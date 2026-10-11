@@ -564,3 +564,195 @@ def measured(asset_id: str, width: int, height: int, *, faces: tuple[UnitBox, ..
 | Slice | Outcome | sha |
 |---|---|---|
 | F0 | landed | 18b981c, 4952b81, 1cdcdfa, 4503474 |
+
+---
+
+# Follow-ups (owner 2026-10-11)
+
+**Start here for the follow-up run.** Decisions and reasons: `/Volumes/Dock/tmp/photo-followups/plan.md` (revision 2; D1 to D10). Designer proposal: `/Volumes/Dock/tmp/photo-followups/ux-proposal.md`. Code map: `/Volumes/Dock/tmp/photo-followups/facts.md`. The owner's words (verbatim, items 1 to 7), the lane table, the environment, the 4-side primitives and lanes fu-a, fu-a2 and fu-d are in `.claude/runs/photo-4.md` "Follow-ups (owner 2026-10-11)" (this branch has it since the freeze merge). Errata: `E-FU-<slice>-<n>`, append only; an implementer who hits a wall appends one and STOPS.
+
+Owner words this page answers (verbatim, 2026-10-11): "the real solution should be more visual and allow me to preview the content selections and transient Frame compatibility. ALSO make sure that compatibility is measuring against the Frame output and not the Display."; "Agreed that these should be configurable, and not hardcoded."; "I would rather lean on strong foundational libraries than reinvent the wheel. Especially when it comes to standard libraries like opencv."; "Note that this preview idea could apply at a few different moments. Like the source creation time, but also frame config, show authoring, etc."; and item 5 (designer agents propose layouts and review the screenshots adversarially through final verification).
+
+## Lanes on this branch
+
+| Lane | Branch | Starts from | After | Slices | Lands on |
+|---|---|---|---|---|---|
+| fu-b | `lane/fu-b` | `origin/lane/fu-b` (this freeze), then B1 step 0 merges `origin/lane/fu-a` | fu-a | B1, B2, XB | `feat/photo-pool-on-frames` |
+| fu-c | `lane/fu-c` | `origin/lane/fu-b` (its tip once fu-b is done), then C1 step 0 merges `origin/lane/fu-a2` and `origin/lane/fu-d` | fu-b, fu-a2, fu-d | C1, C2, XC | `feat/photo-pool-on-frames` |
+
+Both branches were created at this freeze; a lane that starts from another's tip pushes a fast-forward of its own branch (`git push origin HEAD:lane/fu-<x>`). Landing (the run): `feat/photo-sources` (holding fu-a2 and fu-d) and `lane/fu-c` into `feat/photo-pool-on-frames`, merge commits; after C1's step 0 that merge has nothing left to resolve. Gates, budget and models: the 4 ledger's follow-up section, with `--basetemp=/tmp/pwfu/<slice>/<gate>`.
+
+## The freeze (this commit; code architect)
+
+Additive: new names, bodies `NotImplementedError`, existing consumers unchanged. Preceded by the merge of `feat/photo-sources` (its freeze) into this branch.
+
+| File | What is frozen |
+|---|---|
+| `central/wall_plan/fit_settings.py` (new) | `FIT_SETTING_RANGES`, `FitSettings` (fields, defaults, ranges: real), `FitSettingsView` |
+| `central/wall_plan/fit.py` | `FitTarget`, `band` |
+| `central/wall_plan/fit_analysis.py` (new) | `CONTENT_SAMPLE`, `SAMPLES`, `RATIO_BIN_COUNT`, `RATIO_RANGE`, `MAX_SOURCES`, `MAX_DRAFTS`, `AnalysisTier`, `AnalysisRefused`, `FitSelection`, `FrameDraft`, `FitAnalysisRequest`, `SizeGroup`, `SelectionSizes`, `SamplePhoto`, `RatioBin`, `FitSample`, `RefusalCount`, `FrameFit`, `FitAnalysis`, `analyse` |
+| `central/wall_plan/ports.py` | `FitSettingsStore`, `FitAnalysisReader` |
+| `central/photo_fit_routes.py` (new) | the route table, `SETTINGS_PATH`, `ANALYSIS_PATH`, `mount_photo_fit_routes` |
+
+Verified at the freeze: ruff 0; lint-imports 24 kept; unit tier on the fit, key content, planner, crop, tracer, media repository and photo library model tests 217 passed; the merge's unit tier 383 passed. NOT RUN: DB, browser, catalog, Immich fixture, images.
+
+## Shared primitives
+
+| Primitive | Responsibility | Consumers now | Scheduled |
+|---|---|---|---|
+| `central.wall_plan.fit_settings.FitSettings` | every tuning value, one home, with its range | none | B1 (rule, Planner, candidates read, key content judge), B2, C2 |
+| `central.wall_plan.fit.FitTarget` | a Frame as the fit rule sees it (shape and Frame output) | none | B1 (Planner slots, authoring check, candidates read), B2 |
+| `central.wall_plan.fit.band` | a Frame's ratio band at a crop limit | none | B2 (bands, bins); C1 reads it only through the analysis |
+| `central.wall_plan.fit_analysis.analyse` | how a selection fits the Frames (one read for every moment) | none | B2's route; every C1 host |
+| `src/domain/photo-fit.ts` (C1) | the analysis's TypeScript shapes, its hook, and the one home of its words (reasons, ratios, the Planner's step-5 words, "checked N of M") | none | every Fit board host |
+| `src/patterns/fit-board.tsx` (C1) | the Fit board in three sizes (`full`, `compact`, `line`) | none | Photo source editor, Sources list, Scene editor, Show now, Frame page, Settings › Photo fit |
+
+## Test architecture
+
+- **The rule and the settings (unit):** `tests/test_photo_fit.py` drives `shape_fit`, `judge`, `band` through `FitTarget` and `FitSettings` tables; each setting's effect is one case with the same `KeyContent` (no re-measure).
+- **The analysis (unit):** `tests/test_fit_analysis.py` runs `analyse` over an in-test fake `FitAnalysisReader` that records its calls (tier and sample bounds are proven by the call log), with the fit rule itself as the oracle (per-photo `shape_fit` summed equals the grouped answer).
+- **Stores and routes (db):** `tests/test_fit_settings_store.py`, `tests/test_fit_analysis_store.py` (through the reader and the routes, seeding pools through `PgPhotoLibrary`'s worker side), `tests/test_fit_analysis_budget.py` (50,000 photos).
+- **Planner (unit + db):** the existing `tests/test_planner_wall_assignment.py` and `tests/test_wall_plan_tracer.py` move to `FitTarget` and `FitSettings`; one tracer case proves a mat-opening Frame takes a photo the Display's size would refuse.
+- **Console:** `tests/browser/test_fit_board_browser.py` (every host, real app and database, pools seeded through `photo_seed.py`); stories through the catalog leg (every Fit board state and size).
+
+## Maintenance risks
+
+- **Two fit reads remain.** The candidates route (hand-placed photos, "why nothing new?") lists photos; the analysis counts and samples. Both call the same `fit_of`, so they cannot disagree on a verdict; a later change could serve the hand-placed picker from the analysis's samples.
+- **Sampled content tier.** "checked N of M" is honest but a Frame can look fine on 64 photos and refuse most of the rest; the console never extrapolates.
+- **The house crop limit moves Scenes.** A Scene without its own crop limit changes when the house value changes (F-FU-11); the Playback step says which it follows.
+- **Settings as one JSON row.** `photo_fit_settings.settings` is validated by `FitSettings` only (one home of ranges); a hand edit of the row that breaks validation reads as defaults and is logged, never a crash.
+
+---
+
+## B1: the fit rule against the Frame output, every tuning value configurable (lane fu-b)
+
+**Step 0 (before any edit):** `git merge --no-ff origin/lane/fu-a -m "Merge lane/fu-a into lane/fu-b (follow-ups B1)"`. Expected conflicts and their resolution:
+- `central/infra/photo_library_store.py`: take fu-a's tables and reads (A2), then re-apply 5a's behaviour onto them: the Planner's in-pool-only read (`pool_members_in`), `frame_sizes` (kept until A4 lands here).
+- `central/media_repository.py`: fu-a's `library_assets_in` lease reads; 5a's candidate hydration (variant, analysis) unchanged.
+- `central/infra/key_content_store.py` (no textual conflict, but broken by A2's dropped `metadata`): `asset_to_measure` reads through `library_assets_in`; the `INSERT … SELECT … FROM asset_revisions` keeps working (the key is `asset_id`).
+- Tests: keep both sides' cases. Gate after the merge: unit and db tiers on `test_photo_pools`, `test_photo_library_store`, `test_media_repository`, `test_key_content_store`, `test_planner_wall_assignment`, `test_wall_plan_tracer` green before B1's edits.
+
+**Owned:** `central/wall_plan/fit.py`, `central/wall_plan/fit_settings.py`, `central/wall_plan/key_content.py`, `central/wall_plan/assignment.py`, `central/wall_plan/selection.py`, `media/key_content.py`, `central/planner.py`, `central/coordination.py`, `central/media_repository.py` (`source_candidates`), `central/app.py` (the candidates route, wiring), `central/photo_fit_routes.py` (the settings routes), `central/infra/fit_settings_store.py` (new), `central/migrations/086_photo_fit_settings.sql` (new), `central/infra/key_content_store.py`, the merge's files above, `tests/test_photo_fit.py`, `tests/test_key_content.py`, `tests/test_key_content_model.py`, `tests/test_planner.py`, `tests/test_planner_wall_assignment.py`, `tests/test_wall_plan_tracer.py`, `tests/test_fit_settings_store.py` (new), `tests/support/key_content_builders.py`.
+**Design:** plan D1, D6, D7; owner items 2 (last sentence) and 4.
+
+**Frozen page: signatures B1 changes** (no compatibility path; every caller moves):
+- `fit.shape_fit(kind: MediaKind, width: int, height: int, target: FitTarget, crop_limit: float, settings: FitSettings) -> DoesNotFit | None`: rule 2 for an image is `not window_holds(width, height, aspect, target.output_px)` → `below_frame_pixels`, skipped when `target.output_px` is None; the video floor reads `settings.large_frame_inches` and `settings.large_frame_video_short_side`.
+- `fit.judge(kind: MediaKind, width: int, height: int, key: KeyContent | None, target: FitTarget, crop_limit: float, settings: FitSettings) -> FitVerdict`: faces are `key.faces` whose area is at least `settings.min_face_share`, each padded by `settings.face_padding` of its own width and height and clamped (the rule `media/key_content.py` applied before); the interest grid is uniform when `key.spread < settings.min_salience_spread`; offsets `k / settings.window_steps` plus 0.5; rule 4's limit `settings.max_lost_interest_density`. `MAX_LOST_INTEREST_DENSITY`, `WINDOW_STEPS`, `LARGE_FRAME_INCHES`, `LARGE_FRAME_VIDEO_SHORT_SIDE`, `DEFAULT_CROP_LIMIT` and `_OFFSETS` are deleted (their values are `FitSettings()`'s).
+- `fit.band(aspect: float, crop_limit: float) -> tuple[float, float]` as its docstring.
+- `key_content.KeyContent`: `faces` are Immich's boxes as fractions, clamped, unpadded, every non-degenerate box kept; new `spread: float = Field(ge=0, le=1)`, the saliency map's max minus min; `ANALYSIS_VERSION = "2"`. `media/key_content.py` loses `FACE_PADDING`, `MIN_FACE_SHARE`, `MIN_SALIENCE_SPREAD`; `interest_of(thumbnail: bytes) -> tuple[InterestGrid, float]` (grid, spread), the grid uniform only when nothing is above the map's mean.
+- `assignment.Slot.target: FitTarget` replaces `profile`; `Slot.crop_limit` is the resolved value. `fit_of(candidate: Candidate, target: FitTarget, crop_limit: float, settings: FitSettings) -> FitVerdict | None`; `variant_usable(candidate: Candidate, target: FitTarget, settings: FitSettings) -> bool`; `plan_wall(..., limits: WallLimits = WallLimits(), settings: FitSettings)` (keyword, required); `_judged` memo keyed by every input including `settings`.
+- `selection.SceneSelection.crop_limit: float | None = Field(default=None, ge=…, le=…)` with bounds from `FIT_SETTING_RANGES["crop_limit"]`; `MIN_CROP_LIMIT`, `MAX_CROP_LIMIT` deleted. None follows `FitSettings.crop_limit`; the one resolver is `selection.crop_limit_of(selection: SceneSelection, settings: FitSettings) -> float`.
+- `planner.eligible(candidate: Candidate, target: FitTarget, crop_limit: float, settings: FitSettings) -> bool`; `planner.candidate_standing(candidate: Candidate, target: FitTarget, settings: FitSettings) -> Standing`. Coordination reads `frame_outputs_in(conn)` and `fit_settings_in(conn)` once per planning pass and per authoring check, and builds each slot's `FitTarget(profile=binding.profile, output_px=output.output_px)`.
+- `MediaRepository.source_candidates(source_ref: str, *, target: FitTarget | None = None, crop_limit: float | None = None, settings: FitSettings) -> dict`; the route `GET /v1/operator/sources/{source_ref}/candidates?frame_id=&crop_limit=` builds the target from `frame_outputs_in` and the house crop limit when none is given.
+- `central/infra/fit_settings_store.py`: `class PgFitSettings` implementing `FitSettingsStore`, `__init__(self, db: Database, *, times: TransactionClock)`.
+- Migration 086, exact:
+```sql
+-- Follow-ups 2026-10-11 (run ledger .claude/runs/photo-5a.md, slice B1): the photo fit rule's
+-- tuning values, one row, validated by central.wall_plan.fit_settings.FitSettings (the one home
+-- of the ranges). No row: today's values. Plain statements only. Forward-only.
+CREATE TABLE photo_fit_settings (
+  singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
+  settings JSONB NOT NULL,
+  updated_at DOUBLE PRECISION NOT NULL);
+```
+- Routes: `GET /v1/operator/settings/photo-fit` → `FitSettingsView(settings, defaults=FitSettings(), ranges=FIT_SETTING_RANGES)`; `PUT` with a complete `FitSettings` → the view; 422 for a value outside its range.
+
+**Acceptance:**
+1. (unit) A 3,840 x 2,160 Display whose Frame is a Cover opening of 40 % x 40 % (Frame output 1,536 x 864): a 1,600 x 900 photo fits; with `output_px` = the Display's size it is `below_frame_pixels` (the defect, proven fixed).
+2. (unit) The same Display, full screen, turned 10°: a 3,840 x 2,160 photo is `below_frame_pixels`.
+3. (unit) `output_px` None: a 400 x 300 photo on a 4:3 Frame fits (rule 2 skipped).
+4. (unit) One `KeyContent` on a 4:3 photo judged for a 16:9 Frame, holding one close-up face box from 2 % to 74 % of the height (40 % to 60 % of the width): refused `face_cut` at `face_padding` 0.2 (padded, it overflows the 75 % window), fits at 0; nothing re-measured.
+5. (unit) Two faces of 0.1 % of the area each, one at the top edge and one at the bottom edge of a 4:3 photo on a 16:9 Frame: ignored at `min_face_share` 0.002 (fits), `face_cut` at 0.
+6. (unit) A grid whose weight is split between the top and bottom rows, `spread` 0.03, 4:3 photo on a 16:9 Frame: judged as even at `min_salience_spread` 0.05 (fits), `interest_cut` at 0.01.
+7. (unit) `band(16/9, 0.35)` = (16/9 x 0.65, 16/9 / 0.65); a photo exactly on either edge passes rule 1.
+8. (db) Settings: GET with no row → defaults and ranges; PUT `crop_limit` 0.7 → 422; PUT `crop_limit` 0.2 → the next planning pass refuses a 4:3 photo on a 16:9 Frame whose Scene sets none, and a Scene with its own 0.35 still takes it.
+9. (unit, tracer) a wall of one mat-opening Frame plans a photo smaller than the Display.
+10. (unit) `media/key_content.py`: `measure` stores unpadded boxes and the spread; `ANALYSIS_VERSION` is "2".
+
+**Mutation probes:** judge rule 2 against the profile's pixels → cases 1 and 9 fail; pad faces at measure time as well → case 4 refuses at 0; ignore a Scene's own crop limit → case 8's second half fails.
+
+**Land:** `feat(planner): the fit rule measures against the Frame output; every tuning value is a setting (follow-ups B1)`.
+
+## B2: one analysis read for every moment (lane fu-b, after B1)
+
+**Owned:** `central/wall_plan/fit_analysis.py`, `central/infra/fit_analysis_store.py` (new), `central/photo_fit_routes.py` (the analysis route), `central/app.py` (wiring), `tests/test_fit_analysis.py` (new), `tests/test_fit_analysis_store.py` (new), `tests/test_fit_analysis_budget.py` (new).
+**Design:** plan D8; owner items 2 and 7.
+
+**Frozen page.**
+- `analyse(request: FitAnalysisRequest, reader: FitAnalysisReader, saved: FitSettings) -> FitAnalysis` as the module and its docstring say. Settings judged at: `request.settings or saved`; crop limit: `request.crop_limit` or the settings'. Frames: `request.frames` (each must exist) or every Frame; a `FrameDraft`'s target is `FitTarget(profile=draft.profile, output_px=frame_output(draft.profile, draft.calibration, saved display_px))`. Shape tier per Frame from `selection_sizes().groups` (`photos` and `measured` summed over the groups `shape_fit` passes; `refused_by_shape` per reason); bins over every group's ratio (`RATIO_BIN_COUNT` log-spaced bins over `RATIO_RANGE`, the outer two open). Full tier: per Frame one `sample(selection, passing sizes, seed=request.seed, limit=CONTENT_SAMPLE, measured_only=True)` judged by `judge`; one `sample(..., limit=SAMPLES, measured_only=False)` per shape refusal reason with photos (centred crops). Lead: per Frame in id order, the first fitting sample no earlier Frame took; `fitting` up to `SAMPLES`. `nearest_crop_limit` from the groups' `crop_share` (frozen docstring).
+- `central/infra/fit_analysis_store.py`: `class PgFitAnalysisReader` implementing `FitAnalysisReader`, `__init__(self, db: Database, *, times: TransactionClock)`. `selection_sizes` is one statement over `photo_pool_rows` (in-pool rows of the named Sources' and drafts' pools, `DISTINCT asset_id`) joined to `asset_revisions` and `library_assets`, grouped by (kind, width, height), with a count of rows in `photo_key_content` at the current `ANALYSIS_VERSION` and `status = 'measured'`; `sample` orders by `md5(asset_id || seed)`; unknown Source → `AnalysisRefused("source_unknown", 404)`, unknown draft → `("draft_unknown", 404)`.
+- Route `POST /v1/operator/photo-fit/analysis` (`central/photo_fit_routes.py`), wired in `create_app` with `analyse` bound to `PgFitAnalysisReader` and `PgFitSettings.fit_settings()`.
+
+**Acceptance:**
+1. (unit, fake reader) The shape tier equals the fit rule applied photo by photo: for a seeded mix of sizes on three Frames, each `fit_by_shape` and each `refused_by_shape` count equals the sum of `shape_fit` over the individual photos.
+2. (unit) Bins: twelve 3:2 photos land in the bin holding 1.5; the bins' total is the selection's photos plus videos.
+3. (unit) A `FrameDraft` with a mat-opening Position raises `fit_by_shape` for photos between the opening and the Display, and leaves the saved Frames' answers unchanged; `draft` is True on it alone.
+4. (unit) Draft settings with `crop_limit` 0.2 narrow every `band` and lower `fit_by_shape`; `settings` in the answer is the draft.
+5. (unit) Full tier: `checked` ≤ 64; `fit_checked` + the `refused_by_content` counts = `checked`; the same seed gives the same samples, another seed others.
+6. (unit) Leads are distinct across Frames when each Frame has at least as many fitting photos as there are Frames.
+7. (unit) Tier "shape": the fake records no `sample` call; `checked` 0 everywhere. A 9:16 Frame with only 4:3 photos at crop limit 0.35 has `fit_by_shape` 0 and `nearest_crop_limit` equal to `crop_share` of a 4:3 photo on 9:16 (computed in the test) when that is within range, else None; a Frame with photos that fit answers None.
+8. (db) A photo in two Sources of the selection counts once; an unsaved draft works as a selection; unknown Source, draft or Frame → 404 with its code; the JSON holds no Immich id.
+9. (db, `tests/test_fit_analysis_budget.py`) 50,000 in-pool photos (seeded through `record_step` in pages of 1,000) and 8 Frames: the full tier answers within 5 s; the time is printed and reported in the commit body.
+
+**Mutation probes:** count per pool row instead of per asset → case 8's overlap fails; judge every measured photo instead of the sample → case 7's call log or case 9's budget fails; build a draft's target from the saved Position → case 3 fails.
+
+**Land:** `feat(planner): one fit analysis for a selection against the Frames, saved or draft (follow-ups B2)`.
+
+## XB: docs for fu-b (lane fu-b, last)
+
+**Owned:** `docs/module-planner.md` ("The photo fit rule": the Frame output, the settings, judge-time faces and spread; replace the "a 4K 16:9 Frame" example's pixel words with the Frame output), `docs/module-media-worker.md` (key content stores raw boxes and the spread), `docs/central-system-architecture.md` (the analysis read, one line). **Land:** `docs(planner): the fit rule's Frame output, settings and analysis (follow-ups XB)`.
+
+## C1: the Fit board, one pattern at every moment (lane fu-c)
+
+**Step 0 (before any edit):** `git merge --no-ff origin/lane/fu-a2 -m "Merge lane/fu-a2 into lane/fu-c (follow-ups C1)"`, then `git merge --no-ff origin/lane/fu-d -m "Merge lane/fu-d into lane/fu-c (follow-ups C1)"`. Expected conflicts (fu-a2's A4 against 5a's rendition work) and their resolution: take A4's rendition choice everywhere and delete 5a's `frame_sizes` (ports, `PgPhotoLibrary`, the fake, `tests/test_photo_library_store.py`'s frame-sizes case) and `preview_covers` (`media/library_client.py`, `media/immich.py`, `tests/test_immich_library.py`'s case), since `frame_outputs` and `covers` replace them; `media/worker.py`: A4's `process_job` fetch beside 5a's key content measurement, both kept; `media/prepare.py`: A5's (recipe 3). Console conflicts with fu-d: take fu-d's pages, then C1 builds on them. Gate after the merges: unit tier on media, planner and photo library tests; console typecheck. Record the resolution in the merge commit body.
+
+**Owned:** `central/console/src/domain/photo-fit.ts` (new), `central/console/src/patterns/fit-board.tsx`, `shape-map.tsx`, `frame-fit-row.tsx`, `crop-thumb.tsx` (new, each with stories), `central/console/src/pages/photo-source-page.tsx`, `central/console/src/SourcesRegion.jsx`, `central/console/src/SceneFlow.jsx`, `central/console/src/sceneFlowModel.js`, `central/console/src/SceneSteps.jsx`, `central/console/src/SceneSettings.jsx`, `central/console/src/ShowNowFlow.jsx`, `central/console/src/pages/frame-page.tsx`, `central/console/src/domain/frame-photo-fit.tsx` (+ stories; deleted, its place taken by the board), `central/console/src/domain/frame-profile.tsx`, `central/console/src/domain/frame-position.tsx` (the draft-Frame line only), `tests/browser/test_fit_board_browser.py` (new), `tests/browser/test_frame_photo_fit_browser.py` (rewritten or deleted with its component), `tests/browser/test_scene_flow_browser.py`, `tests/browser/test_source_flow_browser.py`, `tests/browser/test_show_now_browser.py`, `tests/browser/catalog-baselines/` (new and changed stories).
+**Design:** plan D9; `ux-proposal.md` (a) a.1 to a.5, a.7, a.8 (minus the cut actions), a.11; design critic rows 1, 5, 8, 9.
+
+**Frozen page.**
+- `src/domain/photo-fit.ts`: TypeScript types mirroring `FitAnalysisRequest` and `FitAnalysis` field for field (snake_case kept); `useFitAnalysis(request: FitAnalysisRequest | null, options?: { live?: boolean }): LoadState<FitAnalysis>` (full tier 400 ms after the last change; with `live` the shape tier 150 ms after each change and the full tier on release; the old answer stays shown, dimmed, while a new one loads); `reasonWords(reason: FitRefusal): string` (the fit rule's words: "doesn't fit this Frame's shape", "too small for this Frame", "a face would be cut", "the interesting part would be cut", "this Frame shows no videos"); `ratioWords(ratio: number): string` (nearest common ratio as "3:2", else "1.62:1"; never orientation words); `emptyFrameWords(frame: FrameFit): string` (the Planner's step 5: "keeps its last photo while it still fits and is free; otherwise plays a photo not yet checked, centred; otherwise nothing new"); `checkedWords(frame: FrameFit): string` ("checked 64 of 1,520").
+- `src/patterns/fit-board.tsx`: `FitBoard({ state, size, onShuffle, onFrame, action }: { state: LoadState<FitAnalysis>; size: "full" | "compact" | "line"; onShuffle?: () => void; onFrame?: (frameId: string) => void; action?: (frame: FrameFit) => ReactNode })`. Full: warnings (a Frame with nothing that fits, worst first, `ProblemCard` `todo`), one `FrameFitRow` per Frame leading (the Frame drawn at its output's shape, filled with its lead sample's crop; "N of M fit"; a stacked bar of fits and refusals in neutral patterns, never severity colour; six `CropThumb`s; "Why N don't"), then "Why" disclosing the `ShapeMap`. Compact: rows without samples. Line: "Fits 5 of 6 Frames · Hall has no photo that fits ›". Every state of ux-proposal a.5 designed. `ShapeMap({ bins, frames, focused })`, `FrameFitRow({ frame, size })`, `CropThumb({ sample, aspect })`: the photo at its ratio, the kept window clear, the cut dimmed.
+- Hosts (each builds its request; none computes a verdict): Photo source editor (the draft's selection; crop limit the house's, or "as in Scene X" from a picker of the Scenes using this Source); Sources list (line per Source, tier shape); Scene editor (Frames step moved before Photos in `sceneFlowModel.js`; Photos and Playback steps show the full board for the draft Scene's Sources and chosen Frames, the crop-limit control drives `live`, and says whether it follows the house value; Review shows compact, with "Raise the crop limit to N %" from `FrameFit.nearest_crop_limit` when a Frame has none that fit); Show now (line for the chosen Scene and targets); Frame page Overview › Photos (one compact row per Scene targeting the Frame, with how it relates to now: "Playing now", "Scheduled 17:00–23:00", "Not scheduled", and `LinkToOwner` to the Scene); Frame profile and Position editors (a line judged with the unsaved values as a `FrameDraft` against the Scenes targeting the Frame).
+
+**Acceptance (`tests/browser/test_fit_board_browser.py`, real app and database, the varied library seeded):**
+1. Photo source editor: the board shows a row per Frame with "N of M fit" equal to the analysis route's answer; changing a filter changes the counts without saving.
+2. The 9:16 Frame with only 3:2 photos shows the none-fit warning with the step-5 words.
+3. Scene editor: Frames come before Photos; dragging the crop limit changes the band and counts before release; Review offers "Raise the crop limit".
+4. Frame page: one row per Scene, each with its relation to now; the old three-line text is gone.
+5. Editing a Frame's Position to a mat opening changes its line before Save.
+6. Show now and the Sources list show their lines.
+7. At 390 px the board is a line that opens it in a Sheet.
+Stories: every `FitBoard` state (Loading, Reading, Ready, Partial, NoneFit, Empty, CantTell, Error) at each size, plus the three smaller patterns; console typecheck, lint and build 0.
+
+**Mutation probes:** compute counts in the browser instead of reading them → case 1 disagrees on the overlap fixture; drop `live` → case 3's before-release assertion fails.
+
+**Land:** `feat(console): the Fit board, one preview of how photos fit the Frames, at every moment (follow-ups C1)`.
+
+## C2: the photo sheet, Settings › Photo fit, and 5a's pages after the critique (lane fu-c, after C1)
+
+**Owned:** `central/console/src/domain/photo-sheet.tsx` (new, + stories), `central/console/src/libraryApi.js` (the photo facts read), `central/console/src/settingsRoutes.jsx`, `central/console/src/pages/photo-fit-settings-page.tsx` (new), `central/console/src/patterns/setting-row.tsx` (only if a house kind is missing), `central/console/src/domain/library-health-card.tsx` (the face-detection note), `central/console/src/pages/frame-page.tsx` (header chip), `central/console/src/SceneSteps.jsx`, `central/console/src/SceneSettings.jsx`, `central/console/src/SceneFlow.jsx` (Review and Playback items below), `tests/browser/test_photo_fit_settings_browser.py` (new), `tests/browser/test_photo_sheet_browser.py` (new), `tests/browser/photo_seed.py` (measured key content for the varied library), `tests/browser/capture_photo_5a_evidence.py`, `docs/evidence/photo5a/`.
+**Design:** plan D7, D9, D10; `ux-proposal.md` (a) a.6, (b), (c) items 1, 3, 4, 6; design critic row 10 (one name for the loop setting; the "Put content on this Frame" card).
+
+**Frozen page.**
+- **Photo sheet** (opened from any `CropThumb`): the photo with each judged Frame's window, one at a time; per Frame its verdict in `reasonWords`; the original's type, size and bytes; Immich's copies from `GET /v1/operator/library/photos/{asset_id}` with measured sizes only ("size known after first use"); "Prepared from: original" from `prepared_from`. No "Open in Immich" and no Never show (F-FU-6, F-FU-7).
+- **Settings › Photo fit** (`section: "photo-fit"`, T8): one `SettingRow` per `FitSettings` field with its range from `FitSettingsView.ranges`, its default and Reset; shown: crop limit (the house's, "Scenes without their own follow it"), space kept around a face, smallest face that counts; under Advanced: how much of the subject a crop may lose, smallest spread of interest, large Frame size for videos and its rows; under Advanced › Details: crop positions tried. A compact Fit board judged with the draft settings over every Source a Scene uses, so each change shows its effect before Save; Save says "applies at the next planning pass; photos on screen finish their turn".
+- **5a pages:** Frame page header: "Enrolled 0 s ago, no report yet" becomes "Getting ready"; Scene Review: the rail stays at the top (the shell's alignment), Id leaves Review, no "Program" word, the Scene's name first, one Change per step group, the compact board; Playback: "Each photo shows for" as a number with unit "s", one name for the loop setting across steps; Photo library: face detection off is a `ProblemCard` notice with the count of photos whose crops cannot protect faces and "Open Immich face settings" text (no link with an Immich id); the Frame page's empty state offers "Put content on this Frame" (make a Scene for it).
+- **Evidence:** `photo_seed.py` gives the varied library measured key content (faces near an edge included); `capture_photo_5a_evidence.py` captures every page C1 and C2 touch, dark and light, 1,280 px and 390 px, including the Fit board's Ready, NoneFit, Reading and unmeasured states, the photo sheet and Settings › Photo fit.
+
+**Acceptance:** the two new browser tests (Settings: Reset restores a default, an out-of-range value shows a field error, Save changes the board's counts; photo sheet: copies in order with measured sizes or "size known after first use", no Immich id in the page); the 5a pages' browser tests assert the new words (no "Program", no "Id" on Review); the capture runs green; console typecheck, lint, build 0.
+**Mutation probes:** hard-code a range in the page → the Settings test that reads a narrowed range from the API fails; show an assumed preview size → the photo sheet test fails.
+**Land:** `feat(console): photo sheet, Settings › Photo fit and the 5a pages after the designer review (follow-ups C2)`.
+
+## XC: docs for fu-c (lane fu-c, last)
+
+**Owned:** `docs/operator-console-design.md` (the Fit board's hosts, Settings › Photo fit, the photo sheet), `docs/design-language.md` (§4 catalogue rows for `FitBoard`, `ShapeMap`, `FrameFitRow`, `CropThumb`; the Scene flow's step order). **Land:** `docs(console): the Fit board and Photo fit settings (follow-ups XC)`.
+
+## End of the follow-up run (once, over both PRs)
+
+CI watcher on both PRs; verifier (every page's mutation probes); review lenses in parallel: **domain** (the fit rule against the Frame output; the analysis tiers), **migrations** (080 and 081 reshaped, 086), **console UX** (`.claude/skills/console-ux/SKILL.md`), and **two UX designer agents** (owner item 5; plan D10): one with the Immich and Google Photos lens, one with the signage-dashboard lens, each reading every after screenshot of both PRs and answering per screen: can I tell which Frames will go empty, can I see the crop, is any word forbidden, is anything decorative coloured, what layout, widget or action would make it more useful, elegant or engaging. A "no" or a proposal they rank P1 goes to the one fix agent; neither PR is marked ready until each is fixed or argued in its body. The PR bodies restate findings F-FU-1 to F-FU-11 (plan section 5) and embed the before and after screenshots.
+
+## Follow-up outcome (filled by the run's closing step)
+
+| Slice | Outcome | sha |
+|---|---|---|
+| freeze | landed | (this commit) |
