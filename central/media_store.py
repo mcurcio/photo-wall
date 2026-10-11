@@ -21,9 +21,10 @@ from central.db import MEDIA_LOCK
 from central.execution_ports import ExecutionMediaAuthorization
 from central.installation_ports import InstallationSessions
 from central.installation_repository import PostgresInstallationRepository
-from central.media_repository import JobLease, MediaRepository
+from central.media_repository import JobLease, MediaRepository, lease_asset_of
 from central.registry import RegistryError
 from contracts.models import PlayerConfiguration, Variant
+from media.models import OriginalAsset
 from media.prepare import PreparedMedia
 
 _NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
@@ -387,11 +388,14 @@ class MediaStore:
                     )
                 finally:
                     os.close(fd)
-                if (
-                    sha1 != lease.asset.original_sha1
-                    or sha256 != prepared.original_sha256
-                    or (
-                        lease.asset.file_size is not None and original_size != lease.asset.file_size
+                if sha256 != prepared.original_sha256 or (
+                    isinstance(lease.asset, OriginalAsset)  # pre-4 leases, until I1
+                    and (
+                        sha1 != lease.asset.original_sha1
+                        or (
+                            lease.asset.file_size is not None
+                            and original_size != lease.asset.file_size
+                        )
                     )
                 ):
                     raise MediaStoreError("media_original_mismatch")
@@ -424,8 +428,9 @@ class MediaStore:
                         )
                     result = {
                         **prepared.model_dump(mode="json", exclude={"path"}),
+                        # The asset id pins the photo (its connection, upstream id and checksum
+                        # or revision), so the journal needs no original digest beside it.
                         "asset_id": lease.asset.asset_id,
-                        "original_sha1": lease.asset.original_sha1,
                     }
                     conn.execute(
                         "UPDATE media_jobs SET state='publishing',variant_sha=%s,result=%s,"
@@ -458,15 +463,14 @@ class MediaStore:
                 raise MediaStoreError("media_io", 503) from None
 
     def _lease_for(self, conn, row) -> JobLease:
-        from media.models import OriginalAsset
-
         asset = conn.execute(
-            "SELECT metadata FROM asset_revisions WHERE asset_id=%s", (row["asset_id"],)
+            "SELECT metadata,upstream_id FROM asset_revisions WHERE asset_id=%s",
+            (row["asset_id"],),
         ).fetchone()
         return JobLease(
             job_id=row["id"],
             attempt_token=row["attempt_token"],
-            asset=OriginalAsset.model_validate(asset["metadata"]),
+            asset=lease_asset_of(asset),
             recipe_id=row["recipe_id"],
             lease_until=row["lease_until"],
             reserved_bytes=max(1, row["reserved_bytes"]),
@@ -483,7 +487,6 @@ class MediaStore:
                 or result["recipe_id"] != row["recipe_id"]
                 or result["variant"]["sha256"] != row["variant_sha"]
                 or result.get("asset_id") != row["asset_id"]
-                or result.get("original_sha1") != recorded.asset.original_sha1
             ):
                 raise MediaStoreError("media_journal_invalid", 503)
             variant = Variant.model_validate(result["variant"])
