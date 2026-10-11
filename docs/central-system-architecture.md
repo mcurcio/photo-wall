@@ -134,7 +134,7 @@ finished run leaves a **job outcome** that waiters read (§10.2).
 | `SyncMediaSources` | Tick | (none) | Catalog | Nothing except one `SyncMediaSource(source)` per enabled source (cron fan-out) | yes |
 | `SyncMediaSource(source)` | `SyncMediaSources`; operator source change | `source` | Catalog | Media catalog + `media-variant` Asset rows, then publishes `Prefetch` | no |
 | `CheckConnection(connection_ref)` (built in 4 as `photo_wall.library.check_connection`) | The media tick for a due connection; operator add, change, Check now | `connection_ref` | Photo library | One contact with Immich: health (the latest-started contact wins, by number), counts, the bound Immich user; then the album, people, place and tag lists | via the media tick (every 15 min per connection) |
-| `CheckPool(pool_key)` (built in 4 as `photo_wall.library.check_pool`) | The media tick for a due pool; a new draft, a changed query, Save, Check now; the previous step | `pool_key` | Photo library | One bounded step of a check (up to N, one exclusion page, or one keyset include page): pool rows and marks, and the next step queued in the same transaction; a complete finish sweeps rows the check did not see | via the media tick (every 15 min per wanted pool) |
+| `CheckPool(pool_key)` (built in 4 as `photo_wall.library.check_pool`) | The media tick for a due pool (also a check with no step begun for 15 minutes, which resumes it); a new draft, a changed query, Save, Check now; the previous step | `pool_key` | Photo library | One bounded step of a check (up to N, one exclusion page, or one keyset include page): pool rows and marks, and the next step queued in the same transaction; a complete finish sweeps rows the check did not see | via the media tick (every 15 min per wanted pool) |
 | `Prefetch` | Tick; after sync, pin, promote, plan change | (none) | Assets & cache | Nothing except the fetch job of each desired asset missing from disk | yes + on change |
 | `MaintainCache` | Tick | (none) | Assets & cache | Removes release files nothing wants: an eager keep-set sweep, not budget-gated. Desired = the window of the 3 newest stable node releases + the selected + the previous deployment + the V1 roots (`desired_in`), read once to pick candidates and again immediately before each unlink (mark and sweep, no lock: a root committed in the remaining instant costs one read-through re-download). Spares a file whose mtime is within `SERVE_GRACE` (1 h) of the run's marker file (both the cache filesystem's clock) or whose `last_served_at` is within 1 h of the database's clock (the clock that wrote it), and a temp file not idle past `TEMP_GRACE` (1 h); at most 50 unlinks per run. Only `os-images/` and `apps/`: never `previews/` or `media/`. Rows, references and produced facts stay. | yes |
 | `RescueStalledJobs` | Tick | (none) | Queue ops (infra) | Re-publishes jobs whose worker's heartbeat stopped, then closes their rows | yes |
@@ -405,9 +405,9 @@ class Publisher(Protocol):
   `TerminalFailure("not_reproducible")`. So a plan never holds an unservable digest, and nothing
   erases facts: an OS image is keyed by its tarball's sha256, so a release re-cut is a new key.
   The one exception is a kind not `keyed_by_content` (`AssetKind`, only `library-thumbnail`,
-  keyed by its original's identity): a later production's facts replace the recorded ones,
-  because the library may regenerate the bytes; its record lives only while a live preview
-  selects it, and a fetch that finds it retired is terminal `thumbnail_unknown`.
+  keyed by its photo's asset id): a later production's facts replace the recorded ones,
+  because the library may regenerate the bytes; its record lives only while a wanted pool
+  holds its photo, and a fetch that finds it retired is terminal `thumbnail_unknown`.
   **`job_outcomes`** holds only the latest written *status* per `(job type, subject)`, last write
   wins. The runtime writes the facts, the status and `NOTIFY job_outcome, <lock key>` in one
   transaction, and `Ready.result` is read from the Asset record. Status is stored

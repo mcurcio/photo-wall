@@ -259,7 +259,7 @@ Every setting a power user expects, with exactly one home: 143 settings (numbere
 | 28 | Exclude tags (built in 4) | Photo source editor › Exclude | none | S |
 | 29 | Archived photos never included (built in 4 as one fixed line with #30, not a switch) | Photo source editor › Exclude | always | M |
 | 30 | Hidden and locked photos never included (the same fixed line as #29) | Photo source editor › Exclude | always | M |
-| 31 | Exclude screenshots (built in 4: a file named "screenshot", or a PNG with no camera maker) | Photo source editor › Exclude | on | M |
+| 31 | Exclude screenshots (built in 4: a file named "screenshot", or a PNG with no camera model) | Photo source editor › Exclude | on | M |
 | 32 | Include partners' photos (built in 4) | Photo source editor › Include | off | N |
 | 33 | Skip blurry/duplicates (deferred in 4: needs Immich's machine learning) | Photo source editor › Exclude | off | N |
 

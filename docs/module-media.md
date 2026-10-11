@@ -15,6 +15,7 @@ The central application owns Immich connections and their health, Photo source q
 | `media/immich.py` (`ImmichClient`) | Everything Immich-shaped: request bodies, answer parsing, versions, redirects | A `ConnectionSecret` → contacts, lists, keyset pages, exclusion pages, edits fingerprints, thumbnails, fetched renditions. No SQL, Frame policy, or Player API. |
 | `media/pool_check.py` | The pure check fold: phases, keyset advance, per-photo entries, stack marks, relative dates resolved in UTC | No I/O, no clock reads. |
 | `media/library_checks.py` (`LibraryChecks`) | Connection checks and pool checks, one bounded step per task | Store + client factory + clock. |
+| `media/library_clients.py` (`LibraryClients`) | One open client per connection, reused while its address and key are unchanged | Used by the checks, preparation and the thumbnail origin. |
 | `media/prepare.py` | Probe, rendition validation, conversion, and recipe identity | Local fetched file + expected metadata + recipe + resource limits → exact `Variant`, coded failure. No upstream transport or assignment authority. |
 | `media/worker.py` | Queued task execution, repository leases, and cleanup orchestration | Repository and store interfaces + adapters + explicit clock → check, preparation and maintenance results. Procrastinate owns dispatch and retry timing. |
 | Integration fixture | Disposable real Immich and synthetic media ([fixture module](module-immich-fixture.md)) | Its own owner, partner and runtime key; it never touches a user's Immich. |
@@ -42,8 +43,8 @@ A **contact** is one connection check. The store hands out a contact number when
 | Problem | Meaning | The fix the console offers |
 |---|---|---|
 | `key_rejected` | Immich answered 401 | Paste a new key |
-| `missing_permissions` | the key lacks some of `REQUIRED_PERMISSIONS` (listed) | Make a key with these permissions |
-| `immich_too_old` | older than 2.5.0 | Update Immich |
+| `missing_permissions` | the key lacks some of `REQUIRED_PERMISSIONS` (listed) | Paste a new key (the card lists the permissions to give it) |
+| `immich_too_old` | older than 2.5.0 | Update Immich, then Check again |
 | `unreachable` | no connection or a timeout | Check again |
 | `unexpected_answer` | an answer that did not parse (its code is the detail) | Check again; Details |
 | `other_user` | the key belongs to another Immich user than the connection's | Paste a key for that user |
@@ -53,7 +54,7 @@ A **contact** is one connection check. The store hands out a contact number when
 | `untested_version` | newer than 2.5.x, the tested release; it keeps working |
 | `no_full_size_copies` | Immich keeps no full-size copies, so HEIC and RAW photos play at preview size |
 
-A connection belongs to the Immich user of its first passing contact; a later key of another user is `other_user`. **While a connection needs a look, the last pool of every Source on it keeps playing** (C7): a rejected key or an outage never empties the wall, and removing the connection is the only way to stop it. Counts are those of the last passing contact.
+A connection belongs to the Immich user of its first passing contact (an Immich older than 2.5 does not bind it); a later key of another user is `other_user`. **While a connection needs a look, the last pool of every Source on it keeps playing** (C7): a rejected key or an outage never empties the wall, and removing the connection is the only way to stop it. Counts are those of the last passing contact, and they are Immich's own totals (`GET assets/statistics` with no filter), which include archived photos. A pool never includes archived photos, so a Source of "everything" can show fewer photos than the connection's count (on the fixture: 25 counted, 24 on the timeline).
 
 The key needs exactly these permissions (one home: `policy.REQUIRED_PERMISSIONS`) and no upload, edit, delete, share or administration permission. What each is for, and what happens without it, is the runbook's [library key](runbook.md#the-library-key).
 
@@ -85,7 +86,7 @@ A Photo source is one Immich query plus exclusion queries (`SourceQuery`; settin
 
 Several albums, people or tags mean "all of them", Immich's own meaning; "any of them" is a second Source on the Scene (#36). Archived, hidden and locked photos are never included: one fixed line, not a switch (#29, #30). On this day (#21) is delivery 5a's Order; a minimum rating (#24) and skipping blurry photos and duplicates (#33) are deferred.
 
-**Immich answers every match question; Photo Wall only subtracts.** The include query is one Immich search. Immich's search has no "not", so each exclusion is one more Immich query, read whole on every check, whose answers Photo Wall subtracts. A screenshot is a file whose name contains "screenshot", or a PNG with no camera maker. This reading of "one Immich query per Photo source" is a choice of 2026-10-11 awaiting the owner's confirmation ([requirements](requirements.md#live-media-compatibility-and-preparation)). Photo Wall never computes a filter itself, with one exception recorded as a finding: Immich's search has no "is a live photo" filter, so a query that chooses photos but not live photos (or the reverse) keeps or drops each still by whether Immich's answer names a live-photo video.
+**Immich answers every match question; Photo Wall only subtracts.** The include query is one Immich search. Immich's search has no "not", so each exclusion is one more Immich query, read whole on every check, whose answers Photo Wall subtracts. A screenshot is a file whose name contains "screenshot" (any case), or a PNG with no camera model (Immich's search cannot ask for a missing maker, so the code asks for a missing `model`). This reading of "one Immich query per Photo source" is a choice of 2026-10-11 awaiting the owner's confirmation ([requirements](requirements.md#live-media-compatibility-and-preparation)). Photo Wall never computes a filter itself, with one exception recorded as a finding: Immich's search has no "is a live photo" filter, so a query that chooses photos but not live photos (or the reverse) keeps or drops each still by whether Immich's answer names a live-photo video.
 
 **One pool per query.** A query's canonical form is its JSON with sorted keys and sorted lists; a relative date range stays relative, so "last 3 years" is one pool on every day. Its sha256 is the **pool key**. Equal queries share one pool: a draft and the Source saved from it, two Sources with the same query, and an edit put back. Editing a draft's query points it at another pool, which the console shows as starting again.
 
@@ -97,16 +98,16 @@ A **check** is one complete read of a pool's queries from Immich, in short steps
 
 A check runs in phases:
 
-1. **Up to.** `POST search/statistics` with the include filters gives "up to N": an upper bound shown at once, since Immich's statistics count partners' photos, stacked copies and exclusions.
+1. **Up to.** `POST search/statistics` with the include filters gives "up to N": an upper bound shown at once, since Immich's statistics count partners' photos, stacked copies and exclusions. The same step reads which timeline months hold stacked copies: `GET timeline/buckets` with stacks shown and with stacks collapsed; a month whose two counts differ holds a stack.
 2. **Exclusions.** Each exclusion query (an album, a person, a tag, screenshots by name, screenshots as camera-less PNGs) is read whole, with no visibility filter, and each id it returns is **marked** excluded for this check. Exclusions come first, so no photo joins the pool and then leaves it.
-3. **Include.** `POST search/metadata` with the query's filters, `visibility: timeline` (archived, hidden and locked never answer), `withStacked: true`, `order: desc` and size 1,000 (`LibraryLimits.page_size`), read by **keyset pages**: each page continues from the oldest capture time seen, inclusive (`takenBefore`), and drops the ids already seen at that instant. The adapter never asks for `page` 2: Immich pages by position, ordered only by capture time, and offset pages lose photos at equal times (the [fixture](module-immich-fixture.md#executed-evidence) proved it). A full page at one instant switches to upload time within that instant (`createdBefore`); more than 1,000 photos at one capture and one upload instant ends the check **incomplete**.
+3. **Include.** `POST search/metadata` with the query's filters, `visibility: timeline` (archived, hidden and locked never answer), `withStacked: true`, `order: desc` and size 1,000 (`LibraryLimits.page_size`), read by **keyset pages**: each page continues from the oldest capture time seen, inclusive (`takenBefore`), and drops the ids already seen at that instant. The adapter never asks for `page` 2: Immich pages by position, ordered only by capture time, and offset pages lose photos at equal times (the [fixture](module-immich-fixture.md#executed-evidence) proved it). A full page at one instant switches to upload time within that instant (`createdBefore`); more than 1,000 photos at one capture and one upload instant ends the check **incomplete**. Immich 2.5.6's search answer never says which photos are stacked copies (`withStacked` changes nothing), so for each page the step also reads the timeline months around any photo near a stacked month, and marks the photos the collapsed timeline does not show.
 4. **Done.**
 
 Each search row becomes one **photo outcome**:
 
 | Row | Outcome |
 |---|---|
-| a stacked copy: its stack's primary is another photo (`stack.primaryAssetId`) | marked `stacked_copy`; a stack joins only through its primary, and only if the primary itself matches (C9) |
+| a stacked copy: taken within a month of a month that holds a stack, and not shown by Immich's timeline with stacks collapsed (`GET timeline/bucket?withStacked=true` for the months around it) | marked `stacked_copy`; a stack joins only through its primary, and only if the primary itself matches (C9) |
 | a partner's photo, unless `partners` | skipped |
 | a still or live photo the query did not choose | skipped |
 | marked in this check | not added |
@@ -115,7 +116,7 @@ Each search row becomes one **photo outcome**:
 | no size yet | waiting (Immich has not read it) |
 | otherwise | in the pool |
 
-A bad answer affects only its photo. An in-pool photo is a `LibraryAsset`: connection, Immich id, revision, kind, capture time, upright size as Immich shows it (EXIF orientations 5–8 swap width and height), and a video's duration. Its **revision** is Immich's checksum, or the checksum plus the first 16 hex of the sha256 of its Immich edits (`GET assets/{id}/edits`) when it is edited; a revision already known is reused while Immich's `updatedAt` is unchanged. Photo Wall's `asset_id` is `asset_identity(connection, Immich id, revision)`, so an unedited photo keeps the id it had before delivery 4, and an edit makes a new asset.
+A bad answer affects only its photo. An in-pool photo is a `LibraryAsset`: connection, Immich id, revision, kind, capture time, upright size as Immich shows it (Immich's own `width` and `height`, already upright and with edits applied, so Photo Wall reads no orientation), and a video's duration. Its **revision** is Immich's checksum, or the checksum plus the first 16 hex of the sha256 of its Immich edits (`GET assets/{id}/edits`) when it is edited; a revision already known is reused while Immich's `updatedAt` is unchanged. Photo Wall's `asset_id` is `asset_identity(connection, Immich id, revision)`, so an unedited photo keeps the id it had before delivery 4, and an edit makes a new asset.
 
 **A check adds what it confirms and removes only when it completes.** Each step upserts its rows with the check's number in one transaction and queues the next step in the same transaction. A finished check:
 
@@ -194,7 +195,7 @@ Retry transport failures with bounded backoff, initially 5/15/60 s; attempts are
 
 Preparation fetches **the photo as Immich shows it**, edits included (owner, 2026-10-09: "whichever one shows up in immich"), and only for planned photos within the preparation horizon. Checking 100,000 photos never means downloading 100,000 files.
 
-- **Photos.** Fetch Immich's edited preview (`thumbnail?size=preview&edited=true`) and read its size from its header. When its long edge covers the long edge of the wall's largest Frame (`largest_frame_edge`), keep it (owner, 2026-10-09: use Immich's downsampled copy only if it is at least the visible Frame size). Otherwise fetch Immich's edited full-size copy (`size=fullsize&edited=true`): the original for JPEG and PNG, Immich's conversion for HEIC and RAW. When Immich keeps no full-size copies (the request redirects to the preview), keep the preview: HEIC and RAW then play at preview size, and the connection shows the `no_full_size_copies` note.
+- **Photos.** Fetch Immich's edited preview (`thumbnail?size=preview&edited=true`) and read its size from its header. When its long edge covers the long edge of the wall's largest Frame (`largest_frame_edge`), keep it (owner, 2026-10-09: use Immich's downsampled copy only if it is at least the visible Frame size). Otherwise fetch Immich's edited full-size copy (`size=fullsize&edited=true`): the original for JPEG and PNG, Immich's conversion for HEIC and RAW. When Immich keeps no full-size copies the request redirects to the preview, and Photo Wall keeps the preview. The connection's `no_full_size_copies` note says HEIC and RAW then play at preview size; in fact, on the fixture's Immich 2.5.6, an unedited JPEG redirects to its preview too, so on a Frame larger than the preview any photo plays at preview size. That case is an open finding awaiting a decision (fetch the original of an unedited photo, or require full-size copies); its test is a strict expected failure (`tests/test_preparation_rendition.py`).
 - **Videos.** Fetch the original (`assets/{id}/original`); Immich 2.5 does not edit videos.
 
 The recipe (`PreparationRecipe.version` 2, so every photo prepared before delivery 4 is prepared once more) accepts JPEG, PNG and WEBP stills and ordinary SDR MP4/MOV H.264/HEVC video. Animated images, HDR/HLG/PQ, non-sRGB/wide-gamut still profiles, unusual rotation matrices, and unsupported containers are explicit preparation failures. Untagged ordinary 8-bit JPEG is interpreted as sRGB; reject a conflicting embedded profile.
