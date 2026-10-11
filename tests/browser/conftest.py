@@ -95,6 +95,7 @@ COLLECTOR = pytest.StashKey[EvidenceCollector]()
 
 
 def pytest_configure(config):
+    shard()   # a malformed PHOTO_WALL_BROWSER_SHARD stops the run here, in every process
     config.stash[COLLECTOR] = collector = EvidenceCollector()
     config.pluginmanager.register(collector, "operator-browser-evidence")
 

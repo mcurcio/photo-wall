@@ -221,7 +221,6 @@ jobs:
             --volume "$GITHUB_WORKSPACE:/work:ro" \
             --volume "$RUNNER_TEMP/console-catalog:/evidence" --workdir /work \
             --env PHOTO_WALL_BROWSER_TESTS=1 --env PYTHONDONTWRITEBYTECODE=1 \
-            --env PHOTO_WALL_BROWSER_SHARD=${{ matrix.shard }}/3 \
             --env CI --env PHOTO_WALL_CATALOG_ACTUAL=/evidence \
             --env UV_PROJECT_ENVIRONMENT=/tmp/photo-wall-browser-venv \
             --env UV_PYTHON_DOWNLOADS=never --env UV_VERSION \
