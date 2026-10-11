@@ -132,25 +132,21 @@ actual outcome without claiming that a new Run started.
 
 `PHOTO_WALL_HORIZON_SECONDS` defaults to 300 seconds and `PHOTO_WALL_RENEWAL_SECONDS`, the plan renewal quantum (at most 60), to 30; the [wall demo](module-wall-demo.md) shortens both. In the scheduler's PostgreSQL transaction, the media repository records each bounded preparation request and defers its exact job ID through Procrastinate. The separate worker publishes verified derivatives into the `media` volume. Central mounts it read-only and serves exact authorized bytes; Players never receive an upstream URL or credential. Procrastinate owns dispatch, retry timing, and queue-worker liveness. Photo Wall schedules only domain preparation, source refresh, and publication/storage maintenance tasks; it retains publication recovery, reservations, and stale-attempt fencing. The worker has a read-only runtime, a private writable media volume, and container CPU/memory limits.
 
-Fresh key-proof enrollment uses `/v1/enrollment/challenge` plus `/v1/enrollment/register`. The single-process Player entry point is `python -m player.service --config /etc/photo-wall/public.json`; see [service configuration and runtime requirements](module-player-service.md). The Player reads its RAM boot context, creates a new process key, and receives a new central authority epoch. A recognized returning equipment observation restores central bindings; unknown equipment remains unbound. `/v1/player/time` supplies independent authenticated clock samples. Base images are fetched from `/v1/netboot/base` (by content hash). Physical Pi/PXE and complete current-image qualification remain pending. Startup-only DRM discovery currently requires a Player restart after connector topology changes.
+Fresh key-proof enrollment uses `/v1/enrollment/challenge` plus `/v1/enrollment/register`. The single-process Player entry point is `python -m player.service --config /etc/photo-wall/public.json`; see [service configuration and runtime requirements](module-player-service.md). The Player derives its boot context from the Pi's serial and a fresh boot id, creates a new process key, says hello on its control session before Central answers any state, and receives a new central authority epoch. A recognized returning equipment observation restores central bindings; unknown equipment remains unbound. `/v1/player/time` supplies independent authenticated clock samples. Base images are fetched through the node boot offer (`/v2/node/boot-offers/{offer_id}/artifacts/{role}`, by content hash). Physical Pi/PXE and complete current-image qualification remain pending. Startup-only DRM discovery currently requires a Player restart after connector topology changes.
 
 The `database` volume persists all authoritative state, including Procrastinate jobs and release/trial records. `media` holds central authoritative media blobs and preparation files, and `connections` holds private worker configuration. Central and worker startup apply forward Photo Wall SQL migrations under a database advisory lock and check hashes of already-applied migrations; they also install/upgrade Procrastinate's versioned schema. Do not edit an applied Photo Wall migration; add another numbered migration. Both containers run as an unprivileged user. The exact Python dependency graph is in `uv.lock`.
 
-## Player provisioning: flash and go
+## Player provisioning: netboot and enroll
 
-The baseline Player path (0008) is flash-and-go: no boot ticket, no pre-registration. Central advertises itself over mDNS (`_photowall._tcp`) once its process starts, unless `PHOTO_WALL_MDNS_ADVERTISE=false` is set. If the deployment serves central on a port other than the default `8000`, also set `PHOTO_WALL_HTTP_PORT` to that real port, or the advertisement points a discovering player at a dead port.
+A Player has one way in: it netboots. There is no flashed image, no boot ticket, no pre-registration and no mDNS discovery; the kernel command line names Central (`photowall.central=…`, [step 2 below](#player-provisioning-stage-the-netboot-bundle-and-read-its-console-0014)).
 
-1. **Flash the generic image** to an SD card or USB drive (build it per the [README's provisioning section](../README.md#provision-player-appliances); there is no published release artifact yet) and boot the Pi on the same trusted LAN as central.
-2. **Watch the pending queue.** The Pi derives its `device_id` from its own hardware serial, finds central by mDNS (only because no explicit origin is configured on the card), and enrolls over plain HTTP. It appears in the operator inventory (`/v1/operator/inventory`, or the operator UI's Players list) as **unbound** — no prior registration required.
+1. **Netboot the Pi** on the same trusted LAN as Central. Stage 1 locates Central from the command line and mounts the base; the Player app root and the App Manager root arrive as squashfs images through [Node control](#node-control). Nothing installs a `.deb` on a Node: the 0009 bootstrapper, `photo-wall-provision.service`, the OS agent, Central's `/v1/app/*` and `/v1/netboot/*` routes and the Player `.deb` are gone ([0019](decisions/0019-debian-packaging-with-debhelper.md)).
+2. **Watch the pending queue.** The Player derives its `device_id` from its own hardware serial and enrolls. It appears in the operator inventory (`/v1/operator/inventory`, or the console's Hardware list) as **unbound**; no prior registration is required.
 3. **Bind** the pending Player's Output to a Frame from the operator interface, the same control used for any equipment change, then calibrate it.
-4. **Unbind** (`DELETE /v1/operator/frames/{frame_id}/binding`) releases a Frame's binding without retiring the Player — the serial can be re-bound later, to the same or a different Frame. This is distinct from **retire**, which is permanent and refuses the serial's re-enrollment.
+4. **Unbind** (`DELETE /v1/operator/frames/{frame_id}/binding`) releases a Frame's binding without retiring the Player: the serial can be re-bound later, to the same or a different Frame. This is distinct from **retire**, which is permanent and refuses the serial's re-enrollment.
 5. **Reboot** of an already-bound Pi re-associates with its Frame automatically by serial; no operator action is required unless the binding itself needs to change.
 
-Netboot (PXE) is the opt-in enhancement path in place of flashing — see the [PXE service module](module-pxe-service.md). Certificate-based identity and pinned/explicit transport trust are further opt-in enhancements described in [decision 0008](decisions/0008-generic-image-and-serial-identity.md); they are designed but not yet implemented, so do not rely on them today. Physical Pi boot of either the flash image or the netboot tree is not yet hardware-qualified.
-
-## Player provisioning: the V1 netboot and promote path (removed)
-
-[Decision 0009](decisions/0009-minimal-base-and-app-package.md) shipped the Player as a `.deb` that a base-owned bootstrapper downloaded and installed with `dpkg --install`. That path is gone ([0019](decisions/0019-debian-packaging-with-debhelper.md)): the bootstrapper, `photo-wall-provision.service`, the OS agent, Central's `/v1/app/*` and `/v1/netboot/*` routes, the `.deb` promotion and the Player `.deb`, bootstrapper `.deb` and Player payload release files no longer exist. A Node boots by [stage 1](#player-provisioning-stage-the-netboot-bundle-and-read-its-console-0014), mounts its base, and its release roots (the Player app root and the AppManager root) arrive as squashfs images through [Node control](#node-control). A Pi enrolls by serial and appears **unbound** in the operator inventory (`/v1/operator/inventory`); bind it to a Frame and calibrate it as in the flash-and-go flow above.
+Physical Pi boot of the netboot tree is not yet hardware-qualified.
 
 ## Player provisioning: stage the netboot bundle and read its console (0014)
 
@@ -398,7 +394,7 @@ The **Hardware** section (`#/hardware`) has one row per physical box (a **Pi**),
 **A Pi's Hardware page** (`#/hardware/<device-id>`) is the one home for the box itself. Each section shows its own read time and fails on its own ("This section could not be shown"):
 
 - **Header**: name, standing, the serial **labelled as a claim**, **Enrollment**, links to the bound Frames' Bindings, the full device and Player ids under **Identifiers**, and a link to the Pi's Software and screens page.
-- **Reboot** (with its history): **Reboot Player** targets Host Management's one current session; when it cannot, the button is disabled and says why (for example, Central's effect gate is closed). The dialog names the bound Frames and their live Runs: the Run stays active and no other Frame or Actuator gets a command. Each request then reads one state: Requested · delivery unknown, Outcome unknown, Received, Accepted or Rejected by Host Management, or Host Management reported the reboot started · completion unknown. If the answer is lost, **Retry the same request** resends the identical request. A **new** request cannot be sent while another reboot request for the same session is outstanding (unexpired on Central's clock and not rejected; Accepted and started requests count). The console checks Central's served `outstanding` at the moment of sending, and Central refuses a new command id with 409 `node_reboot_outstanding`, which reads "Another reboot request for this Player is outstanding; close this dialog and review it."
+- **Reboot** (with its history): **Reboot Player** targets Host Management's one current session; when it cannot, the button is disabled and says why (for example, Host Management has no current session on this boot). The dialog names the bound Frames and their live Runs: the Run stays active and no other Frame or Actuator gets a command. Each request then reads one state: Requested · delivery unknown, Outcome unknown, Received, Accepted or Rejected by Host Management, or Host Management reported the reboot started · completion unknown. If the answer is lost, **Retry the same request** resends the identical request. A **new** request cannot be sent while another reboot request for the same session is outstanding (unexpired on Central's clock and not rejected; Accepted and started requests count). The console checks Central's served `outstanding` at the moment of sending, and Central refuses a new command id with 409 `node_reboot_outstanding`, which reads "Another reboot request for this Player is outstanding; close this dialog and review it."
 - **Health**: the box's [host health](#host-health-on-the-players-pages) in groups (Thermal, Power and throttling, Compute, Storage, Network, Software), the host facts' one receipt line, and an **Every reported metric** disclosure with the raw sample, its fault code and "Host samples do not show visible pixels." Health is hidden while node control is not on and for a retired box.
 - **Link and sessions**: whether Central's hub holds the Node API link, and Host Management's session: when it last reported, and which session and boot.
 - **Danger zone**: **Retire player** (Unbound only). A Bound Pi shows links to its Frames' Bindings instead: unbind it there first.
@@ -414,9 +410,9 @@ The **Hardware** section (`#/hardware`) has one row per physical box (a **Pi**),
 - **App**: the node app operations, each with its named state (for example "Rejected by App Effect Broker", or "Ended by a later boot" for a stage that ran before the Player rebooted). **Stage app** switches this Player's app for this boot only (see [Releases, Stage app and Update the wall](#releases-stage-app-and-update-the-wall)). **Qualified fallback** shows the app environment the Player app linked, lets you qualify it, and lists the stored acceptances.
 - **Danger zone**: **Unbind all outputs** (Bound only). Retire is on the Pi's Hardware page.
 
-A Pi's pages read that box's node state every 5 s while it is open and visible. If Central was started without node control, a banner sits above every page ("Node management is off on this Central …"), the Player page shows one line, "Node records are not shown: node management is off (see the banner).", in place of its node sections, and its header, Outputs, Bind, Identify and Unbind still work. That is a misconfiguration: start Central as [Node control](#node-control) describes. A failed read keeps the last rows, marked "refresh failed". A retired Player is not read ("Not read: Player retired").
+A Pi's pages read that box's node state every 5 s while it is open and visible. A failed read keeps the last rows, marked "refresh failed". A retired Player is not read ("Not read: Player retired").
 
-The serial comes from a separate, optional read of `GET /v1/operator/netboot`, refreshed at most every 30 s or when the set of Players changes. If that read fails, the Hardware list says **"Boot records unavailable"** and keeps the last serials it knew; you stay signed in and everything else works.
+The serial comes from the console's one fleet host read (`GET /v1/operator/node/hosts`, every 15 s once you are signed in). If that read fails, the Hardware list says **"Boot records unavailable"** and keeps the last serials it knew; you stay signed in and everything else works.
 
 ### Host health on the Players pages
 
@@ -460,15 +456,14 @@ The console owns node releases; no step needs curl or a hand-written request. Th
 - **Boot selection**: the one deployment Central offers every node-path boot from now on, its revision and the previous selection. On a wall that has never had a selection, Central selects the newest stable release by itself once it is downloaded, and this line says which release and how much is left (or why it cannot); after that, upgrades are always your choice.
 - **Deployments**: newest first, the selected one always listed. **Select for every boot…** sets the boot selection. Its dialog states the scope: every Player that boots by node path from now on is offered it, including Players Central has not seen, and Central cannot list which Players will boot. A deployment with no app says every boot from now on is offered no app. If another operator selected meanwhile, nothing is sent: "The boot selection changed meanwhile; review it".
 - **Release catalog**: the releases GitHub releases reported, via the media worker. Central turns each valid release into its deployment by itself and downloads the newest three stable releases, the current selection and the previous one in the background; pre-releases are listed but not downloaded ahead. Each row shows one download fact: **Ready**, **Downloading · N GB left**, **Not downloaded**, **Failed: reason**, or **Rejected: reason** (a malformed manifest or a tag conflict; only that release is affected). **Put vX on the wall…** opens Update the wall for that release; on the selected release it reads **Continue putting vX on the wall…**, the way back into a paused rollout. **Check GitHub releases now** queues a catalog check; new releases appear when the worker records them.
-- **Effect gate**: Central's gate state and reason. Reboot and Stage app are refused while it is closed. Central opens it only from a deployment certification; the console cannot open it ([verifier](#optional-read-only-kubernetes-node-verifier)). Until a deployment controller exists, every real Central reads "Effect gate closed · Central's reason: no deployment certification has opened it".
 
 A rebooted Player is offered the boot selection current at its next boot; the reboot dialog says so and links here.
 
-**Stage app** (Player page › App) switches the Player's app **for this boot only**; any later boot, including an unplanned one, is offered the boot selection. It is disabled, with its reason, while the Player is retired, the effect gate is closed, App Effect Broker has no current session on this boot, or a switch is in progress. Pick a deployment that carries an app; Central judges it when you send and the dialog shows Central's answer in its words (for example "No qualified fallback for this Player's current Outputs and base: qualify the running app first"). On a Player that drives Frames, each Frame shows the base page while the app switches, then rejoins its Run at the current point, as on Reboot; missed content is not replayed, and bindings and calibration are kept. Only Central's half of this is qualified so far (the dialog says so): the Player's side of a bound switch has no automated scenario yet.
+**Stage app** (Player page › App) switches the Player's app **for this boot only**; any later boot, including an unplanned one, is offered the boot selection. It is disabled, with its reason, while the Player is retired, App Effect Broker has no current session on this boot, or a switch is in progress. Pick a deployment that carries an app; Central judges it when you send and the dialog shows Central's answer in its words (for example "No qualified fallback for this Player's current Outputs and base: qualify the running app first"). On a Player that drives Frames, each Frame shows the base page while the app switches, then rejoins its Run at the current point, as on Reboot; missed content is not replayed, and bindings and calibration are kept. Only Central's half of this is qualified so far (the dialog says so): the Player's side of a bound switch has no automated scenario yet.
 
-**Qualified fallback** (Player page › App) qualifies the app the Player is running now, so that Stage has a fallback. The Player must be bound and show one steady photo or looping video on every Output for 30 s. **Begin** starts it, and the page asks Central for a sample every 2 s while it stays open and visible. It stops with a reason on a terminal answer or after 2 minutes without progress (a slideshow that changes within 30 s never progresses). Qualification needs no effect gate.
+**Qualified fallback** (Player page › App) qualifies the app the Player is running now, so that Stage has a fallback. The Player must be bound and show one steady photo or looping video on every Output for 30 s. **Begin** starts it, and the page asks Central for a sample every 2 s while it stays open and visible. It stops with a reason on a terminal answer or after 2 minutes without progress (a slideshow that changes within 30 s never progresses).
 
-**Update the wall** (Releases › **Update the wall…**, or **Put vX on the wall…** on a catalog row) walks one release onto the wall: optionally **Try it on one Frame** (the page qualifies the running app if needed, then stages the release on that Player), **Look**, and then **Put vX on the wall** or **Back out**. Put on the wall asks for one confirmation, which names the Players it will reboot and that each Frame is blank while its Player reboots. It then sends one Select and reboots the Players this console knows one at a time (the first reboot waits until Central has downloaded the release), the tried Player first, each waiting until the previous one has rejoined (Central's snapshot lists the Player app on its new boot, the target app is linked, every bound Frame is live and no readiness failure is reported; the page's judgement, not proof each Output shows its assignment). You can skip a Player before its reboot; skips are kept in the page's address. Only the Players the confirmation named are rebooted: a Player that enrolls later reads "Not in this rollout", and after a reload Resume names the Players again before rebooting any. A reported readiness failure on the new boot pauses the rollout too. A Player that has not rejoined after 10 minutes, a rejected or unknown reboot, or a hidden tab pauses the rollout with Retry, Skip and Stop. Back out reboots the tried Player; its next boot is offered the current selection. One reboot at a time holds per page only: a second page, or a Player-page Reboot, can reboot another Player at the same time. Nothing about the rollout is stored in Central: closing the page stops further reboots, and on reopening the page re-derives each row and waits for **Resume**. Select is fleet-wide, so any Player that restarts for any reason is offered the new deployment at that boot. With the effect gate closed, Try is unavailable and Put on the wall is Select alone: each Player is offered the release at its next boot. **Undo**, when the rollout is done, selects the previous selection again.
+**Update the wall** (Releases › **Update the wall…**, or **Put vX on the wall…** on a catalog row) walks one release onto the wall: optionally **Try it on one Frame** (the page qualifies the running app if needed, then stages the release on that Player), **Look**, and then **Put vX on the wall** or **Back out**. Put on the wall asks for one confirmation, which names the Players it will reboot and that each Frame is blank while its Player reboots. It then sends one Select and reboots the Players this console knows one at a time (the first reboot waits until Central has downloaded the release), the tried Player first, each waiting until the previous one has rejoined (Central's snapshot lists the Player app on its new boot, the target app is linked, every bound Frame is live and no readiness failure is reported; the page's judgement, not proof each Output shows its assignment). You can skip a Player before its reboot; skips are kept in the page's address. Only the Players the confirmation named are rebooted: a Player that enrolls later reads "Not in this rollout", and after a reload Resume names the Players again before rebooting any. A reported readiness failure on the new boot pauses the rollout too. A Player that has not rejoined after 10 minutes, a rejected or unknown reboot, or a hidden tab pauses the rollout with Retry, Skip and Stop. Back out reboots the tried Player; its next boot is offered the current selection. One reboot at a time holds per page only: a second page, or a Player-page Reboot, can reboot another Player at the same time. Nothing about the rollout is stored in Central: closing the page stops further reboots, and on reopening the page re-derives each row and waits for **Resume**. Select is fleet-wide, so any Player that restarts for any reason is offered the new deployment at that boot. **Undo**, when the rollout is done, selects the previous selection again.
 
 ### Identify an Output and bind it
 
@@ -537,7 +532,7 @@ A Frame whose Pi runs software without Display Host says "This Frame's Pi runs s
 
 **Hardware** holds the Pi and HDMI port feeding the Frame (**Connect Frame …** from a free port, **Disconnect from this Pi**, **Identify display** on a free port, and the Display the Pi reported when its photo app last started; Central's record, the Player app's last enrollment, is under **Details**) the **Display** the Pi reports on that port (make, model, serial or "Recognised by make and model on this Frame", and the modes it lists, read-only; with a **Display changed** card when it is not the one the Position was set against), and the **Frame profile** (pixel width and height, diagonal, video capable). The Frame profile is **operator-declared at Frame creation and persists across a Display swap**; **Edit Frame profile** works on a Frame with no Pi, or while its display has changed, and clears its position. When both resolutions are known, the Frame profile is compared with the resolution the Pi last reported, in the saved rotation when the position is set; a mismatch is a "Check the Display" card naming both values, with **Edit Frame profile** as its action and how to restart the photo app or change the profile under Details. The record may be stale; it never changes the profile.
 
-Frames whose Pi reports only the older preview path (`legacy_preview`) cannot be positioned from the console: they are told so and linked to their Pi's software page. That is the V2-only cost of this page. The `POST /v1/operator/frames/{id}/calibration` route stays for scripts (`scripts/demo_wall.py`) and tests.
+A Frame whose Pi did not start from Photo Wall (Central holds no node boot for it, `not_admitted`: a Compose or demo Player) cannot be positioned from the console: it is told so and linked to its Pi's page. Central has no other calibration path; the legacy preview and its `POST /v1/operator/frames/{id}/calibration` route were deleted in PR 45. The wall demo and the tests save a Frame's Position through Registry's Save compare-and-set, the one a trial's Save crosses (`tests/support/position.py`).
 
 The page has no colour or hardware brightness controls yet ([roadmap 1c](roadmap.md#1c-brightness-contrast-and-colour)); power is on the Power tab.
 
@@ -857,20 +852,18 @@ so both know migrations 053–054 and the sealed-environment job kind. Keep the
 ordinary `PHOTO_WALL_DATABASE_URL` and `PHOTO_WALL_ADMIN_TOKEN` configuration in
 its existing protected deployment settings. No token is placed in a command line.
 
-Node control is the one supported configuration. Set an installation-specific
-`PHOTO_WALL_NODE_AUDIENCE` and run Central with the node factory:
+Central always runs node control; there is no switch to turn it off and no
+other factory. Run Central with its one factory (the image's own command):
 
 ```sh
-uvicorn central.node_app:create_app --factory --host 0.0.0.0 --port 8000 --ws-max-size 16777216
+uvicorn central.app:create_app --factory --host 0.0.0.0 --port 8000 --ws-max-size 16777216
 ```
 
-Keep `--ws-max-size` at 16 MiB (the image's own command uses the same value): a Node's bus leaf rides Central's WebSocket, and nats-server sends a connection's whole backlog as one frame ([the Node bus](#the-node-bus-and-centrals-hub)).
+Keep `--ws-max-size` at 16 MiB: a Node's bus leaf rides Central's WebSocket, and nats-server sends a connection's whole backlog as one frame ([the Node bus](#the-node-bus-and-centrals-hub)).
 
-The ordinary `central.app:create_app` factory (still the default image and Compose
-command until the [V1 follow-up](player-fleet-implementation-map.md) switches them)
-keeps node transport disabled. That is a **misconfiguration**: Players that boot by
-node path are refused, and the console shows one banner ("Node management is off on
-this Central") above every page. Every Pi boots by the node path: the V1 boot offer
+The node session audience is the product constant `photo-wall` (`NODE_AUDIENCE` in
+`central/fleet/node_sessions.py`), one Central per wall; no environment variable sets it.
+Every Pi boots by the node path: the V1 boot offer
 and the `photowall.node=v2` switch are gone ([0019](decisions/0019-debian-packaging-with-debhelper.md)),
 so the command line needs no flag. Do not add `cgroup_enable=memory`: every release's
 command line carries it, once, and it must stay. Boot trees staged from an earlier
@@ -878,11 +871,10 @@ release do not; restage them. Without the memory controller, which the Pi 5's de
 tree turns off, the base still mounts its store but no memory limit is enforced, and
 the console warns
 ([step 2](#player-provisioning-stage-the-netboot-bundle-and-read-its-console-0014)).
-A node release's boot tree carries both. The node factory enables observation, explicit session enrollment, immutable V2 boot
-offers and scoped command routes; it does **not** open the durable effect gate.
-`/healthz` remains process/service health. Authenticated
-`GET /v1/operator/node/status` reports transport selection and the persistent gate
-state separately. A running HTTP server, accepted serial claim, stored sample, or
+Node control serves observation, explicit session enrollment, immutable V2 boot
+offers and scoped command routes. The operator's word admits Reboot and Stage app:
+there is no effect gate (owner answer G-A). `/healthz` remains process/service
+health. A running HTTP server, accepted serial claim, stored sample, or
 catalogued artifact is not command qualification, authenticated physical identity,
 verified downloaded bytes, or observed pixels.
 
@@ -912,9 +904,7 @@ supersedes the prior boot and revokes that boot's sessions, so the operator neve
 chooses which boot of a box is current (the fleet-wide boot selection above chooses
 what every boot is offered). Two Pis claiming one serial flap visibly, each enrollment revoking
 the other. This does not prove which physical Pi exists or that an
-already-delivered effect stopped. Effect rollout still requires the
-existing D17 all-serving/rollback certification and a real injected serving-image
-verifier; there is no environment-variable bypass. The automated node scenarios and
+already-delivered effect stopped. The automated node scenarios and
 their limits are listed in [validation](validation.md).
 
 
@@ -964,53 +954,6 @@ systemctl list-units --type=mount | grep photo                         # the tra
 **A refused online stage stalls without a report.** When staging refuses inside the import worker, the worker exits without its result, the broker raises `root_import_outcome_unknown` on every tick, and the operation stays `preparing` on the Node while the console shows it staged. The fault is only in the worker's journal: `journalctl -u 'photo-wall-root-import-*'`. Stage again from the console, or reboot the Player. The owner accepted this as a cost of E2c (2026-10-09); it is fixed when the effect protocol is rebuilt ([0017](decisions/0017-node-redesign-r3.md#costs)).
 
 Superseded images stay in the pool until the next reboot. A third distinct app image in one boot is refused as an App Manager storage refusal with both numbers; reboot the Player to clear the pool.
-
-### Optional read-only Kubernetes node verifier
-
-The node factory accepts `PHOTO_WALL_NODE_VERIFIER_CONFIG`, the path to a
-read-only deployment-owned JSON file. Its exact keys are `identity_directory`,
-`namespace`, `ci_record`, `guard_record`, `ci_public_key`, `guard_public_key`, and
-`audience`. Public keys are distinct raw Ed25519 keys encoded as hex. The identity
-directory provides `namespace`, `pod_name`, `pod_uid`, `container_name`,
-`deployment_name`, and `deployment_uid`; populate Pod identity through the
-[Kubernetes downward API](https://kubernetes.io/docs/concepts/workloads/pods/downward-api/).
-The reader checks the actual Pod owner chain and registry-qualified
-[`status.containerStatuses.imageID`](https://kubernetes.io/docs/reference/kubernetes-api/workload-resources/pod-v1/).
-A mutable image tag or runtime config hash is insufficient.
-
-The service-account reader uses verified Kubernetes TLS and GET only. It needs
-complete Pod/ReplicaSet/Deployment, Service/EndpointSlice, Ingress/NetworkPolicy,
-API discovery and supported Gateway resource inventories, plus the two named
-public evidence ConfigMaps. It never reads Secrets. Unknown custom API groups,
-unsupported route resources, forbidden lists or incomplete pagination refuse
-certification. This conservative adapter needs extension and corresponding tests
-before using a cluster with other routing controllers.
-
-Each ConfigMap contains `data["evidence.json"]` with exact `payload` and hex
-`signature` fields. Sign canonical sorted compact JSON after the domain prefix
-`photo-wall-rollout-ci-v1` or `photo-wall-rollout-guard-v1`, each followed by a NUL
-byte. The source `SignedRolloutEvidence` defines the exact payload fields. Both
-records bind audience, record UID, increasing generation, active/revoked state,
-issue/expiry times (at most 300 seconds). CI binds all exact serving and rollback
-image digests plus immutable compatibility, fence and readiness evidence hashes.
-The guard binds Deployment UID/generation, complete endpoint/route hashes, CI
-payload hash, exact image sets, and an irrevocable `mutation_not_before` equal to
-its expiry. Revocation blocks new observation/admission but cannot shorten this
-promised no-mutation interval. The durable local watermark records revocation
-before returning refusal, and rejects earlier signed active records after restart.
-Key rotation or ConfigMap replacement fails closed and requires explicit operator
-reprovisioning; deleting replay floors is not a normal recovery action.
-
-**External implementation dependency:** the separate IaC owner must implement
-and deploy a controller that closes the durable effect gate before changing any
-certified direct Service/Pod/Gateway path, waits out outstanding signed holds,
-prevents uncertified rollback, and retains fenced images while any effect remains
-unreconciled even after certification expiry. It must produce truthful exact-image
-CI matrices and signed guard records from those enforcement results. The adapter
-and signatures do not implement that controller. No real such controller or
-qualification is established by the local tests. An unconfigured or uncertified
-node factory therefore continues to serve observations with effects closed.
-
 
 ## Reaching a Node over SSH
 

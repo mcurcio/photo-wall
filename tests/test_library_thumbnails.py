@@ -317,8 +317,7 @@ def route(registry, tmp_path, monkeypatch):
     root.mkdir()  # an existing volume made before previews/ existed
     monkeypatch.setenv("PHOTO_WALL_CACHE_ROOT", str(root))
     apply_procrastinate_schema(registry.db.dsn)
-    app = create_app(registry.db, registry.clock, ADMIN, media_queue=RecordingMediaQueue(),
-                     mdns_enabled=False)
+    app = create_app(registry.db, registry.clock, ADMIN, media_queue=RecordingMediaQueue())
     return app, root
 
 

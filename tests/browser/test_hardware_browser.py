@@ -7,8 +7,8 @@ Reboot and Retire still go through their confirmation dialogs.
 
 The production app on the loopback harness. The list's host values come from a stubbed fleet
 host read (as tests/browser/test_host_health_browser.py does), so the tiers are exact; the Pi
-page runs against real node records and Central's real reboot owner behind an open effect gate
-(as tests/browser/test_player_page_browser.py does).
+page runs against real node records and Central's real reboot owner (as
+tests/browser/test_player_page_browser.py does).
 """
 
 import os
@@ -20,7 +20,7 @@ from operator_harness import operator_server
 from playwright.sync_api import expect
 from test_fleet_attempts import SERIAL
 from test_host_health_browser import THRESHOLDS, _frames_with_players, _row, _stub
-from test_player_page_browser import NAME, Box, _gated_server, _open_gate
+from test_player_page_browser import NAME, Box, _node_server
 from test_registry import enroll
 
 pytestmark = pytest.mark.skipif(
@@ -116,8 +116,7 @@ def test_the_list_groups_pis_worst_first_and_a_focus_narrows_and_clears(page, re
 def test_the_pi_page_reboots_and_retires_only_through_their_confirmation_dialogs(page, registry):
     box = Box(registry)
     box.host_sample()
-    _open_gate(registry)
-    with _gated_server(registry) as origin:
+    with _node_server(registry) as origin:
         writes = []
         page.on("request", lambda request: writes.append(request.url)
                 if request.method == "POST" and re.search(r"/(reboots|retire)$", request.url) else None)

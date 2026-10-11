@@ -27,10 +27,10 @@ def _admin_routes(app: FastAPI) -> set[str]:
 
 def test_every_admin_route_of_the_real_app_is_under_the_cookie_path():
     app = create_app(Database("postgresql://unused@127.0.0.1:1/unused"), ManualClock(0), ADMIN,
-                     run_scheduler=False, mdns_enabled=False)
+                     run_scheduler=False)
     routes = _admin_routes(app)
     # Non-vacuous: console callers of node and calibration routes are found.
-    assert {"/v1/operator/node/status", "/v1/operator/frames/{frame_id}/calibration-capability",
+    assert {"/v1/operator/node/hosts", "/v1/operator/frames/{frame_id}/calibration-capability",
             "/v1/operator/app/releases/refresh"} <= routes
     assert COOKIE_PATH == OPERATOR_PREFIX
     assert sorted(path for path in routes if not path.startswith(OPERATOR_PREFIX)) == []
@@ -44,7 +44,7 @@ def test_every_operator_route_of_the_real_app_requires_the_operator_login():
     """Per method and path, so one route losing its `admin` dependency (a GET beside a guarded
     POST) fails here, whichever slice added it."""
     app = create_app(Database("postgresql://unused@127.0.0.1:1/unused"), ManualClock(0), ADMIN,
-                     run_scheduler=False, mdns_enabled=False)
+                     run_scheduler=False)
     admin = app.state.operator_auth.admin
     open_routes = {(method, route.path) for route in app.routes
                    if isinstance(route, APIRoute) and route.path.startswith(OPERATOR_PREFIX)

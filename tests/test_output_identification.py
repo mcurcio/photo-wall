@@ -1,7 +1,7 @@
 """Central persistence, eligibility and delivery for output identification."""
 
 from fastapi.testclient import TestClient
-from test_registry import ADMIN, enroll
+from test_registry import ADMIN, enroll, hello
 
 from central.app import create_app
 from contracts.player_control import ControlHello
@@ -10,7 +10,7 @@ from contracts.player_control import ControlHello
 def negotiate(client, player):
     response = client.post("/v1/player/hello", headers={
         "Authorization": "Bearer " + player["token"],
-    }, json={"authority_epoch": player["authority_epoch"], "schemas": [1, 2],
+    }, json={"authority_epoch": player["authority_epoch"], "schemas": [2],
              "capabilities": ["identify_output"]})
     assert response.status_code == 200
     assert response.json() == {"authority_epoch": player["authority_epoch"],
@@ -108,16 +108,17 @@ def test_identify_output_supersedes_and_stops_when_bound_or_disconnected(registr
 def test_identify_output_epoch_is_fenced_by_reenrollment(registry):
     player, key, request = enroll(registry)
     registry.control_hello(player["player_id"], ControlHello(
-        authority_epoch=player["authority_epoch"], schemas=(1, 2),
+        authority_epoch=player["authority_epoch"], schemas=(2,),
         capabilities=("identify_output",)))
     registry.identify_output(player["player_id"], "HDMI-A-2")
     current, _, _ = enroll(registry, key=key, device_id=request.device_id)
+    hello(registry, current, ("identify_output",))
     app = create_app(registry.db, registry.clock, ADMIN)
     with TestClient(app) as client:
         state = client.get("/v1/player/state", headers={
             "Authorization": "Bearer " + current["token"],
         }).json()
-        assert set(state) == {"configuration", "plan", "commits", "revocations"}
+        assert state["identify_output"] is None
 
         retired = client.post(
             f"/v1/operator/players/{player['player_id']}/retire",

@@ -56,7 +56,6 @@ import importlib.util
 import json
 import os
 import queue
-import secrets
 import signal
 import sys
 import threading
@@ -177,21 +176,11 @@ state = Path('/state')
 outputs = tuple(OutputReport(output_id='HDMI-A-' + str(i+1), width_px=1920,
                             height_px=1080) for i in range(count))
 renderer, dispatcher = Recorder(), Dispatch()
-config = PlayerConfig(central_origin='http://central:8000', allow_http=True,
+config = PlayerConfig(central_origin='http://central:8000',
                       cache_dir='/tmp/cache', cache_bytes=32*1024**2)
-device_id = os.environ['PHOTO_WALL_DEMO_DEVICE_ID']
-# 0009 diskless/netboot: no boot ticket is issued -- the base bootstrapper
-# fetches the app .deb and hands off only the origin, never a ticket. A
-# ticketless boot context (ticket_id=None) is the signal the app and central
-# key ticketless enroll on: enroll() sends ticket_id=None (no appliance_devices
-# row to bind), release_accepted flips True immediately, and _control_loop
-# never POSTs the retired /v1/player/boot-health route. This is the runtime
-# contract p4 s3 proves; the old /v1/bootstrap/boot ticket path is gone here.
-boot_context = BootContext.model_validate({
-    'schema': 2, 'ticket_id': None, 'device_id': device_id,
-    'boot_id': str(uuid.uuid4()), 'release_id': secrets.token_hex(32),
-    'trial': False, 'persistence': 'volatile', 'fault': None,
-})
+# A container has no Pi serial: the demo names the device the Player enrolls as.
+boot_context = BootContext(device_id=os.environ['PHOTO_WALL_DEMO_DEVICE_ID'],
+                           run_id=str(uuid.uuid4()))
 # The production wiring (R1): the container's kernel command line names no Central,
 # so the configured origin is the saved root, located before the first request.
 # One Trust for the whole process: the same anchors locate Central and every
@@ -200,7 +189,7 @@ trust = Trust.public()
 find_central = central_finder(config, resolve_central(read_kernel_command_line()),
                               transport=HttpTransport(trust=trust))
 service = AuditedService(config, load_identity(), outputs, renderer, dispatcher,
-                         find_central=find_central, trust=trust, health_path=None,
+                         find_central=find_central, trust=trust,
                          boot_context=boot_context)
 stopping = [False]
 def stop(*_):
@@ -823,35 +812,16 @@ def upstream_action(action: str):
         for item in state["assets"].values()], "permissions": PERMISSIONS if action != "deny" else ["user.read"]}
 
 
-def save_position(database, frame_id: str) -> None:
-    """Position Save for a demo Frame: Corners on the whole output, through Registry's Save CAS
-    (`commit_calibration_trial_in`, what a trial's Save calls). The demo's Players present no
-    Position trial, and the V1 route that committed without one is gone (roadmap 1c)."""
-    from central.registry import Registry
-    from central.transaction_locks import acquire_runtime_locks
-    from contracts.models import Calibration, CornersFit
-    from contracts.time import SystemClock
-
-    with database.transaction() as conn:
-        acquire_runtime_locks(conn)
-        row = conn.execute("SELECT f.calibration, f.generation, f.configuration_revision, b.player_id, b.output_id, "
-                           "p.authority_epoch FROM frames f JOIN bindings b ON b.frame_id=f.id "
-                           "JOIN players p ON p.id=b.player_id WHERE f.id=%s", (frame_id,)).fetchone()
-        require(row is not None, "frame_unbound")
-        Registry(database, SystemClock()).commit_calibration_trial_in(
-            conn, frame_id=frame_id, player_id=row["player_id"], authority_epoch=row["authority_epoch"],
-            output_id=row["output_id"], binding_generation=row["generation"],
-            config_revision=row["configuration_revision"],
-            calibration_revision=Calibration.model_validate(row["calibration"]).revision,
-            calibration=Calibration(fit=CornersFit()))
-
-
 def operator_action(action: str):
     """Control through real operator HTTP; SQL is limited to evidence reads, and to Position Save
-    (`save_position`), which has no operator route without a Position trial."""
+    (`support.position.save_position`, the tests' helper through Registry's Save CAS), which has
+    no operator route without a Position trial: the demo's Players have no Node."""
     import httpx
+    from support.position import save_position
 
     from central.db import Database
+    from central.registry import Registry
+    from contracts.time import SystemClock
     client = httpx.Client(base_url="http://central:8000", trust_env=False, follow_redirects=False,
                          headers={"Authorization": "Bearer " + os.environ["DEMO_ADMIN_TOKEN"]}, timeout=15)
     def request(method, path, body=None):
@@ -883,14 +853,19 @@ def operator_action(action: str):
         expected = 1 if os.environ["DEMO_SCENARIO"] == "baseline" else 3
         require(len(outputs) == expected, "players_not_registered")
         frames = []
-        for index, output in enumerate(outputs):
-            frame = "demo-frame-" + str(index + 1)
-            request("POST", "/v1/operator/frames", {"id": frame, "width_mm": 500, "height_mm": 300,
-                "profile": {"width_px": 1920, "height_px": 1080, "diagonal_inches": 24, "video": True}})
-            request("PUT", "/v1/operator/frames/" + frame + "/binding", {
-                "player_id": output["player_id"], "output_id": output["output_id"], "expected_generation": 0})
-            save_position(Database(os.environ["PHOTO_WALL_DATABASE_URL"]), frame)
-            frames.append(frame)
+        database = Database(os.environ["PHOTO_WALL_DATABASE_URL"])
+        registry = Registry(database, SystemClock())
+        try:
+            for index, output in enumerate(outputs):
+                frame = "demo-frame-" + str(index + 1)
+                request("POST", "/v1/operator/frames", {"id": frame, "width_mm": 500, "height_mm": 300,
+                    "profile": {"width_px": 1920, "height_px": 1080, "diagonal_inches": 24, "video": True}})
+                request("PUT", "/v1/operator/frames/" + frame + "/binding", {
+                    "player_id": output["player_id"], "output_id": output["output_id"], "expected_generation": 0})
+                save_position(registry, frame)
+                frames.append(frame)
+        finally:
+            database.close()
         request("PUT", "/v1/operator/scenes/demo", {"scene_id": "demo", "loop": True,
             "cycle_seconds": SCENE_CYCLE_SECONDS,
             "contributions": [{"target": "frame:" + frame, "kind": "media", "source_refs": ["demo:1"]}
@@ -1089,6 +1064,20 @@ def selected_secured_presentation(before, reports, portrait_sha, deleted_at):
 def retryable_operator_error(error):
     return str(error) in ("docker_command_failed", "operator_http_502", "operator_http_503",
                           "operator_http_504", "operator_transport")
+
+
+def await_central(host, seconds=90):
+    """Wait for Central's health answer, retrying only while Central is not answering yet;
+    any other failure (a broken helper, a refused request) surfaces at once as itself."""
+    deadline = time.monotonic() + seconds
+    while True:
+        try:
+            return host.role("operator", "health")
+        except Exception as error:
+            if not retryable_operator_error(error):
+                raise
+            require(time.monotonic() < deadline, "central_startup_timeout")
+            time.sleep(1)
 
 
 class FaultRun:
@@ -1328,14 +1317,7 @@ def run_demo(state: Path, fixture_state: Path, app_image: Path, scenario: str, k
         setup_operation(evidence, save, "setup_central", "docker-compose", "start_central",
                         lambda: host.compose("up", "-d", "database", "central",
                                              timeout=120, capture=False))
-        deadline = time.monotonic() + 90
-        while True:
-            try:
-                host.role("operator", "health")
-                break
-            except Exception:
-                require(time.monotonic() < deadline, "central_startup_timeout")
-                time.sleep(1)
+        await_central(host)
         setup_operation(evidence, save, "setup_source", "operator", "configure_source",
                         lambda: configure_demo_source(host))
         initial_refresh = setup_operation(

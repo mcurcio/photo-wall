@@ -24,8 +24,8 @@ type CopyOutcome = "copied" | "no-display" | "same-display" | "session-open";
 
 export interface FramePictureProps {
   frameId: string;
-  /** The Frame's Pi's Software page, or null when unbound. */
-  softwareHref: string | null;
+  /** The Frame's Pi's page, or null when unbound. */
+  piHref: string | null;
   /** The tab's live session (the Frame page holds it, so its LeaveGuard covers it). */
   session: PictureSession;
   /** The other Frames on the wall, for Copy. */
@@ -68,13 +68,13 @@ export function whereItActs(view: View, setting: Placeable, actsOn: ActsOn | nul
   return `${ON_DISPLAY} · ${value} %`;
 }
 
-function unavailableWords(session: PictureSession, softwareHref: string | null) {
+function unavailableWords(session: PictureSession, piHref: string | null) {
   if (session.unavailable === null) return null;
   return (
     <>
       {session.unavailable.words}
-      {session.unavailable.code === "no_display" && softwareHref !== null && (
-        <>{" "}<Link href={softwareHref}>Open the Pi&apos;s software page</Link></>
+      {session.unavailable.code === "no_display" && piHref !== null && (
+        <>{" "}<Link href={piHref}>Open the Pi&apos;s software page</Link></>
       )}
     </>
   );
@@ -158,9 +158,9 @@ function CopyToFrames({ frameId, otherFrames, blocked }: { frameId: string; othe
  * onto the display when the display answered. Every change is sent as it is made; Done keeps it
  * once the Pi shows it, Revert puts back what was there. Copy to other Frames copies the values.
  */
-export function FramePicture({ frameId, softwareHref, session, otherFrames }: FramePictureProps) {
+export function FramePicture({ frameId, piHref, session, otherFrames }: FramePictureProps) {
   const { view, draft, phase } = session;
-  const reason = unavailableWords(session, softwareHref);
+  const reason = unavailableWords(session, piHref);
   const ready = view !== null && phase !== "idle";
   const notes = [
     ...(session.leftAt !== null

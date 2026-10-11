@@ -13,21 +13,6 @@ from central.db import Database
 from central.registry import Registry
 from contracts.time import ManualClock
 
-
-@pytest.fixture(autouse=True)
-def _mdns_advertise_disabled_by_default(monkeypatch):
-    """Advertising defaults ON in production (central.app.create_app), so
-    every TestClient(create_app(...)) boot would otherwise perform a real
-    multicast registration (~1s+, and non-hermetic). Tests exist to exercise
-    mDNS advertising explicitly opt back in by passing mdns_enabled=True /
-    mdns_advertiser=... straight to create_app(), or by overriding this env
-    var themselves -- see tests/test_mdns_advertise.py. This only changes
-    the *test* environment default; production's default-enabled behavior
-    in central/app.py is untouched.
-    """
-    monkeypatch.setenv("PHOTO_WALL_MDNS_ADVERTISE", "false")
-
-
 _RUN_ID = pytest.StashKey[str]()
 _UNOWNED_SKIPS = pytest.StashKey[list]()
 

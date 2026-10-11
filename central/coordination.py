@@ -16,7 +16,6 @@ from psycopg.types.json import Jsonb
 from pydantic import Field
 
 from central.db import Database, DatabaseTransactionClock
-from central.equipment_drain import fenced_players_in
 from central.execution_outcomes import ExecutionOutcome, ExecutionOutcomeRouter
 from central.installation_models import OutputInterruption, PlayerReports
 from central.installation_ports import InstallationSessions
@@ -387,7 +386,7 @@ class Coordinator:
             ),
         ).fetchone()["sequence"]
 
-    def _skip_group(self, conn, group_id, code, *, cancel=False, root=None):
+    def _skip_group(self, conn, group_id, code, *, root=None):
         cue_key = conn.execute(
             "SELECT cue_key FROM coordination_groups WHERE id=%s", (group_id,)
         ).fetchone()["cue_key"]
@@ -396,9 +395,8 @@ class Coordinator:
             detail["root"] = root
         sequence = self._event(conn, "group_skipped", detail=detail)
         conn.execute(
-            "UPDATE coordination_groups SET status='skipped',skip_sequence=%s,drain_cancel=%s "
-            "WHERE id=%s",
-            (sequence, cancel, group_id),
+            "UPDATE coordination_groups SET status='skipped',skip_sequence=%s WHERE id=%s",
+            (sequence, group_id),
         )
         conn.execute("UPDATE execution_commits SET valid=FALSE WHERE group_id=%s", (group_id,))
 
@@ -443,7 +441,6 @@ class Coordinator:
             # serialization cut, not at the time it first requested the cut.
             now = self.clock.utc()
             runtime.advance(now)
-            fenced = fenced_players_in(conn)
             configurations = {
                 p["id"]: self._configuration(conn, p["id"], p["authority_epoch"])
                 for p in self._players(conn)
@@ -459,8 +456,7 @@ class Coordinator:
                 runtime,
                 now,
                 bindings_by_player={
-                    p: tuple(b for b in config.bindings
-                             if p not in fenced and b.output_id in config.enabled_outputs)
+                    p: tuple(b for b in config.bindings if b.output_id in config.enabled_outputs)
                     for p, config in configurations.items()
                 },
                 catalog_snapshots=snapshots,
@@ -469,10 +465,7 @@ class Coordinator:
                 horizon_seconds=horizon_end - now,
                 limits=PlannerLimits(max_horizon_seconds=self.limits.horizon_seconds + quantum),
             )
-            groups = self._groups(conn, runtime, now, horizon_end, {
-                p: config.model_copy(update={"enabled_outputs": ()}) if p in fenced else config
-                for p, config in configurations.items()
-            })
+            groups = self._groups(conn, runtime, now, horizon_end, configurations)
             for proposal in projection.players:
                 config = configurations[proposal.player_id]
                 # Historical offers feed content locks only. Reconciliation,
@@ -634,7 +627,7 @@ class Coordinator:
             if plan:
                 membership = self._plan_groups(conn, plan)
                 skipped = conn.execute(
-                    "SELECT id,skip_sequence,drain_cancel FROM coordination_groups "
+                    "SELECT id,skip_sequence FROM coordination_groups "
                     "WHERE status='skipped' AND skip_sequence IS NOT NULL"
                 ).fetchall()
                 revocations = tuple(
@@ -643,7 +636,7 @@ class Coordinator:
                         revision=plan.revision,
                         authority_epoch=epoch,
                         sequence=g["skip_sequence"],
-                        mode="cancel" if g["drain_cancel"] else "invalidate",
+                        mode="invalidate",
                         assignment_ids=tuple(
                             sorted(a for a, group in membership.items() if group == g["id"])
                         ),
@@ -731,8 +724,6 @@ class Coordinator:
     def readiness(self, player_id: str, report: Readiness) -> bool:
         now = self.clock.utc()
         with self._transaction() as conn:
-            if player_id in fenced_players_in(conn):
-                raise CoordinationError("equipment_draining")
             configurations = {
                 p["id"]: self._configuration(conn, p["id"], p["authority_epoch"])
                 for p in self._players(conn)
@@ -851,8 +842,7 @@ class Coordinator:
         """Authorize an exact operational surface, never an execution Commit.
 
         Caller holds Coordination→Runtime before authenticating the node session.
-        A live app linkage and Registry tuple are necessary. V1 drain rows cannot
-        authorize V2 starting-new candidates; that requires the V2 lifecycle port.
+        A live app linkage and Registry tuple are necessary.
         """
         from central.fleet.node_app_links import load_current_node_app_link_for_player_in
 
@@ -869,8 +859,6 @@ class Coordinator:
         if link is None or (link.process, link.app_epoch, link.environment_sha256) != (
                 process, app_epoch, environment_sha256):
             return DisplayAdmission(False, "", "app_process_link_changed")
-        if player_id in fenced_players_in(conn):
-            return DisplayAdmission(False, "", "equipment_drain_requires_v2_target_reservation")
         fence = identity("display-", [player_id, authority_epoch, output_id, frame_id, binding_generation,
             config_revision, link.producer.device_generation, str(link.producer.kernel_boot_id),
             link.process.pid, link.process.start_ticks, str(link.process.invocation_id),

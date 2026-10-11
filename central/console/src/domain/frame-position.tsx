@@ -26,7 +26,7 @@ export interface FramePositionProps {
   adjustment: Adjustment;
   /** The output's size in pixels; null while the Pi has reported none (steps then use a common one). */
   size: PixelSize | null;
-  softwareHref: string | null;
+  piHref: string | null;
   /** The Frame's readiness: a Position to check again is kept by Done with no change. */
   readiness?: Readiness;
 }
@@ -66,7 +66,7 @@ const inside = (value: number) => value >= 0 && value <= 1;
  * checked again (its picture changed, or another display is on its port) is kept by Done with no
  * change. A change that would fold the picture or leave the screen is refused where it is made.
  */
-export function FramePosition({ adjustment, size: reported, softwareHref, readiness }: FramePositionProps) {
+export function FramePosition({ adjustment, size: reported, piHref, readiness }: FramePositionProps) {
   const size = reported ?? FALLBACK_SIZE;
   const checkAgain = readiness === "position-needed" || readiness === "display-changed";
   const [selected, setSelected] = useState<number | null>(null);
@@ -108,7 +108,7 @@ export function FramePosition({ adjustment, size: reported, softwareHref, readin
 
   return (
     <Section title="Position">
-      <LiveAdjustment adjustment={adjustment} noun="position" softwareHref={softwareHref}
+      <LiveAdjustment adjustment={adjustment} noun="position" piHref={piHref}
         unconfirmed={checkAgain ? CHECK_AGAIN : undefined}>
         {reported === null && <Note>{UNKNOWN_SIZE}</Note>}
         <Field label="Fit" help={FIT_HELP[fit.mode]}>

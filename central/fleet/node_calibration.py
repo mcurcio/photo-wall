@@ -64,7 +64,6 @@ class NodeCalibration:
         """A new trial for the Frame, at the saved calibration or at `calibration`, the
         operator's draft whose `revision` is the saved revision it was made from."""
         draft = None if calibration is None else Calibration.model_validate(calibration)
-        self.sessions.require_enabled()
         with self.sessions.db.transaction() as conn:
             acquire_runtime_locks(conn)
             context = self.display.current_frame_in(conn, frame_id)
@@ -137,7 +136,6 @@ class NodeCalibration:
         proposed = (
             Calibration.model_validate(calibration) if operation in ("edit", "renew") else None
         )
-        self.sessions.require_enabled()
         with self.sessions.db.transaction() as conn:
             acquire_runtime_locks(conn)
             terminal = conn.execute(

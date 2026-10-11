@@ -27,7 +27,6 @@ from central.fleet.node_app_links import (
 )
 from central.fleet.node_boot import parse_node_deployment
 from central.fleet.node_sessions import NodeControlError, NodeSessions, claim_intake_in
-from central.fleet.rollout_gate import RolloutEffectGate
 from central.transaction_locks import acquire_runtime_locks
 from contracts.app_environment import AppEnvironmentRefV2
 from contracts.node_boot import parse_node_boot_offer
@@ -55,20 +54,18 @@ class OperatorAppStage:
     session_id: UUID
     device_generation: int
     deployment_id: UUID
-    rollout_generation: int
     operator_audit_ref: str
 
     def __post_init__(self):
         for value in (self.operation_id, self.command_id, self.session_id, self.deployment_id):
             identifier(value)
         counter(self.device_generation, 1)
-        counter(self.rollout_generation, 1)
         token(self.operator_audit_ref, 256)
 
 
 class NodeLifecycle:
-    def __init__(self, sessions: NodeSessions, gate: RolloutEffectGate):
-        self.sessions, self.gate = sessions, gate
+    def __init__(self, sessions: NodeSessions):
+        self.sessions = sessions
 
     @staticmethod
     def _reference_in(conn, digest: str) -> AppEnvironmentRefV2:
@@ -80,10 +77,9 @@ class NodeLifecycle:
 
     @staticmethod
     def _boot_in(conn, principal):
+        """The session's boot offer: a session is enrolled only against an issued offer."""
         row = conn.execute("SELECT offer_payload FROM node_boot_offers WHERE offer_id=%s",
                            (principal.grant.offer_id,)).fetchone()
-        if row is None or row["offer_payload"] is None:
-            raise NodeControlError("node_v2_boot_required")
         return parse_node_boot_offer(bytes(row["offer_payload"]))
 
     @staticmethod
@@ -103,21 +99,17 @@ class NodeLifecycle:
         if self._boot_of(principal.grant.producer) != self._boot_of(command.producer):
             raise NodeControlError("node_app_operation_scope_changed", 403)
 
-    def _command_current_in(self, conn, principal, row, command, gate):
+    def _command_current(self, principal, command):
         """The command targets this exact broker producer; session renewal keeps it current."""
         self._same_boot(principal, command)
-        if (principal.grant.scope != "app_effect" or principal.grant.producer != command.producer
-                or row["rollout_generation"] != gate.generation or row["rollout_scope_sha256"] != gate.scope_sha256):
+        if principal.grant.scope != "app_effect" or principal.grant.producer != command.producer:
             raise NodeControlError("node_app_command_scope_changed", 403)
-        gate.ensure_current_in(conn)
 
     def stage(self, device_id: str, request: OperatorAppStage) -> dict:
-        self.sessions.require_enabled()
         canonical = json.dumps({"device_id": device_id, **asdict(request)}, default=str,
                                sort_keys=True, separators=(",", ":")).encode()
         request_hash = sha256(canonical).hexdigest()
         with self.sessions.db.transaction() as conn:
-            gate = self.gate.require_open_in(conn, expected_generation=request.rollout_generation)
             acquire_runtime_locks(conn)
             principal = self.sessions.load_operator_target_in(conn, request.session_id)
             producer = principal.grant.producer
@@ -131,14 +123,11 @@ class NodeLifecycle:
                 if old["request_sha256"] != request_hash:
                     raise NodeControlError("node_app_operation_identity_conflict")
                 command = parse_stage_command(bytes(old["command_payload"]))
-                self._command_current_in(conn, principal, old, command, gate)
+                self._command_current(principal, command)
                 return {"command": json.loads(bytes(old["command_payload"])), "duplicate": True}
             link = load_current_node_app_link_in(conn, principal)
             if link is None:
                 raise NodeControlError("node_app_current_process_unlinked")
-            if conn.execute("SELECT 1 FROM active_equipment_drains WHERE player_id=%s",
-                            (link.player_id,)).fetchone():
-                raise NodeControlError("node_app_existing_drain")
             boot = self._boot_in(conn, principal)
             publication = conn.execute("SELECT document FROM node_deployments WHERE deployment_id=%s",
                                        (request.deployment_id,)).fetchone()
@@ -158,13 +147,11 @@ class NodeLifecycle:
             claim_intake_in(conn, device_id, "command", now)
             conn.execute("INSERT INTO node_app_operations(operation_id,command_id,device_id,device_generation,"
                 "player_id,authority_epoch,producer_id,session_id,deployment_id,request_sha256,command_sha256,"
-                "command_payload,rollout_generation,rollout_scope_sha256,created_at,operator_audit_ref) "
-                "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                "command_payload,created_at,operator_audit_ref) "
+                "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                 (request.operation_id, request.command_id, device_id, producer.device_generation, link.player_id,
                  link.authority_epoch, principal.producer_id, request.session_id, request.deployment_id, request_hash,
-                 command.command_sha256, encode_stage_command(command), gate.generation, gate.scope_sha256, now,
-                 request.operator_audit_ref))
-            gate.ensure_current_in(conn)
+                 command.command_sha256, encode_stage_command(command), now, request.operator_audit_ref))
             principal.admission.ensure_current(self.sessions.clock)
             return {"command": json.loads(encode_stage_command(command)), "duplicate": False}
 
@@ -184,13 +171,7 @@ class NodeLifecycle:
 
     def desired(self, session_id: UUID, credential: str, *, effects: bool = False) -> dict:
         """The latest stage for this device is desired; an earlier boot's stage is not."""
-        self.sessions.require_enabled()
         with self.sessions.db.transaction() as conn:
-            located = conn.execute("SELECT rollout_generation FROM node_app_operations o JOIN node_sessions s "
-                "ON s.device_id=o.device_id AND s.device_generation=o.device_generation WHERE s.session_id=%s "
-                "ORDER BY o.sequence DESC LIMIT 1", (session_id,)).fetchone()
-            gate = (self.gate.require_open_in(conn, expected_generation=located["rollout_generation"])
-                    if effects and located else None)
             principal = self.sessions.authenticate_in(conn, session_id, credential)
             owner = "app_effect_broker" if effects else "app_manager"
             if principal.grant.producer.owner != owner:
@@ -204,7 +185,7 @@ class NodeLifecycle:
                 if self._boot_of(command.producer) == self._boot_of(principal.grant.producer) and (
                         not effects or command.producer == principal.grant.producer):
                     if effects:
-                        self._command_current_in(conn, principal, row, command, gate)
+                        self._command_current(principal, command)
                     commands.append(json.loads(bytes(row["command_payload"])))
             return {"commands": commands, "scope": "app_effect" if effects else "preparation_read_only"}
 
@@ -296,7 +277,6 @@ class NodeLifecycle:
         `qualification` (console DDD Part E G4) serves what a qualification would observe and
         what earlier ones recorded; whether an acceptance fits is `_qualified_fallback_in`'s
         judgement at stage time, never this read's."""
-        self.sessions.require_enabled()
         with self.sessions.db.transaction() as conn:
             generation = self.sessions.lock_device_generation_in(conn, device_id)
             now = self.sessions.clock.utc()

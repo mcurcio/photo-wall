@@ -37,7 +37,7 @@ const SESSION: PictureSession = {
 const meta = {
   title: "Domain/FramePicture",
   component: FramePicture,
-  args: { frameId: "lobby", softwareHref: "#/players/device-a", session: SESSION, otherFrames: ["hall", "stairs"] },
+  args: { frameId: "lobby", piHref: "#/players/device-a", session: SESSION, otherFrames: ["hall", "stairs"] },
 } satisfies Meta<typeof FramePicture>;
 
 export default meta;

@@ -62,9 +62,9 @@ def test_retired_canonical_device_refuses_new_app_enrollment(registry) -> None:
     outputs = (OutputReport(output_id="HDMI-A-1", width_px=1920, height_px=1080),)
     boot_id = str(BOOT_ID)
     signature = base64.b64encode(key.sign(enrollment_message(
-        nonce, outputs, DEVICE_ID, boot_id, None))).decode()
+        nonce, outputs, DEVICE_ID, boot_id))).decode()
     request = Enrollment(public_key=public, nonce=nonce, outputs=outputs,
-                         device_id=DEVICE_ID, boot_id=boot_id, ticket_id=None,
+                         device_id=DEVICE_ID, boot_id=boot_id,
                          signature=signature)
     with pytest.raises(RegistryError, match="retired_device"):
         registry.enroll(request)

@@ -174,8 +174,7 @@ def test_boot_replaces_every_list_and_drops_connections_no_longer_held(tags):
 def client(registry, tmp_path, monkeypatch):
     monkeypatch.setenv("PHOTO_WALL_CACHE_ROOT", str(tmp_path))
     apply_procrastinate_schema(registry.db.dsn)
-    app = create_app(registry.db, registry.clock, ADMIN, media_queue=RecordingMediaQueue(),
-                     mdns_enabled=False)
+    app = create_app(registry.db, registry.clock, ADMIN, media_queue=RecordingMediaQueue())
     repository = app.state.media_repository
     repository.worker_status(None, ("fixture",))
     repository.record_library_tags("fixture", TAGS)

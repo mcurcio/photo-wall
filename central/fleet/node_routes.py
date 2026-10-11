@@ -1,4 +1,4 @@
-"""Mounted V2 node HTTP composition; effect rollout admission remains default closed."""
+"""Mounted V2 node HTTP composition."""
 from __future__ import annotations
 
 import asyncio
@@ -32,7 +32,6 @@ from central.fleet.node_observations import NodeObservations
 from central.fleet.node_release_catalog import NodeReleaseCatalog
 from central.fleet.node_sessions import NodeControlConfig, NodeControlError, NodeSessions
 from central.fleet.principal import PrincipalError
-from central.fleet.rollout_gate import RolloutEffectGate, RolloutGateError, ServingImageVerifier
 from central.registry import Registry
 from contracts.node_app_link import MAX_NODE_LINK_BYTES
 from contracts.node_boot import MAX_NODE_BOOT_BYTES, encode_node_boot_offer, parse_node_boot_request
@@ -69,17 +68,15 @@ def _operator_reboot(raw: bytes) -> OperatorReboot:
 
 
 def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
-                      admin: Callable[..., None], coordinator: Coordinator, config: NodeControlConfig | None = None,
-                      serving_verifier: ServingImageVerifier | None = None,
+                      admin: Callable[..., None], coordinator: Coordinator, config: NodeControlConfig,
                       content: ContentServices | None = None) -> None:
     sessions = NodeSessions(db, clock, config)
     ingest, observations = NodeIngest(sessions), NodeObservations(sessions)
     display = NodeDisplay(sessions, runtime=coordinator)
     boots = NodeBootService(sessions, publisher=content.publisher if content else None)
     bytes_reader = OfferByteReader(content.reader if content else None)
-    effect_gate = RolloutEffectGate(db, serving_verifier=serving_verifier)
-    commands = NodeCommands(sessions, effect_gate)
-    lifecycle = NodeLifecycle(sessions, effect_gate)
+    commands = NodeCommands(sessions)
+    lifecycle = NodeLifecycle(sessions)
     links = NodeAppLinks(sessions)
     acceptance = NodeAcceptance(sessions)
     publications = NodeReleaseCatalog(sessions, readiness=content.readiness if content else None)
@@ -110,7 +107,7 @@ def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
     async def invoke(function, *args):
         try:
             return await asyncio.to_thread(function, *args)
-        except (RolloutGateError, PrincipalError) as exc:
+        except PrincipalError as exc:
             raise NodeControlError(str(exc), 503) from exc
         except NodeControlError:
             raise
@@ -119,7 +116,6 @@ def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
 
     async def body(request: Request, limit: int) -> bytes:
         """Bound streamed content even when Content-Length is absent or dishonest."""
-        sessions.require_enabled()
         declared = request.headers.get("content-length")
         if declared is not None and declared.isdigit() and int(declared) > limit:
             raise NodeControlError("node_body_too_large", 413)
@@ -129,14 +125,6 @@ def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
                 raise NodeControlError("node_body_too_large", 413)
             data.extend(chunk)
         return bytes(data)
-
-    @app.get("/v1/operator/node/status", dependencies=[Depends(admin)])
-    async def node_status():
-        return {"transport_enabled": config is not None,
-                "installation_audience": config.installation_audience if config else None,
-                "effect_gate": await invoke(effect_gate.status),
-                "command_qualification": "requires_current_scope_and_serving_image_evidence",
-                "physical_qualification": "not_established_by_server_startup"}
 
     @app.post("/v2/node/boot-offers")
     async def boot_offer(request: Request):
@@ -306,7 +294,6 @@ def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
 
     @app.get("/v2/node/commands")
     async def poll(request: Request):
-        sessions.require_enabled()
         return await invoke(commands.poll, *_credentials(request))
 
     @app.post("/v1/operator/node/devices/{device_id}/reboots", dependencies=[Depends(admin)])

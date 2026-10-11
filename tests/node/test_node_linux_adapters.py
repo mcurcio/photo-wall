@@ -323,11 +323,12 @@ def test_stop_terminal_requires_process_cgroup_and_job_absence(stop_driver, monk
     assert driver._stop_sample(expected, group)
 
 
-def test_player_health_has_bounded_private_mount():
+def test_player_unit_mounts_only_its_runtime_and_scratch_directories():
     from appliance.apps.process_linux import app_unit_properties
     props = app_unit_properties(Path("/sealed/rootfs"), ())
     temporary = next(value for value in props if value.startswith("TemporaryFileSystem="))
-    assert "/run/photo-wall/player:rw,nosuid,nodev,noexec,size=1M,uid=10004,gid=10004,mode=0700" in temporary.split()
+    mounts = [entry.split(":")[0] for entry in temporary.removeprefix("TemporaryFileSystem=").split()]
+    assert mounts == ["/run", "/run/photo-wall-wayland", "/tmp"]
     assert not any(value.startswith(("BindPaths=", "RuntimeDirectory=")) for value in props)
 
 

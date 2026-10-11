@@ -7,7 +7,6 @@ import { useHandOff } from "./flow/useHandOff.js";
 import { CloseIcon, MenuIcon } from "./icons.jsx";
 import { neutralRoutes } from "./neutralRoutes.jsx";
 import { useFleetHosts } from "./fleetHosts.js";
-import { NodeControlBanner, NodeControlContext, useNodeControl } from "./nodeControl.js";
 import { PageHiddenContext } from "./pageVisibility.js";
 import { formatRoute, isPlainClick, landingRoute } from "./routes.js";
 import { showRoutes } from "./showRoutes.jsx";
@@ -34,8 +33,8 @@ import { wallRoutes } from "./wallRoutes.jsx";
  *   it holds an unsaved draft; the sidebar then marks that section "Draft".
  *   `handOffs` is the one pending inline hand-off between flows (flow/handOff.js: the
  *   Scene flow's "New selection from your photo library" runs the Source flow inline).
- *   `hosts` is the shell's one fleet host read (fleetHosts.js), null until node control is
- *   read `on` (nodeControl.js) and while the shell is signed out.
+ *   `hosts` is the shell's one fleet host read (fleetHosts.js), null until sign-in is
+ *   confirmed.
  * @typedef {{section: import("./routes.js").Section, label: string,
  *            render: (ctx: RouteContext) => React.ReactNode,
  *            samplePaths: string[], inSidebar?: boolean,
@@ -191,10 +190,6 @@ const Page = memo(function Page({ entry, ctx, ready, hidden = false }) {
  * route that goes elsewhere first drops the request. A sidebar link on a wide screen
  * leaves focus on the link.
  *
- * NODE CONTROL. One read of node status (nodeControl.js `useNodeControl`), provided to every
- * page by context: the one source of the effect gate, and the banner above every page when
- * this Central runs without node control.
- *
  * `hidden` (the sign-in overlay; App.jsx) hides the whole shell and makes it inert
  * while keeping it, and every draft in it, mounted.
  *
@@ -205,14 +200,10 @@ export function Shell({ hidden = false }) {
   const { route, navigate } = useRoute();
   // The ~10 s /healthz poll: the pill, the attention strip and the pages read it.
   const health = useHealth();
-  // Node control (Part E §25): ONE node status read, the effect gate's one source.
-  const nodeControl = useNodeControl({ skip: hidden });
   // The fleet host read (console DDD §63 G12): ONE poll, here, for every page and the strip.
-  // Unlike a page's node read it runs on every page, so it waits for node control to be read
-  // `on`: `nodeReadsAllowed` also admits a FAILED status read, and the status read sent while
-  // sign-in is still being checked fails 401, which would send this poll to a Central
-  // without node control.
-  const hostsSkipped = hidden || nodeControl.state !== "on";
+  // It runs on every page, so it waits for sign-in to be confirmed: a read sent while sign-in
+  // is still being checked would fail 401.
+  const hostsSkipped = auth !== "signedIn";
   const fleetHosts = useFleetHosts({ skip: hostsSkipped });
   const hosts = hostsSkipped ? null : fleetHosts;
   // Boot facts (slice 2 §5): each box's serial from the host read, shared by the fleet pages
@@ -419,22 +410,19 @@ export function Shell({ hidden = false }) {
           <SectionNav current={current} hrefFor={hrefFor} drafts={drafts} />
         </div>
         <main ref={mainRef} className="shell__main" tabIndex={-1}>
-          <NodeControlBanner control={nodeControl} />
           {current === null && <p className="page__loading">Loading…</p>}
-          <NodeControlContext.Provider value={nodeControl}>
-            {showRoutes.map((show) => (
-              <Page
-                key={show.section}
-                entry={show}
-                ctx={ctx}
-                ready={ready}
-                hidden={show.section !== current}
-              />
-            ))}
-            {entry !== null && !SHOW.has(entry.section) && (
-              <Page key={entry.section} entry={entry} ctx={ctx} ready={ready} />
-            )}
-          </NodeControlContext.Provider>
+          {showRoutes.map((show) => (
+            <Page
+              key={show.section}
+              entry={show}
+              ctx={ctx}
+              ready={ready}
+              hidden={show.section !== current}
+            />
+          ))}
+          {entry !== null && !SHOW.has(entry.section) && (
+            <Page key={entry.section} entry={entry} ctx={ctx} ready={ready} />
+          )}
         </main>
       </div>
 

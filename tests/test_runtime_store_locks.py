@@ -6,9 +6,7 @@ from threading import Event
 
 import pytest
 from fastapi.testclient import TestClient
-from psycopg.types.json import Jsonb
-from support.position import save_position
-from test_registry import ADMIN, enroll, frame
+from test_registry import ADMIN
 
 from central.app import create_app
 from central.coordination import COORDINATION_LOCK, Coordinator
@@ -101,15 +99,11 @@ def test_direct_runtime_command_waits_for_coordination_lock(registry):
     assert "serialized-command" in store.read().export_state()["scenes"]
 
 
-def test_operator_activation_uses_post_lock_time_after_drain_cut(registry, monkeypatch):
-    player, _, request = enroll(registry)
-    frame(registry, "drained")
-    registry.bind("drained", player["player_id"], "HDMI-A-1", expected_generation=0)
-    save_position(registry, "drained")
+def test_operator_activation_uses_post_lock_time(registry, monkeypatch):
     store = RuntimeStore(registry.db, registry.clock)
     store.command("set_scene", Scene(
         scene_id="manual", loop=True,
-        contributions=(Contribution(target="frame:drained", kind="black"),),
+        contributions=(Contribution(target="frame:left", kind="black"),),
     ))
     entering = Event()
     original = RuntimeStore.edit
@@ -135,23 +129,13 @@ def test_operator_activation_uses_post_lock_time_after_drain_cut(registry, monke
             with pytest.raises(TimeoutError):
                 pending.result(timeout=.1)
             registry.clock.advance(5)
-            # No Central owner writes drains now; a row is the fence the readers honour.
-            blocker.execute(
-                "INSERT INTO equipment_drains(player_id,attempt_id,boot_id,authority_epoch,"
-                "phase,prepared_at,authorization_expires_at,snapshot) "
-                "VALUES(%s,'attempt-after-cut',%s,%s,'prepared',1005,1010,%s)",
-                (player["player_id"], request.boot_id, player["authority_epoch"],
-                 Jsonb({"outputs": [{"output_id": "HDMI-A-1", "frame_id": "drained"}]})),
-            )
         response = pending.result(timeout=4)
 
     assert response.status_code == 200, response.text
-    assert (response.json()["status"], response.json()["reason"]) == (
-        "rejected", "equipment_draining"
-    )
+    assert response.json()["status"] == "admitted"
     state = store.read().export_state()
     assert state["now"] == 1005
-    assert state["runs"] == {}
+    assert [run["started_at"] for run in state["runs"].values()] == [1005]
 
 
 def test_program_replace_checks_window_after_lock_wait(registry, monkeypatch):

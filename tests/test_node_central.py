@@ -6,15 +6,18 @@ from uuid import uuid4
 import pytest
 from fastapi.testclient import TestClient
 from test_fleet_attempts import BOOT_ID, DEVICE_ID, OFFER_ID, SERIAL, _seed
-from test_fleet_rollout_gate import _gate
 from test_registry import ADMIN
 
 from central.app import create_app
 from central.fleet.node_commands import NodeCommands, OperatorReboot
 from central.fleet.node_ingest import NodeIngest
 from central.fleet.node_observations import NodeObservations
-from central.fleet.node_sessions import NodeControlConfig, NodeControlError, NodeSessions
-from central.fleet.rollout_gate import RolloutEffectGate, RolloutGateError
+from central.fleet.node_sessions import (
+    NODE_AUDIENCE,
+    NodeControlConfig,
+    NodeControlError,
+    NodeSessions,
+)
 from contracts.node_commands import NodeSessionClaim, encode_session_claim, parse_session_grant
 from contracts.node_observation import HostMetricV2, HostObservationV2, encode_host_observation
 from contracts.node_protocol import (
@@ -28,12 +31,17 @@ from contracts.node_protocol import (
 )
 
 
-def node_offer(registry):
-    """A node boot offer for BOOT_ID, through Central's own boot service."""
+def node_offer(registry, config=None):
+    """A node boot offer for BOOT_ID, through Central's own boot service; under `config`'s
+    audience when given (the offer binds it), else cold_setup's."""
     from test_node_boot import cold_setup
 
+    from central.fleet.node_boot import NodeBootService
     from contracts.node_boot import NodeBootRequestV2
     boots, sessions, _ = cold_setup(registry)
+    if config is not None:
+        sessions = NodeSessions(registry.db, registry.clock, config)
+        boots = NodeBootService(sessions)
     return sessions, boots.offer(NodeBootRequestV2(SERIAL, BOOT_ID, "a" * 64))
 
 
@@ -130,10 +138,8 @@ def test_reboot_audit_response_and_initiation_are_separate(registry):
     service, sessions, _ = cold_setup(registry)
     claim = claim_for(service.offer(NodeBootRequestV2(SERIAL, BOOT_ID, "a" * 64)))
     grant = sessions.enroll(claim)
-    gate, _ = _gate(registry)
-    generation = gate.open(expected_revision=0).generation
-    commands = NodeCommands(sessions, gate)
-    request = OperatorReboot(uuid4(), grant.session_id, 1, "operator:fixture", generation)
+    commands = NodeCommands(sessions)
+    request = OperatorReboot(uuid4(), grant.session_id, 1, "operator:fixture")
     issued = commands.request_reboot(DEVICE_ID, request)
     assert not issued["effect_established"]
     assert commands.request_reboot(DEVICE_ID, request)["duplicate"]
@@ -170,12 +176,10 @@ def test_reboot_fence_one_outstanding_per_session_and_served_outstanding(registr
     service, sessions, _ = cold_setup(registry)
     claim = claim_for(service.offer(NodeBootRequestV2(SERIAL, BOOT_ID, "a" * 64)))
     grant = sessions.enroll(claim)
-    gate, _ = _gate(registry)
-    generation = gate.open(expected_revision=0).generation
-    commands, ingest, reads = NodeCommands(sessions, gate), NodeIngest(sessions), NodeObservations(sessions)
+    commands, ingest, reads = NodeCommands(sessions), NodeIngest(sessions), NodeObservations(sessions)
 
     def reboot():
-        return OperatorReboot(uuid4(), grant.session_id, 1, "operator:fixture", generation)
+        return OperatorReboot(uuid4(), grant.session_id, 1, "operator:fixture")
 
     def respond(request, issued, decision):
         ingest.ingest(grant.session_id, claim.credential, encode_node_message(NodeCommandResponseV2(
@@ -211,8 +215,8 @@ def test_reboot_fence_one_outstanding_per_session_and_served_outstanding(registr
     commands.request_reboot(DEVICE_ID, third)  # accepted after expiry
     assert served()[str(third.command_id)] is True and stored() == 3
     later = sessions.enroll(claim_for(service.offer(NodeBootRequestV2(SERIAL, uuid4(), "b" * 64))))
-    commands.request_reboot(DEVICE_ID, OperatorReboot(uuid4(), later.session_id, 1, "operator:fixture",
-                                                      generation))  # an earlier session never blocks
+    commands.request_reboot(DEVICE_ID, OperatorReboot(uuid4(), later.session_id, 1,
+                                                      "operator:fixture"))  # an earlier session never blocks
     assert stored() == 4
 
 
@@ -395,43 +399,31 @@ def test_an_undecodable_display_exchange_fails_only_its_own_output(registry):
     assert "reboot_commands" in status and any(item["current"] for item in status["sessions"])
 
 
-def test_default_gate_cannot_mint_reboot(registry):
-    sessions, _, grant = setup(registry)
-    service = NodeCommands(sessions, RolloutEffectGate(registry.db))
-    with pytest.raises(RolloutGateError):
-        service.request_reboot(DEVICE_ID, OperatorReboot(uuid4(), grant.session_id, 1,
-                                                        "operator:fixture", 1))
-    with registry.db.transaction() as conn:
-        assert conn.execute("SELECT count(*) AS n FROM node_reboot_commands").fetchone()["n"] == 0
-
-
-def test_mounted_routes_disabled_by_default_and_real_when_configured(registry):
-    _, offer = node_offer(registry)
+def test_the_default_app_serves_node_routes_and_an_admin_reboot_reaches_host_core(registry):
+    """Node control is not a mode: the default composition serves the node path, and an admin
+    Reboot is issued and polled with nothing opened first (no effect gate, owner answer G-A)."""
+    _, offer = node_offer(registry, NodeControlConfig())
     claim = NodeSessionClaim(SERIAL, offer.offer_id, BOOT_ID, "host_core", uuid4(), uuid4(),
                              "d" * 64)
     app = create_app(registry.db, registry.clock, ADMIN)
-    with TestClient(app) as client:
-        response = client.post("/v2/node/sessions", content=encode_session_claim(claim))
-        assert response.status_code == 503
-        assert response.headers["cache-control"] == "private, no-store"
-    app = create_app(registry.db, registry.clock, ADMIN, node_control=NodeControlConfig("node-test"))
+    assert app.state.node_sessions.config == NodeControlConfig(NODE_AUDIENCE)
+    assert NODE_AUDIENCE == "photo-wall"
     with TestClient(app) as client:
         response = client.post("/v2/node/sessions", content=encode_session_claim(claim))
         assert response.status_code == 200, response.text
+        assert response.headers["cache-control"] == "private, no-store"
         grant = parse_session_grant(response.content)
         headers = {"Authorization": "Bearer " + claim.credential, "X-Node-Session": str(grant.session_id)}
-        assert grant.command_eligible and grant.command_reason == "boot_admitted_rollout_required"
+        assert grant.command_eligible and grant.command_reason == "boot_admitted"
         assert client.get("/v2/node/commands", headers=headers).json() == {"commands": []}
         assert client.post("/v2/node/evidence", content=b"{}", headers=headers).status_code == 422
         assert client.post("/v2/node/observations", content=b"x" * 20000, headers=headers).status_code == 413
+        admin = {"Authorization": "Bearer " + ADMIN}
+        assert client.get("/v1/operator/node/status", headers=admin).status_code == 404
+        reboot = {"command_id": str(uuid4()), "session_id": str(grant.session_id), "device_generation": 1,
+                  "operator_audit_ref": "console/2026-10-10"}
+        issued = client.post(f"/v1/operator/node/devices/{DEVICE_ID}/reboots", json=reboot, headers=admin)
+        assert issued.status_code == 200, issued.text
+        assert issued.json()["duplicate"] is False
+        assert client.get("/v2/node/commands", headers=headers).json() == {"commands": [issued.json()["command"]]}
 
-
-def test_opt_in_factory_requires_audience_and_keeps_effect_gate_closed(registry, monkeypatch):
-    from central.node_app import create_app as create_node_app
-    monkeypatch.delenv("PHOTO_WALL_NODE_AUDIENCE", raising=False)
-    with pytest.raises(ValueError, match="AUDIENCE required"):
-        create_node_app(db=registry.db, clock=registry.clock, admin_token=ADMIN)
-    monkeypatch.setenv("PHOTO_WALL_NODE_AUDIENCE", "node-factory-test")
-    app = create_node_app(db=registry.db, clock=registry.clock, admin_token=ADMIN)
-    assert app.state.node_sessions.config.installation_audience == "node-factory-test"
-    assert RolloutEffectGate(registry.db).status()["state"] == "closed"

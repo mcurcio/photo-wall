@@ -26,7 +26,6 @@ from fastapi.responses import JSONResponse
 from integration.bus_servers import BusServer
 from psycopg.types.json import Jsonb
 from test_fleet_attempts import DEVICE_ID, SERIAL
-from test_fleet_rollout_gate import _certificate, _gate, _LocalImageVerifier
 from test_node_boot import publish_deployment
 
 from central.app import create_app
@@ -40,7 +39,7 @@ from central.fleet.node_app_links import load_current_node_app_link_in
 from central.fleet.node_boot import NodeBootService, NodeDeployment
 from central.fleet.node_bus_hub import HUB_LISTENERS
 from central.fleet.node_lifecycle import OperatorAppStage
-from central.fleet.node_sessions import NodeControlConfig, NodeControlError, command_eligibility_in
+from central.fleet.node_sessions import NodeControlConfig, NodeControlError
 from central.infra.asset_records import PgAssetRecords
 from central.infra.transactions import PgTransactions
 from central.kernel.assets import AssetKey, AssetKind
@@ -203,9 +202,7 @@ def _central_fixture(
         run_scheduler=True,
         media_root=workdir / "media",
         content=content,
-        mdns_enabled=False,
         node_control=NodeControlConfig("pid1-real-central-fixture"),
-        node_serving_verifier=_LocalImageVerifier(),
         hub_leaf_url=HUB_LEAF_URL if hub is not None else None,
     )
     sessions, lifecycle = app.state.node_sessions, app.state.node_lifecycle
@@ -255,8 +252,6 @@ def _central_fixture(
             records.record_produced(
                 tx, AssetKey(AssetKind.SEALED_ENVIRONMENT, digest), store.measure(path)
             )
-    gate, verifier = _gate(registry, _certificate(expires_in=300))
-    generation = gate.open(expected_revision=0).generation
     operations = {}
     # The outage phase drops every node exchange once the broker has acknowledged the stage AND
     # the target artifact is in flight: the switch must converge locally and report afterwards.
@@ -345,7 +340,6 @@ def _central_fixture(
 
     @app.post("/fixture/stage")
     def stage(request: Request, value: dict):
-        nonlocal generation
         authenticate(request)
         phase = value["phase"]
         if phase not in deployments or phase == "cold":
@@ -353,10 +347,6 @@ def _central_fixture(
         with state_lock:
             if phase in operations:
                 return operations[phase]
-            if gate.status()["expires_at"] < clock.utc() + 90:
-                gate.close()
-                verifier.certificate = _certificate(expires_in=300)
-                generation = gate.open(expected_revision=gate.status()["revision"]).generation
             with registry.db.transaction() as conn:
                 principal, link = current_in(conn)
                 if conn.execute(
@@ -404,7 +394,6 @@ def _central_fixture(
                     principal.grant.session_id,
                     1,
                     deployments[phase].deployment_id,
-                    generation,
                     "fixture:pid1-stage-" + phase,
                 ),
             )
@@ -436,10 +425,6 @@ def _central_fixture(
                 principal.grant.session_id == command.command_session_id
             )
             result["command_authority_epoch"] = row["authority_epoch"]
-            eligible, reason = command_eligibility_in(conn, principal.grant.offer_id)
-            result["boot_eligible"] = eligible
-            if not eligible:
-                result["boot_refusal"] = reason
             effects = conn.execute(
                 "SELECT payload FROM node_app_effects WHERE operation_id=%s ORDER BY sequence",
                 (operation,),
@@ -485,13 +470,11 @@ def _central_fixture(
             )
             result["control"] = dict(
                 status=control.status,
-                schema_version=control.schema_version,
                 issued_sequence=control.issued_sequence,
                 applied_sequence=control.applied_sequence,
                 receipt_sequence=receipt.delivery_sequence,
                 last_result_sequence=control.last_result_sequence,
                 negotiated=control.status == "negotiated",
-                schema_v2=control.schema_version == 2,
                 applied_at_present=control.applied_at is not None,
                 last_result_at_present=control.last_result_at is not None,
                 last_result_applied=control.last_result == "applied",
@@ -665,7 +648,7 @@ def assert_phase_completed(status, phase, target_reference):
     diagnostics = entry["effect_diagnostics"]
     for predicate in ("terminal_effect", "ordered_stop_before_terminal", "process_matches_event",
                       "app_epoch_matches_event", "environment_matches_event",
-                      "authority_advanced", "boot_eligible"):
+                      "authority_advanced"):
         assert diagnostics.get(predicate) is True, (predicate, status)
     # Nothing held: every effect report was accepted and no control delivery is pending.
     assert status["protocol_refusals"] == {}, status

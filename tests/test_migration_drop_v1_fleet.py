@@ -48,7 +48,7 @@ DROPPED = ("fleet_os_observations", "fleet_app_attempts", "fleet_os_command_sess
            "fleet_generation_current_app_attempts",
            "fleet_generation_current_os_command_sessions", "app_releases", "app_release_policy",
            "app_packages", "app_package_policy")
-KEPT = ("app_release_poll", "devices", "fleet_device_lifecycle", "fleet_effect_gate",
+KEPT = ("app_release_poll", "devices", "fleet_device_lifecycle",
         "fleet_t0_daily_quotas", "node_boot_offers", "node_deployments")
 DELETED_ROUTES = (
     ("GET", "/v1/app/manifest"),

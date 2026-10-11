@@ -5,8 +5,8 @@
  * derived on render and reads nothing of its own.
  *
  * `loaded` once a host read has arrived; `unavailable` when the latest host read failed, which
- * KEEPS the last known rows (the host read keeps its last read). With node control off there is
- * no host read: no rows, not loaded, and the node banner says why.
+ * KEEPS the last known rows (the host read keeps its last read). Before sign-in is confirmed
+ * there is no host read: no rows, not loaded.
  *
  * Rows are keyed by `device_id`: a Player's `device_id` and the box's are both
  * `equipment_device_id("pi", serial)`. A box Central has no record of has no row. The serial is

@@ -750,9 +750,10 @@ MODELS = {"facts.js", "health.js", "hostHealth.js", "join.js", "players.js", "ro
 PAGE_IMPORTS = MODELS | {"nodeRead.js", "timeWords.js"}
 # Legacy modules that render markup the Hardware Pi page still composes: the confirmation
 # dialog (ConfirmAction.jsx, whose typed handle, terminal phases and page-hidden suspension the
-# Dialog primitive does not carry yet), the Reboot section and the node-control gate's notice.
-# Declared in .claude/errata.md E-CDS-FIX-1; the dialogs' migration (DS2) empties this set.
-LEGACY_MARKUP = {"ConfirmAction.jsx", "PlayerCommands.jsx", "nodeControl.js"}
+# Dialog primitive does not carry yet) and the Reboot section. Declared in .claude/errata.md
+# E-CDS-FIX-1 (the node-control notice it also listed is deleted); the dialogs' migration (DS2)
+# empties this set.
+LEGACY_MARKUP = {"ConfirmAction.jsx", "PlayerCommands.jsx"}
 # The Frame page's modules, each with the legacy modules it alone may import, until they move
 # to the catalog: the page composes the bind chooser and the live adjustment (a hook); the
 # Overview the two read-only explanations the Now page shares, the readiness report and the

@@ -116,12 +116,10 @@ def test_a_silent_players_binding_line_links_to_its_player_page_without_a_node_r
     report_readiness(registry, player_id)
     registry.clock.advance(40)
     with operator_server(registry.db, registry.clock) as origin:
-        # The shell's one node status read (node control and the effect gate) and its one fleet
-        # host read are not a page's node record read.
+        # The shell's one fleet host read is not a page's node record read.
         node_reads = []
         page.on("request", lambda request: node_reads.append(request.url)
                 if "/v1/operator/node/" in request.url
-                and "/v1/operator/node/status" not in request.url
                 and "/v1/operator/node/hosts" not in request.url else None)
         connect(page, origin, "wall")
         inspector = open_frame(page, FRAME, "hardware")

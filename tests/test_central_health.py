@@ -54,6 +54,11 @@ class FakeCoordinator:
         return type("Projection", (), {"acquisitions": ()})()
 
 
+class NoReconciliation:
+    def advance(self):
+        return 0
+
+
 def app_with(fake_db, fake_coordinator, clock, monkeypatch, *, enabled):
     monkeypatch.setattr(central_app, "Coordinator", lambda *_args, **_kwargs: fake_coordinator)
     monkeypatch.setattr(
@@ -61,6 +66,8 @@ def app_with(fake_db, fake_coordinator, clock, monkeypatch, *, enabled):
         "MediaRepository",
         lambda *_args, **_kwargs: fake_coordinator.media,
     )
+    # A fake database cannot serve the node reconciler's tick: it reconciles nothing here.
+    monkeypatch.setattr(central_app, "NodeRuntimeReconciler", lambda *_args, **_kwargs: NoReconciliation())
     return central_app.create_app(fake_db, clock, ADMIN, run_scheduler=enabled)
 
 

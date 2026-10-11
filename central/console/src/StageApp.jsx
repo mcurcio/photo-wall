@@ -1,6 +1,5 @@
 import React, { useId, useRef, useState } from "react";
 
-import { useNodeControlValue } from "./nodeControl.js";
 import { useReleaseRead } from "./releases.js";
 import { formatRoute } from "./routes.js";
 import { RESEND_LABEL } from "./sendOutcome.js";
@@ -19,7 +18,7 @@ import {
 } from "./stage.js";
 import { useSendDialog } from "./useSendDialog.js";
 
-// The effect gate's and the deployments' home (Part E §25).
+// The deployments' home (Part E §25).
 const RELEASES = formatRoute({ section: "releases" });
 
 /**
@@ -45,10 +44,10 @@ export function BoundRule() {
  * again" re-sends that very request. `sendStage` judges every send on the newest reads.
  *
  * @param {{deviceId: string, name: string, opened: object, held: import("./stage.js").HeldStages,
- *          node: object, control: import("./nodeControl.js").NodeControl,
+ *          node: object,
  *          onSent: (result: object) => void, onClose: (result: object|null) => void}} props
  */
-function StageDialog({ deviceId, name, opened, held, node, control, onSent, onClose }) {
+function StageDialog({ deviceId, name, opened, held, node, onSent, onClose }) {
   const titleId = useId();
   const { dialogRef, cancelRef, phase, result, run, close } = useSendDialog(onClose);
   const releases = useReleaseRead();
@@ -56,15 +55,15 @@ function StageDialog({ deviceId, name, opened, held, node, control, onSent, onCl
   const [chosen, setChosen] = useState(opened.request?.body.deployment_id ?? "");
   const targets = stageTargets(releases.read);
   const request = sentRef.current
-    ?? (chosen === "" ? null : stageRequest(opened.device, opened.gate, chosen, opened.ids));
+    ?? (chosen === "" ? null : stageRequest(opened.device, chosen, opened.ids));
   const refusal = request === null ? null : "refused" in request ? request.refused
-    : stageRefusal(request, node, control.gate, held.get());
+    : stageRefusal(request, node, held.get());
   const again = sentRef.current !== null;
 
   const send = () => {
     if (request === null || "refused" in request) return;
     sentRef.current = request;
-    return run(() => sendStage(deviceId, request, { node, control }, held), onSent);
+    return run(() => sendStage(deviceId, request, { node }, held), onSent);
   };
 
   const replaces = sentRef.current?.replaces ?? opened.replaces;
@@ -105,7 +104,7 @@ function StageDialog({ deviceId, name, opened, held, node, control, onSent, onCl
             <ul>
               <li>{`Audit reference ${request.body.operator_audit_ref}`}</li>
               <li>{`Operation ${request.body.operation_id} · command ${request.body.command_id}`}</li>
-              <li>{`Session ${request.body.session_id} · device generation ${request.body.device_generation} · gate generation ${request.body.rollout_generation}`}</li>
+              <li>{`Session ${request.body.session_id} · device generation ${request.body.device_generation}`}</li>
             </ul>
           </details>
         )}
@@ -134,9 +133,8 @@ function StageDialog({ deviceId, name, opened, held, node, control, onSent, onCl
 
 /**
  * App › Stage app (Part E §25): the button, disabled with its reason on served facts only
- * (stage.js `stageBlocker`; a gate reason links to Releases › Effect gate), and the dialog.
- * The page holds the stage it sent until the app-attempts read lists it; while its answer is
- * lost, only that request may be sent again. The gate is the shell's, read again on open.
+ * (stage.js `stageBlocker`), and the dialog. The page holds the stage it sent until the
+ * app-attempts read lists it; while its answer is lost, only that request may be sent again.
  *
  * @param {{deviceId: string, name: string, node: object, snapshot: object,
  *          player: {id: string, retired_at?: number|null}|null}} props
@@ -144,24 +142,22 @@ function StageDialog({ deviceId, name, opened, held, node, control, onSent, onCl
 export function StageApp({ deviceId, name, node, snapshot, player }) {
   const reasonId = useId();
   const openerRef = useRef(/** @type {HTMLButtonElement|null} */ (null));
-  const control = useNodeControlValue();
   const held = useHeldStage();
   const [opened, setOpened] = useState(/** @type {object|null} */ (null));
   const [status, setStatus] = useState(/** @type {string|null} */ (null));
 
   const pending = pendingStage(held.get(), node.operations);
-  const blocker = stageBlocker(node, node.operations, control.gate, player);
+  const blocker = stageBlocker(node, node.operations, player);
   const waiting = pending !== null && pending.state !== "unknown"
     ? "this page's stage is not listed yet; the next read settles it" : null;
   const reason = pending?.state === "unknown" ? null : waiting ?? blocker?.reason ?? null;
 
   const open = () => {
     setStatus(null);
-    void control.refresh(); // the gate, read again on demand when a dialog opens (§25)
     const playerId = player?.id ?? null;
     setOpened(pending?.state === "unknown"
       ? { request: pending.request, frames: boundFrames(snapshot, playerId), replaces: pending.request.replaces }
-      : { device: node, gate: control.gate, frames: boundFrames(snapshot, playerId), replaces: stageReplaces(node.operations),
+      : { device: node, frames: boundFrames(snapshot, playerId), replaces: stageReplaces(node.operations),
         ids: { operationId: crypto.randomUUID(), commandId: crypto.randomUUID() } });
   };
 
@@ -182,14 +178,11 @@ export function StageApp({ deviceId, name, node, snapshot, player }) {
         {pending?.state === "unknown" ? "Send the held stage again…" : "Stage app…"}
       </button>
       {reason !== null && (
-        <p id={reasonId} className="roster__note">
-          {`Stage app unavailable: ${reason}.`}
-          {waiting === null && blocker?.gate === true && <>{" "}<a href={RELEASES}>See Releases › Effect gate</a></>}
-        </p>
+        <p id={reasonId} className="roster__note">{`Stage app unavailable: ${reason}.`}</p>
       )}
       {status !== null && <p className="roster__status-line" role="status">{status}</p>}
       {opened !== null && (
-        <StageDialog deviceId={deviceId} name={name} opened={opened} held={held} node={node} control={control}
+        <StageDialog deviceId={deviceId} name={name} opened={opened} held={held} node={node}
           onSent={onSent} onClose={onClose} />
       )}
     </div>

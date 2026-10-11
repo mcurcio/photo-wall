@@ -60,12 +60,11 @@ const NOT_READ = Object.freeze({ read: null, readAt: null, error: null, seq: 0 }
 /**
  * The release read, while the Releases page is open.
  *
- * @param {{skip?: boolean}} [options] `skip` while node control is not known to be on
  * @returns {ReleaseRead & {busy: boolean, refresh: () => Promise<void>, latest: () => ReleaseRead,
  *           startedReads: () => number}} `busy`: a read is in flight; it clears only once that
  *   read is settled, so `latest()` already returns it
  */
-export function useReleaseRead({ skip = false } = {}) {
+export function useReleaseRead() {
   const started = useRef(0);
   const load = useCallback(async (current) => {
     const seq = ++started.current;
@@ -73,7 +72,7 @@ export function useReleaseRead({ skip = false } = {}) {
     if (result?.ok) return { read: result.data, readAt: result.data?.read_at ?? null, error: null, seq };
     return { ...current, error: readError(result), seq };
   }, []);
-  const { value, busy, refresh, latest } = usePolledRead(load, { cadenceMs: CADENCE_MS, skip, initial: NOT_READ });
+  const { value, busy, refresh, latest } = usePolledRead(load, { cadenceMs: CADENCE_MS, initial: NOT_READ });
   const startedReads = useCallback(() => started.current, []);
   return useMemo(() => ({ ...value, busy, refresh, latest, startedReads }), [value, busy, refresh, latest, startedReads]);
 }

@@ -7,7 +7,7 @@ import json
 import logging
 import mimetypes
 import os
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -24,16 +24,13 @@ from central.content_wiring import ContentServices, build_content_services
 from central.coordination import CoordinationLimits, Coordinator
 from central.db import Database, DatabaseTransactionClock, ProcessTransactionClock, TransactionClock
 from central.display_routes import mount_display_routes, mount_picture_routes
-from central.equipment_drain import control_fence_in
 from central.execution_repository import PostgresExecutionRepository
 from central.fleet.leaf_bridge import mount_leaf_bridge
 from central.fleet.node_routes import mount_node_routes
 from central.fleet.node_sessions import NodeControlConfig
-from central.fleet.rollout_gate import ServingImageVerifier
 from central.infra.display_store import PgDisplayCommands, PgDisplayQueries, PgPictureSessions
 from central.installation_models import InstallationInventory
 from central.library_routes import mount_library_routes
-from central.mdns_advertise import MdnsCentralAdvertiser
 from central.media_gateway import MediaGateway
 from central.media_ports import (
     MediaApplication,
@@ -130,12 +127,7 @@ def create_app(
     media_root: Path | None = None,
     media_queue: MediaTaskQueue | None = None,
     content: ContentServices | None = None,
-    mdns_enabled: bool | None = None,
-    mdns_port: int | None = None,
-    mdns_advertiser: MdnsCentralAdvertiser | None = None,
-    node_control: NodeControlConfig | None = None,
-    node_serving_verifier: ServingImageVerifier | None = None,
-    node_serving_verifier_factory=None,
+    node_control: NodeControlConfig = NodeControlConfig(),
     media_times: TransactionClock | None = None,
     hub_leaf_url: str | None = None,
 ) -> FastAPI:
@@ -147,10 +139,6 @@ def create_app(
     admin_token = admin_token or os.environ["PHOTO_WALL_ADMIN_TOKEN"]
     if len(admin_token) < 32:
         raise ValueError("PHOTO_WALL_ADMIN_TOKEN must contain at least 32 characters")
-    if node_serving_verifier_factory is not None:
-        if node_serving_verifier is not None:
-            raise ValueError("choose one node serving verifier composition")
-        node_serving_verifier = node_serving_verifier_factory(db)
     registry = Registry(db, clock)
     media_queue = media_queue or (
         ProcrastinateMediaQueue(db.dsn) if isinstance(db, Database) else None
@@ -209,21 +197,6 @@ def create_app(
         if media_root and isinstance(db, Database)
         else None
     )
-    mdns_enabled = (
-        mdns_enabled
-        if mdns_enabled is not None
-        else os.environ.get("PHOTO_WALL_MDNS_ADVERTISE", "true").strip().lower()
-        not in ("false", "0")
-    )
-    # No PHOTO_WALL_HTTP_PORT precedent exists: today the listen port is only
-    # known to the `uvicorn --port` invocation outside this module (see
-    # Dockerfile), never passed into create_app(). Advertising needs it, so
-    # this introduces the one new config knob, defaulting to the port the
-    # shipped Dockerfile's uvicorn CMD already binds (8000).
-    mdns_port = mdns_port or int(os.environ.get("PHOTO_WALL_HTTP_PORT", "8000"))
-    mdns_advertiser = mdns_advertiser or (
-        MdnsCentralAdvertiser(port=mdns_port) if mdns_enabled else None
-    )
     scheduler_health = {
         "enabled": run_scheduler,
         "running": False,
@@ -239,8 +212,7 @@ def create_app(
         try:
             while True:
                 try:
-                    if hasattr(app.state, "node_reconciler"):
-                        await asyncio.to_thread(app.state.node_reconciler.advance)
+                    await asyncio.to_thread(app.state.node_reconciler.advance)
                     projection = await asyncio.to_thread(coordinator.advance)
                     await asyncio.to_thread(
                         media_application.request_acquisitions, projection.acquisitions
@@ -270,18 +242,6 @@ def create_app(
             ProcrastinateMediaQueue.apply_schema(db.dsn)
         if feed is not None:
             await feed.start()
-        # Real network registration (join multicast group, register the
-        # service) can be slow -- or simply hang -- on a constrained Docker
-        # bridge network. Advertising is a convenience for discovery, never
-        # a serving requirement (mdns_advertiser.start() already treats
-        # registration failure as best-effort), so it must not delay
-        # central becoming ready: run it in the background instead of
-        # awaiting it before yield.
-        mdns_advertise_task = (
-            asyncio.create_task(mdns_advertiser.start())
-            if mdns_enabled and mdns_advertiser is not None
-            else None
-        )
         task = asyncio.create_task(scheduler()) if run_scheduler else None
         try:
             yield
@@ -294,12 +254,6 @@ def create_app(
                     await task
                 except asyncio.CancelledError:
                     pass
-            if mdns_enabled and mdns_advertiser is not None:
-                if mdns_advertise_task is not None and not mdns_advertise_task.done():
-                    mdns_advertise_task.cancel()
-                    with suppress(asyncio.CancelledError):
-                        await mdns_advertise_task
-                await mdns_advertiser.stop()
             if owns_db:
                 db.close()
 
@@ -316,7 +270,6 @@ def create_app(
     app.state.operator_snapshot = operator_snapshot
     app.state.media_repository = media_repository
     app.state.content = content
-    app.state.mdns_advertiser = mdns_advertiser
     bearer = HTTPBearer(auto_error=False)
     # The operator principal (pass A): bearer or signed session cookie. The key derives from the
     # token here, once, so a wrong-length or unencodable token fails at construction.
@@ -330,24 +283,20 @@ def create_app(
         return registry.authenticate(credentials.credentials)
 
     def control_state(identity: dict) -> dict:
-        # Projection, drain generation and challenge issuance share one Coordination
-        # transaction. A prepared drain cannot slip between projection and sequence.
+        # Projection and challenge issuance share one Coordination transaction.
         def finalize(conn, delivery: dict) -> dict:
             selection = registry.control_selection_in(
                 conn, identity["id"], identity["authority_epoch"]
             )
             payload = project_state(delivery, selection)
-            if selection.schema_version == 2:
-                cue = payload["identify_output"]
-                payload["identify_expires_at"] = (
-                    clock.utc() + cue["remaining_seconds"] if cue else None
-                )
-                digest = state_digest(
-                    payload, control_fence=control_fence_in(conn, identity["id"])
-                )
-                payload.update(registry.issue_control_delivery_record_in(
-                    conn, identity["id"], identity["authority_epoch"], digest
-                ))
+            cue = payload["identify_output"]
+            payload["identify_expires_at"] = (
+                clock.utc() + cue["remaining_seconds"] if cue else None
+            )
+            digest = state_digest(payload)
+            payload.update(registry.issue_control_delivery_record_in(
+                conn, identity["id"], identity["authority_epoch"], digest
+            ))
             return payload
 
         return coordinator.delivery(
@@ -805,7 +754,7 @@ def create_app(
     if content is not None:
         mount_content_routes(app, content)
     mount_node_routes(app, db=db, clock=clock, admin=admin, coordinator=coordinator, config=node_control,
-                      serving_verifier=node_serving_verifier, content=content)
+                      content=content)
     app.state.node_reconciler = NodeRuntimeReconciler(app.state.node_sessions, coordinator)
     # A Node's leaf arrives at its origin (erratum E-E3D-CUT-4): relayed to the hub when Central has one.
     hub_leaf_url = hub_leaf_url or os.environ.get("PHOTO_WALL_HUB_LEAF_URL")

@@ -124,8 +124,8 @@ out.select.gateway = await select(listed);
 answer = () => { throw new TypeError("network"); };
 out.select.lost = await select(listed);
 const coded = (code, status) => () => new Response(JSON.stringify({ error: code }), { status });
-answer = coded("node_control_disabled", 503);
-out.select.nodeOff = await select(listed);
+answer = coded("node_unlisted_refusal", 503);
+out.select.unlistedRefusal = await select(listed);
 out.selectBodies = sent.map((entry) => ({ url: entry.url, method: entry.method, body: entry.body }));
 out.settled = {
   done: releases.selectionSettled(frozenSelect, read({ selection: { revision: 1, deployment_id: D1, changed_at: 1 } })),
@@ -256,8 +256,8 @@ def test_send_selection_judges_the_newest_read_and_refuses_without_a_put():
     # Fail closed on the code, never the status: an unlisted code is refused, even at 503.
     assert select["unlisted503"] == {"outcome": "refused", "message": "Central refused: mystery_code.", "puts": 1,
                                      "code": "mystery_code"}
-    assert select["nodeOff"] == {"outcome": "refused", "message": "Central refused: node_control_disabled.",
-                                 "puts": 1, "code": "node_control_disabled"}
+    assert select["unlistedRefusal"] == {"outcome": "refused", "message": "Central refused: node_unlisted_refusal.",
+                                 "puts": 1, "code": "node_unlisted_refusal"}
     assert select["gateway"]["outcome"] == select["lost"]["outcome"] == "unknown"
     assert {(entry["url"], entry["method"]) for entry in out["selectBodies"]} == {
         ("/v1/operator/node/boot-policy", "PUT")}

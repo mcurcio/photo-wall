@@ -24,7 +24,7 @@ const ADJUSTMENT: Adjustment = {
 const meta = {
   title: "Domain/FramePosition",
   component: FramePosition,
-  args: { adjustment: ADJUSTMENT, size: { width: 1920, height: 1080 }, softwareHref: "#/players/device-a" },
+  args: { adjustment: ADJUSTMENT, size: { width: 1920, height: 1080 }, piHref: "#/players/device-a" },
 } satisfies Meta<typeof FramePosition>;
 
 export default meta;

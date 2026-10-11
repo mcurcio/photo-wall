@@ -35,6 +35,7 @@ from contracts.models import (
     CornersFit,
     FrameProfile,
 )
+from contracts.player_control import ControlHello
 
 ADMIN = "test-operator-" + "x" * 40
 # A Position that differs from the default one: Corners with the top-left corner moved in.
@@ -42,8 +43,6 @@ SKEWED = Calibration(fit=CornersFit(corners=((0.1, 0), (1, 0), (1, 1), (0, 1))))
 
 
 def enroll(registry, key=None, count=2, device_id=None):
-    # Ticketless enroll (0009): the signed-rootfs boot-ticket path is retired,
-    # so no boot server ever issues a ticket -- ticket_id is always None.
     key = key or Ed25519PrivateKey.generate()
     public = key.public_key().public_bytes_raw().hex()
     device_id = device_id or "device-" + hashlib.sha256(bytes.fromhex(public)).hexdigest()
@@ -52,10 +51,17 @@ def enroll(registry, key=None, count=2, device_id=None):
     outputs = tuple(OutputReport(output_id=f"HDMI-A-{i+1}", width_px=1920, height_px=1080)
                     for i in range(count))
     request = Enrollment(public_key=public, nonce=nonce, outputs=outputs,
-                         device_id=device_id, boot_id=boot_id, ticket_id=None,
+                         device_id=device_id, boot_id=boot_id,
                          signature=base64.b64encode(key.sign(enrollment_message(
-                             nonce, outputs, device_id, boot_id, None))).decode())
+                             nonce, outputs, device_id, boot_id))).decode())
     return registry.enroll(request), key, request
+
+
+def hello(registry, identity, capabilities=()):
+    """The Player's control hello for this enrollment epoch: state is served only after it."""
+    return registry.control_hello(identity["player_id"], ControlHello(
+        authority_epoch=identity["authority_epoch"], schemas=(2,),
+        capabilities=tuple(capabilities)))
 
 
 def frame(registry, frame_id="portrait"):
@@ -64,28 +70,8 @@ def frame(registry, frame_id="portrait"):
                                                           diagonal_inches=24)))
 
 
-def enroll_d0(registry, key=None, count=2, device_id=None):
-    """m3-central-d0-enroll: a flashed/ticketless enroll (0008 baseline) --
-    unlike `enroll` above, this NEVER calls `select_boot`, so no
-    `appliance_devices` row exists for the device; `ticket_id=None` is the
-    explicit D0 signal (contracts/enrollment.py)."""
-    key = key or Ed25519PrivateKey.generate()
-    public = key.public_key().public_bytes_raw().hex()
-    device_id = device_id or "device-" + hashlib.sha256(bytes.fromhex(public)).hexdigest()
-    boot_id = str(uuid.uuid4())
-    nonce = registry.challenge(public)["nonce"]
-    outputs = tuple(OutputReport(output_id=f"HDMI-A-{i+1}", width_px=1920, height_px=1080)
-                    for i in range(count))
-    request = Enrollment(public_key=public, nonce=nonce, outputs=outputs,
-                         device_id=device_id, boot_id=boot_id, ticket_id=None,
-                         signature=base64.b64encode(key.sign(enrollment_message(
-                             nonce, outputs, device_id, boot_id, None))).decode())
-    return registry.enroll(request), key, request
-
-
-def test_d0_ticketless_enroll_succeeds_and_creates_an_unbound_pending_record(registry):
-    identity, _, request = enroll_d0(registry)
-    assert request.ticket_id is None
+def test_serial_enroll_creates_an_unbound_pending_record(registry):
+    identity, _, request = enroll(registry)
     assert identity["token"] and identity["player_id"] and identity["authority_epoch"] == 1
     by_id = {p.id: p for p in registry.inventory().players}
     assert by_id[identity["player_id"]].device_id == request.device_id
@@ -95,12 +81,12 @@ def test_d0_ticketless_enroll_succeeds_and_creates_an_unbound_pending_record(reg
     assert pending_ids == [identity["player_id"]]
 
 
-def test_d0_reboot_reassociates_by_serial_preserving_frame_binding_no_duplicate(registry):
-    identity, _, request = enroll_d0(registry)
+def test_reboot_reassociates_by_serial_preserving_frame_binding_no_duplicate(registry):
+    identity, _, request = enroll(registry)
     frame(registry)
     registry.bind("portrait", identity["player_id"], "HDMI-A-1", expected_generation=0)
     save_position(registry, "portrait")
-    rebooted, _, _ = enroll_d0(registry, device_id=request.device_id)
+    rebooted, _, _ = enroll(registry, device_id=request.device_id)
     assert rebooted["player_id"] == identity["player_id"]
     assert rebooted["authority_epoch"] == identity["authority_epoch"] + 1
     inventory = registry.inventory()
@@ -110,17 +96,17 @@ def test_d0_reboot_reassociates_by_serial_preserving_frame_binding_no_duplicate(
                ["execution_bindings"]) == 1
 
 
-def test_d0_unbound_player_gets_no_execution_bindings_until_operator_binds(registry):
-    # A Frame already exists at enroll time, so the D0 branch has something
+def test_unbound_player_gets_no_execution_bindings_until_operator_binds(registry):
+    # A Frame already exists at enroll time, so enrollment has something
     # it COULD (wrongly) auto-bind to -- the assertions below must catch that.
-    # Cross-player: a SECOND D0 player is bound to the Frame with a real,
+    # Cross-player: a SECOND player is bound to the Frame with a real,
     # committed (ready: Position committed at its generation) execution binding. Without this second
     # player, an empty result is indistinguishable from a broken
     # `configuration_in` scope (central/registry.py `WHERE b.player_id=%s`)
     # that returns nothing for ANY player -- this bites that leak instead.
     frame(registry)
-    identity, _, _ = enroll_d0(registry)
-    bound_identity, _, _ = enroll_d0(registry)
+    identity, _, _ = enroll(registry)
+    bound_identity, _, _ = enroll(registry)
     registry.bind("portrait", bound_identity["player_id"], "HDMI-A-1", expected_generation=0)
     save_position(registry, "portrait")
     bound_config = registry.configuration_for(bound_identity["player_id"], bound_identity["authority_epoch"])
@@ -130,27 +116,11 @@ def test_d0_unbound_player_gets_no_execution_bindings_until_operator_binds(regis
     assert config["bindings"] == [] and config["execution_bindings"] == []
 
 
-def test_d0_retired_serial_is_refused_reenrollment(registry):
-    identity, _, request = enroll_d0(registry)
+def test_retired_serial_is_refused_reenrollment(registry):
+    identity, _, request = enroll(registry)
     registry.retire(identity["player_id"])
     with pytest.raises(RegistryError, match="retired"):
-        enroll_d0(registry, device_id=request.device_id)
-
-
-def test_ticketless_enroll_succeeds_with_no_release_authority_configured(registry):
-    """0009 migration edit A: the enroll<->release-authority guard
-    (central/registry.py) now lives INSIDE the `ticket_id is not None`
-    (ticketed) branch, not ahead of it -- a ticketless enroll (the diskless
-    base's fleet-brick path) must succeed even when central has no release
-    authority configured at all, never dereferencing `self.release_authority`."""
-    unauthorized = Registry(Database(registry.db.dsn), registry.clock)
-    identity, _, request = enroll_d0(unauthorized)
-    assert request.ticket_id is None
-    assert identity["token"] and identity["player_id"] and identity["authority_epoch"] == 1
-    by_id = {p.id: p for p in unauthorized.inventory().players}
-    assert by_id[identity["player_id"]].device_id == request.device_id
-    assert by_id[identity["player_id"]].is_bound is False
-    assert by_id[identity["player_id"]].retired_at is None
+        enroll(registry, device_id=request.device_id)
 
 
 def test_registration_precedes_binding_proof_replay_and_token_rotation(registry):
@@ -214,9 +184,9 @@ def test_expired_challenge_and_invalid_proof_do_not_create_player(registry):
     device_id = "device-" + hashlib.sha256(bytes.fromhex(public)).hexdigest()
     boot_id = str(uuid.uuid4())
     request = Enrollment(public_key=public, nonce=nonce, outputs=outputs,
-                         device_id=device_id, boot_id=boot_id, ticket_id=None,
+                         device_id=device_id, boot_id=boot_id,
                          signature=base64.b64encode(key.sign(enrollment_message(
-                             nonce, outputs, device_id, boot_id, None))).decode())
+                             nonce, outputs, device_id, boot_id))).decode())
     bad = request.model_copy(update={"signature": base64.b64encode(b"x" * 64).decode()})
     with pytest.raises(RegistryError, match="invalid_proof"):
         registry.enroll(bad)

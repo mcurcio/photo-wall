@@ -12,7 +12,6 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from test_fleet_attempts import BOOT_ID, DEVICE_ID, SERIAL
-from test_fleet_rollout_gate import _certificate, _gate, _LocalImageVerifier
 from test_node_boot import claim_for, cold_setup
 from test_registry import enroll
 
@@ -36,12 +35,9 @@ def test_operator_node_browser(registry):
     sessions.enroll(claim_for(second))
     enroll(registry, count=1, device_id=DEVICE_ID)
     coordinator = Coordinator(registry.db, registry.clock)
-    gate, _ = _gate(registry, _certificate(expires_in=300))
-    gate.open(expected_revision=0)
     app = FastAPI()
     mount_node_routes(app, db=registry.db, clock=registry.clock, admin=lambda: None,
-        coordinator=coordinator, config=NodeControlConfig("node-test"),
-        serving_verifier=_LocalImageVerifier())
+        coordinator=coordinator, config=NodeControlConfig("node-test"))
     reader = OperatorSnapshotReader(registry.db, registry.clock, registry,
         RuntimeStore(registry.db, registry.clock), MediaRepository(registry.db, registry.clock, times=ProcessTransactionClock(registry.clock)), coordinator)
     done = threading.Event()
