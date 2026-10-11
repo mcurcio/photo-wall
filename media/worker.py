@@ -20,9 +20,9 @@ from pydantic import ConfigDict, Field, model_validator
 
 from central import cache_layout
 from central.assets.layout import TEMP_PREFIX, CacheLayout
-from central.catalog import CatalogSnapshot
 from central.content_wiring import build_job_runtime, build_library_thumbnails
 from central.db import Database, DatabaseTransactionClock
+from central.infra.photo_library_store import PgPhotoLibrary
 from central.infra.runtime import (
     COMPLETION_NOT_RECORDED,
     WORKER_EXITED,
@@ -31,29 +31,29 @@ from central.infra.runtime import (
 )
 from central.kernel.assets import AssetKind
 from central.media_queue import MEDIA_QUEUE, ProcrastinateMediaQueue
-from central.media_repository import JobLease, MediaRepository, RefreshLease
+from central.media_repository import JobLease, MediaRepository
 from central.media_store import MediaStore, MediaStoreError
 from central.node_bus_wiring import NodeBus, build_node_bus
 from central.registry import RegistryError
 from contracts.models import Model, Positive
 from contracts.time import Clock, SystemClock
 from media.immich import ImmichClient
+from media.library_checks import LibraryChecks
 from media.library_thumbnails import LibraryThumbnailOrigin
 from media.models import (
     ConnectionConfig,
-    Diagnostic,
     DownloadedOriginal,
-    LibraryTag,
     MediaError,
     MediaLimits,
     OriginalAsset,
-    RefreshResult,
-    SourcePreview,
-    SourcePreviewQuery,
-    SourceSpec,
 )
 from media.prepare import BuildIdentity, PreparationLimits, PreparedMedia, Preparer
-from media.task_queue import MediaTaskFailed, RetryableMediaTask, create_worker_app
+from media.task_queue import (
+    MediaTaskFailed,
+    ProcrastinateCheckQueue,
+    RetryableMediaTask,
+    create_worker_app,
+)
 
 logger = logging.getLogger("photo_wall.worker")
 
@@ -119,9 +119,6 @@ class WorkerLimits(Model):
 
 
 class SourceClient(Protocol):
-    async def refresh(self, spec: SourceSpec) -> RefreshResult: ...
-    async def preview(self, query: SourcePreviewQuery) -> SourcePreview: ...
-    async def list_tags(self) -> tuple[LibraryTag, ...]: ...
     async def download_original(self, asset: OriginalAsset, destination: Path) -> DownloadedOriginal: ...
     async def close(self) -> None: ...
 
@@ -221,71 +218,9 @@ class MediaWorker:
             await _blocking(self.repository.set_recipe, recipe)
             self._recipe = recipe
 
-    async def _refresh(self, lease: RefreshLease) -> None:
-        try:
-            async with asyncio.timeout(self.limits.refresh_seconds):
-                result = await self._client(lease.source.connection_ref).refresh(lease.source)
-        except asyncio.CancelledError:
-            # No adapter task remains active when this handler is entered.
-            result = RefreshResult(snapshot=CatalogSnapshot(source_ref=lease.source.source_ref,
-                refreshed_at=self._utc(), status="unavailable"), diagnostics=(Diagnostic(code="worker_cancelled"),))
-            task = asyncio.create_task(_blocking(self.repository.publish_refresh, lease, result))
-            await _drain(task)
-            raise
-        except Exception as error:
-            code = self._code(error)
-            status = error.status if isinstance(error, MediaError) else "unavailable"
-            result = RefreshResult(snapshot=CatalogSnapshot(source_ref=lease.source.source_ref,
-                refreshed_at=self._utc(), status=status), diagnostics=(Diagnostic(code=code),))
-        if not await _blocking(self.repository.publish_refresh, lease, result):
-            raise RetryableMediaTask("stale_refresh")
-        if result.snapshot.status == "ok":
-            self._error = None
-        else:
-            self._error = result.diagnostics[0].code if result.diagnostics else "source_unavailable"
-        await _blocking(self.repository.worker_status, self._error, self._connection_ids())
-
-    async def refresh_once(self) -> bool:
-        lease = await _blocking(self.repository.begin_scheduled_refresh)
-        if lease is None:
-            return False
-        await self._refresh(lease)
-        requested, completed = await _blocking(
-            self.repository.refresh_revisions, lease.source.source_ref
-        )
-        if completed < requested:
-            await self._refresh_source(lease.source.source_ref, retry_busy=False)
-        return True
-
     def _connection_ids(self) -> tuple[str, ...]:
         """Return only the bounded identifiers safe for the central operator view."""
         return tuple(sorted(self.connections))
-
-    async def refresh_source(self, source_ref: str) -> None:
-        """Complete every persisted request revision for one source."""
-        await self._refresh_source(source_ref, retry_busy=True)
-
-    async def _refresh_source(self, source_ref: str, *, retry_busy: bool) -> None:
-        for _ in range(8):
-            lease = await _blocking(
-                self.repository.begin_requested_refresh, source_ref
-            )
-            if lease is None:
-                requested, completed = await _blocking(
-                    self.repository.refresh_revisions, source_ref
-                )
-                if completed >= requested:
-                    return
-                if retry_busy:
-                    raise RetryableMediaTask("refresh_in_progress")
-                return
-            await self._refresh(lease)
-            requested, completed = await _blocking(
-                self.repository.refresh_revisions, source_ref
-            )
-            if completed >= requested:
-                return
-        raise RetryableMediaTask("refresh_not_caught_up")
 
     async def _fail(self, lease: JobLease, code: str, *, retry: bool = True):
         try:
@@ -368,57 +303,6 @@ class MediaWorker:
             if asset_id not in recorded:
                 path.unlink(missing_ok=True)
 
-    async def list_tags(self, *, boot: bool = False) -> None:
-        """Re-list each connection's tags once its last attempt is `TAG_LIST_SECONDS` old by the
-        database clock (the refresh tick). At boot every list is replaced and the lists of
-        connections this worker no longer holds are dropped. A failure keeps the last list."""
-        refs = self._connection_ids()
-        if boot:
-            await _blocking(self.repository.retain_library_tags, refs)
-            due = refs
-        else:
-            due = await _blocking(self.repository.library_tags_due, refs)
-        for ref in due:
-            tags, error = None, None
-            try:
-                async with asyncio.timeout(self.limits.refresh_seconds):
-                    tags = await self._client(ref).list_tags()
-            except asyncio.CancelledError:
-                raise
-            except Exception as caught:
-                error = caught if isinstance(caught, MediaError) else MediaError(self._code(caught))
-            await _blocking(self.repository.record_library_tags, ref, tags, error)
-
-    async def preview_source(self, request_id: str) -> None:
-        """Evaluate one unsaved query through the worker-owned Immich connection."""
-        query = await _blocking(self.repository.begin_source_preview, request_id)
-        if query is None:
-            return
-        try:
-            if query.connection_ref not in self.connections:
-                raise MediaError("connection_unknown", "incompatible")
-            async with asyncio.timeout(self.limits.refresh_seconds):
-                observed = await self._client(query.connection_ref).preview(query)
-            if await _blocking(self.repository.finish_source_preview, request_id, observed):
-                await self._prefetch(observed)
-        except asyncio.CancelledError:
-            await _blocking(self.repository.fail_source_preview, request_id, "worker_cancelled")
-            raise
-        except Exception as error:
-            await _blocking(self.repository.fail_source_preview, request_id, self._code(error))
-        finally:
-            await _blocking(self.repository.worker_status, self._error, self._connection_ids())
-
-    async def _prefetch(self, observed: SourcePreview) -> None:
-        """Queue the completed preview's tiles once (only the completing call reaches here); a
-        failed prefetch never fails the preview: a tile's own request fetches it."""
-        if self.thumbnails is None or not observed.members:
-            return
-        try:
-            await self.thumbnails.prefetch([member.asset_id for member in observed.members])
-        except Exception:
-            logger.warning("thumbnail prefetch failed", exc_info=True)
-
     async def _close_clients(self):
         async def close(client):
             try:
@@ -463,8 +347,6 @@ async def _media_writer(worker: MediaWorker, run_queue: Callable[[], Awaitable[N
             await asyncio.sleep(standby_seconds)
         await worker._register_recipe()
         await worker.maintain()
-        await worker.list_tags(boot=True)
-        await worker.refresh_once()
         await run_queue()
 
 
@@ -530,6 +412,10 @@ async def _entry():
     repository = build_repository(dsn, clock, queue=ProcrastinateMediaQueue(dsn))
     db = repository.db
     connections = load_connections(Path(connection_file))
+    # Roadmap 4: connections, their keys and the photo pools live in Central's database; the
+    # checks read Immich through ImmichClient.for_connection (run ledger slice M2).
+    library = PgPhotoLibrary(db, times=DatabaseTransactionClock(),
+                             queue=ProcrastinateMediaQueue(dsn))
     cache_root = cache_layout.cache_root()
     previews = ensure_previews_directory(cache_root)
     worker = MediaWorker(repository, MediaStore(repository, Path(root)), connections,
@@ -547,7 +433,10 @@ async def _entry():
     await _blocking(repository.db.migrate)
     await _blocking(ProcrastinateMediaQueue.apply_schema, dsn)
     app = create_worker_app(dsn)
-    additional_context = {"media_worker": worker}
+    checks = LibraryChecks(
+        library, lambda secret: ImmichClient.for_connection(secret, clock=clock), clock,
+        queue=ProcrastinateCheckQueue(app))
+    additional_context = {"media_worker": worker, "library_checks": checks}
     try:
         async with app.open_async():
             await _run_workers(
@@ -555,6 +444,7 @@ async def _entry():
                 build_node_bus(dsn, os.environ))
     finally:
         await worker._close_clients()
+        await checks.close()
         await thumbnails.aclose()
 
 
