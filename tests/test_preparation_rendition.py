@@ -17,9 +17,10 @@ from pydantic import SecretStr
 from support.immich_library import run
 
 from central.photo_library.model import ConnectionSecret, LibraryAsset
+from central.photo_library.rendition import FrameNeed
 from contracts.time import ManualClock
 from media.immich import ImmichClient
-from media.library_client import FrameNeed, fetch_plan
+from media.library_client import fetch_plan
 from media.prepare import STILL_MEDIA_TYPES, Preparer
 
 if not os.environ.get("PHOTO_WALL_IMMICH_FIXTURE"):

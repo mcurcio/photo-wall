@@ -29,6 +29,17 @@ export interface PhotoFacts {
     orientation: number | null; size_bytes: number | null } | null;
   copies: CopyView[];
   prepared_from: CopyView["name"] | null;
+  /** Each Frame's need and whether Immich's preview holds it (central/photo_library/views.py
+   * `FrameCopy`); none for a video. */
+  frames: FrameCopy[];
+}
+
+/** What one Frame asks of the photo's copy (central/photo_library/views.py `FrameCopy`). */
+export interface FrameCopy {
+  frame_id: string;
+  need_px: [number, number];
+  output_known: boolean;
+  preview_holds: boolean | null;
 }
 
 /** Immich's copies in the photo sheet's words. */
@@ -56,13 +67,42 @@ export function copyWords(copy: CopyView, facts: PhotoFacts): string {
   if (copy.in_immich === false) return "Immich keeps none";
   if (copy.name === "original") {
     const original = facts.original;
-    if (original === null || original.width === null || original.height === null) return "size not reported by Immich yet";
+    if (original === null || original.width === null || original.height === null) {
+      // Unedited, the photo Immich shows is its original, upright: its size is Immich's own.
+      const kind = typeWords(original?.media_type ?? null);
+      return facts.edited ? "size not reported by Immich yet"
+        : [`${countText(facts.width)} × ${countText(facts.height)}`, kind].filter((part) => part !== null).join(" · ");
+    }
     const parts = [`${countText(original.width)} × ${countText(original.height)}`, typeWords(original.media_type),
       original.size_bytes === null ? null : bytesWords(original.size_bytes)];
     return parts.filter((part) => part !== null).join(" · ");
   }
   if (copy.measured === null) return copy.in_immich === null ? "size known after first use (Immich may keep none)" : "size known after first use";
   return `${countText(copy.measured.width)} × ${countText(copy.measured.height)} · ${typeWords(copy.measured.media_type)}`;
+}
+
+/** One Frame's need in words: "needs 1,920 × 1,080 px (its Frame output); the preview holds it". */
+export function needWords(frame: FrameCopy): string {
+  const need = `needs ${countText(frame.need_px[0])} × ${countText(frame.need_px[1])} px`;
+  const what = frame.output_known ? "its Frame output" : "its profile's size, until its screen reports";
+  const preview = frame.preview_holds === null ? "the preview's size is known after first use"
+    : frame.preview_holds ? "Immich's preview holds it" : "Immich's preview is smaller";
+  return `${need} (${what}); ${preview}`;
+}
+
+/** The copy the wall plays the photo from, in words (owner, 2026-10-09: "use Immich downsampled
+ * copy only if it is at least the visible Frame size, else the original"): the copy it was
+ * prepared from, else the one the next preparation takes as far as the preview's size says. */
+export function playsFromWords(facts: PhotoFacts, name: (frameId: string) => string): string {
+  if (facts.kind === "video") return "its original";
+  if (facts.prepared_from !== null) return `${COPY_WORDS[facts.prepared_from].toLowerCase()} (prepared)`;
+  if (facts.frames.length === 0) return "decided when a Frame shows it";
+  if (facts.frames.some((frame) => frame.preview_holds === null)) {
+    return "Immich's preview if it holds every Frame's need, else a larger copy (decided at first use)";
+  }
+  const short = facts.frames.filter((frame) => frame.preview_holds === false).map((frame) => name(frame.frame_id));
+  if (short.length === 0) return "Immich's preview: it holds every Frame's need";
+  return `a larger copy than Immich's preview, which is smaller than ${short.join(", ")} needs`;
 }
 
 /** What one Frame's answer says of this photo: it fits (with its window), it is left off (and
@@ -156,8 +196,8 @@ export function PhotoSheet({ open, onClose, assetId, sample, frames, focus, name
           {facts.status === "read" && (
             <>
               <FactGroup title="The photo">
-                <FactRow label="Shown as" tone="reported">
-                  {`${countText(facts.facts.width)} × ${countText(facts.facts.height)}${facts.facts.edited ? ", edited in Immich" : ""}`}
+                <FactRow label={facts.facts.edited ? "Shown as (edited in Immich)" : "Shown as (its original, upright)"} tone="reported">
+                  {`${countText(facts.facts.width)} × ${countText(facts.facts.height)}`}
                 </FactRow>
               </FactGroup>
               <FactGroup title="Copies in Immich">
@@ -165,9 +205,12 @@ export function PhotoSheet({ open, onClose, assetId, sample, frames, focus, name
                   <FactRow key={copy.name} label={COPY_WORDS[copy.name]} tone="reported">{copyWords(copy, facts.facts)}</FactRow>
                 ))}
               </FactGroup>
-              <FactRow label="Prepared from" tone="reported">
-                {facts.facts.prepared_from === null ? "not prepared yet" : COPY_WORDS[facts.facts.prepared_from].toLowerCase()}
-              </FactRow>
+              <FactGroup title="Which copy plays">
+                <FactRow label="Plays from" tone="derived">{playsFromWords(facts.facts, name)}</FactRow>
+                {facts.facts.frames.map((frame) => (
+                  <FactRow key={frame.frame_id} label={name(frame.frame_id)} tone="derived">{needWords(frame)}</FactRow>
+                ))}
+              </FactGroup>
             </>
           )}
         </Stack>

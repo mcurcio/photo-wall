@@ -16,7 +16,6 @@ from typing import Literal, Protocol
 
 from pydantic import Field
 
-from central.installation_models import FrameOutput
 from central.photo_library.model import (
     AssetRevision,
     ContactResult,
@@ -38,49 +37,13 @@ from central.photo_library.model import (
     SourceQuery,
 )
 from central.photo_library.policy import IMMICH_WEB_TYPES
-from contracts.frame_fit import window_holds
+from central.photo_library.rendition import FrameNeed, covers
 from contracts.models import Digest, Instant, Model, Positive
 
 # --- The rendition choice (follow-ups 2026-10-11, slice A4; owner, 2026-10-09: "use Immich
 # downsampled copy only if it is at least the visible Frame size, else the original") --------
 
 FetchStep = Literal["preview", "fullsize", "original"]
-
-
-class FrameNeed(Model):
-    """What one Frame asks of a photo's copy: a window of `aspect` (its profile's width_px /
-    height_px, the shape the Player cuts) holding `width` x `height` pixels: its Frame output,
-    or, until its Pi reports its Output's size, its profile's width_px x height_px (never too
-    small; `rendition_needs`)."""
-
-    aspect: Positive
-    width: int = Field(gt=0, strict=True)
-    height: int = Field(gt=0, strict=True)
-
-
-def rendition_needs(frames: Sequence[FrameOutput]) -> tuple[FrameNeed, ...]:
-    """One FrameNeed per distinct (aspect, width, height) over every Frame of the wall
-    (`central.registry.Registry.frame_outputs`), sorted. A photo is prepared once for the whole
-    wall, so its copy must hold every Frame's output. Pure.
-
-    A Frame whose output is unknown (unbound, or its Pi has not reported) asks its profile's
-    size here, while the fit rule judges it by shape only (central/wall_plan/fit.py
-    `shape_fit`). The two answer different questions and vary independently: a fetch that guesses
-    generously costs bytes, while a fit rule that guessed would refuse photos on a guess."""
-    distinct = set()
-    for frame in frames:
-        profile = frame.profile
-        width, height = frame.output_px or (profile.width_px, profile.height_px)
-        distinct.add((profile.width_px / profile.height_px, width, height))
-    return tuple(FrameNeed(aspect=aspect, width=width, height=height)
-                 for aspect, width, height in sorted(distinct))
-
-
-def covers(width: int, height: int, needs: Sequence[FrameNeed]) -> bool:
-    """Whether a `width` x `height` copy holds every need (`contracts.frame_fit.window_holds` at
-    each need's aspect). No need: False (the full-resolution copy is taken). Pure."""
-    return bool(needs) and all(window_holds(width, height, need.aspect, (need.width, need.height))
-                               for need in needs)
 
 
 def fetch_plan(asset: LibraryAsset, needs: Sequence[FrameNeed],

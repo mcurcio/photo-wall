@@ -176,6 +176,45 @@ def test_a_connection_a_source_uses_is_not_removed(client):
     assert test_client.get(CONNECTIONS, headers=AUTH).json() == []
 
 
+def test_a_pool_photos_facts_say_which_frames_the_preview_holds(client, registry):
+    """Follow-ups review (the photo sheet's "plays from"): each Frame's need (its Frame output,
+    or its profile's size until its screen reports) and whether Immich's preview, as measured,
+    holds it. A 1,080 x 1,440 preview holds an unbound 600 x 800 (3:4) Frame, not a 16:9 Frame
+    full screen on a reported 1,920 x 1,080 Output; before the preview is measured, neither is
+    known."""
+    from support.position import save_position
+    from test_registry import enroll
+
+    from central.registry import FrameCreate
+    from contracts.models import FrameProfile
+
+    test_client, library = client
+    ref = _add(test_client).json()["connection_ref"]
+    shown = LibraryAsset(connection_ref=ref, upstream_id=str(UUID(int=8)), revision="c" * 40,
+                         kind="image", taken_at=1_700_000_000.0, width=3024, height=4032)
+    draft = library.create_draft(SourceQuery(connection_ref=ref), None)
+    with library.db.transaction() as conn:
+        pool_key = library.pool_of_draft_in(conn, draft)
+    library.record_step(library.begin_check(pool_key),
+                        CheckStep(progress={}, entries=(InPool(asset=shown),), seen_so_far=1))
+    player, _, _ = enroll(registry, count=1)
+    registry.create_frame(FrameCreate(id="lounge", width_mm=530, height_mm=300, profile=FrameProfile(
+        width_px=1920, height_px=1080, diagonal_inches=24)))
+    registry.bind("lounge", player["player_id"], "HDMI-A-1", expected_generation=0)
+    save_position(registry, "lounge")
+    registry.create_frame(FrameCreate(id="study", width_mm=300, height_mm=400, profile=FrameProfile(
+        width_px=600, height_px=800, diagonal_inches=10)))
+
+    unknown = test_client.get(PHOTOS + shown.asset_id, headers=AUTH).json()["frames"]
+    assert unknown == [
+        {"frame_id": "lounge", "need_px": [1920, 1080], "output_known": True, "preview_holds": None},
+        {"frame_id": "study", "need_px": [600, 800], "output_known": False, "preview_holds": None}]
+    library.record_copies(shown.asset_id, [MeasuredCopy(name="preview", media_type="image/jpeg",
+                                                        width=1080, height=1440)])
+    frames = test_client.get(PHOTOS + shown.asset_id, headers=AUTH).json()["frames"]
+    assert {f["frame_id"]: f["preview_holds"] for f in frames} == {"lounge": False, "study": True}
+
+
 def test_a_pool_photos_facts_name_its_original_and_immichs_copies(client):
     """Follow-ups 2026-10-11, slice A3 case 5: the original's facts from discovery, each of
     Immich's copies in order with the size Photo Wall measured, and the copy the current

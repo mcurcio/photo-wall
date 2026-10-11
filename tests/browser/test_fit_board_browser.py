@@ -334,6 +334,18 @@ def test_a_sample_opens_the_photo_sheet_with_immichs_copies_and_no_immich_id(pag
             re.compile(r"^Original: "),
         ])
         expect(sheet).to_contain_text(f"{LIVING} (16:9): fits")
+        # Unedited, the original is the photo Immich shows (its size is Immich's own), and which
+        # copy plays is said per Frame: neither Frame's screen reports, so each needs its
+        # profile's size, which the 1,440 x 960 preview is smaller than.
+        expect(copies.locator("p").last).to_have_text("Original: 6,000 × 4,000")
+        plays = sheet.get_by_role("group", name="Which copy plays", exact=True)
+        expect(plays.locator("p")).to_have_text([
+            f"Plays from: a larger copy than Immich's preview, which is smaller than {HALL}, {LIVING} needs",
+            f"{HALL}: needs 1,080 × 1,920 px (its profile's size, until its screen reports); "
+            "Immich's preview is smaller",
+            f"{LIVING}: needs 3,840 × 2,160 px (its profile's size, until its screen reports); "
+            "Immich's preview is smaller",
+        ])
         html = page.content()
         for asset in assets:
             assert asset.upstream_id not in html

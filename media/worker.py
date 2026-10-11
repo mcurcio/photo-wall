@@ -36,6 +36,7 @@ from central.media_store import MediaStore, MediaStoreError
 from central.node_bus_wiring import NodeBus, build_node_bus
 from central.photo_library.model import ConnectionSecret, LibraryAsset
 from central.photo_library.ports import LibraryWorkerStore
+from central.photo_library.rendition import rendition_needs
 from central.registry import RegistryError
 from central.wall_plan.ports import KeyContentWriter
 from contracts.models import Model, Positive
@@ -49,7 +50,6 @@ from media.library_client import (
     LibraryClient,
     LibraryUnavailable,
     fetch_plan,
-    rendition_needs,
 )
 from media.library_clients import LibraryClients
 from media.library_thumbnails import LibraryThumbnailOrigin

@@ -142,6 +142,18 @@ class CopyView(Model):
     measured: CopySize | None
 
 
+class FrameCopy(Model):
+    """What one Frame asks of a photo's copy, for the photo sheet (follow-ups review): its need
+    (`central.photo_library.rendition.frame_need`: its Frame output, or its profile's size until
+    its screen reports, `output_known` False), and whether Immich's preview, as Photo Wall last
+    measured it, holds that need (`preview_holds`; None: the preview's size is not known yet)."""
+
+    frame_id: str
+    need_px: tuple[int, int]
+    output_known: bool
+    preview_holds: bool | None
+
+
 class PhotoFacts(Model):
     """`GET /v1/operator/library/photos/{asset_id}` (slice A3): what Photo Wall knows of one pool
     photo and its copies, read from its `library_assets` row, its `asset_revisions` row, that
@@ -149,7 +161,11 @@ class PhotoFacts(Model):
     Immich shows it (upright, edited). `original` None: no check with `withExif` has read it yet.
     `copies` lists thumbnail, preview, fullsize, original, in that order. `prepared_from`: the copy
     the wall's prepared copy was made from (`media_jobs.made_from` of the current recipe's ready
-    job); None before the first preparation. No Immich URL or Immich id (R22)."""
+    job); None before the first preparation. `frames`: each Frame's need and whether the preview
+    holds it (a photo; a video plays from its original, so none): the copy the wall plays is the
+    preview when it holds every Frame's need, else a larger one (owner, 2026-10-09: "use Immich
+    downsampled copy only if it is at least the visible Frame size, else the original"). No
+    Immich URL or Immich id (R22)."""
 
     asset_id: AssetId
     kind: Kind
@@ -160,3 +176,4 @@ class PhotoFacts(Model):
     original: OriginalFile | None
     copies: tuple[CopyView, ...]
     prepared_from: ImmichCopy | None
+    frames: tuple[FrameCopy, ...] = ()
