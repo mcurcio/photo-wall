@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 
 import { BindingFacet } from "../BindingFacet.jsx";
 import { FrameDisplay } from "../domain/frame-display";
+import { frameChip, type FrameHealth } from "../domain/frame-health-chip";
 import { FrameOverview } from "../domain/frame-overview";
 import { FrameDraftFit, FramePhotos } from "../domain/frame-photos";
 import { FramePicture } from "../domain/frame-picture";
@@ -79,18 +80,6 @@ function outputSize(snapshot: object | null, frame: Frame): PixelSize | null {
   return null;
 }
 
-interface Health { state: string; severity: "ok" | "todo" | "alarm"; label: string }
-
-/**
- * The header's status: health.js's, except a Pi enrolled within the silence limit that has not
- * reported yet, which is "Getting ready" (design language §6, a notice), not its enrollment age.
- */
-function headerVerdict(health: Health | null): { severity: "ok" | "todo" | "notice" | "alarm"; label: string } | null {
-  if (health === null) return null;
-  if (health.state === "awaiting-report" && health.severity === "todo") return { severity: "notice", label: "Getting ready" };
-  return { severity: health.severity, label: health.label };
-}
-
 /**
  * One Frame's page (`#/wall/frames/<id>/<tab>`): every setting of one place on the wall, one
  * tab each. The header names the Frame, its way back to the Wall and its health (health.js,
@@ -149,7 +138,8 @@ export function FramePage({ snapshot, bootFacts, hosts, frameId, tab, onTab, foc
     );
   }
   const walls = new Set(frames.map((candidate) => candidate.surface_id));
-  const health = headerVerdict(frameHealth(snapshot, frameId) as Health | null);
+  const classified = frameHealth(snapshot, frameId) as FrameHealth | null;
+  const health = classified === null ? null : frameChip(classified);
   const piHref = isBound(frame) ? playerPageHref(snapshot, frame.player_id as string) : null;
   return (
     <EntityPage header={

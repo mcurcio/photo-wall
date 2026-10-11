@@ -81,6 +81,10 @@ export interface SourcePoolViewProps {
   error?: string | null;
   /** The query's choices, named by an empty pool, each with a Clear. */
   filters?: readonly ActiveFilter[];
+  /** A newer read of these photos is running (its count is the one shown, beside this view):
+   * the grid is dimmed and its own count hidden, so the page shows one count (design review
+   * round 2). */
+  reading?: boolean;
 }
 
 /**
@@ -90,7 +94,8 @@ export interface SourcePoolViewProps {
  * at its own ratio, with "Show more". A complete check that found nothing names the query's
  * choices, each with a Clear.
  */
-export function SourcePoolView({ view, pages, hasMore, onLoadMore, loadingMore = false, error = null, filters = [] }: SourcePoolViewProps) {
+export function SourcePoolView({ view, pages, hasMore, onLoadMore, loadingMore = false, error = null, filters = [],
+  reading = false }: SourcePoolViewProps) {
   if (view === null) {
     return <Note live>{error === null ? "Reading the pool…" : "Photo Wall could not read the pool just now; it keeps trying."}</Note>;
   }
@@ -101,7 +106,7 @@ export function SourcePoolView({ view, pages, hasMore, onLoadMore, loadingMore =
   return (
     <div>
       <HealthBadge verdict={{ severity: verdict.severity, label: verdict.label, receipt: null }} />
-      <Note live>{poolWords(view)}</Note>
+      {!reading && <Note live>{poolWords(view)}</Note>}
       {view.waiting > 0 && <Note>{`Immich is still reading ${counted(view.waiting, "photo")}`}</Note>}
       {view.left_out.filter((row) => row.count > 0).map((row) => (
         <Note key={row.reason}>{LEFT_OUT_WORDS[row.reason](row.count)}</Note>
@@ -135,6 +140,7 @@ export function SourcePoolView({ view, pages, hasMore, onLoadMore, loadingMore =
           }))}
           onMore={hasMore ? onLoadMore : undefined}
           moreBusy={loadingMore}
+          faded={reading}
         />
       )}
     </div>

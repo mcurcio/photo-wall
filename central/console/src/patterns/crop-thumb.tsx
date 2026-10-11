@@ -134,7 +134,7 @@ export function FrameTile({ aspect, lead, height = 96, label, emptyText = "Nothi
     );
   }
   return (
-    <svg role="img" aria-label={lead === null ? `${label}: ${emptyText}` : `${label}: ${lead.alt}`}
+    <svg role="img" aria-label={lead !== null ? `${label}: ${lead.alt}` : emptyText === "" ? label : `${label}: ${emptyText}`}
       width={width} height={height} viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="xMidYMid meet"
       className="block shrink-0">
       <defs>
@@ -149,7 +149,7 @@ export function FrameTile({ aspect, lead, height = 96, label, emptyText = "Nothi
       <rect x={0.5} y={0.5} width={W - 1} height={H - 1} rx={3}
         className="fill-none stroke-line-input" strokeWidth={1} vectorEffect="non-scaling-stroke"
         strokeDasharray={lead === null ? "4 3" : undefined} />
-      {lead === null && width >= 64 ? (
+      {lead === null && emptyText !== "" && width >= 64 ? (
         <text x={W / 2} y={H / 2} textAnchor="middle" dominantBaseline="middle"
           className="fill-muted text-xs">{emptyText}</text>
       ) : null}

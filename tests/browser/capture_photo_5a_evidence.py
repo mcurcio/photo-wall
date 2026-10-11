@@ -19,7 +19,7 @@ import that base lacks sits inside a `followup` case. PNGs go to $PHOTO_WALL_EVI
 The follow-up cases capture, dark and light, at 1,280 px and 390 px (`-phone`), over the varied
 library (photo_seed.VARIED, measured: photo_seed.measure_varied) on a 9:16 Frame "hall" and a
 16:9 Frame "living-room": the Photo source editor's Fit board (Ready, its reasons and Shape map,
-Reading), the photo sheet, the Sources list's lines, the Scene editor's Frames, Photos, Playback
+Reading), the photo sheet, the Sources list's lines, the Scene editor's Frames (before and after its photos are chosen), Photos, Playback
 and Review, Show now's line, the Frame page's Photos (a Scene nothing fits included), a bound
 Frame "Getting ready" and its Position drafted as a mat opening, Settings › Photo fit, and the
 face-detection notice. Every full-page shot is taken from the top, so the sticky sidebar sits
@@ -302,12 +302,23 @@ def test_followup_scene_editor_and_show_now(page, registry, scheme, suffix):
         form = start_scene(page)
         for frame in ("hall", "living-room"):
             form.get_by_label(f"Target frame {frame}", exact=True).check()
+        expect(form.get_by_role("img", name="hall, 9:16", exact=True)).to_be_visible()
         _top_shot(page, f"followup-scene-frames{suffix}", scheme)
         scene_continue(page, "Photos")
         choose_source(form, "landscapes:1")
-        expect(form.get_by_text(re.compile(r"hall has no photo that fits|None of these")).first).to_be_attached()
+        expect(form.get_by_role("list", name="On the wall together", exact=True).get_by_role(
+            "img", name=re.compile(r"^living-room, 16:9: Photo"))).to_be_visible()
         _top_shot(page, f"followup-scene-photos{suffix}", scheme)
+        # Back on Frames with photos chosen: each tile filled with what it would show, and its count.
+        page.get_by_role("button", name="Back", exact=True).click()
+        expect(form.locator("label").filter(has=page.get_by_role("checkbox", name="Target frame living-room"))
+               .get_by_role("img", name=re.compile(r"^living-room, 16:9: Photo"))).to_be_visible()
+        _top_shot(page, f"followup-scene-frames-chosen{suffix}", scheme)
+        scene_continue(page, "Photos")
         scene_continue(page, "Playback")
+        crop = form.get_by_role("region", name="What the crop limit lets each Frame take", exact=True)
+        expect(crop.get_by_role("article", name="Frame hall").locator("visible=true")).to_have_count(1)
+        expect(form.locator("[aria-busy=true]")).to_have_count(0)
         _top_shot(page, f"followup-scene-playback{suffix}", scheme)
         scene_continue(page, "Review")
         form.get_by_label("Scene name", exact=True).fill("Landscapes")
@@ -330,6 +341,8 @@ def test_followup_frame_page(page, registry, scheme, suffix):
         open_frame(page, "hall", "overview")
         photos = page.get_by_role("region", name="Photos", exact=True)
         expect(photos.get_by_role("group", name=f"Scene {WIDE_ONLY}", exact=True)).to_contain_text("Nothing fits")
+        expect(photos.get_by_text(re.compile(r"\d+ of \d+ fit")).locator("visible=true").first).to_be_visible()
+        expect(photos.locator("[aria-busy=true]")).to_have_count(0)
         _top_shot(page, f"followup-frame-photos{suffix}", scheme)
 
 
@@ -365,6 +378,10 @@ def test_followup_frame_position_draft(page, registry, scheme, suffix):
             connect(page, origin)
             open_frame(page, BOUND, "overview")
             expect(page.get_by_role("banner").last).to_be_visible()
+            # Settled: the Scene's board has answered (no skeleton left).
+            photos = page.get_by_role("region", name="Photos", exact=True)
+            expect(photos.get_by_text(re.compile(r"\d+ of \d+ fit")).locator("visible=true").first).to_be_visible()
+            expect(photos.locator("[aria-busy=true]")).to_have_count(0)
             _top_shot(page, f"followup-frame-overview-bound{suffix}", scheme)
             position = open_frame(page, BOUND, "position").get_by_role("region", name="Position", exact=True)
             expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)

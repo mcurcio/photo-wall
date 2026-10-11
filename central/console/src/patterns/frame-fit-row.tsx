@@ -1,10 +1,43 @@
 import { useId } from "react";
 import type * as React from "react";
 
+import { Button } from "../ui/button";
 import { cn } from "../ui/cn";
 import { Disclosure } from "../ui/disclosure";
 import { Link } from "../ui/link";
+import { StatusChip } from "../ui/status-chip";
 import { type CropView, CropThumb, FrameTile } from "./crop-thumb";
+import type { ProblemAction } from "./problem-card";
+
+/** A Frame that will go without, or with too few photos to change: said once, where the Frame
+ * is drawn (its tile on a wall, or its row). `alarm`: nothing fits it; `notice`: a few do. */
+export interface FitAlert {
+  severity: "notice" | "alarm";
+  /** Two words ("Nothing fits", "Few photos"). */
+  label: string;
+  /** What it means, in one plain sentence, with what to do. */
+  what: string;
+  /** The one thing to do about it, where the host can do it ("Raise the crop limit to 44 %"). */
+  action?: ProblemAction;
+}
+
+/** A Frame's alert: its chip, its sentence (unless `brief`) and its action. Severity colour
+ * only through the StatusChip (design language §6); the accent stays for the action. */
+export function FitAlertNote({ alert, brief = false }: { alert: FitAlert; brief?: boolean }) {
+  return (
+    <div role="group" aria-label={alert.label} className="flex min-w-0 flex-col items-start gap-1.5">
+      <StatusChip severity={alert.severity}>{alert.label}</StatusChip>
+      {!brief && <p className="m-0 text-sm wrap-anywhere text-text">{alert.what}</p>}
+      {!brief && alert.action !== undefined && (
+        "href" in alert.action ? (
+          <Link href={alert.action.href}>{alert.action.label}</Link>
+        ) : (
+          <Button className="w-fit" onClick={alert.action.onAction}>{alert.action.label}</Button>
+        )
+      )}
+    </div>
+  );
+}
 
 /** One part of a Frame's bar: the photos that fit, or those left off for one reason. */
 export interface FitSegment {
@@ -45,8 +78,9 @@ export interface FrameFitView {
   checked: string | null;
   /** The pixels it is judged at, in words ("Frame output 1,512 × 1,008 px · on a 3,840 × 2,160 display"). */
   detail: string;
-  /** A short warning drawn under its tile on a wall ("Nothing fits", "Only 1 photo"), or null. */
-  alert: string | null;
+  /** A Frame that will go without or has too few photos, said once where the Frame is drawn;
+   * null when it is fine. */
+  alert: FitAlert | null;
   /** "Why 169 don't" and its reasons, or null when every photo fits. */
   why: { summary: string; reasons: readonly FitReason[] } | null;
   /** A badge for a Frame judged with unsaved values ("As you are setting it"), or null. */
@@ -71,6 +105,12 @@ export interface FrameFitRowProps {
   /** False when its host already names the Frame (the Frame's own page): the row leads with its
    * count, not the Frame's name and shape again. */
   named?: boolean;
+  /** False when the Frame's tile, and its alert, are drawn elsewhere (a wall strip above the
+   * rows): the row is its counts, photos and reasons only. */
+  tile?: boolean;
+  /** `pictures` leads with what the Frame would show: its tile, large, and its photos beside it,
+   * then the counts (a Frame's own page). */
+  layout?: "row" | "pictures";
 }
 
 /** The bar's fills, in order: solid for what fits, then a neutral pattern per reason. Never a
@@ -156,53 +196,80 @@ function FitBar({ segments, label }: { segments: readonly FitSegment[]; label: s
  * FrameFitRow (design language §4, follow-ups C1): one Frame of a Fit board. Its tile at its
  * output's shape, filled with what it would show; its name and shape; how many photos fit and a
  * bar of fits and refusals (neutral patterns, never a severity colour); in `full`, a few photos
- * cropped as it crops them; "Why N don't" opens the reasons, each with its photos.
+ * cropped as it crops them; a Frame nothing fits, or too few to change, says so once, under its
+ * tile; "Why N don't" opens the reasons, each with its photos. Under a wall strip (which draws
+ * the tiles and their alerts) the row is its counts only; on a Frame's own page it leads with
+ * the tile and the photos it would show.
  */
-export function FrameFitRow({ frame, size, onOpen, onFocus, action, faded = false, named = true }: FrameFitRowProps) {
+export function FrameFitRow({ frame, size, onOpen, onFocus, action, faded = false, named = true, tile: drawTile = true,
+  layout = "row" }: FrameFitRowProps) {
   const full = size === "full";
+  const pictures = layout === "pictures";
   const dim = faded ? "opacity-60" : "";
-  const tile = (
-    <span className={cn("block", dim)}><FrameTile aspect={frame.aspect} lead={frame.lead} height={full ? 88 : 56} label={`${frame.name}, ${frame.ratio}`}
-      emptyText={frame.emptyText} /></span>
+  const tileHeight = pictures ? 120 : full ? 88 : 56;
+  const picture = (
+    <span className={cn("block", dim)}><FrameTile aspect={frame.aspect} lead={frame.lead} height={tileHeight}
+      label={`${frame.name}, ${frame.ratio}`} emptyText={frame.emptyText} /></span>
+  );
+  const tile = !drawTile ? null : onFocus ? (
+    <button type="button" onClick={onFocus} aria-label={`Show ${frame.name}'s shapes`}
+      className="cursor-pointer self-start border-0 bg-transparent p-0 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus">
+      {picture}
+    </button>
+  ) : picture;
+  // Led by its tile, the photos beside it are the others it would show (the tile's is not
+  // drawn twice).
+  const shown = pictures ? frame.samples.filter((sample) => sample.key !== frame.lead?.key) : frame.samples;
+  const samples = full && shown.length > 0 ? (
+    <ul aria-label={`Photos ${frame.name} would show`} className={cn("m-0 flex min-w-0 list-none flex-wrap gap-2 p-0", dim)}>
+      {shown.map((sample) => (
+        <li key={sample.key}>
+          <CropThumb sample={sample} height={pictures ? 96 : 72} onOpen={onOpen ? () => onOpen(sample) : undefined} />
+        </li>
+      ))}
+    </ul>
+  ) : null;
+  const counts = (
+    <div className="flex min-w-0 flex-1 flex-col gap-1">
+      {named || frame.draft !== null ? (
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
+          {named && (
+            <>
+              <h4 className="m-0 text-base font-medium wrap-anywhere text-text">
+                {frame.href ? <Link href={frame.href}>{frame.name}</Link> : frame.name}
+              </h4>
+              <span className="text-sm text-muted">{frame.ratio}</span>
+            </>
+          )}
+          {frame.draft !== null && (
+            <span className="rounded-pill border border-line-input px-2.5 py-0.5 text-xs text-text">{frame.draft}</span>
+          )}
+        </div>
+      ) : null}
+      <p className="m-0 text-sm text-text tabular-nums">{frame.count}</p>
+      <FitBar segments={frame.segments} label={`${frame.name}: fit and left off`} />
+    </div>
   );
   return (
     <article aria-label={`Frame ${frame.name}`} className="flex min-w-0 flex-col gap-2 border-b border-line py-3 last:border-b-0">
-      <div className="flex min-w-0 items-start gap-3">
-        {onFocus ? (
-          <button type="button" onClick={onFocus} aria-label={`Show ${frame.name}'s shapes`}
-            className="cursor-pointer border-0 bg-transparent p-0 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus">
+      {pictures ? (
+        <>
+          <div className="flex min-w-0 flex-wrap items-start gap-2">
             {tile}
-          </button>
-        ) : tile}
-        <div className="flex min-w-0 flex-1 flex-col gap-1">
-          {named || frame.draft !== null ? (
-            <div className="flex min-w-0 flex-wrap items-center gap-2">
-              {named && (
-                <>
-                  <h4 className="m-0 text-base font-medium wrap-anywhere text-text">
-                    {frame.href ? <Link href={frame.href}>{frame.name}</Link> : frame.name}
-                  </h4>
-                  <span className="text-sm text-muted">{frame.ratio}</span>
-                </>
-              )}
-              {frame.draft !== null && (
-                <span className="rounded-pill border border-line-input px-2.5 py-0.5 text-xs text-text">{frame.draft}</span>
-              )}
-            </div>
-          ) : null}
-          <p className="m-0 text-sm text-text tabular-nums">{frame.count}</p>
-          <FitBar segments={frame.segments} label={`${frame.name}: fit and left off`} />
-        </div>
-      </div>
-      {full && frame.samples.length > 0 && (
-        <ul aria-label={`Photos ${frame.name} would show`} className={cn("m-0 flex min-w-0 list-none flex-wrap gap-2 p-0", dim)}>
-          {frame.samples.map((sample) => (
-            <li key={sample.key}>
-              <CropThumb sample={sample} height={72} onOpen={onOpen ? () => onOpen(sample) : undefined} />
-            </li>
-          ))}
-        </ul>
+            {samples}
+          </div>
+          {counts}
+        </>
+      ) : (
+        <>
+          <div className="flex min-w-0 items-start gap-3">
+            {tile}
+            {counts}
+          </div>
+          {samples}
+        </>
       )}
+      {drawTile && frame.alert !== null && <FitAlertNote alert={frame.alert} />}
       {frame.checked !== null && <p className="m-0 text-xs text-muted">{frame.checked}</p>}
       <p className="m-0 text-xs text-muted">{frame.detail}</p>
       {action}

@@ -3,7 +3,9 @@ import type * as React from "react";
 
 import type { CropView } from "../patterns/crop-thumb";
 import { FitBoard, type FitBoardLead } from "../patterns/fit-board";
+import type { FrameFitView } from "../patterns/frame-fit-row";
 import type { ProblemAction } from "../patterns/problem-card";
+import { FrameFitTile } from "../patterns/wall-strip";
 import {
   type BoardOptions,
   boardState,
@@ -12,6 +14,7 @@ import {
   type FrameFit,
   type LoadState,
   lineWords,
+  ratioWords,
   useFitAnalysis,
 } from "./photo-fit";
 import { PhotoSheet } from "./photo-sheet";
@@ -42,6 +45,50 @@ export function useFitRead(question: FitQuestion | null,
 export function fitLine(state: LoadState<FitAnalysis>, name?: (frameId: string) => string): string | null {
   const value = state.status === "ready" ? state.value : state.status === "failed" ? state.last : null;
   return value === null ? null : lineWords(value, name);
+}
+
+/** Whether a board drawn from this read shows its own "so far" count (Immich is still being
+ * read, and there are photos and Frames to count), so a host's older count of the same photos
+ * hides while it runs and the page shows one count. */
+export function fitReading(state: LoadState<FitAnalysis>): boolean {
+  const value = state.status === "ready" ? state.value : state.status === "failed" ? state.last : null;
+  return value !== null && value.reading && value.frames.length > 0 && value.photos + value.videos > 0;
+}
+
+interface InventoryFrame { id: string; profile?: { width_px?: number; height_px?: number } }
+
+/** A Frame not judged yet (no photos chosen): drawn at its profile's shape (its Frame output's
+ * shape: the picture keeps the profile's shape inside its Position), empty. */
+function unjudged(snapshot: object | null, frameId: string, words: string): FrameFitView | null {
+  const frames = (snapshot as { inventory?: { frames?: InventoryFrame[] } } | null)?.inventory?.frames ?? [];
+  const profile = frames.find((frame) => frame.id === frameId)?.profile;
+  const width = profile?.width_px ?? 0;
+  const height = profile?.height_px ?? 0;
+  if (width <= 0 || height <= 0) return null;
+  return {
+    key: frameId, name: frameId, aspect: width / height, ratio: ratioWords(width / height), lead: null, emptyText: "",
+    count: words, segments: [], samples: [], checked: null, detail: "", alert: null, why: null, draft: null,
+  };
+}
+
+/**
+ * The Frame picker's tiles (the Scene's Frames step, design review round 2): each Frame drawn at
+ * its Frame output's shape with the photo it would show and how many of the chosen photos fit
+ * it (its alert's chip if it would go without or have few), from the one read of every Frame;
+ * before any photo is chosen (`read` null), at its profile's shape, empty. `sharing`: the Frames
+ * chosen so far, whom the photos are shared between.
+ */
+export function frameChoiceTiles(read: FitRead | null, snapshot: object | null, sharing: number,
+  name?: (frameId: string) => string): (frameId: string) => React.ReactNode {
+  const state = read === null ? null : boardState(read.state, { name, sharing: Math.max(sharing, 1) });
+  const view = state !== null && (state.status === "ready" || state.status === "cant-tell") ? state.view : null;
+  const faded = state !== null && (state.status === "cant-tell" || (state.status === "ready" && state.updating));
+  const judged = new Map((view?.frames ?? []).map((frame) => [frame.key, frame]));
+  const pending = read === null ? "Choose its photos next" : view?.empty ?? "Reading what fits…";
+  return (frameId) => {
+    const frame = judged.get(frameId) ?? unjudged(snapshot, frameId, pending);
+    return frame === null ? null : <FrameFitTile frame={frame} named={false} faded={faded} brief />;
+  };
 }
 
 export interface PhotoFitBoardProps extends BoardOptions {

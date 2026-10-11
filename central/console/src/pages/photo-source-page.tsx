@@ -12,7 +12,7 @@ import {
   defaultQuery,
 } from "../domain/source-query-editor";
 import { type SourcePoolViewData, SourcePoolView, poolWords } from "../domain/source-pool-view";
-import { fitLine, type FitQuestion, PhotoFitBoard, useFitRead } from "../domain/photo-fit-board";
+import { fitLine, type FitQuestion, fitReading, PhotoFitBoard, useFitRead } from "../domain/photo-fit-board";
 import { type FitAnalysis, percentWords, type SceneUse } from "../domain/photo-fit";
 import {
   albumsById,
@@ -217,6 +217,9 @@ export function PhotoSourcePage({ editing, forLabel, onSaved, onDiscard, onChang
   // The same question is asked again whenever the pool read under it moves on (Immich read
   // further, or the query changed and a new pool started).
   const fit = useFitRead(fitQuestion, { refreshKey: JSON.stringify([view?.in_pool ?? null, view?.check ?? null]) });
+  // While Immich is still being read the board's count ("11 photos so far") is the page's one
+  // count; the grid under it is an older read, dimmed, its own count hidden.
+  const reading = fitReading(fit.state);
   const checkNote = editing === null ? null
     : sourceCheckMessage(check.feedback[editing.sourceRef], view?.check ?? null);
 
@@ -281,7 +284,7 @@ export function PhotoSourcePage({ editing, forLabel, onSaved, onDiscard, onChang
         </>
       )}
       previewTitle="Photos in this Source"
-      previewLine={[view === null ? "Reading the pool…" : poolWords(view), fitLine(fit.state)]
+      previewLine={[view === null ? "Reading the pool…" : reading ? null : poolWords(view), fitLine(fit.state)]
         .filter((part) => part !== null).join(" · ")}
       preview={() => (
         <Stack>
@@ -296,7 +299,7 @@ export function PhotoSourcePage({ editing, forLabel, onSaved, onDiscard, onChang
           <PhotoFitBoard read={fit} size="full" lead="shapes" collapse={false}
             title="What these photos are, and which Frames can show them" judged={judgedWords(judgingScene)} />
           <SourcePoolView view={view} pages={pool.pages} hasMore={pool.hasMore} onLoadMore={() => void pool.loadMore()}
-            loadingMore={pool.loadingMore} error={pool.error} filters={filters} />
+            loadingMore={pool.loadingMore} error={pool.error} filters={filters} reading={reading} />
         </Stack>
       )}
       saveBar={(

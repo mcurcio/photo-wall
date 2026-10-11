@@ -2,13 +2,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { frameOf } from "../join.js";
 import type { CropView } from "../patterns/crop-thumb";
-import type { FitBoardState, FitBoardView, FitWarning } from "../patterns/fit-board";
-import type { FitReason, FitSegment, FrameFitView } from "../patterns/frame-fit-row";
+import type { FitBoardState, FitBoardView } from "../patterns/fit-board";
+import type { FitAlert, FitReason, FitSegment, FrameFitView } from "../patterns/frame-fit-row";
 import type { ProblemAction } from "../patterns/problem-card";
 import type { ShapeBin } from "../patterns/shape-map";
 import { analyseFit, readFitSettings, saveFitSettings } from "../photoFitApi.js";
 import { sourceName } from "../sourceNames.js";
-import { countText, countWords, sinceTime } from "../timeWords.js";
+import { countText, countWords, pixelSize, sinceTime } from "../timeWords.js";
 
 /*
  * How a selection of photos fits the Frames (follow-ups 2026-10-11, slice C1): the analysis's
@@ -146,14 +146,31 @@ export function ratioWords(ratio: number): string {
   return ratio >= 1 ? `${ratio.toFixed(2)}:1` : `1:${(1 / ratio).toFixed(2)}`;
 }
 
-/** The Planner's words for a Frame with nothing that fits (docs/module-planner.md, the wall
- * plan's step 5). */
-export const NOTHING_NEW_WORDS =
-  "keeps its last photo while it still fits and is free; otherwise plays a photo not yet checked, centred; otherwise nothing new";
-
-/** A Frame of the answer with nothing that fits, in the Planner's words: what it does. */
-export function emptyFrameWords(frame: FrameFit, name = frame.frame_id): string {
-  return `None of these ${countWords(frame.photos, "photo")} fit ${name}. ${name} ${NOTHING_NEW_WORDS}.`;
+/**
+ * A Frame of the answer with nothing that fits, in one plain sentence with what to do: when its
+ * photos are left off for their shape (the usual case), "hall is 9:16 and these photos are 3:2:
+ * add photos of that shape or raise the crop limit." (`most`: the selection's most common shape);
+ * otherwise what leaves most of them off.
+ */
+export function emptyFrameWords(frame: FrameFit, name: string, most: string | null): string {
+  const top = [...frame.refused_by_shape, ...frame.refused_by_content]
+    .filter((count) => count.photos > 0)
+    .sort((a, b) => b.photos - a.photos)[0];
+  const shape = ratioWords(frame.aspect);
+  switch (top?.reason ?? "beyond_crop_limit") {
+    case "below_frame_pixels":
+      return `${name} needs larger photos than most of these: add larger photos.`;
+    case "face_cut":
+      return `${name} would cut a face in most of these photos: add photos closer to ${shape}.`;
+    case "interest_cut":
+      return `${name} would cut the interesting part of most of these photos: add photos closer to ${shape}.`;
+    case "no_video_here":
+      return `${name} shows no videos, and these are videos: add photos.`;
+    default:
+      return most === null
+        ? `${name} is ${shape}: add photos of that shape or raise the crop limit.`
+        : `${name} is ${shape} and these photos are ${most}: add photos of that shape or raise the crop limit.`;
+  }
 }
 
 /** The sampled check of faces and the interesting part ("checked 64 of 1,520"), or null when
@@ -188,7 +205,8 @@ export function isThin(frame: FrameFit, frames: number): boolean {
   return hasFit(frame) && fits < Math.max(2, frames);
 }
 
-/** A thin Frame (see {@link isThin}) in words: what the Planner will do with so few. */
+/** A thin Frame (see {@link isThin}) in words: what the Planner will do with so few. The one
+ * sentence for "Few photos", wherever a Frame with few photos is drawn. */
 export function thinWords(frame: FrameFit, frames: number, name = frame.frame_id): string {
   const fits = fitCount(frame);
   const only = `Only ${countWords(fits, "photo")} ${fits === 1 ? "fits" : "fit"} ${name}`;
@@ -249,7 +267,7 @@ function cropOf(sample: FitSample, aspect: number, verdict: string, refused = fa
 }
 
 function size([width, height]: [number, number]): string {
-  return `${countText(width)} × ${countText(height)}`;
+  return pixelSize(width, height);
 }
 
 /** The pixels a Frame is judged at, in words: its Frame output (the picture inside its
@@ -276,9 +294,27 @@ export interface BoardOptions {
   rescue?: (frame: FrameFit) => ProblemAction | undefined;
   /** The line names the Frame output too (a one-Frame line under a Position being dragged). */
   lineOutput?: boolean;
+  /** How many Frames share the selection, when not every Frame of the answer does (a Frame
+   * picker judging every Frame while a few are chosen); default: the answer's Frames. */
+  sharing?: number;
 }
 
-function frameView(frame: FrameFit, name: string, href: string | undefined, frames: number): FrameFitView {
+/** The two alerts' words, their one home: a Frame nothing fits, and a Frame with too few to
+ * change (design language §6: `alarm`, it will go without; `notice`, it can wait). */
+export const NOTHING_FITS = "Nothing fits";
+export const FEW_PHOTOS = "Few photos";
+
+/** A Frame's alert, or null when it is fine: said once, where the Frame is drawn. */
+function alertOf(frame: FrameFit, name: string, sharing: number, most: string | null,
+  rescue: BoardOptions["rescue"]): FitAlert | null {
+  if (frame.photos > 0 && !hasFit(frame)) {
+    return { severity: "alarm", label: NOTHING_FITS, what: emptyFrameWords(frame, name, most), action: rescue?.(frame) };
+  }
+  if (isThin(frame, sharing)) return { severity: "notice", label: FEW_PHOTOS, what: thinWords(frame, sharing, name) };
+  return null;
+}
+
+function frameView(frame: FrameFit, name: string, href: string | undefined, alert: FitAlert | null): FrameFitView {
   const aspect = frame.output_px === null ? frame.aspect : frame.output_px[0] / frame.output_px[1];
   const shaped = frame.refused_by_shape.filter((count) => count.photos > 0);
   const segments: FitSegment[] = [
@@ -303,16 +339,15 @@ function frameView(frame: FrameFit, name: string, href: string | undefined, fram
     aspect,
     ratio: ratioWords(frame.aspect),
     lead: frame.lead === null ? null : cropOf(frame.lead, frame.aspect, "fits"),
-    // A shape answer draws no photo (its samples are the full answer's), so its empty tile
-    // says nothing fits only when nothing does.
-    emptyText: hasFit(frame) ? "Not checked yet" : "Nothing fits",
+    // A shape answer draws no photo (its samples are the full answer's): its empty tile says
+    // so. A Frame nothing fits is drawn empty without words: its alert says it, once.
+    emptyText: hasFit(frame) ? "Not checked yet" : "",
     count: `${countText(frame.fit_by_shape)} of ${countText(frame.photos)} fit`,
     segments,
     samples: frame.fitting.map((sample) => cropOf(sample, frame.aspect, "fits")),
     checked: checkedWords(frame),
     detail: outputWords(frame, name),
-    alert: frame.photos > 0 && !hasFit(frame) ? "Nothing fits"
-      : isThin(frame, frames) ? `Only ${countWords(fitCount(frame), "photo")}` : null,
+    alert,
     why: summary === null ? null : { summary, reasons },
     draft: frame.draft ? "As you are setting it" : null,
     href,
@@ -344,24 +379,7 @@ export function boardView(analysis: FitAnalysis, options: BoardOptions = {}): Fi
   const name = options.name ?? ((id: string) => id);
   const most = mostWords(analysis);
   const count = analysis.frames.length;
-  const warnings: FitWarning[] = [
-    ...analysis.frames.filter((frame) => frame.photos > 0 && !hasFit(frame)).map((frame) => {
-      const shape = most === null ? "" : ` Most are ${most}; ${name(frame.frame_id)} is ${ratioWords(frame.aspect)}.`;
-      return {
-        key: frame.frame_id,
-        label: "Nothing fits",
-        subject: name(frame.frame_id),
-        what: `${emptyFrameWords(frame, name(frame.frame_id))}${shape}`,
-        action: options.rescue?.(frame),
-      };
-    }),
-    ...analysis.frames.filter((frame) => isThin(frame, count)).map((frame) => ({
-      key: `${frame.frame_id}-thin`,
-      label: "Few photos",
-      subject: name(frame.frame_id),
-      what: thinWords(frame, count, name(frame.frame_id)),
-    })),
-  ];
+  const sharing = options.sharing ?? count;
   const bands = analysis.frames.map((frame) => ({ key: frame.frame_id, name: name(frame.frame_id),
     low: frame.band[0], high: frame.band[1] }));
   const total = analysis.photos + analysis.videos;
@@ -377,8 +395,8 @@ export function boardView(analysis: FitAnalysis, options: BoardOptions = {}): Fi
     judged: options.judged === undefined ? `Judged at a crop limit of ${percentWords(analysis.crop_limit)}.`
       : typeof options.judged === "function" ? options.judged(analysis) : options.judged,
     reading: analysis.reading ? "Still reading Immich: these are the photos found so far." : null,
-    warnings,
-    frames: analysis.frames.map((frame) => frameView(frame, name(frame.frame_id), options.href?.(frame.frame_id), count)),
+    frames: analysis.frames.map((frame) => frameView(frame, name(frame.frame_id), options.href?.(frame.frame_id),
+      alertOf(frame, name(frame.frame_id), sharing, most, options.rescue))),
     shape: {
       bins: analysis.bins.map((bin) => binWords(bin, bands)),
       bands,

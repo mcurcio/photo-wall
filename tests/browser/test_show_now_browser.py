@@ -196,7 +196,9 @@ def test_unhealthy_scene_frame_opens_its_recovery_tab_and_keeps_show_draft(page,
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "now", paused_at=registry.clock.utc())
         form = show_now(page, SCENE_ID, submit=False)
-        expect(form).to_contain_text(f"{INVALID_FRAME}: No report yet")
+        # Enrolled, no report yet: "Getting ready", the Frame page header's words
+        # (domain/frame-health-chip.ts).
+        expect(form).to_contain_text(f"{INVALID_FRAME}: Getting ready")
         expect(form.get_by_role("link", name=f"Open Frame {INVALID_FRAME}", exact=True)).to_have_attribute(
             "href", f"#/wall/frames/{INVALID_FRAME}/hardware")
 

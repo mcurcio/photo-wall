@@ -18,6 +18,7 @@ import {
 } from "./health.js";
 import { boundOutput } from "./join.js";
 import { BOOT_FACTS_UNAVAILABLE, identifyOffer, panelAtEnrollment, playerPageHref } from "./players.js";
+import { pixelSize } from "./timeWords.js";
 import { useMutate } from "./useMutate.js";
 
 /**
@@ -188,7 +189,7 @@ export function BindingFacet({ snapshot, bootFacts = null, frameId, onTab }) {
   };
 
   const display = observation?.connected === true
-    ? `Connected, ${observation.width_px} × ${observation.height_px}`
+    ? `Connected, ${pixelSize(observation.width_px, observation.height_px)}`
     : observation?.connected === false ? "None connected" : "Not reported";
   const heard = liveness === null ? "Not known to Photo Wall"
     : liveness.state === "heard" ? "Reporting"

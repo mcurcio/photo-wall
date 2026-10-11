@@ -76,7 +76,7 @@ def test_a_changed_display_is_cleared_by_confirming_the_profile_then_checking_po
         frame = open_frame(page, frame_id, "hardware")
         card = frame.get_by_role("group", name=CARD, exact=True)
         expect(card).to_contain_text("DELL U2720Q")
-        expect(card.get_by_role("group", name="Step 1: Frame profile", exact=True)).to_contain_text("1920 × 1080")
+        expect(card.get_by_role("group", name="Step 1: Frame profile", exact=True)).to_contain_text("1,920 × 1,080")
         expect(card.get_by_role("group", name="Step 2: Position", exact=True)).to_be_visible()
         expect(card).not_to_contain_text(re.compile(r"Panel|Actuator|Display Host|calibration", re.IGNORECASE))
         # One card: the Frame profile's enrollment-size check would contradict it (the enrollment
@@ -89,7 +89,7 @@ def test_a_changed_display_is_cleared_by_confirming_the_profile_then_checking_po
         # Pre-filled from the new display's preferred mode; the rest of the profile is kept.
         assert captured.value.post_data_json["profile"] == {
             "width_px": 1920, "height_px": 1080, "diagonal_inches": 24, "video": True}
-        expect(_display(frame).get_by_role("status")).to_contain_text("Frame profile set to 1920 × 1080")
+        expect(_display(frame).get_by_role("status")).to_contain_text("Frame profile set to 1,920 × 1,080")
         assert _row(registry, frame_id).profile.width_px == 1920
         assert _row(registry, frame_id).readiness is Readiness.DISPLAY_CHANGED   # Position still to check
 
@@ -123,7 +123,7 @@ def test_an_unchanged_frame_shows_its_display_and_no_card(page, registry):
         display = _display(frame)
         expect(display).to_contain_text("DELL U2720Q")
         expect(display).to_contain_text("CN0F1X7K")
-        expect(display).to_contain_text("1920 × 1080")
+        expect(display).to_contain_text("1,920 × 1,080")
         expect(frame.get_by_role("group", name=CARD, exact=True)).to_have_count(0)
 
         frame = open_frame(page, unchecked, "hardware")

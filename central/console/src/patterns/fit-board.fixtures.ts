@@ -1,6 +1,6 @@
 import type { CropView } from "./crop-thumb";
 import type { FitBoardView } from "./fit-board";
-import type { FrameFitView } from "./frame-fit-row";
+import type { FitAlert, FrameFitView } from "./frame-fit-row";
 import type { ShapeBin } from "./shape-map";
 
 /*
@@ -27,6 +27,18 @@ export function crop(key: string, w: number, h: number, aspect: number, offset =
     width: w * 1000, height: h * 1000, aspect, offset, verdict, refused,
   };
 }
+
+/** hall (9:16) with nothing that fits, worded as photo-fit.ts words it. */
+export const NOTHING_FITS: FitAlert = {
+  severity: "alarm", label: "Nothing fits",
+  what: "hall is 9:16 and these photos are 4:3: add photos of that shape or raise the crop limit.",
+};
+
+/** stairs with a single photo, shared with other Frames. */
+export const FEW_PHOTOS: FitAlert = {
+  severity: "notice", label: "Few photos",
+  what: "Only 1 photo fits stairs, and a photo never shows on two Frames at once, so stairs will often keep its last photo.",
+};
 
 const WIDE = 16 / 9;
 const TALL = 9 / 16;
@@ -63,7 +75,7 @@ export const LIVING: FrameFitView = {
 export const HALL: FrameFitView = {
   key: "hall", name: "hall", aspect: TALL, ratio: "9:16",
   lead: null,
-  emptyText: "Nothing fits",
+  emptyText: "",
   count: "0 of 1,689 fit",
   segments: [
     { key: "fit", label: "fit", count: 0, countText: "0" },
@@ -72,7 +84,7 @@ export const HALL: FrameFitView = {
   samples: [],
   checked: null,
   detail: "Frame output 1,080 × 1,920 px, 9:16 · on a 1,080 × 1,920 display",
-  alert: "Nothing fits",
+  alert: NOTHING_FITS,
   why: {
     summary: "Why 1,689 don't fit",
     reasons: [{ key: "beyond_crop_limit", label: "doesn't fit this Frame's shape", countText: "1,689",
@@ -124,8 +136,6 @@ export const READY: FitBoardView = {
   line: "Fits 2 of 3 Frames · hall has no photo that fits",
   judged: "Judged on every Frame at the house crop limit, 35 %: a Source has no Frames of its own.",
   reading: null,
-  warnings: [{ key: "hall", label: "Nothing fits", subject: "hall",
-    what: "None of these 1,689 photos fit hall. hall keeps its last photo while it still fits and is free; otherwise plays a photo not yet checked, centred; otherwise nothing new. Most are 4:3; hall is 9:16." }],
   frames: [HALL, LIVING, OFFICE],
   shape: { bins: BINS, bands: BANDS, range: [0.25, 4], ticks: TICKS },
   empty: null,
@@ -144,7 +154,7 @@ export const STAIRS: FrameFitView = {
   samples: [crop("s0", 2, 3, 2 / 3)],
   checked: null,
   detail: "Frame output 960 × 1,440 px, 2:3 · on a 1,920 × 1,080 display",
-  alert: "Only 1 photo",
+  alert: FEW_PHOTOS,
   why: { summary: "Why 1,688 don't fit", reasons: [{ key: "beyond_crop_limit", label: "doesn't fit this Frame's shape",
     countText: "1,688", samples: [crop("s1", 3, 2, 2 / 3, 0.5, "doesn't fit this Frame's shape", true)] }] },
   draft: null,
@@ -155,15 +165,13 @@ export const THIN: FitBoardView = {
   ...READY,
   line: "Fits 2 of 3 Frames · hall has no photo that fits · stairs has only 1 photo",
   judged: "At the Scene's crop limit, 35 %.",
-  warnings: [READY.warnings[0], { key: "stairs-thin", label: "Few photos", subject: "stairs",
-    what: "Only 1 photo fits stairs, and a photo never shows on two Frames at once, so stairs will often keep its last photo." }],
   frames: [LIVING, STAIRS, HALL],
   shape: { ...READY.shape, bands: [...BANDS.filter((band) => band.key !== "office"),
     { key: "stairs", name: "stairs", low: (2 / 3) * 0.65, high: (2 / 3) / 0.65 }] },
 };
 
 export const ALL_FIT: FitBoardView = {
-  ...READY, line: "Fits 2 of 2 Frames", warnings: [], frames: [LIVING, OFFICE],
+  ...READY, line: "Fits 2 of 2 Frames", frames: [LIVING, OFFICE],
   shape: { ...READY.shape, bands: BANDS.filter((band) => band.key !== "hall") },
 };
 
@@ -178,4 +186,4 @@ export const NONE_FIT: FitBoardView = {
   shape: { ...READY.shape, bands: BANDS.filter((band) => band.key === "hall") },
 };
 
-export const EMPTY: FitBoardView = { ...READY, empty: "No photos in this selection.", warnings: [], frames: [] };
+export const EMPTY: FitBoardView = { ...READY, empty: "No photos in this selection.", frames: [] };

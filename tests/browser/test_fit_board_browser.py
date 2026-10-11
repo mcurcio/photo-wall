@@ -13,9 +13,18 @@ through the photo library store's worker side (tests/browser/photo_seed.py) and 
 Displays). At the house crop limit (35 %) three fit living-room and none fit hall; the 1:1 photo
 fits hall from a crop limit of 44 %, the 4:3 one from 58 %.
 
+Design review round 2 (2026-10-11; owner: "I was trying to say that “preview” is an idea, rather
+than a specific widget. Because “what is being previewed” is context dependent"): each moment
+previews its own question. The Frames step draws each Frame as a tile at its Frame output's shape
+with its count; Photos leads with the Frames side by side; Playback puts the crop limit's effect
+right under the slider; the Frame page leads with the Frame's own tile and photos. A warning is
+said once, where its Frame is drawn, on a severity chip (alarm: nothing fits; notice: few photos).
+
 Mutation probes: count in the browser instead of reading the analysis (the Source editor's
 counts disagree with the route's on the overlap fixture); drop `live` (the drag case's count
-before release fails); build a Frame draft from the saved Position (the Position case fails).
+before release fails); build a Frame draft from the saved Position (the Position case fails);
+draw the warnings on top again (the "said once" counts fail); give "Nothing fits" the `todo`
+severity (the chip's severity assertions fail).
 """
 
 import json
@@ -36,6 +45,7 @@ from console_tasks import (
 )
 from operator_harness import operator_server, sign_in
 from photo_seed import (
+    begin,
     connected,
     draft_pool_key,
     drafts,
@@ -45,6 +55,7 @@ from photo_seed import (
     saved_source,
     seed_varied_frames,
     shaped,
+    step,
 )
 from playwright.sync_api import expect
 from support.measured_photos import measure_all
@@ -62,9 +73,10 @@ HALL, LIVING = "hall", "living-room"
 SHAPES = ((6000, 4000), (4032, 3024), (3840, 2160), (3000, 3000))  # 3:2, 4:3, 16:9, 1:1
 SOURCE = "holiday:1"
 SCENE_ID = "evenings"
-# The Planner's words for a Frame with nothing that fits (src/domain/photo-fit.ts).
-NOTHING_NEW = ("keeps its last photo while it still fits and is free; otherwise plays a photo not "
-               "yet checked, centred; otherwise nothing new")
+# A Frame with nothing that fits, in plain words (src/domain/photo-fit.ts `emptyFrameWords`): its
+# shape against the selection's most common one, and what to do.
+NOTHING_FITS_HALL = re.compile(
+    rf"{HALL} is 9:16 and these photos are \d+:\d+: add photos of that shape or raise the crop limit\.")
 
 
 def _library(registry, page, shapes=SHAPES):
@@ -92,6 +104,19 @@ def _scene(registry, frames=(HALL, LIVING), crop_limit=None):
 
 def _row(board, frame):
     return board.get_by_role("article", name=f"Frame {frame}", exact=True)
+
+
+def _tile(wall, frame):
+    """A Frame's tile on a wall strip."""
+    return wall.get_by_role("listitem").filter(has_text=frame)
+
+
+def _said_once(within, label, severity):
+    """The alert `label` is said exactly once in `within`, on a chip of `severity`."""
+    alert = within.get_by_role("group", name=label, exact=True)
+    expect(alert).to_have_count(1)
+    expect(alert.locator("[data-severity]")).to_have_attribute("data-severity", severity)
+    return alert
 
 
 def _analysis(page, request):
@@ -126,8 +151,9 @@ def test_the_photo_source_editor_shows_what_the_analysis_answers_and_follows_the
         assert counts[LIVING] == (3, 4) and counts[HALL] == (0, 4), counts
         for frame, (fit, photos) in counts.items():
             expect(_row(board, frame)).to_contain_text(f"{fit} of {photos} fit")
-        warning = board.get_by_role("group", name="Nothing fits", exact=True)
-        expect(warning).to_contain_text(f"None of these 4 photos fit {HALL}. {HALL} {NOTHING_NEW}.")
+        # Said once, on hall's own row, on an alarm chip, in plain words with what to do.
+        _said_once(board, "Nothing fits", "alarm")
+        expect(_row(board, HALL).get_by_role("group", name="Nothing fits", exact=True)).to_contain_text(NOTHING_FITS_HALL)
         expect(board).not_to_contain_text(re.compile("landscape|portrait|orientation", re.I))
         # What living-room would show first, drawn at its shape and cropped.
         expect(_row(board, LIVING).get_by_role("img", name=re.compile(rf"^{LIVING}, 16:9: Photo, "))).to_be_visible()
@@ -140,11 +166,33 @@ def test_the_photo_source_editor_shows_what_the_analysis_answers_and_follows_the
         expect(_row(board, HALL)).to_contain_text("0 of 1 fit")
 
 
+def test_while_immich_is_still_read_the_source_editor_shows_one_count(page, registry):
+    """Design review round 2: while the photos are still being read, the board's "so far" is the
+    page's one count; the grid under it (an older read) is dimmed and its own count hidden."""
+    library, ref, _assets = _library(registry, page)
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin)
+        editor = start_source(page)
+        fresh = [shaped(ref, 0x900 + index, width, height, 1_780_000_000.0 - index)
+                 for index, (width, height) in enumerate(((4000, 3000), (6000, 4000), (2160, 3840)))]
+        step(library, begin(library, draft_pool_key(registry)), [InPool(asset=a) for a in fresh], seen=3, up_to=900)
+        board = editor.get_by_role("region", name="What these photos are, and which Frames can show them",
+                                    exact=True)
+        grid = editor.get_by_role("list", name="Photos in the pool", exact=True)
+        expect(board).to_contain_text("Still reading Immich")
+        # The one count: the board's (the unsaved Source's pool is the saved one's, read further).
+        expect(board).to_contain_text("7 photos · 0 videos so far")
+        expect(grid).to_have_attribute("aria-busy", "true")
+        expect(editor.get_by_text(re.compile("in the pool so far"))).to_have_count(0)
+
+
 def test_the_scene_editor_asks_frames_first_and_previews_the_crop_limit_live(page, registry):
-    """Acceptance 3: Frames come before Photos; the Scene's Frames are drawn side by side, each
-    with what it would show; Review is a line and that strip, whose sheet offers "Raise the crop
-    limit to 44 %" for hall; dragging Playback's Crop limit changes hall's count before the
-    slider is let go."""
+    """Acceptance 3, each step previewing its own question: Frames come before Photos, each Frame
+    a tile at its shape (empty before photos are chosen, filled with what it would show and its
+    count after); Photos draws the Scene's Frames side by side, hall's "Nothing fits" said once
+    under its tile with "Raise the crop limit to 44 %"; Playback puts the crop limit's effect
+    right under the slider, and dragging it changes hall's count before the slider is let go;
+    Review is a line and that strip."""
     _library(registry, page)
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin)
@@ -153,18 +201,44 @@ def test_the_scene_editor_asks_frames_first_and_previews_the_crop_limit_live(pag
         expect(steps.get_by_role("listitem")).to_have_text(
             [re.compile(r"Kind"), re.compile(r"Frames"), re.compile(r"Photos"), re.compile(r"Playback"),
              re.compile(r"Review")])
+        # No photos yet: each Frame is a tile at its shape, empty.
+        expect(form.get_by_role("img", name=f"{HALL}, 9:16", exact=True)).to_be_visible()
+        expect(form.get_by_role("img", name=f"{LIVING}, 16:9", exact=True)).to_be_visible()
         for frame in (HALL, LIVING):
             form.get_by_label(f"Target frame {frame}", exact=True).check()
         scene_continue(page, "Photos")
         choose_source(form, SOURCE)
         board = form.get_by_role("region", name="How this Scene fills its Frames", exact=True)
-        expect(_row(board, LIVING)).to_contain_text("3 of 4 fit")
-        expect(_row(board, HALL)).to_contain_text("0 of 4 fit")
         wall = board.get_by_role("list", name="On the wall together", exact=True)
         expect(wall.get_by_role("listitem")).to_have_count(2)
-        expect(wall.get_by_role("listitem").filter(has_text=HALL)).to_contain_text("Nothing fits")
+        expect(_tile(wall, LIVING)).to_contain_text("3 of 4 fit")
+        expect(_tile(wall, HALL)).to_contain_text("0 of 4 fit")
         expect(wall.get_by_role("img", name=re.compile(rf"^{LIVING}, 16:9: Photo, "))).to_be_visible()
+        # Said once: under hall's tile, not again on top or in a row (the rows wait under "Each Frame").
+        alert = _said_once(board, "Nothing fits", "alarm")
+        expect(_tile(wall, HALL).get_by_role("group", name="Nothing fits", exact=True)).to_contain_text(NOTHING_FITS_HALL)
+        expect(alert.get_by_role("button", name="Raise the crop limit to 44 %", exact=True)).to_be_visible()
+        expect(board.get_by_role("article")).to_have_count(0)
+
+        # Back on Frames, with photos chosen: each tile is filled with what it would show, and its count.
+        page.get_by_role("button", name="Back", exact=True).click()
+        living = form.locator("label").filter(has=page.get_by_role("checkbox", name=f"Target frame {LIVING}"))
+        expect(living.get_by_role("img", name=re.compile(rf"^{LIVING}, 16:9: Photo, "))).to_be_visible()
+        expect(living).to_contain_text("3 of 4 fit")
+        hall = form.locator("label").filter(has=page.get_by_role("checkbox", name=f"Target frame {HALL}"))
+        expect(hall).to_contain_text("0 of 4 fit")
+        expect(hall.locator("[data-severity=alarm]")).to_have_text(re.compile("Nothing fits"))
+        scene_continue(page, "Photos")
+
         scene_continue(page, "Playback")
+        crop = form.get_by_role("region", name="What the crop limit lets each Frame take", exact=True)
+        slider = form.get_by_role("slider", name="Crop limit", exact=True)
+        expect(crop.get_by_role("region", name="The shapes each Frame takes at this crop limit", exact=True)).to_be_visible()
+        expect(_row(crop, HALL)).to_contain_text("0 of 4 fit")
+        _said_once(crop, "Nothing fits", "alarm")
+        expect(form.get_by_role("list", name="On the wall together", exact=True)).to_have_count(0)
+        assert slider.bounding_box()["y"] < crop.bounding_box()["y"]
+
         scene_continue(page, "Review")
         review = form.get_by_role("region", name="How this Scene fills its Frames", exact=True)
         expect(review.get_by_role("list", name="On the wall together", exact=True).get_by_role("listitem")).to_have_count(2)
@@ -174,6 +248,7 @@ def test_the_scene_editor_asks_frames_first_and_previews_the_crop_limit_live(pag
         sheet.get_by_role("button", name="Close", exact=True).click()
 
         form.get_by_role("button", name="Change Playback", exact=True).click()
+        crop = form.get_by_role("region", name="What the crop limit lets each Frame take", exact=True)
         slider = form.get_by_role("slider", name="Crop limit", exact=True)
         expect(slider).to_have_value("35")
         slider.scroll_into_view_if_needed()
@@ -183,10 +258,10 @@ def test_the_scene_editor_asks_frames_first_and_previews_the_crop_limit_live(pag
         page.mouse.move(box["x"] + box["width"] - 2, box["y"] + box["height"] / 2, steps=8)
         # Held, not let go: the shape answer for the dragged value (60 %) is already drawn: the
         # 1:1 photo (a 44 % cut) and the 4:3 one (58 %) fit hall.
-        expect(_row(board, HALL)).to_contain_text("2 of 4 fit")
+        expect(_row(crop, HALL)).to_contain_text("2 of 4 fit")
         page.mouse.up()
         expect(slider).to_have_value("60")
-        expect(_row(board, HALL)).to_contain_text("2 of 4 fit")
+        expect(_row(crop, HALL)).to_contain_text("2 of 4 fit")
 
 
 def test_the_frame_page_shows_one_row_per_scene_with_its_relation_to_now(page, registry):
@@ -204,6 +279,11 @@ def test_the_frame_page_shows_one_row_per_scene_with_its_relation_to_now(page, r
         expect(scene.get_by_role("link", name="Edit Scene", exact=True)).to_have_attribute(
             "href", f"#/scenes/{SCENE_ID}/edit/review")
         expect(_row(scene, HALL)).to_contain_text("0 of 4 fit")
+        # What this Frame gets leads: its own tile (empty: nothing fits), then the counts; the
+        # alert is said once, on the row, with no warning card over it.
+        expect(_row(scene, HALL).get_by_role("img", name=f"{HALL}, 9:16", exact=True)).to_be_visible()
+        _said_once(scene, "Nothing fits", "alarm")
+        expect(scene).to_contain_text("From the Scene's 4 photos, at the house crop limit, 35 %.")
         # The page is hall's: the row does not name hall or its shape again, and says what it is
         # judged at (no Pi reports hall's screen here).
         expect(_row(scene, HALL).get_by_role("heading", name=HALL, exact=True)).to_have_count(0)
@@ -269,7 +349,8 @@ def test_show_now_and_the_sources_list_say_it_in_one_line_that_opens_the_board(p
         expect(form.get_by_role("list", name="On the wall together", exact=True).get_by_role("listitem")).to_have_count(2)
         line.click()
         sheet = page.get_by_role("dialog", name=f"How {SCENE_ID} fills its Frames", exact=True)
-        expect(_row(sheet, LIVING)).to_contain_text("3 of 4 fit")
+        expect(_tile(sheet.get_by_role("list", name="On the wall together", exact=True), LIVING)).to_contain_text(
+            "3 of 4 fit")
 
 
 def test_a_frame_with_too_few_photos_to_change_is_warned_of(page, registry):
@@ -284,16 +365,18 @@ def test_a_frame_with_too_few_photos_to_change_is_warned_of(page, registry):
         line = form.get_by_role("button", name=re.compile(r"^Fits 2 of 2 Frames · hall has only 1 photo"))
         expect(line).to_be_visible()
         wall = form.get_by_role("list", name="On the wall together", exact=True)
-        expect(wall.get_by_role("listitem").filter(has_text=HALL)).to_contain_text("Only 1 photo")
+        expect(_tile(wall, HALL).locator("[data-severity=notice]")).to_have_text(re.compile("Few photos"))
         line.click()
         sheet = page.get_by_role("dialog", name=f"How {SCENE_ID} fills its Frames", exact=True)
+        _said_once(sheet, "Few photos", "notice")
         expect(sheet.get_by_role("group", name="Few photos", exact=True)).to_contain_text(
             f"Only 1 photo fits {HALL}, and a photo never shows on two Frames at once, so {HALL} "
             "will often keep its last photo.")
 
 
 def test_on_a_phone_the_board_is_a_line_that_opens_it_in_a_sheet(page, registry):
-    """Acceptance 7: at 390 px the Scene editor's board is its line; pressing it opens the board."""
+    """Acceptance 7: at 390 px the Scene editor's board is its line, keeping the Scene's Frames
+    side by side under it (a compact strip, not one line of text); pressing it opens the board."""
     _library(registry, page)
     page.set_viewport_size({"width": 390, "height": 844})
     with operator_server(registry.db, registry.clock) as origin:
@@ -305,9 +388,12 @@ def test_on_a_phone_the_board_is_a_line_that_opens_it_in_a_sheet(page, registry)
         expect(form.get_by_role("region", name="How this Scene fills its Frames", exact=True)).to_be_hidden()
         line = form.get_by_role("button", name=re.compile(r"^3 of 4 fit living-room"))
         expect(line).to_be_visible()
+        strip = form.get_by_role("list", name="On the wall together", exact=True)
+        expect(strip.get_by_role("img", name=re.compile(rf"^{LIVING}, 16:9: Photo, "))).to_be_visible()
         line.click()
         sheet = page.get_by_role("dialog", name="How this Scene fills its Frames", exact=True)
-        expect(_row(sheet, LIVING)).to_contain_text("3 of 4 fit")
+        expect(_tile(sheet.get_by_role("list", name="On the wall together", exact=True), LIVING)).to_contain_text(
+            "3 of 4 fit")
 
 
 def test_a_sample_opens_the_photo_sheet_with_immichs_copies_and_no_immich_id(page, registry):

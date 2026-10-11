@@ -442,10 +442,17 @@ label {
   --status: var(--color-ok);
 }
 
-.health--todo,
-.health--notice,
-.health--unknown {
+.health--todo {
   --status: var(--color-todo);
+}
+
+/* Each severity in its own colour (design language §6), as the catalog's StatusChip draws it. */
+.health--notice {
+  --status: var(--color-notice);
+}
+
+.health--unknown {
+  --status: var(--color-unknown);
 }
 
 .health--alarm {
@@ -489,10 +496,16 @@ label {
   content: "●" / "";
 }
 
-.health--todo::before,
-.health--notice::before,
-.health--unknown::before {
+.health--todo::before {
   content: "■" / "";
+}
+
+.health--notice::before {
+  content: "◆" / "";
+}
+
+.health--unknown::before {
+  content: "○" / "";
 }
 
 .health--alarm::before {
@@ -908,6 +921,39 @@ label {
   font-size: 12px;
 }
 
+/* The Scene's Frames step: each Frame a card, its tile at its Frame output's shape above its
+   checkbox and name; a chosen card's border is the selection (the accent). */
+.target-picker--tiles .target-picker__surface {
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.target-picker--tiles .target-picker__surface-name {
+  flex-basis: 100%;
+}
+
+.target-picker--tiles .target-picker__frame {
+  flex-direction: row;
+  align-items: center;
+  align-content: flex-start;
+  max-width: 18rem;
+  padding: 10px 12px;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-card);
+  background: var(--color-surface-raised);
+  cursor: pointer;
+}
+
+.target-picker--tiles .target-picker__frame:has(input:checked) {
+  border-color: var(--color-accent);
+  box-shadow: inset 0 0 0 1px var(--color-accent);
+}
+
+.target-picker__tile {
+  flex-basis: 100%;
+}
+
 /* Run rows (slice 3 §9): frame chips carry the plan tile's health label. */
 .run-control__frames {
   display: flex;
@@ -1079,19 +1125,6 @@ label {
   margin: 0 0 8px;
   font-weight: 600;
   overflow-wrap: anywhere;
-}
-
-.scene-flow__chosen {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px 8px;
-  align-items: baseline;
-  margin: 8px 0 0;
-}
-
-.scene-flow__chosen-label {
-  color: var(--color-label);
-  font-weight: 500;
 }
 
 /* A notice: a sentence and its actions in a tinted, bordered box; the warn tone for

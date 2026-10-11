@@ -15,18 +15,22 @@ import { SourcePicker } from "./SourcePicker.jsx";
 import { sourceName } from "./sourceNames.js";
 import { FrameChips, TargetPicker } from "./TargetPicker.jsx";
 import { useDraftPool } from "./useDraftPool.js";
-import { PhotoFitBoard } from "./domain/photo-fit-board.tsx";
+import { frameChoiceTiles, PhotoFitBoard } from "./domain/photo-fit-board.tsx";
 
 /**
- * The draft's Fit board (follow-ups C1): how its photos fit its Frames, read by SceneFlow.jsx
- * (`fit`: its read, judged words and the raise a Frame with nothing that fits is offered).
+ * The draft's Fit board (follow-ups C1), composed for its step (design review round 2: each
+ * step previews its own question): read by SceneFlow.jsx (`fit`: its read, judged words and the
+ * raise a Frame with nothing that fits is offered). `lead`: `wall` on Photos (how these photos
+ * fill the Scene's Frames together), `crop` on Playback (what the crop limit, right above it,
+ * lets each Frame take), the strip on Review.
  */
-function SceneFitBoard({ fit, size }) {
+function SceneFitBoard({ fit, size, lead = "wall" }) {
   if (!fit) return null;
+  const crop = lead === "crop";
+  const title = crop ? "What the crop limit lets each Frame take" : "How this Scene fills its Frames";
   return (
-    <PhotoFitBoard read={fit.read} size={size} lead="wall" judged={fit.judged} rescue={fit.rescue}
-      heading={size === "strip" ? undefined : "How this Scene fills its Frames"}
-      title="How this Scene fills its Frames" />
+    <PhotoFitBoard read={fit.read} size={size} lead={lead} judged={crop ? fit.framesJudged : fit.judged} rescue={fit.rescue}
+      heading={size === "strip" ? undefined : title} title={title} />
   );
 }
 import { sourceCheckMessage } from "./useSourceCheck.js";
@@ -132,29 +136,33 @@ export function PhotosStep({ value, patch, problems, sources, onNewSource, sourc
 }
 
 /**
- * Step 3, Frames: the target frames (required), grouped by wall with their health.
+ * Step 2, Frames: the target frames (required), grouped by wall with their health, each a tile
+ * at its Frame output's shape: once the Scene has photos (`fit`, its read of every Frame), filled
+ * with a photo it would show and how many fit it; before, empty at its shape. A chosen card is
+ * drawn as chosen, so no separate line repeats the choice.
  *
- * @param {StepProps & {snapshot: object|null, onToggle: (frameId: string) => void}} props
+ * @param {StepProps & {snapshot: object|null, onToggle: (frameId: string) => void,
+ *          fit?: {read: import("./domain/photo-fit-board.tsx").FitRead}|null}} props
  */
-export function FramesStep({ value, problems, snapshot, onToggle }) {
+export function FramesStep({ value, problems, snapshot, onToggle, fit = null }) {
   return (
     <>
+      <p className="field__hint">
+        {fit === null
+          ? "Each Frame is drawn at its shape. Choose its photos next to see what each would show."
+          : "Each Frame is drawn with a photo it would show, and how many of this Scene's photos fit it."}
+      </p>
       <TargetPicker
         id={problems.idFor("targets")}
         reason={problems.reasonFor("targets")}
         snapshot={snapshot}
+        tileFor={frameChoiceTiles(fit === null ? null : fit.read, snapshot, value.targets.length)}
         targets={new Set(value.targets)}
         onToggle={(frameId) => {
           onToggle(frameId);
           problems.touch("targets");
         }}
       />
-      {value.targets.length > 0 && (
-        <p className="scene-flow__chosen">
-          <span className="scene-flow__chosen-label">Chosen: </span>
-          <FrameChips snapshot={snapshot} frameIds={value.targets} />
-        </p>
-      )}
     </>
   );
 }
@@ -256,7 +264,7 @@ export function PlaybackStep({ value, patch, problems, advanced, fit, houseCropL
       <EndingRows value={value} patch={patch} problems={problems} />
       <SelectionRows value={value} patch={patch} problems={problems} houseCropLimit={houseCropLimit}
         onCropPreview={onCropPreview} />
-      {value.sourceRefs.length > 0 && <SceneFitBoard fit={fit} size="full" />}
+      {value.sourceRefs.length > 0 && <SceneFitBoard fit={fit} size="compact" lead="crop" />}
       <Advanced summary={summary} open={advanced.open} onToggle={advanced.onToggle}>
         <LoopField problems={problems} loop={value.loop} onLoop={(loop) => patch({ loop })} />
         <AdvancedRows value={value} patch={patch} problems={problems} />

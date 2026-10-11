@@ -198,3 +198,15 @@ export function countWords(count, noun, plural = `${noun}s`) {
 export function countText(count) {
   return new Intl.NumberFormat().format(count);
 }
+
+/**
+ * A size in pixels, each side grouped like every count: "1,920 × 1,080" (design review round
+ * 2: one number format everywhere). The one home of how a pixel size reads.
+ *
+ * @param {number} width
+ * @param {number} height
+ * @returns {string}
+ */
+export function pixelSize(width, height) {
+  return `${countText(width)} × ${countText(height)}`;
+}

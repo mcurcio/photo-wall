@@ -8,21 +8,9 @@ import { Sheet } from "../ui/sheet";
 import type { CropView } from "./crop-thumb";
 import { EmptyState } from "./entity-page";
 import { FrameFitRow, type FrameFitView } from "./frame-fit-row";
-import { type ProblemAction, ProblemCard } from "./problem-card";
+import { ProblemCard } from "./problem-card";
 import { type ShapeMapProps, ShapeMap } from "./shape-map";
 import { WallStrip } from "./wall-strip";
-
-/** A Frame that will go without: shown on top of the board, worst first. */
-export interface FitWarning {
-  key: string;
-  /** Its verdict in two words ("Nothing fits", "Few photos"). */
-  label: string;
-  /** The Frame's name. */
-  subject: string;
-  /** What happens, in plain words (the Planner's words for a Frame with nothing new). */
-  what: string;
-  action?: ProblemAction;
-}
 
 /** What a Fit board shows, in words and pictures (the domain builds it from Central's answer). */
 export interface FitBoardView {
@@ -35,7 +23,8 @@ export interface FitBoardView {
   /** While the selection is still being read ("Still reading Immich: these are the photos
    * found so far."), or null. */
   reading: string | null;
-  warnings: readonly FitWarning[];
+  /** Each Frame, with its alert (a Frame that will go without, or with too few photos), said
+   * once where the Frame is drawn. */
   frames: readonly FrameFitView[];
   shape: Omit<ShapeMapProps, "focused">;
   /** Nothing to judge (no photo in the selection, or no Frame), in words; null otherwise. */
@@ -51,11 +40,13 @@ export type FitBoardState =
 
 /** What leads a board, as its host previews it (owner, 2026-10-11: "preview is an idea,
  * rather than a specific widget. Because what is being previewed is context dependent"):
- * `frames`, each Frame's row (a Frame's own page, the Settings); `shapes`, the selection's
- * shapes first, then the Frames they can feed (a Source being edited); `wall`, the Frames side
- * by side, each filled with a different photo, then their rows (a Scene filling its Frames
- * together). */
-export type FitBoardLead = "frames" | "shapes" | "wall";
+ * `frames`, each Frame's row (the Settings); `shapes`, the selection's shapes first, then the
+ * Frames they can feed (a Source being edited); `wall`, the Frames side by side, each filled
+ * with a different photo, its counts and reasons under "Each Frame" (a Scene's photos filling
+ * its Frames together); `crop`, the shapes each Frame takes at the crop limit, then each
+ * Frame's count (a crop limit being set, the board right under it); `frame`, one Frame's tile
+ * and the photos it would show, then its counts (a Frame's own page, one board per Scene). */
+export type FitBoardLead = "frames" | "shapes" | "wall" | "crop" | "frame";
 
 export interface FitBoardProps {
   state: FitBoardState;
@@ -106,12 +97,14 @@ function Board({ view, size, lead, named, faded, onShuffle, onFrame, action, onO
   const [focused, setFocused] = useState<string | null>(null);
   if (view.empty !== null) return <EmptyState>{view.empty}</EmptyState>;
   const shapes = <ShapeMap {...view.shape} focused={focused} />;
+  const wall = lead === "wall";
   const rows = (
     <div className="flex min-w-0 flex-col">
       {view.frames.map((frame) => (
         <FrameFitRow key={frame.key} frame={frame} size={size} faded={faded} named={named}
+          tile={!wall} layout={lead === "frame" ? "pictures" : "row"}
           onOpen={onOpen ? (sample) => onOpen(sample, frame.key) : undefined}
-          onFocus={() => {
+          onFocus={wall || lead === "frame" ? undefined : () => {
             setFocused(frame.key);
             onFrame?.(frame.key);
           }}
@@ -121,12 +114,14 @@ function Board({ view, size, lead, named, faded, onShuffle, onFrame, action, onO
   );
   return (
     <div className="flex min-w-0 flex-col gap-3">
-      <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
-        <p className="m-0 text-sm text-text">{view.summary}</p>
-        {onShuffle && (size === "full" || lead === "wall") ? (
-          <Button variant="ghost" className="px-2 py-0.5 text-xs" onClick={onShuffle}>Shuffle photos</Button>
-        ) : null}
-      </div>
+      {lead !== "frame" && (
+        <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
+          <p className="m-0 text-sm text-text">{view.summary}</p>
+          {onShuffle && (size === "full" || wall) ? (
+            <Button variant="ghost" className="px-2 py-0.5 text-xs" onClick={onShuffle}>Shuffle photos</Button>
+          ) : null}
+        </div>
+      )}
       {view.judged !== null && <p className="m-0 text-xs text-muted">{view.judged}</p>}
       {view.reading !== null && <p className="m-0 text-xs text-muted">{view.reading}</p>}
       {lead === "shapes" && (
@@ -135,24 +130,27 @@ function Board({ view, size, lead, named, faded, onShuffle, onFrame, action, onO
           {shapes}
         </section>
       )}
-      {lead === "wall" && (
+      {lead === "crop" && (
+        <section aria-label="The shapes each Frame takes at this crop limit" className="flex min-w-0 flex-col gap-2">
+          <h5 className="m-0 text-sm font-medium text-text">The shapes of these photos, and the shapes each Frame takes at this crop limit</h5>
+          {shapes}
+        </section>
+      )}
+      {wall && (
         <WallStrip frames={view.frames} faded={faded} onFrame={(key) => {
           setFocused(key);
           onFrame?.(key);
         }} />
       )}
-      {view.warnings.map((warning) => (
-        <ProblemCard key={warning.key} scope="setup" subject={warning.subject} variant="inline"
-          verdict={{ severity: "todo", label: warning.label, receipt: null }}
-          what={warning.what} doing={null} action={warning.action} />
-      ))}
       {lead === "shapes" ? (
         <section aria-label="Which Frames can show them" className="flex min-w-0 flex-col">
           <h5 className="m-0 text-sm font-medium text-text">Which Frames can show them</h5>
           {rows}
         </section>
+      ) : wall ? (
+        <Disclosure summary="Each Frame: its photos, and why some don't fit">{rows}</Disclosure>
       ) : rows}
-      {lead !== "shapes" && size === "full" && (
+      {(lead === "frames" || lead === "wall") && size === "full" && (
         <Disclosure summary="Why: the shapes of these photos">{shapes}</Disclosure>
       )}
     </div>
@@ -249,8 +247,10 @@ function Line({ title, state, strip = false, lead, named, ...rest }: Omit<FitBoa
  * Frames, composed for its moment (`lead`, `size`): a Source's shapes then the Frames they feed,
  * a Scene's Frames side by side then their rows, a Frame's own count, or one line with a strip.
  * Each Frame is drawn at its output's shape and filled with what it would show, with how many
- * photos fit, a bar of why the rest do not and, at `full`, photos cropped as it crops them;
- * Frames with nothing that fits, or too few to change, are warned of on top. The board judges nothing: it draws the words and pictures its host's domain
+ * photos fit, a bar of why the rest do not and, at `full`, photos cropped as it crops them; a
+ * Frame with nothing that fits, or too few to change, says so once, where it is drawn (its tile
+ * on a wall, else its row). On a phone a `full` board is its line (a wall's with its strip),
+ * opening the board in a sheet. The board judges nothing: it draws the words and pictures its host's domain
  * built from Central's one analysis. While a newer answer is read the board stays, dimmed, under
  * a thin line; a failed read keeps the last answer, greyed, as Can't tell.
  */
@@ -272,7 +272,9 @@ export function FitBoard({ state, size, lead = "frames", named = true, title = "
   if (size === "compact" || !collapse) return <section aria-label={title} className="min-w-0">{body}</section>;
   return (
     <>
-      <div className="md:hidden"><Line title={title} state={state} lead={lead} named={named} {...rest} /></div>
+      <div className="md:hidden">
+        <Line title={title} state={state} strip={lead === "wall"} lead={lead} named={named} {...rest} />
+      </div>
       <section aria-label={title} className="hidden min-w-0 md:block">{body}</section>
     </>
   );

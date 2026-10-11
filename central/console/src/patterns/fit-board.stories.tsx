@@ -29,7 +29,7 @@ type Story = StoryObj<typeof meta>;
 
 /** Every Frame has photos that fit: each drawn with what it would show. */
 export const Ready: Story = {};
-/** One Frame has nothing that fits: warned of on top, in the Planner's words. */
+/** One Frame has nothing that fits: said once, on its row, with what to do. */
 export const Partial: Story = { args: { state: STATES.partial } };
 /** The only Frame has nothing that fits. */
 export const NoneFit: Story = { args: { state: STATES.noneFit } };
@@ -68,10 +68,21 @@ export const LineError: Story = { args: { size: "line", state: STATES.error } };
 
 /** A Source being edited: what the selection holds (its shapes) first, then the Frames it feeds. */
 export const SourceEditor: Story = { args: { lead: "shapes", heading: undefined, state: STATES.partial } };
-/** A Scene filling its Frames: the Frames side by side, each with a different photo, then their
- * rows; a Frame with one photo is warned of. */
+/** A Scene's photos filling its Frames (the Photos step): the Frames side by side, each with a
+ * different photo; a Frame with nothing, or one photo, says so under its tile, once; each Frame's
+ * counts and reasons under "Each Frame". */
 export const SceneWall: Story = { args: { lead: "wall", heading: "How this Scene fills its Frames", state: STATES.thin } };
+/** The crop limit's effect (the Playback step, right under the slider): the shapes each Frame
+ * takes at it, then each Frame's count. */
+export const PlaybackCrop: Story = {
+  args: { lead: "crop", size: "compact", heading: "What the crop limit lets each Frame take", state: STATES.thin },
+};
 /** Review and Show now: one line, and the Frames side by side, small. */
 export const ReviewStrip: Story = { args: { size: "strip", lead: "wall", state: STATES.thin } };
-/** A Frame's own page: one Scene's count for this Frame, not naming the Frame again. */
-export const FramePageRow: Story = { args: { size: "compact", named: false, heading: undefined, state: STATES.oneFrame } };
+/** A Frame's own page: what this Frame gets from one Scene, led by its tile and the photos it
+ * would show, not naming the Frame again. */
+export const FramePageRow: Story = { args: { lead: "frame", named: false, heading: undefined, state: STATES.oneFrame } };
+/** A Frame's own page, a Scene nothing fits on it: the empty tile and the alert, once. */
+export const FramePageNoneFit: Story = {
+  args: { lead: "frame", named: false, heading: undefined, state: STATES.noneFit },
+};

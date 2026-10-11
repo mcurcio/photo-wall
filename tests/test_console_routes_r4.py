@@ -92,6 +92,9 @@ SHARED_WITH_SHOW = {
     "photoFitApi.js",
     "photo-sheet.tsx",  # the photo a Fit board's sample opens
     "libraryApi.js",  # the photo sheet's one photo's facts
+    # A Frame's health as a chip (design review round 2): the Frame page header's words and
+    # severity, also the Show side's Frame chips and the Scene's Frame picker. Words only.
+    "frame-health-chip.ts",
 }
 # The console's write modules: the operator write primitive and every module that wraps a
 # write (framesApi writes, the delete confirmation, refresh-after-write, equipment writes).

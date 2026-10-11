@@ -58,7 +58,7 @@ export function ShapeMap({ bins, bands, range, ticks, focused = null }: ShapeMap
   return (
     <div className="flex min-w-0 flex-col gap-2">
       <svg role="img" aria-label="The shapes of these photos, and the shapes each Frame can take"
-        viewBox={`0 0 ${WIDTH} ${height}`} width="100%" preserveAspectRatio="xMidYMin meet" className="block">
+        viewBox={`0 0 ${WIDTH} ${height}`} width="100%" preserveAspectRatio="xMidYMin meet" className="block max-w-xl">
         {bins.map((bin) => {
           const count = bin.total;
           const barHeight = count === 0 ? 0 : Math.max(2, (BARS - 4) * (count / most));

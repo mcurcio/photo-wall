@@ -4,11 +4,11 @@ import { isBound, plannedFor, rankedContributions } from "../join.js";
 import { EmptyState } from "../patterns/entity-page";
 import { OwnerLinks } from "../patterns/link-to-owner";
 import { formatRoute, sceneCreationRoute } from "../routes.js";
-import { windowLabel } from "../timeWords.js";
+import { countWords, windowLabel } from "../timeWords.js";
 import { Section } from "../ui/section";
 import { Stack } from "../ui/stack";
 import { FitBoardFor, type FitQuestion } from "./photo-fit-board";
-import { type FrameDraft, percentWords, type SceneUse, scenesOnFrame } from "./photo-fit";
+import { type FitAnalysis, type FrameDraft, percentWords, type SceneUse, scenesOnFrame } from "./photo-fit";
 
 interface Served {
   runtime?: {
@@ -42,13 +42,16 @@ function SceneRow({ snapshot, frameId, scene }: { snapshot: object | null; frame
   const question: FitQuestion = useMemo(() => ({
     selection: { sources: scene.sourceRefs }, frames: [frameId], crop_limit: scene.cropLimit,
   }), [scene, frameId]);
-  const judged = scene.cropLimit === null ? "At the house crop limit." : `At the Scene's crop limit, ${percentWords(scene.cropLimit)}.`;
+  // One line for what the Scene holds and what it is judged at (the board leads with the picture).
+  const judged = (analysis: FitAnalysis) => `From the Scene's ${countWords(analysis.photos, "photo")}${
+    analysis.videos > 0 ? ` and ${countWords(analysis.videos, "video")}` : ""}, at ${
+    scene.cropLimit === null ? "the house crop limit" : "its own crop limit"}, ${percentWords(analysis.crop_limit)}.`;
   return (
     <Stack label={`Scene ${scene.sceneId}`}>
       <OwnerLinks label={`Scene “${scene.sceneId}” · ${relationWords(snapshot, frameId, scene.sceneId)}`} links={[
         { text: "Edit Scene", href: formatRoute({ section: "scenes", id: scene.sceneId, flow: "edit", step: "review" }) },
       ]} />
-      <FitBoardFor question={question} size="compact" named={false} judged={judged}
+      <FitBoardFor question={question} size="full" lead="frame" named={false} judged={judged}
         title={`What this Frame gets from Scene ${scene.sceneId}`} />
     </Stack>
   );
@@ -57,8 +60,9 @@ function SceneRow({ snapshot, frameId, scene }: { snapshot: object | null; frame
 /**
  * The Frame page's Photos (Overview; follow-ups C1, replacing 5a's three lines of counts): one
  * row per Scene that shows photos here, with how it relates to now and a link to the Scene, and
- * its Fit board for this Frame alone (compact: this Frame drawn with what it would show, how
- * many of the Scene's photos fit, and why the rest do not), judged at the Scene's crop limit.
+ * what this Frame gets from it (design review round 2): led by this Frame's tile, filled with
+ * what it would show, and the photos it would show next, cropped as it crops them; then how many
+ * of the Scene's photos fit and why the rest do not, judged at the Scene's crop limit.
  */
 export function FramePhotos({ snapshot, frameId }: { snapshot: object | null; frameId: string }) {
   const scenes = scenesOnFrame(snapshot, frameId);

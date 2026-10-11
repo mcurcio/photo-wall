@@ -1,7 +1,7 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
 
 import { HALL, LIVING, OFFICE, STAIRS } from "./fit-board.fixtures";
-import { WallStrip } from "./wall-strip";
+import { FrameFitTile, WallStrip } from "./wall-strip";
 
 const meta = {
   title: "Patterns/WallStrip",
@@ -20,3 +20,6 @@ export const AllFit: Story = { args: { frames: [LIVING, OFFICE] } };
 export const Small: Story = { args: { size: "small" } };
 /** An older answer while a newer one is read. */
 export const Faded: Story = { args: { faded: true } };
+
+/** One tile as a Frame picker draws it (beside a checkbox that names it): its alert's chip only. */
+export const PickerTile: Story = { render: () => <FrameFitTile frame={HALL} named={false} brief /> };

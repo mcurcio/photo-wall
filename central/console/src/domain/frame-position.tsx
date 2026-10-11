@@ -5,6 +5,7 @@ import { Note } from "../patterns/fact-row";
 import { NudgePad } from "../patterns/nudge-pad";
 import { ProblemCard } from "../patterns/problem-card";
 import { type Point, QuadEditor } from "../patterns/quad-editor";
+import { pixelSize } from "../timeWords.js";
 import { QUARTER_TURNS } from "../useDraft.js";
 import { Button } from "../ui/button";
 import { Disclosure } from "../ui/disclosure";
@@ -53,7 +54,7 @@ const FIT_HELP: Record<Mode, string> = {
 
 // A Pi that reports no output size: steps are still pixels of a common output.
 const FALLBACK_SIZE: PixelSize = { width: 1920, height: 1080 };
-const UNKNOWN_SIZE = "The Pi has not reported this output's size, so a step is a pixel of a 1920 × 1080 screen.";
+const UNKNOWN_SIZE = "The Pi has not reported its display's size, so a step is a pixel of a 1,920 × 1,080 display.";
 const CHECK_AGAIN = "If the picture sits right on the Display, press Done to keep this position.";
 
 const round = (value: number) => Math.round(value * 10) / 10;
@@ -184,7 +185,7 @@ export function FramePosition({ adjustment, size: reported, piHref, readiness, w
         )}
         {whatFits}
         <Disclosure summary="Exact values">
-          <Note>{`Corners, in pixels of the Pi's ${size.width} × ${size.height} output`}</Note>
+          <Note>{`Corners, in pixels of the ${pixelSize(size.width, size.height)} display`}</Note>
           <Inline>
             {CORNERS.map((name, index) => (
               [0, 1].map((axis) => (

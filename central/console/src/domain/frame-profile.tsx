@@ -10,6 +10,7 @@ import { Field, NumberInput } from "../ui/field";
 import { Section } from "../ui/section";
 import { Inline } from "../ui/stack";
 import { Switch } from "../ui/switch";
+import { pixelSize } from "../timeWords.js";
 import { useMutate } from "../useMutate.js";
 
 interface Profile {
@@ -172,7 +173,7 @@ export function FrameProfile({ snapshot, frame, draftFit }: FrameProfileProps) {
           subject="Frame profile"
           variant="inline"
           verdict={{ severity: "todo", label: "Check the Display", receipt: null }}
-          what={`The Pi reported its Display at ${observation.width_px} × ${observation.height_px}, but this Frame's profile is ${profile.width_px} × ${profile.height_px}. ${frame.readiness === "ready" ? `The saved rotation ${fit?.rotation ?? 0}° was considered.` : "This Frame's position is not set for this Pi yet."}`}
+          what={`The Pi reported its Display at ${pixelSize(observation.width_px!, observation.height_px!)}, but this Frame's profile is ${pixelSize(profile.width_px!, profile.height_px!)}. ${frame.readiness === "ready" ? `The saved rotation ${fit?.rotation ?? 0}° was considered.` : "This Frame's position is not set for this Pi yet."}`}
           doing={null}
           action={{ label: "Edit Frame profile", onAction: begin }}
           details={(

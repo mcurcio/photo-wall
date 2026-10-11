@@ -1344,7 +1344,9 @@ def test_the_target_picker_groups_by_surface_with_health_in_the_description(page
         expect(picked).to_have_accessible_description("Needs a Player")
         valid = wall.get_by_role("checkbox", name=f"Target frame {VALID_FRAME}", exact=True)
         expect(valid).to_have_accessible_name(f"Target frame {VALID_FRAME}")
-        expect(valid).to_have_accessible_description("No report yet")
+        # A Pi enrolled that has not reported yet is "Getting ready" (design language §6), as on
+        # the Frame page's header (domain/frame-health-chip.ts).
+        expect(valid).to_have_accessible_description("Getting ready")
         expect(wall.get_by_role("checkbox")).to_have_count(2)
 
 
