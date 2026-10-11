@@ -8,12 +8,10 @@ const meta = {
   args: {
     label: "Picture position",
     corners: [[0.05, 0.08], [0.95, 0.04], [0.93, 0.95], [0.06, 0.9]],
-    crop: [0.02, 0, 1, 0.97],
     aspect: 16 / 9,
     selected: null,
     onSelect: () => {},
     onCorner: () => {},
-    onCrop: () => {},
     onArrow: () => {},
   },
 } satisfies Meta<typeof QuadEditor>;

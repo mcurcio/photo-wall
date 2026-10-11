@@ -40,7 +40,6 @@ interface Frame {
   player_id?: string | null;
   output_id?: string | null;
   profile?: { width_px?: number; height_px?: number };
-  calibration?: { rotation?: number };
   readiness?: Readiness;
 }
 
@@ -56,7 +55,10 @@ const TABS = [
 // common output.
 const FALLBACK_SIZE: PixelSize = { width: 1920, height: 1080 };
 
-/** The output's size in pixels, as the Pi reported it, else the Frame profile's as mounted. */
+/**
+ * The output's size in pixels, as the Pi reported it, else the Frame profile's. Position's steps
+ * and corner pixels are pixels of the output, whatever way the picture is turned in it.
+ */
 function outputSize(snapshot: object | null, frame: Frame): PixelSize {
   const reported = (boundOutput(snapshot ?? {}, frame.id) as { observation?: { connected?: boolean; width_px?: number; height_px?: number } } | null)
     ?.observation;
@@ -64,9 +66,7 @@ function outputSize(snapshot: object | null, frame: Frame): PixelSize {
     return { width: reported.width_px!, height: reported.height_px! };
   }
   const { width_px: width = 0, height_px: height = 0 } = frame.profile ?? {};
-  if (width <= 0 || height <= 0) return FALLBACK_SIZE;
-  const rotation = frame.calibration?.rotation ?? 0;
-  return rotation === 90 || rotation === 270 ? { width: height, height: width } : { width, height };
+  return width <= 0 || height <= 0 ? FALLBACK_SIZE : { width, height };
 }
 
 /**

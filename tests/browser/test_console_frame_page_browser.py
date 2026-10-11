@@ -26,7 +26,7 @@ from support.position import save_position
 from test_registry import enroll
 
 from central.registry import FrameCreate, RegistryError
-from contracts.models import Calibration, FrameProfile
+from contracts.models import Calibration, CoverFit, FrameProfile
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("PHOTO_WALL_BROWSER_TESTS") != "1",
@@ -61,9 +61,11 @@ def _corners(x):
     return ((x / 1920, 0), (1, 0), (1, 1), (0, 1))
 
 
-def _seed(registry, profile=LANDSCAPE, rotation=0):
+def _seed(registry, profile=LANDSCAPE, rotation=None):
     """A Frame bound to an Output the Player app reported connected at 1920 x 1080, with a
-    saved position (its top-left corner SAVED_X pixels in, revision 2); returns the Player's id."""
+    saved position in Cover (its top-left corner SAVED_X pixels in, revision 2); returns the
+    Player's id. With `rotation`, the position is one saved before 1c (no fit: drawn as Corners),
+    which the Hardware tab's Frame profile check reads."""
     # A fixed device id gives a fixed Player id: the page shows its last six hex digits, and a
     # random one held "24" about one run in fifty, which the Hardware tab's diagonal check reads.
     identity, _key, _request = enroll(registry, count=1, device_id=DEVICE)
@@ -72,7 +74,9 @@ def _seed(registry, profile=LANDSCAPE, rotation=0):
         id=FRAME, surface_id="wall", x_mm=100, y_mm=100, width_mm=500 if landscape else 300,
         height_mm=300 if landscape else 500, profile=profile))
     registry.bind(FRAME, identity["player_id"], OUTPUT, expected_generation=0)
-    save_position(registry, FRAME, Calibration(corners=_corners(SAVED_X), rotation=rotation), expected_revision=1)
+    position = (Calibration(fit=CoverFit(corners=_corners(SAVED_X))) if rotation is None
+                else Calibration(corners=_corners(SAVED_X), rotation=rotation))
+    save_position(registry, FRAME, position, expected_revision=1)
     return identity["player_id"]
 
 
@@ -82,13 +86,16 @@ def _saved(registry):
 
 def _top_left_x(calibration):
     """A saved or drafted position's top-left corner, in pixels of the output."""
-    corners = calibration["corners"] if isinstance(calibration, dict) else calibration.corners
+    if isinstance(calibration, dict):
+        corners = (calibration.get("fit") or calibration)["corners"]
+    else:
+        corners = calibration.fit.corners if calibration.fit is not None else calibration.corners
     return round(corners[0][0] * 1920)
 
 
 def _save_elsewhere(registry, x=ELSEWHERE_X):
     """Another window saves the Frame's position (revision 2 -> 3)."""
-    save_position(registry, FRAME, Calibration(corners=_corners(x)), expected_revision=2)
+    save_position(registry, FRAME, Calibration(fit=CoverFit(corners=_corners(x))), expected_revision=2)
 
 
 class FakeSessions:
@@ -378,7 +385,7 @@ def test_hardware_keeps_the_frame_profile_apart_from_the_panel_record(page, regi
 
     Mutation: render a Frame profile field inside the Pi and HDMI port section -> the
     not_to_contain_text assertion goes RED."""
-    player_id = _seed(registry, PORTRAIT)
+    player_id = _seed(registry, PORTRAIT, rotation=0)
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
         frame = open_frame(page, FRAME, "hardware")
@@ -402,7 +409,7 @@ def _mismatch(frame):
 
 
 def test_the_frame_profile_notes_a_reported_resolution_it_does_not_match(page, registry):
-    _seed(registry, PORTRAIT)
+    _seed(registry, PORTRAIT, rotation=0)
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
         frame = open_frame(page, FRAME, "hardware")
@@ -491,7 +498,8 @@ def test_a_folded_or_thin_picture_is_refused_where_it_is_typed(page, registry, s
         expect(y).to_have_value(before)
         page.wait_for_timeout(500)
         refused = float(values["y"]) / 1080
-        assert all(abs(point[1] - refused) > 1e-9 for point in fake.row["calibration"]["corners"]), fake.row
+        shown = fake.row["calibration"].get("fit") or fake.row["calibration"]
+        assert all(abs(point[1] - refused) > 1e-9 for point in shown["corners"]), fake.row
 
 
 def test_a_refresh_never_overwrites_the_draft(page, registry, sessions):
