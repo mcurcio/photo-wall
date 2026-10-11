@@ -19,9 +19,10 @@ from psycopg.types.json import Jsonb
 
 from central.db import MEDIA_LOCK
 from central.execution_ports import ExecutionMediaAuthorization
+from central.infra.photo_library_store import library_assets_in
 from central.installation_ports import InstallationSessions
 from central.installation_repository import PostgresInstallationRepository
-from central.media_repository import JobLease, MediaRepository, lease_asset_of
+from central.media_repository import JobLease, MediaRepository
 from central.registry import RegistryError
 from contracts.models import PlayerConfiguration, Variant
 from media.prepare import PreparedMedia
@@ -410,10 +411,12 @@ class MediaStore:
                         "asset_id": lease.asset.asset_id,
                     }
                     conn.execute(
-                        "UPDATE media_jobs SET state='publishing',variant_sha=%s,result=%s,"
-                        "reserved_bytes=reserved_bytes-%s,cleanup_state='ready',updated_at=%s WHERE id=%s",
+                        "UPDATE media_jobs SET state='publishing',variant_sha=%s,made_from=%s,"
+                        "result=%s,reserved_bytes=reserved_bytes-%s,cleanup_state='ready',"
+                        "updated_at=%s WHERE id=%s",
                         (
                             variant.sha256,
+                            prepared.made_from,
                             Jsonb(result),
                             0 if existing else variant.size,
                             self.repository.times.now_in(conn),
@@ -440,14 +443,10 @@ class MediaStore:
                 raise MediaStoreError("media_io", 503) from None
 
     def _lease_for(self, conn, row) -> JobLease:
-        asset = conn.execute(
-            "SELECT metadata,upstream_id FROM asset_revisions WHERE asset_id=%s",
-            (row["asset_id"],),
-        ).fetchone()
         return JobLease(
             job_id=row["id"],
             attempt_token=row["attempt_token"],
-            asset=lease_asset_of(asset),
+            asset=library_assets_in(conn, (row["asset_id"],))[row["asset_id"]],
             recipe_id=row["recipe_id"],
             lease_until=row["lease_until"],
             reserved_bytes=max(1, row["reserved_bytes"]),

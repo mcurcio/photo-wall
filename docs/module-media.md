@@ -225,15 +225,36 @@ Invoke FFmpeg/ffprobe as argument arrays with `-nostdin`, bounded logs, no shell
 
 After conversion, probe and fully decode the output under the same limits; verify codec/container, stream count, SDR profile, dimensions, duration, frame-rate bound, orientation, and output byte cap. Hash final bytes, fsync the file, and publish to a canonical digest-derived path on the same filesystem. Only then can the repository atomically expose `Variant(sha256,size,media_type,width,height,duration)`. JPEG has `duration=None`; MP4 has a measured positive duration. This establishes prepared **bytes**, not a Player's decoder readiness, aggregate capacity, or execution commitment.
 
+## The asset tables
+
+Owner, 2026-10-11: "I would build this as a normalized database, with each upstream immich asset being a primary resource and then have no join tables which hold different resolutions, crops, encodings of that asset." Built (migration 080, follow-ups slice A2) as one parent row per Immich asset, with every version of it in a child table keyed to it (one-to-many; no table joins two assets):
+
+| Table | Key | Holds | Written by |
+|---|---|---|---|
+| `library_assets` (the parent) | (connection, Immich asset id) | Kind, taken time, the original file's type, stored width and height, EXIF orientation and bytes (NULL until a check reads them), first and last seen | Every check step that names the photo's kind and taken time. A photo read in full rewrites the original's facts; a waiting or left-out photo keeps them |
+| `asset_revisions` | `asset_id` (connection, Immich id, revision) | One per edit Immich has made: the photo as Immich shows it, upright, its width, height and video duration, Immich's `updatedAt` | Each check step's in-pool photos |
+| `asset_copies` | (`asset_id`, copy) | Each Immich copy of a revision Photo Wall downloaded (thumbnail, preview, full-size): its type and measured size. The original's size is the parent's (Immich reports it), never measured twice | The worker after a fetch (`record_copies`) |
+| `media_jobs` | (`asset_id`, recipe) | Each copy Photo Wall prepared: its state, its file in `media_blobs`, and `made_from`, the Immich copy it was made from | `MediaRepository`, `MediaStore.publish` |
+
+A pool row (`photo_pool_rows`) names a revision by `asset_id` and copies none of its facts, so the pool page, its counts, the Planner's members and the thumbnail read join the revision and its parent. `central.infra.photo_library_store.library_assets_in` is the one place a stored photo becomes a `LibraryAsset`: job claims and `MediaStore` leases read it there. `library_connections.full_size_copies` keeps Immich's last answer on full-size copies.
+
+No cropped file exists: the Player crops at draw time, and a crop is a fact of the plan's layer. `media_blobs` is the content-addressed file store (its variant is the file's own facts). `media_jobs.result` repeats the variant as the publication journal, which recovery checks the file against after a crash: a recovery record, not a second source of the photo's facts, so it stays.
+
+Cost: every pool read is a join. With 50,000 photos in one pool (seeded through the store), the page with its counts reads in about 60 ms and the Planner's whole-pool read in about 260 ms on the development Mac; should it grow, the fix is an index, never copying the facts back onto pool rows. Migration 081 converts the pre-4 records a Scene still holds into revisions with a parent row (their originals unknown) and drops the old `metadata` JSON.
+
+## The Frame output
+
+Owner, 2026-10-11: compatibility must be "measuring against the Frame output and not the Display". The Frame output is the Frame's picture as drawn on its Output, in output pixels along the picture's own width and height (`contracts.frame_fit.picture_size`): in Cover, the cover rectangle (a mat opening needs fewer pixels than the Display; a picture turned off-axis needs more than its opening); in Corners, the longer of each pair of opposite edges, a quarter turn swapping them. `contracts.models.frame_output` computes it from the Frame's profile (its shape), its Position and the size its Output last reported; `central.infra.display_store.frame_outputs_in` is the one read of every Frame's (the worker's `frame_outputs`). A Frame whose Output never reported a size has none. "This photo, or this copy of it, is at least the Frame output" is one test, `contracts.frame_fit.window_holds`: the largest window of the Frame's shape cut from the photo holds the Frame output on both sides (owner, 2026-10-09: Immich's downsampled copy "only if it is at least the visible Frame size, else the original").
+
 ## PostgreSQL, file publication, and reference interface
 
-The root-owned repositories are the only SQL owners: `PgPhotoLibrary` for connections, lists, pools, drafts and check marks; `MediaRepository` for `asset_revisions`, `media_jobs`, `media_blobs` and `media_references`. A pool row's in-pool photo is also an `asset_revisions` row (with its connection, Immich id and `updatedAt`), which is what preparation leases. Blob identity/metadata are immutable. A job is unique for `(asset_revision, recipe_id)` and has `queued/running/retry/ready/failed` state, attempt generation, attempt expiry, bounded failure code, and reserved bytes. Procrastinate owns queue attempts and retry timing. References identify their typed owner and exact digest rather than only a source or Run.
+The root-owned repositories are the only SQL owners: `PgPhotoLibrary` for connections, lists, pools, drafts, check marks and [the asset tables](#the-asset-tables) a check or fetch writes; `MediaRepository` for `media_jobs`, `media_blobs` and `media_references`. A pool row's in-pool photo is an `asset_revisions` row under its `library_assets` parent, which is what preparation leases. Blob identity/metadata are immutable. A job is unique for `(asset_revision, recipe_id)` and has `queued/running/retry/ready/failed` state, attempt generation, attempt expiry, bounded failure code, and reserved bytes. Procrastinate owns queue attempts and retry timing. References identify their typed owner and exact digest rather than only a source or Run.
 
 The worker side of the photo library store (`LibraryWorkerStore`):
 
 * `due_contacts()`, `begin_contact(ref) -> ContactTicket`, `record_contact(ticket, result) -> bool` (applied only when newer), `record_list(ref, kind, …)`.
 * `due_pools()`, `begin_check(pool_key) -> CheckLease | None` (None for an unwanted pool; resumes a running check with its progress), `known_revisions(…)`, `record_step(lease, step) -> bool` (fenced by check number; upserts rows, stores marks, queues the next step in the same transaction), `finish_check(lease, finish) -> bool` (sweeps only on complete).
-* `connection_secret(ref)`, `frame_sizes()`, `pool_thumbnail(asset_id)`, `retire_unwanted()` (drafts older than a day, then unwanted pools, then thumbnail records outside wanted pools).
+* `connection_secret(ref)`, `frame_sizes()`, `frame_outputs()` ([the Frame output](#the-frame-output)), `copy_sizes(asset_id)` and `record_copies(asset_id, measured)` (`asset_copies`), `pool_thumbnail(asset_id)`, `retire_unwanted()` (drafts older than a day, then unwanted pools, then thumbnail records outside wanted pools).
 
 The Planner's read is `MediaRepository.source_pools_in(conn, source_refs) -> {source_ref: SourcePool}` over `PgPhotoLibrary.pool_members_in` ([Planner](module-planner.md#inputs-state-and-output)).
 

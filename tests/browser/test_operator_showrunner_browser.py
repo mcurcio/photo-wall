@@ -61,9 +61,10 @@ from support.position import save_position
 from test_registry import ADMIN, enroll
 
 from central.db import ProcessTransactionClock
+from central.infra.photo_library_store import library_assets_in
 from central.media_repository import MediaRepository
 from central.media_store import MediaStore
-from central.photo_library.model import InPool, LibraryAsset, SourceQuery, TakenBetween
+from central.photo_library.model import InPool, SourceQuery, TakenBetween
 from central.photo_library.ports import CheckFailed
 from central.planner import AcquisitionRequest
 from central.registry import FrameCreate
@@ -1864,10 +1865,9 @@ def _drop_member(registry, asset_id, source_ref=SOURCE):
     of its pool and not it, so the sweep removes it."""
     key = _pool_key(registry, source_ref)
     with registry.db.transaction() as conn:
-        kept = [LibraryAsset.model_validate(row["metadata"]) for row in conn.execute(
-            "SELECT a.metadata FROM photo_pool_rows r JOIN asset_revisions a USING (asset_id) "
-            "WHERE r.pool_key=%s AND r.outcome='in_pool' AND r.asset_id<>%s",
-            (key, asset_id)).fetchall()]
+        kept = list(library_assets_in(conn, [row["asset_id"] for row in conn.execute(
+            "SELECT asset_id FROM photo_pool_rows WHERE pool_key=%s AND outcome='in_pool' "
+            "AND asset_id<>%s", (key, asset_id)).fetchall()]).values())
     filled(_photo_library(registry), key, [InPool(asset=asset) for asset in kept])
 
 
