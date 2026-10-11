@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 from contracts.models import Calibration
 from contracts.node_calibration import TrialCandidate, parse_trial
-from player.geometry import homography, transform
+from player.geometry import fit_of
 from player.rendering import OutputComposition
 
 
@@ -18,7 +18,8 @@ class AppliedTrial:
 
 
 class TrialState:
-    """Per-Output local terminal fence. A delayed envelope cannot revive expiry."""
+    """Per-Output local terminal fence. A delayed envelope cannot revive expiry. The trial's
+    calibration may carry a Frame fit (1c); its primitives are that fit's corners."""
 
     def __init__(self):
         self.scope = None
@@ -81,11 +82,10 @@ class TrialState:
         calibration = Calibration.model_validate_json(candidate.calibration_json)
         if calibration.revision != composition.binding.calibration.revision:
             raise ValueError("trial_calibration_baseline")
-        # Use the renderer's existing transform. The base never recomputes this mapping.
-        matrix = homography(calibration.corners)
+        # The overlay's primitives are the drawn fit's corners (the opening, both modes), read
+        # through the renderer's own fit (player/geometry.py); the base never recomputes them.
         points = tuple(
-            tuple(max(0.0, min(1.0, n)) for n in transform(matrix, x, y))
-            for x, y in ((0, 0), (1, 0), (1, 1), (0, 1))
+            tuple(max(0.0, min(1.0, n)) for n in corner) for corner in fit_of(calibration).corners
         )
         self.trial_id, self.generation, self.sequence = (
             candidate.trial_id,

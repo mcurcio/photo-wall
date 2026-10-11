@@ -4,6 +4,7 @@ import math
 import random
 import threading
 import time
+import uuid
 from types import SimpleNamespace
 
 import pytest
@@ -524,17 +525,24 @@ def test_the_frame_renewer_paints_only_surfaces_not_renewed_within_a_renewal():
         "none": 1, "fresh": 0, "old": 1}
 
 
-def test_a_crossfade_step_or_a_trial_edit_is_a_change_to_redraw():
-    """G8 render on change, E-G8-3: alpha and the calibration trial change pixels without
-    changing the composition's fingerprint, so each is part of what a surface shows."""
+def test_a_crossfade_step_a_trial_edit_or_a_picture_change_is_a_change_to_redraw():
+    """G8 render on change, E-G8-3: alpha, the calibration trial and (1c) the Output's picture
+    operations change pixels without changing the composition's fingerprint, so each is part of
+    what a surface shows."""
     class Frames:
-        def __init__(self, candidate):
-            self.candidate = candidate
+        def __init__(self, candidate, operations=None):
+            self.candidate, self.operations = candidate, operations
 
         def trial(self, composition, grant):
             if self.candidate == "unreadable":
                 raise ValueError("unreadable")
             return None if self.candidate is None else SimpleNamespace(candidate=self.candidate)
+
+        def picture(self, output_id):
+            assert output_id == "hdmi1"
+            if self.operations == "unreadable":
+                raise RuntimeError("display_picture_protocol_lost")
+            return self.operations
 
     def trial(sequence):
         return SimpleNamespace(trial_id="t", generation=1, sequence=sequence,
@@ -542,8 +550,8 @@ def test_a_crossfade_step_or_a_trial_edit_is_a_change_to_redraw():
 
     def shown(alpha=1.0, frames=None):
         local = SimpleNamespace(layer="picture", path=None, alpha=alpha)
-        composition = SimpleNamespace(binding="hdmi1", calibration=Calibration(),
-                                      fallback=False, layers=(local,))
+        composition = SimpleNamespace(binding=SimpleNamespace(output_id="hdmi1"),
+                                      calibration=Calibration(), fallback=False, layers=(local,))
         return native_module._shown(composition, (), (), frames, object())
 
     assert shown() == shown()
@@ -554,6 +562,11 @@ def test_a_crossfade_step_or_a_trial_edit_is_a_change_to_redraw():
     assert shown(frames=Frames(trial(2))) != shown(frames=Frames(trial(1)))
     unreadable = Frames("unreadable")
     assert shown(frames=unreadable) != shown(frames=unreadable)
+    dimmer = _operations(light=.5)
+    assert shown(frames=Frames(None, dimmer)) != shown(frames=Frames(None))
+    assert shown(frames=Frames(None, dimmer)) == shown(frames=Frames(None, _operations(light=.5)))
+    lost = Frames(None, "unreadable")
+    assert shown(frames=lost) != shown(frames=lost)
 
 
 def _presenting_renderer(decoders=None):
@@ -621,3 +634,104 @@ def test_a_playing_video_is_redrawn_on_each_new_sample_only():
     assert renderer.present(video).status == "presented" and surface.area.renders == 2
     _acknowledge(surface)
     assert renderer.present(video).status == "presented" and surface.area.renders == 2
+
+
+# -- roadmap 1c R2: picture operations from the shell, the picture change in the tag ------------
+
+class _FrameClient:
+    """libphoto-wall-frame-client's two v4 calls, faked: the newest `picture` text per Output,
+    and every tag_picture_next_commit's arguments."""
+
+    def __init__(self):
+        self.texts: dict[bytes, bytes] = {}
+        self.tags: list[tuple[bytes, bytes, bytes]] = []
+
+    def pw_frame_client_picture(self, _client, output_id, buffer, capacity):
+        if output_id == b"lost":
+            return -1
+        if output_id not in self.texts:
+            return 0
+        assert capacity > len(self.texts[output_id])
+        buffer.value = self.texts[output_id]
+        return 1
+
+    def pw_frame_client_tag_picture_next_commit(self, _client, _surface, grant_id, tag, change):
+        self.tags.append((grant_id, tag, change))
+        return 0
+
+
+def _wayland_frames():
+    from player.wayland_frames import WaylandFrames
+
+    frames = WaylandFrames.__new__(WaylandFrames)
+    frames.owner, frames.client, frames.trials = threading.get_ident(), object(), {}
+    frames.picture_texts, frames.operations = {}, {}
+    frames.lib = _FrameClient()
+    frames.gdk = SimpleNamespace(gdk_wayland_window_get_wl_surface=lambda _pointer: 1)
+    frames._pointer = lambda _window: 2
+    return frames
+
+
+def test_the_player_reads_the_outputs_newest_picture_operations_and_keeps_the_last_good():
+    """R2: `picture` decodes the shell's v4 event with contracts.node_frame; an undecodable text,
+    or one for another Output, is logged and ignored (the last decoded value stands)."""
+    from contracts.node_frame import encode_picture_operations
+
+    frames = _wayland_frames()
+    assert frames.picture("HDMI-A-1") is None
+    first = _operations(light=.5)
+    frames.lib.texts[b"HDMI-A-1"] = encode_picture_operations(first).encode()
+    assert frames.picture("HDMI-A-1") == first
+    frames.lib.texts[b"HDMI-A-1"] = b'{"not":"operations"}'
+    assert frames.picture("HDMI-A-1") == first
+    other = PictureOperations("HDMI-A-2", 3, (1.0, 1.0, 1.0), 1.0, 1.0, 1.0)
+    frames.lib.texts[b"HDMI-A-1"] = encode_picture_operations(other).encode()
+    assert frames.picture("HDMI-A-1") == first
+    second = PictureOperations("HDMI-A-1", 7, (.9, .95, 1.0), 1.2, .8, 1.1)
+    frames.lib.texts[b"HDMI-A-1"] = encode_picture_operations(second).encode()
+    assert frames.picture("HDMI-A-1") == second
+    with pytest.raises(RuntimeError, match="display_picture_protocol_lost"):
+        frames.picture("lost")
+
+
+def test_every_tag_names_the_picture_change_its_buffer_was_drawn_with():
+    """R2: the tag always goes through tag_picture (frame protocol v4): "0" before any picture
+    operations, else the decimal change."""
+    from player.wayland_frames import FrameGrant
+
+    frames = _wayland_frames()
+    grant = FrameGrant(uuid.uuid4(), 1, 1, "frame", True)
+    frames.tag_rendered_buffer(object(), grant, "tag-a")
+    frames.tag_rendered_buffer(object(), grant, "tag-b", picture_change=7)
+    assert frames.lib.tags == [(str(grant.grant_id).encode(), b"tag-a", b"0"),
+                               (str(grant.grant_id).encode(), b"tag-b", b"7")]
+
+
+def test_a_new_picture_change_is_drawn_again_at_once():
+    """R2: present() queues a draw when the Output's picture operations change, though the
+    composition and its acknowledgment are unchanged."""
+    renderer, surface = _presenting_renderer()
+
+    class Frames:
+        operations = None
+
+        def grant(self, _output_id, _composition=None):
+            return SimpleNamespace(grant_id=uuid.UUID(int=1), binding_generation=1,
+                                   config_revision=1, admitted=True, matches=lambda _c: True)
+
+        def trial(self, _composition, _grant):
+            return None
+
+        def picture(self, _output_id):
+            return self.operations
+
+    renderer._frames = frames = Frames()
+    photo = _composition(SimpleNamespace(layer=SimpleNamespace(assignment_id="a", variant=None),
+                                         path=None, alpha=1.0))
+    assert renderer.present(photo).status == "pending" and surface.area.renders == 1
+    _acknowledge(surface)
+    assert renderer.present(photo).status == "presented" and surface.area.renders == 1
+    frames.operations = PictureOperations("hdmi1", 7, (1.0, 1.0, 1.0), .5, 1.0, 1.0)
+    assert renderer.present(photo).status == "presented" and surface.area.renders == 2
+    _acknowledge(surface)
+    assert renderer.present(photo).status == "presented" and surface.area.renders == 2

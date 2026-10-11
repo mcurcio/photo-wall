@@ -408,6 +408,7 @@ SUITES: Final = (
                  "tests/node/apps/test_environment_image.py", "tests/debs/test_roots.py",
                  "tests/native_display_smoke.py", "tests/native_display_probe.c",
                  "tests/native_player_mainloop_harness.py", "tests/native_player_resource_harness.py",
+                 "tests/native_renderer_pixel_harness.py",
                  "tests/native_display_media.py",
                  "tests/display_harness_health_client.py", "tests/display_harness_judge_feeder.py",
                  "scripts/run_display_harness.py",
