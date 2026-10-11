@@ -1,7 +1,7 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
 
 import { LibraryConnection } from "./library-connection";
-import { AT, CONNECTED, connectionWith } from "./library.fixtures";
+import { CONNECTED, connectedWith, connectionWith } from "./library.fixtures";
 
 const meta = {
   title: "Domain/LibraryConnection",
@@ -23,12 +23,12 @@ export const Connected: Story = {};
 
 /** A passing check with both notes: shown, nothing stops. */
 export const WithNotes: Story = {
-  args: {
-    connection: {
-      ...CONNECTED,
-      health: { state: "ok", checked_at: AT, notes: [{ kind: "untested_version", found: "2.7.0" }, { kind: "no_full_size_copies" }] },
-    },
-  },
+  args: { connection: connectedWith({ kind: "untested_version", found: "2.7.0" }, { kind: "no_full_size_copies" }) },
+};
+
+/** Immich's face detection is off (roadmap 5a): smart crop keeps the interesting part, not faces. */
+export const NoFaceDetection: Story = {
+  args: { connection: connectedWith({ kind: "no_face_detection" }) },
 };
 
 /** Saved, not checked yet. */
