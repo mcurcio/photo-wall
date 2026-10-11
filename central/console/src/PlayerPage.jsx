@@ -1,6 +1,5 @@
 import React, { useEffect, useId, useRef, useState } from "react";
 
-import { deprecatedBootFact } from "./bootFacts.js";
 import { unbindAllRequest, useConfirm } from "./ConfirmAction.jsx";
 import { bind, identifyOutput } from "./equipmentApi.js";
 import { FactLine } from "./domain/fact-line.tsx";
@@ -9,7 +8,6 @@ import { clock, fact, words } from "./facts.js";
 import {
   interruptionFor, isBound, outputLabel, outputStates,
 } from "./health.js";
-import { NodeRecords, nodeReadsAllowed, useNodeControlValue } from "./nodeControl.js";
 import { currentSessionBoot, layerEvidence, useNodeDevice } from "./nodeRead.js";
 import { AppOperationsSection } from "./PlayerCommands.jsx";
 import { QualifiedFallback } from "./QualifiedFallback.jsx";
@@ -25,7 +23,7 @@ import { useMutate } from "./useMutate.js";
 const NO_FRAMES = "No unbound frames. Draw one on the plan first.";
 
 
-/** A link to a Frame's home on the Wall (it opens the facet showing its cause). */
+/** A link to a Frame's page on the Wall (it opens the tab showing its cause). */
 function FrameLink({ frameId, wall }) {
   return (
     <a
@@ -89,8 +87,7 @@ function LayersSection({ node, snapshot, playerId, retired }) {
 
 /**
  * The Boot section (Part E §25): the current node session's boot, then the latest node boot
- * offer record. When Central serves `deprecated_boot` (G5), one warning line above them says
- * this box's newest boot record is not a node boot; the console shows none of those records.
+ * offer record.
  */
 function BootSection({ node, retired }) {
   if (retired) {
@@ -112,25 +109,13 @@ function BootSection({ node, retired }) {
       });
     }
   }
-  const deprecated = read == null ? null : deprecatedBootFact(read.deprecated_boot, read.read_at);
   return (
     <>
-      {deprecated !== null && (
-        <div className="player__warning" role="note">
-          <FactLine label="Booted by the deprecated path" fact={deprecated}
-            suffix="its kernel command line lacks photowall.node=v2; Select and Stage do not reach it" />
-        </div>
-      )}
       <FactLine label="Current node session's boot" fact={current.fact ?? current.none} />
       {offer === null ? (
         <p className="roster__empty">No node boot offer recorded for this box.</p>
       ) : (
         <FactLine label="Node boot offer" fact={offer} />
-      )}
-      {deprecated === null && (
-        <p className="roster__note">
-          A Pi boots by node path when its kernel command line carries <code>photowall.node=v2</code>.
-        </p>
       )}
     </>
   );
@@ -305,8 +290,7 @@ function OutputsSection({ snapshot, bootFacts, row, wall, setStatus }) {
  * its app (Stage app and its operations) and Unbind all. It keeps what belongs to Software and
  * Screens until their own pages land. Each section shows its own read time and sits behind its
  * own error boundary. Node records are read only on a Pi's pages, for that box only
- * (nodeRead.js), never for a retired box and never while the shell's node control is not on;
- * with node control off the node sections give way to one "not shown" line (nodeControl.js).
+ * (nodeRead.js), never for a retired box.
  * Writes stay with their aggregate: Bind goes to the Frame, Stage app to the fleet.
  *
  * @param {{deviceId: string, snapshot: object, bootFacts: object|null,
@@ -316,8 +300,7 @@ export function PlayerPage({ deviceId, snapshot, bootFacts, wall }) {
   const row = playersByDevice(snapshot, bootFacts).find((candidate) => candidate.deviceId === deviceId)
     ?? null;
   const retired = row?.standing === "retired";
-  const control = useNodeControlValue();
-  const node = useNodeDevice(deviceId, { skip: row === null || retired || !nodeReadsAllowed(control) });
+  const node = useNodeDevice(deviceId, { skip: row === null || retired });
   const nameRef = useRef(/** @type {HTMLHeadingElement|null} */ (null));
   const focusName = () => nameRef.current?.focus();
   const { open: openDialog, setStatus, confirmation } = useConfirm(focusName, focusName);
@@ -363,11 +346,9 @@ export function PlayerPage({ deviceId, snapshot, bootFacts, wall }) {
         </PiHeader>
       </div>
 
-      <NodeRecords>
-        <SectionBoundary title="Layers" resetKey={node.readAt}>
-          <LayersSection node={node} snapshot={snapshot} playerId={player?.id ?? null} retired={retired} />
-        </SectionBoundary>
-      </NodeRecords>
+      <SectionBoundary title="Layers" resetKey={node.readAt}>
+        <LayersSection node={node} snapshot={snapshot} playerId={player?.id ?? null} retired={retired} />
+      </SectionBoundary>
 
       <SectionBoundary title="Outputs" resetKey={snapshot?.at}>
         {player === null ? (
@@ -377,21 +358,19 @@ export function PlayerPage({ deviceId, snapshot, bootFacts, wall }) {
         )}
       </SectionBoundary>
 
-      <NodeRecords quiet>
-        <SectionBoundary title="Boot" resetKey={node.readAt}>
-          <BootSection node={node} retired={retired} />
-        </SectionBoundary>
+      <SectionBoundary title="Boot" resetKey={node.readAt}>
+        <BootSection node={node} retired={retired} />
+      </SectionBoundary>
 
-        {!retired && (
-          <SectionBoundary title="App" resetKey={node.operations?.read_at}>
-            <StageApp key={deviceId} deviceId={deviceId} name={row.name} node={node} snapshot={snapshot}
-              player={player} />
-            <AppOperationsSection node={node} />
-            <QualifiedFallback key={deviceId} deviceId={deviceId} node={node} snapshot={snapshot}
-              playerId={player?.id ?? null} />
-          </SectionBoundary>
-        )}
-      </NodeRecords>
+      {!retired && (
+        <SectionBoundary title="App" resetKey={node.operations?.read_at}>
+          <StageApp key={deviceId} deviceId={deviceId} name={row.name} node={node} snapshot={snapshot}
+            player={player} />
+          <AppOperationsSection node={node} />
+          <QualifiedFallback key={deviceId} deviceId={deviceId} node={node} snapshot={snapshot}
+            playerId={player?.id ?? null} />
+        </SectionBoundary>
+      )}
 
       {player !== null && row.standing === "bound" && (
         <SectionBoundary title="Danger zone">

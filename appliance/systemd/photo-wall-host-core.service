@@ -1,6 +1,5 @@
 [Unit]
 Description=Photo Wall independent host observation and scoped reboot
-ConditionKernelCommandLine=photowall.node=v2
 ConditionPathExists=/run/photo-wall-node/host.json
 After=network-online.target
 
@@ -8,7 +7,7 @@ After=photo-wall-node-handoff.service
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 -I -B /usr/lib/photo-wall-host-core
+ExecStart=/usr/bin/python3 -I -B /usr/lib/photo-wall/node/host-core
 Restart=always
 RestartSec=2
 User=root

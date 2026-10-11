@@ -17,7 +17,7 @@ from fakes.transactions import FakeTransactions
 from central.infra.outcome_feed import APPLICATION_NAME, OutcomeFeed
 from central.infra.outcomes import JobOutcomes
 from central.infra.transactions import PgTransactions
-from central.kernel.job_types import FetchPackage, SyncReleases
+from central.kernel.job_types import FetchSealedEnvironment, SyncReleases
 from central.kernel.jobs import job_keys
 
 UNREACHABLE = "postgresql://127.0.0.1:1/none?connect_timeout=1"
@@ -163,7 +163,7 @@ async def until(predicate):
 def test_fifty_waiters_share_one_listen_connection_and_one_entry(registry):
     # A long recheck: only the NOTIFY can resolve these waiters in time.
     feed, transactions, outcomes = pg_feed(registry, timedelta(minutes=5))
-    job = FetchPackage(sha256="ab" * 32)
+    job = FetchSealedEnvironment(sha256="ab" * 32)
     lock = job_keys(job).lock
     dsn = registry.db.dsn
     # Another process's feed on the same database (CI: the Compose `central`); not ours to count.

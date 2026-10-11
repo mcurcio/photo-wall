@@ -4,7 +4,7 @@ A row's upstream version is its manifest asset's `(updated_at, id)` (`UpstreamVe
 observation is applied unless it is older than the stored one: a stored NULL version takes any
 observation; a stored version takes only a set one that is not older, compared as the row value
 (changed_at, id). Equal re-applies: the same upstream bytes, so the same facts (a prerelease flag
-may still have changed). `app_releases` (029) and `node_release_observations` (065) both use it.
+may still have changed). `node_release_observations` (065) uses it.
 """
 
 from __future__ import annotations

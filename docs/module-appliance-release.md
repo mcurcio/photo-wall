@@ -1,8 +1,6 @@
 # Central signed release and rollback contract
 
-Status: central release authority, stateless bootstrap, and volatile trial watchdog are implemented and tested in isolation. Complete built-image rollback and physical Pi boot qualification remain pending. This contract supersedes the former Player-local A/B, `SlotStore`, and `PWSTATE` design. Earlier evidence for that design remains historical evidence only.
-
-**This whole signed-release contract is being retired.** [Decision 0009](decisions/0009-minimal-base-and-app-package.md) drops OS-boot signing for the netboot tier and moves the Player out of the signed image entirely, replacing it with the unsigned app-package contract in [The app-package contract (0009)](#the-app-package-contract-0009-unsigned-in-parallel) below. Per 0009 gate #5 the release authority, the ticket/trial machinery, and this whole document are slated for deletion once the 0009 replacement's boot chain is wired and hardware-validated — **not yet done**, so every mechanism below remains live, in the code, and is what a netboot Player actually uses today. Do not remove it and do not treat it as already gone.
+**History: none of this contract exists in the code.** The signed release authority, its tickets and trial watchdog were dropped by migration `015_drop_release_authority.sql`; the last boot-ticket field (`ticket_id` in enrollment) and the Player's boot-context file were deleted in PR 45 (2026-10-10). The unsigned app-package contract that replaced it ([decision 0009](decisions/0009-minimal-base-and-app-package.md), [0010](decisions/0010-github-release-sourcing.md)) and the per-device base path ([0012](decisions/0012-netboot-base-auto-mirror.md)) were removed in turn by [0019](decisions/0019-debian-packaging-with-debhelper.md): `/v1/app/*`, `/v1/netboot/*`, the Player `.deb`, the bootstrapper and the OS agent are gone. Every Pi boots by the node path: a release ships one boot tree, the base squashfs and the node release (`components.json`, the root images and the `.deb`s of the [Debian packaging module](module-debian-packaging.md)), and Central offers the operator's boot selection ([Node control](runbook.md#node-control)). The sections below are kept as the design record of the signed contract only.
 
 ## Signed artifact boundary
 
@@ -76,33 +74,3 @@ The central database migration is `012_release_authority.sql`. Release rootfs by
 Unit and PostgreSQL tests cover canonical release parsing/signatures, immutable registration, accepted/candidate policy, transactionally consumed trials, idempotent and conflicting boot requests, stale tickets/sessions/health, continuous-health promotion, central restart state, stateless bootstrap verification/copy/mount seams, mandatory candidate watchdog arming, and watchdog timeout/acceptance behavior. Dated local-slot and systemd-adapter evidence under [the evidence index](evidence/README.md) exercised useful signing, health, and failure seams but predates this central design and does not qualify it end to end.
 
 Acceptance still requires the exact built image to boot a candidate, fail health, invoke the real reboot path, receive the centrally accepted release on the next PXE boot, and re-enroll without local state. Physical Pi/PXE, power interruption, dual HDMI, and native sustained-health behavior remain separate gates in [validation](validation.md).
-
-## The app-package contract (0009, unsigned, in parallel)
-
-[Decision 0009](decisions/0009-minimal-base-and-app-package.md) adds a second, much smaller
-central contract for shipping the Player, independent of everything above: no shared tables, no
-`ReleaseAuthority` dependency, no signature anywhere. The release catalog
-(`central/content_catalog/catalog.py`, `ReleaseCatalog`) owns it over two tables: `app_releases`
-(one row per GitHub release tag, with its `.deb`'s sha256 and size) and the singleton
-`app_release_policy` (the promoted tag, who promoted it, and the last-good tag). There is no
-manifest signature, no per-device candidate/trial, and no health-based promotion.
-
-| Route | Auth | What it does |
-|---|---|---|
-| `GET /v1/app/manifest` | none (trusted LAN) | Returns the promoted `{version, sha256, size}`; while the promoted `.deb` is not on disk, the last-good one if it is (with neither on disk, the promoted one). 503 `app_unconfigured` if nothing is promoted yet. A promotion records who set it: `auto` (the release sync) or `operator`; the sync never moves an `operator` promotion. |
-| `GET /v1/app/package/{sha256}.deb` | none | Streams the `.deb` bytes from the cache (`O_NOFOLLOW`/`fstat`/regular-file/size-match). 404 `app_package_not_found` unless a release ships that sha256 and its `.deb` is either wanted by the fleet or already on disk. A miss waits up to 30s for the download, then serves or answers 503 `app_<reason>` with `Retry-After`. |
-| `GET /v1/operator/app/releases` | admin token | Lists every release, newest first: `tag`, `is_prerelease`, `deployable` (has a `.deb`), `promoted`, `promoted_by` (`auto`, `operator`, or null) and `has_os_image`. |
-| `POST /v1/operator/app/releases/{tag}/promote` | admin token | Promotes the tag (`promoted_by: operator`) and queues its `.deb` download in the same transaction; 200 `{"status": "promoted"}`. 404 unknown tag, 409 no `.deb`, 422 not a version tag. |
-| `POST /v1/operator/app/releases/refresh` | admin token | Queues a release sync now; 202 `{"status": "polling"}`. |
-
-The sha256 this contract carries is, by the owner's explicit home-LAN ruling, **a corruption check only** — it lets a downloader detect a truncated or garbled `.deb`, never an authorship or authenticity proof; there is no boot-tree hash and no signing key backing it. There is also no auto-rollback: a promoted `.deb` that crashes on boot has no health signal analogous to `/v1/player/boot-health` above, so recovery from a bad promote is manual (re-promote a prior tag). See 0009's ["What can go wrong"](decisions/0009-minimal-base-and-app-package.md#what-can-go-wrong) table for the full list of accepted risks this design trades for simplicity.
-
-This contract is implemented and unit-tested (the catalog above, the Player routes in
-`central/content_routes.py`, the operator routes in `central/app.py`) and is exercised by the bootstrapper (`appliance/provision.py`) in isolation, but nothing above wires it into a real boot yet — see [the appliance builder module](module-appliance-builder.md#the-0009-minimal-base-and-bootstrapper-in-progress) for the current gap.
-
-## The auto-mirror and per-device release path (0012)
-
-[Decision 0012](decisions/0012-netboot-base-auto-mirror.md) adds automatic base-image mirroring and a **per-device** whole-release path on top of the 0009/0010 contract above (which is left untouched — `GET /v1/app/manifest` and its `promoted_tag`/`current_sha256` pointer are neither read nor repurposed). Central discovers every release, caches each needed base squashfs in the `os-images/` subdir of the single cache root (`PHOTO_WALL_CACHE_ROOT`, worker-RW/central-RO — [decision 0013](decisions/0013-unified-cache-root.md) retired the dedicated `PHOTO_WALL_BASE_ROOT` volume and made base serving always-on), and serves each device the base of the version it resolves to. See the [Central cache subsystem](module-central-cache.md). Two operational notes for this module:
-
-- **Auto-rollback is server-side, because the appliance is diskless.** Unlike the signed `appliance_releases` contract above (which records boot health via `/v1/player/boot-health` and rolls back on the device), the 0012 base path keeps rollback on **central**, keyed on the serial: it detects a served target that never reported base-healthy and serves the device's known-good on its next netboot, sticking there so it cannot oscillate. See [the runbook](runbook.md#base-image-auto-mirror-0012).
-- **Base-health is posted by the enrolled `player`, not by the bootstrapper (errata E8).** The `PHOTO_WALL_PER_DEVICE_DEB` path's base-health check-in requires the enrolled player token, and the bootstrapper never enrolls (0009 gate #2) — and `player → appliance` imports are forbidden — so the poster lives in `player/service.py` (`_report_base_health`), fed the served tag via the appliance's origin-handoff. The appliance's 0012 role is only the per-device manifest fetch (`GET /v1/netboot/manifest`, serial-keyed) and the served-tag handoff.

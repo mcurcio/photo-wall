@@ -8,14 +8,22 @@ from __future__ import annotations
 
 import ctypes
 import json
+import logging
 import threading
 from dataclasses import dataclass
 from uuid import UUID
 
-from contracts.node_frame import frame_witness_tag
+from contracts.node_frame import (
+    PICTURE_OPERATIONS_BYTES,
+    PictureOperations,
+    decode_picture_operations,
+    frame_witness_tag,
+    picture_change_text,
+)
 from player.rendering import LocalLayer, OutputComposition
 
-CLIENT_LIBRARY = "/usr/lib/photo-wall-client/libphoto-wall-frame-client.so"
+CLIENT_LIBRARY = "/usr/lib/photo-wall/frame-client/libphoto-wall-frame-client.so"
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -52,6 +60,9 @@ class WaylandFrames:
     def __init__(self, gdk_display):
         self.owner = threading.get_ident()
         self.trials = {}
+        # Per Output: the newest picture operations' text read, and the last ones that decoded.
+        self.picture_texts: dict[str, str] = {}
+        self.operations: dict[str, PictureOperations] = {}
         self.lib = ctypes.CDLL(CLIENT_LIBRARY)  # sealed app path; no base fallback
         self.gdk = ctypes.CDLL("libgdk-3.so.0")
         pointer = ctypes.c_void_p
@@ -63,13 +74,22 @@ class WaylandFrames:
         self.lib.pw_frame_client_create.restype = pointer
         self.lib.pw_frame_client_destroy.argtypes = (pointer,)
         self.lib.pw_frame_client_destroy.restype = None
-        self.lib.pw_frame_client_tag_next_commit.argtypes = (
+        # Frame protocol v4 (1c): every tag names the picture change its buffer was drawn with.
+        self.lib.pw_frame_client_tag_picture_next_commit.argtypes = (
             pointer,
             pointer,
+            ctypes.c_char_p,
             ctypes.c_char_p,
             ctypes.c_char_p,
         )
-        self.lib.pw_frame_client_tag_next_commit.restype = ctypes.c_int
+        self.lib.pw_frame_client_tag_picture_next_commit.restype = ctypes.c_int
+        self.lib.pw_frame_client_picture.argtypes = (
+            pointer,
+            ctypes.c_char_p,
+            ctypes.c_char_p,
+            ctypes.c_uint32,
+        )
+        self.lib.pw_frame_client_picture.restype = ctypes.c_int
         self.lib.pw_frame_client_grant.argtypes = (
             pointer,
             ctypes.c_char_p,
@@ -174,10 +194,35 @@ class WaylandFrames:
             time.clock_gettime_ns(time.CLOCK_BOOTTIME) // 1_000_000,
         )
 
+    def picture(self, output_id: str) -> PictureOperations | None:
+        """The Output's newest picture operations from the shell's `picture` event (frame protocol
+        v4), decoded by contracts.node_frame; None before any arrived. An undecodable one is logged
+        and ignored: the last decoded value stands."""
+        self._thread()
+        raw = ctypes.create_string_buffer(PICTURE_OPERATIONS_BYTES + 1)
+        result = self.lib.pw_frame_client_picture(self.client, output_id.encode(), raw, len(raw))
+        if result < 0:
+            raise RuntimeError("display_picture_protocol_lost")
+        if result == 0:
+            return self.operations.get(output_id)
+        text = raw.value.decode(errors="replace")
+        if self.picture_texts.get(output_id) != text:      # decode (and log) each new text once
+            self.picture_texts[output_id] = text
+            try:
+                decoded = decode_picture_operations(text)
+                if decoded.output_id != output_id:
+                    raise ValueError("picture_operations_output")
+                self.operations[output_id] = decoded
+            except ValueError as error:
+                LOGGER.warning("ignoring undecodable picture operations for %s: %s", output_id, error)
+        return self.operations.get(output_id)
+
     def tag_rendered_buffer(
-        self, gdk_window, grant: FrameGrant, frame_tag: str, primitives=None
+        self, gdk_window, grant: FrameGrant, frame_tag: str, primitives=None, *,
+        picture_change: int | None = None
     ) -> None:
-        """Only call within a successful GLArea render, before GDK's paint commit."""
+        """Only call within a successful GLArea render, before GDK's paint commit. The tag names
+        the picture change the buffer was drawn with (None: neutral, none received)."""
         self._thread()
         surface = self.gdk.gdk_wayland_window_get_wl_surface(self._pointer(gdk_window))
         if primitives is not None:
@@ -191,8 +236,9 @@ class WaylandFrames:
                 raise RuntimeError("display_trial_overlay_failed")
         if (
             not surface
-            or self.lib.pw_frame_client_tag_next_commit(
-                self.client, surface, str(grant.grant_id).encode(), frame_tag.encode()
+            or self.lib.pw_frame_client_tag_picture_next_commit(
+                self.client, surface, str(grant.grant_id).encode(), frame_tag.encode(),
+                picture_change_text(picture_change).encode()
             )
             != 0
         ):

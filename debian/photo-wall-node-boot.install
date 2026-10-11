@@ -1,0 +1,2 @@
+appliance/boot/*.py usr/lib/photo-wall/node-boot/appliance/boot
+appliance/node_boot_handoff.py usr/lib/photo-wall/node-boot/appliance

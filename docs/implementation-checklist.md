@@ -34,7 +34,7 @@ Objective: make [draft PR #2](https://github.com/mcurcio/photo-wall/pull/2) revi
 
 ## Final-revision acceptance
 
-- [ ] Commit the final refactor revision and build its exact Player wheelhouse, central image, worker image, signed appliance image, and PXE tree.
+- [ ] Commit the final refactor revision and build its exact node components (the app root, [Debian packaging module](module-debian-packaging.md)), central image, worker image, and PXE tree.
 - [ ] Rerun the complete two-Player/three-Output demo on that revision. The current harness refuses uncommitted or mismatched inputs.
 - [ ] Complete the authenticated operator-browser walkthrough, including binding and calibration.
 - [ ] Boot the exact image without a writable Player volume and with an empty cache; recover recognized equipment bindings, acquire assets, and render committed content.

@@ -317,7 +317,7 @@ def loop_turn(node, running, session, *, granted):
     loop = BrokerLoop(broker=SimpleNamespace(reconcile=lambda: None), online=online, store=node.store,
                       session=session, driver=SimpleNamespace(current=lambda: running),
                       links=SimpleNamespace(serve_one=lambda: None, remember_grant=lambda: None),
-                      probes=probes, feeds=SimpleNamespace(serve=lambda: None))
+                      probes=probes, feeds=SimpleNamespace(serve=lambda: None), clock=lambda: 1000)
     loop.turn()
     return probes
 
@@ -333,7 +333,8 @@ def test_a_turn_delivers_the_slot_only_with_a_grant(monkeypatch, node):
     probes = loop_turn(node, running, session, granted=True)
     assert [path for _, path, _ in session.requests] == ["/v2/node/evidence", "/v2/node/app-links"]
     assert not node.store.read(OUTBOX)
-    assert [e.kind for e in probes.feed.read(0, incarnation=None).events] == ["app_link_recorded"]
+    assert [e.kind for e in probes.feed.read(0, incarnation=None).events] == [
+        "app_started", "app_link_recorded"]  # each loop is new: it reports the run it first sees
 
 
 def test_every_known_turn_restates_the_owed_relink_with_or_without_a_grant(monkeypatch, node):

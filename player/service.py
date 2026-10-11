@@ -9,18 +9,15 @@ import functools
 import json
 import logging
 import math
-import os
 import queue
 import re
-import secrets
 import signal
-import tempfile
 import threading
 import uuid
 from collections import deque
 from collections.abc import Awaitable
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Literal
 
@@ -44,6 +41,7 @@ from contracts.models import (
     Revocation,
 )
 from contracts.player_control import (
+    CAPABILITIES,
     ControlAck,
     ControlAckResponse,
     ControlAppliedReceipt,
@@ -55,17 +53,15 @@ from player.cache import Cache
 from player.central_link import CentralLink, Session, read_refusal
 from player.executor import AuthorityError, Executor
 from player.identity import Identity, load_identity
-from player.local_app_proof import LocalAppProofClient, LocalProofError
 from player.mainloop import DispatchRefused, LatePosts, LoopLate, MainLoopDispatcher, Tick
 from player.node_app_link import NodeAppLinkClient
 from player.output_discovery import discover_outputs, output_app_id
 from player.probe_responder import ProbeResponder
 from player.rendering import CapacityResult, PrepareResult, PresentationResult, Renderer
-from uplink import watchdog
 from uplink.causes import Cause, UplinkError
 from uplink.clock import RunClockRecord
 from uplink.diagnosis import failure_text
-from uplink.finder import CentralDiscovery, Found, find_central
+from uplink.finder import Found, find_central
 from uplink.locate import LocatedCentral
 from uplink.origin import Origin
 from uplink.resolver import (
@@ -85,9 +81,9 @@ CHUNK_SIZE = 64 * 1024
 BACKOFF = SESSION_BACKOFF
 # A failed media download retries on its own schedule; it is not a liveness contract.
 MEDIA_RETRY_BACKOFF = (1, 5, 15, 60)
-LOCAL_PROOF_RETRY = 5.0
+APP_LINK_RETRY = 5.0
 # How long a thread-to-main handoff may wait for the GLib loop before the Player raises the
-# main_loop_late health fault instead of waiting on a starved loop in silence (G8). Readiness
+# main_loop_late fault instead of waiting on a starved loop in silence (G8). Readiness
 # is left as last sent: a late loop never withdraws prepared playback (E-G8-8 decision).
 DISPATCH_DEADLINE = 2 * REPORT_INTERVAL
 LOG = logging.getLogger("photo_wall.player")
@@ -113,39 +109,25 @@ class MainLoopLate(ServiceError):
 class PlayerConfig(Model):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True, allow_inf_nan=False)
     schema_version: Literal[1] = Field(default=1, alias="schema")
-    # The saved root (R1): written by provisioning only when its root came from mDNS, and
-    # used only when the kernel command line names no Central. Opaque until saved_root():
+    # The saved root (R1): written by the node's handoff stage (/etc/photo-wall/public.json),
+    # and used only when the kernel command line names no Central. Opaque until saved_root():
     # any JSON value loads (no type or length check here), and only saved_root() -- called
     # only when the cmdline names no Central -- validates it, with the one Central-root
     # validator, uplink.origin.Origin.parse_root. So when the cmdline names Central, no
     # saved value of any type or length can stop the Player (U3).
     central_origin: Any = Field(default=None, repr=False)
-    # The base tag this boot's diskless base was served, handed forward by the
-    # appliance bootstrapper on the opt-in per-device path (0012 bead 6). When
-    # set, the enrolled player reports it healthy on /v1/player/base-health so
-    # the latest-verified frontier advances. Absent on the flashed/D0 baseline
-    # and on the 0010 global `.deb` path -- no base-health is posted there.
-    base_running_tag: str | None = Field(default=None, max_length=256)
     # A PEM bundle used instead of the Debian bundle for every Central request this
     # process makes (locate, httpx, websocket): main() builds the one Trust from it.
     ca_file: str | None = Field(default=None, max_length=4096)
     cache_dir: str | None = Field(default=None, max_length=4096)
-    boot_context_file: str = Field(
-        default="/run/photo-wall/boot.json", min_length=1, max_length=4096
-    )
     cache_bytes: int = Field(default=512 * 1024**2, ge=1024**2, le=1024**4)
     decoder_limit: int = Field(default=4, ge=1, le=16)
     texture_budget: int = Field(default=512 * 1024**2, ge=1024**2, le=4 * 1024**3)
-    # Accepted and ignored: R2 makes an http root legal. Kept because the model forbids
-    # unknown keys and older handoffs and configs carry it.
-    allow_http: bool = False
 
     @model_validator(mode="after")
     def trusted_origin(self):
         if self.cache_dir is not None and not Path(self.cache_dir).is_absolute():
             raise ValueError("absolute cache directory required")
-        if not Path(self.boot_context_file).is_absolute():
-            raise ValueError("absolute boot context path required")
         if self.ca_file is not None and not Path(self.ca_file).is_absolute():
             raise ValueError("absolute public CA path required")
         return self
@@ -191,39 +173,26 @@ class State(Model):
     revocations: tuple[Revocation, ...] = Field(max_length=1024)
     identify_output: IdentifyOutput | None = None
     identify_expires_at: Instant | None = None
-    delivery_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{32}$")
-    delivery_sequence: int | None = Field(default=None, ge=1, le=2**63 - 1)
+    delivery_id: str = Field(pattern=r"^[a-f0-9]{32}$")
+    delivery_sequence: int = Field(ge=1, le=2**63 - 1)
 
     @model_validator(mode="after")
-    def coherent_delivery(self):
-        if (self.delivery_id is None) != (self.delivery_sequence is None):
-            raise ValueError("control_delivery_pair")
+    def coherent_identify(self):
         if self.identify_expires_at is not None and self.identify_output is None:
             raise ValueError("identify_expiry_without_request")
-        if (self.delivery_sequence is not None and self.identify_output is not None
-                and self.identify_expires_at is None):
+        if self.identify_output is not None and self.identify_expires_at is None:
             raise ValueError("identify_request_without_expiry")
         return self
 
 
 class BootContext(Model):
-    schema_version: Literal[2] = Field(alias="schema")
-    # None means no boot ticket was issued for this boot -- the signal the
-    # player and central key ticketless enroll and boot-health reporting on
-    # (see enroll(), _report_boot_health, and central/registry.py enroll()).
-    # A netboot (D1) boot always carries a real ticket here
-    # (appliance/bootstrap.py boot()); hardware_boot_context() (D0/flashed)
-    # never had a ticket and now says so honestly instead of synthesizing one.
-    ticket_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{48}$")
+    """The equipment and run this Player enrolls as: the Pi's serial-derived device_id and a
+    fresh `run_id` for this Player process. The run id is not the kernel boot id
+    (`PlayerService.boot_id`, which the node link names); it travels as the enrollment's
+    `boot_id` field, so a restarted Player is a new enrollment."""
+
     device_id: str = Field(pattern=r"^device-[a-f0-9]{64}$")
-    boot_id: str = Field(pattern=r"^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$")
-    release_id: str = Field(pattern=r"^[a-f0-9]{64}$")
-    trial: bool
-    # "volatile": netboot (D1), written by appliance/bootstrap.py boot().
-    # "persistent": flashed (D0), synthesized by hardware_boot_context()
-    # below when no netboot boot context file is present.
-    persistence: Literal["volatile", "persistent"]
-    fault: None = None
+    run_id: str = Field(pattern=r"^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$")
 
 
 class Registration(Model):
@@ -235,11 +204,6 @@ class Registration(Model):
 class Challenge(Model):
     nonce: str = Field(pattern=r"^[a-f0-9]{64}$")
     expires_at: Instant
-
-
-def load_boot_context(path: Path) -> BootContext:
-    with path.open("rb") as stream:
-        return BootContext.model_validate(_json(stream.read(MAX_JSON + 1)))
 
 
 PI_SERIAL_PATH = Path("/sys/firmware/devicetree/base/serial-number")
@@ -283,22 +247,9 @@ def display_serial(raw: bytes | None) -> str | None:
 
 
 def hardware_boot_context(serial_reader: Callable[[], bytes | None] = read_pi_serial) -> BootContext:
-    """Flashed/D0 fallback for when no netboot boot context file exists.
-
-    Derives `device_id` from the Pi hardware serial using the SAME kind+hash
-    scheme as the netboot bootstrap (appliance/bootstrap.py LinuxOps.device_id,
-    kind="pi", via the shared contracts.equipment.equipment_device_id), so one
-    Pi keeps one device_id across tiers (0008: device_id is the immutable
-    serial).
-
-    There is no netboot-ticket source at D0 (there is no boot server to
-    issue one), so `ticket_id` is honestly `None` here -- this is the
-    explicit "no boot ticket" signal `enroll()` and `_report_boot_health`
-    key off of (re-keyed off the ticket itself, not `persistence`): it
-    skips the netboot release-binding entirely and enrolls the player
-    unbound (pending) by serial alone, with no prior boot ticket required.
-    Boot-health / OS-release tracking has no ticket to report against at D0
-    and remains out of scope here.
+    """The Player's boot context: `device_id` from the Pi hardware serial by the one
+    kind+hash scheme (contracts.equipment.equipment_device_id, kind="pi"), so one Pi keeps one
+    device_id (0008: device_id is the immutable serial), and a fresh `run_id` for this run.
     """
     try:
         raw = serial_reader()
@@ -307,27 +258,7 @@ def hardware_boot_context(serial_reader: Callable[[], bytes | None] = read_pi_se
     device_id = equipment_device_id("pi", raw) if raw is not None else None
     if device_id is None:
         raise ServiceError("boot_equipment_identity")
-    return BootContext(
-        schema=2,
-        ticket_id=None,
-        device_id=device_id,
-        boot_id=str(uuid.uuid4()),
-        release_id=secrets.token_hex(32),
-        trial=False,
-        persistence="persistent",
-        fault=None,
-    )
-
-
-def resolve_boot_context(path: Path, *,
-                         serial_reader: Callable[[], bytes | None] = read_pi_serial) -> BootContext:
-    """D1 (netboot): the boot server writes `path` before handing off to the
-    player service; use it verbatim, unmodified. D0 (flashed): no such file
-    exists, so derive an equivalent boot context from the Pi hardware serial.
-    """
-    if path.exists():
-        return load_boot_context(path)
-    return hardware_boot_context(serial_reader)
+    return BootContext(device_id=device_id, run_id=str(uuid.uuid4()))
 
 
 @dataclass(frozen=True)
@@ -375,11 +306,9 @@ class PlayerService:
                  time_client: httpx.AsyncClient | None = None,
                  clock_record: Callable[[], ClockRecord | None] = RunClockRecord().read,
                  websocket_connect=None, cache_factory=Cache, executor_factory=Executor,
-                 app_proof_client: LocalAppProofClient | None = None,
                  node_link_client: NodeAppLinkClient | None = None,
-                 health_path: Path | None = Path("/run/photo-wall/player/service-health.json"),
                  boot_id_path: Path = Path("/proc/sys/kernel/random/boot_id"),
-                 boot_context: BootContext | None = None):
+                 boot_context: BootContext):
         self.config, self.identity, self.outputs = config, identity, outputs
         self.renderer, self.dispatcher = renderer, dispatcher
         self.clock = clock or SystemClock()
@@ -388,9 +317,6 @@ class PlayerService:
                                 time_client=time_client, websocket_connect=websocket_connect)
         self.clock_record = clock_record
         self.cache_factory, self.executor_factory = cache_factory, executor_factory
-        self.app_proof_client = (LocalAppProofClient() if app_proof_client is None
-                                 else app_proof_client)
-        self.health_path = health_path
         try:
             with boot_id_path.open("r") as stream:
                 boot_id = stream.read(37).strip()
@@ -427,12 +353,6 @@ class PlayerService:
         self._task = None
         self.last_fault: str | None = None
         self.last_fault_detail: str | None = None
-        # The authority epoch whose base-health has been reported (0012 bead 6);
-        # None until a check-in lands, then one report per epoch (a re-enroll
-        # bumps the epoch and re-reports; central is monotonic per epoch).
-        self._base_health_epoch: int | None = None
-        self._base_health_sequence_epoch: int | None = None
-        self._base_health_sequence = 0
         self._hello_epoch: int | None = None
         self._control_selection: ControlSelection | None = None
         self._highest_control_sequence = 0
@@ -446,7 +366,7 @@ class PlayerService:
         self._identify_output: str | None = None
         self._identify_deadline: float | None = None
         # Dispatches abandoned at DISPATCH_DEADLINE: while one is unreached the loop is late,
-        # every dispatch is MainLoopLate at once, and run() does not pet the watchdog.
+        # every dispatch is MainLoopLate at once.
         self._late_posts = LatePosts()
 
     def fault(self, code: str, *, detail: str | None = None):
@@ -455,13 +375,11 @@ class PlayerService:
         self.last_fault, self.last_fault_detail = code, detail
 
     def _main_loop_late(self) -> None:
-        """The GLib loop missed a dispatch deadline: raise the health fault, never touch
-        readiness. Central keeps the last readiness it accepted, so committed groups stand; it
+        """The GLib loop missed a dispatch deadline: raise the fault, never touch readiness. Central keeps the last readiness it accepted, so committed groups stand; it
         commits no new group once that report is older than readiness_seconds, and a long
         stall reads as player-silent, as before G8 (E-G8-8 decision: a late loop must not
         withdraw prepared playback)."""
         self.fault("main_loop_late")
-        self._write_health(False, "main_loop_late")
 
     def _render_unbound_diagnostic(self) -> None:
         """Publish Central-link context only on known unbound outputs."""
@@ -505,9 +423,8 @@ class PlayerService:
         one is unreached: a late loop is never a capacity refusal and never fills the
         dispatcher's slots (E-G8-7). A callback that started before the deadline cannot be
         abandoned, so its outcome is awaited and returned, never MainLoopLate: its effects
-        landed (E-G8-10). One that never returns blocks the GLib thread: on a V2 node its
-        probes go unanswered and the broker's probe kill ends that Player; under the V1 unit
-        the watchdog, no longer petted, does."""
+        landed (E-G8-10). One that never returns blocks the GLib thread: its probes go
+        unanswered and the broker's probe kill ends that Player."""
         source, abandon = self._late_posts.post(self.dispatcher, callback)
         loop = asyncio.get_running_loop()
         waiter = loop.create_future()
@@ -570,7 +487,7 @@ class PlayerService:
         return None if self._session is None else self._session.registration
 
     async def locate_central(self) -> LocatedCentral:
-        """await find_central() (R1: cmdline root, else the saved root, else mDNS); keeps the
+        """await find_central() (R1: cmdline root, else the saved root); keeps the
         result for the session. A located origin other than the one that issued the
         registration drops it (Session.relocated), so the next step re-enrolls there.
         Raises UplinkError."""
@@ -632,22 +549,14 @@ class PlayerService:
         return length
 
     async def enroll(self):
-        if self.boot_context is None:
-            raise ServiceError("boot_context")
         session = self.session
         challenge = Challenge.model_validate(await self.request("POST", "/v1/enrollment/challenge",
             body={"public_key": self.identity.public_key}, authenticated=False))
-        # A boot context with no ticket (D0/flashed, and 0009's diskless
-        # bootstrapper) has no `appliance_devices` row to bind against, so
-        # the presence of a ticket -- not `persistence` -- is what tells
-        # central this is a ticketless enroll (0008 baseline).
-        ticket_id = self.boot_context.ticket_id
         enrollment = self.identity.enrollment(
             challenge.nonce,
             self.outputs,
             device_id=self.boot_context.device_id,
-            boot_id=self.boot_context.boot_id,
-            ticket_id=ticket_id,
+            boot_id=self.boot_context.run_id,
         )
         registered = Registration.model_validate(await self.request("POST", "/v1/enrollment/register",
             body=enrollment.model_dump(mode="json"), authenticated=False))
@@ -695,23 +604,15 @@ class PlayerService:
                 raise ServiceError("player_initialization") from error
 
     async def hello_protocol(self) -> None:
-        """Negotiate before either state transport; only this hello's 404 means legacy."""
+        """Negotiate before either state transport."""
         if self.registration is None:
             raise Unauthorized("not_registered")
         epoch = self.registration.authority_epoch
         if self._hello_epoch == epoch:
             return
-        offer = ControlHello(authority_epoch=epoch, schemas=(1, 2),
-                             capabilities=("identify_output",))
-        try:
-            response = await self.request("POST", "/v1/player/hello",
-                                          body=offer.model_dump(mode="json"))
-        except UplinkError as error:
-            if error.cause is Cause.HTTP and error.detail == "status=404":
-                self._control_selection = ControlSelection(authority_epoch=epoch, schema=1)
-                self._hello_epoch = epoch
-                return
-            raise
+        offer = ControlHello(authority_epoch=epoch, schemas=(2,), capabilities=CAPABILITIES)
+        response = await self.request("POST", "/v1/player/hello",
+                                      body=offer.model_dump(mode="json"))
         selected = ControlSelection.model_validate(response)
         if selected.authority_epoch != epoch or selected.schema_version not in offer.schemas:
             raise ServiceError("control_selection_invalid")
@@ -719,48 +620,6 @@ class PlayerService:
             raise ServiceError("control_selection_invalid")
         self._control_selection = selected
         self._hello_epoch = epoch
-
-    async def _report_base_health(self):
-        """One-shot base-image health check-in after enroll (0012 bead 6).
-
-        The diskless base is served per-device by tag; the appliance
-        bootstrapper hands the tag it booted forward as
-        `PlayerConfig.base_running_tag` (public.json). Once enrolled, the player
-        reports that tag healthy on `POST /v1/player/base-health` -- an
-        enrolled-token endpoint that requires NO live plan offer, so even an
-        unbound device advances the latest-verified frontier. Central validates
-        `running_tag == devices.last_served_tag` (the tag it recorded serving
-        this device this boot), so the reported tag is the served tag, never a
-        guess. Best-effort and idempotent per authority epoch: a failed or
-        repeated check-in never disturbs the coordination loop -- it retries on
-        the next enroll. A player with no handed-forward tag (flashed/D0 or the
-        0010 global path) reports nothing.
-        """
-        tag = self.config.base_running_tag
-        if not tag or self.registration is None:
-            return
-        if self._base_health_epoch == self.registration.authority_epoch:
-            return
-        epoch = self.registration.authority_epoch
-        if self._base_health_sequence_epoch != epoch:
-            self._base_health_sequence_epoch = epoch
-            self._base_health_sequence = 0
-        self._base_health_sequence += 1
-        try:
-            response = await self.request("POST", "/v1/player/base-health", body={
-                "authority_epoch": epoch,
-                "sequence": self._base_health_sequence,
-                "running_tag": tag,
-                "healthy": True,
-            })
-            if response.get("accepted") is not True:
-                raise ServiceError("base_health_rejected")
-            self._base_health_epoch = epoch
-        except (ServiceError, Unauthorized, StaleFeedback, httpx.HTTPError,
-                UplinkError, asyncio.TimeoutError) as error:
-            LOG.info("player base-health check-in deferred: %s",
-                     error if isinstance(error, (ServiceError, UplinkError))
-                     else type(error).__name__)
 
     def _apply_state(self, state: State):
         self._main()
@@ -771,12 +630,7 @@ class PlayerService:
             raise ServiceError("state_authority")
         sequence = state.delivery_sequence
         with self._lock:
-            if sequence is None:
-                # An old pod can answer during a mixed rollout. Its unsequenced state
-                # cannot supersede a v2 delivery already observed in this epoch.
-                if self._highest_control_sequence:
-                    return "superseded"
-            elif sequence < self._highest_control_sequence:
+            if sequence < self._highest_control_sequence:
                 return "superseded"
             elif sequence == self._highest_control_sequence:
                 if state.delivery_id != self._highest_control_delivery_id:
@@ -832,9 +686,8 @@ class PlayerService:
             unbound = self._unbound_outputs
             selection = self._control_selection
             cue = state.identify_output if (
-                sequence is not None and selection is not None
+                selection is not None
                 and selection.authority_epoch == configuration.authority_epoch
-                and selection.schema_version == 2
                 and "identify_output" in selection.capabilities
             ) else None
             deadline = None
@@ -851,9 +704,8 @@ class PlayerService:
     async def _ack_control(self, state: State, result: str) -> None:
         session = self._session
         selection = self._control_selection
-        if (result == "superseded" or state.delivery_id is None
+        if (result == "superseded"
                 or session is None or session.registration is None or selection is None
-                or selection.schema_version != 2
                 or selection.authority_epoch != session.registration.authority_epoch):
             return
         registration = session.registration
@@ -956,56 +808,6 @@ class PlayerService:
                     (self._plan.authority_epoch, self._plan.plan_id, self._plan.revision)
                 and any(layer.assignment_id == observation.assignment_id for layer in self._plan.layers))
 
-    def _health(self):
-        return self._health_status()[0]
-
-    def _health_status(self):
-        """One renderer-thread evaluation owns both health and its public reason."""
-        self._main()
-        if self.executor is None:
-            return False, "executor"
-        if self._configuration is None:
-            return False, "configuration"
-        if not self.mapping.healthy():
-            return False, "clock"
-        if not self.renderer.capacity(()).available:
-            return False, "renderer_capacity"
-        return True, "healthy"
-
-    def _write_health(self, healthy: bool, reason: str | None = None):
-        if self.health_path is None:
-            return
-        if reason is None:
-            reason = "healthy" if healthy else "disconnected"
-        if healthy and not self.boot_id:
-            healthy, reason = False, "identity"
-        if (reason not in {"healthy", "executor", "identity", "configuration", "clock",
-                           "renderer_capacity", "disconnected", "main_loop_late"}
-                or (reason == "healthy") != bool(healthy)):
-            raise ValueError("inconsistent health reason")
-        body = dict(boot_id=self.boot_id, sampled_monotonic=self.clock.monotonic(),
-                    player_id=self.registration.player_id if self.registration else None,
-                    authority_epoch=self.registration.authority_epoch if self.registration else None,
-                    persistence="volatile", healthy=bool(healthy), health_reason=reason,
-                    clock=asdict(self.mapping.diagnostics))
-        temporary = None
-        try:
-            # The root-owned /run/photo-wall parent protects boot.json; this
-            # Player-owned child is the only place health publication may write.
-            fd, temporary = tempfile.mkstemp(prefix=".service-health-", dir=self.health_path.parent)
-            with os.fdopen(fd, "w") as stream:
-                os.fchmod(stream.fileno(), 0o600)
-                json.dump(body, stream, allow_nan=False, separators=(",", ":"))
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(temporary, self.health_path)
-        except (OSError, ValueError):
-            self.fault("health_storage")
-        finally:
-            if temporary is not None:
-                with contextlib.suppress(FileNotFoundError):
-                    os.unlink(temporary)
-
     def _authorized(self, job: Download):
         with self._lock:
             plan, configuration = self._plan, self._configuration
@@ -1098,9 +900,13 @@ class PlayerService:
                 verified_at = self.clock.monotonic()
             await asyncio.sleep(.1)
 
+    @staticmethod
+    def _state(body: dict) -> State:
+        return State.model_validate(body)
+
     async def poll_state(self):
         body, _ = await self._request_with_receipt("GET", "/v1/player/state")
-        state = State.model_validate(body)
+        state = self._state(body)
         result = await self.dispatch(lambda: self._apply_state(state))
         await self._ack_control(state, result)
 
@@ -1163,16 +969,11 @@ class PlayerService:
             try:
                 await self.poll_state()
                 readiness, observations = await self.dispatch(self._feedback)
-                healthy, reason = await self.dispatch(self._health_status)
             except MainLoopLate:
                 # Nothing is posted: the readiness Central holds stays (E-G8-8 decision).
                 self._main_loop_late()
                 await asyncio.sleep(max(0, REPORT_INTERVAL - (asyncio.get_running_loop().time() - started)))
                 continue
-            # The signed-release boot-health trial has been retired (0009):
-            # every boot is ticketless, so there is no per-boot release to
-            # report against and no watchdog to disarm.
-            self._write_health(healthy, reason)
             if readiness is not None:
                 try:
                     await self.request("POST", "/v1/player/readiness", body=readiness.model_dump(mode="json"))
@@ -1182,9 +983,6 @@ class PlayerService:
                 if len(self._outgoing) == self._outgoing.maxlen:
                     self.fault("observation_capacity")
                 self._outgoing.append(observation)
-            # A completed state/readiness exchange with the GLib thread answering: the
-            # session is live (M5; the unit's WatchdogSec is the deadline owner).
-            watchdog.pet()
             await asyncio.sleep(max(0, REPORT_INTERVAL - (asyncio.get_running_loop().time() - started)))
 
     async def _observation_loop(self):
@@ -1208,7 +1006,7 @@ class PlayerService:
                 body = _json(message)
                 if body.pop("type", None) != "state":
                     raise ServiceError("message_type")
-                state = State.model_validate(body)
+                state = self._state(body)
                 try:
                     result = await self.dispatch(lambda: self._apply_state(state))
                 except MainLoopLate:
@@ -1218,55 +1016,29 @@ class PlayerService:
                 await self._ack_control(state, result)
             raise ServiceError("session_closed")
 
-    async def _local_app_proof_loop(self) -> None:
-        """Keep OS-local evidence separate from Central liveness and rendering.
+    async def _app_link_loop(self) -> None:
+        """Link this process to its latest applied control receipt over the node's app-link
+        socket, apart from Central liveness and rendering.
 
-        Only the process-local enrollment key enters the blocking socket worker.
-        A re-enrollment or relocation replaces the Session object and invalidates
-        that worker before it signs or sends a response.
+        Only the process-local enrollment key enters the blocking socket worker. A new
+        delivery, a re-enrollment or a relocation invalidates that worker before it signs or
+        sends a response.
         """
-        recorded_session: Session | None = None
-        recorded_applied: tuple[Session, ControlAppliedReceipt] | None = None
-        recorded_node: tuple[Session, ControlAppliedReceipt] | None = None
+        recorded: tuple[Session, ControlAppliedReceipt] | None = None
         while self._proof_active and not self._stop.is_set():
             if self._relink.is_set():
                 # The broker could not deliver the recorded link: prove it again.
                 self._relink.clear()
-                recorded_applied = recorded_node = None
+                recorded = None
             session = self._session
             registration = session.registration if session is not None else None
             generation = self._proof_generation
-            if (registration is not None and session is not recorded_session
-                    and self.boot_context is not None and self.boot_id):
-                def current() -> bool:
-                    return (self._proof_active and self._proof_generation == generation
-                            and not self._stop.is_set() and self._session is session
-                            and session.registration is registration)
-
-                try:
-                    outcome = await asyncio.to_thread(
-                        self.app_proof_client.exchange, identity=self.identity,
-                        player_id=registration.player_id,
-                        authority_epoch=registration.authority_epoch,
-                        device_id=self.boot_context.device_id,
-                        kernel_boot_id=self.boot_id,
-                        enrollment_current=current,
-                    )
-                    if outcome == "recorded":
-                        recorded_session = session
-                        LOG.debug("player: OS-local app proof recorded")
-                except (LocalProofError, OSError, TimeoutError) as error:
-                    LOG.debug("player: OS-local app proof unavailable: %s",
-                              str(error) if isinstance(error, LocalProofError)
-                              else type(error).__name__)
-                except Exception as error:
-                    LOG.warning("player: OS-local app proof failed: %s", type(error).__name__)
             with self._lock:
                 applied = self._applied_proof_receipt
                 revision = self._control_proof_revision
             if (registration is not None and applied is not None
-                    and applied[0] is session and (applied != recorded_applied or applied != recorded_node)
-                    and self.boot_context is not None and self.boot_id):
+                    and applied[0] is session and applied != recorded
+                    and self.boot_id):
                 receipt = applied[1]
 
                 def applied_current() -> bool:
@@ -1281,7 +1053,7 @@ class PlayerService:
 
                 try:
                     outcome = await asyncio.to_thread(
-                        self.app_proof_client.exchange_applied, identity=self.identity,
+                        self.node_link_client.exchange_applied, identity=self.identity,
                         player_id=registration.player_id,
                         authority_epoch=registration.authority_epoch,
                         device_id=self.boot_context.device_id,
@@ -1289,30 +1061,12 @@ class PlayerService:
                         enrollment_current=applied_current,
                     )
                     if outcome == "recorded" and applied_current():
-                        recorded_applied = applied
-                        LOG.debug("player: OS-local applied control proof recorded")
-                except (LocalProofError, OSError, TimeoutError) as error:
-                    LOG.debug("player: OS-local applied control proof unavailable: %s",
-                              str(error) if isinstance(error, LocalProofError)
-                              else type(error).__name__)
+                        recorded = applied
+                except (ValueError, OSError, TimeoutError) as error:
+                    LOG.debug("player: node process linkage unavailable: %s", type(error).__name__)
                 except Exception as error:
-                    LOG.warning("player: OS-local applied control proof failed: %s",
-                                type(error).__name__)
-                if applied != recorded_node:
-                    try:
-                        node_result = await asyncio.to_thread(
-                            self.node_link_client.exchange_applied, identity=self.identity,
-                            player_id=registration.player_id,
-                            authority_epoch=registration.authority_epoch,
-                            device_id=self.boot_context.device_id,
-                            kernel_boot_id=self.boot_id, receipt=receipt,
-                            enrollment_current=applied_current,
-                        )
-                        if node_result == "recorded" and applied_current():
-                            recorded_node = applied
-                    except (ValueError, OSError, TimeoutError) as error:
-                        LOG.debug("player: node process linkage unavailable: %s", type(error).__name__)
-            await asyncio.sleep(LOCAL_PROOF_RETRY)
+                    LOG.warning("player: node process linkage failed: %s", type(error).__name__)
+            await asyncio.sleep(APP_LINK_RETRY)
 
     async def run(self):
         self._loop = asyncio.get_running_loop()
@@ -1331,9 +1085,8 @@ class PlayerService:
                         await self.locate_central()
                     if self.registration is None:
                         await self.enroll()
-                        await self._report_base_health()
                     if proof_task is None:
-                        proof_task = asyncio.create_task(self._local_app_proof_loop())
+                        proof_task = asyncio.create_task(self._app_link_loop())
                     await self.hello_protocol()
                     # Reconnection reconciles authority before any download work. A late GLib
                     # loop does not end the session here: its loops raise main_loop_late.
@@ -1381,11 +1134,6 @@ class PlayerService:
                     with self._lock:
                         self._offered = False
                         self._jobs = ()
-                    self._write_health(False)
-                    # One completed cycle, whatever its outcome (M5), unless the GLib loop has
-                    # not reached an abandoned dispatch: a stuck loop is the watchdog's to end.
-                    if not self._late_posts.late:
-                        watchdog.pet()
                 if not self._stop.is_set():
                     await asyncio.sleep(BACKOFF[min(attempt, 3)])
                     attempt = min(attempt + 1, 3)
@@ -1438,6 +1186,8 @@ class PlayerService:
 class UnavailableRenderer:
     """Registration remains possible without falsely acknowledging native output."""
 
+    gl_renderer = None  # no GL context: nothing to report
+
     def prepare(self, layer):
         return PrepareResult("failed", "capacity")
 
@@ -1463,23 +1213,16 @@ def central_finder(config: PlayerConfig, resolution: Configured | Unconfigured, 
     """R1/U3's wiring for the Player (design §2.3): the cmdline root wins outright, and then
     the saved root (config.central_origin) is never parsed or validated, only noted as
     ignored; without a cmdline root the saved root is validated (UplinkError when it is not a
-    Central root) and used; mDNS is built only when resolution is Unconfigured and nothing is
-    saved. The zeroconf import is deferred to that branch, so `import player.service` never
-    pulls it in."""
+    Central root) and used. Neither: find_central fails "not_discovered" and the cycle
+    retries."""
     saved: Origin | None = None
-    discovery: CentralDiscovery | None = None
     if isinstance(resolution, Configured):
         if config.central_origin is not None:
             LOG.info("player: the saved central_origin is ignored: the kernel command line "
                      "names %s", resolution.root)
     else:
         saved = config.saved_root()
-        if saved is None:
-            from player.mdns_discovery import MdnsCentralDiscovery
-
-            discovery = MdnsCentralDiscovery()
-    return functools.partial(find_central, resolution, transport=transport, saved=saved,
-                             discovery=discovery)
+    return functools.partial(find_central, resolution, transport=transport, saved=saved)
 
 
 def build_finder(config: PlayerConfig, *, transport: Transport,
@@ -1508,7 +1251,7 @@ def main():
         LOG.error("player: %s", failure_text(error, clock=None))
         raise SystemExit(1) from None
     identity = load_identity()
-    boot_context = resolve_boot_context(Path(config.boot_context_file))
+    boot_context = hardware_boot_context()
     discovery = discover_outputs()
     import gi
     gi.require_version("Gtk", "3.0")
@@ -1569,8 +1312,8 @@ def main():
     Tick(GLib, 33, tick)
     service.start()
     # Probes are answered at control dispatch's priority (own one-slot lane), never here.
-    ProbeResponder(dispatcher, on_relink=service.request_relink).start()
-    watchdog.ready()    # Type=notify: started; WatchdogSec runs from here (M5)
+    ProbeResponder(dispatcher, on_relink=service.request_relink,
+                   gl_renderer=lambda: renderer.gl_renderer).start()
     with contextlib.suppress(KeyboardInterrupt):
         loop.run()
 

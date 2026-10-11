@@ -1,5 +1,7 @@
 # 2026-10-01 Player node fix: real-PID1 scenarios automated, first local result
 
+> **Historical record.** The builders and tools named below (`build_node_components.py`, `build_node_pid1_fixture.py`) were deleted by [0019](../decisions/0019-debian-packaging-with-debhelper.md); the current build is the [Debian packaging module](../module-debian-packaging.md).
+
 Scope: the node fix at `c30025b` (a rebooted Player re-enrolls and supersedes its previous boot;
 an app switch converges locally on the latest stage and reports its effects, with no Central
 round trip). Its four real-systemd scenarios are now automated tests, not a by-hand procedure:

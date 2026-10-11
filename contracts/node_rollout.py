@@ -1,7 +1,7 @@
-"""Canonical immutable CI qualification and live D17 evidence domains.
+"""The exact-image qualification record the release pipeline retains, and canonical JSON.
 
-Hashes identify exact reports, not an operator's assertion of compatibility.
-Signature verification and publication belong to infrastructure adapters.
+Hashes identify exact reports, not an operator's assertion of compatibility. The record is
+evidence kept beside a release (scripts/node_rollout_image_check.py); nothing signs or reads it.
 """
 from __future__ import annotations
 
@@ -10,12 +10,6 @@ import math
 import re
 from hashlib import sha256
 
-from contracts.strict_json import loads_object
-
-QUALIFICATION_DOMAIN = b"photo-wall-image-qualification-v1\0"
-REVOCATION_DOMAIN = b"photo-wall-image-qualification-revocations-v1\0"
-CI_LIVE_DOMAIN = b"photo-wall-rollout-ci-v1\0"
-GUARD_LIVE_DOMAIN = b"photo-wall-rollout-guard-v1\0"
 REPORT_CATEGORIES = ("compatibility_matrix", "fence_contract", "readiness_contract")
 MAX_QUALIFICATION_BYTES = 131072
 _HEX = re.compile(r"[0-9a-f]{64}\Z")
@@ -82,8 +76,3 @@ def validate_qualification(value: dict) -> dict:
     if len(canonical(value)) > MAX_QUALIFICATION_BYTES:
         raise ValueError("qualification_too_large")
     return value
-
-
-def parse_qualification(raw: bytes) -> dict:
-    value = loads_object(raw, max_bytes=MAX_QUALIFICATION_BYTES)
-    return validate_qualification(value)

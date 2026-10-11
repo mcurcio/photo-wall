@@ -6,27 +6,27 @@ import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 from test_coordination import setup_players
-from test_registry import ADMIN, enroll
+from test_registry import ADMIN, enroll, hello
 
 from central.app import create_app
-from central.media_ports import SourceConfigurationReceipt
 from contracts.models import PlayerConfiguration, Readiness
 
 
 def test_operator_source_scene_program_workflow_and_player_originated_session(registry):
     player = setup_players(registry, count=1)[0]
+    hello(registry, player)
     app = create_app(registry.db, registry.clock, ADMIN)
     operator = {"Authorization": "Bearer " + ADMIN}
     appliance = {"Authorization": "Bearer " + player["token"]}
     with TestClient(app) as client:
-        source = {"schema": 1, "source_ref": "source:1", "connection_ref": "library", "favorites": True}
-        configured = client.put(
-            "/v1/operator/sources/source:1", json=source, headers=operator,
-        ).json()
-        assert SourceConfigurationReceipt.model_validate(configured, strict=True).model_dump() == {
-            "source_ref": "source:1", "created": True,
-        }
-        assert client.put("/v1/operator/sources/source:1", json={**source, "favorites": False}, headers=operator).status_code == 409
+        connection = client.post("/v1/operator/library/connections", headers=operator, json={
+            "name": "library", "url": "http://immich.invalid", "key": "PUBLIC-FIXTURE-KEY-1234",
+        }).json()["connection_ref"]
+        draft = client.post("/v1/operator/photo-drafts", headers=operator, json={
+            "query": {"connection_ref": connection, "favourites_only": True}}).json()["draft_ref"]
+        saved = client.post(f"/v1/operator/photo-drafts/{draft}/save", headers=operator,
+                            json={"name": "source"})
+        assert (saved.status_code, saved.json()) == (200, {"source_ref": "source:1"})
         scene = {"scene_id": "night", "loop": True, "cycle_seconds": 30,
                  "contributions": [{"target": "frame:frame-0", "kind": "black"}]}
         assert client.put("/v1/operator/scenes/night", json=scene, headers=appliance).status_code == 401
@@ -129,6 +129,7 @@ def test_operator_unbind_endpoint_reverses_binding_and_updates_pending_queue(reg
 
 def test_live_session_rejects_retired_or_wrong_epoch_authority(registry):
     player = setup_players(registry, count=1)[0]
+    hello(registry, player)
     app = create_app(registry.db, registry.clock, ADMIN)
     with TestClient(app) as client:
         with pytest.raises(WebSocketDisconnect) as unauthorized:

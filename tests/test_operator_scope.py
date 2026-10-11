@@ -27,13 +27,34 @@ def _admin_routes(app: FastAPI) -> set[str]:
 
 def test_every_admin_route_of_the_real_app_is_under_the_cookie_path():
     app = create_app(Database("postgresql://unused@127.0.0.1:1/unused"), ManualClock(0), ADMIN,
-                     run_scheduler=False, mdns_enabled=False)
+                     run_scheduler=False)
     routes = _admin_routes(app)
     # Non-vacuous: console callers of node and calibration routes are found.
-    assert {"/v1/operator/node/status", "/v1/operator/frames/{frame_id}/calibration-capability",
-            "/v1/operator/fleet"} <= routes
+    assert {"/v1/operator/node/hosts", "/v1/operator/frames/{frame_id}/calibration-capability",
+            "/v1/operator/app/releases/refresh"} <= routes
     assert COOKIE_PATH == OPERATOR_PREFIX
     assert sorted(path for path in routes if not path.startswith(OPERATOR_PREFIX)) == []
+
+
+# The operator session itself: sign-in and sign-out are the only operator routes without the login.
+SESSION_ROUTES = {("POST", "/v1/operator/session"), ("DELETE", "/v1/operator/session")}
+
+
+def test_every_operator_route_of_the_real_app_requires_the_operator_login():
+    """Per method and path, so one route losing its `admin` dependency (a GET beside a guarded
+    POST) fails here, whichever slice added it."""
+    app = create_app(Database("postgresql://unused@127.0.0.1:1/unused"), ManualClock(0), ADMIN,
+                     run_scheduler=False)
+    admin = app.state.operator_auth.admin
+    open_routes = {(method, route.path) for route in app.routes
+                   if isinstance(route, APIRoute) and route.path.startswith(OPERATOR_PREFIX)
+                   and not _guarded(route.dependant, admin) for method in route.methods}
+    assert open_routes == SESSION_ROUTES
+    # Non-vacuous: the Power tab's routes are among the guarded ones.
+    guarded = {(method, route.path) for route in app.routes
+               if isinstance(route, APIRoute) and _guarded(route.dependant, admin) for method in route.methods}
+    assert {("GET", "/v1/operator/frames/{frame_id}/power"),
+            ("PUT", "/v1/operator/displays/{display_id}/power-settings")} <= guarded
 
 
 def test_require_scoped_refuses_a_direct_or_nested_admin_route_outside_the_prefix():

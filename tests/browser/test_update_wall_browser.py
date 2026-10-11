@@ -22,7 +22,7 @@ from itertools import count
 
 import pytest
 from console_tasks import connect, visit
-from operator_harness import operator_server, reload_after, report_readiness
+from operator_harness import operator_server, reload_after, report_readiness, run_page_clock
 from playwright.sync_api import expect
 from test_node_boot import cold_setup
 from test_registry import enroll
@@ -39,15 +39,11 @@ pytestmark = pytest.mark.skipif(
 )
 
 OLD_APP = "11" * 32
-OPEN = {"effective_state": "open", "state": "open", "generation": 7, "reason": None}
-CLOSED = {"effective_state": "closed", "state": "closed", "generation": 6, "reason": "never_certified",
-          "changed_at": 1_759_363_000}
 JOURNEY = "#/releases/update/v9.0.0"
 PUT_TITLE = "Put release v9.0.0 on the wall?"
 REBOOT = "Put it on the wall and reboot"
 NO_REBOOT = "No Player is rebooted; each gets it at its next boot."
 KEEP_WORDS = "These are the Players this console knows. Select is fleet-wide: any other Pi that boots by node path is offered deployment"
-GATE_CLOSED_KEEP = "Each Player is offered it at its next boot; this page cannot reboot them while the gate is closed."
 TRIED_RUNNING = "App Effect Broker reported the staged app running"
 SELECT_SCOPE = ("Every Player that boots by node path from now on is offered this deployment, including Players "
                 "Central has not seen. Central cannot list which Players will boot.")
@@ -62,15 +58,13 @@ class Fleet:
 
     _ids = count(1)
 
-    def __init__(self, page, devices, gate=OPEN, accepted=True):
-        self.page, self.gate, self.target_app = page, gate, None
+    def __init__(self, page, devices, accepted=True):
+        self.page, self.target_app = page, None
         self.readiness = {"readiness": "ready", "readiness_reason": None, "missing_bytes": 0}
         self.boxes = {device: {"boot": f"boot-{next(self._ids)}", "linked": OLD_APP,
                                "acceptances": [OLD_APP] if accepted else [], "commands": [], "operations": []}
                       for device in devices}
         self.reboots, self.stages, self.begins, self.samples = [], [], [], []
-        page.route("**/v1/operator/node/status", lambda route: self._json(
-            route, {"transport_enabled": True, "effect_gate": self.gate}))
         page.route(re.compile(r".*/v1/operator/node/devices/[^/]+(/[a-z-]+)?$"), self._device)
         page.route("**/v1/operator/node/app-qualifications/*/sample", self._sample)
         page.route("**/v1/operator/node/releases", self._releases)
@@ -101,7 +95,7 @@ class Fleet:
         if request.method == "GET" and tail == "":
             return self._json(route, {"device_id": device, "device_generation": 3, "read_at": 1_759_363_300,
                                       "sessions": self._sessions(box), "reboot_commands": box["commands"],
-                                      "boot_claims": [], "deprecated_boot": None, "display_outputs": []})
+                                      "boot_claims": [], "display_outputs": []})
         if request.method == "GET" and tail == "app-attempts":
             return self._json(route, {"device_id": device, "generation": 3, "read_at": 1_759_363_300,
                                       "operations": box["operations"], "qualification": {
@@ -375,27 +369,6 @@ def test_try_samples_then_stages_then_looks_and_back_out_reboots_only_the_tried_
         assert fleet.reboots == [tried_device] and puts == [] and fleet.stages == [tried_device]
 
 
-def test_a_closed_gate_sends_no_stage_or_reboot_and_put_is_select_alone(page, registry, monkeypatch):
-    release, wall = _start(registry, monkeypatch)
-    with operator_server(registry.db, registry.clock) as origin:
-        fleet = Fleet(page, [device for _, device in wall], gate=CLOSED)
-        fleet.target_app = release.app_environment.environment_sha256
-        puts = _writes(page, "PUT", "/boot-policy")
-        _journey(page, origin, registry)
-        choose = _section(page, "Choose")
-        expect(choose).to_contain_text("Try unavailable while the effect gate is closed.")
-        expect(choose.get_by_role("link", name=re.compile("^Try on"))).to_have_count(0)
-        expect(choose).to_contain_text(GATE_CLOSED_KEEP)
-        dialog = _put(page, "Select for every boot", says=["Selects v9.0.0 for every boot.", NO_REBOOT,
-                                                           "Ready: Central has every file of v9.0.0."])
-        expect(dialog.get_by_role("list", name="Players this page reboots", exact=True)).to_have_count(0)
-        keep = _section(page, "Put on the wall")
-        expect(keep).to_contain_text(GATE_CLOSED_KEEP, timeout=10_000)
-        expect(keep.get_by_role("button", name="Resume", exact=True)).to_have_count(0)
-        _settle(page, times=4)
-        assert len(puts) == 1 and fleet.reboots == [] and fleet.stages == []
-
-
 def test_a_base_changing_target_withdraws_try_with_its_words(page, registry, monkeypatch):
     cold_setup(registry)  # a selection on another base
     release, wall = _start(registry, monkeypatch)
@@ -581,7 +554,7 @@ def test_the_first_reboot_waits_for_centrals_download_then_rolls(page, registry,
         _settle(page, times=4)
         assert fleet.reboots == []
         fleet.readiness = {"readiness": "ready", "readiness_reason": None, "missing_bytes": 0}
-        page.clock.run_for(30_000)  # the next release read
+        run_page_clock(page, 30_000)  # the next release read
         _settle(page, times=2)
         assert len(fleet.reboots) == 1
 
@@ -625,7 +598,7 @@ def test_a_refused_put_starts_no_rolling(page, registry, monkeypatch):
         with registry.db.transaction() as conn:
             [deployment] = [row["deployment_id"] for row in conn.execute("SELECT deployment_id FROM node_deployments")]
         NodeBootService(NodeSessions(registry.db, registry.clock, NodeControlConfig("node-test"))).select(deployment, 0)
-        page.clock.run_for(30_000)  # the next release read
+        run_page_clock(page, 30_000)  # the next release read
         keep = _section(page, "Put on the wall")
         expect(keep.get_by_role("status")).to_have_text("Paused · 0 of 3 Players on the selection", timeout=10_000)
         _settle(page, times=4)

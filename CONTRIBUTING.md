@@ -69,6 +69,14 @@ Preserve two runtime boundaries in every implementation:
 - [Player provisioning](docs/requirements.md#player-provisioning) is plug-and-play PXE: a Player must appear in the central system without local setup.
 - [The central media boundary](docs/requirements.md#central-media-boundary) keeps Players unaware of Immich. Players obtain media exclusively through the central Photo Wall service; Immich-specific integration belongs centrally.
 
+## Packaging the Node's software
+
+The Node's software is built as Debian packages by one debhelper source package ([Debian packaging module](docs/module-debian-packaging.md), [decision 0019](docs/decisions/0019-debian-packaging-with-debhelper.md)). Three rules bind every change to it:
+
+- **No hand-rolled packaging code.** No Python or shell stages package files, writes control files or calls `dpkg-deb`; add files to `debian/*.install` and Depends to `debian/control`. Build-time Python only checks imports, seals a root or writes the release contract.
+- **OS features go in rpi-image-gen layers** (`appliance/rpi_image_gen/`), never in a Photo Wall package's Depends (SSH is the example).
+- **Prove packages through the built artifact:** `tests/debs` runs against a real `debian-packaging/build-repo.sh` output, and the PID1 scenarios boot the built images.
+
 ## Choose the right evidence
 
 | Environment | Useful checks | Limits |

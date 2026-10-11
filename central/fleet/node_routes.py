@@ -1,4 +1,4 @@
-"""Mounted V2 node HTTP composition; effect rollout admission remains default closed."""
+"""Mounted V2 node HTTP composition."""
 from __future__ import annotations
 
 import asyncio
@@ -9,11 +9,17 @@ from uuid import UUID
 from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse, Response
 
-from central.content_routes import ClientDisconnected, stream_opened, until_disconnect
+from central.content_routes import (
+    ClientDisconnected,
+    error_response,
+    stream_opened,
+    until_disconnect,
+)
 from central.content_wiring import ContentServices
 from central.coordination import Coordinator
 from central.db import Database
 from central.fleet.bytes import OfferByteReader
+from central.fleet.models import FleetError
 from central.fleet.node_acceptance import NodeAcceptance
 from central.fleet.node_app_links import NodeAppLinks
 from central.fleet.node_boot import NodeBootService
@@ -26,7 +32,6 @@ from central.fleet.node_observations import NodeObservations
 from central.fleet.node_release_catalog import NodeReleaseCatalog
 from central.fleet.node_sessions import NodeControlConfig, NodeControlError, NodeSessions
 from central.fleet.principal import PrincipalError
-from central.fleet.rollout_gate import RolloutEffectGate, RolloutGateError, ServingImageVerifier
 from central.registry import Registry
 from contracts.node_app_link import MAX_NODE_LINK_BYTES
 from contracts.node_boot import MAX_NODE_BOOT_BYTES, encode_node_boot_offer, parse_node_boot_request
@@ -63,17 +68,15 @@ def _operator_reboot(raw: bytes) -> OperatorReboot:
 
 
 def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
-                      admin: Callable[..., None], coordinator: Coordinator, config: NodeControlConfig | None = None,
-                      serving_verifier: ServingImageVerifier | None = None,
+                      admin: Callable[..., None], coordinator: Coordinator, config: NodeControlConfig,
                       content: ContentServices | None = None) -> None:
     sessions = NodeSessions(db, clock, config)
     ingest, observations = NodeIngest(sessions), NodeObservations(sessions)
     display = NodeDisplay(sessions, runtime=coordinator)
     boots = NodeBootService(sessions, publisher=content.publisher if content else None)
     bytes_reader = OfferByteReader(content.reader if content else None)
-    effect_gate = RolloutEffectGate(db, serving_verifier=serving_verifier)
-    commands = NodeCommands(sessions, effect_gate)
-    lifecycle = NodeLifecycle(sessions, effect_gate)
+    commands = NodeCommands(sessions)
+    lifecycle = NodeLifecycle(sessions)
     links = NodeAppLinks(sessions)
     acceptance = NodeAcceptance(sessions)
     publications = NodeReleaseCatalog(sessions, readiness=content.readiness if content else None)
@@ -89,6 +92,14 @@ def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
             response.headers["Cache-Control"] = "private, no-store"
         return response
 
+    @app.exception_handler(FleetError)
+    async def fleet_error(_request: Request, exc: FleetError) -> JSONResponse:
+        """A spent daily quota (429) retries after the day ends; the offer bytes' 503 carries
+        its own Retry-After."""
+        retry_after = (max(1, 86400 - int(clock.utc()) % 86400) if exc.status == 429
+                       else exc.retry_after)
+        return error_response(exc.code, exc.status, retry_after=retry_after)
+
     @app.exception_handler(NodeControlError)
     async def node_error(_request: Request, error: NodeControlError):
         return JSONResponse({"error": error.code, **error.details}, status_code=error.status)
@@ -96,7 +107,7 @@ def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
     async def invoke(function, *args):
         try:
             return await asyncio.to_thread(function, *args)
-        except (RolloutGateError, PrincipalError) as exc:
+        except PrincipalError as exc:
             raise NodeControlError(str(exc), 503) from exc
         except NodeControlError:
             raise
@@ -105,7 +116,6 @@ def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
 
     async def body(request: Request, limit: int) -> bytes:
         """Bound streamed content even when Content-Length is absent or dishonest."""
-        sessions.require_enabled()
         declared = request.headers.get("content-length")
         if declared is not None and declared.isdigit() and int(declared) > limit:
             raise NodeControlError("node_body_too_large", 413)
@@ -115,14 +125,6 @@ def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
                 raise NodeControlError("node_body_too_large", 413)
             data.extend(chunk)
         return bytes(data)
-
-    @app.get("/v1/operator/node/status", dependencies=[Depends(admin)])
-    async def node_status():
-        return {"transport_enabled": config is not None,
-                "installation_audience": config.installation_audience if config else None,
-                "effect_gate": await invoke(effect_gate.status),
-                "command_qualification": "requires_current_scope_and_serving_image_evidence",
-                "physical_qualification": "not_established_by_server_startup"}
 
     @app.post("/v2/node/boot-offers")
     async def boot_offer(request: Request):
@@ -264,8 +266,14 @@ def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
         return await invoke(Registry(db, clock).calibration_capability, frame_id)
 
     @app.post("/v1/operator/frames/{frame_id}/calibration-trials", dependencies=[Depends(admin)])
-    async def calibration_begin(frame_id: str):
-        return await invoke(trials.begin, frame_id)
+    async def calibration_begin(frame_id: str, request: Request):
+        # An empty body, or `{}`, begins at the saved calibration; `{"calibration": draft}` at
+        # the operator's draft, whose `revision` is the saved revision it was made from.
+        raw = await body(request, 4096)
+        value = loads_object(raw, max_bytes=4096) if raw.strip() else {}
+        if value is None or set(value) - {"calibration"}:
+            raise NodeControlError("node_trial_operation_invalid", 422)
+        return await invoke(trials.begin, frame_id, value.get("calibration"))
 
     @app.post("/v1/operator/frames/{frame_id}/calibration-trials/{trial_id}", dependencies=[Depends(admin)])
     async def calibration_operate(frame_id: str, trial_id: UUID, request: Request):
@@ -286,7 +294,6 @@ def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
 
     @app.get("/v2/node/commands")
     async def poll(request: Request):
-        sessions.require_enabled()
         return await invoke(commands.poll, *_credentials(request))
 
     @app.post("/v1/operator/node/devices/{device_id}/reboots", dependencies=[Depends(admin)])

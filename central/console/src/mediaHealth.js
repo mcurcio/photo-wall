@@ -3,11 +3,8 @@ import { fact, factText, plannedNothing, words } from "./facts.js";
 import { isBound, LIVE_PHASES, plannedFact, rankedContributions, toTarget } from "./join.js";
 import { cycleWording, runScene } from "./showState.js";
 import { sourceName } from "./sourceNames.js";
-import {
-  datedWords, favouritesWords, kindsWords, refreshFact, refusalIssue, refusalProblem,
-  refusalState, tagCountWords,
-} from "./sourceWords.js";
-import { captureDay, clockTime } from "./timeWords.js";
+import { checkWords } from "./sourceWords.js";
+import { captureDay, clockTime, countWords } from "./timeWords.js";
 
 /**
  * The media pipeline in words (pass 2 slice 3 §14). Pure reads of the served
@@ -19,23 +16,16 @@ import { captureDay, clockTime } from "./timeWords.js";
  * receive it only from Central (requirements: Players are library-unaware).
  * Nothing here says a panel shows anything (R2).
  *
- * @typedef {"ok"|"todo"|"alarm"} Severity
+ * @typedef {"ok"|"todo"|"notice"|"alarm"|"unknown"} Severity
  * @typedef {{state: string, severity: Severity, label: string}} Classified
  */
 
 // The worker's maintenance runs every 5 min (media/task_queue.py MAINTENANCE_CRON)
 // and each run records that it checked in (media_settings.worker_seen).
 export const WORKER_CHECK_IN_SECONDS = 300;
-// Sources are refreshed every 30 s (media/task_queue.py REFRESH_CRON;
-// central/media_repository.py StoreLimits.refresh_seconds sets next_refresh).
-export const SOURCE_REFRESH_SECONDS = 30;
-// One refresh may run this long (media/worker.py WorkerLimits.refresh_seconds).
-export const REFRESH_RUN_SECONDS = 65;
-// Past these, a missed beat is not jitter: two intervals plus slack. A pytest
-// pins the three constants above to the worker's schedule, and WORKER_QUIET_AFTER
-// to the worker container's healthcheck window (media/task_queue.py WORKER_FRESH_SECONDS).
+// Past this, a missed beat is not jitter: two intervals plus slack. A pytest pins it to the
+// worker container's healthcheck window (media/task_queue.py WORKER_FRESH_SECONDS).
 export const WORKER_QUIET_AFTER = 2 * WORKER_CHECK_IN_SECONDS + 60;
-export const REFRESH_OVERDUE_AFTER = 2 * SOURCE_REFRESH_SECONDS + REFRESH_RUN_SECONDS;
 
 /**
  * The read time media ages are taken against: `media.read_at`, the database's
@@ -120,119 +110,17 @@ export function workerState(health, now) {
 const day = captureDay;
 
 /**
- * A Source's filters in words (§7, §14, §39), from the one home of a Source's selection
- * words (sourceWords.js), in `selectionWords`' order: its tags ("2 tags", or their paths
- * when every one is given in `tagPaths`), favourites, a single kind and its dated window.
- * "2 tags · favourites only · photos only · dated 2024". Empty when it takes everything.
- *
- * @param {object|null} spec the stored SourceSpec
- * @param {Readonly<Record<string, string|null>>|null} [tagPaths] id -> path, when loaded
- * @returns {string[]}
- */
-export function sourceFilters(spec, tagPaths = null) {
-  const kinds = spec?.media_types ?? ["image", "video"];
-  return [
-    tagCountWords(spec?.tags, tagPaths),
-    favouritesWords(spec?.favorites),
-    kinds.length === 1 ? kindsWords(kinds) : null,
-    datedWords(spec?.captured_from, spec?.captured_until),
-  ].filter((part) => part !== null);
-}
-
-/** "never refreshed successfully", or "last good refresh 2 h ago". */
-function good(source, now) {
-  return source.last_success == null
-    ? "never refreshed successfully"
-    : `last good refresh ${age(ageAt(now, source.last_success))} ago`;
-}
-
-/**
- * A failed refresh's Source-level code (per-item codes carry an asset id), else the first.
+ * One Source's state in words (roadmap 4, run 2: one home): read from its `check` alone
+ * (central/photo_library/model.py `CheckState`, served on each `/v1/operator/media` `sources`
+ * row), in sourceWords.js `checkWords`' words. A failed check is `notice` and says "Photos keep
+ * playing" (C7): the last pool plays on, so nothing reads as emptied.
  *
  * @param {object} source a `/v1/operator/media` `sources` row
- * @returns {string|undefined}
- */
-function refusalCode(source) {
-  const diagnostics = source.diagnostics ?? [];
-  return (diagnostics.find((entry) => entry?.code && !entry.asset_id) ?? diagnostics[0])?.code;
-}
-
-/**
- * A failing Source's problem, for an error alert (sourceWords.js `refusalProblem`): what
- * failed, why (its filters, and a tag list refused for the key), the one fix, then when it
- * last refreshed successfully. Null for any Source that is not failing.
- *
- * @param {object} source a `/v1/operator/media` `sources` row
- * @param {number} now `media.read_at`
- * @param {string|null} [tagListStatus] its connection's stored tag-list status, when read
- * @returns {{title: string, lines: string[]}|null}
- */
-export function sourceProblem(source, now, tagListStatus = null) {
-  if (source == null || sourceState(source, now, false).state !== "failing") return null;
-  const code = refusalCode(source);
-  const problem = refusalProblem(code, source.status, sourceFilters(source.spec), tagListStatus);
-  // The refresh's other codes (at most three in all, as a Source card lists them), each once.
-  const others = [...new Set((source.diagnostics ?? []).map((entry) => entry?.code))]
-    .filter((other) => other && other !== code).slice(0, 2).map(refusalIssue);
-  const last = good(source, now);
-  return {
-    ...problem,
-    lines: [...new Set([...problem.lines, ...others]), `${last[0].toUpperCase()}${last.slice(1)}.`],
-  };
-}
-
-/**
- * One Source's state, first match (§14): awaiting its first refresh
- * (`next_refresh = 0`, 005_media_jobs.sql), failing, overdue past
- * {@link REFRESH_OVERDUE_AFTER}, nothing valid in its last refresh, ok. "Valid"
- * is the refresh's own count (`counts.valid`): items it found and accepted,
- * not items ready for any frame. The label carries the Source's filters.
- *
- * @param {object} source a `/v1/operator/media` `sources` row
- * @param {number} now `media.read_at`, the database's clock (G11)
+ * @param {number} now `media.read_at`, the database's clock (G11), for the check's times
  * @returns {Classified}
  */
-export function sourceState(source, now, includeFilters = true, connections = []) {
-  const filters = sourceFilters(source.spec);
-  const said = (state, severity, label) => ({
-    state,
-    severity,
-    label: includeFilters ? [label, ...filters].join(" · ") : label,
-  });
-  // A newly configured Source starts as unavailable before any refresh attempt.
-  // A failed periodic refresh can leave the explicit request revision at zero, so
-  // an absent next_refresh is the reliable signal that no attempt has run yet.
-  if (!source.next_refresh && Number(source.refresh_completed_revision ?? 0) === 0 &&
-      !source.diagnostics?.length) {
-    return said("never-refreshed", "todo", "Awaiting refresh");
-  }
-  if (source.status !== "ok") {
-    // One closed table names each refusal's owner and words (sourceWords.js
-    // SOURCE_REFUSALS, §39 R21): Photo Wall's own refusals never read as the library's
-    // fault, and a code it does not hold reads neutrally.
-    const failure = refusalState(refusalCode(source), source.status);
-    return said("failing", "alarm", `${failure} · ${good(source, now)}`);
-  }
-  if (!source.next_refresh) {
-    return said("never-refreshed", "todo", "Awaiting refresh");
-  }
-  const late = ageAt(now, source.next_refresh);
-  if (!(late <= REFRESH_OVERDUE_AFTER)) {
-    return said("overdue", "alarm", `Refresh overdue by ${age(late)}`);
-  }
-  const valid = Number(source.counts?.valid ?? 0);
-  const pending = Number(source.counts?.pending ?? 0);
-  const rejected = Number(source.counts?.rejected ?? 0);
-  const partialCount = Math.max(0, pending) + Math.max(0, rejected);
-  if (!(valid > 0)) {
-    return said("empty", "todo", "nothing valid in the last refresh");
-  }
-  const qualifier = partialCount > 0
-    ? ` · ${partialCount} item${partialCount === 1 ? "" : "s"} pending or rejected`
-    : "";
-  // The refresh's one home (sourceWords.js `refreshFact`), so a Source card that shows this
-  // label states its refresh once, as the library's `reported` fact.
-  return said("ok", "ok", `${factText(refreshFact(source, now, connections))}${qualifier}`);
+export function sourceState(source, now) {
+  return checkWords(source?.check, now);
 }
 
 // --- One candidate's standing for a frame, as Central serves it.
@@ -269,18 +157,19 @@ export function candidateLabels(candidates) {
 
 /**
  * "Check this frame" (§14 step 5): a tally of the served standings of the
- * frame's items across the Scene's Sources. A Source whose last refresh
- * failed is left out, as planning leaves it out (central/planner.py `_pool`),
- * and an item several Sources share counts once: its standing is the same
- * from each, since Central reads it per item, not per Source.
+ * frame's items across the Scene's Sources, as planning pools them
+ * (central/planner.py `_pool`): every Source's pool counts, whether or not its
+ * latest check completed (C7), and an item several Sources share counts once:
+ * its standing is the same from each, since Central reads it per item, not per
+ * Source.
  *
- * @param {Array<{status: string, candidates: Array<object>}>} reads one
- *   `readCandidates` result per Source
+ * @param {Array<{candidates: Array<object>}>} reads one `readCandidates`
+ *   result per Source
  * @returns {Record<"usable"|"preparing"|"failed_to_prepare"|"no_compatible_variant", number>}
  */
 export function checkCounts(reads) {
   const standings = new Map();
-  for (const read of reads.filter((entry) => entry.status === "ok")) {
+  for (const read of reads) {
     for (const candidate of read.candidates) {
       standings.set(candidate.asset_id, candidate.standing);
     }
@@ -348,12 +237,18 @@ function lastEnded(runtime, frameId) {
  * each step a served fact. The first step that is not ok is marked `stops`.
  * `check` is the result of "Check this frame" (null until asked).
  *
+ * Step 4 ("The Source") judges the Scene's pools, not their checks (roadmap 4, C7): a Source
+ * counts when its pool has photos, whatever its check's state, since the last pool keeps
+ * playing while Immich cannot be read. `pools` is each Source's pool as read (its photos and
+ * whether its check is running), by ref; a ref not read yet is absent.
+ *
  * @param {object|null} snapshot
  * @param {string} frameId
  * @param {{counts?: object, error?: string}|null} [check]
+ * @param {Readonly<Record<string, {photos: number, checking: boolean}>>} [pools]
  * @returns {Step[]}
  */
-export function whyNothingNew(snapshot, frameId, check = null) {
+export function whyNothingNew(snapshot, frameId, check = null, pools = {}) {
   const runtime = snapshot?.runtime;
   const now = mediaNow(snapshot);
   const [winner] = rankedContributions(runtime, frameId);
@@ -396,20 +291,7 @@ export function whyNothingNew(snapshot, frameId, check = null) {
   }
 
   if (live) {
-    const sources = snapshot?.media?.sources ?? [];
-    const read = winner.source_refs.map((ref) => {
-      const source = sources.find((candidate) => candidate.source_ref === ref);
-      return source === undefined
-        ? { ok: false, saved: true, text: `${sourceName(ref)}: this Run uses saved Source settings; their current status is not shown here` }
-        : (({ severity, label }) => ({ ok: severity === "ok", text: `${sourceName(source)}: ${label}` }))(
-          sourceState(source, now),
-        );
-    });
-    steps.push({
-      title: "The Source",
-      state: read.some((entry) => entry.ok) ? "ok" : read.some((entry) => entry.saved) ? "info" : "stop",
-      text: `${read.map((entry) => entry.text).join("; ")}.`,
-    });
+    steps.push(sourceStep(snapshot?.media?.sources ?? [], winner.source_refs, pools, now));
     steps.push({ title: "Check this frame", ...checkStep(frameId, check) });
   } else {
     steps.push(skip("The Source"), skip("Check this frame"));
@@ -432,6 +314,35 @@ export function whyNothingNew(snapshot, frameId, check = null) {
   return steps.map((step, index) => (index === first ? { ...step, stops: true } : step));
 }
 
+/**
+ * Step 4: whether any of the Run's Sources has photos in its pool (C7: a failed check keeps its
+ * pool playing). Each Source is named with its pool and its state in words.
+ */
+function sourceStep(sources, refs, pools, now) {
+  const read = refs.map((ref) => {
+    const source = sources.find((candidate) => candidate.source_ref === ref);
+    const pool = Object.hasOwn(pools, ref) ? pools[ref] : null;
+    const state = source === undefined ? null : sourceState(source, now);
+    const name = sourceName(source ?? ref);
+    const held = pool === null ? "its pool is being read" : `${countWords(pool.photos, "photo")} in its pool`;
+    return { pool, text: `${name}: ${held}${state === null ? "" : ` · ${state.label}`}` };
+  });
+  const text = `${read.map((entry) => entry.text).join("; ")}.`;
+  if (read.some((entry) => entry.pool !== null && entry.pool.photos > 0)) {
+    return { title: "The Source", state: "ok", text };
+  }
+  if (read.some((entry) => entry.pool === null)) {
+    return { title: "The Source", state: "info", text };
+  }
+  return {
+    title: "The Source",
+    state: "stop",
+    text: read.some((entry) => entry.pool.checking)
+      ? "Photo Wall is still reading this Scene's Sources."
+      : "None of this Scene's Sources has photos yet.",
+  };
+}
+
 /** Step 2 for a frame nothing targets now: the Run that last did (§14). */
 function endedStep(snapshot, run, frameId) {
   const scene = runScene(snapshot, run);
@@ -443,12 +354,13 @@ function endedStep(snapshot, run, frameId) {
     };
   }
   const once = cycleWording(scene) !== null ? " after one cycle" : "";
-  const retains = (scene?.contributions ?? []).some(
-    (entry) => entry.target === toTarget(frameId) && entry.retain_on_expiry,
-  );
-  const still = retains
+  // What the frame keeps after the Scene (each Contribution's `after_end`): its ending's,
+  // when it has one on this frame, else its photos'.
+  const on = (entries) => (entries ?? []).find((entry) => entry.target === toTarget(frameId));
+  const after = (on(scene?.outro_contributions) ?? on(scene?.contributions))?.after_end;
+  const still = after === "keep_this_photo"
     ? "; if its last item was a photo, the frame keeps that still (a video is not kept)"
-    : "";
+    : after === "keep_nothing" ? "; its ending left the frame black" : "";
   return {
     title: "Run ended?",
     state: "stop",

@@ -1,7 +1,7 @@
 """scripts/initrd_mount_probe.py, the CI guard that runs stage 1's real mount path out of the
 built initrd. Its real run needs root, loop devices and an arm64 kernel (base-image.yml); here
 every host command is faked, so these pin the probe's own logic: kernel-order unpacking, the
-chroot command, the in-initrd program, the display modules' resolution, deepest-first teardown,
+chroot command, the in-initrd program, the Player modules' resolution, deepest-first teardown,
 the AUTOCLEAR check, and that a tree with anything still mounted under it is never deleted."""
 
 from __future__ import annotations
@@ -11,11 +11,11 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from test_verify_netboot_initrd import newc_archive
 
 import appliance.netboot_init as netboot_module
 from appliance.bootstrap import BootstrapError
 from scripts import initrd_mount_probe as probe_module
-from scripts.build_boot_data import newc_archive
 from scripts.initrd_mount_probe import (
     INITRAMFS_PATH,
     MARKER,
@@ -32,13 +32,15 @@ from scripts.initrd_mount_probe import (
     unpack,
 )
 
-BOOT_DATA = newc_archive({"usr/lib/python3.13/appliance/bootstrap.py": b"code"})
+FLOOR_LAYER = newc_archive({"usr/lib/photo-wall/clock-floor": b"1760000000\n"})
 EARLY = newc_archive({"kernel/x86/microcode/fake.bin": b"ucode"})
 CACHED = newc_archive({"usr/bin/mount": b"klibc"})
 RELEASE = "6.18.50+rpt-rpi-2712"
-# What the in-initrd program prints for a display module that resolves on the new root.
+# What the in-initrd program prints for each stage-2 module that resolves on the new root.
 RESOLVED = ("resolve vc4 exit=0 files=16 missing=0 last=vc4.ko.xz\n"
-            "resolve v3d exit=0 files=7 missing=0 last=v3d.ko.xz\n")
+            "resolve v3d exit=0 files=7 missing=0 last=v3d.ko.xz\n"
+            "resolve rpi-hevc-dec exit=0 files=8 missing=0 last=rpi-hevc-dec.ko.xz\n"
+            "resolve i2c-dev exit=0 files=2 missing=0 last=i2c-dev.ko.xz\n")
 
 
 def completed(argv, stdout=b"", returncode=0):
@@ -69,27 +71,27 @@ class RecordingRun:
         return completed(argv)
 
 
-def test_unpack_extracts_boot_data_then_early_archives_then_the_compressed_one(tmp_path):
+def test_unpack_extracts_the_floor_then_early_archives_then_the_compressed_one(tmp_path):
     initrd = tmp_path / "initrd.img"
-    initrd.write_bytes(BOOT_DATA + EARLY + gzip.compress(CACHED))
+    initrd.write_bytes(FLOOR_LAYER + EARLY + gzip.compress(CACHED))
     run = RecordingRun()
     assert unpack(initrd, tmp_path, run=run) == []
     assert [(argv[0], data) for argv, data in run.calls] == [
-        ("cpio", BOOT_DATA), ("cpio", EARLY), ("gzip", gzip.compress(CACHED)), ("cpio", CACHED)]
+        ("cpio", FLOOR_LAYER), ("cpio", EARLY), ("gzip", gzip.compress(CACHED)), ("cpio", CACHED)]
 
 
-def test_unpack_refuses_an_initrd_without_boot_data_in_front(tmp_path):
+def test_unpack_refuses_an_initrd_without_the_floors_layer_in_front(tmp_path):
     initrd = tmp_path / "initrd.img"
     initrd.write_bytes(gzip.compress(CACHED))
     assert unpack(initrd, tmp_path, run=RecordingRun())[0].startswith(
-        "initrd does not start with the boot-data archive")
+        "initrd does not start with the floor's layer")
 
 
 def test_unpack_names_an_unknown_compression(tmp_path):
     initrd = tmp_path / "initrd.img"
-    initrd.write_bytes(BOOT_DATA + b"LZMA??" + bytes(10))
+    initrd.write_bytes(FLOOR_LAYER + b"LZMA??" + bytes(10))
     assert unpack(initrd, tmp_path, run=RecordingRun()) == [
-        f"archive at byte {len(BOOT_DATA)}: unknown compression (leading bytes "
+        f"archive at byte {len(FLOOR_LAYER)}: unknown compression (leading bytes "
         f"{(b'LZMA??').hex()})"]
 
 
@@ -99,7 +101,8 @@ def test_the_chroot_runs_the_initrds_own_python_with_inits_path_only(tmp_path):
     argv = chroot_argv(tmp_path, "/probe/i.squashfs", "/probe/root", RELEASE)
     assert argv[:5] == ["env", "-i", f"PATH={INITRAMFS_PATH}", "chroot", str(tmp_path)]
     assert argv[5:9] == ["/usr/bin/python3", "-I", "-c", PROBE_PROGRAM]
-    assert argv[9:] == ["/probe/i.squashfs", "/probe/root", MARKER, RELEASE, "vc4", "v3d"]
+    assert argv[9:] == ["/probe/i.squashfs", "/probe/root", MARKER, RELEASE, "vc4", "v3d",
+                        "rpi-hevc-dec", "i2c-dev"]   # the DDC/CI driver too (E-1B-I1-4)
 
 
 def modprobe_shows(rootmnt, *, missing_file=False, unknown=()):
@@ -164,17 +167,20 @@ def test_the_program_reports_a_module_the_new_root_lacks(tmp_path, monkeypatch, 
     assert code == 0
     assert out.splitlines()[-2:] == ["resolve vc4 exit=0 files=2 missing=1 last=vc4.ko.xz",
                                      "resolve v3d exit=1 files=0 missing=0 last=none"]
-    assert resolution_violations(out) == [
+    assert resolution_violations(out, ("vc4", "v3d")) == [
         "vc4: does not resolve on the new root (exit=0 files=2 missing=1 last=vc4.ko.xz)",
         "v3d: does not resolve on the new root (exit=1 files=0 missing=0 last=none)"]
 
 
 def test_a_program_that_never_resolved_a_module_is_a_violation():
     assert resolution_violations(RESOLVED) == []
-    assert resolution_violations(RESOLVED.splitlines()[0]) == [
-        "v3d: not resolved on the new root (no result)"]
+    lines = RESOLVED.splitlines(keepends=True)
+    assert resolution_violations(lines[0] + lines[1] + lines[2]) == [
+        "i2c-dev: not resolved on the new root (no result)"]
+    assert resolution_violations(lines[0] + lines[1] + lines[3]) == [
+        "rpi-hevc-dec: not resolved on the new root (no result)"]
     assert resolution_violations("resolve vc4 exit=0 files=3 missing=0 last=drm.ko.xz\n"
-                                 + RESOLVED.splitlines()[1]) == [
+                                 + "".join(lines[1:])) == [
         "vc4: does not resolve on the new root (exit=0 files=3 missing=0 last=drm.ko.xz)"]
 
 
@@ -260,7 +266,7 @@ class FakeHost:
 @pytest.fixture
 def initrd(tmp_path):
     path = tmp_path / "initrd.img"
-    path.write_bytes(BOOT_DATA + gzip.compress(CACHED))
+    path.write_bytes(FLOOR_LAYER + gzip.compress(CACHED))
     return path
 
 
@@ -287,7 +293,7 @@ def test_the_chroot_is_given_the_initrds_kernel_release(tmp_path, initrd):
     host = FakeHost(tmp_path)
     host.probe(initrd)
     [chroot] = [call for call in host.calls if call[0] == "env"]
-    assert chroot[-3:] == [RELEASE, "vc4", "v3d"]
+    assert chroot[-5:] == [RELEASE, "vc4", "v3d", "rpi-hevc-dec", "i2c-dev"]
     assert (host.work / "source/lib").readlink() == Path("usr/lib")   # the base is merged-/usr
 
 

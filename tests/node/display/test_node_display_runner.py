@@ -18,8 +18,9 @@ from support.repo import REPO
 
 from appliance import feed_socket
 from appliance.display_host import runner
+from appliance.display_host.bus import DISPLAY_SLICE
 from appliance.display_host.domain import OutputState
-from appliance.display_host.runner import Controller
+from appliance.display_host.runner import Controller, OutputReporter
 from appliance.display_host.weston import MAX_PACKET, CompositorPresentation
 from contracts.node_display import Surface
 from contracts.node_protocol import NodeProcessIdentity, OutputKey
@@ -128,6 +129,45 @@ def test_every_events_read_carries_each_output_and_its_admission():
                  controller.feed_events({"after": 0, "incarnation": None})):
         assert page["events"] == [] and page["outputs"] == expected
     assert json.loads(json.dumps(expected)) == expected  # JSON-native: no UUID objects
+
+
+class Reports:
+    """A ReportSink that keeps what was put."""
+
+    def __init__(self) -> None:
+        self.puts: list = []
+
+    def put_report(self, report) -> None:
+        self.puts.append(report)
+
+    def emit_attempt(self, attempt) -> None:
+        raise AssertionError("D1 emits no power attempt")
+
+
+def test_the_controller_reports_outputs_at_start_and_after_each_hotplug():
+    backend = FakeBackend()
+    host = backend.host
+    backend.states = (OutputState(key(host, "HDMI-A-1"), connected=False),)
+    sink = Reports()
+    controller = Controller(backend, reports=OutputReporter(sink, read=lambda output_id: None))
+    assert [(r.output_id, r.connected) for r in sink.puts] == [("HDMI-A-1", False)]
+    plugged = OutputKey(host.boot_id, host.incarnation_id, "HDMI-A-1", 3, 3)
+    backend.states = (OutputState(plugged),)
+    backend.queue.append(plugged)                      # Weston's hotplug event
+    controller.observe()
+    assert [(r.output_id, r.connected) for r in sink.puts] == [("HDMI-A-1", False), ("HDMI-A-1", True)]
+
+
+def test_main_starts_the_display_session_without_the_central_config(monkeypatch, tmp_path):
+    started = []
+    monkeypatch.setattr(runner, "_unit", lambda unit: {"MainPID": "1"})
+    monkeypatch.setattr(runner, "display_session",
+                        lambda digest: SimpleNamespace(start=lambda: started.append(digest)))
+    monkeypatch.setattr(sys, "argv", ["display-controller", "--runtime", str(tmp_path)])
+    monkeypatch.setattr(os, "umask", lambda mask: 0)
+    with pytest.raises(OSError):                       # no compositor control socket here
+        runner.main()
+    assert started == [DISPLAY_SLICE.digest]
 
 
 def test_the_feed_socket_answers_events_and_nothing_else():
@@ -252,24 +292,187 @@ def test_the_controller_serves_the_kernel_listener_at_the_display_feed_path():
 # -- packaging -----------------------------------------------------------------------------
 
 
-def test_the_base_declares_the_display_feed_directory_and_group(tmp_path):
-    from scripts.build_node_base_deb import POLICIES, stage_tree
-    from scripts.module_closure import closure_for
+def test_the_base_declares_the_display_feed_directory_and_group():
+    from node.launcher_closures import closure
 
-    modules = set(closure_for(POLICIES["display-controller"], repo=REPO).modules)
+    modules = set(closure("display-controller").modules)
     assert {"appliance.feed", "appliance.feed_socket"} <= modules
     assert not [module for module in modules if module.startswith("appliance.node")]
-    root = tmp_path / "package"
-    stage_tree(REPO, root)
-    tmpfiles = (root / "usr/lib/tmpfiles.d/photo-wall-node.conf").read_text().splitlines()
+    tmpfiles = (REPO / "debian/photo-wall-node.tmpfiles").read_text().splitlines()
     assert "d /run/photo-wall-display-feed 0750 pw-display pw-node-feeds -" in tmpfiles
-    users = (root / "usr/lib/sysusers.d/photo-wall-node.conf").read_text().splitlines()
+    users = (REPO / "debian/photo-wall-node.sysusers").read_text().splitlines()
     # The group comes from the controller's unit only: Weston (PAMName=login) and the overlay
     # client would inherit a sysusers membership (E-AP1-2).
     assert not [line for line in users if line.startswith("m pw-display ")]
-    unit = (root / "lib/systemd/system/photo-wall-display-controller.service").read_text()
+    unit = (REPO / "appliance/systemd/photo-wall-display-controller.service").read_text()
     lines = unit.splitlines()
-    assert "SupplementaryGroups=pw-node-feeds" in lines
+    (groups,) = [line for line in lines if line.startswith("SupplementaryGroups=")]
+    assert "pw-node-feeds" in groups.split("=", 1)[1].split()
     assert any(line.startswith("ReadWritePaths=")
                and "/run/photo-wall-display-feed" in line.split("=", 1)[1].split()
                for line in lines)
+
+
+def test_the_display_paths_are_the_ones_the_base_units_and_tmpfiles_declare():
+    """appliance.kernel.display_paths is the one home the broker and the controller read; the
+    packaged units and tmpfiles.d must say the same, so a unit edit cannot strand a reader."""
+    from appliance.kernel import display_paths as paths
+
+    units = REPO / "appliance/systemd"
+    display = (units / paths.DISPLAY_UNIT).read_text().splitlines()
+    (execstart,) = [line for line in display if line.startswith("ExecStart=")]
+    arguments = execstart.split()
+    assert f"XDG_RUNTIME_DIR={paths.RUNTIME}" in arguments
+    assert f"--socket={paths.WAYLAND_SOCKET}" in arguments
+    assert f"RuntimeDirectory={paths.RUNTIME.name}" in display
+    (writable,) = [line for line in display if line.startswith("ReadWritePaths=")]
+    assert {str(paths.RUNTIME), str(paths.WAYLAND_DIRECTORY)} <= set(writable.split("=", 1)[1].split())
+    tmpfiles = (REPO / "debian/photo-wall-node.tmpfiles").read_text().splitlines()
+    assert f"d {paths.WAYLAND_DIRECTORY} 0750 pw-display pw-display -" in tmpfiles
+    controller = (units / "photo-wall-display-controller.service").read_text().splitlines()
+    assert f"BindsTo={paths.DISPLAY_UNIT}" in controller
+    assert f"After={paths.DISPLAY_UNIT}" in controller
+    assert {f"RuntimeDirectory={paths.CONTROLLER_STATE.name}", "RuntimeDirectoryPreserve=yes"} <= set(controller)
+
+
+# -- power (1b D2) ----------------------------------------------------------------------------
+
+
+def test_the_controller_unit_reaches_the_cec_and_i2c_devices_and_nothing_else():
+    lines = (REPO / "appliance/systemd/photo-wall-display-controller.service").read_text().splitlines()
+    assert "PrivateDevices=yes" not in lines
+    assert {"DevicePolicy=closed", "DeviceAllow=char-cec rw", "DeviceAllow=char-i2c rw"} <= set(lines)
+    (groups,) = [line for line in lines if line.startswith("SupplementaryGroups=")]
+    # video: /dev/cecN (root:video 0660); i2c: /dev/i2c-N (root:i2c 0660, E-1B-D2-1). Without the
+    # group DeviceAllow=char-i2c opens nothing and DDC/CI never answers.
+    assert {"pw-node-feeds", "video", "i2c"} <= set(groups.split("=", 1)[1].split())
+    # A group the root lacks fails the unit at start (216/GROUP): the base declares every one the
+    # unit names beyond the distribution's own (video).
+    users = (REPO / "debian/photo-wall-node.sysusers").read_text().splitlines()
+    declared = {line.split()[1] for line in users if line.startswith(("g ", "u "))}
+    assert set(groups.split("=", 1)[1].split()) - {"video"} <= declared
+
+
+def test_power_reports_carry_what_the_output_reporter_saw():
+    """The power controller is the one writer of the report: the EDID half from the reporter,
+    the power half from its own looks."""
+    from appliance.display_host.output_power import OutputPowerController
+    from appliance.display_host.runner import PowerObservations
+
+    sink = Reports()
+    power = OutputPowerController({}, sink, SimpleNamespace(monotonic=lambda: 0.0))
+    seen = []
+    picture = SimpleNamespace(output=lambda output_id, **observed: seen.append((output_id, observed)))
+    backend = FakeBackend()
+    backend.states = (OutputState(key(backend.host, "HDMI-A-1")),)
+    Controller(backend, reports=OutputReporter(PowerObservations(power, picture), read=lambda output_id: None))
+    (report,) = sink.puts
+    assert (report.output_id, report.connected, report.answers, report.method) == ("HDMI-A-1", True, (), None)
+    assert seen == [("HDMI-A-1", {"connected": True, "identity": None})]   # the picture controller saw it too
+
+
+def test_one_ddc_channel_feeds_both_the_power_and_the_picture_adapters(tmp_path):
+    """One DDC/CI channel per Pi: the power controller's DDC/CI adapter and the picture
+    controller's adapter both run ddcutil through it (so one port lock serialises them), and the
+    backend hands the shell's picture events to the picture controller."""
+    import subprocess
+
+    from appliance.display_host.ddc import DdcChannel
+    from appliance.display_host.output_report import OutputReports
+    from contracts.node_output import PowerMethod
+
+    (tmp_path / "card1-HDMI-A-1").mkdir()
+    (tmp_path / "card1-HDMI-A-1" / "ddc").symlink_to(tmp_path / "i2c-13")
+    ran = []
+
+    def run(argv, timeout):
+        ran.append(list(argv))
+        return subprocess.CompletedProcess(argv, 1, "", "")
+
+    ddc = DdcChannel(run, drm_root=tmp_path, cache_dir=tmp_path / "cache")
+    backend = SimpleNamespace(picture_events=None)
+    reports = OutputReports(Reports())
+    power, _cec = runner.power_controller(backend, reports, ddc)
+    picture = runner.picture_controller(backend, reports, ddc)
+    power._adapters[PowerMethod.DDC_CI].read("HDMI-A-1", timeout=1)
+    picture._ddc.read("HDMI-A-1", "10", timeout=1)
+    assert [argv[1:] for argv in ran] == [["--bus", "13", "--noconfig", "getvcp", "D6", "--terse"],
+                                          ["--bus", "13", "--noconfig", "getvcp", "10", "--terse"]]
+    assert backend.picture_events is picture
+
+
+@pytest.mark.skipif(not LINUX, reason="the shell's control socket is SOCK_SEQPACKET with SO_PEERCRED (Linux)")
+def test_the_backend_asks_the_shell_for_output_power_from_another_thread():
+    """WestonBackend over a real SEQPACKET pair, the far end playing the shell's protocol: the
+    power worker's `output_power` gets the shell's `output_power` event, while the main loop's
+    dispatch never blocks on an event the worker's request already took."""
+    from appliance.display_host.weston import WestonBackend
+    from contracts.node_output import Power
+
+    ours, shell = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+    boot, incarnation = uuid4(), uuid4()
+    output = {"kernel_boot_id": str(boot), "display_host_incarnation": str(incarnation),
+              "output_id": "HDMI-A-1", "connection_generation": 1, "mode_generation": 1}
+
+    def send(value):
+        shell.send(json.dumps(value).encode())
+
+    send({"event": "hello", "protocol": 1, "boot_id": str(boot), "incarnation_id": str(incarnation)})
+    send({"event": "output", "output": output, "connected": True, "width": 640, "height": 480,
+          "power": "on"})
+    asked = []
+
+    def play_shell():
+        request = json.loads(shell.recv(16384))
+        asked.append(request)
+        send({"event": "output_power", "output_id": request["output_id"], "power": request["power"]})
+        send({"event": "response", "request_id": request["request_id"], "accepted": True})
+
+    with ours, shell:
+        backend = WestonBackend(ours, display_uid=os.getuid(), compositor_pid=os.getpid(),
+                                verify_process=lambda grant: True)
+        backend.initialize()
+        assert backend.output_powered("HDMI-A-1") is None          # not seen yet
+        assert backend.dispatch() == OutputKey(boot, incarnation, "HDMI-A-1", 1, 1)
+        assert backend.output_powered("HDMI-A-1") is Power.ON
+        playing = threading.Thread(target=play_shell)
+        playing.start()
+        done = []
+        worker = threading.Thread(target=lambda: done.append(
+            backend.output_power("HDMI-A-1", Power.OFF, timeout=2)))
+        worker.start()
+        worker.join(5)
+        playing.join(5)
+        assert done == [True] and backend.output_powered("HDMI-A-1") is Power.OFF
+        assert (asked[0]["op"], asked[0]["power"], asked[0]["output"]) == ("output_power", "off", output)
+        assert backend.dispatch() is None                           # nothing left: no block
+        assert backend.output_power("HDMI-A-2", Power.OFF, timeout=1) is False   # no such Output
+
+
+def test_the_document_feed_decodes_each_document_and_ignores_the_rest():
+    from appliance.display_host.runner import document_feed
+    from contracts.node_output import (
+        AS_THE_DISPLAY_HAS_IT,
+        BEST_DETECTED,
+        ActsOn,
+        OutputDocument,
+        OutputPicture,
+        PictureSetting,
+        Power,
+        PowerRequest,
+        RequestReason,
+        encode_output_document,
+    )
+    from nodeapi.documents import Document
+
+    got, pictures = [], []
+    feed = document_feed(SimpleNamespace(document=lambda output_id, document: got.append((output_id, document))),
+                         SimpleNamespace(document=lambda output_id, document: pictures.append((output_id, document))))
+    wanted = OutputDocument("HDMI-A-1", 2, (PowerRequest("standing", Power.ON, RequestReason.STANDING),),
+                            BEST_DETECTED, False, False, 1,
+                            OutputPicture(PictureSetting(ActsOn.DISPLAY, AS_THE_DISPLAY_HAS_IT),
+                                          PictureSetting(ActsOn.DISPLAY, AS_THE_DISPLAY_HAS_IT), 6500, 22))
+    feed("output-HDMI-A-1", Document(encode_output_document(wanted), "central", None))
+    feed("output-HDMI-A-2", Document(encode_output_document(wanted), "central", None))   # another key
+    feed("output-HDMI-A-1", Document(b'{"output_id":"HDMI-A-1"}', "central", None))       # undecodable
+    assert got == pictures == [("HDMI-A-1", wanted)]   # each controller acts on its own change number

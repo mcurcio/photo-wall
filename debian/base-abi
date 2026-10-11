@@ -1,0 +1,33 @@
+#!/bin/sh
+# The base's ABI identity (decision 0019, "ABI ownership"): writes
+# debian/<package>/usr/lib/photo-wall/node/abi.json as {"base_abi": "node-v2-<64 hex>"}.
+#
+#   debian/base-abi <package>
+#
+# The hex is a sha256 over the composition's expanded Depends, as the first dh_gencontrol pass
+# wrote them into debian/<package>/DEBIAN/control (every context at its exact content version,
+# nats-server at its pin), and the release roots' image format, the NAME=value lines of
+# debian-packaging/image-format.env (comments and blank lines aside):
+#
+#   Depends: <the Depends field>\n<each NAME=value line>\n
+#
+# so a new context, a new pin or a new image format is a new base_abi, and nothing else is.
+# Run by debian/photo-wall-node.pre-identity (debian/content-versions), after that first pass and
+# before the package's identity hash, which therefore covers abi.json.
+set -eu
+
+package=$1
+control="debian/$package/DEBIAN/control"
+depends=$(sed -n 's/^Depends: //p' "$control")
+if [ -z "$depends" ]; then
+	echo "base-abi: no Depends in $control" >&2
+	exit 1
+fi
+hex=$({
+	printf 'Depends: %s\n' "$depends"
+	grep -v -e '^[[:space:]]*#' -e '^[[:space:]]*$' debian-packaging/image-format.env
+} | sha256sum | cut -c1-64)
+directory="debian/$package/usr/lib/photo-wall/node"
+mkdir -p "$directory"
+printf '{"base_abi": "node-v2-%s"}\n' "$hex" > "$directory/abi.json"
+chmod 0644 "$directory/abi.json"

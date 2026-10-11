@@ -90,7 +90,7 @@ const RETIRED_COLUMN: EntityColumn<HardwareRow> = {
 export interface HardwareListProps {
   snapshot: object | null;
   bootFacts: { unavailable?: boolean; devices?: Map<string, object> } | null;
-  /** The shell's fleet host read; null while it is skipped (node control not on). */
+  /** The shell's fleet host read; null while it is skipped (sign-in not confirmed). */
   hosts: HostsRead | null;
   /** The Pi the list is focused on (`?pi=`), or null. */
   focus: string | null;

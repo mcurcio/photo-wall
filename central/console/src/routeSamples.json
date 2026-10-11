@@ -17,15 +17,16 @@
       "#/schedule/new/review",
       "#/schedule/sample-program/edit/review"
     ],
-    "sources": ["#/sources", "#/sources/new/library", "#/sources/new/tags", "#/sources/new/narrow", "#/sources/new/name", "#/sources/new/review", "#/sources/sample/edit/review"]
+    "sources": ["#/sources", "#/sources/new/query", "#/sources/sample/edit/query"]
   },
   "wall": {
     "wall": [
       "#/wall",
       "#/wall/layout",
-      "#/wall/frames/sample-frame/status",
-      "#/wall/frames/sample-frame/binding",
-      "#/wall/frames/sample-frame/calibration"
+      "#/wall/frames/sample-frame/overview",
+      "#/wall/frames/sample-frame/position",
+      "#/wall/frames/sample-frame/picture",
+      "#/wall/frames/sample-frame/hardware"
     ]
   },
   "fleet": {
@@ -39,6 +40,9 @@
     ],
     "releases": ["#/releases", "#/releases/update/v0.15.0", "#/releases/update/v0.15.0/try/sample-player",
       "#/releases/update/v0.15.0/skip/sample-player", "#/releases/update/v0.15.0/try/sample-player/skip/other-player/third-player"]
+  },
+  "settings": {
+    "photo-library": ["#/photo-library"]
   },
   "neutral": {
     "attention": ["#/attention"]

@@ -4,6 +4,7 @@ import copy
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -192,6 +193,51 @@ def test_private_host_manifest_has_explicit_public_image_readability(source_tree
         assert recipe.index("COPY scripts ") < recipe.index("COPY --chmod=0644")
         assert ("COPY release /release/\n" in recipe) == include_release
     assert (harness / "bundle.json").stat().st_mode & 0o777 == 0o600
+
+
+def apply_copy_lines(recipe: str, context: Path, image_root: Path) -> None:
+    """Apply a recipe's COPY lines, as the builder would, onto a local image-shaped tree."""
+    for line in recipe.splitlines():
+        words = line.split()
+        if not words or words[0] != "COPY":
+            continue
+        source, target = words[-2], words[-1]
+        assert not (context / source).is_symlink()
+        destination = image_root / target.lstrip("/")
+        if (context / source).is_dir():
+            shutil.copytree(context / source, destination, dirs_exist_ok=True)
+        else:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(context / source, destination)
+
+
+def test_helper_image_recipe_ships_exactly_the_bundle_as_importable_modules(tmp_path):
+    root = Path(__file__).parents[1]
+    context = tmp_path / "context"
+    context.mkdir()
+    bundle = WALL_HELPER_BUNDLE.stage(root, context)
+    write_json(context / "bundle.json", {"schema": 1, "files": bundle})
+    image = tmp_path / "image"
+    apply_copy_lines(wall_helper_dockerfile("sha256:" + "a" * 64), context, image)
+    harness = image / "harness"
+    targets = {item.target for item in WALL_HELPER_BUNDLE.files}
+    assert {path.relative_to(harness).as_posix() for path in harness.rglob("*.py")} == targets
+    assert (harness / "bundle.json").is_file()
+    # The base image supplies the application packages (central, contracts, ...); the repo root
+    # stands in for it after the harness tree, and every target must resolve inside the tree.
+    modules = sorted(target.removesuffix(".py").replace("/", ".") for target in targets)
+    result = subprocess.run(
+        [sys.executable, "-I", "-c",
+         "import importlib, sys; harness, app = sys.argv[1:3]; sys.path[:0] = [harness, app]\n"
+         "for name in sys.argv[3:]:\n"
+         "    origin = importlib.import_module(name).__file__\n"
+         "    assert origin.startswith(harness + '/'), (name, origin)\n"
+         "print('imported')",
+         str(harness), str(root), *modules],
+        check=False, capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "imported\n"
 
 
 @pytest.mark.parametrize("error,code", [

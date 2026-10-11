@@ -22,8 +22,7 @@ from central.fleet.node_sessions import NodeControlConfig
 from central.installation_models import InstallationInventory
 from contracts.models import Readiness
 
-# The console assumes node control (console DDD Part E, R20), so the harness runs it by
-# default; `node_control=None` is the misconfigured Central without it.
+# Central always runs node control (console DDD Part E, R20); tests pick its audience.
 NODE_CONTROL = NodeControlConfig("node-test")
 
 # Readiness sequences only ever rise, as a live Player's do (player/executor.py).
@@ -32,16 +31,12 @@ _SEQUENCE = itertools.count(1)
 
 @contextmanager
 def operator_server(db, clock, *, media_root=None, media_queue=None, admin_token=ADMIN,
-                    node_control=NODE_CONTROL, node_serving_verifier=None):
+                    node_control=NODE_CONTROL):
     """Run the production app on an ephemeral loopback listener with real lifespan.
 
-    `node_control` (a NodeControlConfig, node-test by default) mounts node management as the
-    supported composition does; `node_control=None` runs Central without node control, the
-    misconfiguration the console shows as one banner.
-    `node_serving_verifier` lets the effect gate admit node commands (reboots)."""
+    `node_control` is the node control configuration (node-test by default)."""
     app = create_app(db, clock, admin_token, run_scheduler=False,
-                     media_root=media_root, media_queue=media_queue, node_control=node_control,
-                     node_serving_verifier=node_serving_verifier)
+                     media_root=media_root, media_queue=media_queue, node_control=node_control)
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))
     listener.listen()
@@ -119,6 +114,7 @@ def tile_health(page, frame_id):
 
 INVENTORY = "**/v1/operator/inventory"
 SNAPSHOT = "**/v1/operator/snapshot"
+POLL_MS = 5000  # the console's snapshot poll (useSnapshot.js POLL_MS)
 
 
 def drive_poll(page):
@@ -132,8 +128,24 @@ def drive_poll(page):
     """
     status = page.get_by_role("group", name="Snapshot status", exact=True)
     with page.expect_response(SNAPSHOT):
-        page.clock.run_for(5000)
+        page.clock.run_for(POLL_MS)
     expect(status).not_to_have_attribute("aria-busy", "true")
+
+
+def run_page_clock(page, ms):
+    """Run the paused page clock `ms` forward one poll at a time, each poll's read landing.
+
+    Never one `run_for` jump past a request timeout: the fake clock also drives
+    `AbortSignal.timeout` (15 s for every console read and write), so a read begun inside
+    a long jump is aborted when the jump outruns its real response, and the single-flight
+    poller makes nothing more until the clock runs again. Each step here is one poll
+    interval and waits for that poll's snapshot read to land (`drive_poll`). Other reads
+    the steps start (release, netboot, node) are not awaited; they survive because each
+    step is 5 s, under the 15 s request timeout, so no single step can abort one.
+    """
+    assert ms % POLL_MS == 0, f"{ms} ms is not a whole number of {POLL_MS} ms polls"
+    for _ in range(ms // POLL_MS):
+        drive_poll(page)
 
 
 _OFFENDERS = """() => [...document.querySelectorAll("body *")]

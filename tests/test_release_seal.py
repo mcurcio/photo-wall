@@ -14,13 +14,10 @@ from __future__ import annotations
 
 import hashlib
 import http.server
-import io
 import itertools
 import json
-import os
 import socket
 import stat
-import tarfile
 import threading
 from dataclasses import dataclass, field, replace
 from urllib.parse import parse_qs, urlparse
@@ -34,11 +31,11 @@ from support.release_build import (
     digest,
     inputs,
     manifest_blob,
+    node_components,
     reference,
-    with_base_abi,
 )
 
-from contracts.player_payload import FORMAT, archive_name, base_abi, canonical_json
+from contracts.node_release import NODE_RELEASE_MANIFEST
 from contracts.release import CHECKSUMS, IMAGES, MANIFEST
 from scripts import release_seal
 from scripts.package_release_artifacts import package, verify
@@ -385,9 +382,8 @@ def registry(github):
 @pytest.fixture
 def build(tmp_path):
     given = inputs(tmp_path / "inputs")
-    return Build(TAG, REVISION, SINCE, given.base_bundle, given.player_deb,
-                 given.bootstrapper_deb, dict(IMAGE_REFERENCES), tmp_path / "artifacts", EPOCH,
-                 "owner/repo")
+    return Build(TAG, REVISION, SINCE, given.base_bundle, given.node_components,
+                 dict(IMAGE_REFERENCES), tmp_path / "artifacts", EPOCH, "owner/repo")
 
 
 def _again(build: Build, name: str) -> Build:
@@ -575,16 +571,16 @@ def test_an_unresolvable_image_digest_refuses_before_any_promote_or_publish(gith
 def _packaging_then(damage):
     def packaged(*args, **kwargs):
         manifest = package(*args, **kwargs)
-        damage(args[3], manifest)
+        damage(args[2], manifest)
         return manifest
     return packaged
 
 
 @pytest.mark.parametrize("damage, reason", [
-    (lambda destination, manifest: (destination / manifest["bootstrapper_deb"]["filename"])
-     .unlink(), "missing photo-wall-bootstrapper"),
+    (lambda destination, manifest: (destination / f"photo-wall-node-{REVISION}-app.deb")
+     .unlink(), f"missing photo-wall-node-{REVISION}-app.deb"),
     (lambda destination, manifest: (destination / CHECKSUMS).unlink(), "missing SHA256SUMS"),
-    (lambda destination, manifest: (destination / manifest["player_deb"]["filename"])
+    (lambda destination, manifest: (destination / manifest["boot_image"]["filename"])
      .write_bytes(b"truncated"), "digest_mismatch"),
     (lambda destination, manifest: (destination / "notes.md").write_text("x"),
      "undeclared notes.md"),
@@ -863,6 +859,8 @@ def test_a_digest_that_never_reads_back_refuses_without_publishing(github, regis
 def _newer(build: Build, name: str) -> Build:
     """The next push's build: main's new tip, its own images, the same planned version."""
     return replace(_again(build, name), revision=NEWER,
+                   node_components=node_components(build.destination.parent / f"{name}-inputs",
+                                                   revision=NEWER),
                    images={image: reference(image, cut="-newer") for image in IMAGES})
 
 
@@ -972,30 +970,6 @@ def test_a_rerun_after_a_successful_publish_writes_nothing_and_passes(github, re
     assert len(state.writes()) == writes and registry.tags == tags and len(registry.writes) == 2
 
 
-def test_schema_two_publish_and_rerun_read_both_manifests(github, registry, build, tmp_path):
-    files = {"app/__main__.py": b"pass\n", "app/closure.json": b"{}\n"}
-    manifest = {"schema": 1, "format": FORMAT, "revision": REVISION,
-                "base_abi": base_abi("20260904T000000Z", ("python3",),
-                                     "sha256:" + "a" * 64),
-                "entrypoint": "app", "files": {
-                    name: {"sha256": hashlib.sha256(data).hexdigest(), "size": len(data)}
-                    for name, data in files.items()}}
-    payload = tmp_path / archive_name(REVISION)
-    with tarfile.open(payload, "w:gz") as archive:
-        for name, data in (("manifest.json", canonical_json(manifest)), *sorted(files.items())):
-            info = tarfile.TarInfo(name)
-            info.size, info.mode = len(data), 0o644
-            archive.addfile(info, io.BytesIO(data))
-    build = replace(build, player_payload=payload)
-    with_base_abi(build.base_bundle, manifest["base_abi"])
-    state, api = github
-    first = seal(api, registry, build)
-    writes = len(state.writes())
-    assert any(asset["name"] == "manifest.v2.json" for asset in first["assets"])
-    again = seal(api, registry, _again(build, "rerun-payload"))
-    assert again["id"] == first["id"] and len(state.writes()) == writes
-
-
 def _drop_asset(state: State, name: str) -> None:
     [published] = _for(state, TAG)
     published["assets"] = [asset for asset in published["assets"] if asset["name"] != name]
@@ -1006,9 +980,10 @@ def _drop_asset(state: State, name: str) -> None:
         {f"{REPOSITORY}/central:{TAG}": digest("central", cut="-elsewhere")}),
      "names .* not this run's"),
     (lambda state, registry: _drop_asset(state, CHECKSUMS), "does not attach exactly"),
+    (lambda state, registry: _drop_asset(state, NODE_RELEASE_MANIFEST), "without its"),
     (lambda state, registry: state.blobs.update(
         {(_for(state, TAG)[0]["id"], MANIFEST): b'{"schema": 1}'}), "not a release's|exactly"),
-], ids=["tag-moved", "asset-missing", "manifest-changed"])
+], ids=["tag-moved", "asset-missing", "node-release-missing", "manifest-changed"])
 def test_a_rerun_after_a_publish_that_is_not_intact_is_refused(github, registry, build, change,
                                                                match):
     state, api = github
@@ -1112,8 +1087,8 @@ def test_buildx_never_reads_a_registry_error_as_absent(docker):
 def test_promote_through_buildx_tags_each_digest_and_moves_one_only_for_the_tip(
         docker, github, build, tmp_path):
     state, api = github
-    package(build.base_bundle, build.player_deb, build.bootstrapper_deb, tmp_path / "out",
-            revision=REVISION, images=IMAGE_REFERENCES, source_date_epoch=EPOCH)
+    package(build.base_bundle, build.node_components, tmp_path / "out", revision=REVISION,
+            tag=TAG, images=IMAGE_REFERENCES, source_date_epoch=EPOCH)
     packaged = verify(tmp_path / "out", revision=REVISION)
     promoted = {f"{REPOSITORY}/{name}:{TAG}": digest(name) for name in IMAGES}
     promote(docker.buildx, api, packaged.images, TAG, REVISION)
@@ -1135,14 +1110,10 @@ def test_the_seal_command(github, registry, build, capsys, tmp_path):
     summary = tmp_path / "summary.md"
     args = ["--tag", TAG, "--revision", REVISION, "--since", SINCE,
             "--base-bundle", str(build.base_bundle),
-            "--player-deb", str(build.player_deb.parent / "player-artifact"),
-            "--bootstrapper-deb", str(build.bootstrapper_deb),
+            "--node-components", str(build.node_components),
             "--image", f"central={IMAGE_REFERENCES['central']}",
             "--image", f"media-worker={IMAGE_REFERENCES['media-worker']}",
             "--destination", str(build.destination), "--source-date-epoch", str(EPOCH)]
-    artifact = build.player_deb.parent / "player-artifact"
-    artifact.mkdir()
-    os.link(build.player_deb, artifact / build.player_deb.name)   # a downloaded artifact dir
     environ = {"GITHUB_REPOSITORY": "owner/repo", "GITHUB_STEP_SUMMARY": str(summary)}
     assert release_seal.main(args, github=api, registry=registry, environ=environ) == 0
     assert "publish: v0.9.1 at" in capsys.readouterr().out
@@ -1163,20 +1134,10 @@ def test_the_seal_command_refuses_a_malformed_or_missing_image(github, registry,
                                                                image):
     _, api = github
     args = ["--tag", TAG, "--revision", REVISION, "--since", SINCE,
-            "--base-bundle", str(build.base_bundle), "--player-deb", str(build.player_deb),
-            "--bootstrapper-deb", str(build.bootstrapper_deb), "--image", image,
+            "--base-bundle", str(build.base_bundle),
+            "--node-components", str(build.node_components), "--image", image,
             "--destination", str(build.destination), "--source-date-epoch", str(EPOCH)]
     assert release_seal.main(args, github=api, registry=registry,
                              environ={"GITHUB_REPOSITORY": "owner/repo"}) == 1
     assert "::error title=release seal::" in capsys.readouterr().out
     assert registry.writes == []
-
-
-def test_a_downloaded_artifact_must_hold_exactly_one_deb(tmp_path):
-    (tmp_path / "a.deb").write_bytes(b"x")
-    (tmp_path / "b.deb").write_bytes(b"y")
-    with pytest.raises(SealError, match="holds 2 .deb files"):
-        release_seal._one_deb(tmp_path)
-    assert release_seal._one_deb(tmp_path / "a.deb") == tmp_path / "a.deb"
-    (tmp_path / "b.deb").unlink()
-    assert release_seal._one_deb(tmp_path) == tmp_path / "a.deb"

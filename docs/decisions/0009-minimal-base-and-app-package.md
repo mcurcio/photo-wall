@@ -119,8 +119,8 @@ the operator.
 |---|---|---|
 | Netboot RAM-roots a **signed** squashfs: the initramfs asks central for a `BootTicket`, verifies an Ed25519-signed `Release` manifest, streams the squashfs, checks its sha256, and overlay-mounts it in RAM. | [appliance/bootstrap.py:207](../../appliance/bootstrap.py), [:402](../../appliance/bootstrap.py), [:366](../../appliance/bootstrap.py); `appliance/updates.py:71` | The OS-delivery mechanism this decision replaces. The overlay-in-RAM machinery ([:366](../../appliance/bootstrap.py)) is reusable; the ticket/signature layer is not. |
 | The whole squashfs (base OS **plus** the Player venv) is one signed artifact selected per device. | `central/releases.py:183` `select_boot`; `appliance/build.py:721` (retired) `configure_root` bakes the venv into the root. | Base and app rev together today. Splitting them is the core change. |
-| The Player is built as a **hashed wheelhouse** (one app wheel + exactly five runtime wheels) with a `--require-hashes` `requirements.txt`, installed offline into a venv. | [scripts/build_player.py:349](../../scripts/build_player.py); ROOTS = pydantic/httpx/websockets/cryptography/zeroconf [:39](../../scripts/build_player.py); pip install `appliance/build.py:752` (retired) | The `.deb` payload can reuse this builder verbatim; only the packaging wrapper is new. |
-| mDNS discovery already exists and is wired into the **running app**, consulted only when no explicit origin is set. | [player/mdns_discovery.py:46](../../player/mdns_discovery.py); `resolve_origin` [player/service.py:405](../../player/service.py); wiring [player/service.py:1013](../../player/service.py) | The base's bootstrapper can reuse this exact class; but discovery must now also run **before the app exists**. |
+| The Player is built as a **hashed wheelhouse** (one app wheel + exactly five runtime wheels) with a `--require-hashes` `requirements.txt`, installed offline into a venv. | scripts/build_player.py:349 (`scripts/build_player.py`); ROOTS = pydantic/httpx/websockets/cryptography/zeroconf :39 (`scripts/build_player.py`); pip install `appliance/build.py:752` (retired) | The `.deb` payload can reuse this builder verbatim; only the packaging wrapper is new. |
+| mDNS discovery already exists and is wired into the **running app**, consulted only when no explicit origin is set. | `player/mdns_discovery.py:46` (deleted in PR 45); `resolve_origin` [player/service.py:405](../../player/service.py); wiring [player/service.py:1013](../../player/service.py) | The base's bootstrapper can reuse this exact class; but discovery must now also run **before the app exists**. |
 | Only the **flashed / persistent** path enrolls ticketless: `service.py:489` sends `ticket_id=None` **only when** `boot_context.persistence == "persistent"`. The **netboot / diskless** path writes `persistence="volatile"` ([appliance/bootstrap.py:428](../../appliance/bootstrap.py)) and so sends a **real** `ticket_id`. | [player/service.py:489](../../player/service.py); [appliance/bootstrap.py:428](../../appliance/bootstrap.py) | The diskless path does **not** enroll ticketless today. "The app enrolls unchanged" is **false** for 0009's diskless fleet — a real ticket goes to central, which now has no authority to honor it. Fixed in migration. |
 | A real `ticket_id` at enroll drives `bind_session_in` → `_device` → **404 `device_not_found`** once the release authority (and its `appliance_devices` rows) retire. | [central/registry.py:138](../../central/registry.py) → `central/releases.py:167` | Every diskless enroll would 404 → **fleet-wide enroll failure** if the diskless base is not made to send `ticket_id=None`. |
 | `release_accepted` is set `True` **only** for persistent boots ([service.py:511](../../player/service.py)); a volatile boot starts it `False`, and `_control_loop` then POSTs boot-health every loop ([service.py:826-827](../../player/service.py)). | [player/service.py:511](../../player/service.py), [:826](../../player/service.py) | With boot-health **retired**, a diskless Player would POST a dead route on every loop. The diskless base must also yield `release_accepted=True`. |
@@ -231,7 +231,7 @@ by the owner's 2026-09-12 ruling it stays flat: a home LAN with no threat model.
 authenticity check on the app `.deb`. The sha256 catches a corrupted download,
 not a lie: a rogue on the LAN could advertise mDNS and serve arbitrary app code
 (the discovery tiebreak is deterministic —
-[player/mdns_discovery.py:52-54](../../player/mdns_discovery.py) — so a rogue with
+`player/mdns_discovery.py:52-54` (deleted in PR 45) — so a rogue with
 a low-sorting name would win repeatably, and its code runs before enroll and
 before the operator sees the device). **The owner has explicitly accepted this**:
 on a home LAN there is no such rogue, and a player that fails to render is
@@ -282,11 +282,11 @@ sequenceDiagram
 2. The bootstrapper resolves central from the kernel cmdline
    (`photowall.central=<root>`) when present; only when the cmdline names no
    Central does it fall back to mDNS discovery, reusing
-   [player/mdns_discovery.py:46](../../player/mdns_discovery.py) (amended by
+   `player/mdns_discovery.py:46` (deleted in PR 45) (amended by
    [0014 R1](0014-reaching-central-from-every-boot-stage.md#requirements-hard-rules)
    — netboot always sets the cmdline, so this fallback applies only to
    non-netboot use). The mDNS discovery winner is deterministic (lowest-sorting
-   name, [mdns_discovery.py:100](../../player/mdns_discovery.py)); on a home LAN
+   name, `mdns_discovery.py:100` (deleted in PR 45)); on a home LAN
    the only advertiser is the operator's central.
 3. The bootstrapper reads the manifest, then streams the `.deb` from the same
    central and checks the bytes against the manifest sha256 before install — a
@@ -353,7 +353,7 @@ stateDiagram-v2
   derivation, so the bootstrapper and the app agree on identity
   ([appliance/bootstrap.py:301](../../appliance/bootstrap.py) already uses it).
 - `player.mdns_discovery.MdnsCentralDiscovery` — the exact discovery class the
-  app uses ([player/mdns_discovery.py:46](../../player/mdns_discovery.py)).
+  app uses (`player/mdns_discovery.py:46` (deleted in PR 45)).
 - The bounded, no-redirect, deadline-guarded HTTP fetch discipline already
   written for the initramfs ([appliance/bootstrap.py:133](../../appliance/bootstrap.py)
   `Fetcher`, [:227](../../appliance/bootstrap.py) `copy_verified`), reused for
@@ -367,7 +367,7 @@ bootstrapper; the app carries everything else in its `.deb`.
 discovers central by mDNS to fetch the `.deb`. The app then starts and runs its
 *own* `resolve_origin` ([player/service.py:415-421](../../player/service.py)),
 which — because `MdnsCentralDiscovery` remembers nothing across calls
-([mdns_discovery.py:63-64](../../player/mdns_discovery.py)) — performs a **fresh**
+(`mdns_discovery.py:63-64` (deleted in PR 45)) — performs a **fresh**
 mDNS browse. Two independent discoveries can resolve **different** responders:
 the app could enroll against a central other than the one that served its code.
 **Fix:** the bootstrapper writes its resolved origin as an explicit
@@ -435,11 +435,11 @@ layer):
 - **Payload (recommended):** a prebuilt venv at the fixed path
   `/opt/photo-wall/venv` plus the systemd units and `weston.ini` — install is an
   unpack, needing no pip or build tools in the base at boot. Built by running the
-  **existing** wheelhouse builder ([scripts/build_player.py:349](../../scripts/build_player.py))
+  **existing** wheelhouse builder (scripts/build_player.py:349 (`scripts/build_player.py`))
   and then assembling the venv the way `appliance/build.py:752` (retired)
   does today, wrapped as a `.deb`.
 - **Version:** the existing wheel version `base_version+g<commit>`
-  ([scripts/build_player.py:382](../../scripts/build_player.py)) becomes the
+  (scripts/build_player.py:382 (`scripts/build_player.py`)) becomes the
   package version — one identifier for source, wheel, and `.deb`.
 - **Dependencies (amended by
   [0014, Project 2](0014-reaching-central-from-every-boot-stage.md#delivery) —
@@ -517,8 +517,8 @@ size-match, and streaming discipline.
 / retire, calibration, `/v1/player/state`, `/v1/player/time`, media, readiness,
 observations, the websocket session, mDNS advertise
 ([central/app.py:210](../../central/app.py)) and discover
-([player/mdns_discovery.py](../../player/mdns_discovery.py)), and the wheelhouse
-builder ([scripts/build_player.py](../../scripts/build_player.py)).
+(`player/mdns_discovery.py` (deleted in PR 45)), and the wheelhouse
+builder (`scripts/build_player.py`).
 
 **The required edits — the diskless path must actually enroll ticketless.**
 This is **two** coupled fixes, not one. The earlier draft named only the first
@@ -651,7 +651,7 @@ are ranked accordingly.
 |---|---|---|
 | **Promoted `.deb` crashes on boot, fleet-wide** | Every Player loops boot → fetch-same-`.deb` → crash → reboot, all at once; **and boot-health is retired, so central has NO down-signal** — the fleet goes dark with no telemetry. Recovery is manual: operator promotes a prior `.deb`. The dark screen is the intended (and only) monitoring, per the owner ruling | **documented** — no auto-rollback (retired, gate #3) **and no crash-detection signal**; ranked worst because it is self-inflicted by a normal promote and is invisible to central |
 | Release authority retired but **either** enroll fix omitted | Edit A omitted → all enroll 503s; edit B omitted → diskless enroll 404s fleet-wide **and** every loop POSTs the retired boot-health route | **construction** — both edits ([registry.py:92](../../central/registry.py) **and** the client ticket/health gates [service.py:489](../../player/service.py),[:511](../../player/service.py),[:826](../../player/service.py)) must land, enforced by a diskless-enroll test |
-| **mDNS multicast is unavailable / filtered** (VLAN, AP client-isolation, IGMP-snooping switch) | Netboot is unaffected — the cmdline always names Central (amended by [0014 R1](0014-reaching-central-from-every-boot-stage.md#requirements-hard-rules)); only a non-netboot Player with no cmdline origin falls back to mDNS and blocks pre-app on bounded retry until multicast works | **documented** — [player/mdns_discovery.py:75](../../player/mdns_discovery.py) returns None on timeout; fail-closed, but a cmdline-less network must carry multicast |
+| **mDNS multicast is unavailable / filtered** (VLAN, AP client-isolation, IGMP-snooping switch) | Netboot is unaffected — the cmdline always names Central (amended by [0014 R1](0014-reaching-central-from-every-boot-stage.md#requirements-hard-rules)); only a non-netboot Player with no cmdline origin falls back to mDNS and blocks pre-app on bounded retry until multicast works | **documented** — `player/mdns_discovery.py:75` (deleted in PR 45) returns None on timeout; fail-closed, but a cmdline-less network must carry multicast |
 | **Per-boot bandwidth** — every Player re-fetches the full `.deb` on every boot | A fleet power-cycle (power blip, morning turn-on) is N × `.deb` + N × base-squashfs concurrent pulls off central and the boot server; large `.deb` (prebuilt venv, gate #6) makes this worse | **documented** — pull-at-boot with no local cache (diskless); a slow cold-start is expected, sized by the operator's LAN |
 | App `.deb` corrupted in transit | sha256 mismatch against the manifest; bootstrapper discards and retries; app never starts | **decision** — hash checked while streaming before install |
 | No app promoted on central | Player cannot fetch a manifest / matching `.deb`; stays pre-app and retries; no fabrication | **decision** — fail closed, no default app |
@@ -696,7 +696,7 @@ graph LR
   RPi5 fact) from the distinct app-authenticity decision. (3) Struck the false
   "rogue central still cannot bind a Frame" containment claim: in 0009 the `.deb`
   **executes before** enroll and before the operator sees the device. (4) The
-  rogue mDNS win is **deterministic** ([mdns_discovery.py:52-54](../../player/mdns_discovery.py)),
+  rogue mDNS win is **deterministic** (`mdns_discovery.py:52-54` (deleted in PR 45)),
   not incidental. (5) "Diskless enrolls unchanged" was **false** — the volatile
   path sends a real ticket ([service.py:489](../../player/service.py) +
   [bootstrap.py:428](../../appliance/bootstrap.py)) → 404 fleet-wide, and POSTs a
@@ -811,13 +811,13 @@ Phases 1–3 have landed on this branch: the app-package service
 (`central/app_packages.py`, since removed by the Central MVP, routes
 [central/app.py:458-500](../../central/app.py), migration
 [014_app_package.sql](../../central/migrations/014_app_package.sql)), the
-bootstrapper ([appliance/provision.py](../../appliance/provision.py)), the two
+bootstrapper (`appliance/provision.py`), the two
 enroll fixes (Edit A guard-move [central/registry.py:139-144](../../central/registry.py);
 Edit B ticket-keyed gates [player/service.py:493,513](../../player/service.py),
 `hardware_boot_context` [:227-261](../../player/service.py) returns
 `ticket_id=None`), and the `.deb` builders
-([scripts/build_player_deb.py](../../scripts/build_player_deb.py),
-[scripts/build_bootstrapper_deb.py](../../scripts/build_bootstrapper_deb.py)),
+(`scripts/build_player_deb.py`,
+`scripts/build_bootstrapper_deb.py`),
 plus the rpi-image-gen base squashfs
 ([appliance/rpi_image_gen/](../../appliance/rpi_image_gen/),
 [.github/workflows/base-image.yml](../../.github/workflows/base-image.yml)).

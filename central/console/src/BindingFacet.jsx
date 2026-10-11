@@ -3,11 +3,18 @@ import React, { useEffect, useId, useRef, useState } from "react";
 import { unbindRequest, useConfirm } from "./ConfirmAction.jsx";
 import { bind, identifyOutput } from "./equipmentApi.js";
 import { FactLine } from "./domain/fact-line.tsx";
+import { FactRow, Note } from "./patterns/fact-row.tsx";
+import { Button } from "./ui/button.tsx";
+import { Disclosure } from "./ui/disclosure.tsx";
+import { Link } from "./ui/link.tsx";
+import { Section } from "./ui/section.tsx";
 import {
   bindableOutputs,
   isBound,
   outputLabel,
+  playerHandle,
   playerLiveness,
+  portName,
 } from "./health.js";
 import { boundOutput } from "./join.js";
 import { BOOT_FACTS_UNAVAILABLE, identifyOffer, panelAtEnrollment, playerPageHref } from "./players.js";
@@ -15,7 +22,8 @@ import { useMutate } from "./useMutate.js";
 
 /**
  * Binding facet (Bead 9; slice 2 §6): read the current Player/Output and WRITE
- * bind/unbind.
+ * bind/unbind. The page says "Pi" and "HDMI port", "connect" and "disconnect"; Central's
+ * words (Player, Output, Panel, enrollment) are under Details.
  *
  * Read state comes straight from the Frame's FrameInventory row
  * (`player_id`/`output_id`); the console never invents a Player or Output that
@@ -36,8 +44,8 @@ import { useMutate } from "./useMutate.js";
  * that removes the chosen Output clears the choice and announces it.
  *
  * On success the facet shows the amber "Review required" state and a
- * "Calibrate this Frame" CTA that switches the Inspector to the Calibration
- * facet (pending -> bind -> calibrate).
+ * "Set its position" CTA that switches the Frame page to its Position tab
+ * (pending -> bind -> position). It is the Frame page's Hardware tab (pages/frame-page.tsx).
  *
  * UNBIND opens the one confirmation dialog (ConfirmAction, slice 2 §7), which
  * captures the Frame's generation, live Runs and sibling Frame when it opens.
@@ -48,9 +56,9 @@ import { useMutate } from "./useMutate.js";
  * serial suffix when the App-level boot facts know it (bootFacts.js).
  *
  * @param {{snapshot: object|null, bootFacts?: object|null, frameId: string,
- *          onFacet?: (facet: string) => void}} props
+ *          onTab?: (tab: string) => void}} props
  */
-export function BindingFacet({ snapshot, bootFacts = null, frameId, onFacet }) {
+export function BindingFacet({ snapshot, bootFacts = null, frameId, onTab }) {
   const mutate = useMutate();
   const ids = useId();
   const [message, setMessage] = useState(/** @type {string|null} */ (null));
@@ -68,7 +76,8 @@ export function BindingFacet({ snapshot, bootFacts = null, frameId, onFacet }) {
     /** @type {{kind: "status"|"alert", text: string}|null} */ (null),
   );
   const [focusSuccessor, setFocusSuccessor] = useState(false);
-  const headingRef = useRef(/** @type {HTMLHeadingElement|null} */ (null));
+  // Focus after a disconnect whose refresh failed (the Frame still reads connected).
+  const headingRef = useRef(/** @type {HTMLButtonElement|null} */ (null));
   const chooserRef = useRef(/** @type {HTMLDivElement|null} */ (null));
   // The unbind dialog; its status line also announces a vanished choice.
   const { open, setStatus: setAnnouncement, confirmation } = useConfirm(
@@ -108,11 +117,11 @@ export function BindingFacet({ snapshot, bootFacts = null, frameId, onFacet }) {
     );
     if (!offered) {
       setChoice(null);
-      setAnnouncement(`${choice.label} is no longer available. Choose another output.`);
+      setAnnouncement(`${choice.label} is no longer available. Choose another HDMI port.`);
     }
   }, [snapshot]);
 
-  // After an unbind: the chooser when it rendered, else the facet heading.
+  // After an unbind: the chooser when it rendered, else the Disconnect button.
   useEffect(() => {
     if (focusSuccessor) {
       (chooserRef.current ?? headingRef.current)?.focus();
@@ -129,7 +138,7 @@ export function BindingFacet({ snapshot, bootFacts = null, frameId, onFacet }) {
     setChoice({
       playerId: option.playerId,
       outputId: option.outputId,
-      label: outputLabel(snapshot, bootFacts, option.playerId, option.outputId),
+      label: outputLabel(snapshot, bootFacts, option.playerId, option.outputId, { port: true }),
       generation: frame.generation,
     });
   };
@@ -166,7 +175,7 @@ export function BindingFacet({ snapshot, bootFacts = null, frameId, onFacet }) {
     setBusy(false);
     setIdentified(result.outcome === "done"
       ? { kind: "status",
-        text: `Identify requested for ${option.outputId}. Check the Panel; this request expires in 15 seconds.` }
+        text: `Identify requested for ${portName(option.outputId)}. Check the Display; this request expires in 15 seconds.` }
       : { kind: "alert", text: result.message });
   };
 
@@ -178,77 +187,60 @@ export function BindingFacet({ snapshot, bootFacts = null, frameId, onFacet }) {
     open(event, unbindRequest(snapshot, bootFacts, frameId));
   };
 
+  const display = observation?.connected === true
+    ? `Connected, ${observation.width_px} × ${observation.height_px}`
+    : observation?.connected === false ? "None connected" : "Not reported";
+  const heard = liveness === null ? "Not known to Photo Wall"
+    : liveness.state === "heard" ? "Reporting"
+      : liveness.state === "silent" ? "Not heard from lately" : "Started, no report yet";
   return (
-    <div className="facet facet--binding">
-      <h3 ref={headingRef} className="facet__title" tabIndex={-1}>
-        Binding
-      </h3>
-
+    <Section title="Pi and HDMI port">
       {bound ? (
         <>
-          <dl className="facet__fields">
-            <div className="facet__field">
-              <dt>Player</dt>
-              <dd>{playerHref === null ? frame.player_id : <a href={playerHref}>{frame.player_id}</a>}</dd>
-            </div>
-            <div className="facet__field">
-              <dt>Output</dt>
-              <dd>{frame.output_id}</dd>
-            </div>
-            <div className="facet__field">
-              <dt>Player reports</dt>
-              <dd>
-                {liveness?.label ?? "Player not in the inventory"}
-                {liveness?.state === "silent" && silentHref !== null && (
-                  <>
-                    {" · "}
-                    <a href={silentHref}>See its layers on the Player page</a>
-                  </>
-                )}
-              </dd>
-            </div>
-          </dl>
-          <section className="facet__section" role="group"
-            aria-label="Panel at the Player app's last enrollment (may be stale)">
-            <h4 className="facet__subtitle">Panel at the Player app&apos;s last enrollment (may be stale)</h4>
-            <FactLine label="Panel" fact={panelAtEnrollment(observation, snapshot?.inventory?.read_at, enrolledAt)} />
-            {observation?.connected === true && (
-              <p className="facet__note">
-                {`Output resolution at that enrollment: ${observation.width_px} × ${observation.height_px}`}
-              </p>
+          <FactRow label="Fed by" tone="set">
+            {playerHref === null
+              ? `Pi ${playerHandle(snapshot, bootFacts, frame.player_id)}`
+              : <Link href={playerHref}>{`Pi ${playerHandle(snapshot, bootFacts, frame.player_id)}`}</Link>}
+            {` · ${portName(frame.output_id)}`}
+          </FactRow>
+          <FactRow label="The Pi" tone="reported">
+            {heard}
+            {liveness?.state === "silent" && silentHref !== null && (
+              <>
+                {" · "}
+                <Link href={silentHref}>See why on its page</Link>
+              </>
             )}
-          </section>
+          </FactRow>
+          <FactRow label="Display, when the Pi last started" tone="reported">{display}</FactRow>
+          <Disclosure summary="Details">
+            <FactRow label="Player" tone="set">{frame.player_id}</FactRow>
+            <FactRow label="Output" tone="set">{frame.output_id}</FactRow>
+            <FactRow label="Player reports" tone="reported">{liveness?.label ?? "Player not in the inventory"}</FactRow>
+            <FactLine label="Panel" fact={panelAtEnrollment(observation, snapshot?.inventory?.read_at, enrolledAt)} />
+          </Disclosure>
           {reviewRequired && (
-            <div className="facet__review" role="status">
-              <p className="facet__review-text">
-                Review required — this Frame was just bound; its calibration is no
-                longer valid.
-              </p>
-              <button
-                type="button"
-                className="facet__cta"
-                onClick={() => onFacet?.("calibration")}
-              >
-                Calibrate this Frame
-              </button>
+            <div role="status">
+              <Note>Connected. Set this Frame&apos;s position on its Display.</Note>
+              <Button onClick={() => onTab?.("position")}>Set its position</Button>
             </div>
           )}
-          <button type="button" className="facet__unbind" onClick={openUnbind}>
-            Unbind
-          </button>
+          <span>
+            <Button ref={headingRef} onClick={openUnbind}>Disconnect from this Pi</Button>
+          </span>
         </>
       ) : (
         <>
-          <p className="facet__empty">Unbound</p>
+          <p className="facet__empty">No Pi feeds this Frame yet.</p>
           <div
             ref={chooserRef}
             className="chooser"
             role="radiogroup"
-            aria-label="Choose an output"
+            aria-label="Choose a Pi and HDMI port"
             tabIndex={-1}
           >
             <p className="chooser__title" aria-hidden="true">
-              Choose an output
+              Choose a Pi and HDMI port
             </p>
             {bootFacts?.unavailable && (
               <p className="chooser__note">
@@ -257,8 +249,8 @@ export function BindingFacet({ snapshot, bootFacts = null, frameId, onFacet }) {
             )}
             {options.length === 0 ? (
               <p className="chooser__empty">
-                No free Output has a Panel listed as connected at its Player app&apos;s last
-                enrollment. Power on a Player with its Panel attached; it appears under Players.
+                No free HDMI port has a Display connected. Turn on a Pi with its Display plugged
+                in; it appears under Hardware.
               </p>
             ) : (
               options.map((option, index) => {
@@ -279,7 +271,7 @@ export function BindingFacet({ snapshot, bootFacts = null, frameId, onFacet }) {
                         onChange={() => choose(option)}
                         aria-describedby={livenessId}
                       />
-                      {outputLabel(snapshot, bootFacts, option.playerId, option.outputId)}
+                      {outputLabel(snapshot, bootFacts, option.playerId, option.outputId, { port: true })}
                     </label>
                     <span id={livenessId} className="chooser__liveness">
                       {playerLiveness(snapshot, option.playerId)?.label}
@@ -292,7 +284,7 @@ export function BindingFacet({ snapshot, bootFacts = null, frameId, onFacet }) {
                           aria-describedby={identify.offer ? undefined : identifyReasonId}
                           onClick={() => doIdentify(option)}
                         >
-                          Identify Panel<span className="visually-hidden">{` ${option.outputId}`}</span>
+                          Identify display<span className="visually-hidden">{` ${portName(option.outputId)}`}</span>
                         </button>
                         {!identify.offer && (
                           <span id={identifyReasonId} className="chooser__note">{identify.reason}</span>
@@ -310,7 +302,7 @@ export function BindingFacet({ snapshot, bootFacts = null, frameId, onFacet }) {
             onClick={doBind}
             disabled={choice === null || busy}
           >
-            {`Bind to ${frameId}`}
+            {`Connect Frame ${frameId}`}
           </button>
         </>
       )}
@@ -326,6 +318,6 @@ export function BindingFacet({ snapshot, bootFacts = null, frameId, onFacet }) {
           {message}
         </p>
       )}
-    </div>
+    </Section>
   );
 }

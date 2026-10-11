@@ -71,6 +71,39 @@ export function clockTime(epochSeconds) {
   return `${hourMinute(date)} ${zoneLabel(date)}`;
 }
 
+/**
+ * A time of day with its seconds and no zone, "21:04:07": when the Pi acknowledged a live
+ * change (Central's time of it), or when this browser saved or left one.
+ *
+ * @param {number} epochSeconds
+ * @returns {string}
+ */
+export function timeOfDay(epochSeconds) {
+  const date = toDate(epochSeconds);
+  return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
+/**
+ * When a check or a contact last happened, or since when something needs a look (design
+ * language §7, "Since"): the weekday and a 24-hour time, "Sun 03:39". With `nowSeconds` (a
+ * served read time on the same clock, never this browser's: R10), a day more than six days
+ * before it names its date instead, "12 Sep 03:39". No zone abbreviation and no seconds: seconds
+ * are for acknowledgements ({@link timeOfDay}). The one format of every check and contact time
+ * on the photo pages (Photo source, Sources, Scene Photos, Show now, Photo library, Needs a look).
+ *
+ * @param {number} epochSeconds
+ * @param {number} [nowSeconds] the served read time the six days count back from
+ * @returns {string}
+ */
+export function sinceTime(epochSeconds, nowSeconds) {
+  const date = toDate(epochSeconds);
+  const time = `${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  const options = Number.isFinite(nowSeconds) && nowSeconds - epochSeconds > 6 * 86400
+    ? { day: "numeric", month: "short" }
+    : { weekday: "short" };
+  return `${date.toLocaleDateString("en-GB", options)} ${time}`;
+}
+
 /** "Tue 2 Mar". */
 export function dayLabel(epochSeconds) {
   return toDate(epochSeconds).toLocaleDateString(undefined, {
@@ -146,4 +179,22 @@ export function occurrenceTime(epochSeconds) {
     timeZoneName: "short",
   }).format(date);
   return `${clock} (${zonePart(date, "longOffset") ?? "local time"})`;
+}
+
+/**
+ * A count in the house's number words, with its noun: "41,203 photos", "1 person" (design
+ * language §7, Counts: locale grouping, exact). The one home of count words, beside the times.
+ *
+ * @param {number} count
+ * @param {string} noun the singular
+ * @param {string} [plural]
+ * @returns {string}
+ */
+export function countWords(count, noun, plural = `${noun}s`) {
+  return `${countText(count)} ${count === 1 ? noun : plural}`;
+}
+
+/** A bare count with locale grouping: "41,203". */
+export function countText(count) {
+  return new Intl.NumberFormat().format(count);
 }

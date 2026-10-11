@@ -6,8 +6,8 @@ and tray write lives in LayoutEditor.jsx (Edit layout, `#/wall/layout`), which i
 positive control.
 
 Model: unfinished.js `wallUnfinished` (G2: structural, from `set` records only) and health.js
-`wallAttention` (evidence only) never share an item, and health.js `facetFor` opens the cause
-facet or the Wall's Status fallback. Run under Node as the other console model tests are.
+`wallAttention` (evidence only) never share an item, and health.js `tabFor` opens the cause
+tab or the Frame page's Overview fallback. Run under Node as the other console model tests are.
 
 The browser half is tests/browser/test_operator_wall_browser.py.
 """
@@ -63,19 +63,21 @@ const { wallUnfinished } = await import(process.argv[2]);
 const player = (id, extra = {}) => ({ id, device_id: `device-${id}`, authority_epoch: 1,
   registered_at: 10, last_seen: 900, retired_at: null, last_report_at: 995, ...extra });
 const frame = (id, extra = {}) => ({ id, surface_id: "wall", x_mm: 10, y_mm: 10,
-  width_mm: 300, height_mm: 500, player_id: null, output_id: null, calibration_valid: false,
+  width_mm: 300, height_mm: 500, player_id: null, output_id: null, readiness: "unbound",
   ...extra });
 const output = (player_id, output_id) => ({ player_id, output_id,
   observation: { connected: true } });
 const snapshot = { inventory: {
   read_at: 1000, silent_after_seconds: 30, report_interval_seconds: 5,
   players: [player("heard"), player("silent", { last_report_at: 100 }), player("raw")],
-  outputs: [output("heard", "HDMI-A-1"), output("silent", "HDMI-A-1"), output("raw", "HDMI-A-1")],
+  outputs: [output("heard", "HDMI-A-1"), output("heard", "HDMI-A-2"), output("silent", "HDMI-A-1"),
+    output("raw", "HDMI-A-1")],
   frames: [
     frame("unbound"),
-    frame("dark", { player_id: "silent", output_id: "HDMI-A-1", calibration_valid: true }),
-    frame("ok", { player_id: "heard", output_id: "HDMI-A-1", calibration_valid: true }),
-    frame("raw", { player_id: "raw", output_id: "HDMI-A-1" }),
+    frame("dark", { player_id: "silent", output_id: "HDMI-A-1", readiness: "ready" }),
+    frame("ok", { player_id: "heard", output_id: "HDMI-A-1", readiness: "ready" }),
+    frame("raw", { player_id: "raw", output_id: "HDMI-A-1", readiness: "position-needed" }),
+    frame("moved", { player_id: "heard", output_id: "HDMI-A-2", readiness: "display-changed" }),
     frame("origin", { x_mm: 0, y_mm: 0 }),
   ],
 } };
@@ -83,8 +85,8 @@ const attention = health.wallAttention(snapshot);
 console.log(JSON.stringify({
   unfinished: wallUnfinished(snapshot),
   attention: { ...attention, alarms: attention.alarms.map((entry) => entry.frame.id) },
-  facet: ["unbound", "ok", "dark", "raw"].map(
-    (id) => health.facetFor(health.frameHealth(snapshot, id), "status")),
+  tab: ["unbound", "ok", "dark", "raw", "moved"].map(
+    (id) => health.tabFor(health.frameHealth(snapshot, id), "overview")),
   empty: wallUnfinished({ inventory: { frames: [] } }),
 }));
 """
@@ -105,19 +107,21 @@ def test_to_finish_is_structural_and_attention_is_evidence():
     # Frame order; each Frame's missing `set` records in bring-up order. An unbound Frame
     # needs a Player, not a calibration; an origin Frame is also not on the plan.
     assert out["unfinished"] == [
+        # Another display on its port: the Hardware tab's card, not Position (1b K1).
+        {"frameId": "moved", "step": "display", "route": wall(id="moved", tab="hardware")},
         {"frameId": "origin", "step": "place", "route": wall(mode="layout")},
-        {"frameId": "origin", "step": "bind", "route": wall(id="origin", facet="binding")},
-        {"frameId": "raw", "step": "calibrate", "route": wall(id="raw", facet="calibration")},
-        {"frameId": "unbound", "step": "bind", "route": wall(id="unbound", facet="binding")},
+        {"frameId": "origin", "step": "bind", "route": wall(id="origin", tab="hardware")},
+        {"frameId": "raw", "step": "calibrate", "route": wall(id="raw", tab="position")},
+        {"frameId": "unbound", "step": "bind", "route": wall(id="unbound", tab="hardware")},
     ]
     # The silent bound Player's Frame is an attention row and not a To finish item; the
     # unbound Frame is a To finish item and not an attention row. No `todos` remain.
-    assert out["attention"] == {"frameCount": 5, "awaiting": 0, "alarms": ["dark"]}
+    assert out["attention"] == {"frameCount": 6, "awaiting": 0, "alarms": ["dark"]}
     assert "dark" not in {item["frameId"] for item in out["unfinished"]}
     assert out["empty"] == []
 
 
-def test_facet_for_opens_the_cause_or_status():
-    # Unbound -> Binding; ok -> the Wall's Status fallback; a silent Player -> Binding;
-    # needs calibration -> Calibration.
-    assert _run()["facet"] == ["binding", "status", "binding", "calibration"]
+def test_tab_for_opens_the_cause_or_overview():
+    # Unbound -> Hardware; ok -> the Frame page's Overview fallback; a silent Player ->
+    # Hardware; needs calibration -> Position; display changed -> Hardware.
+    assert _run()["tab"] == ["hardware", "overview", "hardware", "position", "hardware"]

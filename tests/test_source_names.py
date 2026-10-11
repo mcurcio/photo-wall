@@ -1,33 +1,57 @@
-"""Logical Source names retain immutable revisions and admitted execution."""
+"""Logical Source names retain immutable revisions and admitted execution.
 
-import uuid
+A revision is saved from a draft (`SourceNameService.save_draft`), as the console saves one; the
+pools are the photo library store's, fed by nothing here (no worker, no Immich).
+"""
 
 import pytest
 from fastapi.testclient import TestClient
-from media_queue import RecordingMediaQueue
-from psycopg.types.json import Jsonb
+from support.photo_pools import fixture_connection, library_of
 
 from central.app import create_app
-from central.catalog import CatalogSnapshot
 from central.db import ProcessTransactionClock
 from central.media_repository import MediaRepository
-from central.registry import RegistryError
+from central.photo_library.model import SourceQuery
 from central.runtime import Child, Contribution, Program, RuntimeConflict, Scene
 from central.runtime_store import RuntimeStore
-from central.source_names import NamedSourceWrite, SourceInUse, SourceNameService
-from media.models import OriginalAsset, RefreshResult, SourceSpec
+from central.source_names import SourceInUse, SourceNameService
 
 
-def write(expected, *, favorites=None):
-    return NamedSourceWrite(expected_revision=expected, connection_ref="immich-main",
-                            favorites=favorites)
+class Names:
+    """The service, its repository and Runtime, and a `save` as the editor's Save."""
+
+    def __init__(self, registry):
+        self.registry = registry
+        self.repository = MediaRepository(registry.db, registry.clock,
+                                          times=ProcessTransactionClock(registry.clock))
+        self.runtime = RuntimeStore(registry.db, registry.clock)
+        self.library = library_of(registry)
+        self.service = SourceNameService(registry.db, self.repository, self.runtime,
+                                         self.library)
+        self.connection = fixture_connection(registry)
+
+    def save(self, name: str, *, editing: str | None = None, favourites: bool = False) -> dict:
+        query = SourceQuery(connection_ref=self.connection, favourites_only=favourites)
+        return self.service.save_draft(self.library.create_draft(query, editing), name)
+
+    def reconcile(self) -> None:
+        with self.registry.db.transaction() as conn, self.runtime.edit(conn) as current:
+            self.repository.reconcile_source_activity_in(conn, current.planning_source_refs())
+
+    def active(self, source_ref: str) -> bool:
+        with self.registry.db.transaction() as conn:
+            return conn.execute("SELECT refresh_active FROM media_sources WHERE source_ref=%s",
+                                (source_ref,)).fetchone()["refresh_active"]
 
 
-def test_named_edit_revises_future_scenes_but_keeps_admitted_run(registry):
-    repository = MediaRepository(registry.db, registry.clock, times=ProcessTransactionClock(registry.clock))
-    runtime = RuntimeStore(registry.db, registry.clock)
-    names = SourceNameService(registry.db, repository, runtime)
-    assert names.put("all-photos", write(None))["source_ref"] == "all-photos:1"
+@pytest.fixture
+def names(registry):
+    return Names(registry)
+
+
+def test_named_edit_revises_future_scenes_but_keeps_admitted_run(names):
+    runtime = names.runtime
+    assert names.save("all-photos")["source_ref"] == "all-photos:1"
     child = Scene(scene_id="child", contributions=(Contribution(target="frame:child",
                               source_refs=("all-photos:1",)),))
     scene = Scene(scene_id="show", loop=True, children=(Child(scene=child),),
@@ -42,7 +66,7 @@ def test_named_edit_revises_future_scenes_but_keeps_admitted_run(registry):
                              repeat="queue", expires_at=1100)
     assert queued.status == "queued"
 
-    edited = names.put("all-photos", write(1, favorites=True))
+    edited = names.save("all-photos", editing="all-photos:1", favourites=True)
     assert edited == {"name": "all-photos", "revision": 2,
                       "source_ref": "all-photos:2", "created": True}
     saved = runtime.read().export_state()
@@ -60,233 +84,94 @@ def test_named_edit_revises_future_scenes_but_keeps_admitted_run(registry):
     saved = runtime.read().export_state()
     program_run = saved["admissions"]["program:next:1010"]["run_id"]
     assert saved["runs"][program_run]["scene"]["contributions"][0]["source_refs"] == ["all-photos:2"]
-    assert names.put("all-photos", write(1, favorites=True))["created"] is False
-    with pytest.raises(RegistryError, match="source_revision_conflict"):
-        names.put("all-photos", write(1, favorites=False))
-    assert [s["name"] for s in repository.sources()] == ["all-photos"]
-    assert repository.sources()[0]["source_ref"] == "all-photos:2"
+    assert [s["name"] for s in names.repository.sources()] == ["all-photos"]
+    assert names.repository.sources()[0]["source_ref"] == "all-photos:2"
 
 
-def test_delete_guards_scenes_and_recreate_uses_next_hidden_revision(registry):
-    repository = MediaRepository(registry.db, registry.clock, times=ProcessTransactionClock(registry.clock))
-    runtime = RuntimeStore(registry.db, registry.clock)
-    names = SourceNameService(registry.db, repository, runtime)
-    names.put("used", write(None))
-    runtime.command("set_scene", Scene(scene_id="dependent", contributions=(
+def test_delete_guards_scenes_and_recreate_uses_next_hidden_revision(names):
+    names.save("used")
+    names.runtime.command("set_scene", Scene(scene_id="dependent", contributions=(
         Contribution(target="frame:main", source_refs=("used:1",)),)))
     with pytest.raises(SourceInUse) as error:
-        names.delete("used", 1)
+        names.service.delete("used", 1)
     assert error.value.scene_ids == ("dependent",)
-    names.put("unused", write(None))
-    assert names.delete("unused", 1)["deleted"] is True
-    assert "unused" not in {row["name"] for row in repository.sources()}
-    recreated = names.put("unused", write(None, favorites=True))
-    assert recreated["source_ref"] == "unused:2"
+    names.save("unused")
+    assert names.service.delete("unused", 1)["deleted"] is True
+    assert "unused" not in {row["name"] for row in names.repository.sources()}
+    assert names.save("unused", favourites=True)["source_ref"] == "unused:2"
 
 
-def test_rename_changes_future_scene_and_keeps_old_run(registry):
-    repository = MediaRepository(registry.db, registry.clock, times=ProcessTransactionClock(registry.clock))
-    runtime = RuntimeStore(registry.db, registry.clock)
-    names = SourceNameService(registry.db, repository, runtime)
-    names.put("old", write(None))
+def test_rename_changes_future_scene_and_keeps_old_run(names):
+    runtime = names.runtime
+    names.save("old")
     runtime.command("set_scene", Scene(scene_id="show", loop=True, contributions=(
         Contribution(target="frame:main", source_refs=("old:1",)),)))
     run = runtime.command("activate", "show", "first", 1000)
-    renamed = names.put("old", NamedSourceWrite(expected_revision=1,
-                        connection_ref="immich-main", new_name="new"))
-    assert renamed["source_ref"] == "new:1"
-    assert names.put("old", NamedSourceWrite(expected_revision=1,
-                     connection_ref="immich-main", new_name="new"))["created"] is False
-    assert [row["name"] for row in repository.sources()] == ["new"]
+    assert names.save("new", editing="old:1")["source_ref"] == "new:1"
+    assert [row["name"] for row in names.repository.sources()] == ["new"]
     saved = runtime.read().export_state()
     assert saved["scenes"]["show"]["contributions"][0]["source_refs"] == ["new:1"]
     assert saved["runs"][run.run_id]["scene"]["contributions"][0]["source_refs"] == ["old:1"]
 
 
-def test_planner_catalog_excludes_dormant_revisions(registry):
-    repository = MediaRepository(registry.db, registry.clock, times=ProcessTransactionClock(registry.clock))
-    runtime = RuntimeStore(registry.db, registry.clock)
-    names = SourceNameService(registry.db, repository, runtime)
-    names.put("photos", write(None))
-    runtime.command("set_scene", Scene(scene_id="show", contributions=(
+def test_planner_pools_exclude_dormant_revisions(names):
+    names.save("photos")
+    names.runtime.command("set_scene", Scene(scene_id="show", contributions=(
         Contribution(target="frame:main", source_refs=("photos:1",)),)))
-    names.put("photos", write(1, favorites=True))
-    needed = runtime.read().planning_source_refs()
-    with registry.db.transaction() as conn:
-        snapshots, _ = repository.catalog_in(conn, needed)
-    assert set(snapshots) == {"photos:2"}
+    names.save("photos", editing="photos:1", favourites=True)
+    needed = names.runtime.read().planning_source_refs()
+    with names.registry.db.transaction() as conn:
+        pools = names.repository.source_pools_in(conn, needed)
+    assert set(pools) == {"photos:2"}
 
 
-def test_dormant_revision_stops_scheduled_refresh_and_reactivates_for_run(registry):
-    repository = MediaRepository(registry.db, registry.clock, times=ProcessTransactionClock(registry.clock))
-    runtime = RuntimeStore(registry.db, registry.clock)
-    names = SourceNameService(registry.db, repository, runtime)
-    names.put("photos", write(None))
+def test_a_dormant_revision_is_unwanted_until_a_scene_needs_it_again(names):
+    """`refresh_active` is the wanted rule's Source half (the store's due_pools and
+    retire_unwanted read it): a revision an admitted Run holds stays wanted; once nothing
+    needs it, it is not; a Scene naming it again makes it wanted."""
+    runtime = names.runtime
+    names.save("photos")
     runtime.command("set_scene", Scene(scene_id="show", loop=True, contributions=(
         Contribution(target="frame:main", source_refs=("photos:1",)),)))
     first = runtime.command("activate", "show", "first", 1000)
-    names.put("photos", write(1, favorites=True))
-    with registry.db.transaction() as conn:
-        assert conn.execute("SELECT refresh_active FROM media_sources WHERE source_ref='photos:1'").fetchone()[
-            "refresh_active"] is True
+    names.save("photos", editing="photos:1", favourites=True)
+    assert names.active("photos:1") is True
     runtime.command("cancel", first.run_id, 1001)
-    with registry.db.transaction() as conn, runtime.edit(conn) as current:
-        repository.reconcile_source_activity_in(conn, current.planning_source_refs())
-    with registry.db.transaction() as conn:
-        assert conn.execute("SELECT refresh_active FROM media_sources WHERE source_ref='photos:1'").fetchone()[
-            "refresh_active"] is False
-    assert repository.begin_scheduled_refresh().source.source_ref == "photos:2"
-    # A newly authored legacy Scene can make the old immutable revision live
-    # again; it first becomes unavailable and immediately due for refresh.
+    names.reconcile()
+    assert (names.active("photos:1"), names.active("photos:2")) == (False, True)
     runtime.command("set_scene", Scene(scene_id="old-again", contributions=(
         Contribution(target="frame:other", source_refs=("photos:1",)),)))
-    with registry.db.transaction() as conn, runtime.edit(conn) as current:
-        repository.reconcile_source_activity_in(conn, current.planning_source_refs())
-    with registry.db.transaction() as conn:
-        old = conn.execute("SELECT refresh_active,status,next_refresh FROM media_sources "
-                           "WHERE source_ref='photos:1'").fetchone()
-    assert old == {"refresh_active": True, "status": "unavailable", "next_refresh": 0}
+    names.reconcile()
+    assert names.active("photos:1") is True
 
 
-def test_retirement_waits_for_lease_then_fences_expired_publication(registry):
-    repository = MediaRepository(registry.db, registry.clock, times=ProcessTransactionClock(registry.clock))
-    names = SourceNameService(registry.db, repository, RuntimeStore(registry.db, registry.clock))
-    names.put("photos", write(None))
-    lease = repository.begin_scheduled_refresh()
-    assert lease.source.source_ref == "photos:1"
-    names.put("photos", write(1, favorites=True))
-    with registry.db.transaction() as conn:
-        assert conn.execute("SELECT refresh_active FROM media_sources WHERE source_ref='photos:1'").fetchone()[
-            "refresh_active"] is True
-    registry.clock.advance(91)
-    runtime = RuntimeStore(registry.db, registry.clock)
-    with registry.db.transaction() as conn, runtime.edit(conn) as current:
-        repository.reconcile_source_activity_in(conn, current.planning_source_refs())
-    result = RefreshResult(snapshot=CatalogSnapshot(source_ref="photos:1",
-                                                    refreshed_at=registry.clock.utc(), status="ok"))
-    assert repository.publish_refresh(lease, result) is False
-    with registry.db.transaction() as conn:
-        assert conn.execute("SELECT refresh_active FROM media_sources WHERE source_ref='photos:1'").fetchone()[
-            "refresh_active"] is False
-
-
-def test_retirement_waits_for_requested_refresh_completion(registry):
-    repository = MediaRepository(registry.db, registry.clock, times=ProcessTransactionClock(registry.clock))
-    runtime = RuntimeStore(registry.db, registry.clock)
-    names = SourceNameService(registry.db, repository, runtime)
-    names.put("photos", write(None))
-    repository.queue = RecordingMediaQueue()
-    receipt = repository.request_refresh("photos:1")
-    assert receipt.requested_revision == 1
-    names.put("photos", write(1, favorites=True))
-    with registry.db.transaction() as conn:
-        assert conn.execute("SELECT refresh_active FROM media_sources WHERE source_ref='photos:1'").fetchone()[
-            "refresh_active"] is True
-    lease = repository.begin_requested_refresh("photos:1")
-    assert lease is not None and lease.request_revision == 1
-    assert repository.publish_refresh(lease, RefreshResult(snapshot=CatalogSnapshot(
-        source_ref="photos:1", refreshed_at=registry.clock.utc(), status="ok")))
-    with registry.db.transaction() as conn, runtime.edit(conn) as current:
-        repository.reconcile_source_activity_in(conn, current.planning_source_refs())
-    with registry.db.transaction() as conn:
-        assert conn.execute("SELECT refresh_active FROM media_sources WHERE source_ref='photos:1'").fetchone()[
-            "refresh_active"] is False
-
-
-def test_dormant_snapshot_releases_metadata_capacity_after_run_ends(registry):
-    repository = MediaRepository(registry.db, registry.clock, times=ProcessTransactionClock(registry.clock))
-    runtime = RuntimeStore(registry.db, registry.clock)
-    names = SourceNameService(registry.db, repository, runtime)
-    names.put("photos", write(None))
-    asset = OriginalAsset(connection_id="immich-main", upstream_id=str(uuid.UUID(int=1)),
-                          original_sha1="0" * 39 + "1", kind="image", raw_width=30,
-                          raw_height=50, orientation=1, captured_at=900, file_size=10)
-    snapshot = CatalogSnapshot(source_ref="photos:1", refreshed_at=1000,
-                               status="ok", candidates=(asset.candidate,))
-    with registry.db.transaction() as conn:
-        conn.execute("INSERT INTO asset_revisions(asset_id,metadata,first_seen,last_seen) "
-                     "VALUES(%s,%s,1000,1000)",
-                     (asset.asset_id, Jsonb(asset.model_dump(mode="json"))))
-        conn.execute("INSERT INTO source_members(source_ref,asset_id) VALUES('photos:1',%s)",
-                     (asset.asset_id,))
-        conn.execute("UPDATE catalog_snapshots SET snapshot=%s WHERE source_ref='photos:1'",
-                     (Jsonb(snapshot.model_dump(mode="json")),))
-        assert repository._candidate_capacity(conn) == 1
-    runtime.command("set_scene", Scene(scene_id="show", loop=True, contributions=(
-        Contribution(target="frame:main", source_refs=("photos:1",)),)))
-    run = runtime.command("activate", "show", "first", 1000)
-    names.put("photos", write(1, favorites=True))
-    with registry.db.transaction() as conn:
-        assert repository._candidate_capacity(conn) == 1
-    runtime.command("cancel", run.run_id, 1001)
-    with registry.db.transaction() as conn, runtime.edit(conn) as current:
-        repository.reconcile_source_activity_in(conn, current.planning_source_refs())
-    with registry.db.transaction() as conn:
-        assert repository._candidate_capacity(conn) == 0
-        assert conn.execute("SELECT count(*) AS n FROM source_members WHERE source_ref='photos:1'").fetchone()["n"] == 0
-
-
-def test_legacy_versions_group_and_api_reports_dependent_scene_ids(registry):
-    repository = MediaRepository(registry.db, registry.clock, times=ProcessTransactionClock(registry.clock))
-    repository.configure_source(SourceSpec(source_ref="legacy:1", connection_ref="immich-main"))
-    repository.configure_source(SourceSpec(source_ref="legacy:2", connection_ref="immich-main"))
-    runtime = RuntimeStore(registry.db, registry.clock)
-    runtime.command("set_scene", Scene(scene_id="old", contributions=(
-        Contribution(target="frame:main", source_refs=("legacy:1",)),)))
+def test_the_delete_api_reports_dependent_scene_ids(names, registry):
+    names.save("family")
+    names.runtime.command("set_scene", Scene(scene_id="old", contributions=(
+        Contribution(target="frame:main", source_refs=("family:1",)),)))
     app = create_app(registry.db, registry.clock, "a" * 32)
     headers = {"Authorization": "Bearer " + "a" * 32}
     with TestClient(app) as client:
-        response = client.put("/v1/operator/source-names/legacy", headers=headers,
-                              json={"expected_revision": 2, "connection_ref": "immich-main",
-                                    "favorites": True})
-        assert response.status_code == 200 and response.json()["revision"] == 3
         media = client.get("/v1/operator/media", headers=headers).json()
         assert [(row["name"], row["source_ref"]) for row in media["sources"]] == [
-            ("legacy", "legacy:3")]
-        refused = client.delete("/v1/operator/source-names/legacy?expected_revision=3",
+            ("family", "family:1")]
+        refused = client.delete("/v1/operator/source-names/family?expected_revision=1",
                                 headers=headers)
         assert refused.status_code == 409
         assert refused.json() == {"error": "source_in_use", "scene_ids": ["old"]}
-    assert runtime.read().export_state()["scenes"]["old"]["contributions"][0]["source_refs"] == ["legacy:3"]
-
-
-def test_source_preview_api_is_authenticated_and_only_enqueues_unsaved_query(registry):
-    queue = RecordingMediaQueue()
-    repository = MediaRepository(registry.db, registry.clock, queue=queue, times=ProcessTransactionClock(registry.clock))
-    repository.worker_status(None, ("immich-main",))
-    app = create_app(registry.db, registry.clock, "a" * 32, media_queue=queue)
-    headers = {"Authorization": "Bearer " + "a" * 32}
-    query = {"connection_ref": "immich-main", "media_types": ["image"], "favorites": True}
-    with TestClient(app) as client:
-        refused = client.post("/v1/operator/source-previews", json=query)
-        assert refused.status_code == 401
-        accepted = client.post("/v1/operator/source-previews", headers=headers, json=query)
-        assert accepted.status_code == 202
-        receipt = accepted.json()
-        assert receipt["status"] == "pending"
-        result = client.get(f"/v1/operator/source-previews/{receipt['request_id']}", headers=headers)
-        assert result.status_code == 200
-        assert result.json() == {"request_id": receipt["request_id"], "status": "pending", "read_at": 1000}
-        unavailable = client.post("/v1/operator/source-previews", headers=headers,
-                                  json={**query, "connection_ref": "removed"})
-        assert unavailable.status_code == 409
-        assert unavailable.json() == {"error": "source_connection_unavailable"}
-    assert queue.previews[0][1] == receipt["request_id"]
-    assert repository.sources() == []
-    with registry.db.transaction() as conn:
-        assert conn.execute("SELECT count(*) AS n FROM source_previews").fetchone()["n"] == 1
+        retired = client.put("/v1/operator/source-names/family", headers=headers, json={})
+        assert retired.status_code in (404, 405)   # a rename is a draft saved under a new name
 
 
 def test_migration_preserves_legacy_collisions_and_large_numeric_suffix(registry):
     refs = ("foo", "foo:1", "foo:bar", "large:" + "9" * 22)
     with registry.db.transaction() as conn:
         conn.execute("DROP TABLE media_source_name_versions")
-        conn.execute("DROP TABLE media_source_names")
+        # 080's drafts name a Source name: their reference goes with the table (030 re-runs).
+        conn.execute("DROP TABLE media_source_names CASCADE")
         conn.execute("DELETE FROM schema_migrations WHERE name='030_source_names.sql'")
         for ref in refs:
-            spec = SourceSpec(source_ref=ref, connection_ref="immich-main")
-            conn.execute("INSERT INTO media_sources(source_ref,spec) VALUES(%s,%s)",
-                         (ref, Jsonb(spec.model_dump(mode="json", by_alias=True))))
+            conn.execute("INSERT INTO media_sources(source_ref) VALUES(%s)", (ref,))
     registry.db.migrate()
     with registry.db.transaction() as conn:
         versions = conn.execute("SELECT source_ref,name,revision FROM media_source_name_versions "
@@ -294,18 +179,3 @@ def test_migration_preserves_legacy_collisions_and_large_numeric_suffix(registry
         assert len(versions) == len(refs)
         assert {row["name"] for row in versions} == {"foo", "foo:bar", refs[-1]}
         assert len({(row["name"], row["revision"]) for row in versions}) == len(refs)
-
-
-def test_a_named_source_keeps_its_tags_and_an_equivalent_write_creates_nothing(registry):
-    names = SourceNameService(registry.db, MediaRepository(registry.db, registry.clock, times=ProcessTransactionClock(registry.clock)),
-                              RuntimeStore(registry.db, registry.clock))
-    tags = (str(uuid.UUID(int=12)), str(uuid.UUID(int=11)))
-    created = names.put("family", NamedSourceWrite(expected_revision=None, connection_ref="immich-main",
-                                                   tags=tags))
-    with registry.db.transaction() as conn:
-        spec = conn.execute("SELECT spec FROM media_sources WHERE source_ref=%s",
-                            (created["source_ref"],)).fetchone()["spec"]
-    assert spec["tags"] == sorted(tags)
-    again = names.put("family", NamedSourceWrite(expected_revision=1, connection_ref="immich-main",
-                                                 tags=tuple(reversed(tags)), media_types=("video", "image")))
-    assert again["created"] is False

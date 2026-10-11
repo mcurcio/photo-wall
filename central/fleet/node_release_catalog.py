@@ -52,7 +52,6 @@ class NodeReleaseCatalog:
         `deployments` are the 50 newest by `published_at` plus the selected and the previous
         one, wherever they fall. Each release row carries its `deployment_id` (None while the
         tag has no good manifest), its `problem`, `stable`, `in_window` and its readiness."""
-        self.sessions.require_enabled()
         with self.sessions.db.transaction() as conn:
             # Must precede the first data query (operator_snapshot.py does the same).
             conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")

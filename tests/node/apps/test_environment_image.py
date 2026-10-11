@@ -1,11 +1,11 @@
-"""The shipped environment images (E2c): each `<role>.squashfs` a component build ships is the
-image its components.json ref names, has the contract's format, and, mounted read-only, passes
-the full `verify_root` (the per-file proof's one home: the Node trusts the image digest and runs
-only the release check, errata E-E2C-DR-2). Two builds giving one digest is the build's own
-check (scripts/build_node_components.py, `node_components_image_not_reproducible`).
+"""The shipped environment images (E2c): each `<role>.squashfs` the release writer ships
+(scripts/node_release_writer.py) is the image its components.json ref names, has the contract's
+format, and, mounted read-only, passes the full `verify_root` (the per-file proof's one home: the
+Node trusts the image digest and runs only the release check, errata E-E2C-DR-2). Two builds
+giving one digest is the build's own check (debian-packaging/build-root.sh).
 
 Integration only: real docker, a real loop mount. node-components.yml runs it on the component
-set it just built or restored. pytest runs as the runner user; mount, umount and the verify over
+set it just wrote. pytest runs as the runner user; mount, umount and the verify over
 the mount run as root (`sudo -n`, direct when euid is 0), as the Node's PID1 does: the sealed
 roots hold root-only files (etc/shadow 0640), which only root can hash once `-all-root` owns
 them by root.
@@ -20,13 +20,12 @@ from pathlib import Path
 
 import pytest
 
-from appliance.apps.environment import file_sha256
-from scripts.build_environment_image import IMAGE_SUFFIX, tools_image
+from appliance.apps.environment import IMAGE_SUFFIX, file_sha256
 
 REPO = Path(__file__).resolve().parents[3]
 ENABLE_VARIABLE = "PHOTO_WALL_IMAGE_MOUNT_TESTS"
 COMPONENTS_VARIABLE = "PHOTO_WALL_NODE_COMPONENTS"
-# components.json field -> the image scripts/build_node_components.py ships beside it.
+# components.json field -> the image scripts/node_release_writer.py ships beside it.
 IMAGES = {"app_environment": "app" + IMAGE_SUFFIX, "manager_primary": "manager-primary" + IMAGE_SUFFIX}
 
 pytestmark = pytest.mark.skipif(
@@ -67,8 +66,10 @@ def metadata(components: Path) -> dict:
 
 
 @pytest.fixture(scope="module")
-def tools(metadata: dict) -> str:
-    return tools_image(architecture=metadata["app_environment"]["architecture"])
+def tools() -> str:
+    """The roots container (squashfs-tools at the pin), as debian-packaging/build-root.sh loads it."""
+    return subprocess.run([str(REPO / "debian-packaging/build-container.sh"), "--target", "roots"],
+                          check=True, capture_output=True, text=True).stdout.strip()
 
 
 @pytest.mark.parametrize("role", IMAGES)

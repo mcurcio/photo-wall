@@ -23,7 +23,7 @@ from player.native import NativeOutput, NativeRenderer
 for module in (player.native, player.wayland_frames, contracts.node_frame):
     source = Path(module.__file__)
     print("FROZEN_IMPORT", source, hashlib.sha256(source.read_bytes()).hexdigest(), flush=True)
-print("FROZEN_CLIENT", hashlib.sha256(Path("/usr/lib/photo-wall-client/libphoto-wall-frame-client.so").read_bytes()).hexdigest(), flush=True)
+print("FROZEN_CLIENT", hashlib.sha256(Path("/usr/lib/photo-wall/frame-client/libphoto-wall-frame-client.so").read_bytes()).hexdigest(), flush=True)
 
 renderer = NativeRenderer((NativeOutput("headless", "photo-wall-headless", 640, 480),))
 renderer.set_unbound_outputs((), "fixture-player")
@@ -61,7 +61,7 @@ def tick():
 
             config = PlayerConfiguration.model_validate_json(last_configuration)
             binding = config.bindings[0] if config.bindings else None
-            if binding and binding.calibration.gain == 0.5 and media_plan is None:
+            if binding and binding.calibration.fit.rotation == 180 and media_plan is None:
                 # Explicit fixture authority: genuine readiness/Commit path, no
                 # assertion that this local fixture is Central Run certification.
                 config = config.model_copy(update={"enabled_outputs": (binding.output_id,)})

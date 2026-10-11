@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <protocol name="photo_wall_frame_v1">
   <copyright>Copyright 2026 Photo Wall contributors. MIT license.</copyright>
-  <interface name="pw_frame_manager_v1" version="3">
+  <interface name="pw_frame_manager_v1" version="4">
     <description summary="Correlate an app frame with a base-authorized grant">
       This request grants no authority and produces no presentation evidence.
       Tag and wp_presentation.feedback MUST precede the same wl_surface.commit
@@ -58,8 +58,31 @@
       <arg name="config_revision" type="string"/>
       <arg name="state" type="uint"/>
     </event>
+    <event name="picture" since="4">
+      <description summary="The Output's picture operations (roadmap 1c)">
+        Bounded canonical JSON of contracts.node_frame.PictureOperations, at most
+        512 bytes, sent by the base controller through the shell for one Output.
+        The shell forwards it verbatim and never interprets it. It is re-sent to a
+        client that binds later and after a Weston restart. The app applies the
+        newest one it received for the Output in its final pass.
+      </description>
+      <arg name="output_id" type="string"/>
+      <arg name="operations" type="string"/>
+    </event>
+    <request name="tag_picture" since="4">
+      <description summary="Tag a buffer with its frame tag and its picture change">
+        Replaces tag for version 4 clients, with the same rules. picture_change is
+        the decimal picture change of the operations this buffer was drawn with,
+        or "0" before any picture event (contracts.node_frame.picture_change_text).
+        The shell echoes it in its presented event; it grants nothing.
+      </description>
+      <arg name="surface" type="object" interface="wl_surface"/>
+      <arg name="grant_id" type="string"/>
+      <arg name="frame_tag" type="string"/>
+      <arg name="picture_change" type="string"/>
+    </request>
   </interface>
-  <interface name="pw_diagnostic_manager_v1" version="3">
+  <interface name="pw_diagnostic_manager_v1" version="4">
     <description summary="Base-private diagnostic surfaces">
       Only the compositor-created private diagnostic client may bind this global.
       Output events name physical Output pixels. Serial is acknowledged before
@@ -97,6 +120,15 @@
       <arg name="surface" type="object" interface="wl_surface"/>
       <arg name="output" type="string"/>
     </request>
+    <event name="brightness" since="4">
+      <description summary="The base page's brightness line for one Output (roadmap 1c)">
+        Display text composed by the base controller (where brightness acts and its
+        value), forwarded verbatim by the shell; at most 128 bytes. Re-sent when the
+        diagnostic client binds. The client draws it on the base page.
+      </description>
+      <arg name="output_id" type="string"/>
+      <arg name="text" type="string"/>
+    </event>
   </interface>
   <interface name="pw_health_layer_v1" version="1">
     <request name="destroy" type="destructor"/>

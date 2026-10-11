@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 
+from central.displays.model import Readiness
+from central.infra.display_store import POSITION_COLUMNS, SEEN_DISPLAY_JOIN, frame_readiness
 from contracts.models import Calibration, FrameProfile, OutputBinding
 from contracts.time import Clock
 
@@ -72,13 +74,9 @@ class PostgresInstallationRepository:
     ) -> dict[str, list[OutputBinding]] | None:
         if not self.session_is_current_in(conn, player_id, authority_epoch, lock=True):
             return None
-        conn.execute(
-            "UPDATE frames SET preview=NULL,preview_expires=NULL,"
-            "configuration_revision=configuration_revision+1 WHERE preview_expires<=%s",
-            (self.clock.utc(),),
-        )
         rows = conn.execute(
-            "SELECT f.*,b.output_id FROM bindings b JOIN frames f ON f.id=b.frame_id "
+            f"SELECT f.*,b.output_id,{POSITION_COLUMNS} FROM bindings b "  # noqa: S608
+            f"JOIN frames f ON f.id=b.frame_id {SEEN_DISPLAY_JOIN} "
             "WHERE b.player_id=%s ORDER BY b.output_id FOR SHARE OF f,b",
             (player_id,),
         ).fetchall()
@@ -90,8 +88,6 @@ class PostgresInstallationRepository:
                 configuration_revision=row["configuration_revision"],
                 profile=FrameProfile.model_validate(row["profile"]),
                 calibration=Calibration.model_validate(row["calibration"]),
-                preview=(Calibration.model_validate(row["preview"]) if row["preview"] else None),
-                preview_expires=row["preview_expires"],
             )
             for row in rows
         ]
@@ -100,6 +96,6 @@ class PostgresInstallationRepository:
             "execution_bindings": [
                 binding
                 for binding, row in zip(bindings, rows, strict=True)
-                if row["calibration_valid"]
+                if frame_readiness(row) is Readiness.READY
             ],
         }

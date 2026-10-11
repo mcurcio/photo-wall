@@ -15,6 +15,7 @@ from appliance.kernel.clock import boot_id, boottime_ms
 from appliance.node.manager import ManagerRecovery
 from appliance.process_identity import read_proc_start_ticks
 from contracts.app_environment import AppEnvironmentRefV2
+from contracts.node_boot import MANAGER_PACKAGE
 from contracts.strict_json import loads_object
 
 UNIT = "photo-wall-node-manager.service"
@@ -28,7 +29,7 @@ class SystemdManagerLauncher:
 
     def verify(self, root_digest: str) -> bool:
         reference = self.references.get(root_digest)
-        if reference is None or reference.environment_sha256 != root_digest or reference.deb_name != "photo-wall-node-manager":
+        if reference is None or reference.environment_sha256 != root_digest or reference.deb_name != MANAGER_PACKAGE:
             return False
         try:
             verify_root(self.roots / root_digest, reference, **self.abi)

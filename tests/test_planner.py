@@ -2,7 +2,7 @@ import hashlib
 
 import pytest
 
-from central.catalog import Candidate, CatalogSnapshot
+from central.catalog import Candidate, SourcePool
 from central.planner import PlannerLimits, PlanningBudgetExceeded, PlanningError, eligible, project
 from central.runtime import Child, Contribution, RecordingActuator, Runtime, Scene
 from contracts.models import FrameProfile, OutputBinding, Plan, Variant
@@ -18,6 +18,10 @@ def candidate(asset="a", *, width=1200, height=1800, kind="image", prepared=True
     ) if prepared else None
     return Candidate(asset_id=asset, kind=kind, original_width=width, original_height=height,
                      captured_at=captured, variant=variant)
+
+
+def pool(source="holiday:1", *candidates, ready=True):
+    return SourcePool(source_ref=source, ready=ready, candidates=candidates)
 
 
 def binding(frame="left", output="hdmi-1", *, width=1080, height=1920, diagonal=40,
@@ -39,13 +43,12 @@ def runtime(*, cycle=10, contributions=None, children=()):
     return instance
 
 
-def propose(instance, *, now=0, horizon=25, assets=None, snapshots=None, bindings=None,
+def propose(instance, *, now=0, horizon=25, assets=None, pools=None, bindings=None,
             authored=None, locks=None, limits=None):
     options = dict(
         bindings_by_player=bindings or {"player-one": (binding(),)},
-        catalog_snapshots=snapshots if snapshots is not None else {
-            "holiday:1": CatalogSnapshot(source_ref="holiday:1", refreshed_at=now,
-                                         candidates=tuple(assets or [candidate()])),
+        source_pools=pools if pools is not None else {
+            "holiday:1": pool("holiday:1", *(assets or [candidate()])),
         },
         authored_candidates=authored or {}, locked_assignments=locks or {},
         horizon_seconds=horizon,
@@ -72,9 +75,7 @@ def test_live_results_change_unsecured_cycles_same_run_and_locks_preserve_delete
     assert by_start[20].variant == candidate("new").variant
     assert layers(first)[0].assignment_id == by_start[0].assignment_id
     assert instance.advance(5).for_target("frame:left").source_refs == ("holiday:1",)
-    empty = propose(instance, now=5, snapshots={
-        "holiday:1": CatalogSnapshot(source_ref="holiday:1", refreshed_at=5, candidates=()),
-    }, locks={locked.assignment_id: locked})
+    empty = propose(instance, now=5, pools={"holiday:1": pool()}, locks={locked.assignment_id: locked})
     assert layers(empty) == (locked,)
     assert {d.code for d in empty.diagnostics} >= {"source_empty", "no_eligible_candidates"}
 
@@ -113,22 +114,58 @@ def test_upscaled_720p_is_never_sent_to_large_frame_and_authored_alternative_sta
     assert "authored_no_eligible_alternative" in {d.code for d in missing.diagnostics}
 
 
-@pytest.mark.parametrize("status", ["unavailable", "permission", "incompatible"])
-def test_failed_sources_do_not_use_stale_candidates_or_masquerade_as_empty(status):
+def test_a_pool_not_yet_complete_still_plays_and_an_empty_one_says_which_it_is():
+    """C7: the last pool keeps playing while Immich is down, so a pool with no complete check
+    assigns what it has. Empty, it is `source_not_ready` until a check completes, then
+    `source_empty`. Mutation probe: skip pools that are not ready (nothing is assigned)."""
     instance = runtime()
-    result = propose(instance, snapshots={
-        "holiday:1": CatalogSnapshot(source_ref="holiday:1", refreshed_at=0,
-                                     status=status, candidates=(candidate(),)),
-    })
-    assert layers(result) == ()
-    codes = {diagnostic.code for diagnostic in result.diagnostics}
-    assert f"source_{status}" in codes
-    assert "source_empty" not in codes
+    playing = propose(instance, pools={"holiday:1": pool("holiday:1", candidate(), ready=False)})
+    assert [layer.variant for layer in layers(playing)] == [candidate().variant] * 3
+    assert not {d.code for d in playing.diagnostics} & {"source_not_ready", "source_empty"}
+    waiting = propose(instance, pools={"holiday:1": pool(ready=False)})
+    assert layers(waiting) == ()
+    codes = {diagnostic.code for diagnostic in waiting.diagnostics}
+    assert "source_not_ready" in codes and "source_empty" not in codes
+    empty = propose(instance, pools={"holiday:1": pool()})
+    codes = {diagnostic.code for diagnostic in empty.diagnostics}
+    assert "source_empty" in codes and "source_not_ready" not in codes
     first = layers(propose(instance))[0]
-    locked = propose(instance, snapshots={
-        "holiday:1": CatalogSnapshot(source_ref="holiday:1", refreshed_at=0, status=status),
-    }, locks={first.assignment_id: first})
+    locked = propose(instance, pools={"holiday:1": pool(ready=False)},
+                     locks={first.assignment_id: first})
     assert layers(locked) == (first,)
+
+
+def test_two_sources_sharing_a_photo_give_one_candidate_newest_first_across_sources():
+    """F-1: a contribution's photos are the union of its Sources' pools, one per asset id.
+    Mutation probe: union without dedup (the shared photo takes two of the cycles)."""
+    instance = runtime(contributions=(
+        Contribution(target="frame:left", source_refs=("holiday:1", "garden:1")),))
+    shared, older, newest = (candidate("shared", captured=2), candidate("older", captured=1),
+                             candidate("newest", captured=3))
+    result = propose(instance, horizon=35, pools={
+        "holiday:1": pool("holiday:1", older, shared),
+        "garden:1": pool("garden:1", shared, newest),
+    })
+    assert [s.asset_id for s in result.selections] == ["newest", "shared", "older", "newest"]
+
+
+def test_a_photo_only_in_a_source_the_contribution_does_not_name_is_never_assigned():
+    instance = runtime(contributions=(
+        Contribution(target="frame:left", source_refs=("holiday:1",)),))
+    result = propose(instance, pools={
+        "holiday:1": pool("holiday:1", candidate("mine", captured=1)),
+        "garden:1": pool("garden:1", candidate("theirs", captured=9)),
+    })
+    assert {s.asset_id for s in result.selections} == {"mine"}
+
+
+def test_a_pool_of_fifty_thousand_photos_projects_with_no_budget_error():
+    """C11: no window and no candidate cap. Mutation probe: keep a candidate-count bound."""
+    instance = runtime()
+    photos = [candidate(f"photo-{n}", captured=n, prepared=False) for n in range(50_000)]
+    result = propose(instance, assets=photos)
+    assert [s.asset_id for s in result.selections] == ["photo-49999", "photo-49998", "photo-49997"]
+    assert {r.asset_id for r in result.acquisitions} == {"photo-49999", "photo-49998", "photo-49997"}
 
 
 def test_missing_source_diagnosed_and_missing_variant_requests_deduplicated_acquisition():
@@ -143,7 +180,7 @@ def test_missing_source_diagnosed_and_missing_variant_requests_deduplicated_acqu
     assert len(result.acquisitions[0].assignment_ids) == 6
     assert result.acquisitions[0].earliest_start == 0
     assert {d.code for d in result.diagnostics} == {"preparation_pending"}
-    missing = propose(instance, snapshots={})
+    missing = propose(instance, pools={})
     assert "source_missing" in {d.code for d in missing.diagnostics}
 
 
@@ -229,10 +266,8 @@ def test_stable_recent_cycle_variety_and_snapshot_order_independence():
 
 
 @pytest.mark.parametrize("limits,overrides", [
-    (PlannerLimits(max_candidates=1), {"assets": [candidate("a"), candidate("b")]}),
-    (PlannerLimits(max_sources=1), {"snapshots": {
-        "holiday:1": CatalogSnapshot(source_ref="holiday:1", refreshed_at=0),
-        "other:1": CatalogSnapshot(source_ref="other:1", refreshed_at=0),
+    (PlannerLimits(max_sources=1), {"pools": {
+        "holiday:1": pool("holiday:1"), "other:1": pool("other:1"),
     }}),
     (PlannerLimits(max_assignments=1), {}),
     (PlannerLimits(max_acquisitions=1), {"assets": [candidate("a", prepared=False),
@@ -240,7 +275,7 @@ def test_stable_recent_cycle_variety_and_snapshot_order_independence():
     (PlannerLimits(max_horizon_seconds=5), {}),
     (PlannerLimits(max_cycle_seconds=5), {}),
     (PlannerLimits(max_events=1), {}),
-    (PlannerLimits(max_diagnostics=1), {"snapshots": {}}),
+    (PlannerLimits(max_diagnostics=1), {"pools": {}}),
 ])
 def test_each_planning_budget_fails_without_mutation(limits, overrides):
     instance = runtime()
@@ -255,9 +290,7 @@ def test_invalid_input_and_prepared_variant_fail_safely():
     with pytest.raises(PlanningError, match="one current binding"):
         propose(instance, bindings={"one": (binding(),), "two": (binding(),)})
     with pytest.raises(PlanningError, match="immutable source"):
-        propose(instance, snapshots={
-            "holiday:1": CatalogSnapshot(source_ref="wrong:1", refreshed_at=0),
-        })
+        propose(instance, pools={"holiday:1": pool("wrong:1")})
     for invalid in (0, -1, float("nan"), float("inf"), True):
         with pytest.raises(PlanningError):
             propose(instance, horizon=invalid)
@@ -309,13 +342,40 @@ def test_authored_reference_input_budget_is_explicit():
     instance = runtime(contributions=(Contribution(target="frame:left", source_refs=("holiday:1",) * 3),))
     with pytest.raises(PlanningBudgetExceeded, match="authored source reference"):
         propose(instance, limits=PlannerLimits(max_sources=2))
+    authored = runtime(contributions=(Contribution(target="frame:left", asset_refs=("a", "b")),))
+    with pytest.raises(PlanningBudgetExceeded, match="authored asset reference"):
+        propose(authored, authored={"a": candidate("a")}, limits=PlannerLimits(max_authored_refs=1))
 
 
 def test_source_health_remains_observable_when_entire_projection_is_locked():
     instance = runtime()
     lock = layers(propose(instance, horizon=5))[0]
-    result = propose(instance, horizon=5, locks={lock.assignment_id: lock}, snapshots={
-        "holiday:1": CatalogSnapshot(source_ref="holiday:1", refreshed_at=0, status="unavailable"),
-    })
+    result = propose(instance, horizon=5, locks={lock.assignment_id: lock},
+                     pools={"holiday:1": pool(ready=False)})
     assert layers(result) == (lock,)
-    assert "source_unavailable" in {diagnostic.code for diagnostic in result.diagnostics}
+    assert "source_not_ready" in {diagnostic.code for diagnostic in result.diagnostics}
+
+
+def test_a_locked_layer_takes_a_revised_fade_out_and_nothing_else():
+    """Central may revise only the fade-out and the after-state of a layer it already offered
+    (Finish makes the current cycle the last and holds a kept photo there; migration 071 left
+    in-flight endings at "leave_as_is"); any other change to it stays a stale lock. Mutation
+    probes: refuse the revised fade-out (the layer is dropped as stale); accept any change (the
+    revised fade-in is planned)."""
+    instance = runtime(contributions=(Contribution(
+        target="frame:left", source_refs=("holiday:1",), fade_in_seconds=1, fade_out_seconds=2,
+    ),))
+    offered = layers(propose(instance, now=3, horizon=5))[0]
+    assert offered.fade_out == 2
+    revised = propose(instance, now=4, horizon=5,
+                      locks={offered.assignment_id: offered.model_copy(update={"fade_out": 0})})
+    assert layers(revised)[0] == offered
+    assert not [d for d in revised.diagnostics if d.code == "lock_stale_authority"]
+    kept = propose(instance, now=4, horizon=5, locks={
+        offered.assignment_id: offered.model_copy(update={"after_end": "keep_nothing"})})
+    assert layers(kept)[0] == offered
+    stale = propose(instance, now=4, horizon=5,
+                    locks={offered.assignment_id: offered.model_copy(update={"fade_in": 0})})
+    assert offered.assignment_id not in {layer.assignment_id for layer in layers(stale)}
+    assert "lock_stale_authority" in {
+        d.code for d in stale.diagnostics if d.assignment_id == offered.assignment_id}

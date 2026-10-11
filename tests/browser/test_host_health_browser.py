@@ -488,32 +488,45 @@ def test_a_failing_host_read_is_named_and_no_host_row_claims_health(page, regist
         connect(page, origin, "attention")
         expect(_summary(page)).to_have_text("No Frame or Player needs attention · host health not read")
         expect(visible_page(page)).not_to_contain_text("Host Management")
-        # The Status chip does not judge a box it could not read.
-        inspector = open_frame(page, FRAME, "status")
+        # The Overview's host chip does not judge a box it could not read: in plain words on
+        # the page, in the classifier's words under Details.
+        inspector = open_frame(page, FRAME, "overview")
+        now = inspector.get_by_role("region", name="Now", exact=True)
+        expect(now.get_by_role("link", name="Can't tell how its Pi is", exact=True)).to_have_attribute(
+            "data-severity", "unknown")
+        now.get_by_role("button", name="Details", exact=True).click()
         expect(inspector.get_by_role("link", name=re.compile(r"· host health not read$"))).to_have_attribute(
             "data-severity", "unknown")
 
 
-def test_the_status_chip_names_the_worst_item_and_links_to_the_pis_hardware_page(page, registry):
+def test_the_overview_chip_names_the_worst_item_and_links_to_the_pis_hardware_page(page, registry):
     ((player_id, device, name),) = _frames_with_players(registry, [FRAME])
     report_readiness(registry, player_id)
     document = {"read_at": 1000.0, "thresholds": N1_THRESHOLDS, "devices": [_n1_row(device, 0x4)]}
     _stub(page, document)
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin)
-        inspector = open_frame(page, FRAME, "status")
+        inspector = open_frame(page, FRAME, "overview")
+        now = inspector.get_by_role("region", name="Now", exact=True)
+        # On the page, the Pi's health in plain words, leading to its Hardware page.
+        plain = now.get_by_role("link", name="Its Pi has a problem", exact=True)
+        expect(plain).to_have_attribute("href", f"#/hardware/{device}")
+        expect(now).to_contain_text("Photo Wall is sending nothing to this Frame now")
+        # Under Details, the classifier's chip and the Frame's planned fact (console DDD §34, S1).
+        now.get_by_role("button", name="Details", exact=True).click()
         chip = inspector.get_by_role("link", name=f"{name} · throttled now", exact=True)
         expect(chip).to_have_attribute("href", f"#/hardware/{device}")
-        # Under the chip, the first line is the Frame's planned fact (console DDD §34, S1).
-        expect(inspector.locator("p:has(> a[href^='#/hardware/']) + .facet__planned")).to_contain_text(
+        expect(now).to_contain_text(
             "On top: nothing · no Run puts a layer on this Frame now (Central's Runs; the Panel "
             "is not observed)")
         document["devices"] = [_row(device, 880.0, 50)]
         page.reload()
+        now.get_by_role("button", name="Details", exact=True).click()
         expect(inspector.get_by_role("link", name=f"{name} · Host Management silent 2 min", exact=True)
                ).to_be_visible()
         document["devices"] = [_row(device, 997.0, 50)]
         page.reload()
+        now.get_by_role("button", name="Details", exact=True).click()
         chip = inspector.get_by_role("link", name=f"{name} · Host Management last reported 3 s ago", exact=True)
         expect(chip).to_be_visible()
         chip.click()

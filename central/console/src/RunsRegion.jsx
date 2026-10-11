@@ -27,7 +27,7 @@ import { useMutate } from "./useMutate.js";
  *     nested, then a closed "Recently ended" list. Finish asks for a natural end;
  *     Cancel stops now and goes through ConfirmAction.
  *  3. WHY — per frame, "Why?" opens Central's Runs on it (join.js `explainPrecedence`,
- *     PrecedenceExplanation.jsx, shared with the Wall's Status facet) and "Why nothing new?" the media chain
+ *     PrecedenceExplanation.jsx, shared with the Frame page's Overview) and "Why nothing new?" the media chain
  *     (MediaPipeline.jsx `WhyNothingNew`), each a disclosure.
  *
  * Everything here is Central's Runs (intent), never a readback of what a panel shows
@@ -72,7 +72,8 @@ export function RunsRegion({ snapshot, route, navigate, recentScene, markDraft }
       role="region"
       aria-label="Runs"
     >
-      <h2 className="showrunner__region-title">Runs</h2>
+      {/* While Show now runs, its own title is the heading (follow-ups D1: no "Runs" there). */}
+      <h2 className="showrunner__region-title" hidden={inFlow}>Runs</h2>
       <ShowNowFlow
         snapshot={snapshot}
         route={route}

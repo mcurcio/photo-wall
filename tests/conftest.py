@@ -13,27 +13,15 @@ from central.db import Database
 from central.registry import Registry
 from contracts.time import ManualClock
 
-
-@pytest.fixture(autouse=True)
-def _mdns_advertise_disabled_by_default(monkeypatch):
-    """Advertising defaults ON in production (central.app.create_app), so
-    every TestClient(create_app(...)) boot would otherwise perform a real
-    multicast registration (~1s+, and non-hermetic). Tests exist to exercise
-    mDNS advertising explicitly opt back in by passing mdns_enabled=True /
-    mdns_advertiser=... straight to create_app(), or by overriding this env
-    var themselves -- see tests/test_mdns_advertise.py. This only changes
-    the *test* environment default; production's default-enabled behavior
-    in central/app.py is untouched.
-    """
-    monkeypatch.setenv("PHOTO_WALL_MDNS_ADVERTISE", "false")
-
-
 _RUN_ID = pytest.StashKey[str]()
 _UNOWNED_SKIPS = pytest.StashKey[list]()
 
 # The fixture every database fixture builds on: a test whose fixture closure holds it is a `db`
 # test, however it reaches the database, so a new database fixture classifies itself.
 DATABASE_ROOT = "database_provisioner"
+# Likewise a test whose closure holds the real Immich fixture is an `immich` test (it may also be
+# `db`): CI's software-e2e.yml photo-sources job runs them against a published fixture.
+IMMICH_ROOT = "immich_library"
 BROWSER_TESTS = Path(__file__).parent / "browser"
 
 # A skip in CI (`CI` set) fails the run unless its reason starts with one of these: each is a
@@ -48,10 +36,11 @@ CI_SKIP_ALLOWLIST = (
     "set PHOTO_WALL_PROVENANCE_BASE_IMAGE",  # a locally built core image only
     "set PHOTO_WALL_NATIVE_DISPLAY_IMAGE",  # a built Linux display image only
     "interactive local fixture only",  # a developer's interactive fixture
-    "real dpkg-deb build/inspection requires",  # opt-in PHOTO_WALL_IMAGE_TOOL_TESTS only
     "set PHOTO_WALL_RELEASE_TOKEN",  # a fork pull request gets no token
     "set PHOTO_WALL_NODE_PID1_FIXTURE",  # node-pid1.yml builds it and requires every scenario
     "set PHOTO_WALL_IMAGE_MOUNT_TESTS",  # node-components.yml mounts the images (docker, loop, sudo)
+    "set PHOTO_WALL_LOCAL_REPO",  # node-components.yml's debs job proves the repo it builds
+    "set PHOTO_WALL_IMMICH_FIXTURE",  # software-e2e.yml photo-sources runs the named Immich tests
 )
 
 
@@ -61,17 +50,26 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "db: needs PostgreSQL (derived from its fixtures)")
     config.addinivalue_line("markers", "browser: drives the console in a browser (tests/browser)")
     config.addinivalue_line("markers", "node_pid1: the node under real systemd (node-pid1.yml)")
+    config.addinivalue_line("markers", "immich: needs the published Immich fixture (derived from "
+                            "its fixtures; software-e2e.yml photo-sources)")
 
 
 @pytest.hookimpl(tryfirst=True)  # before `-m` deselects and xdist reads the groups
 def pytest_collection_modifyitems(items):
-    """Derive each test's tier: `browser` by path, else `db` by its fixtures, else unit."""
+    """Derive each test's tier: `browser` by path, else `db` by its fixtures, else unit; and
+    `immich` by its fixtures, whatever its tier."""
     for item in items:
+        immich = IMMICH_ROOT in getattr(item, "fixturenames", ())
+        if immich:
+            item.add_marker(pytest.mark.immich)
+            # The fixture is one shared library that some tests add photos to and remove them
+            # from while others count it: every Immich test runs on one worker, in order.
+            item.add_marker(pytest.mark.xdist_group("immich"))
         if BROWSER_TESTS in item.path.parents:
             item.add_marker(pytest.mark.browser)
         elif DATABASE_ROOT in getattr(item, "fixturenames", ()):
             item.add_marker(pytest.mark.db)
-            if "module_registry" in item.fixturenames:
+            if "module_registry" in item.fixturenames and not immich:
                 # One system for the whole module, its tests in order: keep them on one worker.
                 item.add_marker(pytest.mark.xdist_group(item.module.__name__))
 
@@ -133,6 +131,19 @@ def pytest_runtest_makereport(item, call):
     if log:
         with open(log, "a", encoding="utf-8") as handle:
             handle.write(json.dumps({**readings, "exception": str(report.longrepr)}) + "\n")
+
+
+@pytest.fixture(scope="session")
+def immich_library():
+    """The published real Immich fixture (support/immich_library.py); skips without
+    PHOTO_WALL_IMMICH_FIXTURE. Imported here, not at the top: it reads the fixture's own tooling
+    (`scripts`), which an image that runs only other tests (linux-media's) does not carry."""
+    from support.immich_library import load_immich_library
+
+    try:
+        return load_immich_library()
+    except LookupError as unset:
+        pytest.skip(str(unset))
 
 
 @pytest.fixture

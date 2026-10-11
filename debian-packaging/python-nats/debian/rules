@@ -1,0 +1,8 @@
+#!/usr/bin/make -f
+# python3-nats from upstream's nats-py sdist (decision 0019), built by pybuild's pyproject
+# plugin. The sdist carries no tests: pybuild's test step would find none.
+export PYBUILD_NAME=nats
+export PYBUILD_DISABLE=test
+
+%:
+	dh $@ --buildsystem=pybuild

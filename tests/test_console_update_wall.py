@@ -1,6 +1,6 @@
 """Update the wall, its pure parts (console DDD Part E §25a, beads NU1 and B8): updateWall.js
-(`journeyStep` over every row of the step table, the one Put-on-the-wall confirmation in both
-gate forms and its download wait, `keepPlan`'s order, `keepRow` over every row of the Keep table,
+(`journeyStep` over every row of the step table, the one Put-on-the-wall confirmation and its
+download wait, `keepPlan`'s order, `keepRow` over every row of the Keep table,
 `nextReboot`'s one-in-flight rule, `keepPause`), run under Node as
 tests/test_console_stage.py runs stage.js, and the static rule that the journey's modules name no
 route (every write goes through its verb's one send function). Without Node it skips on a
@@ -104,14 +104,13 @@ out.withdrawn = {
 };
 out.target = targetOf("v2.0.0");
 
-// --- Put vX on the wall: ONE confirmation, in its two gate forms, with the readiness line.
+// --- Put vX on the wall: ONE confirmation naming the reboot cost, with the readiness line.
 const request = { contents: "Base v1.0.0 · app 222222…", noApp: false, body: { deployment_id: TARGET, expected_revision: 4 } };
 const downloading = targetOf("v2.0.0", readOf({ rows: [release(MANIFEST, "v2.0.0", "v1.0.0", NEW_APP,
   { deployment_id: TARGET, readiness: "downloading", missing_bytes: 1500000000 })] }));
 out.put = {
-  closed: uw.putConfirmation(request, targetOf("v2.0.0"), false),
-  open: uw.putConfirmation(request, targetOf("v2.0.0"), true),
-  openDownloading: uw.putConfirmation(request, downloading, true),
+  open: uw.putConfirmation(request, targetOf("v2.0.0")),
+  openDownloading: uw.putConfirmation(request, downloading),
   wait: [uw.downloadWait(targetOf("v2.0.0")), uw.downloadWait(downloading),
     uw.downloadWait({ release: { tag: "v2.0.0", readiness: "failed", readiness_reason: "cache_disk_full" } }),
     uw.downloadWait({ release: { tag: "v2.0.0", readiness: null } })],
@@ -128,7 +127,7 @@ const snapshotOf = ({ interrupted = [], silent = [], failing = [] } = {}) => ({
     players: [player("p-c"), player("p-a"), player("p-b"), player("p-gone", null, { retired_at: 5 })]
       .map((p) => (silent.includes(p.id) ? { ...p, last_report_at: 100 } : p)),
     outputs: ["p-a", "p-b", "p-c", "p-gone"].map((id) => ({ player_id: id, output_id: "HDMI-A-1", observation: { connected: true } })),
-    frames: ["p-a", "p-b", "p-c"].map((id) => ({ id: `f-${id}`, player_id: id, output_id: "HDMI-A-1", calibration_valid: true })),
+    frames: ["p-a", "p-b", "p-c"].map((id) => ({ id: `f-${id}`, player_id: id, output_id: "HDMI-A-1", readiness: "ready" })),
   },
   outputInterruptions: interrupted.map((id) => ({ frame_id: `f-${id}`, cause_layer: "app_effect_broker", interrupted_at: 990 })),
   readinessDiagnostics: failing.map((id) => ({ player_id: id, frame_id: `f-${id}`, output_id: "HDMI-A-1",
@@ -140,8 +139,6 @@ out.plan = uw.keepPlan(snapshotOf(), { devices: boot }, "p-c").map((entry) => en
 out.planUntried = uw.keepPlan(snapshotOf(), { devices: boot }, null).map((entry) => entry.playerId);
 
 // --- keepRow: every row of the Keep table.
-const open = { effective_state: "open", state: "open", generation: 7 };
-const closed = { effective_state: "closed", state: "closed", reason: "never_certified", generation: 6, changed_at: 900 };
 const host = (bootId) => ({ session_id: `s-${bootId}`, current: true, scope: "operator_reboot", command_eligible: true,
   producer: { owner: "host_core", kernel_boot_id: bootId } });
 const command = (id, extra = {}) => ({ command_id: id, issued_at: 990, expires_at: 1020, outstanding: true,
@@ -168,7 +165,7 @@ const NOAPP = targetOf("v2.1.0");
 out.identifies = { identified: T.appIdentifies, sharedApp: SHARED.appIdentifies, baseOnly: BASE_ONLY.appIdentifies,
   noApp: NOAPP.appIdentifies, pure: uw.appIdentifiesTarget(IDENTIFIED_READ, T),
   prerelease: uw.appIdentifiesTarget(PRE_READ, T), prereleasePrevious: uw.appIdentifiesTarget(PRE_PREVIOUS, T) };
-const keepValue = (input) => uw.keepRow({ node: node(), snapshot: snapshotOf(), playerId: "p-a", target: T, gate: open,
+const keepValue = (input) => uw.keepRow({ node: node(), snapshot: snapshotOf(), playerId: "p-a", target: T,
   sent: null, waitedMs: 0, skipped: false, ...input });
 const keep = (input) => {
   const value = keepValue(input);
@@ -199,7 +196,6 @@ out.rows = {
   notRejoinedRebooting: keep({ sent: sent(), waitedMs: 600000 }),
   notRejoinedRejoining: keep({ sent: sent(), node: node({ bootId: "boot-2", linked: OLD_APP }), waitedMs: 600000 }),
   stillRejoiningAt599: keep({ sent: sent(), node: node({ bootId: "boot-2", linked: OLD_APP }), waitedMs: 599999 }),
-  cannotGate: keep({ gate: closed }),
   cannotNoHost: keep({ node: { ...node(), read: { ...node().read, sessions: [] } } }),
   skipped: keep({ skipped: true }),
   // A base-only release: its app is the old release's too, so a Player not rebooted by this page
@@ -225,7 +221,7 @@ out.evidence = {
 // --- The same session, a base-only release selected: no Player reads Rejoined, nothing is Done,
 // and the first Player is rebooted (the bug: every row read Rejoined, Done with zero reboots).
 const baseOnlyRows = ["p-a", "p-b", "p-c"].map((id) => uw.keepRow({ node: node({ linked: NEW_APP }),
-  snapshot: snapshotOf(), playerId: id, target: BASE_ONLY, gate: open, sent: null, waitedMs: 0, skipped: false }));
+  snapshot: snapshotOf(), playerId: id, target: BASE_ONLY, sent: null, waitedMs: 0, skipped: false }));
 const BASE_ONLY_READ = readOf({ selected: BASE_ONLY.deploymentId,
   extra: [{ deployment_id: BASE_ONLY.deploymentId, published_at: 860, base_tag: "v3.0.0", app_environment_sha256: NEW_APP }] });
 out.baseOnlySession = {
@@ -237,8 +233,8 @@ out.baseOnlySession = {
 };
 // The tried Player first in the plan, running a Stage: it is the next reboot, not skipped as done.
 const triedRows = [uw.keepRow({ node: { ...node({ linked: NEW_APP }), operations: ops([op("o-1", "target_running")], NEW_APP) },
-  snapshot: snapshotOf(), playerId: "p-c", target: T, gate: open, sent: null, waitedMs: 0, skipped: false }),
-uw.keepRow({ node: node({ linked: NEW_APP }), snapshot: snapshotOf(), playerId: "p-a", target: T, gate: open, sent: null,
+  snapshot: snapshotOf(), playerId: "p-c", target: T, sent: null, waitedMs: 0, skipped: false }),
+uw.keepRow({ node: node({ linked: NEW_APP }), snapshot: snapshotOf(), playerId: "p-a", target: T, sent: null,
   waitedMs: 0, skipped: false })];
 out.triedFirst = { states: triedRows.map((value) => value.state), next: uw.nextReboot(triedRows) };
 
@@ -264,12 +260,10 @@ out.followUp = {
 };
 const { stageResult } = await import(new URL("./stage.js", process.argv[1]).href);
 out.stageCodes = {
-  fallback: stageResult({ ok: false, status: 409, error: "node_app_qualified_fallback_required", data: null }, open).code,
-  done: stageResult({ ok: true, status: 201, error: null, data: { duplicate: false } }, open).code,
-  lost: stageResult(null, open).code,
+  fallback: stageResult({ ok: false, status: 409, error: "node_app_qualified_fallback_required", data: null }).code,
+  done: stageResult({ ok: true, status: 201, error: null, data: { duplicate: false } }).code,
+  lost: stageResult(null).code,
 };
-out.gateFlag = uw.keepRow({ node: node(), snapshot: snapshotOf(), playerId: "p-a", target: T, gate: closed, sent: null,
-  waitedMs: 0, skipped: false }).gate === true;
 
 // --- nextReboot: at most one in flight.
 const rows = (...states) => states.map((state, index) => ({ playerId: `p-${index}`, state, label: state, pause: null }));
@@ -287,7 +281,7 @@ out.next = {
 out.pause = {
   stall: uw.keepPause([{ playerId: "p-0", state: "rejoined", pause: null },
     { playerId: "p-1", state: "not_rejoined", label: "x", pause: "stalled" }]),
-  cannot: uw.keepPause([{ playerId: "p-0", state: "cannot_reboot", label: "Cannot reboot: gate", pause: null, gate: true }]),
+  cannot: uw.keepPause([{ playerId: "p-0", state: "cannot_reboot", label: "Cannot reboot: no session", pause: null }]),
   none: uw.keepPause(rows("rejoined", "waiting")),
 };
 out.count = uw.keepCount(rows("rejoined", "waiting", "rejoining"));
@@ -318,7 +312,7 @@ const members = (skipped) => uw.rolloutMembers(livePlan, frozen, new Set(skipped
   .map(({ entry: e, member }) => `${e.playerId}:${member}`);
 const memberRows = uw.rolloutMembers(livePlan, frozen, new Set()).map(({ entry: e, member }) => (member === "planned"
   ? { playerId: e.playerId, state: "rejoined", label: "Rejoined", pause: null }
-  : uw.keepRow({ node: node(), snapshot: snapshotOf(), playerId: e.playerId, target: T, gate: open, sent: null,
+  : uw.keepRow({ node: node(), snapshot: snapshotOf(), playerId: e.playerId, target: T, sent: null,
     waitedMs: 0, skipped: member === "skipped", outside: member === "outside" })));
 out.rollout = {
   frozen: frozen.map((e) => e.playerId),
@@ -376,19 +370,13 @@ def test_try_is_withdrawn_for_a_base_change_or_no_app_as_a_hint():
 
 
 SCOPE = ("Every Player that boots by node path from now on is offered this deployment, including Players Central "
-         "has not seen. Central cannot list which Players will boot. A Pi whose kernel command line lacks "
-         "photowall.node=v2 is misconfigured and is not offered it.")
+         "has not seen. Central cannot list which Players will boot.")
 
 
-def test_put_on_the_wall_is_one_confirmation_naming_the_reboot_cost_in_both_gate_forms():
+def test_put_on_the_wall_is_one_confirmation_naming_the_reboot_cost():
     put = _run()["put"]
-    assert put["closed"] == {
-        "title": "Put release v2.0.0 on the wall?",
-        "lines": ["Base v1.0.0 · app 222222…", SCOPE, "Selects v2.0.0 for every boot.",
-                  "No Player is rebooted; each gets it at its next boot."],
-        "after": ["Ready: Central has every file of v2.0.0."],
-        "confirmLabel": "Select for every boot",
-    }
+    assert put["open"]["title"] == "Put release v2.0.0 on the wall?"
+    assert put["open"]["lines"][:3] == ["Base v1.0.0 · app 222222…", SCOPE, "Selects v2.0.0 for every boot."]
     assert put["open"]["lines"][-1] == "These are the Players this console knows; this page reboots them in this order:"
     assert put["open"]["after"] == [
         "Then this page reboots these Players one at a time, each after the previous one rejoins. Each Frame a "
@@ -419,12 +407,12 @@ def test_every_row_of_the_keep_table_derives_from_the_reads():
         "rejoiningOutput": "rejoining", "rejoiningSilent": "rejoining", "rejoined": "rejoined",
         "rejoiningStaleSnapshot": "rejoining",
         "rejoinedInferred": "rejoined", "rejoinedNoApp": "rejoined", "notRejoinedRebooting": "not_rejoined",
-        "notRejoinedRejoining": "not_rejoined", "stillRejoiningAt599": "rejoining", "cannotGate": "cannot_reboot",
+        "notRejoinedRejoining": "not_rejoined", "stillRejoiningAt599": "rejoining",
         "cannotNoHost": "cannot_reboot", "skipped": "skipped", "baseOnlyNotRebooted": "waiting",
         "sharedAppNotRebooted": "waiting", "baseOnlyRebooted": "rejoined", "triedStageRunning": "waiting",
         "stageEndedByLaterBoot": "rejoined",
     }
-    assert len(states) == 27
+    assert len(states) == 26
     assert rows["rejoiningStaleSnapshot"]["label"] == (
         "Rejoining: Central's snapshot does not list the Player app's enrollment on the new boot yet")
     assert rows["waiting"]["label"] == "Waiting"
@@ -443,8 +431,7 @@ def test_every_row_of_the_keep_table_derives_from_the_reads():
     assert rows["rejoiningApp"]["label"] == f"Rejoining: the Player app has not linked app {NEW_APP[:6]}… yet"
     assert rows["rejoiningOutput"]["label"] == "Rejoining: a bound Output's Frame is not live yet"
     assert rows["notRejoinedRejoining"]["pause"] == "This Player has not rejoined after 10 minutes"
-    assert rows["cannotGate"]["label"].startswith("Cannot reboot: Effect gate closed")
-    assert _run()["gateFlag"] is True
+    assert rows["cannotNoHost"]["label"] == "Cannot reboot: no current Host Management session on this box"
 
 
 def test_the_linked_app_counts_only_when_it_identifies_the_target():
@@ -495,7 +482,7 @@ def test_next_reboot_holds_while_any_earlier_row_is_unsettled():
         "none": None,
     }
     assert out["pause"] == {"stall": {"playerId": "p-1", "reason": "stalled"},
-                            "cannot": {"playerId": "p-0", "reason": "Cannot reboot: gate", "gate": True},
+                            "cannot": {"playerId": "p-0", "reason": "Cannot reboot: no session"},
                             "none": None}
     assert out["count"] == "1 of 3 Players on the selection"
 

@@ -1,6 +1,6 @@
 """The Show-now flow's pure parts (flow design §6 frozen surface, §7 J7; bead 5):
-`coveringPriority` and its helpers in showState.js, and showNowModel.js (steps, keys,
-seed and the activation key's rules), run under Node as tests/test_console_flow.py runs
+`coveringPriority` and its helpers in showState.js, showNowModel.js (steps, keys,
+seed and the activation key's rules) and Check now's receipt (useSourceCheck.js), run under Node as tests/test_console_flow.py runs
 the flow kit. Without Node it skips on a developer machine, but FAILS where the checks
 are meant to run in full (`CI` or `PHOTO_WALL_BROWSER_TESTS` set).
 """
@@ -16,7 +16,7 @@ SRC = Path(__file__).parents[1] / "central/console/src"
 SCRIPT = r"""
 const show = await import(process.argv[1]);
 const model = await import(process.argv[2]);
-const refresh = await import(process.argv[3]);
+const check = await import(process.argv[3]);
 const out = {};
 
 // Served Runs in admission order (central/runtime.py `_view`: sorted by `order`).
@@ -104,20 +104,18 @@ out.authoredMedia = [
   show.sceneHasAuthoredMedia({ contributions: [{ target: "frame:a", source_refs: ["live:1"] }] }),
   show.sceneHasAuthoredMedia(undefined),
 ];
-const healthySource = { refresh_completed_revision: 7 };
-const healthyState = { state: "ok", label: "refreshed recently" };
-out.refreshFeedback = {
-  unknown: refresh.sourceRefreshMessage(
-    refresh.sourceRefreshResult({ ok: false, status: 503 }), healthySource, healthyState),
-  failed: refresh.sourceRefreshMessage(
-    refresh.sourceRefreshResult({ ok: false, status: 409, error: "refresh_conflict" }),
-    healthySource, healthyState),
-  requestedWithoutRevision: refresh.sourceRefreshMessage(
-    refresh.sourceRefreshResult({ ok: true, status: 202, data: {} }),
-    healthySource, healthyState),
-  completed: refresh.sourceRefreshMessage(
-    refresh.sourceRefreshResult({ ok: true, status: 202,
-      data: { requested_revision: 7 } }), healthySource, healthyState),
+// Check now's receipt (useSourceCheck.js): it lasts while the served check is the one it was
+// asked from, and ends when Central serves another, never by the browser's clock.
+const before = { state: "complete", at: 100 };
+const asked = (result) => check.sourceCheckResult(result, before);
+out.checkFeedback = {
+  unknown: check.sourceCheckMessage(asked({ ok: false, status: 503 }), before),
+  failed: check.sourceCheckMessage(asked({ ok: false, status: 404, error: "source_unknown" }), before),
+  requested: check.sourceCheckMessage(asked({ ok: true, status: 202 }), before),
+  equal: check.sourceCheckMessage(asked({ ok: true, status: 202 }), { state: "complete", at: 100 }),
+  started: check.sourceCheckMessage(asked({ ok: true, status: 202 }),
+    { state: "checking", seen_so_far: 0, started_at: 150, last_complete_at: 100 }),
+  completed: check.sourceCheckMessage(asked({ ok: true, status: 202 }), { state: "complete", at: 160 }),
 };
 
 // The flow's shape.
@@ -174,7 +172,7 @@ def test_covering_priority_and_the_show_now_model():
     result = subprocess.run(
         ["node", "--input-type=module", "-e", SCRIPT, "--",
          (SRC / "showState.js").as_uri(), (SRC / "showNowModel.js").as_uri(),
-         (SRC / "useSourceRefresh.js").as_uri()],
+         (SRC / "useSourceCheck.js").as_uri()],
         capture_output=True, text=True, timeout=30, check=True)
     out = json.loads(result.stdout)
 
@@ -221,11 +219,14 @@ def test_covering_priority_and_the_show_now_model():
     assert out["sceneFrames"] == [["a", "b", "c"], []]
     assert out["sceneSourceRefs"] == [["a:1", "child:1", "nested:1", "outro:1", "z:2"], [], []]
     assert out["authoredMedia"] == [True, True, False, False]
-    assert out["refreshFeedback"] == {
-        "unknown": "The refresh request outcome is unknown. Check the Source status before retrying.",
-        "failed": "Refresh request failed: refresh conflict.",
-        "requestedWithoutRevision": "Refresh requested. The status will update when the media worker finishes.",
-        "completed": "Refresh finished. Current Source status: refreshed recently.",
+    requested = "Check requested. Photos keep playing while Photo Wall reads Immich."
+    assert out["checkFeedback"] == {
+        "unknown": "The request's outcome is unknown. Look at the Source's state before asking again.",
+        "failed": "Check request failed: source unknown.",
+        "requested": requested,
+        "equal": requested,       # the same served check: the receipt stays
+        "started": None,          # a new check: the Source's state takes over
+        "completed": None,
     }
 
     assert out["steps"] == ["scene", "review"]

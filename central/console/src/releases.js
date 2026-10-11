@@ -60,12 +60,11 @@ const NOT_READ = Object.freeze({ read: null, readAt: null, error: null, seq: 0 }
 /**
  * The release read, while the Releases page is open.
  *
- * @param {{skip?: boolean}} [options] `skip` while node control is not known to be on
  * @returns {ReleaseRead & {busy: boolean, refresh: () => Promise<void>, latest: () => ReleaseRead,
  *           startedReads: () => number}} `busy`: a read is in flight; it clears only once that
  *   read is settled, so `latest()` already returns it
  */
-export function useReleaseRead({ skip = false } = {}) {
+export function useReleaseRead() {
   const started = useRef(0);
   const load = useCallback(async (current) => {
     const seq = ++started.current;
@@ -73,7 +72,7 @@ export function useReleaseRead({ skip = false } = {}) {
     if (result?.ok) return { read: result.data, readAt: result.data?.read_at ?? null, error: null, seq };
     return { ...current, error: readError(result), seq };
   }, []);
-  const { value, busy, refresh, latest } = usePolledRead(load, { cadenceMs: CADENCE_MS, skip, initial: NOT_READ });
+  const { value, busy, refresh, latest } = usePolledRead(load, { cadenceMs: CADENCE_MS, initial: NOT_READ });
   const startedReads = useCallback(() => started.current, []);
   return useMemo(() => ({ ...value, busy, refresh, latest, startedReads }), [value, busy, refresh, latest, startedReads]);
 }
@@ -354,8 +353,7 @@ export function selectionRequest(read, deploymentId) {
 
 /** Select's scope (§26, R17): fleet-wide, and wider than any list the console could show. */
 export const SELECT_SCOPE = "Every Player that boots by node path from now on is offered this deployment, including "
-  + "Players Central has not seen. Central cannot list which Players will boot. A Pi whose kernel command line "
-  + "lacks photowall.node=v2 is misconfigured and is not offered it.";
+  + "Players Central has not seen. Central cannot list which Players will boot.";
 /** Central's offer when the selected deployment has no app (R17). */
 export const SELECT_NO_APP = "This deployment has no app: every boot from now on is offered no app.";
 

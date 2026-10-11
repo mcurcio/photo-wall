@@ -1,8 +1,7 @@
 """One hardened file-open primitive for central's byte-serving routes.
 
-Every artifact central streams to an unauthenticated client -- the `.deb`
-(`/v1/app/package`), and the netboot base squashfs plus its `SHA256SUMS`
-(`/v1/netboot/base`) -- opens through `open_regular` so the
+Every cached artifact central streams to an unauthenticated client (a node
+offer's base and sealed environments) opens through `open_regular` so the
 `O_RDONLY|O_CLOEXEC|O_NOFOLLOW` + `fstat` + regular-file discipline is enforced
 by shared code, not re-copied per route. Three hand-copies drift; a drifted
 copy is how a symlink-follow or a fifo/device serve slips into an unauthed

@@ -1,0 +1,22 @@
+Source: python-nats
+Section: python
+Priority: optional
+Maintainer: Photo Wall <noreply@example.invalid>
+Build-Depends: debhelper-compat (= 13),
+ dh-python,
+ dh-sequence-python3,
+ pybuild-plugin-pyproject,
+ python3-all,
+ python3-setuptools
+Standards-Version: 4.7.2
+Rules-Requires-Root: no
+Homepage: https://github.com/nats-io/nats.py
+
+# Upstream's nats-py sdist at the pin in ../upstream.env, built for the Photo Wall Node's local
+# repo (decision 0019): Debian trixie does not package it.
+Package: python3-nats
+Architecture: all
+Depends: ${python3:Depends}, ${misc:Depends}
+Description: NATS client for Python 3 (asyncio)
+ The Python client for the NATS messaging system, as the Photo Wall Node API
+ library (nodeapi) uses it.

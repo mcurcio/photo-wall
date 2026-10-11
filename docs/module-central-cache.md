@@ -8,10 +8,12 @@ module doc is the operator-facing summary of what it means for Central's on-disk
 served assets. (Distinct from the Player-side disposable cache in
 [module-cache.md](module-cache.md), which is a per-process RAM/temp cache on the Pi.)
 
+**V1 removal ([0019](decisions/0019-debian-packaging-with-debhelper.md)).** The Player `.deb` and its `apps/` domain no longer exist: `AssetKind.PLAYER_DEB` and `/v1/app/*` are gone, a `.deb` cached earlier stays on disk until the cache is purged (the cache is purgeable at any time), and `apps/` now holds the sealed release-root images (`AssetKind.SEALED_ENVIRONMENT`). Read the `.deb` passages below as history.
+
 ## Responsibility and boundary
 
 Central's served assets — photo **media** (a cache of Immich), the Player **`.deb`**
-(a cache of GitHub Releases), and the **OS squashfs** (a cache of GitHub Releases) —
+(a cache of GitHub Releases; removed with the V1 path, see below), and the **OS squashfs** (a cache of GitHub Releases) —
 are treated as **one disposable cache** that the app owns and Kubernetes places.
 None is a master copy; each source of truth lives upstream. The subsystem owns the
 on-disk layout, miss-tolerant serving, per-domain GC, and orphan removal. It does
@@ -35,7 +37,7 @@ The resolver is `central/cache_layout.py`:
 
 `previews/` (added 2026-10-02, console batch 5) holds asset kind
 `library-thumbnail` (`AssetKind.LIBRARY_THUMBNAIL`, `previews/asset-<id>.jpg`), the
-tiles of the operator console's Source preview; see [Library thumbnails](#library-thumbnails-previews)
+tiles of a pool in the console's Photo source editor; see [Library thumbnails](#library-thumbnails-previews)
 below. The Dockerfile creates it in both stages, the entrypoint loop includes it, and
 the media worker creates it at boot (`ensure_previews_directory`) on a volume made
 before it existed.
@@ -107,11 +109,11 @@ the dangling window because `unlink` is non-transactional).
 
 **Superseded by the Central MVP.** The sweep, the floor and the cap below went with `base_cache`.
 OS images are now `os-images/base-<tarball sha256>.squashfs`, named by the sha256 of the
-release's base tarball. `MaintainCache` removes an orphaned file: an eager keep-set sweep, hourly, with no byte budget: it removes every release file under `os-images/` and `apps/` whose key is not desired (the window of the 3 newest stable node releases, the selected and the previous deployment, and the V1 roots: pins, known-goods, served tags, policy tags and fleet reservations), re-checking the desired set immediately before each unlink (mark and sweep, no lock; a root committed in the remaining instant costs one read-through re-download), sparing a file whose mtime is within `SERVE_GRACE` (1 h) of the run's marker file on the cache filesystem, or whose `last_served_at` is within 1 h of the database's clock, and a temp file not idle past `TEMP_GRACE` (1 h), at most 50 unlinks per run; `previews/` and `media/` are never touched ([`central/assets/maintenance.py`](../central/assets/maintenance.py)). An
-unreferenced asset row stays ([runbook](runbook.md#base-image-auto-mirror-0012)). The rest of this
+release's base tarball. `MaintainCache` removes an orphaned file: an eager keep-set sweep, hourly, with no byte budget: it removes every release file under `os-images/` and `apps/` whose key is not desired (the window of the 3 newest stable node releases, and the selected and the previous deployment), re-checking the desired set immediately before each unlink (mark and sweep, no lock; a root committed in the remaining instant costs one read-through re-download), sparing a file whose mtime is within `SERVE_GRACE` (1 h) of the run's marker file on the cache filesystem, or whose `last_served_at` is within 1 h of the database's clock, and a temp file not idle past `TEMP_GRACE` (1 h), at most 50 unlinks per run; `previews/` and `media/` are never touched ([`central/assets/maintenance.py`](../central/assets/maintenance.py)). An
+unreferenced asset row stays ([runbook](runbook.md#release-sourcing-from-github-0010)). The rest of this
 section records Slice 1 as it landed.
 
-The poll-tail **orphan sweep** (`central/netboot_base.py`, modeled on media
+The poll-tail **orphan sweep** (the V1 `central/netboot_base.py`, deleted by [0019](decisions/0019-debian-packaging-with-debhelper.md); the hourly `MaintainCache` sweep replaced it; modeled on media
 `store.recover`) enumerates the `os-images/` directory and unlinks any
 `base-<tag>.squashfs` with no owning `base_cache` row. "Owning row" **includes
 in-flight states** (`caching`, not only `cached`), so a file mid-fetch is never
@@ -162,17 +164,20 @@ by construction ([console design §38](operator-console-ddd.md#38-pr-37-folded-i
   `library-preview`, locator `http://library.invalid/`, no digest or size;
   `central/assets/library.py` `THUMBNAIL_REFERENCE`), which no handler reads. Every
   other kind still names its key.
-- **Not content-addressed.** A thumbnail is keyed by its original's identity, and its
-  bytes change when the library regenerates it, while produced facts are write-once.
-  So a thumbnail's record lives only while a live preview selects it: the worker's
-  maintenance (`MediaRepository.maintain_source_previews`) deletes the other records,
-  then sweeps their files from `previews/`, and the next preview records fresh facts.
+- **Not content-addressed.** A thumbnail is keyed by its photo's asset id (its Immich
+  id and revision, so an edit in Immich is a new id), and its bytes change when the
+  library regenerates it, while produced facts are write-once. So a thumbnail's record
+  lives only while a wanted pool holds its photo: the worker's maintenance
+  (`PgPhotoLibrary.retire_unwanted`, roadmap [4](roadmap.md#4-real-photo-sources))
+  deletes the other records, then sweeps their files from `previews/`, and the next
+  request records fresh facts.
 
-**Servable** means a member of a live preview row; any other id is never referenced,
+**Servable** means an in-pool row of a wanted pool (a live draft's, or an active Source
+revision's; `pool_thumbnail`); any other id is never referenced,
 fetched or published. A miss behaves like every other domain's: the route waits at
 most 2 s in its own four waiter slots, then answers `503` with `Retry-After`.
 **Costs:** a reference whose locator means "no address", which a reader must know is
-reserved; a thumbnail's produced facts are not write-once (it is keyed by its original,
+reserved; a thumbnail's produced facts are not write-once (it is keyed by its photo,
 `AssetKind.keyed_by_content`), so after a purge the library's regenerated bytes replace
 them, and between a re-fetch's install and its recorded facts the reader checks the file only against the recorded size, so a same-size regenerated tile is served at once and a different-size one is a miss that waits for the fetch's outcome (the thumbnail route sends no `Digest`, so no header names the previous bytes); a file re-written
 between one maintenance pass's delete and its sweep can be swept and is refetched on
@@ -199,7 +204,7 @@ so the log fields are the interim observability floor.
   corruption, adding the requeue transition) lands in **Slice 3**.
 - **Hand-staging is removed.** GitHub is the sole `.deb` source: the operator
   hand-staging routes (`POST /v1/operator/app`, `PUT /v1/operator/app/current`) no
-  longer exist ([runbook](runbook.md#player-provisioning-promote-a-release-from-github-0010)).
+  longer exist ([runbook](runbook.md#release-sourcing-from-github-0010)).
 
 Between slices, an out-of-band loss in an unlanded domain (`.deb`, media) still
 errors rather than self-healing — the one disclosed interim cost.
@@ -209,6 +214,6 @@ errors rather than self-healing — the one disclosed interim cost.
 - [Decision 0013 — unified cache root](decisions/0013-unified-cache-root.md) (design of record)
 - [PXE service](module-pxe-service.md) — the netboot transport that serves `os-images`
 - [Central release / app-package contract](module-appliance-release.md)
-- [Base-image auto-mirror runbook](runbook.md#base-image-auto-mirror-0012)
+- [Release sourcing runbook](runbook.md#release-sourcing-from-github-0010)
 - [Player disposable cache](module-cache.md) — the unrelated Pi-side cache
-- [Media module](module-media.md#tags-previews-and-thumbnails) — the library side of preview thumbnails
+- [Media module](module-media.md#lists-pools-and-thumbnails) — the library side of pool thumbnails

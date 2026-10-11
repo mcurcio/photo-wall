@@ -10,7 +10,7 @@ def test_current_control_snapshot_carries_accepted_nonce_without_public_leak(reg
     player, _, request = enroll(registry)
     player_id, epoch = player["player_id"], player["authority_epoch"]
     registry.control_hello(player_id, ControlHello(
-        authority_epoch=epoch, schemas=(1, 2), capabilities=()))
+        authority_epoch=epoch, schemas=(2,), capabilities=()))
     delivery = registry.issue_control_delivery_record(player_id, epoch, "a" * 64)
     accepted = registry.control_ack_response(player_id, ControlAck(
         authority_epoch=epoch, delivery_id=delivery["delivery_id"], result="applied"))

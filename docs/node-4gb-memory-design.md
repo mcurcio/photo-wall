@@ -140,7 +140,7 @@ The 15 per-unit rows (5 units × known/active/failed) are retired:
 | `capacity.StorageShort(required: int, room: int, fault: str = "node_storage_capacity")` | Still a `ValueError`; message = fault | — |
 | `admit_cold`, `preparation_room`, `admit_preparation`, `appliance/apps/root_import.py` check | Signatures unchanged. `storage_budget(total, available)` is replaced by `device_class(total).store_bytes`. `admit_cold` raises `StorageShort(retained_peak, store_bytes)` or `StorageShort(incremental, min(free, available − EMERGENCY))`. **Admission still reads MemAvailable** (the tar era). Removed: `MIN_MEMORY`, `RESERVE`, `MAX_STORE`, `storage_budget` | `StorageShort` |
 | `storage_mount.mount_storage() -> None` | Order: read memcg (an absent controller is logged and **reported only**, never refused: ruling E-FX2-1), then class, then mount `size=store_bytes`, then require `0 < f_blocks × f_frsize ≤ store_bytes` | `StorageShort`; `ValueError("node_storage_mount_budget")` |
-| `scripts/node_release_artifacts.py:60` | Appends `photowall.node=v2 cgroup_enable=memory`. The checks at `:73` and `:141` require each token exactly once | `ValueError("node_bundle_flag_missing")` |
+| `scripts/node_release_artifacts.py` | Design-time row: it appended `photowall.node=v2 cgroup_enable=memory` and required each token exactly once. The `photowall.node=v2` switch is gone ([0019](decisions/0019-debian-packaging-with-debhelper.md)); the release's one boot tree carries `cgroup_enable=memory` once | `ValueError("node_bundle_flag_missing")` |
 | Units | `photo-wall-node-prepare.service`: + `Requires=photo-wall-node-handoff.service`. `photo-wall-app-broker.service` and `photo-wall-manager-supervisor.service`: + `Requires=photo-wall-node-prepare.service`. Broker, manager-supervisor, display and display-controller: `StartLimitIntervalSec=10min`, `StartLimitBurst=10`, **no** `StartLimitAction` (R8; prior art `photo-wall-provision.service:15-17`). `OOMScoreAdjust`: app unit `+500` (`app_unit_properties`), App Manager unit `+300`, HostCore `-900`, the four base services `-500` | — |
 
 **T2: contracts and Central** (risk: high)
@@ -263,7 +263,7 @@ Frozen surfaces (A5):
 - **Clock use.** Wall time is the box's own clock and is for display only. It is never compared with Central's.
 
 A5 costs:
-- Changing `shell.c` and the protocol changes the `graphics_abi` digest (`scripts/build_node_display_deb.py:56-62`), which forces a new app environment. That is atomic per release (R5).
+- Changing `shell.c` and the protocol changes the `graphics_abi` digest (`debian/graphics-abi`, run by `debian/rules`), which forces a new app environment. That is atomic per release (R5).
 - Two native files and one protocol bump; risk tier high.
 
 Placement: **A5 is recommended to follow the tracer, not join it** (gate question Q1).

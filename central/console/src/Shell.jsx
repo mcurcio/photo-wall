@@ -1,15 +1,15 @@
 import React, { memo, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 
 import { AttentionStrip } from "./AttentionStrip.jsx";
-import { useBootFacts } from "./bootFacts.js";
+import { bootFactsFrom } from "./bootFacts.js";
 import { fleetRoutes } from "./fleetRoutes.jsx";
 import { useHandOff } from "./flow/useHandOff.js";
 import { CloseIcon, MenuIcon } from "./icons.jsx";
 import { neutralRoutes } from "./neutralRoutes.jsx";
 import { useFleetHosts } from "./fleetHosts.js";
-import { NodeControlBanner, NodeControlContext, useNodeControl } from "./nodeControl.js";
 import { PageHiddenContext } from "./pageVisibility.js";
 import { formatRoute, isPlainClick, landingRoute } from "./routes.js";
+import { settingsRoutes } from "./settingsRoutes.jsx";
 import { showRoutes } from "./showRoutes.jsx";
 import { useRoute } from "./useRoute.js";
 import { useHealth, useSnapshot, useSnapshotAge } from "./useSnapshot.js";
@@ -34,13 +34,16 @@ import { wallRoutes } from "./wallRoutes.jsx";
  *   it holds an unsaved draft; the sidebar then marks that section "Draft".
  *   `handOffs` is the one pending inline hand-off between flows (flow/handOff.js: the
  *   Scene flow's "New selection from your photo library" runs the Source flow inline).
- *   `hosts` is the shell's one fleet host read (fleetHosts.js), null until node control is
- *   read `on` (nodeControl.js) and while the shell is signed out.
+ *   `hosts` is the shell's one fleet host read (fleetHosts.js), null until sign-in is
+ *   confirmed.
  * @typedef {{section: import("./routes.js").Section, label: string,
  *            render: (ctx: RouteContext) => React.ReactNode,
- *            samplePaths: string[], inSidebar?: boolean}} RouteEntry
+ *            samplePaths: string[], inSidebar?: boolean,
+ *            ownsHeading?: (route: import("./routes.js").Route) => boolean}} RouteEntry
  *   `inSidebar: false` keeps a section that is only ever one instance's page (reached by a
- *   link) out of the sidebar; its label is still its page's heading.
+ *   link) out of the sidebar; its label is still its page's heading. `ownsHeading` true for a
+ *   route whose page renders its own level-1 heading (an object page names the object), so
+ *   the section's label is not one too.
  */
 
 // The Central pill's colour: the shared health severity for each /healthz state.
@@ -50,11 +53,12 @@ const PILL_SEVERITY = { ok: "ok", unavailable: "alarm", unreachable: "alarm" };
 const WIDE = "(min-width: 850px)";
 
 // Sidebar groups, in a fixed order (console DDD §48): Wall; Show (Now, Scenes, Schedule,
-// Sources); Fleet (Hardware, Releases); Needs attention. Nothing reorders or counts on state.
+// Sources); Fleet (Hardware, Releases); Settings (Photo library); Needs attention. Nothing reorders or counts on state.
 const GROUPS = [
   { name: "Wall", table: wallRoutes },
   { name: "Show", table: showRoutes },
   { name: "Fleet", table: fleetRoutes },
+  { name: "Settings", table: settingsRoutes },
   { name: "Needs attention", table: neutralRoutes },
 ];
 const ENTRIES = GROUPS.flatMap((group) => group.table);
@@ -143,9 +147,12 @@ function SnapshotAge({ refreshFailed }) {
 const Page = memo(function Page({ entry, ctx, ready, hidden = false }) {
   return (
     <section className={`page page--${entry.section}`} hidden={hidden}>
-      <h1 className="page__title" tabIndex={-1}>
-        {entry.label}
-      </h1>
+      {/* An object page (a Frame's) names itself in its own heading. */}
+      {!entry.ownsHeading?.(ctx.route) && (
+        <h1 className="page__title" tabIndex={-1}>
+          {entry.label}
+        </h1>
+      )}
       {ready ? (
         <div className="page__content">
           {/* A hidden page's confirmations put their dialogs away (pageVisibility.js). */}
@@ -170,7 +177,7 @@ const Page = memo(function Page({ entry, ctx, ready, hidden = false }) {
  * PAGES. Show sections are ALWAYS MOUNTED and those not current carry the HTML
  * `hidden` attribute (rule 2: a draft never unmounts; `hidden`, not CSS, so their
  * status and alert regions leave the accessibility tree). Wall, fleet and neutral
- * sections mount only while current, so no hidden page ever holds Calibration DOM
+ * sections mount only while current, so no hidden page ever holds a Frame's Position tab
  * (R4) and a Pi page's node read stops when it is left.
  * Content waits for the first snapshot ("Loading…"); the route itself is parsed at
  * once, and an unknown route is replaced by the landing route once the first snapshot
@@ -185,10 +192,6 @@ const Page = memo(function Page({ entry, ctx, ready, hidden = false }) {
  * route that goes elsewhere first drops the request. A sidebar link on a wide screen
  * leaves focus on the link.
  *
- * NODE CONTROL. One read of node status (nodeControl.js `useNodeControl`), provided to every
- * page by context: the one source of the effect gate, and the banner above every page when
- * this Central runs without node control.
- *
  * `hidden` (the sign-in overlay; App.jsx) hides the whole shell and makes it inert
  * while keeping it, and every draft in it, mounted.
  *
@@ -197,21 +200,17 @@ const Page = memo(function Page({ entry, ctx, ready, hidden = false }) {
 export function Shell({ hidden = false }) {
   const { snapshot, refresh, auth, signOut, refreshFailed, refreshing } = useSnapshot();
   const { route, navigate } = useRoute();
-  // Boot facts (slice 2 §5): ONE optional read of the netboot records, shared by
-  // the fleet pages and the output chooser.
-  const bootFacts = useBootFacts(snapshot);
   // The ~10 s /healthz poll: the pill, the attention strip and the pages read it.
   const health = useHealth();
-  // Node control (Part E §25): ONE node status read, the effect gate's one source.
-  const nodeControl = useNodeControl({ skip: hidden });
   // The fleet host read (console DDD §63 G12): ONE poll, here, for every page and the strip.
-  // Unlike a page's node read it runs on every page, so it waits for node control to be read
-  // `on`: `nodeReadsAllowed` also admits a FAILED status read, and the status read sent while
-  // sign-in is still being checked fails 401, which would send this poll to a Central
-  // without node control.
-  const hostsSkipped = hidden || nodeControl.state !== "on";
+  // It runs on every page, so it waits for sign-in to be confirmed: a read sent while sign-in
+  // is still being checked would fail 401.
+  const hostsSkipped = auth !== "signedIn";
   const fleetHosts = useFleetHosts({ skip: hostsSkipped });
   const hosts = hostsSkipped ? null : fleetHosts;
+  // Boot facts (slice 2 §5): each box's serial from the host read, shared by the fleet pages
+  // and the output chooser.
+  const bootFacts = useMemo(() => bootFactsFrom(hosts), [hosts]);
   const wall = useWallMemory(route, snapshot, navigate);
   // Flow hand-offs (see RouteContext): the Scene last saved or picked, and the Show
   // sections holding an unsaved draft. Log out remounts the shell and clears both.
@@ -310,7 +309,7 @@ export function Shell({ hidden = false }) {
       return;
     }
     if (headingFor.section === current) {
-      mainRef.current?.querySelector(":scope > section:not([hidden]) > h1")?.focus();
+      mainRef.current?.querySelector(":scope > section:not([hidden]) h1")?.focus();
       setHeadingFor(null);
     } else if (headingFor.from !== current) {
       setHeadingFor(null);
@@ -319,7 +318,10 @@ export function Shell({ hidden = false }) {
 
   const focusHeadingOf = (section) => setHeadingFor({ section, from: current });
 
-  const hrefFor = (section) => formatRoute(section === "wall" ? wall.lastWall : { section });
+  // The Wall link returns to the Wall as last shown, except from the Wall itself (a Frame's
+  // page), where it leads back to the plan.
+  const hrefFor = (section) =>
+    formatRoute(section === "wall" && current !== "wall" ? wall.lastWall : { section });
 
   const chooseFromDrawer = (section) => {
     choosingRef.current = true;
@@ -410,22 +412,19 @@ export function Shell({ hidden = false }) {
           <SectionNav current={current} hrefFor={hrefFor} drafts={drafts} />
         </div>
         <main ref={mainRef} className="shell__main" tabIndex={-1}>
-          <NodeControlBanner control={nodeControl} />
           {current === null && <p className="page__loading">Loading…</p>}
-          <NodeControlContext.Provider value={nodeControl}>
-            {showRoutes.map((show) => (
-              <Page
-                key={show.section}
-                entry={show}
-                ctx={ctx}
-                ready={ready}
-                hidden={show.section !== current}
-              />
-            ))}
-            {entry !== null && !SHOW.has(entry.section) && (
-              <Page key={entry.section} entry={entry} ctx={ctx} ready={ready} />
-            )}
-          </NodeControlContext.Provider>
+          {showRoutes.map((show) => (
+            <Page
+              key={show.section}
+              entry={show}
+              ctx={ctx}
+              ready={ready}
+              hidden={show.section !== current}
+            />
+          ))}
+          {entry !== null && !SHOW.has(entry.section) && (
+            <Page key={entry.section} entry={entry} ctx={ctx} ready={ready} />
+          )}
         </main>
       </div>
 

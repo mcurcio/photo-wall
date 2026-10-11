@@ -1,6 +1,6 @@
 """Explicit boot/producer admission and separate, boot-scoped LAN credentials.
 
-Lock order: optional rollout gate, Fleet, device, lifecycle, boot, session,
+Lock order: Fleet, device, lifecycle, boot, session,
 producer, then evidence/commands. Retirement shares the Fleet/device boundary.
 A session is a serial claim; it does not authenticate a physical device.
 """
@@ -40,15 +40,17 @@ class NodeControlError(ValueError):
         self.code, self.status, self.details = code, status, details or {}
 
 
+# One Central per wall, so the audience is the product, not an installation name.
+NODE_AUDIENCE: Final = "photo-wall"
+
+
 @dataclass(frozen=True, slots=True)
 class NodeControlConfig:
-    installation_audience: str
+    installation_audience: str = NODE_AUDIENCE
     session_seconds: int = 3600
 
     def __post_init__(self) -> None:
         token(self.installation_audience, 256)
-        if self.installation_audience == "photo-wall-central-t0":
-            raise ValueError("node_command_audience_required")
         if type(self.session_seconds) is not int or not 60 <= self.session_seconds <= 86400:
             raise ValueError("node_session_duration_invalid")
 
@@ -88,22 +90,9 @@ def claim_intake_in(conn, device_id: str, kind: str, now: float) -> None:
                  (device_id, day - 1))
 
 
-def command_eligibility_in(conn, offer_id: UUID) -> tuple[bool, str]:
-    """Weak legacy observation adoption never carries operator commands."""
-    basis = conn.execute("SELECT basis FROM node_offer_contexts WHERE offer_id=%s", (offer_id,)).fetchone()
-    if basis is None or basis["basis"] != "node_v2":
-        return False, "legacy_observation_adoption"
-    return True, "boot_admitted_rollout_required"
-
-
 class NodeSessions:
-    def __init__(self, db: Database, clock: Clock, config: NodeControlConfig | None):
+    def __init__(self, db: Database, clock: Clock, config: NodeControlConfig):
         self.db, self.clock, self.config = db, clock, config
-
-    def require_enabled(self) -> NodeControlConfig:
-        if self.config is None:
-            raise NodeControlError("node_control_disabled", 503)
-        return self.config
 
     def lock_device_generation_in(self, conn, device_id: str) -> int:
         lock_fleet_assets_in(conn)
@@ -120,20 +109,12 @@ class NodeSessions:
         """Bind the claim to its offer identity; offer age never refuses enrollment."""
         node = conn.execute("SELECT offer_payload,device_generation FROM node_boot_offers WHERE offer_id=%s",
                             (claim.offer_id,)).fetchone()
-        if node:
-            if node["offer_payload"] is None or node["device_generation"] != generation:
-                raise NodeControlError("node_offer_mismatch", 403)
-            offer = parse_node_boot_offer(bytes(node["offer_payload"]))
-            if (offer.device_id, offer.serial, offer.kernel_boot_id, offer.installation_audience) != (
-                    device_id, claim.serial, claim.kernel_boot_id, self.config.installation_audience):
-                raise NodeControlError("node_offer_mismatch", 403)
-            return
-        legacy = conn.execute("SELECT * FROM fleet_boot_offers WHERE offer_id=%s", (claim.offer_id,)).fetchone()
-        if (legacy is None or legacy["device_id"] != device_id or legacy["serial"] != claim.serial
-                or legacy["kernel_boot_id"] != claim.kernel_boot_id):
+        if node is None or node["offer_payload"] is None or node["device_generation"] != generation:
             raise NodeControlError("node_offer_mismatch", 403)
-        conn.execute("INSERT INTO node_offer_contexts(offer_id,basis,legacy_offer_id) "
-                     "VALUES(%s,'legacy_adoption',%s) ON CONFLICT DO NOTHING", (claim.offer_id, claim.offer_id))
+        offer = parse_node_boot_offer(bytes(node["offer_payload"]))
+        if (offer.device_id, offer.serial, offer.kernel_boot_id, offer.installation_audience) != (
+                device_id, claim.serial, claim.kernel_boot_id, self.config.installation_audience):
+            raise NodeControlError("node_offer_mismatch", 403)
 
     def _admit_boot_in(self, conn, claim: NodeSessionClaim, device_id: str, generation: int,
                        now: float):
@@ -180,11 +161,11 @@ class NodeSessions:
                             (grant.session_id, self.clock.utc())).fetchone()
         if live is None:
             return replace(grant, command_eligible=False, command_reason="node_session_unavailable")
-        eligible, reason = command_eligibility_in(conn, grant.offer_id)
-        return replace(grant, command_eligible=eligible, command_reason=reason)
+        # Every admission is a node boot offer's (077): a live session carries commands.
+        return replace(grant, command_eligible=True, command_reason="boot_admitted")
 
     def enroll(self, claim: NodeSessionClaim) -> NodeSessionGrant:
-        config = self.require_enabled()
+        config = self.config
         serial = sanitize_serial(claim.serial)
         device_id = device_id_for_serial(serial)
         if serial != claim.serial or device_id is None:
@@ -250,7 +231,6 @@ class NodeSessions:
 
     def authenticate_in(self, conn, session_id: UUID, credential: str, *,
                         allow_historical: bool = False) -> NodePrincipal:
-        self.require_enabled()
         try:
             digest(credential)
         except ValueError as exc:
@@ -269,7 +249,7 @@ class NodeSessions:
         return self._load_session_in(conn, session_id, allow_historical=False)[0]
 
     def _load_session_in(self, conn, session_id: UUID, *, allow_historical: bool):
-        config = self.require_enabled()
+        config = self.config
         started, monotonic = _clock_sample(self.clock)
         # Read only to locate owning device, then re-read under canonical locks.
         located = conn.execute("SELECT device_id FROM node_sessions WHERE session_id=%s",

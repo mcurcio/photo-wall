@@ -17,7 +17,7 @@ import { formatRoute, parseRoute } from "./routes.js";
  * the current one (landing, plain selection on the Wall, and flow steps later), then
  * announces the change with a `hashchange` event, since `history.replaceState` sends none.
  * Navigating to the route already shown does nothing. A hash that parses but is not its
- * route's canonical form (`#/wall/frames/<id>/nowshowing`, which parses to its Status facet) is
+ * route's canonical form (`#/wall/frames/<id>`, which parses to its Overview tab) is
  * replaced by it.
  *
  * `navigate(route, {replace: true, ifUnknown: true})` (the landing route) goes only if
@@ -63,8 +63,8 @@ export function useRoute() {
     }
   }, []);
 
-  // A hash that parses to a route it is not the canonical form of (an old facet name such as
-  // `nowshowing`) is replaced by that form, so the location names the page shown.
+  // A hash that parses to a route it is not the canonical form of (a Frame route with no tab,
+  // `#/wall/frames/<id>`) is replaced by that form, so the location names the page shown.
   useEffect(() => {
     if (route !== null && formatRoute(route) !== hash) {
       navigate(route, { replace: true });

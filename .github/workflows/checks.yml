@@ -6,7 +6,8 @@ name: MVP checks
 #
 # The suite runs as three tiers in parallel jobs, each test in exactly one: tests/conftest.py
 # derives `browser` from the path (tests/browser) and `db` from the fixtures, and everything
-# else is `unit` (the runbook's test section). Each tier job's timeout is about twice its budget, and prints
+# else is `unit` (the runbook's test section); the db leg leaves the `immich` tests (real Immich,
+# derived from their fixtures) to software-e2e.yml's photo-sources job. Each tier job's timeout is about twice its budget, and prints
 # its 25 slowest phases. In every job a test that reaches a database where none is provided
 # fails, and a skip no allowlist owns fails the run (tests/conftest.py).
 on:
@@ -52,13 +53,7 @@ jobs:
       - uses: ./.github/actions/python-uv
       - run: uv sync --frozen
       - uses: ./.github/actions/console-bundle
-      - name: Prepare digest-pinned published Player wire fixtures
-        run: |
-          .venv/bin/python scripts/published_player_wire.py prepare \
-            "$RUNNER_TEMP/published-player-wire"
       - name: Run the unit tier, with no database
-        env:
-          PHOTO_WALL_PUBLISHED_PLAYER_WIRE_DIR: ${{ runner.temp }}/published-player-wire
         run: |
           .venv/bin/python -m pytest -q --tb=short --durations=25 \
             -m "not db and not browser" -n 4 --dist worksteal
@@ -94,6 +89,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - id: docker-hub-mirror
+        uses: ./.github/actions/docker-hub-mirror
       - uses: ./.github/actions/python-uv
       - run: uv sync --frozen
       - name: Fetch the pinned nats-server
@@ -112,6 +109,8 @@ jobs:
     timeout-minutes: 8
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - id: docker-hub-mirror
+        uses: ./.github/actions/docker-hub-mirror
       - uses: ./.github/actions/python-uv
       - run: uv sync --frozen
       - uses: ./.github/actions/console-bundle
@@ -122,10 +121,6 @@ jobs:
           echo "PHOTO_WALL_NATS_SERVER=$binary" >> "$GITHUB_ENV"
       - name: Start the disposable test database
         run: docker compose -f tests/integration/compose.test-database.yml up -d --wait
-      - name: Prepare digest-pinned published Player wire fixtures
-        run: |
-          .venv/bin/python scripts/published_player_wire.py prepare \
-            "$RUNNER_TEMP/published-player-wire"
       - name: Run the database tier
         env:
           # The built-in, repo-scoped GHA token (no manually-managed secret): the
@@ -137,16 +132,17 @@ jobs:
           # empty/restricted, so gate (b) skips (its guard treats an empty token as
           # unset) -- the correct safe behavior.
           PHOTO_WALL_RELEASE_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PHOTO_WALL_PUBLISHED_PLAYER_WIRE_DIR: ${{ runner.temp }}/published-player-wire
         run: |
           .venv/bin/python scripts/test_local.py -q --tb=short --durations=25 \
-            -m db -n 4 --dist loadgroup
+            -m "db and not immich" -n 4 --dist loadgroup
 
   browser:
     runs-on: ubuntu-24.04
     timeout-minutes: 7
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - id: docker-hub-mirror
+        uses: ./.github/actions/docker-hub-mirror
       - id: python-uv
         uses: ./.github/actions/python-uv
       - uses: ./.github/actions/console-bundle
@@ -264,6 +260,8 @@ jobs:
           test "$PREPARATION" = success
           test -n "$MEDIA_BASE_IMAGE"
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - id: docker-hub-mirror
+        uses: ./.github/actions/docker-hub-mirror
       - run: python3 scripts/configure.py
       - name: Authenticate to the durable image registry
         env:
@@ -271,6 +269,9 @@ jobs:
         run: printf '%s' "$REGISTRY_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
       - name: Set up the container build cache
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e
+        with:
+          buildkitd-config-inline: ${{ steps.docker-hub-mirror.outputs.buildkitd-config }}
+          driver-opts: image=${{ steps.docker-hub-mirror.outputs.buildkit-image }}
       - name: Build or restore the media worker image
         uses: ./.github/actions/service-image
         with:
@@ -288,6 +289,21 @@ jobs:
           tags: photo-wall-ci-central
       - run: docker compose up -d --no-build --wait
       - run: curl --fail http://127.0.0.1:8000/healthz
+      # The shipped image, on its own command, runs node control: a first boot request on a
+      # fresh Central is refused for the unselected boot policy.
+      - name: Node control answers on the image's own command
+        run: |
+          set -eu
+          boot_id=$(python3 -c 'import uuid; print(uuid.uuid4())')
+          nonce=$(python3 -c 'import secrets; print(secrets.token_hex(32))')
+          status=$(curl --silent --output "$RUNNER_TEMP/boot-offer.json" --write-out '%{http_code}' \
+            -H 'Content-Type: application/json' \
+            --data "{\"schema\":2,\"kind\":\"node_boot_request\",\"serial\":\"1a2b3c4d\",\"kernel_boot_id\":\"$boot_id\",\"boot_nonce\":\"$nonce\"}" \
+            http://127.0.0.1:8000/v2/node/boot-offers)
+          cat "$RUNNER_TEMP/boot-offer.json"; echo
+          [ "$status" = 503 ]
+          python3 -c 'import json, sys; assert json.load(open(sys.argv[1]))["error"] == "node_boot_policy_unconfigured"' \
+            "$RUNNER_TEMP/boot-offer.json"
         # GET / must serve the console shell (HTTP 200), not 500. Because
         # central/console/dist/ is .dockerignore'd, the compose central image
         # gets its bundle SOLELY from the Dockerfile's console-builder stage --
@@ -342,12 +358,17 @@ jobs:
           test "$PREPARATION" = success
           test -n "$MEDIA_BASE_IMAGE"
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - id: docker-hub-mirror
+        uses: ./.github/actions/docker-hub-mirror
       - name: Authenticate to the durable image registry
         env:
           REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: printf '%s' "$REGISTRY_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
       - name: Set up the container build cache
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e
+        with:
+          buildkitd-config-inline: ${{ steps.docker-hub-mirror.outputs.buildkitd-config }}
+          driver-opts: image=${{ steps.docker-hub-mirror.outputs.buildkit-image }}
       # Reads its cache on every run and writes it only on main: a pull request's write would
       # land in a scope only that pull request can read (docs/module-appliance-ci.md, "Limits").
       - name: Build the pinned Linux media test image

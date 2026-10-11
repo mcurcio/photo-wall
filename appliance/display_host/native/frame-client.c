@@ -9,7 +9,10 @@
 #include "frame-client.h"
 #define MAX_FEEDBACK 128
 #define MAX_OUTPUTS 16
+#define MAX_OPERATIONS 512   /* contracts.node_frame.PICTURE_OPERATIONS_BYTES */
 struct grant { char output[97], id[37], frame[97], trial[4097]; uint64_t generation, revision; uint32_t state; };
+/* The newest `picture` operations per Output (frame protocol v4), kept verbatim. */
+struct picture { char output[97], operations[MAX_OPERATIONS + 1]; };
 struct pw_frame_client {
     struct wl_display *display;
     struct wl_event_queue *queue;
@@ -19,7 +22,9 @@ struct pw_frame_client {
     struct wp_presentation_feedback *feedback[MAX_FEEDBACK];
     uint32_t manager_name, presentation_name;
     bool lost;
+    uint32_t version;
     struct grant grants[MAX_OUTPUTS * 2];
+    struct picture pictures[MAX_OUTPUTS];
 };
 static void clock_id(void *data, struct wp_presentation *presentation, uint32_t id) {
     (void)data; (void)presentation; (void)id;
@@ -55,12 +60,26 @@ static void trial_event(void *data, struct pw_frame_manager_v1 *manager,
         strcpy(c->grants[i].trial, candidate); return;
     }
 }
-static const struct pw_frame_manager_v1_listener manager_listener = {.grant_frame = grant_event, .trial = trial_event};
+static void picture_event(void *data, struct pw_frame_manager_v1 *manager,
+                          const char *output, const char *operations) {
+    (void)manager;
+    struct pw_frame_client *c = data;
+    if (!*output || strlen(output) > 96 || strlen(operations) > MAX_OPERATIONS) { c->lost = true; return; }
+    struct picture *p = NULL;
+    for (int i = 0; i < MAX_OUTPUTS && !p; i++) if (!strcmp(c->pictures[i].output, output)) p = &c->pictures[i];
+    for (int i = 0; i < MAX_OUTPUTS && !p; i++) if (!c->pictures[i].output[0]) p = &c->pictures[i];
+    if (!p) { c->lost = true; return; }
+    strcpy(p->output, output); strcpy(p->operations, operations);
+}
+static const struct pw_frame_manager_v1_listener manager_listener = {
+    .grant_frame = grant_event, .trial = trial_event, .picture = picture_event
+};
 static void global(void *data, struct wl_registry *registry, uint32_t name,
                    const char *interface, uint32_t version) {
     struct pw_frame_client *c = data;
     if (!strcmp(interface, "pw_frame_manager_v1") && !c->manager && version >= 3) {
-        c->manager = wl_registry_bind(registry, name, &pw_frame_manager_v1_interface, 3);
+        c->version = version >= 4 ? 4 : version;
+        c->manager = wl_registry_bind(registry, name, &pw_frame_manager_v1_interface, c->version);
         c->manager_name = name;
         pw_frame_manager_v1_add_listener(c->manager, &manager_listener, c);
     } else if (!strcmp(interface, "wp_presentation") && !c->presentation) {
@@ -125,18 +144,42 @@ int pw_frame_client_dispatch(struct pw_frame_client *c) {
     if (!c || c->lost) return -1;
     return wl_display_dispatch_queue_pending(c->display, c->queue);
 }
-int pw_frame_client_tag_next_commit(struct pw_frame_client *c, struct wl_surface *surface,
-    const char *grant_id, const char *frame_tag) {
+/* The tag (v3 `tag`, or v4 `tag_picture` with `picture_change`) and its presentation feedback. */
+static int tag_commit(struct pw_frame_client *c, struct wl_surface *surface,
+    const char *grant_id, const char *frame_tag, const char *picture_change) {
     if (!c || !surface || !grant_id || strlen(grant_id) != 36 || !frame_tag ||
         !*frame_tag || strlen(frame_tag) > 96 || pw_frame_client_dispatch(c) < 0) return -1;
+    if (picture_change) {
+        size_t length = strlen(picture_change);
+        if (c->version < 4 || !length || length > 20 || strspn(picture_change, "0123456789") != length) return -1;
+    }
     int slot = -1;
     for (int i = 0; i < MAX_FEEDBACK; i++) if (!c->feedback[i]) { slot = i; break; }
     if (slot < 0) return -1;
-    pw_frame_manager_v1_tag(c->manager, surface, grant_id, frame_tag);
+    if (picture_change) pw_frame_manager_v1_tag_picture(c->manager, surface, grant_id, frame_tag, picture_change);
+    else pw_frame_manager_v1_tag(c->manager, surface, grant_id, frame_tag);
     struct wp_presentation_feedback *f = wp_presentation_feedback(c->presentation, surface);
     if (!f) return -1;
     c->feedback[slot] = f;
     wp_presentation_feedback_add_listener(f, &feedback_listener, c);
+    return 0;
+}
+int pw_frame_client_tag_next_commit(struct pw_frame_client *c, struct wl_surface *surface,
+    const char *grant_id, const char *frame_tag) {
+    return tag_commit(c, surface, grant_id, frame_tag, NULL);
+}
+int pw_frame_client_tag_picture_next_commit(struct pw_frame_client *c, struct wl_surface *surface,
+    const char *grant_id, const char *frame_tag, const char *picture_change) {
+    if (!picture_change) return -1;
+    return tag_commit(c, surface, grant_id, frame_tag, picture_change);
+}
+int pw_frame_client_picture(struct pw_frame_client *c, const char *output, char *operations, uint32_t capacity) {
+    if (!c || !output || !operations || c->version < 4 || pw_frame_client_dispatch(c) < 0) return -1;
+    for (int i = 0; i < MAX_OUTPUTS; i++) if (c->pictures[i].output[0] && !strcmp(c->pictures[i].output, output)) {
+        if (strlen(c->pictures[i].operations) >= capacity) return -1;
+        strcpy(operations, c->pictures[i].operations);
+        return 1;
+    }
     return 0;
 }
 

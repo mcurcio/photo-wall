@@ -1,4 +1,9 @@
-"""Pure bounded rolling media selection; no acquisition or execution authority."""
+"""Pure bounded rolling media selection; no acquisition or execution authority.
+
+Each contribution's photos are the union of its Sources' whole pools (roadmap 4, C11): no
+window and no candidate cap. A pool that has never completed a check still plays what it has
+(C7: the last pool keeps playing while Immich is down).
+"""
 
 from __future__ import annotations
 
@@ -10,9 +15,9 @@ from typing import TYPE_CHECKING, Literal
 
 from pydantic import Field
 
-from central.catalog import Candidate, CatalogSnapshot
+from central.catalog import Candidate, SourcePool
 from central.runtime import Intent, Runtime, RuntimeBudgetExceeded
-from contracts.models import FrameProfile, Layer, Model, OutputBinding
+from contracts.models import AfterEnd, FrameProfile, Layer, Model, OutputBinding
 
 if TYPE_CHECKING:
     from central.execution_outcomes import ExecutionOutcome
@@ -43,7 +48,7 @@ class PlannerLimits(Model):
     max_events: int = Field(default=10000, ge=1)
     max_assignments: int = Field(default=4096, ge=1)
     max_sources: int = Field(default=128, ge=1)
-    max_candidates: int = Field(default=10000, ge=1)
+    max_authored_refs: int = Field(default=10000, ge=1)
     max_acquisitions: int = Field(default=256, ge=1)
     max_diagnostics: int = Field(default=8192, ge=1)
     max_players: int = Field(default=128, ge=1)
@@ -100,6 +105,19 @@ def eligible(candidate: Candidate, profile: FrameProfile) -> bool:
     )
 
 
+# What Central may revise on a layer it has already offered (each offered layer is a lock:
+# its content and interval are fixed): the arbitration; the fade-out, which a Finish or a
+# follower revises (`runtime._may_hold_to_the_end`); and the after-state, which is not content
+# (a Run's after-states are fixed by its Scene; migration 071 left in-flight endings'
+# offered layers at "leave_as_is" while their Scene says "keep_nothing").
+REVISABLE = frozenset({"priority", "root_order", "admission_order", "fade_out", "after_end"})
+
+
+def same_execution(first: Layer, second: Layer) -> bool:
+    """The same execution of an assignment, up to what Central may revise (`REVISABLE`)."""
+    return first.model_dump(exclude=REVISABLE) == second.model_dump(exclude=REVISABLE)
+
+
 def assignment_id(intent: Intent) -> str:
     identity = json.dumps(
         [intent.run_id, intent.target, intent.phase, intent.interval_start, intent.interval_end],
@@ -153,17 +171,26 @@ def candidate_standing(candidate: Candidate, profile: FrameProfile) -> Standing:
     return "usable" if _variant_usable(candidate, profile) else "no_compatible_variant"
 
 
+def _after_end(intent: Intent, *, still: bool) -> AfterEnd:
+    """The layer's after-state: the authored one, except that only a still is kept (a kept
+    Scene's videos change nothing)."""
+    if intent.after_end == "keep_this_photo" and not still:
+        return "leave_as_is"
+    return intent.after_end
+
+
 class _ProjectionBuilder:
     def __init__(
         self,
         *,
         bindings_by_player: Mapping[str, Sequence[OutputBinding]],
-        snapshots: Mapping[str, CatalogSnapshot],
+        source_pools: Mapping[str, SourcePool],
         authored: Mapping[str, Candidate],
         locks: Mapping[str, Layer],
         limits: PlannerLimits,
     ) -> None:
-        self.limits, self.snapshots, self.authored, self.locks = limits, snapshots, authored, locks
+        self.limits, self.source_pools, self.authored, self.locks = (
+            limits, source_pools, authored, locks)
         self.frames: dict[str, tuple[str, OutputBinding]] = {}
         self.layers: dict[str, list[Layer]] = {player: [] for player in bindings_by_player}
         self.diagnostics: dict[tuple, Diagnostic] = {}
@@ -177,15 +204,11 @@ class _ProjectionBuilder:
     def _validate_inputs(self, bindings: Mapping[str, Sequence[OutputBinding]]) -> None:
         _bound(len(bindings), self.limits.max_players, "Player count")
         _bound(sum(len(items) for items in bindings.values()), self.limits.max_bindings, "binding count")
-        _bound(len(self.snapshots), self.limits.max_sources, "source count")
-        _bound(
-            len(self.authored) + sum(len(snapshot.candidates) for snapshot in self.snapshots.values()),
-            self.limits.max_candidates, "candidate count",
-        )
+        _bound(len(self.source_pools), self.limits.max_sources, "source count")
         _bound(len(self.locks), self.limits.max_assignments, "locked assignment count")
-        for source, snapshot in self.snapshots.items():
-            if snapshot.source_ref != source:
-                raise PlanningError("catalog snapshot key does not match its immutable source reference")
+        for source, pool in self.source_pools.items():
+            if pool.source_ref != source:
+                raise PlanningError("source pool key does not match its immutable source reference")
         for key, layer in self.locks.items():
             if key != layer.assignment_id:
                 raise PlanningError("locked assignment key mismatch")
@@ -214,16 +237,13 @@ class _ProjectionBuilder:
 
     def _source_diagnostics(self, intent: Intent, identity: str) -> None:
         for source in intent.source_refs if not intent.asset_refs else ():
-            snapshot = self.snapshots.get(source)
-            if snapshot is None:
+            pool = self.source_pools.get(source)
+            if pool is None:
                 self.diagnose("source_missing", intent=intent, assignment=identity, source=source)
-            elif snapshot.status != "ok":
-                self.diagnose(
-                    f"source_{snapshot.status}", intent=intent, assignment=identity, source=source
-                )
-            elif not snapshot.candidates:
-                self.diagnose("source_empty", intent=intent, assignment=identity, source=source)
-            elif any(c.preparation_failure for c in snapshot.candidates):
+            elif not pool.candidates:
+                self.diagnose("source_empty" if pool.ready else "source_not_ready",
+                              intent=intent, assignment=identity, source=source)
+            elif any(c.preparation_failure for c in pool.candidates):
                 self.diagnose("asset_preparation_failed", intent=intent, assignment=identity, source=source)
 
     def _pool(self, intent: Intent, profile: FrameProfile) -> tuple[Candidate, ...]:
@@ -233,20 +253,15 @@ class _ProjectionBuilder:
         if intent.asset_refs:
             candidates = [self.authored[ref] for ref in intent.asset_refs if ref in self.authored]
         else:
-            # Newer snapshots win duplicate asset metadata deterministically;
-            # sources remain immutable definitions while their results evolve.
-            merged: dict[str, tuple[tuple[float, str], Candidate]] = {}
+            # The union of the contribution's Sources' whole pools, one row per asset id (the
+            # first seen, Sources in the contribution's order), ready or not (C7), newest first.
+            merged: dict[str, Candidate] = {}
             for source in intent.source_refs:
-                snapshot = self.snapshots.get(source)
-                if snapshot is None or snapshot.status != "ok":
-                    continue
-                for candidate in snapshot.candidates:
-                    version = (snapshot.refreshed_at, source)
-                    if candidate.asset_id not in merged or version > merged[candidate.asset_id][0]:
-                        merged[candidate.asset_id] = (version, candidate)
+                pool = self.source_pools.get(source)
+                for candidate in pool.candidates if pool is not None else ():
+                    merged.setdefault(candidate.asset_id, candidate)
             candidates = sorted(
-                (entry[1] for entry in merged.values()),
-                key=lambda candidate: (-candidate.captured_at, candidate.asset_id),
+                merged.values(), key=lambda candidate: (-candidate.captured_at, candidate.asset_id),
             )
         pool = tuple(candidate for candidate in candidates if eligible(candidate, profile)
                      and candidate_standing(candidate, profile) != "failed_to_prepare")
@@ -271,7 +286,7 @@ class _ProjectionBuilder:
         if intent.kind == "actuator" or intent.interval_start >= horizon_end or intent.interval_end <= now:
             return
         _bound(len(intent.source_refs), self.limits.max_sources, "authored source reference count")
-        _bound(len(intent.asset_refs), self.limits.max_candidates, "authored asset reference count")
+        _bound(len(intent.asset_refs), self.limits.max_authored_refs, "authored asset reference count")
         identity = assignment_id(intent)
         if identity in self.seen:
             return
@@ -292,25 +307,23 @@ class _ProjectionBuilder:
         locked = self.locks.get(identity)
         if locked is not None:
             expected_kind = "black" if intent.kind == "black" else "media"
-            arbitration = {"priority", "root_order", "admission_order"}
             if any(
                 getattr(locked, field) != value
-                for field, value in fields.items() if field not in arbitration
+                for field, value in fields.items() if field not in REVISABLE
             ) or locked.presentation != expected_kind:
                 self.diagnose("lock_stale_authority", intent=intent, assignment=identity)
                 return
-            if locked.retain_on_expiry != bool(intent.retain_on_expiry and locked.variant and
-                                               locked.variant.media_type != "video/mp4"):
-                self.diagnose("lock_stale_authority", intent=intent, assignment=identity)
-                return
             self.used_locks.add(identity)
-            self.layers[player].append(locked.model_copy(update={
-                field: fields[field] for field in arbitration
+            revised = {**fields, "after_end": _after_end(
+                intent, still=locked.variant is not None and locked.variant.media_type != "video/mp4")}
+            self.layers[player].append(Layer.model_validate({
+                **locked.model_dump(), **{field: revised[field] for field in REVISABLE},
             }))
             self.selections.append(AssignmentSelection(assignment_id=identity, locked=True))
             return
         if intent.kind == "black":
-            self.layers[player].append(Layer(**fields, presentation="black"))
+            self.layers[player].append(Layer(**fields, presentation="black",
+                                             after_end=_after_end(intent, still=False)))
             return
         pool = self._pool(intent, binding.profile)
         if not pool:
@@ -335,7 +348,7 @@ class _ProjectionBuilder:
             self.diagnose("variant_incompatible", intent=intent, assignment=identity)
             return
         self.layers[player].append(Layer(**fields, presentation="media", variant=candidate.variant,
-            retain_on_expiry=intent.retain_on_expiry and candidate.kind == "image"))
+            after_end=_after_end(intent, still=candidate.kind == "image")))
 
     def result(self, now: float, horizon_end: float) -> Projection:
         for identity, lock in self.locks.items():
@@ -371,7 +384,7 @@ def project(
     now: float,
     *,
     bindings_by_player: Mapping[str, Sequence[OutputBinding]],
-    catalog_snapshots: Mapping[str, CatalogSnapshot],
+    source_pools: Mapping[str, SourcePool],
     authored_candidates: Mapping[str, Candidate],
     locked_assignments: Mapping[str, Layer],
     horizon_seconds: float = 300,
@@ -385,7 +398,7 @@ def project(
     _bound(horizon_seconds, limits.max_horizon_seconds, "horizon length")
     horizon_end = _finite(now + horizon_seconds, "horizon end")
     builder = _ProjectionBuilder(
-        bindings_by_player=bindings_by_player, snapshots=catalog_snapshots,
+        bindings_by_player=bindings_by_player, source_pools=source_pools,
         authored=authored_candidates, locks=locked_assignments, limits=limits,
     )
     try:

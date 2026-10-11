@@ -10,6 +10,7 @@ mutable manager policy. No offer receipt proves download, boot, or playback.
 """
 from __future__ import annotations
 
+from typing import Literal
 from uuid import UUID, uuid4
 
 from central.content_catalog.catalog import device_id_for_serial, sanitize_serial
@@ -23,9 +24,8 @@ from central.content_catalog.deployment import (
     parse_node_deployment as parse_node_deployment,
 )
 from central.content_catalog.ports import NodeReleaseRefused
-from central.fleet.models import OfferAsset
+from central.fleet.models import FleetError, OfferAsset
 from central.fleet.node_sessions import NodeControlError, NodeSessions
-from central.fleet.service import FleetService
 from central.infra.asset_roots import lock_fleet_assets_in
 from central.infra.node_releases import select_deployment
 from central.infra.transactions import PgTransaction
@@ -40,6 +40,49 @@ from contracts.node_boot import (
 )
 from contracts.node_protocol import counter, identifier
 
+_DAY_SECONDS = 86400
+_OFFER_DEVICE_DAILY = 128
+_OFFER_GLOBAL_DAILY = 32768  # 128 Players x 128 offers, plus equivalent spoof headroom
+_NEW_CLAIMS_GLOBAL_DAILY = 1024  # bounds distinct fake serial rows, above 128-Player ceiling
+
+
+def claim_quota(conn, *, device_id: str, kind: Literal["offer"], now: float) -> None:
+    """Charge one unauthenticated boot offer to the day's global and per-device quotas, or
+    refuse it with `t0_rate_limited` (429) when either is spent."""
+    day = int(now // _DAY_SECONDS)
+    limits = {"offer": (_OFFER_GLOBAL_DAILY, _OFFER_DEVICE_DAILY)}[kind]
+    for scope, limit in zip(("global", device_id), limits, strict=True):
+        row = conn.execute(
+            "INSERT INTO fleet_t0_daily_quotas(scope,kind,day,used) "
+            "VALUES(%s,%s,%s,1) ON CONFLICT(scope,kind,day) DO UPDATE SET "
+            "used=fleet_t0_daily_quotas.used+1 WHERE fleet_t0_daily_quotas.used<%s "
+            "RETURNING used", (scope, kind, day, limit),
+        ).fetchone()
+        if row is None:
+            raise FleetError("t0_rate_limited", 429)
+    # A bounded day index keeps fake-serial quota rows from accumulating forever.
+    conn.execute("DELETE FROM fleet_t0_daily_quotas WHERE day<%s", (day - 30,))
+
+
+def claim_new_device(conn, *, device_id: str, serial: str, now: float) -> None:
+    """Create the device row for a serial seen for the first time, within the day's global
+    new-device quota (`t0_claim_limit`, 429, once it is spent); a known device is a no-op."""
+    if conn.execute("SELECT 1 FROM devices WHERE device_id=%s", (device_id,)).fetchone():
+        return
+    day = int(now // _DAY_SECONDS)
+    row = conn.execute(
+        "INSERT INTO fleet_t0_daily_quotas(scope,kind,day,used) "
+        "VALUES('global','new_device',%s,1) ON CONFLICT(scope,kind,day) DO UPDATE SET "
+        "used=fleet_t0_daily_quotas.used+1 "
+        "WHERE fleet_t0_daily_quotas.used<%s RETURNING used",
+        (day, _NEW_CLAIMS_GLOBAL_DAILY),
+    ).fetchone()
+    if row is None:
+        raise FleetError("t0_claim_limit", 429)
+    conn.execute("INSERT INTO devices(device_id,serial,first_seen,last_seen) "
+                 "VALUES(%s,%s,%s,%s) ON CONFLICT(device_id) DO NOTHING",
+                 (device_id, serial, now, now))
+
 
 class NodeBootService:
     """`publisher` warms the cache when a deployment is selected (a Prefetch in the selecting
@@ -49,7 +92,6 @@ class NodeBootService:
         self.sessions, self.publisher = sessions, publisher
 
     def select(self, deployment_id: UUID, expected_revision: int) -> dict:
-        self.sessions.require_enabled()
         identifier(deployment_id)
         counter(expected_revision)
         try:
@@ -64,7 +106,7 @@ class NodeBootService:
         return {"revision": revision, "deployment_id": str(deployment_id)}
 
     def offer(self, request: NodeBootRequestV2) -> NodeBootOfferV2:
-        config = self.sessions.require_enabled()
+        config = self.sessions.config
         serial = sanitize_serial(request.serial)
         device_id = device_id_for_serial(serial)
         if serial != request.serial or device_id is None:
@@ -75,8 +117,8 @@ class NodeBootService:
         with self.sessions.db.transaction() as conn:
             lock_fleet_assets_in(conn)
             now = self.sessions.clock.utc()
-            FleetService._claim_quota(conn, device_id=device_id, kind="offer", now=now)
-            FleetService._claim_new_device(conn, device_id=device_id, serial=serial, now=now)
+            claim_quota(conn, device_id=device_id, kind="offer", now=now)
+            claim_new_device(conn, device_id=device_id, serial=serial, now=now)
             generation = self.sessions.lock_device_generation_in(conn, device_id)
             prior = conn.execute("SELECT * FROM node_boot_offers WHERE device_id=%s AND "
                                  "(kernel_boot_id=%s OR boot_nonce=%s)",
@@ -115,7 +157,6 @@ class NodeBootService:
         return result
 
     def asset(self, offer_id: UUID, role: str) -> OfferAsset:
-        self.sessions.require_enabled()
         with self.sessions.db.transaction() as conn:
             lock_fleet_assets_in(conn)
             row = conn.execute("SELECT * FROM node_boot_offers WHERE offer_id=%s", (offer_id,)).fetchone()

@@ -20,6 +20,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi.testclient import TestClient
 
 from central.app import create_app
+from central.displays.model import Readiness
 from central.registry import (
     Enrollment,
     FrameCreate,
@@ -48,9 +49,9 @@ def enroll(registry, count=2):
     outputs = tuple(OutputReport(output_id=f"HDMI-A-{i+1}", width_px=1920, height_px=1080)
                     for i in range(count))
     request = Enrollment(public_key=public, nonce=nonce, outputs=outputs,
-                         device_id=device_id, boot_id=boot_id, ticket_id=None,
+                         device_id=device_id, boot_id=boot_id,
                          signature=base64.b64encode(key.sign(enrollment_message(
-                             nonce, outputs, device_id, boot_id, None))).decode())
+                             nonce, outputs, device_id, boot_id))).decode())
     return registry.enroll(request)
 
 
@@ -103,11 +104,10 @@ def _replacement_portrait_profile():
 
 def test_put_profile_preserves_frame_identity_geometry_and_invalidates_calibration(registry):
     _portrait(registry)
-    # Seed the persisted state to prove the operation clears both calibration
-    # validity and an active preview, and fences in-flight calibration requests.
+    # Seed the persisted state to prove the operation clears calibration validity (its Position,
+    # now at a stale generation) and raises the calibration revision a Save names.
     with registry.db.transaction() as conn:
-        conn.execute("UPDATE frames SET calibration_valid=true,preview=calibration,"
-                     "preview_expires=2000 WHERE id='portrait'")
+        conn.execute("UPDATE frames SET position_generation=generation WHERE id='portrait'")
     before = registry.inventory().frames[0]
     with TestClient(create_app(registry.db, registry.clock, ADMIN, run_scheduler=False)) as client:
         response = client.put("/v1/operator/frames/portrait/profile",
@@ -119,16 +119,9 @@ def test_put_profile_preserves_frame_identity_geometry_and_invalidates_calibrati
     assert (after.id, after.surface_id, after.x_mm, after.y_mm, after.width_mm, after.height_mm) == (
         before.id, before.surface_id, before.x_mm, before.y_mm, before.width_mm, before.height_mm)
     assert after.profile.model_dump() == _replacement_portrait_profile()
-    assert after.calibration_valid is False
-    assert after.preview is None and after.preview_expires is None
+    assert after.readiness is Readiness.UNBOUND and after.generation == 1   # its Position (at 0) is stale
     assert after.calibration.revision == before.calibration.revision + 1
     assert after.configuration_revision == before.configuration_revision + 1
-    with TestClient(create_app(registry.db, registry.clock, ADMIN, run_scheduler=False)) as client:
-        stale = client.post("/v1/operator/frames/portrait/calibration", headers=AUTH,
-                            json={"operation": "revert", "expected_revision": before.calibration.revision,
-                                  "expected_generation": 1})
-    assert stale.status_code == 409
-    assert stale.json() == {"error": "calibration_revision_conflict"}
 
 
 def test_put_profile_guards_stale_generation_and_allows_identical_retry(registry):

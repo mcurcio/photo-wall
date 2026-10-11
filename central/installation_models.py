@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Literal, Self
+from typing import Annotated, Literal, Self
 
 from pydantic import Field, JsonValue, model_validator
 
+from central.displays.model import Readiness
 from contracts.enrollment import OutputReport
 from contracts.liveness import REPORT_INTERVAL, SILENT_AFTER_SECONDS
 from contracts.models import Calibration, FrameProfile, Identifier, Instant, Model
@@ -46,12 +47,29 @@ class FrameInventory(Model):
     profile: FrameProfile
     generation: int = Field(ge=0)
     calibration: Calibration
-    calibration_valid: bool
-    preview: Calibration | None = None
-    preview_expires: Instant | None = None
+    readiness: Readiness                      # worked out (central/displays/model.py), never stored
     configuration_revision: int = Field(ge=1)
     player_id: Identifier | None = None
     output_id: Identifier | None = None
+
+
+Pixels = Annotated[int, Field(ge=1, le=65536, strict=True)]
+
+
+class FrameOutput(Model):
+    """One Frame's Frame output and what it came from (follow-ups 2026-10-11, slice A1; owner,
+    2026-10-11: compatibility "measuring against the Frame output and not the Display").
+
+    `output_px` is `contracts.models.frame_output(profile, calibration, display_px)`: the
+    Frame's picture in output pixels, (width, height) along its own axes. `display_px` is the
+    size its Output last reported (`outputs.observation` width_px x height_px, kept while the
+    display is unplugged). Both are None for a Frame bound to no Output, or whose Output never
+    reported a size above 0 x 0. Read by `central.infra.display_store.frame_outputs_in`."""
+
+    frame_id: Identifier
+    profile: FrameProfile
+    output_px: tuple[Pixels, Pixels] | None
+    display_px: tuple[Pixels, Pixels] | None
 
 
 class PlayerReports(Model):
@@ -97,7 +115,7 @@ class InstallationInventory(Model):
         """A copy carrying each Player's last accepted report, read after this inventory.
 
         read_at is at least every last_seen and every report, so no age taken from it is
-        negative; it does not bound preview_expires, which is in the future by design."""
+        negative."""
         return self.model_copy(update={
             "players": tuple(
                 player.model_copy(update={"last_report_at": reports.reports.get(player.id)})

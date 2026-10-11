@@ -41,7 +41,7 @@ class Witnesses:
     def __init__(self, registry):
         self.registry = registry
         (self.coordinator,self.player,self.key,self.sessions,self.claims,self.grants,
-         facts,_,self.proof) = rig(registry,node_v2=True)
+         facts,_,self.proof) = rig(registry)
         self.display = NodeDisplay(self.sessions,runtime=self.coordinator)
         self.claim = self.claims['display_host']
         self.grant = self.grants['display_host']
@@ -142,7 +142,7 @@ def test_advancing_real_owner_witnesses_qualify_without_cached_repeats(registry)
         assert len(row['evidence']['sample_ids'])==7
     # G4: the operator read lists the qualified environment (the gate plays no part in a read).
     from central.fleet.node_lifecycle import NodeLifecycle
-    [listed] = NodeLifecycle(witness.sessions, None).status(DEVICE_ID)['qualification']['acceptances']
+    [listed] = NodeLifecycle(witness.sessions).status(DEVICE_ID)['qualification']['acceptances']
     assert listed['environment_sha256']==witness.proof.challenge.environment_sha256 and listed['base_tag'] is not None
 
 
@@ -189,7 +189,6 @@ def test_binding_change_cannot_keep_old_qualification_witness(registry):
 def test_actual_qualification_selects_fallback_but_changed_mode_blocks_new_stage(registry):
     import json
 
-    from test_fleet_rollout_gate import _gate
     from test_node_boot import environment, publish_deployment
 
     from central.fleet.node_boot import parse_node_deployment
@@ -208,11 +207,9 @@ def test_actual_qualification_selects_fallback_but_changed_mode_blocks_new_stage
     publish_deployment(registry.db,selected,registry.clock)
     registry.unbind('node-f0',expected_generation=1)
     registry.unbind('node-f1',expected_generation=1)
-    gate,_=_gate(registry)
-    generation=gate.open(expected_revision=0).generation
-    lifecycle=NodeLifecycle(witness.sessions,gate)
+    lifecycle=NodeLifecycle(witness.sessions)
     claim=witness.claims['app_effect_broker']
-    issued=lifecycle.stage(DEVICE_ID,OperatorAppStage(uuid4(),uuid4(),claim.session_id,1,selected.deployment_id,generation,'operator:qualified'))
+    issued=lifecycle.stage(DEVICE_ID,OperatorAppStage(uuid4(),uuid4(),claim.session_id,1,selected.deployment_id,'operator:qualified'))
     command=parse_stage_command(json.dumps(issued['command']).encode())
     assert command.fallback==deployment.app_environment
     old=next(iter(witness.requests.values()))
@@ -223,4 +220,4 @@ def test_actual_qualification_selects_fallback_but_changed_mode_blocks_new_stage
     # The fallback is frozen at stage time; a changed output cohort refuses a new stage.
     with pytest.raises(NodeControlError,match='qualified_fallback_required'):
         lifecycle.stage(DEVICE_ID,OperatorAppStage(uuid4(),uuid4(),claim.session_id,1,selected.deployment_id,
-                                                   generation,'operator:after-mode-change'))
+                                                   'operator:after-mode-change'))

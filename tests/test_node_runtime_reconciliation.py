@@ -4,8 +4,9 @@ from dataclasses import replace
 from uuid import uuid4
 
 import pytest
+from support.position import save_position
 from test_coordination import report
-from test_fleet_attempts import BOOT_ID, DEVICE_ID, OFFER_ID, SERIAL, _seed
+from test_fleet_attempts import BOOT_ID, DEVICE_ID, SERIAL
 from test_registry import enroll, frame
 
 from central.coordination import Coordinator
@@ -14,7 +15,7 @@ from central.fleet.node_ingest import NodeIngest
 from central.fleet.node_sessions import NodeControlConfig, NodeControlError, NodeSessions
 from central.node_runtime_reconciliation import NodeRuntimeReconciler
 from central.runtime import Contribution, Scene
-from contracts.models import Calibration
+from contracts.models import Calibration, CornersFit
 from contracts.node_app_link import (
     NodeAppLinkChallengeV2,
     NodeAppLinkV2,
@@ -34,21 +35,17 @@ from contracts.node_protocol import (
 from contracts.player_control import ControlAck, ControlHello
 
 
-def rig(registry, *, node_v2=False):
-    offer_id = OFFER_ID
-    if node_v2:
-        from test_node_boot import cold_setup
+def rig(registry):
+    from test_node_boot import cold_setup
 
-        from contracts.node_boot import NodeBootRequestV2
-        boots, _, _ = cold_setup(registry)
-        offer_id = boots.offer(NodeBootRequestV2(SERIAL, BOOT_ID, "a" * 64)).offer_id
-    else:
-        _seed(registry)
+    from contracts.node_boot import NodeBootRequestV2
+    boots, _, _ = cold_setup(registry)
+    offer_id = boots.offer(NodeBootRequestV2(SERIAL, BOOT_ID, "a" * 64)).offer_id
     player, key, _ = enroll(registry, device_id=DEVICE_ID)
     for index in range(2):
         frame(registry, f"node-f{index}")
         registry.bind(f"node-f{index}", player["player_id"], f"HDMI-A-{index+1}", expected_generation=0)
-        registry.calibrate(f"node-f{index}", "commit", 1, Calibration(), expected_generation=1)
+        save_position(registry, f"node-f{index}")
     coordinator = Coordinator(registry.db, registry.clock)
     coordinator.runtime.command("set_scene", Scene(scene_id="node-scene", loop=True, cycle_seconds=60,
         contributions=(Contribution(target="frame:node-f0", kind="black"),
@@ -170,7 +167,7 @@ def test_link_replay_exact_but_modified_proof_and_new_control_rejected(registry)
         links.admit(broker.session_id, claims["app_effect_broker"].credential, encode_node_app_link(changed))
 
 
-def test_display_admission_is_exact_and_never_releases_runtime_or_active_drain(registry):
+def test_display_admission_is_exact_and_never_releases_runtime(registry):
     from central.transaction_locks import acquire_runtime_locks
     coordinator, player, _, _, _, _, surfaces, _, proof = rig(registry)
     surface = surfaces[0]
@@ -190,11 +187,6 @@ def test_display_admission_is_exact_and_never_releases_runtime_or_active_drain(r
             "process": replace(surface.process, start_ticks=surface.process.start_ticks+1)}).allowed
         assert not coordinator.display_admission_in(conn, **{**arguments,
             "config_revision": surface.config_revision+1}).allowed
-        conn.execute("INSERT INTO equipment_drains(player_id,attempt_id,boot_id,authority_epoch,phase,"
-                     "prepared_at,authorization_expires_at,snapshot) VALUES(%s,'test','test',1,'prepared',1000,1100,jsonb_build_object('outputs',jsonb_build_array()))",
-                     (player["player_id"],))
-        denied = coordinator.display_admission_in(conn, **arguments)
-        assert not denied.allowed and denied.reason == "equipment_drain_requires_v2_target_reservation"
     assert coordinator.runtime.read().export_state() == before
 
 
@@ -235,7 +227,7 @@ def test_equal_counter_frame_rebind_preserves_historical_loss_without_fencing_re
         registry.commit_calibration_trial_in(conn, frame_id=binding.frame_id,
             player_id=player["player_id"], authority_epoch=1, output_id=binding.output_id,
             binding_generation=binding.generation, config_revision=binding.configuration_revision,
-            calibration_revision=binding.calibration.revision, calibration=Calibration())
+            calibration_revision=binding.calibration.revision, calibration=Calibration(fit=CornersFit()))
     binding = next(b for b in coordinator.configuration(player["player_id"], 1).bindings
                    if b.frame_id == "replacement-frame")
     assert (binding.generation, binding.configuration_revision) == (old.binding_generation, old.config_revision)

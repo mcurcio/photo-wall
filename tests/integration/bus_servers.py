@@ -512,13 +512,29 @@ class FileLinkStore:
 
 
 class Projection:
-    """Central's document projection (`nodeapi.hub.DocumentSource`): stream -> key -> value."""
+    """Central's document projection (`nodeapi.hub.DocumentSource`): stream -> key -> value. A
+    `set` wakes every link awaiting `changed()`; writing `streams` directly wakes none, so only a
+    reconcile (or an explicit assert) carries it."""
 
     def __init__(self) -> None:
         self.streams: dict[str, dict[str, bytes]] = {}
+        self._changed = asyncio.Event()
 
     async def documents(self, stream: str) -> Mapping[str, bytes]:
         return dict(self.streams.get(stream, {}))
+
+    def set(self, stream: str, key: str, value: bytes) -> None:
+        """Change one document and tell the links (on the links' event loop)."""
+        self.streams.setdefault(stream, {})[key] = value
+        self._changed.set()
+
+    async def changed(self) -> None:
+        await self._changed.wait()
+        self._changed.clear()
+
+    def source(self, serial: str, pipe: str) -> Projection:
+        """Central's `DocumentSources` (central/infra/node_links.py): every link shares this one."""
+        return self
 
 
 async def reload_hub(hub: BusServer, serials: Sequence[str], *, requests: int = 2) -> None:

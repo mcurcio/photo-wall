@@ -75,8 +75,8 @@ out.send = {
 };
 answer = () => new Response(JSON.stringify({ error: "node_environment_unknown" }), { status: 404 });
 out.send.unknownEnvironment = await send(served);
-answer = () => new Response(JSON.stringify({ error: "node_control_disabled" }), { status: 503 });
-out.send.disabled = await send(served);
+answer = () => new Response(JSON.stringify({ error: "node_unlisted_refusal" }), { status: 503 });
+out.send.unlistedRefusal = await send(served);
 answer = () => { throw new TypeError("network"); };
 out.send.lost = await send(served);
 out.sentUrl = posts[0].url;
@@ -96,12 +96,12 @@ out.answers = {
 };
 for (const code of ["node_qualification_control_stale", "node_qualification_control_unlinked",
   "node_qualification_readiness_stale", "node_qualification_readiness_unavailable", "node_qualification_plan_changed",
-  "node_qualification_handoff_unavailable", "node_qualification_preview_active", "node_qualification_base_unavailable",
+  "node_qualification_handoff_unavailable", "node_qualification_base_unavailable",
   "node_output_cohort_unavailable", "node_representative_media_evidence_required",
   "node_representative_single_media_required", "node_representative_frame_witness_mismatch",
   "node_qualification_unknown", "node_qualification_generation_changed", "node_qualification_base_abi_mismatch",
   "node_qualification_process_changed", "node_player_unavailable", "node_device_unavailable",
-  "node_control_disabled", "node_something_new"]) {
+  "node_unlisted_refusal", "node_something_new"]) {
   out.answers[code] = q.sampleAnswer(no(409, code));
 }
 
@@ -124,7 +124,7 @@ out.steps = {
   accepted: run([progress(0), progress(5), out.answers.accepted, waiting]),
   terminal: run([waiting, out.answers.node_qualification_process_changed, waiting]),
   unlisted: run([out.answers.node_something_new, waiting]),
-  disabled: run([out.answers.node_control_disabled, waiting]),
+  unlistedRefusal: run([out.answers.node_unlisted_refusal, waiting]),
   // 60 waiting answers 2 s apart: 120 s without progress, stopped on the 60th.
   quiet: run(Array(70).fill(waiting)),
   quiet59: run(Array(59).fill(waiting)),
@@ -190,8 +190,8 @@ def test_send_begin_judges_the_newest_read_and_refuses_without_a_post():
                                 "message": "The Player app's linked process changed; begin again."}
     assert send["unknownEnvironment"] == {"outcome": "refused", "posts": 1, "code": "node_environment_unknown",
                                           "message": "Central does not know this app environment."}
-    assert send["disabled"] == {"outcome": "refused", "posts": 1, "message": "Central refused: node_control_disabled.",
-                                "code": "node_control_disabled"}
+    assert send["unlistedRefusal"] == {"outcome": "refused", "posts": 1, "message": "Central refused: node_unlisted_refusal.",
+                                "code": "node_unlisted_refusal"}
     assert send["lost"]["outcome"] == "unknown" and send["lost"]["posts"] == 1
     assert out["sentUrl"] == "/v1/operator/node/devices/d-1/app-qualifications"
     # Every Begin sent carries the same frozen body, so a resend after a lost answer is identical.
@@ -208,24 +208,24 @@ def test_sample_answers_are_classed_and_any_unlisted_code_is_terminal():
     assert answers["lost"] == answers["gateway"] == {"kind": "waiting",
                                                      "text": "Waiting: Central did not answer this sample"}
     waiting = [code for code, value in answers.items() if code.startswith("node_") and value["kind"] == "waiting"]
-    assert len(waiting) == 12 and all(answers[code]["text"].startswith("Waiting: ") for code in waiting)
+    assert len(waiting) == 11 and all(answers[code]["text"].startswith("Waiting: ") for code in waiting)
     assert answers["node_representative_single_media_required"]["text"] == (
         "Waiting: every bound Output must keep showing the same photo or video at full opacity for 30 s")
     terminal = [code for code, value in answers.items() if value["kind"] == "terminal"]
     assert set(terminal) == {"node_qualification_unknown", "node_qualification_generation_changed",
                              "node_qualification_base_abi_mismatch", "node_qualification_process_changed",
-                             "node_player_unavailable", "node_device_unavailable", "node_control_disabled",
+                             "node_player_unavailable", "node_device_unavailable", "node_unlisted_refusal",
                              "node_something_new", "oddStatus", "noCode4xx"}
     assert answers["node_qualification_process_changed"]["text"] == (
         f"Stopped: the Player app's linked process changed or unlinked. {STEADY}")
-    assert answers["node_control_disabled"]["text"] == f"Stopped: Central refused: node_control_disabled. {STEADY}"
+    assert answers["node_unlisted_refusal"]["text"] == f"Stopped: Central refused: node_unlisted_refusal. {STEADY}"
     assert answers["node_something_new"]["text"] == f"Stopped: Central refused: node_something_new. {STEADY}"
 
 
 def test_the_sampler_stops_on_accepted_terminal_and_two_minutes_without_progress():
     steps = _run()["steps"]
     assert steps["accepted"]["phase"] == "accepted" and steps["accepted"]["samples"] == 3
-    for name in ("terminal", "unlisted", "disabled"):
+    for name in ("terminal", "unlisted", "unlistedRefusal"):
         assert steps[name]["phase"] == "stopped", name
         assert steps[name]["trail"][-1] == "stopped" and steps[name]["stopped"].endswith(STEADY)
     assert steps["terminal"]["samples"] == 2 and steps["unlisted"]["samples"] == 1

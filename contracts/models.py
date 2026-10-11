@@ -6,6 +6,8 @@ from typing import Annotated, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_serializer, model_validator
 
+from contracts.frame_fit import FULL_SCREEN, OutputSize, PictureSize, convex_clockwise, picture_size
+
 # The API identifier rule (path parameters, Scene/Program/Source ids). The console's
 # IDENTIFIER_PATTERN (authoring.js) is pinned equal to it by a test.
 IDENTIFIER_PATTERN = r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}"
@@ -32,36 +34,52 @@ class FrameProfile(Model):
     video: bool = True
 
 
-class Calibration(Model):
-    """Physical Frame geometry remains in registry; these values map output pixels.
+Fraction = Annotated[float, Field(ge=0, le=1, allow_inf_nan=False)]
+FitPoint = tuple[Fraction, Fraction]
+FitCorners = tuple[FitPoint, FitPoint, FitPoint, FitPoint]   # TL, TR, BR, BL; fractions of the output
 
-    Corner order: top-left, top-right, bottom-right, bottom-left; normalized output.
-    Renderer applies crop/layout before this projective transform and gain.
-    """
 
-    revision: int = Field(default=1, ge=1)
+class CornersFit(Model):
+    """Frame fit Corners (roadmap 1c; an explicit opt-in, owner 2026-10-10 q1): the picture is
+    stretched exactly onto the four corners (a perspective transform), and a quarter turn picks
+    which corner edge is the picture's top."""
+    mode: Literal["corners"] = "corners"
+    corners: FitCorners = FULL_SCREEN
     rotation: Literal[0, 90, 180, 270] = 0
-    corners: tuple[tuple[float, float], tuple[float, float], tuple[float, float], tuple[float, float]] = (
-        (0, 0), (1, 0), (1, 1), (0, 1)
-    )
-    crop: tuple[float, float, float, float] = (0, 0, 1, 1)
-    gain: float = Field(default=1, ge=0, le=2)
 
     @model_validator(mode="after")
-    def geometry(self) -> Self:
-        if any(not 0 <= n <= 1 for point in self.corners for n in point):
-            raise ValueError("corners must lie in normalized output space")
-        left, top, right, bottom = self.crop
-        if not (0 <= left < right <= 1 and 0 <= top < bottom <= 1):
-            raise ValueError("crop must describe a nonempty normalized rectangle")
-        # Consistently convex clockwise in screen coordinates; excludes folded/degenerate quads.
-        cross = []
-        for i, a in enumerate(self.corners):
-            b, c = self.corners[(i + 1) % 4], self.corners[(i + 2) % 4]
-            cross.append((b[0]-a[0])*(c[1]-b[1]) - (b[1]-a[1])*(c[0]-b[0]))
-        if min(cross) <= 1e-6:
+    def convex(self) -> Self:
+        if not convex_clockwise(self.corners):
             raise ValueError("corners must form a nondegenerate ordered convex aperture")
         return self
+
+
+class CoverFit(Model):
+    """Frame fit Cover (roadmap 1c; the default, owner 2026-10-10 q1): the four corners are the
+    opening; the picture is the unskewed rectangle turned `rotation` degrees clockwise that holds
+    every corner (contracts/frame_fit.py `cover_rectangle`), and nothing is drawn outside the
+    opening (owner q2: "Black/nothing")."""
+    mode: Literal["cover"] = "cover"
+    corners: FitCorners = FULL_SCREEN
+    rotation: float = Field(default=0, ge=0, lt=360, allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def convex(self) -> Self:
+        if not convex_clockwise(self.corners):
+            raise ValueError("corners must form a nondegenerate ordered convex aperture")
+        return self
+
+
+FrameFit = Annotated[CornersFit | CoverFit, Field(discriminator="mode")]
+
+
+class Calibration(Model):
+    """A Frame's Position (the console's word): how its picture sits on the output, as its Frame
+    fit (roadmap 1c; Cover by default, Corners an explicit opt-in, owner 2026-10-10 q1).
+    `revision` rises with every saved Position."""
+
+    revision: int = Field(default=1, ge=1)
+    fit: FrameFit = Field(default_factory=CoverFit)
 
 
 class OutputBinding(Model):
@@ -71,21 +89,20 @@ class OutputBinding(Model):
     configuration_revision: int = Field(default=1, ge=1)
     profile: FrameProfile
     calibration: Calibration = Field(default_factory=Calibration)
-    preview: Calibration | None = None
-    preview_expires: Instant | None = None
 
-    @model_validator(mode="after")
-    def preview_lease(self) -> Self:
-        if (self.preview is None) != (self.preview_expires is None):
-            raise ValueError("preview and expiry must be supplied together")
-        if self.preview and self.preview.revision != self.calibration.revision:
-            raise ValueError("preview must reference committed calibration revision")
-        return self
 
-    def effective_calibration(self, now: float) -> Calibration:
-        if self.preview is not None and self.preview_expires is not None and now < self.preview_expires:
-            return self.preview
-        return self.calibration
+def frame_output(profile: FrameProfile, calibration: Calibration,
+                 output: OutputSize | None) -> PictureSize | None:
+    """The Frame output of a Frame whose Output reports `output` (width, height): its picture's
+    pixels (contracts/frame_fit.py `picture_size`, in the Frame fit's mode, corners and rotation,
+    at the profile's aspect width_px / height_px). None when `output` is None or has a side
+    below 1 (its Pi has not reported the Output's size). Pure; the one place a Frame's
+    calibration and profile become its Frame output (follow-ups 2026-10-11, slice A1)."""
+    if output is None or output[0] < 1 or output[1] < 1:
+        return None
+    fit = calibration.fit
+    return picture_size(fit.mode, fit.corners, fit.rotation, output,
+                        profile.width_px / profile.height_px)
 
 
 class IdentifyOutput(Model):
@@ -152,6 +169,14 @@ class PlayerTime(Model):
     server_time: Instant
 
 
+# What a Frame keeps once a layer has been shown, for when nothing plays on it (the Player's
+# fallback, an outage included). The layer takes effect once its fade-in is over:
+# "keep_this_photo" keeps this opaque still up; "keep_nothing" keeps nothing (black);
+# "leave_as_is" changes nothing (an earlier layer's after-state still holds). Central plans it
+# (docs/execution-contract.md "What a Frame keeps"); the Player only applies it.
+AfterEnd = Literal["leave_as_is", "keep_this_photo", "keep_nothing"]
+
+
 class Layer(Model):
     assignment_id: Identifier
     run_id: Identifier
@@ -170,7 +195,7 @@ class Layer(Model):
     fade_in: float = Field(default=0, ge=0)
     fade_out: float = Field(default=0, ge=0)
     required: bool = True
-    retain_on_expiry: bool = False
+    after_end: AfterEnd = "leave_as_is"
 
     @model_validator(mode="after")
     def interval(self) -> Self:
@@ -182,10 +207,10 @@ class Layer(Model):
             raise ValueError("black layer cannot carry media")
         if self.fade_in + self.fade_out > self.end - self.start:
             raise ValueError("fades exceed layer interval")
-        if self.retain_on_expiry and (
+        if self.after_end == "keep_this_photo" and (
             self.variant is None or self.variant.media_type == "video/mp4" or self.opacity != 1
         ):
-            raise ValueError("only an opaque still may be retained")
+            raise ValueError("only an opaque still may be kept")
         return self
 
     def position(self, now: float) -> float:

@@ -102,7 +102,9 @@ Known defects against these rules, fixed in PR #28:
 - **The saved root, only when the cmdline names no Central.** When provisioning finds Central by
   mDNS, it writes that root to the handoff as `central_origin`, and the Player uses it before
   browsing mDNS itself. This is the current code, not an owner ruling. The "cmdline > saved root >
-  mDNS" order in [0008](0008-generic-image-and-serial-identity.md) describes it.
+  mDNS" order in [0008](0008-generic-image-and-serial-identity.md) describes it. *Amended
+  2026-10-10 (PR 45): mDNS discovery and advertising are deleted; the order is cmdline, then the
+  saved root the Node's handoff stage writes.*
 - **Computed module lists.** The build computes each artefact's import set, which replaces the
   hand-kept lists that caused the crash, for the initramfs and both packages.
 - **One Debian declaration; nothing on the device resolves packages.** `scripts/debian_packages.py`
@@ -114,6 +116,10 @@ Known defects against these rules, fixed in PR #28:
 - **Private package directories (Q1).** Each `.deb` ships its computed closure under
   `/usr/lib/<package>/`, run as `python3 -I -B <dir>`. Nothing goes to dist-packages, so the two
   packages share no file.
+- **Superseded in part by [0019](0019-debian-packaging-with-debhelper.md#relation-to-earlier-records)**
+  (2026-10-09): the packages these three bullets describe become debhelper packages. Depends live
+  in `debian/control` and the pin in `snapshot.list`; private directories and computed imports
+  stay, as a check.
 - **A Player the base cannot satisfy (Q2).** dpkg refuses it, and the unit's start limit reboots
   the Pi. The build checks one revision's base against its Player's Depends. Operator rule: stage
   the base first.

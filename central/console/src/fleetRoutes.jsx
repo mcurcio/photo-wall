@@ -16,7 +16,7 @@ import { UpdateWallPage } from "./UpdateWallPage.jsx";
  * aggregates, with its Update the wall journey (`#/releases/update/<tag>[/try/<player-id>]`,
  * §25a). Like the Wall sections, the shell mounts them ONLY while current, so a Pi page's node
  * read and the release read stop when the operator leaves them. Like the Show and neutral
- * sections they never reach the Calibration facet or the Inspector (R4;
+ * sections they never reach the Frame page or its live adjustment (R4;
  * tests/test_console_routes_r4.py): a Frame appears here only as a link to its home on the Wall.
  *
  * @type {ReadonlyArray<import("./Shell.jsx").RouteEntry>}

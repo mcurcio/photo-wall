@@ -6,7 +6,7 @@ is attached and every service image it names is tagged.
 tests passed and the `images` job pushed the service images by digest:
 
   python3 -m scripts.release_seal --tag T --revision R --since S \\
-      --base-bundle DIR --player-deb PATH --bootstrapper-deb PATH \\
+      --base-bundle DIR --node-components DIR \\
       --image central=REF --image media-worker=REF --destination DIR
 
 Its steps, in order. Each is idempotent, so a re-run of a failed seal converges, and a re-run of
@@ -71,15 +71,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Protocol, TypeVar
 
-from contracts.release import (
-    CHECKSUMS,
-    MANIFEST,
-    MANIFEST_SCHEMA,
-    MANIFEST_V2,
-    MAX_MANIFEST_BYTES,
-    PAYLOAD_MANIFEST_SCHEMA,
-    legacy_projection,
-)
+from contracts.release import BASE_IMAGE, BOOT_IMAGE, CHECKSUMS, MANIFEST, MAX_MANIFEST_BYTES
 from scripts.package_release_artifacts import (
     IMAGE_REFERENCE,
     Asset,
@@ -505,53 +497,37 @@ def check_sealed(github: GitHub, registry: Registry, release: Mapping[str, objec
     attached = {str(asset.get("name")): asset for asset in release.get("assets") or ()}
     if MANIFEST not in attached:
         raise SealError(f"{tag} is published without its {MANIFEST}")
-    legacy_body = github.asset_bytes(attached[MANIFEST], MAX_MANIFEST_BYTES)
+    body = github.asset_bytes(attached[MANIFEST], MAX_MANIFEST_BYTES)
     try:
-        legacy = json.loads(legacy_body)
-        if (not isinstance(legacy, dict) or type(legacy.get("schema")) is not int
-                or legacy["schema"] != MANIFEST_SCHEMA):
-            raise PackagingError("manifest_schema_invalid")
-        read_manifest(legacy, revision=revision)
+        declared = read_manifest(json.loads(body), revision=revision)
     except (ValueError, UnicodeError, PackagingError) as error:
         raise SealError(f"{tag}'s published {MANIFEST} is not a release's: {error}") from None
-    body = legacy_body
-    manifest = legacy
-    if MANIFEST_V2 in attached:
-        body = github.asset_bytes(attached[MANIFEST_V2], MAX_MANIFEST_BYTES)
-        try:
-            manifest = json.loads(body)
-            if (not isinstance(manifest, dict)
-                    or manifest.get("schema") != PAYLOAD_MANIFEST_SCHEMA
-                    or legacy_projection(manifest) != legacy):
-                raise PackagingError("manifest_legacy_mismatch")
-        except (ValueError, UnicodeError, PackagingError) as error:
-            raise SealError(f"{tag}'s published {MANIFEST_V2} is not a release's: {error}") from None
-    try:
-        declared = read_manifest(manifest, revision=revision)
-    except PackagingError as error:
-        raise SealError(f"{tag}'s published manifest is not a release's: {error}") from None
-    expected = {MANIFEST: (hashlib.sha256(legacy_body).hexdigest(), len(legacy_body)),
+    expected = {MANIFEST: (hashlib.sha256(body).hexdigest(), len(body)),
                 **{filename: (sha256, size) for filename, sha256, size in declared.files.values()}}
-    if MANIFEST_V2 in attached:
-        expected[MANIFEST_V2] = hashlib.sha256(body).hexdigest(), len(body)
     from contracts.node_release import (
         MAX_NODE_RELEASE_BYTES,
         NODE_RELEASE_MANIFEST,
         parse_node_release,
     )
-    if NODE_RELEASE_MANIFEST in attached:
-        node_body = github.asset_bytes(attached[NODE_RELEASE_MANIFEST], MAX_NODE_RELEASE_BYTES)
-        try:
-            node = parse_node_release(node_body)
-            if node.revision != revision or node.base.tag != tag:
-                raise ValueError("node_release_context_mismatch")
-            node_expected = {asset.filename: (asset.sha256, asset.size_bytes) for asset in node.artifacts}
-            if set(node_expected) & {*expected, CHECKSUMS, NODE_RELEASE_MANIFEST}:
-                raise ValueError("node_release_asset_collision")
-            expected.update(node_expected)
-            expected[NODE_RELEASE_MANIFEST] = hashlib.sha256(node_body).hexdigest(), len(node_body)
-        except ValueError as error:
-            raise SealError(f"{tag}'s node manifest is invalid: {error}") from error
+    if NODE_RELEASE_MANIFEST not in attached:
+        raise SealError(f"{tag} is published without its {NODE_RELEASE_MANIFEST}")
+    node_body = github.asset_bytes(attached[NODE_RELEASE_MANIFEST], MAX_NODE_RELEASE_BYTES)
+    try:
+        node = parse_node_release(node_body)
+        if node.revision != revision or node.base.tag != tag:
+            raise ValueError("node_release_context_mismatch")
+        node_expected = {asset.filename: (asset.sha256, asset.size_bytes) for asset in node.artifacts}
+        tree = {asset.role: (asset.filename, asset.sha256, asset.size_bytes)
+                for asset in node.artifacts if asset.role in ("base", "boot")}
+        if tree != {"base": declared.files[BASE_IMAGE], "boot": declared.files[BOOT_IMAGE]}:
+            raise ValueError("node_release_tree_mismatch")
+        own = set(node_expected).difference(filename for filename, _, _ in tree.values())
+        if own & {*expected, CHECKSUMS, NODE_RELEASE_MANIFEST}:
+            raise ValueError("node_release_asset_collision")
+        expected.update(node_expected)
+        expected[NODE_RELEASE_MANIFEST] = hashlib.sha256(node_body).hexdigest(), len(node_body)
+    except ValueError as error:
+        raise SealError(f"{tag}'s node manifest is invalid: {error}") from error
     if set(attached) != {*expected, CHECKSUMS} or attached[CHECKSUMS].get("state") != "uploaded" \
             or not all(_matches(attached[name], *record) for name, record in expected.items()):
         raise SealError(f"{tag} is published, but does not attach exactly what its own "
@@ -573,7 +549,7 @@ def notes(packaged: Packaged, tag: str, revision: str, repository: str, server: 
                        for image in packaged.images)
     return f"""\
 Photo Wall 0009 release assets for `{revision}`: the minimal base OS
-image, the Player application and the Central service images, built for this
+image, the Node software and the Central service images, built for this
 exact commit.
 
 **Unsigned, by design.** Per the project's home-LAN, no-threat-model
@@ -591,24 +567,13 @@ beneath your TFTP boot-server tree -- see the
 [runbook]({blob}/docs/runbook.md#player-provisioning-stage-the-netboot-bundle-and-read-its-console-0014).
 It is the `photo-wall-base/boot/` of `{manifest['base_image']['filename']}`
 (sha256 `{manifest['base_image']['sha256']}`), whose base squashfs Central
-serves over HTTP. Every diskless Player netboots this image and fetches the
-current app at boot; it carries no application code itself.
+serves over HTTP. Every diskless Player netboots this image.
 
-## Player application (revs independently of the base)
+## Node software
 
-Central pulls `{manifest['player_deb']['filename']}` (sha256
-`{manifest['player_deb']['sha256']}`) from this GitHub release
-itself; there is nothing to copy or register by hand. It discovers
-the release on its next release sync (every 15 minutes), or at once
-after `POST /v1/operator/app/releases/refresh`. A fleet with no
-bound Players follows the newest release automatically; otherwise
-promote it (`Authorization: Bearer <PHOTO_WALL_ADMIN_TOKEN>`):
-
-       curl -X POST http://<central>/v1/operator/app/releases/{tag}/promote \\
-         -H 'Authorization: Bearer <admin-token>'
-
-Every Player fetches the newly promoted `.deb` on its next reboot;
-running Players are unaffected until then.
+`manifest.node-v2.json` names the Node's component set, attached here, and
+the base and boot tarballs above. Central reads it from this GitHub release
+itself; there is nothing to copy or register by hand.
 
 ## Service images
 
@@ -630,16 +595,12 @@ class Build:
     revision: str
     since: str | None
     base_bundle: Path
-    player_deb: Path
-    bootstrapper_deb: Path
+    node_components: Path
     images: Mapping[str, str]            # image name -> `<repository>@<digest>`
     destination: Path
     source_date_epoch: int
     repository: str                      # owner/name, for the notes' links
     server: str = "https://github.com"
-    player_payload: Path | None = None
-    node_components: Path | None = None
-    node_bundle: Path | None = None
 
 
 def seal(github: GitHub, registry: Registry, build: Build) -> dict:
@@ -654,14 +615,9 @@ def seal(github: GitHub, registry: Registry, build: Build) -> dict:
         print(f"seal: {build.tag} is published at this revision and intact: nothing written")
         return claimed.sealed
     try:
-        payload = ({"player_payload": build.player_payload}
-                   if build.player_payload is not None else {})
-        if build.node_components is not None or build.node_bundle is not None:
-            payload.update(node_components=build.node_components, node_bundle=build.node_bundle,
-                           release_tag=build.tag)
-        package(build.base_bundle, build.player_deb, build.bootstrapper_deb, build.destination,
-                revision=build.revision, images=build.images,
-                source_date_epoch=build.source_date_epoch, **payload)
+        package(build.base_bundle, build.node_components, build.destination,
+                revision=build.revision, tag=build.tag, images=build.images,
+                source_date_epoch=build.source_date_epoch)
     except PackagingError as error:
         raise SealError(f"packaging failed: {error}") from None
     packaged = verified(build.destination, build.revision, registry)
@@ -900,26 +856,6 @@ class Buildx:
 
 # --- the command line --------------------------------------------------------------------------
 
-def _one_deb(path: Path) -> Path:
-    """`path` itself, or the one `.deb` in the directory `path` (a downloaded artifact)."""
-    if not path.is_dir():
-        return path
-    debs = sorted(path.glob("*.deb"))
-    if len(debs) != 1:
-        raise SealError(f"{path} holds {len(debs)} .deb files, not one")
-    return debs[0]
-
-
-def _one_payload(path: Path) -> Path:
-    """A payload path, or the one revision-named payload tarball in a downloaded artifact."""
-    if not path.is_dir():
-        return path
-    found = sorted(path.glob("photo-wall-player-payload-*.tar.gz"))
-    if len(found) != 1:
-        raise SealError(f"{path} holds {len(found)} Player payload archives, not one")
-    return found[0]
-
-
 def _image(value: str) -> tuple[str, str]:
     name, separator, reference = value.partition("=")
     if not separator or not IMAGE_REFERENCE.fullmatch(reference):
@@ -934,11 +870,7 @@ def main(argv: Sequence[str] | None = None, *, github: GitHub | None = None,
     parser.add_argument("--revision", required=True)
     parser.add_argument("--since", required=True, help="the plan's last tag; empty for none")
     parser.add_argument("--base-bundle", type=Path, required=True)
-    parser.add_argument("--player-deb", type=Path, required=True)
-    parser.add_argument("--player-payload", type=Path)
-    parser.add_argument("--node-components", type=Path)
-    parser.add_argument("--node-bundle", type=Path)
-    parser.add_argument("--bootstrapper-deb", type=Path, required=True)
+    parser.add_argument("--node-components", type=Path, required=True)
     parser.add_argument("--image", action="append", default=[], help="NAME=REPOSITORY@DIGEST")
     parser.add_argument("--destination", type=Path, required=True)
     parser.add_argument("--source-date-epoch", type=int,
@@ -952,11 +884,9 @@ def main(argv: Sequence[str] | None = None, *, github: GitHub | None = None,
         if epoch is None:
             epoch = int(git(REPO, "show", "-s", "--format=%ct", args.revision).strip())
         build = Build(args.tag, args.revision, args.since or None, args.base_bundle,
-                      _one_deb(args.player_deb), _one_deb(args.bootstrapper_deb), images,
-                      args.destination, epoch, environ.get("GITHUB_REPOSITORY", ""),
-                      environ.get("GITHUB_SERVER_URL") or "https://github.com",
-                      _one_payload(args.player_payload) if args.player_payload else None,
-                      args.node_components, args.node_bundle)
+                      args.node_components, images, args.destination, epoch,
+                      environ.get("GITHUB_REPOSITORY", ""),
+                      environ.get("GITHUB_SERVER_URL") or "https://github.com")
         release = seal(github or GitHubApi.from_env(environ), registry or Buildx(), build)
     except (SealError, PlanError) as error:
         for line in str(error).splitlines():

@@ -2,21 +2,24 @@
 
 Argument `refused` (the node-pid1 `refused` scenario): the storage stage alone reads a fake
 /proc/meminfo below the smallest memory class, and the base units start as one PID1
-transaction, so the units' own Requires= decide what runs after the refusal.
+transaction, so the units' own Requires= decide what runs after the refusal; the display stack,
+which needs no storage, then starts as in every scenario.
 """
 
+import ast
 import json
 import shutil
 import subprocess
 import sys
-import time
 import urllib.request
 from pathlib import Path
 
-sys.path.insert(0, "/usr/lib/photo-wall-node-bootstrap")
-from appliance.kernel.clock import boot_id, boottime_ms
-from appliance.node_boot_handoff import write_node_handoff
-from contracts.node_boot import parse_node_boot_offer
+sys.path[:0] = next(ast.literal_eval(node.value) for node in ast.parse(Path(
+    "/usr/lib/photo-wall/node/node-bootstrap/__main__.py").read_text()).body
+    if isinstance(node, ast.AnnAssign) and node.target.id == "PATH")  # its launcher's PATH
+from appliance.kernel.clock import boot_id, boottime_ms  # noqa: E402
+from appliance.node_boot_handoff import write_node_handoff  # noqa: E402
+from contracts.node_boot import parse_node_boot_offer  # noqa: E402
 
 config = json.loads(Path("/var/lib/node-fixture-config.json").read_text())
 request = urllib.request.Request(
@@ -32,28 +35,27 @@ write_node_handoff(
     central=ready["central"],
     offer=parse_node_boot_offer(json.dumps(ready["offer"]).encode()),
 )
-# Container has no real boot command line. Only the node cohort condition is removed;
-# every production service command, sandbox and capability remains otherwise exact.
-units = [
-    "photo-wall-node.target",
-    "photo-wall-node-storage.service",
-    "photo-wall-node-handoff.service",
-    "photo-wall-node-prepare.service",
-    "photo-wall-display.service",
-    "photo-wall-display-controller.service",
-    "photo-wall-host-core.service",
-    "photo-wall-app-broker.service",
-    "photo-wall-health.service",
-    "photo-wall-manager-supervisor.service",
-    "photo-wall-bus.service",
-]
-for unit in units:
-    d = Path("/etc/systemd/system") / (unit + ".d")
-    d.mkdir(parents=True, exist_ok=True)
-    (d / "fixture-cohort.conf").write_text("[Unit]\nConditionKernelCommandLine=\n")
 shutil.copy2("/var/tmp/fixture-head.so", "/usr/lib/photo-wall-fixture-head.so")
+# Each drop-in directory is made where it is written: nothing else in the image makes them.
 d = Path("/etc/systemd/system/photo-wall-display.service.d")
-(d / "fixture-headless.conf").write_text("""[Service]
+d.mkdir(parents=True, exist_ok=True)
+# The installed unit's own command with only the hardware swapped: headless instead of DRM, and
+# the fixture head loaded before the production modules, so READY=1 (systemd-notify.so, Type=)
+# and every other argument stay the package's.
+(execstart,) = [
+    line.split("=", 1)[1]
+    for line in Path("/lib/systemd/system/photo-wall-display.service").read_text().splitlines()
+    if line.startswith("ExecStart=")
+]
+for production, fixture in (
+    ("--backend=drm", "--backend=headless --no-outputs --renderer=pixman"),
+    ("--modules=", "--modules=/usr/lib/photo-wall-fixture-head.so,"),
+    ("--idle-time=0", "--idle-time=0 --width=640 --height=480 --no-config"),
+):
+    if execstart.count(production) != 1:
+        raise AssertionError("display ExecStart lacks " + production + ": " + execstart)
+    execstart = execstart.replace(production, fixture)
+(d / "fixture-headless.conf").write_text(f"""[Service]
 TTYPath=
 StandardInput=null
 UtmpIdentifier=
@@ -61,7 +63,7 @@ TTYReset=no
 TTYVHangup=no
 TTYVTDisallocate=no
 ExecStart=
-ExecStart=/usr/bin/env XDG_RUNTIME_DIR=/run/photo-wall-display /usr/bin/weston --backend=headless --no-outputs --renderer=pixman --shell=/usr/lib/photo-wall-display/photo-wall-shell.so --modules=/usr/lib/photo-wall-fixture-head.so --socket=wayland-0 --idle-time=0 --width=640 --height=480 --no-config
+ExecStart={execstart}
 """)
 # The real Player's normal DRM discovery reads synthetic hardware metadata. The
 # compositor's matching Virtual-1 head is real headless Weston, never a DRM claim.
@@ -73,6 +75,7 @@ d.mkdir(parents=True, exist_ok=True)
 )
 if config.get("stop_diagnostics"):
     diagnostic = Path("/etc/systemd/system/photo-wall-app-broker.service.d/fixture-diagnostic.conf")
+    diagnostic.parent.mkdir(parents=True, exist_ok=True)
     diagnostic.write_text(
         "[Service]\nExecStart=\nExecStart=/usr/bin/python3 -I -B /usr/lib/photo-wall-stop-diagnostic.py\n"
     )
@@ -85,6 +88,7 @@ if scenario == "refused":
         "MemTotal:        2097152 kB\nMemFree:         1048576 kB\nMemAvailable:    1572864 kB\n"
     )
     d = Path("/etc/systemd/system/photo-wall-node-storage.service.d")
+    d.mkdir(parents=True, exist_ok=True)
     (d / "fixture-memory-class.conf").write_text(
         "[Service]\nBindReadOnlyPaths=/var/lib/node-fixture-meminfo:/proc/meminfo\n"
     )
@@ -112,19 +116,17 @@ if scenario == "refused":
     if started.returncode == 0:
         raise AssertionError("refused storage did not fail the base transaction")
     print("REFUSED BASE TRANSACTION FAILED", started.returncode, flush=True)
+    # The display stack is independent of storage: the controller alone, as the target pulls it.
+    subprocess.run(["systemctl", "start", "photo-wall-display-controller.service"], check=True)
     raise SystemExit(0)
 subprocess.run(
     ["systemctl", "start", "photo-wall-node-handoff.service", "photo-wall-node-storage.service"],
     check=True,
 )
 subprocess.run(["systemctl", "start", "photo-wall-node-prepare.service"], check=True, timeout=1200)
-subprocess.run(["systemctl", "start", "photo-wall-display.service"], check=True)
-for _ in range(100):
-    if Path("/run/photo-wall-display/wayland-0").exists():
-        break
-    time.sleep(0.1)
-else:
-    raise AssertionError("fixture compositor socket missing")
+# The controller alone: its BindsTo= pulls Weston in and After= holds it until READY=1, which
+# tests/test_node_pid1.py's verify_display_ready checks.
+subprocess.run(["systemctl", "start", "photo-wall-display-controller.service"], check=True)
 subprocess.run(
     [
         "systemctl",

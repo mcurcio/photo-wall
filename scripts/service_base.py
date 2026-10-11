@@ -14,6 +14,8 @@ import tempfile
 import time
 from pathlib import Path
 
+from scripts.registry_pull import RegistryPullError, pull_image
+
 MARKER = b"# END MEDIA OS DEFINITION\n"
 ARCHITECTURES = ("amd64", "arm64")
 MIB = 1024**2
@@ -117,7 +119,10 @@ def select(ref: str, *, allow_build: bool) -> str | None:
 def pull(ref: str, *, platform: str = "linux/arm64") -> str:
     if platform not in ("linux/amd64", "linux/arm64"):
         raise ImageError("unsupported CI image platform")
-    run(["docker", "pull", "--platform", platform, ref], timeout=1200)
+    try:
+        pull_image(ref, platform=platform)
+    except RegistryPullError as error:
+        raise CommandError(f"{error}: {error.diagnostic.decode(errors='replace')[-4000:]}") from None
     return image_id(ref)
 
 
@@ -207,18 +212,14 @@ def prepare(repository: Path, namespace: str, architecture: str, compare: str, *
          "--file", str(repository / "Dockerfile"), "--tag", ref,
          str(repository)], timeout=3600)
     config = image_id(ref)
-    # Qualify native executables and the worker's private default configuration
-    # before publication, without granting the candidate any network access.
+    # Qualify native executables and the package inventory before publication, without
+    # granting the candidate any network access.
     run([
         "docker", "run", "--rm", "--platform", platform, "--network", "none",
         "--read-only", "--cap-drop", "ALL", "--user", "10001:10001", ref,
         "sh", "-ec", "sha256sum -c /etc/photo-wall/conversion-binaries.sha256 "
         "&& ffmpeg -version >/dev/null && ffprobe -version >/dev/null "
-        "&& python -c \"import json, pathlib, stat; "
-        "p = pathlib.Path('/etc/photo-wall/private/connections.json'); "
-        "assert json.loads(p.read_text()) == {'schema': 1, 'connections': []}; "
-        "assert p.stat().st_uid == 10001 and stat.S_IMODE(p.stat().st_mode) == 0o600; "
-        "assert pathlib.Path('/etc/photo-wall/packages.tsv').stat().st_size > 0\"",
+        "&& test -s /etc/photo-wall/packages.tsv",
     ], timeout=120)
     if publish:
         # Workflow concurrency serializes cooperating publishers of this definition.

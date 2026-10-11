@@ -12,6 +12,7 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi.testclient import TestClient
 from pydantic import TypeAdapter, ValidationError
+from support.position import save_position
 
 from central.app import create_app
 from central.coordination import Coordinator
@@ -27,14 +28,21 @@ from central.registry import (
     enrollment_message,
 )
 from central.runtime import Target
-from contracts.models import IDENTIFIER_PATTERN, TARGET_ID_PATTERN, Calibration, FrameProfile
+from contracts.models import (
+    IDENTIFIER_PATTERN,
+    TARGET_ID_PATTERN,
+    Calibration,
+    CornersFit,
+    FrameProfile,
+)
+from contracts.player_control import ControlHello
 
 ADMIN = "test-operator-" + "x" * 40
+# A Position that differs from the default one: Corners with the top-left corner moved in.
+SKEWED = Calibration(fit=CornersFit(corners=((0.1, 0), (1, 0), (1, 1), (0, 1))))
 
 
 def enroll(registry, key=None, count=2, device_id=None):
-    # Ticketless enroll (0009): the signed-rootfs boot-ticket path is retired,
-    # so no boot server ever issues a ticket -- ticket_id is always None.
     key = key or Ed25519PrivateKey.generate()
     public = key.public_key().public_bytes_raw().hex()
     device_id = device_id or "device-" + hashlib.sha256(bytes.fromhex(public)).hexdigest()
@@ -43,10 +51,17 @@ def enroll(registry, key=None, count=2, device_id=None):
     outputs = tuple(OutputReport(output_id=f"HDMI-A-{i+1}", width_px=1920, height_px=1080)
                     for i in range(count))
     request = Enrollment(public_key=public, nonce=nonce, outputs=outputs,
-                         device_id=device_id, boot_id=boot_id, ticket_id=None,
+                         device_id=device_id, boot_id=boot_id,
                          signature=base64.b64encode(key.sign(enrollment_message(
-                             nonce, outputs, device_id, boot_id, None))).decode())
+                             nonce, outputs, device_id, boot_id))).decode())
     return registry.enroll(request), key, request
+
+
+def hello(registry, identity, capabilities=()):
+    """The Player's control hello for this enrollment epoch: state is served only after it."""
+    return registry.control_hello(identity["player_id"], ControlHello(
+        authority_epoch=identity["authority_epoch"], schemas=(2,),
+        capabilities=tuple(capabilities)))
 
 
 def frame(registry, frame_id="portrait"):
@@ -55,28 +70,8 @@ def frame(registry, frame_id="portrait"):
                                                           diagonal_inches=24)))
 
 
-def enroll_d0(registry, key=None, count=2, device_id=None):
-    """m3-central-d0-enroll: a flashed/ticketless enroll (0008 baseline) --
-    unlike `enroll` above, this NEVER calls `select_boot`, so no
-    `appliance_devices` row exists for the device; `ticket_id=None` is the
-    explicit D0 signal (contracts/enrollment.py)."""
-    key = key or Ed25519PrivateKey.generate()
-    public = key.public_key().public_bytes_raw().hex()
-    device_id = device_id or "device-" + hashlib.sha256(bytes.fromhex(public)).hexdigest()
-    boot_id = str(uuid.uuid4())
-    nonce = registry.challenge(public)["nonce"]
-    outputs = tuple(OutputReport(output_id=f"HDMI-A-{i+1}", width_px=1920, height_px=1080)
-                    for i in range(count))
-    request = Enrollment(public_key=public, nonce=nonce, outputs=outputs,
-                         device_id=device_id, boot_id=boot_id, ticket_id=None,
-                         signature=base64.b64encode(key.sign(enrollment_message(
-                             nonce, outputs, device_id, boot_id, None))).decode())
-    return registry.enroll(request), key, request
-
-
-def test_d0_ticketless_enroll_succeeds_and_creates_an_unbound_pending_record(registry):
-    identity, _, request = enroll_d0(registry)
-    assert request.ticket_id is None
+def test_serial_enroll_creates_an_unbound_pending_record(registry):
+    identity, _, request = enroll(registry)
     assert identity["token"] and identity["player_id"] and identity["authority_epoch"] == 1
     by_id = {p.id: p for p in registry.inventory().players}
     assert by_id[identity["player_id"]].device_id == request.device_id
@@ -86,12 +81,12 @@ def test_d0_ticketless_enroll_succeeds_and_creates_an_unbound_pending_record(reg
     assert pending_ids == [identity["player_id"]]
 
 
-def test_d0_reboot_reassociates_by_serial_preserving_frame_binding_no_duplicate(registry):
-    identity, _, request = enroll_d0(registry)
+def test_reboot_reassociates_by_serial_preserving_frame_binding_no_duplicate(registry):
+    identity, _, request = enroll(registry)
     frame(registry)
     registry.bind("portrait", identity["player_id"], "HDMI-A-1", expected_generation=0)
-    registry.calibrate("portrait", "commit", 1, Calibration(), expected_generation=1)
-    rebooted, _, _ = enroll_d0(registry, device_id=request.device_id)
+    save_position(registry, "portrait")
+    rebooted, _, _ = enroll(registry, device_id=request.device_id)
     assert rebooted["player_id"] == identity["player_id"]
     assert rebooted["authority_epoch"] == identity["authority_epoch"] + 1
     inventory = registry.inventory()
@@ -101,19 +96,19 @@ def test_d0_reboot_reassociates_by_serial_preserving_frame_binding_no_duplicate(
                ["execution_bindings"]) == 1
 
 
-def test_d0_unbound_player_gets_no_execution_bindings_until_operator_binds(registry):
-    # A Frame already exists at enroll time, so the D0 branch has something
+def test_unbound_player_gets_no_execution_bindings_until_operator_binds(registry):
+    # A Frame already exists at enroll time, so enrollment has something
     # it COULD (wrongly) auto-bind to -- the assertions below must catch that.
-    # Cross-player: a SECOND D0 player is bound to the Frame with a real,
-    # committed (calibration_valid) execution binding. Without this second
+    # Cross-player: a SECOND player is bound to the Frame with a real,
+    # committed (ready: Position committed at its generation) execution binding. Without this second
     # player, an empty result is indistinguishable from a broken
     # `configuration_in` scope (central/registry.py `WHERE b.player_id=%s`)
     # that returns nothing for ANY player -- this bites that leak instead.
     frame(registry)
-    identity, _, _ = enroll_d0(registry)
-    bound_identity, _, _ = enroll_d0(registry)
+    identity, _, _ = enroll(registry)
+    bound_identity, _, _ = enroll(registry)
     registry.bind("portrait", bound_identity["player_id"], "HDMI-A-1", expected_generation=0)
-    registry.calibrate("portrait", "commit", 1, Calibration(), expected_generation=1)
+    save_position(registry, "portrait")
     bound_config = registry.configuration_for(bound_identity["player_id"], bound_identity["authority_epoch"])
     assert len(bound_config["execution_bindings"]) == 1
     assert registry.bindings_for(identity["player_id"], identity["authority_epoch"]) == []
@@ -121,27 +116,11 @@ def test_d0_unbound_player_gets_no_execution_bindings_until_operator_binds(regis
     assert config["bindings"] == [] and config["execution_bindings"] == []
 
 
-def test_d0_retired_serial_is_refused_reenrollment(registry):
-    identity, _, request = enroll_d0(registry)
+def test_retired_serial_is_refused_reenrollment(registry):
+    identity, _, request = enroll(registry)
     registry.retire(identity["player_id"])
     with pytest.raises(RegistryError, match="retired"):
-        enroll_d0(registry, device_id=request.device_id)
-
-
-def test_ticketless_enroll_succeeds_with_no_release_authority_configured(registry):
-    """0009 migration edit A: the enroll<->release-authority guard
-    (central/registry.py) now lives INSIDE the `ticket_id is not None`
-    (ticketed) branch, not ahead of it -- a ticketless enroll (the diskless
-    base's fleet-brick path) must succeed even when central has no release
-    authority configured at all, never dereferencing `self.release_authority`."""
-    unauthorized = Registry(Database(registry.db.dsn), registry.clock)
-    identity, _, request = enroll_d0(unauthorized)
-    assert request.ticket_id is None
-    assert identity["token"] and identity["player_id"] and identity["authority_epoch"] == 1
-    by_id = {p.id: p for p in unauthorized.inventory().players}
-    assert by_id[identity["player_id"]].device_id == request.device_id
-    assert by_id[identity["player_id"]].is_bound is False
-    assert by_id[identity["player_id"]].retired_at is None
+        enroll(registry, device_id=request.device_id)
 
 
 def test_registration_precedes_binding_proof_replay_and_token_rotation(registry):
@@ -178,7 +157,7 @@ def test_stateless_player_can_be_bound_and_recovers_binding_with_a_fresh_key(reg
     assert len(inventory.outputs) == 2
     frame(registry)
     registry.bind("portrait", identity["player_id"], "HDMI-A-1", expected_generation=0)
-    registry.calibrate("portrait", "commit", 1, Calibration(), expected_generation=1)
+    save_position(registry, "portrait")
     restarted, _, _ = enroll(registry, device_id=first.device_id)
     assert restarted["player_id"] == identity["player_id"]
     assert restarted["authority_epoch"] == 2
@@ -189,7 +168,7 @@ def test_boot_context_is_signed_and_stale_ticket_cannot_reenroll(registry):
     identity, _, request = enroll(registry)
     frame(registry)
     registry.bind("portrait", identity["player_id"], "HDMI-A-1", expected_generation=0)
-    registry.calibrate("portrait", "commit", 1, Calibration(), expected_generation=1)
+    save_position(registry, "portrait")
     forged = request.model_copy(update={"boot_id": str(uuid.uuid4())})
     with pytest.raises(RegistryError, match="invalid_proof"):
         registry.enroll(forged)
@@ -205,9 +184,9 @@ def test_expired_challenge_and_invalid_proof_do_not_create_player(registry):
     device_id = "device-" + hashlib.sha256(bytes.fromhex(public)).hexdigest()
     boot_id = str(uuid.uuid4())
     request = Enrollment(public_key=public, nonce=nonce, outputs=outputs,
-                         device_id=device_id, boot_id=boot_id, ticket_id=None,
+                         device_id=device_id, boot_id=boot_id,
                          signature=base64.b64encode(key.sign(enrollment_message(
-                             nonce, outputs, device_id, boot_id, None))).decode())
+                             nonce, outputs, device_id, boot_id))).decode())
     bad = request.model_copy(update={"signature": base64.b64encode(b"x" * 64).decode()})
     with pytest.raises(RegistryError, match="invalid_proof"):
         registry.enroll(bad)
@@ -223,7 +202,7 @@ def test_replacement_preserves_frame_rejects_retired_identity_and_revalidates(re
     frame(registry)
     first = registry.bind("portrait", old["player_id"], "HDMI-A-1", expected_generation=0)
     assert first["generation"] == 1
-    registry.calibrate("portrait", "commit", 1, Calibration(gain=.8), expected_generation=1)
+    save_position(registry, "portrait", SKEWED)
     assert len(registry.bindings_for(old["player_id"], 1)) == 1
     # Replacement is unbind, then retire: a Player with a bound Output cannot be retired.
     registry.unbind("portrait", expected_generation=1)
@@ -235,10 +214,8 @@ def test_replacement_preserves_frame_rejects_retired_identity_and_revalidates(re
     assert registry.bind("portrait", new["player_id"], "HDMI-A-2", expected_generation=2)["generation"] == 3
     assert registry.bindings_for(new["player_id"], 1) == []
     location = registry.inventory().frames[0]
-    assert (location.id, location.width_mm, location.calibration.gain) == ("portrait", 300, .8)
-    with pytest.raises(RegistryError, match="generation_conflict"):
-        registry.calibrate("portrait", "commit", 2, Calibration(gain=.5), expected_generation=1)
-    registry.calibrate("portrait", "commit", 2, Calibration(gain=.9), expected_generation=3)
+    assert (location.id, location.width_mm, location.calibration.fit) == ("portrait", 300, SKEWED.fit)
+    save_position(registry, "portrait")
     assert registry.bindings_for(new["player_id"], 1)[0].generation == 3
 
 
@@ -246,7 +223,7 @@ def test_unbind_withdraws_execution_binding_generation_fenced_and_allows_rebind(
     identity, _, _ = enroll(registry)
     frame(registry)
     registry.bind("portrait", identity["player_id"], "HDMI-A-1", expected_generation=0)
-    registry.calibrate("portrait", "commit", 1, Calibration(), expected_generation=1)
+    save_position(registry, "portrait")
     assert len(registry.bindings_for(identity["player_id"], 1)) == 1
     result = registry.unbind("portrait", expected_generation=1)
     # The generation bump (mirroring bind/retire) is what a stale caller is fenced on below;
@@ -418,30 +395,15 @@ def test_delayed_binding_retry_cannot_undo_a_newer_transfer(registry):
     assert registry.inventory().frames[0].player_id == second["player_id"]
 
 
-def test_calibration_preview_expiry_revert_commit_conflict_and_restart(registry):
+def test_a_saved_position_survives_restart(registry):
     identity, _, _ = enroll(registry)
     frame(registry)
     registry.bind("portrait", identity["player_id"], "HDMI-A-1", expected_generation=0)
-    registry.calibrate("portrait", "commit", 1, Calibration(), expected_generation=1)
-    registry.calibrate("portrait", "preview", 2, Calibration(gain=.5), expected_generation=1)
-    preview = registry.bindings_for(identity["player_id"], 1)[0]
-    assert preview.calibration.gain == 1
-    assert preview.effective_calibration(registry.clock.utc()).gain == .5
-    registry.clock.advance(31)
-    # The downloaded configuration contains everything needed to revert offline.
-    assert preview.effective_calibration(registry.clock.utc()).gain == 1
-    expired = registry.bindings_for(identity["player_id"], 1)[0]
-    assert expired.calibration.gain == 1
-    assert expired.configuration_revision > preview.configuration_revision
-    registry.calibrate("portrait", "preview", 2, Calibration(gain=.7), expected_generation=1)
-    registry.calibrate("portrait", "revert", 2, expected_generation=1)
-    assert registry.bindings_for(identity["player_id"], 1)[0].calibration.gain == 1
-    registry.calibrate("portrait", "commit", 2, Calibration(gain=.8), expected_generation=1)
+    save_position(registry, "portrait", SKEWED)
     restarted = Registry(Database(registry.db.dsn), registry.clock)
     restarted.db.migrate()  # Idempotent migration on a fresh connection.
-    assert restarted.bindings_for(identity["player_id"], 1)[0].calibration.revision == 3
-    with pytest.raises(RegistryError, match="revision_conflict"):
-        restarted.calibrate("portrait", "commit", 2, Calibration(gain=.2), expected_generation=1)
+    saved = restarted.bindings_for(identity["player_id"], 1)[0]
+    assert (saved.calibration.revision, saved.calibration.fit) == (2, SKEWED.fit)
 
 
 def test_http_operator_and_player_authority_are_separate_and_errors_are_sanitized(registry):
@@ -504,7 +466,7 @@ def test_place_frame_never_touches_generation_revision_or_calibration(registry):
     identity, _, _ = enroll(registry)
     frame(registry)
     registry.bind("portrait", identity["player_id"], "HDMI-A-1", expected_generation=0)
-    registry.calibrate("portrait", "commit", 1, Calibration(gain=.7), expected_generation=1)
+    save_position(registry, "portrait", SKEWED)
     before = registry.inventory().frames[0]
     registry.place_frame("portrait", FramePlacement(x_mm=42))
     after = registry.inventory().frames[0]

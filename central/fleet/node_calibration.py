@@ -1,8 +1,26 @@
 """Live CalibrationTrial application owner; exact presentation precedes atomic Save.
 
 Trials are operational, leased and separate from Registry's persistent calibration.
+The lease has two deadlines: an idle one (`inactivity_seconds`) that an edit or a
+`keepalive` slides forward, and a hard one (`hard_seconds`) fixed at begin, which the
+Node never lets a trial extend (appliance/display_host/weston.py, native/shell.c refuse
+one over 120 s; 110 s leaves room for a step in Central's clock). An open console page
+sends `keepalive` while it shows the Frame's Position or Picture tab, so a trial ends
+within the idle window once the page closes.
+
+A trial carries the operator's draft and the saved calibration revision the draft was made
+from (its base, `calibration.revision`). `begin` may start from a draft and `renew` hands an
+active trial over to the next one before its hard deadline, carrying the draft, in ONE
+transaction: the old trial ends and the new one (the next generation) is the Frame's active
+trial at once, so the Node is handed the draft on its next exchange, with no gap that shows
+the saved calibration and no gap another console could begin in. Both refuse a draft whose
+base is not the saved revision (`trial_baseline_revision_changed`), as `edit` does, so a
+save made elsewhere is never overwritten across trials.
 The only persistence write crosses Registry's in-transaction CAS port. Failed Save
 rolls back its row lock and all writes; it cannot strand a durable frozen trial.
+
+The lease and the expected sequence are the Live model's shared rules (central/live_session.py),
+which the Display's picture session follows too; this module maps them to its own error codes.
 """
 
 from __future__ import annotations
@@ -12,6 +30,7 @@ from uuid import UUID, uuid4
 from psycopg.types.json import Jsonb
 
 from central.fleet.node_sessions import NodeControlError
+from central.live_session import Lease, StaleSequence, next_sequence, touched
 from central.transaction_locks import acquire_runtime_locks
 from contracts.models import Calibration
 from contracts.node_calibration import TrialCandidate, candidate_hash, canonical, encode_trial
@@ -26,7 +45,7 @@ class NodeCalibration:
         display,
         registry,
         inactivity_seconds: float = 5,
-        hard_seconds: float = 30,
+        hard_seconds: float = 110,
     ):
         if not 1 <= inactivity_seconds <= hard_seconds <= 120:
             raise ValueError("trial_lifetime_bound")
@@ -41,8 +60,10 @@ class NodeCalibration:
             if key not in ("producer_id",)
         }
 
-    def begin(self, frame_id: str) -> dict:
-        self.sessions.require_enabled()
+    def begin(self, frame_id: str, calibration: dict | None = None) -> dict:
+        """A new trial for the Frame, at the saved calibration or at `calibration`, the
+        operator's draft whose `revision` is the saved revision it was made from."""
+        draft = None if calibration is None else Calibration.model_validate(calibration)
         with self.sessions.db.transaction() as conn:
             acquire_runtime_locks(conn)
             context = self.display.current_frame_in(conn, frame_id)
@@ -57,39 +78,47 @@ class NodeCalibration:
                 (frame_id,),
             ).fetchone():
                 raise NodeControlError("trial_already_active", 409)
-            generation = conn.execute(
-                "SELECT COALESCE(max(generation),0)+1 AS n "
-                "FROM node_calibration_trials WHERE frame_id=%s",
-                (frame_id,),
-            ).fetchone()["n"]
-            trial_id = uuid4()
-            baseline = context.request.admitted
-            calibration = context.binding.calibration
-            payload = canonical(calibration.model_dump(mode="json"))
-            sha = candidate_hash(trial_id, generation, 1, baseline, payload)
-            row = conn.execute(
-                "INSERT INTO node_calibration_trials(trial_id,frame_id,generation,player_id,"
-                "authority_epoch,producer_id,baseline,calibration_revision,sequence,calibration,candidate_sha256,"
-                "state,created_at,touched_at,expires_at,hard_expires_at) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,1,%s,%s,"
-                "'active',%s,%s,%s,%s) RETURNING *",
-                (
-                    trial_id,
-                    frame_id,
-                    generation,
-                    context.link.player_id,
-                    context.link.authority_epoch,
-                    context.producer_id,
-                    Jsonb(document(baseline)),
-                    calibration.revision,
-                    Jsonb(calibration.model_dump(mode="json")),
-                    sha,
-                    now,
-                    now,
-                    now + self.inactivity_seconds,
-                    now + self.hard_seconds,
-                ),
-            ).fetchone()
-            return self._view(row)
+            return self._open(conn, frame_id, context, draft, now)
+
+    def _open(self, conn, frame_id: str, context, draft: Calibration | None, now: float) -> dict:
+        """Insert the Frame's next-generation active trial (the caller holds the locks and has
+        ended any active one): at the saved calibration, or at `draft` if its base is it."""
+        saved = context.binding.calibration
+        if draft is not None and draft.revision != saved.revision:
+            raise NodeControlError("trial_baseline_revision_changed", 409)
+        calibration = saved if draft is None else draft
+        generation = conn.execute(
+            "SELECT COALESCE(max(generation),0)+1 AS n "
+            "FROM node_calibration_trials WHERE frame_id=%s",
+            (frame_id,),
+        ).fetchone()["n"]
+        trial_id = uuid4()
+        baseline = context.request.admitted
+        payload = canonical(calibration.model_dump(mode="json"))
+        sha = candidate_hash(trial_id, generation, 1, baseline, payload)
+        row = conn.execute(
+            "INSERT INTO node_calibration_trials(trial_id,frame_id,generation,player_id,"
+            "authority_epoch,producer_id,baseline,calibration_revision,sequence,calibration,candidate_sha256,"
+            "state,created_at,touched_at,expires_at,hard_expires_at) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,1,%s,%s,"
+            "'active',%s,%s,%s,%s) RETURNING *",
+            (
+                trial_id,
+                frame_id,
+                generation,
+                context.link.player_id,
+                context.link.authority_epoch,
+                context.producer_id,
+                Jsonb(document(baseline)),
+                calibration.revision,
+                Jsonb(calibration.model_dump(mode="json")),
+                sha,
+                now,
+                now,
+                now + self.inactivity_seconds,
+                now + self.hard_seconds,
+            ),
+        ).fetchone()
+        return self._view(row)
 
     def operate(
         self,
@@ -100,12 +129,13 @@ class NodeCalibration:
         expected_sequence: int,
         calibration: dict | None = None,
     ) -> dict:
-        if operation not in ("edit", "save", "end", "status"):
+        if operation not in ("edit", "save", "end", "status", "keepalive", "renew"):
             raise NodeControlError("trial_operation_invalid", 422)
         if type(expected_sequence) is not int or expected_sequence < 1:
             raise NodeControlError("trial_sequence_invalid", 422)
-        proposed = Calibration.model_validate(calibration) if operation == "edit" else None
-        self.sessions.require_enabled()
+        proposed = (
+            Calibration.model_validate(calibration) if operation in ("edit", "renew") else None
+        )
         with self.sessions.db.transaction() as conn:
             acquire_runtime_locks(conn)
             terminal = conn.execute(
@@ -121,7 +151,7 @@ class NodeCalibration:
             try:
                 context = self.display.current_frame_in(conn, frame_id)
             except NodeControlError:
-                if operation not in ("status", "end"):
+                if operation not in ("status", "end", "keepalive"):
                     raise
             row = conn.execute(
                 "SELECT * FROM node_calibration_trials WHERE trial_id=%s AND frame_id=%s "
@@ -133,7 +163,7 @@ class NodeCalibration:
             now = self.sessions.clock.utc()
             terminal = None
             if row["state"] == "active":
-                if now >= row["expires_at"]:
+                if not _lease(row).live(now):
                     terminal = "expired"
                 elif context is None or not self._same(
                     row, context.producer_id, context.request.admitted
@@ -146,8 +176,27 @@ class NodeCalibration:
                 ).fetchone()
             if operation == "status" or row["state"] != "active":
                 return self._view(row)
-            if row["sequence"] != expected_sequence:
-                raise NodeControlError("trial_sequence_conflict", 409)
+            if operation == "keepalive":
+                # Slides only the idle deadline, never past the hard one; the candidate, its
+                # sequence and its presentation are unchanged, so Save stays as it was.
+                return self._view(conn.execute(
+                    "UPDATE node_calibration_trials SET touched_at=%s,expires_at=%s "
+                    "WHERE trial_id=%s RETURNING *",
+                    (now, self._touched(row, now), trial_id),
+                ).fetchone())
+            try:
+                sequence = next_sequence(row["sequence"], expected_sequence)
+            except StaleSequence:
+                raise NodeControlError("trial_sequence_conflict", 409) from None
+            if operation == "renew":
+                # The handover: this trial ends and the next generation begins at the draft, in
+                # this one transaction (the module docstring).
+                if proposed.revision != row["calibration_revision"]:
+                    raise NodeControlError("trial_baseline_revision_changed", 409)
+                conn.execute(
+                    "UPDATE node_calibration_trials SET state='ended' WHERE trial_id=%s", (trial_id,)
+                )
+                return self._open(conn, frame_id, context, proposed, now)
             if operation == "end":
                 row = conn.execute(
                     "UPDATE node_calibration_trials SET state='ended' WHERE trial_id=%s RETURNING *",
@@ -156,7 +205,6 @@ class NodeCalibration:
             elif operation == "edit":
                 if proposed.revision != row["calibration_revision"]:
                     raise NodeControlError("trial_baseline_revision_changed", 409)
-                sequence = row["sequence"] + 1
                 sha = candidate_hash(
                     trial_id,
                     row["generation"],
@@ -173,7 +221,7 @@ class NodeCalibration:
                         Jsonb(proposed.model_dump(mode="json")),
                         sha,
                         now,
-                        min(row["hard_expires_at"], now + self.inactivity_seconds),
+                        self._touched(row, now),
                         trial_id,
                     ),
                 ).fetchone()
@@ -205,6 +253,10 @@ class NodeCalibration:
                 ).fetchone()
             return self._view(row)
 
+    def _touched(self, row, now: float) -> float:
+        """The trial's idle deadline after an edit or keepalive at `now` (never past its hard one)."""
+        return touched(_lease(row), now, idle_seconds=self.inactivity_seconds).idle_until
+
     @staticmethod
     def _same(row, producer_id, surface) -> bool:
         return (
@@ -222,14 +274,15 @@ class NodeCalibration:
         ).fetchone()
         if row is None:
             return None
+        live = _lease(row).live(now)
         if (
-            now >= row["expires_at"]
+            not live
             or not self._same(row, principal.producer_id, request.admitted)
             or row["authority_epoch"] != link.authority_epoch
         ):
             conn.execute(
                 "UPDATE node_calibration_trials SET state=%s WHERE trial_id=%s",
-                ("expired" if now >= row["expires_at"] else "invalidated", row["trial_id"]),
+                ("invalidated" if live else "expired", row["trial_id"]),
             )
             return None
         receipt = request.receipt
@@ -259,3 +312,8 @@ class NodeCalibration:
             request.sampled_boottime_ms + max(1, int((row["hard_expires_at"] - now) * 1000)),
         )
         return encode_trial(candidate)
+
+
+def _lease(row) -> Lease:
+    """A trial row's lease: its idle deadline (`expires_at`) and its hard one."""
+    return Lease(row["expires_at"], row["hard_expires_at"])

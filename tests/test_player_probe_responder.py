@@ -10,10 +10,13 @@ import pytest
 from test_player_service import close, rig
 
 from contracts.node_app_link import (
+    NodeProbeV2,
+    NodeRendererV2,
     encode_node_probe,
     encode_node_relink,
     parse_node_probe_answer,
     parse_node_probe_open,
+    parse_node_probe_reply,
 )
 from contracts.player_control import ControlAppliedReceipt
 from player.mainloop import CONTROL, DispatchRefused, MainLoopDispatcher
@@ -154,6 +157,44 @@ def test_unstarved_queue_answers_only_the_latest_nonce_once_from_the_glib_queue(
     assert len(rig_.glib.callbacks) == 1
     rig_.glib.run_idle()
     assert rig_.answers() == [NONCES[3]]
+    rig_.shut()
+
+
+def test_the_gl_renderer_follows_the_first_answer_once_per_channel():
+    """The renderer is reported on the main thread, after an answer, once it is known."""
+    known = {"name": None}
+    rig_ = Rig()
+    rig_.responder.gl_renderer = lambda: known["name"]
+
+    def packets():
+        found = []
+        while True:
+            try:
+                raw = rig_.broker.incoming.get(timeout=.05)
+            except Empty:
+                return found
+            if raw:
+                found.append(parse_node_probe_reply(raw))
+
+    rig_.open()
+    rig_.probe(NONCES[0])
+    rig_.settle()
+    rig_.glib.run_idle()
+    assert packets() == [NodeProbeV2(NONCES[0])]  # no GL context yet: nothing to report
+    known["name"] = "V3D 7.1.10.2"
+    for nonce in NONCES[1:3]:
+        rig_.probe(nonce)
+        rig_.settle()
+        rig_.glib.run_idle()
+    assert packets() == [NodeProbeV2(NONCES[1]), NodeRendererV2("V3D 7.1.10.2"), NodeProbeV2(NONCES[2])]
+    rig_.shut()
+    rig_.player, rig_.broker = channel_pair()  # a new channel (a restarted broker) hears it again
+    rig_.responder.connector = lambda _path: rig_.player
+    rig_.open()
+    rig_.probe(NONCES[3])
+    rig_.settle()
+    rig_.glib.run_idle()
+    assert packets() == [NodeProbeV2(NONCES[3]), NodeRendererV2("V3D 7.1.10.2")]
     rig_.shut()
 
 
@@ -335,13 +376,6 @@ def test_relink_request_clears_the_recorded_link_on_the_next_turn(tmp_path, monk
                                          delivery_sequence=5, state_digest="f" * 64,
                                          ack_nonce="b" * 64)
 
-    class Proof:
-        def exchange(self, **_kwargs):
-            return "recorded"
-
-        def exchange_applied(self, **_kwargs):
-            return "recorded"
-
     class Link:
         def __init__(self):
             self.calls = 0
@@ -353,7 +387,7 @@ def test_relink_request_clears_the_recorded_link_on_the_next_turn(tmp_path, monk
     async def run():
         service, server = await rig(tmp_path)
         link = Link()
-        service.app_proof_client, service.node_link_client = Proof(), link
+        service.node_link_client = link
         service.boot_id = BOOT_ID
         service._proof_active = True
         registration = service.registration
@@ -361,8 +395,8 @@ def test_relink_request_clears_the_recorded_link_on_the_next_turn(tmp_path, monk
         service._highest_control_sequence = 5
         service._highest_control_delivery_id = "e" * 32
         service._applied_proof_receipt = (service._session, receipt)
-        monkeypatch.setattr("player.service.LOCAL_PROOF_RETRY", .01)
-        task = asyncio.create_task(service._local_app_proof_loop())
+        monkeypatch.setattr("player.service.APP_LINK_RETRY", .01)
+        task = asyncio.create_task(service._app_link_loop())
         try:
             await asyncio.sleep(.08)
             assert link.calls == 1          # recorded once, then held

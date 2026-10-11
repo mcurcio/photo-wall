@@ -36,14 +36,17 @@ CHECKS = {
         "equipment_replacement_retirement",
     ),
     "test_drag_create_posts_frame_with_scaled_placement": ("frame_creation_binding",),
-    # Calibration: live calibration lease + conflict handling.
-    "test_manual_revert_clears_preview_and_returns_draft_to_committed": (
+    # Calibration: the Frame page's live Position (kept while the tab is open) + conflicts.
+    "test_one_click_on_a_wall_tile_opens_the_frame_page_and_its_position_is_kept_live": (
         "calibration_preview_revert_commit",
     ),
-    "test_calibration_stale_commit_conflicts_on_revision": ("stale_calibration_conflict",),
-    "test_calibration_overtaken_detected_by_inventory_poll": ("inventory_refresh_recovery",),
-    "test_calibration_lease_expiry_reverts_to_committed_no_auto_renew": ("preview_expiry",),
-    "test_calibration_provenance_frame_profile_vs_panel_at_enrollment": (
+    # A preview expires once the console stops keeping it (the page closed).
+    "test_a_closed_page_stops_keeping_its_session_and_it_ends_within_the_idle_window": (
+        "preview_expiry",
+    ),
+    "test_a_stale_done_is_refused_and_keeps_the_other_save": ("stale_calibration_conflict",),
+    "test_a_refresh_never_overwrites_the_draft": ("inventory_refresh_recovery",),
+    "test_hardware_keeps_the_frame_profile_apart_from_the_panel_record": (
         "fresh_server_persistence",
     ),
     # Content walkthrough: sources, scenes, programs, runs (showrunner).

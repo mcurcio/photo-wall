@@ -6,7 +6,6 @@ from pydantic import ValidationError
 
 from central.runtime import (
     OPERATOR_HISTORY_SECONDS,
-    AdmissionPolicy,
     Child,
     Contribution,
     Program,
@@ -29,60 +28,6 @@ def lamp(start=0, end=1):
 
 def get_run(view, run_id):
     return next(run for run in view.runs if run.run_id == run_id)
-
-
-def test_drain_policy_rejects_manual_force_restart_and_explicit_queue_before_admission():
-    scene = Scene(scene_id="nested", loop=True, children=(Child(scene=Scene(
-        scene_id="child", contributions=(media("frame:drained"),),
-    )),))
-    runtime = Runtime()
-    runtime.set_scene(scene)
-    existing = runtime.activate("nested", "existing", 0)
-    policy = AdmissionPolicy(frozenset({"frame:drained"}))
-    guarded = Runtime.restore(runtime.export_state(), admission_policy=policy)
-
-    for identity, options in (
-        ("manual", {}),
-        ("forced-restart", {"repeat": "restart", "force": True}),
-        ("explicit-queue", {"repeat": "queue", "expires_at": 20}),
-    ):
-        refusal = guarded.activate("nested", identity, 0, **options)
-        assert (refusal.status, refusal.reason) == ("rejected", "equipment_draining")
-    assert [run.run_id for run in guarded.project(0).runs
-            if run.ended_at is None and run.parent_id is None] == [
-        existing.run_id
-    ]
-    assert guarded.export_state()["queue"] == []
-    assert guarded.project(0).now == 0
-    assert guarded._copy().admission_policy == policy
-
-    guarded.set_scene(Scene(scene_id="unrelated", contributions=(media("frame:open"),)))
-    assert guarded.activate("unrelated", "unrelated", 0).status == "admitted"
-
-
-def test_preexisting_queued_activation_waits_behind_drain_until_expiry_without_spin():
-    runtime = Runtime()
-    runtime.set_scene(Scene(scene_id="queued", loop=True, cycle_seconds=100,
-                            contributions=(media("frame:open"),)))
-    existing = runtime.activate("queued", "existing", 0)
-    runtime.set_scene(Scene(scene_id="queued", revision=2, loop=True, cycle_seconds=100,
-                            contributions=(media("frame:drained"),)))
-    assert runtime.activate("queued", "pending", 0, repeat="queue", expires_at=10).status == (
-        "queued"
-    )
-    guarded = Runtime.restore(
-        runtime.export_state(), admission_policy=AdmissionPolicy(frozenset({"frame:drained"}))
-    )
-    guarded.cancel(existing.run_id, 0)
-
-    before = guarded.export_state()
-    assert guarded.project(5, max_events=2).now == 5
-    assert guarded.export_state() == before
-    assert guarded.advance(5, max_events=2).now == 5
-    assert guarded.export_state()["admissions"]["pending"]["status"] == "queued"
-    assert guarded.advance(10, max_events=2).now == 10
-    assert guarded.export_state()["admissions"]["pending"]["status"] == "expired"
-    assert guarded.export_state()["queue"] == []
 
 
 def test_frame_references_include_nested_outro_and_upcoming_program_context():
@@ -992,3 +937,143 @@ def test_deleting_definition_does_not_rewrite_ended_run_snapshot():
     snapshot = runtime.export_state()["runs"][run_id]["scene"]
     runtime.delete_scene("historical", 1)
     assert runtime.export_state()["runs"][run_id]["scene"] == snapshot
+
+
+KEEP = {"after_end": "keep_this_photo"}
+
+
+def _kept_scene(**scene):
+    return Scene(scene_id="kept", cycle_seconds=10, loop=True, contributions=(
+        media(fade_in_seconds=1, fade_out_seconds=2, **KEEP),), **scene)
+
+
+def _fades(view):
+    return [(intent.phase, intent.fade_in_seconds, intent.fade_out_seconds)
+            for intent in view.contributions]
+
+
+def test_a_kept_photo_plans_no_fade_out_in_its_final_cycle_only():
+    """The final cycle of a kept photo (the Scene stops at its end and nothing on the Frame
+    follows) holds full strength: a Program's end, the Scene's duration and Finish each make a
+    cycle final; earlier cycles, an ending on the Frame, and a photo not kept keep the authored
+    fade-out. Mutation probe: drop the final-cycle rule (the fade-out stays 2)."""
+    runtime = Runtime()
+    runtime.set_scene(_kept_scene())
+    runtime.set_program(Program(program_id="evening", scene_id="kept", starts_at=0, ends_at=20))
+    assert _fades(runtime.advance(5)) == [("body", 1, 2)]
+    assert _fades(runtime.advance(15)) == [("body", 1, 0)]
+
+    timed = Runtime()
+    timed.set_scene(_kept_scene(duration_seconds=15))
+    timed.activate("kept", "timed", 0)
+    assert _fades(timed.advance(5)) == [("body", 1, 2)]
+    assert _fades(timed.advance(12)) == [("body", 1, 0)]
+
+    finished = Runtime()
+    finished.set_scene(_kept_scene())
+    run = finished.activate("kept", "finished", 0).run_id
+    assert _fades(finished.advance(3)) == [("body", 1, 2)]
+    assert _fades(finished.finish(run, 4)) == [("body", 1, 0)]
+
+    ending = Runtime()
+    ending.set_scene(_kept_scene(outro_seconds=4, outro_contributions=(
+        Contribution(target="frame:left", kind="black"),)))
+    run = ending.activate("kept", "ending", 0).run_id
+    assert _fades(ending.finish(run, 4)) == [("body", 1, 2)]
+
+    plain = Runtime()
+    plain.set_scene(Scene(scene_id="plain", cycle_seconds=10, contributions=(
+        media(fade_in_seconds=1, fade_out_seconds=2),)))
+    plain.activate("plain", "plain", 0)
+    assert _fades(plain.advance(5)) == [("body", 1, 2)]
+
+
+def test_a_kept_photo_followed_on_its_frame_keeps_its_fade_out():
+    """The final-cycle hold is only for a photo nothing follows: a Program starting at its end,
+    or a Run playing beneath it, keeps the authored fade-out; a follower that appears later
+    revises the hold away. Mutation probe: ignore what follows (the fade-out is 0)."""
+    def kept(runtime):
+        return [(i.fade_in_seconds, i.fade_out_seconds) for i in runtime.advance(
+            runtime._state.now).contributions if i.scene_id == "kept"]
+
+    following = Runtime()
+    following.set_scene(_kept_scene())
+    following.set_scene(Scene(scene_id="next", cycle_seconds=10, contributions=(media(),)))
+    following.set_program(Program(program_id="evening", scene_id="kept", starts_at=0, ends_at=10))
+    following.advance(5)
+    assert kept(following) == [(1, 0)]
+    following.set_program(Program(program_id="night", scene_id="next", starts_at=10, ends_at=20))
+    assert kept(following) == [(1, 2)]
+
+    beneath = Runtime()
+    beneath.set_scene(_kept_scene())
+    beneath.set_scene(Scene(scene_id="under", cycle_seconds=10, loop=True, contributions=(media(),)))
+    beneath.activate("under", "under", 0)
+    beneath.set_program(Program(program_id="evening", scene_id="kept", starts_at=0, ends_at=10))
+    beneath.advance(5)
+    assert kept(beneath) == [(1, 2)]
+
+
+def test_looking_at_what_follows_a_kept_photo_spends_the_callers_budget():
+    """The projection that decides a final-cycle hold is bounded by the caller's `max_events`:
+    the same advance that fits the budget without a kept photo exceeds it with one. Mutation
+    probe: give the projection its own budget (the kept advance succeeds)."""
+    def advance(after_end):
+        runtime = Runtime()
+        runtime.set_scene(Scene(scene_id="kept", cycle_seconds=10, loop=True, contributions=(
+            media(fade_in_seconds=1, fade_out_seconds=2, after_end=after_end),)))
+        runtime.set_program(Program(program_id="evening", scene_id="kept", starts_at=0,
+                                    ends_at=10))
+        return runtime.advance(5, max_events=2)
+
+    from central.runtime import RuntimeBudgetExceeded
+
+    assert advance("leave_as_is").contributions
+    with pytest.raises(RuntimeBudgetExceeded):
+        advance("keep_this_photo")
+
+
+def test_an_ending_keeps_nothing_only_when_nothing_plays_beneath_it():
+    """Owner, 2026-10-10: "When the top show ends, it gets out of the way and the show
+    underneath takes over." An ending's `keep_nothing` becomes `leave_as_is` when another Run
+    plays on its Frame at its end. Mutation probe: keep the authored after-state."""
+    def ending(beneath):
+        runtime = Runtime()
+        runtime.set_scene(Scene(scene_id="top", cycle_seconds=10, outro_seconds=4,
+                                contributions=(media(),), outro_contributions=(
+                                    Contribution(target="frame:left", kind="black",
+                                                 after_end="keep_nothing"),)))
+        if beneath:
+            runtime.set_scene(Scene(scene_id="under", cycle_seconds=10, loop=True,
+                                    contributions=(media(),)))
+            runtime.activate("under", "under", 0)
+        runtime.activate("top", "top", 0)
+        return [i.after_end for i in runtime.advance(11).contributions if i.phase == "outro"]
+
+    assert ending(beneath=False) == ["keep_nothing"]
+    assert ending(beneath=True) == ["leave_as_is"]
+
+
+def test_a_photo_is_kept_only_when_no_run_beneath_it_plays_on():
+    """The same principle for Keep the last photo up: a top Scene's photo keeps nothing of its
+    own while a Run beneath it plays on its Frame at its cycle's end, so the show underneath
+    keeps its photo; a Program that follows it (on top, not beneath) does not change it.
+    Mutation probes: keep the top's photo whatever plays beneath; step aside for any
+    follower."""
+    def after_ends(other):
+        runtime = Runtime()
+        runtime.set_scene(_kept_scene())
+        runtime.set_scene(Scene(scene_id="other", cycle_seconds=10, loop=True,
+                                contributions=(media(after_end="keep_this_photo"),)))
+        if other == "beneath":
+            runtime.activate("other", "other", 0)
+        runtime.set_program(Program(program_id="evening", scene_id="kept", starts_at=0,
+                                    ends_at=20))
+        if other == "after":
+            runtime.set_program(Program(program_id="night", scene_id="other", starts_at=20,
+                                        ends_at=30))
+        return [(i.scene_id, i.after_end) for i in runtime.advance(15).contributions]
+
+    assert after_ends(None) == [("kept", "keep_this_photo")]
+    assert after_ends("after") == [("kept", "keep_this_photo")]
+    assert after_ends("beneath") == [("other", "keep_this_photo"), ("kept", "leave_as_is")]

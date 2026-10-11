@@ -5,13 +5,11 @@ systemd's watchdog (M5). Seeded from the review's bearer-leak probe and survivin
 
 import asyncio
 import errno
-import functools
 import json
 import logging
 import signal
 import sys
 import types
-from pathlib import Path
 
 import httpx
 import pytest
@@ -19,7 +17,6 @@ import tls_fixture as tls
 from test_player_service import (
     CMDLINE,
     LOCATED,
-    NoMdns,
     _until_steady,
     close,
     finder_rig,
@@ -29,10 +26,8 @@ from test_player_service import (
 from test_player_uplink_faults import _BrokenBody
 from uplink_fakes import FakeTransport, central, finding, located
 
-from player.central_link import REQUEST_TIMEOUT, Session
-from player.mdns_discovery import DEFAULT_TIMEOUT as MDNS_TIMEOUT
+from player.central_link import Session
 from player.service import (
-    BACKOFF,
     PlayerConfig,
     PlayerService,
     Registration,
@@ -44,9 +39,6 @@ from player.service import (
 )
 from player.service import main as player_main
 from uplink.causes import Cause, UplinkError
-from uplink.finder import find_central
-from uplink.locate import LOCATE_DEADLINE
-from uplink.resolver import Unconfigured
 
 TOKEN = "1" * 32
 REGISTRATION = Registration(player_id="p-" + "a" * 32, token=TOKEN, authority_epoch=1)
@@ -258,19 +250,15 @@ def test_a_service_error_is_its_own_bounded_code(error):
     asyncio.run(check())
 
 
-def test_a_discovery_bug_reaches_the_player_as_player_error(monkeypatch):
-    """R9: a discovery that raises a programming error ends the cycle as "player_error" with
+def test_a_finder_bug_reaches_the_player_as_player_error(monkeypatch):
+    """R9: a finder that raises a programming error ends the cycle as "player_error" with
     its type, not as a configuration cause; the Player keeps cycling."""
     monkeypatch.setattr("player.service.BACKOFF", (.001,) * 4)
     raised = []
 
-    class Buggy:
-        async def discover(self, unconfigured):
-            raised.append(1)
-            raise AttributeError("a bug")
-
-    find = functools.partial(find_central, Unconfigured("absent"), transport=FakeTransport({}),
-                             discovery=Buggy())
+    async def find():
+        raised.append(1)
+        raise AttributeError("a bug")
 
     async def check():
         service, _ = await finder_rig(find)
@@ -385,7 +373,6 @@ def test_a_media_redirect_ends_the_cycle_and_locates_again(monkeypatch, caplog):
 # --- R4a / U3: the cmdline wins before anything saved is read --------------------------------
 
 def test_a_cmdline_root_wins_and_a_bad_saved_root_is_never_read(tmp_path, monkeypatch):
-    monkeypatch.setattr("player.mdns_discovery.MdnsCentralDiscovery", NoMdns)
     cmdline = tmp_path / "cmdline"
     cmdline.write_text(f"console=ttyAMA0 photowall.central={CMDLINE} quiet\n")
     config = PlayerConfig(central_origin="not a central root")
@@ -395,7 +382,6 @@ def test_a_cmdline_root_wins_and_a_bad_saved_root_is_never_read(tmp_path, monkey
 
 
 def test_without_a_cmdline_the_saved_root_is_validated_and_used(tmp_path, monkeypatch):
-    monkeypatch.setattr("player.mdns_discovery.MdnsCentralDiscovery", NoMdns)
     missing = tmp_path / "absent"
     transport = FakeTransport({str(LOCATED.url("/v1/locate")): central})
     found = asyncio.run(build_finder(PlayerConfig(central_origin="http://central"),
@@ -443,7 +429,6 @@ def test_a_cmdline_root_wins_over_any_malformed_saved_value(tmp_path, monkeypatc
     """U3, owner requirement: the cmdline wins outright. Whatever the saved central_origin
     holds, the config loads and the cmdline root is used; the value is validated only when
     the cmdline names no Central, and then refused."""
-    monkeypatch.setattr("player.mdns_discovery.MdnsCentralDiscovery", NoMdns)
     path = tmp_path / "public.json"
     path.write_text(json.dumps({"schema": 1, "central_origin": saved}))
     config = load_config(path)
@@ -459,7 +444,7 @@ def test_a_cmdline_root_wins_over_any_malformed_saved_value(tmp_path, monkeypatc
 def _main_until_the_loop(tmp_path, monkeypatch, *, saved) -> list[str]:
     """Runs main() with the cmdline naming Central and `saved` as central_origin, past every
     pre-GTK step, with GLib, outputs, the boot context and the service thread stubbed. Returns
-    the order in which main started the service, signalled readiness and ran the loop."""
+    the order in which main started the service and ran the loop."""
     events: list[str] = []
 
     class Loop:
@@ -480,11 +465,10 @@ def _main_until_the_loop(tmp_path, monkeypatch, *, saved) -> list[str]:
     monkeypatch.setitem(sys.modules, "gi.repository", repository)
     monkeypatch.setattr(signal, "signal", lambda *_: None)
     monkeypatch.setattr("player.service.load_identity", lambda: "identity")
-    monkeypatch.setattr("player.service.resolve_boot_context", lambda path: None)
+    monkeypatch.setattr("player.service.hardware_boot_context", lambda: None)
     monkeypatch.setattr("player.service.discover_outputs",
                         lambda: types.SimpleNamespace(outputs=(), fault=None))
     monkeypatch.setattr(PlayerService, "start", lambda self: events.append("start"))
-    monkeypatch.setattr("uplink.watchdog.ready", lambda: events.append("ready") or True)
     cmdline = tmp_path / "cmdline"
     cmdline.write_text(f"console=ttyAMA0 photowall.central={CMDLINE} quiet\n")
     monkeypatch.setattr("player.service.KERNEL_COMMAND_LINE", cmdline)
@@ -500,82 +484,6 @@ def _main_until_the_loop(tmp_path, monkeypatch, *, saved) -> list[str]:
                          ids=["list", "long-root"])
 def test_main_goes_on_past_a_malformed_saved_value_when_the_cmdline_names_central(
         tmp_path, monkeypatch, saved):
-    assert _main_until_the_loop(tmp_path, monkeypatch, saved=saved) == ["start", "ready", "loop"]
+    assert _main_until_the_loop(tmp_path, monkeypatch, saved=saved) == ["start", "loop"]
 
 
-# --- M5: the Player's deadline owner ---------------------------------------------------------
-
-def test_main_signals_ready_once_the_service_has_started(tmp_path, monkeypatch):
-    """Type=notify: main() sends READY=1 after starting the service and before the GLib loop,
-    so WatchdogSec runs from a started Player. Without it systemd times the start out."""
-    events = _main_until_the_loop(tmp_path, monkeypatch, saved="http://192.0.2.20:8000")
-    assert events == ["start", "ready", "loop"]
-
-def _unit() -> dict[str, str]:
-    text = Path("appliance/systemd/player.service").read_text()
-    return dict(line.split("=", 1) for line in text.splitlines()
-                if "=" in line and not line.startswith("#"))
-
-
-def test_the_player_unit_owns_a_watchdog_sized_for_a_slow_healthy_cycle():
-    """The longest healthy gap between pets: one backoff, then a full reconnect up to the
-    first completed control exchange (locate + mDNS, challenge, register, base-health, clock,
-    state, then state + readiness + a stale re-poll)."""
-    unit = _unit()
-    assert unit["Type"] == "notify" and unit["NotifyAccess"] == "main"
-    watchdog_sec = float(unit["WatchdogSec"])
-    slowest = BACKOFF[-1] + LOCATE_DEADLINE + MDNS_TIMEOUT + 5 * REQUEST_TIMEOUT \
-        + 3 * REQUEST_TIMEOUT
-    assert watchdog_sec >= 1.25 * slowest
-
-
-def test_a_steady_session_and_every_cycle_pet_the_watchdog(monkeypatch):
-    monkeypatch.setattr("player.service.BACKOFF", (.001,) * 4)
-    pets = []
-    monkeypatch.setattr("uplink.watchdog.pet", lambda: pets.append(1) or True)
-    failing = []
-
-    async def find():
-        failing.append(1)
-        raise UplinkError(Cause.CONFIGURATION, "absent", detail="not_discovered")
-
-    async def cycles():
-        service, _ = await finder_rig(find)
-        task = asyncio.create_task(service.run())
-        try:
-            async def cycled():
-                while len(failing) < 3:
-                    await asyncio.sleep(.01)
-            await asyncio.wait_for(cycled(), 5)
-        finally:
-            service.stop()
-            await asyncio.wait_for(task, 10)
-            await close(service)
-
-    asyncio.run(cycles())
-    assert len(pets) >= 2                         # at least one per completed (failed) cycle
-
-    pets.clear()
-    find_ok = finding("http://central")
-
-    async def steady_session():
-        service, server = await finder_rig(find_ok)
-        steady = asyncio.Event()
-        await service.link.client.aclose()
-        service.link.client = service.link.time_client = httpx.AsyncClient(
-            transport=httpx.MockTransport(_until_steady(server, steady)))
-        task = asyncio.create_task(service.run())
-        try:
-            await asyncio.wait_for(steady.wait(), 10)
-
-            async def petted():
-                while not pets:                   # no cycle has ended: the control loop pets
-                    await asyncio.sleep(.01)
-            await asyncio.wait_for(petted(), 5)
-            assert find_ok.calls == 1
-        finally:
-            service.stop()
-            await asyncio.wait_for(task, 10)
-            await close(service)
-
-    asyncio.run(steady_session())

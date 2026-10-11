@@ -1,0 +1,2 @@
+player/*.py usr/lib/photo-wall/player/player
+appliance/launchers/player/__main__.py usr/lib/photo-wall/player

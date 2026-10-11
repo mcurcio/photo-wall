@@ -6,7 +6,7 @@ import threading
 from uuid import UUID
 
 import pytest
-from test_player_local_app_proof import _packet_pair
+from test_player_app_link import _packet_pair
 
 from contracts.node_app_link import (
     NodeAppLinkChallengeV2,

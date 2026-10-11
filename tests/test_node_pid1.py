@@ -12,12 +12,13 @@ and after a hub restart WALL is current on the Node and its leaf relinked). Hard
 (sysfs Virtual-1, headless Weston, a 2 GiB meminfo seen by the storage stage alone); no
 DRM/HDMI/PXE claim.
 
-Inputs: PHOTO_WALL_NODE_PID1_FIXTURE names a scripts/build_node_pid1_fixture.py output. Without
+Inputs: PHOTO_WALL_NODE_PID1_FIXTURE names a tests/node_pid1_fixture/build.sh output. Without
 it these tests skip, unless PHOTO_WALL_TEST_REQUIRE_NODE_PID1=1 (the node-pid1 CI job), where
 they fail. Each test removes its own containers, database and archive copies.
 """
 
 import asyncio
+import datetime
 import hashlib
 import json
 import os
@@ -39,9 +40,11 @@ from node_pid1_central_fixture import (
     assert_phase_completed,
     central_fixture,
 )
+from node_pid1_container import BOOTED, HOST_ACTING_UNITS, Container, cpuinfo_text, docker_run_argv
 from test_fleet_attempts import DEVICE_ID, SERIAL
 
 from appliance.kernel.capacity import LINES
+from appliance.kernel.display_paths import DISPLAY_UNIT, RUNTIME, WAYLAND_SOCKET
 from central.fleet.node_bus_presence import bus_links_in
 from central.infra.node_link_store import PgWallMarks
 from central.node_bus_wiring import WALL_TABLE
@@ -57,13 +60,6 @@ from contracts.node_link import (
 )
 from contracts.node_observation import HOST_OBSERVATION_INTERVAL_SECONDS
 from nodeapi.hub import WallWriter
-from scripts.player_start_probe import (
-    BOOTED,
-    HOST_ACTING_UNITS,
-    Container,
-    cpuinfo_text,
-    docker_run_argv,
-)
 
 pytestmark = pytest.mark.node_pid1
 FIXTURE_VARIABLE = "PHOTO_WALL_NODE_PID1_FIXTURE"
@@ -72,9 +68,6 @@ SCENARIOS = ("success", "failure", "outage", "reboot", "refused", "join")
 
 MASKS = (
     *HOST_ACTING_UNITS,
-    "photo-wall-player.service",
-    "photo-wall-weston.service",
-    "photo-wall-os-agent.service",
     "reboot.target",
     "poweroff.target",
     "halt.target",
@@ -99,6 +92,21 @@ JOIN_SECONDS = 120
 HUB_RESTART_SECONDS = 60
 HOST_STATE_STREAM = "KV_state_host"
 BIRTH_SUBJECT = "$KV.state_host.birth"
+CONTROLLER_UNIT = "photo-wall-display-controller.service"
+PLAYER_UNIT = "photo-wall-node-player.service"
+# Weston's RestartSec and READY=1, the broker's next turn, the Player's start and its app link.
+PLAYER_RELAUNCH_SECONDS = 60
+# A Player that dies on its own: the broker's first paced relaunch (1 s), its next turn, the
+# collection of the old unit and the new unit's start.
+PLAYER_CRASH_RELAUNCH_SECONDS = 15
+BROKER_LAUNCH = "/run/photo-wall-app-broker/launch.json"  # the broker's current launch record
+CONTROL_SOCKET = str(RUNTIME / "control.sock")
+# The controller's journal must never hold these: its connect to a control.sock not yet bound
+# (started before Weston's READY=1), or a sandbox set up on a vanished runtime directory.
+CONTROLLER_FAULTS = ("FileNotFoundError", "226/NAMESPACE")
+# Weston's WatchdogSec (photo-wall-display.service), plus its RestartSec, start and the controller's.
+DISPLAY_RECOVERY_SECONDS = 30
+EPOCH = datetime.datetime(1970, 1, 1)
 
 
 @pytest.fixture
@@ -109,7 +117,7 @@ def node_pid1_inputs():
         if os.environ.get(REQUIRE_VARIABLE) == "1":
             pytest.fail(f"{REQUIRE_VARIABLE}=1 but {FIXTURE_VARIABLE} is unset", pytrace=False)
         pytest.skip(
-            f"set {FIXTURE_VARIABLE} (scripts/build_node_pid1_fixture.py) for the "
+            f"set {FIXTURE_VARIABLE} (tests/node_pid1_fixture/build.sh) for the "
             "real PID1 node scenarios; the node-pid1 CI job runs them"
         )
     root = Path(location).resolve(strict=True)
@@ -215,23 +223,25 @@ class Node:
         # This allowlist binds a supplied image to the exact trusted packages and
         # separate fixture source, in addition to requiring an immutable image ID.
         expected = {
-            "/var/tmp/node-base.deb": file_sha(components_dir / "node-base.deb"),
-            "/var/tmp/node-display.deb": file_sha(components_dir / "node-display.deb"),
             "/var/tmp/fixture-head.c": file_sha(
                 Path(__file__).with_name("node_pid1_fixture_head.c")
             ),
         }
         for image_path, digest in expected.items():
             assert run("/usr/bin/sha256sum", image_path).split()[0] == digest
-        assert not run(
-            "/usr/bin/dpkg", "--verify", "photo-wall-node-base", "photo-wall-node-display"
-        ).strip()
+        # dpkg --verify and the exact payload binding, both honouring the image's dpkg filters.
         container.copy_in(
             Path(__file__).with_name("node_pid1_package_verify.py"),
             "/var/lib/node_pid1_package_verify.py",
         )
         package_binding = run("/usr/bin/python3", "/var/lib/node_pid1_package_verify.py")
         (work / "installed-package-binding.json").write_text(package_binding)
+        # The installed composition and display are the shipped components, byte for byte (the
+        # repo's .debs the image installed from, decision 0019).
+        assert {each["package"]: each["sha256"] for each in json.loads(package_binding)} == {
+            "photo-wall-node": file_sha(components_dir / "node-base.deb"),
+            "photo-wall-node-display": file_sha(components_dir / "node-display.deb"),
+        }
         run("systemd-sysusers")
         run("systemd-tmpfiles", "--create")
         config = work / "config.json"
@@ -262,6 +272,111 @@ class Node:
             *(() if scenario is None else (scenario,)),
             timeout=1200,
         )
+        self.verify_display_ready("display-ready")
+
+    def verify_display_ready(self, name):
+        """The controller of the running Weston incarnation started once, after Weston's READY=1:
+        Weston's control socket existed before the controller's main process started, it never
+        restarted, and its journal this boot holds no connect or sandbox fault."""
+        display = unit_properties_of(self, DISPLAY_UNIT, "ActiveState,MainPID,InvocationID")
+        controller = unit_properties_of(
+            self, CONTROLLER_UNIT, "ActiveState,SubState,NRestarts,InvocationID"
+        )
+        started = self.run(
+            "systemctl", "show", CONTROLLER_UNIT, "-P", "ExecMainStartTimestamp",
+            "--timestamp=us+utc",
+        ).strip()
+        since_epoch = datetime.datetime.strptime(started, "%a %Y-%m-%d %H:%M:%S.%f UTC") - EPOCH
+        started_ns = since_epoch // datetime.timedelta(microseconds=1) * 1000
+        bound_ns = int(self.run("stat", "-c", "%.9Z", CONTROL_SOCKET).strip().replace(".", ""))
+        journal = self.run("journalctl", "--no-pager", "-b", "-u", CONTROLLER_UNIT)
+        # The app's way in: owned by pw-display and group-writable (connect needs write).
+        client = self.run("stat", "-c", "%U %G %A", str(WAYLAND_SOCKET), str(WAYLAND_SOCKET.parent))
+        evidence = {
+            "display": display,
+            "controller": controller,
+            "controller_started": started,
+            "control_socket_changed_ns": bound_ns,
+            "controller_faults": [fault for fault in CONTROLLER_FAULTS if fault in journal],
+            "wayland": client.split("\n"),
+        }
+        (self.work / (name + ".json")).write_text(json.dumps(evidence, sort_keys=True))
+        assert display["ActiveState"] == "active" and controller["ActiveState"] == "active", evidence
+        assert controller["NRestarts"] == "0", evidence
+        assert not evidence["controller_faults"], evidence
+        socket_row, directory_row = client.splitlines()
+        owner, group, mode = socket_row.split()
+        assert (owner, group, mode[0], mode[5]) == ("pw-display", "pw-display", "s", "w"), evidence
+        assert directory_row == "pw-display pw-display drwxr-x---", evidence
+        # Both read the one kernel's realtime clock. The shell binds and chmods control.sock in
+        # its init, before the module that sends READY=1 loads.
+        assert bound_ns <= started_ns, evidence
+        return display, controller
+
+    def recover_display(self, signal, name):
+        """Weston's main process gets `signal`; within DISPLAY_RECOVERY_SECONDS a new Weston
+        incarnation is ready and a new controller runs against it, cleanly (verify_display_ready)."""
+        display, controller = self.verify_display_ready(name + "-before")
+        self.run("systemctl", "kill", "--kill-whom=main", "-s", signal, DISPLAY_UNIT)
+        deadline = time.monotonic() + DISPLAY_RECOVERY_SECONDS
+        while True:
+            now_display = unit_properties_of(self, DISPLAY_UNIT, "ActiveState,InvocationID")
+            now_controller = unit_properties_of(
+                self, CONTROLLER_UNIT, "ActiveState,SubState,InvocationID"
+            )
+            if (
+                now_display["InvocationID"] not in ("", display["InvocationID"])
+                and now_display["ActiveState"] == "active"
+                and now_controller["InvocationID"] not in ("", controller["InvocationID"])
+                and now_controller["SubState"] == "running"
+            ):
+                break
+            assert time.monotonic() < deadline, (signal, display, now_display, now_controller)
+            time.sleep(0.5)
+        self.verify_display_ready(name)
+
+    def player_follows_display(self, fixture):
+        """Weston crashes: the Player bound to it (BindsTo=) stops with it, and the broker starts
+        the same environment again for the new Weston incarnation, which links to Central again."""
+        before = unit_properties_of(self, PLAYER_UNIT, "ActiveState,InvocationID")
+        linked = status_of(fixture, self.work)["current"]
+        assert before["ActiveState"] == "active" and linked, (before, linked)
+        self.recover_display("SIGSEGV", "display-under-player")
+        deadline = time.monotonic() + PLAYER_RELAUNCH_SECONDS
+        while True:
+            now = unit_properties_of(self, PLAYER_UNIT, "ActiveState,SubState,InvocationID")
+            current = status_of(fixture, self.work)["current"]
+            if (now["InvocationID"] not in ("", before["InvocationID"])
+                    and now["SubState"] == "running"
+                    and current and current["process"] != linked["process"]):
+                break
+            assert time.monotonic() < deadline, ("no Player for the new Weston", before, now, current)
+            time.sleep(0.5)
+        (self.work / "player-after-display.json").write_text(
+            json.dumps({"before": before, "after": now, "linked": current}, sort_keys=True))
+
+    def player_restarts_after_a_crash(self):
+        """The Player dies on its own (SIGSEGV), Weston untouched: the broker starts it again on
+        its relaunch pacing, as a new launch epoch, within the same kernel boot (1b P1b)."""
+        boot = self.run("cat", "/proc/sys/kernel/random/boot_id").strip()
+        before = unit_properties_of(self, PLAYER_UNIT, "ActiveState,InvocationID")
+        epoch = json.loads(self.run("cat", BROKER_LAUNCH))["epoch"]
+        assert before["ActiveState"] == "active", before
+        self.run("systemctl", "kill", "--signal=SIGSEGV", PLAYER_UNIT)
+        deadline = time.monotonic() + PLAYER_CRASH_RELAUNCH_SECONDS
+        while True:
+            now = unit_properties_of(self, PLAYER_UNIT, "ActiveState,InvocationID")
+            launch = json.loads(self.run("cat", BROKER_LAUNCH))
+            if (now["ActiveState"] == "active"
+                    and now["InvocationID"] not in ("", before["InvocationID"])
+                    and launch["running"]):
+                break
+            assert time.monotonic() < deadline, ("no Player after its crash", before, now, launch)
+            time.sleep(0.5)
+        evidence = {"before": before, "after": now, "epochs": [epoch, launch["epoch"]]}
+        (self.work / "player-after-crash.json").write_text(json.dumps(evidence, sort_keys=True))
+        assert launch["epoch"] == epoch + 1, evidence
+        assert self.run("cat", "/proc/sys/kernel/random/boot_id").strip() == boot, evidence
 
     def cold(self, fixture, components_dir, previous=None):
         """Boot PID1, bind the exact packages, start real units; return the cold app-link."""
@@ -288,30 +403,6 @@ class Node:
         else:
             raise AssertionError("real cold Player app-link absent: " + str(work))
         before = status["current"]
-        health_script = """import json,os,pathlib,stat,sys,time
-pid=int(sys.argv[1]);root=pathlib.Path('/proc')/str(pid)/'root'
-path=root/'run/photo-wall/player/service-health.json'
-for _ in range(100):
- if path.exists():break
- time.sleep(.1)
-info=path.stat();parent=path.parent.stat();value=json.loads(path.read_text())
-assert info.st_uid==10004 and stat.S_IMODE(info.st_mode)==0o600
-assert parent.st_uid==10004 and stat.S_IMODE(parent.st_mode)==0o700
-assert value['boot_id']==pathlib.Path('/proc/sys/kernel/random/boot_id').read_text().strip()
-assert value['player_id'] is not None and value['authority_epoch']==int(sys.argv[2])
-assert not pathlib.Path('/run/photo-wall/player/service-health.json').exists()
-fs=os.statvfs(path.parent);assert fs.f_blocks*fs.f_frsize<=1024*1024
-print(json.dumps({'health':value,'uid':info.st_uid,'mode':stat.S_IMODE(info.st_mode),'private_mount_bytes':fs.f_blocks*fs.f_frsize},sort_keys=True))"""
-        health = run(
-            "/usr/bin/python3",
-            "-c",
-            health_script,
-            str(before["process"]["pid"]),
-            str(before["authority_epoch"]),
-        )
-        if self.boot_id is not None:
-            assert json.loads(health)["health"]["boot_id"] == str(self.boot_id), health
-        (work / "cold-health.json").write_text(health)
         (work / "cold-current.json").write_text(json.dumps(before, sort_keys=True))
         print("COLD actual app-link observed", str(work), flush=True)
         return before
@@ -329,7 +420,7 @@ print(json.dumps({'health':value,'uid':info.st_uid,'mode':stat.S_IMODE(info.st_m
         raise AssertionError("the Node bus never answered: " + str(self.work))
 
     def _host_birth(self, deadline, *, not_epoch=None):
-        """The host component's {"birth", "base", "epoch"}, read with HostCore's shipped nats-py and
+        """The host component's {"birth", "base", "epoch"}, read with python3-nats and HostCore's
         nodeapi, once it is there (in an epoch other than `not_epoch`) before `deadline`."""
         last = ""
         while time.monotonic() < deadline:
@@ -360,7 +451,7 @@ print(json.dumps({'health':value,'uid':info.st_uid,'mode':stat.S_IMODE(info.st_m
         return json.loads(result.stdout)["value"] if result.returncode == 0 else None
 
     def verify_bus(self, before_kill=None):
-        """The bus from node-base.deb runs on loopback, named for the Node, inside its fence from
+        """The bus photo-wall-node starts runs on loopback, named for the Node, inside its fence from
         contracts; a kill -9 restarts it at once and neither the Player, the broker nor HostCore
         notices. HostCore's session writes the host's birth (its release digest the boot's base tag)
         and, after the kill, writes it again in the bus's new epoch with no help from Central.
@@ -467,8 +558,8 @@ print(json.dumps({'health':value,'uid':info.st_uid,'mode':stat.S_IMODE(info.st_m
         components = json.loads((components_dir / "components.json").read_text())
         # Every root is an image (E2c): staged by the predicate the Node itself uses, and its
         # pool image re-hashed.
-        verify_script = """import json,pathlib,sys
-sys.path.insert(0,'/usr/lib/photo-wall-node-bootstrap')
+        verify_script = """import ast,json,pathlib,sys
+sys.path[:0]=next(ast.literal_eval(n.value) for n in ast.parse(pathlib.Path('/usr/lib/photo-wall/node/node-bootstrap/__main__.py').read_text()).body if isinstance(n,ast.AnnAssign) and n.target.id=='PATH')
 from appliance.apps.environment import IMAGE_SUFFIX,file_sha256,mounted_root
 from appliance.kernel.image_mount import SystemdImageMounter
 from contracts.app_environment import AppEnvironmentRefV2
@@ -814,6 +905,7 @@ def test_node_pid1_lifecycle(node_pid1_inputs, node_host, registry, tmp_path, ph
                 node.verify_image_mounts(components_dir)
                 node.verify_bus()
                 reported = assert_bus_memory_reported(fixture, node)
+                node.player_follows_display(fixture)
             stage_and_complete(fixture, node, phase, reference)
             if phase == "success":
                 node.verify_target_mount(reference)
@@ -822,6 +914,7 @@ def test_node_pid1_lifecycle(node_pid1_inputs, node_host, registry, tmp_path, ph
                 # After assert_memory_lines, whose every slice reads oom_kill 0.
                 node.induce_bus_oom()
                 assert_bus_oom_reported(fixture, node, reported)
+                node.player_restarts_after_a_crash()
             node.stop_and_verify_roots(components_dir, reference)
             print("PASS real PID1/Central phase", phase, "evidence", work, flush=True)
         finally:
@@ -974,6 +1067,13 @@ def test_node_pid1_refused(node_pid1_inputs, node_host, registry, tmp_path):
             names = {name: value for name, value in host["metrics"]}
             assert names.get("memcg_present") == 1, host
             assert any(name.startswith("memory_peak:") for name in names), host
+            # The display stack needs no storage, so it runs here, without a Player on it: a
+            # crashed Weston and a hung one (its watchdog aborts it) each come back with a
+            # controller bound to the new incarnation.
+            node.recover_display("SIGSEGV", "display-after-crash")
+            node.recover_display("SIGSTOP", "display-after-hang")
+            hung = node.run("journalctl", "--no-pager", "-b", "-u", DISPLAY_UNIT)
+            assert "Watchdog timeout" in hung, "a stopped Weston was not aborted by its watchdog"
             print("PASS real PID1/Central phase", phase, "evidence", work, flush=True)
         finally:
             node.capture_and_remove(fixture, sys.exc_info()[1])

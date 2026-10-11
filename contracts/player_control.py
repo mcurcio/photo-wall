@@ -27,16 +27,14 @@ class ControlHello(Model):
         return self
 
 
+# The one control envelope: sequenced deliveries, applied ACKs and their receipts.
+SCHEMA = 2
+
+
 class ControlSelection(Model):
     authority_epoch: int = Field(ge=1)
-    schema_version: Literal[1, 2] = Field(alias="schema")
+    schema_version: Literal[2] = Field(alias="schema")
     capabilities: tuple[str, ...] = ()
-
-    @model_validator(mode="after")
-    def valid_selection(self):
-        if self.schema_version == 1 and self.capabilities:
-            raise ValueError("legacy_control_capabilities")
-        return self
 
 
 class ControlDelivery(Model):
@@ -44,16 +42,16 @@ class ControlDelivery(Model):
     delivery_sequence: int = Field(ge=1, le=2**63 - 1)
 
 
+CAPABILITIES = ("identify_output",)
+
+
 def select_control(offer: ControlHello) -> ControlSelection | None:
-    """Select only a mutually known envelope, ignoring bounded future offers."""
-    common = set(offer.schemas) & {1, 2}
-    if not common:
+    """Select the one known envelope, ignoring bounded future offers."""
+    if SCHEMA not in offer.schemas:
         return None
-    schema = max(common)
-    capabilities = ("identify_output",) if (
-        schema == 2 and "identify_output" in offer.capabilities
-    ) else ()
-    return ControlSelection(authority_epoch=offer.authority_epoch, schema=schema,
+    capabilities = tuple(
+        capability for capability in CAPABILITIES if capability in offer.capabilities)
+    return ControlSelection(authority_epoch=offer.authority_epoch, schema=SCHEMA,
                             capabilities=capabilities)
 
 

@@ -10,14 +10,13 @@ from __future__ import annotations
 from typing import Any
 
 import procrastinate
+import psycopg
 
 from central.kernel.assets import AssetReady
 from central.kernel.job_types import (
     CATALOG,
     FetchLibraryThumbnail,
     FetchOsImage,
-    FetchPackage,
-    FetchPlayerPayload,
     FetchSealedEnvironment,
     MaintainCache,
     Prefetch,
@@ -32,16 +31,6 @@ FACTS = AssetReady(size=7, sha256="ef" * 32)
 
 class FetchOsImageStub:
     async def handle(self, job: FetchOsImage) -> AssetReady:
-        return FACTS
-
-
-class FetchPackageStub:
-    async def handle(self, job: FetchPackage) -> AssetReady:
-        return FACTS
-
-
-class FetchPlayerPayloadStub:
-    async def handle(self, job: FetchPlayerPayload) -> AssetReady:
         return FACTS
 
 
@@ -81,22 +70,24 @@ class PurgeStub:
 
 
 def catalog_stubs() -> list[Any]:
-    return [FetchOsImageStub(), FetchPackageStub(), FetchPlayerPayloadStub(),
-            FetchSealedEnvironmentStub(), FetchLibraryThumbnailStub(), SyncReleasesStub(),
+    return [FetchOsImageStub(), FetchSealedEnvironmentStub(),
+            FetchLibraryThumbnailStub(), SyncReleasesStub(),
             PrefetchStub(), MaintainCacheStub(), RescueStub(), PurgeStub()]
 
 
 def catalog_instances() -> list[Job]:
     samples = {FetchOsImage: FetchOsImage(tarball_sha256="cd" * 32),
-               FetchPackage: FetchPackage(sha256="ab" * 32),
-               FetchPlayerPayload: FetchPlayerPayload(sha256="ef" * 32),
                FetchSealedEnvironment: FetchSealedEnvironment(sha256="12" * 32),
                FetchLibraryThumbnail: FetchLibraryThumbnail(asset_id="asset-" + "34" * 32)}
     return [samples.get(job_type) or job_type() for job_type in CATALOG]
 
 
 def apply_procrastinate_schema(dsn: str) -> None:
-    """Install procrastinate's schema into the (test-private) schema `dsn` searches."""
+    """Install procrastinate's schema into the (test-private) schema `dsn` searches, once: a
+    database that already has it is left as it is (several seeding helpers may ask)."""
+    with psycopg.connect(dsn) as conn:
+        if conn.execute("SELECT to_regclass('procrastinate_jobs')").fetchone()[0] is not None:
+            return
     app = procrastinate.App(connector=procrastinate.SyncPsycopgConnector(conninfo=dsn))
     app.open()
     try:

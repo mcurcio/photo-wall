@@ -36,7 +36,7 @@ from central.infra.transactions import PgTransactions
 from central.kernel.job_types import (
     CATALOG,
     FetchOsImage,
-    FetchPackage,
+    FetchSealedEnvironment,
     PurgeFinishedJobs,
     SyncReleases,
 )
@@ -240,7 +240,7 @@ class SavepointConnection:
 
 
 @pytest.mark.parametrize("job,holds_lock", [
-    (FetchPackage(sha256=SHA), True),  # an asset fetch keeps its one-runner lock
+    (FetchSealedEnvironment(sha256=SHA), True),  # an asset fetch keeps its one-runner lock
     (FetchOsImage(tarball_sha256="cd" * 32), True),
     (Mixed(s="x", i=1, b=True, c=Colour.RED), False),  # every other job may overlap itself
     (SyncReleases(), False),
@@ -272,7 +272,7 @@ def test_defer_async_uses_the_app_pool_and_reports_merges():
     assert app.configured[0]["connection"] is None
     assert app.configured[0]["lock"] is None
     assert app.deferred == [job_kwargs(SyncReleases(), attempt=2)]
-    asset = FetchPackage(sha256=SHA)
+    asset = FetchSealedEnvironment(sha256=SHA)
     assert asyncio.run(defer_async(app, asset, attempt=0)) is True
     assert app.configured[1]["lock"] == job_keys(asset).lock  # an asset fetch keeps its lock
     assert asyncio.run(defer_async(RecordingApp(raises=True), SyncReleases(), attempt=0)) is False
@@ -344,7 +344,7 @@ def test_outcomes_upsert_sequence_and_purge(registry):
 
 def test_outcome_notify_is_sent_only_on_commit(registry):
     transactions, outcomes = PgTransactions(registry.db), JobOutcomes()
-    job = FetchPackage(sha256=SHA)
+    job = FetchSealedEnvironment(sha256=SHA)
     with psycopg.connect(registry.db.dsn, autocommit=True) as listener:
         listener.execute("LISTEN job_outcome")
         with pytest.raises(RuntimeError):

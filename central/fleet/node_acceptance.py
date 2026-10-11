@@ -70,7 +70,6 @@ class NodeAcceptance:
 
     def begin(self, device_id: str, qualification_id: UUID, environment_sha256: str,
               operator_audit_ref: str) -> dict:
-        self.sessions.require_enabled()
         identifier(qualification_id)
         digest(environment_sha256)
         token(operator_audit_ref, 256)
@@ -92,7 +91,6 @@ class NodeAcceptance:
         return {"qualification_id": str(qualification_id), "status": "awaiting_representative_media"}
 
     def sample(self, qualification_id: UUID) -> dict:
-        self.sessions.require_enabled()
         identifier(qualification_id)
         with self.sessions.db.transaction() as conn:
             acquire_runtime_locks(conn)
@@ -180,8 +178,6 @@ class NodeAcceptance:
                         or active[0].opacity != 1 or active[0].fade_in or active[0].fade_out):
                     raise NodeControlError("node_representative_single_media_required")
                 binding = by_output[output]
-                if binding.preview is not None:
-                    raise NodeControlError("node_qualification_preview_active")
                 expected_tag = frame_witness_tag(output_id=output, frame_id=binding.frame_id, binding_generation=binding.generation,
                     config_revision=binding.configuration_revision, calibration=binding.calibration.model_dump(mode="json"),
                     layers=({"assignment_id": active[0].assignment_id, "variant_sha256": active[0].variant.sha256},))

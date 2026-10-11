@@ -6,6 +6,7 @@ caller's Frame snapshot. It deliberately stores no second copy of readiness stat
 
 from __future__ import annotations
 
+from central.displays.model import Readiness as FrameReadiness
 from central.installation_models import FrameInventory
 from contracts.liveness import SILENT_AFTER_SECONDS
 from contracts.models import (
@@ -41,7 +42,7 @@ class ReadinessDiagnostic(Model):
     layer_end: Instant
 
 
-def _snapshot_bindings(frames: tuple[FrameInventory, ...], player_id: str, read_at: float):
+def _snapshot_bindings(frames: tuple[FrameInventory, ...], player_id: str):
     """Build current binding facts from the caller's same-snapshot Frame inventory."""
     owned = sorted(
         (frame for frame in frames if frame.player_id == player_id and frame.output_id is not None),
@@ -55,13 +56,10 @@ def _snapshot_bindings(frames: tuple[FrameInventory, ...], player_id: str, read_
             configuration_revision=frame.configuration_revision,
             profile=FrameProfile.model_validate(frame.profile),
             calibration=frame.calibration,
-            preview=(frame.preview if frame.preview_expires is not None and frame.preview_expires > read_at else None),
-            preview_expires=(frame.preview_expires if frame.preview is not None and frame.preview_expires is not None
-                             and frame.preview_expires > read_at else None),
         )
         for frame in owned
     )
-    enabled = {frame.output_id for frame in owned if frame.calibration_valid}
+    enabled = {frame.output_id for frame in owned if frame.readiness is FrameReadiness.READY}
     return bindings, enabled, {frame.id: frame for frame in owned}
 
 
@@ -119,7 +117,7 @@ def project_readiness_diagnostics(
             continue
 
         if row["player_id"] not in binding_cache:
-            binding_cache[row["player_id"]] = _snapshot_bindings(frames, row["player_id"], read_at)
+            binding_cache[row["player_id"]] = _snapshot_bindings(frames, row["player_id"])
         current_bindings, enabled_outputs, current_frames = binding_cache[row["player_id"]]
         configuration = PlayerConfiguration.model_validate(row["configuration"])
         if (

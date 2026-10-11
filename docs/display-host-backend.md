@@ -8,7 +8,7 @@ Save qualification is established by this source.
 
 ## Selected backend and responsibilities
 
-The opt-in node display service uses a base-owned Weston **14** shell module,
+The node display service uses a base-owned Weston **14** shell module,
 `photo-wall-shell.so`, replacing kiosk-shell for this path. libweston has a
 versioned native ABI; Meson requires `libweston-14`; Weston 14 includes its desktop API in that library.
 The native Debian build locks the actual package versions from the repository's
@@ -23,7 +23,7 @@ The shell and its Cairo diagnostic client run from the base, independently of ap
 files or imports. The sealed Player receives only the public Wayland socket.
 
 The diagnostic client is launched by the shell at the fixed base path
-`/usr/lib/photo-wall-display/diagnostic-client`. A private socketpair is passed as
+`/usr/lib/photo-wall/node-display/diagnostic-client`. A private socketpair is passed as
 `WAYLAND_SOCKET`; the compositor retains that exact `wl_client` as the capability
 to bind the diagnostic protocol. A public client with the same app ID, UID, or
 claimed PID cannot obtain that role. Client failure restores a compositor-owned
@@ -32,7 +32,8 @@ proof of a readable error page. Actual diagnostic presentation is reported only
 from presentation feedback for the private client's committed page buffer.
 
 The page shows bounded predefined status text, the physical Output ID and actual
-pixel dimensions, `Frame binding unconfirmed`, and unavailable panel brightness.
+pixel dimensions, `Frame binding unconfirmed`, and, since 1c, brightness with where it
+acts (the controller's line, sent with the `picture` op below; nothing when it has none).
 Registry binding-name/freshness adoption and Identify/calibration overlays remain
 separate integration work. App pixels cannot set these diagnostic strings.
 
@@ -80,6 +81,60 @@ process loss and lease expiry invalidate affected authority. Mode/connection
 generations and the compositor incarnation fence connector reuse. A new controller
 connection explicitly invalidates old grants rather than inventing recovered
 presentation evidence. Compositor loss remains Output unknown until recovery.
+
+## Units and Weston incarnations
+
+The display stack is two base units in `photowallbase.slice`. Their ordering is
+systemd's, not a poll or a retry in either process:
+
+- `photo-wall-display.service` runs Weston with `Type=notify`, `NotifyAccess=main`
+  and Weston's own `systemd-notify.so` module (`--modules=`). Weston loads it after
+  it has created its Wayland socket and the shell has bound `control.sock`, so
+  READY=1 means both sockets accept connections. The `/usr/bin/env` wrapper restates
+  `XDG_RUNTIME_DIR`, which `PAMName=login`'s pam_systemd would otherwise replace,
+  and execs Weston, so the main PID is Weston's. `WatchdogSec=10s`: the module pings
+  from Weston's event loop at half that interval, so a hung compositor is aborted
+  (SIGABRT) and restarted like a crashed one.
+- `photo-wall-display-controller.service` has `BindsTo=` and `After=` the display
+  unit, and the display unit `Wants=` it. Each Weston incarnation therefore gets
+  one controller, started after its READY=1 and stopped when it ends; the next
+  incarnation brings a new one. The controller never starts, or builds its sandbox,
+  while Weston's `RuntimeDirectory` (`/run/photo-wall-display`) is absent, so no
+  `RuntimeDirectoryPreserve=` is needed. The directory leaves with the incarnation
+  that made it, and no reader can open a dead incarnation's sockets.
+- The public Wayland socket is not in that directory. Weston binds it at
+  `/run/photo-wall-display-wayland/wayland-0` (`--socket=` takes the absolute path),
+  in a directory the base's tmpfiles.d creates as `pw-display:pw-display 0750`. It
+  outlives every incarnation, so an app in group `pw-display` binds the directory,
+  never a socket file a restart replaces, and never sees `control.sock` or
+  `ingress.sock`. Weston's umask under `PAMName=login` is 0002, so the socket is
+  group-writable. [`appliance/kernel/display_paths.py`](../appliance/kernel/display_paths.py)
+  is the one home of these paths; a unit test pins them to the packaged units and
+  tmpfiles.d.
+
+Any other consumer of `/run/photo-wall-display` must follow the same rule: start
+after the display unit is ready, and end with the Weston incarnation it connected
+to. The app broker's `After=` orders it on READY=1. The Player's transient unit
+binds `WAYLAND_DIRECTORY` read-only at the same path, sets `WAYLAND_DISPLAY` to
+`WAYLAND_SOCKET`, and carries `BindsTo=` and `After=` the display unit
+([`app_unit_properties`](../appliance/apps/process_linux.py)): its start waits for
+READY=1 and it stops with that Weston. Each launch records the display's
+`InvocationID`. One rule, `relaunch_absent`
+([`broker.py`](../appliance/apps/broker.py); [the restart rule](player-architecture.md)), serves whichever launch is current:
+the boot's (`AppEffectBroker.reconcile`) or an online switch's
+(`OnlineEffectBroker.reconcile`, for its target or fallback). When the Player is
+absent while a newer incarnation runs, the same environment starts again under the
+same operation, once for that incarnation. Until PID1 has unloaded the old unit
+nothing starts, and the next turn asks again. A switch still completes only at the
+control proof. The node-pid1 success scenario crashes Weston under a linked Player
+and requires a new Player to link.
+
+The node-pid1 scenarios start the controller alone, so Weston comes up only
+through the units' own dependencies. Every scenario then checks that `control.sock`
+existed before the controller's main process started, that the controller never
+restarted, and that its journal holds no `FileNotFoundError` or `226/NAMESPACE`.
+The `refused` scenario also sends Weston SIGSEGV, then SIGSTOP (its watchdog aborts
+it), and requires a new Weston and a new clean controller each time.
 
 ## Base controller ingress
 
@@ -140,6 +195,33 @@ Primary implementation references: [Weston 14 shell APIs](https://gitlab.freedes
 [Wayland server protocol logger](https://gitlab.freedesktop.org/wayland/wayland/-/blob/1.23.1/src/wayland-server-core.h),
 and [presentation feedback protocol](https://gitlab.freedesktop.org/wayland/wayland-protocols/-/blob/main/stable/presentation-time/presentation-time.xml).
 
+## Picture operations (frame protocol v4)
+
+Since 1c the shell offers `pw_frame_manager_v1` and `pw_diagnostic_manager_v1` at
+version 4 ([`photo-wall-frame-v1.xml`](../appliance/display_host/native/photo-wall-frame-v1.xml)).
+Display Host carries a Display's picture settings and talks DDC/CI; the Player renderer
+is the only picture pipeline, so the shell forwards picture operations and never
+interprets them. The rules for what the operations are and when they are sent belong
+to the [Player architecture](player-architecture.md#picture-settings-1c).
+
+- **Control op `picture`** (base-only control socket): `output_id`, `output`, `operations`
+  (a string of at most 512 bytes) and `brightness` (the base page's line, at most 128).
+  The shell stores both per Output, sends `picture(output_id, operations)` to every
+  version-4 frame manager of that Output's app client and `brightness(output_id, text)`
+  to the diagnostic client. It sends the stored values again on a version-4 bind and
+  when it grants the Output, since a client binds before it is granted.
+- **Request `tag_picture`**: as `tag`, plus the picture change the buffer was drawn
+  with (digits only, at most 20 characters). The `presented` event carries it as
+  `"picture_change"`, or `null` for a buffer tagged with version-3 `tag`.
+- **The frame client** ([`frame-client.c`](../appliance/display_host/native/frame-client.c))
+  binds version 4 when offered and still refuses below 3; `pw_frame_client_picture`
+  returns the newest operations per Output and `pw_frame_client_tag_picture_next_commit`
+  tags the next commit. The Player reads them through `player/wayland_frames.py`.
+
+CI proves this in `tests/native_display_smoke.py` (node-pid1 `display-harness`):
+operations reach a late app verbatim, a 10-byte non-JSON operations text is not parsed,
+oversize operations and lines are refused, and `tag_picture` presents its change.
+
 ## The health layer's buffers
 
 The overlay client (`overlay/client.py`) keeps its health surface mapped over the whole
@@ -167,7 +249,8 @@ Frame-v3 grants include `frame_id` alongside process identity, local app epoch,
 OutputKey, binding generation, and configuration revision. Frame counters alone
 are not globally unique. The canonical Surface codec is shared by Central and
 DisplayHost; the native grant event carries the same Frame identity to Player.
-The app-private bridge requires protocol version 3. Historical facts without
+The app-private bridge requires protocol version 3 and binds 4 when offered
+(picture operations, above). Historical facts without
 Frame identity are not current authority.
 
 When a live Output moves to another Frame or process/binding identity, Central's

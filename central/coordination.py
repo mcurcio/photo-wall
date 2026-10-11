@@ -16,7 +16,6 @@ from psycopg.types.json import Jsonb
 from pydantic import Field
 
 from central.db import Database, DatabaseTransactionClock
-from central.equipment_drain import fenced_players_in
 from central.execution_outcomes import ExecutionOutcome, ExecutionOutcomeRouter
 from central.installation_models import OutputInterruption, PlayerReports
 from central.installation_ports import InstallationSessions
@@ -29,6 +28,7 @@ from central.planner import (
     assignment_id,
     eligible,
     project,
+    same_execution,
 )
 from central.planner import (
     handle_execution_outcome as handle_planning_outcome,
@@ -75,12 +75,6 @@ class CoordinationError(RegistryError):
 def identity(prefix: str, parts) -> str:
     encoded = json.dumps(parts, sort_keys=True, separators=(",", ":"), allow_nan=False)
     return prefix + hashlib.sha256(encoded.encode()).hexdigest()[:40]
-
-
-def same_execution(first: Layer, second: Layer) -> bool:
-    # Arbitration can change while the adopted media/interval remains immutable.
-    exclude = {"priority", "root_order", "admission_order"}
-    return first.model_dump(exclude=exclude) == second.model_dump(exclude=exclude)
 
 
 def offer_owner(plan: Plan) -> str:
@@ -272,9 +266,6 @@ class Coordinator:
             result[layer.assignment_id] = layer
         return result
 
-    def _catalog(self, conn, runtime):
-        return self.media.catalog_in(conn, runtime.planning_source_refs())
-
     def _groups(self, conn, runtime, now, horizon_end, configurations) -> dict[str, str]:
         owners = {
             f"frame:{b.frame_id}": (p, c.authority_epoch, b.output_id, b.generation)
@@ -293,6 +284,16 @@ class Coordinator:
                 cue["members"][assignment_id(intent)] = owners.get(intent.target)
                 cue["ends"][assignment_id(intent)] = intent.interval_end
         assignments = {}
+        cue_keys = {identity("cue-", list(key)) for key in cues}
+        # A future cue is a forecast until it starts; one the timeline no longer holds is
+        # withdrawn now rather than surfacing later as a not_ready skip.
+        for orphan in conn.execute(
+            "SELECT id,cue_key FROM coordination_groups WHERE status IN ('pending','committed') "
+            "AND starts_at>%s AND starts_at<%s ORDER BY starts_at,id",
+            (now, horizon_end),
+        ).fetchall():
+            if orphan["cue_key"] not in cue_keys:
+                self._skip_group(conn, orphan["id"], "superseded")
         for (root, starts), cue in cues.items():
             cue_key = identity("cue-", [root, starts])
             previous = conn.execute(
@@ -300,19 +301,45 @@ class Coordinator:
                 "ORDER BY cohort_sequence DESC LIMIT 1",
                 (cue_key,),
             ).fetchone()
+            superseding = False
             if previous:
-                if not cue["members"].keys() <= previous["members"].keys():
-                    raise CoordinationError("cue_membership_changed")
-                # A child completing cannot shrink a skipped cue into a new successful one.
-                changed_authority = any(
+                grows = not cue["members"].keys() <= previous["members"].keys()
+                moved = not grows and any(
                     (tuple(previous["members"][a]) if previous["members"][a] else None) != owner
                     for a, owner in cue["members"].items()
                 )
-                if not changed_authority:
+                if (
+                    starts > now
+                    and previous["status"] != "skipped"
+                    and (moved or cue["members"].keys() != previous["members"].keys())
+                ):
+                    # An edit rewrote a cue that has not started: a fresh cohort replaces it,
+                    # and skipping the old one withdraws any commit it had already granted.
+                    self._skip_group(conn, previous["id"], "superseded", root=root)
+                    superseding = True
+                elif grows:
+                    # A started cue is immutable. Growth invalidates this one cue, never
+                    # the tick that offers every other Frame its plan.
+                    if previous["status"] != "skipped":
+                        self._skip_group(conn, previous["id"], "cue_membership_changed", root=root)
                     assignments.update({a: previous["id"] for a in cue["members"]})
                     continue
-            group_id = identity("group-", [cue_key, cue["members"]])
-            deadline = now + self.limits.prepare_seconds if starts <= now else starts
+                elif not moved:
+                    # A child completing cannot shrink a skipped cue into a new successful one.
+                    assignments.update({a: previous["id"] for a in cue["members"]})
+                    continue
+            # The previous cohort names the new one, so a forecast that returns to an
+            # earlier membership never collides with that earlier, skipped cohort.
+            group_id = identity(
+                "group-", [cue_key, cue["members"], *([previous["id"]] if previous else [])]
+            )
+            # A late join keeps preparation grace. So does a superseding cohort: a Player that
+            # fetches the new plan only after the start may already be playing the old commit,
+            # and must be able to commit the new cohort rather than be revoked at the start.
+            if starts <= now or superseding:
+                deadline = max(starts, now) + self.limits.prepare_seconds
+            else:
+                deadline = starts
             conn.execute(
                 "INSERT INTO coordination_groups(id,members,starts_at,deadline,valid_until,status,cue_key,member_ends) "
                 "VALUES(%s,%s,%s,%s,%s,'pending',%s,%s) "
@@ -356,12 +383,17 @@ class Coordinator:
             ),
         ).fetchone()["sequence"]
 
-    def _skip_group(self, conn, group_id, code, *, cancel=False):
-        sequence = self._event(conn, "group_skipped", detail={"group_id": group_id, "code": code})
+    def _skip_group(self, conn, group_id, code, *, root=None):
+        cue_key = conn.execute(
+            "SELECT cue_key FROM coordination_groups WHERE id=%s", (group_id,)
+        ).fetchone()["cue_key"]
+        detail = {"group_id": group_id, "code": code, "cue_key": cue_key}
+        if root is not None:
+            detail["root"] = root
+        sequence = self._event(conn, "group_skipped", detail=detail)
         conn.execute(
-            "UPDATE coordination_groups SET status='skipped',skip_sequence=%s,drain_cancel=%s "
-            "WHERE id=%s",
-            (sequence, cancel, group_id),
+            "UPDATE coordination_groups SET status='skipped',skip_sequence=%s WHERE id=%s",
+            (sequence, group_id),
         )
         conn.execute("UPDATE execution_commits SET valid=FALSE WHERE group_id=%s", (group_id,))
 
@@ -406,14 +438,14 @@ class Coordinator:
             # serialization cut, not at the time it first requested the cut.
             now = self.clock.utc()
             runtime.advance(now)
-            fenced = fenced_players_in(conn)
             configurations = {
                 p["id"]: self._configuration(conn, p["id"], p["authority_epoch"])
                 for p in self._players(conn)
             }
             offers = self._offers(conn, configurations)
             self.media.reconcile_source_activity_in(conn, runtime.planning_source_refs())
-            snapshots, authored = self._catalog(conn, runtime)
+            pools = self.media.source_pools_in(conn, runtime.planning_source_refs())
+            authored = self.media.authored_in(conn)
             locks = self._locks(conn, configurations, offers)
             # Renewable extent changes only at a renewal boundary, avoiding heartbeat churn.
             quantum = self.limits.renewal_seconds
@@ -422,20 +454,16 @@ class Coordinator:
                 runtime,
                 now,
                 bindings_by_player={
-                    p: tuple(b for b in config.bindings
-                             if p not in fenced and b.output_id in config.enabled_outputs)
+                    p: tuple(b for b in config.bindings if b.output_id in config.enabled_outputs)
                     for p, config in configurations.items()
                 },
-                catalog_snapshots=snapshots,
+                source_pools=pools,
                 authored_candidates=authored,
                 locked_assignments=locks,
                 horizon_seconds=horizon_end - now,
                 limits=PlannerLimits(max_horizon_seconds=self.limits.horizon_seconds + quantum),
             )
-            groups = self._groups(conn, runtime, now, horizon_end, {
-                p: config.model_copy(update={"enabled_outputs": ()}) if p in fenced else config
-                for p, config in configurations.items()
-            })
+            groups = self._groups(conn, runtime, now, horizon_end, configurations)
             for proposal in projection.players:
                 config = configurations[proposal.player_id]
                 # Historical offers feed content locks only. Reconciliation,
@@ -597,7 +625,7 @@ class Coordinator:
             if plan:
                 membership = self._plan_groups(conn, plan)
                 skipped = conn.execute(
-                    "SELECT id,skip_sequence,drain_cancel FROM coordination_groups "
+                    "SELECT id,skip_sequence FROM coordination_groups "
                     "WHERE status='skipped' AND skip_sequence IS NOT NULL"
                 ).fetchall()
                 revocations = tuple(
@@ -606,7 +634,7 @@ class Coordinator:
                         revision=plan.revision,
                         authority_epoch=epoch,
                         sequence=g["skip_sequence"],
-                        mode="cancel" if g["drain_cancel"] else "invalidate",
+                        mode="invalidate",
                         assignment_ids=tuple(
                             sorted(a for a, group in membership.items() if group == g["id"])
                         ),
@@ -694,8 +722,6 @@ class Coordinator:
     def readiness(self, player_id: str, report: Readiness) -> bool:
         now = self.clock.utc()
         with self._transaction() as conn:
-            if player_id in fenced_players_in(conn):
-                raise CoordinationError("equipment_draining")
             configurations = {
                 p["id"]: self._configuration(conn, p["id"], p["authority_epoch"])
                 for p in self._players(conn)
@@ -814,8 +840,7 @@ class Coordinator:
         """Authorize an exact operational surface, never an execution Commit.
 
         Caller holds Coordination→Runtime before authenticating the node session.
-        A live app linkage and Registry tuple are necessary. V1 drain rows cannot
-        authorize V2 starting-new candidates; that requires the V2 lifecycle port.
+        A live app linkage and Registry tuple are necessary.
         """
         from central.fleet.node_app_links import load_current_node_app_link_for_player_in
 
@@ -832,8 +857,6 @@ class Coordinator:
         if link is None or (link.process, link.app_epoch, link.environment_sha256) != (
                 process, app_epoch, environment_sha256):
             return DisplayAdmission(False, "", "app_process_link_changed")
-        if player_id in fenced_players_in(conn):
-            return DisplayAdmission(False, "", "equipment_drain_requires_v2_target_reservation")
         fence = identity("display-", [player_id, authority_epoch, output_id, frame_id, binding_generation,
             config_revision, link.producer.device_generation, str(link.producer.kernel_boot_id),
             link.process.pid, link.process.start_ticks, str(link.process.invocation_id),

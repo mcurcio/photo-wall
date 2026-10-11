@@ -6,72 +6,31 @@ repository and the interpreter's own standard library only -- never site-package
 refuses a closure in which first-party code imports a top-level name that is neither
 first-party nor in `sys.stdlib_module_names`, or a package the caller forbids. The scan stops
 at the first-party boundary: a stdlib module first-party code imports is found, but its own
-imports are the interpreter's business (the initrd ships the whole stdlib tree), so the result
-does not depend on whether the build interpreter ships `test`/`_testcapi`.
+imports are the interpreter's business, so the result does not depend on whether the build
+interpreter ships `test`/`_testcapi`.
 
-Each artefact has one ClosurePolicy (Project 2 design §2.7): its root modules, the packages it
-must not reach, and its third-party table (import root -> Debian package), which is derived from
-the Debian declaration (`scripts/debian_packages.py`) and never hand-written, and its vendored
-table (import root -> a wheel `scripts/vendored_packages.py` pins, staged in the launcher's own
-directory). A declared third-party or vendored import is allowed and recorded; an undeclared one
-fails the build; a declared one no code reaches is reported by `unreached_imports`, which the
-`.deb` builders refuse. The initramfs policy allows no third-party import, and its forbidden list
-travels in the manifest to the initrd verifier, so it is written once. A `.deb`'s closure is staged privately as a directory
-application (`stage_application`: the files, a generated `__main__.py`, `closure.json`), and
-`isolated_import` proves the staged tree imports on its own.
+It computes; it stages nothing (decision 0019: the Node's packages, stage 1's included, are
+built by debhelper and judged by scripts/import_check.py, whose Finder this is). Its readers:
+the import check (`Finder`), stage 1's initrd verify (`first_party_files`), the release writer's
+cache key (`first_party_files`) and the launchers' forbidden lists (`compute_closure`,
+tests/node/launcher_closures.py).
 
 Build tooling: stdlib only, runs on the builder's own python3.
 """
 
 from __future__ import annotations
 
-import argparse
 import hashlib
-import json
 import modulefinder
-import shutil
-import subprocess
 import sys
 import sysconfig
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
-from typing import Final, Literal
+from typing import Final
 
 REPO: Final = Path(__file__).resolve().parents[1]
-if __package__ in (None, "") and str(REPO) not in sys.path:
-    sys.path.insert(0, str(REPO))
-
-from scripts import debian_packages  # noqa: E402
-
-
-@dataclass(frozen=True, slots=True)
-class ClosurePolicy:
-    name: Literal["initrd", "bootstrapper", "player"]
-    roots: tuple[str, ...]
-    forbidden: tuple[str, ...]              # top-level names, or dotted first-party modules/packages
-    third_party: Mapping[str, str]          # import root -> Debian package; never hand-written
-    # import root -> vendored distribution (scripts/vendored_packages.py), staged beside the closure
-    vendored: Mapping[str, str] = MappingProxyType({})
-
-
-# The ONE forbidden policy for the initramfs: written into the manifest; the verifier reads it.
-INITRD_POLICY: Final = ClosurePolicy(
-    "initrd", ("appliance.netboot_init",),
-    ("player", "central", "media", "zeroconf", "ifaddr", "gi"), MappingProxyType({}))
-BOOTSTRAPPER_POLICY: Final = ClosurePolicy(
-    "bootstrapper", ("appliance.provision", "appliance.os_agent",
-                     "appliance.app_launcher", "appliance.app_proof_service"),
-    ("central", "media"),
-    debian_packages.import_table("bootstrapper"))
-PLAYER_POLICY: Final = ClosurePolicy(
-    "player", ("player.service",), ("central", "media", "appliance"),
-    debian_packages.import_table("player"))
-POLICIES: Final[Mapping[str, ClosurePolicy]] = MappingProxyType(
-    {policy.name: policy for policy in (INITRD_POLICY, BOOTSTRAPPER_POLICY, PLAYER_POLICY)})
-INITRD_ROOTS: Final = INITRD_POLICY.roots
-INITRD_FORBIDDEN: Final = INITRD_POLICY.forbidden
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,18 +41,9 @@ class Closure:
     digest: str                         # sha256 over (path, content) pairs, for logs and cache keys
 
 
-@dataclass(frozen=True, slots=True)
-class Manifest:
-    """What the build recorded about the closure it shipped, read back by the verifier."""
-    modules: tuple[str, ...]
-    files: tuple[str, ...]
-    forbidden: tuple[str, ...]
-    digest: str
-
-
 class ClosureError(Exception):
-    """An undeclared third-party import, a forbidden package, or a staged tree that does not
-    import on its own."""
+    """An undeclared third-party import, a forbidden package, or a module that does not
+    exist."""
 
 
 def search_path() -> list[str]:
@@ -108,11 +58,16 @@ def first_party_packages(repo: Path) -> tuple[str, ...]:
     return tuple(sorted(path.parent.name for path in repo.glob("*/__init__.py")))
 
 
-class _Finder(modulefinder.ModuleFinder):
+class Finder(modulefinder.ModuleFinder):
     """modulefinder that scans first-party code only and remembers which module's code first
     reached each module, so an error names the importer and not just the import. A module
     outside `first_party` is still found and loaded (so it is judged as an import of the
-    first-party code that reached it), but its own imports are not followed."""
+    first-party code that reached it), but its own imports are not followed.
+
+    `edges` holds every direct import a first-party module's code makes, found or not, as
+    (importer, imported) dotted names: the absolute name of each import statement (a relative
+    one resolved against the importer), each ancestor package of it (importing `a.b.c` imports
+    `a` and `a.b`), and each `from` name that is a module found under it."""
 
     def __init__(self, path: list[str], first_party: frozenset[str],
                  namespaces: Mapping[str, str] = MappingProxyType({})) -> None:
@@ -120,6 +75,7 @@ class _Finder(modulefinder.ModuleFinder):
         self.first_party = first_party | frozenset(namespaces)
         self.namespaces = namespaces          # top-level PEP 420 package -> its one directory
         self.importer: dict[str, str] = {}
+        self.edges: set[tuple[str, str]] = set()
         self._scanning: list[str] = []
 
     def find_module(self, name, path, parent=None):
@@ -148,6 +104,24 @@ class _Finder(modulefinder.ModuleFinder):
         finally:
             self._scanning.pop()
 
+    def _safe_import_hook(self, name, caller, fromlist, level=-1):
+        # Every import statement of scanned (first-party) code passes here; `caller` is None for
+        # `from . import x`, which modulefinder hands on as an absolute import of the parent.
+        importer = self._scanning[-1] if self._scanning else None
+        super()._safe_import_hook(name, caller, fromlist, level)
+        if importer is None:
+            return
+        if level > 0:
+            try:
+                parent = self.determine_parent(caller, level)
+            except (ImportError, KeyError):
+                return
+            name = f"{parent.__name__}.{name}" if name else parent.__name__
+        parts = name.split(".")
+        self.edges.update((importer, ".".join(parts[:end])) for end in range(1, len(parts) + 1))
+        self.edges.update((importer, f"{name}.{sub}") for sub in fromlist or ()
+                          if f"{name}.{sub}" in self.modules)
+
     def importers(self, name: str) -> str:
         if name in self.badmodules:
             return ",".join(sorted(self.badmodules[name])) or "?"
@@ -169,10 +143,13 @@ def _names_a_module(repo: Path, dotted: str) -> bool:
 
 def compute_closure(roots: Sequence[str], *, repo: Path, first_party: Sequence[str],
                     forbidden: Sequence[str] = (),
-                    third_party: Mapping[str, str] = MappingProxyType({})) -> Closure:
+                    third_party: Mapping[str, str] | None = MappingProxyType({})) -> Closure:
     """The first-party modules `roots` import, directly or not, at module level or inside a
     function. A top-level name in `third_party` is allowed and recorded in `third_party` (its
-    own imports are the Debian package's business, as the stdlib's are the interpreter's).
+    own imports are the Debian package's business, as the stdlib's are the interpreter's);
+    `third_party=None` allows and records every top-level name that is neither first-party nor
+    stdlib, for a caller whose third-party imports another check judges (the build's import
+    check judges each against its package's Depends).
     Raises ClosureError naming the importer and the import when the closure reaches a top-level
     name that is neither first-party, stdlib nor declared, a first-party module that does not
     exist, or any name under `forbidden`. A `forbidden` entry matches a module that equals it or
@@ -184,8 +161,13 @@ def compute_closure(roots: Sequence[str], *, repo: Path, first_party: Sequence[s
         if "." in entry and entry.partition(".")[0] in first_party and not _names_a_module(
                 repo, entry):
             raise ClosureError(f"forbidden entry {entry} names no module under {repo}")
-    declared, reached_third_party = frozenset(third_party), set()
-    finder = _Finder([str(repo), *search_path()], first_party)
+    declared, reached_third_party = frozenset(third_party or ()), set()
+
+    def allowed(top: str) -> bool:
+        return top in declared or (third_party is None and top not in first_party
+                                   and top not in sys.stdlib_module_names)
+
+    finder = Finder([str(repo), *search_path()], first_party)
     for root in roots:
         try:
             finder.import_hook(root)
@@ -201,7 +183,7 @@ def compute_closure(roots: Sequence[str], *, repo: Path, first_party: Sequence[s
                            f"{_forbidden_entry(name, forbidden)} is forbidden here")
     for name in sorted(finder.modules):
         top = name.partition(".")[0]
-        if top in declared:
+        if allowed(top):
             reached_third_party.add(top)
         elif top not in first_party and top not in sys.stdlib_module_names:
             raise ClosureError(f"{finder.importers(name)} imports {name}, which is neither "
@@ -218,7 +200,7 @@ def compute_closure(roots: Sequence[str], *, repo: Path, first_party: Sequence[s
             if name in missing:
                 raise ClosureError(f"{finder.importers(name)} imports {name}, which does not "
                                    "exist")
-        elif top in declared:
+        elif allowed(top):
             reached_third_party.add(top)
         elif top not in sys.stdlib_module_names:
             raise ClosureError(f"{finder.importers(name)} imports {name}, which is neither "
@@ -244,7 +226,7 @@ def first_party_files(roots: Sequence[str], *, repo: Path,
     count as first-party packages. Raises ClosureError for a root or a first-party module that
     does not exist."""
     first_party = frozenset(first_party_packages(repo)) | frozenset(namespaces)
-    finder = _Finder([str(repo), *search_path()], first_party,
+    finder = Finder([str(repo), *search_path()], first_party,
                      MappingProxyType({name: str(repo / name) for name in namespaces}))
     for root in roots:
         try:
@@ -259,188 +241,3 @@ def first_party_files(roots: Sequence[str], *, repo: Path,
     return tuple(sorted(Path(module.__file__).resolve().relative_to(repo.resolve())
                         for name, module in finder.modules.items()
                         if name.partition(".")[0] in first_party and module.__file__))
-
-
-def stage(closure: Closure, *, repo: Path, into: Path) -> None:
-    """Copy each closure file to the same repo-relative path under `into`."""
-    for path in closure.files:
-        target = into / path
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(repo / path, target)
-        target.chmod(0o644)
-
-
-def write_manifest(closure: Closure, path: Path, *, forbidden: Sequence[str]) -> None:
-    path.write_text(json.dumps({
-        "modules": list(closure.modules),
-        "files": [file.as_posix() for file in closure.files],
-        "forbidden": list(forbidden),
-        "digest": closure.digest,
-    }, indent=2) + "\n")
-
-
-def read_manifest(path: Path) -> Manifest:
-    """The manifest `write_manifest` wrote; ValueError if it is not one."""
-    document = json.loads(path.read_text())
-    try:
-        manifest = Manifest(tuple(document["modules"]), tuple(document["files"]),
-                            tuple(document["forbidden"]), document["digest"])
-    except (KeyError, TypeError) as error:
-        raise ValueError(f"not a closure manifest: {error}") from None
-    if not all(isinstance(value, str) for value in
-               (*manifest.modules, *manifest.files, *manifest.forbidden, manifest.digest)):
-        raise ValueError("not a closure manifest: a non-string entry")
-    return manifest
-
-
-def _declared_imports(policy: ClosurePolicy) -> Mapping[str, str]:
-    """Every third-party import root `policy` allows: its Debian and its vendored tables."""
-    return MappingProxyType({**policy.third_party, **policy.vendored})
-
-
-def closure_for(policy: ClosurePolicy, *, repo: Path = REPO) -> Closure:
-    """The closure of `policy`'s roots over `repo`, under its forbidden list and both its
-    third-party tables (recorded together in Closure.third_party)."""
-    return compute_closure(policy.roots, repo=repo, first_party=first_party_packages(repo),
-                           forbidden=policy.forbidden, third_party=_declared_imports(policy))
-
-
-def initrd_closure(repo: Path = REPO) -> Closure:
-    """Stage 1's closure under the initramfs policy."""
-    return closure_for(INITRD_POLICY, repo=repo)
-
-
-def unreached_imports(closure: Closure, policy: ClosurePolicy) -> tuple[str, ...]:
-    """Declared import roots (policy.third_party and policy.vendored keys) the closure never
-    reached, sorted. The builders and the every-PR test refuse a non-empty result: a stale
-    declaration would put an unused package on the base and in Depends, or an unused wheel in a
-    launcher. With compute_closure's refusal this makes closure.third_party ==
-    set(_declared_imports(policy)) for every .deb."""
-    return tuple(sorted(set(_declared_imports(policy)) - set(closure.third_party)))
-
-
-def entry_point(module: str) -> bytes:
-    """The generated __main__.py: runpy.run_module(<module>, run_name="__main__",
-    alter_sys=True), so the module's own `if __name__ == "__main__"` stays the entry."""
-    return (f'"""Generated by scripts/module_closure.py: runs {module} as __main__."""\n'
-            "import runpy\n\n"
-            f'runpy.run_module({module!r}, run_name="__main__", alter_sys=True)\n').encode()
-
-
-def stage_application(closure: Closure, policy: ClosurePolicy, *, repo: Path,
-                      into: Path) -> None:
-    """stage() the closure under `into`, then write into/__main__.py (entry_point of
-    policy.roots[0]) and into/closure.json (write_manifest). `into` is the private install dir
-    inside a .deb staging tree, run as `python3 -I -B <into>` (a PEP 441 directory
-    application: the interpreter puts `into` first on sys.path)."""
-    root = policy.roots[0]
-    if root not in closure.modules:
-        raise ClosureError(f"the closure does not contain {policy.name}'s root {root}")
-    stage(closure, repo=repo, into=into)
-    main_file, manifest = into / "__main__.py", into / "closure.json"
-    main_file.write_bytes(entry_point(root))
-    write_manifest(closure, manifest, forbidden=policy.forbidden)
-    for path in (main_file, manifest):
-        path.chmod(0o644)
-
-
-@dataclass(frozen=True, slots=True)
-class ImportReport:
-    imported: tuple[str, ...]
-    unavailable: tuple[tuple[str, str], ...]   # (module, third-party root not installed here)
-
-
-_SITE_PACKAGES_PROBE: Final = "import json, site; print(json.dumps(site.getsitepackages()))"
-_IMPORT_PROBE: Final = """\
-import importlib, json, sys
-into, modules, third_party, site_packages = sys.argv[1], *map(json.loads, sys.argv[2:])
-sys.path[:0] = [into]
-sys.path += [entry for entry in site_packages if entry not in sys.path]
-report = {"imported": [], "unavailable": [], "failed": []}
-for name in modules:
-    try:
-        module = importlib.import_module(name)
-    except ModuleNotFoundError as error:
-        root = (error.name or "").partition(".")[0]
-        if root in third_party:
-            report["unavailable"].append([name, root])
-        else:
-            report["failed"].append(f"{name}: {type(error).__name__}: {error}")
-        continue
-    except Exception as error:
-        report["failed"].append(f"{name}: {type(error).__name__}: {error}")
-        continue
-    origin = getattr(module, "__file__", None) or ""
-    if not origin.startswith(into.rstrip("/") + "/"):
-        report["failed"].append(f"{name}: imported from {origin or 'no file'}, not {into}")
-    else:
-        report["imported"].append(name)
-print(json.dumps(report))
-"""
-
-
-def isolated_import(into: Path, modules: Sequence[str], *, policy: ClosurePolicy,
-                    python: Path = Path(sys.executable)) -> ImportReport:
-    """Import each module in a fresh `python -I -S -B` whose sys.path is `into`, the stdlib and
-    the interpreter's site-packages directories (asked of the interpreter itself; `-S` means no
-    .pth processing, so an editable install of the repo cannot mask a missing file), and assert
-    each module's __file__ is under `into`. A ModuleNotFoundError for a policy.third_party root
-    is reported as unavailable (the host lacks it; the device root leg has it). Any other
-    failure raises ClosureError. `-B` keeps the staged tree free of bytecode."""
-    into = into.resolve()
-    try:
-        site_packages = subprocess.run(
-            [str(python), "-I", "-c", _SITE_PACKAGES_PROBE],
-            check=True, capture_output=True, text=True, timeout=60).stdout
-        result = subprocess.run(
-            [str(python), "-I", "-S", "-B", "-c", _IMPORT_PROBE, str(into),
-             json.dumps(list(modules)), json.dumps(sorted(policy.third_party)), site_packages],
-            check=True, capture_output=True, text=True, timeout=300, cwd=into)
-        report = json.loads(result.stdout)
-    except (subprocess.SubprocessError, OSError, ValueError) as error:
-        detail = getattr(error, "stderr", None) or error
-        raise ClosureError(f"isolated import under {python} did not run: {detail}") from None
-    if report["failed"]:
-        raise ClosureError(f"{policy.name} tree {into} does not import on its own: "
-                           + "; ".join(report["failed"]))
-    return ImportReport(tuple(report["imported"]),
-                        tuple((module, root) for module, root in report["unavailable"]))
-
-
-def main(argv: Sequence[str] | None = None) -> int:
-    """--policy {initrd,bootstrapper,player} (default initrd) --root M (repeatable) --stage DIR
-    --manifest FILE --digest; exit 1 with the offending import named. --digest prints only the
-    closure's digest (a cache key)."""
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--policy", choices=tuple(POLICIES), default=INITRD_POLICY.name)
-    parser.add_argument("--root", action="append", default=[], metavar="MODULE",
-                        help="a root module (repeatable; default: the policy's roots)")
-    parser.add_argument("--repo", type=Path, default=REPO)
-    parser.add_argument("--stage", type=Path, help="copy the closure's files under DIR")
-    parser.add_argument("--manifest", type=Path, help="write the closure manifest to FILE")
-    parser.add_argument("--digest", action="store_true", help="print only the closure's digest")
-    args = parser.parse_args(argv)
-    policy = POLICIES[args.policy]
-    try:
-        closure = compute_closure(args.root or policy.roots, repo=args.repo,
-                                  first_party=first_party_packages(args.repo),
-                                  forbidden=policy.forbidden,
-                                  third_party=_declared_imports(policy))
-    except ClosureError as error:
-        print(f"module_closure: {error}", file=sys.stderr)
-        return 1
-    if args.stage is not None:
-        stage(closure, repo=args.repo, into=args.stage)
-    if args.manifest is not None:
-        write_manifest(closure, args.manifest, forbidden=policy.forbidden)
-    if args.digest:
-        print(closure.digest)
-        return 0
-    for module in closure.modules:
-        print(module)
-    print(f"module_closure: {len(closure.modules)} modules, sha256 {closure.digest}")
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())

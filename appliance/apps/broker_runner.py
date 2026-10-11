@@ -5,12 +5,19 @@ import argparse
 import http.client
 import subprocess
 import time
+from collections.abc import Callable
 from pathlib import Path
 from uuid import UUID, uuid4
 
 from appliance.apps.broker import AppEffectBroker, ColdStart
+from appliance.apps.descriptors import DESCRIPTOR_SAMPLE_MS, descriptor_use
 from appliance.apps.import_worker import RootImportWorker
-from appliance.apps.lifecycle_storage import FileEffectJournal, primitive, running_from
+from appliance.apps.lifecycle_storage import (
+    FileEffectJournal,
+    FileRelaunchPacing,
+    primitive,
+    running_from,
+)
 from appliance.apps.online_runner import OnlineRunner
 from appliance.apps.probe import (
     RECOVERY_ACKNOWLEDGED,
@@ -24,6 +31,7 @@ from appliance.central_session.http import NodeHTTP
 from appliance.central_session.session import NodeSession
 from appliance.feed import Feed, answer_feed_read
 from appliance.feed_socket import FEED_READERS, FEEDS_GROUP, FeedListener
+from appliance.kernel.app_facts import APP_DESCRIPTORS, APP_EXITED, APP_STARTED
 from appliance.kernel.boot_store import BootStore
 from appliance.kernel.clock import boot_id, boottime_ms
 from appliance.node.app_link import BrokerLinkService, deliver_app_link, owed_relink
@@ -77,15 +85,21 @@ def feed_listener(feed: Feed, path: Path = FEED_SOCKET, *, owner_uid: int = 0,
 class BrokerLoop:
     """One main-loop turn. Every blocking call (systemctl, HTTP) lives here, never in the
     probe thread; the loop publishes the current app run to the probe thread each turn and
-    alone carries out a kill the thread found due."""
+    alone carries out a kill the thread found due. Every known turn also reports the run's
+    start and exit and samples its open files (`appliance.kernel.app_facts`), Central session
+    or not."""
 
     def __init__(self, *, broker, online, store, session, driver, links, probes: ProbeThread,
-                 feeds: FeedListener):
+                 feeds: FeedListener, clock: Callable[[], int] = boottime_ms,
+                 proc: Path = Path("/proc")):
         self.broker, self.online, self.store, self.session = broker, online, store, session
         self.driver, self.links, self.probes, self.feeds = driver, links, probes, feeds
+        self.clock, self.proc = clock, proc
         self.last_online_poll = 0.0
         self.withheld: tuple[AppRunKey, str] | None = None  # last kill_withheld (run, reason)
         self.killed: AppRunKey | None = None  # the run this broker killed: never signalled twice
+        self.last_run: AppRunKey | None = None  # the run the last known turn saw
+        self.sampled_at: int | None = None  # when the current run's descriptors were sampled
 
     def turn(self) -> None:
         self.probes.check()
@@ -101,6 +115,7 @@ class BrokerLoop:
         known, current, granted = self._observe()
         run = None if current is None else AppRunKey.of(current)
         if known:
+            self._report_run(run)
             # After online.broker.service(), which may have acknowledged a recovery this turn.
             armed = self._recovery_may_be_armed()
             self.probes.publish_run(run, recovery_may_be_armed=armed)
@@ -129,6 +144,30 @@ class BrokerLoop:
             except (OSError, ValueError, http.client.HTTPException):
                 if self.store.failed:
                     raise
+
+    def _report_run(self, run: AppRunKey | None) -> None:
+        """The run's start and exit, once each, and its open files every DESCRIPTOR_SAMPLE_MS:
+        node-feed facts for the health judge (`appliance.kernel.app_facts`)."""
+        feed = self.probes.feed
+        if run != self.last_run:
+            if self.last_run is not None:
+                feed.append(APP_EXITED, {"run": self.last_run.document()})
+            if run is not None:
+                feed.append(APP_STARTED, {"run": run.document()})
+            self.last_run, self.sampled_at = run, None
+        if run is None:
+            return
+        now = self.clock()
+        if self.sampled_at is not None and now - self.sampled_at < DESCRIPTOR_SAMPLE_MS:
+            return
+        self.sampled_at = now
+        try:
+            use = descriptor_use(self.proc, run.pid, run.start_ticks)
+        except OSError:
+            return
+        if use is not None:
+            feed.append(APP_DESCRIPTORS, {"run": run.document(), "open": use.open,
+                                          "soft_limit": use.soft_limit})
 
     def _recovery_may_be_armed(self) -> bool:
         try:
@@ -216,9 +255,12 @@ def main() -> None:
                       policy={"offer_id": value["offer_id"], "environment": value["environment"]})
     measured = {key: value[key] for key in ("base_abi", "graphics_abi", "plugin_abi")}
     driver = SystemdAppProcessDriver(Path("/run/photo-wall-node-storage/app-roots"), store, **measured)
+    # One pacing for the app unit, shared by the cold-start and the online owner.
+    pacing = FileRelaunchPacing(store)
     broker = AppEffectBroker(boot_id=kernel_boot_id, offer_id=UUID(value["offer_id"]),
                             authorized_environment=environment,
-                            journal=FileEffectJournal(store), driver=driver)
+                            journal=FileEffectJournal(store), driver=driver,
+                            pacing=pacing, now_ms=boottime_ms)
     # Independently scoped broker credential; no HostCore credential or reboot port.
     configuration = Path("/run/photo-wall-node/broker.json")
     status = configuration.lstat()
@@ -231,7 +273,8 @@ def main() -> None:
                           serial=endpoint["serial"], offer_id=UUID(value["offer_id"]),
                           kernel_boot_id=kernel_boot_id)
     online = OnlineRunner(store, driver, session, RecoveryClient(),
-                          worker=RootImportWorker(store, **measured))
+                          worker=RootImportWorker(store, **measured), pacing=pacing,
+                          now_ms=boottime_ms)
     feed = Feed(FEED_CAPACITY)
     probes = ProbeThread(feed)
     links = BrokerLinkService(driver, session, Path("/run/photo-wall-app-proof/app-link.sock"),

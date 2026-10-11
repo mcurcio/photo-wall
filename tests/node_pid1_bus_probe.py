@@ -6,12 +6,13 @@ and imported by the bus integration tests. Stdlib only at import.
 127.0.0.1:<port>, and every address listening on that TCP port in /proc/net/tcp and /proc/net/tcp6.
 
 `birth` prints {"birth", "base", "epoch"}: the host component's `birth` and `base` from its state
-bucket and that bucket's epoch, read with the nats-py and `nodeapi` HostCore's launcher ships
-(HOST_CORE first on sys.path), so it also proves the package's copy imports on the Node's python3.
+bucket and that bucket's epoch, read with python3-nats and the `nodeapi` HostCore's launcher runs
+(its installed PATH first on sys.path, `host_core_path`), so it also proves the packages' copy
+imports on the Node's python3.
 
 `wall` prints {"value"}: as every wall reader does at attach, it creates the Node's WALL mirror when it
 is absent (`nodeapi.buffers.wall_mirror_config`, create only), then reads the mirror's latest value of
-the wall key WALL_KEY (None while the mirror holds none), with HostCore's shipped nats-py and nodeapi.
+the wall key WALL_KEY (None while the mirror holds none), with python3-nats and HostCore's nodeapi.
 
 `fill` prints {"sent", "ended"}: with the same nats-py, it fills a FILL_BYTES memory stream with
 FILL_MESSAGE-byte messages, up to FILL_PASSES times over, until the server ends the connection
@@ -19,6 +20,7 @@ FILL_MESSAGE-byte messages, up to FILL_PASSES times over, until the server ends 
 """
 from __future__ import annotations
 
+import ast
 import ipaddress
 import json
 import socket
@@ -26,7 +28,7 @@ import sys
 from pathlib import Path
 
 LISTEN = "0A"   # TCP_LISTEN in /proc/net/tcp's `st` column
-HOST_CORE = "/usr/lib/photo-wall-host-core"
+HOST_CORE = Path("/usr/lib/photo-wall/node/host-core/__main__.py")   # its launcher
 HOST_STATE = "KV_state_host"
 # The induced OOM's stream: 8 MiB of the store's free room beside the host line, in small messages,
 # whose heap per stored byte is the largest (erratum E-E3C-S2-1).
@@ -35,6 +37,15 @@ FILL_BYTES = 8 * 1024 * 1024
 FILL_MESSAGE = 1024
 FILL_PASSES = 4
 WALL_KEY = "timing"   # the one key of Central's placeholder wall table (central.node_bus_wiring.WALL_TABLE)
+
+
+def host_core_path() -> None:
+    """HostCore's launcher PATH (its literal constant, read without running it) first on
+    sys.path, when the launcher is installed (inside the PID1 container; the bus integration
+    tests import this module on the host)."""
+    if HOST_CORE.is_file():
+        sys.path[:0] = next(ast.literal_eval(node.value) for node in ast.parse(HOST_CORE.read_text()).body
+                            if isinstance(node, ast.AnnAssign) and node.target.id == "PATH")
 
 
 def server_info(port: int, host: str = "127.0.0.1", timeout: float = 5.0) -> dict:
@@ -81,8 +92,8 @@ async def host_state(client) -> dict:
 
 
 def host_birth(port: int) -> dict:
-    """host_state of the bus on 127.0.0.1:<port>, with HostCore's shipped nats-py and nodeapi."""
-    sys.path.insert(0, HOST_CORE)
+    """host_state of the bus on 127.0.0.1:<port>, with python3-nats and HostCore's nodeapi."""
+    host_core_path()
     import asyncio
 
     import nats
@@ -100,8 +111,8 @@ def host_birth(port: int) -> dict:
 
 def wall(port: int) -> dict:
     """{"value": the Node's WALL mirror's latest WALL_KEY as text, or None}, the mirror created first
-    when it is absent, on the bus on 127.0.0.1:<port>, with HostCore's shipped nats-py and nodeapi."""
-    sys.path.insert(0, HOST_CORE)
+    when it is absent, on the bus on 127.0.0.1:<port>, with python3-nats and HostCore's nodeapi."""
+    host_core_path()
     import asyncio
 
     import nats
@@ -130,7 +141,7 @@ def wall(port: int) -> dict:
 def fill(port: int) -> dict:
     """Fill a FILL_BYTES memory stream on the bus on 127.0.0.1:<port> until the server ends the
     connection or FILL_PASSES times its bytes are sent: {"sent": messages, "ended": error type or None}."""
-    sys.path.insert(0, HOST_CORE)
+    host_core_path()
     import asyncio
 
     import nats

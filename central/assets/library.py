@@ -1,19 +1,19 @@
 """Library thumbnails on the one asset layer (console DDD §38 shape A, §40, G10).
 
-A thumbnail may be referenced, fetched or served only while it is SERVABLE: a member of a live
-preview, which `servable` reads from current data. `resolve` is the thumbnail route's catalog:
+A thumbnail may be referenced, fetched or served only while it is SERVABLE: a row of a wanted
+pool, which `servable` reads from current data (`PgPhotoLibrary.pool_thumbnail`). `resolve` is the thumbnail route's catalog:
 a servable id is referenced and resolved to its one fetch job, which the route reads through
 its own dedicated `AssetReader`; any other id resolves to None, and nothing is written or
-published for it. `prefetch` references and publishes a just-completed preview's members.
+published for it. `prefetch` references and publishes servable ids ahead of their first read.
 
 Every reference carries the same reserved locator: the library's address is held only by the
-media worker (R22), whose injected `ThumbnailOrigin` finds the item from the preview's stored
-member, so no handler reads this locator. A thumbnail is keyed by its original's identity, not
+media worker (R22), whose injected `ThumbnailOrigin` finds the item from its pool row, so no
+handler reads this locator. A thumbnail is keyed by its original's identity, not
 its own bytes (`AssetKind.keyed_by_content` is False), so the library may regenerate it: after a
 purged cache, a re-production's new bytes replace its produced facts instead of failing for good.
-Its record must not outlive the previews that select it: the media worker's maintenance deletes
-the records (and files) of thumbnails no live preview selects
-(`MediaRepository.maintain_source_previews`), and the next preview starts a fresh record.
+Its record must not outlive the pools that select it: the media worker's maintenance deletes
+the records (and files) of thumbnails no wanted pool row selects (`retire_unwanted`), and the
+next read starts a fresh record.
 """
 
 from __future__ import annotations

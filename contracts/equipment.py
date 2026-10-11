@@ -1,19 +1,16 @@
-"""Equipment-serial identity derivation, shared by the netboot bootstrap
-(appliance/bootstrap.py LinuxOps.device_id) and the flashed-image fallback
+"""Equipment-serial identity derivation, shared by Central's node records
+(central/content_catalog/catalog.py device_id_for_serial) and the Player
 (player/service.py hardware_boot_context) so a given Pi resolves to the SAME
-`device_id` regardless of boot tier (0008: device_id is the immutable serial).
+`device_id` (0008: device_id is the immutable serial).
 """
 
 import hashlib
 import re
 
 MAX_RAW_BYTES = 256
-# Both raw-serial read sites (appliance/bootstrap.py LinuxOps.device_id and
-# player/service.py read_pi_serial) read exactly READ_CAP bytes so an
-# oversized file is detected (raw longer than MAX_RAW_BYTES survives
-# normalization) rather than silently truncated to something that validates.
-# Defined once, here, so a future one-sided edit to either read site cannot
-# desynchronize the netboot/flash device_id derivations from each other.
+# A raw-serial read site reads exactly READ_CAP bytes so an oversized file is
+# detected (raw longer than MAX_RAW_BYTES survives normalization) rather than
+# silently truncated to something that validates.
 READ_CAP = MAX_RAW_BYTES + 1
 _NORMALIZED_PATTERN = re.compile(rb"[a-z0-9-]+")
 

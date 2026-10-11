@@ -236,8 +236,8 @@ def test_g12_omits_retired_boxes_and_lists_active_ones_without_a_boot(registry):
     registry.retire(retired)
     read = NodeObservations(sessions).fleet_hosts()
     assert _device(read, retired_id) is None
-    assert _device(read) is not None
-    assert _device(read, spare_id) == {"device_id": spare_id, "host": None,
+    assert _device(read)["serial"] == SERIAL  # the box's claim at boot, for the console's names
+    assert _device(read, spare_id) == {"device_id": spare_id, "serial": None, "host": None,
                                        "previous_boot_received_at": None, "intake_full": False,
                                        "preparation_intake_full": False,
                                        "boot": None, "facts": None, "preparation": None,
@@ -304,10 +304,6 @@ def test_g12_route_access(registry):
         response = client.get("/v1/operator/node/hosts", headers={"Authorization": "Bearer " + ADMIN})
         assert response.status_code == 200, response.text
         assert _device(response.json())["host"]["metrics"][0]["name"] == "soc_temperature"
-    app = create_app(registry.db, registry.clock, ADMIN)
-    with TestClient(app) as client:
-        response = client.get("/v1/operator/node/hosts", headers={"Authorization": "Bearer " + ADMIN})
-        assert response.status_code == 503 and response.json()["error"] == "node_control_disabled"
 
 
 def test_g12_reads_one_producers_newest_sample_through_the_primary_key(registry):

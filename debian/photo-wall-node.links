@@ -1,0 +1,1 @@
+usr/lib/systemd/system/photo-wall-node.target etc/systemd/system/multi-user.target.wants/photo-wall-node.target

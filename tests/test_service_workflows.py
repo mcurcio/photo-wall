@@ -49,7 +49,7 @@ def test_shared_producer_queues_all_callers_and_requires_published_output():
 
 def test_existing_required_jobs_fail_if_shared_preparation_fails():
     for name, jobs in [('checks.yml', ['image-smoke', 'linux-media']),
-                       ('software-e2e.yml', ['two-players-three-outputs', 'immich-adapter'])]:
+                       ('software-e2e.yml', ['two-players-three-outputs', 'photo-sources'])]:
         workflow = (WORKFLOWS / name).read_text()
         for job in jobs:
             body = re.split(r'^  [\w-]+:\n', workflow.split(f'  {job}:\n')[1],
@@ -99,7 +99,8 @@ def test_the_tier_jobs_partition_the_suite_and_fail_closed():
         in workflow
     selections = {job: _job(workflow, job) for job in ('unit', 'db', 'browser')}
     assert '-m "not db and not browser" -n 4 --dist worksteal' in selections['unit']
-    assert '-m db -n 4 --dist loadgroup' in selections['db']
+    # The db leg leaves the real-Immich tests to software-e2e.yml's photo-sources job.
+    assert '-m "db and not immich" -n 4 --dist loadgroup' in selections['db']
     assert ' tests/browser -n 4 --browser chromium' in selections['browser']
     assert '["status"] != "passed")' in selections['browser']
     for job, body in selections.items():
@@ -109,9 +110,6 @@ def test_the_tier_jobs_partition_the_suite_and_fail_closed():
     for job in ('db', 'browser'):
         assert 'compose.test-database.yml up -d --wait' in selections[job]
     assert 'PHOTO_WALL_RELEASE_TOKEN' in selections['db']
-    for job in ('unit', 'db'):  # both tiers hold tests of the published Player wire
-        assert 'published_player_wire.py prepare' in selections[job]
-        assert 'PHOTO_WALL_PUBLISHED_PLAYER_WIRE_DIR' in selections[job]
     assert '--env PHOTO_WALL_TEST_REQUIRE_DATABASE --env CI' in selections['browser']
 
 
@@ -130,17 +128,37 @@ def test_the_console_catalog_walk_is_its_own_leg_in_the_browser_image_the_script
     assert re.search(r'timeout-minutes: [1-8]\n', walk)
 
 
-def test_the_wall_scenario_keeps_every_immich_adapter_check_in_a_parallel_job():
-    """The scenario jobs start a set-up fixture only; the full adapter run is its own job."""
+def test_the_named_immich_tests_run_in_their_own_job_against_one_published_fixture():
+    """photo-sources starts one fixture, published on the runner's loopback, and runs every
+    `immich` test against it (with the test database); the wall scenario's fixture stays
+    unpublished, and the retired adapter job is gone."""
     workflow = (WORKFLOWS / 'software-e2e.yml').read_text()
+    assert '\n  immich-adapter:\n' not in workflow and 'immich_runtime verify' not in workflow
     scenario = _job(workflow, 'two-players-three-outputs')
-    adapter = _job(workflow, 'immich-adapter')
-    assert '--keep --setup-only' in scenario
-    assert 'scripts.immich_fixture run' in adapter
-    assert '--setup-only' not in adapter and '--keep' not in adapter
+    photos = _job(workflow, 'photo-sources')
+    assert '--keep --setup-only' in scenario and '--publish' not in scenario
+    assert photos.count('scripts.immich_fixture run') == 1
+    assert '--keep --setup-only --publish' in photos
+    assert '--base-image "$WORKER_IMAGE"' in photos
+    assert 'runs-on: ubuntu-24.04-arm\n' in photos and 'timeout-minutes: 20\n' in photos
+    run = photos.split('name: Run the named Immich tests', 1)[1].split('\n      - ', 1)[0]
+    assert 'PHOTO_WALL_IMMICH_FIXTURE: ${{ runner.temp }}/immich-fixture' in run
+    assert "PHOTO_WALL_TEST_REQUIRE_DATABASE: '1'" in run
+    assert 'scripts/test_local.py' in run and '-m immich -n 4 --dist loadgroup' in run
+    order = [photos.index(step) for step in (
+        'software-e2e-setup', 'apt-get install -y --no-install-recommends ffmpeg',
+        'compose.test-database.yml up -d --wait', 'scripts.immich_fixture run',
+        'name: Run the named Immich tests', 'scripts.immich_fixture cleanup')]
+    assert order == sorted(order)
+    cleanup = photos.split('name: Remove the disposable Immich fixture', 1)[1]
+    assert cleanup.startswith('\n        if: always()')
     setup = (ACTIONS / 'software-e2e-setup/action.yml').read_text()
-    assert setup.index('Prefetch the Immich fixture images') < setup.index(
-        'Build or restore the central image')
+    # One signed-in, retrying pull of the fixture images per job, overlapping the image builds.
+    prefetch = setup.index('Prefetch the Immich fixture images')
+    assert setup.index('uv sync --frozen') < setup.index('docker login ghcr.io') < prefetch
+    assert prefetch < setup.index('Build or restore the central image')
+    assert '.venv/bin/python -m scripts.immich_fixture prefetch' in setup
+    assert not re.search(r'docker (compose .*)?pull', setup)
 
 
 def test_the_wall_scenario_jobs_run_every_fault_segment_exactly_once():
@@ -153,11 +171,29 @@ def test_the_wall_scenario_jobs_run_every_fault_segment_exactly_once():
     covered = [segment for part in parts for segment in SCENARIOS[part]]
     assert sorted(covered) == sorted(set(covered)) == sorted(SCENARIOS['full'])
     assert SCENARIOS['full'] == tuple(FAULT_SEGMENTS)
-    for job in ('two-players-three-outputs', 'immich-adapter'):
+    for job in ('two-players-three-outputs', 'photo-sources'):
         body = _job(workflow, job)
         assert body.count(E2E_SETUP) == 1, job
         for repeated in ('uv sync', 'docker login', 'setup-buildx-action', 'service-image'):
             assert repeated not in body, (job, repeated)
+
+
+def test_the_wall_scenario_runs_the_player_from_this_runs_app_image():
+    """The Players run from the app root node-components.yml built for the plan's revision
+    (decision 0019), never from a wheelhouse built beside it."""
+    workflow = (WORKFLOWS / 'software-e2e.yml').read_text()
+    scenario = _job(workflow, 'two-players-three-outputs')
+    assert 'name: photo-wall-node-components-${{ inputs.revision }}' in scenario
+    assert '--app-image "$RUNNER_TEMP/node-components/app.squashfs"' in scenario
+    assert 'REVISION: ${{ inputs.revision }}' in scenario and '--revision "$REVISION"' in scenario
+    # The roots container that unpacks the image comes from node-components' build cache.
+    assert 'PHOTO_WALL_NODE_BUILDER: ${{ steps.setup.outputs.builder }}' in scenario
+    assert 'PHOTO_WALL_NODE_BUILD_CACHE_FROM: ${{ steps.cache.outputs.from }}' in scenario
+    for retired in ('build_player', 'wheelhouse'):
+        assert retired not in workflow, retired
+    job = _job((WORKFLOWS / 'pipeline.yml').read_text(), 'e2e')
+    assert 'needs: [plan, node-components]' in job
+    assert 'revision: ${{ needs.plan.outputs.revision }}' in job
 
 
 def test_the_node_pid1_job_requires_every_real_systemd_scenario_in_parallel():
@@ -176,10 +212,13 @@ def test_the_node_pid1_job_requires_every_real_systemd_scenario_in_parallel():
     assert f"\n  {REQUIRE_VARIABLE}: '1'\n" in workflow
     assert "\n  PHOTO_WALL_TEST_REQUIRE_DATABASE: '1'\n" in workflow
     assert 'compose.test-database.yml up -d --wait' in scenario
-    builds = _job((WORKFLOWS / 'node-components.yml').read_text(), 'build')
-    assert 'runs-on: ubuntu-24.04-arm\n' in builds
-    for builder in ('build_node_components', 'build_node_pid1_fixture'):
-        assert f'.venv/bin/python -m scripts.{builder}' in builds, builder
+    components = (WORKFLOWS / 'node-components.yml').read_text()
+    builds, fixture = _job(components, 'build'), _job(components, 'pid1-fixture')
+    assert 'runs-on: ubuntu-24.04-arm\n' in builds and 'runs-on: ubuntu-24.04-arm\n' in fixture
+    for builder, job in (('debian-packaging/build-root.sh', builds),
+                         ('.venv/bin/python -m scripts.node_release_writer write', builds),
+                         ('tests/node_pid1_fixture/build.sh', fixture)):
+        assert builder in job, builder
         assert builder not in scenario, builder
     components = 'name: photo-wall-node-components-${{ env.REVISION }}'
     assert components in scenario and components in (WORKFLOWS / 'base-image.yml').read_text()
@@ -196,21 +235,6 @@ def test_the_node_pid1_job_requires_every_real_systemd_scenario_in_parallel():
     assert 'uses: ./.github/workflows/node-components.yml' in build
     assert 'revision: ${{ needs.plan.outputs.revision }}' in build
     assert "pid1-fixture: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'node-pid1') }}" in build
-
-
-def test_the_base_probes_run_at_once_and_every_failure_fails_the_step():
-    """The three systemd probes of the built base run concurrently, each in its own work
-    directory (their containers and images carry random names), and the step waits for every
-    one, shows every log and fails when any failed."""
-    workflow = (WORKFLOWS / 'base-image.yml').read_text()
-    step = workflow.split('      - name: Start the Player, the Player payload and the OS-agent')[1]
-    step = step.split('\n      - name: ')[0]
-    works = re.findall(r'--work "\$RUNNER_TEMP/([\w-]+)"', step)
-    assert len(works) == len(set(works)) == 3
-    assert step.count('    probe ') == 3 and '"$@" > "$logs/$name.log" 2>&1 &' in step
-    assert 'for name in player-deb player-payload os-agent; do' in step
-    assert 'wait "${probes[$name]}" || status=$?' in step
-    assert 'if [ "${#failed[@]}" -ne 0 ]; then' in step and 'exit 1' in step
 
 
 def test_a_pull_request_uploads_no_release_artifact_but_keeps_failure_diagnostics():
@@ -233,3 +257,107 @@ def test_linux_media_runs_in_parallel_and_writes_its_cache_only_from_main():
     action = (ACTIONS / 'service-image/action.yml').read_text()
     assert 'uses: ./.github/actions/buildkit-cache' in action
     assert 'write: ${{ inputs.cache-write }}' in action
+
+
+# --- Docker Hub pulls go through the mirror (docs/module-appliance-ci.md, "Docker Hub pulls") ---
+
+MIRROR_ACTION = 'docker-hub-mirror'
+BUILDKIT_MIRROR = ('buildkitd-config-inline: '
+                   '${{ steps.docker-hub-mirror.outputs.buildkitd-config }}\n')
+BUILDKIT_IMAGE = 'driver-opts: image=${{ steps.docker-hub-mirror.outputs.buildkit-image }}\n'
+# A step that reaches Docker: the CLI, Compose, a builder, or an action that builds an image.
+_DOCKER_STEP = re.compile(r'\bdocker\b|\bcompose\b|buildx|build-push-action'
+                          r'|uses: \./\.github/actions/(service-image|software-e2e-setup)\n')
+# Jobs that pull nothing from Docker Hub, so they need no mirror; every other job with steps
+# runs it before its first Docker step, so a new job is red until it does or is listed here.
+WITHOUT_DOCKER_HUB = {
+    'checks.yml': {'static', 'unit', 'node-bus',
+                   'console-catalog'},             # the Playwright image, from mcr.microsoft.com
+    'pipeline.yml': {'plan', 'tested', 'gate',
+                     'seal'},                      # reads and tags ghcr.io images only
+    'base-image.yml': {'build-base-image'},        # runs only the squashfs it built and imported
+}
+
+
+def _steps(body, indent):
+    """The steps of a job or composite action, comment lines dropped (a comment heads the next
+    step, so it would be counted with the one before)."""
+    text = '\n'.join(line for line in body.splitlines() if not line.lstrip().startswith('#'))
+    return re.split(rf'^{indent}- ', text + '\n', flags=re.MULTILINE)[1:]
+
+
+def _workflow_jobs():
+    for workflow in sorted(WORKFLOWS.glob('*.yml')):
+        parts = re.split(r'^  ([\w-]+):\n', workflow.read_text().split('\njobs:\n', 1)[1],
+                         flags=re.MULTILINE)
+        for job, body in zip(parts[1::2], parts[2::2]):
+            if '\n    steps:\n' in body:  # not a reusable-workflow call
+                yield workflow.name, job, body
+
+
+def _first_docker_contact(steps, routed):
+    """'mirror' when a step routing through the mirror comes before any Docker step, 'docker'
+    when a Docker step comes first, None when there is neither."""
+    for step in steps:
+        if any(f'uses: ./.github/actions/{action}\n' in step for action in routed):
+            return 'mirror'
+        if _DOCKER_STEP.search(step):
+            return 'docker'
+    return None
+
+
+def _routed_actions():
+    """The mirror action, and each composite action that runs it before any Docker step."""
+    routed = {MIRROR_ACTION}
+    for action in ACTIONS.glob('*/action.yml'):
+        if _first_docker_contact(_steps(action.read_text(), '    '), {MIRROR_ACTION}) == 'mirror':
+            routed.add(action.parent.name)
+    return routed
+
+
+def test_every_job_that_reaches_docker_hub_runs_the_mirror_before_docker():
+    routed = _routed_actions()
+    assert 'software-e2e-setup' in routed
+    listed = {(name, job) for name, jobs in WITHOUT_DOCKER_HUB.items() for job in jobs}
+    seen = set()
+    for name, job, body in _workflow_jobs():
+        seen.add((name, job))
+        contact = _first_docker_contact(_steps(body, '      '), routed)
+        if (name, job) in listed:
+            assert contact != 'mirror', f'{name}: {job} runs the mirror; drop it from the list'
+        else:
+            assert contact == 'mirror', (
+                f'{name}: {job} must run ./.github/actions/{MIRROR_ACTION} before its first '
+                'Docker step, or be listed as pulling nothing from Docker Hub')
+    assert listed <= seen, listed - seen
+
+
+def test_every_buildx_builder_carries_the_mirror():
+    """A docker-container builder ignores the daemon's mirrors: each gets the action's BuildKit
+    configuration and BuildKit's own image through the mirror (setup-buildx-action otherwise
+    pulls moby/buildkit from Docker Hub), from a mirror step that ran before it."""
+    routed = _routed_actions()
+    sources = [(path, '      ') for path in WORKFLOWS.glob('*.yml')]
+    sources += [(path, '    ') for path in ACTIONS.glob('*/action.yml')]
+    builders = 0
+    for path, indent in sources:
+        for step in _steps(path.read_text(), indent):
+            if 'uses: docker/setup-buildx-action@' in step:
+                builders += 1
+                assert BUILDKIT_MIRROR in step, path
+                assert BUILDKIT_IMAGE in step, path
+    assert builders >= 5  # not vacuous: the five builders today (one is node-builder)
+    for action in ACTIONS.glob('*/action.yml'):
+        if 'docker/setup-buildx-action@' in action.read_text():
+            assert action.parent.name in routed, action
+
+
+def test_no_job_level_image_is_pulled_from_docker_hub():
+    """A job's `container:` or `services:` image is pulled before any step runs, so before the
+    mirror: it must name another registry (mirror.gcr.io/library/<name>@<digest> for a Docker Hub
+    image)."""
+    for workflow in WORKFLOWS.glob('*.yml'):
+        for reference in re.findall(r'^\s+(?:image|container): *([^\s{][^\s]*)$',
+                                    workflow.read_text(), flags=re.MULTILINE):
+            host = reference.split('/', 1)[0]
+            assert '/' in reference and '.' in host and host != 'docker.io', (workflow, reference)

@@ -13,7 +13,6 @@ import {
 } from "./fleetCommands.js";
 import { frameHealth } from "./health.js";
 import { liveRunsFor } from "./join.js";
-import { effectGateFact, NodeRecords, nodeReadsAllowed, useNodeControlValue } from "./nodeControl.js";
 import { currentSessionBoot, useNodeDevice } from "./nodeRead.js";
 import { playerPageHref } from "./players.js";
 import { QualifiedFallback } from "./QualifiedFallback.jsx";
@@ -50,10 +49,10 @@ import {
   keepRow,
   nextReboot,
   playerEpoch,
-  PUT_GATE_CLOSED,
   putConfirmation,
   rolloutMembers,
   rowSettled,
+  SELECT_ALONE,
   stageFollowUp,
   tryWithdrawn,
 } from "./updateWall.js";
@@ -80,7 +79,6 @@ const pausedWords = (deploymentId) => "Paused means this page sends no more rebo
 const KNOWN_PLAYERS = "These are the Players this console knows.";
 const keepScope = (deploymentId) => `${KNOWN_PLAYERS} Select is fleet-wide: any other Pi `
   + `that boots by node path is offered deployment ${deploymentHandle(deploymentId)} at its next boot.`;
-const GATE_CLOSED_KEEP = "Each Player is offered it at its next boot; this page cannot reboot them while the gate is closed.";
 const PUT_UNKNOWN = "Outcome unknown: Central did not answer. The next read of the boot selection decides; rebooting "
   + "starts only if it shows this release selected.";
 const HIDDEN = "the tab was hidden; this page sends no reboots while it is not shown";
@@ -90,8 +88,6 @@ const FALLBACK_LOOK = "The new app did not start; the Player fell back on its ow
 const COUNT_FACT = fact({ kind: "derived", value: "each Rejoined row is this page's judgement",
   basis: "a later kernel boot than this page's reboot, or a linked app that identifies this release, and every bound "
     + "Output's Frame live with no current readiness failure; see each row's Evidence" });
-
-const gateOpen = (gate) => gate?.effective_state === "open";
 
 /** The step strip: where the journey is, re-derived from the reads on every render. */
 function Steps({ step }) {
@@ -155,9 +151,7 @@ function KeepProbe({ entry, active, register, onRead }) {
  * Central cannot serve (updateWall.js); everything else is derived on each render.
  */
 function Journey({ tag, tried, skippedIds, snapshot, bootFacts, navigate, say, message, withdrawnBy, withdraw }) {
-  const control = useNodeControlValue();
-  const allowed = nodeReadsAllowed(control);
-  const releases = useReleaseRead({ skip: !allowed });
+  const releases = useReleaseRead();
   const heldStage = useHeldStage();
   const { open, confirmation } = useConfirm(null);
   const read = releases.read;
@@ -165,7 +159,7 @@ function Journey({ tag, tried, skippedIds, snapshot, bootFacts, navigate, say, m
   const selected = target !== null && target.deploymentId !== null && read.selection?.deployment_id === target.deploymentId;
   const plan = keepPlan(snapshot, bootFacts, tried);
   const triedEntry = tried == null ? null : plan.find((entry) => entry.playerId === tried && entry.frames.length > 0) ?? null;
-  const triedNode = useNodeDevice(triedEntry?.deviceId ?? "none", { skip: !allowed || triedEntry === null || selected });
+  const triedNode = useNodeDevice(triedEntry?.deviceId ?? "none", { skip: triedEntry === null || selected });
 
   const [memory, setMemory] = useState({ sampling: false, qualified: false, needQualify: false, refusals: 0,
     backingOut: false, stageId: null });
@@ -183,7 +177,7 @@ function Journey({ tag, tried, skippedIds, snapshot, bootFacts, navigate, say, m
   const rollingRef = useRef(false);
   rollingRef.current = rolling;
   const rollingSince = useRef(/** @type {number|null} */ (null));
-  const [pause, setPause] = useState(/** @type {{reason: string, playerId?: string, gate?: true}|null} */ (null));
+  const [pause, setPause] = useState(/** @type {{reason: string, playerId?: string}|null} */ (null));
   // Skips are the operator's choices, so they live in the URL (§25a); the rollout a
   // confirmation named is frozen here, and rolling reboots only its Players.
   const skipped = new Set(skippedIds);
@@ -197,7 +191,7 @@ function Journey({ tag, tried, skippedIds, snapshot, bootFacts, navigate, say, m
   const sendingRef = useRef(false);
   const hooksRef = useRef(new Map());
   const [probeReads, setProbeReads] = useState(/** @type {Record<string, object>} */ ({}));
-  // A Put whose Select answer was lost (gate open): the first read started after it settles
+  // A Put whose Select answer was lost: the first read started after it settles
   // whether rolling starts (only on that read showing the target selected, §6.5).
   const [pendingPut, setPendingPut] = useState(
     /** @type {{request: object, named: ReadonlyArray<import("./updateWall.js").PlanEntry>, after: number}|null} */ (null));
@@ -210,7 +204,7 @@ function Journey({ tag, tried, skippedIds, snapshot, bootFacts, navigate, say, m
   const rows = selected && snapshot != null ? members.map(({ entry, member }) => {
     const sent = sentRef.current.get(entry.playerId) ?? null;
     return keepRow({ node: probeReads[entry.playerId] ?? NOT_READ, snapshot, playerId: entry.playerId, target,
-      gate: control.gate, sent, skipped: member === "skipped", outside: member === "outside",
+      sent, skipped: member === "skipped", outside: member === "outside",
       waitedMs: sent !== null ? nowMs - sent.atMs : rolling && rollingSince.current !== null ? nowMs - rollingSince.current : 0 });
   }) : null;
   const step = journeyStep({ releases: read, tried: triedEntry === null || selected ? null : { operations: triedNode.operations }, rows },
@@ -239,14 +233,14 @@ function Journey({ tag, tried, skippedIds, snapshot, bootFacts, navigate, say, m
     sendingRef.current = true;
     try {
       const latest = node.latest();
-      const request = rebootRequest(rebootTarget(latest, control.latest().gate), latest.read?.reboot_commands ?? null,
+      const request = rebootRequest(rebootTarget(latest), latest.read?.reboot_commands ?? null,
         snapshot, latest.readAt, { playerId, commandId: crypto.randomUUID(), reason: "update-wall" });
       if ("refused" in request) {
         stop(`${entry.name}: ${request.refused}`, { playerId });
         return;
       }
       const epoch = playerEpoch(snapshot, playerId);
-      const result = await sendReboot(entry.deviceId, request, node, control);
+      const result = await sendReboot(entry.deviceId, request, node);
       if (heldReboot(request, result) !== null) {
         sentRef.current.set(playerId, { request, atMs: performance.now(), epoch });
         setSentVersion((version) => version + 1);
@@ -340,27 +334,25 @@ function Journey({ tag, tried, skippedIds, snapshot, bootFacts, navigate, say, m
   }, [pendingPut, releases.seq, releases.read]);
 
   // Put vX on the wall (§6.5, R7): ONE confirmation naming the reboot cost, then Select through
-  // its one send function. With the gate open, rolling starts on a done or already Select
-  // outcome, holds on unknown until the next read settles it, and never starts on changed or
-  // refused. With it closed, Select alone.
+  // its one send function. Rolling starts on a done or already Select outcome, holds on unknown
+  // until the next read settles it, and never starts on changed or refused.
   const onPut = (event) => {
     const request = selectionRequest(read, target.deploymentId);
     if ("refused" in request) {
       say(`Put on the wall unavailable: ${request.refused}.`);
       return;
     }
-    const canReboot = gateOpen(control.gate);
     // The rollout this confirmation names, frozen as named: a Player that appears later is
     // never rebooted.
     const named = freezeRollout(plan, skipped);
-    const dialog = putConfirmation(request, target, canReboot);
+    const dialog = putConfirmation(request, target);
     open(event, {
-      key: `journey-put-${target.deploymentId}-${request.body.expected_revision}-${canReboot}`,
+      key: `journey-put-${target.deploymentId}-${request.body.expected_revision}`,
       title: dialog.title,
       body: (
         <>
           {dialog.lines.map((line) => <p key={line}>{line}</p>)}
-          {canReboot && <PlanNames plan={plan} skipped={skipped} />}
+          <PlanNames plan={plan} skipped={skipped} />
           {dialog.after.map((line) => <p key={line}>{line}</p>)}
         </>
       ),
@@ -368,15 +360,15 @@ function Journey({ tag, tried, skippedIds, snapshot, bootFacts, navigate, say, m
       run: async () => {
         setPendingPut(null);
         const outcome = await sendSelection(request, releases);
-        if (canReboot && (outcome.outcome === "done" || outcome.outcome === "already")) {
+        if (outcome.outcome === "done" || outcome.outcome === "already") {
           setFrozen(named);
           frozenRef.current = named;
           start();
-        } else if (canReboot && outcome.outcome === "unknown") {
+        } else if (outcome.outcome === "unknown") {
           setPendingPut({ request, named, after: releases.startedReads() });
         }
         void releases.refresh();
-        return { state: outcome.outcome, message: outcome.outcome === "unknown" && canReboot ? PUT_UNKNOWN : outcome.message };
+        return { state: outcome.outcome, message: outcome.outcome === "unknown" ? PUT_UNKNOWN : outcome.message };
       },
     });
   };
@@ -398,7 +390,7 @@ function Journey({ tag, tried, skippedIds, snapshot, bootFacts, navigate, say, m
       body: (
         <>
           {selectionConfirmation(request).map((line) => <p key={line}>{line}</p>)}
-          <p>{PUT_GATE_CLOSED}</p>
+          <p>{SELECT_ALONE}</p>
         </>
       ),
       confirmLabel: "Select for every boot",
@@ -418,12 +410,12 @@ function Journey({ tag, tried, skippedIds, snapshot, bootFacts, navigate, say, m
     const pending = pendingStage(heldStage.get(), triedNode.operations);
     stageIds.current ??= { operationId: crypto.randomUUID(), commandId: crypto.randomUUID() };
     const request = pending?.state === "unknown" ? pending.request
-      : stageRequest(triedNode, control.gate, target.deploymentId, stageIds.current);
+      : stageRequest(triedNode, target.deploymentId, stageIds.current);
     if ("refused" in request) {
       setStageWords(`Stage unavailable: ${request.refused}.`);
       return;
     }
-    const outcome = await sendStage(triedEntry.deviceId, request, { node: triedNode, control }, heldStage);
+    const outcome = await sendStage(triedEntry.deviceId, request, { node: triedNode }, heldStage);
     void triedNode.refresh();
     // Keyed on Central's served code (updateWall.js `stageFollowUp`), never on the words.
     const next = stageFollowUp(outcome, memory.refusals);
@@ -458,7 +450,7 @@ function Journey({ tag, tried, skippedIds, snapshot, bootFacts, navigate, say, m
   const onBackOut = async () => {
     if (backOutSending.current) return;
     const latest = triedNode.latest();
-    const request = backOut ?? rebootRequest(rebootTarget(latest, control.latest().gate), latest.read?.reboot_commands ?? null,
+    const request = backOut ?? rebootRequest(rebootTarget(latest), latest.read?.reboot_commands ?? null,
       snapshot, latest.readAt, { playerId: tried, commandId: crypto.randomUUID(), reason: "update-wall-back-out" });
     if ("refused" in request) {
       say(`Back out unavailable: ${request.refused}.`);
@@ -467,7 +459,7 @@ function Journey({ tag, tried, skippedIds, snapshot, bootFacts, navigate, say, m
     backOutSending.current = true;
     setBackOutInFlight(true);
     try {
-      const result = await sendReboot(triedEntry.deviceId, request, triedNode, control);
+      const result = await sendReboot(triedEntry.deviceId, request, triedNode);
       void triedNode.refresh();
       setBackOut(heldReboot(request, result));
       if (result.outcome === "done" || result.outcome === "already") remember({ backingOut: true });
@@ -482,13 +474,6 @@ function Journey({ tag, tried, skippedIds, snapshot, bootFacts, navigate, say, m
     return releases.error === null ? <p className="player__read-time">Release read: not read yet</p>
       : <FactLine label="Release read" fact={fact({ kind: "unknown", why: `Central did not answer (${releases.error.code})` })} />;
   }
-  const gate = control.gate;
-  const gateLine = !gateOpen(gate) && (
-    <div className="roster__note">
-      <FactLine label="Effect gate" fact={effectGateFact(gate)} />
-      <a href={RELEASES}>See Releases › Effect gate</a>
-    </div>
-  );
   const triedName = triedEntry?.name ?? "";
 
   const putButton = target?.deploymentId != null && !selected && (
@@ -516,7 +501,6 @@ function Journey({ tag, tried, skippedIds, snapshot, bootFacts, navigate, say, m
           {(() => {
             const why = withdrawnBy ?? tryWithdrawn(read, step.target);
             if (why !== null) return <p className="roster__note">{`Try unavailable: ${why}.`}</p>;
-            if (!gateOpen(gate)) return <>{"Try unavailable while the effect gate is closed."}{gateLine}</>;
             const triable = plan.filter((entry) => entry.frames.length > 0);
             if (triable.length === 0) return <p className="roster__note">No Player drives a Frame.</p>;
             return (
@@ -536,7 +520,6 @@ function Journey({ tag, tried, skippedIds, snapshot, bootFacts, navigate, say, m
           <p className="roster__note">{keepScope(step.target.deploymentId)}</p>
           <PlanChoice plan={plan} skipped={skipped} onToggle={toggleSkip} />
           {putButton}
-          {!gateOpen(gate) && <p className="roster__note">{GATE_CLOSED_KEEP}</p>}
         </SectionBoundary>
       )}
       {step.step === "qualifying" && triedEntry !== null && (
@@ -565,7 +548,7 @@ function Journey({ tag, tried, skippedIds, snapshot, bootFacts, navigate, say, m
             <OperationLine operation={step.stage} readAt={triedNode.operations?.read_at ?? null} />
           ) : (() => {
             const blocker = stageBlocker(triedNode, triedNode.operations,
-              gate, snapshot?.inventory?.players?.find((player) => player.id === tried) ?? null);
+              snapshot?.inventory?.players?.find((player) => player.id === tried) ?? null);
             const held = pendingStage(heldStage.get(), triedNode.operations);
             return (
               <>
@@ -574,10 +557,7 @@ function Journey({ tag, tried, skippedIds, snapshot, bootFacts, navigate, say, m
                   {held?.state === "unknown" ? "Send the same stage again" : `Stage release ${tag} on ${triedName}`}
                 </button>
                 {blocker !== null && held === null && (
-                  <p className="roster__note">
-                    {`Stage unavailable: ${blocker.reason}.`}
-                    {blocker.gate === true && <>{" "}<a href={RELEASES}>See Releases › Effect gate</a></>}
-                  </p>
+                  <p className="roster__note">{`Stage unavailable: ${blocker.reason}.`}</p>
                 )}
               </>
             );
@@ -606,7 +586,7 @@ function Journey({ tag, tried, skippedIds, snapshot, bootFacts, navigate, say, m
             return (
               <>
                 <p className="player__state">{record === undefined ? "Reboot sent; Central has not listed it yet"
-                  : rebootCommandState(record, triedNode.readAt, { nodeDevice: triedNode, gate }).label}</p>
+                  : rebootCommandState(record, triedNode.readAt, { nodeDevice: triedNode }).label}</p>
                 <FactLine label="Current node session's boot" fact={boot.fact ?? boot.none} />
               </>
             );
@@ -624,10 +604,7 @@ function Journey({ tag, tried, skippedIds, snapshot, bootFacts, navigate, say, m
               {pause !== null && <p className="roster__note">{`Why: ${pause.reason}.`}</p>}
               <p className="roster__note">{pausedWords(step.target.deploymentId)}</p>
               {pendingPut !== null && <p className="roster__note" role="status">{PUT_UNKNOWN}</p>}
-              {gateOpen(gate) ? (
-                <button type="button" onClick={(event) => resume(event)} disabled={pendingPut !== null}>Resume</button>
-              )
-                : <><p className="roster__note">{GATE_CLOSED_KEEP}</p>{gateLine}</>}
+              <button type="button" onClick={(event) => resume(event)} disabled={pendingPut !== null}>Resume</button>
             </>
           )}
           {step.step === "keeping" && (
@@ -757,10 +734,8 @@ export function UpdateWallPage({ tag, tried, skipped, snapshot, bootFacts, navig
         <p><a href={RELEASES}>Releases</a></p>
         <h2 className="player__name">{`Update the wall with release ${tag}`}</h2>
       </header>
-      <NodeRecords>
-        <Journey key={tried ?? ""} tag={tag} tried={tried} skippedIds={skipped} snapshot={snapshot} bootFacts={bootFacts} navigate={navigate}
-          say={setMessage} message={message} withdrawnBy={withdrawn} withdraw={setWithdrawn} />
-      </NodeRecords>
+      <Journey key={tried ?? ""} tag={tag} tried={tried} skippedIds={skipped} snapshot={snapshot} bootFacts={bootFacts} navigate={navigate}
+        say={setMessage} message={message} withdrawnBy={withdrawn} withdraw={setWithdrawn} />
     </div>
   );
 }

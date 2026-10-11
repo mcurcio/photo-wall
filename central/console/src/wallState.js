@@ -1,11 +1,11 @@
 import { useMemo, useRef, useState } from "react";
 
-import { facetFor, frameHealth } from "./health.js";
-import { DEFAULT_FACET } from "./routes.js";
+import { frameHealth, tabFor } from "./health.js";
+import { DEFAULT_TAB } from "./routes.js";
 
 // The Wall's state that outlives the Wall page (flow design §6): the shell holds it,
 // so it lives here, in a module that imports no component. Shell.jsx must not reach
-// the Inspector or the Calibration facet except through wallRoutes.jsx (R4;
+// the Frame page or its live adjustment except through wallRoutes.jsx (R4;
 // tests/test_console_routes_r4.py).
 
 /**
@@ -16,7 +16,7 @@ import { DEFAULT_FACET } from "./routes.js";
  *            frameRoute: (frameId: string) => Route,
  *            prepareVisit: (frameId: string) => void,
  *            visitFrame: (frameId: string) => void,
- *            selectPlainly: (frameId: string, surfaceId: string|null) => void}} WallMemory
+ *            openFrame: (frameId: string) => void}} WallMemory
  */
 
 /** The snapshot's frame `frameId`, or undefined. */
@@ -28,25 +28,19 @@ function findFrame(snapshot, frameId) {
  * What the Wall remembers while it is not mounted (the shell calls this; flow design
  * §6). The Wall page mounts only while it is current, but leaving it must not lose the
  * chosen Surface or a pending focus request, so they live here, above the page. The
- * selected frame and its facet live in the route (`#/wall/frames/<id>/<facet>`). No facet
- * is remembered: a Frame opens on Status unless a visit names its cause (console DDD §61,
- * G3), and the Guidance banner has no dismissal (§54: nothing to dismiss, it leaves when a
- * Frame exists).
+ * Frame shown and its tab live in the route (`#/wall/frames/<id>/<tab>`).
  *
- * `lastWall` is the Wall's daily face as last shown, for the sidebar link; Edit layout
- * (`#/wall/layout`) is never remembered, so the Wall link always opens the daily face.
+ * `lastWall` is the Wall as last shown (the plan, or a Frame's page at a tab), for the
+ * sidebar link from another section; Edit layout (`#/wall/layout`) is never remembered.
  *
- * Visiting a frame from outside the plan (the attention strip, the Needs attention
- * page, a Player page) shows its Surface, opens the facet that shows its cause
- * (health.js `facetFor`; an ok frame opens Status) and asks the Inspector
- * to take focus ONCE: `focusRequest` is a fresh number each time, and the Inspector
- * clears it when spent, so a later remount does not refocus. Plain selection on the
- * plan or tray (`selectPlainly`) clears it and never moves focus.
+ * Opening a Frame (a plan tile or tray entry: `openFrame`, at Overview) or visiting one from
+ * outside the plan (the attention strip, the Needs attention page, a Player page: the tab that
+ * shows its cause, health.js `tabFor`) asks the Frame page to take focus ONCE: `focusRequest`
+ * is a fresh number each time, and the page clears it when spent, so a later remount does not
+ * refocus.
  *
- * THE SURFACE follows the route: whenever the route comes to name a frame by any way
- * but plain selection (a typed URL, Back or Forward, a link), the chosen Surface
- * becomes that frame's, so the plan shows what the Inspector does. Plain selection
- * keeps the Surface in view, even for an unplaced frame of another Surface.
+ * THE SURFACE follows the route: whenever the route comes to name a frame, the chosen Surface
+ * becomes that frame's, so the plan shows it when the operator goes back.
  *
  * The returned object is the same between renders until something in it changes, so
  * the shell's route context, and the hidden Show pages, stay still on unrelated renders.
@@ -66,10 +60,8 @@ export function useWallMemory(route, snapshot, navigate) {
     lastWallRef.current = route;
   }
 
-  // The frame the route last named, once the snapshot lists it, and the frame plain
-  // selection is about to route to (that one keeps the Surface).
+  // The frame the route last named, once the snapshot lists it.
   const [routedFrameId, setRoutedFrameId] = useState(/** @type {string|null} */ (null));
-  const [plainFrameId, setPlainFrameId] = useState(/** @type {string|null} */ (null));
   const routeFrameId = route?.section === "wall" ? route.id ?? null : null;
   if (routeFrameId !== routedFrameId) {
     // Storing what the last render saw (React's pattern for adjusting state to a prop):
@@ -77,10 +69,9 @@ export function useWallMemory(route, snapshot, navigate) {
     const frame = routeFrameId === null ? undefined : findFrame(snapshot, routeFrameId);
     if (routeFrameId === null || frame !== undefined) {
       setRoutedFrameId(routeFrameId);
-      if (frame !== undefined && plainFrameId !== routeFrameId) {
+      if (frame !== undefined) {
         setSurfaceId(frame.surface_id);
       }
-      setPlainFrameId(null);
     }
   }
 
@@ -89,7 +80,7 @@ export function useWallMemory(route, snapshot, navigate) {
     const frameRoute = (frameId) => ({
       section: "wall",
       id: frameId,
-      facet: facetFor(frameHealth(snapshot, frameId), DEFAULT_FACET),
+      tab: tabFor(frameHealth(snapshot, frameId), DEFAULT_TAB),
     });
     const prepareVisit = (frameId) => {
       const frame = findFrame(snapshot, frameId);
@@ -114,10 +105,9 @@ export function useWallMemory(route, snapshot, navigate) {
         prepareVisit(frameId);
         navigate(frameRoute(frameId));
       },
-      selectPlainly: (frameId, keepSurfaceId) => {
-        setPlainFrameId(frameId);
-        setFocusRequest(null);
-        setSurfaceId(keepSurfaceId);
+      openFrame: (frameId) => {
+        prepareVisit(frameId);
+        navigate({ section: "wall", id: frameId, tab: DEFAULT_TAB });
       },
     };
   }, [surfaceId, focusRequest, lastWall, snapshot, navigate]);

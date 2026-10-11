@@ -1,4 +1,4 @@
-"""Application envelope compatibility and epoch-scoped control evidence."""
+"""Control negotiation, the one state envelope and epoch-scoped control evidence."""
 
 import re
 import threading
@@ -7,16 +7,19 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
+from starlette.websockets import WebSocketDisconnect
 from test_registry import ADMIN, enroll
 
 from central.app import create_app
 from central.player_control_protocol import project_state, state_digest
+from contracts.models import FrameProfile, Layer, OutputBinding, Plan, PlayerConfiguration, Variant
 from contracts.player_control import (
     ControlAck,
     ControlHello,
     ControlSelection,
     select_control,
 )
+from player.service import PlayerService
 
 
 class _WireValue:
@@ -47,36 +50,32 @@ def test_future_control_schema_offer_selects_highest_known_common():
                          capabilities=("identify_output", "future_capability"))
     assert select_control(offer) == ControlSelection(
         authority_epoch=3, schema=2, capabilities=("identify_output",))
-    assert select_control(ControlHello(authority_epoch=3, schemas=(3,),
-                                       capabilities=())) is None
+    for schemas in ((3,), (1,)):
+        assert select_control(ControlHello(authority_epoch=3, schemas=schemas,
+                                           capabilities=())) is None
+    with pytest.raises(ValidationError):
+        ControlSelection(authority_epoch=3, schema=1)
     with pytest.raises(ValidationError):
         ControlHello(authority_epoch=3, schemas=(0, 2), capabilities=())
     with pytest.raises(ValidationError):
         ControlHello(authority_epoch=3, schemas=(2, 2), capabilities=())
 
 
-def test_legacy_projection_is_exact_four_field_published_envelope():
-    delivery = {"configuration": _WireValue({"authority_epoch": 1}), "plan": None,
-                "commits": (), "revocations": (),
-                "identify_output": _WireValue({"output_id": "HDMI-A-1"})}
-    assert project_state(delivery, ControlSelection(authority_epoch=1, schema=1)) == {
-        "configuration": {"authority_epoch": 1}, "plan": None,
-        "commits": [], "revocations": [],
-    }
-
-
-def test_legacy_http_and_websocket_state_and_identify_refusal(registry):
+def test_state_before_hello_is_refused_and_identify_is_unsupported(registry):
+    """No state reaches a session that has not negotiated: HTTP answers 409 and the
+    WebSocket closes; Identify needs the negotiated capability. Mutation probe: serve an
+    unnegotiated epoch any envelope."""
     player, _, _ = enroll(registry)
     app = create_app(registry.db, registry.clock, ADMIN)
     headers = {"Authorization": "Bearer " + player["token"]}
     with TestClient(app) as client:
         state = client.get("/v1/player/state", headers=headers)
-        assert state.status_code == 200
-        assert set(state.json()) == {"configuration", "plan", "commits", "revocations"}
-        with client.websocket_connect("/v1/player/session", headers=headers) as socket:
-            message = socket.receive_json()
-            assert message.pop("type") == "state"
-            assert set(message) == {"configuration", "plan", "commits", "revocations"}
+        assert state.status_code == 409
+        assert state.json() == {"error": "control_negotiation_required"}
+        with pytest.raises(WebSocketDisconnect) as closed:
+            with client.websocket_connect("/v1/player/session", headers=headers) as socket:
+                socket.receive_json()
+        assert closed.value.code == 1008
         refused = client.post(
             f"/v1/operator/players/{player['player_id']}/outputs/HDMI-A-2/identify",
             headers={"Authorization": "Bearer " + ADMIN},
@@ -85,37 +84,38 @@ def test_legacy_http_and_websocket_state_and_identify_refusal(registry):
         assert refused.json() == {"error": "identify_unsupported"}
 
 
-def test_mixed_pod_enrollment_without_control_row_seals_legacy(registry):
+def test_hello_without_a_control_row_negotiates_the_current_epoch(registry):
+    """A missing row (enrollment opens one; nothing else removes it) is an open epoch."""
     player, _, _ = enroll(registry)
     with registry.db.transaction() as conn:
         conn.execute("DELETE FROM player_control_sessions WHERE player_id=%s",
                      (player["player_id"],))
     app = create_app(registry.db, registry.clock, ADMIN)
     headers = {"Authorization": "Bearer " + player["token"]}
-    offer = {"authority_epoch": player["authority_epoch"], "schemas": [1, 2],
+    offer = {"authority_epoch": player["authority_epoch"], "schemas": [2],
              "capabilities": ["identify_output"]}
     with TestClient(app) as client:
         hello = client.post("/v1/player/hello", json=offer, headers=headers)
         assert hello.status_code == 200
         assert hello.json() == {"authority_epoch": player["authority_epoch"],
-                                "schema": 1, "capabilities": []}
-        assert set(client.get("/v1/player/state", headers=headers).json()) == {
-            "configuration", "plan", "commits", "revocations"}
-        assert client.post("/v1/player/hello", json=offer, headers=headers).status_code == 409
+                                "schema": 2, "capabilities": ["identify_output"]}
+        assert client.get("/v1/player/state", headers=headers).json()["delivery_sequence"] == 1
+        refused = client.post("/v1/player/hello", json={**offer, "schemas": [1]},
+                              headers=headers)
+        assert refused.status_code == 409
 
 
-def test_first_state_seals_hello_and_new_epoch_can_negotiate(registry):
+def test_a_refused_state_leaves_hello_open_and_new_epoch_can_negotiate(registry):
     player, key, request = enroll(registry)
     app = create_app(registry.db, registry.clock, ADMIN)
-    offer = {"authority_epoch": player["authority_epoch"], "schemas": [1, 2],
+    offer = {"authority_epoch": player["authority_epoch"], "schemas": [2],
              "capabilities": ["identify_output"]}
     with TestClient(app) as client:
         assert client.get("/v1/player/state", headers={
-            "Authorization": "Bearer " + player["token"]}).status_code == 200
+            "Authorization": "Bearer " + player["token"]}).status_code == 409
         late = client.post("/v1/player/hello", json=offer, headers={
             "Authorization": "Bearer " + player["token"]})
-        assert late.status_code == 409
-        assert late.json() == {"error": "control_negotiation_closed"}
+        assert late.status_code == 200
         newer, _, _ = enroll(registry, key=key, device_id=request.device_id)
         headers = {"Authorization": "Bearer " + newer["token"]}
         offer["authority_epoch"] = newer["authority_epoch"]
@@ -136,7 +136,7 @@ def test_v2_applied_ack_replays_exact_receipt_until_superseded_and_epoch_fenced(
     player, key, request = enroll(registry)
     app = create_app(registry.db, registry.clock, ADMIN)
     headers = {"Authorization": "Bearer " + player["token"]}
-    offer = {"authority_epoch": player["authority_epoch"], "schemas": [1, 2],
+    offer = {"authority_epoch": player["authority_epoch"], "schemas": [2],
              "capabilities": ["identify_output"]}
     with TestClient(app) as client:
         assert client.post("/v1/player/hello", json=offer, headers=headers).status_code == 200
@@ -189,7 +189,7 @@ def test_delivery_sequence_and_applied_receipt_remain_distinct_from_latest_resul
     player, _, _ = enroll(registry)
     player_id, epoch = player["player_id"], player["authority_epoch"]
     registry.control_hello(player_id, ControlHello(
-        authority_epoch=epoch, schemas=(1, 2), capabilities=()))
+        authority_epoch=epoch, schemas=(2,), capabilities=()))
     first = registry.issue_control_delivery_record(player_id, epoch, "a" * 64)
     assert registry.issue_control_delivery_record(player_id, epoch, "a" * 64) == first
     assert first["delivery_sequence"] == 1
@@ -206,8 +206,8 @@ def test_delivery_sequence_and_applied_receipt_remain_distinct_from_latest_resul
         assert conn.execute("SELECT applied_ack_nonce FROM player_control_sessions "
                             "WHERE player_id=%s", (player_id,)).fetchone()[
                                 "applied_ack_nonce"] is None
-    assert not registry.control_ack(player_id, ControlAck(
-        authority_epoch=epoch, delivery_id=first["delivery_id"], result="applied"))
+    assert not registry.control_ack_response(player_id, ControlAck(
+        authority_epoch=epoch, delivery_id=first["delivery_id"], result="applied")).accepted
     rejected = registry.control_ack_response(player_id, ControlAck(
         authority_epoch=epoch, delivery_id=second["delivery_id"], result="rejected"))
     assert rejected.model_dump(exclude_none=True) == {"accepted": True}
@@ -224,38 +224,13 @@ def test_delivery_sequence_and_applied_receipt_remain_distinct_from_latest_resul
     assert fact["last_result"] == "rejected"
 
 
-def test_older_central_writer_cannot_leave_a_replayable_receipt(registry):
-    player, _, _ = enroll(registry)
-    player_id, epoch = player["player_id"], player["authority_epoch"]
-    registry.control_hello(player_id, ControlHello(
-        authority_epoch=epoch, schemas=(1, 2), capabilities=()))
-    first = registry.issue_control_delivery_record(player_id, epoch, "a" * 64)
-    ack = ControlAck(authority_epoch=epoch, delivery_id=first["delivery_id"],
-                     result="applied")
-    assert registry.control_ack_response(player_id, ack).receipt is not None
-    # Simulate a mixed-version Central pod that issues a newer delivery using
-    # the pre-receipt SQL, which does not know about applied_ack_nonce.
-    with registry.db.transaction() as conn:
-        conn.execute(
-            "UPDATE player_control_sessions SET issued_sequence=issued_sequence+1,"
-            "pending_id=%s,pending_digest=%s,pending_expires=%s WHERE player_id=%s",
-            ("b" * 32, "b" * 64, registry.clock.utc() + 60, player_id),
-        )
-        nonce = conn.execute("SELECT applied_ack_nonce FROM player_control_sessions "
-                             "WHERE player_id=%s", (player_id,)).fetchone()[
-                                 "applied_ack_nonce"]
-    assert nonce is None
-    assert registry.control_ack_response(player_id, ack).model_dump(exclude_none=True) == {
-        "accepted": False}
-
-
 @pytest.mark.parametrize("operation", ["ack", "reissue"])
 def test_control_expiry_is_sampled_after_waiting_for_player_lock(
         registry, monkeypatch, operation):
     player, _, _ = enroll(registry)
     player_id, epoch = player["player_id"], player["authority_epoch"]
     registry.control_hello(player_id, ControlHello(
-        authority_epoch=epoch, schemas=(1, 2), capabilities=()))
+        authority_epoch=epoch, schemas=(2,), capabilities=()))
     first = registry.issue_control_delivery_record(player_id, epoch, "a" * 64)
     waiting = threading.Event()
     original = registry._control_player
@@ -283,3 +258,41 @@ def test_control_expiry_is_sampled_after_waiting_for_player_lock(
     else:
         assert outcome["delivery_id"] != first["delivery_id"]
         assert outcome["delivery_sequence"] == first["delivery_sequence"] + 1
+
+
+def after_end_plan() -> tuple[PlayerConfiguration, Plan]:
+    """A kept photo, then a black ending that keeps nothing, then a plain overlay."""
+    binding = OutputBinding(output_id="HDMI-A-1", frame_id="frame-0", generation=1,
+                            profile=FrameProfile(width_px=1920, height_px=1080,
+                                                 diagonal_inches=24))
+    configuration = PlayerConfiguration(player_id="p-" + "a" * 32, authority_epoch=1,
+                                        configuration_revision=1, bindings=(binding,),
+                                        enabled_outputs=("HDMI-A-1",))
+    common = dict(run_id="run-1", output_id="HDMI-A-1", frame_id="frame-0", binding_generation=1)
+    photo = Variant(sha256="b" * 64, size=10, media_type="image/jpeg", width=10, height=10)
+    layers = (
+        Layer(assignment_id="kept", start=0, end=10, media_origin=0, variant=photo,
+              after_end="keep_this_photo", **common),
+        Layer(assignment_id="ending", start=10, end=14, media_origin=10, presentation="black",
+              after_end="keep_nothing", **common),
+        Layer(assignment_id="overlay", start=14, end=20, media_origin=14, variant=photo,
+              priority=5, **common),
+    )
+    return configuration, Plan(plan_id="plan-1", revision=1, player_id=configuration.player_id,
+                               authority_epoch=1, issued_at=0, valid_from=0, valid_until=20,
+                               bindings=(binding,), layers=layers)
+
+
+def test_every_session_is_sent_the_after_state_and_this_player_reads_it():
+    """A plan layer's `after_end` reaches every negotiated session as sent; there is no
+    down-converted yes/no flag. Mutation probe: drop `after_end` from the projection."""
+    configuration, plan = after_end_plan()
+    selection = ControlSelection(authority_epoch=1, schema=2)
+    state = project_state({"configuration": configuration, "plan": plan, "commits": (),
+                           "revocations": (), "identify_output": None}, selection)
+    layers = state["plan"]["layers"]
+    assert [layer["after_end"] for layer in layers] == [
+        "keep_this_photo", "keep_nothing", "leave_as_is"]
+    assert not any("retain_on_expiry" in layer for layer in layers)
+    sent = {**state, "delivery_id": "1" * 32, "delivery_sequence": 1}  # as finalize adds them
+    assert PlayerService._state(sent).plan == plan

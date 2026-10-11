@@ -19,6 +19,7 @@ from contracts.node_app_link import (
     encode_node_app_link_result,
     encode_node_probe_answer,
     encode_node_probe_open,
+    encode_node_renderer,
     parse_node_probe_channel_message,
 )
 from contracts.node_protocol import NodeProcessIdentity
@@ -105,6 +106,25 @@ def probes():
     thread.start()
     yield thread
     thread.close()
+
+
+def test_the_players_renderer_is_a_fact_and_keeps_the_channel_open(stepped):
+    ours, theirs = packet_pair()
+    theirs.settimeout(2)
+    try:
+        stepped.publish_run(RUN, False)
+        stepped.adopt(ours, RUN)
+        now = passes(stepped, 2)
+        theirs.send(encode_node_probe_answer(parse_node_probe_channel_message(theirs.recv(9000)).nonce))
+        theirs.send(encode_node_renderer("V3D 7.1.10.2"))
+        now = passes(stepped, 2, now)  # one packet read per pass
+        assert [e.value["renderer"] for e in facts(stepped.feed, "app_renderer")] == ["V3D 7.1.10.2"]
+        assert len(facts(stepped.feed, "probe_answered")) == 1
+        for _ in range(2):  # the channel still probes
+            parse_node_probe_channel_message(theirs.recv(9000))
+        assert [e.value["state"] for e in facts(stepped.feed, "probe_channel")] == ["open"]
+    finally:
+        theirs.close()
 
 
 def test_healthy_channel_is_answered_every_period(stepped):

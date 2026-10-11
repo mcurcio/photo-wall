@@ -59,10 +59,10 @@ def materialize_handoff(*, root: Path = Path("/")) -> tuple:
     # The bus needs only the origin and the serial, so it runs (and Central can reach it) even
     # when the checks below refuse this boot's base.
     write_bus_environment(root, central, offer.serial)
-    marker =_marker(root / "usr/lib/photo-wall-node-base/abi.json", {"base_abi"})
+    marker = _marker(root / "usr/lib/photo-wall/node/abi.json", {"base_abi"})
     if marker["base_abi"] != offer.base.base_abi:
         raise ValueError("node_measured_base_abi_mismatch")
-    graphics = _marker(root / "usr/lib/photo-wall-display/abi.json", {"graphics_abi", "plugin_abi"})
+    graphics = _marker(root / "usr/lib/photo-wall/node-display/abi.json", {"graphics_abi", "plugin_abi"})
     abi = {**marker, **graphics}
     if any(getattr(offer.base, name) != value for name, value in abi.items()):
         raise ValueError("node_measured_graphics_abi_mismatch")
@@ -141,7 +141,7 @@ def prepare_roots(*, root: Path = Path("/"), mounter: ImageMounter | None = None
         stage_image(directory / environment.environment_sha256, roots, environment,
                     images=images, mounter=mounter, **abi)
         if kind == "app":
-            bridge = roots / environment.environment_sha256 / "rootfs/usr/lib/photo-wall-client/libphoto-wall-frame-client.so"
+            bridge = roots / environment.environment_sha256 / "rootfs/usr/lib/photo-wall/frame-client/libphoto-wall-frame-client.so"
             if not bridge.is_file():
                 raise ValueError("node_player_frame_bridge_missing")
 

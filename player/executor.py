@@ -449,6 +449,24 @@ class Executor:
         return LocalLayer(assignment.layer, assignment.path, assignment.layer.position(now),
                           _alpha(assignment.layer, now))
 
+    def _apply_after_end(self, binding: OutputBinding, local: LocalLayer, now: float) -> None:
+        """A drawn layer, covered or not, sets what its Frame keeps for when nothing plays
+        (`Layer.after_end`, planned by Central): nothing, from its first draw; or this photo,
+        at full strength, from the first draw after its fade-in."""
+        layer = local.layer
+        if layer.after_end == "keep_nothing":
+            self._retained.pop(binding.output_id, None)
+            return
+        if layer.after_end == "leave_as_is" or now < layer.start + layer.fade_in:
+            return
+        identity = (f"{binding.output_id}:{binding.frame_id}:"
+                    f"{binding.generation}:{layer.assignment_id}")
+        owner = (f"pwretain:{self.player_id}:{self._last_epoch}:"
+                 f"{hashlib.sha256(identity.encode()).hexdigest()}")
+        self._pin_intents[owner] = layer.variant.sha256
+        self._retained[binding.output_id] = _Retained(
+            replace(local, alpha=layer.opacity), binding, owner)
+
     def _compositions(self, items: Iterable[_Assignment], now: float) -> tuple[OutputComposition, ...]:
         grouped: dict[str, list[LocalLayer]] = {}
         for assignment in items:
@@ -460,7 +478,7 @@ class Executor:
                 layers.sort(key=lambda local: (
                     local.layer.priority, local.layer.root_order, local.layer.admission_order
                 ))
-                result.append(OutputComposition(binding, binding.effective_calibration(now),
+                result.append(OutputComposition(binding, binding.calibration,
                                                 tuple(layers)))
         return tuple(result)
 
@@ -677,7 +695,7 @@ class Executor:
     def _fallback(self, binding: OutputBinding, now: float) -> OutputComposition:
         retained = self._retained.get(binding.output_id)
         layers = (retained.local,) if retained else ()
-        return OutputComposition(binding, binding.effective_calibration(now), layers, fallback=True)
+        return OutputComposition(binding, binding.calibration, layers, fallback=True)
 
     def _show_fallback(self, composition: OutputComposition) -> bool:
         """Only observed fallback replaces state; unavailable retained media yields black."""
@@ -758,7 +776,7 @@ class Executor:
                 return ()
             for output_id, binding in tuple(self._retired_outputs.items()):
                 if self._show_fallback(OutputComposition(
-                    binding, binding.effective_calibration(now), fallback=True
+                    binding, binding.calibration, fallback=True
                 )):
                     del self._retired_outputs[output_id]
             active = []
@@ -830,15 +848,11 @@ class Executor:
                                     assignment = self._assignments[local.layer.assignment_id]
                                     assignment.started = True
                                     observations.append(self._observation(local, observed_at, "presented"))
-                                    if (local.alpha >= 1 and local.layer.retain_on_expiry
-                                            and local.layer.variant
-                                            and local.layer.variant.duration is None):
-                                        identity = (f"{binding.output_id}:{binding.frame_id}:"
-                                                    f"{binding.generation}:{local.layer.assignment_id}")
-                                        owner = (f"pwretain:{self.player_id}:{self._last_epoch}:"
-                                                 f"{hashlib.sha256(identity.encode()).hexdigest()}")
-                                        self._pin_intents[owner] = local.layer.variant.sha256
-                                        self._retained[binding.output_id] = _Retained(local, binding, owner)
+                                # Every drawn layer, covered ones included (a Scene beneath keeps
+                                # its photo while a Scene on top shows), bottom to top, so the
+                                # topmost layer's after-state holds.
+                                for local in drawn.layers:
+                                    self._apply_after_end(binding, local, now)
                                 continue
                             if presented.status == "pending":
                                 # Native GL presentation acknowledges on a later main-loop turn.
@@ -858,7 +872,7 @@ class Executor:
                     self._valid_current(local, previous, now) for local in previous.layers
                 ):
                     continuation = OutputComposition(
-                        binding, binding.effective_calibration(now), tuple(
+                        binding, binding.calibration, tuple(
                             LocalLayer(local.layer, local.path, local.layer.position(now),
                                        _alpha(local.layer, now)) for local in previous.layers
                         )

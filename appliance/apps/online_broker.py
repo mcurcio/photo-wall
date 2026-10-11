@@ -8,9 +8,15 @@ transition is an effect event queued for Central; reporting never gates progress
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from uuid import uuid4
 
-from appliance.apps.broker import RunningApp
+from appliance.apps.broker import (
+    RelaunchPacingStore,
+    RunningApp,
+    display_took_app,
+    relaunch_absent,
+)
 from appliance.apps.probe import RECOVERY_ACKNOWLEDGED, RECOVERY_ARMED
 from appliance.apps.stop_operation import (
     StopGuaranteeUnavailable,
@@ -40,9 +46,11 @@ LOG = logging.getLogger(__name__)
 
 
 class OnlineEffectBroker:
-    def __init__(self, store, driver, session, recovery):
+    def __init__(self, store, driver, session, recovery, *, pacing: RelaunchPacingStore,
+                 now_ms: Callable[[], int]):
         self.store, self.driver, self.session = store, driver, session
         self.recovery = recovery
+        self.pacing, self.now_ms = pacing, now_ms
 
     @property
     def record(self):
@@ -231,13 +239,48 @@ class OnlineEffectBroker:
         else:
             self._event("effect_unknown", fault="fallback_exited_before_control")
 
+    def _relaunch(self, command: StageCommandV2, phase: str):
+        """The paced relaunch of the launch `phase` (running or fallback_running) names; a failed
+        start is reported and kept as `relaunch_of` for the next turn's retry."""
+        launched = command.target if phase == "running" else command.fallback
+        try:
+            return relaunch_absent(self.driver, self.pacing, launched, command.operation_id,
+                                   now_ms=self.now_ms)
+        except Exception:
+            self._event("effect_unknown", fault="relaunch_outcome_unknown")
+            self._save({**self.record, "relaunch_of": phase})
+            return None
+
     def reconcile(self) -> None:
         record = self.record
         if record is None or record["phase"] == "preparing":
             return
         command = parse_stage_command(record["command"].encode())
+        # A relaunch whose start failed (E-1B-18 on the switch path) is asked again on the cold
+        # start's pacing, never left for good: the phase it relaunched is kept beside the fault.
+        retry = record.get("relaunch_of") if record["phase"] == "effect_unknown" else None
+        if retry is not None:
+            running = self.driver.current()
+            if running is None:
+                running = self._relaunch(command, retry)
+            if running is not None:
+                self._event(retry, running=running)
+                self._save({key: value for key, value in self.record.items() if key != "relaunch_of"})
+            return
         if record["phase"] in ("running", "fallback_running"):
-            self._settle(record, command)
+            if self.driver.current() is not None:
+                self._settle(record, command)
+                return
+            # The app is absent. Before control is proven its exit is the switch's own failure
+            # (E-1B-17), unless its Weston took it. Otherwise the cold start's relaunch rule
+            # holds for the switch's current launch: the same root again, paced. The switch's
+            # own record is untouched; it still completes only at the control proof.
+            if (not self._controlled(command)
+                    and not display_took_app(self.driver.launched(),
+                                             self.driver.display_incarnation())):
+                self._settle(record, command)
+                return
+            self._relaunch(command, record["phase"])
             return
         if record.get("intent_stop_written") and not record.get("stop_consumed") and record.get("stop_request"):
             request = stop_request_from(record["stop_request"])

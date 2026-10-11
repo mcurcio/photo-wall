@@ -31,9 +31,9 @@ const base = (interruptions, { silent = false, connected = true, runtime = LIVE 
       { player_id: "p-1", output_id: "HDMI-A-2", observation: { connected: true } },
     ],
     frames: [
-      { id: "lobby", player_id: "p-1", output_id: "HDMI-A-1", generation: 3, calibration_valid: true },
-      { id: "hall", player_id: "p-1", output_id: "HDMI-A-2", generation: 1, calibration_valid: true },
-      { id: "spare", player_id: null, output_id: null, generation: 0, calibration_valid: false },
+      { id: "lobby", player_id: "p-1", output_id: "HDMI-A-1", generation: 3, readiness: "ready" },
+      { id: "hall", player_id: "p-1", output_id: "HDMI-A-2", generation: 1, readiness: "ready" },
+      { id: "spare", player_id: null, output_id: null, generation: 0, readiness: "unbound" },
     ],
   },
 });
@@ -44,7 +44,7 @@ const served = base([row]);
 const found = health.interruptionFor(served, "lobby");
 out.fact = { kind: found.fact.kind, text: facts.factText(found.fact), label: found.label };
 const lobby = health.frameHealth(served, "lobby");
-out.lobby = { state: lobby.state, severity: lobby.severity, cause: lobby.cause, facet: lobby.facet,
+out.lobby = { state: lobby.state, severity: lobby.severity, cause: lobby.cause, tab: lobby.tab,
   label: lobby.label, tileLabel: lobby.tileLabel };
 // Another Frame on the same Player shows nothing: rows are keyed by Frame id only.
 out.hall = [health.interruptionFor(served, "hall"), health.frameHealth(served, "hall").state];
@@ -95,7 +95,7 @@ def test_a_served_row_is_a_derived_fact_worded_with_its_layer_and_age():
 def test_a_served_row_makes_its_frame_output_interrupted_an_alarm_and_the_run_continues():
     out = _run()
     assert out["lobby"] == {"state": "output-interrupted", "severity": "alarm", "cause": "output",
-                            "facet": "binding", "label": WORDING + " · the Run continues",
+                            "tab": "hardware", "label": WORDING + " · the Run continues",
                             "tileLabel": "Output interrupted · the Run continues"}
     assert out["attention"] == [["lobby", WORDING + " · the Run continues"]]
 

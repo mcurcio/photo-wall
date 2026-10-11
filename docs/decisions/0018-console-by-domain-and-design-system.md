@@ -1,6 +1,6 @@
 # 0018 — The console by domain, and its design system
 
-**Date:** 2026-10-09 · **Layer:** system (the console's information architecture and how its pages are built) · **Status:** Owner-approved on the two gate pages below, 2026-10-09. Milestone 1 (the design-system foundation, DS0) is built; later milestones follow the migration below. The layouts are a starting point (see [Layouts are a starting point](#layouts-are-a-starting-point)).
+**Date:** 2026-10-09 · **Layer:** system (the console's information architecture and how its pages are built) · **Status:** Owner-approved on the two gate pages below, 2026-10-09. Milestone 1 (the design-system foundation, DS0) is built; later milestones follow the migration below. The layouts are a starting point (see [Layouts are a starting point](#layouts-are-a-starting-point)). **Superseded in part by [0019](0019-first-principles-console.md) (2026-10-09, proposed):** the sidebar, the Screens landing, the two pages per Frame and per Pi, rule H3, and where the live and setup halves of Frame health are shown; the design system, including the severity scale, stands.
 
 **Gate pages:** [Console by Domain](https://claude.ai/artifact/Dx6gHA8T31WDmAGccyg1TY) · [Console design system](https://claude.ai/artifact/B9GbkgD3d66wsh5iiwzwjh). The page text is kept in the repository as the design inputs `.claude/runs/console-by-domain-design.md` and `.claude/runs/console-design-system.md`; the owner's words are in `.claude/runs/console-owner-notes.md`.
 

@@ -6,17 +6,15 @@ import base64
 import contextlib
 import functools
 import hashlib
-import inspect
+import itertools
 import json
 import logging
 import math
 import re
-import stat
-import subprocess
-import sys
 import tempfile
 import threading
 import time
+import types
 import typing
 from concurrent.futures import Future
 from pathlib import Path
@@ -27,13 +25,13 @@ import tls_fixture as tls
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from media_queue import RecordingMediaQueue
 from pydantic import ValidationError
+from support.position import save_position
 from test_executor import binding, layer
 from uplink_fakes import FakeReply, FakeTransport, central, finding
 from websockets.datastructures import Headers
 from websockets.exceptions import InvalidStatus
 from websockets.http11 import Response as Http11Response
 
-import player.service as service_module
 from central.db import ProcessTransactionClock
 from contracts.enrollment import Enrollment, OutputReport, enrollment_message
 from contracts.models import Commit, Plan, PlayerConfiguration, Revocation
@@ -42,12 +40,12 @@ from contracts.time import ManualClock, TimeMapping
 from player.identity import load_identity
 from player.mainloop import CONTROL, DispatchRefused, LoopLate, MainLoopDispatcher
 from player.output_discovery import (
-    CONFIGURED_OUTPUT_IDS,
+    OUTPUT_IDS,
     discover_outputs,
     output_app_id,
     weston_ini,
 )
-from player.rendering import CapacityResult, PrepareResult, PresentationResult, RecordingRenderer
+from player.rendering import PrepareResult, PresentationResult, RecordingRenderer
 from player.service import (
     MAX_JSON,
     BootContext,
@@ -95,42 +93,9 @@ TRUST = Trust.public(tls.write_bundle(_TRUST_DIR / "ca.pem", tls.CA))
 
 def boot_context() -> BootContext:
     return BootContext.model_validate({
-        "schema": 2,
-        "ticket_id": "a" * 48,
         "device_id": "device-" + "b" * 64,
-        "boot_id": "12345678-1234-1234-1234-123456789abc",
-        "release_id": "c" * 64,
-        "trial": False,
-        "persistence": "volatile",
-        "fault": None,
+        "run_id": "12345678-1234-1234-1234-123456789abc",
     })
-
-
-def d0_boot_context() -> BootContext:
-    """m3-central-d0-enroll / 0009 re-key: flashed/ticketless
-    (persistence="persistent", ticket_id=None). `hardware_boot_context`
-    (player/service.py) has no netboot-ticket source and honestly reports
-    `ticket_id=None`; enroll() derives the ticketless signal from the
-    presence of a ticket, not from `persistence`."""
-    return boot_context().model_copy(update={"persistence": "persistent", "ticket_id": None})
-
-
-def test_importing_service_never_pulls_in_zeroconf():
-    """The appliance chroot smoke-test does `import player.service,gi,OpenGL`
-    in a netboot venv that has no zeroconf -- 0008 D1 players use an explicit
-    `central_origin` and never need mDNS discovery. `MdnsCentralDiscovery` (and
-    its `zeroconf` dependency) must therefore be imported lazily, only on the
-    discovery branch in main(), never at `player.service` module import time.
-
-    Run in a subprocess (not just `sys.modules` in-process) so this doesn't
-    depend on whichever test happened to import zeroconf first in this
-    session, and so it doesn't poison `sys.modules` for later tests."""
-    result = subprocess.run(
-        [sys.executable, "-c", "import player.service, sys; "
-            "assert 'zeroconf' not in sys.modules, sys.modules.keys()"],
-        capture_output=True, text=True,
-    )
-    assert result.returncode == 0, result.stderr
 
 
 def test_identity_is_fresh_signed_and_never_written(tmp_path):
@@ -138,8 +103,7 @@ def test_identity_is_fresh_signed_and_never_written(tmp_path):
     first, second = load_identity(), load_identity()
     assert first.public_key != second.public_key
     context = boot_context()
-    fields = dict(device_id=context.device_id, boot_id=context.boot_id,
-                  ticket_id=context.ticket_id)
+    fields = dict(device_id=context.device_id, boot_id=context.run_id)
     proof = first.enrollment("f" * 64, (), **fields)
     Ed25519PublicKey.from_public_bytes(bytes.fromhex(first.public_key)).verify(
         base64.b64decode(proof.signature), enrollment_message(proof.nonce, (), **fields))
@@ -166,13 +130,10 @@ def test_the_saved_root_rejects_untrusted_or_non_origin_urls_only_when_read(tmp_
     assert (excinfo.value.cause, excinfo.value.reason) == (Cause.CONFIGURATION, "invalid")
 
 
-@pytest.mark.parametrize("allow_http", [{}, {"allow_http": False}, {"allow_http": True}])
-def test_config_accepts_an_http_root_and_allow_http_is_inert(tmp_path, allow_http):
-    """R2 makes an http root legal; allow_http is still accepted (older handoffs carry it) and
-    changes nothing."""
+def test_config_accepts_an_http_root(tmp_path):
+    """R2 makes an http root legal."""
     path = tmp_path / "public.json"
-    path.write_text(json.dumps({"schema": 1, "central_origin": "http://192.0.2.10:8000",
-                                **allow_http}))
+    path.write_text(json.dumps({"schema": 1, "central_origin": "http://192.0.2.10:8000"}))
     assert load_config(path).saved_root() == Origin.parse_root("http://192.0.2.10:8000")
     assert PlayerConfig().saved_root() is None
 
@@ -182,7 +143,8 @@ def test_config_is_strict_bounded_public_json(tmp_path):
     path.write_text(json.dumps({"schema": 1, "central_origin": "https://central:8443/",
                               "cache_dir": str(tmp_path), "cache_bytes": 1048576}))
     assert load_config(path).central_origin == "https://central:8443/"
-    for data in ({"unexpected": True}, {"cache_bytes": "1048576"}, {"allow_http": "false"}):
+    for data in ({"unexpected": True}, {"cache_bytes": "1048576"}, {"allow_http": True},
+                 {"boot_context_file": "/run/photo-wall/boot.json"}):
         with pytest.raises(ValidationError):
             PlayerConfig.model_validate({"central_origin": "https://central", **data})
     path.write_bytes(b" " * (MAX_JSON + 1))
@@ -236,8 +198,8 @@ def test_connector_discovery_rejects_mixed_or_duplicate_virtual_outputs(tmp_path
 
 
 def test_connector_routing_and_generated_weston_config_are_bounded():
-    assert CONFIGURED_OUTPUT_IDS == ("HDMI-A-1", "HDMI-A-2", "Virtual-1", "Virtual-2")
-    for output_id in CONFIGURED_OUTPUT_IDS:
+    assert OUTPUT_IDS == ("HDMI-A-1", "HDMI-A-2", "Virtual-1", "Virtual-2")
+    for output_id in OUTPUT_IDS:
         assert output_app_id(output_id) == "photo-wall-" + output_id
     assert output_app_id("HDMI-A-3") == "photo-wall-HDMI-A-3"
     for invalid in ("Virtual-3", "DP-1", "../../config"):
@@ -246,7 +208,7 @@ def test_connector_routing_and_generated_weston_config_are_bounded():
     config = weston_ini()
     assert config.count("[output]") == 4
     assert all(f"name={output_id}\napp-ids=photo-wall-{output_id}" in config
-               for output_id in CONFIGURED_OUTPUT_IDS)
+               for output_id in OUTPUT_IDS)
 
 
 def test_numeric_hdmi_connector_suffix_remains_supported(tmp_path):
@@ -256,6 +218,15 @@ def test_numeric_hdmi_connector_suffix_remains_supported(tmp_path):
     found = discover_outputs(tmp_path)
     assert found.fault is None
     assert found.outputs[0].output_id == "HDMI-A-3"
+
+
+_DELIVERIES = itertools.count(1)
+
+
+def delivered(**fields) -> State:
+    """A State as Central sends it: every delivery carries its id and its sequence."""
+    sequence = next(_DELIVERIES)
+    return State(delivery_id=f"{sequence:032x}", delivery_sequence=sequence, **fields)
 
 
 class Server:
@@ -280,8 +251,7 @@ class Server:
             self.proofs.append(proof)
             Ed25519PublicKey.from_public_bytes(bytes.fromhex(proof.public_key)).verify(
                 base64.b64decode(proof.signature), enrollment_message(
-                    proof.nonce, proof.outputs, proof.device_id, proof.boot_id, proof.ticket_id
-                ))
+                    proof.nonce, proof.outputs, proof.device_id, proof.boot_id))
             self.epoch += 1
             self.player_id = "p-" + hashlib.sha256(proof.device_id.encode()).hexdigest()[:32]
             return httpx.Response(200, json={"player_id": self.player_id,
@@ -295,11 +265,9 @@ class Server:
         if path == "/v1/player/state":
             return httpx.Response(200, json=self.state.model_dump(mode="json"))
         if path == "/v1/player/hello":
-            # Existing Central releases have no negotiation route; a new Player
-            # must fall back only for this exact 404 before its first state read.
-            return httpx.Response(404, json={"detail": "Not Found"})
-        if path == "/v1/player/boot-health":
-            return httpx.Response(200, json={"accepted": True, "release_id": "c" * 64})
+            offer = json.loads(request.content)
+            return httpx.Response(200, json={"authority_epoch": offer["authority_epoch"],
+                                             "schema": 2, "capabilities": []})
         if path.startswith("/v1/media/"):
             return self.media_response or httpx.Response(200, content=self.data,
                 headers={"Content-Type": "image/png", "Content-Length": str(len(self.data))})
@@ -312,7 +280,7 @@ class Server:
             authority_epoch=self.epoch, issued_at=self.clock.utc(), valid_from=self.clock.utc(),
             valid_until=300, bindings=configuration.bindings,
             layers=(layer(data=self.data),) if layers is None else layers)
-        self.state = State(configuration=configuration, plan=None if absent else plan,
+        self.state = delivered(configuration=configuration, plan=None if absent else plan,
             commits=commits, revocations=revocations)
         return self.state
 
@@ -322,13 +290,13 @@ async def rig(tmp_path, *, server=None, negotiate=False):
     directory.mkdir(mode=0o700, exist_ok=True)
     clock = ManualClock(100)
     server = server or Server(clock)
-    config = PlayerConfig(central_origin="http://central", allow_http=True, cache_dir=str(directory),
+    config = PlayerConfig(central_origin="http://central", cache_dir=str(directory),
                           cache_bytes=1024**2)
     client = httpx.AsyncClient(transport=httpx.MockTransport(server), trust_env=False)
     service = PlayerService(config, load_identity(), (), RecordingRenderer(), immediate,
         find_central=finding("http://central"), trust=TRUST, clock=clock,
         client=client, time_client=client,
-        websocket_connect=False, health_path=None, boot_context=boot_context())
+        websocket_connect=False, boot_context=boot_context())
     await service.locate_central()
     await service.enroll()
     if negotiate:
@@ -337,6 +305,24 @@ async def rig(tmp_path, *, server=None, negotiate=False):
     server.offer()
     await service.poll_state()
     return service, server
+
+
+def test_an_unsequenced_state_is_refused_at_parse(tmp_path):
+    """Central sequences every delivery, so state without its id and sequence is a protocol
+    error the session names, never applied. Mutation probe: make the pair optional again."""
+    async def check():
+        service, server = await rig(tmp_path)
+        try:
+            body = server.state.model_dump(mode="json")
+            del body["delivery_id"], body["delivery_sequence"]
+            server.state = types.SimpleNamespace(model_dump=lambda mode: body)
+            applied = service._highest_control_sequence
+            with pytest.raises(ValidationError):
+                await service.poll_state()
+            assert service._highest_control_sequence == applied
+        finally:
+            await close(service)
+    asyncio.run(check())
 
 
 def test_player_negotiates_before_state_and_acknowledges_ordered_v2(tmp_path):
@@ -373,12 +359,15 @@ def test_player_negotiates_before_state_and_acknowledges_ordered_v2(tmp_path):
     asyncio.run(check())
 
 
-def test_legacy_hello_fallback_suppresses_unnegotiated_identify(tmp_path):
+def test_an_identify_cue_the_session_did_not_select_is_never_shown(tmp_path):
     async def check():
-        service, _ = await rig(tmp_path)
+        service, server = await rig(tmp_path)
         try:
             await service.hello_protocol()
-            assert service._control_selection.schema_version == 1
+            hello = json.loads(next(request.content for request in server.requests
+                                    if request.url.path == "/v1/player/hello"))
+            assert hello["schemas"] == [2]
+            assert service._control_selection.capabilities == ()
             service.outputs = (OutputReport(output_id="hdmi2", width_px=1920,
                                             height_px=1080, connected=True),)
             config = PlayerConfiguration(player_id=service.registration.player_id,
@@ -386,8 +375,9 @@ def test_legacy_hello_fallback_suppresses_unnegotiated_identify(tmp_path):
                 configuration_revision=2, bindings=(), enabled_outputs=())
             cue = IdentifyOutput(request_id="old-central-cue", output_id="hdmi2",
                 authority_epoch=service.registration.authority_epoch, remaining_seconds=10)
-            state = State(configuration=config, plan=None, commits=(), revocations=(),
-                          identify_output=cue)
+            state = delivered(configuration=config, plan=None, commits=(), revocations=(),
+                              identify_output=cue,
+                              identify_expires_at=service.clock.utc() + 10)
             assert service._apply_state(state) == "applied"
             assert service.renderer.identify_output is None
         finally:
@@ -422,9 +412,8 @@ async def _identify_output_scenario(tmp_path):
             configuration_revision=2, bindings=(), enabled_outputs=())
         cue = IdentifyOutput(request_id="identify-1", output_id="hdmi2",
             authority_epoch=service.registration.authority_epoch, remaining_seconds=10)
-        state = State(configuration=config, plan=None, commits=(), revocations=(),
-                      identify_output=cue, identify_expires_at=service.clock.utc() + 10,
-                      delivery_id="1" * 32, delivery_sequence=1)
+        state = delivered(configuration=config, plan=None, commits=(), revocations=(),
+                          identify_output=cue, identify_expires_at=service.clock.utc() + 10)
         service._apply_state(state)
         renderer = service.renderer
         deadline = service._identify_deadline
@@ -446,21 +435,15 @@ async def _identify_output_scenario(tmp_path):
         assert renderer.identify_output is None
         assert service._identify_deadline is None
 
-        cleared = state.model_copy(update={"identify_output": None,
-                                           "identify_expires_at": None,
-                                           "delivery_id": "2" * 32,
-                                           "delivery_sequence": 2})
+        cleared = delivered(configuration=config, plan=None, commits=(), revocations=())
         service._apply_state(cleared)
         assert service._apply_state(state) == "superseded"
         assert renderer.identify_output is None
 
         new_cue = cue.model_copy(update={"request_id": "identify-2"})
-        service._apply_state(state.model_copy(update={
-            "identify_output": new_cue,
-            "identify_expires_at": service.clock.utc() + 5,
-            "delivery_id": "3" * 32,
-            "delivery_sequence": 3,
-        }))
+        service._apply_state(delivered(configuration=config, plan=None, commits=(),
+                                       revocations=(), identify_output=new_cue,
+                                       identify_expires_at=service.clock.utc() + 5))
         assert renderer.identify_output == "hdmi2"
 
         service._apply_identify_output(cue, ("hdmi2",), config.authority_epoch + 1)
@@ -483,25 +466,17 @@ def gateway():
         str(LOCATED.url("/v1/locate")): central})
 
 
-class NoMdns:
-    """Fails the test if the wiring builds an mDNS browser."""
-
-    def __init__(self, *args, **kwargs):
-        raise AssertionError("no mDNS object may be built")
-
-
 async def finder_rig(find, handle=None):
     clock = ManualClock(100)
     server = Server(clock)
     client = httpx.AsyncClient(transport=httpx.MockTransport(handle or server), trust_env=False)
     service = PlayerService(PlayerConfig(), load_identity(), (), RecordingRenderer(), immediate,
         find_central=find, trust=TRUST, clock=clock, client=client, time_client=client,
-        websocket_connect=False, health_path=None, boot_context=boot_context())
+        websocket_connect=False, boot_context=boot_context())
     return service, server
 
 
-def test_a_cmdline_root_wins_over_the_saved_root_and_no_mdns_is_built(monkeypatch, caplog):
-    monkeypatch.setattr("player.mdns_discovery.MdnsCentralDiscovery", NoMdns)
+def test_a_cmdline_root_wins_over_the_saved_root(caplog):
     caplog.set_level(logging.INFO, logger="photo_wall.player")
     config = PlayerConfig(central_origin="http://192.0.2.20:8000")
     found = asyncio.run(central_finder(config, Configured(CMDLINE), transport=gateway())())
@@ -511,33 +486,20 @@ def test_a_cmdline_root_wins_over_the_saved_root_and_no_mdns_is_built(monkeypatc
 
 
 @pytest.mark.parametrize("unconfigured", [Unconfigured("absent"), Unconfigured("no_cmdline")])
-def test_the_saved_root_is_used_without_a_cmdline_root_and_builds_no_mdns(
-        monkeypatch, unconfigured):
-    monkeypatch.setattr("player.mdns_discovery.MdnsCentralDiscovery", NoMdns)
+def test_the_saved_root_is_used_without_a_cmdline_root(unconfigured):
     transport = FakeTransport({str(LOCATED.url("/v1/locate")): central})
     config = PlayerConfig(central_origin="http://central")
     found = asyncio.run(central_finder(config, unconfigured, transport=transport)())
     assert (found.root, found.source, found.central.origin) == (LOCATED, "saved", LOCATED)
 
 
-def test_mdns_is_built_only_without_a_cmdline_or_saved_root(monkeypatch):
-    built = []
-
-    class Mdns:
-        def __init__(self):
-            self.proofs = []
-            built.append(self)
-
-        async def discover(self, unconfigured):
-            self.proofs.append(unconfigured)
-            return LOCATED
-
-    monkeypatch.setattr("player.mdns_discovery.MdnsCentralDiscovery", Mdns)
+def test_without_a_cmdline_or_saved_root_nothing_is_found():
     transport = FakeTransport({str(LOCATED.url("/v1/locate")): central})
     find = central_finder(PlayerConfig(), Unconfigured("absent"), transport=transport)
-    found = asyncio.run(find())
-    assert (found.root, found.source) == (LOCATED, "discovered")
-    assert [mdns.proofs for mdns in built] == [[Unconfigured("absent")]]
+    with pytest.raises(UplinkError) as excinfo:
+        asyncio.run(find())
+    assert (excinfo.value.cause, excinfo.value.reason, excinfo.value.detail) == (
+        Cause.CONFIGURATION, "absent", "not_discovered")
 
 
 def test_every_request_goes_to_the_located_origin_not_the_root(tmp_path):
@@ -579,89 +541,11 @@ def test_the_websocket_url_comes_from_the_located_origin(tmp_path):
     asyncio.run(check())
 
 
-def test_d0_persistent_boot_context_enrolls_with_no_ticket_id(tmp_path):
-    """The player derives the ticketless signal from `boot_context.ticket_id
-    is None`, not `persistence` -- `hardware_boot_context` (player/service.py)
-    now honestly reports `ticket_id=None` rather than a synthesized
-    placeholder, and enroll() never has to translate `persistence` into a
-    ticketless flag."""
-    async def check():
-        directory = tmp_path / "cache"
-        directory.mkdir(mode=0o700)
-        clock = ManualClock(100)
-        server = Server(clock)
-        config = PlayerConfig(central_origin="http://central", allow_http=True,
-                              cache_dir=str(directory), cache_bytes=1024**2)
-        client = httpx.AsyncClient(transport=httpx.MockTransport(server), trust_env=False)
-        service = PlayerService(config, load_identity(), (), RecordingRenderer(), immediate,
-            find_central=finding("http://central"), trust=TRUST, clock=clock,
-            client=client, time_client=client, websocket_connect=False, health_path=None,
-            boot_context=d0_boot_context())
-        try:
-            await service.locate_central()
-            await service.enroll()
-            assert server.proofs[-1].ticket_id is None
-            assert server.proofs[-1].device_id == d0_boot_context().device_id
-        finally:
-            await close(service)
-    asyncio.run(check())
-
-
-def test_volatile_boot_context_enrolls_with_its_real_ticket_id_unchanged(tmp_path):
-    """Netboot (persistence="volatile", a real ticket_id) is byte-unchanged:
-    the real ticket_id still reaches central, exactly as before this bead."""
-    async def check():
-        service, server = await rig(tmp_path)
-        try:
-            assert server.proofs[-1].ticket_id == boot_context().ticket_id
-        finally:
-            await close(service)
-    asyncio.run(check())
-
-
-def test_volatile_persistence_with_no_ticket_still_enrolls_ticketless(tmp_path):
-    """0009 re-key proof: `persistence` no longer gates enroll at all. A
-    boot context that is `persistence="volatile"` (the netboot label) but
-    carries `ticket_id=None` (0009's diskless bootstrapper issues no ticket)
-    must still enroll ticketless and start `release_accepted=True` -- keying
-    on `persistence` instead of the ticket would send this boot context's
-    real-looking `persistence="volatile"` down the ticketed branch and 404."""
-    async def check():
-        directory = tmp_path / "cache"
-        directory.mkdir(mode=0o700)
-        clock = ManualClock(100)
-        server = Server(clock)
-        config = PlayerConfig(central_origin="http://central", allow_http=True,
-                              cache_dir=str(directory), cache_bytes=1024**2)
-        client = httpx.AsyncClient(transport=httpx.MockTransport(server), trust_env=False)
-        diskless = boot_context().model_copy(update={"ticket_id": None})
-        assert diskless.persistence == "volatile"
-        service = PlayerService(config, load_identity(), (), RecordingRenderer(), immediate,
-            find_central=finding("http://central"), trust=TRUST, clock=clock,
-            client=client, time_client=client, websocket_connect=False, health_path=None,
-            boot_context=diskless)
-        try:
-            await service.locate_central()
-            await service.enroll()
-            assert server.proofs[-1].ticket_id is None
-        finally:
-            await close(service)
-    asyncio.run(check())
-
-
-def test_d0_flashed_player_reaches_sustained_session_without_boot_health_crash_loop(
+def test_a_run_reaches_a_sustained_session(
         tmp_path, monkeypatch):
-    """m3-central-d0-enroll FIX: a D0/flashed player has no central-issued boot
-    ticket to report against -- `boot_context.ticket_id is None`
-    (hardware_boot_context) means `_control_loop` must never call
-    `_report_boot_health` for it at all (0009 re-key); calling it anyway
-    would 403 `stale_boot_ticket` and, uncaught, tear down every sibling task
-    via run()'s FIRST_COMPLETED wait, restarting forever (never
-    rendering/downloading/opening a websocket). Drive the actual control loop
-    through run() and assert the session SURVIVES: the boot-health endpoint
-    is never called, the websocket loop connects exactly once (never torn
-    down and reconnected by a crash restart), and the media loop reaches and
-    completes a real download."""
+    """Drive the control loop through run() and assert the session survives: the websocket
+    loop connects exactly once (never torn down and
+    reconnected by a crash restart), and the media loop completes a real download."""
     monkeypatch.setattr("player.service.BACKOFF", (.001,) * 4)
 
     async def check():
@@ -669,14 +553,9 @@ def test_d0_flashed_player_reaches_sustained_session_without_boot_health_crash_l
         directory.mkdir(mode=0o700)
         clock = ManualClock(100)
         server = Server(clock)
-        boot_health_calls, media_calls, connect_calls = [], [], []
+        media_calls, connect_calls = [], []
 
         def handle(request):
-            if request.url.path == "/v1/player/boot-health":
-                boot_health_calls.append(request)
-                # Central never recorded the D0 placeholder ticket: a real
-                # central would 403 any boot-health call from a D0 player.
-                return httpx.Response(403, json={"error": "stale_boot_ticket"})
             if request.url.path.startswith("/v1/media/"):
                 media_calls.append(request)
             result = server(request)
@@ -684,7 +563,7 @@ def test_d0_flashed_player_reaches_sustained_session_without_boot_health_crash_l
                 server.offer()
             return result
 
-        config = PlayerConfig(central_origin="http://central", allow_http=True,
+        config = PlayerConfig(central_origin="http://central",
                               cache_dir=str(directory), cache_bytes=1024**2)
         client = httpx.AsyncClient(transport=httpx.MockTransport(handle), trust_env=False)
 
@@ -709,8 +588,8 @@ def test_d0_flashed_player_reaches_sustained_session_without_boot_health_crash_l
 
         service = PlayerService(config, load_identity(), (), RecordingRenderer(), immediate,
             find_central=finding("http://central"), trust=TRUST, clock=clock,
-            client=client, time_client=client, websocket_connect=connect, health_path=None,
-            boot_context=d0_boot_context())
+            client=client, time_client=client, websocket_connect=connect,
+            boot_context=boot_context())
         task = asyncio.create_task(service.run())
         try:
             async def connected():
@@ -724,11 +603,9 @@ def test_d0_flashed_player_reaches_sustained_session_without_boot_health_crash_l
             await asyncio.wait_for(downloaded(), 3)
 
             # Give the control loop several more 0.5s cadences to prove it
-            # keeps running rather than looping the 403 into a task teardown
-            # and restart (m3-central-d0-enroll's crash-loop).
+            # keeps running rather than tearing its tasks down and restarting.
             await asyncio.sleep(.2)
             assert service.registration is not None
-            assert not boot_health_calls
             assert connect_calls == [True]
         finally:
             service.stop()
@@ -891,7 +768,7 @@ def test_only_connected_unbound_outputs_show_enrollment_diagnostic(tmp_path):
              OutputReport(output_id="hdmi2", width_px=0, height_px=0, connected=False)),
             RecordingRenderer(), immediate, find_central=finding("http://central"),
             trust=TRUST, clock=clock, client=client, time_client=client,
-            websocket_connect=False, health_path=None, boot_context=boot_context(),
+            websocket_connect=False, boot_context=boot_context(),
         )
         try:
             assert service.central_link_state == service.renderer.central_link_state == "connecting"
@@ -906,7 +783,7 @@ def test_only_connected_unbound_outputs_show_enrollment_diagnostic(tmp_path):
             unbound_plan = initial.plan.model_copy(update={
                 "bindings": (),
             })
-            server.state = State(configuration=unbound_config, plan=unbound_plan,
+            server.state = delivered(configuration=unbound_config, plan=unbound_plan,
                                  commits=(), revocations=())
             await service.poll_state()
             assert service.renderer.unbound_outputs == ("hdmi1",)
@@ -917,9 +794,8 @@ def test_only_connected_unbound_outputs_show_enrollment_diagnostic(tmp_path):
             service._set_central_link_state("retrying")
             assert service.renderer.central_link_state == "retrying"
             assert service.renderer.unbound_outputs == ("hdmi1",)
-            service.config = service.config.model_copy(update={"base_running_tag": "a" * 64})
-            await service._report_base_health()
-            assert any(request.url.path == "/v1/player/base-health" for request in server.requests)
+            assert not any(request.url.path == "/v1/player/base-health"
+                           for request in server.requests)  # the Player posts no base-health
             assert service.renderer.central_link_state == "retrying"
             await service.poll_state()
             assert service.central_link_state == service.renderer.central_link_state == "reachable"
@@ -932,7 +808,7 @@ def test_only_connected_unbound_outputs_show_enrollment_diagnostic(tmp_path):
                 "configuration_revision": 2,
             })
             rebound_plan = initial.plan.model_copy(update={"revision": 2})
-            server.state = State(configuration=rebound_config, plan=rebound_plan,
+            server.state = delivered(configuration=rebound_config, plan=rebound_plan,
                                  commits=(), revocations=())
             await service.poll_state()
             assert service.renderer.unbound_outputs == ()
@@ -940,7 +816,7 @@ def test_only_connected_unbound_outputs_show_enrollment_diagnostic(tmp_path):
 
             unbound_config = unbound_config.model_copy(update={"configuration_revision": 3})
             unbound_plan = unbound_plan.model_copy(update={"revision": 3})
-            server.state = State(configuration=unbound_config, plan=unbound_plan,
+            server.state = delivered(configuration=unbound_config, plan=unbound_plan,
                                  commits=(), revocations=())
             await service.poll_state()
             assert service.renderer.unbound_outputs == ("hdmi1",)
@@ -1138,7 +1014,7 @@ def test_revocation_and_full_plan_omission_cancel_jobs_before_draw(tmp_path):
     asyncio.run(check())
 
 
-def test_bad_clock_measurement_withholds_preparation_and_health(tmp_path):
+def test_bad_clock_measurement_withholds_preparation(tmp_path):
     async def check():
         service, server = await rig(tmp_path)
         try:
@@ -1147,7 +1023,7 @@ def test_bad_clock_measurement_withholds_preparation_and_health(tmp_path):
             server.time_offset = 10
             assert not await service.probe_time()
             readiness, _ = service._feedback()
-            assert not readiness.prepared and not service._health()
+            assert not readiness.prepared
             assert service.mapping.diagnostics.status == "uncertainty"
             server.time_offset = 0
             assert await service.probe_time()
@@ -1331,7 +1207,6 @@ def test_a_late_main_loop_raises_the_health_fault_and_never_withdraws_readiness(
     async def check():
         service, server = await rig(tmp_path)
         try:
-            service.health_path = tmp_path / "health.json"
             service.boot_id = "00000000-1111-2222-3333-444444444444"
             service._feedback()
             assert await service.download(service._jobs[0])
@@ -1358,7 +1233,6 @@ def test_a_late_main_loop_raises_the_health_fault_and_never_withdraws_readiness(
             assert readiness_posts(server)[posted:] == []   # readiness untouched
             assert len(StarvedGLib.callbacks) <= 4      # one abandoned post holds the line
             assert service.last_fault == "main_loop_late"
-            assert json.loads(service.health_path.read_text())["health_reason"] == "main_loop_late"
             # The loop runs again: nothing it missed runs late, and reporting resumes.
             ran = []
             monkeypatch.setattr(service, "_apply_state", lambda state: ran.append(state))
@@ -1370,25 +1244,22 @@ def test_a_late_main_loop_raises_the_health_fault_and_never_withdraws_readiness(
             recovered = (await turn(service, server, 1))[0]
             assert recovered["sequence"] == live["sequence"] + 1     # no gap, nothing in between
             assert recovered["failures"] == [] and recovered["secured"] == live["secured"]
-            assert json.loads(service.health_path.read_text())["health_reason"] == "healthy"
         finally:
             await close(service)
     asyncio.run(check())
 
 
-def test_a_blocked_main_loop_keeps_its_session_and_leaves_the_watchdog_to_restart(
+def test_a_blocked_main_loop_keeps_its_session_and_resumes_once_the_loop_runs(
         tmp_path, monkeypatch):
     """E-G8-7, through run() with the time loop live and the production dispatcher: a GLib
     loop that stops running dispatches never turns into a dispatch_capacity refusal. The
     Player keeps raising main_loop_late (and posts no readiness) across many deadlines and
     across a session that ends meanwhile (its reconnect's cycle-start dispatches are late, not
-    fatal: it re-locates once and that session holds), and run() pets the watchdog not once until the loop runs again, so WatchdogSec
-    restarts a Player whose loop stays stuck."""
+    fatal: it re-locates once and that session holds), and reporting resumes once the loop runs
+    again. A loop that stays stuck is the broker's probe kill to end."""
     monkeypatch.setattr("player.service.DISPATCH_DEADLINE", .05)
     monkeypatch.setattr("player.service.REPORT_INTERVAL", .01)
     monkeypatch.setattr("player.service.BACKOFF", (.001,) * 4)
-    pets = []
-    monkeypatch.setattr(service_module.watchdog, "pet", lambda: pets.append(True))
 
     class GLib:
         blocked, queued = False, []
@@ -1436,9 +1307,12 @@ def test_a_blocked_main_loop_keeps_its_session_and_leaves_the_watchdog_to_restar
 
         task = asyncio.create_task(service.run())
         try:
-            await asyncio.wait_for(until(lambda: posts and pets), 5)
+            await asyncio.wait_for(until(lambda: posts), 5)
             GLib.blocked = True
-            blocked_at, petted = len(posts), len(pets)
+            # Only the control loop posts, one exchange at a time, so its first late dispatch
+            # means no readiness post is still in flight: count posts from there.
+            await asyncio.wait_for(until(lambda: late_count() >= 1), 5)
+            blocked_at = len(posts)
             await asyncio.wait_for(until(lambda: late_count() >= 6), 5)
             fail_state.append(False)        # the session ends while the loop is blocked
             await asyncio.wait_for(until(lambda: fail_state[0]), 5)
@@ -1450,15 +1324,14 @@ def test_a_blocked_main_loop_keeps_its_session_and_leaves_the_watchdog_to_restar
             assert service._located
             assert len(posts) == blocked_at         # no readiness while the loop is late
             assert "dispatch_capacity" not in faults
-            assert len(pets) == petted              # no pet while the loop is stuck
             assert len(GLib.queued) <= 4
-            # The loop runs again: the abandoned posts drain, reporting and petting resume.
+            # The loop runs again: the abandoned posts drain and reporting resumes.
             GLib.blocked = False
             for callback in GLib.queued:
                 callback()
             await asyncio.wait_for(
-                until(lambda: len(pets) > petted and len(posts) > blocked_at), 5)
-            assert all(not report["failures"] for report in posts)
+                until(lambda: len(posts) > blocked_at), 5)
+            assert all(not report["failures"] for report in posts), posts
         finally:
             service.stop()
             await asyncio.wait_for(task, 5)
@@ -1505,7 +1378,6 @@ def test_a_late_clock_probe_is_main_loop_late_not_a_clock_fault(tmp_path, monkey
     ServiceError, so without its own branch it would read as a clock_probe failure."""
     async def check():
         service, _ = await rig(tmp_path)
-        service.health_path = tmp_path / "health.json"
 
         async def late():
             service._stop.set()
@@ -1514,7 +1386,6 @@ def test_a_late_clock_probe_is_main_loop_late_not_a_clock_fault(tmp_path, monkey
         try:
             await asyncio.wait_for(service._time_loop(), 5)
             assert service.last_fault == "main_loop_late"
-            assert json.loads(service.health_path.read_text())["health_reason"] == "main_loop_late"
         finally:
             await close(service)
     asyncio.run(check())
@@ -1610,115 +1481,6 @@ def test_every_player_failure_code_has_console_recovery_wording():
     assert codes - known == set()
 
 
-def test_health_has_boot_authority_and_no_secrets(tmp_path):
-    async def check():
-        service, server = await rig(tmp_path)
-        try:
-            service.health_path = tmp_path / "health.json"
-            service.boot_id = "00000000-1111-2222-3333-444444444444"
-            service._write_health(*service._health_status())
-            body = json.loads(service.health_path.read_text())
-            assert body["healthy"] and body["authority_epoch"] == 1
-            assert body["health_reason"] == "healthy"
-            assert body["sampled_monotonic"] == 0 and body["boot_id"] == service.boot_id
-            assert body["persistence"] == "volatile"
-            assert body["clock"]["status"] == "healthy"
-            assert "token" not in body and "public_key" not in body
-            assert stat.S_IMODE(service.health_path.stat().st_mode) == 0o600
-            service._write_health(False)
-            body = json.loads(service.health_path.read_text())
-            assert not body["healthy"] and body["health_reason"] == "disconnected"
-            service.boot_id = ""
-            service._write_health(True)
-            body = json.loads(service.health_path.read_text())
-            assert not body["healthy"] and body["health_reason"] == "identity"
-        finally:
-            await close(service)
-    asyncio.run(check())
-
-
-@pytest.mark.parametrize("reason", ["executor", "configuration", "clock",
-                                    "renderer_capacity", "healthy"])
-def test_health_reason_preserves_gate_order_and_single_evaluation(tmp_path, monkeypatch, reason):
-    async def check():
-        service, _ = await rig(tmp_path)
-        try:
-            calls = []
-            def clock():
-                calls.append("clock")
-                return reason != "clock"
-            def capacity(_):
-                calls.append("renderer_capacity")
-                return CapacityResult(reason == "healthy")
-            monkeypatch.setattr(service.mapping, "healthy", clock)
-            monkeypatch.setattr(service.renderer, "capacity", capacity)
-            if reason == "executor":
-                service.executor = None
-            if reason in {"executor", "configuration"}:
-                service._configuration = None
-            assert service._health_status() == (reason == "healthy", reason)
-            expected = ([] if reason in {"executor", "configuration"}
-                        else ["clock"] if reason == "clock" else ["clock", "renderer_capacity"])
-            assert calls == expected
-            calls.clear()
-            assert service._health() is (reason == "healthy")
-            assert calls == expected
-        finally:
-            await close(service)
-    asyncio.run(check())
-
-
-@pytest.mark.parametrize("healthy,reason", [(True, "clock"), (False, "healthy"),
-                                            (False, "private-error"), (False, "")])
-def test_health_writer_rejects_inconsistent_or_unbounded_reasons(tmp_path, healthy, reason):
-    async def check():
-        service, _ = await rig(tmp_path)
-        try:
-            service.health_path = tmp_path / "health.json"
-            service.boot_id = "00000000-1111-2222-3333-444444444444"
-            with pytest.raises(ValueError, match="inconsistent health reason"):
-                service._write_health(healthy, reason)
-            assert not service.health_path.exists()
-        finally:
-            await close(service)
-    asyncio.run(check())
-
-
-@pytest.mark.parametrize("reason", ["healthy", "clock"])
-def test_control_writes_one_consistent_health_sample_with_clock_diagnostics(
-        tmp_path, monkeypatch, reason):
-    async def check():
-        service, _ = await rig(tmp_path)
-        try:
-            service.health_path = tmp_path / "health.json"
-            service.boot_id = "00000000-1111-2222-3333-444444444444"
-            calls = []
-            async def poll():
-                service._stop.set()
-            def status():
-                calls.append(reason)
-                return reason == "healthy", reason
-            monkeypatch.setattr(service, "poll_state", poll)
-            monkeypatch.setattr(service, "_feedback", lambda: (None, ()))
-            monkeypatch.setattr(service, "_health_status", status)
-            await service._control_loop()
-            assert calls == [reason]
-            value = json.loads(service.health_path.read_text())
-            assert value["health_reason"] == reason
-            assert value["healthy"] is (reason == "healthy")
-            assert value["persistence"] == "volatile"
-            assert value["clock"]["status"] == "healthy"
-            assert value["clock"]["accepted"] >= 1
-        finally:
-            await close(service)
-    asyncio.run(check())
-
-
-def test_health_default_is_player_private_path():
-    default = inspect.signature(PlayerService).parameters["health_path"].default
-    assert default == Path("/run/photo-wall/player/service-health.json")
-
-
 def test_cache_initialization_failure_fails_session_without_local_fallback(tmp_path):
     async def check():
         directory = private_dir(tmp_path / "state")
@@ -1727,10 +1489,10 @@ def test_cache_initialization_failure_fails_session_without_local_fallback(tmp_p
         def fail(*_):
             raise OSError("full volume")
         client = httpx.AsyncClient(transport=httpx.MockTransport(server))
-        service = PlayerService(PlayerConfig(central_origin="http://central", allow_http=True,
+        service = PlayerService(PlayerConfig(central_origin="http://central",
             cache_dir=str(directory)), load_identity(), (), RecordingRenderer(), immediate,
             find_central=finding("http://central"), trust=TRUST, clock=clock,
-            client=client, time_client=client, cache_factory=fail, health_path=None,
+            client=client, time_client=client, cache_factory=fail,
             boot_context=boot_context())
         try:
             await service.locate_central()
@@ -1939,10 +1701,10 @@ def test_the_default_websocket_connector_refuses_redirects(tmp_path, monkeypatch
         clock = ManualClock(100)
         server = Server(clock)
         client = httpx.AsyncClient(transport=httpx.MockTransport(server), trust_env=False)
-        service = PlayerService(PlayerConfig(central_origin="http://central", allow_http=True),
+        service = PlayerService(PlayerConfig(central_origin="http://central"),
             load_identity(), (), RecordingRenderer(), immediate,
             find_central=finding("http://central"), trust=TRUST, clock=clock,
-            client=client, time_client=client, health_path=None, boot_context=boot_context())
+            client=client, time_client=client, boot_context=boot_context())
         assert service.link.websocket_connect is None
         try:
             await service.locate_central()
@@ -2103,8 +1865,6 @@ def test_real_central_http_media_commit_outage_rejoin_and_renewal(registry, tmp_
     from central.media_repository import MediaRepository, StoreLimits
     from central.media_store import MediaStore
     from contracts.enrollment import OutputReport
-    from contracts.models import Calibration
-    from media.models import SourceSpec
 
     repository = MediaRepository(registry.db, registry.clock, StoreLimits(
         max_bytes=10000, max_original_bytes=1000, max_image_bytes=1000, max_video_bytes=2000),
@@ -2112,11 +1872,7 @@ def test_real_central_http_media_commit_outage_rejoin_and_renewal(registry, tmp_
     repository.set_recipe(RECIPE)
     storage = MediaStore(repository, tmp_path / "central-media")
     with storage.worker_lock():
-        lease, _, prepared = staged(storage)
-        repository.configure_source(SourceSpec(source_ref="library:1", connection_ref="fixture"))
-        with repository.transaction() as conn:
-            conn.execute("UPDATE media_sources SET status='ok'")
-            conn.execute("INSERT INTO source_members VALUES('library:1',%s)", (lease.asset.asset_id,))
+        lease, _, prepared = staged(storage)   # a photo of Source library:1's pool
         storage.publish(lease, prepared)
     app = create_app(
         registry.db,
@@ -2149,14 +1905,7 @@ def test_real_central_http_media_commit_outage_rejoin_and_renewal(registry, tmp_
         cache_dir = private_dir(tmp_path / "player-cache")
         boot_id = "12345678-1234-1234-1234-123456789abc"
         device_id = "device-" + "d" * 64
-        # Ticketless enroll (0009): the signed boot-ticket path is retired, so
-        # this drives the real central with ticket_id=None, exactly as a
-        # diskless/flashed player does.
-        context = BootContext.model_validate({
-            "schema": 2, "device_id": device_id, "boot_id": boot_id,
-            "ticket_id": None, "release_id": "c" * 64,
-            "trial": False, "persistence": "volatile", "fault": None,
-        })
+        context = BootContext(device_id=device_id, run_id=boot_id)
         client = httpx.AsyncClient(trust_env=False, follow_redirects=False)
         # An http root needs no trust store; the fixture CA keeps the host's out of it.
         trust = Trust.public(tls.write_bundle(tmp_path / "ca.pem", tls.CA))
@@ -2166,19 +1915,19 @@ def test_real_central_http_media_commit_outage_rejoin_and_renewal(registry, tmp_
             RecordingRenderer(), immediate,
             find_central=functools.partial(find_central, Configured(Origin.parse_root(origin)),
                                            transport=transport),
-            trust=trust, clock=registry.clock, client=client, time_client=client,
-            health_path=None, boot_context=context)
+            trust=trust, clock=registry.clock, client=client, time_client=client, boot_context=context)
         socket_task = None
         try:
             assert (await service.locate_central()).origin == Origin.parse_root(origin)
             await service.enroll()
+            await service.hello_protocol()
             registered = service.registration
             await service.probe_time()
             await service.poll_state()
             assert service._plan is None
             frame(registry, "portrait")
             registry.bind("portrait", registered.player_id, "HDMI-A-1", expected_generation=0)
-            registry.calibrate("portrait", "commit", 1, Calibration(), expected_generation=1)
+            save_position(registry, "portrait")
             schedule(app.state.coordinator, ["portrait"], starts=1000, media=True)
             await service.poll_state()
             service._feedback()
@@ -2239,6 +1988,7 @@ def test_real_central_http_media_commit_outage_rejoin_and_renewal(registry, tmp_
             old = await client.get(origin + "/v1/player/state",
                                    headers={"Authorization": "Bearer " + registered.token})
             assert old.status_code == 401
+            await service.hello_protocol()
             app.state.coordinator.advance()
             await service.poll_state()
             service._feedback()
@@ -2257,103 +2007,3 @@ def test_real_central_http_media_commit_outage_rejoin_and_renewal(registry, tmp_
         thread.join(timeout=5)
         listener.close()
         assert not thread.is_alive()
-
-
-# --- 0012 bead 6: base-health check-in after enroll --------------------------
-
-BASE_TAG = "v9.9.9"
-
-
-def _base_health_rig(tmp_path, config, *, responses=()):
-    """A PlayerService wired to a Server that captures base-health POST bodies.
-
-    Mirrors `rig`'s construction but keeps the base-health path observable and
-    lets the caller vary `config` (e.g. whether a served tag was handed forward).
-    """
-    directory = tmp_path / "cache"
-    directory.mkdir(mode=0o700, exist_ok=True)
-    clock = ManualClock(100)
-    server = Server(clock)
-    posts = []
-    answers = iter(responses)
-    inner = server.__call__
-
-    def capture(request):
-        if request.url.path == "/v1/player/base-health":
-            posts.append(json.loads(request.content))
-            if responses:
-                return httpx.Response(200, json={"accepted": next(answers)})
-        return inner(request)
-
-    client = httpx.AsyncClient(transport=httpx.MockTransport(capture), trust_env=False)
-    service = PlayerService(config, load_identity(), (), RecordingRenderer(), immediate,
-        find_central=finding("http://central"), trust=TRUST, clock=clock,
-        client=client, time_client=client,
-        websocket_connect=False, health_path=None, boot_context=boot_context())
-    return service, posts
-
-
-def test_base_health_posted_once_per_epoch_after_enroll(tmp_path):
-    # The enrolled player reports the handed-forward served tag healthy so the
-    # latest-verified frontier can advance; the report is idempotent per epoch.
-    config = PlayerConfig(central_origin="http://central", allow_http=True,
-                          cache_dir=str(tmp_path / "cache"), cache_bytes=1024**2,
-                          base_running_tag=BASE_TAG)
-
-    async def check():
-        service, posts = _base_health_rig(tmp_path, config)
-        try:
-            await service.locate_central()
-            await service.enroll()
-            await service._report_base_health()
-            await service._report_base_health()  # no re-post within the same epoch
-            epoch = service.registration.authority_epoch
-            assert posts == [{"authority_epoch": epoch, "sequence": 1,
-                              "running_tag": BASE_TAG, "healthy": True}]
-            assert service._base_health_epoch == epoch
-        finally:
-            await close(service)
-
-    asyncio.run(check())
-
-
-def test_rejected_base_health_retries_with_new_sequence(tmp_path):
-    config = PlayerConfig(central_origin="http://central", allow_http=True,
-                          cache_dir=str(tmp_path / "cache"), cache_bytes=1024**2,
-                          base_running_tag=BASE_TAG)
-
-    async def check():
-        service, posts = _base_health_rig(tmp_path, config, responses=(False, True))
-        try:
-            await service.locate_central()
-            await service.enroll()
-            await service._report_base_health()
-            assert service._base_health_epoch is None
-            await service._report_base_health()
-            assert service._base_health_epoch == service.registration.authority_epoch
-            await service._report_base_health()
-            assert [post["sequence"] for post in posts] == [1, 2]
-        finally:
-            await close(service)
-
-    asyncio.run(check())
-
-
-def test_no_base_health_when_no_tag_handed_forward(tmp_path):
-    # Flashed/D0 or the 0010 global `.deb` path: no served tag was handed
-    # forward, so the player posts no base-health (regression guard on d).
-    config = PlayerConfig(central_origin="http://central", allow_http=True,
-                          cache_dir=str(tmp_path / "cache"), cache_bytes=1024**2)
-
-    async def check():
-        service, posts = _base_health_rig(tmp_path, config)
-        try:
-            await service.locate_central()
-            await service.enroll()
-            await service._report_base_health()
-            assert posts == []
-            assert service._base_health_epoch is None
-        finally:
-            await close(service)
-
-    asyncio.run(check())

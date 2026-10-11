@@ -9,6 +9,11 @@ Those scratch files are pipeline working state and do **not** ship; their
 content is folded in here. If this document and any predecessor disagree, this
 document wins.
 
+> **Superseded (2026-10-09) by the [operator console design](operator-console-design.md).**
+> This document is the historical gate record of 2026-09-13 with its later notes.
+> Where the two differ, the operator console design wins; see
+> [decision 0019](decisions/0019-first-principles-console.md) for what changed.
+
 **What the reader is being asked:** approve the shape and the costed decisions
 in [§10 Decisions that are yours](#10-decisions-that-are-yours) so the delivery
 phase can begin with the tracer slice in
@@ -56,6 +61,22 @@ sold.
 > arriving with its own served read. The console says **Panel** for the display
 > hardware ("Display" survives only in Display Host). The tier and Commissioning
 > text below is kept as the record of the 2026-09-13 gate, not as current design.
+
+> **One page per Frame (2026-10-09).** The owner, 2026-10-09: "I cant find some of the simple
+> config knobs, like how do i set the visible frame position on a display? ... how do i change
+> the brightness and contrast?" The Frame Inspector and its Status · Binding · Calibration
+> facets are replaced by **one Frame page** (`#/wall/frames/<id>/<tab>`,
+> `pages/frame-page.tsx`), opened with one click on a Frame's tile: **Overview** (the former
+> Status), **Position** (corners, nudges in 1, 10 or 50 pixel steps, trims, rotation), **Picture**
+> (Brightness — Photo Wall picture adjustment, the former SDR gain) and **Hardware** (the former
+> Binding, and the Frame profile). Position and Picture show each change on the Display while
+> the tab is open and offer **Done** once the Pi has shown the latest change, and **Revert**;
+> the live session no longer times out while the tab is open (`liveAdjustment.js`, Central's
+> `keepalive`, and `renew`, which hands a session over at the draft in one step; the draft
+> carries the saved revision it was made from, so a save made elsewhere is never overwritten). A Pi without Display Host cannot adjust live and is told so; the 30-second
+> preview path is no longer offered by the console. The old facet addresses are gone (no
+> aliases). How to use it: the [runbook](runbook.md#operator-console-calibration-and-conflict-states).
+> The facet text below is kept as the record of its gate, not as current design.
 
 > **Fleet releases and the V2-only console (2026-10-02).** [Part E of the
 > domain-driven console design](operator-console-ddd.md#24-what-part-e-covers-and-why)

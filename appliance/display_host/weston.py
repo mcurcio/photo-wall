@@ -9,19 +9,34 @@ Wayland peer PID/UID and /proc start time at each observed presentation.
 from __future__ import annotations
 
 import json
+import logging
+import select
 import socket
 import struct
+import threading
 import time
 from collections import deque
 from dataclasses import asdict, dataclass
-from typing import Callable
+from typing import Callable, Protocol
 from uuid import UUID, uuid4
 
+from contracts.node_frame import PictureOperations, encode_picture_operations, parse_picture_change
+from contracts.node_output import Power
 from contracts.node_protocol import NodeProcessIdentity, OutputKey, SurfaceFact
 
 from .domain import DisplayHost, Surface
 
 MAX_PACKET = 16384
+
+log = logging.getLogger(__name__)
+
+
+class PictureEvents(Protocol):
+    """What the shell tells the picture controller (picture.PictureController), from `dispatch`."""
+
+    def presented(self, output_id: str, picture_change: int | None) -> None: ...   # never blocks
+
+    def shell_output(self, output_id: str) -> None: ...   # the shell (re)created the Output; never blocks
 
 
 def _pairs(pairs: list[tuple[str, object]]) -> dict:
@@ -112,6 +127,10 @@ class DiagnosticRelease:
 class WestonBackend:
     """Serialized controller; call ``dispatch`` only outside a domain mutation.
 
+    One lock serializes the channel: the display controller's main loop dispatches and requests
+    on it, and the power controller's worker asks for output power (``output_power``,
+    ``power_methods.OutputPowerControl``) from its own thread.
+
     The caller owns a bounded authenticated ingress and event outbox. Transport
     failure makes the output unknown; it cannot acknowledge a diagnostic. The
     shell's own local timer independently covers the app on lease/process loss.
@@ -145,6 +164,9 @@ class WestonBackend:
         self.host: DisplayHost | None = None
         self.boot_id: UUID | None = None
         self.incarnation_id: UUID | None = None
+        self._channel_lock = threading.RLock()
+        self._powered: dict[str, Power] = {}   # the compositor's own output power, per Output
+        self.picture_events: PictureEvents | None = None   # set by the runner (roadmap 1c)
 
     def _receive(self) -> dict:
         raw, _ancillary, flags, _address = self.channel.recvmsg(MAX_PACKET)
@@ -154,6 +176,13 @@ class WestonBackend:
         if type(value) is not dict or type(value.get("event")) is not str:
             raise ValueError("display_message_invalid")
         return value
+
+    def _note_power(self, value: dict) -> bool:
+        """Keep the compositor's output power from an `output_power` event; whether it was one."""
+        if value.get("event") != "output_power":
+            return False
+        self._powered[value["output_id"]] = Power(value["power"])
+        return True
 
     def _enqueue(self, value: dict) -> None:
         if len(self.pending) == self.pending.maxlen:
@@ -171,7 +200,11 @@ class WestonBackend:
         )
         return self.host
 
-    def _request(self, operation: str, key: OutputKey, **values: object) -> None:
+    def _request(self, operation: str, key: OutputKey, *, timeout: float = 2, **values: object) -> None:
+        with self._channel_lock:
+            self._request_locked(operation, key, timeout, values)
+
+    def _request_locked(self, operation: str, key: OutputKey, timeout: float, values: dict) -> None:
         request_id = str(uuid4())
         payload = {
             "op": operation,
@@ -183,15 +216,49 @@ class WestonBackend:
         wire = json.dumps(payload, default=str, separators=(",", ":")).encode()
         if len(wire) > MAX_PACKET or self.channel.send(wire) != len(wire):
             raise ConnectionError("display_request_failed")
-        deadline = time.monotonic() + 2
+        deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             value = self._receive()
             if value.get("event") == "response" and value.get("request_id") == request_id:
                 if value.get("accepted") is not True:
                     raise ValueError("display_request_rejected")
                 return
-            self._enqueue(value)
+            if not self._note_power(value):
+                self._enqueue(value)
         raise TimeoutError("display_response_timeout")
+
+    def output_power(self, output_id: str, power: Power, *, timeout: float) -> bool:
+        """Ask the shell to turn `output_id`'s signal off or on (DPMS; the Output stays); whether
+        the compositor reports it done. Called from the power controller's worker thread."""
+        try:
+            with self._channel_lock:
+                if self.host is None or output_id not in self._powered:
+                    return False
+                key = self.host.state(output_id).key
+                self._request("output_power", key, timeout=timeout, power=power.value)
+                return self._powered.get(output_id) is power
+        except (OSError, ValueError, KeyError, TimeoutError):
+            return False
+
+    def output_powered(self, output_id: str) -> Power | None:
+        """The compositor's own output power for `output_id`; None while it has no such Output."""
+        with self._channel_lock:
+            return self._powered.get(output_id)
+
+    def picture(self, operations: PictureOperations, *, timeout: float, brightness: str) -> bool:
+        """Hand one Output's picture operations and base page brightness line to the shell (control
+        op `picture`; frame protocol v4 forwards them to the Player and the overlay client); whether
+        the shell took them. Called from the picture controller's workers."""
+        try:
+            with self._channel_lock:
+                if self.host is None:
+                    return False
+                key = self.host.state(operations.output_id).key
+                self._request("picture", key, timeout=timeout,
+                              operations=encode_picture_operations(operations), brightness=brightness)
+                return True
+        except (OSError, ValueError, KeyError, TimeoutError):
+            return False
 
     def allow(self, grant: SurfaceGrant) -> UUID:
         """Called by protected lifecycle/configuration ingress, never by Player IPC."""
@@ -307,11 +374,34 @@ class WestonBackend:
         | OutputKey
         | None
     ):
-        """Consume an independently delivered native event; never synthesize one."""
+        """Consume an independently delivered native event; never synthesize one. None when
+        another thread's request already took the event the caller saw arrive."""
         if self.host is None:
             raise RuntimeError("display_not_initialized")
-        value = self.pending.popleft() if self.pending else self._receive()
+        with self._channel_lock:
+            if self.pending:
+                return self._dispatch(self.pending.popleft())
+            if not select.select([self.channel], [], [], 0)[0]:
+                return None
+            return self._dispatch(self._receive())
+
+    def _picture_presented(self, output_id: str, text: object) -> None:
+        """A v4 `presented` event's picture change to the picture controller (null: a v3 `tag`)."""
+        if self.picture_events is None or text is None:
+            return
+        try:
+            change = parse_picture_change(text) if isinstance(text, str) else None
+        except ValueError:
+            change = None
+        if change is None and text != "0":
+            log.warning("presented event with an invalid picture change on %s", output_id)
+            return
+        self.picture_events.presented(output_id, change)
+
+    def _dispatch(self, value: dict):
         event = value["event"]
+        if self._note_power(value):
+            return None
         if event == "role_removed":
             surface, decision_id = _surface(value["identity"]), UUID(value["decision_id"])
             if self.withdrawals.get(surface.output.output_id) != (surface, decision_id):
@@ -322,10 +412,16 @@ class WestonBackend:
         if event == "output":
             key = _output(value["output"])
             self.host.observe_output(key, connected=value["connected"])
+            if value["connected"]:
+                self._powered[key.output_id] = Power(value.get("power", Power.ON.value))
+            else:
+                self._powered.pop(key.output_id, None)
             self.grants.pop(key.output_id, None)
             self.revisions.pop(key.output_id, None)
             self.withdrawals.pop(key.output_id, None)
             self.trials.pop(key.output_id, None)
+            if value["connected"] and self.picture_events is not None:
+                self.picture_events.shell_output(key.output_id)
             return key
         if event == "overlay_presented":
             key = _output(value["output"])
@@ -385,6 +481,7 @@ class WestonBackend:
         fact = self.host.presented(
             surface, buffer_token=value["buffer_id"], now_ms=value["observed_monotonic_ms"]
         )
+        self._picture_presented(surface.output.output_id, value.get("picture_change"))
         return CompositorPresentation(
             fact, grant_id, value["frame_tag"], value["observed_monotonic_ms"]
         )

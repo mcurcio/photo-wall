@@ -1,18 +1,27 @@
 #!/bin/sh
-# Installed as /etc/initramfs-tools/hooks/photo-wall-netboot in the scratch
-# builder root. Stages the interpreter, its stdlib and the userland the slim,
-# UNSIGNED netboot init (appliance.netboot_init) needs into the initrd.
+# photo-wall-netboot-init's initramfs-tools hook, installed as
+# /usr/share/initramfs-tools/hooks/photo-wall-netboot (decision 0019 P4). Stages
+# into the initrd the interpreter, its stdlib and the userland the slim,
+# UNSIGNED netboot init (appliance.netboot_init) needs, then stage 1 itself:
 #
-# It copies NO first-party code and NO CA bundle or clock floor: those are the
-# boot data (scripts/build_boot_data.py; decision 0014 §5), an uncompressed
-# archive rebuilt on every build and placed in front of this cached initrd, so
-# no cache key has to cover them and they never go stale in the cache. The
-# boot data puts stage 1's computed closure in this interpreter's stdlib dir.
+#   * the contents of each package directory the package's path file lists
+#     (/usr/lib/photo-wall/netboot-init/path: the directories stage 1's imports
+#     reach, held by scripts/import_check.py to its computed launcher path),
+#     copied into the interpreter's stdlib dir, where
+#     `python3 -I -m appliance.netboot_init` finds them. Whole directories, so
+#     photo-wall-common's nodeapi rides along, never imported;
+#   * this root's /etc/ssl/certs/ca-certificates.crt, the CA bundle stage 1's
+#     Trust loads (R5). The root and the base install ca-certificates from the
+#     same snapshot pin, so the bytes are the base's; the bundle check
+#     (scripts/verify_netboot_initrd.py) compares them.
+#
+# The clock floor is NOT here: it changes with every revision, so it is a
+# one-file layer scripts/build_netboot_bundle.sh puts in front of this cached
+# initrd (R6).
 #
 # Self-contained on purpose (0008 p4-boot-chain s2a): no signed material (no
 # ca.pem/bootstrap.json/boot-policy.json/release.pub.pem), no openssl/chronyd/
-# blkid, so the old signed initramfs dir (appliance/initramfs/) can be deleted
-# whole at p4-retire without touching this one.
+# blkid.
 set -eu
 case "${1:-}" in prereqs) exit 0 ;; esac
 . /usr/share/initramfs-tools/hook-functions
@@ -37,6 +46,26 @@ for extension in "${libdir}"/lib-dynload/*.so; do
     copy_exec "$extension" "$extension"
 done
 cp -a "${libdir}/." "${DESTDIR}${libdir}/"
+
+# Stage 1: each listed package directory's import roots (its directories and
+# modules; the path file itself is no import root), merged into the stdlib dir.
+# A missing path file or directory fails the build.
+stage1_path=/usr/lib/photo-wall/netboot-init/path
+while IFS= read -r directory; do
+    if [ ! -d "$directory" ]; then
+        echo "photo-wall-netboot: $stage1_path names $directory, which is not installed" >&2
+        exit 1
+    fi
+    for entry in "$directory"/*; do
+        if [ -d "$entry" ] || [ "${entry%.py}" != "$entry" ]; then
+            cp -a "$entry" "${DESTDIR}${libdir}/"
+        fi
+    done
+done < "$stage1_path"
+
+# The CA bundle stage 1 verifies Central against (R5).
+mkdir -p "${DESTDIR}/etc/ssl/certs"
+cp /etc/ssl/certs/ca-certificates.crt "${DESTDIR}/etc/ssl/certs/ca-certificates.crt"
 
 # Only what LinuxOps.mount_root / ram / loop_device / command shell out to:
 #   mount/umount  -- NOT staged here: initramfs-tools stages klibc-utils'
@@ -67,37 +96,33 @@ printf '%s\n' 'root:x:0:' > "${DESTDIR}/etc/group"
 printf '%s\n' 'passwd: files' 'group: files' 'hosts: files dns' > "${DESTDIR}/etc/nsswitch.conf"
 printf '%s\n' '127.0.0.1 localhost' '::1 localhost' > "${DESTDIR}/etc/hosts"
 
-# Modules the RAM-overlay mount needs: squashfs (loop-mounted base), overlay
-# (merged root), loop (backing device). ext4/vfat/nls_* from the old signed
-# path are dropped -- this path never touches a block filesystem.
-for module in squashfs overlay loop; do
-    manual_add_modules "$module"
-done
-
-# The Player's display drivers: vc4 (KMS and HDMI, for weston's DRM backend)
-# and v3d (Mesa's GL). MODULES=most (initramfs-tools' default) leaves them
-# out. The base has no kernel and no modules, so they travel with the kernel
-# they were built for, and stage 1 copies this initrd's whole module tree onto
-# the new root (appliance.netboot_init hand_over_modules), where the base's
-# udev can load any of them later.
+# The kernel package's WHOLE module tree, so every device on the board finds its
+# driver by alias (issue 64: a hand-kept list -- MODULES=most plus vc4 and v3d
+# -- left the Pi 5's HEVC decoder, codec@800000, with no driver, so the Player
+# had no /dev/video*). The base has no kernel and no modules, so they travel
+# with the kernel they were built for, and stage 1 copies this initrd's whole
+# module tree onto the new root (appliance.netboot_init hand_over_modules),
+# where the base's udev loads any of them by alias at coldplug -- as on any
+# installed Debian system. This is the RAM-overlay mount's squashfs, overlay and
+# loop too.
 #
-# They load in STAGE 1, on purpose: initramfs-tools' own udev (init-top/udev)
-# loads every initrd module whose alias matches a device, and config.txt's
-# vc4-kms-v3d-pi5 overlay turns the display nodes on and the legacy firmware
-# framebuffer (brcm,bcm2708-fb) off. vc4's framebuffer is then the console
-# stage 1 prints its phase and FAILED lines on; holding vc4 back to stage 2
-# could leave the HDMI console dark for all of stage 1. The drivers stay
+# initramfs-tools' own udev (init-top/udev) loads every initrd module whose
+# alias matches a device, so they load in STAGE 1. That is wanted for the
+# display: config.txt's vc4-kms-v3d-pi5 overlay turns the display nodes on and
+# the legacy firmware framebuffer (brcm,bcm2708-fb) off, and vc4's framebuffer
+# is then the console stage 1 prints its phase and FAILED lines on. Drivers stay
 # loaded across switch_root.
 #
-# manual_add_modules resolves each through `modprobe --show-depends`, so
-# dependencies and softdeps come too; for vc4 on 6.18.50+rpt-rpi-2712: drm,
-# drm_kms_helper, drm_dma_helper, drm_display_helper, drm_exec,
-# drm_client_lib, cec, snd-soc-core, snd-pcm and the softdep
-# snd-soc-hdmi-codec; for v3d: gpu-sched and drm_shmem_helper. Input (evdev,
-# hid, hid-generic, usbhid) and the watchdog are built into this kernel. The
-# Player plays no audio and decodes in software (avdec_h264), so nothing else
-# is needed. scripts/verify_netboot_initrd.py requires vc4 and v3d in the
-# built initrd.
-for module in vc4 v3d; do
-    manual_add_modules "$module"
-done
+# copy_modules_dir (hook-functions) adds every module under kernel/ through
+# manual_add_modules, which dracut-install resolves with dependencies, softdeps
+# and any firmware this root holds (the Wi-Fi and Bluetooth chips' firmware is
+# not installed here or in the base, so those two drivers bind nothing).
+# scripts/verify_netboot_initrd.py requires every module the kernel's
+# modules.order names, and the Player's drivers by name (PLAYER_MODULES).
+#
+# i2c-dev is display power's DDC/CI driver: it gives each HDMI port's DDC bus
+# (vc4's i2c-13 and i2c-14) a /dev/i2c-N node for ddcutil (spike, 2026-10-10).
+# The whole tree carries it, but nothing matches it by alias, so the base loads
+# it at boot from etc/modules-load.d (rpi_image_gen/layer/photo-wall-os.yaml).
+# scripts/verify_netboot_initrd.py requires it by name as DDC_MODULES.
+copy_modules_dir kernel

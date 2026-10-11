@@ -11,6 +11,7 @@ import pytest
 from contracts.models import (
     Calibration,
     Commit,
+    CornersFit,
     FrameProfile,
     Layer,
     OutputBinding,
@@ -121,7 +122,7 @@ def test_retained_fallback_waits_for_native_draw_without_overwriting_with_black(
 
     rig = Rig(tmp_path)
     rig.renderer = rig.executor.renderer = DeferredFallback()
-    rig.play(layer(end=101, retain_on_expiry=True))
+    rig.play(layer(end=101, after_end="keep_this_photo"))
     rig.advance(1.01)
     rig.executor.tick()
     assert rig.renderer.outputs["hdmi1"].layers
@@ -148,7 +149,7 @@ def test_native_ack_rejects_stale_or_different_authority(tmp_path, fault):
             elif fault == "binding":
                 drawn = replace(drawn, binding=drawn.binding.model_copy(update={"generation": 2}))
             elif fault == "calibration":
-                drawn = replace(drawn, calibration=Calibration(gain=.5))
+                drawn = replace(drawn, calibration=Calibration(fit=CornersFit(rotation=90)))
             else:
                 local = drawn.layers[0]
                 drawn = replace(drawn, layers=(replace(local, layer=local.layer.model_copy(
@@ -358,7 +359,7 @@ def test_secured_cycle_identity_cannot_be_rerolled_but_priority_can_change(tmp_p
 @pytest.mark.parametrize("failure_phase", ["prepare", "present"])
 def test_recoverable_replacement_failure_retains_valid_still(tmp_path, failure_phase):
     rig = Rig(tmp_path)
-    old = layer(retain_on_expiry=True)
+    old = layer(after_end="keep_this_photo")
     rig.play(old)
     replacement = layer("replacement", data=b"new", start=102)
     rig.advance(2)
@@ -422,7 +423,7 @@ def test_original_fade_interval_survives_rolling_plan_and_black_is_not_transpare
 
 def test_overlay_and_video_expire_to_retained_still_in_warm_outage(tmp_path):
     rig = Rig(tmp_path)
-    old = layer(retain_on_expiry=True, end=101)
+    old = layer(after_end="keep_this_photo", end=101)
     rig.play(old)
     rig.executor.maintain_cache()
     rig.advance(1)
@@ -454,21 +455,11 @@ def test_no_successful_still_means_black_beyond_horizon(tmp_path):
     assert rig.renderer.outputs["hdmi1"].layers == ()
 
 
-def test_preview_expires_locally_without_configuration_message(tmp_path):
-    preview = binding(preview=Calibration(gain=.4), preview_expires=105)
-    rig = Rig(tmp_path, bindings=(preview,))
-    rig.play(layer())
-    assert rig.renderer.outputs["hdmi1"].calibration.gain == .4
-    rig.advance(6, refresh=False)
-    rig.executor.tick()
-    assert rig.renderer.outputs["hdmi1"].calibration.gain == 1
-
-
 def test_clock_step_and_stale_sample_refuse_unexecuted_commit_retain_visible(tmp_path):
     rig = Rig(tmp_path)
-    rig.play(layer(retain_on_expiry=True))
+    rig.play(layer(after_end="keep_this_photo"))
     future = layer("future", start=103, data=b"future")
-    rig.offer(layer(retain_on_expiry=True), future, revision=2)
+    rig.offer(layer(after_end="keep_this_photo"), future, revision=2)
     rig.secure("future", b"future")
     rig.executor.prepare_imminent()
     rig.commit("future")
@@ -551,7 +542,7 @@ def test_cancellation_during_blocked_stream_neither_blocks_tick_nor_resurrects(t
 
 def test_rebinding_and_disabled_configuration_remove_old_retained_authority(tmp_path):
     rig = Rig(tmp_path)
-    rig.play(layer(retain_on_expiry=True))
+    rig.play(layer(after_end="keep_this_photo"))
     replacement = binding().model_copy(update={"generation": 2, "configuration_revision": 2})
     config = rig.configuration.model_copy(update={
         "configuration_revision": 2, "bindings": (replacement,), "enabled_outputs": (),
@@ -568,7 +559,7 @@ def test_rebinding_and_disabled_configuration_remove_old_retained_authority(tmp_
 
 def test_restart_restores_no_authority_or_pins_and_rejects_old_epoch(tmp_path):
     rig = Rig(tmp_path)
-    rig.play(layer(retain_on_expiry=True))
+    rig.play(layer(after_end="keep_this_photo"))
     rig.executor.maintain_cache()
     rig.cache.close()
     cache = Cache(tmp_path / "cache", 4096)
@@ -591,7 +582,7 @@ def test_restart_restores_no_authority_or_pins_and_rejects_old_epoch(tmp_path):
 
 def test_new_authority_epoch_rejects_old_commits_and_clears_old_output(tmp_path):
     rig = Rig(tmp_path)
-    rig.offer(layer(retain_on_expiry=True))
+    rig.offer(layer(after_end="keep_this_photo"))
     rig.secure()
     rig.executor.prepare_imminent()
     old_commit = rig.commit("picture")
@@ -605,7 +596,7 @@ def test_new_authority_epoch_rejects_old_commits_and_clears_old_output(tmp_path)
 
 def test_rendering_methods_do_not_touch_cache_or_hash_files(tmp_path, monkeypatch):
     rig = Rig(tmp_path)
-    rig.offer(layer(retain_on_expiry=True))
+    rig.offer(layer(after_end="keep_this_photo"))
     rig.secure()
 
     def forbidden(*_args, **_kwargs):
@@ -713,7 +704,7 @@ def test_omitted_secured_assignment_keeps_lease_and_immutable_identity(tmp_path)
 @pytest.mark.parametrize("failure", ["pending", "prepare", "present"])
 def test_unavailable_retained_fallback_cannot_leave_expired_video_visible(tmp_path, failure):
     rig = Rig(tmp_path)
-    rig.play(layer(retain_on_expiry=True, end=101))
+    rig.play(layer(after_end="keep_this_photo", end=101))
     rig.executor.maintain_cache()
     rig.advance(1)
     rig.offer(layer("video", video=True, start=101, end=103), revision=2)
@@ -736,8 +727,8 @@ def test_unavailable_retained_fallback_cannot_leave_expired_video_visible(tmp_pa
 def test_retention_created_during_worker_pass_keeps_original_pin(tmp_path, monkeypatch):
     rig = Rig(tmp_path)
     video = layer("video", video=True, end=102)
-    dummy = layer("dummy", output="hdmi2", frame="frame2", data=b"dummy", retain_on_expiry=True)
-    picture = layer(start=101, end=102, priority=10, retain_on_expiry=True)
+    dummy = layer("dummy", output="hdmi2", frame="frame2", data=b"dummy", after_end="keep_this_photo")
+    picture = layer(start=101, end=102, priority=10, after_end="keep_this_photo")
     rig.play(video, dummy, picture, payloads={"dummy": b"dummy"})
     entered, resume = Event(), Event()
     original_pin = rig.cache.pin

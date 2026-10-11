@@ -7,9 +7,10 @@ or production command route is supplied by this portable module.
 """
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from threading import RLock
-from typing import Protocol
+from typing import Final, Protocol
 from uuid import UUID
 
 from contracts.app_environment import AppEnvironmentRefV2
@@ -72,13 +73,167 @@ class AppProcessDriver(Protocol):
         ...
 
     def select(self, environment: AppEnvironmentRefV2) -> None: ...
-    def start(self, environment: AppEnvironmentRefV2, operation_id: UUID) -> RunningApp: ...
+    def start(self, environment: AppEnvironmentRefV2, operation_id: UUID) -> RunningApp:
+        """Spawn; the launch records the display incarnation current at the spawn."""
+        ...
+
+    def display_incarnation(self) -> str | None:
+        """The running display's incarnation (Weston's InvocationID); None while it is down."""
+        ...
+
+    def launched(self) -> Launch | None:
+        """The current launch (its boot-store `launch` record); None before the first start."""
+        ...
+
+    def unit_collected(self) -> bool:
+        """The app unit's name is free: no process, no job, unloaded (a start can begin now)."""
+        ...
+
+
+# -- 1b P1b: the paced relaunch (frozen; bodies in P1b) ----------------------------------------
+# The Player's death becomes a timely restart with one owner, the broker, paced like Kubernetes'
+# CrashLoopBackOff: consecutive short runs wait 1 s, 5 s, 30 s, then 5 minutes each; a run that
+# lasted STABLE_RUN_MS starts the count again. systemd's Restart= is not used: it would start
+# runs the broker never journaled (a second supervisor, and a launch record whose process no
+# longer matches: `app_process_incarnation_mismatch`).
+RELAUNCH_BACKOFF_MS: Final[tuple[int, ...]] = (1_000, 5_000, 30_000, 300_000)
+STABLE_RUN_MS: Final = 600_000
+
+
+@dataclass(frozen=True)
+class Launch:
+    """The driver's record of the current launch (its boot-store `launch`): the app epoch it
+    started, the display incarnation current at the spawn, and the spawn's boottime in ms
+    (`appliance.kernel.clock.boottime_ms`, the clock every `now_ms` here is read on)."""
+
+    epoch: int
+    display: str | None
+    started_ms: int
+
+    def __post_init__(self) -> None:
+        """ValueError("launch_invalid") unless epoch >= 1, display is None or a non-empty str,
+        and started_ms is an int >= 0."""
+        if not (type(self.epoch) is int and self.epoch >= 1
+                and (self.display is None or (type(self.display) is str and self.display))
+                and type(self.started_ms) is int and self.started_ms >= 0):
+            raise ValueError("launch_invalid")
+
+
+@dataclass(frozen=True)
+class RelaunchPacing:
+    """When the next relaunch may start. Durable for this boot (the boot store), one for the app
+    unit, shared by the cold-start and the online owner."""
+
+    epoch: int  # the launch whose exit this pacing judged (an exit is counted once)
+    exits: int  # consecutive short exits counted, >= 0
+    not_before_ms: int  # boottime ms before which no relaunch starts
+
+    def __post_init__(self) -> None:
+        """ValueError("relaunch_pacing_invalid") unless epoch >= 1, exits >= 0 and
+        not_before_ms >= 0, all ints."""
+        if not all(type(value) is int for value in (self.epoch, self.exits, self.not_before_ms)) \
+                or self.epoch < 1 or self.exits < 0 or self.not_before_ms < 0:
+            raise ValueError("relaunch_pacing_invalid")
+
+
+class RelaunchPacingStore(Protocol):
+    def get(self) -> RelaunchPacing | None: ...
+
+    def put(self, pacing: RelaunchPacing) -> None:
+        """Persist before returning."""
+        ...
+
+
+def display_took_app(launch: Launch | None, display: str | None) -> bool:
+    """PURE. True iff a display is up (`display` not None) and it is not the incarnation
+    `launch` was spawned under (the app is bound to its Weston and stopped with it). False when
+    `launch` is None."""
+    return launch is not None and display is not None and display != launch.display
+
+
+def pace_relaunch(prior: RelaunchPacing | None, launch: Launch, *, display_changed: bool,
+                  now_ms: int) -> RelaunchPacing:
+    """PURE. The one pacing rule, judging the exit of `launch` first seen at `now_ms`.
+
+    - `prior` judged this launch (`prior.epoch == launch.epoch`): `prior`, unchanged.
+    - `display_changed`: the display took the app, not its own failure: exits stay
+      `prior.exits` (0 without a prior), not_before_ms = now_ms.
+    - the run lasted at least STABLE_RUN_MS (`now_ms - launch.started_ms`): exits = 1.
+    - otherwise: exits = (prior.exits if prior else 0) + 1.
+    Then not_before_ms = now_ms + RELAUNCH_BACKOFF_MS[min(exits, len) - 1] (exits >= 1).
+    """
+    if prior is not None and prior.epoch == launch.epoch:
+        return prior
+    if display_changed:
+        return RelaunchPacing(launch.epoch, prior.exits if prior else 0, now_ms)
+    if now_ms - launch.started_ms >= STABLE_RUN_MS:
+        exits = 1
+    else:
+        exits = (prior.exits if prior else 0) + 1
+    return _paced(launch.epoch, exits, now_ms)
+
+
+def pace_failed_start(paced: RelaunchPacing, launch: Launch, *, now_ms: int) -> RelaunchPacing:
+    """PURE. A relaunch whose start raised at `now_ms` counts as one more short exit, judged for
+    `launch` (the driver's launch after the failure: a new epoch when the start recorded one, the
+    same as `paced.epoch` when it raised before that), so the next try waits its backoff and that
+    launch's exit is not counted again."""
+    return _paced(launch.epoch, paced.exits + 1, now_ms)
+
+
+def _paced(epoch: int, exits: int, now_ms: int) -> RelaunchPacing:
+    """`exits` (>= 1) consecutive short exits, the last judged at `now_ms`."""
+    wait = RELAUNCH_BACKOFF_MS[min(exits, len(RELAUNCH_BACKOFF_MS)) - 1]
+    return RelaunchPacing(epoch, exits, now_ms + wait)
+
+
+def relaunch_absent(driver: AppProcessDriver, pacing: RelaunchPacingStore,
+                    environment: AppEnvironmentRefV2, operation_id: UUID, *,
+                    now_ms: Callable[[], int], intent: Callable[[], None] = lambda: None,
+                    ) -> RunningApp | None:
+    """The one relaunch rule (replaces `relaunch_for_display`), for whichever launch is current.
+
+    Its owner holds a settled record saying `environment` should be running and calls this every
+    turn the app is absent. In order: no display up (`driver.display_incarnation()` None) ->
+    None; no launch recorded (`driver.launched()` None) -> ValueError("relaunch_without_launch");
+    the exit is paced (`pace_relaunch` with display_changed = `display_took_app(...)`, stored
+    through `pacing` when it differs from `pacing.get()`); the old unit not yet collected, or
+    `now_ms()` before `not_before_ms` -> None (the owner's next turn asks again); else `intent`
+    runs, then `driver.start(environment, operation_id)`, whose identity must match
+    (ValueError("started_environment_mismatch")). A failed start is paced as one more short exit
+    (`pace_failed_start`, stored before the error is raised again), whether or not it recorded a
+    launch first; the owner records the failure and asks again on a later turn.
+    """
+    display = driver.display_incarnation()
+    if display is None:
+        return None
+    launch = driver.launched()
+    if launch is None:
+        raise ValueError("relaunch_without_launch")
+    now = now_ms()
+    prior = pacing.get()
+    paced = pace_relaunch(prior, launch, display_changed=display_took_app(launch, display),
+                          now_ms=now)
+    if paced != prior:
+        pacing.put(paced)
+    if not driver.unit_collected() or now < paced.not_before_ms:
+        return None
+    intent()
+    try:
+        running = driver.start(environment, operation_id)
+    except Exception:
+        pacing.put(pace_failed_start(paced, driver.launched() or launch, now_ms=now))
+        raise
+    if running.environment != environment or running.operation_id != operation_id:
+        raise ValueError("started_environment_mismatch")
+    return running
 
 
 class AppEffectBroker:
     def __init__(self, *, boot_id: UUID, offer_id: UUID,
                  authorized_environment: AppEnvironmentRefV2,
-                 journal: EffectJournal, driver: AppProcessDriver):
+                 journal: EffectJournal, driver: AppProcessDriver,
+                 pacing: RelaunchPacingStore, now_ms: Callable[[], int]):
         identifier(boot_id)
         identifier(offer_id)
         if type(authorized_environment) is not AppEnvironmentRefV2:
@@ -90,6 +245,8 @@ class AppEffectBroker:
         self.authorized_environment = authorized_environment
         self.journal = journal
         self.driver = driver
+        self.pacing = pacing
+        self.now_ms = now_ms
         self._lock = RLock()
 
     def cold_start(self, command: ColdStart) -> EffectRecord:
@@ -125,7 +282,9 @@ class AppEffectBroker:
             return record
 
     def reconcile(self) -> EffectRecord | None:
-        """Observe ambiguous effects without starting, stopping or selecting again."""
+        """Observe ambiguous effects without starting, stopping or selecting again, except the
+        paced relaunch (`relaunch_absent`) of a launch found absent: a settled one (`running`,
+        `exited`) or one whose relaunch failed (`relaunch_outcome_unknown`, E-1B-18)."""
         with self._lock:
             record = self.journal.current()
             if record is None:
@@ -135,8 +294,19 @@ class AppEffectBroker:
                     and running.operation_id == record.command.operation_id
                     and (record.running is None or running.process == record.running.process)):
                 record = replace(record, phase="running", running=running, fault=None)
-            elif running is None and record.phase in ("running", "exited"):
-                record = replace(record, phase="exited", fault="process_exited")
+            elif running is None and (record.phase in ("running", "exited") or (
+                    record.phase == "effect_unknown" and record.fault == "relaunch_outcome_unknown")):
+                command = record.command
+                intent = replace(record, phase="intent_start", running=None, fault=None)
+                try:
+                    running = relaunch_absent(self.driver, self.pacing, command.environment,
+                                              command.operation_id, now_ms=self.now_ms,
+                                              intent=lambda: self.journal.put(intent))
+                except Exception:
+                    record = replace(intent, phase="effect_unknown", fault="relaunch_outcome_unknown")
+                else:
+                    record = (replace(record, phase="exited", fault="process_exited") if running is None
+                              else replace(intent, phase="running", running=running))
             else:
                 # Absence after intent cannot prove that no short-lived process ran.
                 record = replace(record, phase="effect_unknown", fault="reconciliation_required")

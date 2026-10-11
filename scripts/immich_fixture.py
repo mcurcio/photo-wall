@@ -2,6 +2,10 @@
 
 No existing Immich instance is accepted. Private credentials stay in a new state
 directory and container roles receive only the mount needed for their function.
+
+`run --publish` also publishes Immich on an ephemeral 127.0.0.1 port for the named tests on
+this host: the state directory then holds `published.json` (the URL), `runtime/library.json`
+(the content set and its keys) and `runtime/admin.json` (the admin session), all synthetic.
 """
 
 from __future__ import annotations
@@ -38,19 +42,27 @@ from scripts.harness_failure import (  # noqa: E402
     FailureEnvelope,
     FailureRole,
 )
+from scripts.registry_pull import RegistryPullError, pull_images  # noqa: E402
 
 MAX_CAPTURE_BYTES = 2 * 1024 * 1024
 MAX_STREAM_BYTES = 16 * 1024 * 1024
 TERMINATE_GRACE = 5.0
 
-# A disposable fixture's image pull and container start are the two docker
-# operations exposed to real registry/daemon flakiness. Bounding the retry
-# count keeps a truly permanent failure (bad image ref, unfixable config)
-# from hanging CI, while still absorbing the transient hiccup that clears on
-# a human re-run. This layer cannot reliably tell the two apart -- both
-# surface as the same closed `docker_command_failed`/`docker_command_timeout`
-# code -- so retrying a bounded few times regardless is treated as safe for a
-# fixture that is torn down and rebuilt from scratch on every attempt anyway.
+COMPOSE_FILE = ROOT / "tests/integration/compose.immich.yml"
+PUBLISHED_COMPOSE_FILE = ROOT / "tests/integration/compose.immich-published.yml"
+# The one host binding `--publish` allows: Immich's API on an ephemeral loopback port.
+PUBLISHED_PORT = "2283/tcp"
+# The upstream services whose images come from a registry (the rest build locally).
+UPSTREAM_SERVICES = ("immich", "database", "redis")
+
+# Container start is exposed to daemon flakiness (registry pulls retry in
+# scripts.registry_pull). Bounding the retry count keeps a truly permanent
+# failure (unfixable config) from hanging CI, while still absorbing the
+# transient hiccup that clears on a human re-run. This layer cannot reliably
+# tell the two apart -- both surface as the same closed
+# `docker_command_failed`/`docker_command_timeout` code -- so retrying a
+# bounded few times regardless is treated as safe for a fixture that is torn
+# down and rebuilt from scratch on every attempt anyway.
 STARTUP_RETRY_ATTEMPTS = 4
 STARTUP_RETRY_BACKOFF_SECONDS = (2.0, 5.0, 10.0)
 _TRANSIENT_DOCKER_CODES = ("docker_command_failed", "docker_command_timeout")
@@ -129,6 +141,30 @@ def _retryable_startup_error(error: BaseException) -> bool:
     return isinstance(error, HarnessError) and str(error) in _TRANSIENT_DOCKER_CODES
 
 
+def fixture_images(*services: str) -> list[str]:
+    """The digest-pinned image reference each named service declares in the compose file."""
+    compose = COMPOSE_FILE.read_text()
+    refs = []
+    for service in services:
+        match = re.search(rf"^  {re.escape(service)}:\n(?:    .*\n)*?    image: (\S+)$",
+                          compose, re.MULTILINE)
+        require(match is not None and re.search(r"@sha256:[a-f0-9]{64}$", match[1]) is not None,
+                "fixture_document_invalid")
+        refs.append(match[1])
+    return refs
+
+
+def pull_fixture_images(*services: str, **retry) -> None:
+    """Make the services' registry images present (see scripts.registry_pull), keeping the
+    printed failure a HarnessError code and the sanitized stderr on its `diagnostic`."""
+    try:
+        pull_images(fixture_images(*services), **retry)
+    except RegistryPullError as error:
+        failure = HarnessError(error.code)
+        failure.diagnostic = error.diagnostic
+        raise failure from None
+
+
 def read_json(path: Path) -> dict:
     return json.loads(path.read_text())
 
@@ -162,9 +198,6 @@ def helper_identity(args: list[str]) -> tuple[str, str] | None:
         identity = ("init", "initialize")
     elif command == "run" and service == "setup" and len(tail) == 2 and tail[0] == "setup":
         identity = ("setup", tail[1])
-    elif (command == "exec" and service == "central-probe" and len(tail) >= 5
-          and tail[:4] == ["python", "-m", "scripts.immich_runtime", "verify"]):
-        identity = ("verify", tail[4])
     if identity is None:
         return None
     try:
@@ -230,8 +263,8 @@ def fixture_provenance_paths() -> tuple[tuple[str, ...], tuple[str, ...]]:
         "contracts/time.py", "pyproject.toml", "uv.lock", *runtime,
     )
     host = (
-        "scripts/docker_diagnostics.py", "scripts/immich_fixture.py",
-        "tests/integration/compose.immich.yml",
+        "scripts/docker_diagnostics.py", "scripts/immich_fixture.py", "scripts/registry_pull.py",
+        "tests/integration/compose.immich.yml", "tests/integration/compose.immich-published.yml",
         *(item.source for item in IMMICH_RUNTIME_BUNDLE.files),
     )
     return audited, host
@@ -247,19 +280,23 @@ class FixtureHost:
         require(re.fullmatch(r"pw-immich-fixture-[a-f0-9]{12}", self.project) is not None,
                 "invalid_fixture_marker")
         require(marker.get("state") == str(self.state), "fixture_path_mismatch")
+        self.published = marker.get("publish") is True
+        files = (COMPOSE_FILE, PUBLISHED_COMPOSE_FILE) if self.published else (COMPOSE_FILE,)
         self.base = ["docker", "compose", "--project-name", self.project, "--env-file",
-                     str(self.state / ".env"), "--file",
-                     str(ROOT / "tests/integration/compose.immich.yml")]
+                     str(self.state / ".env")]
+        for file in files:
+            self.base += ["--file", str(file)]
 
     @classmethod
-    def create(cls, state: Path) -> FixtureHost:
+    def create(cls, state: Path, *, publish: bool = False) -> FixtureHost:
         require(state.is_absolute(), "state_path_must_be_absolute")
         state.mkdir(mode=0o700, parents=False, exist_ok=False)
         state = state.resolve()
         for name in ("setup", "runtime"):
             (state / name).mkdir(mode=0o700)
         project = "pw-immich-fixture-" + secrets.token_hex(6)
-        write_json(state / "fixture.json", {"schema": 1, "project": project, "state": str(state)})
+        write_json(state / "fixture.json", {"schema": 1, "project": project, "state": str(state),
+                                            "publish": publish})
         # Values are generated here, not shell expressions. No deployment secret is read.
         require(not any(c in str(state) for c in "\r\n$#'\""), "unsupported_state_path")
         config = {
@@ -423,15 +460,10 @@ class FixtureHost:
         # Buildx builder (as in GHA) cannot resolve that daemon-local FROM tag.
         self.compose(*daemon_compose_build("central-probe"), timeout=600, capture=False)
 
-    def pull(self, *services: str, timeout: int = 300, sleep=time.sleep) -> None:
-        """Pull upstream registry images before startup, isolating a slow or
-        hiccupping registry from the container-start step below and retrying
-        it independently (see module docstring on STARTUP_RETRY_ATTEMPTS)."""
-        call_with_retry(
-            lambda: self.compose("pull", *services, timeout=timeout, capture=False),
-            attempts=STARTUP_RETRY_ATTEMPTS, backoff_seconds=STARTUP_RETRY_BACKOFF_SECONDS,
-            cleanup=self.cleanup, retryable=_retryable_startup_error, sleep=sleep,
-        )
+    def pull(self, *services: str, **retry) -> None:
+        """Make the upstream registry images present before startup, so a slow or
+        throttled registry is never mistaken for a container-start failure."""
+        pull_fixture_images(*services, **retry)
 
     def start(self, *, wait_timeout: int = 240, timeout: int = 600, sleep=time.sleep) -> None:
         """Start the fixture's containers and wait for health, retrying a
@@ -450,17 +482,31 @@ class FixtureHost:
         self.compose("cp", "central-probe:/runtime/.", str(self.state / "runtime"),
                      timeout=30, capture=False)
 
-    def role(self, role: str, action: str, *, page_size: int = 3) -> dict:
-        if role == "setup":
-            output = self.compose("run", "--rm", "--no-deps", "setup", "setup", action,
-                                  timeout=240)
-        else:
-            output = self.compose("exec", "-T", "central-probe", "python",
-                                  "-m", "scripts.immich_runtime", "verify", action,
-                                  "--page-size", str(page_size), timeout=240)
+    def role(self, role: str, action: str) -> dict:
+        require(role == "setup", "unknown_fixture_action")
+        # The content set waits for Immich to read every asset (and to geocode two).
+        output = self.compose("run", "--rm", "--no-deps", "setup", "setup", action, timeout=600)
         result = json.loads(output)
         require(isinstance(result, dict), "invalid_role_result")
         return result
+
+    def publish(self) -> dict:
+        """Hand the named tests on this host the published URL and the admin session.
+
+        Runs after `export_runtime()` (which brought `runtime/library.json`); the admin session
+        is read from the setup volume by a one-off container and written privately."""
+        require(self.published, "fixture_document_invalid")
+        binding = self.compose("port", "immich", "2283", timeout=30).strip()
+        host, _, port = binding.rpartition(":")
+        require(host == "127.0.0.1" and port.isdigit(), "upstream_host_port_exposed")
+        session = json.loads(self.compose("run", "--rm", "--no-deps", "-T", "--entrypoint",
+                                          "cat", "setup", "/setup/session.json", timeout=60))
+        require(isinstance(session, dict) and isinstance(session.get("token"), str),
+                "fixture_document_invalid")
+        write_json(self.state / "runtime/admin.json", {"token": session["token"]})
+        published = {"base_url": f"http://127.0.0.1:{port}/api"}
+        write_json(self.state / "published.json", published)
+        return published
 
     def topology(self) -> tuple[dict, str]:
         containers = self.compose("ps", "--all", "--quiet").split()
@@ -473,10 +519,18 @@ class FixtureHost:
             service = container["Config"]["Labels"]["com.docker.compose.service"]
             networks = container["NetworkSettings"]["Networks"]
             memberships = sorted(name.removeprefix(self.project + "_") for name in networks)
+            published = self.published and service == "immich"
             expected = (["upstream_net", "wall_net"] if service == "central-probe"
+                        else ["published_net", "upstream_net"] if published
                         else ["upstream_net"])
             require(memberships == expected, "unexpected_network_membership")
-            require(not container["HostConfig"]["PortBindings"], "upstream_host_port_exposed")
+            bindings = container["HostConfig"]["PortBindings"] or {}
+            if published:
+                require(list(bindings) == [PUBLISHED_PORT]
+                        and [item["HostIp"] for item in bindings[PUBLISHED_PORT]]
+                        == ["127.0.0.1"], "upstream_host_port_exposed")
+            else:
+                require(not bindings, "upstream_host_port_exposed")
             if service == "immich":
                 upstream_ip = networks[self.project + "_upstream_net"]["IPAddress"]
             if service == "central-probe":
@@ -504,23 +558,17 @@ class FixtureHost:
 
 
 
-# The upstream every consumer needs: a signed-in owner, the runtime key and synthetic content.
+# The upstream every consumer needs: a signed-in owner, the runtime key and the content set.
 SETUP_ROLES = (("setup", "initialize"),)
-# The adapter checks against it, in order (each mutation, then the adapter's view of it).
-ADAPTER_ROLES = (("central", "initial"), ("setup", "live"), ("central", "live"),
-                 ("setup", "delete"), ("central", "deleted"), ("setup", "deny"),
-                 ("central", "deny"), ("setup", "restore"))
 
 
-def run_fixture(state: Path, keep: bool, *, page_size: int = 3,
-                base_image: str | None = None, setup_only: bool = False) -> dict:
-    """Start the disposable upstream, set it up and, unless `setup_only`, run every adapter
-    check against it. `setup_only` serves a consumer that needs only the set-up upstream (the
-    software e2e, whose workflow runs the adapter checks in a parallel job)."""
-    require(type(page_size) is int and 1 <= page_size <= 1000, "invalid_page_size")
-    host = FixtureHost.create(state)
-    scope = ("set-up upstream only" if setup_only
-             else "real upstream adapter and network boundary")
+def run_fixture(state: Path, keep: bool, *, base_image: str | None = None,
+                setup_only: bool = False, publish: bool = False) -> dict:
+    """Start the disposable upstream and set it up, with the Player-probe boundary checked
+    before the setup and, unless `setup_only`, again after it. `publish` (with `keep`) leaves
+    Immich reachable on 127.0.0.1 for the named tests (tests/support/immich_library.py)."""
+    host = FixtureHost.create(state, publish=publish)
+    scope = "set-up upstream" + (", published on 127.0.0.1" if publish else "")
     evidence = {"class": "integration", "scope": scope,
                 "started_utc": datetime.now(timezone.utc).isoformat(), "checks": {}}
     evidence["source_state"] = {
@@ -528,7 +576,7 @@ def run_fixture(state: Path, keep: bool, *, page_size: int = 3,
                                       capture=True).strip(),
         "checkout_dirty": bool(host._command(["git", "status", "--porcelain"], timeout=10,
                                              capture=True).strip()),
-        "qualification": "Exact adapter source hashes are recorded from the running image; "
+        "qualification": "Exact fixture source hashes are recorded from the running image; "
                          "the checkout may include uncommitted implementation work.",
     }
     write_json(host.state / "evidence.json", evidence)
@@ -538,7 +586,7 @@ def run_fixture(state: Path, keep: bool, *, page_size: int = 3,
         host.build(base_image=base_image)
         evidence["stage"] = "startup"
         write_json(host.state / "evidence.json", evidence)
-        host.pull("immich", "database", "redis")
+        host.pull(*UPSTREAM_SERVICES)
         host.start(wait_timeout=240, timeout=600)
         inventory, upstream_ip = host.topology()
         evidence["inventory"] = inventory
@@ -557,23 +605,20 @@ def run_fixture(state: Path, keep: bool, *, page_size: int = 3,
             for relative in harness_files
         }
         evidence["checks"]["denial_before"] = host.probe(upstream_ip)
-        for role, action in SETUP_ROLES + (() if setup_only else ADAPTER_ROLES):
+        for role, action in SETUP_ROLES:
             evidence["stage"] = role + "_" + action
             write_json(host.state / "evidence.json", evidence)
-            evidence["checks"][role + "_" + action] = host.role(role, action, page_size=page_size)
+            evidence["checks"][role + "_" + action] = host.role(role, action)
             write_json(host.state / "evidence.json", evidence)
         if not setup_only:
             evidence["checks"]["denial_after"] = host.probe(upstream_ip)
-            host.compose("stop", "immich", capture=False)
-            evidence["checks"]["central_outage"] = host.role("central", "outage",
-                                                             page_size=page_size)
-            host.compose("up", "-d", "--wait", "--wait-timeout", "120", "immich",
-                         timeout=180, capture=False)
-            evidence["checks"]["central_recovered"] = host.role("central", "recovered",
-                                                                page_size=page_size)
+        if publish:
+            evidence["stage"] = "publish"
+            host.export_runtime()
+            evidence["checks"]["published"] = host.publish()
         evidence["result"] = "passed"
         return {"result": "passed", "evidence": str(host.state / "evidence.json"),
-                "services_retained": keep}
+                "services_retained": keep, "published": publish}
     except Exception as error:
         evidence["result"] = "failed"
         evidence["failure"] = (str(error) if isinstance(error, HarnessError)
@@ -594,18 +639,24 @@ def run_fixture(state: Path, keep: bool, *, page_size: int = 3,
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
+    # `prefetch` pulls the upstream images ahead of a later `run` (CI overlaps it with builds).
+    commands.add_parser("prefetch")
     for name in ("run", "cleanup"):
         command = commands.add_parser(name)
         command.add_argument("--state-dir", type=Path, required=True)
         if name == "run":
             command.add_argument("--keep", action="store_true")
-            command.add_argument("--page-size", type=int, default=3)
             command.add_argument("--base-image")
             command.add_argument("--setup-only", action="store_true")
+            command.add_argument("--publish", action="store_true",
+                                 help="publish Immich on 127.0.0.1 for the named tests")
     args = parser.parse_args()
     if args.command == "run":
-        result = run_fixture(args.state_dir, args.keep, page_size=args.page_size,
-                             base_image=args.base_image, setup_only=args.setup_only)
+        result = run_fixture(args.state_dir, args.keep, base_image=args.base_image,
+                             setup_only=args.setup_only, publish=args.publish)
+    elif args.command == "prefetch":
+        pull_fixture_images(*UPSTREAM_SERVICES)
+        result = {"prefetched": list(UPSTREAM_SERVICES)}
     else:
         FixtureHost(args.state_dir).cleanup()
         result = {"cleaned": True}

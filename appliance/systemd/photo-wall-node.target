@@ -1,6 +1,5 @@
 [Unit]
 Description=Photo Wall isolated node services (explicit v2 boot cohort)
-ConditionKernelCommandLine=photowall.node=v2
 Wants=photo-wall-node-handoff.service photo-wall-node-prepare.service photo-wall-display.service photo-wall-display-controller.service photo-wall-host-core.service photo-wall-app-broker.service photo-wall-health.service photo-wall-manager-supervisor.service photo-wall-bus.service
 After=network-online.target
 

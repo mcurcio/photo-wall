@@ -18,7 +18,7 @@ type Story = StoryObj<typeof meta>;
 export const Groups: Story = {};
 /** Focused on one Pi (`?pi=`). */
 export const Focused: Story = { args: { focus: "device-a" } };
-/** Node control not on: the host columns are not shown. */
+/** No host read yet (sign-in not confirmed): the host columns are not shown. */
 export const NoHostRead: Story = { args: { hosts: null } };
 /** The fleet host read failed with no earlier result. */
 export const ReadFailed: Story = { args: { hosts: HOSTS_FAILED } };
@@ -26,7 +26,7 @@ export const Empty: Story = { args: { snapshot: { inventory: { read_at: 1000, pl
 
 /** One Pi's Health section. */
 export const Health: Story = { render: () => <HostHealthPanel hosts={HOSTS} deviceId="device-b" /> };
-/** A Frame's host link, as the Wall's Status facet shows it. */
+/** A Frame's host link, as the Frame page's Overview shows it. */
 export const HostLink: Story = {
   render: () => <HostHealthLink snapshot={SNAPSHOT} frameId="lobby-right" hosts={HOSTS} />,
 };

@@ -5,7 +5,7 @@ The main loop hands over admitted channels (`adopt`), publishes the current app 
 turn (`publish_run`), restates the relink it owes (`owe_relink`) and collects kill decisions
 (`take_kill_due`); it alone actuates. This thread only measures: it sends a nonce every T on
 the current run's channel, matches answers, and appends probe facts (audience node) to the
-broker feed. It never calls systemctl, HTTP, the store or the driver. A channel is judged
+broker feed, with the renderer the Player reports on its channel (`app_renderer`). It never calls systemctl, HTTP, the store or the driver. A channel is judged
 against every publication after its adoption: one whose run is not the published run is
 closed. An owed relink is a level, not a packet: each channel instance for the owed run gets
 it once per owed episode (each Central refusal is a new episode), so a relink owed while no
@@ -37,9 +37,10 @@ from appliance.feed import Feed
 from appliance.kernel.clock import boottime_ms
 from contracts.node_app_link import (
     MAX_NODE_LINK_BYTES,
+    NodeRendererV2,
     encode_node_probe,
     encode_node_relink,
-    parse_node_probe_answer,
+    parse_node_probe_reply,
 )
 
 LOG = logging.getLogger(__name__)
@@ -251,10 +252,15 @@ class ProbeThread:
             self._close("eof")
             return
         try:
-            nonce = parse_node_probe_answer(raw)
+            reply = parse_node_probe_reply(raw)
         except ValueError:
-            self._close("protocol")  # anything but `probe_answer` ends the channel
+            self._close("protocol")  # anything but `probe_answer` or `renderer` ends the channel
             return
+        if isinstance(reply, NodeRendererV2):  # a fact for the judge, never progress
+            self.feed.append("app_renderer", {"run": channel.run.document(),
+                                              "renderer": reply.renderer})
+            return
+        nonce = reply.nonce
         probes = self._probes
         if probes is not None and probes.run == channel.run and probes.answered(nonce, now):
             with self._lock:  # the run answered: a latch set before the answer is stale
