@@ -28,7 +28,6 @@ from central.execution_repository import PostgresExecutionRepository
 from central.fleet.leaf_bridge import mount_leaf_bridge
 from central.fleet.node_routes import mount_node_routes
 from central.fleet.node_sessions import NodeControlConfig
-from central.fleet.rollout_gate import ServingImageVerifier
 from central.infra.display_store import PgDisplayCommands, PgDisplayQueries
 from central.installation_models import InstallationInventory
 from central.library_routes import mount_library_routes
@@ -129,7 +128,6 @@ def create_app(
     media_queue: MediaTaskQueue | None = None,
     content: ContentServices | None = None,
     node_control: NodeControlConfig = NodeControlConfig(),
-    node_serving_verifier: ServingImageVerifier | None = None,
     media_times: TransactionClock | None = None,
     hub_leaf_url: str | None = None,
 ) -> FastAPI:
@@ -754,7 +752,7 @@ def create_app(
     if content is not None:
         mount_content_routes(app, content)
     mount_node_routes(app, db=db, clock=clock, admin=admin, coordinator=coordinator, config=node_control,
-                      serving_verifier=node_serving_verifier, content=content)
+                      content=content)
     app.state.node_reconciler = NodeRuntimeReconciler(app.state.node_sessions, coordinator)
     # A Node's leaf arrives at its origin (erratum E-E3D-CUT-4): relayed to the hub when Central has one.
     hub_leaf_url = hub_leaf_url or os.environ.get("PHOTO_WALL_HUB_LEAF_URL")

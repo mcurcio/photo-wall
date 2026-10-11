@@ -1,6 +1,6 @@
 """Explicit boot/producer admission and separate, boot-scoped LAN credentials.
 
-Lock order: optional rollout gate, Fleet, device, lifecycle, boot, session,
+Lock order: Fleet, device, lifecycle, boot, session,
 producer, then evidence/commands. Retirement shares the Fleet/device boundary.
 A session is a serial claim; it does not authenticate a physical device.
 """
@@ -161,9 +161,8 @@ class NodeSessions:
                             (grant.session_id, self.clock.utc())).fetchone()
         if live is None:
             return replace(grant, command_eligible=False, command_reason="node_session_unavailable")
-        # Every admission is a node boot offer's (076): a live session carries commands, which
-        # the rollout effect gate still has to admit.
-        return replace(grant, command_eligible=True, command_reason="boot_admitted_rollout_required")
+        # Every admission is a node boot offer's (076): a live session carries commands.
+        return replace(grant, command_eligible=True, command_reason="boot_admitted")
 
     def enroll(self, claim: NodeSessionClaim) -> NodeSessionGrant:
         config = self.config

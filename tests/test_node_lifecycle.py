@@ -7,14 +7,15 @@ from dataclasses import replace
 from uuid import uuid4
 
 import pytest
+from fastapi.testclient import TestClient
 from psycopg.types.json import Jsonb
 from test_coordination import report
 from test_fleet_attempts import DEVICE_ID, SERIAL
-from test_fleet_rollout_gate import _certificate, _gate
 from test_node_boot import claim_for, environment, publish_deployment
 from test_node_runtime_reconciliation import rig
-from test_registry import enroll
+from test_registry import ADMIN, enroll
 
+from central.app import create_app
 from central.coordination import CoordinationError
 from central.displays.model import Readiness
 from central.fleet.node_acceptance import current_cohort_in
@@ -44,7 +45,7 @@ from contracts.player_control import ControlAck, ControlHello
 
 
 class Rig:
-    def __init__(self, registry, *, qualified=True, unbound=True, gate_seconds=60):
+    def __init__(self, registry, *, qualified=True, unbound=True):
         coordinator, player, key, sessions, claims, grants, surfaces, _, proof = rig(registry)
         self.display = NodeDisplay(sessions, runtime=coordinator)
         self.display_claim, self.display_grant, self.surfaces = claims['display_host'], grants['display_host'], surfaces
@@ -67,10 +68,8 @@ class Rig:
         if unbound:
             registry.unbind('node-f0', expected_generation=1)
             registry.unbind('node-f1', expected_generation=1)
-        gate, _ = _gate(registry, _certificate(expires_in=gate_seconds))
-        self.generation = gate.open(expected_revision=0).generation
         self.coordinator, self.key, self.grants = coordinator, key, grants
-        self.service = NodeLifecycle(sessions, gate)
+        self.service = NodeLifecycle(sessions)
         self.claim = claims['app_effect_broker']
 
     def refresh_display(self, sampled_boottime_ms):
@@ -82,7 +81,7 @@ class Rig:
 
     def stage(self, index=0, *, session_id=None):
         issued = self.service.stage(DEVICE_ID, OperatorAppStage(uuid4(), uuid4(), session_id or self.claim.session_id,
-            1, self.deployments[index].deployment_id, self.generation, 'operator:test'))
+            1, self.deployments[index].deployment_id, 'operator:test'))
         return parse_stage_command(json.dumps(issued['command']).encode())
 
     def desired(self, claim=None):
@@ -227,6 +226,25 @@ def test_latest_stage_is_desired_state_without_command_expiry(registry):
     second = fixture.stage(1)
     registry.clock.advance(1800)  # Former stage lifetime: desired state does not expire.
     assert fixture.desired() == [second]
+    assert fixture.states() == ['staged', 'superseded']
+
+
+def test_an_admin_stage_through_the_default_app_needs_no_opener_and_the_newer_replaces_it(registry):
+    """No effect gate (owner answer G-A): the default composition stages on the operator's word."""
+    fixture = Rig(registry)
+    admin = {'Authorization': 'Bearer ' + ADMIN}
+    sent = []
+    app = create_app(registry.db, registry.clock, ADMIN, node_control=fixture.sessions.config)
+    with TestClient(app) as client:
+        for deployment in fixture.deployments:
+            response = client.post(f'/v1/operator/node/devices/{DEVICE_ID}/app-stages', headers=admin, json={
+                'operation_id': str(uuid4()), 'command_id': str(uuid4()),
+                'session_id': str(fixture.claim.session_id), 'device_generation': 1,
+                'deployment_id': str(deployment.deployment_id), 'operator_audit_ref': 'console/2026-10-10'})
+            assert response.status_code == 200, response.text
+            sent.append(parse_stage_command(json.dumps(response.json()['command']).encode()))
+    assert [command.target for command in sent] == [item.app_environment for item in fixture.deployments]
+    assert fixture.desired() == [sent[1]]
     assert fixture.states() == ['staged', 'superseded']
 
 

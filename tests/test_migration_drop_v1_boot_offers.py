@@ -180,7 +180,7 @@ def test_069_drops_the_v1_lane_and_keeps_every_node_record(before_069, tmp_path)
     with TestClient(app) as client:
         for method, path in DELETED_ROUTES:
             assert client.request(method, path, headers=auth, json={}).status_code == 404, path
-        status = client.get("/v1/operator/node/status", headers=auth)
+        status = client.get("/v1/operator/node/hosts", headers=auth)
         assert status.status_code == 200  # the app serves; the V1 fleet routes are 070's
 
 

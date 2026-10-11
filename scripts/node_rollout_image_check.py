@@ -20,6 +20,7 @@ import time
 from hashlib import sha256
 from pathlib import Path
 from uuid import uuid4
+from xml.etree import ElementTree
 
 ROOT = Path(__file__).resolve().parents[1]
 SUITES = {
@@ -34,6 +35,19 @@ SUITES = {
     "readiness_contract": ("test_readiness_diagnostics.py", "test_coordination.py", "test_node_central.py"),
 }
 PRODUCTION_MODULES = ("central.app", "central.coordination", "central.fleet.node_lifecycle", "contracts.node_protocol")
+
+
+def report_result(raw: bytes) -> dict:
+    """One JUnit report's hash and passed count; any failure, error or skip refuses it."""
+    if len(raw) > 16*1024*1024 or b"<!DOCTYPE" in raw.upper() or b"<!ENTITY" in raw.upper():
+        raise ValueError("qualification_report_invalid")
+    root = ElementTree.fromstring(raw)
+    cases = list(root.iter("testcase"))
+    if not cases or any(list(case.iter("failure")) or list(case.iter("error")) or list(case.iter("skipped")) for case in cases):
+        raise ValueError("qualification_report_not_all_passed")
+    if any(int(suite.get(key, "0")) for suite in root.iter("testsuite") for key in ("failures", "errors", "skipped")):
+        raise ValueError("qualification_report_not_all_passed")
+    return {"sha256": sha256(raw).hexdigest(), "passed": len(cases)}
 
 
 def _run(*args, **kwargs):
@@ -101,7 +115,6 @@ def _test_dependencies(destination: Path):
 def check(images: list[str], revision: str, output: Path):
     sys.path.insert(0, str(ROOT))
     from contracts.node_rollout import canonical, image_digest, validate_qualification
-    from scripts.node_rollout_ci_evidence import report_result
     from scripts.registry_pull import pull_image
 
     if not re.fullmatch(r"[0-9a-f]{40}", revision):
@@ -163,8 +176,6 @@ def check(images: list[str], revision: str, output: Path):
     payload = validate_qualification({"schema": 1, "kind": "image_qualification", "revision": revision,
         "suite_sha256": suite_hash, "created_at": now, "expires_at": now+30*86400, "images": rows})
     (output / "qualification.json").write_bytes(canonical(payload))
-    (output / "status.json").write_bytes(canonical({"state": "unsigned_unqualified", "suite_sha256": suite_hash,
-        "reason": "separate_trusted_ci_signature_and_live_scope_publication_required"}))
 
 
 def main():

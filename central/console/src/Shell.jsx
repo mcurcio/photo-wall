@@ -7,7 +7,6 @@ import { useHandOff } from "./flow/useHandOff.js";
 import { CloseIcon, MenuIcon } from "./icons.jsx";
 import { neutralRoutes } from "./neutralRoutes.jsx";
 import { useFleetHosts } from "./fleetHosts.js";
-import { NodeControlContext, useNodeControl } from "./nodeControl.js";
 import { PageHiddenContext } from "./pageVisibility.js";
 import { formatRoute, isPlainClick, landingRoute } from "./routes.js";
 import { showRoutes } from "./showRoutes.jsx";
@@ -191,9 +190,6 @@ const Page = memo(function Page({ entry, ctx, ready, hidden = false }) {
  * route that goes elsewhere first drops the request. A sidebar link on a wide screen
  * leaves focus on the link.
  *
- * NODE CONTROL. One read of node status (nodeControl.js `useNodeControl`), provided to every
- * page by context: the one source of the effect gate.
- *
  * `hidden` (the sign-in overlay; App.jsx) hides the whole shell and makes it inert
  * while keeping it, and every draft in it, mounted.
  *
@@ -204,8 +200,6 @@ export function Shell({ hidden = false }) {
   const { route, navigate } = useRoute();
   // The ~10 s /healthz poll: the pill, the attention strip and the pages read it.
   const health = useHealth();
-  // Node control (Part E §25): ONE node status read, the effect gate's one source.
-  const nodeControl = useNodeControl({ skip: hidden });
   // The fleet host read (console DDD §63 G12): ONE poll, here, for every page and the strip.
   // It runs on every page, so it waits for sign-in to be confirmed: a read sent while sign-in
   // is still being checked would fail 401.
@@ -417,20 +411,18 @@ export function Shell({ hidden = false }) {
         </div>
         <main ref={mainRef} className="shell__main" tabIndex={-1}>
           {current === null && <p className="page__loading">Loading…</p>}
-          <NodeControlContext.Provider value={nodeControl}>
-            {showRoutes.map((show) => (
-              <Page
-                key={show.section}
-                entry={show}
-                ctx={ctx}
-                ready={ready}
-                hidden={show.section !== current}
-              />
-            ))}
-            {entry !== null && !SHOW.has(entry.section) && (
-              <Page key={entry.section} entry={entry} ctx={ctx} ready={ready} />
-            )}
-          </NodeControlContext.Provider>
+          {showRoutes.map((show) => (
+            <Page
+              key={show.section}
+              entry={show}
+              ctx={ctx}
+              ready={ready}
+              hidden={show.section !== current}
+            />
+          ))}
+          {entry !== null && !SHOW.has(entry.section) && (
+            <Page key={entry.section} entry={entry} ctx={ctx} ready={ready} />
+          )}
         </main>
       </div>
 

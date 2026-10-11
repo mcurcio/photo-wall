@@ -30,16 +30,10 @@ const broker = { session_id: "s-broker", current: true, scope: "app_effect", com
   producer: { owner: "app_effect_broker", kernel_boot_id: "boot-2" } };
 const read = (sessions, extra = {}) => ({ read_at: 1000, device_generation: 3, sessions,
   reboot_commands: [], boot_claims: [], ...extra });
-// The effect gate is the shell's (nodeControl.js), passed beside the node read, never inside it.
-const open = { state: "open", effective_state: "open", generation: 7, reason: null };
-const closed = { state: "closed", effective_state: "closed", generation: 7, reason: "never_certified" };
 const node = (r, extra = {}) => ({ read: r, operations: null, readAt: r?.read_at ?? null, error: null, ...extra });
-const target = (n, gate = open) => commands.rebootTarget(n, gate);
+const target = (n) => commands.rebootTarget(n);
 out.target = [
   target(node(read([host(), broker, host({ session_id: "old", current: false })]))),
-  target(node(read([host()])), { ...closed, reason: "operator_closed" }),
-  target(node(read([host()])), closed),
-  target(node(read([host()])), null),
   target(node(read([broker]))),
   target(node(read([host({ command_eligible: false, command_reason: "node_offer_superseded" })]))),
   target(node(read([host(), host({ session_id: "s-2" })]))),
@@ -67,10 +61,9 @@ out.states = {
 };
 // Requested, but Central's poll would not offer it now: the label says so; the state is unchanged.
 const targeting = command({ command: { command_session_id: "s-host", producer: { kernel_boot_id: "boot-2" } } });
-const notOffered = (n, gate = open) => show(commands.rebootCommandState(targeting, 1000, { clock, nodeDevice: n, gate }));
+const notOffered = (n) => show(commands.rebootCommandState(targeting, 1000, { clock, nodeDevice: n }));
 out.notOffered = {
   offered: notOffered(node(read([host()]))),
-  gateClosed: notOffered(node(read([host()])), closed),
   sessionLapsed: notOffered(node(read([host({ current: false })]))),
 };
 
@@ -96,8 +89,6 @@ out.whileOutstanding = commands.rebootRequest(bound, [onSession("c-1", true)], s
   { playerId: "p-1", commandId: "c-new", clock });
 out.badReason = commands.rebootRequest(bound, [], snapshot, 1000,
   { playerId: "p-1", commandId: "c-new", reason: "two words", clock });
-out.closed = commands.rebootRequest(target(node(read([host()])), closed),
-  [], snapshot, 1000, { playerId: "p-1", commandId: "c-new", clock });
 out.afterUnknownSameBoot = commands.rebootRequest(bound, [command({ outstanding: false })], snapshot, 1020,
   { playerId: "p-1", commandId: "c-new", clock }).previous;
 out.afterUnknownLaterBoot = commands.rebootRequest(bound,
@@ -144,10 +135,9 @@ globalThis.fetch = async (url, init) => {
 };
 const frozenAt1000 = commands.rebootRequest(bound, [], snapshot, 1000, { playerId: "p-1", commandId: "c-a", clock });
 const hook = (r) => ({ latest: () => node(r) });
-const control = (gate = open) => ({ latest: () => ({ state: "on", gate, failed: false }) });
-const send = async (request, r, gate = open) => {
+const send = async (request, r) => {
   const before = posts.length;
-  const outcome = await commands.sendReboot("d-1", request, hook(r), control(gate));
+  const outcome = await commands.sendReboot("d-1", request, hook(r));
   return { outcome: outcome.outcome, message: outcome.message, posts: posts.length - before };
 };
 out.send = {
@@ -161,8 +151,6 @@ out.send = {
     reboot_commands: [onSession("c-a", true, { expires_at: 1045 })] })),
   // The session changed after the dialog opened: the frozen request is out of date.
   sessionChanged: await send(frozenAt1000, read([host({ session_id: "s-later" })], { read_at: 1005 })),
-  // The shell's gate closed after the dialog opened: judged on control.latest(), no POST.
-  gateClosed: await send(frozenAt1000, read([host()], { read_at: 1005 }), closed),
 };
 out.sentBodies = posts.map((post) => post.body);
 out.sentUrl = posts[0]?.url;
@@ -179,8 +167,7 @@ const ok = () => new Response(JSON.stringify({ duplicate: false }), { status: 20
 // Answer every POST in flight (each with `how`), then let the sends settle.
 const answerAll = (how) => { const now = pending; pending = []; now.forEach(how); };
 const resolveOk = ({ resolve }) => resolve(ok());
-const flight = (device = "d-1") => commands.sendReboot(device, frozenAt1000, hook(read([host()], { read_at: 1005 })),
-  control());
+const flight = (device = "d-1") => commands.sendReboot(device, frozenAt1000, hook(read([host()], { read_at: 1005 })));
 const words = (r) => ({ outcome: r.outcome, message: r.message });
 const first = flight();
 const secondCall = flight();
@@ -237,7 +224,6 @@ out.results = [
   answer(true, 200, null, { duplicate: true }),
   answer(false, 410, "node_reboot_expired"),
   answer(false, 502),
-  answer(false, 503, "rollout_gate_closed"),
   answer(false, 403, "node_reboot_session_unavailable"),
   answer(false, 409, "node_offer_superseded"),
   answer(false, 409, "node_reboot_outstanding"),
@@ -258,13 +244,7 @@ def _run():
 def test_reboot_binds_the_one_current_host_management_session_or_says_why_not():
     out = _run()
     assert out["target"] == [
-        {"available": True, "sessionId": "s-host", "deviceGeneration": 3, "rolloutGeneration": 7,
-         "kernelBootId": "boot-2"},
-        # A gate reason carries `gate`, so the Player page links it to Releases › Effect gate.
-        {"available": False, "reason": "Effect gate closed · Central's reason: operator closed", "gate": True},
-        {"available": False, "gate": True,
-         "reason": "Effect gate closed · Central's reason: no deployment certification has opened it"},
-        {"available": False, "reason": "Central's effect gate is not readable", "gate": True},
+        {"available": True, "sessionId": "s-host", "deviceGeneration": 3, "kernelBootId": "boot-2"},
         {"available": False, "reason": "no current Host Management session on this box"},
         {"available": False,
          "reason": "Central refuses commands to this Host Management session (node offer superseded)"},
@@ -304,8 +284,7 @@ def test_the_reboot_request_is_frozen_whole_when_the_dialog_opens():
     out = _run()
     assert out["request"] == {
         "body": {"command_id": "c-new", "session_id": "s-host", "device_generation": 3,
-                 "operator_audit_ref": "console/2025-10-02/stuck", "rollout_generation": 7,
-                 "valid_for_seconds": 30},
+                 "operator_audit_ref": "console/2025-10-02/stuck", "valid_for_seconds": 30},
         "kernelBootId": "boot-2", "windowSeconds": 30, "retryUntil": 1759363230,
         # In Output order; an ended Run is not live, and a Run's other targets are not named.
         "frames": [{"frameId": "lobby", "runs": [{"runId": "r-1", "sceneId": "morning", "phase": "body"}]},
@@ -319,8 +298,6 @@ def test_no_new_command_id_while_a_command_on_the_session_is_outstanding():
     out = _run()
     assert out["whileOutstanding"] == {
         "refused": "a reboot request is outstanding until t1020; only the page that sent it can retry it"}
-    assert out["closed"] == {
-        "refused": "Effect gate closed · Central's reason: no deployment certification has opened it"}
     assert out["badReason"] == {"refused": "a reason is one word: letters, digits and _ . : / - only"}
 
 
@@ -345,7 +322,6 @@ def test_send_reboot_judges_the_newest_read_at_call_time_and_refuses_without_a_p
     assert send["outOfDate"] == {"outcome": "changed", "posts": 0,
                                  "message": "This request is out of date; close and reopen."}
     assert send["sessionChanged"]["posts"] == 0
-    assert send["gateClosed"]["posts"] == 0
     assert send["inWindow"] == {"outcome": "done", "posts": 1,
                                 "message": "Reboot recorded. Requested · delivery unknown."}
     assert send["heldRetry"]["posts"] == 1
@@ -382,7 +358,7 @@ def test_send_reboot_is_the_only_poster_of_reboots():
     start = source.index("export async function sendReboot(")
     at = route.search(source).start()
     assert start < at < source.index("\n}\n", start)
-    assert "rebootRefusal(request, node.latest(), control.latest().gate)" in source[start:at]
+    assert "rebootRefusal(request, node.latest())" in source[start:at]
 
 
 def test_the_hardware_pi_page_reboots_only_through_send_reboot():
@@ -409,9 +385,6 @@ def test_a_requested_label_says_when_central_is_not_offering_it_now():
     out = _run()["notOffered"]
     assert out["offered"]["label"] == (
         "Requested · delivery unknown · Central offers it to Host Management until t1020")
-    assert out["gateClosed"] == {
-        "state": "requested", "label": "Requested · Central is not offering it now (effect gate closed)",
-        "fact": "Recorded by Central · audit console/2026-10-02 · recorded 10 s ago"}
     assert out["sessionLapsed"]["state"] == "requested"
     assert out["sessionLapsed"]["label"] == (
         "Requested · Central is not offering it now (session no longer current)")
@@ -468,11 +441,11 @@ def test_reboot_answers_use_the_equipment_outcomes_and_410_is_outcome_unknown():
     results = _run()["results"]
     assert [(entry["outcome"], entry["retryable"]) for entry in results] == [
         ("done", False), ("already", False), ("unknown", False), ("unknown", True),
-        ("changed", False), ("changed", False), ("refused", False), ("changed", False)]
+        ("changed", False), ("refused", False), ("changed", False)]
     assert results[1]["message"] == "Already recorded. Requested · delivery unknown."
     assert results[2]["message"].startswith("Outcome unknown")
-    assert results[6]["message"] == "Refused: node offer superseded."
-    assert results[7]["message"] == (
+    assert results[5]["message"] == "Refused: node offer superseded."
+    assert results[6]["message"] == (
         "Another reboot request for this Player is outstanding; close this dialog and review it.")
 
 

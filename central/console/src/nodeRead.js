@@ -12,8 +12,7 @@ import { usePolledRead } from "./polledRead.js";
  * open — `GET …/node/devices/<id>` (its sessions, host samples, preparation, broker
  * projection, Display Host's newest exchange per Output, boot claims and reboot audit) and
  * `GET …/node/devices/<id>/app-attempts` (its app operations) — every `cadenceMs` through
- * the shared polled read (polledRead.js), never for a retired box (`skip`). The effect gate is NOT read here: the shell's node status read is
- * its one source (nodeControl.js). Like the fleet host read it goes through
+ * the shared polled read (polledRead.js), never for a retired box (`skip`). Like the fleet host read it goes through
  * `apiWrite(path, {method: "GET"})`, so a failure never touches the session. A failed read
  * KEEPS the last values and reports its error beside them.
  *

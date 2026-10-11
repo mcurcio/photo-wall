@@ -4,8 +4,8 @@ Central always runs node control: the console has no node-off mode and shows no 
 surface. That posture is held by ONE
 source-scan test over every console module, with ONE shared list (`V2_POSTURE`, below: the
 bead's acceptance list, verbatim), and mutation probes proving the scan refuses what it should.
-The pure parts of node control (nodeControl.js) and the boot facts (bootFacts.js) run under
-Node, as tests/test_console_players.py runs the fleet model.
+The boot facts (bootFacts.js) run under Node, as tests/test_console_players.py runs the fleet
+model.
 """
 
 import json
@@ -94,9 +94,9 @@ def _console_sources():
 
 def test_the_console_holds_the_v2_posture():
     sources = _console_sources()
-    assert len(sources) > 50 and "nodeControl.js" in sources
+    assert len(sources) > 50 and "bootFacts.js" in sources
     assert posture_offenders(sources) == []
-    for deleted in ("V1Offers.jsx", "ManagementFacts.jsx", "fleetApi.js"):
+    for deleted in ("V1Offers.jsx", "ManagementFacts.jsx", "fleetApi.js", "nodeControl.js"):
         assert not (SRC / deleted).exists()
 
 
@@ -131,27 +131,8 @@ def test_the_scan_reads_jsx_text_and_literals_but_not_comments():
 # --- The pure parts, under Node.
 
 SCRIPT = r"""
-const control = await import(process.argv[1]);
-const boot = await import(process.argv[2]);
-const { factText } = await import(process.argv[3]);
+const boot = await import(process.argv[1]);
 const out = {};
-const status = (data, ok = true) => control.controlFromStatus({ ok, data });
-const gate = { state: "closed", effective_state: "closed", reason: "never_certified", generation: 1 };
-out.states = [
-  status({ effect_gate: gate }),
-  status({ error: "rollout_gate_missing" }, false),
-  control.controlFromStatus(null),
-  status({}),
-];
-out.gates = [
-  null,
-  gate,
-  { ...gate, reason: "deployment_changed" },
-  { ...gate, reason: "operator_paused" },
-  { ...gate, state: "open", reason: null },
-  { state: "open", effective_state: "open", generation: 4, reason: null },
-].map((value) => factText(control.effectGateFact(value)));
-out.recorded = factText(control.effectGateFact({ ...gate, changed_at: 1000 }));
 const rows = [{ device_id: "device-a", serial: "10000000aaaa0001" }, { device_id: "device-b" }];
 out.boot = [
   null,
@@ -170,39 +151,9 @@ console.log(JSON.stringify(out));
 def _run():
     _require_node()
     result = subprocess.run(
-        ["node", "--input-type=module", "-e", SCRIPT, "--", (SRC / "nodeControl.js").as_uri(),
-         (SRC / "bootFacts.js").as_uri(), (SRC / "facts.js").as_uri()],
+        ["node", "--input-type=module", "-e", SCRIPT, "--", (SRC / "bootFacts.js").as_uri()],
         capture_output=True, text=True, timeout=30, check=True)
     return json.loads(result.stdout)
-
-
-def test_the_node_status_read_is_the_effect_gate_or_unreadable():
-    out = _run()
-    gate = {"state": "closed", "effective_state": "closed", "reason": "never_certified", "generation": 1}
-    assert out["states"] == [
-        {"gate": gate},
-        # A failed read (a missing gate row answers 503), no answer, or no gate: unreadable.
-        {"gate": None},
-        {"gate": None},
-        {"gate": None},
-    ]
-
-
-def test_the_effect_gate_has_one_wording_with_centrals_reason_and_no_age():
-    out = _run()
-    assert out["gates"] == [
-        "Unknown: Central's effect gate is not readable",
-        "Effect gate closed · Central's reason: no deployment certification has opened it",
-        "Effect gate closed · Central's reason: the deployment changed",
-        "Effect gate closed · Central's reason: operator paused",
-        "Effect gate closed · Central's reason: its certification expired",
-        "Effect gate open · certified by the deployment · generation 4 · Central re-checks its "
-        "serving evidence on every Reboot and Stage",
-    ]
-    # Central's timestamp is displayed as a time, never subtracted from a browser clock.
-    assert out["recorded"].startswith(
-        "Effect gate closed · Central's reason: no deployment certification has opened it · recorded ")
-    assert " ago" not in out["recorded"]
 
 
 def test_boot_facts_are_each_boxs_serial_from_the_fleet_host_read():

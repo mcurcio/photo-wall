@@ -13,7 +13,6 @@ from test_fleet_attempts import (
     SERIAL,
     _seed,
 )
-from test_fleet_rollout_gate import _gate
 
 from central.content_catalog.ports import NodeReleaseRefused
 from central.fleet.node_boot import NodeBootService, NodeDeployment
@@ -115,10 +114,8 @@ def test_new_boot_supersedes_prior_boot_and_revokes_its_sessions(registry):
     first = service.offer(NodeBootRequestV2(SERIAL, BOOT_ID, "a" * 64))
     claim = claim_for(first)
     grant = sessions.enroll(claim)
-    gate, _ = _gate(registry)
-    generation = gate.open(expected_revision=0).generation
-    commands = NodeCommands(sessions, gate)
-    request = OperatorReboot(uuid4(), grant.session_id, 1, "fixture:operator", generation)
+    commands = NodeCommands(sessions)
+    request = OperatorReboot(uuid4(), grant.session_id, 1, "fixture:operator")
     commands.request_reboot(DEVICE_ID, request)
     # A second boot of the same serial needs no knowledge of its predecessor.
     second = service.offer(NodeBootRequestV2(SERIAL, uuid4(), "b" * 64))

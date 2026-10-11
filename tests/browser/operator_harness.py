@@ -31,14 +31,12 @@ _SEQUENCE = itertools.count(1)
 
 @contextmanager
 def operator_server(db, clock, *, media_root=None, media_queue=None, admin_token=ADMIN,
-                    node_control=NODE_CONTROL, node_serving_verifier=None):
+                    node_control=NODE_CONTROL):
     """Run the production app on an ephemeral loopback listener with real lifespan.
 
-    `node_control` is the node control configuration (node-test by default).
-    `node_serving_verifier` lets the effect gate admit node commands (reboots)."""
+    `node_control` is the node control configuration (node-test by default)."""
     app = create_app(db, clock, admin_token, run_scheduler=False,
-                     media_root=media_root, media_queue=media_queue, node_control=node_control,
-                     node_serving_verifier=node_serving_verifier)
+                     media_root=media_root, media_queue=media_queue, node_control=node_control)
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))
     listener.listen()

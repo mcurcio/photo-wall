@@ -3,7 +3,6 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useConfirm } from "./ConfirmAction.jsx";
 import { FactLine } from "./domain/fact-line.tsx";
 import { clock, fact } from "./facts.js";
-import { effectGateFact, useNodeControlValue } from "./nodeControl.js";
 import {
   deploymentHandle,
   newestStable,
@@ -20,11 +19,6 @@ import { formatRoute } from "./routes.js";
 import { SectionBoundary } from "./SectionBoundary.jsx";
 
 const SELECT_UNKNOWN = "Outcome unknown: Central did not answer. The next read of the boot selection decides.";
-
-// What the effect gate governs (§25), beside Central's state and reason.
-const GATE_GOVERNS = "Reboot and Stage app are refused while it is closed. Central opens it only from a "
-  + "deployment certification; this console cannot open it. An open gate is necessary, not sufficient: Central "
-  + "re-checks its serving evidence on every Reboot and Stage.";
 
 
 /** "Release read as of <time>", whether its last refresh failed, or why it has no answer. */
@@ -128,22 +122,11 @@ function CatalogSection({ read, checking, onCheck }) {
   );
 }
 
-/** The effect gate (§25, §26): the shell's one reading of it, in its one wording. */
-function EffectGateSection({ gate }) {
-  return (
-    <>
-      <FactLine label="Effect gate" fact={effectGateFact(gate)} />
-      <p className="roster__note">{GATE_GOVERNS}</p>
-    </>
-  );
-}
-
 /**
  * The release sections (§25): one read feeds them all (releases.js `useReleaseRead`), and the
  * Select dialog sends through its one send function, judged on the newest read.
  */
 function ReleaseRecords() {
-  const control = useNodeControlValue();
   const releases = useReleaseRead();
   // This page's unanswered "Check GitHub releases now" (releases.js `HeldCheck`): the same shape.
   const checkRef = useRef(false);
@@ -230,17 +213,14 @@ function ReleaseRecords() {
           </SectionBoundary>
         </>
       )}
-      <SectionBoundary title="Effect gate" resetKey={control.gate}>
-        <EffectGateSection gate={control.gate} />
-      </SectionBoundary>
     </>
   );
 }
 
 /**
  * Fleet › Releases (console DDD Part E §25, beads NR1, NR2 and B7): the releases Central
- * observed and downloads by itself → their deployments → the boot selection, and the effect
- * gate: the fleet-wide aggregates' home.
+ * observed and downloads by itself → their deployments → the boot selection: the fleet-wide
+ * aggregates' home.
  */
 export function ReleasesPage() {
   return (

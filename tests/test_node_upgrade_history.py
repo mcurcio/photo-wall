@@ -121,12 +121,13 @@ def test_049_to_current_drops_the_v1_offer_session_and_drain(history):
         registry.db.migrate()
         assert ledger(registry.db)[:len(before)] == before
         with registry.db.transaction() as conn:
+            # The effect gate and its verifier chain go too (079, owner answer G-A).
             for table in ("fleet_boot_offers", "fleet_os_command_sessions", "equipment_drains",
-                          "active_equipment_drains"):
+                          "active_equipment_drains", "fleet_effect_gate",
+                          "node_rollout_evidence_heads"):
                 assert conn.execute("SELECT to_regclass(%s) AS name", (table,)).fetchone()[
                     "name"] is None
             assert conn.execute("SELECT count(*) AS n FROM node_sessions").fetchone()["n"] == 0
-            assert conn.execute("SELECT state FROM fleet_effect_gate").fetchone()["state"] == "closed"
 
 
 def test_053_admission_offer_fk_backfill_preserves_legacy_identity(history):

@@ -1,4 +1,4 @@
-"""Mounted V2 node HTTP composition; effect rollout admission remains default closed."""
+"""Mounted V2 node HTTP composition."""
 from __future__ import annotations
 
 import asyncio
@@ -32,7 +32,6 @@ from central.fleet.node_observations import NodeObservations
 from central.fleet.node_release_catalog import NodeReleaseCatalog
 from central.fleet.node_sessions import NodeControlConfig, NodeControlError, NodeSessions
 from central.fleet.principal import PrincipalError
-from central.fleet.rollout_gate import RolloutEffectGate, RolloutGateError, ServingImageVerifier
 from central.registry import Registry
 from contracts.node_app_link import MAX_NODE_LINK_BYTES
 from contracts.node_boot import MAX_NODE_BOOT_BYTES, encode_node_boot_offer, parse_node_boot_request
@@ -70,16 +69,14 @@ def _operator_reboot(raw: bytes) -> OperatorReboot:
 
 def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
                       admin: Callable[..., None], coordinator: Coordinator, config: NodeControlConfig,
-                      serving_verifier: ServingImageVerifier | None = None,
                       content: ContentServices | None = None) -> None:
     sessions = NodeSessions(db, clock, config)
     ingest, observations = NodeIngest(sessions), NodeObservations(sessions)
     display = NodeDisplay(sessions, runtime=coordinator)
     boots = NodeBootService(sessions, publisher=content.publisher if content else None)
     bytes_reader = OfferByteReader(content.reader if content else None)
-    effect_gate = RolloutEffectGate(db, serving_verifier=serving_verifier)
-    commands = NodeCommands(sessions, effect_gate)
-    lifecycle = NodeLifecycle(sessions, effect_gate)
+    commands = NodeCommands(sessions)
+    lifecycle = NodeLifecycle(sessions)
     links = NodeAppLinks(sessions)
     acceptance = NodeAcceptance(sessions)
     publications = NodeReleaseCatalog(sessions, readiness=content.readiness if content else None)
@@ -110,7 +107,7 @@ def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
     async def invoke(function, *args):
         try:
             return await asyncio.to_thread(function, *args)
-        except (RolloutGateError, PrincipalError) as exc:
+        except PrincipalError as exc:
             raise NodeControlError(str(exc), 503) from exc
         except NodeControlError:
             raise
@@ -128,13 +125,6 @@ def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
                 raise NodeControlError("node_body_too_large", 413)
             data.extend(chunk)
         return bytes(data)
-
-    @app.get("/v1/operator/node/status", dependencies=[Depends(admin)])
-    async def node_status():
-        return {"installation_audience": config.installation_audience,
-                "effect_gate": await invoke(effect_gate.status),
-                "command_qualification": "requires_current_scope_and_serving_image_evidence",
-                "physical_qualification": "not_established_by_server_startup"}
 
     @app.post("/v2/node/boot-offers")
     async def boot_offer(request: Request):
