@@ -14,9 +14,15 @@ Photos step, Show now, Needs attention, and Settings › Photo library (new here
 Seeding reuses the browser tests' own helpers (main: test_operator_showrunner_browser.py and
 test_source_flow_browser.py's stubbed library; this branch: photo_seed.py's store-side seeding),
 so every state reached here is one those tests prove.
+
+The after pages (follow-ups D2) run over the varied library (photo_seed.VARIED: 3:2, 4:3, 16:9,
+9:16, 1:1, a 4:1 panorama, an 8 MP photo, a face at the edge; each thumbnail drawn at its true
+ratio with its subject where it sits) and two more Frames (9:16 "hall", 16:9 "living-room"), at
+1,280 px and at 390 px ("-phone"), dark and light; befores are not re-taken.
 """
 
 import os
+import re
 import struct
 import zlib
 from pathlib import Path
@@ -53,10 +59,13 @@ def _tiles(page):
     page.route(THUMBNAILS, lambda route: route.fulfill(status=200, content_type="image/png", body=PNG))
 
 
-def _shot(page, name: str, scheme: str) -> None:
+def _shot(page, name: str, scheme: str, *, full_page=True) -> None:
+    """One PNG. An editor is shot as the view shows it (`full_page=False`): its preview column
+    and Save bar are sticky, and a full-page shot would draw them where the view's bottom was."""
     OUT.mkdir(parents=True, exist_ok=True)
     page.wait_for_timeout(400)
-    page.screenshot(path=str(OUT / f"{name}.{scheme}.png"), full_page=True, animations="disabled", caret="hide")
+    page.screenshot(path=str(OUT / f"{name}.{scheme}.png"), full_page=full_page, animations="disabled",
+                    caret="hide")
 
 
 def _open(page, scheme):
@@ -141,21 +150,33 @@ def test_before_new_source(page, registry, scheme):
         _shot(page, "new-source-before", scheme)
 
 
-# --- after (this branch) ----------------------------------------------------------------------
+# --- after (this branch; follow-ups D2: the varied library, desktop and phone) -------------------
+
+# Each after page at 1,280 px ("<page>-after.<scheme>.png") and at 390 px ("-after-phone").
+WIDTHS = {"": 1280, "-phone": 390}
 
 
-def _library(registry):
-    """One connection Family (Anna's key) with its people and albums listed, and a saved Source
-    "garden" (Anna) whose pool holds 8 photos."""
+def _sized(page, scheme, width):
+    page.set_viewport_size({"width": width, "height": 900 if width > 600 else 844})
+    page.emulate_media(color_scheme=scheme)
+
+
+def _library(registry, page):
+    """One connection Family (Anna's key) with its people and albums listed; a saved Source
+    "garden" (Anna) whose pool is the varied library (photo_seed.VARIED: 3:2, 4:3, 16:9, 9:16,
+    1:1, a 4:1 panorama, an 8 MP photo, a face at the edge), each thumbnail drawn at its ratio;
+    and the two Frames of both shapes beside the test's own."""
     from photo_seed import (
         album,
         connected,
-        filled,
-        in_pool,
         library_of,
         listed,
         person,
+        route_thumbnails,
         saved_source,
+        seed_varied_frames,
+        seed_varied_library,
+        varied_assets,
     )
 
     from central.photo_library.model import SourceQuery
@@ -167,12 +188,15 @@ def _library(registry):
     garden = saved_source(registry, library, "garden", SourceQuery(connection_ref=ref, people=(anna.person_ref,)))
     with registry.db.transaction() as conn:
         key = conn.execute("SELECT pool_key FROM media_sources WHERE source_ref=%s", (garden,)).fetchone()["pool_key"]
-    filled(library, key, in_pool(ref, range(1, 9)))
+    seed_varied_library(library, ref, pool_key=key)
+    seed_varied_frames(registry)
+    route_thumbnails(page, varied_assets(ref))
     return library, ref, garden
 
 
+@pytest.mark.parametrize("suffix", sorted(WIDTHS))
 @pytest.mark.parametrize("scheme", SCHEMES)
-def test_after_pages(page, registry, scheme):
+def test_after_pages(page, registry, scheme, suffix):
     """The Sources cards, Scene Photos and Show now over the saved Photo source "garden"."""
     from console_tasks import choose_source, connect, start_scene, start_show_now
     from operator_harness import operator_server
@@ -181,38 +205,40 @@ def test_after_pages(page, registry, scheme):
     from central.runtime import Contribution, Scene
 
     _seed(registry)
-    _library_store, _ref, garden = _library(registry)
+    _library(registry, page)
+    garden = "garden:1"
     _runtime(registry).command("set_scene", Scene(scene_id=SCENE_ID, loop=True, contributions=(
         Contribution(target=f"frame:{VALID_FRAME}", source_refs=(garden,)),)))
-    _open(page, scheme)
-    _tiles(page)
+    _sized(page, scheme, WIDTHS[suffix])
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "sources")
-        expect(_region(page, "Sources").get_by_role("article", name="garden", exact=True)).to_be_visible()
-        _shot(page, "sources-after", scheme)
+        card = _region(page, "Sources").get_by_role("article", name="garden", exact=True)
+        expect(card.get_by_role("img")).to_have_count(4)
+        _shot(page, f"sources-after{suffix}", scheme)
 
         form = start_scene(page)
         choose_source(form, garden)
         expect(form.get_by_role("region", name="Source media status")).to_contain_text("garden")
-        _shot(page, "scene-photos-after", scheme)
+        _shot(page, f"scene-photos-after{suffix}", scheme)
 
         form = start_show_now(page, SCENE_ID)
-        expect(form.get_by_role("region", name="Saved Sources", exact=True)).to_contain_text("garden")
-        _shot(page, "show-now-after", scheme)
+        expect(form.get_by_label("Photos from", exact=True)).to_contain_text("garden")
+        _shot(page, f"show-now-after{suffix}", scheme)
 
 
+@pytest.mark.parametrize("suffix", sorted(WIDTHS))
 @pytest.mark.parametrize("scheme", SCHEMES)
-def test_after_new_source(page, registry, scheme):
-    """New Source: Anna chosen in People, the unsaved Source's pool filled with 8 photos."""
+def test_after_new_source(page, registry, scheme, suffix):
+    """New Photo source: Anna chosen in People, the unsaved Source's pool the varied library; on
+    a phone, the count line, then the preview opened in its sheet."""
     from console_tasks import connect, start_source
     from operator_harness import operator_server
-    from photo_seed import draft_pool_key, filled, in_pool
+    from photo_seed import draft_pool_key, seed_varied_library
     from test_operator_showrunner_browser import _seed
 
     _seed(registry)
-    library, ref, _garden = _library(registry)
-    _open(page, scheme)
-    _tiles(page)
+    library, ref, _garden = _library(registry, page)
+    _sized(page, scheme, WIDTHS[suffix])
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "sources")
         editor = start_source(page)
@@ -222,14 +248,24 @@ def test_after_new_source(page, registry, scheme):
             editor.get_by_role("option", name="Anna").click()
         expect(editor.get_by_role("list", name="Chosen people")).to_contain_text("Anna")
         editor.get_by_label("Name", exact=True).fill("family")  # moves focus, closing the list
-        filled(library, draft_pool_key(registry), in_pool(ref, range(11, 19)))
-        pool = _region(page, "Photos in this Source")
-        expect(pool.get_by_role("list", name="Photos in the pool").get_by_role("listitem")).to_have_count(8)
-        _shot(page, "new-source-after", scheme)
+        seed_varied_library(library, ref, pool_key=draft_pool_key(registry))
+        if suffix:
+            line = editor.get_by_role("button", name=re.compile(r"^\d+ photos · "))
+            expect(line).to_be_visible()
+            _shot(page, f"new-source-after{suffix}", scheme, full_page=False)
+            line.click()
+            sheet = page.get_by_role("dialog", name="Photos in this Source")
+            expect(sheet.get_by_role("list", name="Photos in the pool").get_by_role("img")).to_have_count(8)
+            _shot(page, f"new-source-preview-after{suffix}", scheme, full_page=False)
+        else:
+            pool = _region(page, "Photos in this Source")
+            expect(pool.get_by_role("list", name="Photos in the pool").get_by_role("img")).to_have_count(8)
+            _shot(page, f"new-source-after{suffix}", scheme, full_page=False)
 
 
+@pytest.mark.parametrize("suffix", sorted(WIDTHS))
 @pytest.mark.parametrize("scheme", SCHEMES)
-def test_after_photo_library_and_attention(page, registry, scheme):
+def test_after_photo_library_and_attention(page, registry, scheme, suffix):
     """Settings › Photo library with one connection connected and one whose key Immich rejects,
     then Needs attention listing that one."""
     from console_tasks import connect, go
@@ -243,19 +279,18 @@ def test_after_photo_library_and_attention(page, registry, scheme):
     from central.photo_library.views import ConnectionWrite
 
     _seed(registry)
-    library, _ref, _garden = _library(registry)
+    _library(registry, page)
     store = PgPhotoLibrary(registry.db, times=DatabaseTransactionClock(), queue=NoQueue())
     archive = store.add_connection(ConnectionWrite(name="Archive", url="http://archive.invalid:2283",
                                                    key=KEY.replace("1234", "9876")))
     assert store.record_contact(store.begin_contact(archive), ContactRefused(problem=KeyRejected()))
-    _open(page, scheme)
+    _sized(page, scheme, WIDTHS[suffix])
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "photo-library")
         expect(_region(page, "Family").get_by_text("Connected")).to_be_visible()
         expect(_region(page, "Archive").get_by_text("Immich rejected the API key.")).to_be_visible()
-        _shot(page, "photo-library-after", scheme)
+        _shot(page, f"photo-library-after{suffix}", scheme)
 
         go(page, "attention")
         expect(_region(page, "Photo library").get_by_text("Immich rejected the API key.")).to_be_visible()
-        _shot(page, "attention-after", scheme)
-
+        _shot(page, f"attention-after{suffix}", scheme)

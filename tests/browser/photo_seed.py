@@ -140,6 +140,24 @@ def seed_varied_library(store: PgPhotoLibrary, connection_ref: str, *, pool_key:
     return tuple(a.asset_id for a in assets)
 
 
+TALL_FRAME, WIDE_FRAME = "hall", "living-room"
+
+
+def seed_varied_frames(registry) -> tuple[str, str]:
+    """Two Frames beside the test's own, so a screenshot shows both shapes: "hall", 9:16 on a 32"
+    display, and "living-room", 16:9 on a 55" one (placed, not bound)."""
+    from central.registry import FrameCreate
+    from contracts.models import FrameProfile
+
+    registry.create_frame(FrameCreate(id=TALL_FRAME, surface_id="hall", x_mm=100, y_mm=100, width_mm=400,
+                                      height_mm=710, profile=FrameProfile(width_px=1080, height_px=1920,
+                                                                          diagonal_inches=32)))
+    registry.create_frame(FrameCreate(id=WIDE_FRAME, surface_id="living", x_mm=100, y_mm=100, width_mm=1210,
+                                      height_mm=680, profile=FrameProfile(width_px=3840, height_px=2160,
+                                                                          diagonal_inches=55)))
+    return TALL_FRAME, WIDE_FRAME
+
+
 def thumbnail_png(width: int, height: int, subject=(0.5, 0.5), long_edge=120) -> bytes:
     """A thumbnail at a photo's true ratio: a gradient with a bright disc where its subject sits,
     so a ratio, a crop and an off-centre subject all read on a screenshot."""

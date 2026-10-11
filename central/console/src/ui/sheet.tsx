@@ -14,17 +14,17 @@ export interface SheetProps {
 
 /**
  * Sheet (design language §4): a panel over the page, from the bottom on a phone and from the
- * side above `md` (Base UI Dialog: focus is trapped and Escape closes it). Its title names it;
- * Close is always its last button.
+ * side above `md` (Base UI Dialog: focus is trapped and Escape closes it). Its title names it,
+ * with Close beside it; it sits above the page's sticky bars and toasts.
  */
 export function Sheet({ open, onOpenChange, title, children }: SheetProps) {
   return (
     <BaseDialog.Root open={open} onOpenChange={(next) => onOpenChange(next)}>
       <BaseDialog.Portal>
-        <BaseDialog.Backdrop className="fixed inset-0 bg-surface/70" />
+        <BaseDialog.Backdrop className="fixed inset-0 z-30 bg-surface/70" />
         <BaseDialog.Popup
           className={cn(
-            "fixed inset-x-0 bottom-0 flex max-h-5/6 flex-col gap-3 overflow-y-auto",
+            "fixed inset-x-0 bottom-0 z-30 flex max-h-5/6 flex-col gap-3 overflow-y-auto",
             "rounded-t-card border border-line bg-surface-raised p-4 font-sans text-text shadow-lg shadow-shadow",
             "md:inset-y-0 md:right-0 md:left-auto md:max-h-none md:w-120 md:rounded-none md:p-6",
             "focus-visible:outline-2 focus-visible:outline-focus",
