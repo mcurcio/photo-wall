@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 
 from pydantic import SecretStr
 
+from central.installation_models import FrameOutput
 from central.photo_library.model import (
     CheckMark,
     ConnectionSecret,
@@ -88,6 +89,7 @@ class FakeLibraryStore:
         self.known: dict[tuple[str, str], KnownRevision] = {}
         self.queued: list[str] = []               # pool keys whose next step was queued
         self.frame_edge: int | None = None
+        self.outputs: tuple[FrameOutput, ...] = ()   # what `frame_outputs` answers
 
     # seeding and reading (tests only) --------------------------------------------------------
 
@@ -240,6 +242,9 @@ class FakeLibraryStore:
 
     def largest_frame_edge(self) -> int | None:
         return self.frame_edge
+
+    def frame_outputs(self) -> tuple[FrameOutput, ...]:
+        return self.outputs
 
     def pool_thumbnail(self, asset_id: str) -> PoolThumbnail | None:
         for pool in self.pools.values():

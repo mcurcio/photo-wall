@@ -26,6 +26,8 @@ from psycopg.types.json import Jsonb
 from pydantic import SecretStr, TypeAdapter, ValidationError
 
 from central.db import Database, TransactionClock
+from central.infra.display_store import frame_outputs_in
+from central.installation_models import FrameOutput
 from central.media_queue import MediaTaskQueue
 from central.photo_library import policy
 from central.photo_library.model import (
@@ -819,6 +821,10 @@ class PgPhotoLibrary:
                 "SELECT max(GREATEST((profile->>'width_px')::int,(profile->>'height_px')::int)) "
                 "AS edge FROM frames").fetchone()
         return row["edge"]
+
+    def frame_outputs(self) -> tuple[FrameOutput, ...]:
+        with self.db.transaction() as conn:
+            return frame_outputs_in(conn)
 
     def pool_thumbnail(self, asset_id: str) -> PoolThumbnail | None:
         with self.db.transaction() as conn:
