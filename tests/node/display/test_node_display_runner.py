@@ -360,11 +360,44 @@ def test_power_reports_carry_what_the_output_reporter_saw():
 
     sink = Reports()
     power = OutputPowerController({}, sink, SimpleNamespace(monotonic=lambda: 0.0))
+    seen = []
+    picture = SimpleNamespace(output=lambda output_id, **observed: seen.append((output_id, observed)))
     backend = FakeBackend()
     backend.states = (OutputState(key(backend.host, "HDMI-A-1")),)
-    Controller(backend, reports=OutputReporter(PowerObservations(power), read=lambda output_id: None))
+    Controller(backend, reports=OutputReporter(PowerObservations(power, picture), read=lambda output_id: None))
     (report,) = sink.puts
     assert (report.output_id, report.connected, report.answers, report.method) == ("HDMI-A-1", True, (), None)
+    assert seen == [("HDMI-A-1", {"connected": True, "identity": None})]   # the picture controller saw it too
+
+
+def test_one_ddc_channel_feeds_both_the_power_and_the_picture_adapters(tmp_path):
+    """One DDC/CI channel per Pi: the power controller's DDC/CI adapter and the picture
+    controller's adapter both run ddcutil through it (so one port lock serialises them), and the
+    backend hands the shell's picture events to the picture controller."""
+    import subprocess
+
+    from appliance.display_host.ddc import DdcChannel
+    from appliance.display_host.output_report import OutputReports
+    from contracts.node_output import PowerMethod
+
+    (tmp_path / "card1-HDMI-A-1").mkdir()
+    (tmp_path / "card1-HDMI-A-1" / "ddc").symlink_to(tmp_path / "i2c-13")
+    ran = []
+
+    def run(argv, timeout):
+        ran.append(list(argv))
+        return subprocess.CompletedProcess(argv, 1, "", "")
+
+    ddc = DdcChannel(run, drm_root=tmp_path, cache_dir=tmp_path / "cache")
+    backend = SimpleNamespace(picture_events=None)
+    reports = OutputReports(Reports())
+    power, _cec = runner.power_controller(backend, reports, ddc)
+    picture = runner.picture_controller(backend, reports, ddc)
+    power._adapters[PowerMethod.DDC_CI].read("HDMI-A-1", timeout=1)
+    picture._ddc.read("HDMI-A-1", "10", timeout=1)
+    assert [argv[1:] for argv in ran] == [["--bus", "13", "--noconfig", "getvcp", "D6", "--terse"],
+                                          ["--bus", "13", "--noconfig", "getvcp", "10", "--terse"]]
+    assert backend.picture_events is picture
 
 
 @pytest.mark.skipif(not LINUX, reason="the shell's control socket is SOCK_SEQPACKET with SO_PEERCRED (Linux)")
@@ -427,11 +460,12 @@ def test_the_document_feed_decodes_each_document_and_ignores_the_rest():
     )
     from nodeapi.documents import Document
 
-    got = []
-    feed = document_feed(SimpleNamespace(document=lambda output_id, document: got.append((output_id, document))))
+    got, pictures = [], []
+    feed = document_feed(SimpleNamespace(document=lambda output_id, document: got.append((output_id, document))),
+                         SimpleNamespace(document=lambda output_id, document: pictures.append((output_id, document))))
     wanted = OutputDocument("HDMI-A-1", 2, (PowerRequest("standing", Power.ON, RequestReason.STANDING),),
                             BEST_DETECTED, False, False)
     feed("output-HDMI-A-1", Document(encode_output_document(wanted), "central", None))
     feed("output-HDMI-A-2", Document(encode_output_document(wanted), "central", None))   # another key
     feed("output-HDMI-A-1", Document(b'{"output_id":"HDMI-A-1"}', "central", None))       # undecodable
-    assert got == [("HDMI-A-1", wanted)]
+    assert got == pictures == [("HDMI-A-1", wanted)]   # each controller acts on its own change number

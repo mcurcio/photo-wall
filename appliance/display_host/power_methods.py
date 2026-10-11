@@ -5,10 +5,10 @@ Each class implements `output_power.PowerMethodAdapter`. They are the only code 
 `ddcutil` or `cec-ctl` or asks the compositor for output power; every call is bounded by its
 `timeout` through the injected `Runner` (tests pass a fake that plays recorded tool output).
 
-- DDC/CI: `ddcutil --bus <n> --noconfig` with XDG_CACHE_HOME on the unit's private /tmp; read
+- DDC/CI: through the port's one DDC/CI channel (ddc.DdcChannel, shared with the picture
+  controller since 1c, so a power write and a brightness write never meet on one bus); read
   `getvcp D6 --terse`, write `setvcp D6 4` (standby) / `setvcp D6 1` (on), always read back;
-  never D6 = 5. The bus of an Output is the i2c number of `/sys/class/drm/<card>-<output>/ddc`
-  (HDMI-A-1 -> 13, HDMI-A-2 -> 14 on a Pi 5). Input (#117, #118): VCP 60, which many monitors
+  never D6 = 5. Input (#117, #118): VCP 60, which many monitors
   ignore (the test monitor does), so `showing_other_input` is None when the read is unstable.
 - HDMI-CEC: `cec-ctl -d /dev/cec<n> --playback` to claim a logical address, `--to 0
   --give-device-power-status` to read, `--standby` / `--image-view-on` to write,
@@ -26,15 +26,17 @@ with Active Source.
 from __future__ import annotations
 
 import glob
-import os
 import re
 import subprocess
 import time
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Final, Protocol
+from typing import TYPE_CHECKING, Final, Protocol
 
 from contracts.node_output import Power, PowerMethod, PowerResult
+
+if TYPE_CHECKING:                  # ddc.py imports Runner and DDC_CACHE from here
+    from .ddc import DdcChannel
 
 DDCUTIL: Final = "/usr/bin/ddcutil"
 CEC_CTL: Final = "/usr/bin/cec-ctl"
@@ -87,46 +89,17 @@ def _connectors(drm_root: Path, output_id: str) -> list[Path]:
 
 
 _DDC_POWER: Final = re.compile(rf"^VCP {DDC_POWER_CODE} SNC x([0-9A-Fa-f]{{2}})\s*$", re.MULTILINE)
-_I2C_BUS: Final = re.compile(r"i2c-(\d+)")
-
-
 class DdcCiAdapter:
     method: Final = PowerMethod.DDC_CI
 
-    def __init__(self, run: Runner, *, drm_root: Path = Path("/sys/class/drm"),
-                 cache_dir: Path = DDC_CACHE) -> None:
-        self._run = run
-        self._drm_root = drm_root
-        self._cache_dir = cache_dir
-
-    def _bus(self, output_id: str) -> int | None:
-        """The i2c bus the connector's `ddc` link names (HDMI-A-1 -> 13 on a Pi 5)."""
-        for connector in _connectors(self._drm_root, output_id):
-            try:
-                target = os.readlink(connector / "ddc")
-            except OSError:
-                continue
-            if (bus := _I2C_BUS.fullmatch(Path(target).name)) is not None:
-                return int(bus.group(1))
-        return None
-
-    def _ddcutil(self, output_id: str, arguments: Sequence[str], timeout: float) -> str | None:
-        """ddcutil's output for one command on the Output's bus; None when it did not answer."""
-        bus = self._bus(output_id)
-        if bus is None:
-            return None
-        try:
-            self._cache_dir.mkdir(parents=True, exist_ok=True)
-        except OSError:
-            pass                                    # ddcutil works without its cache
-        done = _ask(self._run, [DDCUTIL, "--bus", str(bus), "--noconfig", *arguments], timeout)
-        return done.stdout if done is not None and done.returncode == 0 else None
+    def __init__(self, channel: DdcChannel) -> None:
+        self._channel = channel
 
     def probe(self, output_id: str, *, timeout: float) -> bool:
         return self.read(output_id, timeout=timeout) is not None
 
     def read(self, output_id: str, *, timeout: float) -> Power | None:
-        output = self._ddcutil(output_id, ["getvcp", DDC_POWER_CODE, "--terse"], timeout)
+        output = self._channel.get(output_id, DDC_POWER_CODE, timeout=timeout)
         value = _DDC_POWER.search(output) if output is not None else None
         if value is None:
             return None
@@ -135,7 +108,7 @@ class DdcCiAdapter:
     def set(self, output_id: str, power: Power, *, timeout: float) -> PowerResult:
         deadline = time.monotonic() + timeout
         value = DDC_ON if power is Power.ON else DDC_STANDBY
-        self._ddcutil(output_id, ["setvcp", DDC_POWER_CODE, str(value)], timeout)
+        self._channel.set(output_id, DDC_POWER_CODE, value, timeout=timeout)
         # The read-back decides, never the write's exit status: a write that bounced hot-plug may
         # still have taken.
         if self.read(output_id, timeout=_left(deadline)) is power:
