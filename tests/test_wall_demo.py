@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from contracts.models import Calibration, CornersFit
 from scripts.container_build import daemon_image_build
 from scripts.demo_wall import (
     CORE_IMAGES,
@@ -33,6 +34,7 @@ from scripts.demo_wall import (
     connect_demo_library,
     core_image_mapping,
     delete_secured_original,
+    demo_position,
     demo_query,
     expected_pool,
     fault_holds,
@@ -1400,3 +1402,28 @@ def test_every_demo_upload_fills_every_demo_frame(project):
         verdict = judge("image", *size, key, target, DEMO_CROP_LIMIT, house)
         assert isinstance(verdict, Fits), (label, verdict)
     assert shape_fit("video", *DEMO_VIDEO_SIZE, target, DEMO_CROP_LIMIT, house) is None
+
+
+def test_every_demo_upload_fills_the_demo_frame_output_and_none_fills_the_whole_display():
+    """The e2e baseline needs photos on the wall: the fit rule judges them against the Frame
+    output (owner, 2026-10-11), so the demo's Position is a mat opening its small uploads fill,
+    on the 1920 x 1080 Output its simulated Pis report. Full screen, none of them would."""
+    from central.wall_plan.fit import FitTarget, shape_fit
+    from central.wall_plan.fit_settings import FitSettings
+    from contracts.models import FrameProfile, frame_output
+    from scripts.demo_wall import DEMO_CROP_LIMIT, DEMO_FRAME_PROFILE, DEMO_IMAGES, DEMO_VIDEO_SIZE
+
+    assert "width_px=1920" in PLAYER_RUNNER and "height_px=1080" in PLAYER_RUNNER
+    profile = FrameProfile.model_validate(DEMO_FRAME_PROFILE)
+    display = (1920, 1080)
+    opening = frame_output(profile, demo_position({"width_px": 1920, "height_px": 1080}), display)
+    whole = frame_output(profile, Calibration(fit=CornersFit()), display)
+    assert opening == (90, 90) and whole == display
+    uploads = [("image", size) for size, _ in DEMO_IMAGES.values()] + [("video", DEMO_VIDEO_SIZE)]
+    for kind, (width, height) in uploads:
+        assert shape_fit(kind, width, height, FitTarget(profile=profile, output_px=opening),
+                         DEMO_CROP_LIMIT, FitSettings()) is None, (kind, width, height)
+    for size, _ in DEMO_IMAGES.values():
+        refused = shape_fit("image", *size, FitTarget(profile=profile, output_px=whole),
+                            DEMO_CROP_LIMIT, FitSettings())
+        assert refused is not None and refused.reason == "below_frame_pixels"

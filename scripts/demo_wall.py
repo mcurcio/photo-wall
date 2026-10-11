@@ -41,11 +41,15 @@ DEMO_HORIZON_SECONDS = 15
 DEMO_RENEWAL_SECONDS = 10
 SCENE_CYCLE_SECONDS = 8
 # Roadmap 5a's fit rule (central/wall_plan/fit.py): a photo shows on a Frame only when a window
-# of the Frame's shape, inside the Scene's crop limit, has at least the Frame's pixels. The demo's
-# uploads are small (160 x 96, 96 x 160, 144 x 96, 152 x 96; the video 320 x 180), so its Frames
-# are square and sized to them, and its Scene's crop limit (45 %) lets every one of them fill
-# every Frame: 5:3 and 3:5 crop 40 %, 3:2 33 %, 19:12 37 %, the 16:9 video 44 %.
+# of the Frame's shape, inside the Scene's crop limit, holds at least the Frame output's pixels
+# (owner, 2026-10-11: compatibility is "measuring against the Frame output and not the Display").
+# The demo's uploads are small (160 x 96, 96 x 160, 144 x 96, 152 x 96; the video 320 x 180), so
+# its Frames are square, each Position is a mat opening of DEMO_OPENING_PX output pixels on its
+# 1920 x 1080 Output (the Frame output, not the Display, is what they must fill), and its Scene's
+# crop limit (45 %) lets every one of them fill every Frame: 5:3 and 3:5 crop 40 %, 3:2 33 %,
+# 19:12 37 %, the 16:9 video 44 %.
 DEMO_FRAME_PROFILE = {"width_px": 90, "height_px": 90, "diagonal_inches": 24, "video": True}
+DEMO_OPENING_PX = 90
 DEMO_CROP_LIMIT = 0.45
 # The upstream role's uploads: label -> (size, capture offset); "evolve" adds the last two.
 DEMO_IMAGES = {"landscape": ((160, 96), 10), "portrait": ((96, 160), 20),
@@ -892,6 +896,17 @@ def labelled(*labels):
     return lambda item: item["label"] in labels
 
 
+def demo_position(observation: dict):
+    """The demo Frame's Position: a Cover opening DEMO_OPENING_PX output pixels square at the
+    top left of the Output its Pi reported, so its Frame output (contracts.models.frame_output) is
+    DEMO_OPENING_PX x DEMO_OPENING_PX however large the Display is."""
+    from contracts.models import Calibration, CoverFit
+    right = DEMO_OPENING_PX / observation["width_px"]
+    bottom = DEMO_OPENING_PX / observation["height_px"]
+    return Calibration(fit=CoverFit(corners=((0.0, 0.0), (right, 0.0), (right, bottom),
+                                             (0.0, bottom))))
+
+
 def operator_action(action: str):
     """Control through real operator HTTP; SQL is limited to evidence reads, and to Position Save
     (`support.position.save_position`, the tests' helper through Registry's Save CAS), which has
@@ -963,7 +978,7 @@ def operator_action(action: str):
                     "profile": DEMO_FRAME_PROFILE})
                 request("PUT", "/v1/operator/frames/" + frame + "/binding", {
                     "player_id": output["player_id"], "output_id": output["output_id"], "expected_generation": 0})
-                save_position(registry, frame)
+                save_position(registry, frame, demo_position(output["observation"]))
                 frames.append(frame)
         finally:
             database.close()
