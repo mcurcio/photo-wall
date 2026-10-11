@@ -15,7 +15,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import Any, Final
 
-from central.wall_plan.order import PhotoShowing, WallHistory
+from central.wall_plan.order import KeptStill, PhotoShowing, WallHistory
 
 # How long a shown row is kept. Longer than the longest no-repeat window (365 days), so a pass
 # older than this restarts from what remains (design parked note "Shown-history retention").
@@ -23,19 +23,85 @@ SHOWN_KEEP_SECONDS: Final = 400 * 86400
 # How long a selection is kept after its layer ends (its presented report may arrive late).
 SELECTION_KEEP_SECONDS: Final = 86400
 
+_COLUMNS: Final = ("assignment_id, asset_id, frame_id, scene_id, pass_number, starts_at, ends_at, "
+                   "fade_in, after_end")
+
+
+def _showing(row: dict) -> PhotoShowing:
+    return PhotoShowing(
+        assignment_id=row["assignment_id"], asset_id=row["asset_id"], frame_id=row["frame_id"],
+        scene_id=row["scene_id"], pass_number=row["pass_number"], start=row["starts_at"],
+        end=row["ends_at"], fade_in=row["fade_in"], after_end=row["after_end"],
+    )
+
 
 class PgShownHistory:
     """Stateless; every method runs in the caller's transaction (coordination's)."""
 
     def record_selected_in(self, conn: Any, showings: Iterable[PhotoShowing]) -> None:
-        raise NotImplementedError
+        rows = [(s.assignment_id, s.asset_id, s.frame_id, s.scene_id, s.pass_number, s.start,
+                 s.end, s.fade_in, s.after_end) for s in showings]
+        if not rows:
+            return
+        with conn.cursor() as cursor:
+            cursor.executemany(
+                f"INSERT INTO photo_selections ({_COLUMNS}) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING",
+                rows,
+            )
 
     def record_presented_in(self, conn: Any, assignment_id: str, presented_at: float) -> bool:
-        raise NotImplementedError
+        selected = conn.execute(
+            "SELECT 1 FROM photo_selections WHERE assignment_id=%s", (assignment_id,)
+        ).fetchone()
+        if selected is None:
+            return False
+        conn.execute(
+            f"INSERT INTO shown_photos ({_COLUMNS}, presented_at) "
+            f"SELECT {_COLUMNS}, %s FROM photo_selections WHERE assignment_id=%s "
+            "ON CONFLICT DO NOTHING",
+            (presented_at, assignment_id),
+        )
+        return True
 
     def wall_history_in(self, conn: Any, scene_ids: Iterable[str], *, now: float,
                         window_seconds: float) -> WallHistory:
-        raise NotImplementedError
+        scenes = sorted(set(scene_ids))
+        # Two index-backed halves (shown_photos_ends; shown_photos_pass, one max per named
+        # Scene), so the per-second advance never scans the whole retained history.
+        shown = conn.execute(
+            f"SELECT {_COLUMNS} FROM shown_photos WHERE ends_at >= %s "
+            f"UNION SELECT {', '.join('s.' + c for c in _COLUMNS.split(', '))} "
+            "FROM unnest(%s::text[]) AS named(scene_id) "
+            "CROSS JOIN LATERAL (SELECT max(pass_number) AS pass_number FROM shown_photos "
+            "    WHERE scene_id = named.scene_id) AS current "
+            "JOIN shown_photos s ON s.scene_id = named.scene_id "
+            "    AND s.pass_number = current.pass_number "
+            "ORDER BY starts_at, assignment_id",
+            (now - window_seconds, scenes),
+        ).fetchall()
+        selected = conn.execute(
+            f"SELECT {_COLUMNS} FROM photo_selections WHERE ends_at > %s "
+            "ORDER BY starts_at, assignment_id",
+            (now,),
+        ).fetchall()
+        # Each Frame's latest shown layer that set what it keeps; it keeps a photo only when that
+        # layer said "keep_this_photo" (a later "keep_nothing" clears it).
+        kept = conn.execute(
+            "SELECT DISTINCT ON (frame_id) frame_id, asset_id, starts_at + fade_in AS since, "
+            "after_end FROM shown_photos WHERE after_end <> 'leave_as_is' "
+            "ORDER BY frame_id, starts_at DESC, assignment_id DESC",
+        ).fetchall()
+        return WallHistory(
+            shown=tuple(_showing(row) for row in shown),
+            selected=tuple(_showing(row) for row in selected),
+            kept=tuple(
+                KeptStill(frame_id=row["frame_id"], asset_id=row["asset_id"], since=row["since"])
+                for row in kept if row["after_end"] == "keep_this_photo"
+            ),
+        )
 
     def prune_in(self, conn: Any, *, now: float) -> None:
-        raise NotImplementedError
+        conn.execute("DELETE FROM photo_selections WHERE ends_at < %s",
+                     (now - SELECTION_KEEP_SECONDS,))
+        conn.execute("DELETE FROM shown_photos WHERE ends_at < %s", (now - SHOWN_KEEP_SECONDS,))

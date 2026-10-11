@@ -480,7 +480,21 @@ class Runtime:
         or future Run projection (configured Scenes, active Runs' and queued Scenes, each with
         its children), by scene id; a Run's admitted snapshot wins over the configured Scene of
         the same id. Coordination reads the shown history for these Scenes."""
-        raise NotImplementedError
+        selections: dict[str, SceneSelection] = {}
+
+        def walk(scene: Scene) -> None:
+            selections[scene.scene_id] = scene.selection
+            for child in scene.children:
+                walk(child.scene)
+
+        for scene in self._state.scenes.values():
+            walk(scene)
+        for queued in self._state.queue:
+            walk(queued.scene)
+        for run in self._state.runs.values():
+            if run.active:
+                walk(run.scene)
+        return selections
 
     def revise_source_refs(self, old_refs: set[str], new_ref: str) -> tuple[str, ...]:
         """Revise future Scene definitions; admitted and queued snapshots stay intact."""
@@ -1010,6 +1024,7 @@ class Runtime:
                     fade_out_seconds=fade_out,
                     after_end=after_end,
                     actuator_value=value, phase=run.phase,
+                    selection=run.scene.selection,
                 ))
         winners: dict[str, Intent] = {}
         for intent in intents:
