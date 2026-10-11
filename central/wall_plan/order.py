@@ -26,8 +26,9 @@ the same, central/photo_library/model.py).
 """
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Mapping, Sequence
-from datetime import date
+from datetime import UTC, date, datetime
 
 from pydantic import Field
 
@@ -86,19 +87,72 @@ class ScenePass(Model):
 def scene_passes(history: WallHistory) -> dict[str, ScenePass]:
     """Each Scene's pass as the module docstring says, for every Scene the history names. A Scene
     absent from the result starts at pass 1 with nothing picked. Pure."""
-    raise NotImplementedError
+    rows = (*history.shown, *history.selected)
+    current: dict[str, PassNumber] = {}
+    for row in rows:
+        current[row.scene_id] = max(current.get(row.scene_id, 1), row.pass_number)
+    picked: dict[str, set[str]] = {scene_id: set() for scene_id in current}
+    for row in rows:
+        if row.pass_number == current[row.scene_id]:
+            picked[row.scene_id].add(row.asset_id)
+    last: dict[str, PhotoShowing] = {}
+    for row in history.shown:
+        held = last.get(row.scene_id)
+        if held is None or (row.start, row.assignment_id) > (held.start, held.assignment_id):
+            last[row.scene_id] = row
+    return {
+        scene_id: ScenePass(
+            scene_id=scene_id, pass_number=pass_number, picked=frozenset(picked[scene_id]),
+            last_shown=last[scene_id].asset_id if scene_id in last else None,
+        )
+        for scene_id, pass_number in current.items()
+    }
 
 
 def last_shown_at(history: WallHistory) -> dict[str, float]:
     """The latest shown `end` of each asset, on any Frame and any Scene. Pure."""
-    raise NotImplementedError
+    latest: dict[str, float] = {}
+    for row in history.shown:
+        latest[row.asset_id] = max(latest.get(row.asset_id, row.end), row.end)
+    return latest
+
+
+def _shuffle_key(scene_id: str, pass_number: PassNumber, asset_id: str) -> str:
+    return hashlib.sha256(f"{scene_id}\x00{pass_number}\x00{asset_id}".encode()).hexdigest()
+
+
+def _captured(candidate: Candidate) -> datetime:
+    return datetime.fromtimestamp(candidate.captured_at, UTC)
 
 
 def pass_sequence(candidates: Sequence[Candidate], selection: SceneSelection, *, scene_id: str,
                   pass_number: PassNumber, after: Candidate | None, today: date) -> tuple[str, ...]:
     """Every candidate's asset id once, in the Scene's order for this pass (module docstring).
     `after` is used by chronological only. Pure and deterministic."""
-    raise NotImplementedError
+    unique = list({candidate.asset_id: candidate for candidate in reversed(candidates)}.values())
+
+    def shuffled(items: Sequence[Candidate]) -> list[Candidate]:
+        return sorted(items, key=lambda c: _shuffle_key(scene_id, pass_number, c.asset_id))
+
+    if selection.order == "shuffle":
+        ordered = shuffled(unique)
+    elif selection.order == "chronological":
+        ordered = sorted(unique, key=lambda c: (c.captured_at, c.asset_id))
+        if after is not None:
+            mark = (after.captured_at, after.asset_id)
+            later = [c for c in ordered if (c.captured_at, c.asset_id) > mark]
+            ordered = later + [c for c in ordered if (c.captured_at, c.asset_id) <= mark]
+    elif selection.order == "newest_first":
+        ordered = sorted(unique, key=lambda c: (-c.captured_at, c.asset_id))
+    else:
+        def on_this_day(candidate: Candidate) -> bool:
+            taken = _captured(candidate)
+            return (taken.month, taken.day) == (today.month, today.day)
+
+        ordered = sorted((c for c in unique if on_this_day(c)),
+                         key=lambda c: (-c.captured_at, c.asset_id))
+        ordered += shuffled([c for c in unique if not on_this_day(c)])
+    return tuple(candidate.asset_id for candidate in ordered)
 
 
 class SceneLine:
@@ -113,19 +167,63 @@ class SceneLine:
         Scene's slots in this plan (they fit a Frame the Scene targets and are measured); a pass
         ends when all of them are picked. ValueError when `pickable` names an asset not in
         `candidates`."""
-        raise NotImplementedError
+        self._candidates = {candidate.asset_id: candidate for candidate in reversed(candidates)}
+        unknown = pickable - self._candidates.keys()
+        if unknown:
+            raise ValueError(f"pickable assets not in the line: {sorted(unknown)}")
+        self._scene_id = scene_id
+        self._selection = selection
+        self._pickable = pickable
+        self._after = (self._candidates.get(scene_pass.last_shown)
+                       if scene_pass.last_shown is not None else None)
+        self._today = today
+        window = selection.no_repeat_days * 86400
+        self._recent = frozenset(
+            asset_id for asset_id, end in shown_at.items()
+            if window > 0 and end >= now - window
+        )
+        self._pass = scene_pass.pass_number
+        self._picked = set(scene_pass.picked)
+        self._sequence: tuple[str, ...] = ()
+        # A pass the history already completed (its last pick ended the previous plan) is over.
+        if not self._roll():
+            self._sequence = self._pass_sequence()
+
+    def _pass_sequence(self) -> tuple[str, ...]:
+        return pass_sequence(tuple(self._candidates.values()), self._selection,
+                             scene_id=self._scene_id, pass_number=self._pass, after=self._after,
+                             today=self._today)
+
+    def _roll(self) -> bool:
+        if not self._pickable or not self._pickable <= self._picked:
+            return False
+        self._pass += 1
+        self._picked = set()
+        self._sequence = self._pass_sequence()
+        return True
 
     @property
     def pass_number(self) -> PassNumber:
-        raise NotImplementedError
+        return self._pass
 
     def ranked(self) -> tuple[str, ...]:
         """Every candidate's asset id, tiers first, then the pass sequence (module docstring)."""
-        raise NotImplementedError
+        def tier(asset_id: str) -> int:
+            if asset_id in self._picked:
+                return 2
+            return 1 if asset_id in self._recent else 0
+
+        position = {asset_id: index for index, asset_id in enumerate(self._sequence)}
+        return tuple(sorted(self._sequence, key=lambda a: (tier(a), position[a])))
 
     def pick(self, asset_id: str) -> PassNumber:
         """Record that a slot of this Scene took `asset_id` in the current pass; return that pass
         number. Rolls to the next pass once every pickable asset is picked (after recording).
         Picking an asset already picked in this pass (a repeat) is allowed and changes nothing
         but the return. KeyError for an asset not in the line."""
-        raise NotImplementedError
+        if asset_id not in self._candidates:
+            raise KeyError(asset_id)
+        picked_in = self._pass
+        self._picked.add(asset_id)
+        self._roll()
+        return picked_in
