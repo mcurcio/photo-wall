@@ -316,7 +316,16 @@ class NoFullSizeCopies(Model):
     kind: Literal["no_full_size_copies"] = "no_full_size_copies"  # HEIC, RAW play at preview size
 
 
-LibraryNote = Annotated[UntestedVersion | NoFullSizeCopies, Field(discriminator="kind")]
+class NoFaceDetection(Model):
+    """Roadmap 5a: Immich's face detection is off (`GET server/features` `facialRecognition`), so
+    crops ignore faces (owner, 2026-10-11: "If immich face detection is unavailable, then smart
+    crop doesn't take into account faces"). Emitted from slice M1."""
+
+    kind: Literal["no_face_detection"] = "no_face_detection"
+
+
+LibraryNote = Annotated[UntestedVersion | NoFullSizeCopies | NoFaceDetection,
+                        Field(discriminator="kind")]
 
 
 class NotChecked(Model):
@@ -349,6 +358,7 @@ class ContactAnswer(Model):
     missing_permissions: tuple[str, ...] = ()
     counts: LibraryCounts | None = None       # None when a permission it needs is missing
     full_size_copies: bool | None = None      # None when it could not be told
+    face_detection: bool | None = None        # roadmap 5a; None when it could not be told
 
 
 class ContactRefused(Model):
