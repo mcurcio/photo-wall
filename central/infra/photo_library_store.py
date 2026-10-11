@@ -197,6 +197,10 @@ def _copy_sizes_in(conn: Any, asset_id: str) -> dict[MeasurableCopy, CopySize]:
                                   measured_at=row["measured_at"]) for row in rows}
 
 
+# The `original_*` columns, in `_original_values`'s order.
+_ORIGINAL_KEYS = ("media_type", "width", "height", "orientation", "bytes")
+
+
 def _original_values(original: OriginalFile | None) -> tuple:
     """The five `original_*` column values of `original` (None: five NULLs)."""
     if original is None:
@@ -840,28 +844,33 @@ class PgPhotoLibrary:
         taken time rewritten; the original's facts rewritten by an InPool, None writing NULLs,
         and kept by a Waiting or LeftOut, which did not read them); then each InPool's revision
         upserts its `asset_revisions` row."""
+        # One statement over the entries in their (Immich id) order, so two steps lock shared
+        # rows in one order: two batches, each sorted, would not be (a deadlock between two
+        # pools whose steps saw the same two photos as InPool and Waiting the other way round).
         in_pool = [e for e in entries if isinstance(e, InPool)]
-        if in_pool:
+        assets = []
+        for entry in entries:
+            if isinstance(entry, InPool):
+                asset = entry.asset
+                assets.append(dict(ref=asset.connection_ref, id=asset.upstream_id, kind=asset.kind,
+                                   taken=asset.taken_at, read=True, now=now,
+                                   **dict(zip(_ORIGINAL_KEYS, _original_values(asset.original),
+                                              strict=True))))
+            elif entry.kind is not None and entry.taken_at is not None:
+                assets.append(dict(ref=connection_ref, id=entry.upstream_id, kind=entry.kind,
+                                   taken=entry.taken_at, read=False, now=now,
+                                   **dict.fromkeys(_ORIGINAL_KEYS)))
+        if assets:
+            kept = ",".join(f"original_{key}=CASE WHEN %(read)s THEN EXCLUDED.original_{key} "
+                            f"ELSE library_assets.original_{key} END" for key in _ORIGINAL_KEYS)
             cursor.executemany(
                 "INSERT INTO library_assets(connection_ref,upstream_id,kind,taken_at,"
                 "original_media_type,original_width,original_height,original_orientation,"
-                "original_bytes,first_seen,last_seen) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+                "original_bytes,first_seen,last_seen) VALUES(%(ref)s,%(id)s,%(kind)s,%(taken)s,"
+                "%(media_type)s,%(width)s,%(height)s,%(orientation)s,%(bytes)s,%(now)s,%(now)s) "
                 "ON CONFLICT(connection_ref,upstream_id) DO UPDATE SET kind=EXCLUDED.kind,"
-                "taken_at=EXCLUDED.taken_at,original_media_type=EXCLUDED.original_media_type,"
-                "original_width=EXCLUDED.original_width,original_height=EXCLUDED.original_height,"
-                "original_orientation=EXCLUDED.original_orientation,"
-                "original_bytes=EXCLUDED.original_bytes,last_seen=EXCLUDED.last_seen",
-                [(e.asset.connection_ref, e.asset.upstream_id, e.asset.kind, e.asset.taken_at,
-                  *_original_values(e.asset.original), now, now) for e in in_pool])
-        others = [e for e in entries if not isinstance(e, InPool)
-                  and e.kind is not None and e.taken_at is not None]
-        if others:
-            cursor.executemany(
-                "INSERT INTO library_assets(connection_ref,upstream_id,kind,taken_at,first_seen,"
-                "last_seen) VALUES(%s,%s,%s,%s,%s,%s) ON CONFLICT(connection_ref,upstream_id) "
-                "DO UPDATE SET kind=EXCLUDED.kind,taken_at=EXCLUDED.taken_at,"
-                "last_seen=EXCLUDED.last_seen",
-                [(connection_ref, e.upstream_id, e.kind, e.taken_at, now, now) for e in others])
+                f"taken_at=EXCLUDED.taken_at,{kept},last_seen=EXCLUDED.last_seen",  # noqa: S608
+                assets)
         if in_pool:
             cursor.executemany(
                 "INSERT INTO asset_revisions(asset_id,connection_ref,upstream_id,revision,width,"

@@ -139,3 +139,55 @@ def test_a_published_copy_records_the_immich_copy_it_was_made_from(storage):  # 
         job = conn.execute("SELECT made_from,variant_sha FROM media_jobs WHERE id=%s",
                            (lease.job_id,)).fetchone()
     assert (job["made_from"], job["variant_sha"]) == ("preview", prepared.variant.sha256)
+
+
+def test_a_step_locks_its_photos_in_immich_id_order_whatever_their_outcomes(library):
+    """Two pools' steps that saw the same two photos, one as InPool and the other as Waiting the
+    other way round, lock the shared `library_assets` rows in one order (Immich id), so neither
+    waits on the other while holding a row it needs. The probe: hold photo 1's row, run a step
+    with photo 2 InPool and photo 1 Waiting, and while it waits photo 2's row must still be free.
+    Mutation probe: upsert InPool and the other outcomes in two batches and photo 2 is locked."""
+    import threading
+    import time
+
+    import psycopg
+
+    store, ref = library
+    _first_draft, first = _draft(store, SourceQuery(connection_ref=ref))
+    _second_draft, second = _draft(store, SourceQuery(connection_ref=ref, favourites_only=True))
+    store.record_step(store.begin_check(first), step(InPool(asset=photo(ref, 1, 100.0)),
+                                                     InPool(asset=photo(ref, 2, 90.0))))
+    lease = store.begin_check(second)
+    holder = psycopg.connect(store.db.dsn, autocommit=False)
+    prober = psycopg.connect(store.db.dsn, autocommit=False)
+    try:
+        holder.execute("SET application_name='asset-order-holder'")
+        holder.execute("SELECT 1 FROM library_assets WHERE upstream_id=%s FOR UPDATE", (uid(1),))
+        done = threading.Event()
+        worker = threading.Thread(target=lambda: (store.record_step(lease, step(
+            InPool(asset=photo(ref, 2, 90.0)),
+            Waiting(upstream_id=uid(1), kind="image", taken_at=100.0))), done.set()))
+        worker.start()
+        deadline = time.monotonic() + 10
+        while not prober.execute(
+                "SELECT count(*) AS n FROM pg_stat_activity WHERE wait_event_type='Lock' "
+                "AND datname=current_database() AND application_name<>'asset-order-holder'"
+                ).fetchone()[0]:
+            prober.rollback()
+            assert time.monotonic() < deadline, "the step never waited on photo 1"
+            time.sleep(0.05)
+        prober.execute("SET lock_timeout='200ms'")
+        try:
+            prober.execute("SELECT 1 FROM library_assets WHERE upstream_id=%s FOR UPDATE NOWAIT",
+                           (uid(2),))
+            free = True
+        except psycopg.errors.LockNotAvailable:
+            free = False
+        prober.rollback()
+        holder.rollback()
+        worker.join(10)
+        assert done.is_set()
+        assert free, "the step locked photo 2 before photo 1"
+    finally:
+        holder.close()
+        prober.close()
