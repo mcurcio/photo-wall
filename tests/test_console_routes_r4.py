@@ -82,6 +82,10 @@ SHARED_WITH_SHOW = {
     "ReadinessNotice.jsx",  # shared read-only Player failure explanation
     "readinessRecovery.js",  # plain-language failure mapping; no controls
     "useMutate.js",  # refresh after a write
+    # The one candidates read (a GET): the Scene flow's chooser, the Now page's "Check this
+    # frame" and the Frame page's Photos (roadmap 5a K2), so none imports another.
+    "candidatesApi.js",
+    "sourceNames.js",  # a Source's plain name: the Show side's lists and the Frame page's Photos
 }
 # The console's write modules: the operator write primitive and every module that wraps a
 # write (framesApi writes, the delete confirmation, refresh-after-write, equipment writes).
@@ -785,6 +789,8 @@ FRAME_PAGE_IMPORTS = {
                           "useRoute.js", "useSnapshot.js"},
     "live-adjustment.tsx": {"liveAdjustment.js"},
     "frame-power.tsx": {"polledRead.js", "powerApi.js"},
+    # The Overview's Photos (roadmap 5a K2): the candidates read, polled, and a Source's name.
+    "frame-photo-fit.tsx": {"candidatesApi.js", "polledRead.js", "sourceNames.js"},
 }
 # Roadmap 4's photo library pages, each with the legacy modules it alone may import: their routes
 # (libraryApi.js, photoSourcesApi.js) and hooks.

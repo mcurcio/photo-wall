@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { BindingFacet } from "../BindingFacet.jsx";
 import { FrameDisplay } from "../domain/frame-display";
 import { FrameOverview } from "../domain/frame-overview";
+import { FramePhotoFit } from "../domain/frame-photo-fit";
 import { FramePicture } from "../domain/frame-picture";
 import { FramePosition, type PixelSize } from "../domain/frame-position";
 import { FramePower } from "../domain/frame-power";
@@ -69,7 +70,8 @@ function outputSize(snapshot: object | null, frame: Frame): PixelSize | null {
 /**
  * One Frame's page (`#/wall/frames/<id>/<tab>`): every setting of one place on the wall, one
  * tab each. The header names the Frame, its way back to the Wall and its health (health.js,
- * the plan tile's words). Overview is what Central puts on it and why; Position is where the
+ * the plan tile's words). Overview is what Central puts on it and why, and its Photos: how many
+ * of each Source's photos fit it and why the rest do not (roadmap 5a); Position is where the
  * picture sits on the Display (its fit, corners, nudges, rotation); Picture is the brightness,
  * contrast, colour temperature and gamma of the display that feeds it; Power is how the Pi turns
  * its display off and on, with Test: turn off and Turn on; Hardware is which Pi and HDMI output
@@ -141,7 +143,12 @@ export function FramePage({ snapshot, bootFacts, hosts, frameId, tab, onTab, foc
         onStay={() => setLeaving(null)}
       />
       <Tabs label="Frame settings" tabs={TABS} value={tab} onValueChange={(next) => choose(next as Tab)}>
-        {tab === "overview" && <FrameOverview snapshot={snapshot} bootFacts={bootFacts} frameId={frameId} hosts={hosts} />}
+        {tab === "overview" && (
+          <>
+            <FrameOverview snapshot={snapshot} bootFacts={bootFacts} frameId={frameId} hosts={hosts} />
+            <FramePhotoFit key={`${frameId}:photos`} snapshot={snapshot} frameId={frameId} />
+          </>
+        )}
         {tab === "position" && (
           <FramePosition adjustment={adjustment} size={outputSize(snapshot, frame)} piHref={piHref}
             readiness={frame.readiness} />
