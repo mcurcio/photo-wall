@@ -205,7 +205,9 @@ def test_contact_reads_version_user_permissions_and_exact_counts():
     assert (str(answer.version), answer.user.user_ref, answer.user.name) == ("2.5.6", OWNER,
                                                                           "Owner")
     assert answer.missing_permissions == ()
-    assert answer.counts.model_dump() == {"photos": 41203, "videos": 512, "albums": 212,
+    # Albums: the user's own (Immich's `shared` counts albums shared with them, which a Source
+    # cannot read, and their own shared ones twice); people: the visible ones.
+    assert answer.counts.model_dump() == {"photos": 41203, "videos": 512, "albums": 200,
                                           "people": 96}
     assert answer.full_size_copies is None   # no photo whose original a browser cannot show
     people = next(r for r in library.requests if r.url.path == "/api/people")
@@ -552,11 +554,10 @@ def test_a_photo_whose_revision_moved_is_not_fetched(tmp_path):
 
 def test_lists_are_read_whole_without_a_count_cap():
     library = Library()
-    library.routes["/api/albums"] = lambda request: library.json(
-        [{"id": ref(31), "albumName": "Shared", "assetCount": 3}]
-        if request.url.params.get("shared") == "true" else
-        [{"id": ref(30), "albumName": "Garden", "assetCount": 12},
-         {"id": ref(31), "albumName": "Shared", "assetCount": 3}])
+    library.routes["/api/albums"] = library.json(
+        [{"id": ref(30), "albumName": "Garden", "assetCount": 12, "ownerId": OWNER},
+         {"id": ref(31), "albumName": "Mine, shared", "assetCount": 3, "ownerId": OWNER},
+         {"id": ref(32), "albumName": "Shared with me", "assetCount": 5, "ownerId": ref(99)}])
     pages = {"1": {"people": [{"id": ref(40 + n), "name": f"P{n:05}", "isHidden": False}
                               for n in range(1000)], "hasNextPage": True,
                    "total": 1002, "hidden": 0},
@@ -572,7 +573,8 @@ def test_lists_are_read_whole_without_a_count_cap():
         {"id": ref(50 + n), "name": f"t{n}", "value": f"t{n}", "parentId": None}
         for n in range(6000)])
     client = library.client()
-    assert [a.name for a in run(client.albums())] == ["Garden", "Shared"]
+    # Only the user's own albums: Immich's search returns no photo of another user's album.
+    assert [a.name for a in run(client.albums())] == ["Garden", "Mine, shared"]
     people = run(client.people())
     assert len(people) == 1001 and people[-1].name == "Zed"   # the unnamed one is not offered
     assert run(client.places()) == (Place(city="Paris", state="Île-de-France",

@@ -68,9 +68,13 @@ class ImmichLibrary:
     albums: Mapping[str, str]       # album name -> album id
     people: Mapping[str, str]       # person name -> person id
     tags: Mapping[str, str]         # tag path -> tag id
-    counts: Mapping[str, int]       # Immich's own statistics: photos, videos, albums, people
+    # The counts the owner should see: photos and videos (Immich's statistics), albums (their
+    # own) and people (named, not hidden), the last two from the content set.
+    counts: Mapping[str, int]
     admin_token: str = field(default="", repr=False)        # the owner's (admin) session
     partner_api_key: str = field(default="", repr=False)    # the partner's REQUIRED_PERMISSIONS key
+    shared_albums: Mapping[str, str] = field(default_factory=dict)  # the partner's, shared
+    hidden_people: Mapping[str, str] = field(default_factory=dict)  # the owner hid them
 
     def _admin(self) -> UpstreamFixture:
         return UpstreamFixture(self.base_url, token=self.admin_token)
@@ -151,7 +155,8 @@ def library_from_state(state: Path) -> ImmichLibrary:
         owner_ref=library["owner"]["ref"], owner_name=library["owner"]["name"],
         assets=assets, albums=dict(library["albums"]), people=dict(library["people"]),
         tags=dict(library["tags"]), counts=dict(library["counts"]),
-        admin_token=admin["token"], partner_api_key=library["partner_api_key"])
+        admin_token=admin["token"], partner_api_key=library["partner_api_key"],
+        shared_albums=dict(library["shared_albums"]), hidden_people=dict(library["hidden_people"]))
 
 
 def load_immich_library() -> ImmichLibrary:

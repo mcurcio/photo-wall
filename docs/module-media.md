@@ -36,7 +36,7 @@ A **contact** is one connection check. The store hands out a contact number when
 | `GET users/me` | `user.read` | the Immich user |
 | `GET api-keys/me` | none | the key's permissions; missing = `REQUIRED_PERMISSIONS` minus these |
 | `GET assets/statistics` | `asset.statistics` | photos (`images`), videos (`videos`) |
-| `GET albums/statistics` | `album.statistics` | albums (`owned + shared`) |
+| `GET albums/statistics` | `album.statistics` | albums (`owned`: the user's own, the ones a Source can read; `shared` counts albums shared with them, and their own shared ones a second time) |
 | `GET people?size=1` | `person.read` | people (`total − hidden`) |
 | `GET server/features` | none | whether Immich's face detection is on (`facialRecognition`) |
 | `GET assets/{id}/thumbnail?size=fullsize` of one non-JPEG photo, not followed | `asset.view` | whether Immich keeps full-size copies: a redirect to the preview means off |
@@ -66,7 +66,7 @@ The key needs exactly these permissions (one home: `policy.REQUIRED_PERMISSIONS`
 
 **Versions.** Immich 2.5.x is tested (the CI fixture runs v2.5.6). An older Immich is Needs a look ("Update Immich"); a newer one keeps working with the `untested_version` note. A changed field in a newer Immich reads as `unexpected_answer` with the field's code, never as an empty pool. The offline answers in `tests/test_immich_library.py` are the record of what 2.5.6 sends.
 
-**Lists.** After each passing contact the worker lists the connection's albums, people, places and tags and stores them one row per item, with no cap (owner, 2026-10-09: "i dont want any limit on the count of a source"). A failed listing keeps the last list and records the failure beside it. A place is a city, state and country together (Immich's reverse geocoding). Central's list routes read only stored lists: up to 20 matches per answer, prefix matches before contains matches, names stripped of control, bidi and zero-width characters; a by-id read names an item `absent` only from a list that was read whole.
+**Lists.** After each passing contact the worker lists the connection's albums, people, places and tags and stores them one row per item, with no cap (owner, 2026-10-09: "i dont want any limit on the count of a source"). A failed listing keeps the last list and records the failure beside it. A place is a city, state and country together (Immich's reverse geocoding). Albums are the user's own only: Immich 2.5.6's search returns only the user's and their partners' photos, so an album another user shares with them would give a Source none of its owner's photos (probed against the fixture, 2026-10-11). Central's list routes read only stored lists: up to 20 matches per answer, prefix matches before contains matches, names stripped of control, bidi and zero-width characters; a by-id read names an item `absent` only from a list that was read whole.
 
 **The cut-over (C12).** Migration 080 gave each connection name the old file named an empty row (no URL, no key, `not_checked`), so existing Sources keep pointing at it. Until the owner pastes that Immich's URL and key once, nothing on it is checked, no new photos play, and Frames keep their last photo.
 

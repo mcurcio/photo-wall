@@ -251,6 +251,14 @@ def test_counts_by_outcome(pools):
                                                             ("unreadable_answer", 1)]
     assert view.immich_up_to == 9
     assert view.check.state == "checking" and view.check.seen_so_far == 7
+    # The Planner reads the in-pool photos only: never one Waiting or Left out, which the
+    # preview does not show either. Mutation probe: drop pool_members_in's outcome filter.
+    _save_source(store, "family:1", SourceQuery(connection_ref=ref), _draft_pool(store, draft))
+    with store.db.transaction() as conn:
+        members, _ = store.pool_members_in(conn, {"family:1"})["family:1"]
+    assert [member.asset_id for member in members] == [
+        asset(ref, 3, 3.0).asset_id, asset(ref, 2, 2.0, "video").asset_id,
+        asset(ref, 1, 1.0).asset_id]
 
 
 def test_no_ceiling_25000_photos_page_count_and_reach_the_planner(pools):

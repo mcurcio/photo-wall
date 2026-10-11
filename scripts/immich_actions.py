@@ -34,7 +34,7 @@ PERMISSIONS = [
 ]
 UPSTREAM = "http://immich:2283/api"
 MAX_DOCUMENT_BYTES = 10 * 1024**2
-LIBRARY_SCHEMA = 1
+LIBRARY_SCHEMA = 2
 OWNER_NAME = "Fixture Owner"
 PARTNER_NAME = "Fixture Partner"
 # The locked folder needs a PIN on the admin session; synthetic, never a real secret.
@@ -99,6 +99,12 @@ CONTENT: tuple[Item, ...] = (
     Item("video-1", "2025-08-01T12:00:00Z", kind="video", size=(160, 90)),
 )
 ALBUMS = {"Garden": ("garden-1", "garden-2"), "Holidays": ("paris-1", "anna-ben-1")}
+# The partner's album, shared with the owner: never offered (Immich's search returns none of
+# another user's album) and not among the owner's album count.
+SHARED_ALBUM = ("Partner's trip", ("partner-anna-ben",))
+# A person the owner hid, with one face (Immich counts only people with a face): never offered
+# and not among the people count.
+HIDDEN_PERSON = ("Hidden Hal", "scan")
 # Each tag path and the labels it is on; "Family/Christmas" is a child of "Family".
 TAGS = {"Family": ("anna-ben-2",), "Family/Christmas": ("xmas-1",)}
 # The stack: its primary first (POST /stacks makes the first id the primary).
@@ -360,7 +366,7 @@ class UpstreamFixture:
                 "name": "Photo Wall fixture (partner)", "permissions": PERMISSIONS})
             partner.request("POST", "/partners", (201,), json={"sharedWithId": owner["id"]})
             self.request("PUT", "/partners/" + partner_user["id"], json={"inTimeline": True})
-            library = self._content(partner)
+            library = self._content(partner, owner["id"])
         finally:
             partner.close()
 
@@ -376,7 +382,7 @@ class UpstreamFixture:
                 "machine_learning_enabled": False, "reverse_geocoding_enabled": True,
                 "edited_reported": library.pop("_edited_reported")}
 
-    def _content(self, partner: UpstreamFixture) -> dict:
+    def _content(self, partner: UpstreamFixture, owner_ref: str) -> dict:
         sessions = {"owner": self, "partner": partner}
         people: dict[str, dict[str, str]] = {"owner": {}, "partner": {}}
         for owner, session in sessions.items():
@@ -393,12 +399,21 @@ class UpstreamFixture:
                                  slot)
             assets[item.label] = record
         ids = {label: record["upstream_id"] for label, record in assets.items()}
+        hidden_name, hidden_label = HIDDEN_PERSON
+        hidden = self.request("POST", "/people", (201,), json={"name": hidden_name})
+        self.add_face(ids[hidden_label], hidden["id"],
+                      next(item.size for item in CONTENT if item.label == hidden_label), 0)
+        self.request("PUT", "/people/" + hidden["id"], json={"isHidden": True})
 
         albums = {}
         for name, labels in ALBUMS.items():
             album = self.request("POST", "/albums", (201,), json={
                 "albumName": name, "assetIds": [ids[label] for label in labels]})
             albums[name] = album["id"]
+        shared_name, shared_labels = SHARED_ALBUM
+        shared = partner.request("POST", "/albums", (201,), json={
+            "albumName": shared_name, "assetIds": [ids[label] for label in shared_labels],
+            "albumUsers": [{"userId": owner_ref, "role": "viewer"}]})
         tags = {}
         for path, labels in TAGS.items():
             tags.update(self.tag([path], [ids[label] for label in labels]))
@@ -426,12 +441,17 @@ class UpstreamFixture:
                             "is_edited": asset.get("isEdited")}
         return {"assets": assets, "albums": albums, "tags": tags,
                 "people": people["owner"], "partner_people": people["partner"],
+                "shared_albums": {shared_name: shared["id"]},
+                "hidden_people": {hidden_name: hidden["id"]},
                 "stack": {"primary": STACK[0], "copies": list(STACK[1:])},
                 "edit": {"label": EDIT[0], "crop": EDIT[1]},
                 "_edited_reported": reported}
 
     def _counts(self, api_key: str) -> dict[str, int]:
-        """Immich's own statistics, read through the runtime key."""
+        """The counts the owner should see: photos and videos as Immich's statistics give them
+        (read through the runtime key), albums and people from the content set (the owner's own
+        albums; the named people they did not hide), so the product's formulas over Immich's
+        statistics are checked against the content, not against those statistics again."""
         import httpx
 
         with httpx.Client(base_url=str(self.client.base_url), trust_env=False,
@@ -444,10 +464,12 @@ class UpstreamFixture:
 
             me = get("/api-keys/me")
             require(sorted(me["permissions"]) == sorted(PERMISSIONS), "key_scope_mismatch")
-            assets, albums = get("/assets/statistics"), get("/albums/statistics")
-            people = get("/people")
+            assets = get("/assets/statistics")
+            albums, people = get("/albums/statistics"), get("/people")
+        # The content set is what Immich holds: a shared album and a hidden person are there.
+        require(albums["shared"] >= 1 and people["hidden"] >= 1, "fixture_document_invalid")
         return {"photos": assets["images"], "videos": assets["videos"],
-                "albums": albums["owned"], "people": people["total"]}
+                "albums": len(ALBUMS), "people": len(AB)}
 
 
 def run_action(action: str) -> dict:

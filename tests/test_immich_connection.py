@@ -160,8 +160,14 @@ def test_a_passing_contact_lists_albums_people_places_and_tags(system, immich_li
     wait_for(lambda: all(listed(kind)["status"] == "ok"
                          for kind in ("albums", "people", "places", "tags")),
              seconds=60, what="the four lists")
-    assert {item["name"] for item in listed("albums")["items"]} >= set(immich_library.albums)
-    assert {item["name"] for item in listed("people")["items"]} >= set(immich_library.people)
+    albums = {item["name"] for item in listed("albums")["items"]}
+    assert albums >= set(immich_library.albums)
+    # Another user's album shared with the owner is not offered: Immich's search returns none
+    # of its owner's photos. A hidden person is not offered either.
+    assert immich_library.shared_albums and not albums & set(immich_library.shared_albums)
+    people = {item["name"] for item in listed("people")["items"]}
+    assert people >= set(immich_library.people)
+    assert immich_library.hidden_people and not people & set(immich_library.hidden_people)
     assert "Paris" in {item["city"] for item in listed("places")["items"]}
     assert {item["path"] for item in listed("tags")["items"]} >= set(immich_library.tags)
 
