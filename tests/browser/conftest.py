@@ -1,5 +1,6 @@
 """Bounded public evidence for the opt-in, disposable operator browser checks."""
 
+import hashlib
 import importlib.metadata
 import json
 import os
@@ -98,6 +99,46 @@ def pytest_configure(config):
     config.pluginmanager.register(collector, "operator-browser-evidence")
 
 
+# CI's browser leg runs as SHARDS parallel jobs (checks.yml, the owner's ~4 min per leg):
+# a run without PHOTO_WALL_BROWSER_SHARD is whole. A test belongs to the shard its function's name
+# hashes to, so every process (the xdist controller included, which collects nothing) agrees, and
+# the shards together run every test once.
+SHARD_VARIABLE = "PHOTO_WALL_BROWSER_SHARD"
+
+
+def shard() -> tuple[int, int] | None:
+    """(index, count) from PHOTO_WALL_BROWSER_SHARD "index/count" (index from 1), or None."""
+    text = os.environ.get(SHARD_VARIABLE)
+    if not text:
+        return None
+    match = re.fullmatch(r"([1-9][0-9]*)/([1-9][0-9]*)", text)
+    if match is None or int(match[1]) > int(match[2]):
+        raise pytest.UsageError(f"{SHARD_VARIABLE} must be index/count, got {text!r}")
+    return int(match[1]), int(match[2])
+
+
+def in_shard(name: str, selected: tuple[int, int] | None) -> bool:
+    if selected is None:
+        return True
+    index, count = selected
+    return int(hashlib.sha256(name.encode()).hexdigest(), 16) % count == index - 1
+
+
+def pytest_collection_modifyitems(config, items):
+    selected = shard()
+    if selected is None:
+        return
+    browser = Path(__file__).parent
+    kept, dropped = [], []
+    for item in items:
+        name = getattr(item, "originalname", item.name)
+        mine = not item.path.is_relative_to(browser) or in_shard(name, selected)
+        (kept if mine else dropped).append(item)
+    if dropped:
+        config.hook.pytest_deselected(items=dropped)
+        items[:] = kept
+
+
 @pytest.fixture
 def installation(registry):
     # Only simulated equipment setup bypasses the operator UI.
@@ -164,7 +205,10 @@ def pytest_sessionfinish(session, exitstatus):
     if not results:  # a run of no operator check (the catalog walker alone) has no evidence to record
         return
     checks = []
+    selected = shard()
     for name, assertions in CHECKS.items():
+        if not in_shard(name, selected):   # another shard's check
+            continue
         result = results.get(name, {})
         phases = result.get("phases", {})
         passed = all(phases.get(phase) == "passed" for phase in ("setup", "call", "teardown"))
@@ -187,6 +231,7 @@ def pytest_sessionfinish(session, exitstatus):
                         "runtime_advance": "controlled_production_owner",
                         "media": "generated_public_jpeg_controlled_acquisition_production_publication",
                         "preparation": "synthetic_recipe_and_build"},
+        "shard": None if selected is None else {"index": selected[0], "count": selected[1]},
         "checks": checks,
         "qualification": {"authored_media_controls": AUTHORED_MEDIA_CHECK in passed_checks,
                           "program_controls": PROGRAM_CONTROL_CHECK in passed_checks,

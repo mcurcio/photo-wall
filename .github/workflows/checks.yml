@@ -136,9 +136,15 @@ jobs:
           .venv/bin/python scripts/test_local.py -q --tb=short --durations=25 \
             -m "db and not immich" -n 4 --dist loadgroup
 
+  # Three shards (PHOTO_WALL_BROWSER_SHARD, tests/browser/conftest.py: a test belongs to the shard
+  # its name hashes to), so each leg stays near the ~4 min budget; each writes its shard's evidence.
   browser:
     runs-on: ubuntu-24.04
     timeout-minutes: 7
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - id: docker-hub-mirror
@@ -157,6 +163,7 @@ jobs:
             --volume "$GITHUB_WORKSPACE:/work:ro" \
             --volume "$RUNNER_TEMP/operator-browser:/evidence" --workdir /work \
             --env PHOTO_WALL_BROWSER_TESTS=1 --env PYTHONDONTWRITEBYTECODE=1 \
+            --env PHOTO_WALL_BROWSER_SHARD=${{ matrix.shard }}/3 \
             --env PHOTO_WALL_TEST_REQUIRE_DATABASE --env CI \
             --env GITHUB_SHA --env GITHUB_EVENT_NAME --env GITHUB_ACTIONS \
             --env UV_PROJECT_ENVIRONMENT=/tmp/photo-wall-browser-venv \
@@ -185,7 +192,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: operator-browser-${{ github.sha }}
+          name: operator-browser-${{ github.sha }}-shard-${{ matrix.shard }}
           path: ${{ runner.temp }}/operator-browser
           if-no-files-found: ignore
           retention-days: 7
@@ -214,6 +221,7 @@ jobs:
             --volume "$GITHUB_WORKSPACE:/work:ro" \
             --volume "$RUNNER_TEMP/console-catalog:/evidence" --workdir /work \
             --env PHOTO_WALL_BROWSER_TESTS=1 --env PYTHONDONTWRITEBYTECODE=1 \
+            --env PHOTO_WALL_BROWSER_SHARD=${{ matrix.shard }}/3 \
             --env CI --env PHOTO_WALL_CATALOG_ACTUAL=/evidence \
             --env UV_PROJECT_ENVIRONMENT=/tmp/photo-wall-browser-venv \
             --env UV_PYTHON_DOWNLOADS=never --env UV_VERSION \
