@@ -51,22 +51,19 @@ const TABS = [
   { value: "hardware", label: "Hardware" },
 ] as const;
 
-// A Pi that reports no output size and a Frame with no profile: steps are still pixels of a
-// common output.
-const FALLBACK_SIZE: PixelSize = { width: 1920, height: 1080 };
-
 /**
- * The output's size in pixels, as the Pi reported it, else the Frame profile's. Position's steps
- * and corner pixels are pixels of the output, whatever way the picture is turned in it.
+ * The output's size in pixels, as the Pi reported it; null when it reported none. Position's
+ * steps and corner pixels are pixels of the output, whatever way the picture is turned in it.
+ * Never the Frame profile: in Cover that is the cover rectangle's size, not the output's (the
+ * same reason Central refuses a Cover Save `output_size_unknown`).
  */
-function outputSize(snapshot: object | null, frame: Frame): PixelSize {
+function outputSize(snapshot: object | null, frame: Frame): PixelSize | null {
   const reported = (boundOutput(snapshot ?? {}, frame.id) as { observation?: { connected?: boolean; width_px?: number; height_px?: number } } | null)
     ?.observation;
   if (reported?.connected === true && (reported.width_px ?? 0) > 0 && (reported.height_px ?? 0) > 0) {
     return { width: reported.width_px!, height: reported.height_px! };
   }
-  const { width_px: width = 0, height_px: height = 0 } = frame.profile ?? {};
-  return width <= 0 || height <= 0 ? FALLBACK_SIZE : { width, height };
+  return null;
 }
 
 /**
@@ -146,7 +143,8 @@ export function FramePage({ snapshot, bootFacts, hosts, frameId, tab, onTab, foc
       <Tabs label="Frame settings" tabs={TABS} value={tab} onValueChange={(next) => choose(next as Tab)}>
         {tab === "overview" && <FrameOverview snapshot={snapshot} bootFacts={bootFacts} frameId={frameId} hosts={hosts} />}
         {tab === "position" && (
-          <FramePosition adjustment={adjustment} size={outputSize(snapshot, frame)} softwareHref={softwareHref} />
+          <FramePosition adjustment={adjustment} size={outputSize(snapshot, frame)} softwareHref={softwareHref}
+            readiness={frame.readiness} />
         )}
         {tab === "picture" && (
           <FramePicture frameId={frameId} softwareHref={softwareHref} session={picture}

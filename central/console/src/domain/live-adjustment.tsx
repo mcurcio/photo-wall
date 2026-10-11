@@ -22,6 +22,8 @@ export interface LiveAdjustmentProps {
   noun: string;
   /** The Frame's Pi's Software page, for a Pi that cannot show changes live. */
   softwareHref: string | null;
+  /** The saved values must be confirmed on the display, in words (LivePreviewEditor `unconfirmed`). */
+  unconfirmed?: string;
   /** The tab's controls. */
   children: React.ReactNode;
 }
@@ -62,7 +64,7 @@ function statusWords(adjustment: Adjustment): string {
  * refusals as an inline ProblemCard (its code under Details), and the bottom bar with the Pi's
  * acknowledgement (Central's time of it), **Done** and **Revert**.
  */
-export function LiveAdjustment({ adjustment, noun, softwareHref, children }: LiveAdjustmentProps) {
+export function LiveAdjustment({ adjustment, noun, softwareHref, unconfirmed, children }: LiveAdjustmentProps) {
   const reason = unavailableWords(adjustment, noun, softwareHref);
   const { error } = adjustment;
   const notes = [
@@ -80,6 +82,7 @@ export function LiveAdjustment({ adjustment, noun, softwareHref, children }: Liv
         at: adjustment.ack.at === null ? null : timeOfDay(adjustment.ack.at),
       }}
       dirty={adjustment.dirty}
+      unconfirmed={unconfirmed}
       busy={adjustment.busy}
       onDone={() => { void adjustment.done(); }}
       onRevert={() => { void adjustment.revert(); }}

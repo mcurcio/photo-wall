@@ -13,6 +13,11 @@ export interface LivePreviewEditorProps {
   ack: { revision: number; at: string | null } | null;
   /** The changes differ from the saved values. */
   dirty: boolean;
+  /**
+   * The saved values still have to be confirmed on the display (a Frame whose Position must be
+   * checked again): Done is then offered with no change, and these words say what it keeps.
+   */
+  unconfirmed?: string;
   /** Done or Revert is running. */
   busy?: boolean;
   onDone: () => void;
@@ -34,12 +39,13 @@ export interface LivePreviewEditorProps {
  * Every change goes to the display as it is made; the bar at the bottom says whether the Pi has
  * acknowledged presenting the latest change, and holds **Done** and **Revert**. Done is enabled
  * only when the acknowledged change is the latest one (`ack.revision === latestRevision`): a
- * page cannot pass an enabled flag. When Done cannot be pressed, the bar says why. On a phone
+ * page cannot pass an enabled flag. With no change, Done is offered only while the saved values
+ * are `unconfirmed`, and keeps them as they are. When Done cannot be pressed, the bar says why. On a phone
  * the bar stays at the bottom of the screen while the controls scroll.
  */
 export function LivePreviewEditor({
-  label, latestRevision, ack, dirty, busy = false, onDone, onRevert, controls, unavailable, status, problem,
-  notes = [],
+  label, latestRevision, ack, dirty, unconfirmed, busy = false, onDone, onRevert, controls, unavailable, status,
+  problem, notes = [],
 }: LivePreviewEditorProps) {
   if (unavailable !== undefined) {
     return (
@@ -52,8 +58,11 @@ export function LivePreviewEditor({
     );
   }
   const acknowledged = latestRevision !== null && ack !== null && ack.revision === latestRevision;
-  const canDone = dirty && acknowledged && !busy;
-  const why = !dirty ? "No changes to keep." : acknowledged ? null : "Done is offered once the Pi presents your latest change.";
+  const keeping = dirty || unconfirmed !== undefined;
+  const canDone = keeping && acknowledged && !busy;
+  const why = !keeping ? "No changes to keep."
+    : !acknowledged ? "Done is offered once the Pi presents your latest change."
+      : dirty ? null : unconfirmed ?? null;
   return (
     <div className="flex min-w-0 flex-col gap-4">
       {controls}

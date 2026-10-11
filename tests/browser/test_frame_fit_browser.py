@@ -7,8 +7,11 @@ trial rules, Save through the real Registry's Save CAS), so Save in Cover writes
 shape and refuses a picture whose shape disagrees with the Frame's (`fit_orientation_mismatch`, F-4)
 exactly as Central does.
 
-Mutation probes: start a draft on Corners (useDraft.js `fitOf`) -> the opens-on-Cover case fails;
-keep a crop field in the draft -> the draft-shape and Trim-absent cases fail.
+Mutation probes: read every saved fit as Corners (useDraft.js `fitOf`'s `mode`) -> the
+opens-on-Cover case fails (its no-saved-position fallback is not reached here: Central serves every
+Frame a Position, and the server-side default is tests/test_frame_fit_settings.py's); keep a crop
+field in the draft -> the draft-shape and Trim-absent cases fail; offer Done only for a changed
+draft (live-preview-editor.tsx `unconfirmed`) -> the check-again case fails.
 """
 
 import os
@@ -20,14 +23,18 @@ from operator_harness import operator_server, sign_in
 from playwright.sync_api import expect
 from test_console_frame_page_browser import (
     FRAME,
+    PORTRAIT,
     PRESENTED,
     SAVED_X,
     FakeSessions,
     _bar,
+    _move,
     _saved,
     _seed,
+    _top_left_x,
 )
 
+from central.displays.model import Readiness
 from contracts.frame_fit import cover_rectangle
 
 pytestmark = pytest.mark.skipif(
@@ -162,3 +169,50 @@ def test_a_60_degree_save_on_a_landscape_frame_says_why_in_plain_words(page, reg
         expect(alert).to_contain_text(MISMATCH)
         alert.get_by_role("button", name="Details", exact=True).click()
         expect(alert).to_contain_text("fit_orientation_mismatch")
+
+
+def test_a_frame_to_check_again_is_kept_by_done_with_no_change(page, registry, sessions):
+    """After migration 075 every Frame's Position must be checked again (owner q1's accepted
+    cost): its saved fit is what the operator confirms, so Done is offered with no change once the
+    Pi presents it, and keeping it makes the Frame ready. A ready Frame with no change has nothing
+    to keep."""
+    _seed(registry)
+    with registry.db.transaction() as conn:
+        conn.execute("UPDATE frames SET position_generation=NULL")
+    with operator_server(registry.db, registry.clock) as origin:
+        sign_in(page, origin)
+        open_frame(page, FRAME, "position")
+        bar = _bar(page)
+        expect(bar.get_by_role("status")).to_have_text(PRESENTED)
+        expect(bar).to_contain_text("press Done to keep this position")
+        done = bar.get_by_role("button", name="Done", exact=True)
+        expect(done).to_be_enabled()
+        done.click()
+        expect(page.get_by_role("status").filter(has_text="Saved at")).to_be_visible()
+        frame = next(frame for frame in registry.inventory().frames if frame.id == FRAME)
+        assert frame.readiness is Readiness.READY
+        assert _top_left_x(frame.calibration) == SAVED_X
+        page.reload()
+        expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
+        expect(_bar(page).get_by_role("button", name="Done", exact=True)).to_be_disabled()
+        expect(_bar(page)).to_contain_text("No changes to keep.")
+
+
+def test_with_no_reported_output_size_a_step_is_a_pixel_of_a_common_screen_not_the_profile(
+        page, registry, sessions):
+    """The Frame profile is the picture's shape (in Cover the cover rectangle's), never the
+    output's size: while the Pi reports no size, a step is a pixel of 1920 x 1080 and the tab says
+    so (here its output last reported disconnected). Mutation probe: fall back to the profile (1080 x 1920 here) -> the 10 px step moves the
+    corner 10/1080 of the width."""
+    _seed(registry, profile=PORTRAIT, rotation=90)
+    with registry.db.transaction() as conn:
+        conn.execute("UPDATE outputs SET observation = jsonb_set(observation, '{connected}', 'false')")
+    with operator_server(registry.db, registry.clock) as origin:
+        sign_in(page, origin)
+        position = _position(open_frame(page, FRAME, "position"))
+        expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
+        expect(position).to_contain_text("The Pi has not reported this output's size")
+        after = len(sessions.sent)
+        _move(page)
+        draft = _wait_for_draft(page, sessions, after, lambda draft: _top_left_x(draft) != SAVED_X)
+        assert _top_left_x(draft) == SAVED_X + 10

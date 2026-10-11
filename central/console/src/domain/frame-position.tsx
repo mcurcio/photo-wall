@@ -13,6 +13,7 @@ import { Select } from "../ui/select";
 import { Section } from "../ui/section";
 import { Slider } from "../ui/slider";
 import { Inline } from "../ui/stack";
+import type { Readiness } from "./frame-profile";
 import { type Adjustment, LiveAdjustment } from "./live-adjustment";
 
 /** The output's size in pixels: what a pixel step and a corner's pixel value are measured in. */
@@ -23,8 +24,11 @@ export interface PixelSize {
 
 export interface FramePositionProps {
   adjustment: Adjustment;
-  size: PixelSize;
+  /** The output's size in pixels; null while the Pi has reported none (steps then use a common one). */
+  size: PixelSize | null;
   softwareHref: string | null;
+  /** The Frame's readiness: a Position to check again is kept by Done with no change. */
+  readiness?: Readiness;
 }
 
 type Mode = "cover" | "corners";
@@ -43,6 +47,11 @@ const FIT_HELP: Record<Mode, string> = {
   corners: "Stretch the picture exactly onto the corners. Its shape follows the corners; it turns only in quarter turns.",
 };
 
+// A Pi that reports no output size: steps are still pixels of a common output.
+const FALLBACK_SIZE: PixelSize = { width: 1920, height: 1080 };
+const UNKNOWN_SIZE = "The Pi has not reported this output's size, so a step is a pixel of a 1920 × 1080 screen.";
+const CHECK_AGAIN = "If the picture sits right on the Display, press Done to keep this position.";
+
 const round = (value: number) => Math.round(value * 10) / 10;
 const inside = (value: number) => value >= 0 && value <= 1;
 
@@ -53,10 +62,13 @@ const inside = (value: number) => value >= 0 && value <= 1;
  * drawing, or choose what to move (the whole picture or one corner) and press the arrows (or the
  * arrow keys on the drawing) in steps of 1, 10 or 50 pixels; turn it a quarter at a time, or in
  * Cover to any angle; reset. Each corner's pixels are under **Exact values**. Every change is sent
- * to the Pi as it is made (liveAdjustment.js), and Done keeps it. A change that would fold the
- * picture or leave the screen is refused where it is made.
+ * to the Pi as it is made (liveAdjustment.js), and Done keeps it. A Frame whose Position must be
+ * checked again (its picture changed, or another display is on its port) is kept by Done with no
+ * change. A change that would fold the picture or leave the screen is refused where it is made.
  */
-export function FramePosition({ adjustment, size, softwareHref }: FramePositionProps) {
+export function FramePosition({ adjustment, size: reported, softwareHref, readiness }: FramePositionProps) {
+  const size = reported ?? FALLBACK_SIZE;
+  const checkAgain = readiness === "position-needed" || readiness === "display-changed";
   const [selected, setSelected] = useState<number | null>(null);
   const [step, setStep] = useState<(typeof STEPS)[number]>("10");
   const [problem, setProblem] = useState<string | null>(null);
@@ -96,7 +108,9 @@ export function FramePosition({ adjustment, size, softwareHref }: FramePositionP
 
   return (
     <Section title="Position">
-      <LiveAdjustment adjustment={adjustment} noun="position" softwareHref={softwareHref}>
+      <LiveAdjustment adjustment={adjustment} noun="position" softwareHref={softwareHref}
+        unconfirmed={checkAgain ? CHECK_AGAIN : undefined}>
+        {reported === null && <Note>{UNKNOWN_SIZE}</Note>}
         <Field label="Fit" help={FIT_HELP[fit.mode]}>
           <SegmentedControl label="Fit" value={fit.mode} options={FITS}
             onChange={(mode) => apply(adjustment.change({ mode }))} />
