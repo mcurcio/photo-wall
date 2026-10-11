@@ -54,8 +54,8 @@ export function attentionSummary({ alarms, players, awaiting, hostsUnread }) {
  * shell's fleet host read when it did not fail (none from a failed or skipped read).
  * `players` counts the Players with an incident; `severity` is the worst incident's tier
  * (a Frame alarm or a Player alarm is "alarm", Unknown-only Player incidents "unknown"); `hostsUnread` is true while the shell's
- * fleet host read is mounted but has failed or not yet loaded (node control off mounts none,
- * and its banner names that).
+ * fleet host read is mounted but has failed or not yet loaded (none is mounted before
+ * sign-in is confirmed).
  *
  * @param {object} snapshot
  * @param {{scheduler: string|null}|null} central

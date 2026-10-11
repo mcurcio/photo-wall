@@ -1,34 +1,25 @@
-import React, { createContext, useCallback, useContext, useMemo } from "react";
+import { createContext, useCallback, useContext, useMemo } from "react";
 
 import { apiWrite } from "./apiWrite.js";
 import { clock, fact, words } from "./facts.js";
 import { usePolledRead } from "./polledRead.js";
 
 /**
- * Node control (console DDD Part E §24-§25, R20): whether this Central runs node control, and
- * the fleet effect gate, from ONE shell read of `GET /v1/operator/node/status`.
- *
- * The console assumes node control. A Central started without it is a misconfiguration,
- * shown once as a banner above every page (`NodeControlBanner`); node pages then show one
- * "not shown" line (`NodeRecords`) and mount their node reads with `skip`. This is the ONLY
- * module that reads `transport_enabled` and the only console source of the effect gate
- * (a source-scan test holds both): every gate consumer takes the shell's value.
- *
- * States, re-judged on every read (§27): `on` (`transport_enabled: true`), `off` (`false`),
- * `unread` (no answer yet, or the read failed: no banner and no claim). The console never
- * infers `off` from a page-level refusal: a node read refused `node_control_disabled` is an
- * ordinary failed read until this read raises the banner.
+ * Node control (console DDD Part E §24-§25, R20): the fleet effect gate, from ONE shell read of
+ * `GET /v1/operator/node/status`. Central always runs node control; this is the only console
+ * source of the effect gate (a source-scan test holds it): every gate consumer takes the
+ * shell's value. A failed or unanswered read leaves the gate unreadable (`gate: null`), never
+ * a claim; each node page shows its own read failures.
  *
  * @typedef {{effective_state: string, state?: string, reason?: string|null,
  *            generation?: number, changed_at?: number|null}} EffectGate
  *   the served `effect_gate` row (central/fleet/rollout_gate.py `status`)
- * @typedef {{state: "on"|"off"|"unread", gate: EffectGate|null, failed: boolean}} NodeControlRead
- *   `failed`: the last read got no usable answer (as opposed to no answer yet)
+ * @typedef {{gate: EffectGate|null}} NodeControlRead
  * @typedef {NodeControlRead & {refresh: () => Promise<void>, latest: () => NodeControlRead}} NodeControl
  */
 
 const CADENCE_MS = 30000;
-const UNREAD = Object.freeze({ state: "unread", gate: null, failed: false });
+const UNREAD = Object.freeze({ gate: null });
 
 /**
  * One node status answer as the shell's state (exported for the model tests).
@@ -37,13 +28,8 @@ const UNREAD = Object.freeze({ state: "unread", gate: null, failed: false });
  * @returns {NodeControlRead}
  */
 export function controlFromStatus(result) {
-  const enabled = result?.ok === true ? result.data?.transport_enabled : undefined;
-  if (enabled === true || enabled === false) {
-    const gate = result.data?.effect_gate;
-    return Object.freeze({ state: enabled ? "on" : "off",
-      gate: gate !== null && typeof gate === "object" ? gate : null, failed: false });
-  }
-  return Object.freeze({ state: "unread", gate: null, failed: true });
+  const gate = result?.ok === true ? result.data?.effect_gate : null;
+  return gate !== null && typeof gate === "object" ? Object.freeze({ gate }) : UNREAD;
 }
 
 /**
@@ -63,24 +49,12 @@ export function useNodeControl({ skip = false } = {}) {
 
 const noRefresh = async () => {};
 
-/** What every consumer reads when no Shell provides node control (no claim either way). */
+/** What every consumer reads when no Shell provides node control (the gate unreadable). */
 export const NodeControlContext = createContext(
   /** @type {NodeControl} */ ({ ...UNREAD, refresh: noRefresh, latest: () => UNREAD }));
 
 /** The shell's node control, from context. */
 export const useNodeControlValue = () => useContext(NodeControlContext);
-
-/**
- * Whether a node page may send its node reads: with node control on, or when the status read
- * failed (pages then show their own read failures). Not while it is off, and not before the
- * first answer, so a Central without node control receives no node read at all.
- *
- * @param {NodeControlRead} control
- * @returns {boolean}
- */
-export function nodeReadsAllowed(control) {
-  return control.state === "on" || (control.state === "unread" && control.failed);
-}
 
 // Central's gate reason codes in words (§26); any other code is shown as its words.
 const REASONS = Object.freeze({
@@ -120,37 +94,4 @@ export function effectGateFact(gate) {
   const reason = effectGateReason(gate);
   const recorded = typeof gate.changed_at === "number" ? ` · recorded ${clock(gate.changed_at)}` : "";
   return fact({ kind: "set", value: `Effect gate closed · Central's reason: ${reason}${recorded}` });
-}
-
-const BANNER_TITLE = "Node management is off on this Central.";
-const NOT_SHOWN = "Node records are not shown: node management is off (see the banner).";
-const h = React.createElement;
-
-/**
- * The one banner (§25), above every page, only while node control is `off`.
- *
- * @param {{control: NodeControlRead}} props
- */
-export function NodeControlBanner({ control }) {
-  if (control.state !== "off") return null;
-  return h("div", { className: "node-banner", role: "region", "aria-label": "Node control" },
-    h("p", null,
-      h("strong", null, BANNER_TITLE),
-      " It was started without node control: Players that boot by node path are refused, and node "
-        + "records, Reboot, App operations and Releases have nothing to read. Start Central with ",
-      h("code", null, "central.node_app"), " and set ", h("code", null, "PHOTO_WALL_NODE_AUDIENCE"),
-      " (runbook › Node control)."));
-}
-
-/**
- * A page's node sections, or, while node control is `off`, the one "not shown" line in
- * their place. `quiet` renders nothing instead, for further node sections on a page that
- * already shows the line once.
- *
- * @param {{children: React.ReactNode, quiet?: boolean}} props
- */
-export function NodeRecords({ children, quiet = false }) {
-  const control = useNodeControlValue();
-  if (control.state !== "off") return children;
-  return quiet ? null : h("p", { className: "roster__empty" }, NOT_SHOWN);
 }

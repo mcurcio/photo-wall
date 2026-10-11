@@ -208,7 +208,6 @@ class NodeObservations:
         No fleet or device lock is taken, so a held lock never blocks this read. A superseded
         boot's sample is never served as `host`; its receipt alone is served, and only when
         the current boot has none."""
-        self.sessions.require_enabled()
         with self.sessions.db.transaction() as conn:
             # Must precede the first data query (central/operator_snapshot.py).
             conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
@@ -253,7 +252,6 @@ class NodeObservations:
         return {"read_at": read_at, "thresholds": thresholds_document(), "devices": devices}
 
     def status(self, device_id: str) -> dict:
-        self.sessions.require_enabled()
         with self.sessions.db.transaction() as conn:
             generation = self.sessions.lock_device_generation_in(conn, device_id)
             rows = conn.execute("SELECT s.session_id,s.grant_payload,s.expires_at,s.revoked_at,"

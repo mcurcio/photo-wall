@@ -2033,17 +2033,6 @@ label {
   border-left: 2px solid var(--color-line);
 }
 
-/* Node control off (Part E §25): the one banner above every page. It names a
-   misconfiguration, so it reads as a warning. */
-.node-banner {
-  margin: 0 0 16px;
-  padding: 12px 16px;
-  border: 1px solid var(--color-notice);
-  border-left-width: 4px;
-  border-radius: 6px;
-}
-.node-banner p { margin: 0; }
-
 /* The Player page (console DDD §9): one section per aggregate part, each with its own
    read time; facts carry their truth kind (FactLine.jsx). */
 .player {

@@ -1,6 +1,7 @@
 """The V2-only console (console DDD Part E §24-§28, bead NV1; R20).
 
-The console assumes node control and shows no V1-lane surface. That posture is held by ONE
+Central always runs node control: the console has no node-off mode and shows no V1-lane
+surface. That posture is held by ONE
 source-scan test over every console module, with ONE shared list (`V2_POSTURE`, below: the
 bead's acceptance list, verbatim), and mutation probes proving the scan refuses what it should.
 The pure parts of node control (nodeControl.js) and the boot facts (bootFacts.js) run under
@@ -18,16 +19,14 @@ SRC = Path(__file__).parents[1] / "central/console/src"
 
 # The V2 posture (Part E §28), the one list the scan and NV1's acceptance cite:
 #   routes  no console module names a V1-lane route (the `/v1/operator/` prefix itself is allowed);
-#   words   no string literal or JSX text carries one of these (comments are not scanned), with
-#           exactly one named exemption;
-#   reader  only this module reads `transport_enabled`.
+#   words   no code, string literal or JSX text carries one of these (comments are not
+#           scanned): among them the retired node-off mode's banner, its status field and its
+#           refusal code.
 V2_POSTURE = {
     "routes": ("/v1/operator/fleet", "maintenance-requests", "app-override", "app-policy",
                "base-baseline", "/v1/netboot/", "/v1/operator/netboot", "/pin"),
     "words": ("V1", "netboot base", "release frontier", "maintenance request",
-              "node management is off", "deprecated path"),
-    "exemptions": {"nodeControl.js": ("node management is off",)},
-    "reader": ("transport_enabled", "nodeControl.js"),
+              "node management is off", "deprecated path", "transport_enabled", "node_control_disabled"),
 }
 
 # A `/` after one of these (or at the start) opens a regular expression literal, not a division.
@@ -80,15 +79,10 @@ def _phrase(word):
 def posture_offenders(sources):
     """Every (module, what) breaking the V2 posture in `sources` ({module name: source})."""
     offenders = []
-    reader, owner = V2_POSTURE["reader"]
     for name, source in sorted(sources.items()):
         code = strip_comments(source)
         offenders += [(name, route) for route in V2_POSTURE["routes"] if route in code]
-        exempt = V2_POSTURE["exemptions"].get(name, ())
-        offenders += [(name, word) for word in V2_POSTURE["words"]
-                      if word not in exempt and _phrase(word).search(code)]
-        if reader in code and name != owner:
-            offenders.append((name, reader))
+        offenders += [(name, word) for word in V2_POSTURE["words"] if _phrase(word).search(code)]
     return offenders
 
 
@@ -125,13 +119,13 @@ def test_the_scan_reads_jsx_text_and_literals_but_not_comments():
                 "/* Release frontier, maintenance request: comments too. */\n"
                 "const url = `/v1/operator/node/status`; const re = /\\/\\//;\n",
         "c.js": "const s = 'The Release Frontier moved';\n",
-        "nodeControl.js": 'const t = "Node management is off on this Central."; '
-                          "const on = data.transport_enabled;\n",
         "d.js": 'const t = "Node management is off"; const on = x.transport_enabled;\n',
+        "e.js": 'if (error.code === "node_control_disabled") banner();\n',
     }
     assert posture_offenders(probe) == [
         ("a.jsx", "V1"), ("c.js", "release frontier"),
-        ("d.js", "node management is off"), ("d.js", "transport_enabled")]
+        ("d.js", "node management is off"), ("d.js", "transport_enabled"),
+        ("e.js", "node_control_disabled")]
 
 
 # --- The pure parts, under Node.
@@ -144,16 +138,11 @@ const out = {};
 const status = (data, ok = true) => control.controlFromStatus({ ok, data });
 const gate = { state: "closed", effective_state: "closed", reason: "never_certified", generation: 1 };
 out.states = [
-  status({ transport_enabled: true, effect_gate: gate }),
-  status({ transport_enabled: false, effect_gate: gate }),
+  status({ effect_gate: gate }),
   status({ error: "rollout_gate_missing" }, false),
   control.controlFromStatus(null),
   status({}),
 ];
-out.allowed = [
-  { state: "on", failed: false }, { state: "off", failed: false },
-  { state: "unread", failed: false }, { state: "unread", failed: true },
-].map(control.nodeReadsAllowed);
 out.gates = [
   null,
   gate,
@@ -187,20 +176,16 @@ def _run():
     return json.loads(result.stdout)
 
 
-def test_node_control_is_on_off_or_unread_and_never_inferred():
+def test_the_node_status_read_is_the_effect_gate_or_unreadable():
     out = _run()
     gate = {"state": "closed", "effective_state": "closed", "reason": "never_certified", "generation": 1}
     assert out["states"] == [
-        {"state": "on", "gate": gate, "failed": False},
-        {"state": "off", "gate": gate, "failed": False},
-        # A failed read (a missing gate row answers 503) is no claim either way.
-        {"state": "unread", "gate": None, "failed": True},
-        {"state": "unread", "gate": None, "failed": True},
-        {"state": "unread", "gate": None, "failed": True},
+        {"gate": gate},
+        # A failed read (a missing gate row answers 503), no answer, or no gate: unreadable.
+        {"gate": None},
+        {"gate": None},
+        {"gate": None},
     ]
-    # Node reads go out with node control on, or after the status read failed; never while it
-    # is off, and not before its first answer.
-    assert out["allowed"] == [True, False, False, True]
 
 
 def test_the_effect_gate_has_one_wording_with_centrals_reason_and_no_age():
@@ -224,7 +209,7 @@ def test_boot_facts_are_each_boxs_serial_from_the_fleet_host_read():
     rows = [{"device_id": "device-a", "serial": "10000000aaaa0001"},
             {"device_id": "device-b", "serial": None}]
     assert _run()["boot"] == [
-        {"devices": [], "loaded": False, "unavailable": False},  # node control off: no read
+        {"devices": [], "loaded": False, "unavailable": False},  # before sign-in: no read
         {"devices": [], "loaded": False, "unavailable": False},  # not read yet
         {"devices": [], "loaded": False, "unavailable": True},   # the first read failed
         {"devices": rows, "loaded": True, "unavailable": False},

@@ -5,7 +5,6 @@ import { frameLinks } from "../domain/frame-links";
 import { HostHealthPanel, type HostsRead } from "../domain/host-health";
 import { PiHeader } from "../domain/pi-header";
 import { PiLink } from "../domain/pi-link";
-import { NodeRecords, nodeReadsAllowed, useNodeControlValue } from "../nodeControl.js";
 import { useNodeDevice } from "../nodeRead.js";
 import { EmptyState, EntityPage } from "../patterns/entity-page";
 import { Note } from "../patterns/fact-row";
@@ -20,7 +19,7 @@ export interface HardwarePiPageProps {
   deviceId: string;
   snapshot: object | null;
   bootFacts: { unavailable?: boolean; loaded?: boolean; devices?: Map<string, object> } | null;
-  /** The shell's fleet host read; null while it is skipped (node control not on): no Health. */
+  /** The shell's fleet host read; null while it is skipped (sign-in not confirmed): no Health. */
   hosts: HostsRead | null;
 }
 
@@ -29,15 +28,13 @@ export interface HardwarePiPageProps {
  * then Reboot (with its history), Health (from the shell's fleet host read), Link and sessions
  * (the fleet host read) and the Danger zone (Retire). Its bound Frames are links to their
  * Binding on the Wall: a Bound Pi is retired only after it is unbound there. Node records are
- * read only here and on the Pi's Software page, never for a retired Pi and never while node
- * control is not on. Each section sits behind its own error boundary.
+ * read only here and on the Pi's Software page, never for a retired Pi. Each section sits behind its own error boundary.
  */
 export function HardwarePiPage({ deviceId, snapshot, bootFacts, hosts }: HardwarePiPageProps) {
   const row = playersByDevice(snapshot, bootFacts as never).find((candidate) => candidate.deviceId === deviceId)
     ?? null;
   const retired = row?.standing === "retired";
-  const control = useNodeControlValue();
-  const node = useNodeDevice(deviceId, { skip: row === null || retired || !nodeReadsAllowed(control) });
+  const node = useNodeDevice(deviceId, { skip: row === null || retired });
   const nameRef = useRef<HTMLHeadingElement | null>(null);
   const focusName = () => nameRef.current?.focus();
   const { open, confirmation } = useConfirm(focusName, focusName);
@@ -63,25 +60,19 @@ export function HardwarePiPage({ deviceId, snapshot, bootFacts, hosts }: Hardwar
       </PiHeader>
     }>
       {!retired && (
-        <NodeRecords quiet>
-          <Section title="Reboot" resetKey={node.readAt}>
-            <RebootSection key={deviceId} deviceId={deviceId} name={row.name} node={node} snapshot={snapshot as never}
-              playerId={player?.id ?? null} />
-          </Section>
-        </NodeRecords>
+        <Section title="Reboot" resetKey={node.readAt}>
+          <RebootSection key={deviceId} deviceId={deviceId} name={row.name} node={node} snapshot={snapshot as never}
+            playerId={player?.id ?? null} />
+        </Section>
       )}
       {!retired && hosts !== null && (
-        <NodeRecords quiet>
-          <Section title="Health" resetKey={(hosts.read as { read_at?: number } | null)?.read_at}>
-            <HostHealthPanel hosts={hosts} deviceId={deviceId} />
-          </Section>
-        </NodeRecords>
-      )}
-      <NodeRecords>
-        <Section title="Link and sessions" resetKey={node.readAt}>
-          <PiLink deviceId={deviceId} hosts={hosts} node={node} snapshot={snapshot} playerId={player?.id ?? null} retired={retired} />
+        <Section title="Health" resetKey={(hosts.read as { read_at?: number } | null)?.read_at}>
+          <HostHealthPanel hosts={hosts} deviceId={deviceId} />
         </Section>
-      </NodeRecords>
+      )}
+      <Section title="Link and sessions" resetKey={node.readAt}>
+        <PiLink deviceId={deviceId} hosts={hosts} node={node} snapshot={snapshot} playerId={player?.id ?? null} retired={retired} />
+      </Section>
       {player !== null && row.standing === "unbound" && (
         <Section title="Danger zone">
           <Button aria-label={`Retire player ${player.id}`}

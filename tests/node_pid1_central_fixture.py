@@ -203,7 +203,6 @@ def _central_fixture(
         run_scheduler=True,
         media_root=workdir / "media",
         content=content,
-        mdns_enabled=False,
         node_control=NodeControlConfig("pid1-real-central-fixture"),
         node_serving_verifier=_LocalImageVerifier(),
         hub_leaf_url=HUB_LEAF_URL if hub is not None else None,

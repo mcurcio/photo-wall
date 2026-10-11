@@ -10,7 +10,7 @@ coordination, with the REAL entry points.
 
 The read path is exercised through a node boot offer's artifact route
 (`/v2/node/boot-offers/{id}/artifacts/{role}`), the unauthenticated byte route a Node boots
-from: the pods run `central.node_app:create_app`, a node deployment whose manager environment is
+from: the pods run `central.app:create_app`, a node deployment whose manager environment is
 the fake release's blob (served where the `.deb` was) is written and selected as the release
 sync's ingest does it, and one Node's offer names it. The base tarball answers 404, so the only
 download that can hold or throttle is the environment's.
@@ -70,7 +70,6 @@ ADMIN = "two-pod-run-operator-token-" + "x" * 32
 PODS = ("central-a", "central-b")
 WORKERS = ("worker-1", "worker-2")
 ENVIRONMENT_FETCH = "photo_wall.sealed_environment.fetch"
-NODE_AUDIENCE = "two-pods-installation"
 SERIAL = "10000000beef0001"
 SQUASHFS_BYTES = 64 * 1024
 BASE_ABI = "sha256:" + "c" * 64
@@ -111,9 +110,8 @@ class TwoPods:
         self.origin = origin
         self.procs: dict[str, Proc] = {}
         self.env = worker_env(
-            root, db.dsn, PHOTO_WALL_ADMIN_TOKEN=ADMIN, PHOTO_WALL_MDNS_ADVERTISE="false",
-            PHOTO_WALL_RELEASE_REPO=REPO, PHOTO_WALL_RELEASE_API_BASE=origin.api_base,
-            PHOTO_WALL_NODE_AUDIENCE=NODE_AUDIENCE)
+            root, db.dsn, PHOTO_WALL_ADMIN_TOKEN=ADMIN,
+            PHOTO_WALL_RELEASE_REPO=REPO, PHOTO_WALL_RELEASE_API_BASE=origin.api_base)
         self.cache = Path(self.env["PHOTO_WALL_CACHE_ROOT"])
         self.offer_id: str | None = None
 
@@ -139,7 +137,7 @@ class TwoPods:
 
     def spawn_central(self, name: str) -> Proc:
         port = _free_port()
-        return self._spawn(name, [sys.executable, "-m", "uvicorn", "central.node_app:create_app",
+        return self._spawn(name, [sys.executable, "-m", "uvicorn", "central.app:create_app",
                                   "--factory", "--host", "127.0.0.1", "--port", str(port)], port)
 
     def spawn_worker(self, name: str) -> Proc:

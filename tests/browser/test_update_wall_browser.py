@@ -70,7 +70,7 @@ class Fleet:
                       for device in devices}
         self.reboots, self.stages, self.begins, self.samples = [], [], [], []
         page.route("**/v1/operator/node/status", lambda route: self._json(
-            route, {"transport_enabled": True, "effect_gate": self.gate}))
+            route, {"installation_audience": "photo-wall", "effect_gate": self.gate}))
         page.route(re.compile(r".*/v1/operator/node/devices/[^/]+(/[a-z-]+)?$"), self._device)
         page.route("**/v1/operator/node/app-qualifications/*/sample", self._sample)
         page.route("**/v1/operator/node/releases", self._releases)

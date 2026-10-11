@@ -3,7 +3,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useConfirm } from "./ConfirmAction.jsx";
 import { FactLine } from "./domain/fact-line.tsx";
 import { clock, fact } from "./facts.js";
-import { effectGateFact, NodeRecords, nodeReadsAllowed, useNodeControlValue } from "./nodeControl.js";
+import { effectGateFact, useNodeControlValue } from "./nodeControl.js";
 import {
   deploymentHandle,
   newestStable,
@@ -144,7 +144,7 @@ function EffectGateSection({ gate }) {
  */
 function ReleaseRecords() {
   const control = useNodeControlValue();
-  const releases = useReleaseRead({ skip: !nodeReadsAllowed(control) });
+  const releases = useReleaseRead();
   // This page's unanswered "Check GitHub releases now" (releases.js `HeldCheck`): the same shape.
   const checkRef = useRef(false);
   const [checking, setChecking] = useState(false);
@@ -240,15 +240,12 @@ function ReleaseRecords() {
 /**
  * Fleet › Releases (console DDD Part E §25, beads NR1, NR2 and B7): the releases Central
  * observed and downloads by itself → their deployments → the boot selection, and the effect
- * gate: the fleet-wide aggregates' home. While node control is off it shows the one "not shown"
- * line and reads nothing (nodeControl.js `NodeRecords`).
+ * gate: the fleet-wide aggregates' home.
  */
 export function ReleasesPage() {
   return (
     <div className="player">
-      <NodeRecords>
-        <ReleaseRecords />
-      </NodeRecords>
+      <ReleaseRecords />
     </div>
   );
 }

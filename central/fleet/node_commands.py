@@ -62,7 +62,7 @@ class NodeCommands:
         self.sessions, self.gate = sessions, gate
 
     def request_reboot(self, device_id: str, request: OperatorReboot) -> dict:
-        config = self.sessions.require_enabled()
+        config = self.sessions.config
         # Slots dataclass identity is explicitly frozen, independent of request transport.
         request_hash = sha256(json.dumps({"device_id": device_id,
             "command_id": str(request.command_id), "session_id": str(request.session_id),
@@ -130,7 +130,6 @@ class NodeCommands:
             return {"command": json.loads(payload), "duplicate": False, "effect_established": False}
 
     def poll(self, session_id: UUID, credential: str) -> dict:
-        self.sessions.require_enabled()
         # Locate the relevant gate without taking lower-level locks. Recheck every
         # frozen command after both gate and session locks have been acquired.
         with self.sessions.db.transaction() as conn:

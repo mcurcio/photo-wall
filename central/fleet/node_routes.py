@@ -69,7 +69,7 @@ def _operator_reboot(raw: bytes) -> OperatorReboot:
 
 
 def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
-                      admin: Callable[..., None], coordinator: Coordinator, config: NodeControlConfig | None = None,
+                      admin: Callable[..., None], coordinator: Coordinator, config: NodeControlConfig,
                       serving_verifier: ServingImageVerifier | None = None,
                       content: ContentServices | None = None) -> None:
     sessions = NodeSessions(db, clock, config)
@@ -119,7 +119,6 @@ def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
 
     async def body(request: Request, limit: int) -> bytes:
         """Bound streamed content even when Content-Length is absent or dishonest."""
-        sessions.require_enabled()
         declared = request.headers.get("content-length")
         if declared is not None and declared.isdigit() and int(declared) > limit:
             raise NodeControlError("node_body_too_large", 413)
@@ -132,8 +131,7 @@ def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
 
     @app.get("/v1/operator/node/status", dependencies=[Depends(admin)])
     async def node_status():
-        return {"transport_enabled": config is not None,
-                "installation_audience": config.installation_audience if config else None,
+        return {"installation_audience": config.installation_audience,
                 "effect_gate": await invoke(effect_gate.status),
                 "command_qualification": "requires_current_scope_and_serving_image_evidence",
                 "physical_qualification": "not_established_by_server_startup"}
@@ -306,7 +304,6 @@ def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
 
     @app.get("/v2/node/commands")
     async def poll(request: Request):
-        sessions.require_enabled()
         return await invoke(commands.poll, *_credentials(request))
 
     @app.post("/v1/operator/node/devices/{device_id}/reboots", dependencies=[Depends(admin)])

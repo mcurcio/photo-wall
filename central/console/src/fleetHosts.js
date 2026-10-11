@@ -6,9 +6,8 @@ import { usePolledRead } from "./polledRead.js";
 
 /**
  * The fleet host read (console DDD §63 G12): ONE read of `GET /v1/operator/node/hosts`, every
- * 15 s while the tab is visible, mounted once in the Shell and skipped until the shell's node
- * status read says node control is on (Shell.jsx says why that is stricter than
- * `nodeReadsAllowed`). It serves each active box's current-boot Host
+ * 15 s while the tab is visible, mounted once in the Shell and skipped until sign-in is
+ * confirmed (Shell.jsx). It serves each active box's current-boot Host
  * Management sample, the previous boot's receipt, whether Central's observation intake for the
  * box is full today, Central's read time and Central's numbers-only thresholds. hostHealth.js
  * `classifyHost` is the one judge of it, and hostHealth.js `hostRow` finds one box in it
@@ -28,7 +27,7 @@ const CADENCE_MS = 15000;
 const NOT_READ = Object.freeze({ read: null, failed: false, error: null });
 
 /**
- * @param {{skip?: boolean}} [options] `skip` reads nothing (signed out, node reads not allowed)
+ * @param {{skip?: boolean}} [options] `skip` reads nothing (sign-in not confirmed)
  * @returns {FleetHosts}
  */
 export function useFleetHosts({ skip = false } = {}) {

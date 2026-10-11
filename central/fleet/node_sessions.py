@@ -102,13 +102,8 @@ def command_eligibility_in(conn, offer_id: UUID) -> tuple[bool, str]:
 
 
 class NodeSessions:
-    def __init__(self, db: Database, clock: Clock, config: NodeControlConfig | None):
+    def __init__(self, db: Database, clock: Clock, config: NodeControlConfig):
         self.db, self.clock, self.config = db, clock, config
-
-    def require_enabled(self) -> NodeControlConfig:
-        if self.config is None:
-            raise NodeControlError("node_control_disabled", 503)
-        return self.config
 
     def lock_device_generation_in(self, conn, device_id: str) -> int:
         lock_fleet_assets_in(conn)
@@ -181,7 +176,7 @@ class NodeSessions:
         return replace(grant, command_eligible=eligible, command_reason=reason)
 
     def enroll(self, claim: NodeSessionClaim) -> NodeSessionGrant:
-        config = self.require_enabled()
+        config = self.config
         serial = sanitize_serial(claim.serial)
         device_id = device_id_for_serial(serial)
         if serial != claim.serial or device_id is None:
@@ -247,7 +242,6 @@ class NodeSessions:
 
     def authenticate_in(self, conn, session_id: UUID, credential: str, *,
                         allow_historical: bool = False) -> NodePrincipal:
-        self.require_enabled()
         try:
             digest(credential)
         except ValueError as exc:
@@ -266,7 +260,7 @@ class NodeSessions:
         return self._load_session_in(conn, session_id, allow_historical=False)[0]
 
     def _load_session_in(self, conn, session_id: UUID, *, allow_historical: bool):
-        config = self.require_enabled()
+        config = self.config
         started, monotonic = _clock_sample(self.clock)
         # Read only to locate owning device, then re-read under canonical locks.
         located = conn.execute("SELECT device_id FROM node_sessions WHERE session_id=%s",

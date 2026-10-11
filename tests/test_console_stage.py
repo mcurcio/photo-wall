@@ -121,7 +121,7 @@ out.results = Object.fromEntries([
   ["node_app_operator_target_changed", 403], ["node_session_unavailable", 403], ["node_session_superseded", 403],
   ["node_deployment_unknown", 404], ["node_environment_unknown", 404], ["node_app_operation_identity_conflict", 409],
   ["rollout_gate_closed", 503], ["rollout_serving_verifier_unavailable", 503], ["rollout_measured_evidence_expired", 503],
-  ["bound_switch_policy_unselected", 409], ["node_control_disabled", 503], ["node_app_stage_invalid", 422],
+  ["bound_switch_policy_unselected", 409], ["node_app_stage_invalid", 422],
 ].map(([code, status]) => [code, result(status, code)]));
 out.results.gateClosedWhileShellOpen = stage.stageResult({ ok: false, status: 503, error: "rollout_gate_closed" }, open);
 out.results.gateway = stage.stageResult({ ok: false, status: 502, error: null }, open);
@@ -242,8 +242,8 @@ def test_every_stage_code_maps_to_its_words_and_an_unlisted_one_is_refused():
         "Central refused the effect: rollout_serving_verifier_unavailable.")
     assert refused["rollout_measured_evidence_expired"] == (
         "Central refused the effect: rollout_measured_evidence_expired.")
-    # Unlisted, including the deleted G6 code and node_control_disabled: the default, refused.
-    for code in ("bound_switch_policy_unselected", "node_control_disabled", "node_app_stage_invalid"):
+    # Unlisted, including the deleted G6 code: the default, refused.
+    for code in ("bound_switch_policy_unselected", "node_app_stage_invalid"):
         assert refused[code] == f"Central refused: {code}."
     assert results["gateClosedWhileShellOpen"]["message"] == (
         "Effect gate closed: its reason is not readable here (see Releases › Effect gate).")

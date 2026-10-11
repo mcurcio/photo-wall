@@ -13,7 +13,7 @@ import {
 } from "./fleetCommands.js";
 import { frameHealth } from "./health.js";
 import { liveRunsFor } from "./join.js";
-import { effectGateFact, NodeRecords, nodeReadsAllowed, useNodeControlValue } from "./nodeControl.js";
+import { effectGateFact, useNodeControlValue } from "./nodeControl.js";
 import { currentSessionBoot, useNodeDevice } from "./nodeRead.js";
 import { playerPageHref } from "./players.js";
 import { QualifiedFallback } from "./QualifiedFallback.jsx";
@@ -156,8 +156,7 @@ function KeepProbe({ entry, active, register, onRead }) {
  */
 function Journey({ tag, tried, skippedIds, snapshot, bootFacts, navigate, say, message, withdrawnBy, withdraw }) {
   const control = useNodeControlValue();
-  const allowed = nodeReadsAllowed(control);
-  const releases = useReleaseRead({ skip: !allowed });
+  const releases = useReleaseRead();
   const heldStage = useHeldStage();
   const { open, confirmation } = useConfirm(null);
   const read = releases.read;
@@ -165,7 +164,7 @@ function Journey({ tag, tried, skippedIds, snapshot, bootFacts, navigate, say, m
   const selected = target !== null && target.deploymentId !== null && read.selection?.deployment_id === target.deploymentId;
   const plan = keepPlan(snapshot, bootFacts, tried);
   const triedEntry = tried == null ? null : plan.find((entry) => entry.playerId === tried && entry.frames.length > 0) ?? null;
-  const triedNode = useNodeDevice(triedEntry?.deviceId ?? "none", { skip: !allowed || triedEntry === null || selected });
+  const triedNode = useNodeDevice(triedEntry?.deviceId ?? "none", { skip: triedEntry === null || selected });
 
   const [memory, setMemory] = useState({ sampling: false, qualified: false, needQualify: false, refusals: 0,
     backingOut: false, stageId: null });
@@ -757,10 +756,8 @@ export function UpdateWallPage({ tag, tried, skipped, snapshot, bootFacts, navig
         <p><a href={RELEASES}>Releases</a></p>
         <h2 className="player__name">{`Update the wall with release ${tag}`}</h2>
       </header>
-      <NodeRecords>
-        <Journey key={tried ?? ""} tag={tag} tried={tried} skippedIds={skipped} snapshot={snapshot} bootFacts={bootFacts} navigate={navigate}
-          say={setMessage} message={message} withdrawnBy={withdrawn} withdraw={setWithdrawn} />
-      </NodeRecords>
+      <Journey key={tried ?? ""} tag={tag} tried={tried} skippedIds={skipped} snapshot={snapshot} bootFacts={bootFacts} navigate={navigate}
+        say={setMessage} message={message} withdrawnBy={withdrawn} withdraw={setWithdrawn} />
     </div>
   );
 }

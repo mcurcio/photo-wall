@@ -1,7 +1,7 @@
 """Fleet › Releases against Central's real release read and writes (console DDD Part E §25-§28,
 beads NR1, NR2 and B7).
 
-The production app on the loopback harness with node control on. The release catalog is filled
+The production app on the loopback harness. The release catalog is filled
 the way the media worker fills it (GitHub releases, through a mock transport, ingested into its
 deployment by Central itself), and Select runs Central's real compare-and-set. It proves: an
 observed release is listed with its own deployment ("From release"), with no Publish anywhere,
@@ -9,8 +9,7 @@ and its row's one verb opens Update the wall for it; each row's readiness, Rejec
 and "Newer upload rejected" facts, and the first-run empty state, read as the design says;
 that Select's one send rule judges the newest read (a dialog frozen before another page's
 selection sends no PUT), that Central's 409 and a lost answer read as the design says; that an
-unlisted code is refused and nothing is re-sent; and (NV1) that a Central without node control
-shows one "not shown" line here and is sent no release read. Check GitHub releases now sends one
+unlisted code is refused and nothing is re-sent. Check GitHub releases now sends one
 POST while unanswered and claims no release; and the Effect gate section shows Central's reason
 and an open gate's generation.
 
@@ -25,7 +24,7 @@ from hashlib import sha256
 from uuid import uuid4
 
 import pytest
-from console_tasks import connect, go
+from console_tasks import connect
 from operator_harness import RequestGate, operator_server, run_page_clock
 from playwright.sync_api import expect
 from test_fleet_attempts import BOOT_ID, SERIAL
@@ -47,7 +46,6 @@ pytestmark = pytest.mark.skipif(
 PAUSED_AT = 1_759_363_200  # the page clock: release reads run only when the test runs it
 RELEASE_READ = "/v1/operator/node/releases"
 CHANGED = "The boot selection changed meanwhile; review it."
-NOT_SHOWN = "Node records are not shown: node management is off (see the banner)."
 
 
 def _writes(page, method, fragment):
@@ -270,18 +268,6 @@ def test_an_unlisted_code_reads_refused_and_nothing_is_resent(page, registry):
         _read_once(page)
         _read_once(page)
         assert len(puts) == 1
-
-
-def test_without_node_control_releases_shows_one_line_and_reads_nothing(page, registry):
-    with operator_server(registry.db, registry.clock, node_control=None) as origin:
-        reads = []
-        page.on("request", lambda request: reads.append(request.url) if RELEASE_READ in request.url else None)
-        connect(page, origin, "releases")
-        expect(page.get_by_text(NOT_SHOWN)).to_have_count(1)
-        go(page, "hardware")
-        go(page, "releases")
-        expect(page.get_by_text(NOT_SHOWN)).to_have_count(1)
-        assert reads == []
 
 
 # --- NR2: Releases complete.

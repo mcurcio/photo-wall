@@ -415,38 +415,31 @@ def test_default_gate_cannot_mint_reboot(registry):
         assert conn.execute("SELECT count(*) AS n FROM node_reboot_commands").fetchone()["n"] == 0
 
 
-def test_mounted_routes_enabled_by_default_and_disabled_only_when_asked(registry):
+def test_the_default_app_serves_node_routes_with_the_one_audience_and_keeps_gate_closed(registry):
+    """Node control is not a mode: the default composition serves the node path."""
     _, offer = node_offer(registry, NodeControlConfig())
     claim = NodeSessionClaim(SERIAL, offer.offer_id, BOOT_ID, "host_core", uuid4(), uuid4(),
                              "d" * 64)
-    # An explicit None still builds the disabled branch (A3 deletes it).
-    app = create_app(registry.db, registry.clock, ADMIN, node_control=None)
-    with TestClient(app) as client:
-        response = client.post("/v2/node/sessions", content=encode_session_claim(claim))
-        assert response.status_code == 503
-        assert response.headers["cache-control"] == "private, no-store"
     app = create_app(registry.db, registry.clock, ADMIN)
     assert app.state.node_sessions.config == NodeControlConfig(NODE_AUDIENCE)
     assert NODE_AUDIENCE == "photo-wall"
     with TestClient(app) as client:
         response = client.post("/v2/node/sessions", content=encode_session_claim(claim))
         assert response.status_code == 200, response.text
+        assert response.headers["cache-control"] == "private, no-store"
         grant = parse_session_grant(response.content)
         headers = {"Authorization": "Bearer " + claim.credential, "X-Node-Session": str(grant.session_id)}
         assert grant.command_eligible and grant.command_reason == "boot_admitted_rollout_required"
         assert client.get("/v2/node/commands", headers=headers).json() == {"commands": []}
         assert client.post("/v2/node/evidence", content=b"{}", headers=headers).status_code == 422
         assert client.post("/v2/node/observations", content=b"x" * 20000, headers=headers).status_code == 413
-
-
-def test_alias_factory_builds_the_default_config_ignores_audience_env_and_keeps_gate_closed(
-        registry, monkeypatch):
-    from central.node_app import create_app as create_node_app
-    default = create_app(registry.db, registry.clock, ADMIN).state.node_sessions.config
-    monkeypatch.delenv("PHOTO_WALL_NODE_AUDIENCE", raising=False)
-    app = create_node_app(db=registry.db, clock=registry.clock, admin_token=ADMIN)
-    assert app.state.node_sessions.config == default == NodeControlConfig(NODE_AUDIENCE)
-    monkeypatch.setenv("PHOTO_WALL_NODE_AUDIENCE", "node-factory-test")
-    app = create_node_app(db=registry.db, clock=registry.clock, admin_token=ADMIN)
-    assert app.state.node_sessions.config.installation_audience == NODE_AUDIENCE
+        status = client.get("/v1/operator/node/status", headers={"Authorization": "Bearer " + ADMIN}).json()
+        assert "transport_enabled" not in status and status["installation_audience"] == NODE_AUDIENCE
     assert RolloutEffectGate(registry.db).status()["state"] == "closed"
+
+
+def test_the_default_app_reads_the_deployment_verifier_config(registry, monkeypatch, tmp_path):
+    """The deployment's verifier comes from PHOTO_WALL_NODE_VERIFIER_CONFIG on the one factory."""
+    monkeypatch.setenv("PHOTO_WALL_NODE_VERIFIER_CONFIG", str(tmp_path / "verifier.json"))
+    with pytest.raises(ValueError, match="configured and injected node verifier conflict"):
+        create_app(registry.db, registry.clock, ADMIN, node_serving_verifier=object())

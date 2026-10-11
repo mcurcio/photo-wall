@@ -112,7 +112,6 @@ class NodeLifecycle:
         gate.ensure_current_in(conn)
 
     def stage(self, device_id: str, request: OperatorAppStage) -> dict:
-        self.sessions.require_enabled()
         canonical = json.dumps({"device_id": device_id, **asdict(request)}, default=str,
                                sort_keys=True, separators=(",", ":")).encode()
         request_hash = sha256(canonical).hexdigest()
@@ -184,7 +183,6 @@ class NodeLifecycle:
 
     def desired(self, session_id: UUID, credential: str, *, effects: bool = False) -> dict:
         """The latest stage for this device is desired; an earlier boot's stage is not."""
-        self.sessions.require_enabled()
         with self.sessions.db.transaction() as conn:
             located = conn.execute("SELECT rollout_generation FROM node_app_operations o JOIN node_sessions s "
                 "ON s.device_id=o.device_id AND s.device_generation=o.device_generation WHERE s.session_id=%s "
@@ -296,7 +294,6 @@ class NodeLifecycle:
         `qualification` (console DDD Part E G4) serves what a qualification would observe and
         what earlier ones recorded; whether an acceptance fits is `_qualified_fallback_in`'s
         judgement at stage time, never this read's."""
-        self.sessions.require_enabled()
         with self.sessions.db.transaction() as conn:
             generation = self.sessions.lock_device_generation_in(conn, device_id)
             now = self.sessions.clock.utc()

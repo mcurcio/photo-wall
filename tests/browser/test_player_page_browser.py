@@ -17,11 +17,10 @@ and (NS1, Part E) Stage app against Central's real stage owner: a Frame-bound Pl
 Ended by a later boot, a switch in progress refuses a stale dialog with zero POSTs, a lost answer
 resends the identical body, and refusals read in Central's words;
 and (NS2, Part E) Qualified fallback: Begin names the linked app, this page samples every 2 s
-only while visible, stops with zero further samples on a terminal, unlisted or
-node_control_disabled answer and after 2 minutes without progress, and a qualification Central
+only while visible, stops with zero further samples on a terminal or unlisted answer and
+after 2 minutes without progress, and a qualification Central
 accepts is listed and admits a following Stage as its fallback;
-and (NV1, Part E) the V2 posture: a Central without node control shows one banner, one "not
-shown" line and sends no node read; the Boot section holds node records only; the effect gate
+and (NV1, Part E) the V2 posture: the Boot section holds node records only; the effect gate
 comes from the shell's one status read.
 
 Every assertion is behavioural (role, text, outcome); ages are Central's read time minus
@@ -80,11 +79,6 @@ pytestmark = pytest.mark.skipif(
 NODE = NodeControlConfig("node-test")
 NAME = f"Player …{SERIAL[-6:]}"
 DEVICE_READ = f"**/v1/operator/node/devices/{DEVICE_ID}"
-BANNER = ("Node management is off on this Central. It was started without node control: Players "
-          "that boot by node path are refused, and node records, Reboot, App operations and Releases "
-          "have nothing to read. Start Central with central.node_app and set PHOTO_WALL_NODE_AUDIENCE "
-          "(runbook › Node control).")
-NOT_SHOWN = "Node records are not shown: node management is off (see the banner)."
 STATUS_READ = "/v1/operator/node/status"
 HOSTS_READ = "/v1/operator/node/hosts"
 
@@ -281,76 +275,13 @@ def test_a_malformed_read_blanks_one_section_only(page, registry):
         expect(hardware_list(page).get_by_role("link", name=NAME, exact=True)).to_be_visible()
 
 
-def test_with_node_control_off_one_banner_one_line_no_node_reads_and_the_page_works(page, registry):
-    identity, _, request = enroll(registry, count=2)
-    player_id = identity["player_id"]
-    registry.create_frame(FrameCreate(id="off-1", surface_id="wall", x_mm=100, y_mm=100, width_mm=400,
-                                      height_mm=300, profile=FrameProfile(width_px=1920, height_px=1080,
-                                                                          diagonal_inches=24)))
-    page.route(f"**/v1/operator/players/{player_id}/outputs/HDMI-A-2/identify", lambda route: route.fulfill(
-        status=202, content_type="application/json", body=json.dumps({
-            "request_id": "synthetic-request", "output_id": "HDMI-A-2",
-            "expires_at": registry.clock.utc() + 15})))
-    name = f"Player {request.device_id}"
-    with operator_server(registry.db, registry.clock, node_control=None) as origin:
-        sent = _node_reads(page)
-        host_reads = []
-        page.on("request", lambda request: host_reads.append(request.url)
-                if HOSTS_READ in request.url else None)
-        connect(page, origin)
-        banner = page.get_by_role("region", name="Node control", exact=True)
-        expect(banner).to_have_text(BANNER)
-        expect(banner).to_have_count(1)
-        pi = open_pi(page, name)
-        expect(banner).to_have_count(1)
-        # In place of each page's node sections, exactly one line.
-        expect(pi.get_by_text(NOT_SHOWN, exact=True)).to_have_count(1)
-        for section in ("Health", "Link and sessions", "Reboot"):
-            expect(page.get_by_role("region", name=section, exact=True)).to_have_count(0)
-        expect(pi).not_to_contain_text("Unknown: node management")
-        _software(page, name)
-        player = page.locator("main > section:not([hidden])")
-        expect(player.get_by_text(NOT_SHOWN, exact=True)).to_have_count(1)
-        for section in ("Layers", "Boot", "App"):
-            expect(page.get_by_role("region", name=section, exact=True)).to_have_count(0)
-        expect(player).not_to_contain_text("Unknown: node management")
-        # Identify, Bind, Unbind and Retire still work.
-        outputs = page.get_by_role("list", name=f"Outputs of {name}", exact=True)
-        outputs.get_by_role("button", name="Identify Panel HDMI-A-2", exact=True).click()
-        expect(outputs.get_by_role("status")).to_contain_text("Identify requested for HDMI-A-2.")
-        page.get_by_role("combobox", name=f"Frame for {player_id[-6:]} · HDMI-A-1 · Free", exact=True
-                         ).select_option("off-1")
-        outputs.get_by_role("button", name="Bind HDMI-A-1", exact=True).click()
-        expect(page.get_by_role("heading", level=1, name="Frame off-1", exact=True)).to_be_visible()
-        assert registry.inventory().frames[0].player_id == player_id
-        player = open_player(page, name)
-        player.get_by_role("button", name=f"Unbind all outputs of {player_id}", exact=True).click()
-        dialog = page.get_by_role("dialog")
-        dialog.get_by_role("button", name="Confirm unbind all", exact=True).click()
-        expect(dialog.get_by_role("status")).to_have_text("1 of 1 unbound")
-        assert registry.inventory().frames[0].player_id is None
-        dialog.get_by_role("button", name="Close", exact=True).click()
-        # Retire lives on the Pi's Hardware page.
-        pi = open_pi(page, name)
-        pi.get_by_role("button", name=f"Retire player {player_id}", exact=True).click()
-        dialog = page.get_by_role("dialog")
-        dialog.get_by_label(f"Type {player_id[-6:]} to confirm", exact=True).fill(player_id[-6:])
-        dialog.get_by_role("button", name="Confirm retire", exact=True).click()
-        expect(pi).to_contain_text("Standing: Retired")
-        page.wait_for_timeout(300)
-        assert sent == [], "a node read was sent to a Central without node control"
-        assert host_reads == [], "the shell read fleet hosts from a Central without node control"
-
-
-def test_with_node_control_on_there_is_no_banner_and_the_player_page_reads_no_status_itself(
-        page, registry):
+def test_the_player_page_reads_no_node_status_itself(page, registry):
     box = Box(registry)
     box.host_sample()
     with operator_server(registry.db, registry.clock, node_control=NODE) as origin:
         status = _status_reads(page)
         connect(page, origin)
         expect(page.get_by_role("heading", level=1)).to_be_visible()
-        expect(page.get_by_role("region", name="Node control", exact=True)).to_have_count(0)
         go(page, "hardware")
         page.wait_for_timeout(200)
         shell_reads = len(status)
@@ -365,7 +296,6 @@ def test_with_node_control_on_there_is_no_banner_and_the_player_page_reads_no_st
         with page.expect_response(DEVICE_READ, timeout=10_000):
             pass
         assert len(status) == shell_reads, "the Player page read node status itself"
-        expect(page.get_by_role("region", name="Node control", exact=True)).to_have_count(0)
 
 
 def test_the_boot_section_holds_node_records_only(page, registry):
@@ -1118,7 +1048,7 @@ def test_begin_names_the_linked_app_and_samples_every_two_seconds_only_while_vis
 @pytest.mark.parametrize("status, code, words", [
     (409, "node_qualification_process_changed", "Stopped: the Player app's linked process changed or unlinked."),
     (409, "node_something_new", "Stopped: Central refused: node_something_new."),
-    (503, "node_control_disabled", "Stopped: Central refused: node_control_disabled."),
+    (503, "rollout_gate_missing", "Stopped: Central refused: rollout_gate_missing."),
 ])
 def test_a_terminal_or_unlisted_sample_answer_stops_sampling_with_zero_further_posts(
         page, registry, status, code, words):

@@ -304,10 +304,6 @@ def test_g12_route_access(registry):
         response = client.get("/v1/operator/node/hosts", headers={"Authorization": "Bearer " + ADMIN})
         assert response.status_code == 200, response.text
         assert _device(response.json())["host"]["metrics"][0]["name"] == "soc_temperature"
-    app = create_app(registry.db, registry.clock, ADMIN, node_control=None)  # A3 deletes this half
-    with TestClient(app) as client:
-        response = client.get("/v1/operator/node/hosts", headers={"Authorization": "Bearer " + ADMIN})
-        assert response.status_code == 503 and response.json()["error"] == "node_control_disabled"
 
 
 def test_g12_reads_one_producers_newest_sample_through_the_primary_key(registry):

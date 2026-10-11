@@ -12,12 +12,10 @@ import { usePolledRead } from "./polledRead.js";
  * open — `GET …/node/devices/<id>` (its sessions, host samples, preparation, broker
  * projection, Display Host's newest exchange per Output, boot claims and reboot audit) and
  * `GET …/node/devices/<id>/app-attempts` (its app operations) — every `cadenceMs` through
- * the shared polled read (polledRead.js), never for a retired box and never while node
- * control is off (`skip`). The effect gate is NOT read here: the shell's node status read is
+ * the shared polled read (polledRead.js), never for a retired box (`skip`). The effect gate is NOT read here: the shell's node status read is
  * its one source (nodeControl.js). Like the fleet host read it goes through
  * `apiWrite(path, {method: "GET"})`, so a failure never touches the session. A failed read
- * KEEPS the last values and reports its error beside them; a read refused
- * `node_control_disabled` is such a failure, until the shell's read raises the banner.
+ * KEEPS the last values and reports its error beside them.
  *
  * THE MODEL (`layerEvidence`, `currentSessionBoot`, `processFacts`): pure functions from
  * that read and the snapshot to facts (facts.js). A field that is null or absent renders
@@ -55,8 +53,8 @@ export function readError(result) {
  * Read one box's node records while its Player page is open.
  *
  * @param {string} deviceId
- * @param {{cadenceMs?: number, skip?: boolean}} [options] `skip` (a retired box, node control
- *   not on) reads nothing
+ * @param {{cadenceMs?: number, skip?: boolean}} [options] `skip` (a retired box, an unknown
+ *   one) reads nothing
  * @returns {NodeDevice & {refresh: () => Promise<void>, latest: () => NodeDevice}} `refresh`
  *   reads now (after a write); `latest` returns the newest read at call time, so a send
  *   judges what arrived even before React re-renders (fleetCommands.js `sendReboot`)
