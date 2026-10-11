@@ -3,6 +3,7 @@ import React, { useId } from "react";
 import { draftId, idFromName, PLAYBACK_LABELS } from "./authoring.js";
 import { CycleField, LoopField } from "./CycleInput.jsx";
 import { Field, IdField, idNeeded, NameField } from "./Field.jsx";
+import { SourceCheckProblem } from "./domain/source-check-problem.tsx";
 import { Advanced } from "./flow/Advanced.jsx";
 import { CheckAnswers, NotChosen } from "./flow/CheckAnswers.jsx";
 import { candidateLabels, sourceState } from "./mediaHealth.js";
@@ -375,7 +376,9 @@ function ChosenSource({ sourceRef, source, now, check, onRemove }) {
   const receipt = source === null ? null : sourceCheckMessage(check.feedback[sourceRef], source.check);
   return (
     <li aria-label={name}>
-      <p><strong>{name}</strong>{`: ${state?.label ?? "No longer current: choose a current Source"}`}</p>
+      {state?.state === "failed"
+        ? <SourceCheckProblem name={name} check={source.check} />
+        : <p><strong>{name}</strong>{`: ${state?.label ?? "No longer current: choose a current Source"}`}</p>}
       {source !== null && <PoolReadiness sourceRef={sourceRef} />}
       {receipt !== null && <p role="status">{receipt}</p>}
       <div className="record__actions">

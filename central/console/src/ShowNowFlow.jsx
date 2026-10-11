@@ -4,6 +4,8 @@ import { apiWrite } from "./apiWrite.js";
 import { activationProblems } from "./authoring.js";
 import { useConfirm } from "./ConfirmAction.jsx";
 import { PriorityField, useProblems } from "./Field.jsx";
+import { SourceCheckProblem } from "./domain/source-check-problem.tsx";
+import { CHECK_FAILED } from "./sourceWords.js";
 import { Advanced } from "./flow/Advanced.jsx";
 import { CheckAnswers, NotChosen } from "./flow/CheckAnswers.jsx";
 import { FlowFrame } from "./flow/FlowFrame.jsx";
@@ -429,19 +431,27 @@ function ReviewStep({
 function SceneSources({ snapshot, refs, authoredMedia }) {
   const sources = snapshot?.media?.sources ?? [];
   const now = mediaNow(snapshot);
-  const words = refs.map((ref) => {
-    const source = sources.find((candidate) => candidate.source_ref === ref) ?? null;
-    const state = source === null ? "its state is not served" : sourceState(source, now).label;
-    return `${sourceName(source ?? ref)} (${state})`;
+  const chosen = refs.map((ref) => sources.find((candidate) => candidate.source_ref === ref) ?? null);
+  const words = refs.map((ref, index) => {
+    const source = chosen[index];
+    const state = source === null ? null : sourceState(source, now);
+    // A failed check is said once, as its problem below (SourceCheckProblem).
+    const label = state === null ? "its state is not served" : state.state === "failed" ? CHECK_FAILED : state.label;
+    return `${sourceName(source ?? ref)} (${label})`;
   });
   return (
-    <dl className="record" aria-label="Photos from">
-      <dt>Photos from</dt>
-      <dd>
-        {refs.length > 0 ? words.join(", ")
-          : authoredMedia ? "Hand-picked photos" : "No Photo source"}
-      </dd>
-    </dl>
+    <>
+      <dl className="record" aria-label="Photos from">
+        <dt>Photos from</dt>
+        <dd>
+          {refs.length > 0 ? words.join(", ")
+            : authoredMedia ? "Hand-picked photos" : "No Photo source"}
+        </dd>
+      </dl>
+      {chosen.map((source, index) => source !== null && (
+        <SourceCheckProblem key={refs[index]} name={sourceName(source)} check={source.check} />
+      ))}
+    </>
   );
 }
 

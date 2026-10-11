@@ -1,4 +1,4 @@
-import { captureDay, countWords, sinceTime } from "./timeWords.js";
+import { captureDay, countText, countWords, sinceTime } from "./timeWords.js";
 
 /**
  * A Photo source in words (roadmap 4): one home for what its query includes and for its check's
@@ -24,9 +24,40 @@ export function checkTime(at, now) {
 }
 
 export const PHOTOS_KEEP_PLAYING = "Photos keep playing.";
+
+/**
+ * Who produced each failure, the one table (owner, 2026-10-09: "If Immich rejects the grants on
+ * the API key, then its an 'immich' error. But if photo wall is rejecting sources that produce
+ * more than 1000 photos, then its a 'photo wall' error"): a failed check's `problem` and a left-out
+ * photo's `reason` (central/photo_library/model.py `SourceProblem`, `LeftOutReason`). Each
+ * failure's words below name their code's origin from here, never on their own.
+ */
+export const ORIGINS = Object.freeze({
+  connection: "Immich",           // the connection's health says which part of Immich
+  chosen_item_gone: "Immich",     // deleted in Immich
+  unreadable_answer: "Immich",    // Immich's answer for the photo did not parse
+  over_item_limits: "Photo Wall", // Photo Wall's pixel, byte or video-length limits
+});
+
 export const FAILED_WORDS = {
-  connection: "Immich could not be read: see Photo library",
-  chosen_item_gone: "An album, person or tag in this Source was deleted in Immich",
+  connection: `${ORIGINS.connection} could not be read: see Photo library`,
+  chosen_item_gone: `An album, person or tag in this Source was deleted in ${ORIGINS.chosen_item_gone}`,
+};
+
+/** A failed check's "what" sentence, naming its origin: "Immich could not be read: see Photo library." */
+export function failedWords(check) {
+  return `${FAILED_WORDS[check?.problem] ?? "The last check failed"}.`;
+}
+
+/** A failed check's chip: the error template's short verdict (its sentence follows it). */
+export const CHECK_FAILED = "Check failed";
+
+/** Why photos were left out of a pool, each naming who refused them (ORIGINS). */
+export const LEFT_OUT_WORDS = {
+  unreadable_answer: (count) =>
+    `${countText(count)} could not be read: ${ORIGINS.unreadable_answer} sent an answer Photo Wall can't read`,
+  over_item_limits: (count) =>
+    `${countText(count)} ${count === 1 ? "is" : "are"} over ${ORIGINS.over_item_limits}'s size limits`,
 };
 export const INCOMPLETE_WORDS = "Checked part of it: more than 1,000 photos share one moment";
 
@@ -50,11 +81,7 @@ export function checkWords(check, now) {
     case "incomplete":
       return { state: "incomplete", severity: "notice", label: INCOMPLETE_WORDS };
     case "failed":
-      return {
-        state: "failed",
-        severity: "notice",
-        label: `${FAILED_WORDS[check.problem] ?? "The last check failed"}. ${PHOTOS_KEEP_PLAYING}`,
-      };
+      return { state: "failed", severity: "notice", label: `${failedWords(check)} ${PHOTOS_KEEP_PLAYING}` };
     default:
       return { state: "unknown", severity: "unknown", label: "Its check was not served" };
   }
