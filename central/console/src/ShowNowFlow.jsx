@@ -322,7 +322,7 @@ function SceneFit({ sceneId, scene, sourceRefs, frames }) {
     selection: { sources: sourceKey.split("\n") }, frames: frameKey.split("\n"), crop_limit: cropLimit,
   }), [sourceKey, frameKey, cropLimit]);
   return (
-    <FitBoardFor question={question} size="line" title={`How ${sceneId}'s photos fit its Frames`}
+    <FitBoardFor question={question} size="strip" lead="wall" title={`How ${sceneId} fills its Frames`}
       judged={(analysis) => `At ${cropLimit === null ? "the house crop limit" : "the Scene's crop limit"}, ${percentWords(analysis.crop_limit)}.`} />
   );
 }

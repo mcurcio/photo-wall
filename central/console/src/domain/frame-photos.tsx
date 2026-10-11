@@ -48,8 +48,8 @@ function SceneRow({ snapshot, frameId, scene }: { snapshot: object | null; frame
       <OwnerLinks label={`Scene “${scene.sceneId}” · ${relationWords(snapshot, frameId, scene.sceneId)}`} links={[
         { text: "Edit Scene", href: formatRoute({ section: "scenes", id: scene.sceneId, flow: "edit", step: "review" }) },
       ]} />
-      <FitBoardFor question={question} size="compact" judged={judged}
-        title={`How Scene ${scene.sceneId}'s photos fit this Frame`} />
+      <FitBoardFor question={question} size="compact" named={false} judged={judged}
+        title={`What this Frame gets from Scene ${scene.sceneId}`} />
     </Stack>
   );
 }
@@ -113,7 +113,7 @@ function DraftLine({ scene, frameId, profile, calibration }: {
     };
   }, [scene, frameId, key]);
   return (
-    <FitBoardFor question={question} size="line"
+    <FitBoardFor question={question} size="line" lineOutput named={false}
       title={`Scene ${scene.sceneId} on this Frame, as you are setting it`} />
   );
 }

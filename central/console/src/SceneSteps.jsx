@@ -24,8 +24,9 @@ import { PhotoFitBoard } from "./domain/photo-fit-board.tsx";
 function SceneFitBoard({ fit, size }) {
   if (!fit) return null;
   return (
-    <PhotoFitBoard read={fit.read} size={size} judged={fit.judged} rescue={fit.rescue}
-      heading="How these photos fit the Frames" title="How these photos fit the Frames" />
+    <PhotoFitBoard read={fit.read} size={size} lead="wall" judged={fit.judged} rescue={fit.rescue}
+      heading={size === "strip" ? undefined : "How this Scene fills its Frames"}
+      title="How this Scene fills its Frames" />
   );
 }
 import { sourceCheckMessage } from "./useSourceCheck.js";
@@ -386,7 +387,7 @@ export function ReviewStep({
         </section>
       ))}
       </section>
-      {value.sourceRefs.length > 0 && <SceneFitBoard fit={fit} size="compact" />}
+      {value.sourceRefs.length > 0 && <SceneFitBoard fit={fit} size="strip" />}
       <SourceReadiness {...sourceReadiness} />
     </>
   );

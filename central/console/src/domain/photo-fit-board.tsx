@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import type * as React from "react";
 
 import type { CropView } from "../patterns/crop-thumb";
-import { FitBoard } from "../patterns/fit-board";
+import { FitBoard, type FitBoardLead } from "../patterns/fit-board";
 import type { ProblemAction } from "../patterns/problem-card";
 import {
   type BoardOptions,
@@ -46,7 +46,11 @@ export function fitLine(state: LoadState<FitAnalysis>, name?: (frameId: string) 
 
 export interface PhotoFitBoardProps extends BoardOptions {
   read: FitRead;
-  size: "full" | "compact" | "line";
+  size: "full" | "compact" | "strip" | "line";
+  /** What leads the board at this moment (patterns/fit-board.tsx `FitBoardLead`). */
+  lead?: FitBoardLead;
+  /** False when the host already names the Frame. */
+  named?: boolean;
   title?: string;
   /** A heading shown over the board ("Which Frames can show them"). */
   heading?: string;
@@ -62,14 +66,14 @@ export interface PhotoFitBoardProps extends BoardOptions {
  * builds its own question (what is being previewed is the host's, owner 2026-10-11); this is
  * the one place a read becomes a board.
  */
-export function PhotoFitBoard({ read, size, title, heading, action, collapse, ...options }: PhotoFitBoardProps) {
+export function PhotoFitBoard({ read, size, lead, named, title, heading, action, collapse, ...options }: PhotoFitBoardProps) {
   const [open, setOpen] = useState<{ sample: CropView; frameKey: string } | null>(null);
   const state = boardState(read.state, options);
   const answer = read.state.status === "ready" ? read.state.value
     : read.state.status === "failed" ? read.state.last : null;
   return (
     <>
-      <FitBoard state={state} size={size} title={title} heading={heading} action={action} collapse={collapse}
+      <FitBoard state={state} size={size} lead={lead} named={named} title={title} heading={heading} action={action} collapse={collapse}
         onShuffle={read.shuffle} onOpen={(sample, frameKey) => setOpen({ sample, frameKey })} />
       <PhotoSheet
         open={open !== null}
@@ -91,11 +95,12 @@ export interface FitBoardForProps extends Omit<PhotoFitBoardProps, "read"> {
 }
 
 /** A Fit board that reads its own question. */
-export function FitBoardFor({ question, live, tier, size, title, heading, action, collapse, name, href, judged, rescue }: FitBoardForProps) {
+export function FitBoardFor({ question, live, tier, size, lead, named, title, heading, action, collapse, name, href,
+  judged, rescue, lineOutput }: FitBoardForProps) {
   const read = useFitRead(question, { live, tier });
   return (
-    <PhotoFitBoard read={read} size={size} title={title} heading={heading} action={action} collapse={collapse}
-      name={name} href={href} judged={judged} rescue={rescue} />
+    <PhotoFitBoard read={read} size={size} lead={lead} named={named} title={title} heading={heading} action={action}
+      collapse={collapse} name={name} href={href} judged={judged} rescue={rescue} lineOutput={lineOutput} />
   );
 }
 

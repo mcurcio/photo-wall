@@ -45,6 +45,8 @@ export interface FrameFitView {
   checked: string | null;
   /** The pixels it is judged at, in words ("Frame output 1,512 × 1,008 px · on a 3,840 × 2,160 display"). */
   detail: string;
+  /** A short warning drawn under its tile on a wall ("Nothing fits", "Only 1 photo"), or null. */
+  alert: string | null;
   /** "Why 169 don't" and its reasons, or null when every photo fits. */
   why: { summary: string; reasons: readonly FitReason[] } | null;
   /** A badge for a Frame judged with unsaved values ("As you are setting it"), or null. */
@@ -66,6 +68,9 @@ export interface FrameFitRowProps {
   /** Its pictures dimmed: an older answer, while a newer one is read or after a failed read
    * (the words keep their contrast). */
   faded?: boolean;
+  /** False when its host already names the Frame (the Frame's own page): the row leads with its
+   * count, not the Frame's name and shape again. */
+  named?: boolean;
 }
 
 /** The bar's fills, in order: solid for what fits, then a neutral pattern per reason. Never a
@@ -153,7 +158,7 @@ function FitBar({ segments, label }: { segments: readonly FitSegment[]; label: s
  * bar of fits and refusals (neutral patterns, never a severity colour); in `full`, a few photos
  * cropped as it crops them; "Why N don't" opens the reasons, each with its photos.
  */
-export function FrameFitRow({ frame, size, onOpen, onFocus, action, faded = false }: FrameFitRowProps) {
+export function FrameFitRow({ frame, size, onOpen, onFocus, action, faded = false, named = true }: FrameFitRowProps) {
   const full = size === "full";
   const dim = faded ? "opacity-60" : "";
   const tile = (
@@ -170,15 +175,21 @@ export function FrameFitRow({ frame, size, onOpen, onFocus, action, faded = fals
           </button>
         ) : tile}
         <div className="flex min-w-0 flex-1 flex-col gap-1">
-          <div className="flex min-w-0 flex-wrap items-center gap-2">
-            <h4 className="m-0 text-base font-medium wrap-anywhere text-text">
-              {frame.href ? <Link href={frame.href}>{frame.name}</Link> : frame.name}
-            </h4>
-            <span className="text-sm text-muted">{frame.ratio}</span>
-            {frame.draft !== null && (
-              <span className="rounded-pill border border-line-input px-2.5 py-0.5 text-xs text-text">{frame.draft}</span>
-            )}
-          </div>
+          {named || frame.draft !== null ? (
+            <div className="flex min-w-0 flex-wrap items-center gap-2">
+              {named && (
+                <>
+                  <h4 className="m-0 text-base font-medium wrap-anywhere text-text">
+                    {frame.href ? <Link href={frame.href}>{frame.name}</Link> : frame.name}
+                  </h4>
+                  <span className="text-sm text-muted">{frame.ratio}</span>
+                </>
+              )}
+              {frame.draft !== null && (
+                <span className="rounded-pill border border-line-input px-2.5 py-0.5 text-xs text-text">{frame.draft}</span>
+              )}
+            </div>
+          ) : null}
           <p className="m-0 text-sm text-text tabular-nums">{frame.count}</p>
           <FitBar segments={frame.segments} label={`${frame.name}: fit and left off`} />
         </div>

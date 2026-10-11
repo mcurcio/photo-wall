@@ -293,8 +293,8 @@ export function PhotoSourcePage({ editing, forLabel, onSaved, onDiscard, onChang
               ]} />
             </Field>
           )}
-          <PhotoFitBoard read={fit} size="full" collapse={false} heading="Which Frames can show them"
-            title="Which Frames can show them" judged={judgedWords(judgingScene)} />
+          <PhotoFitBoard read={fit} size="full" lead="shapes" collapse={false}
+            title="What these photos are, and which Frames can show them" judged={judgedWords(judgingScene)} />
           <SourcePoolView view={view} pages={pool.pages} hasMore={pool.hasMore} onLoadMore={() => void pool.loadMore()}
             loadingMore={pool.loadingMore} error={pool.error} filters={filters} />
         </Stack>

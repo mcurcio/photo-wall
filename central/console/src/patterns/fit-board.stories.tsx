@@ -1,13 +1,15 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
 
 import { type FitBoardState, FitBoard } from "./fit-board";
-import { ALL_FIT, EMPTY, NONE_FIT, READING, READY } from "./fit-board.fixtures";
+import { ALL_FIT, EMPTY, LIVING, NONE_FIT, READING, READY, THIN } from "./fit-board.fixtures";
 
 const STATES: Record<string, FitBoardState> = {
   loading: { status: "loading" },
   reading: { status: "ready", view: READING, updating: true },
   ready: { status: "ready", view: ALL_FIT, updating: false },
   partial: { status: "ready", view: READY, updating: false },
+  thin: { status: "ready", view: THIN, updating: false },
+  oneFrame: { status: "ready", view: { ...ALL_FIT, line: "1,520 of 1,689 fit living-room", frames: [LIVING] }, updating: false },
   noneFit: { status: "ready", view: NONE_FIT, updating: false },
   empty: { status: "ready", view: EMPTY, updating: false },
   cantTell: { status: "cant-tell", view: READY,
@@ -60,3 +62,16 @@ export const LineLoading: Story = { args: { size: "line", state: STATES.loading 
 export const LineEmpty: Story = { args: { size: "line", state: STATES.empty } };
 export const LineCantTell: Story = { args: { size: "line", state: STATES.cantTell } };
 export const LineError: Story = { args: { size: "line", state: STATES.error } };
+
+// --- Each moment's composition (owner, 2026-10-11: "preview is an idea, rather than a specific
+// widget. Because what is being previewed is context dependent").
+
+/** A Source being edited: what the selection holds (its shapes) first, then the Frames it feeds. */
+export const SourceEditor: Story = { args: { lead: "shapes", heading: undefined, state: STATES.partial } };
+/** A Scene filling its Frames: the Frames side by side, each with a different photo, then their
+ * rows; a Frame with one photo is warned of. */
+export const SceneWall: Story = { args: { lead: "wall", heading: "How this Scene fills its Frames", state: STATES.thin } };
+/** Review and Show now: one line, and the Frames side by side, small. */
+export const ReviewStrip: Story = { args: { size: "strip", lead: "wall", state: STATES.thin } };
+/** A Frame's own page: one Scene's count for this Frame, not naming the Frame again. */
+export const FramePageRow: Story = { args: { size: "compact", named: false, heading: undefined, state: STATES.oneFrame } };

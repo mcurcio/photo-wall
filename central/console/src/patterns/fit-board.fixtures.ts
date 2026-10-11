@@ -45,7 +45,8 @@ export const LIVING: FrameFitView = {
   samples: [crop("l1", 3, 2, WIDE, 0.5), crop("l2", 4, 3, WIDE, 0.3, "fits", false, [0.5, 0.3]),
     crop("l3", 16, 9, WIDE), crop("l4", 3, 2, WIDE, 0.7), crop("l5", 4, 3, WIDE, 0.5), crop("l6", 3, 2, WIDE, 0.2)],
   checked: "Faces and the interesting part: checked 64 of 1,520; 61 keep them whole.",
-  detail: "Frame output 3,840 × 2,160 px · on a 3,840 × 2,160 display",
+  detail: "Frame output 1,512 × 851 px, 16:9 · on a 3,840 × 2,160 display",
+  alert: null,
   why: {
     summary: "Why 169 don't fit",
     reasons: [
@@ -70,7 +71,8 @@ export const HALL: FrameFitView = {
   ],
   samples: [],
   checked: null,
-  detail: "Frame output 1,080 × 1,920 px · on a 1,080 × 1,920 display",
+  detail: "Frame output 1,080 × 1,920 px, 9:16 · on a 1,080 × 1,920 display",
+  alert: "Nothing fits",
   why: {
     summary: "Why 1,689 don't fit",
     reasons: [{ key: "beyond_crop_limit", label: "doesn't fit this Frame's shape", countText: "1,689",
@@ -90,7 +92,8 @@ export const OFFICE: FrameFitView = {
   ],
   samples: [crop("o1", 4, 3, FOUR_THREE), crop("o2", 3, 2, FOUR_THREE, 0.6), crop("o3", 1, 1, FOUR_THREE, 0.4)],
   checked: null,
-  detail: "Judged by shape only: its Pi has not reported its display's size yet.",
+  detail: "Size not known yet: office's screen hasn't reported. Judged by shape only.",
+  alert: null,
   why: { summary: "Why 88 don't fit", reasons: [{ key: "beyond_crop_limit", label: "doesn't fit this Frame's shape", countText: "88", samples: [] }] },
   draft: null,
 };
@@ -121,11 +124,42 @@ export const READY: FitBoardView = {
   line: "Fits 2 of 3 Frames · hall has no photo that fits",
   judged: "Judged on every Frame at the house crop limit, 35 %: a Source has no Frames of its own.",
   reading: null,
-  warnings: [{ key: "hall", subject: "hall",
+  warnings: [{ key: "hall", label: "Nothing fits", subject: "hall",
     what: "None of these 1,689 photos fit hall. hall keeps its last photo while it still fits and is free; otherwise plays a photo not yet checked, centred; otherwise nothing new. Most are 4:3; hall is 9:16." }],
   frames: [HALL, LIVING, OFFICE],
   shape: { bins: BINS, bands: BANDS, range: [0.25, 4], ticks: TICKS },
   empty: null,
+};
+
+/** A Frame with a single photo that fits: it fits, but too few to change. */
+export const STAIRS: FrameFitView = {
+  key: "stairs", name: "stairs", aspect: 2 / 3, ratio: "2:3",
+  lead: crop("s0", 2, 3, 2 / 3),
+  emptyText: "Not checked yet",
+  count: "1 of 1,689 fit",
+  segments: [
+    { key: "fit", label: "fit", count: 1, countText: "1" },
+    { key: "beyond_crop_limit", label: "doesn't fit this Frame's shape", count: 1688, countText: "1,688" },
+  ],
+  samples: [crop("s0", 2, 3, 2 / 3)],
+  checked: null,
+  detail: "Frame output 960 × 1,440 px, 2:3 · on a 1,920 × 1,080 display",
+  alert: "Only 1 photo",
+  why: { summary: "Why 1,688 don't fit", reasons: [{ key: "beyond_crop_limit", label: "doesn't fit this Frame's shape",
+    countText: "1,688", samples: [crop("s1", 3, 2, 2 / 3, 0.5, "doesn't fit this Frame's shape", true)] }] },
+  draft: null,
+};
+
+/** A Scene on three Frames: one fills well, one has a single photo, one has none. */
+export const THIN: FitBoardView = {
+  ...READY,
+  line: "Fits 2 of 3 Frames · hall has no photo that fits · stairs has only 1 photo",
+  judged: "At the Scene's crop limit, 35 %.",
+  warnings: [READY.warnings[0], { key: "stairs-thin", label: "Few photos", subject: "stairs",
+    what: "Only 1 photo fits stairs, and a photo never shows on two Frames at once, so stairs will often keep its last photo." }],
+  frames: [LIVING, STAIRS, HALL],
+  shape: { ...READY.shape, bands: [...BANDS.filter((band) => band.key !== "office"),
+    { key: "stairs", name: "stairs", low: (2 / 3) * 0.65, high: (2 / 3) / 0.65 }] },
 };
 
 export const ALL_FIT: FitBoardView = {

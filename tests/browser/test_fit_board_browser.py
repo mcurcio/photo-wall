@@ -113,7 +113,13 @@ def test_the_photo_source_editor_shows_what_the_analysis_answers_and_follows_the
         connect(page, origin)
         editor = start_source(page)
         filled(library, draft_pool_key(registry), [InPool(asset=a) for a in assets])
-        board = editor.get_by_role("region", name="Which Frames can show them", exact=True)
+        board = editor.get_by_role("region", name="What these photos are, and which Frames can show them",
+                                    exact=True)
+        # The Source's own moment: what the selection holds leads, then the Frames it can feed.
+        shapes = board.get_by_role("region", name="The shapes of these photos", exact=True)
+        feeds = board.get_by_role("region", name="Which Frames can show them", exact=True)
+        expect(shapes).to_be_visible()
+        assert shapes.bounding_box()["y"] < feeds.bounding_box()["y"]
         draft = drafts(registry)[-1]["draft_ref"]
         answer = _analysis(page, {"selection": {"drafts": [str(draft)]}, "tier": "shape"})
         counts = {frame["frame_id"]: (frame["fit_by_shape"], frame["photos"]) for frame in answer["frames"]}
@@ -135,8 +141,10 @@ def test_the_photo_source_editor_shows_what_the_analysis_answers_and_follows_the
 
 
 def test_the_scene_editor_asks_frames_first_and_previews_the_crop_limit_live(page, registry):
-    """Acceptance 3: Frames come before Photos; Review offers "Raise the crop limit to 44 %" for
-    hall; dragging Playback's Crop limit changes hall's count before the slider is let go."""
+    """Acceptance 3: Frames come before Photos; the Scene's Frames are drawn side by side, each
+    with what it would show; Review is a line and that strip, whose sheet offers "Raise the crop
+    limit to 44 %" for hall; dragging Playback's Crop limit changes hall's count before the
+    slider is let go."""
     _library(registry, page)
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin)
@@ -149,13 +157,21 @@ def test_the_scene_editor_asks_frames_first_and_previews_the_crop_limit_live(pag
             form.get_by_label(f"Target frame {frame}", exact=True).check()
         scene_continue(page, "Photos")
         choose_source(form, SOURCE)
-        board = form.get_by_role("region", name="How these photos fit the Frames", exact=True)
+        board = form.get_by_role("region", name="How this Scene fills its Frames", exact=True)
         expect(_row(board, LIVING)).to_contain_text("3 of 4 fit")
         expect(_row(board, HALL)).to_contain_text("0 of 4 fit")
+        wall = board.get_by_role("list", name="On the wall together", exact=True)
+        expect(wall.get_by_role("listitem")).to_have_count(2)
+        expect(wall.get_by_role("listitem").filter(has_text=HALL)).to_contain_text("Nothing fits")
+        expect(wall.get_by_role("img", name=re.compile(rf"^{LIVING}, 16:9: Photo, "))).to_be_visible()
         scene_continue(page, "Playback")
         scene_continue(page, "Review")
-        raise_button = form.get_by_role("button", name="Raise the crop limit to 44 %", exact=True)
-        expect(raise_button).to_be_visible()
+        review = form.get_by_role("region", name="How this Scene fills its Frames", exact=True)
+        expect(review.get_by_role("list", name="On the wall together", exact=True).get_by_role("listitem")).to_have_count(2)
+        review.get_by_role("button", name=re.compile(r"^Fits 1 of 2 Frames · hall has no photo that fits")).click()
+        sheet = page.get_by_role("dialog", name="How this Scene fills its Frames", exact=True)
+        expect(sheet.get_by_role("button", name="Raise the crop limit to 44 %", exact=True)).to_be_visible()
+        sheet.get_by_role("button", name="Close", exact=True).click()
 
         form.get_by_role("button", name="Change Playback", exact=True).click()
         slider = form.get_by_role("slider", name="Crop limit", exact=True)
@@ -188,6 +204,11 @@ def test_the_frame_page_shows_one_row_per_scene_with_its_relation_to_now(page, r
         expect(scene.get_by_role("link", name="Edit Scene", exact=True)).to_have_attribute(
             "href", f"#/scenes/{SCENE_ID}/edit/review")
         expect(_row(scene, HALL)).to_contain_text("0 of 4 fit")
+        # The page is hall's: the row does not name hall or its shape again, and says what it is
+        # judged at (no Pi reports hall's screen here).
+        expect(_row(scene, HALL).get_by_role("heading", name=HALL, exact=True)).to_have_count(0)
+        expect(_row(scene, HALL)).to_contain_text(
+            "Size not known yet: hall's screen hasn't reported. Judged by shape only.")
         expect(photos).not_to_contain_text("photos fit this Frame")
         expect(photos).not_to_contain_text("from Source")
 
@@ -217,13 +238,16 @@ def test_a_position_drafted_as_a_mat_opening_changes_what_fits_before_done(page,
             sign_in(page, origin)
             position = open_frame(page, FRAME, "position").get_by_role("region", name="Position", exact=True)
             expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
-            expect(position.get_by_role("button", name=re.compile(rf"^1 of 2 fit {FRAME}"))).to_be_visible()
+            expect(position.get_by_role("button", name=re.compile(
+                rf"^1 of 2 fit {FRAME} · it will keep that one photo up · Frame output 1,920 × 1,080 px, 16:9 "
+                r"· on a 1,920 × 1,080 display"))).to_be_visible()
             position.get_by_role("button", name="Exact values", exact=True).click()
             for label, value in (("Top-left x", "480"), ("Bottom-left x", "480"), ("Top-right x", "1440"),
                                  ("Bottom-right x", "1440"), ("Top-left y", "270"), ("Top-right y", "270"),
                                  ("Bottom-right y", "810"), ("Bottom-left y", "810")):
                 position.get_by_label(label, exact=True).fill(value)
-            expect(position.get_by_role("button", name=re.compile(rf"^2 of 2 fit {FRAME}"))).to_be_visible()
+            expect(position.get_by_role("button", name=re.compile(
+                rf"^2 of 2 fit {FRAME} · Frame output 960 × 540 px, 16:9 · on a 1,920 × 1,080 display"))).to_be_visible()
     finally:
         page.unroute_all(behavior="ignoreErrors")
         del sessions
@@ -242,9 +266,30 @@ def test_show_now_and_the_sources_list_say_it_in_one_line_that_opens_the_board(p
         form = start_show_now(page, SCENE_ID)
         line = form.get_by_role("button", name=re.compile(r"Fits 1 of 2 Frames · hall has no photo that fits"))
         expect(line).to_be_visible()
+        expect(form.get_by_role("list", name="On the wall together", exact=True).get_by_role("listitem")).to_have_count(2)
         line.click()
-        sheet = page.get_by_role("dialog", name=f"How {SCENE_ID}'s photos fit its Frames", exact=True)
+        sheet = page.get_by_role("dialog", name=f"How {SCENE_ID} fills its Frames", exact=True)
         expect(_row(sheet, LIVING)).to_contain_text("3 of 4 fit")
+
+
+def test_a_frame_with_too_few_photos_to_change_is_warned_of(page, registry):
+    """Review: at a 50 % crop limit only the 1:1 photo fits hall. A photo never shows on two
+    Frames at once, so hall will often keep its last photo: the line says so, Show now's strip
+    marks hall, and its sheet warns of it in the Planner's terms."""
+    _library(registry, page)
+    _scene(registry, crop_limit=0.5)
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "sources")
+        form = start_show_now(page, SCENE_ID)
+        line = form.get_by_role("button", name=re.compile(r"^Fits 2 of 2 Frames · hall has only 1 photo"))
+        expect(line).to_be_visible()
+        wall = form.get_by_role("list", name="On the wall together", exact=True)
+        expect(wall.get_by_role("listitem").filter(has_text=HALL)).to_contain_text("Only 1 photo")
+        line.click()
+        sheet = page.get_by_role("dialog", name=f"How {SCENE_ID} fills its Frames", exact=True)
+        expect(sheet.get_by_role("group", name="Few photos", exact=True)).to_contain_text(
+            f"Only 1 photo fits {HALL}, and a photo never shows on two Frames at once, so {HALL} "
+            "will often keep its last photo.")
 
 
 def test_on_a_phone_the_board_is_a_line_that_opens_it_in_a_sheet(page, registry):
@@ -257,11 +302,11 @@ def test_on_a_phone_the_board_is_a_line_that_opens_it_in_a_sheet(page, registry)
         form.get_by_label(f"Target frame {LIVING}", exact=True).check()
         scene_continue(page, "Photos")
         choose_source(form, SOURCE)
-        expect(form.get_by_role("region", name="How these photos fit the Frames", exact=True)).to_be_hidden()
+        expect(form.get_by_role("region", name="How this Scene fills its Frames", exact=True)).to_be_hidden()
         line = form.get_by_role("button", name=re.compile(r"^3 of 4 fit living-room"))
         expect(line).to_be_visible()
         line.click()
-        sheet = page.get_by_role("dialog", name="How these photos fit the Frames", exact=True)
+        sheet = page.get_by_role("dialog", name="How this Scene fills its Frames", exact=True)
         expect(_row(sheet, LIVING)).to_contain_text("3 of 4 fit")
 
 

@@ -29,3 +29,6 @@ export const Compact: Story = { args: { size: "compact" } };
 
 /** A Frame judged with unsaved values. */
 export const Draft: Story = { args: { frame: { ...LIVING, draft: "As you are setting it" }, size: "compact" } };
+
+/** On a Frame's own page the host names the Frame: the row leads with its count. */
+export const Unnamed: Story = { args: { size: "compact", named: false } };
