@@ -30,12 +30,16 @@ from appliance.display_host.bus import DISPLAY_COMPONENT, DISPLAY_SLICE, DISPLAY
 from appliance.host.bus import HOST_SLICE, host_session
 from contracts.node_link import CENTRAL_WRITER, NODE_MAX_STREAMS, Pipe, account_id
 from contracts.node_output import (
+    AS_THE_DISPLAY_HAS_IT,
     BEST_DETECTED,
     SCHEMA_MAJOR,
+    ActsOn,
     DisplayIdentity,
     DisplayMode,
     OutputDocument,
+    OutputPicture,
     OutputReport,
+    PictureSetting,
     Power,
     PowerMethod,
     PowerRequest,
@@ -56,9 +60,11 @@ STATE = "KV_state_display"
 KEY = output_document_key("HDMI-A-1")
 UNLISTED = "output-HDMI-A-3"
 STANDING = PowerRequest("standing", Power.ON, RequestReason.STANDING)
-FIRST = OutputDocument("HDMI-A-1", 1, (STANDING,), BEST_DETECTED, True, True)
+PICTURE = OutputPicture(PictureSetting(ActsOn.DISPLAY, AS_THE_DISPLAY_HAS_IT),
+                        PictureSetting(ActsOn.DISPLAY, AS_THE_DISPLAY_HAS_IT), 6500, 22)
+FIRST = OutputDocument("HDMI-A-1", 1, (STANDING,), BEST_DETECTED, True, True, 1, PICTURE)
 TEST_OFF = OutputDocument("HDMI-A-1", 2, (PowerRequest("req-1", Power.OFF, RequestReason.CONSOLE_TEST, 300), STANDING),
-                          BEST_DETECTED, True, True)
+                          BEST_DETECTED, True, True, 1, PICTURE)
 REPORT = OutputReport("HDMI-A-1", True, DisplayIdentity("XYM", 5475, "MNN", None),
                       (DisplayMode(1920, 1080, 60000, preferred=True),), (PowerMethod.DDC_CI, PowerMethod.SIGNAL_OFF),
                       PowerMethod.DDC_CI, 2, None, None)

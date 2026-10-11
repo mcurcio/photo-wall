@@ -1,20 +1,21 @@
 ---
 name: display-control
-description: Operate a Photo Wall Pi's displays by hand over SSH - read a display's EDID, map HDMI ports to CEC devices and DDC/CI buses, turn a display off and on with cec-ctl or ddcutil, and read what the display controller did. Use it for the 1b bench step (Test off and on), to diagnose "Display didn't answer" or a power method that never answers, or to probe a new display's support. The rules (what the controller does, what Central decides) live in the docs it links; this is the runbook and its traps.
+description: Operate a Photo Wall Pi's displays by hand over SSH - read a display's EDID, map HDMI ports to CEC devices and DDC/CI buses, turn a display off and on with cec-ctl or ddcutil, read and set brightness (VCP 10) and contrast (VCP 12), and read what the display controller did. Use it for the 1b bench step (Test off and on), the 1c bench steps (brightness from the console read back, Cover on the test monitor, write timing), to diagnose "Display didn't answer", "The display did not take it" or a power method that never answers, or to probe a new display's support. The rules (what the controller does, what Central decides) live in the docs it links; this is the runbook and its traps.
 ---
 
 # display-control
 
 How to reach and drive the displays on a Photo Wall Pi 5, learned in the 1b spike on the test Pi
-(2026-10-10) and the 1b build. The rules are not here; they have one home each:
+(2026-10-10), the 1b build and the 1c build. The rules are not here; they have one home each:
 
 | Rules | Home |
 |---|---|
 | What the Pi's display controller does (when it acts, read before write, best detected, the Output document and report) | [Player architecture › Display identity and power](../../../docs/player-architecture.md#display-identity-and-power-1b) |
-| How Central recognises a display, readiness, the Power tab's words | [Operator console design §6–§7](../../../docs/operator-console-design.md#6-display-identity) |
+| Picture on the Pi (where a setting acts, one DDC/CI channel per port, newest wins, picture operations, frame protocol v4) | [Player architecture › Picture settings](../../../docs/player-architecture.md#picture-settings-1c) |
+| How Central recognises a display, readiness, the Power and Picture tabs' words, where a setting is placed | [Operator console design §5–§7](../../../docs/operator-console-design.md#6-display-identity) |
 | Central's side: tables, routes, the LISTEN wake, what each console result means | [Runbook › Display identity and power](../../../docs/runbook.md#display-identity-and-power) |
 | SSH access to a Node | [Runbook › Reaching a Node over SSH](../../../docs/runbook.md#reaching-a-node-over-ssh) |
-| The code | `appliance/display_host/power_methods.py` (the exact tool calls), `output_power.py`, `edid.py`; `contracts/node_output.py` |
+| The code | `appliance/display_host/ddc.py` (the one place `ddcutil` runs), `power_methods.py` (the exact power tool calls), `picture.py` (VCP 10 and 12), `output_power.py`, `edid.py`; `contracts/node_output.py` |
 
 ## Access
 
@@ -115,6 +116,46 @@ the method in use, the request in force with the Pi's seconds left, and the last
 change it names. Prefer the console's **Test: turn off** over hand writes for anything you want to
 claim as the controller's behaviour.
 
+## Picture: brightness and contrast (1c)
+
+The controller writes VCP `10` (brightness) and `12` (contrast) only for a setting that acts on the
+display, through the port's one DDC/CI channel, so it never overlaps a power write on the same bus;
+it reads first, writes only when the display reads otherwise, and reads back. A percent is of the
+display's own maximum (`getvcp 10` prints `max value`): 60 % of 100 writes 60, of 255 writes 153.
+Newest wins: while one write runs, a newer document replaces the one waiting, so a dragged slider
+leaves its first and last values on the display, not every step. A set value is read again every
+60 s; a difference (someone used the display's buttons) is reported, not written back until the
+next change.
+
+From Central, `GET /v1/operator/frames/{id}/picture` (admin token) gives each setting's value and
+where it acts, whether the display answered the read at its first report, the last write result for
+the picture change it names, and whether the Player presented the latest change.
+
+**Bench steps** (NOT RUN until a release with 1c is on the test Pi; each needs the Frame bound and
+its Position saved, or it shows no photos):
+
+```sh
+B=13                                                        # from readlink .../card1-HDMI-A-1/ddc
+sudo env XDG_CACHE_HOME=/tmp/ddc ddcutil --noconfig --bus $B getvcp 10 12   # note the values to restore
+```
+
+1. **Brightness from the console:** on the Frame's Picture tab set Brightness to 60 % (it should say
+   "On the display"), wait for Done, then `getvcp 10` reads 60 % of its max, and the picture route
+   says `taken`.
+2. **Contrast:** set Contrast to 25 % on the display and look at the screen; record whether the
+   picture changes (the spike saw the register change but no effect).
+3. **Write timing:** `time sudo env XDG_CACHE_HOME=/tmp/ddc ddcutil --noconfig --bus $B setvcp 10 60`
+   five times; record the spread. Some monitors save each write to memory that wears; the console
+   sends at most 2 per second while dragging.
+4. **Hot-plug after a brightness write:** after step 1, `journalctl _PID=$(pgrep -x weston)` shows no
+   `connector … disconnected`, and `photo-wall-node-player` is still running.
+5. **Cover on the test monitor:** on the Position tab, Cover at 7 degrees and at 90 degrees: the
+   picture is turned, never skewed, keeps the Frame profile's shape (still landscape at 90 degrees
+   on a landscape Frame), covers the four corners, and nothing shows outside them.
+
+Afterwards put brightness and contrast back from the console (or Revert), not by hand: a hand write
+is reported as "Changed on the display's buttons" and left alone.
+
 ## Traps
 
 - **Some monitors drop the hot-plug signal on a DDC/CI standby or input write** (the test monitor,
@@ -125,10 +166,11 @@ claim as the controller's behaviour.
 - **The controller acts when a display comes back.** A hand `setvcp D6 4` that blips the signal
   makes the display reappear, and the controller then works it toward its document (standing on),
   so it may turn it back on. That is by design; test power through the console.
-- **The controller cannot use DDC/CI yet.** Its unit is not in the `i2c` group (the node package
-  does not create the group), so `/dev/i2c-N` is closed to it and best detected falls to signal
-  off on a DDC/CI-only monitor ([gap G15](../../../docs/player-architecture.md#observed-gaps)). Your
-  `sudo ddcutil` works regardless, so a hand test proving DDC/CI does not prove the controller can.
+- **A hand test does not prove the controller can use DDC/CI.** Your `sudo ddcutil` works
+  regardless of the unit's access. The controller needs the `i2c` group, which a release before
+  the fix of [gap G15](../../../docs/player-architecture.md#observed-gaps) did not create; there
+  `/dev/i2c-N` is closed to it, best detected falls to signal off and every brightness reads
+  "no answer". Check `systemctl show photo-wall-display-controller -p SupplementaryGroups`.
 - **Never send DDC/CI writes to a production Frame while it is showing.**
 - **`ddcutil` under `sudo -E` writes a root-owned cache into your home directory.** Use
   `--noconfig` and `XDG_CACHE_HOME=/tmp/...`, as above.

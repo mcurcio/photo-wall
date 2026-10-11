@@ -11,6 +11,7 @@ import pytest
 from contracts.models import (
     Calibration,
     Commit,
+    CornersFit,
     FrameProfile,
     Layer,
     OutputBinding,
@@ -148,7 +149,7 @@ def test_native_ack_rejects_stale_or_different_authority(tmp_path, fault):
             elif fault == "binding":
                 drawn = replace(drawn, binding=drawn.binding.model_copy(update={"generation": 2}))
             elif fault == "calibration":
-                drawn = replace(drawn, calibration=Calibration(gain=.5))
+                drawn = replace(drawn, calibration=Calibration(fit=CornersFit(rotation=90)))
             else:
                 local = drawn.layers[0]
                 drawn = replace(drawn, layers=(replace(local, layer=local.layer.model_copy(
@@ -452,16 +453,6 @@ def test_no_successful_still_means_black_beyond_horizon(tmp_path):
     rig.executor.tick()
     assert rig.renderer.outputs["hdmi1"].fallback
     assert rig.renderer.outputs["hdmi1"].layers == ()
-
-
-def test_preview_expires_locally_without_configuration_message(tmp_path):
-    preview = binding(preview=Calibration(gain=.4), preview_expires=105)
-    rig = Rig(tmp_path, bindings=(preview,))
-    rig.play(layer())
-    assert rig.renderer.outputs["hdmi1"].calibration.gain == .4
-    rig.advance(6, refresh=False)
-    rig.executor.tick()
-    assert rig.renderer.outputs["hdmi1"].calibration.gain == 1
 
 
 def test_clock_step_and_stale_sample_refuse_unexecuted_commit_retain_visible(tmp_path):

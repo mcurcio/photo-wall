@@ -411,8 +411,8 @@ def test_the_stale_page_is_drawn_by_the_loop_after_v(layer):
     assert link.sent == []
 
 
-def test_the_production_client_binds_the_manager_v3():
-    assert client.MANAGER_VERSION == 3
+def test_the_production_client_binds_the_manager_v4():
+    assert client.MANAGER_VERSION == 4   # v3 the health layer; v4 the base page's brightness line (1c)
 
 
 # -- the judge link -----------------------------------------------------------------------------

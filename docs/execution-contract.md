@@ -35,7 +35,7 @@ A plan resolves enough information for local execution without repeating central
 |---|---|
 | Identity and authority | Activation and Run identity, execution epoch, plan identity/revision and validity; correlate outcomes and reject obsolete authority. |
 | Participants | Typed Frame/Actuator targets, responsible executors, concrete Output bindings and binding generations. |
-| Configuration | Resolved authored revisions and relevant calibration/equipment revisions. |
+| Configuration | Resolved authored revisions and relevant calibration/equipment revisions. A Frame's Position (corners, fit, rotation) is calibration; a Display's picture settings are not (below). |
 | Media | Upstream-neutral exact variant/content identities, central show system retrieval references, intended assignments and required underlying state for reveal. |
 | Timing | Intended execution times, media positions, preparation deadlines and validity limits. |
 | Presentation | Local layers/effects and resolved Actuator state/cues. |
@@ -44,6 +44,8 @@ A plan resolves enough information for local execution without repeating central
 | Feedback | Acknowledgments, readiness changes and observed execution/failure with enough context to reconcile state. |
 
 Resolve typed targets centrally. A display plan need contain only its Player's relevant outputs, but lamps remain managed participants in the central plan. A parent's full target union must remain distinct from its current contribution: a later child's Frame is not implicitly darkened early. Omission of an Actuator expresses no command to it.
+
+**Picture settings are Display state, outside a Frame's content (1c).** Brightness, contrast, colour temperature and gamma belong to the Display and travel only in its Output document over the Node bus, with their own change number ([operator console design §6](operator-console-design.md#6-display-identity)). They are never part of a plan, a Scene, a Frame's Position or the Player's configuration, so a picture change neither revises configuration nor touches a Run, a commitment or a Frame's readiness. The Player receives them as picture operations from Display Host ([Player architecture](player-architecture.md#picture-settings-1c)). An authored fade or a black Scene stays content; a picture setting is equipment.
 
 Authored edits default to the next Run; live query results remain changeable data. Define when referenced Scenes, sources and group membership resolve. A later child launch is a new Run; freezing every descendant revision at parent admission is an open policy, not an assumed rule.
 

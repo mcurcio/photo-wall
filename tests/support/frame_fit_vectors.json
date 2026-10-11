@@ -1,0 +1,459 @@
+{
+ "_comment": "Shared Frame fit vectors (roadmap 1c, slice T0): tests/test_frame_fit.py checks contracts/frame_fit.py against them and the console's convex.js check reads them too. Points are fractions of the output, origin top-left, clockwise from top-left; `profile` is the Frame profile's width_px and height_px (the cover rectangle's aspect); cover rectangles are in output pixels (centre, width along the picture's u axis, height along v).",
+ "output": [
+  1920,
+  1080
+ ],
+ "convex": [
+  [
+   [
+    0,
+    0
+   ],
+   [
+    1,
+    0
+   ],
+   [
+    1,
+    1
+   ],
+   [
+    0,
+    1
+   ]
+  ],
+  [
+   [
+    0.1,
+    0.1
+   ],
+   [
+    0.9,
+    0.05
+   ],
+   [
+    0.8,
+    0.95
+   ],
+   [
+    0.2,
+    0.8
+   ]
+  ],
+  [
+   [
+    0.25,
+    0.25
+   ],
+   [
+    0.75,
+    0.25
+   ],
+   [
+    0.75,
+    0.75
+   ],
+   [
+    0.25,
+    0.75
+   ]
+  ]
+ ],
+ "folded": [
+  [
+   [
+    0,
+    0
+   ],
+   [
+    1,
+    1
+   ],
+   [
+    1,
+    0
+   ],
+   [
+    0,
+    1
+   ]
+  ],
+  [
+   [
+    0,
+    0
+   ],
+   [
+    0,
+    1
+   ],
+   [
+    1,
+    1
+   ],
+   [
+    1,
+    0
+   ]
+  ],
+  [
+   [
+    0,
+    0
+   ],
+   [
+    1,
+    0
+   ],
+   [
+    1,
+    0
+   ],
+   [
+    0,
+    1
+   ]
+  ],
+  [
+   [
+    0,
+    0
+   ],
+   [
+    0.5,
+    0
+   ],
+   [
+    1,
+    0
+   ],
+   [
+    0,
+    1
+   ]
+  ]
+ ],
+ "cover": [
+  {
+   "name": "full-screen-0",
+   "corners": [
+    [
+     0,
+     0
+    ],
+    [
+     1,
+     0
+    ],
+    [
+     1,
+     1
+    ],
+    [
+     0,
+     1
+    ]
+   ],
+   "rotation": 0,
+   "profile": [
+    1920,
+    1080
+   ],
+   "centre": [
+    960.0,
+    540.0
+   ],
+   "width": 1920.0,
+   "height": 1080.0
+  },
+  {
+   "name": "full-screen-7",
+   "corners": [
+    [
+     0,
+     0
+    ],
+    [
+     1,
+     0
+    ],
+    [
+     1,
+     1
+    ],
+    [
+     0,
+     1
+    ]
+   ],
+   "rotation": 7,
+   "profile": [
+    1920,
+    1080
+   ],
+   "centre": [
+    960.0,
+    540.0
+   ],
+   "width": 2321.669303308,
+   "height": 1305.938983111
+  },
+  {
+   "name": "full-screen-45",
+   "corners": [
+    [
+     0,
+     0
+    ],
+    [
+     1,
+     0
+    ],
+    [
+     1,
+     1
+    ],
+    [
+     0,
+     1
+    ]
+   ],
+   "rotation": 45,
+   "profile": [
+    1920,
+    1080
+   ],
+   "centre": [
+    960.0,
+    540.0
+   ],
+   "width": 3771.236166328,
+   "height": 2121.32034356
+  },
+  {
+   "name": "full-screen-90",
+   "corners": [
+    [
+     0,
+     0
+    ],
+    [
+     1,
+     0
+    ],
+    [
+     1,
+     1
+    ],
+    [
+     0,
+     1
+    ]
+   ],
+   "rotation": 90,
+   "profile": [
+    1920,
+    1080
+   ],
+   "centre": [
+    960.0,
+    540.0
+   ],
+   "width": 3413.333333333,
+   "height": 1920.0
+  },
+  {
+   "name": "full-screen-135",
+   "corners": [
+    [
+     0,
+     0
+    ],
+    [
+     1,
+     0
+    ],
+    [
+     1,
+     1
+    ],
+    [
+     0,
+     1
+    ]
+   ],
+   "rotation": 135,
+   "profile": [
+    1920,
+    1080
+   ],
+   "centre": [
+    960.0,
+    540.0
+   ],
+   "width": 3771.236166328,
+   "height": 2121.32034356
+  },
+  {
+   "name": "asymmetric-0",
+   "corners": [
+    [
+     0.1,
+     0.1
+    ],
+    [
+     0.9,
+     0.05
+    ],
+    [
+     0.8,
+     0.95
+    ],
+    [
+     0.2,
+     0.8
+    ]
+   ],
+   "rotation": 0,
+   "profile": [
+    1920,
+    1080
+   ],
+   "centre": [
+    960.0,
+    540.0
+   ],
+   "width": 1728.0,
+   "height": 972.0
+  },
+  {
+   "name": "asymmetric-7",
+   "corners": [
+    [
+     0.1,
+     0.1
+    ],
+    [
+     0.9,
+     0.05
+    ],
+    [
+     0.8,
+     0.95
+    ],
+    [
+     0.2,
+     0.8
+    ]
+   ],
+   "rotation": 7,
+   "profile": [
+    1920,
+    1080
+   ],
+   "centre": [
+    914.459560931,
+    451.897112259
+   ],
+   "width": 1756.717819252,
+   "height": 988.153773329
+  },
+  {
+   "name": "asymmetric-45",
+   "corners": [
+    [
+     0.1,
+     0.1
+    ],
+    [
+     0.9,
+     0.05
+    ],
+    [
+     0.8,
+     0.95
+    ],
+    [
+     0.2,
+     0.8
+    ]
+   ],
+   "rotation": 45,
+   "profile": [
+    1920,
+    1080
+   ],
+   "centre": [
+    1014.0,
+    417.0
+   ],
+   "width": 2707.747567424,
+   "height": 1523.108006676
+  },
+  {
+   "name": "asymmetric-90",
+   "corners": [
+    [
+     0.1,
+     0.1
+    ],
+    [
+     0.9,
+     0.05
+    ],
+    [
+     0.8,
+     0.95
+    ],
+    [
+     0.2,
+     0.8
+    ]
+   ],
+   "rotation": 90,
+   "profile": [
+    1920,
+    1080
+   ],
+   "centre": [
+    960.0,
+    540.0
+   ],
+   "width": 2730.666666667,
+   "height": 1536.0
+  },
+  {
+   "name": "asymmetric-135",
+   "corners": [
+    [
+     0.1,
+     0.1
+    ],
+    [
+     0.9,
+     0.05
+    ],
+    [
+     0.8,
+     0.95
+    ],
+    [
+     0.2,
+     0.8
+    ]
+   ],
+   "rotation": 135,
+   "profile": [
+    1920,
+    1080
+   ],
+   "centre": [
+    1014.0,
+    417.0
+   ],
+   "width": 2843.512069412,
+   "height": 1599.475539044
+  }
+ ]
+}

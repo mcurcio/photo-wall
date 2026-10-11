@@ -84,26 +84,30 @@ release removes stale queued work before another draw can execute.
 
 ## Geometry and colour
 
-`player/geometry.py` is the authoritative pure reference for inversion of the
-unit-aperture homography, inverse clockwise quarter-turn, centered cover within
-the normalized crop using the logical Frame aspect, sRGB/BT.709 transfer,
-premultiplied linear source-over composition, bounded linear gain and final sRGB
-encoding. Its scalar reference is for tests, not production pixel loops. Shader
-parameters and GLSL implement those equations. Output coordinates and source UV
-coordinates use top-left origin; texture upload does not silently add a second
-vertical flip. Pixels outside the convex aperture and empty output are black.
+`player/geometry.py` is the authoritative pure reference for the Frame fit's one
+matrix (`output_to_picture`: Cover's turned, evenly scaled rectangle of the Frame
+profile's aspect from `contracts/frame_fit.py`, or Corners' inverse perspective
+with its quarter turn), the per-Frame mask (`inside_opening`), each photo's
+centred cover of the same Frame profile aspect (`photo_rect`, the one crop), sRGB/BT.709 transfer, premultiplied linear
+source-over composition and the final pass (`final_pixel`: the Display's picture
+operations, then the per-Output mask last). Its scalar reference is for tests,
+not production pixel loops. Shader parameters and GLSL implement those
+equations. Output coordinates and source UV coordinates use top-left origin;
+texture upload does not silently add a second vertical flip. Pixels outside
+every opening and empty output are black, whatever the picture settings.
 
 Stills use sRGB and video uses BT.709. Each sampled straight RGB value is decoded
 to linear before multiplying by source alpha and effective Layer alpha. Ordered
-layers compose in linear floating-point framebuffer storage. Gain applies once
-after composition, then RGB is encoded to sRGB. Black is a real source-over
+layers compose in linear floating-point framebuffer storage. The picture
+operations apply once after composition (white balance and light factor in
+linear light, then sRGB encoding, contrast and gamma). Black is a real source-over
 layer; alpha zero contributes nothing. HDR, ICC management and measured panel
 colour accuracy are outside this accepted SDR convention.
 
 ## Verification and native smoke
 
 Portable tests cover projective corner correspondence/inversion, clipped
-apertures, crop applied once, Frame/source aspect mismatch, all quarter-turns,
+openings, the Cover rectangle at any angle, Frame/source aspect mismatch, all quarter-turns,
 transfer breakpoints, linear-light blending, transparent and opaque black,
 sample bounds and bounded mailbox/release behavior.
 
@@ -137,7 +141,7 @@ Set `GDK_GL=gles` and `PYOPENGL_PLATFORM=egl` before native imports. In the test
 Noble environment GLArea's ES preference alone selected desktop compatibility GL;
 the explicit environment selected OpenGL ES3.2. The smoke's rendered-pixel checks
 compare calibrated shader output with the scalar reference, including source
-orientation, projective aperture, crop/quarter-turn, source alpha, gain and linear
+orientation, projective aperture, Cover and quarter turns, source alpha, picture operations and linear
 source-over blending. The native app uses native buffer transfers and GPU pixels;
 Pillow and ffmpeg in the smoke only generate its public synthetic test inputs.
 [GLArea API](https://docs.gtk.org/gtk3/class.GLArea.html),

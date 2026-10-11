@@ -823,8 +823,32 @@ def upstream_action(action: str):
         for item in state["assets"].values()], "permissions": PERMISSIONS if action != "deny" else ["user.read"]}
 
 
+def save_position(database, frame_id: str) -> None:
+    """Position Save for a demo Frame: Corners on the whole output, through Registry's Save CAS
+    (`commit_calibration_trial_in`, what a trial's Save calls). The demo's Players present no
+    Position trial, and the V1 route that committed without one is gone (roadmap 1c)."""
+    from central.registry import Registry
+    from central.transaction_locks import acquire_runtime_locks
+    from contracts.models import Calibration, CornersFit
+    from contracts.time import SystemClock
+
+    with database.transaction() as conn:
+        acquire_runtime_locks(conn)
+        row = conn.execute("SELECT f.calibration, f.generation, f.configuration_revision, b.player_id, b.output_id, "
+                           "p.authority_epoch FROM frames f JOIN bindings b ON b.frame_id=f.id "
+                           "JOIN players p ON p.id=b.player_id WHERE f.id=%s", (frame_id,)).fetchone()
+        require(row is not None, "frame_unbound")
+        Registry(database, SystemClock()).commit_calibration_trial_in(
+            conn, frame_id=frame_id, player_id=row["player_id"], authority_epoch=row["authority_epoch"],
+            output_id=row["output_id"], binding_generation=row["generation"],
+            config_revision=row["configuration_revision"],
+            calibration_revision=Calibration.model_validate(row["calibration"]).revision,
+            calibration=Calibration(fit=CornersFit()))
+
+
 def operator_action(action: str):
-    """Control through real operator HTTP; SQL is limited to evidence reads."""
+    """Control through real operator HTTP; SQL is limited to evidence reads, and to Position Save
+    (`save_position`), which has no operator route without a Position trial."""
     import httpx
 
     from central.db import Database
@@ -865,9 +889,7 @@ def operator_action(action: str):
                 "profile": {"width_px": 1920, "height_px": 1080, "diagonal_inches": 24, "video": True}})
             request("PUT", "/v1/operator/frames/" + frame + "/binding", {
                 "player_id": output["player_id"], "output_id": output["output_id"], "expected_generation": 0})
-            request("POST", "/v1/operator/frames/" + frame + "/calibration", {
-                "operation": "commit", "expected_revision": 1, "expected_generation": 1,
-                "calibration": {}})
+            save_position(Database(os.environ["PHOTO_WALL_DATABASE_URL"]), frame)
             frames.append(frame)
         request("PUT", "/v1/operator/scenes/demo", {"scene_id": "demo", "loop": True,
             "cycle_seconds": SCENE_CYCLE_SECONDS,

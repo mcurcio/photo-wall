@@ -2,20 +2,21 @@
 
 import pytest
 from psycopg.types.json import Jsonb
+from support.position import save_position
 from test_coordination import publish_fixture_catalog as _publish_catalog
 from test_coordination import schedule
 from test_registry import enroll, frame
 
 from central.coordination import CoordinationError, CoordinationLimits, Coordinator
 from central.registry import RegistryError
-from contracts.models import Calibration, Readiness
+from contracts.models import Readiness
 
 
 def _player_with_frame(registry, frame_id="frame-0"):
     player, key, _ = enroll(registry, count=1)
     frame(registry, frame_id)
     registry.bind(frame_id, player["player_id"], "HDMI-A-1", expected_generation=0)
-    registry.calibrate(frame_id, "commit", 1, Calibration(), expected_generation=1)
+    save_position(registry, frame_id)
     return player, key, frame_id
 
 
@@ -162,9 +163,9 @@ def test_changed_binding_generation_cannot_reuse_old_epoch_content(registry):
 
     other, _, _ = enroll(registry, count=1)
     registry.bind("frame-0", other["player_id"], "HDMI-A-1", expected_generation=1)
-    registry.calibrate("frame-0", "commit", 2, Calibration(), expected_generation=2)
+    save_position(registry, "frame-0")
     registry.bind("frame-0", player["player_id"], "HDMI-A-1", expected_generation=2)
-    registry.calibrate("frame-0", "commit", 3, Calibration(), expected_generation=3)
+    save_position(registry, "frame-0")
     _publish_catalog(registry, digest="b" * 64, asset="original-b")
     fresh = enroll(registry, key, count=1)[0]
 

@@ -33,6 +33,7 @@ One home each for:
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 from collections.abc import Collection
 from dataclasses import dataclass
@@ -44,6 +45,7 @@ from contracts.node_output import (
     BEST_DETECTED,
     DisplayIdentity,
     OutputDocument,
+    OutputPicture,
     OutputReport,
     Power,
     PowerMethod,
@@ -55,7 +57,7 @@ from contracts.node_output import (
 
 TEST_SECONDS: Final = 300                    # owner q1, 2026-10-10
 STANDING_REQUEST_ID: Final = "standing"
-_DIGEST_CHANGE: Final = 1                    # any fixed change number: the digest covers everything but it
+_DIGEST_CHANGE: Final = 1                    # any fixed change number: neither digest covers it
 
 
 def standing_on() -> PowerRequest:
@@ -176,27 +178,50 @@ class PowerTest:
 
 @dataclass(frozen=True)
 class ProjectedOutput:
-    """One Output's document, all but its change number."""
+    """One Output's document, all but its two change numbers. The power part (`power`, `settings`)
+    and the picture part (`picture`, roadmap 1c) each have their own digest, so a picture edit
+    never raises `change` (a picture change never re-runs power) and a power change never raises
+    `picture_change` (1c design rule 3)."""
     output_id: str
     power: tuple[PowerRequest, ...]
     settings: DisplaySettings
+    picture: OutputPicture
 
     def digest(self) -> str:
-        """sha256 hex of the canonical body; the projector raises the change when it differs."""
-        return hashlib.sha256(encode_output_document(self.at_change(_DIGEST_CHANGE))).hexdigest()
+        """sha256 hex of the canonical power part (the document but its change numbers and picture
+        part); the projector raises `change` when it differs."""
+        part = self._fields()
+        for name in ("change", "picture_change", "picture"):
+            del part[name]
+        return _sha256(part)
 
-    def at_change(self, change: int) -> OutputDocument:
+    def picture_digest(self) -> str:
+        """sha256 hex of the picture part's canonical encoding; the projector raises
+        `picture_change` when it differs."""
+        return _sha256(self._fields()["picture"])
+
+    def at_change(self, change: int, picture_change: int) -> OutputDocument:
         settings = self.settings
         return OutputDocument(self.output_id, change, self.power,
                               BEST_DETECTED if settings.power_method is None else settings.power_method,
-                              settings.switch_input_on_power_on, settings.never_off_on_other_input)
+                              settings.switch_input_on_power_on, settings.never_off_on_other_input,
+                              picture_change, self.picture)
+
+    def _fields(self) -> dict:
+        return json.loads(encode_output_document(self.at_change(_DIGEST_CHANGE, _DIGEST_CHANGE)))
+
+
+def _sha256(value: object) -> str:
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
 def project_output(output_id: str, *, test: PowerTest | None, settings: DisplaySettings | None,
-                   now: float) -> ProjectedOutput:
+                   picture: OutputPicture, now: float) -> ProjectedOutput:
     """The Output's document body at Central's `now`: `test` (when given and now < ends_at) on top
-    of standing on; `settings` or DEFAULT_SETTINGS."""
-    return ProjectedOutput(output_id, power_stack(test, now), DEFAULT_SETTINGS if settings is None else settings)
+    of standing on; `settings` or DEFAULT_SETTINGS; `picture`, the Display's picture part
+    (central/displays/picture.py `output_picture`)."""
+    return ProjectedOutput(output_id, power_stack(test, now), DEFAULT_SETTINGS if settings is None else settings,
+                           picture)
 
 
 def power_stack(test: PowerTest | None, now: float) -> tuple[PowerRequest, ...]:

@@ -24,3 +24,13 @@ int pw_frame_client_trial(struct pw_frame_client *client, const char *output_id,
     const char *grant_id, char *candidate, uint32_t capacity);
 int pw_frame_client_overlay(struct pw_frame_client *client, struct wl_surface *surface,
     const char *grant_id, const char *frame_tag, const char *primitives);
+
+/* Frame protocol v4 (roadmap 1c; run ledger .claude/runs/display-1c.md, slices P1 and R2).
+ * Copies the newest `picture` operations for output_id into caller-owned storage of at least
+ * `capacity` bytes (513 holds the largest). Returns 1 when one was received, 0 when none yet,
+ * -1 for transport failure or a client bound below version 4. */
+int pw_frame_client_picture(struct pw_frame_client *client, const char *output_id,
+    char *operations, uint32_t capacity);
+/* tag_next_commit plus the picture change the buffer was drawn with ("0": none yet). */
+int pw_frame_client_tag_picture_next_commit(struct pw_frame_client *client,
+    struct wl_surface *surface, const char *grant_id, const char *frame_tag, const char *picture_change);

@@ -23,14 +23,14 @@ from central.content_routes import mount_content_routes
 from central.content_wiring import ContentServices, build_content_services
 from central.coordination import CoordinationLimits, Coordinator
 from central.db import Database, DatabaseTransactionClock, ProcessTransactionClock, TransactionClock
-from central.display_routes import mount_display_routes
+from central.display_routes import mount_display_routes, mount_picture_routes
 from central.equipment_drain import control_fence_in
 from central.execution_repository import PostgresExecutionRepository
 from central.fleet.leaf_bridge import mount_leaf_bridge
 from central.fleet.node_routes import mount_node_routes
 from central.fleet.node_sessions import NodeControlConfig
 from central.fleet.rollout_gate import ServingImageVerifier
-from central.infra.display_store import PgDisplayCommands, PgDisplayQueries
+from central.infra.display_store import PgDisplayCommands, PgDisplayQueries, PgPictureSessions
 from central.installation_models import InstallationInventory
 from central.library_routes import mount_library_routes
 from central.mdns_advertise import MdnsCentralAdvertiser
@@ -61,7 +61,6 @@ from central.runtime_store import RuntimeStore
 from central.source_names import NamedSourceWrite, SourceInUse, SourceNameService
 from contracts.central_identity import LOCATE_PATH, identity_body
 from contracts.models import (
-    Calibration,
     Identifier,
     Model,
     Observation,
@@ -94,13 +93,6 @@ class UnbindRequest(Model):
 class ProgramReplacementRequest(Model):
     expected: Program
     program: Program
-
-
-class CalibrationRequest(Model):
-    operation: Literal["preview", "commit", "revert"]
-    expected_revision: int = Field(ge=1)
-    expected_generation: int = Field(ge=1)
-    calibration: Calibration | None = None
 
 
 class ActivationRequest(Model):
@@ -685,16 +677,6 @@ def create_app(
     def unbind(frame_id: Identifier, request: UnbindRequest):
         return registry.unbind(frame_id, expected_generation=request.expected_generation)
 
-    @app.post("/v1/operator/frames/{frame_id}/calibration", dependencies=[Depends(admin)])
-    def calibrate(frame_id: Identifier, request: CalibrationRequest):
-        return registry.calibrate(
-            frame_id,
-            request.operation,
-            request.expected_revision,
-            request.calibration,
-            expected_generation=request.expected_generation,
-        )
-
     @app.post("/v1/operator/players/{player_id}/retire", dependencies=[Depends(admin)])
     def retire(player_id: Identifier):
         registry.retire(player_id)
@@ -818,6 +800,8 @@ def create_app(
 
     mount_library_routes(app, admin=admin, media=media_application, content=content)
     mount_display_routes(app, admin=admin, queries=PgDisplayQueries(db), commands=PgDisplayCommands(db))
+    pictures = PgPictureSessions(db)
+    mount_picture_routes(app, admin=admin, queries=pictures, commands=pictures)
     if content is not None:
         mount_content_routes(app, content)
     mount_node_routes(app, db=db, clock=clock, admin=admin, coordinator=coordinator, config=node_control,

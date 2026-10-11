@@ -12,6 +12,7 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi.testclient import TestClient
 from pydantic import TypeAdapter, ValidationError
+from support.position import save_position
 
 from central.app import create_app
 from central.coordination import Coordinator
@@ -27,9 +28,17 @@ from central.registry import (
     enrollment_message,
 )
 from central.runtime import Target
-from contracts.models import IDENTIFIER_PATTERN, TARGET_ID_PATTERN, Calibration, FrameProfile
+from contracts.models import (
+    IDENTIFIER_PATTERN,
+    TARGET_ID_PATTERN,
+    Calibration,
+    CornersFit,
+    FrameProfile,
+)
 
 ADMIN = "test-operator-" + "x" * 40
+# A Position that differs from the default one: Corners with the top-left corner moved in.
+SKEWED = Calibration(fit=CornersFit(corners=((0.1, 0), (1, 0), (1, 1), (0, 1))))
 
 
 def enroll(registry, key=None, count=2, device_id=None):
@@ -90,7 +99,7 @@ def test_d0_reboot_reassociates_by_serial_preserving_frame_binding_no_duplicate(
     identity, _, request = enroll_d0(registry)
     frame(registry)
     registry.bind("portrait", identity["player_id"], "HDMI-A-1", expected_generation=0)
-    registry.calibrate("portrait", "commit", 1, Calibration(), expected_generation=1)
+    save_position(registry, "portrait")
     rebooted, _, _ = enroll_d0(registry, device_id=request.device_id)
     assert rebooted["player_id"] == identity["player_id"]
     assert rebooted["authority_epoch"] == identity["authority_epoch"] + 1
@@ -113,7 +122,7 @@ def test_d0_unbound_player_gets_no_execution_bindings_until_operator_binds(regis
     identity, _, _ = enroll_d0(registry)
     bound_identity, _, _ = enroll_d0(registry)
     registry.bind("portrait", bound_identity["player_id"], "HDMI-A-1", expected_generation=0)
-    registry.calibrate("portrait", "commit", 1, Calibration(), expected_generation=1)
+    save_position(registry, "portrait")
     bound_config = registry.configuration_for(bound_identity["player_id"], bound_identity["authority_epoch"])
     assert len(bound_config["execution_bindings"]) == 1
     assert registry.bindings_for(identity["player_id"], identity["authority_epoch"]) == []
@@ -178,7 +187,7 @@ def test_stateless_player_can_be_bound_and_recovers_binding_with_a_fresh_key(reg
     assert len(inventory.outputs) == 2
     frame(registry)
     registry.bind("portrait", identity["player_id"], "HDMI-A-1", expected_generation=0)
-    registry.calibrate("portrait", "commit", 1, Calibration(), expected_generation=1)
+    save_position(registry, "portrait")
     restarted, _, _ = enroll(registry, device_id=first.device_id)
     assert restarted["player_id"] == identity["player_id"]
     assert restarted["authority_epoch"] == 2
@@ -189,7 +198,7 @@ def test_boot_context_is_signed_and_stale_ticket_cannot_reenroll(registry):
     identity, _, request = enroll(registry)
     frame(registry)
     registry.bind("portrait", identity["player_id"], "HDMI-A-1", expected_generation=0)
-    registry.calibrate("portrait", "commit", 1, Calibration(), expected_generation=1)
+    save_position(registry, "portrait")
     forged = request.model_copy(update={"boot_id": str(uuid.uuid4())})
     with pytest.raises(RegistryError, match="invalid_proof"):
         registry.enroll(forged)
@@ -223,7 +232,7 @@ def test_replacement_preserves_frame_rejects_retired_identity_and_revalidates(re
     frame(registry)
     first = registry.bind("portrait", old["player_id"], "HDMI-A-1", expected_generation=0)
     assert first["generation"] == 1
-    registry.calibrate("portrait", "commit", 1, Calibration(gain=.8), expected_generation=1)
+    save_position(registry, "portrait", SKEWED)
     assert len(registry.bindings_for(old["player_id"], 1)) == 1
     # Replacement is unbind, then retire: a Player with a bound Output cannot be retired.
     registry.unbind("portrait", expected_generation=1)
@@ -235,10 +244,8 @@ def test_replacement_preserves_frame_rejects_retired_identity_and_revalidates(re
     assert registry.bind("portrait", new["player_id"], "HDMI-A-2", expected_generation=2)["generation"] == 3
     assert registry.bindings_for(new["player_id"], 1) == []
     location = registry.inventory().frames[0]
-    assert (location.id, location.width_mm, location.calibration.gain) == ("portrait", 300, .8)
-    with pytest.raises(RegistryError, match="generation_conflict"):
-        registry.calibrate("portrait", "commit", 2, Calibration(gain=.5), expected_generation=1)
-    registry.calibrate("portrait", "commit", 2, Calibration(gain=.9), expected_generation=3)
+    assert (location.id, location.width_mm, location.calibration.fit) == ("portrait", 300, SKEWED.fit)
+    save_position(registry, "portrait")
     assert registry.bindings_for(new["player_id"], 1)[0].generation == 3
 
 
@@ -246,7 +253,7 @@ def test_unbind_withdraws_execution_binding_generation_fenced_and_allows_rebind(
     identity, _, _ = enroll(registry)
     frame(registry)
     registry.bind("portrait", identity["player_id"], "HDMI-A-1", expected_generation=0)
-    registry.calibrate("portrait", "commit", 1, Calibration(), expected_generation=1)
+    save_position(registry, "portrait")
     assert len(registry.bindings_for(identity["player_id"], 1)) == 1
     result = registry.unbind("portrait", expected_generation=1)
     # The generation bump (mirroring bind/retire) is what a stale caller is fenced on below;
@@ -418,30 +425,15 @@ def test_delayed_binding_retry_cannot_undo_a_newer_transfer(registry):
     assert registry.inventory().frames[0].player_id == second["player_id"]
 
 
-def test_calibration_preview_expiry_revert_commit_conflict_and_restart(registry):
+def test_a_saved_position_survives_restart(registry):
     identity, _, _ = enroll(registry)
     frame(registry)
     registry.bind("portrait", identity["player_id"], "HDMI-A-1", expected_generation=0)
-    registry.calibrate("portrait", "commit", 1, Calibration(), expected_generation=1)
-    registry.calibrate("portrait", "preview", 2, Calibration(gain=.5), expected_generation=1)
-    preview = registry.bindings_for(identity["player_id"], 1)[0]
-    assert preview.calibration.gain == 1
-    assert preview.effective_calibration(registry.clock.utc()).gain == .5
-    registry.clock.advance(31)
-    # The downloaded configuration contains everything needed to revert offline.
-    assert preview.effective_calibration(registry.clock.utc()).gain == 1
-    expired = registry.bindings_for(identity["player_id"], 1)[0]
-    assert expired.calibration.gain == 1
-    assert expired.configuration_revision > preview.configuration_revision
-    registry.calibrate("portrait", "preview", 2, Calibration(gain=.7), expected_generation=1)
-    registry.calibrate("portrait", "revert", 2, expected_generation=1)
-    assert registry.bindings_for(identity["player_id"], 1)[0].calibration.gain == 1
-    registry.calibrate("portrait", "commit", 2, Calibration(gain=.8), expected_generation=1)
+    save_position(registry, "portrait", SKEWED)
     restarted = Registry(Database(registry.db.dsn), registry.clock)
     restarted.db.migrate()  # Idempotent migration on a fresh connection.
-    assert restarted.bindings_for(identity["player_id"], 1)[0].calibration.revision == 3
-    with pytest.raises(RegistryError, match="revision_conflict"):
-        restarted.calibrate("portrait", "commit", 2, Calibration(gain=.2), expected_generation=1)
+    saved = restarted.bindings_for(identity["player_id"], 1)[0]
+    assert (saved.calibration.revision, saved.calibration.fit) == (2, SKEWED.fit)
 
 
 def test_http_operator_and_player_authority_are_separate_and_errors_are_sanitized(registry):
@@ -504,7 +496,7 @@ def test_place_frame_never_touches_generation_revision_or_calibration(registry):
     identity, _, _ = enroll(registry)
     frame(registry)
     registry.bind("portrait", identity["player_id"], "HDMI-A-1", expected_generation=0)
-    registry.calibrate("portrait", "commit", 1, Calibration(gain=.7), expected_generation=1)
+    save_position(registry, "portrait", SKEWED)
     before = registry.inventory().frames[0]
     registry.place_frame("portrait", FramePlacement(x_mm=42))
     after = registry.inventory().frames[0]

@@ -17,7 +17,10 @@ from collections.abc import Callable
 from pathlib import Path
 
 import pytest
+from node.display.fake_display_state import SOURCE as STATE_SOURCE
+from node.display.fake_display_state import changing_state, read_state
 
+from appliance.display_host.ddc import DdcChannel
 from appliance.display_host.output_power import OutputPowerController, in_force, next_deadline
 from appliance.display_host.power_methods import (
     CEC_CTL,
@@ -28,9 +31,13 @@ from appliance.display_host.power_methods import (
     run_tool,
 )
 from contracts.node_output import (
+    AS_THE_DISPLAY_HAS_IT,
     BEST_DETECTED,
+    ActsOn,
     DisplayIdentity,
     OutputDocument,
+    OutputPicture,
+    PictureSetting,
     Power,
     PowerMethod,
     PowerRequest,
@@ -42,13 +49,14 @@ OUTPUT = "HDMI-A-1"
 IDENTITY = DisplayIdentity("XYM", 5475, "MNN", None)   # the spike's monitor
 
 # The scripted display both tools read and write. `power` is the panel's; D6 reads 1 when on and
-# 2 in standby (the spike: setvcp D6 4 reads back x02).
+# 2 in standby (the spike: setvcp D6 4 reads back x02). The state goes through
+# `fake_display_state`, whose source each tool embeds ahead of its own.
 FAKE_DDCUTIL = '''
 import json, sys, time
 state_path, log_path = {state!r}, {log!r}
 with open(log_path, "a") as log:
     log.write(json.dumps(sys.argv[1:]) + "\\n")
-state = json.load(open(state_path))
+state = read_state(state_path)
 if state.get("hang"):
     time.sleep(60)
 if not state["ddc"]:
@@ -57,8 +65,8 @@ args = sys.argv[sys.argv.index("--noconfig") + 1:]
 if args[0] == "getvcp":
     print("VCP D6 SNC x%02x" % (1 if state["power"] == "on" else 2))
 elif args[0] == "setvcp" and args[1] == "D6":
-    state["power"] = {{"1": "on", "4": "standby"}}[args[2]]
-    json.dump(state, open(state_path, "w"))
+    with changing_state(state_path) as state:
+        state["power"] = {{"1": "on", "4": "standby"}}[args[2]]
 '''
 
 FAKE_CEC_CTL = '''
@@ -66,7 +74,7 @@ import json, sys
 state_path, log_path = {state!r}, {log!r}
 with open(log_path, "a") as log:
     log.write(json.dumps(sys.argv[1:]) + "\\n")
-state = json.load(open(state_path))
+state = read_state(state_path)
 device = sys.argv[sys.argv.index("-d") + 1]
 connector = {{"cec0": 35, "cec1": 36}}[device.rsplit("/", 1)[1]]
 args = sys.argv[sys.argv.index("-d") + 2:]
@@ -75,11 +83,11 @@ print("\\tPhysical Address           : 1.0.0.0")
 if "--to" in args:
     if not state["cec"]:
         print("\\tTx, Not Acknowledged (4), Max Retries"); sys.exit(0)
-    if "--standby" in args:
-        state["power"] = "standby"
-    if "--image-view-on" in args:
-        state["power"] = "on"
-    json.dump(state, open(state_path, "w"))
+    with changing_state(state_path) as state:
+        if "--standby" in args:
+            state["power"] = "standby"
+        if "--image-view-on" in args:
+            state["power"] = "on"
     if "--give-device-power-status" in args:
         print("\\tpwr-state: %s (0x0%d)" % (state["power"], 0 if state["power"] == "on" else 1))
 '''
@@ -98,7 +106,7 @@ class Display:
         bin_dir.mkdir()
         for tool, source in ((DDCUTIL, FAKE_DDCUTIL), (CEC_CTL, FAKE_CEC_CTL)):
             path = bin_dir / Path(tool).name
-            path.write_text(f"#!{sys.executable} -I\n"
+            path.write_text(f"#!{sys.executable} -I\n" + STATE_SOURCE
                             + source.format(state=str(self.state_path), log=str(self.log_path)))
             path.chmod(0o755)
         self.bin = bin_dir
@@ -115,12 +123,12 @@ class Display:
             (self.dev / name).touch()
 
     def script(self, **values: object) -> None:
-        state = json.loads(self.state_path.read_text()) if self.state_path.exists() else {}
-        self.state_path.write_text(json.dumps({**state, **values}))
+        with changing_state(self.state_path) as state:
+            state.update(values)
 
     @property
     def power(self) -> str:
-        return json.loads(self.state_path.read_text())["power"]
+        return read_state(self.state_path)["power"]
 
     def run(self, argv, timeout):
         """The production runner, with the tool's path pointed at the fake."""
@@ -182,7 +190,7 @@ class Sink:
 
 
 def ddc(display: Display) -> DdcCiAdapter:
-    return DdcCiAdapter(display.run, drm_root=display.drm, cache_dir=display.root / "cache")
+    return DdcCiAdapter(DdcChannel(display.run, drm_root=display.drm, cache_dir=display.root / "cache"))
 
 
 def cec(display: Display) -> HdmiCecAdapter:
@@ -192,10 +200,12 @@ def cec(display: Display) -> HdmiCecAdapter:
 def document(change: int, *requests: PowerRequest, method=BEST_DETECTED, never_off_on_other_input=False,
              switch_input_on_power_on=False) -> OutputDocument:
     return OutputDocument(OUTPUT, change, (*requests, STANDING), method, switch_input_on_power_on,
-                          never_off_on_other_input)
+                          never_off_on_other_input, 1, PICTURE)
 
 
 STANDING = PowerRequest("standing", Power.ON, RequestReason.STANDING)
+PICTURE = OutputPicture(PictureSetting(ActsOn.DISPLAY, AS_THE_DISPLAY_HAS_IT),
+                        PictureSetting(ActsOn.DISPLAY, AS_THE_DISPLAY_HAS_IT), 6500, 22)
 
 
 def console_off(seconds: int = 300, request_id: str = "17") -> PowerRequest:

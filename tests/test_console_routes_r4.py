@@ -57,8 +57,10 @@ SOURCE_SUFFIXES = (".js", ".jsx", ".ts", ".tsx")
 SAMPLES = json.loads((SRC / "routeSamples.json").read_text())
 TABLES = {"show": "showRoutes.jsx", "wall": "wallRoutes.jsx", "fleet": "fleetRoutes.jsx",
           "neutral": "neutralRoutes.jsx"}
-# The Frame page, its Position tab and the live adjustment that writes a Frame's calibration.
-DISPLAY_CONTROLS = {"frame-page.tsx", "frame-position.tsx", "liveAdjustment.js"}
+# The Frame page, its Position tab and the live adjustment that writes a Frame's calibration,
+# and its Picture tab with the session and routes that write the display's picture (1c K1).
+DISPLAY_CONTROLS = {"frame-page.tsx", "frame-position.tsx", "liveAdjustment.js", "frame-picture.tsx",
+                    "pictureSession.js", "pictureApi.js"}
 # The display's calibration routes (central/fleet/node_routes.py
 # `/v1/operator/frames/{frame_id}/calibration-…`): only the Wall side may name them. Matched with
 # the interpolated Frame id's closing brace, so no hash route can be mistaken for one.
@@ -757,7 +759,11 @@ LEGACY_MARKUP = {"ConfirmAction.jsx", "PlayerCommands.jsx", "nodeControl.js"}
 # Frame id rule; the Frame profile its write and refresh-after-write; the live adjustment's
 # view the hook's type. No other page or domain module may import any of them.
 FRAME_PAGE_IMPORTS = {
-    "frame-page.tsx": {"BindingFacet.jsx", "liveAdjustment.js"},
+    "frame-page.tsx": {"BindingFacet.jsx", "liveAdjustment.js", "pictureSession.js"},
+    # The Picture tab (1c K1): its routes and the session hook's type; Position (1c K2): the
+    # quarter turns its draft takes.
+    "frame-picture.tsx": {"pictureApi.js", "pictureSession.js"},
+    "frame-position.tsx": {"useDraft.js"},
     "frame-overview.tsx": {"PrecedenceExplanation.jsx", "ReadinessNotice.jsx", "readinessRecovery.js",
                            "frameIds.js"},
     "frame-profile.tsx": {"framesApi.js", "useMutate.js"},

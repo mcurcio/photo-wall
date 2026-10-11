@@ -6,14 +6,15 @@ from uuid import UUID
 
 import pytest
 from psycopg.types.json import Jsonb
-from test_registry import enroll, frame
+from support.position import save_position
+from test_registry import SKEWED, enroll, frame
 
 from central.catalog import CatalogSnapshot
 from central.coordination import CoordinationError, CoordinationLimits, Coordinator
 from central.registry import RegistryError
 from central.runtime import Child, Contribution, Program, Scene
 from central.runtime_store import RuntimeStore
-from contracts.models import Calibration, Failure, Readiness, Variant
+from contracts.models import Failure, Readiness, Variant
 from media.models import OriginalAsset
 
 
@@ -24,7 +25,7 @@ def setup_players(registry, count=2):
         frame_id = f"frame-{i}"
         frame(registry, frame_id)
         registry.bind(frame_id, player["player_id"], "HDMI-A-1", expected_generation=0)
-        registry.calibrate(frame_id, "commit", 1, Calibration(), expected_generation=1)
+        save_position(registry, frame_id)
         players.append(player)
     return players
 
@@ -74,10 +75,10 @@ def test_configuration_revision_detects_independent_output_changes(registry):
     first = coordinator.configuration(player["player_id"], 1)
     assert len(first.bindings) == 2 and first.enabled_outputs == ()
     for revision in range(1, 5):
-        registry.calibrate("f0", "commit", revision, Calibration(), expected_generation=1)
+        save_position(registry, "f0")
     high = coordinator.configuration(player["player_id"], 1)
     assert high.configuration_revision == first.configuration_revision + 1
-    registry.calibrate("f1", "commit", 1, Calibration(gain=.8), expected_generation=1)
+    save_position(registry, "f1", SKEWED)
     low = coordinator.configuration(player["player_id"], 1)
     assert low.configuration_revision == high.configuration_revision + 1
     assert coordinator.configuration(player["player_id"], 1) == low
@@ -265,7 +266,7 @@ def test_mixed_calibrated_outputs_use_complete_plan_configuration_and_suppress_s
     ready = report(coordinator, player)
     coordinator.readiness(player["player_id"], ready)
     assert coordinator.delivery(player["player_id"], 1)["commits"]
-    registry.calibrate("frame-0", "preview", 2, Calibration(gain=.5), expected_generation=1)
+    save_position(registry, "frame-0", SKEWED)   # a new Position: the offered plan is stale
     stale = coordinator.delivery(player["player_id"], 1)
     assert stale["plan"] is None and stale["commits"] == ()
     coordinator.readiness(player["player_id"], ready.model_copy(update={"sequence": 2}))
@@ -324,7 +325,7 @@ def test_explicit_binding_cohort_change_offers_fresh_revision_for_current_state(
     assert old["revocations"]
     frame(registry, "missing")
     registry.bind("missing", player["player_id"], "HDMI-A-2", expected_generation=0)
-    registry.calibrate("missing", "commit", 1, Calibration(), expected_generation=1)
+    save_position(registry, "missing")
     registry.clock.advance(1)
     coordinator.advance()
     current = coordinator.delivery(player["player_id"], 1)
@@ -554,7 +555,7 @@ def test_a_new_binding_supersedes_the_pending_cohort_it_replaces(registry):
     before = next(g for g in cohorts(registry) if g["starts_at"] == 1100)
     frame(registry, "late")
     registry.bind("late", player["player_id"], "HDMI-A-2", expected_generation=0)
-    registry.calibrate("late", "commit", 1, Calibration(), expected_generation=1)
+    save_position(registry, "late")
     registry.clock.advance(90)
     drive(registry, coordinator, [player], 1110)
     assert [d["code"] for d in group_events(registry, before["id"])] == ["superseded"]

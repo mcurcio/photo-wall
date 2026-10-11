@@ -4,14 +4,28 @@ slices C1-C3, read by the console slices K1 and K2). Plain models, one per answe
 """
 from __future__ import annotations
 
-from typing import Annotated
+from enum import StrEnum
+from typing import Annotated, Literal
 from uuid import UUID
 
 from pydantic import Field
 
 from central.displays.model import PowerStatus, Readiness
+from central.displays.picture import PictureStatus, Setting
 from contracts.models import Identifier, Instant, Model
-from contracts.node_output import Power, PowerMethod, PowerResult, RequestReason
+from contracts.node_output import (
+    GAMMA_TENTHS_MAX,
+    GAMMA_TENTHS_MIN,
+    KELVIN_MAX,
+    KELVIN_MIN,
+    PERCENT_MAX,
+    ActsOn,
+    Power,
+    PowerMethod,
+    PowerResult,
+    RequestReason,
+    WriteResult,
+)
 
 
 class ModeView(Model):
@@ -92,3 +106,72 @@ class DisplayPowerSettings(Model):
     power_method: PowerMethod | None
     switch_input_on_power_on: bool
     never_off_on_other_input: bool
+
+
+# Roadmap 1c (run ledger .claude/runs/display-1c.md, slice C2; read by the console slice K1): the
+# Picture tab's shapes. A value None is "as the display has it" (nothing set).
+
+class PictureSettingView(Model):
+    """Brightness or contrast on the Picture tab: where it acts (None: not placed yet, the display
+    has not been seen), the value in force, and what the Pi reported for it."""
+    acts_on: ActsOn | None
+    value: Annotated[int, Field(ge=0, le=PERCENT_MAX)] | None
+    answered: bool | None                         # the display answered its DDC/CI read; None: no report
+    read: Annotated[int, Field(ge=0, le=PERCENT_MAX)] | None   # what the display last read back
+    result: WriteResult | None                    # the Pi's write result for the latest picture change
+
+
+class PictureSessionView(Model):
+    """An open picture session: the sequence the next edit names, and its idle deadline."""
+    session_id: UUID
+    sequence: Annotated[int, Field(ge=1)]
+    idle_until: Instant
+
+
+class FramePictureView(Model):
+    """GET /v1/operator/frames/{frame_id}/picture: the Picture tab."""
+    frame_id: Identifier
+    status: PictureStatus
+    display_id: UUID | None                       # the Display last seen on the bound Output
+    brightness: PictureSettingView
+    contrast: PictureSettingView
+    colour_temperature_kelvin: Annotated[int, Field(ge=KELVIN_MIN, le=KELVIN_MAX)]
+    gamma_tenths: Annotated[int, Field(ge=GAMMA_TENTHS_MIN, le=GAMMA_TENTHS_MAX)]
+    connected: bool | None                        # the latest Output report's; None: no report
+    session: PictureSessionView | None            # the Display's open session, if any
+
+
+class PictureEdit(Model):
+    """POST /v1/operator/picture-sessions/{session_id}/edits: one setting, one value."""
+    setting: Setting
+    value: int                                    # percent, kelvin or gamma tenths, by setting
+    expected_sequence: Annotated[int, Field(ge=1)]
+
+
+class PicturePlace(Model):
+    """POST /v1/operator/picture-sessions/{session_id}/places: move brightness or contrast."""
+    setting: Literal[Setting.BRIGHTNESS, Setting.CONTRAST]
+    acts_on: ActsOn
+    expected_sequence: Annotated[int, Field(ge=1)]
+
+
+class PictureSequence(Model):
+    """An accepted edit or place: the sequence the next one names."""
+    sequence: Annotated[int, Field(ge=1)]
+
+
+class PictureCopyRequest(Model):
+    """POST /v1/operator/frames/{frame_id}/picture-copies (#119): copy this Frame's Display values."""
+    to_frames: Annotated[tuple[Identifier, ...], Field(min_length=1, max_length=64)]
+
+
+class CopyOutcome(StrEnum):
+    COPIED = "copied"
+    NO_DISPLAY = "no-display"                     # the target has no Display recorded
+    SAME_DISPLAY = "same-display"                 # the target is fed by the source's own Display
+    SESSION_OPEN = "session-open"                 # someone is adjusting the target's Display now
+
+
+class PictureCopyResult(Model):
+    frame_id: Identifier
+    outcome: CopyOutcome
