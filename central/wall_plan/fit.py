@@ -58,6 +58,26 @@ FitRefusal = Literal[
 MediaKind = Literal["image", "video"]
 
 
+class FitTarget(Model):
+    """A Frame as the photo fit rule judges it (follow-ups 2026-10-11, slice B1; owner,
+    2026-10-11: compatibility "measuring against the Frame output and not the Display"): its
+    profile (the shape `width_px / height_px`, `video`, `diagonal_inches`) and its Frame output
+    (`central.installation_models.FrameOutput.output_px`; None until its Output reports a size,
+    when rule 2 is skipped and the analysis says "judged by shape only"). Hashable: the rule's
+    memo is keyed by it."""
+
+    profile: FrameProfile
+    output_px: tuple[int, int] | None = None
+
+
+def band(aspect: float, crop_limit: float) -> tuple[float, float]:
+    """The photo ratios (width / height) rule 1 accepts on a Frame of `aspect` at `crop_limit`:
+    (aspect x (1 - crop_limit), aspect / (1 - crop_limit)), from `crop_share`'s formula. The one
+    home of a Frame's ratio band: the analysis's Frame bands and its ratio histogram ask here
+    (slice B2). Pure; ValueError unless `aspect` > 0 and 0 < `crop_limit` < 1."""
+    raise NotImplementedError
+
+
 class Fits(Model):
     fits: Literal[True] = True
     crop: PhotoCrop
