@@ -9,10 +9,11 @@ from pydantic import ValidationError
 from support.photo_pools import photo, seed_pool
 
 from central.db import ProcessTransactionClock
-from central.media_queue import PREPARE_MEDIA_TASK, ProcrastinateMediaQueue
+from central.media_queue import PREPARE_MEDIA_TASK, ProcrastinateMediaQueue, QueueReceipt
 from central.media_repository import MediaRepository, StoreLimits, lease_asset_of
-from central.planner import AcquisitionRequest
+from central.planner import AcquisitionRequest, MeasureRequest
 from central.registry import RegistryError
+from central.wall_plan.key_content import ANALYSIS_VERSION, InterestGrid, KeyContent, Measured
 from contracts.models import Variant
 
 
@@ -123,6 +124,37 @@ def test_source_pools_in_hydrates_a_ready_variant_and_leaves_out_an_unknown_sour
         newer.asset_id, older.asset_id]
     assert [c.variant for c in pools["family:1"].candidates] == [variant, None]
     assert pools["garden:1"].ready is False and pools["garden:1"].candidates == ()
+
+
+class MeasureQueue(RecordingMediaQueue):
+    def __init__(self):
+        super().__init__()
+        self.measured = []
+
+    def enqueue_measure_in(self, conn, asset_id):
+        self.measured.append(asset_id)
+        return QueueReceipt(coalesced=False)
+
+
+def test_source_pools_in_hydrates_key_content_and_a_measurement_is_requested_once(registry):
+    """Roadmap 5a (M1): a measured photo carries its analysis; an unmeasured one carries None,
+    and the scheduler's request queues it once."""
+    queue = MeasureQueue()
+    repo = MediaRepository(registry.db, registry.clock, StoreLimits(), queue=queue,
+                           times=ProcessTransactionClock(registry.clock))
+    measured, unmeasured = photo("measured", taken_at=990), photo("unmeasured", taken_at=900)
+    seed_pool(registry, "family:1", (unmeasured, measured))
+    key = KeyContent(analysis_version=ANALYSIS_VERSION,
+                     interest=InterestGrid(columns=1, rows=1, weights=(1.0,)))
+    repo.key_content.record_measured(measured.asset_id, key)
+    with registry.db.transaction() as conn:
+        pool = repo.source_pools_in(conn, {"family:1"})["family:1"]
+    assert [(c.asset_id, c.analysis) for c in pool.candidates] == [
+        (measured.asset_id, Measured(key=key)), (unmeasured.asset_id, None)]
+    wanted = tuple(MeasureRequest(asset_id=c.asset_id) for c in pool.candidates)
+    assert repo.request_measurements(wanted) == 1
+    assert repo.request_measurements(()) == 0
+    assert queue.measured == [unmeasured.asset_id]
 
 
 
