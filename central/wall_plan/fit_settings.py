@@ -3,9 +3,16 @@
 
 Owner, 2026-10-11: "Agreed that these should be configurable, and not hardcoded." One typed home,
 house-wide, one stored row (migration 086, central/infra/fit_settings_store.py), read by Central
-on each planning pass, the authoring check, the candidates read and the fit analysis. Each default
-is the value the rule used before it was configurable; each range is the one home of what the
-API accepts and the console's control offers (Settings › Photo fit, slice C2).
+on each planning pass, the authoring check, the candidates read and the fit analysis. Each range
+is the one home of what the API accepts and the console's control offers (Settings › Photo fit,
+slice C2); each default here is the one home of its value (the console reads it as `defaults`).
+
+Defaults loosened 2026-10-12 (owner, verbatim: "the default values are very conservative and
+exclude many photos"): `face_padding` 0.20 -> 0.10 and `max_lost_interest_density` 1.25 -> 1.75.
+`crop_limit` stays 0.35: it is what keeps a portrait photo off a landscape Frame (the nearest
+pair, 4:5 on 5:4, cuts 36 %; owner, 2026-10-11: a portrait photo never lands on a landscape
+Frame), so a square on 16:9 (44 %) stays out. A saved row keeps the values it was saved with;
+each row's Reset brings the new default.
 
 `crop_limit` is the house crop limit: a Scene whose own crop limit is unset follows it
 (`central.wall_plan.selection.SceneSelection.crop_limit`), so the value lives in one place.
@@ -48,14 +55,18 @@ class FitSettings(Model):
     # The most of a photo's area a Frame may cut away (rule 1), for every Scene without its own.
     crop_limit: float = Field(default=0.35, ge=_R["crop_limit"][0], le=_R["crop_limit"][1],
                               allow_inf_nan=False)
-    # Room kept beside each face, as a share of the face's own width (height) on each side.
-    face_padding: float = Field(default=0.20, ge=_R["face_padding"][0], le=_R["face_padding"][1],
+    # Room kept beside each face, as a share of the face's own width (height) on each side: a
+    # tenth keeps a face whole with a margin without a close-up's face claiming most of the photo.
+    face_padding: float = Field(default=0.10, ge=_R["face_padding"][0], le=_R["face_padding"][1],
                                 allow_inf_nan=False)
     # A face smaller than this share of the photo's area does not decide a crop.
     min_face_share: float = Field(default=0.002, ge=_R["min_face_share"][0],
                                   le=_R["min_face_share"][1], allow_inf_nan=False)
-    # Rule 4: how much denser in interest than the photo's average the removed part may be.
-    max_lost_interest_density: float = Field(default=1.25,
+    # Rule 4: how much denser in interest than the photo's average the removed part may be. At
+    # 1.75 the texture spectral-residual saliency finds at a photo's edges (grass, sky, foliage)
+    # no longer refuses a crop, while a subject on both cut sides (a 4:3 photo on 16:9 with 90 %
+    # of its interest in its top and bottom quarters, 1.9 times its share) still does.
+    max_lost_interest_density: float = Field(default=1.75,
                                              ge=_R["max_lost_interest_density"][0],
                                              le=_R["max_lost_interest_density"][1],
                                              allow_inf_nan=False)

@@ -414,22 +414,24 @@ class PgPhotoLibrary:
         with self.db.transaction() as conn:
             # Two Centrals starting together take turns; the unique index keeps one managed row.
             conn.execute("LOCK TABLE library_connections IN SHARE ROW EXCLUSIVE MODE")
-            managed = conn.execute("SELECT connection_ref,url,api_key FROM library_connections "
+            managed = conn.execute("SELECT connection_ref,name,url,api_key FROM library_connections "
                                    "WHERE managed").fetchone()
             outcome: Literal["created", "adopted", "updated"]
             if managed is not None:
                 ref = managed["connection_ref"]
+                named = self._name_if_unnamed(conn, managed)
                 if (managed["url"], managed["api_key"]) == (url, secret):
-                    return Provision(connection_ref=ref, outcome="unchanged")
+                    return Provision(connection_ref=ref, outcome="renamed" if named else "unchanged")
                 outcome = "updated"
             else:
                 adopted = conn.execute(
-                    "SELECT connection_ref FROM library_connections WHERE api_key=%(key)s OR "
+                    "SELECT connection_ref,name FROM library_connections WHERE api_key=%(key)s OR "
                     "url=%(url)s OR url IS NULL ORDER BY api_key IS NOT DISTINCT FROM %(key)s DESC,"
                     " url IS NOT DISTINCT FROM %(url)s DESC, created_at, connection_ref LIMIT 1",
                     {"key": secret, "url": url}).fetchone()
                 if adopted is not None:
                     ref, outcome = adopted["connection_ref"], "adopted"
+                    self._name_if_unnamed(conn, adopted)
                 else:
                     ref, outcome = "library-" + uuid.uuid4().hex[:12], "created"
                     conn.execute("INSERT INTO library_connections(connection_ref,name,created_at) "
@@ -439,6 +441,17 @@ class PgPhotoLibrary:
                          "WHERE connection_ref=%s", (url, secret, ref))
             queue.enqueue_connection_check_in(conn, ref)
         return Provision(connection_ref=ref, outcome=outcome)
+
+    @classmethod
+    def _name_if_unnamed(cls, conn: Any, row: Any) -> bool:
+        """A managed connection whose name is still its ref (migration 080's cut-over row, e.g.
+        `immich-main`) never had a name chosen, and the operator cannot rename a managed one: it
+        takes `_free_name`'s. A name someone chose is kept. True when it was renamed."""
+        if row["name"] != row["connection_ref"]:
+            return False
+        conn.execute("UPDATE library_connections SET name=%s WHERE connection_ref=%s",
+                     (cls._free_name(conn), row["connection_ref"]))
+        return True
 
     @staticmethod
     def _free_name(conn: Any) -> str:

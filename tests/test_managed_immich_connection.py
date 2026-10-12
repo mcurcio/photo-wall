@@ -9,7 +9,8 @@ Mutation probes (each turns its case red): drop `managed=TRUE` from the store's 
 UPDATE -> the 409 and the restart cases; drop the `connection_managed` refusal in
 `change_connection` (or in `remove_connection`) -> the refusal case; compare only the URL in the
 unchanged check -> the key-change case; return SetByDeployment for a URL without a key -> the
-partial case; drop the release call -> the removed-variables case.
+partial case; drop the release call -> the removed-variables case; drop `_name_if_unnamed`'s
+UPDATE -> the cut-over cases.
 """
 
 from __future__ import annotations
@@ -208,8 +209,24 @@ def test_it_takes_over_the_connection_waiting_since_the_cut_over(start, registry
     client, library = start(**_set())
     rows = {row["connection_ref"]: row for row in client.get(CONNECTIONS, headers=AUTH).json()}
     assert rows["family-library"]["managed"] and rows["family-library"]["url"] == URL + "/api"
+    # Its name was only its ref (nobody chose it) and Settings cannot rename a managed one.
+    assert rows["family-library"]["name"] == "Immich 2"
     assert not rows["library-000000000001"]["managed"]
     assert library.connection_secret("family-library").api_key.get_secret_value() == KEY
+
+
+def test_a_set_connection_still_named_by_its_ref_is_named_immich_at_the_next_start(start, registry):
+    """Production after delivery 4: the cut-over row `immich-main`, already managed, showed its ref
+    as its name everywhere (owner, 2026-10-12: "immich photo source says "immich-main" instead of
+    the more natural "Immich""). The next start names it; no check is queued for a rename."""
+    with registry.db.transaction() as conn:
+        conn.execute("INSERT INTO library_connections(connection_ref,name,url,api_key,managed,"
+                     "created_at) VALUES('immich-main','immich-main',%s,%s,TRUE,0)",
+                     (URL + "/api", KEY))
+    client, library = start(**_set())
+    [row] = client.get(CONNECTIONS, headers=AUTH).json()
+    assert (row["connection_ref"], row["name"], row["managed"]) == ("immich-main", "Immich", True)
+    assert _checks(library.db) == []
 
 
 def test_with_a_connection_of_that_name_it_is_named_immich_2(start, registry):

@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React from "react";
 
 import { cropPercent, ORDERS, PLAYBACK_LABELS, SCENE_SETTING_DEFAULTS, SETTING_RANGES } from "./authoring.js";
 import { SettingRow } from "./patterns/setting-row.tsx";
@@ -195,8 +195,6 @@ export function SelectionRows({ value, patch, problems, houseCropLimit = null, o
   const order = value.order ?? D.order;
   const days = value.noRepeatDays ?? D.noRepeatDays;
   const typed = String(days).trim() !== "";
-  // The value under a dragging pointer, shown until it is let go (the draft keeps the last kept).
-  const [dragged, setDragged] = useState(/** @type {number|null} */ (null));
   const follows = value.cropLimit === null || value.cropLimit === undefined;
   // Following the house: the value is the served one (Settings › Photo fit), never a copy of
   // its default; until it is read the row draws no number.
@@ -274,14 +272,10 @@ export function SelectionRows({ value, patch, problems, houseCropLimit = null, o
           ) : (
             <Slider
               {...percents}
-              value={dragged ?? cropPercent(/** @type {number} */ (crop))}
+              value={cropPercent(/** @type {number} */ (crop))}
               unit="%"
-              onPreview={(percent) => {
-                setDragged(percent);
-                onCropPreview?.(percent / 100);
-              }}
+              onPreview={(percent) => onCropPreview?.(percent / 100)}
               onCommit={(percent) => {
-                setDragged(null);
                 patch({ cropLimit: percent / 100 });
                 onCropPreview?.(null);
               }}
