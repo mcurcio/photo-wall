@@ -69,7 +69,8 @@ def test_a_pasted_connection_is_listed_with_a_key_hint_and_not_checked(client):
     [row] = test_client.get(CONNECTIONS, headers=AUTH).json()
     assert row == {"connection_ref": ref, "name": "Home", "url": "http://immich.invalid:2283/api",
                    "key_hint": "…1234", "immich_user": None, "health": {"state": "not_checked"},
-                   "counts": None, "required_permissions": list(REQUIRED_PERMISSIONS)}
+                   "counts": None, "required_permissions": list(REQUIRED_PERMISSIONS),
+                   "managed": False}
 
 
 def test_the_key_is_in_no_answer_job_or_log(client, caplog):

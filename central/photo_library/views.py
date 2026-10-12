@@ -46,7 +46,8 @@ class ConnectionSaved(Model):
 
 
 class LibraryConnectionView(Model):
-    """One row of Settings › Photo library (#8-#12). A cut-over row (C12) has no url or key yet."""
+    """One row of Settings › Photo library (#8-#12). A cut-over row (C12) has no url or key yet.
+    A `managed` row is the one the deployment sets: never changed or removed through the API."""
 
     connection_ref: ConnectionRef
     name: str
@@ -56,6 +57,7 @@ class LibraryConnectionView(Model):
     health: LibraryHealth
     counts: LibraryCounts | None      # the last passing check's
     required_permissions: tuple[str, ...]  # policy.REQUIRED_PERMISSIONS, for "Make a key with these"
+    managed: bool                     # set by the deployment (provisioning.py): shown read-only
 
 
 class ListAnswer(Model, Generic[Item]):

@@ -13,7 +13,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any, Literal, Protocol
 
-from pydantic import Field
+from pydantic import Field, SecretStr
 
 from central.installation_models import FrameOutput
 from central.photo_library.model import (
@@ -61,7 +61,8 @@ class LibraryRefused(Exception):
     """A refusal the routes answer as {"error": code} with `status`:
     connection_unknown 404, sources_use_connection 409, invalid_url 422, key_required 422,
     connection_name_exists 409, draft_unknown 404, source_unknown 404, cursor_invalid 422,
-    source_name_exists 409, source_revision_conflict 409, invalid_source_name 422."""
+    source_name_exists 409, source_revision_conflict 409, invalid_source_name 422,
+    connection_managed 409 (the deployment sets that connection: ManagedConnectionCommands)."""
 
     def __init__(self, code: str, status: int) -> None:
         super().__init__(code)
@@ -124,16 +125,47 @@ class PhotoLibraryCommands(Protocol):
     def change_connection(self, connection_ref: ConnectionRef, write: ConnectionWrite) -> None:
         """Rename, re-point or re-key; `write.key` None keeps the key. Queues a check.
         The bound Immich user stays (a key for another user reads Needs a look, other_user).
-        LibraryRefused("connection_unknown", 404), ("invalid_url", 422)."""
+        LibraryRefused("connection_unknown", 404), ("invalid_url", 422), ("connection_managed",
+        409) for the connection the deployment sets."""
         ...
 
     def remove_connection(self, connection_ref: ConnectionRef) -> None:
         """Delete the connection, its key, health and lists. Refused while a saved Source or a
-        draft uses it: LibraryRefused("sources_use_connection", 409); ("connection_unknown", 404)."""
+        draft uses it: LibraryRefused("sources_use_connection", 409); ("connection_unknown", 404);
+        ("connection_managed", 409) for the connection the deployment sets."""
         ...
 
     def check_connection(self, connection_ref: ConnectionRef) -> None:
         """Check now: queue a contact; the answer lands on the row's health."""
+        ...
+
+
+class Provision(Model):
+    """What keeping the managed connection in step did: `created` a new connection, `adopted` an
+    existing one (the same key, else the same address, else the oldest one still waiting for its
+    first address and key), `updated` its address or key, or found it `unchanged`."""
+
+    connection_ref: ConnectionRef
+    outcome: Literal["created", "adopted", "updated", "unchanged"]
+
+
+class ManagedConnectionCommands(Protocol):
+    """The deployment's connection (central/photo_library/provisioning.py), applied at Central's
+    start. At most one connection is managed (a unique index); the operator commands refuse to
+    change or remove it: LibraryRefused("connection_managed", 409)."""
+
+    def provision_connection(self, url: str, key: SecretStr) -> Provision:
+        """Keep the one managed connection at this normalised `url` and `key`. With none managed,
+        adopt an existing connection (Provision's order), keeping its name, Sources and pools, or
+        create one named "Immich". A new, adopted or changed connection queues a check; its bound
+        Immich user stays (a key of another user reads Needs a look, other_user, as a changed
+        connection does). ("invalid_url", 422)."""
+        ...
+
+    def release_managed_connection(self) -> ConnectionRef | None:
+        """The deployment no longer sets a connection: the managed one, if any, loses its mark and
+        becomes an ordinary connection with its address, key, Sources and pools as they were.
+        Returns its ref, or None when none was managed."""
         ...
 
 
