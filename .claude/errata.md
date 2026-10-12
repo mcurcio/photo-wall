@@ -5628,3 +5628,26 @@ Order: (a) merge the iac PR that switches the factory to `central.app:create_app
   load) and fails the same way on origin/main (1 of 96):** the alert it waits for lives one
   keepalive tick (about 500 ms) and Playwright's `expect` polls at widening intervals (up to 1 s),
   so a poll can miss it. Test-side, not this branch; not fixed here.
+
+## print-look interfaces (code architect, 2026-10-12)
+
+- **"Frame protocol v5" is picture operations v5, not a Wayland interface bump.** No frame-protocol
+  message changes shape: only the `picture` event's operations text grows (512 to 1024 bytes,
+  `MAX_OPERATIONS` in shell.c and frame-client.c, `PICTURE_OPERATIONS_BYTES`). The interface stays
+  version 4; a display host and a Player of different releases refuse each other's operations
+  through the strict codec (exactly the ten fields), and a Pi's release ships whole. The design's
+  cost line "frame protocol v5" reads as this.
+- **The LUTs routes follow the repo's operator prefix:** `/v1/operator/luts` (list, add, remove),
+  not the design sketch's `/api/luts`; the Player's fetch is `/v1/luts/{profile_sha256}/{recipe_id}`
+  (`contracts/lut.py` `LutRef.path`), beside `/v1/media/...`.
+- **The kelvin table moved to `contracts/kelvin.py` and widened to 2000-10000 K** for the lights'
+  range (the design's 2000..10000; a warm white bulb is 2700 K). The rows 3000-9300 are unchanged
+  (4900 K blue stays 0.5796, the source reads 0.5797). The software colour temperature keeps
+  3000-9300 (`SoftwarePicture` checks it).
+- **Light strength is `strength_tenths` (0..100) and a light's colour `colour_kelvin`:** the design
+  sketch's `strength: number // 0..10 in 0.1` cannot be a float without rounding; the console shows
+  0.0..10.0. The mat's depth stays `depth_mm` in 0.5 steps (exact in binary).
+- **New fields default to neutral in Python constructors** (`SoftwarePicture`, `PictureOperations`,
+  `TrialCandidate.mat_json`, `OutputBinding.mat`): the wire never defaults (strict decoders), so a
+  mixed release is refused; the cost is that a constructor that forgets a field still runs. Each
+  lane's page names its constructors, with a mutation probe per field.

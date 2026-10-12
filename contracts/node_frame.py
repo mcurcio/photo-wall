@@ -14,9 +14,19 @@ appliance/display_host/native/photo-wall-frame-v1.xml) adds the picture:
   was drawn with; the shell echoes it in its `presented` event, so the controller reports the
   newest picture change the Player presented. Its wire text is `picture_change_text`'s.
 
-One home each here: the operations' shape, ranges and codec; the picture change's wire text.
-How settings become operations is Display Host's (appliance/display_host/picture.py); the final
-pass that applies them is the Player's (player/geometry.py, player/native.py).
+Picture operations v5 (the print look, 2026-10-12) add the print look's steps: `saturation`,
+`highlight_knee` (the highlight rolloff, which replaces the clamp after white balance x
+brightness), `black_floor` (the last tone step) and `lut` (`LutMix`: a LUT by name and how much of
+it is mixed in). Each at its neutral value (1, 1, 0, None) is skipped by the Player, never
+computed, so neutral operations draw exactly the v4 pixels. The Wayland messages are unchanged
+(the interface stays version 4); the `picture` event's operations text grows to
+PICTURE_OPERATIONS_BYTES, and a Player and a display host from different releases refuse each
+other's text (the strict codec below), as a Pi's release ships whole.
+
+One home each here: the operations' shape, ranges and codec; the picture change's wire text; the
+knee's and the floor's bounds. How settings become operations is Display Host's
+(appliance/display_host/picture.py `operations_for`); what each operation does, in which order,
+is the Player's (player/geometry.py, the scalar reference, mirrored by player/native.py).
 """
 from __future__ import annotations
 
@@ -27,15 +37,20 @@ from dataclasses import dataclass, fields
 from hashlib import sha256
 from typing import Final
 
+from contracts.lut import LutRef
 from contracts.node_protocol import counter, digest, token
 from contracts.strict_json import loads_object
 
-PICTURE_OPERATIONS_BYTES: Final = 512     # one `picture` event's operations, encoded
+PICTURE_OPERATIONS_BYTES: Final = 1024    # one `picture` event's operations, encoded (v5; 512 in v4)
 LIGHT_FACTOR_MAX: Final = 2.0             # light_factor in 0..2 (Photo Wall's brightness 0..150 % is 0..1.5)
 CONTRAST_SLOPE_MAX: Final = 2.0           # contrast_slope in 0..2
 GAMMA_EXPONENT_MIN: Final = 0.5           # gamma_exponent in 0.5..2
 GAMMA_EXPONENT_MAX: Final = 2.0
 NO_PICTURE_CHANGE: Final = "0"            # tag_picture's text before any picture event reached the Player
+SATURATION_MAX: Final = 1.5               # saturation in 0..1.5 (Photo Wall's 0..150 %); 1 is skipped
+HIGHLIGHT_KNEE_MIN: Final = 0.18          # highlight_knee in 0.18..1, linear light (0.18: mid-grey); 1 is skipped.
+                                          # The rolloff slider's 100 % (a placeholder, tuned on the bench)
+BLACK_FLOOR_MAX: Final = 0.5              # black_floor in 0..0.5, an output value; 0 is skipped
 
 
 def srgb_to_linear(value: float) -> float:
@@ -46,26 +61,51 @@ def srgb_to_linear(value: float) -> float:
 
 
 @dataclass(frozen=True)
+class LutMix:
+    """A LUT the Player applies (step 1 of the print look's order), by name (`ref`, fetched from
+    Central), mixed in by `amount` (0 < amount <= 1: a LUT at amount 0 is no LutMix at all)."""
+    ref: LutRef
+    amount: float
+
+    def __post_init__(self) -> None:
+        """ValueError("picture_operations") unless ref is a LutRef and amount a finite float (or an
+        int, never a bool) with 0 < amount <= 1."""
+        if not (isinstance(self.ref, LutRef) and _number(self.amount, 0, 1) and self.amount > 0):
+            raise ValueError("picture_operations")
+
+
+@dataclass(frozen=True)
 class PictureOperations:
-    """What the Player's final pass does to one Output's picture, in this order (1c design, Final
-    pass order): multiply linear light by `rgb_multipliers` (white balance; the largest is 1),
-    multiply by `light_factor`, clamp, encode for the screen, apply `contrast_slope` about
-    mid-grey (0.5), raise to `gamma_exponent`, clamp, then zero everything outside the Output's
-    Frame openings. Every value at its neutral (1) changes nothing. `picture_change` is the
-    Output document's picture change these came from, echoed by the Player's tag."""
+    """What the Player's final pass does to one Output's picture (v5). The order, each step's
+    formula and its skip rule are the Player's (player/geometry.py `final_pixel`); in brief: mix in
+    the LUT (`lut`), `saturation` about luminance, multiply linear light by `rgb_multipliers` (white
+    balance; the largest is 1) and `light_factor`, roll the highlights off above `highlight_knee`
+    (or clamp, as v4, when skipped), encode for the screen, apply `contrast_slope` about mid-grey
+    (0.5), raise to `gamma_exponent`, clamp, lift to `black_floor`, then the Frame's mat shadow
+    (from its binding, never from here) and black outside the Output's Frame openings. Every value
+    at its neutral (multipliers and factors 1, knee 1, floor 0, no LUT) changes nothing.
+    `picture_change` is the picture document's change these came from, echoed by the Player's tag.
+
+    The print look's fields default to their neutral values in Python; the wire never defaults
+    them (`decode_picture_operations` needs every field)."""
     output_id: str
     picture_change: int
     rgb_multipliers: tuple[float, float, float]
     light_factor: float
     contrast_slope: float
     gamma_exponent: float
+    saturation: float = 1.0
+    highlight_knee: float = 1.0
+    black_floor: float = 0.0
+    lut: LutMix | None = None
 
     def __post_init__(self) -> None:
         """ValueError("picture_operations") unless output_id is a node token, picture_change >= 1,
         every number is a finite float (an int is accepted and kept as given, never a bool), each
         multiplier is in (0, 1] with the largest exactly 1.0, 0 <= light_factor <=
-        LIGHT_FACTOR_MAX, 0 <= contrast_slope <= CONTRAST_SLOPE_MAX, and GAMMA_EXPONENT_MIN <=
-        gamma_exponent <= GAMMA_EXPONENT_MAX."""
+        LIGHT_FACTOR_MAX, 0 <= contrast_slope <= CONTRAST_SLOPE_MAX, GAMMA_EXPONENT_MIN <=
+        gamma_exponent <= GAMMA_EXPONENT_MAX, 0 <= saturation <= SATURATION_MAX, HIGHLIGHT_KNEE_MIN
+        <= highlight_knee <= 1, 0 <= black_floor <= BLACK_FLOOR_MAX, and lut is None or a LutMix."""
         multipliers = self.rgb_multipliers
         try:
             token(self.output_id)
@@ -77,22 +117,32 @@ class PictureOperations:
                  and max(multipliers) == 1.0
                  and _number(self.light_factor, 0, LIGHT_FACTOR_MAX)
                  and _number(self.contrast_slope, 0, CONTRAST_SLOPE_MAX)
-                 and _number(self.gamma_exponent, GAMMA_EXPONENT_MIN, GAMMA_EXPONENT_MAX))
+                 and _number(self.gamma_exponent, GAMMA_EXPONENT_MIN, GAMMA_EXPONENT_MAX)
+                 and _number(self.saturation, 0, SATURATION_MAX)
+                 and _number(self.highlight_knee, HIGHLIGHT_KNEE_MIN, 1)
+                 and _number(self.black_floor, 0, BLACK_FLOOR_MAX)
+                 and (self.lut is None or isinstance(self.lut, LutMix)))
         if not valid:
             raise ValueError("picture_operations")
 
 
 def neutral_operations(output_id: str, picture_change: int) -> PictureOperations:
-    """Operations that change nothing: multipliers (1, 1, 1) and every factor 1."""
+    """Operations that change nothing: multipliers (1, 1, 1), every factor 1, knee 1, floor 0, no LUT."""
     return PictureOperations(output_id=output_id, picture_change=picture_change, rgb_multipliers=(1.0, 1.0, 1.0),
-                             light_factor=1.0, contrast_slope=1.0, gamma_exponent=1.0)
+                             light_factor=1.0, contrast_slope=1.0, gamma_exponent=1.0, saturation=1.0,
+                             highlight_knee=1.0, black_floor=0.0, lut=None)
 
 
 def encode_picture_operations(operations: PictureOperations) -> str:
-    """Canonical JSON (sorted keys, no spaces, tuples as lists, floats as Python's repr) of at most
-    PICTURE_OPERATIONS_BYTES; ValueError("picture_operations_too_large") past it."""
+    """Canonical JSON (sorted keys, no spaces, tuples as lists, a LutMix and its LutRef as objects of
+    their fields, floats as Python's repr) of at most PICTURE_OPERATIONS_BYTES;
+    ValueError("picture_operations_too_large") past it (never for valid operations: every field at
+    its longest fits)."""
     value = {field.name: getattr(operations, field.name) for field in fields(PictureOperations)}
     value["rgb_multipliers"] = list(operations.rgb_multipliers)
+    mix = operations.lut
+    value["lut"] = None if mix is None else {"amount": mix.amount, "ref": {
+        "profile_sha256": mix.ref.profile_sha256, "recipe_id": mix.ref.recipe_id}}
     raw = json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
     if len(raw.encode()) > PICTURE_OPERATIONS_BYTES:
         raise ValueError("picture_operations_too_large")
@@ -100,15 +150,24 @@ def encode_picture_operations(operations: PictureOperations) -> str:
 
 
 def decode_picture_operations(raw: str) -> PictureOperations:
-    """The operations `raw` encodes (contracts.strict_json rules; exactly the six fields);
+    """The operations `raw` encodes (contracts.strict_json rules; exactly the ten fields, a lut
+    exactly {amount, ref} and its ref exactly {profile_sha256, recipe_id});
     ValueError("picture_operations") for anything else."""
     value = loads_object(raw.encode(), max_bytes=PICTURE_OPERATIONS_BYTES) if isinstance(raw, str) else None
     if value is None or set(value) != {field.name for field in fields(PictureOperations)}:
         raise ValueError("picture_operations")
-    multipliers = value["rgb_multipliers"]
+    multipliers, mix = value["rgb_multipliers"], value["lut"]
     if not isinstance(multipliers, list):
         raise ValueError("picture_operations")
-    return PictureOperations(**{**value, "rgb_multipliers": tuple(multipliers)})
+    if mix is not None:
+        if not (isinstance(mix, dict) and set(mix) == {"amount", "ref"} and isinstance(mix["ref"], dict)
+                and set(mix["ref"]) == {"profile_sha256", "recipe_id"}):
+            raise ValueError("picture_operations")
+        try:
+            mix = LutMix(LutRef(**mix["ref"]), mix["amount"])
+        except ValueError as error:
+            raise ValueError("picture_operations") from error
+    return PictureOperations(**{**value, "rgb_multipliers": tuple(multipliers), "lut": mix})
 
 
 def picture_change_text(change: int | None) -> str:

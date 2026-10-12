@@ -31,7 +31,7 @@
 #define MAX_PACKET 16384
 #define LEASE_MS 5000
 #define FRAME_VERSION 4      /* pw_frame_manager_v1 and pw_diagnostic_manager_v1: v4 carries the picture (1c) */
-#define MAX_OPERATIONS 512   /* contracts.node_frame.PICTURE_OPERATIONS_BYTES */
+#define MAX_OPERATIONS 1024  /* contracts.node_frame.PICTURE_OPERATIONS_BYTES (picture operations v5) */
 #define MAX_BRIGHTNESS 128
 #define MAX_PICTURE_CHANGE 20
 

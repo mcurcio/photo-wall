@@ -9,7 +9,8 @@ Output:
   `picture_document_key(output_id)`): `picture_change`, which rises whenever anything below it
   changes and never with the Output document's `change`; `hardware`, the display settings someone
   set in Photo Wall, by MCCS code (an absent code is "as the display has it": nothing is written);
-  `software`, Photo Wall's four, always all present.
+  `software`, Photo Wall's group (the picture split's four, and the print look's saturation,
+  highlight rolloff, black floor and LUT choice with its amount), always all present.
 - The **picture report** (Pi -> Central, the state bucket, key `picture_report_key(output_id)`):
   the identity of the display `offered` describes; `offered`, the settings on the picture list the
   display answered when the Pi asked (None: not known yet; (): asked, it offers none); `results`,
@@ -28,7 +29,10 @@ Rules this module owns (one home each):
 - **a level as a percent** (`HardwareRange.percent`): a whole percent of the display's maximum,
   half up, which the base page and the console show first, the display's own count second;
 - the software ranges (brightness and contrast SOFTWARE_PERCENT_MIN..SOFTWARE_PERCENT_MAX, 100
-  changes nothing; colour temperature and gamma as before);
+  changes nothing; colour temperature and gamma as before; the print look's: saturation
+  SATURATION_PERCENT_MIN..SATURATION_PERCENT_MAX, 100 changes nothing; highlight rolloff
+  0..ROLLOFF_PERCENT_MAX, 0 changes nothing; black floor 0..BLACK_FLOOR_TENTHS_MAX tenths of a
+  percent of white light, 0 changes nothing; a LUT or none, mixed by 0..LUT_AMOUNT_PERCENT_MAX);
 - the wire shapes, their size caps (which the bounds below make every valid value fit, so no
   valid report is ever refused for size) and the two keys.
 
@@ -46,6 +50,7 @@ from enum import StrEnum
 from types import MappingProxyType
 from typing import Any, Final
 
+from contracts.lut import LutRef
 from contracts.node_output import OUTPUT_IDS, DisplayIdentity
 from contracts.wire_codec import decode, encode, fields_of, list_of, object_of, require, whole
 
@@ -67,6 +72,17 @@ KELVIN_NEUTRAL: Final = 6500                    # changes nothing
 GAMMA_TENTHS_MIN: Final = 18                    # gamma (#114) in tenths: 18..26 is 1.8..2.6
 GAMMA_TENTHS_MAX: Final = 26
 GAMMA_TENTHS_NEUTRAL: Final = 22                # 2.2: changes nothing
+# The print look (design /print-look, 2026-10-12): each at its neutral changes nothing, and the
+# Player skips that step.
+SATURATION_PERCENT_MIN: Final = 0               # 0 is grey
+SATURATION_PERCENT_MAX: Final = 150
+SATURATION_PERCENT_NEUTRAL: Final = 100
+ROLLOFF_PERCENT_MAX: Final = 100                # highlight rolloff: 0 is today's clip at white
+ROLLOFF_PERCENT_NEUTRAL: Final = 0
+BLACK_FLOOR_TENTHS_MAX: Final = 100             # 10.0 % of white light (~0.5 % gloss ink, ~2.5 % matte)
+BLACK_FLOOR_TENTHS_NEUTRAL: Final = 0
+LUT_AMOUNT_PERCENT_MAX: Final = 100             # how much of the LUT is mixed in
+LUT_AMOUNT_PERCENT_DEFAULT: Final = 100         # a LUT, once chosen, acts fully
 
 PICTURE_DOCUMENT_BYTES: Final = 1024            # a picture document's largest encoding
 PICTURE_REPORT_BYTES: Final = 32768             # a picture report's largest encoding (30 settings, 16 choices each)
@@ -197,23 +213,40 @@ class HardwareSetting:
 
 @dataclass(frozen=True)
 class SoftwarePicture:
-    """Photo Wall's four picture settings, always all present. Each at its neutral value
-    (SOFTWARE_PERCENT_NEUTRAL, SOFTWARE_PERCENT_NEUTRAL, KELVIN_NEUTRAL, GAMMA_TENTHS_NEUTRAL)
-    changes nothing (NEUTRAL_SOFTWARE)."""
+    """Photo Wall's picture settings (the Display's software group), always all present: the
+    picture split's four, then the print look's (saturation, highlight rolloff, black floor, the
+    LUT and how much of it is mixed in). Each at its neutral value changes nothing
+    (NEUTRAL_SOFTWARE); with no LUT, `lut_amount_percent` is kept but acts on nothing.
+
+    The print look's fields default to their neutral values (the print look off) in Python; the
+    wire never defaults them (`decode_picture_document` needs every field)."""
     brightness_percent: int
     contrast_percent: int
     colour_temperature_kelvin: int
     gamma_tenths: int
+    saturation_percent: int = SATURATION_PERCENT_NEUTRAL
+    highlight_rolloff_percent: int = ROLLOFF_PERCENT_NEUTRAL
+    black_floor_tenths: int = BLACK_FLOOR_TENTHS_NEUTRAL
+    lut: LutRef | None = None
+    lut_amount_percent: int = LUT_AMOUNT_PERCENT_DEFAULT
 
     def __post_init__(self) -> None:
         """ValueError("software_picture") unless both percents are ints in
         SOFTWARE_PERCENT_MIN..SOFTWARE_PERCENT_MAX, KELVIN_MIN <= kelvin <= KELVIN_MAX in KELVIN_STEP,
-        and GAMMA_TENTHS_MIN <= gamma_tenths <= GAMMA_TENTHS_MAX (ints, never bools)."""
+        GAMMA_TENTHS_MIN <= gamma_tenths <= GAMMA_TENTHS_MAX, saturation_percent in
+        SATURATION_PERCENT_MIN..SATURATION_PERCENT_MAX, highlight_rolloff_percent in
+        0..ROLLOFF_PERCENT_MAX, black_floor_tenths in 0..BLACK_FLOOR_TENTHS_MAX, lut_amount_percent in
+        0..LUT_AMOUNT_PERCENT_MAX (ints, never bools), and lut is None or a LutRef."""
         require(whole(self.brightness_percent, SOFTWARE_PERCENT_MIN, SOFTWARE_PERCENT_MAX)
                 and whole(self.contrast_percent, SOFTWARE_PERCENT_MIN, SOFTWARE_PERCENT_MAX)
                 and whole(self.colour_temperature_kelvin, KELVIN_MIN, KELVIN_MAX)
                 and (self.colour_temperature_kelvin - KELVIN_MIN) % KELVIN_STEP == 0
-                and whole(self.gamma_tenths, GAMMA_TENTHS_MIN, GAMMA_TENTHS_MAX), "software_picture")
+                and whole(self.gamma_tenths, GAMMA_TENTHS_MIN, GAMMA_TENTHS_MAX)
+                and whole(self.saturation_percent, SATURATION_PERCENT_MIN, SATURATION_PERCENT_MAX)
+                and whole(self.highlight_rolloff_percent, 0, ROLLOFF_PERCENT_MAX)
+                and whole(self.black_floor_tenths, 0, BLACK_FLOOR_TENTHS_MAX)
+                and (self.lut is None or isinstance(self.lut, LutRef))
+                and whole(self.lut_amount_percent, 0, LUT_AMOUNT_PERCENT_MAX), "software_picture")
 
 
 @dataclass(frozen=True)
@@ -311,8 +344,11 @@ def encode_picture_document(document: PictureDocument) -> bytes:
 def decode_picture_document(raw: bytes) -> PictureDocument:
     """The document `raw` encodes; ValueError("picture_document") for anything else."""
     def build(value: dict[str, Any]) -> PictureDocument:
+        software = fields_of(SoftwarePicture, value["software"])
+        lut = software["lut"]
         return PictureDocument(**{**value, "hardware": dict(object_of(value["hardware"])),
-                                  "software": SoftwarePicture(**fields_of(SoftwarePicture, value["software"]))})
+                                  "software": SoftwarePicture(**{
+                                      **software, "lut": None if lut is None else LutRef(**fields_of(LutRef, lut))})})
 
     return decode(raw, PICTURE_DOCUMENT_BYTES, PictureDocument, build, "picture_document")
 
@@ -337,7 +373,8 @@ def decode_picture_report(raw: bytes) -> PictureReport:
 
 
 NEUTRAL_SOFTWARE: Final = SoftwarePicture(SOFTWARE_PERCENT_NEUTRAL, SOFTWARE_PERCENT_NEUTRAL, KELVIN_NEUTRAL,
-                                          GAMMA_TENTHS_NEUTRAL)
+                                          GAMMA_TENTHS_NEUTRAL, SATURATION_PERCENT_NEUTRAL, ROLLOFF_PERCENT_NEUTRAL,
+                                          BLACK_FLOOR_TENTHS_NEUTRAL, None, LUT_AMOUNT_PERCENT_DEFAULT)
 
 _KEY_PREFIX: Final = "picture-"                 # both buckets: picture-<output_id>
 _LIST_ORDER: Final[Mapping[VcpCode, int]] = MappingProxyType({code: index for index, code in enumerate(PICTURE_LIST)})
@@ -377,6 +414,9 @@ def _hardware_result(value: object) -> HardwareResult:
 
 
 __all__ = [
+    "BLACK_FLOOR_TENTHS_MAX", "BLACK_FLOOR_TENTHS_NEUTRAL", "LUT_AMOUNT_PERCENT_DEFAULT", "LUT_AMOUNT_PERCENT_MAX",
+    "ROLLOFF_PERCENT_MAX", "ROLLOFF_PERCENT_NEUTRAL", "SATURATION_PERCENT_MAX", "SATURATION_PERCENT_MIN",
+    "SATURATION_PERCENT_NEUTRAL",
     "CHOICE_NAME_MAX", "CHOICE_VALUE_MAX", "GAMMA_TENTHS_MAX", "GAMMA_TENTHS_MIN", "GAMMA_TENTHS_NEUTRAL",
     "KELVIN_MAX", "KELVIN_MIN", "KELVIN_NEUTRAL", "KELVIN_STEP", "LEVEL_MAX", "MAX_CHOICES",
     "NEUTRAL_SOFTWARE", "PICTURE_DOCUMENT_BYTES", "PICTURE_LIST", "PICTURE_REPORT_BYTES", "SOFTWARE_PERCENT_MAX",

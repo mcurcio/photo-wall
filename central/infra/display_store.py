@@ -51,7 +51,7 @@ import logging
 import threading
 import uuid
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass, replace
+from dataclasses import dataclass, replace
 from datetime import timedelta
 from typing import Any, Final
 from uuid import UUID
@@ -1070,7 +1070,8 @@ class PgPictureSessions:
             hardware=tuple(_hardware_view(hardware) for hardware in hardware_rows(
                 picture.hardware, offered, report.results if answered and report is not None else None,
                 connected=row["connected"] is True)),
-            software=SoftwarePictureView(**asdict(picture.software)),
+            software=SoftwarePictureView(**{name: getattr(picture.software, name)
+                                            for name in SoftwarePictureView.model_fields}),
             session=_session_view(session) if live and session is not None else None)
 
     def begin_picture(self, frame_id: str) -> PictureSessionView:

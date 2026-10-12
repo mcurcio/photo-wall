@@ -30,7 +30,6 @@ from appliance.display_host.picture import (
     PictureController,
     brightness_line,
     judged,
-    kelvin_multipliers,
     operations_for,
     write_order,
 )
@@ -39,6 +38,7 @@ from appliance.display_host.picture_list import (
     FileOfferedCache,
     PictureListAsker,
 )
+from contracts.kelvin import kelvin_white
 from contracts.node_frame import PictureOperations, decode_picture_operations, neutral_operations
 from contracts.node_output import DisplayIdentity
 from contracts.node_picture import (
@@ -331,7 +331,7 @@ def test_colour_temperature_shows_white_as_charitys_table(kelvin):
     the encoded rows -> 3000 K white shows green 0.75 where the table's is 0.53."""
     ratio = [_linear(value) / _linear(neutral) for value, neutral in zip(CHARITY[kelvin], CHARITY[6500], strict=True)]
     expected = [value / max(ratio) for value in ratio]
-    multipliers = kelvin_multipliers(kelvin)
+    multipliers = kelvin_white(kelvin)
     assert multipliers == pytest.approx(expected, abs=1e-3)
     assert max(multipliers) == 1.0
     operations = operations_for(OUTPUT, 1, software(kelvin=kelvin))
@@ -341,15 +341,15 @@ def test_colour_temperature_shows_white_as_charitys_table(kelvin):
 
 
 def test_the_neutral_values_change_nothing_and_the_ranges_hold():
-    assert kelvin_multipliers(6500) == (1.0, 1.0, 1.0)
+    assert kelvin_white(6500) == (1.0, 1.0, 1.0)
     assert operations_for(OUTPUT, 3, NEUTRAL_SOFTWARE) == neutral_operations(OUTPUT, 3)
     widest = operations_for(OUTPUT, 3, software(150, 0, 6500, 18))
     assert (widest.light_factor, widest.contrast_slope, widest.gamma_exponent) == (1.5, 0.0, 18 / 22)
     for kelvin in range(3000, 9301, 100):
-        assert max(kelvin_multipliers(kelvin)) == 1.0
-    for kelvin in (2900, 6550, 9400, 6500.0, True):
+        assert max(kelvin_white(kelvin)) == 1.0
+    for kelvin in (1900, 6550, 10100, 6500.0, True):
         with pytest.raises(ValueError, match="^kelvin$"):
-            kelvin_multipliers(kelvin)
+            kelvin_white(kelvin)
 
 
 def test_the_base_page_names_each_brightness_and_never_the_software_as_the_panels():

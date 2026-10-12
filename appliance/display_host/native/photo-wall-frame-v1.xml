@@ -61,7 +61,8 @@
     <event name="picture" since="4">
       <description summary="The Output's picture operations (roadmap 1c)">
         Bounded canonical JSON of contracts.node_frame.PictureOperations, at most
-        512 bytes, sent by the base controller through the shell for one Output.
+        1024 bytes (picture operations v5, the print look; 512 before), sent by the
+        base controller through the shell for one Output.
         The shell forwards it verbatim and never interprets it. It is re-sent to a
         client that binds later and after a Weston restart. The app applies the
         newest one it received for the Output in its final pass.

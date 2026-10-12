@@ -9,7 +9,7 @@
 #include "frame-client.h"
 #define MAX_FEEDBACK 128
 #define MAX_OUTPUTS 16
-#define MAX_OPERATIONS 512   /* contracts.node_frame.PICTURE_OPERATIONS_BYTES */
+#define MAX_OPERATIONS 1024  /* contracts.node_frame.PICTURE_OPERATIONS_BYTES (picture operations v5) */
 struct grant { char output[97], id[37], frame[97], trial[4097]; uint64_t generation, revision; uint32_t state; };
 /* The newest `picture` operations per Output (frame protocol v4), kept verbatim. */
 struct picture { char output[97], operations[MAX_OPERATIONS + 1]; };
