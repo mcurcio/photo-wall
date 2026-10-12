@@ -89,7 +89,7 @@ class LibraryChecks:
         if lease is None:
             return
         progress = (CheckProgress.model_validate(lease.progress) if lease.progress
-                    else pool_check.start(lease.query, self.clock.utc()))
+                    else pool_check.start(lease.query, self.clock.utc(), lease.zone))
         if progress.phase == "done":
             finish: CheckFinish = (CheckIncomplete(reason="over_1000_at_one_instant")
                                    if progress.incomplete else CheckComplete())

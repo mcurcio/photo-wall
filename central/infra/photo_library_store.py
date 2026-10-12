@@ -35,6 +35,7 @@ from pydantic import SecretStr, TypeAdapter, ValidationError
 
 from central.db import Database, TransactionClock
 from central.infra.display_store import frame_outputs_in
+from central.infra.house_store import house_time_in
 from central.installation_models import FrameOutput
 from central.media_queue import MediaTaskQueue
 from central.photo_library import policy
@@ -773,9 +774,10 @@ class PgPhotoLibrary:
             else:
                 conn.execute("UPDATE photo_pools SET step_at=%s WHERE pool_key=%s",
                              (now, pool_key))
+            zone = house_time_in(conn).zone
         return CheckLease(pool_key=pool_key, query=SourceQuery.model_validate(row["query"]),
                           connection=self._secret(row), check_number=row["check_number"],
-                          started_at=row["check_started_at"], progress=row["progress"])
+                          started_at=row["check_started_at"], zone=zone, progress=row["progress"])
 
     def known_revisions(self, connection_ref: ConnectionRef,
                         upstream_ids: Sequence[LibraryRef]) -> dict[str, KnownRevision]:

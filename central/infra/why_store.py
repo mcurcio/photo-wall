@@ -17,6 +17,7 @@ from central.runtime_store import RuntimeStore
 from central.why.explain import content_why, kept_out, power_why
 from central.why.model import FrameWhy, Week
 from central.why.ports import WhyRefused
+from central.why.week import week
 
 
 class PgWhy:
@@ -46,7 +47,16 @@ class PgWhy:
         return FrameWhy(frame_id=frame_id, content=content, power=power)
 
     def week(self, first_day: date) -> Week:
-        raise NotImplementedError
+        with self._db.transaction() as conn:
+            runtime = RuntimeStore.read_in(conn)
+            policy = power_policy_in(conn, self._times.now_in(conn))
+            frame_ids = tuple(row["id"] for row in conn.execute("SELECT id FROM frames").fetchall())
+        state = runtime.export_state()
+        chosen = state["default_scene"]
+        return week(programs={program_id: Program.model_validate(program)
+                              for program_id, program in state["programs"].items()},
+                    default_scene_id=None if chosen is None else chosen["scene_id"], policy=policy,
+                    frame_ids=frame_ids, house=runtime.house, first_day=first_day)
 
 
 __all__ = ["PgWhy"]

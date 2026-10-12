@@ -1,10 +1,13 @@
 import hashlib
+from datetime import UTC, datetime
+from zoneinfo import ZoneInfo
 
 import pytest
 from support.house_time import UTC_HOUSE, window_program
 from support.key_content_builders import measured
 
 from central.catalog import Candidate, SourcePool
+from central.house_time.model import HouseTime
 from central.planner import PlannerLimits, PlanningBudgetExceeded, PlanningError, eligible, project
 from central.runtime import Child, Contribution, RecordingActuator, Runtime, Scene
 from central.wall_plan.fit import FitTarget
@@ -173,6 +176,28 @@ def test_two_sources_sharing_a_photo_give_one_candidate_newest_first_across_sour
         "garden:1": pool("garden:1", shared, newest),
     })
     assert [s.asset_id for s in result.selections] == ["newest", "shared", "older", "newest"]
+
+
+def test_on_this_day_picks_by_the_house_date():
+    """Roadmap 2b: On this day is the house's day. At 23:40 on 12 Oct in New York it is already
+    13 Oct in UTC; the photo taken at 23:30 on a 12 Oct (house clock; 13 Oct in UTC) is on this day,
+    the one taken at noon on a 13 Oct is not.
+
+    Mutation probe (P-utc-today): keep `datetime.fromtimestamp(now, UTC).date()` -> the 13 Oct
+    photo comes first."""
+    house = HouseTime(zone="America/New_York")
+    zone = ZoneInfo(house.zone)
+    now = datetime(2026, 10, 12, 23, 40, tzinfo=zone).timestamp()
+    assert datetime.fromtimestamp(now, UTC).day == 13
+    instance = Runtime(house=house)
+    instance.set_scene(Scene(scene_id="scene", cycle_seconds=10, loop=True,
+                             selection=SceneSelection(order="on_this_day"),
+                             contributions=(Contribution(target="frame:left", source_refs=("holiday:1",)),)))
+    instance.activate("scene", "run", now)
+    late = candidate("late-12th", captured=datetime(2025, 10, 12, 23, 30, tzinfo=zone).timestamp())
+    noon = candidate("noon-13th", captured=datetime(2024, 10, 13, 12, tzinfo=zone).timestamp())
+    result = propose(instance, now=now, horizon=15, assets=[noon, late])
+    assert [s.asset_id for s in result.selections][:2] == ["late-12th", "noon-13th"]
 
 
 def test_a_photo_only_in_a_source_the_contribution_does_not_name_is_never_assigned():

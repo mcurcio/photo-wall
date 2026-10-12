@@ -12,7 +12,8 @@ hands this module what they answered. A check runs in phases, one bounded step e
 4. **done**: the next step finishes the check (complete, or incomplete when one instant held
    more than a page).
 
-Relative dates resolve in UTC at the check's start (until 2b's timezone).
+Relative dates resolve on the house calendar (Settings › House's zone, the lease's `zone`) at the
+check's start: "last 1 month" from 12 Oct 23:30 house time is from 12 Sep 23:30 house time.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ import calendar
 from collections.abc import Collection, Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Literal
+from zoneinfo import ZoneInfo
 
 from pydantic import Field
 
@@ -53,26 +55,29 @@ class CheckProgress(Model):
     stacked_months: tuple[str, ...] = ()   # timeline months whose counts differ (C9)
 
 
-def window_of(query: SourceQuery, now_utc: float) -> TakenWindow:
-    """The query's capture-time bounds for a check starting at `now_utc` (UTC)."""
+def window_of(query: SourceQuery, now_utc: float, zone: str) -> TakenWindow:
+    """The query's capture-time bounds for a check starting at `now_utc` (UTC), relative dates
+    counted back on the house calendar of `zone` (an IANA zone)."""
     match query.taken:
         case TakenBetween(start=start, end=end):
             return TakenWindow(after=start, before=end)
         case TakenLast(years=years, months=months):
-            return TakenWindow(after=_months_back(now_utc, 12 * years + months))
+            return TakenWindow(after=_months_back(now_utc, 12 * years + months, zone))
     return TakenWindow()
 
 
-def _months_back(now_utc: float, months: int) -> float:
-    now = datetime.fromtimestamp(now_utc, UTC)
+def _months_back(now_utc: float, months: int, zone: str) -> float:
+    """The same house clock time `months` calendar months before `now_utc` (the day clamped to
+    the month's last); a time a daylight-saving change skips or repeats resolves as zoneinfo does."""
+    now = datetime.fromtimestamp(now_utc, ZoneInfo(zone))
     index = now.year * 12 + now.month - 1 - months
     year, month = divmod(index, 12)
     day = min(now.day, calendar.monthrange(year, month + 1)[1])
-    return now.replace(year=year, month=month + 1, day=day).timestamp()
+    return now.replace(year=year, month=month + 1, day=day, fold=0).timestamp()
 
 
-def start(query: SourceQuery, now_utc: float) -> CheckProgress:
-    return CheckProgress(phase="up_to", window=window_of(query, now_utc))
+def start(query: SourceQuery, now_utc: float, zone: str) -> CheckProgress:
+    return CheckProgress(phase="up_to", window=window_of(query, now_utc, zone))
 
 
 def exclusions_of(query: SourceQuery) -> tuple[ExclusionQuery, ...]:

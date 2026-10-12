@@ -8,6 +8,7 @@ LibraryUnavailable. Steps are driven one call at a time, as the queue would.
 import asyncio
 from datetime import UTC, datetime
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 import pytest
 from support.library_store_fake import FakeLibraryStore, check_to_end
@@ -24,6 +25,7 @@ from central.photo_library.model import (
     NeedsALook,
     Place,
     SourceQuery,
+    TakenLast,
     Unreachable,
 )
 from central.photo_library.policy import STALE_CHECK_SECONDS
@@ -66,6 +68,7 @@ class FakeClient:
         self.fail_on: str | None = None
         self.stacked: tuple[TimeBucket, ...] = ()
         self.shown: frozenset[str] = frozenset()
+        self.windows: list = []                  # each up_to's capture-time window
         self.closed = False
 
     def _call(self, name):
@@ -105,6 +108,7 @@ class FakeClient:
 
     async def up_to(self, query, window):
         self._call("up_to")
+        self.windows.append(window)
         return len(self.photos)
 
     async def stacked_buckets(self, *, partners):
@@ -133,9 +137,9 @@ class FakeClient:
         self.closed = True
 
 
-def setup(client, **query_changes):
-    clock = ManualClock(wall=T0, mono=0)
-    store = FakeLibraryStore(clock)
+def setup(client, *, zone="UTC", now=T0, **query_changes):
+    clock = ManualClock(wall=now, mono=0)
+    store = FakeLibraryStore(clock, zone=zone)
     store.add_connection("main", "http://immich.test/api", "key-one")
     query = SourceQuery(connection_ref="main", **{
         "exclude": Exclusions(screenshots=False), **query_changes})
@@ -163,6 +167,19 @@ def test_a_check_reads_up_to_then_exclusions_then_include_pages_one_per_step():
     assert store.pools[key].up_to == 5
     assert isinstance(store.pools[key].outcome, CheckComplete)
     assert len(store.queued) == 6   # six steps each queued the next; the seventh finished
+
+
+def test_a_relative_date_counts_back_on_the_lease_house_calendar():
+    """Roadmap 2b: the check reads Immich from "last 1 month" before its start on the house's
+    calendar (the lease's zone): from 22:00 on 31 March in New York (1 April in UTC), 28 February."""
+    house = ZoneInfo("America/New_York")
+    client = FakeClient([photo(1)])
+    store, key, checks, _ = setup(client, zone="America/New_York",
+                                  now=datetime(2026, 3, 31, 22, tzinfo=house).timestamp(),
+                                  taken=TakenLast(months=1))
+    asyncio.run(check_to_end(checks, store, key))
+    (window,) = client.windows
+    assert window.after == datetime(2026, 2, 28, 22, tzinfo=house).timestamp()
 
 
 def test_an_unreachable_immich_mid_check_fails_it_and_removes_nothing():

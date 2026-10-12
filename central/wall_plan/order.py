@@ -11,7 +11,8 @@ Rules this module owns (one home each):
   adds or removes photos keeps the others' relative order; a new pass reshuffles). Chronological:
   ascending (captured_at, asset_id), starting after `after` (the Scene's last shown photo) and
   wrapping. Newest first: descending captured_at, then asset_id. On this day: the photos whose
-  UTC capture month and day equal `today`'s, newest year first, then the rest in shuffle order.
+  capture month and day on the house calendar equal `today`'s (the house's date, Settings › House),
+  newest year first, then the rest in shuffle order.
 - **A Scene's pass** (`scene_passes`): from the history, its current pass number (the highest
   among its shown rows and live selections; 1 when it has none), the assets picked in that pass
   (shown in it, or selected in it by a live offered layer), and its last shown asset.
@@ -21,18 +22,21 @@ Rules this module owns (one home each):
 - **Rolling a pass** (`SceneLine.pick`): when every `pickable` asset is picked in the current
   pass, the next pass starts: pass number + 1, nothing picked, a new pass sequence.
 
-Dates are UTC until roadmap 2b gives the wall a time zone (the photo library's relative dates do
-the same, central/photo_library/model.py).
+Dates are the house's (roadmap 2b; central/house_time/calculator.py `house_date`, the one home of
+an instant's house date), as the photo library's relative dates are (media/pool_check.py).
 """
 from __future__ import annotations
 
 import hashlib
 from collections.abc import Mapping, Sequence
-from datetime import UTC, date, datetime
+from datetime import date
+from typing import Final
 
 from pydantic import Field
 
 from central.catalog import Candidate
+from central.house_time.calculator import house_date
+from central.house_time.model import HouseTime
 from central.wall_plan.selection import SceneSelection
 from contracts.models import AfterEnd, Identifier, Instant, Model
 
@@ -121,14 +125,17 @@ def _shuffle_key(scene_id: str, pass_number: PassNumber, asset_id: str) -> str:
     return hashlib.sha256(f"{scene_id}\x00{pass_number}\x00{asset_id}".encode()).hexdigest()
 
 
-def _captured(candidate: Candidate) -> datetime:
-    return datetime.fromtimestamp(candidate.captured_at, UTC)
+# The house a caller that names none is in (tests of the order alone); the Planner always passes
+# Runtime's house.
+UTC_HOUSE: Final = HouseTime(zone="UTC")
 
 
 def pass_sequence(candidates: Sequence[Candidate], selection: SceneSelection, *, scene_id: str,
-                  pass_number: PassNumber, after: Candidate | None, today: date) -> tuple[str, ...]:
+                  pass_number: PassNumber, after: Candidate | None, today: date,
+                  house: HouseTime = UTC_HOUSE) -> tuple[str, ...]:
     """Every candidate's asset id once, in the Scene's order for this pass (module docstring).
-    `after` is used by chronological only. Pure and deterministic."""
+    `after` is used by chronological only; `today` and `house` by On this day. Pure and
+    deterministic."""
     unique = list({candidate.asset_id: candidate for candidate in reversed(candidates)}.values())
 
     def shuffled(items: Sequence[Candidate]) -> list[Candidate]:
@@ -146,7 +153,7 @@ def pass_sequence(candidates: Sequence[Candidate], selection: SceneSelection, *,
         ordered = sorted(unique, key=lambda c: (-c.captured_at, c.asset_id))
     else:
         def on_this_day(candidate: Candidate) -> bool:
-            taken = _captured(candidate)
+            taken = house_date(house, candidate.captured_at)
             return (taken.month, taken.day) == (today.month, today.day)
 
         ordered = sorted((c for c in unique if on_this_day(c)),
@@ -161,7 +168,7 @@ class SceneLine:
 
     def __init__(self, scene_id: str, selection: SceneSelection, candidates: Sequence[Candidate],
                  scene_pass: ScenePass, shown_at: Mapping[str, float], *, now: float, today: date,
-                 pickable: frozenset[str]) -> None:
+                 pickable: frozenset[str], house: HouseTime = UTC_HOUSE) -> None:
         """`candidates`: the union of the Scene's contributions' pools (one per asset id).
         `shown_at`: `last_shown_at(history)`. `pickable`: the assets that could fill one of the
         Scene's slots in this plan (they fit a Frame the Scene targets and are measured); a pass
@@ -176,7 +183,7 @@ class SceneLine:
         self._pickable = pickable
         self._after = (self._candidates.get(scene_pass.last_shown)
                        if scene_pass.last_shown is not None else None)
-        self._today = today
+        self._today, self._house = today, house
         window = selection.no_repeat_days * 86400
         self._recent = frozenset(
             asset_id for asset_id, end in shown_at.items()
@@ -192,7 +199,7 @@ class SceneLine:
     def _pass_sequence(self) -> tuple[str, ...]:
         return pass_sequence(tuple(self._candidates.values()), self._selection,
                              scene_id=self._scene_id, pass_number=self._pass, after=self._after,
-                             today=self._today)
+                             today=self._today, house=self._house)
 
     def _roll(self) -> bool:
         if not self._pickable or not self._pickable <= self._picked:

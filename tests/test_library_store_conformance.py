@@ -16,9 +16,11 @@ from typing import NamedTuple
 from uuid import UUID
 
 import pytest
+from support.house_time import set_house
 from support.library_store_fake import FakeLibraryStore
 
 from central.db import ProcessTransactionClock
+from central.house_time.model import HouseTime
 from central.infra.photo_library_store import PgPhotoLibrary, _original_of, library_assets_in
 from central.media_queue import QueueReceipt
 from central.photo_library.model import (
@@ -117,12 +119,15 @@ class _RecordingQueue:
         return QueueReceipt(coalesced=False)
 
 
+HOUSE_ZONE = "America/New_York"   # Settings › House in both harnesses
+
+
 class FakeHarness:
     name = "fake"
 
     def __init__(self, clock):
         self.clock = clock
-        self.store = FakeLibraryStore(clock)
+        self.store = FakeLibraryStore(clock, zone=HOUSE_ZONE)
         self._refs = 0
 
     def connect(self, *, key: str | None = KEY) -> str:
@@ -181,6 +186,7 @@ class PgHarness:
         self.store = PgPhotoLibrary(registry.db, times=ProcessTransactionClock(registry.clock),
                                     queue=self.queue)
         self.db = registry.db
+        set_house(registry.db, HouseTime(zone=HOUSE_ZONE))
         self._names = 0
         self._drafts: dict[str, str] = {}
 
@@ -374,6 +380,7 @@ def test_a_wanted_pool_is_due_until_checked_and_a_lost_step_makes_it_due_again(h
     assert store.due_pools() == (key,)
     lease = store.begin_check(key)
     assert lease.check_number == 1 and lease.progress is None
+    assert lease.zone == HOUSE_ZONE                  # relative dates count on the house calendar
     assert store.due_pools() == ()
     assert store.record_step(lease, step(page=1))
     clock.advance(STALE_CHECK_SECONDS - 1)

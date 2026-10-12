@@ -10,12 +10,13 @@ Every route takes the operator `admin` dependency. WhyRefused answers {"error": 
 """
 from __future__ import annotations
 
+from datetime import date
 from typing import Any
 
 from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from central.why.model import FrameWhy
+from central.why.model import FrameWhy, Week
 from central.why.ports import WhyQueries, WhyRefused
 from contracts.models import Identifier
 
@@ -30,6 +31,10 @@ def mount_why_routes(app: FastAPI, *, admin: Any, queries: WhyQueries) -> None:
     @app.get("/v1/operator/frames/{frame_id}/why", dependencies=[Depends(admin)], response_model=FrameWhy)
     def frame_why(frame_id: Identifier) -> FrameWhy:
         return queries.frame_why(frame_id)
+
+    @app.get("/v1/operator/week", dependencies=[Depends(admin)], response_model=Week)
+    def week(first_day: date) -> Week:
+        return queries.week(first_day)
 
 
 __all__ = ["mount_why_routes"]

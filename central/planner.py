@@ -18,12 +18,13 @@ import json
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal
 
 from pydantic import Field
 
 from central.catalog import Candidate, SourcePool
+from central.house_time.calculator import house_date
+from central.house_time.model import HouseTime
 from central.runtime import Intent, Runtime, RuntimeBudgetExceeded
 from central.wall_plan.assignment import (
     FixedShowing,
@@ -260,7 +261,9 @@ class _ProjectionBuilder:
         limits: PlannerLimits,
         settings: FitSettings,
         frame_outputs: Mapping[str, tuple[int, int] | None],
+        house: HouseTime,
     ) -> None:
+        self.house = house          # On this day's date (roadmap 2b)
         self.limits, self.source_pools, self.authored, self.locks = (
             limits, source_pools, authored, locks)
         self.settings, self.frame_outputs = settings, frame_outputs
@@ -432,7 +435,7 @@ class _ProjectionBuilder:
         reserved = {ref for item in self.pending for ref in item.slot.authored}
         passes = scene_passes(history)
         shown_at = last_shown_at(history)
-        today = datetime.fromtimestamp(now, UTC).date()
+        today = house_date(self.house, now)
         by_scene: dict[str, list[_Pending]] = {}
         for item in self.pending:
             if item.slot.pool:
@@ -453,7 +456,7 @@ class _ProjectionBuilder:
             lines[scene_id] = SceneLine(
                 scene_id, items[0].intent.selection, tuple(members.values()),
                 passes.get(scene_id, ScenePass(scene_id=scene_id)), shown_at, now=now,
-                today=today, pickable=pickable)
+                today=today, pickable=pickable, house=self.house)
         return lines
 
     def _fit_slot_budget(self, window: PlanWindow, budget: int) -> None:
@@ -629,7 +632,7 @@ def project(
     builder = _ProjectionBuilder(
         bindings_by_player=bindings_by_player, source_pools=source_pools,
         authored=authored_candidates, locks=locked_assignments, limits=limits,
-        settings=settings, frame_outputs=frame_outputs,
+        settings=settings, frame_outputs=frame_outputs, house=runtime.house,
     )
     try:
         timeline = runtime.timeline(now, window.plan_end, max_events=limits.max_events)
