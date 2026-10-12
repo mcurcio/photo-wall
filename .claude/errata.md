@@ -5513,3 +5513,18 @@ Order: (a) merge the iac PR that switches the factory to `central.app:create_app
   `reverted` reads only touched codes, so the extra ones are inert.
 - **Copy skips (and names) a stored level past the source display's maximum now** (its maximum changed since it was
   set), rather than raising from `level_share`.
+
+## E-PS-S5 (Picture split, slice S5, 2026-10-12) · feat/picture-hardware-and-software
+- **`copyWords` takes the source's names as an optional second argument** (`copyWords(result, names = {})`): the
+  frozen page's `copyWords(result)` has only codes to hand (`hardware_skipped`), and its "Select color preset,
+  Video gain: Red" needs names; the only name home the console has is the view's rows (`name`), so the tab
+  passes code -> name from them. A code with no row falls back to the code itself.
+- **"Changed on the display's buttons" is Central's judgement** (S4's `HardwareSettingView.changed_on_buttons`,
+  `hardware.changed_on_buttons`); the console only words it ("Changed on the display's buttons: 35 of 100") and
+  never while the operator's own change of that code is in the draft. The browser FakePi now re-reads the list
+  with the written values current (as S3's periodic re-read does), plus `buttons` for a press it finds.
+- **Words follow the frozen page, not S2's minimum:** a level says "46 of 100" (S2's "Set in Photo Wall · "
+  prefix dropped); "Applies when the display is connected" moves from each row to one line under Display
+  (hardware), as `hardwareWords(row, draft)` has no view. A setting set here and no longer offered is a line
+  with no control and keeps its hand-back ("As the display has it: sharpness"); a CHOICE row's hand-back is the
+  select's own "As the display has it" option.

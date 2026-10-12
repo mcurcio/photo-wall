@@ -1,6 +1,7 @@
 import { useState } from "react";
 
 import { copyPicture } from "../pictureApi.js";
+import type { HardwareSettingView, PictureCopyResult } from "../pictureApi.js";
 import type { usePictureSession } from "../pictureSession.js";
 import { FactGroup, FactRow, Note } from "../patterns/fact-row";
 import { LivePreviewEditor } from "../patterns/live-preview-editor";
@@ -11,6 +12,7 @@ import { Disclosure } from "../ui/disclosure";
 import { Field } from "../ui/field";
 import { Link } from "../ui/link";
 import { Section } from "../ui/section";
+import { Select } from "../ui/select";
 import { Slider } from "../ui/slider";
 import { Inline, Stack } from "../ui/stack";
 import { Switch } from "../ui/switch";
@@ -18,8 +20,7 @@ import { Switch } from "../ui/switch";
 /** The Picture tab's live session, as pictureSession.js serves it. */
 export type PictureSession = ReturnType<typeof usePictureSession>;
 type View = NonNullable<PictureSession["view"]>;
-type HardwareRow = View["hardware"][number];
-type CopyOutcome = "copied" | "no-display" | "same-display" | "session-open";
+type CopyOutcome = PictureCopyResult["outcome"];
 
 export interface FramePictureProps {
   frameId: string;
@@ -36,6 +37,9 @@ export const PHOTO_WALL_GROUP = "Photo Wall (software)";
 const AS_IT_HAS_IT = "As the display has it";
 const NOT_CONNECTED = "Applies when the display is connected";
 const NO_CHANGE = "100 % changes nothing";
+const CHECKING = "Checking what this display offers…";
+// The Select's value for "As the display has it" (a choice's own value is its byte, in decimal).
+const AS_IT_HAS_IT_OPTION = "as-the-display-has-it";
 
 const COPY_WORDS: Record<CopyOutcome, string> = {
   copied: "Copied",
@@ -44,19 +48,38 @@ const COPY_WORDS: Record<CopyOutcome, string> = {
   "session-open": "Not copied: someone is adjusting that display now",
 };
 
+/** A display value in the display's own words: "46 of 100" for a level, a choice's name ("6500 K"),
+ * else the number it answered. */
+function displayValue(row: HardwareSettingView, value: number): string {
+  const range = row.offered?.range;
+  if (range?.kind === "level" && range.maximum !== null) return `${value} of ${range.maximum}`;
+  return range?.choices.find((choice) => choice.value === value)?.name ?? String(value);
+}
+
 /**
- * One display setting's line (design "What the tab says"): as the display has it when nobody set
- * it here, whether the display took the latest write, else the value set in Photo Wall on the
- * display's own count ("46 of 100").
+ * One display setting's words (design "What the tab says"), `draft` the operator's change in this
+ * visit (undefined: none; null: handed back): as the display has it when nobody set it here; set
+ * here but not offered at the display's last check; whether the display took the latest write or
+ * was changed on its own buttons since (Central's judgement, central/displays/hardware.py
+ * `changed_on_buttons`; never while the operator's own change is in flight); else the value set in Photo Wall on the display's own count
+ * ("46 of 100") or by its choice's name ("6500 K").
  */
-export function hardwareWords(view: View, row: HardwareRow, value: number | null, touched: boolean): string {
-  if (view.connected === false) return NOT_CONNECTED;
+export function hardwareWords(row: HardwareSettingView, draft: number | null | undefined): string {
+  const value = draft === undefined ? row.value : draft;
   if (value === null) return AS_IT_HAS_IT;
-  if (!touched && (row.result?.result === "not-taken" || row.result?.result === "no-answer")) {
+  if (row.offered === null) return "Not offered by this display at its last check";
+  if (draft === undefined && (row.result?.result === "not-taken" || row.result?.result === "no-answer")) {
     return "The display did not take it";
   }
-  const maximum = row.offered?.range.maximum;
-  return maximum == null ? `Set in Photo Wall · ${value}` : `Set in Photo Wall · ${value} of ${maximum}`;
+  if (draft === undefined && row.changed_on_buttons) return `Changed on the display's buttons: ${displayValue(row, row.offered.current!)}`;
+  return displayValue(row, value);
+}
+
+/** Copy's words for one target: its outcome, and the display settings left as they are there,
+ * named from `names` (the source's rows: code to name) or by code. */
+export function copyWords(result: PictureCopyResult, names: Readonly<Record<string, string>> = {}): string {
+  const skipped = result.hardware_skipped.map((code) => names[code] ?? code);
+  return skipped.length === 0 ? COPY_WORDS[result.outcome] : `${COPY_WORDS[result.outcome]}; skipped: ${skipped.join(", ")}`;
 }
 
 function unavailableWords(session: PictureSession, piHref: string | null) {
@@ -71,43 +94,67 @@ function unavailableWords(session: PictureSession, piHref: string | null) {
   );
 }
 
-/** Display (hardware): a slider per level the display offers, with "As the display has it"; a list
- * setting as a read-only line (slice S5 adds its picker). */
-function DisplaySettings({ view, session, ready }: { view: View; session: PictureSession; ready: boolean }) {
+/** One display setting: a slider per level, a picker per list of choices (its choices and "As the
+ * display has it"), a line with no control for a setting the display answers but lists nothing for,
+ * or one it no longer offers; a hand-back ("As the display has it: …") wherever a value is set. */
+function HardwareSettingRow({ row, session, ready }: { row: HardwareSettingView; session: PictureSession; ready: boolean }) {
   const { draft } = session;
+  const drafted = row.code in draft.hardware ? draft.hardware[row.code] : undefined;
+  const value = drafted === undefined ? row.value : drafted;
+  const words = hardwareWords(row, drafted);
+  const set = (next: number | null) => session.changeHardware(row.code, next);
+  const range = row.offered?.range;
+  const handBack = value !== null && range?.kind !== "choice" && (
+    <Inline>
+      <Button variant="ghost" disabled={!ready} onClick={() => set(null)}>
+        {`${AS_IT_HAS_IT}: ${row.name.toLowerCase()}`}
+      </Button>
+    </Inline>
+  );
+  if (range?.kind === "level" && range.maximum !== null) {
+    return (
+      <Stack>
+        <Field label={row.name} notes={[words]}>
+          <Slider min={0} max={range.maximum} step={1} unit="" value={value ?? row.offered?.current ?? 0}
+            disabled={!ready} onPreview={set} onCommit={set} />
+        </Field>
+        {handBack}
+      </Stack>
+    );
+  }
+  if (range?.kind === "choice") {
+    const options = [
+      { value: AS_IT_HAS_IT_OPTION, label: AS_IT_HAS_IT },
+      ...range.choices.map((choice) => ({ value: String(choice.value), label: choice.name })),
+    ];
+    const chosen = value === null ? AS_IT_HAS_IT_OPTION : String(value);
+    return (
+      <Field label={row.name} notes={[words]}>
+        <Select value={options.some((option) => option.value === chosen) ? chosen : null} options={options}
+          disabled={!ready} onChange={(next) => set(next === AS_IT_HAS_IT_OPTION ? null : Number(next))} />
+      </Field>
+    );
+  }
+  const current = row.offered?.current;
+  return (
+    <Stack>
+      <FactRow label={row.name} tone="reported">
+        {row.offered === null || value !== null ? words : current == null ? "No answer" : displayValue(row, current)}
+      </FactRow>
+      {handBack}
+    </Stack>
+  );
+}
+
+/** Display (hardware): every setting the display offers, and every one set here, in picture-list
+ * order; "Checking what this display offers" until the Pi has asked it. */
+function DisplaySettings({ view, session, ready }: { view: View; session: PictureSession; ready: boolean }) {
   return (
     <FactGroup title={DISPLAY_GROUP}>
       <Stack>
-        {!view.offered_known && <Note>Checking what this display offers…</Note>}
-        {view.hardware.map((row) => {
-          const touched = row.code in draft.hardware;
-          const value = touched ? draft.hardware[row.code]! : row.value;
-          const range = row.offered?.range;
-          if (range?.kind !== "level" || range.maximum === null) {
-            const shown = value ?? row.offered?.current;
-            return (
-              <FactRow key={row.code} label={row.name} tone="reported">
-                {shown == null ? "No answer" : String(shown)}
-              </FactRow>
-            );
-          }
-          const set = (next: number) => session.changeHardware(row.code, next);
-          return (
-            <Stack key={row.code}>
-              <Field label={row.name} notes={[hardwareWords(view, row, value, touched)]}>
-                <Slider min={0} max={range.maximum} step={1} unit="" value={value ?? row.offered?.current ?? 0}
-                  disabled={!ready} onPreview={set} onCommit={set} />
-              </Field>
-              {value !== null && (
-                <Inline>
-                  <Button variant="ghost" disabled={!ready} onClick={() => session.changeHardware(row.code, null)}>
-                    {`${AS_IT_HAS_IT}: ${row.name.toLowerCase()}`}
-                  </Button>
-                </Inline>
-              )}
-            </Stack>
-          );
-        })}
+        {!view.offered_known && <Note>{CHECKING}</Note>}
+        {view.connected === false && <Note>{NOT_CONNECTED}</Note>}
+        {view.hardware.map((row) => <HardwareSettingRow key={row.code} row={row} session={session} ready={ready} />)}
       </Stack>
     </FactGroup>
   );
@@ -150,17 +197,19 @@ function PhotoWallSettings({ view, session, ready }: { view: View; session: Pict
 }
 
 /** Copy to other Frames (#119): Photo Wall's four and the display settings set here, never position. */
-function CopyToFrames({ frameId, otherFrames, blocked }: { frameId: string; otherFrames: readonly string[]; blocked: string | null }) {
+function CopyToFrames({ frameId, otherFrames, blocked, names }: {
+  frameId: string; otherFrames: readonly string[]; blocked: string | null; names: Readonly<Record<string, string>>;
+}) {
   const [chosen, setChosen] = useState<readonly string[]>([]);
   const [sending, setSending] = useState(false);
-  const [outcomes, setOutcomes] = useState<readonly { frame_id: string; outcome: CopyOutcome }[] | null>(null);
+  const [outcomes, setOutcomes] = useState<readonly PictureCopyResult[] | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
   if (otherFrames.length === 0) return null;
   const copy = async () => {
     setSending(true);
     setProblem(null);
     const result = await copyPicture(frameId, [...chosen]) as
-      { ok: true; results: { frame_id: string; outcome: CopyOutcome }[] } | { ok: false; error: string };
+      { ok: true; results: PictureCopyResult[] } | { ok: false; error: string };
     setSending(false);
     if (result.ok) {
       setOutcomes(result.results);
@@ -196,8 +245,8 @@ function CopyToFrames({ frameId, otherFrames, blocked }: { frameId: string; othe
         {blocked !== null && <Note>{blocked}</Note>}
         {outcomes !== null && (
           <FactGroup title="Copy results">
-            {outcomes.map(({ frame_id: other, outcome }) => (
-              <FactRow key={other} label={`Frame ${other}`} tone="set">{COPY_WORDS[outcome]}</FactRow>
+            {outcomes.map((result) => (
+              <FactRow key={result.frame_id} label={`Frame ${result.frame_id}`} tone="set">{copyWords(result, names)}</FactRow>
             ))}
           </FactGroup>
         )}
@@ -244,6 +293,7 @@ export function FramePicture({ frameId, piHref, session, otherFrames }: FramePic
       <DisplaySettings view={view} session={session} ready={ready} />
       <PhotoWallSettings view={view} session={session} ready={ready} />
       <CopyToFrames frameId={frameId} otherFrames={otherFrames}
+        names={Object.fromEntries(view.hardware.map((row) => [row.code, row.name]))}
         blocked={session.dirty ? "Press Done or Revert first: Copy copies the kept values." : null} />
     </Stack>
   );

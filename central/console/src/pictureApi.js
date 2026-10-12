@@ -2,7 +2,7 @@ import { apiWrite } from "./apiWrite.js";
 
 /**
  * The Picture tab's read and writes (roadmap 1c's Live model; decision 0022, the picture split,
- * slice S2): the eight routes of central/display_routes.py `mount_picture_routes`, answered with the
+ * slices S2 and S5): the eight routes of central/display_routes.py `mount_picture_routes`, answered with the
  * shapes of central/displays/views.py (their one home). Each returns `{ok: true, …}` or
  * `{ok: false, error}`: a refusal answers its code (`unknown_frame`, `frame_unbound`, `no_display`,
  * `session_open`, `unknown_session`, `session_ended`, `stale_sequence`, `not_offered`,
@@ -19,10 +19,11 @@ import { apiWrite } from "./apiWrite.js";
  * @typedef {{range: HardwareRangeView, current: number|null}} OfferedView
  * @typedef {{result: WriteResult, before: number|null, after: number|null}} HardwareResultView
  * @typedef {{code: VcpCode, name: string, offered: OfferedView|null, value: number|null,
- *            result: HardwareResultView|null}} HardwareSettingView
+ *            result: HardwareResultView|null, changed_on_buttons: boolean}} HardwareSettingView
  *   One row of Display (hardware): every offered setting and every set code. `offered` null: set
  *   here, not offered at the last check; `value` null: as the display has it; `result` only for the
- *   latest picture change.
+ *   latest picture change; `changed_on_buttons`: the display's latest read differs from the value
+ *   set here (someone used its own buttons).
  * @typedef {{brightness_percent: number, contrast_percent: number, colour_temperature_kelvin: number,
  *            gamma_tenths: number}} SoftwarePictureView
  * @typedef {{session_id: string, sequence: number, idle_until: number}} PictureSessionView

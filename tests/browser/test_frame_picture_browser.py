@@ -1,5 +1,5 @@
 """The Frame page's Picture tab: the display's own settings and Photo Wall's, each on its own, live,
-with Done, Revert and Copy (decision 0022, the picture split, slice S2; roadmap 1c's Live model,
+with Done, Revert and Copy (decision 0022, the picture split, slices S2 and S5; roadmap 1c's Live model,
 design-language §8 row B5; console design §5 Picture, settings #111-#114, #119).
 
 Every write goes through the operator API the tab calls, on the real Registry and display store.
@@ -9,7 +9,8 @@ its judge (`test_display_picture_settings._picture_report`), so the tab's words 
 Central's real status, never from the console alone.
 
 Mutation probes: enable Done before the phase is `shown` -> the Done case fails; send every drag
-event -> the rate case fails; one edit route for both groups -> the two-groups case fails.
+event -> the rate case fails; one edit route for both groups -> the two-groups case fails; render a
+READ_ONLY_CHOICE row with a select -> the list-settings case's "no control" assertion fails.
 """
 
 import os
@@ -17,6 +18,7 @@ import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 
 import pytest
 from console_tasks import connect, open_frame
@@ -25,7 +27,14 @@ from playwright.sync_api import expect
 from test_display_identity import NO_SERIAL, _bind, _frame, _report, _sql, enroll_pi
 from test_display_picture_settings import OFFERED, _picture, _picture_report
 
-from contracts.node_picture import HardwareResult, WriteResult
+from contracts.node_picture import (
+    Choice,
+    HardwareRange,
+    HardwareResult,
+    HardwareSetting,
+    RangeKind,
+    WriteResult,
+)
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("PHOTO_WALL_BROWSER_TESTS") != "1",
@@ -38,6 +47,12 @@ PRESENTED = "Presented by the Pi"
 WAITING = "Previewing — waiting for the Pi"
 DISPLAY = "Display (hardware)"
 PHOTO_WALL = "Photo Wall (software)"
+AS_IT_HAS_IT = "As the display has it"
+# Brightness a level of 100; colour preset a list of two named choices; display mode answers a value
+# but lists none (read-only).
+LISTS = (HardwareSetting("10", HardwareRange(RangeKind.LEVEL, 100, ()), 60),
+         HardwareSetting("14", HardwareRange(RangeKind.CHOICE, None, (Choice(4, "5000 K"), Choice(5, "6500 K"))), 4),
+         HardwareSetting("DC", HardwareRange(RangeKind.READ_ONLY_CHOICE, None, ()), 2))
 
 
 def _off_thread(call, *args, **kwargs):
@@ -49,21 +64,26 @@ def _off_thread(call, *args, **kwargs):
 class FakePi:
     """The Pi on one Output: every POLL_S it takes the picture document the worker's source projects
     now and reports for its picture change, each hardware value written and read back as written
-    (`taken`). `presenting` False holds the Player's `presented` echo back, so the latest change is
-    not shown."""
+    (`taken`), and the display's list re-read with those values current (the periodic re-read).
+    `presenting` False holds the Player's `presented` echo back, so the latest change is not shown;
+    `buttons` (code: value) is what someone set on the display's own buttons since, which the re-read
+    finds."""
 
     POLL_S = 0.15
 
-    def __init__(self, registry, serial=SERIAL, output_id="HDMI-A-1"):
-        self.registry, self.serial, self.output_id = registry, serial, output_id
+    def __init__(self, registry, serial=SERIAL, output_id="HDMI-A-1", offered=OFFERED):
+        self.registry, self.serial, self.output_id, self.offered = registry, serial, output_id, offered
         self.presenting = True
+        self.buttons = {}
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
 
     def answer(self):
         document = _picture(self.registry, self.serial, self.output_id)
         results = {code: HardwareResult(WriteResult.TAKEN, 60, value) for code, value in document.hardware.items()}
-        _picture_report(self.registry, for_change=document.picture_change, results=results,
+        read = {**document.hardware, **self.buttons}
+        offered = tuple(replace(setting, current=read.get(setting.code, setting.current)) for setting in self.offered)
+        _picture_report(self.registry, offered=offered, for_change=document.picture_change, results=results,
                         presented=document.picture_change if self.presenting else None,
                         serial=self.serial, output_id=self.output_id)
 
@@ -81,12 +101,14 @@ class FakePi:
         self._thread.join()
 
 
-def _seen(registry, frame=FRAME, serial=SERIAL, output_id="HDMI-A-1", player=None):
-    """A bound Frame whose Pi reported a display offering brightness and contrast as levels of 100."""
+def _seen(registry, frame=FRAME, serial=SERIAL, output_id="HDMI-A-1", player=None, offered=OFFERED):
+    """A bound Frame whose Pi reported a display offering `offered` (brightness and contrast as
+    levels of 100); `offered` None: the Pi has sent no picture report yet (the list is not known)."""
     player = player or enroll_pi(registry, serial)
     _bind(registry, _frame(registry, frame), player, output_id)
     _off_thread(_report, registry, serial, output_id, NO_SERIAL)
-    _off_thread(_picture_report, registry, serial=serial, output_id=output_id, offered=OFFERED)
+    if offered is not None:
+        _off_thread(_picture_report, registry, serial=serial, output_id=output_id, offered=offered)
     return player
 
 
@@ -162,7 +184,7 @@ def test_the_tab_shows_both_groups_and_each_slider_sends_its_own_edit(page, regi
 
         hardware, software = _edits(page, "hardware-edits"), _edits(page, "software-edits")
         _press(page, DISPLAY, "Brightness", "ArrowRight")
-        expect(_row(page, DISPLAY, "Brightness")).to_contain_text(re.compile(r"Set in Photo Wall · \d+ of 100"))
+        expect(_row(page, DISPLAY, "Brightness")).to_contain_text(re.compile(r"\b61 of 100"))
         _press(page, PHOTO_WALL, "Brightness", "ArrowRight")
         expect(_row(page, PHOTO_WALL, "Brightness")).to_contain_text("101 %")
         expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
@@ -226,7 +248,7 @@ def test_done_waits_until_the_pi_shows_the_latest_change_then_keeps_both_groups(
         stored = _display(registry)
         assert (stored["hardware_picture"], stored["software_brightness_percent"]) == ({"10": 53}, 114)
         expect(_slider(page, DISPLAY, "Brightness")).to_have_value("53")
-        expect(_row(page, DISPLAY, "Brightness")).to_contain_text("Set in Photo Wall · 53 of 100")
+        expect(_row(page, DISPLAY, "Brightness")).to_contain_text("53 of 100")
 
 
 def test_revert_puts_back_the_kept_values(page, registry):
@@ -256,7 +278,7 @@ def test_as_the_display_has_it_hands_a_display_setting_back(page, registry):
         connect(page, origin, "wall")
         open_frame(page, FRAME, "picture")
         bar = _bar(page)
-        expect(_row(page, DISPLAY, "Brightness")).to_contain_text("Set in Photo Wall · 60 of 100")
+        expect(_row(page, DISPLAY, "Brightness")).to_contain_text("60 of 100")
         _group(page, DISPLAY).get_by_role("button", name="As the display has it: brightness", exact=True).click()
         expect(_row(page, DISPLAY, "Brightness")).to_contain_text("As the display has it")
         expect(bar.get_by_role("status")).to_have_text(PRESENTED)
@@ -265,17 +287,73 @@ def test_as_the_display_has_it_hands_a_display_setting_back(page, registry):
         assert _display(registry)["hardware_picture"] == {}
 
 
+def test_list_settings_a_picker_of_exactly_their_choices_and_a_read_only_line_with_no_control(page, registry):
+    """A display offering brightness (a level of 100), colour preset (choices 4 "5000 K" and 5
+    "6500 K") and display mode (read-only): a slider, a select of exactly the two choices plus "As
+    the display has it", and a line with no control. Choosing "6500 K" sends {code 14, value 5};
+    "As the display has it" sends value None.
+
+    Mutation: render a READ_ONLY_CHOICE row with a select -> the "no control" assertion fails."""
+    _seen(registry, offered=LISTS)
+    with FakePi(registry, offered=LISTS), operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "wall")
+        open_frame(page, FRAME, "picture")
+        expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
+        display = _group(page, DISPLAY)
+        expect(_slider(page, DISPLAY, "Brightness")).to_be_visible()
+        preset = display.get_by_role("combobox", name="Select color preset", exact=True)
+        expect(preset.locator("option")).to_have_text([AS_IT_HAS_IT, "5000 K", "6500 K"])
+        expect(preset).to_have_value("as-the-display-has-it")
+        expect(preset).to_have_accessible_description(AS_IT_HAS_IT)
+        expect(display.locator("p", has_text="Display mode")).to_have_text("Display mode: 2")
+        expect(display.get_by_role("combobox")).to_have_count(1)
+        expect(display.get_by_role("slider")).to_have_count(1)
+        expect(display.get_by_role("button")).to_have_count(0)
+
+        edits = _edits(page, "hardware-edits")
+        preset.select_option(label="6500 K")
+        expect(preset).to_have_value("5")
+        expect(preset).to_have_accessible_description("6500 K")
+        expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
+        assert _off_thread(_picture, registry).hardware == {"14": 5}
+        page.wait_for_timeout(600)
+        preset.select_option(label=AS_IT_HAS_IT)
+        expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
+        page.wait_for_timeout(600)
+        assert [(body["code"], body["value"]) for _at, body in edits] == [("14", 5), ("14", None)], edits
+
+
+def test_a_value_changed_on_the_displays_buttons_is_shown_not_fought(page, registry):
+    """Owner addition (2026-10-12): the Pi re-reads the set codes; a current value other than the one
+    set in Photo Wall says "Changed on the display's buttons", and nothing is written back."""
+    _seen(registry)
+    _store(registry, hardware_picture='{"10": 40}')
+    with FakePi(registry) as pi, operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "wall")
+        open_frame(page, FRAME, "picture")
+        expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
+        expect(_row(page, DISPLAY, "Brightness")).to_contain_text("40 of 100")
+        edits = _edits(page, "hardware-edits")
+        pi.buttons = {"10": 35}
+        expect(_row(page, DISPLAY, "Brightness")).to_contain_text("Changed on the display's buttons: 35 of 100")
+        page.wait_for_timeout(600)
+        assert edits == []
+        assert _display(registry)["hardware_picture"] == {"10": 40}
+
+
 def _positions(registry):
     return {frame.id: (frame.calibration.model_dump(mode="json"), frame.readiness)
             for frame in registry.inventory().frames}
 
 
 def test_copy_to_two_frames_copies_photo_walls_values_and_never_position(page, registry):
-    """Copy (#119): Photo Wall's four of this Frame's display go to two other Frames' displays (S2
-    copies no display setting); both Frames' position (fit, corners, readiness) stays as it was."""
+    """Copy (#119): Photo Wall's four of this Frame's display go to two other Frames' displays, and
+    each display setting set here where the target offers it the same way (hall: brightness, a level
+    of 100 on both); stairs' Pi has not said what its display offers, so brightness is skipped there
+    and named. Both Frames' position (fit, corners, readiness) stays as it was."""
     player = _seen(registry)
     _seen(registry, "hall", output_id="HDMI-A-2", player=player)
-    _seen(registry, "stairs", serial="pi-stairs")
+    _seen(registry, "stairs", serial="pi-stairs", offered=None)
     _store(registry, software_brightness_percent=120, software_contrast_percent=30, colour_temperature_kelvin=5000,
            gamma_tenths=24, hardware_picture='{"10": 70}')
     _store(registry, "hall", hardware_picture='{"12": 10}')
@@ -293,11 +371,11 @@ def test_copy_to_two_frames_copies_photo_walls_values_and_never_position(page, r
         picture.get_by_role("switch", name="Frame stairs", exact=True).click()
         picture.get_by_role("button", name="Copy to 2 Frames", exact=True).click()
         results = picture.get_by_role("group", name="Copy results", exact=True)
-        expect(results).to_contain_text("Frame hall: Copied")
-        expect(results).to_contain_text("Frame stairs: Copied")
+        expect(results.locator("p", has_text="Frame hall")).to_have_text("Frame hall: Copied")
+        expect(results.locator("p", has_text="Frame stairs")).to_have_text("Frame stairs: Copied; skipped: Brightness")
 
     assert sent == [{"to_frames": ["hall", "stairs"]}]
-    for frame, hardware in (("hall", {"12": 10}), ("stairs", {})):
+    for frame, hardware in (("hall", {"10": 70, "12": 10}), ("stairs", {})):
         display = _display(registry, frame)
         assert (display["software_brightness_percent"], display["software_contrast_percent"],
                 display["colour_temperature_kelvin"], display["gamma_tenths"]) == (120, 30, 5000, 24)
