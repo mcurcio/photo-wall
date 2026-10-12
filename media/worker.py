@@ -336,7 +336,7 @@ async def _entry():
         repository, library, previews=previews,
         key_content=PgKeyContent(db, times=DatabaseTransactionClock()),
         media_cache=MediaCacheBudget(
-            store=media_store, use=PgMediaVariantUse(times=DatabaseTransactionClock()),
+            store=media_store, use=PgMediaVariantUse(),
             transactions=PgTransactions(db), settings=CacheSettings.from_env(os.environ)))
     # The library half of the thumbnail fetch (R22): only this package holds the key.
     thumbnails = LibraryThumbnailOrigin(

@@ -246,7 +246,8 @@ def fits_slot(candidate: Candidate, slot: Slot, settings: FitSettings) -> bool:
 def useful_for(candidate: Candidate, slot: Slot, settings: FitSettings) -> bool:
     """Whether the fit rule leaves the candidate in play for `slot`: it fits (prepared or not), or
     it waits for a measurement. False: refused, failed, or a prepared copy the Frame cannot
-    draw. The Planner reads more of a Scene's line while none of what it read is useful."""
+    draw. The Planner reads more of a Scene's line while fewer of what it read are useful than
+    the line has slots."""
     return _standing(candidate, slot.target, slot.crop_limit, settings,
                      inside=False)[0] in ("take", "measure")
 

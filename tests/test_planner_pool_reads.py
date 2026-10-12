@@ -153,6 +153,25 @@ def test_a_batch_the_fit_rule_refuses_entirely_is_read_again_twice_as_long():
     assert placed == ["fit4", "fit3"]
 
 
+def test_a_batch_with_fewer_useful_photos_than_slots_is_read_deeper():
+    """Sparse fits: the newest photo fits, the next 40 would each cut a face on the wide Frame,
+    and five older ones fit. A first batch holding one useful photo for four slots is read
+    deeper (until it holds a useful photo per slot, or the line ends), so the plan rotates
+    through the fitting photos as a whole-pool read does, never repeating the one it found."""
+    cut = (face(0.0, 0.0, 0.3, 0.2), face(0.7, 0.8, 1.0, 1.0))
+    photos = [photo("fitA", "wide", captured=2000)]
+    photos += [photo(f"cut{n:02d}", "four_three", captured=1000 + n, faces=cut) for n in range(40)]
+    photos += [photo(f"fit{n}", "wide", captured=n) for n in range(5)]
+    pool = SourcePool(source_ref=POOL, ready=True, candidates=tuple(photos))
+    frames = {"left": "wide"}
+    lean = plan(wall(frames, order="newest_first"), frames, PoolLines({POOL: pool}),
+                horizon=60, plan_seconds=120)
+    full = plan(wall(frames, order="newest_first"), frames, PoolLines({POOL: pool}),
+                horizon=60, plan_seconds=120, limits=PlannerLimits(hydrate_factor=64))
+    assert [entry.asset_id for entry in lean.plan] == ["fitA", "fit4", "fit3", "fit2"]
+    assert lean == full
+
+
 def test_a_pass_reads_at_most_its_slots_times_the_factor_per_line():
     frames = {f"frame{n}": ("wide", "tall")[n % 2] for n in range(8)}
     photos = tuple(photo(f"p{n:05d}", ("wide", "tall")[n % 2], captured=n)

@@ -134,15 +134,34 @@ export type LoadState<T> =
 export const REASON_WORDS: Readonly<Record<FitRefusal, string>> = {
   beyond_crop_limit: "doesn't fit this Frame's shape",
   below_frame_pixels: "too small for this Frame",
-  above_player_limit: "too large for the Player to show on this Frame",
+  above_player_limit: "needs more detail than this Pi can draw",
   face_cut: "a face would be cut",
   interest_cut: "the interesting part would be cut",
   no_video_here: "this Frame shows no videos",
 };
 
 /** Photos the fit rule cannot judge yet: the size of the largest copy Photo Wall can read of them
- * (a RAW photo's preview) is being measured (follow-up S1). */
-export const SIZE_UNKNOWN_WORDS = "size not measured yet";
+ * (a RAW photo's preview) is being measured (follow-up S1). Pending, not refused: said apart
+ * from the bar's reasons, in neutral words ("1 waiting to be measured · Photo Wall is reading
+ * its size from Immich"). */
+export function waitingWords(photos: number): string {
+  return `${countText(photos)} waiting to be measured · Photo Wall is reading ${photos === 1 ? "its" : "their"} size from Immich`;
+}
+
+/** A reason's photos as a clause after their count ("3 don't fit its shape", "1 is too small"),
+ * for a sentence that names every reason a Frame refuses photos for. */
+function refusedClause(reason: FitRefusal, photos: number): string {
+  const one = photos === 1;
+  const clause: Record<FitRefusal, string> = {
+    beyond_crop_limit: one ? "doesn't fit its shape" : "don't fit its shape",
+    below_frame_pixels: one ? "is too small" : "are too small",
+    above_player_limit: one ? "needs more detail than its Pi can draw" : "need more detail than its Pi can draw",
+    face_cut: "would lose a face",
+    interest_cut: one ? "would lose its interesting part" : "would lose their interesting part",
+    no_video_here: one ? "is a video it doesn't show" : "are videos it doesn't show",
+  };
+  return `${countText(photos)} ${clause[reason]}`;
+}
 
 export function reasonWords(reason: FitRefusal): string {
   return REASON_WORDS[reason];
@@ -190,15 +209,22 @@ function frameShapeClause(frame: FrameFit, name: string): string {
  * selection's most common shape); otherwise what leaves most of them off.
  */
 export function emptyFrameWords(frame: FrameFit, name: string, most: string | null): string {
-  const top = [...frame.refused_by_shape, ...frame.refused_by_content]
+  const refused = [...frame.refused_by_shape, ...frame.refused_by_content]
     .filter((count) => count.photos > 0)
-    .sort((a, b) => b.photos - a.photos)[0];
+    .sort((a, b) => b.photos - a.photos);
+  const top = refused[0];
   const shape = ratioWords(shapeOf(frame));
   switch (top?.reason ?? "beyond_crop_limit") {
     case "below_frame_pixels":
       return `Most of these photos are smaller than ${name} needs: add larger photos.`;
-    case "above_player_limit":
-      return `These photos would need a larger picture on ${name} than its Player can show: give it a smaller Frame output.`;
+    case "above_player_limit": {
+      // The Pi's drawing limit is the cause, never the photo: no fix is offered (nothing in the
+      // console changes what a Pi can draw), only what Photo Wall does about it. Every other
+      // reason follows with its count, so none is hidden behind the largest.
+      const rest = refused.slice(1).map((count) => `; ${refusedClause(count.reason, count.photos)}`).join("");
+      return `${countText(top.photos)} of ${countText(frame.photos)} ${top.photos === 1 ? "needs" : "need"} more detail than ${
+        name}'s Pi can draw${rest}. They are left out on ${name}; they still show on Frames that can draw them.`;
+    }
     case "face_cut":
       return `Most of these photos would lose a face on ${name}: add photos closer to ${shape}.`;
     case "interest_cut":
@@ -462,14 +488,17 @@ export const FEW_PHOTOS = "Few photos";
 /** A Frame's alert, or null when it is fine: said once, where the Frame is drawn. */
 function alertOf(frame: FrameFit, name: string, sharing: number, most: string | null,
   rescue: BoardOptions["rescue"]): FitAlert | null {
-  if (frame.photos > 0 && !hasFit(frame)) {
+  const refused = [...frame.refused_by_shape, ...frame.refused_by_content].some((count) => count.photos > 0);
+  // Every photo still waiting to be measured is pending, not refused: its own line says so.
+  if (frame.photos > 0 && !hasFit(frame) && (refused || (frame.size_unknown ?? 0) === 0)) {
     return { severity: "alarm", label: NOTHING_FITS, what: emptyFrameWords(frame, name, most), action: rescue?.(frame) };
   }
   if (isThin(frame, sharing)) return { severity: "notice", label: FEW_PHOTOS, what: thinWords(frame, sharing, name) };
   return null;
 }
 
-function frameView(frame: FrameFit, name: string, href: string | undefined, alert: FitAlert | null): FrameFitView {
+function frameView(frame: FrameFit, name: string, href: string | undefined, alert: FitAlert | null,
+  maxStillEdge: number): FrameFitView {
   const aspect = shapeOf(frame);
   const shaped = frame.refused_by_shape.filter((count) => count.photos > 0);
   const unsized = frame.size_unknown ?? 0;
@@ -477,18 +506,21 @@ function frameView(frame: FrameFit, name: string, href: string | undefined, aler
     { key: "fit", label: "fit", count: frame.fit_by_shape, countText: countText(frame.fit_by_shape) },
     ...shaped.map((count) => ({ key: count.reason, label: reasonWords(count.reason), count: count.photos,
       countText: countText(count.photos) })),
-    ...(unsized > 0 ? [{ key: "size_unknown", label: SIZE_UNKNOWN_WORDS, count: unsized, countText: countText(unsized) }] : []),
   ];
   const content = frame.refused_by_content.filter((count) => count.photos > 0);
   const reasons: FitReason[] = [
     ...shaped.map((count) => ({ key: count.reason, label: reasonWords(count.reason), countText: countText(count.photos),
       samples: count.samples.map((sample) => cropOf(sample, frame.aspect, reasonWords(count.reason), true)) })),
-    ...(unsized > 0 ? [{ key: "size_unknown", label: SIZE_UNKNOWN_WORDS, countText: countText(unsized), samples: [] }] : []),
     ...content.map((count) => ({ key: count.reason, label: `${reasonWords(count.reason)} (of those checked)`,
       countText: countText(count.photos),
       samples: count.samples.map((sample) => cropOf(sample, frame.aspect, reasonWords(count.reason), true)) })),
   ];
-  const left = frame.photos - frame.fit_by_shape;
+  // Waiting photos are neither fit nor refused: not among those that "don't fit".
+  const left = frame.photos - frame.fit_by_shape - unsized;
+  const limited = shaped.some((count) => count.reason === "above_player_limit");
+  const output = frame.output_px === null ? null : outputWords(frame, name);
+  // The Pi's limit in pixels is a Details fact (design language §7: pixels only there).
+  const limit = limited ? `This Pi draws a photo at most ${countText(maxStillEdge)} px on its longest side` : null;
   const summary = left > 0 ? `Why ${countText(left)} don't fit`
     : content.length > 0 ? "Why some of those checked don't fit" : null;
   return {
@@ -507,7 +539,8 @@ function frameView(frame: FrameFit, name: string, href: string | undefined, aler
     // The Frame output in pixels is a Details fact (design language §7, units); not known yet
     // is said in words.
     unknownOutput: frame.output_px === null ? outputWords(frame, name) : null,
-    detail: frame.output_px === null ? null : outputWords(frame, name),
+    detail: [output, limit].filter((part): part is string => part !== null).join(" · ") || null,
+    waiting: unsized > 0 ? waitingWords(unsized) : null,
     alert,
     why: summary === null ? null : { summary, reasons },
     draft: frame.draft ? "As you are setting it" : null,
@@ -557,7 +590,7 @@ export function boardView(analysis: FitAnalysis, options: BoardOptions = {}): Fi
       : options.judged === null ? null : judgedWords(options.judged, analysis),
     reading: analysis.reading ? "Still reading Immich: these are the photos found so far." : null,
     frames: analysis.frames.map((frame) => frameView(frame, name(frame.frame_id), options.href?.(frame.frame_id),
-      alertOf(frame, name(frame.frame_id), sharing, most, options.rescue))),
+      alertOf(frame, name(frame.frame_id), sharing, most, options.rescue), analysis.settings.max_still_edge)),
     shape: {
       bins: analysis.bins.map((bin) => binWords(bin, bands)),
       bands,

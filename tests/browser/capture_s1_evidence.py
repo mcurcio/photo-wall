@@ -6,10 +6,10 @@ CI never collects it). Run by path against a built console and the test database
 
 The varied wall of capture_photo_5a_evidence.py, plus two 6,000 x 4,000 GIF photos (Immich
 keeps no full-size copy of a GIF and Photo Wall cannot read the original, so only its preview
-counts): one whose preview is not measured yet ("size not measured yet") and one whose
+counts): one whose preview is not measured yet ("1 waiting to be measured") and one whose
 1,440 x 960 preview is too small for living-room's 1,920 x 1,080 Frame output; the Player's
 still limit is lowered to 1,900 px, so every photo needs a longer copy on
-living-room than the Player shows ("too large for the Player to show on this Frame").
+living-room than the Pi draws ("needs more detail than this Pi can draw").
 """
 
 import os
@@ -74,8 +74,9 @@ def test_s1_reasons(page, registry, scheme):
         living = board.get_by_role("article", name="Frame living-room")
         expect(living).to_be_visible()
         living.get_by_role("button", name=re.compile(r"^Why ")).click()
-        expect(living).to_contain_text("too large for the Player to show on this Frame")
-        expect(living).to_contain_text("size not measured yet")
+        expect(living).to_contain_text("needs more detail than this Pi can draw")
+        expect(living).to_contain_text("1 waiting to be measured")
+        expect(living).to_contain_text("they still show on Frames that can draw them")
         _top_shot(page, "s1-source-editor-why-living-room", scheme)
         open_frame(page, "living-room", "overview")
         photos = page.get_by_role("region", name="Photos", exact=True)

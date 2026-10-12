@@ -63,7 +63,7 @@ _SLACK: Final = 1e-9
 FitRefusal = Literal[
     "beyond_crop_limit",     # "doesn't fit this Frame's shape"
     "below_frame_pixels",    # "too small for this Frame"
-    "above_player_limit",    # "too large for the Player to show on this Frame"
+    "above_player_limit",    # "needs more detail than this Pi can draw"
     "face_cut",              # "a face would be cut"
     "interest_cut",          # "the interesting part would be cut"
     "no_video_here",         # "this Frame shows no videos"

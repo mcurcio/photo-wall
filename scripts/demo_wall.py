@@ -530,6 +530,25 @@ def composition(project: str, fixture_project: str, scenario: str) -> dict:
                  "fixture_setup": dict(external=True, name=fixture_project + "_setup")})
 
 
+def player_cache_audit_code(directory: str) -> str:
+    """The script the demo runs inside a Player to hash each file in its cache.
+
+    The Player names a cached file `<sha256 of its variant key>.<sha256 of its bytes>.blob`
+    (player/cache.py `_BLOB`), so the audit hashes the bytes against the name's second part.
+    """
+    return f"""import hashlib,json,pathlib,re
+result=[]
+name=re.compile(r'^([a-f0-9]{{64}})[.]([a-f0-9]{{64}})[.]blob$')
+for path in sorted(pathlib.Path({directory!r}).glob('*.blob')):
+    if len(result)>=32: raise RuntimeError('audit_bound')
+    match=name.fullmatch(path.name)
+    assert match is not None, path.name
+    digest=hashlib.file_digest(path.open('rb'),'sha256').hexdigest()
+    assert digest == match.group(2)
+    result.append(dict(key=match.group(1),sha256=digest,size=path.stat().st_size))
+print(json.dumps(result))"""
+
+
 class DemoHost:
     def __init__(self, state: Path):
         self.state = state.resolve()
@@ -682,14 +701,7 @@ class DemoHost:
         return result
 
     def byte_audit(self):
-        code = """import hashlib,json,pathlib
-result=[]
-for path in sorted(pathlib.Path('/tmp/cache').glob('*.blob')):
-    if len(result)>=32: raise RuntimeError('audit_bound')
-    digest=hashlib.file_digest(path.open('rb'),'sha256').hexdigest()
-    assert digest == path.stem
-    result.append(dict(sha256=digest,size=path.stat().st_size))
-print(json.dumps(result))"""
+        code = player_cache_audit_code("/tmp/cache")
         return {name: json.loads(self.compose("exec", "-T", name, "python3", "-c", code))
                 for name in self.players}
 

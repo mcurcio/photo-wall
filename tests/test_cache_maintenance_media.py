@@ -34,7 +34,7 @@ SIZE = 100  # every variant's file
 def budget(registry, root, budget_bytes: int) -> MediaCacheBudget:
     return MediaCacheBudget(
         store=CacheStore(CacheLayout(root)),
-        use=PgMediaVariantUse(times=ProcessTransactionClock(registry.clock)),
+        use=PgMediaVariantUse(),
         transactions=PgTransactions(registry.db),
         settings=CacheSettings(media_budget_bytes=budget_bytes))
 
@@ -89,9 +89,26 @@ def test_pinned_files_survive_over_budget(registry, tmp_path):
     wall.pin(locked, "secured:player:1:assignment", 1200)  # a secured lock's pin
     wall.pin(expired, "transfer:" + "0" * 32, 900)         # expired before the clock's 1000
     removed = budget(registry, tmp_path, 0).enforce()
-    assert wall.kept() == [True, True, False, False]
-    assert sorted(path.name for path in removed) == sorted(
-        wall.path(v).name for v in (expired, loose))
+    assert wall.kept() == [True, True, True, False]
+    assert [path.name for path in removed] == [wall.path(loose).name]
+
+
+def test_a_pin_held_until_central_expires_it_whatever_the_database_clock_says(registry, tmp_path):
+    """A pin's `expires_at` is on Central's clock, so the budget never compares it with a clock:
+    any pin row holds its file (here one whose time is long behind every clock), until Central's
+    Coordinator expires it on its own clock (`expire_pins_in`); then the file may go.
+
+    Mutation probe: compare `expires_at` with the database clock in `PgMediaVariantUse` -> the
+    file is evicted while its pin row stands, and this test fails."""
+    wall = Variants(registry, tmp_path, 1)
+    (held,) = wall.variants
+    wall.pin(held, "secured:player:1:assignment", 1)
+    assert budget(registry, tmp_path, 0).enforce() == []
+    assert wall.kept() == [True]
+    with registry.db.transaction() as conn:
+        wall.repository.expire_pins_in(conn, registry.clock.utc())
+    assert [path.name for path in budget(registry, tmp_path, 0).enforce()] == [wall.path(held).name]
+    assert wall.kept() == [False]
 
 
 def test_the_least_recently_served_files_go_first_until_under_budget(registry, tmp_path):

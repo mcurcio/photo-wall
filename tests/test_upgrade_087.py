@@ -29,8 +29,10 @@ BYTES = b"a prepared copy the media store published"
 
 
 def test_087_names_a_secured_locks_variant_and_keeps_serving_its_bytes(empty_database, tmp_path):
-    """Mutation probe: skip 087's layer rewrite -> the lock names no variant, its Player is
-    refused the bytes, and this test fails."""
+    """Mutation probes: skip 087's layer rewrite of the locks -> the lock names no variant, its
+    Player is refused the bytes, and this test fails; skip it for the offered plans (`WHERE
+    FALSE AND ...` on the plan_offers UPDATE) -> the offered media layer names no variant and
+    this test fails."""
     db = Database(empty_database)
     try:
         migrate_before(db, "087")
@@ -39,6 +41,7 @@ def test_087_names_a_secured_locks_variant_and_keeps_serving_its_bytes(empty_dat
         picture = photo("photo-1", taken_at=900)
         seed_pool(registry, "source:1", (picture,))
         player, _, _ = enroll(registry)
+        other, _, _ = enroll(registry)
         registry.bind("portrait", player["player_id"], "HDMI-A-1", expected_generation=0)
         save_position(registry, "portrait")
         binding = registry.bindings_for(player["player_id"], 1)[0]
@@ -60,6 +63,12 @@ def test_087_names_a_secured_locks_variant_and_keeps_serving_its_bytes(empty_dat
                          "'preview',1)", (picture.asset_id, OLD_RECIPE, digest))
             conn.execute("INSERT INTO assignment_locks VALUES(%s,1,'assignment',%s,1000,1200)",
                          (player["player_id"], Jsonb(layer)))
+            # Another Player's offered plan (only its layers, which 087 rewrites): a media
+            # layer, then a blank one (no variant), in that order.
+            blank = {**layer, "assignment_id": "blank", "variant": None}
+            conn.execute("INSERT INTO plan_offers(player_id,authority_epoch,revision,plan_id,"
+                         "manifest,groups,created_at,valid_until) VALUES(%s,1,1,'plan',%s,"
+                         "'[]',1000,1200)", (other["player_id"], Jsonb({"layers": [layer, blank]})))
             conn.execute("INSERT INTO media_references VALUES(%s,%s,1200)",
                          (f"secured:{player['player_id']}:1:assignment", digest))
         blob = tmp_path / "media" / "blobs" / digest  # where the media store published it
@@ -74,9 +83,15 @@ def test_087_names_a_secured_locks_variant_and_keeps_serving_its_bytes(empty_dat
             ).fetchone()["layer"])
             references = conn.execute("SELECT owner,variant_key FROM media_references"
                                       ).fetchall()
+            offered = conn.execute("SELECT manifest FROM plan_offers WHERE plan_id='plan'"
+                                   ).fetchone()["manifest"]["layers"]
         name = f"{picture.asset_id}.{OLD_RECIPE}"
         assert lock.variant.key == name
         assert (lock.variant.sha256, lock.variant.size) == (digest, len(BYTES))
+        assert [item["assignment_id"] for item in offered] == ["assignment", "blank"]
+        assert offered[0]["variant"] == {**stored, "asset_id": picture.asset_id,
+                                         "recipe_id": OLD_RECIPE}
+        assert offered[1]["variant"] is None
         assert references == [{"owner": f"secured:{player['player_id']}:1:assignment",
                                "variant_key": name}]
         app = create_app(db, ManualClock(1000), ADMIN, cache_root=tmp_path, run_scheduler=False)

@@ -33,6 +33,7 @@ from central.infra.transactions import PgTransaction, PgTransactions
 from central.installation_repository import PostgresInstallationRepository
 from central.kernel.job_types import PrepareMedia
 from central.kernel.jobs import asset_key
+from central.kernel.publishing import Pending
 from central.media_repository import MediaRepository
 
 ORIGINAL = b"public synthetic original bytes"
@@ -65,12 +66,12 @@ class Wall:
                                                     asset_key(PrepareMedia(key=key)), facts)
             return self.repository.variants_in(conn, (key,))[key]
 
-    def app(self):
+    def app(self, publisher=None):
         content = build_content_services(self.registry.db, self.registry.clock,
                                          cache_root=self.root)
         reader = AssetReader(store=CacheStore(CacheLayout(self.root)), records=self.repository.records,
                              transactions=PgTransactions(self.registry.db),
-                             publisher=InlinePublisher(self.maker, self.repository),
+                             publisher=publisher or InlinePublisher(self.maker, self.repository),
                              slots=WaiterSlots(8), clock=self.registry.clock)
         return create_app(self.registry.db, self.registry.clock, ADMIN, cache_root=self.root,
                           content=replace(content, frame_media_reader=reader))
@@ -133,6 +134,40 @@ def test_another_players_media_unknown_names_and_retired_players_are_refused(wal
         registry.unbind("portrait", expected_generation=1)
         registry.retire(player["player_id"])
         assert client.get(url, headers=headers).status_code == 401
+    assert wall.transfers() == 0
+
+
+class StillMaking:
+    """A `Publisher` whose re-make has not finished when the read stops waiting."""
+
+    def __init__(self) -> None:
+        self.published: list = []
+
+    async def publish_now(self, job, *, retry_terminal: bool = False):
+        self.published.append(job)
+        return self
+
+    async def wait(self, *, timeout):
+        return Pending()
+
+
+def test_a_miss_whose_re_make_does_not_finish_in_time_answers_503_and_releases_its_pin(
+        wall, registry):
+    """The file is gone and its re-make is still running when the read stops waiting: 503
+    `media_unavailable` with a Retry-After, and the transfer pin the grant took is released."""
+    variant = wall.first_making()
+    player, _, _ = grant(registry, wall.repository, variant)
+    with registry.db.transaction() as conn:
+        produced = wall.repository.records.get(
+            PgTransaction(conn), asset_key(PrepareMedia(key=variant.key))).produced
+    CacheLayout(wall.root).path(asset_key(PrepareMedia(key=variant.key)), produced).unlink()
+    publisher = StillMaking()
+    with TestClient(wall.app(publisher)) as client:
+        response = client.get(f"/v1/media/{variant.asset_id}/{variant.recipe_id}",
+                              headers={"Authorization": f"Bearer {player['token']}"})
+    assert (response.status_code, response.json()) == (503, {"error": "media_unavailable"})
+    assert int(response.headers["Retry-After"]) > 0
+    assert publisher.published == [PrepareMedia(key=variant.key)]
     assert wall.transfers() == 0
 
 

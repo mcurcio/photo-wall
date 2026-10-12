@@ -5301,3 +5301,31 @@ Order: (a) merge the iac PR that switches the factory to `central.app:create_app
 - **The photo sheet says which copy plays:** `PhotoFacts.frames` (each Frame's need and whether the measured preview holds it); an unedited photo's original shows Immich's own size.
 - **Catalog baselines** for the new and changed FitBoard, FrameFitRow and WallStrip stories are arm64 renders (`PHOTO_WALL_CATALOG_PLATFORM=linux/arm64`; this Mac cannot run the amd64 image); a full `--check` of all 456 there passed. CI's amd64 leg confirms them.
 - **NOT RUN by this agent: the designer agents' adversarial review of the new screenshots** (owner item 5). This fix agent has no tool to start other agents; the orchestrator should send them over `docs/evidence/photo5a/followup-*` against `pre-review-*`.
+
+## photo-sizing follow-up (PR 84), end-review fix round, 2026-10-12
+
+- **S3 "double the batch if all are refused" is wrong.** Reading deeper only when *no* member
+  of the batch is useful lets one usable photo fill every slot by repetition, while a whole-pool
+  plan rotates through fitting photos further down the line (review scratch: fitA, 40 face-cut
+  photos, 5 fitting; lean plan `[fitA, fitA, fitA, fitA]`, whole plan `[fitA, fit4, fit3, fit2]`).
+  Fixed: the Planner doubles while the batch holds **fewer useful members than the line has
+  slots**, up to the line's length (`central/planner.py` `_read_lines`; test
+  `test_a_batch_with_fewer_useful_photos_than_slots_is_read_deeper`).
+- **S3's migration 089 (line indexes) is not added: no index serves the read.** The ranked read's
+  sort key is the tier `CASE` then, for shuffle, a per-row `sha256(scene || sep || pass || sep ||
+  asset_id)`; for the other orders a tier `CASE` leads too. No btree can return that order, so
+  Postgres must read every in-pool row and top-N heapsort them. `auto_explain` (50,000 photos,
+  one pool, 1,920-row limit, local test database): `Limit -> Sort (top-N heapsort, 928 kB) ->
+  Hash Join (50,000 rows)`; pool rows by `Seq Scan` (the pool is the whole table; the existing
+  partial index `photo_pool_rows_in_pool (pool_key, asset_id) WHERE outcome='in_pool'` serves a
+  selective pool), `library_assets` by its primary key, `asset_revisions` by its primary key or
+  a seq scan; 155 ms. The joins already use primary keys; the cost is the full read the order
+  needs, which an index would not remove.
+- **S3 `LineQuery` departs from its frozen page.** It takes `picked`, `recent`, `today` and
+  `after` (the pass's picked ids, the no-repeat window's recent ids, the day for On this day, and
+  chronological's wrap mark) instead of `no_repeat_days` and `now`. The meaning is the same: the
+  Planner resolves the no-repeat window and the day from `now` and the history once, in Python
+  (`central/wall_plan/order.py`), so the SQL never reads a clock or the history tables.
+- **S3's "within a placeholder budget of 0.5 s" is not a CI assertion.** Shared CI runners took
+  1.09 s where a laptop took 0.31-0.45 s. `test_planner_pass_budget` keeps the member-count gate
+  and prints the read's time; the 0.5 s budget is a bench measurement ("to be measured").

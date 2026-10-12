@@ -43,19 +43,32 @@ class CacheStore:
         """The asset's file opened read-only when it is a regular file of `facts.size`, else None.
 
         A kind stored by digest is also hash-checked in full before it is returned: a file whose
-        bytes do not match `facts` is discarded and answers None (a miss the caller re-makes)."""
+        bytes do not match `facts` is discarded and answers None (a miss the caller re-makes).
+        Only a file found wrong is discarded (not a regular file, or the wrong size or bytes): a
+        failure to open one (a full descriptor table, a refused permission, an I/O error) says
+        nothing about its bytes, so it answers None and the file stays."""
         path = self._layout.path(key, facts)
         try:
             fd, metadata = open_regular(path, expected_size=facts.size)
-        except HardenedOpenError:
-            if key.kind.stored_by_digest:
-                self.discard(path)  # absent stays absent; a wrong file at the name goes
+        except HardenedOpenError as error:
+            if key.kind.stored_by_digest and (error.reason == "invalid"
+                                              or self._not_a_regular_file(path)):
+                self.discard(path)  # a wrong file at the name goes; absent stays absent
             return None
         if key.kind.stored_by_digest and not self._hash_matches(fd, facts):
             os.close(fd)
             self.discard(path)
             return None
         return OpenedFile(fd=fd, size=metadata.st_size)
+
+    @staticmethod
+    def _not_a_regular_file(path: Path) -> bool:
+        """Whether something other than a regular file sits at `path` (a symlink, refused by
+        `O_NOFOLLOW`); False when nothing is there or `lstat` itself fails."""
+        try:
+            return not stat.S_ISREG(os.lstat(path).st_mode)
+        except OSError:
+            return False
 
     @staticmethod
     def _hash_matches(fd: int, facts: AssetReady) -> bool:

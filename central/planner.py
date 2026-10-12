@@ -432,8 +432,8 @@ class _ProjectionBuilder:
             dict[str, Candidate], dict[str, frozenset[str]], dict[str, SceneLine]]:
         """Follow-up S3 (design rule 3: the Planner reads only what the plan needs, fresh, every
         pass). Each Scene with Scene-line slots reads the top of its line (`SceneLines.line`):
-        its slots x `limits.hydrate_factor` members, the batch doubled while none of it is
-        useful (`useful_for`: every one refused), up to the whole line; and, when this pass could
+        its slots x `limits.hydrate_factor` members, the batch doubled while it holds fewer
+        useful members (`useful_for`) than the line has slots, up to the whole line; and, when this pass could
         end in this plan (every member it has not picked is read, and no more of them are
         pickable than it has slots), the top of the next pass too. Returns every candidate a slot
         may take (the members read, then the authored ones), each slot pool's members read, and
@@ -480,8 +480,12 @@ class _ProjectionBuilder:
 
             limit = len(items) * self.limits.hydrate_factor
             answer = read(scene_pass.pass_number, scene_pass.picked, limit)
+            # Read deeper while the batch holds fewer useful photos than the line has slots
+            # (and the line goes on): a sparse batch would otherwise fill every slot by
+            # repeating the few it found, where a whole-pool read rotates through the fitting
+            # photos further down the line.
             while (len(answer.members) == limit
-                   and not any(serves(member, useful_for) for member in answer.members)):
+                   and sum(serves(member, useful_for) for member in answer.members) < len(items)):
                 limit *= 2
                 answer = read(scene_pass.pass_number, scene_pass.picked, limit)
             whole = len(answer.members) < limit

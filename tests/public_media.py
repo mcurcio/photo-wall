@@ -18,7 +18,7 @@ from central.assets.layout import CacheLayout
 from central.infra.transactions import PgTransaction
 from central.kernel.assets import AssetKind, MediaReady
 from central.media_repository import MediaRepository
-from central.photo_library.model import LibraryAsset
+from central.photo_library.model import LibraryAsset, OriginalFile
 from contracts.models import Variant
 
 
@@ -61,7 +61,11 @@ def public_photo(*, connection_id=FIXTURE_CONNECTION, number=1,
     original, derivative = (buffer.getvalue() for buffer in buffers)
     asset = LibraryAsset(connection_ref=connection_id, upstream_id=str(uuid.UUID(int=number)),
         revision=hashlib.sha1(original).hexdigest(), kind="image", width=width, height=height,
-        taken_at=captured_at)
+        taken_at=captured_at,
+        # A JPEG original, as Immich's search answer describes one (`originalMimeType`): its copy
+        # ladder ends at the original, so its readable size is its own and needs no measurement.
+        original=OriginalFile(media_type="image/jpeg", width=width, height=height,
+                              size_bytes=len(original)))
     return PublicPhoto(asset, original, derivative)
 
 
