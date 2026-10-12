@@ -1086,6 +1086,12 @@ class PlayerService:
                     )
                     if outcome == "recorded" and applied_current():
                         recorded = applied
+                    elif outcome == "rejected":
+                        LOG.warning("player: the broker refused the app link; retrying in %.0f s",
+                                    APP_LINK_RETRY)
+                    else:
+                        LOG.info("player: app link stale (a newer control delivery or "
+                                 "enrollment); retrying in %.0f s", APP_LINK_RETRY)
                 except (ValueError, OSError, TimeoutError) as error:
                     LOG.debug("player: node process linkage unavailable: %s", type(error).__name__)
                 except Exception as error:

@@ -25,9 +25,10 @@ from contracts.node_frame import frame_witness_tag
 from contracts.player_control import ControlAck
 
 
-def fresh_proof(registry, service, claim, old_proof, key, *, sampled=35001):
+def fresh_proof(registry, service, claim, old_proof, key, *, sampled=35001, digest=None):
     registry.clock.advance(1)
-    delivery = registry.issue_control_delivery_record(old_proof.challenge.player_id, 1, uuid4().hex*2)
+    delivery = registry.issue_control_delivery_record(old_proof.challenge.player_id, 1,
+                                                      digest or uuid4().hex*2)
     receipt = registry.control_ack_response(old_proof.challenge.player_id,
         ControlAck(authority_epoch=1, delivery_id=delivery['delivery_id'], result='applied')).receipt
     challenge = replace(old_proof.challenge, control_receipt=json.dumps(receipt.model_dump(mode='json', by_alias=True),
@@ -78,12 +79,12 @@ class Witnesses:
         return parse_display_decision(self.display.exchange(self.claim.session_id,self.claim.credential,
                                                            encode_display_exchange(request)))
 
-    def advance(self, *, interval=5, tag_override=None):
+    def advance(self, *, interval=5, tag_override=None, digest=None):
         self.registry.clock.advance(interval-1)
         self.sequence += 1
-        # Ordinary live control transport issues a genuinely new applied receipt.
+        # A changed state issues a new applied receipt; an unchanged one (`digest`) replays it.
         self.proof = fresh_proof(self.registry,self,self.claims['app_effect_broker'],self.proof,self.key,
-                                sampled=int((self.registry.clock.utc()-1000)*1000)+2000)
+                                sampled=int((self.registry.clock.utc()-1000)*1000)+2000, digest=digest)
         self.coordinator.advance()
         self.coordinator.readiness(self.player['player_id'],report(self.coordinator,self.player,sequence=self.sequence))
         plan = self.coordinator.delivery(self.player['player_id'],1)['plan']
@@ -137,6 +138,16 @@ def test_advancing_real_owner_witnesses_qualify_without_cached_repeats(registry)
     assert witness.acceptance.sample(witness.qualification)['status']=='awaiting_new_witnesses'
     for _ in range(6):
         result = witness.advance()
+    assert result['status']=='accepted' and result['fleet_frontier_changed'] is False
+
+
+def test_an_unchanged_control_state_still_qualifies(registry):
+    """Central re-sends the applied delivery while the state is unchanged, so the applied
+    receipt keeps its sequence and age; fresh, advancing readiness carries liveness instead.
+    Mutation probe: restore the applied-age check or the advancing control sequence."""
+    witness = Witnesses(registry)
+    for _ in range(7):
+        result = witness.advance(digest='f'*64)
     assert result['status']=='accepted' and result['fleet_frontier_changed'] is False
     with registry.db.transaction() as conn:
         row = conn.execute('SELECT evidence FROM node_environment_acceptances').fetchone()

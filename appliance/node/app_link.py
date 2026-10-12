@@ -11,6 +11,7 @@ import hashlib
 import http.client
 import logging
 import os
+import re
 import secrets
 import socket
 import stat
@@ -125,8 +126,12 @@ class BrokerLinkService:
                     handed_over = True
                 else:
                     self.handle(connection, first=first)
-            except (OSError, ValueError, TypeError):
-                # Refusal does not expose configuration, bearer or exception details.
+            except (OSError, ValueError, TypeError) as error:
+                # Refusal does not expose configuration, bearer or exception details to the
+                # peer; the journal gets the refusal code alone.
+                code = str(error)  # this module's and the contracts' codes: node_link_peer
+                LOG.warning("broker: app link refused locally (%s)", code if re.fullmatch(
+                    r"[a-z0-9_]{1,64}", code) else type(error).__name__)
                 try:
                     connection.send(b'{"schema":2,"kind":"result","status":"refused"}')
                 except OSError:

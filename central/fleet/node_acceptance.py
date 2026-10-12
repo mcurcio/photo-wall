@@ -107,8 +107,10 @@ class NodeAcceptance:
                 return {"status": "accepted", "acceptance_id": str(accepted["acceptance_id"])}
             now = self.sessions.clock.utc()
             control = load_current_app_control_in(conn, request["device_id"])
-            if (control is None or control.last_result != "applied" or control.applied_at is None
-                    or now-control.applied_at > self.MAX_GAP_SECONDS):
+            # Central re-sends the applied delivery while the state is unchanged, so its age
+            # is not liveness: the control witness is that the link's receipt is the current
+            # applied one (below); fresh, advancing readiness carries liveness.
+            if control is None or control.last_result != "applied" or control.applied_at is None:
                 raise NodeControlError("node_qualification_control_stale")
             link = load_current_node_app_link_for_player_in(conn, control.player_id, control.authority_epoch, now)
             if link is None or link.environment_sha256 != request["environment_sha256"]:
@@ -196,8 +198,7 @@ class NodeAcceptance:
                                    "ORDER BY observed_at DESC", (qualification_id,)).fetchall()
             if samples:
                 previous = samples[0]["witness"]
-                if (witness["control_sequence"] <= previous["control_sequence"]
-                        or witness["readiness_sequence"] <= previous["readiness_sequence"]
+                if (witness["readiness_sequence"] <= previous["readiness_sequence"]
                         or any(buffers[k] == previous["buffers"].get(k)
                                or buffer_samples[k] <= previous["buffer_samples"].get(k, -1) for k in buffers)):
                     return {"status": "awaiting_new_witnesses", "accepted": False}

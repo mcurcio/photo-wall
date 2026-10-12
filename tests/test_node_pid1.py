@@ -381,8 +381,10 @@ class Node:
     def cold(self, fixture, components_dir, previous=None):
         """Boot PID1, bind the exact packages, start real units; return the cold app-link."""
         run, work = self.run, self.work
+        booted = time.monotonic()
         self.boot(fixture, components_dir)
-        deadline = time.monotonic() + 120
+        started = time.monotonic()  # the units are started; the Player starts within seconds
+        deadline = started + 120
         while time.monotonic() < deadline:
             status = status_of(fixture, work)
             # After a reboot the previous boot's link stays current until this boot links.
@@ -401,9 +403,15 @@ class Node:
                 raise AssertionError("actual Player unit CHDIR failed: " + str(work))
             time.sleep(0.5)
         else:
-            raise AssertionError("real cold Player app-link absent: " + str(work))
+            raise AssertionError("real cold Player app-link absent: " + str(work) + " app-link "
+                                 "refusals: " + json.dumps(status.get("app_link_refusals")))
         before = status["current"]
         (work / "cold-current.json").write_text(json.dumps(before, sort_keys=True))
+        # Startup responsiveness evidence: boot to Central recording this boot's app link.
+        (work / "cold-link-timing.json").write_text(json.dumps({
+            "boot_to_link_seconds": round(time.monotonic() - booted, 1),
+            "units_to_link_seconds": round(time.monotonic() - started, 1),
+            "app_link_refusals": status.get("app_link_refusals")}, sort_keys=True))
         print("COLD actual app-link observed", str(work), flush=True)
         return before
 
