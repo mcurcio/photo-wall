@@ -1,11 +1,13 @@
 """The Pi's picture controller: carries out each picture document (the display's own settings and
-Photo Wall's, each on its own) and reports back (decision 0022; the picture split, slice S1; from
-roadmap 1c's controller).
+Photo Wall's, each on its own) and reports back (decision 0022; the picture split, slices S1 and
+S3; from roadmap 1c's controller).
 
 Pure core, effects at the edges. `operations_for`, `kelvin_multipliers`, `judged`, `write_order`
-and `brightness_line` are pure. `PictureController` applies them through five ports: `PictureDdc`
+and `brightness_line` are pure. `PictureController` applies them through six ports: `PictureDdc`
 (one code's read and write over the port's DDC/CI channel, picture's turn), `PictureAsk` (which
-settings on the picture list the display offers; picture_list.PictureListAsker), `PictureShell`
+settings on the picture list the display offers, and their values read again;
+picture_list.PictureListAsker), `OfferedCache` (each display's last list, kept across controller
+restarts; picture_list.FileOfferedCache), `PictureShell`
 (the shell's `picture` control op; weston.WestonBackend), `PictureReports` (the picture report's
 state key; bus.BusPictureSink) and `AppliedPictures` (which picture change each display last had,
 kept across controller restarts; `FileAppliedPictures`).
@@ -18,14 +20,21 @@ Rules this module owns (one home each):
   display did not offer. The Pi never moves a setting on its own: a refused write is reported
   (`not-taken`, `no-answer`).
 - **Ask once per display:** at an appearance with an identity whose list it does not hold, the
-  worker asks the list (`PictureAsk.ask`), again every ASK_AGAIN_SECONDS while it is unknown; the
-  list is held per identity for the controller's life (a blip with the same identity does not
-  re-ask).
+  worker takes the list kept for it (`OfferedCache`) or else asks it (`PictureAsk.ask`), again
+  every ASK_AGAIN_SECONDS while it is unknown; the list is held per identity for the controller's
+  life (a blip with the same identity does not re-ask), and kept whenever it changes.
+- **Read again:** every REREAD_SECONDS the worker reads the held list's values again
+  (`PictureAsk.read_again`, picture's turn, batched) and reports them as each setting's current,
+  so a value changed on the display's own buttons shows (Central says so). Every read the worker
+  makes (before a write, its read-back) is a current too. Reading never writes: the Pi never puts
+  a value back on its own.
 - **Write only on a new picture change or another display:** the hardware codes are written, in
-  `write_order`, when the document's picture_change rose or the display appeared with another
-  identity, once it is connected and its list is known. Each code is read first (a display that
-  already has the value is not written), a level past the display's maximum is not written
-  (`not-taken`), and the read-back judges a write (`judged`). A picture change already carried out
+  `write_order` (list settings first, so a preset is chosen before the gains it moves), when the
+  document's picture_change rose or the display appeared with another identity, once it is
+  connected and its list is known. Each code is read first (a display that already has the value
+  is not written), a level past the display's maximum or a choice the display does not list is not
+  written (`not-taken`), a list setting's value is its byte (`setvcp 14 5`), and the read-back
+  judges a write (`judged`). A picture change already carried out
   on the same display is never written again, even by a restarted controller (a Weston restart
   restarts it): `AppliedPictures` remembers it.
 - **At most two writes a second per display** (WRITE_GAP_SECONDS): some displays save each write
@@ -42,13 +51,11 @@ Rules this module owns (one home each):
 - **Presented:** `presented_change` is the newest picture change the shell's `presented` events
   echoed for the Output (frame protocol v4 `tag_picture`), or the new change when its operations
   equal the ones last presented.
-- **The base page's line** (`brightness_line`) rides the shell's `picture` op beside the
-  operations; the shell forwards it to the overlay client (frame protocol v4 `brightness`).
+- **The base page's line** (`brightness_line`): the display's own brightness and Photo Wall's,
+  each named; it rides the shell's `picture` op beside the operations, and the shell forwards it to
+  the overlay client (frame protocol v4 `brightness`).
 - **The report** is put whenever it changes (identity, offered, for_change, results,
   presented_change).
-
-The periodic re-read of the display's settings (1c's REREAD_SECONDS, "Changed on the display's
-buttons") is the picture split's slice S3, on this controller's worker.
 """
 from __future__ import annotations
 
@@ -66,7 +73,6 @@ from typing import Final, Protocol
 from contracts.node_frame import PictureOperations, srgb_to_linear
 from contracts.node_output import DisplayIdentity
 from contracts.node_picture import (
-    CHOICE_VALUE_MAX,
     GAMMA_TENTHS_NEUTRAL,
     KELVIN_NEUTRAL,
     PICTURE_LIST,
@@ -82,14 +88,15 @@ from contracts.node_picture import (
 )
 
 from .ddc import DdcChannel, Urgency, VcpAnswer, VcpReading, parse_terse
-from .picture_list import ASK_AGAIN_SECONDS, PictureAsk
+from .picture_list import ASK_AGAIN_SECONDS, OfferedCache, PictureAsk, with_current
 
 BRIGHTNESS_CODE: Final = "10"       # VESA MCCS luminance
 READ_SECONDS: Final = 5.0           # one VCP read (the port's wait included)
 WRITE_SECONDS: Final = 10.0         # one VCP write with its read-back
 WRITE_GAP_SECONDS: Final = 0.5      # the least time between two writes to one display
 SHELL_SECONDS: Final = 2.0          # one `picture` control op
-TICK_SECONDS: Final = 1.0           # a worker's longest sleep: an ask again falls due within it
+TICK_SECONDS: Final = 1.0           # a worker's longest sleep: an ask or a read again falls due within it
+REREAD_SECONDS: Final = 60.0        # the held list's values are read again this often (1c's re-read)
 CONTRAST_NEUTRAL_PERCENT: Final = 100   # contrast slope = contrast / 100
 _HISTORY: Final = 16                # picture changes remembered per Output for `presented`
 
@@ -164,10 +171,12 @@ def judged(written: int, after: VcpAnswer | None) -> WriteResult:
 
 
 def write_order(hardware: Mapping[VcpCode, int], offered: tuple[HardwareSetting, ...]) -> tuple[VcpCode, ...]:
-    """The codes of `hardware` the display offers, in the order they are written: PICTURE_LIST's
-    (S3: list settings before levels). A code the display does not offer is never written. Pure."""
-    codes = {setting.code for setting in offered}
-    return tuple(code for code in PICTURE_LIST if code in hardware and code in codes)
+    """The codes of `hardware` the display offers, in the order they are written: list settings
+    first, then levels, each in PICTURE_LIST order (a preset is chosen before the gains it moves).
+    A code the display does not offer is never written. Pure."""
+    levels = {setting.code: setting.range.kind is RangeKind.LEVEL for setting in offered}
+    codes = [code for code in PICTURE_LIST if code in hardware and code in levels]
+    return tuple(sorted(codes, key=lambda code: levels[code]))          # stable: list order within each
 
 
 @dataclass(frozen=True)
@@ -180,7 +189,9 @@ class DisplayBrightness:
 
 def brightness_line(software_percent: int, display: DisplayBrightness) -> str:
     """The base page's brightness line: the display's own brightness and Photo Wall's, each named,
-    so a software value is never shown as a panel value (U9). Pure. (S3 owns the final words.)"""
+    so a software value is never shown as a panel value (U9): "Brightness: display 46 % · Photo Wall
+    114 %"; when the display did not take the brightness set in Photo Wall, "the display did not take
+    it" in the display's place; when its brightness is not known, "as the display has it". Pure."""
     software = f"Photo Wall {software_percent} %"
     if display.set_here and not display.took:
         return f"Brightness: the display did not take it · {software}"
@@ -271,6 +282,14 @@ class DdcPictureAdapter:
         return self.read(output_id, code, timeout=deadline - time.monotonic())
 
 
+def _settable(setting: HardwareSetting, value: int) -> bool:
+    """Whether `value` is one the display offers for `setting`: a level within its maximum, a choice
+    it lists (a READ_ONLY_CHOICE lists none). Pure."""
+    if setting.range.kind is RangeKind.LEVEL:
+        return value <= (setting.range.maximum or 0)
+    return value in {choice.value for choice in setting.range.choices}
+
+
 _NEVER: Final = object()            # no display carried out yet (an identity may itself be None)
 
 
@@ -290,9 +309,9 @@ class _Port:
     carried_out_on: object = _NEVER                 # the display the latest finished change was carried out on
     lists: dict[DisplayIdentity, tuple[HardwareSetting, ...]] = field(default_factory=dict)   # held per identity
     ask_after: dict[DisplayIdentity, float] = field(default_factory=dict)   # an unknown list's next ask
+    read_after: dict[DisplayIdentity, float] = field(default_factory=dict)  # a held list's next read again
     for_change: int | None = None
     results: dict[VcpCode, HardwareResult] = field(default_factory=dict)
-    brightness_read: int | None = None              # the display's last read of 10, in its own count
     brightness_took: bool = True                    # the latest write of 10 was taken, or none was needed
     sent: tuple[PictureOperations, str] | None = None   # what the shell last took
     history: dict[int, tuple] = field(default_factory=dict)   # picture change -> its operations' values
@@ -315,10 +334,11 @@ class PictureController:
     """Every Output's picture, from its picture document, through DDC/CI and the shell, to its
     picture report."""
 
-    def __init__(self, ddc: PictureDdc, ask: PictureAsk, shell: PictureShell, reports: PictureReports,
-                 applied: AppliedPictures, clock: Callable[[], float]) -> None:
-        """`clock` is the Pi's monotonic seconds for asking again, never compared elsewhere."""
-        self._ddc, self._ask, self._shell, self._reports = ddc, ask, shell, reports
+    def __init__(self, ddc: PictureDdc, ask: PictureAsk, offered: OfferedCache, shell: PictureShell,
+                 reports: PictureReports, applied: AppliedPictures, clock: Callable[[], float]) -> None:
+        """`clock` is the Pi's monotonic seconds for asking and reading again, never compared
+        elsewhere."""
+        self._ddc, self._ask, self._offered, self._shell, self._reports = ddc, ask, offered, shell, reports
         self._applied, self._clock = applied, clock
         self._ports: dict[str, _Port] = {}
         self._wake = threading.Condition()
@@ -406,6 +426,14 @@ class PictureController:
                                            name=f"picture-{output_id}", daemon=True)
             port.worker.start()
 
+    def _read_due(self, port: _Port) -> DisplayIdentity | None:
+        """Under the lock: the connected display whose held list is due a read again; None when none is."""
+        identity = port.identity
+        if not port.connected or identity is None or not port.lists.get(identity):
+            return None
+        after = port.read_after.get(identity)
+        return identity if after is not None and self._clock() >= after else None
+
     def _ask_due(self, port: _Port) -> DisplayIdentity | None:
         """Under the lock: the connected display whose list is due an ask; None when none is."""
         identity = port.identity
@@ -417,11 +445,13 @@ class PictureController:
     def _run(self, output_id: str, port: _Port) -> None:
         while True:
             with self._wake:
-                while not self._stopping and not (port.want_apply or port.want_send or self._ask_due(port)):
+                while not self._stopping and not (port.want_apply or port.want_send or self._ask_due(port)
+                                                  or self._read_due(port)):
                     self._wake.wait(TICK_SECONDS)
                 if self._stopping:
                     return
                 apply, send, asking = port.want_apply, port.want_send, self._ask_due(port)
+                reading = self._read_due(port)
                 port.want_apply = port.want_send = False
             try:
                 if apply or send:                    # the operations first, before any port wait
@@ -432,22 +462,55 @@ class PictureController:
                     self._carry_out(output_id, port)
                 elif asking is not None:
                     self._send(output_id, port, force=False)   # the line follows the list's read of 10
+                if reading is not None:
+                    self._read_again(output_id, port, reading)
             except Exception:
                 log.exception("picture: %s failed", output_id)
 
     def _asked(self, output_id: str, port: _Port, identity: DisplayIdentity) -> bool:
-        """Ask `identity`'s list; whether the latest document now waits only on it."""
-        offered = self._ask.ask(output_id)
+        """`identity`'s list, the one kept for it or else asked; whether the latest document now
+        waits only on it."""
+        kept = self._offered.get(identity)
+        offered = kept if kept is not None else self._ask.ask(output_id)
         with self._wake:
             if offered is None:
                 port.ask_after[identity] = self._clock() + ASK_AGAIN_SECONDS
                 return False
             port.lists[identity] = offered
-            brightness = next((setting for setting in offered if setting.code == BRIGHTNESS_CODE), None)
-            if brightness is not None and port.identity == identity:
-                port.brightness_read = brightness.current
+            port.read_after[identity] = self._clock() + REREAD_SECONDS
             self._report(output_id, port)
-            return port.pending
+            pending = port.pending
+        if kept is None:
+            self._offered.put(identity, offered)
+        return pending
+
+    def _read_again(self, output_id: str, port: _Port, identity: DisplayIdentity) -> None:
+        """The held list's values read again (the periodic re-read); a read that is not known
+        changes nothing."""
+        with self._wake:
+            held = port.lists.get(identity)
+            port.read_after[identity] = self._clock() + REREAD_SECONDS
+        if not held:
+            return
+        fresh = self._ask.read_again(output_id, held)
+        with self._wake:
+            if fresh is None or port.lists.get(identity) != held or fresh == held:
+                return
+            port.lists[identity] = fresh
+            self._report(output_id, port)
+        self._offered.put(identity, fresh)
+        self._send(output_id, port, force=False)     # the line follows the display's brightness
+
+    def _current(self, output_id: str, port: _Port, identity: DisplayIdentity | None, code: VcpCode,
+                 answer: VcpAnswer | None) -> None:
+        """A read the worker made of `code` on `identity`'s display is that setting's current."""
+        with self._wake:
+            held = None if identity is None else port.lists.get(identity)
+            if identity is None or held is None:
+                return
+            port.lists[identity] = tuple(with_current(setting, answer) if setting.code == code else setting
+                                         for setting in held)
+            self._report(output_id, port)
 
     def _carry_out(self, output_id: str, port: _Port) -> None:
         """The latest document's hardware on the connected display: each offered code in
@@ -470,22 +533,27 @@ class PictureController:
         settings = {setting.code: setting for setting in offered}
         results: dict[VcpCode, HardwareResult] = {}
         for code in write_order(document.hardware, offered):
-            result = self._write(output_id, port, settings[code], document.hardware[code])
+            result = self._write(output_id, port, identity, settings[code], document.hardware[code])
             if result is not None:
                 results[code] = result
         self._applied.record(output_id, document.picture_change, identity)
         self._finish(output_id, port, document, identity, results)
+        with self._wake:
+            held = None if identity is None else port.lists.get(identity)
+        if identity is not None and held is not None:
+            self._offered.put(identity, held)        # the currents the writes read
 
-    def _write(self, output_id: str, port: _Port, setting: HardwareSetting, value: int) -> HardwareResult | None:
+    def _write(self, output_id: str, port: _Port, identity: DisplayIdentity | None, setting: HardwareSetting,
+               value: int) -> HardwareResult | None:
         """One code: None when the display already has `value`; else the write's result. A write
         waits out WRITE_GAP_SECONDS after the port's last."""
         code = setting.code
-        before = _value(self._ddc.read(output_id, code, timeout=READ_SECONDS))
-        self._brightness(port, code, before)
+        read = self._ddc.read(output_id, code, timeout=READ_SECONDS)
+        self._current(output_id, port, identity, code, read)
+        before = _value(read)
         if before == value:
             return None
-        limit = setting.range.maximum if setting.range.kind is RangeKind.LEVEL else CHOICE_VALUE_MAX
-        if value > (limit or 0):                    # past the display's own range: never written
+        if not _settable(setting, value):           # past the display's range, or a choice it does not list
             if before is None:
                 return HardwareResult(WriteResult.NO_ANSWER, None, None)
             return HardwareResult(WriteResult.NOT_TAKEN, before, before)
@@ -495,13 +563,8 @@ class PictureController:
             after = self._ddc.write(output_id, code, value, timeout=WRITE_SECONDS)
         finally:
             port.last_write = time.monotonic()
-        self._brightness(port, code, _value(after))
+        self._current(output_id, port, identity, code, after)
         return HardwareResult(judged(value, after), before, _value(after))
-
-    def _brightness(self, port: _Port, code: VcpCode, value: int | None) -> None:
-        if code == BRIGHTNESS_CODE and value is not None:
-            with self._wake:
-                port.brightness_read = value
 
     def _finish(self, output_id: str, port: _Port, document: PictureDocument, identity: DisplayIdentity | None,
                 results: dict[VcpCode, HardwareResult]) -> None:
@@ -525,8 +588,8 @@ class PictureController:
         setting = next((item for item in offered if item.code == BRIGHTNESS_CODE), None)
         percent = None
         if (setting is not None and setting.range.kind is RangeKind.LEVEL and setting.range.maximum
-                and port.brightness_read is not None):
-            percent = round(port.brightness_read * 100 / setting.range.maximum)
+                and setting.current is not None):
+            percent = round(setting.current * 100 / setting.range.maximum)
         display = DisplayBrightness(percent, BRIGHTNESS_CODE in document.hardware, port.brightness_took)
         return brightness_line(document.software.brightness_percent, display)
 
@@ -566,7 +629,7 @@ class PictureController:
             self._reports.put_picture(report)
 
 
-__all__ = ["BRIGHTNESS_CODE", "CONTRAST_NEUTRAL_PERCENT", "READ_SECONDS", "SHELL_SECONDS", "TICK_SECONDS",
-           "WRITE_GAP_SECONDS", "WRITE_SECONDS", "AppliedPictures", "DdcPictureAdapter", "DisplayBrightness",
+__all__ = ["BRIGHTNESS_CODE", "CONTRAST_NEUTRAL_PERCENT", "READ_SECONDS", "REREAD_SECONDS", "SHELL_SECONDS",
+           "TICK_SECONDS", "WRITE_GAP_SECONDS", "WRITE_SECONDS", "AppliedPictures", "DdcPictureAdapter", "DisplayBrightness",
            "FileAppliedPictures", "PictureController", "PictureDdc", "PictureReports", "PictureShell",
            "brightness_line", "judged", "kelvin_multipliers", "operations_for", "write_order"]

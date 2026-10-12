@@ -3,7 +3,7 @@ the picture controller tests (the picture split, slice S1).
 
 The tool records every call with its start and end time and answers from the scripted display:
 continuous codes (`vcp`: code -> [current, maximum]), simple non-continuous ones (`snc`: code ->
-byte), power D6, whether it answers at all, whether a write takes, how long a read or a write
+byte), the `capabilities` text it prints, power D6, whether it answers at all, whether a write takes, how long a read or a write
 lasts (`read_seconds`, for every read but power's), and which codes hang a read (`hang`: a getvcp naming one sleeps `hang_seconds`). It runs
 through the production `run_tool` and the real `DdcChannel`. Codes are the terse format's
 upper-case hex; `getvcp` takes several codes at once and answers each on its own line, an unknown
@@ -23,6 +23,113 @@ from appliance.display_host.power_methods import DDCUTIL, run_tool
 
 OUTPUT = "HDMI-A-1"
 OTHER = "HDMI-A-2"
+
+# A recorded `ddcutil capabilities` (a Wacom Cintiq Pro 32, MCCS 2.2; the linuxwacom wiki,
+# "Adjusting Display Settings"): colour preset 14 names six values; DC is not listed; maker codes
+# list values without names.
+RECORDED_CAPABILITIES = """\
+MCCS version: 2.2
+Commands:
+   Command: 01 (VCP Request)
+   Command: 02 (VCP Response)
+   Command: 03 (VCP Set)
+   Command: 07 (Timing Request)
+   Command: 0c (Save Settings)
+   Command: e3 (Capabilities Reply)
+   Command: f3 (Capabilities Request)
+VCP Features:
+   Feature: 02 (New control value)
+   Feature: 04 (Restore factory defaults)
+   Feature: 05 (Restore factory brightness/contrast defaults)
+   Feature: 08 (Restore color defaults)
+   Feature: 10 (Luminosity)
+   Feature: 12 (Contrast)
+   Feature: 14 (Select color preset)
+      Values:
+         04: 5000 K
+         05: 6500 K
+         08: 9300 K
+         09: 10000 K
+         0b: User 1
+         0c: User 2
+   Feature: 16 (Video gain: Red)
+   Feature: 18 (Video gain: Green)
+   Feature: 1A (Video gain: Blue)
+   Feature: 59 (6 axis saturation: Red)
+   Feature: 5A (6 axis saturation: Yellow)
+   Feature: 5B (6 axis saturation: Green)
+   Feature: 5C (6 axis saturation: Cyan)
+   Feature: 5D (6 axis saturation: Blue)
+   Feature: 5E (6 axis saturation: Magenta)
+   Feature: 72 (Gamma)
+      Values:
+         Invalid gamma descriptor: fd 05 28
+   Feature: 87 (Sharpness)
+   Feature: 8A (Color Saturation)
+   Feature: 90 (Hue)
+   Feature: 9B (6 axis hue control: Red)
+   Feature: 9C (6 axis hue control: Yellow)
+   Feature: 9D (6 axis hue control: Green)
+   Feature: 9E (6 axis hue control: Cyan)
+   Feature: 9F (6 axis hue control: Blue)
+   Feature: A0 (6 axis hue control: Magenta)
+   Feature: AC (Horizontal frequency)
+   Feature: AE (Vertical frequency)
+   Feature: B6 (Display technology type)
+   Feature: C0 (Display usage time)
+   Feature: C6 (Application enable key)
+   Feature: C8 (Display controller type)
+   Feature: C9 (Display firmware level)
+   Feature: CC (OSD Language)
+      Values:
+         01: Chinese (traditional, Hantai)
+         02: English
+         03: French
+         04: German
+         05: Italian
+         06: Japanese
+         07: Korean
+         08: Portuguese (Portugal)
+         09: Russian
+         0a: Spanish
+         0d: Chinese (simplified / Kantai)
+         14: Dutch
+         1e: Polish
+         26: Unrecognized value
+   Feature: D6 (Power mode)
+      Values:
+         01: DPM: On,  DPMS: Off
+         04: DPM: Off, DPMS: Off
+         05: Write only value to turn off display
+   Feature: DF (VCP Version)
+   Feature: E0 (manufacturer specific feature)
+      Values: 00 01 02 03 (interpretation unavailable)
+   Feature: E1 (manufacturer specific feature)
+      Values: 00 01 (interpretation unavailable)
+   Feature: E2 (manufacturer specific feature)
+      Values: 01 02 03 (interpretation unavailable)
+   Feature: E4 (manufacturer specific feature)
+   Feature: E5 (manufacturer specific feature)
+   Feature: E6 (manufacturer specific feature)
+   Feature: E7 (manufacturer specific feature)
+      Values: 00 01 (interpretation unavailable)
+   Feature: E8 (manufacturer specific feature)
+      Values: 00 01 (interpretation unavailable)
+   Feature: E9 (manufacturer specific feature)
+      Values: 00 01 (interpretation unavailable)
+   Feature: EA (manufacturer specific feature)
+      Values: 00 01 (interpretation unavailable)
+   Feature: EB (manufacturer specific feature)
+   Feature: EC (manufacturer specific feature)
+      Values: 60 (interpretation unavailable)
+   Feature: ED (manufacturer specific feature)
+      Values: 00 01 02 (interpretation unavailable)
+   Feature: F0 (manufacturer specific feature)
+      Values: 00 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d (interpretation unavailable)
+   Feature: F2 (manufacturer specific feature)
+   Feature: F3 (manufacturer specific feature)
+      Values: 00 01 (interpretation unavailable)
+"""
 
 # Its state goes through `fake_display_state`, whose source the tool embeds ahead of this.
 FAKE_DDCUTIL = '''
@@ -55,6 +162,11 @@ try:
                 print("VCP %s SNC x%02x" % (code, state["snc"][code]))
             else:
                 print("VCP %s ERR" % code)
+    elif args[0] == "capabilities":
+        if not state["answer"]:
+            print("No monitor detected on bus", file=sys.stderr); sys.exit(1)
+        time.sleep(state["read_seconds"])
+        print(state["capabilities"], end="")
     elif args[0] == "setvcp":
         if not state["answer"]:
             print("No monitor detected on bus", file=sys.stderr); sys.exit(1)
@@ -85,7 +197,8 @@ class Display:
         self.log_path = root / "calls.log"
         self.log_path.touch()
         self.script(vcp={"10": [60, 100], "12": [50, 100]}, snc={}, power=1, answer=True, take=True,
-                    write_seconds=0, read_seconds=0, hang=[], hang_seconds=0, mute_after_write=False)
+                    write_seconds=0, read_seconds=0, hang=[], hang_seconds=0, mute_after_write=False,
+                    capabilities="")
         bin_dir = root / "bin"
         bin_dir.mkdir()
         tool = bin_dir / Path(DDCUTIL).name

@@ -1,7 +1,7 @@
 """The Pi's one DDC/CI channel per HDMI port (roadmap 1c; run ledger .claude/runs/display-1c.md, slice
 P1; the picture split, decision 0022). The only code that runs `ddcutil`: power (VCP D6,
-power_methods.DdcCiAdapter) and picture (the picture list, picture_list.PictureListAsker and
-picture.DdcPictureAdapter) both go through it.
+power_methods.DdcCiAdapter) and picture (the picture list and the display's capabilities string,
+picture_list.PictureListAsker, and picture.DdcPictureAdapter) all go through it.
 
 Rules this module owns (one home each):
 - **One command at a time per port, power first:** a port's commands are serialised by that port's
@@ -190,8 +190,10 @@ class DdcChannel:
         return parse_terse(done.stdout) if done is not None else None
 
     def capabilities(self, output_id: str, *, urgency: Urgency, timeout: float) -> str | None:
-        """`capabilities`'s stdout as one hold of the port; None when it did not answer (S3)."""
-        raise NotImplementedError("picture split S3")
+        """`capabilities`'s stdout as one hold of the port at `urgency`; None when it did not answer
+        (no bus, a non-zero exit, a run past `timeout` or, for PICTURE, past PICTURE_HOLD_SECONDS)."""
+        done = self._command(output_id, ["capabilities"], urgency, timeout)
+        return done.stdout if done is not None and done.returncode == 0 else None
 
     def _port(self, output_id: str) -> PortLock:
         with self._guard:

@@ -268,7 +268,7 @@ def main() -> None:
         PictureController,
         operations_for,
     )
-    from appliance.display_host.picture_list import PictureListAsker
+    from appliance.display_host.picture_list import FileOfferedCache, PictureListAsker
     from appliance.display_host.weston import (
         CompositorPresentation,
         DiagnosticRelease,
@@ -368,7 +368,7 @@ def main() -> None:
         # controller's documents and reports name the compositor's Output.
         node_picture.OUTPUT_IDS = (*node_picture.OUTPUT_IDS, OUTPUT)
         channel = DdcChannel(never_answers, drm_root=fake_drm())
-        controller = PictureController(DdcPictureAdapter(channel), PictureListAsker(channel),
+        controller = PictureController(DdcPictureAdapter(channel), PictureListAsker(channel), FileOfferedCache(applied),
                                        backend, reports, FileAppliedPictures(applied), time.monotonic)
         backend.picture_events = controller
         controller.output(OUTPUT, connected=True, identity=None)

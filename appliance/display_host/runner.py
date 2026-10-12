@@ -44,7 +44,7 @@ from .domain import OutputState
 from .edid import parse_edid, read_edid
 from .output_power import OutputPowerController, PiClock, ReportSink
 from .picture import DdcPictureAdapter, FileAppliedPictures, PictureController, PictureReports
-from .picture_list import PictureListAsker
+from .picture_list import FileOfferedCache, PictureListAsker
 from .power_methods import DdcCiAdapter, HdmiCecAdapter, SignalOffAdapter, run_tool
 from .weston import MAX_PACKET, SurfaceGrant, WestonBackend, _pairs, _surface
 
@@ -246,10 +246,10 @@ def picture_controller(backend: WestonBackend, sink: PictureReports, ddc: DdcCha
                        applied: Path = CONTROLLER_STATE) -> PictureController:
     """The picture controller on the port's DDC/CI channel (the one the power controller uses, at
     picture's turn), asking each display's list there (PictureListAsker), and the shell,
-    remembering each display's applied picture change in `applied` (the controller's preserved
-    runtime directory); it hears the shell's `presented` and `output` events through the backend."""
-    picture = PictureController(DdcPictureAdapter(ddc), PictureListAsker(ddc), backend, sink,
-                                FileAppliedPictures(applied), time.monotonic)
+    remembering each display's list (FileOfferedCache) and applied picture change in `applied` (the
+    controller's preserved runtime directory); it hears the shell's `presented` and `output` events through the backend."""
+    picture = PictureController(DdcPictureAdapter(ddc), PictureListAsker(ddc), FileOfferedCache(applied), backend,
+                                sink, FileAppliedPictures(applied), time.monotonic)
     backend.picture_events = picture
     return picture
 

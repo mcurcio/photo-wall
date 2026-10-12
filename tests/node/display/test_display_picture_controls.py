@@ -1,6 +1,6 @@
 """The Pi carries out each picture document, the display's own settings and Photo Wall's each on
-its own (decision 0022; the picture split, slice S1; appliance/display_host/picture.py, from
-roadmap 1c's controller).
+its own (decision 0022; the picture split, slices S1 and S3; appliance/display_host/picture.py,
+from roadmap 1c's controller).
 
 `ddcutil` is a real executable (node.display.fake_ddcutil): a fake script that records every call
 and answers from a scripted display, run through the production `run_tool`, the real
@@ -19,9 +19,10 @@ from collections.abc import Callable
 from uuid import uuid4
 
 import pytest
-from node.display.fake_ddcutil import OTHER, OUTPUT, Display
+from node.display.fake_ddcutil import OTHER, OUTPUT, RECORDED_CAPABILITIES, Display
 
 from appliance.display_host.picture import (
+    REREAD_SECONDS,
     WRITE_GAP_SECONDS,
     DdcPictureAdapter,
     DisplayBrightness,
@@ -33,7 +34,11 @@ from appliance.display_host.picture import (
     operations_for,
     write_order,
 )
-from appliance.display_host.picture_list import ASK_AGAIN_SECONDS, PictureListAsker
+from appliance.display_host.picture_list import (
+    ASK_AGAIN_SECONDS,
+    FileOfferedCache,
+    PictureListAsker,
+)
 from contracts.node_frame import PictureOperations, decode_picture_operations, neutral_operations
 from contracts.node_output import DisplayIdentity
 from contracts.node_picture import (
@@ -120,6 +125,7 @@ class Running:
         applied = display.root / "applied"       # the controller's preserved runtime directory
         applied.mkdir(exist_ok=True)
         self.controller = PictureController(DdcPictureAdapter(display.channel), PictureListAsker(display.channel),
+                                            FileOfferedCache(applied),
                                             self.shell, self.reports, FileAppliedPictures(applied), self.clock)
 
     def connect(self, output_id: str = OUTPUT, identity: DisplayIdentity = IDENTITY) -> None:
@@ -296,6 +302,9 @@ def test_judged_and_the_write_order():
     offered = (HardwareSetting("10", LEVEL_100, 1), HardwareSetting("12", LEVEL_100, 1),
                HardwareSetting("87", LEVEL_100, 1))
     assert write_order({"87": 1, "10": 2, "16": 3}, offered) == ("10", "87")
+    preset = HardwareSetting("14", HardwareRange(RangeKind.READ_ONLY_CHOICE, None, ()), 5)
+    mode = HardwareSetting("DC", HardwareRange(RangeKind.READ_ONLY_CHOICE, None, ()), 0)
+    assert write_order({"87": 1, "DC": 0, "10": 2, "14": 5}, (*offered, preset, mode)) == ("14", "DC", "10", "87")
 
 
 def _linear(encoded: float) -> float:
@@ -518,3 +527,72 @@ def test_the_backend_sends_the_picture_op_and_hands_the_shells_events_on():
         assert decode_picture_operations(request["operations"]) == operations
         assert request["brightness"] == "Brightness: as the display has it"
         assert not backend.picture(neutral_operations("HDMI-A-2", 1), timeout=1, brightness="")   # no such Output
+
+
+# List settings, the list kept, the re-read (slice S3) ---------------------------------------------
+
+def asks(display: Display) -> int:
+    """How many times the whole list was asked: its first batch (0C 10 12 14)."""
+    return sum(1 for args in display.started() if args[:2] == ["getvcp", "0C"])
+
+
+def test_a_preset_is_written_before_the_gains_it_moves(display, running):
+    """Acceptance: hardware {14: 5, 16: 40} writes 14 (a CHOICE named by the capabilities string)
+    before 16, as the byte (`setvcp 14 5`). Mutation probe: `write_order` puts levels first -> 16
+    is written first."""
+    display.script(snc={"14": 8}, vcp={"10": [60, 100], "16": [128, 255]}, capabilities=RECORDED_CAPABILITIES)
+    run = running()
+    offered = {setting.code: setting for setting in run.offered()}
+    assert offered["14"].range.kind is RangeKind.CHOICE and offered["16"].range.maximum == 255
+    run.controller.document(OUTPUT, document(1, {"16": 40, "14": 5}))
+    report = run.reported(1)
+    assert display.writes() == [["14", "5"], ["16", "40"]]
+    assert report.results == {"14": HardwareResult(WriteResult.TAKEN, 8, 5), "16": HardwareResult(WriteResult.TAKEN, 128, 40)}
+
+
+def test_a_choice_the_display_does_not_list_is_not_written(display, running):
+    display.script(snc={"14": 8, "DC": 0}, capabilities=RECORDED_CAPABILITIES)
+    run = running()
+    run.offered()
+    run.controller.document(OUTPUT, document(1, {"14": 6, "DC": 2}))      # 6 not listed; DC lists none
+    report = run.reported(1)
+    assert display.writes() == []
+    assert report.results == {"14": HardwareResult(WriteResult.NOT_TAKEN, 8, 8),
+                              "DC": HardwareResult(WriteResult.NOT_TAKEN, 0, 0)}
+
+
+def test_a_restarted_controller_reports_the_kept_list_without_asking_and_another_display_asks(display, running):
+    """Acceptance: a restarted controller with the same identity reports the kept list without
+    asking (the fake counts the asks); another identity asks."""
+    first = running()
+    kept = first.offered()
+    first.controller.stop()
+    assert asks(display) == 1
+    again = running()
+    assert again.offered() == kept
+    time.sleep(0.3)
+    assert asks(display) == 1
+    again.connect(identity=DisplayIdentity("ABC", 1, "Other", None))
+    until(lambda: asks(display) == 2)
+
+
+def test_the_display_is_read_again_and_a_change_on_its_buttons_is_reported_not_undone(display, running):
+    """The owner's addition (2026-10-12): the Pi reads the held list again every REREAD_SECONDS and
+    reports each current, so Central can say "Changed on the display's buttons"; it writes nothing
+    back. A write's own read-back is the setting's current at once."""
+    run = running()
+    run.controller.document(OUTPUT, document(1, {"10": 46}))
+    run.reported(1)
+    until(lambda: {setting.code: setting.current for setting in run.reports.latest().offered}["10"] == 46)
+    display.vcp("10", 30, 100)                          # someone on the display's buttons
+    time.sleep(1.2)
+    assert {setting.code: setting.current for setting in run.reports.latest().offered}["10"] == 46   # not yet due
+    run.clock.now += REREAD_SECONDS
+    until(lambda: {setting.code: setting.current for setting in run.reports.latest().offered}["10"] == 30)
+    until(lambda: run.shell.last()[1] == "Brightness: display 30 % · Photo Wall 100 %")
+    assert display.writes() == [["10", "46"]] and run.reports.latest().for_change == 1
+    reads = len(display.started())
+    time.sleep(1.2)
+    assert len(display.started()) == reads              # once per REREAD_SECONDS, not every tick
+    restarted = Running(display)                        # the kept list carries the latest read
+    assert restarted.controller._offered.get(IDENTITY) == run.reports.latest().offered

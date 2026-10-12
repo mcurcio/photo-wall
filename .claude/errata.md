@@ -5528,3 +5528,37 @@ Order: (a) merge the iac PR that switches the factory to `central.app:create_app
   (hardware), as `hardwareWords(row, draft)` has no view. A setting set here and no longer offered is a line
   with no control and keeps its hand-back ("As the display has it: sharpness"); a CHOICE row's hand-back is the
   select's own "As the display has it" option.
+
+## E-PS-S3 (Picture split, slice S3, 2026-10-12) · feat/picture-hardware-and-software
+- **The periodic re-read is back (owner addition, main loop, 2026-10-12), against S1's "Dropped from 1c".** No wire
+  change: every REREAD_SECONDS (60, 1c's value; `picture.py`) the worker reads the held list's codes again through
+  `PictureListAsker.read_again` (a method added to the `PictureAsk` protocol: same ASK_BATCH batches, Urgency.PICTURE,
+  PICTURE_HOLD_SECONDS each; a batch that does not finish leaves the read unknown) and reports them as
+  `offered[].current` (a code that no longer answers: current None). Every read the worker makes before a write and
+  every read-back also become that setting's current at once, so Central's "current differs from the stored value"
+  rule (S4) never fires on the Pi's own write. The Pi never writes a value back after a re-read.
+- **The kept list is put whenever its currents change** (after an ask, a write and a re-read that changed something),
+  not only "when known": a restarted controller reports the kept list without asking (the page's rule), so a list
+  kept only at the ask would carry pre-write currents and S4 would read them as "changed on the display's buttons"
+  until the first re-read. The files sit on /run (tmpfs): no wear. The re-read falls due REREAD_SECONDS after the
+  list arrives (from the cache or an ask), not at once, so the acceptance "reports the cached list without asking"
+  holds literally.
+- **The capabilities string is read only when a list setting answered** (the page: "after the batches, one
+  `capabilities` hold"): a display offering only levels (the test monitor) costs no extra hold. Its hold is
+  PICTURE_HOLD_SECONDS (1.5 s) because `_command` caps every PICTURE run; a real `ddcutil capabilities` without its
+  cache may take longer, in which case list settings stay READ_ONLY_CHOICE on that display (and, since the list is
+  kept, until the cache file goes with a reboot). The bench step should time `ddcutil capabilities` on the test
+  monitor beside the batch.
+- **A choice the display does not list is not written, READ_ONLY_CHOICE included** (it lists none): `not-taken` with
+  before = after = the read, as the page's rule for a CHOICE; values the string lists without names ("Values: 00 01
+  (interpretation unavailable)") name nothing; a name ddcutil gives as "Unrecognized value" is kept as named.
+- **Cache file names:** a serial's characters outside [A-Za-z0-9._] are written "_" (an EDID serial may hold "/");
+  the file stores the list in the picture report's own encoding with the identity, which `get` checks, so names that
+  meet after that never share a list.
+- **Base page words** stay as S1 wrote them, now final: "Brightness: display 46 % · Photo Wall 114 %", "Brightness:
+  the display did not take it · Photo Wall 114 %", "Brightness: as the display has it · Photo Wall 114 %"; the
+  display's percent now follows the latest read (re-read included). docs/player-architecture.md:272 and the overlay
+  tests still carry 1c's words (S6).
+- **Files beyond the owned list:** `tests/node/display/fake_ddcutil.py` (the fake answers `capabilities` from a
+  scripted string; `RECORDED_CAPABILITIES`, a recorded Cintiq Pro 32 string from the linuxwacom wiki, is the
+  fixture) and `tests/native_picture_e2e_harness.py` (the controller's new `offered` argument).
