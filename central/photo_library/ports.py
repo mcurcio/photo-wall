@@ -143,10 +143,11 @@ class PhotoLibraryCommands(Protocol):
 class Provision(Model):
     """What keeping the managed connection in step did: `created` a new connection, `adopted` an
     existing one (the same key, else the same address, else the oldest one still waiting for its
-    first address and key), `updated` its address or key, or found it `unchanged`."""
+    first address and key), `updated` its address or key, `renamed` it only (a name that was still
+    its ref), or found it `unchanged`."""
 
     connection_ref: ConnectionRef
-    outcome: Literal["created", "adopted", "updated", "unchanged"]
+    outcome: Literal["created", "adopted", "updated", "renamed", "unchanged"]
 
 
 class ManagedConnectionCommands(Protocol):
@@ -156,8 +157,11 @@ class ManagedConnectionCommands(Protocol):
 
     def provision_connection(self, url: str, key: SecretStr) -> Provision:
         """Keep the one managed connection at this normalised `url` and `key`. With none managed,
-        adopt an existing connection (Provision's order), keeping its name, Sources and pools, or
-        create one named "Immich". A new, adopted or changed connection queues a check; its bound
+        adopt an existing connection (Provision's order), keeping its Sources and pools, or
+        create one named "Immich". It keeps a chosen name; a name that is still the connection's
+        ref (the cut-over's `immich-main`) becomes "Immich" ("Immich 2"… when taken), since the
+        operator cannot rename a managed connection. A new, adopted or changed connection queues a
+        check (a rename alone does not); its bound
         Immich user stays (a key of another user reads Needs a look, other_user, as a changed
         connection does). ("invalid_url", 422)."""
         ...
