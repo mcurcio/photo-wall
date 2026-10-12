@@ -120,7 +120,8 @@ claim as the controller's behaviour.
 
 Two groups, set apart ([Player architecture › Picture settings](../../../docs/player-architecture.md#picture-settings-1c)):
 the display's own settings someone set in Photo Wall, which the controller writes over DDC/CI, and
-Photo Wall's four, which the Player applies (light factor = Photo Wall brightness ÷ 100). Nothing
+Photo Wall's own (its four and the print look, [0023](../../../docs/decisions/0023-print-look.md)),
+which the Player applies (light factor = Photo Wall brightness ÷ 100). Nothing
 nobody set is ever written.
 
 **Asking the picture list.** On a display's first appearance (per EDID identity, kept across
