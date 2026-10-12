@@ -28,6 +28,16 @@ NODE_CONTROL = NodeControlConfig("node-test")
 # Readiness sequences only ever rise, as a live Player's do (player/executor.py).
 _SEQUENCE = itertools.count(1)
 
+# How long the test server keeps an idle connection open: longer than any one server's life
+# (one `with operator_server(...)` block), so it never closes one under a test. uvicorn's
+# default is 5 s, the console's poll cadence, and a route handler's `route.fetch()` reuses an
+# idle connection: a poll that lands as the server closes it fails in Playwright with "socket
+# hang up" (ECONNRESET on Linux), where a browser would retry the request. The handler then
+# raises, its route is never answered and the page's single-flight read waits forever (main
+# red after PR 87: the Player page never saw a late reboot response). Production keeps the
+# default: there the browser itself talks to Central.
+_IDLE_CONNECTION_SECONDS = 600
+
 
 @contextmanager
 def operator_server(db, clock, *, cache_root=None, media_queue=None, admin_token=ADMIN,
@@ -41,7 +51,8 @@ def operator_server(db, clock, *, cache_root=None, media_queue=None, admin_token
     listener.bind(("127.0.0.1", 0))
     listener.listen()
     origin = f"http://127.0.0.1:{listener.getsockname()[1]}"
-    server = uvicorn.Server(uvicorn.Config(app, log_level="warning", access_log=False))
+    server = uvicorn.Server(uvicorn.Config(app, log_level="warning", access_log=False,
+                                           timeout_keep_alive=_IDLE_CONNECTION_SECONDS))
     thread = threading.Thread(target=lambda: server.run(sockets=[listener]), daemon=True)
     thread.start()
     try:
