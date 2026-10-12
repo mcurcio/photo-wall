@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 
 import { NightOffEditor, type NightOffDraft, type NightOffView } from "../domain/night-off-editor";
 import { HoldBanner, holdUntilWords, type HoldView, PowerButtons, PowerLane, scheduleLane, type Week } from "../domain/power-lane";
@@ -55,7 +55,15 @@ function pressWords(power: "on" | "off" | "resume", answer: Answer, now: string 
  * page works out no time, and reads the house's "today" from Central's read time in the house's
  * zone, never the browser's.
  */
-export function WeekPage({ snapshot }: { snapshot: object | null }) {
+export function WeekPage({ snapshot, schedules = null, hidden = false }: {
+  snapshot: object | null;
+  /** The Schedules list, drawn under the calendar and above the rules (the Default Scene, Night off).
+   * It keeps one place in the tree whatever the week shows, so its state (an outcome sentence)
+   * survives a read, and the Schedule flow, which hides the week. */
+  schedules?: ReactNode;
+  /** The Schedule flow shows a step: the week is left out (rule 1) and not read. */
+  hidden?: boolean;
+}) {
   const served = snapshot as Snapshot | null;
   const readAt = useRef<number | null>(null);
   readAt.current = served?.readAt ?? null;
@@ -82,13 +90,13 @@ export function WeekPage({ snapshot }: { snapshot: object | null }) {
   }, [firstDay]);
   // The house's today comes from Central's read time: nothing is read before the first snapshot.
   const { value: read, refresh } = usePolledRead(load, {
-    cadenceMs: 30000, initial: null as Read, skip: served?.readAt === undefined,
+    cadenceMs: 30000, initial: null as Read, skip: served?.readAt === undefined || hidden,
   });
   // The page is kept mounted while hidden (the Show sections are): it re-reads with every
   // snapshot, so a change made elsewhere (Settings › House, a Schedule) shows when it is next seen.
   useEffect(() => {
-    if (served?.readAt !== undefined) void refresh();
-  }, [served, refresh]);
+    if (served?.readAt !== undefined && !hidden) void refresh();
+  }, [served, refresh, hidden]);
 
   /** Central's read time on the house clock, for "until 23:00" (null before a read). */
   const nowWords = () => (readAt.current === null || read === null || !read.ok ? null : houseLocal(readAt.current, read.zone));
@@ -118,13 +126,22 @@ export function WeekPage({ snapshot }: { snapshot: object | null }) {
     return answer;
   };
 
-  if (read === null) return <Note>Reading the week…</Note>;
+  // One shape whatever the read: the region, the week's top, the Schedules, the rules.
+  const page = (top: ReactNode, rules: ReactNode) => (
+    <section role={hidden ? undefined : "region"} aria-label={hidden ? undefined : "Week"}>
+      <Stack>
+        {hidden ? null : top}
+        {schedules}
+        {hidden ? null : rules}
+      </Stack>
+    </section>
+  );
+  if (read === null) return page(<Note>Reading the week…</Note>, null);
   if (!read.ok) {
-    return (
+    return page(
       <ProblemCard scope="central" verdict={{ severity: "unknown", label: "Can't tell", receipt: null }}
         what="Central did not answer with the week." doing="The page tries again by itself."
-        details={<Note>{`Photo Wall's answer: ${read.error}`}</Note>} />
-    );
+        details={<Note>{`Photo Wall's answer: ${read.error}`}</Note>} />, null);
   }
   const definitions = served?.runtime?.definitions ?? {};
   const onDefaultScene = async (next: string, label: string) => {
@@ -134,13 +151,13 @@ export function WeekPage({ snapshot }: { snapshot: object | null }) {
         : `Not changed: Central refused it (${answer.error}).`);
     void refresh();
   };
-  return (
-    <WeekView read={read} now={readAt.current === null ? null : houseLocal(readAt.current, read.zone)}
-      frames={frames} sceneIds={Object.keys(definitions)} busy={busy} said={said} sceneSaid={sceneSaid}
-      thisWeek={firstDay === null} onWeek={setFirstDay} onHold={(power) => void onHold(power)}
-      onResume={(held) => void onResume(held)} onDefaultScene={(next, label) => void onDefaultScene(next, label)}
-      onSaveNightOff={onSaveNightOff} />
-  );
+  const props: WeekViewProps = {
+    read, now: readAt.current === null ? null : houseLocal(readAt.current, read.zone), frames,
+    sceneIds: Object.keys(definitions), busy, said, sceneSaid, thisWeek: firstDay === null, onWeek: setFirstDay,
+    onHold: (power) => void onHold(power), onResume: (held) => void onResume(held),
+    onDefaultScene: (next, label) => void onDefaultScene(next, label), onSaveNightOff,
+  };
+  return page(<WeekTop view={props} />, <WeekRules view={props} />);
 }
 
 export interface WeekViewProps {
@@ -171,15 +188,16 @@ export interface WeekViewProps {
  * banner while one is in force, the calendar with its colour key (a day at a time on a phone), a
  * line on how to add a Schedule when none plays this week, the Default Scene and Night off.
  */
-export function WeekView({
-  read, now, frames, sceneIds, busy, said, sceneSaid, thisWeek, onWeek, onHold, onResume, onDefaultScene, onSaveNightOff,
-}: WeekViewProps) {
-  const { week, holds, nightOff, placeSet } = read;
+export function WeekView(props: WeekViewProps) {
+  return <Stack><WeekTop view={props} /><WeekRules view={props} /></Stack>;
+}
+
+/** The week's top: its header (All off, All on, the weeks), the hold banner, the calendar. */
+function WeekTop({ view }: { view: WeekViewProps }) {
+  const { read, now, frames, busy, said, thisWeek, onWeek, onHold, onResume } = view;
+  const { week, holds } = read;
   const title = `Week of ${houseDayWords(week.first_day)}`;
   const names = Object.fromEntries(frames.map((frame) => [frame.id, frame.name]));
-  const scenes = [{ value: NOTHING, label: "Nothing" },
-    ...[...sceneIds].sort().map((sceneId) => ({ value: sceneId, label: `Scene ${sceneId}` }))];
-  const houseHref = formatRoute({ section: "house" } as never);
   return (
     <Stack>
       <EntityHeader title={title}>
@@ -201,6 +219,19 @@ export function WeekView({
               : "the Default Scene plays wherever none does"}.`}
         </Note>
       )}
+    </Stack>
+  );
+}
+
+/** The week's rules, under the Schedules: the Default Scene and Night off. */
+function WeekRules({ view }: { view: WeekViewProps }) {
+  const { read, now, frames, sceneIds, sceneSaid, onDefaultScene, onSaveNightOff } = view;
+  const { week, nightOff, placeSet } = read;
+  const scenes = [{ value: NOTHING, label: "Nothing" },
+    ...[...sceneIds].sort().map((sceneId) => ({ value: sceneId, label: `Scene ${sceneId}` }))];
+  const houseHref = formatRoute({ section: "house" } as never);
+  return (
+    <Stack>
       <Section title="Default Scene">
         <SettingRow kind="house" label="Default Scene" state="idle" defaultLabel="Default: Nothing"
           help="Plays wherever no Schedule does. Nothing leaves those Frames with their last photo."

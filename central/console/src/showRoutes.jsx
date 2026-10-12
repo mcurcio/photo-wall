@@ -67,15 +67,11 @@ export const showRoutes = Object.freeze(
     {
       section: "schedule",
       label: "Schedule",
-      // The week page (Power and the week): the week calendar with its Power lane, then the
-      // Schedules; while the Schedule flow shows a step, the week is left out (rule 1).
-      render: ({ snapshot, route, navigate, recentScene, markDraft }) => (
-        <>
-          {route?.flow === undefined && (
-            <section className="showrunner__region" role="region" aria-label="Week">
-              <WeekPage snapshot={snapshot} />
-            </section>
-          )}
+      // The week page (Power and the week): the week calendar with its Power lane, the
+      // Schedules under it, then the rules (the Default Scene, Night off); while the Schedule flow
+      // shows a step, the week is left out (rule 1). The page is flat: no card around its cards.
+      render: ({ snapshot, route, navigate, recentScene, markDraft }) => {
+        const schedules = (
           <ProgramsRegion
             snapshot={snapshot}
             route={route}
@@ -83,8 +79,9 @@ export const showRoutes = Object.freeze(
             recentScene={recentScene}
             markDraft={markDraft}
           />
-        </>
-      ),
+        );
+        return <WeekPage snapshot={snapshot} schedules={schedules} hidden={route?.flow !== undefined} />;
+      },
       samplePaths: SAMPLES.show.schedule,
     },
     {

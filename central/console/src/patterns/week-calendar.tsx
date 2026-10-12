@@ -1,9 +1,10 @@
-import { useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 
 import { cn } from "../ui/cn";
 
-/** How a band is drawn: solid on, grey off, hatched held, an outlined content window. */
-export type BandTone = "on" | "off" | "held" | "window";
+/** How a band is drawn: solid on, grey off, hatched held, an outlined content window, a dashed
+ * window that does not play. */
+export type BandTone = "on" | "off" | "held" | "window" | "skipped";
 
 /** One span on a lane, on the house clock: Central's strings ("2026-10-12T23:00"). */
 export interface CalendarBand {
@@ -49,7 +50,6 @@ export interface WeekCalendarProps {
 
 const WIDTH = 1000;
 const NAME = 104;
-const PLOT = WIDTH - NAME - 8;
 const AXIS = 20;
 const LANE = 20;
 const GAP = 3;
@@ -84,12 +84,15 @@ function onDay(band: CalendarBand, date: string): [number, number] | null {
   return [minuteOf(start), end === dayEnd ? DAY_MINUTES : minuteOf(end)];
 }
 
+// Status colours (tokens.css `--color-band-*`), never the accent: that is for what can be acted on.
 const TONE_CLASS: Record<BandTone, string> = {
-  on: "fill-accent",
+  on: "fill-band-on",
   off: "fill-muted",
-  window: "fill-accent-tint stroke-accent",
-  held: "stroke-accent",
+  window: "fill-band-window stroke-muted",
+  held: "stroke-band-held",
+  skipped: "fill-transparent stroke-muted",
 };
+const DASHED: Partial<Record<BandTone, string>> = { skipped: "4 3" };
 
 const defaultHour = (hour: number) => `${String(hour % 24).padStart(2, "0")}:00`;
 
@@ -97,8 +100,8 @@ const defaultHour = (hour: number) => `${String(hour % 24).padStart(2, "0")}:00`
 function Hatch({ id }: { id: string }) {
   return (
     <pattern id={id} width={6} height={6} patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
-      <rect width={6} height={6} className="fill-accent-tint" />
-      <line x1={0} y1={0} x2={0} y2={6} strokeWidth={3} className="stroke-accent" />
+      <rect width={6} height={6} className="fill-band-held-tint" />
+      <line x1={0} y1={0} x2={0} y2={6} strokeWidth={3} className="stroke-band-held" />
     </pattern>
   );
 }
@@ -118,7 +121,8 @@ function BandShape({ band, x, y, width, height, hatch }: BandShapeProps) {
   return (
     <g>
       <rect role="img" aria-label={band.name} x={x} y={y} width={width} height={height} rx={3}
-        fill={held ? `url(#${hatch})` : undefined} className={TONE_CLASS[band.tone]} strokeWidth={1} />
+        fill={held ? `url(#${hatch})` : undefined} className={TONE_CLASS[band.tone]} strokeWidth={1}
+        strokeDasharray={DASHED[band.tone]} />
       {band.short !== undefined && width > band.short.length * 7 + 8 && (
         <>
           {/* A held band's label sits on a plain ground: the hatching never runs through it. */}
@@ -127,7 +131,7 @@ function BandShape({ band, x, y, width, height, hatch }: BandShapeProps) {
               className="fill-surface-raised" aria-hidden="true" />
           )}
           <text x={x + 4} y={y + height / 2 + 4} fontSize={FONT} aria-hidden="true"
-            className={band.tone === "window" || held ? "fill-text" : "fill-on-accent"}>
+            className={band.tone === "off" ? "fill-surface" : band.tone === "skipped" ? "fill-muted" : "fill-text"}>
             {band.short}
           </text>
         </>
@@ -141,7 +145,7 @@ function Swatch({ tone, hatch }: { tone: BandTone; hatch: string }) {
   return (
     <svg width={28} height={14} aria-hidden="true" className="shrink-0">
       <rect x={0.5} y={0.5} width={27} height={13} rx={3} strokeWidth={1} className={TONE_CLASS[tone]}
-        fill={tone === "held" ? `url(#${hatch})` : undefined} />
+        fill={tone === "held" ? `url(#${hatch})` : undefined} strokeDasharray={DASHED[tone]} />
     </svg>
   );
 }
@@ -227,14 +231,38 @@ interface WholeWeekProps {
   hatch: string;
 }
 
-/** The whole week, one row a day. */
+/**
+ * The width the calendar is drawn at, in CSS pixels: its box's, measured, so the drawing is never
+ * scaled and its text is FONT px in any column (a sidebar beside it, a narrow window). WIDTH until
+ * measured.
+ */
+function useDrawnWidth(): [React.RefObject<HTMLDivElement | null>, number] {
+  const box = useRef<HTMLDivElement | null>(null);
+  const [width, setWidth] = useState(WIDTH);
+  useEffect(() => {
+    const element = box.current;
+    if (element === null || typeof ResizeObserver === "undefined") return undefined;
+    const observer = new ResizeObserver(([entry]) => {
+      const measured = Math.round(entry.contentRect.width);
+      if (measured > 0) setWidth(measured);
+    });
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+  return [box, width];
+}
+
+/** The whole week, one row a day, drawn at its box's own width (text at FONT px). */
 function WholeWeek({ label, days, lanes, now, nowDay, hourWords, hatch }: WholeWeekProps) {
-  const x = (minute: number) => NAME + (PLOT * minute) / DAY_MINUTES;
+  const [box, width] = useDrawnWidth();
+  const plot = width - NAME - 8;
+  const x = (minute: number) => NAME + (plot * minute) / DAY_MINUTES;
   const dayHeight = PAD * 2 + lanes.length * LANE + (lanes.length - 1) * GAP;
   const height = AXIS + days.length * dayHeight;
   return (
-    <svg role="group" aria-label={label} viewBox={`0 0 ${WIDTH} ${height}`} width="100%"
-      preserveAspectRatio="xMidYMin meet" className="block">
+    <div ref={box} className="min-w-0">
+    <svg role="group" aria-label={label} viewBox={`0 0 ${width} ${height}`} width={width} height={height}
+      className="block max-w-full">
       {HOURS.map((hour) => (
         <g key={hour} aria-hidden="true">
           <text x={x(hour * 60)} y={FONT + 2} fontSize={FONT} className="fill-muted"
@@ -248,7 +276,7 @@ function WholeWeek({ label, days, lanes, now, nowDay, hourWords, hatch }: WholeW
         const top = AXIS + dayIndex * dayHeight;
         return (
           <g key={day.date} role="group" aria-label={day.label}>
-            <line x1={0} x2={WIDTH} y1={top + 0.5} y2={top + 0.5} strokeWidth={1} className="stroke-line" aria-hidden="true" />
+            <line x1={0} x2={width} y1={top + 0.5} y2={top + 0.5} strokeWidth={1} className="stroke-line" aria-hidden="true" />
             <text x={0} y={top + PAD + LANE / 2 + 4} fontSize={FONT} className="fill-text" aria-hidden="true">{day.label}</text>
             {lanes.map((lane, laneIndex) => {
               const y = top + PAD + laneIndex * (LANE + GAP);
@@ -268,6 +296,7 @@ function WholeWeek({ label, days, lanes, now, nowDay, hourWords, hatch }: WholeW
           y2={AXIS + (nowDay + 1) * dayHeight} strokeWidth={2} className="stroke-text" aria-hidden="true" />
       )}
     </svg>
+    </div>
   );
 }
 

@@ -4,6 +4,7 @@ import { readHouse } from "../houseApi.js";
 import { Note } from "../patterns/fact-row";
 import { ProblemCard } from "../patterns/problem-card";
 import { usePolledRead } from "../polledRead.js";
+import { POWER, power as powerWords } from "../powerWords.js";
 import { houseLocal, untilWords } from "../timeWords.js";
 import { readFrameWhy } from "../whyApi.js";
 import { Section } from "../ui/section";
@@ -69,7 +70,7 @@ export function contentWhyWords(content: FrameWhyView["content"]): string {
   return `${requestWords(content.winner)} is playing${beat.length === 0 ? "" : `; ${beat.join("; ")}`}.`;
 }
 
-const REASON: Record<"night-off" | "test", string> = { "night-off": "Night off", test: "a power test" };
+const REASON: Record<"night-off" | "test", string> = { "night-off": POWER.nightOff, test: "a power test" };
 
 /**
  * The Frame's display power in one line (the amended U1), from Central's answer only: Resting is
@@ -78,7 +79,7 @@ const REASON: Record<"night-off" | "test", string> = { "night-off": "Night off",
  */
 export function powerWhyWords(power: NonNullable<FrameWhyView["power"]>, now: string | null): string {
   const until = power.until === null ? null : untilWords(power.until, now);
-  if (power.result === "did-not-answer") return "Display didn't answer";
+  if (power.result === "did-not-answer") return POWER.didNotAnswer;
   if (power.wanted === "off" && power.result === "another-input") return "Kept on: the display is showing another input";
   if (power.pi_says === "not-heard") return "Not heard from the Pi";
   if (power.pi_says.kind === "timetable-ran-out") return "Left as it is: no power times from Central for a week";
@@ -87,7 +88,8 @@ export function powerWhyWords(power: NonNullable<FrameWhyView["power"]>, now: st
   }
   if (power.wanted === "off") {
     if (!power.resting) return "Turning off: the Pi has not carried out the off yet";
-    return `Resting: ${REASON[power.because === "test" ? "test" : "night-off"]}${until === null ? "" : ` until ${until}`}`;
+    const resting = powerWords("restingFor", { reason: REASON[power.because === "test" ? "test" : "night-off"] });
+    return until === null ? resting : powerWords("until", { words: resting, time: until });
   }
   return until === null ? "On" : `On: Night off starts at ${until}`;
 }
@@ -130,7 +132,7 @@ export function FrameWhy({ read, readAt, powerOnly = false }: FrameWhyProps) {
   }
   const now = readAt === null || read.zone === null ? null : houseLocal(readAt, read.zone);
   const power = read.why.power === null ? "Display power: no Pi feeds this Frame yet."
-    : `Display power: ${powerWhyWords(read.why.power, now)}`;
+    : powerWords("powerLine", { words: powerWhyWords(read.why.power, now) });
   if (powerOnly) return <Note>{power}</Note>;
   return (
     <Section title="Why is this playing?">

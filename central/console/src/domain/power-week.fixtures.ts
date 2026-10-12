@@ -20,7 +20,7 @@ function nightBands(frameId: string): PowerBand[] {
 
 const WINDOWS: WeekWindow[] = DATES.slice(0, 5).map((date, index) => ({
   program_id: "p-evenings", name: "Evenings", scene_id: "evening", priority: "normal",
-  start_at: 100 + index, end_at: 200 + index, start: `${date}T17:00`, end: `${date}T23:00`,
+  start_at: 100 + index, end_at: 200 + index, start: `${date}T17:00`, end: `${date}T23:00`, plays: true,
 }));
 
 export const WEEK: Week = {
@@ -51,4 +51,5 @@ export const NIGHT_OFF: NightOffView = {
   },
   next_off: "2026-10-14T23:00",
   next_on: "2026-10-15T07:00",
+  waits_for_zone: false,
 };

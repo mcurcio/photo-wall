@@ -21,6 +21,7 @@ import pytest
 from console_tasks import connect, open_frame
 from operator_harness import operator_server
 from playwright.sync_api import expect
+from support.console_words import POWER
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("PHOTO_WALL_BROWSER_TESTS") != "1",
@@ -157,7 +158,7 @@ def test_after_power(page, registry, scheme):
         expect(status).to_have_text(WAITING)
         test_id = _rows(registry, "SELECT id FROM power_requests")[0]["id"]
         _reported(registry, _change(registry), PowerResult.DID_NOT_ANSWER, InForce(InForceKind.TEST, Power.OFF, str(test_id), 299, None))
-        expect(status).to_have_text("Display didn't answer")
+        expect(status).to_have_text(POWER["didNotAnswer"])
         _shot(page, "after-power-did-not-answer", scheme)
 
         power = _power(open_frame(page, unbound, "power"))

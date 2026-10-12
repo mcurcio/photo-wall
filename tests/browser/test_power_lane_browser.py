@@ -12,12 +12,13 @@ tab's 21:00 overwrites 22:30.
 """
 
 import os
-import re
 
 import pytest
 from console_tasks import connect
 from operator_harness import operator_server
 from playwright.sync_api import expect
+from power_page import band, button, night_off_band, night_off_editor, week
+from support.console_words import POWER
 from support.house_time import LONDON, at, set_house
 
 from central.house_time.model import HouseTime, Place
@@ -43,15 +44,6 @@ def seed_house(registry, frame="bedroom"):
         conn.execute("""UPDATE night_off SET settings = jsonb_set(settings, '{frames}', '{"kind": "all-frames"}')""")
 
 
-def week(page):
-    return page.get_by_role("region", name="Week", exact=True)
-
-
-def band(page, day, name):
-    """The band named `name` (a regex) in `day`'s row of the calendar."""
-    return week(page).get_by_role("group", name=day, exact=True).get_by_role("img", name=re.compile(name))
-
-
 @pytest.mark.browser_context_args(timezone_id="Pacific/Auckland")
 def test_the_lane_draws_night_off_and_holds_with_resume_schedule(page, registry):
     seed_house(registry)
@@ -61,11 +53,11 @@ def test_the_lane_draws_night_off_and_holds_with_resume_schedule(page, registry)
         # Night off's grey band every night, on the house clock, the on band between.
         # (the week ends at Monday's midnight, so Sunday's night is drawn to it).
         for day, ends in zip(DAYS, (*(f"{day} 07:00" for day in DAYS[1:]), "Mon 19 Oct 00:00")):
-            expect(band(page, day, f"^Off · Night off, {day} 23:00 – {ends}$")).to_have_count(1)
+            expect(night_off_band(page, day, f"{day} 23:00 – {ends}")).to_have_count(1)
         expect(band(page, "Wed 14 Oct", "^On, Wed 14 Oct 07:00–23:00$")).to_have_count(1)
 
         # All off: a hatched hold labelled with who set it, until the next change (23:00).
-        week(page).get_by_role("button", name="All off", exact=True).click()
+        button(week(page), "allOff").click()
         expect(band(page, "Wed 14 Oct", r"^Held off · console, Wed 14 Oct 12:00–23:00$")).to_have_count(1)
         holds = week(page).get_by_role("region", name="Holds", exact=True)     # the hold banner
         expect(holds.get_by_role("heading", name="Held off until 23:00", exact=True)).to_be_visible()
@@ -73,15 +65,15 @@ def test_the_lane_draws_night_off_and_holds_with_resume_schedule(page, registry)
         expect(holds).to_contain_text("Held off · console · until 23:00 · Frame 1")
 
         # Resume schedule removes it at once, and the hold banner with it.
-        holds.get_by_role("button", name="Resume schedule", exact=True).click()
+        button(holds, "resume").click()
         expect(band(page, "Wed 14 Oct", "^Held")).to_have_count(0)
         expect(holds).to_have_count(0)
         expect(week(page)).not_to_contain_text("Held off until")
 
         # All on, then All off: only the newest hold shows.
-        week(page).get_by_role("button", name="All on", exact=True).click()
+        button(week(page), "allOn").click()
         expect(band(page, "Wed 14 Oct", "^Held on · console")).to_have_count(1)
-        week(page).get_by_role("button", name="All off", exact=True).click()
+        button(week(page), "allOff").click()
         expect(band(page, "Wed 14 Oct", "^Held off · console")).to_have_count(1)
         expect(band(page, "Wed 14 Oct", "^Held on")).to_have_count(0)
         expect(week(page)).to_contain_text("Held off until 23:00")
@@ -92,7 +84,7 @@ def test_night_off_saves_moves_the_lane_and_a_stale_tab_reloads(page, registry):
     seed_house(registry)
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "schedule")
-        editor = week(page).get_by_role("region", name="Night off", exact=True)
+        editor = night_off_editor(page)
         # No Place: sunrise and sunset wait, with the way to set the house location.
         expect(editor.get_by_role("radiogroup", name="Turn off at", exact=True).get_by_role(
             "radio", name="Sunset", exact=True)).to_be_disabled()
@@ -100,22 +92,22 @@ def test_night_off_saves_moves_the_lane_and_a_stale_tab_reloads(page, registry):
 
         second = page.context.new_page()
         second.goto(origin + "/console#/schedule")
-        stale = week(second).get_by_role("region", name="Night off", exact=True)
+        stale = night_off_editor(second)
         expect(stale.get_by_label("Turn off", exact=True)).to_have_value("23:00")
 
         editor.get_by_label("Turn off", exact=True).fill("22:30")
-        editor.get_by_role("button", name="Save Night off", exact=True).click()
+        button(editor, "saveNightOff").click()
         expect(editor.get_by_role("status")).to_have_text("Saved. The displays follow it from its next off or on.")
-        expect(band(page, "Wed 14 Oct", "^Off · Night off, Wed 14 Oct 22:30 – Thu 15 Oct 07:00$")).to_have_count(1)
+        expect(night_off_band(page, "Wed 14 Oct", "Wed 14 Oct 22:30 – Thu 15 Oct 07:00")).to_have_count(1)
 
         # The other tab opened Night off before that save: its Save is refused, never overwrites.
         stale.get_by_label("Turn off", exact=True).fill("21:00")
         with second.expect_response(lambda r: r.url.endswith("/power/night-off") and r.request.method == "PUT") as sent:
-            stale.get_by_role("button", name="Save Night off", exact=True).click()
+            button(stale, "saveNightOff").click()
         assert sent.value.status == 409
-        expect(stale).to_contain_text("Night off changed since you opened it")
-        expect(stale.get_by_role("button", name="Save Night off", exact=True)).to_be_disabled()
-        stale.get_by_role("button", name="Reload Night off", exact=True).click()
+        expect(stale).to_contain_text(POWER["nightOffChanged"])
+        expect(button(stale, "saveNightOff")).to_be_disabled()
+        button(stale, "reloadNightOff").click()
         expect(stale.get_by_label("Turn off", exact=True)).to_have_value("22:30")
         assert page.request.get(origin + "/v1/operator/power/night-off").json()["night_off"]["off"] == {
             "at": "clock", "time": "22:30"}
@@ -124,13 +116,13 @@ def test_night_off_saves_moves_the_lane_and_a_stale_tab_reloads(page, registry):
         # a typed minus sign was lost on the way (it saved 30 after).
         set_house(registry.db, HouseTime(zone=LONDON.zone, place=Place(latitude=51.5, longitude=-0.13)))
         page.reload()
-        editor = week(page).get_by_role("region", name="Night off", exact=True)
+        editor = night_off_editor(page)
         editor.get_by_role("radiogroup", name="Turn off at", exact=True).get_by_role(
             "radio", name="Sunset", exact=True).click()
         editor.get_by_role("radiogroup", name="Turn off: before or after sunset", exact=True).get_by_role(
             "radio", name="Before", exact=True).click()
         editor.get_by_label("Turn off: minutes before sunset", exact=True).fill("30")
-        editor.get_by_role("button", name="Save Night off", exact=True).click()
+        button(editor, "saveNightOff").click()
         expect(editor.get_by_role("status")).to_have_text("Saved. The displays follow it from its next off or on.")
         assert page.request.get(origin + "/v1/operator/power/night-off").json()["night_off"]["off"] == {
             "at": "sunset", "offset_minutes": -30}
@@ -157,15 +149,15 @@ def test_at_phone_width_the_week_is_a_day_at_a_time_with_no_sideways_scroll_and_
         days = week(page).get_by_role("group", name="Week of Mon 12 Oct: choose a day", exact=True)
         # Today (the house's Wednesday) is shown first; only its bands are drawn.
         expect(days.get_by_role("button", name="Wed 14 Oct", exact=True)).to_have_attribute("aria-pressed", "true")
-        expect(band(page, "Wed 14 Oct", "^Off · Night off, Wed 14 Oct 23:00 – Thu 15 Oct 07:00$")).to_have_count(1)
+        expect(night_off_band(page, "Wed 14 Oct", "Wed 14 Oct 23:00 – Thu 15 Oct 07:00")).to_have_count(1)
         expect(week(page).get_by_role("group", name="Thu 15 Oct", exact=True)).to_have_count(0)
         days.get_by_role("button", name="Thu 15 Oct", exact=True).click()
-        expect(band(page, "Thu 15 Oct", "^Off · Night off, Thu 15 Oct 23:00 – Fri 16 Oct 07:00$")).to_have_count(1)
+        expect(night_off_band(page, "Thu 15 Oct", "Thu 15 Oct 23:00 – Fri 16 Oct 07:00")).to_have_count(1)
         expect(week(page).get_by_role("group", name="Wed 14 Oct", exact=True)).to_have_count(0)
         # The colour key says what each band means.
         expect(week(page).get_by_role("list", name="Colour key", exact=True).get_by_role("listitem")).to_have_count(4)
 
-        week(page).get_by_role("button", name="All off", exact=True).click()
+        button(week(page), "allOff").click()
         expect(week(page).get_by_role("region", name="Holds", exact=True)).to_be_visible()
         assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth"), "the page scrolls sideways"
         small = _small_targets(week(page).element_handle())

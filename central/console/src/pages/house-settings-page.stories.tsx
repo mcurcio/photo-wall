@@ -8,7 +8,7 @@ const meta = {
   args: {
     settings: {
       time: { zone: "Europe/London", place: { latitude: 51.5, longitude: -0.13 } }, units: "cm", clock: "24h",
-      updated_at: 1_792_000_000,
+      updated_at: 1_792_000_000, zone_confirmed: true,
     },
     browser: "America/New_York",
     locate: (async () => ({ latitude: 40.7128, longitude: -74.006 })) as Locate,
@@ -23,8 +23,13 @@ type Story = StoryObj<typeof meta>;
 export const Default: Story = {};
 /** No location yet, and a browser that cannot give one: typed coordinates only. */
 export const NoLocation: Story = {
-  args: { settings: { time: { zone: "Europe/London", place: null }, units: "in", clock: "12h", updated_at: 1_792_000_000 },
+  args: { settings: { time: { zone: "Europe/London", place: null }, units: "in", clock: "12h", updated_at: 1_792_000_000,
+      zone_confirmed: true },
     browser: "Europe/London", locate: null },
 };
 /** At phone width. */
 export const Phone: Story = { parameters: { phone: true } };
+/** Never saved: the zone is Central's own, so Night off waits; Save is offered with no change. */
+export const Unconfirmed: Story = {
+  args: { settings: { time: { zone: "UTC", place: null }, units: "cm", clock: "24h", updated_at: 0, zone_confirmed: false } },
+};

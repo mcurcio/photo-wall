@@ -48,7 +48,7 @@ export function runOrigin(runtime, run) {
     const root = (runtime?.current?.runs ?? []).find((candidate) => candidate.run_id === run.root_id);
     return {
       kind: "child",
-      words: root === undefined ? "part of another Run" : `part of ${root.scene_id}'s Run`,
+      words: root === undefined ? "part of another Scene" : `part of Scene ${root.scene_id}`,
       programListed: false,
     };
   }

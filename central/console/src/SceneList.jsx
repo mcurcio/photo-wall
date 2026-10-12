@@ -7,7 +7,7 @@ import { SummaryCard } from "./flow/SummaryCard.jsx";
 import { LIVE_PHASES } from "./join.js";
 import { sceneContentSummary } from "./sceneTargets.js";
 import { cycleWording } from "./showState.js";
-import { SCHEDULE, schedule, scheduleName } from "./showWords.js";
+import { SCENE, SCHEDULE, scene as sceneWords, schedule, scheduleName } from "./showWords.js";
 import { FrameChips } from "./TargetPicker.jsx";
 import { sourceName } from "./sourceNames.js";
 
@@ -163,13 +163,13 @@ function SceneCard({ scene, snapshot, usedBy, running, editDisabled, onEdit, onS
           ) : (
             <p className="field__hint scene-list__withheld">{`Edit unavailable: ${UNAUTHORABLE_REASON}`}</p>
           )}
-          <button type="button" aria-label={`Show Scene ${id} now`} onClick={() => onShowNow(id)}>
-            Show now
+          <button type="button" aria-label={sceneWords("showCard", { id })} onClick={() => onShowNow(id)}>
+            {SCENE.showNow}
           </button>
-          <button type="button" aria-label={`Schedule Scene ${id}`} onClick={() => onSchedule(id)}>
-            Schedule it
+          <button type="button" aria-label={sceneWords("scheduleCard", { id })} onClick={() => onSchedule(id)}>
+            {SCENE.scheduleIt}
           </button>
-          <button type="button" aria-label={`Delete Scene ${id}`} onClick={(event) => onDelete(event, scene)}>
+          <button type="button" aria-label={sceneWords("deleteCard", { id })} onClick={(event) => onDelete(event, scene)}>
             Delete
           </button>
         </>

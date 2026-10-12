@@ -10,8 +10,9 @@ through the worker's document source and the link store's judge
 Resting is Central's answer (`power.resting`, central/why/explain.py `is_resting`; the pure cases
 are tests/test_why_power.py); the console renders it and the result Why carries, from one read.
 
-Mutation probe (P-resting-wide): `powerWhyWords` drops the did-not-answer line -> the
-did-not-answer case no longer says "Display didn't answer".
+Mutation probes: (P-resting-wide) `powerWhyWords` drops the did-not-answer line -> the
+did-not-answer case no longer says "Display didn't answer"; (P-resting-beats-alarm) `frameChip`
+says Resting over an alarm -> the silent Pi's chip reads Resting.
 """
 
 import os
@@ -19,9 +20,12 @@ import re
 
 import pytest
 from console_tasks import connect, open_frame
-from operator_harness import operator_server
+from operator_harness import operator_server, report_readiness
 from playwright.sync_api import expect
+from power_page import power_line, resting_line
+from support.console_words import POWER
 from support.house_time import LONDON, at, daily, set_house
+from support.position import save_position
 from test_display_power_requests import _answer, _bound_frame, _projected
 from test_frame_power_browser import _off_thread
 
@@ -49,7 +53,7 @@ class WhyClock:
 
 
 def _scene(scene_id, frame):
-    return Scene(scene_id=scene_id, loop=True, cycle_seconds=600, contributions=(
+    return Scene(scene_id=scene_id, loop=True, cycle_seconds=60, contributions=(
         Contribution(target=f"frame:{frame}", source_refs=("library:1",)),))
 
 
@@ -66,7 +70,7 @@ def _why(page):
 def test_the_overview_names_the_winner_and_resting_and_a_display_that_did_not_answer(page, registry):
     registry.clock.wall = at(LONDON, "2026-10-14T12:00")       # the Schedule is made before its window
     set_house(registry.db, LONDON)
-    frame, _player = _bound_frame(registry)
+    frame, player = _bound_frame(registry)
     with registry.db.transaction() as conn:
         conn.execute("""UPDATE night_off SET settings = jsonb_set(settings, '{frames}', '{"kind": "all-frames"}')""")
     runtime = RuntimeStore(registry.db, registry.clock)
@@ -83,16 +87,23 @@ def test_the_overview_names_the_winner_and_resting_and_a_display_that_did_not_an
         overview = open_frame(page, frame, "overview")
         why = _why(overview)
         expect(why).to_contain_text("Evenings is playing; it beat calm, the Default Scene, which has lower priority.")
-        expect(why).to_contain_text("Display power: Resting: Night off until 07:00")
-        # The header's status chip says Resting from the same answer (Why's `resting`).
-        expect(_chip(page, "Resting")).to_be_visible()
+        expect(why).to_contain_text(resting_line("07:00"))
+        # Its Pi has never reported: a failure beats Resting, so the header's chip keeps the alarm.
+        expect(page.get_by_role("main").locator('[data-severity="alarm"]').first).to_be_visible()
+        expect(_chip(page, POWER["resting"])).to_have_count(0)
+        # Once the Frame is positioned and its Pi reports, the chip says Resting from the same
+        # answer (Why's `resting`).
+        _off_thread(save_position, registry, frame)
+        _off_thread(report_readiness, registry, player)
+        why = _why(open_frame(page, frame, "overview"))
+        expect(_chip(page, POWER["resting"])).to_be_visible()
 
         power = open_frame(page, frame, "power").get_by_role("region", name="Power", exact=True)
-        expect(power).to_contain_text("Display power: Resting: Night off until 07:00")
+        expect(power).to_contain_text(resting_line("07:00"))
 
         # The Pi says the display did not answer its off: a power problem, never Resting.
         _off_thread(_answer, registry, change, PowerResult.DID_NOT_ANSWER, OFF)
         why = _why(open_frame(page, frame, "overview"))
-        expect(why).to_contain_text("Display power: Display didn't answer")
-        expect(why).not_to_contain_text("Resting")
-        expect(_chip(page, "Resting")).to_have_count(0)
+        expect(why).to_contain_text(power_line(POWER["didNotAnswer"]))
+        expect(why).not_to_contain_text(POWER["resting"])
+        expect(_chip(page, POWER["resting"])).to_have_count(0)

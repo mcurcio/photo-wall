@@ -66,6 +66,13 @@ label {
   cursor: pointer;
 }
 
+/* 44 px targets on a phone (design language §2), as the design system's Button (max-md:min-h-11). */
+@media (max-width: 767.98px) {
+  :where(button) {
+    min-height: 44px;
+  }
+}
+
 :where(button[type="submit"]) {
   color: var(--color-on-accent);
   background: var(--color-accent);

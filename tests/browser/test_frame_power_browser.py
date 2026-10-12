@@ -21,6 +21,8 @@ import pytest
 from console_tasks import connect, current_hash, open_frame
 from operator_harness import operator_server
 from playwright.sync_api import expect
+from power_page import power_line
+from support.console_words import POWER
 from test_display_identity import NO_SERIAL, _frame, enroll_pi
 from test_display_identity import _report as _recorded
 from test_display_power_requests import SERIAL, _answer, _bound_frame, _projected, _rows
@@ -102,7 +104,8 @@ def test_test_off_waits_for_the_pi_then_reads_confirmed_off_and_turn_on_ends_it(
         _reported(registry, _change(registry), PowerResult.CONFIRMED, InForce(InForceKind.TIMETABLE, Power.ON, None, None, None))
         expect(status).to_have_text("Display confirmed on")
         # The tab's one power line (Why's): the request underneath is in force.
-        expect(power.locator("p", has_text="Display power: ")).to_have_text(re.compile(r"^Display power: On\b"))
+        line = power_line("On")
+        expect(power.locator("p", has_text=line)).to_have_text(re.compile("^" + re.escape(line) + r"\b"))
         expect(turn_on).to_be_disabled()
         assert sent == ["POST", "DELETE"]
 
@@ -116,7 +119,7 @@ def test_an_unanswered_test_reads_display_did_not_answer(page, registry):
         expect(power.get_by_role("status")).to_have_text(WAITING)
         test_id = _rows(registry, "SELECT id FROM power_requests")[0]["id"]
         _reported(registry, _change(registry), PowerResult.DID_NOT_ANSWER, InForce(InForceKind.TEST, Power.OFF, str(test_id), 299, None))
-        expect(power.get_by_role("status")).to_have_text("Display didn't answer")
+        expect(power.get_by_role("status")).to_have_text(POWER["didNotAnswer"])
 
 
 def test_a_method_change_saves_by_itself(page, registry):

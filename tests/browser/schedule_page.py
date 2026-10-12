@@ -6,7 +6,7 @@ re-types the console's copy. The Schedule flow's tasks (start it, walk it, make 
 console_tasks.py and use these.
 """
 
-from console_words import SCHEDULE, schedule
+from support.console_words import SCHEDULE, schedule
 
 
 def schedules(page):

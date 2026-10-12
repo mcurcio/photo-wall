@@ -7,6 +7,7 @@ import { PrecedenceExplanation } from "../PrecedenceExplanation.jsx";
 import { ReadinessNotice } from "../ReadinessNotice.jsx";
 import { readinessReportForFrame } from "../readinessRecovery.js";
 import { formatRoute, sceneCreationRoute } from "../routes.js";
+import { SCENE } from "../showWords.js";
 import { Disclosure } from "../ui/disclosure";
 import { Section } from "../ui/section";
 import { FactLine } from "./fact-line";
@@ -18,6 +19,8 @@ export interface FrameOverviewProps {
   snapshot: object | null;
   bootFacts: object | null;
   frameId: string;
+  /** The Frame's name as its page heading shows it (never its id). */
+  frameName: string;
   hosts: HostsRead | null;
   /** The Frame's Why (the page reads it once). */
   why: WhyRead;
@@ -53,7 +56,7 @@ function sendingWords(sceneId: string | null, phase: string | null, bound: boole
  * **Details**. Above it, "Why is this playing?" (E6): Central's Why, the winner, what it beat and the
  * display's power line.
  */
-export function FrameOverview({ snapshot, bootFacts, frameId, hosts, why }: FrameOverviewProps) {
+export function FrameOverview({ snapshot, bootFacts, frameId, frameName, hosts, why }: FrameOverviewProps) {
   const served = snapshot as Runtime | null;
   const frame = (served?.inventory?.frames ?? []).find((candidate) => candidate.id === frameId);
   const bound = isBound(frame);
@@ -80,7 +83,7 @@ export function FrameOverview({ snapshot, bootFacts, frameId, hosts, why }: Fram
       </Section>
       <Section title="Put content on this Frame">
         <Note>
-          {`Make a Scene; Frame ${frameId} starts selected on its Frames step. The Scene chooses the photos or videos; after saving it, choose Show now or Schedule it.`}
+          {`Make a Scene; ${frameName} starts selected on its Frames step. The Scene chooses the photos or videos; after saving it, choose ${SCENE.choose}.`}
         </Note>
         {FRAME_ID_PATTERN.test(frameId) ? (
           <OwnerLinks links={[

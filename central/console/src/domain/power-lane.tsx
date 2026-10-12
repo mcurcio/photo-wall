@@ -1,6 +1,7 @@
 import { Note } from "../patterns/fact-row";
 import { OverrideBanner } from "../patterns/override-banner";
 import { type CalendarBand, type CalendarKeyEntry, type CalendarLane, WeekCalendar } from "../patterns/week-calendar";
+import { POWER, power as powerWords } from "../powerWords.js";
 import { addDays, houseDayWords, hourWords, localClockWords, untilWords, windowWords } from "../timeWords.js";
 import { Button } from "../ui/button";
 import { Inline } from "../ui/stack";
@@ -31,6 +32,8 @@ export interface WeekWindow {
   end_at: number;
   start: string;
   end: string;
+  /** False for a window of the saved rule that started before the rule applies (R10): it does not play. */
+  plays: boolean;
 }
 
 /** GET /v1/operator/week (central/why/model.py `Week`). */
@@ -67,7 +70,7 @@ function bandWords(band: PowerBand): { short?: string; what: string } {
     const words = holdWords(band.power, band.source);
     return { short: words, what: words };
   }
-  if (band.because === "night-off") return { short: "Night off", what: "Off · Night off" };
+  if (band.because === "night-off") return { short: POWER.nightOff, what: POWER.nightOffBand };
   if (band.because === "test") return { short: "Test", what: `${band.power === "on" ? "On" : "Off"} · power test` };
   return { what: band.power === "on" ? "On" : "Off" };
 }
@@ -107,7 +110,7 @@ export function powerLanes(week: Week, names: Readonly<Record<string, string>>):
           key: `${band.start_at}:${band.because}`,
           start: band.start,
           end: band.end,
-          name: `${what}, ${windowWords(band)}`,
+          name: powerWords("band", { what, when: windowWords(band) }),
           short,
           tone: toneOf(band),
         };
@@ -116,7 +119,8 @@ export function powerLanes(week: Week, names: Readonly<Record<string, string>>):
   });
 }
 
-/** The Schedules' lane: every window of the week, named by its Schedule. */
+/** The Schedules' lane: every window of the week, named by its Schedule; one that does not play
+ * (saved after it started) is drawn dashed and says so. */
 export function scheduleLane(week: Week): CalendarLane {
   return {
     key: "schedules",
@@ -125,9 +129,9 @@ export function scheduleLane(week: Week): CalendarLane {
       key: `${window.program_id}:${window.start_at}`,
       start: window.start,
       end: window.end,
-      name: `${window.name}, ${windowWords(window)}`,
+      name: `${window.name}, ${windowWords(window)}${window.plays ? "" : NOT_PLAYING}`,
       short: window.name,
-      tone: "window" as const,
+      tone: window.plays ? "window" as const : "skipped" as const,
     })),
   };
 }
@@ -161,8 +165,8 @@ export interface PowerButtonsProps {
 export function PowerButtons({ busy, onHold }: PowerButtonsProps) {
   return (
     <Inline label="Power for every Frame">
-      <Button disabled={busy} onClick={() => onHold("off")}>All off</Button>
-      <Button disabled={busy} onClick={() => onHold("on")}>All on</Button>
+      <Button disabled={busy} onClick={() => onHold("off")}>{POWER.allOff}</Button>
+      <Button disabled={busy} onClick={() => onHold("on")}>{POWER.allOn}</Button>
     </Inline>
   );
 }
@@ -174,6 +178,11 @@ export const POWER_KEY: readonly CalendarKeyEntry[] = [
   { tone: "held", label: "Held by All off or All on" },
   { tone: "window", label: "A Schedule plays" },
 ];
+/** The key's entry for a window that does not play, drawn only when the week has one. */
+const SKIPPED_KEY: CalendarKeyEntry = { tone: "skipped", label: "Saved after it started: does not play" };
+
+/** A Schedule window that does not play, in its name. */
+const NOT_PLAYING = ": saved after it started, so it does not play";
 
 export interface HoldBannerProps {
   holds: readonly HoldView[];
@@ -202,7 +211,7 @@ export function HoldBanner({ holds, names, now, busy, onResume }: HoldBannerProp
             {`${holdWords(hold.power, hold.source)} · until ${holdUntilWords(hold, now)}`
               + ` · ${hold.frame_ids.map((frameId) => names[frameId] ?? frameId).join(", ")}`}
           </Note>
-          <Button disabled={busy} onClick={() => onResume(hold)}>Resume schedule</Button>
+          <Button disabled={busy} onClick={() => onResume(hold)}>{POWER.resume}</Button>
         </Inline>
       ))}
     </OverrideBanner>
@@ -228,6 +237,7 @@ export interface PowerLaneProps {
 export function PowerLane({ week, names, now, below = [], calendarLabel }: PowerLaneProps) {
   return (
     <WeekCalendar label={calendarLabel} days={weekDays(week)} lanes={[...powerLanes(week, names), ...below]}
-      now={now} nowWords={now === null ? null : localClockWords(now)} hourWords={hourWords} colourKey={POWER_KEY} />
+      now={now} nowWords={now === null ? null : localClockWords(now)} hourWords={hourWords}
+      colourKey={below.some((lane) => lane.bands.some((band) => band.tone === "skipped")) ? [...POWER_KEY, SKIPPED_KEY] : POWER_KEY} />
   );
 }

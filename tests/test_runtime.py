@@ -800,7 +800,8 @@ def test_after_a_save_mid_window_the_card_and_the_week_name_the_windows_runtime_
     assert windows.current.admission.status == "admitted"
     assert (windows.next.start, windows.next.end) == ("1970-01-02T19:00", "1970-01-02T22:00")
     plays = runtime.program_windows_between(runtime._state.programs["p1"], 0, 2 * 86400)
-    assert [(window.start / 3600, window.end / 3600) for window in plays] == [(17, 23), (24 + 19, 24 + 22)]
+    assert [(window.start / 3600, window.end / 3600, played) for window, played in plays] == [
+        (17, 23, True), (19, 22, False), (24 + 19, 24 + 22, True)]
 
 
 def test_a_protected_refusal_is_a_served_program_window_admission():

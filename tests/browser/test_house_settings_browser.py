@@ -12,6 +12,7 @@ import pytest
 from console_tasks import connect, go
 from operator_harness import operator_server
 from playwright.sync_api import expect
+from support.console_words import POWER, power
 from support.house_time import LONDON
 from test_power_lane_browser import NOON, seed_house, week
 
@@ -71,7 +72,8 @@ def test_house_offers_the_browsers_zone_lists_zones_by_city_and_saves_zone_and_p
         go(page, "schedule")
         expect(week(page)).to_contain_text("The upright line is now: 7:00 am on the house clock.")
         expect(week(page).get_by_role("group", name="Wed 14 Oct", exact=True).get_by_role(
-            "img", name="Off · Night off, Wed 14 Oct 11:00 pm – Thu 15 Oct 7:00 am")).to_have_count(1)
+            "img", name=power("band", what=POWER["nightOffBand"], when="Wed 14 Oct 11:00 pm – Thu 15 Oct 7:00 am"))
+               ).to_have_count(1)
 
         go(page, "house")
         house(page).get_by_role("button", name="Clear location", exact=True).click()

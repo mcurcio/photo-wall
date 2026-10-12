@@ -2,10 +2,11 @@ import WORDS from "./showWords.json" with { type: "json" };
 
 /**
  * The Show's words: the one home of the console's copy for a Show concept the operator names
- * (today the Schedule, which Central and the API call a Program; frame.md "Programs (the
- * console's Schedules)"). Every label, heading, button name and outcome sentence that names a
- * Schedule is a template in `showWords.json`, filled here; the browser tests read the same file
- * (tests/browser/console_words.py), so renaming a word is one JSON edit and no test changes.
+ * (the Schedule, which Central and the API call a Program; frame.md "Programs (the console's
+ * Schedules)"; and a Scene's actions, Show now and Schedule it). Every label, heading, button name
+ * and outcome sentence for them is a template in `showWords.json`, filled here; the tests read the
+ * same file (tests/browser/console_words.py), so renaming a word is one JSON edit, and
+ * tests/test_console_copy_home.py fails a test that types one again. (Power's are powerWords.js.)
  *
  * A template's `{name}`-style holes are filled by `fill`; a missing value leaves the hole as is,
  * so a mistake shows on screen instead of reading "undefined".
@@ -13,6 +14,9 @@ import WORDS from "./showWords.json" with { type: "json" };
 
 /** The Schedule's templates (showWords.json `schedule`). */
 export const SCHEDULE = Object.freeze(WORDS.schedule);
+
+/** A Scene card's and a saved Scene's actions (showWords.json `scene`). */
+export const SCENE = Object.freeze(WORDS.scene);
 
 /**
  * `template` with each `{key}` replaced by `values[key]`.
@@ -34,6 +38,17 @@ export function fill(template, values = {}) {
  */
 export function schedule(key, values) {
   return fill(SCHEDULE[key], values);
+}
+
+/**
+ * One Scene template filled: `scene("scheduleCard", {id: "evening"})` → "Schedule Scene evening".
+ *
+ * @param {keyof typeof WORDS.scene} key
+ * @param {Record<string, string|number>} [values]
+ * @returns {string}
+ */
+export function scene(key, values) {
+  return fill(SCENE[key], values);
 }
 
 /**

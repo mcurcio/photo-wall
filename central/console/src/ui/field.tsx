@@ -111,7 +111,8 @@ export interface TextInputProps {
   value: string;
   onChange: (value: string) => void;
   /** `password` for a secret pasted once (an API key): the browser never shows it back. */
-  type?: "text" | "password" | "url" | "search" | "date";
+  /** `time` for a time of day ("23:00"): the browser's time picker, a phone's wheel. */
+  type?: "text" | "password" | "url" | "search" | "date" | "time";
   /** How wide the field is: `short` for a name, `long` for an address. */
   width?: "short" | "long";
   placeholder?: string;

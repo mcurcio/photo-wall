@@ -44,7 +44,6 @@ from console_tasks import (
     visible_page,
     visit,
 )
-from console_words import SCHEDULE, schedule
 from media_queue import RecordingMediaQueue
 from operator_harness import (
     RequestGate,
@@ -59,6 +58,7 @@ from playwright.sync_api import expect
 from psycopg.types.json import Jsonb
 from public_media import MediaCache, public_photo, publish_photo, request_photo
 from schedule_page import card, remove_button, remove_dialog, said
+from support.console_words import SCHEDULE, scene_words, schedule
 from support.house_time import UTC_HOUSE, set_house, window_program
 from support.photo_pools import FIXTURE_CONNECTION, fixture_connection
 from support.position import save_position
@@ -512,7 +512,7 @@ def test_scene_delete_removes_unused_scene_with_revision_guard(page, registry):
         author_scene(page, "delete-unused", SOURCE, (VALID_FRAME,))
         scenes = page.get_by_role("region", name="Scenes", exact=True)
         with page.expect_response(lambda r: r.request.method == "DELETE" and "/v1/operator/scenes/delete-unused?" in r.url) as info:
-            scenes.get_by_role("button", name="Delete Scene delete-unused", exact=True).click()
+            scenes.get_by_role("button", name=scene_words("deleteCard", id="delete-unused"), exact=True).click()
             dialog = page.get_by_role("dialog")
             expect(dialog).to_contain_text("removes Scene delete-unused from future choices")
             expect(dialog).to_contain_text("never stops a Run")
@@ -993,7 +993,7 @@ def test_why_states_admission_order_and_the_limit_line(page, registry):
             "group", name="Why", exact=True)
         why.get_by_role("button", name=f"Why? {VALID_FRAME}", exact=True).click()
         expect(why).to_contain_text(
-            f"Central's Runs on {VALID_FRAME}: intro (priority 0, part of evening's Run, started "
+            f"Central's Runs on {VALID_FRAME}: intro (priority 0, part of Scene evening, started "
             "directly, by Show now or the API) on top.")  # a child names its root's Run (§35)
         rows = why.get_by_role("list", name="Contribution precedence").get_by_role("listitem")
         expect(rows).to_have_count(2)

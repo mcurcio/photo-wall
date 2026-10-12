@@ -20,6 +20,8 @@ export interface HouseSettings {
   units: "cm" | "in";
   clock: "12h" | "24h";
   updated_at: number;
+  /** False until the house is saved once: Night off switches no display before then. */
+  zone_confirmed: boolean;
 }
 
 /** The draft as typed: the location's numbers as their text. */
@@ -161,6 +163,9 @@ export function HouseSettingsForm({ settings, browser, locate, onSave }: HouseSe
   return (
     <Stack>
       <Note>The house&apos;s time and place: every time the console shows is on the house clock.</Note>
+      {!settings.zone_confirmed && (
+        <Note live>{`Check the timezone and save: until you do, Night off turns no display off. It started as Central's own (${settings.time.zone}), which may not be the house's.`}</Note>
+      )}
       <Section title="House">
         <SettingRow kind="house" label="Timezone" help="The city whose clock the house keeps, as London."
           state="idle" control={<Select value={current.zone === "" ? null : current.zone}
@@ -203,7 +208,7 @@ export function HouseSettingsForm({ settings, browser, locate, onSave }: HouseSe
             onChange={(clock) => change({ clock })} />} />
       </Section>
       <SaveBar label="House actions" message={said !== null && <Note live>{said}</Note>}>
-        <Button variant="primary" disabled={!changed || saving} onClick={() => void save()}>
+        <Button variant="primary" disabled={(!changed && settings.zone_confirmed) || saving} onClick={() => void save()}>
           {saving ? "Saving…" : "Save house settings"}
         </Button>
         <Button variant="ghost" disabled={!changed || saving} onClick={() => { setDraft(null); setSaid(null); }}>

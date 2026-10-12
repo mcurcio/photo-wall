@@ -23,7 +23,6 @@ from console_tasks import (
     frame_name,
     visible_page,
 )
-from console_words import SCHEDULE
 from operator_harness import (
     operator_server,
     pause_page_clock,
@@ -32,6 +31,8 @@ from operator_harness import (
     tile_health,
 )
 from playwright.sync_api import expect
+from support.console_words import SCENE as SCENE_WORDS
+from support.console_words import SCHEDULE
 from support.house_time import window_program
 from test_registry import enroll
 
@@ -253,8 +254,11 @@ def test_the_frame_page_guides_content_authoring_from_its_frame(page, registry):
         inspector.get_by_role("region", name="Now", exact=True).get_by_role(
             "button", name="Details", exact=True).click()
         expect(inspector).to_contain_text(NOTHING_PLANNED)
-        expect(inspector).to_contain_text("Frame new-frame starts selected on its Frames step")
-        expect(inspector).to_contain_text("Show now or Schedule it")
+        # The Frame by its name, as its page heading shows it, never its id.
+        name = page.get_by_role("heading", level=1).inner_text()
+        assert name != "new-frame"
+        expect(inspector).to_contain_text(f"{name} starts selected on its Frames step")
+        expect(inspector).to_contain_text(SCENE_WORDS["choose"])
         inspector.get_by_role("link", name="Make a Scene", exact=True).click()
 
         expect(page.get_by_role(

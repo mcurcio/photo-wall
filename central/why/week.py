@@ -18,12 +18,12 @@ from central.why.model import PowerBand, Week, WeekWindow
 DAYS: Final = 7
 
 
-def week(*, programs: Mapping[str, Program], plays: Callable[[Program, float, float], tuple[Window, ...]],
+def week(*, programs: Mapping[str, Program], plays: Callable[[Program, float, float], tuple[tuple[Window, bool], ...]],
          default_scene_id: str | None, policy: PowerPolicy, frame_ids: tuple[str, ...], house: HouseTime,
          first_day: date) -> Week:
     """Seven house days from `first_day`'s start (calculator `day_start`) to the start of the day
-    seven days later: each Program's windows overlapping them as Runtime plays them (`plays`:
-    Runtime.program_windows_between, so a saved rule shows from the window it applies from, R10),
+    seven days later: each Program's windows overlapping them, each marked whether Runtime plays it
+    (`plays`: Runtime.program_windows_between; a saved rule applies from its next window, R10),
     in start order; each Frame's power spans (power.timetable `spans`), by Frame then start."""
     start = calculator.day_start(house, first_day)
     end = calculator.day_start(house, first_day + timedelta(days=DAYS))
@@ -36,7 +36,8 @@ def week(*, programs: Mapping[str, Program], plays: Callable[[Program, float, fl
         found = plays(program, start, end)
         windows.extend(WeekWindow(program_id=program.program_id, name=program.name, scene_id=program.scene_id,
                                   priority=program.priority, start_at=window.start, end_at=window.end,
-                                  start=local(window.start), end=local(window.end)) for window in found)
+                                  start=local(window.start), end=local(window.end), plays=window_plays)
+                       for window, window_plays in found)
     windows.sort(key=lambda window: (window.start_at, window.program_id))
     power = tuple(PowerBand(frame_id=frame_id, power=span.power, because=span.because, start_at=span.start,
                             end_at=span.end, start=local(span.start), end=local(span.end), hold_id=span.hold_id,

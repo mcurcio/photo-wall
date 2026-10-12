@@ -92,7 +92,7 @@ export function plannedFor(runtime, frameId, bound) {
 
 /**
  * Who started an Intent's Run, in words (§35), read from its ROOT Run: a root Intent names
- * its root's origin, a child's "part of <root scene>'s Run, <root's origin>". Null when the
+ * its root's origin, a child's "part of Scene <root scene>, <root's origin>". Null when the
  * root is missing from the read. The one home of the origin wording for the `planned` fact,
  * the Why heading and its rows.
  *
@@ -104,7 +104,7 @@ export function intentOrigin(runtime, intent) {
   const root = (runtime?.current?.runs ?? []).find((run) => run.run_id === intent.root_id);
   if (root === undefined) return null;
   const rootOrigin = originPhrase(runtime, root);
-  return intent.run_id === intent.root_id ? rootOrigin : `part of ${root.scene_id}'s Run, ${rootOrigin}`;
+  return intent.run_id === intent.root_id ? rootOrigin : `part of Scene ${root.scene_id}, ${rootOrigin}`;
 }
 
 /**
@@ -193,7 +193,7 @@ export function explainPrecedence(runtime, frameId) {
     }
     if (intent.root_order !== winner.root_order) {
       return (
-        `${lead} same priority, and Central admitted ${winner.scene_id}'s Run later. ` +
+        `${lead} same priority, and ${winner.scene_id} started later. ` +
         SCHEDULE.adjudication
       );
     }

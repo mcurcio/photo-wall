@@ -44,9 +44,20 @@
     "editOrRemove": "Edit or remove the Schedules.",
     "sinceRemoved": "a Schedule since removed",
     "untilItEnds": "{seconds} s per cycle, keeps playing until its Schedule ends or, when started by hand, until you Finish or Cancel it",
-    "restartHint": "Ends the current Run and starts a new one now. A restarted Run has no Schedule end; it {length}.",
-    "replaceNote": "Runs already going keep what they started with; Schedules that start later use the saved changes.",
+    "restartHint": "Starts the Scene again now. Started again by hand, it has no Schedule end; it {length}.",
+    "replaceNote": "Scenes already playing keep what they started with; Schedules that start later use the saved changes.",
     "referenced": "Schedules",
-    "adjudication": "Admission order, not the Schedule's start time; Schedules starting at the same instant are admitted in an order Central fixes."
+    "adjudication": "Later means when Central started it, not the Schedule's start time; Schedules starting at the same moment are put in an order Central fixes."
+  },
+  "scene": {
+    "showNow": "Show now",
+    "scheduleIt": "Schedule it",
+    "choose": "Show now or Schedule it",
+    "showCard": "Show Scene {id} now",
+    "scheduleCard": "Schedule Scene {id}",
+    "deleteCard": "Delete Scene {id}",
+    "next": "Next for Scene {id}",
+    "showInstead": "Show Scene {id} instead",
+    "scheduleInstead": "Schedule Scene {id} instead"
   }
 }

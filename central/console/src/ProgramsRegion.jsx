@@ -439,8 +439,8 @@ function removeRunningRequest(program) {
     confirmLabel: "Confirm remove",
     body: (
       <p>
-        {`It is playing now. Its Run of ${program.scene_id} is asked to finish: it ends at the end ` +
-          "of its current cycle, after any outro. No later window plays."}
+        {`It is playing now. Scene “${program.scene_id}” finishes at the end of its current cycle, ` +
+          "after any outro. No later window plays."}
       </p>
     ),
     run: async () => {

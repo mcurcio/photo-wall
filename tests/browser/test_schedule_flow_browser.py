@@ -27,7 +27,6 @@ from console_tasks import (
     start_schedule,
     visit,
 )
-from console_words import schedule, schedule_pattern
 from operator_harness import answer_first, operator_server
 from playwright.sync_api import expect
 from schedule_page import (
@@ -40,6 +39,7 @@ from schedule_page import (
     save_button,
     schedules,
 )
+from support.console_words import SCENE, scene_words, schedule, schedule_pattern
 from support.house_time import daily, window_program
 from test_operator_showrunner_browser import (
     SCENE_ID,
@@ -137,26 +137,26 @@ def test_schedule_it_prefills_the_scene_from_the_scene_flow_and_a_card(page, reg
         connect(page, origin, "scenes")
         author_scene(page, "saved-scene", SOURCE, (VALID_FRAME,))
         scenes = page.get_by_role("region", name="Scenes", exact=True)
-        scenes.get_by_role("group", name="Next for Scene saved-scene").get_by_role(
-            "button", name="Schedule it", exact=True).click()
+        scenes.get_by_role("group", name=scene_words("next", id="saved-scene")).get_by_role(
+            "button", name=SCENE["scheduleIt"], exact=True).click()
         assert current_hash(page) == "#/schedule/new/scene"
         form = schedule_form(page)
         scene = form.get_by_label("Scene", exact=True)
         expect(scene).to_have_value("saved-scene")
 
         go(page, "scenes")
-        scenes.get_by_role("button", name="Schedule Scene evening", exact=True).click()
+        scenes.get_by_role("button", name=scene_words("scheduleCard", id="evening"), exact=True).click()
         assert current_hash(page) == "#/schedule/new/scene"
         expect(scene).to_have_value("evening")
 
         schedule_continue(page, "When")
         form.get_by_label("Starts", exact=True).fill("18:00")
         go(page, "scenes")
-        scenes.get_by_role("button", name="Schedule Scene saved-scene", exact=True).click()
+        scenes.get_by_role("button", name=scene_words("scheduleCard", id="saved-scene"), exact=True).click()
         assert current_hash(page) == "#/schedule/new/scene"
         expect(scene).to_have_value("evening")
         expect(form).to_contain_text("Your unsaved draft schedules Scene evening.")
-        form.get_by_role("button", name="Schedule Scene saved-scene instead", exact=True).click()
+        form.get_by_role("button", name=scene_words("scheduleInstead", id="saved-scene"), exact=True).click()
         expect(scene).to_have_value("saved-scene")
         schedule_continue(page, "When")
         expect(form.get_by_label("Starts", exact=True)).to_have_value("18:00")
@@ -421,7 +421,7 @@ def test_a_scene_delete_refusal_names_the_schedule_that_plays_it(page, registry)
         scenes = page.get_by_role("region", name="Scenes", exact=True)
         with page.expect_response(lambda r: r.request.method == "DELETE"
                                   and f"/v1/operator/scenes/{SCENE_ID}?" in r.url) as info:
-            scenes.get_by_role("button", name=f"Delete Scene {SCENE_ID}", exact=True).click()
+            scenes.get_by_role("button", name=scene_words("deleteCard", id=SCENE_ID), exact=True).click()
             dialog = page.get_by_role("dialog")
             expect(dialog).to_contain_text(schedule("named", name="Morning"))
             dialog.get_by_role("button", name="Confirm delete", exact=True).click()
@@ -458,15 +458,19 @@ def _london_evening(registry):
 def test_a_weekday_schedule_shows_on_the_week_monday_to_friday_only(page, registry):
     """K3: "Evenings, Mon–Fri 17:00–23:00" is one repeating Schedule, drawn on Mon–Fri of the
     week and nowhere else; a 22:00–02:00 Schedule reads "ends next day"; Priority offers the three
-    named levels, Normal first. Mutation probe (P-days-off-by-one): send Sunday-first days from
-    `buildProgram` -> the calendar draws Tue–Sat."""
+    named levels, Normal first. Mutation probes: (P-days-off-by-one) send Sunday-first days from
+    `buildProgram` -> the calendar draws Tue–Sat; (P-week-plays-all) the week marks every window
+    as playing -> Wednesday's 17:00 window, made at 18:00, reads as playing."""
     _london_evening(registry)
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin)
         schedule_program(page, "Evenings", "evening", "17:00", "23:00", days=WEEKDAYS)
         for day in WEEK_DAYS:
             expect(_windows(page, day, "Evenings")).to_have_count(1 if day[:3] in ("Mon", "Tue", "Wed", "Thu", "Fri") else 0)
-        expect(_windows(page, "Mon 12 Oct", "Evenings")).to_have_accessible_name("Evenings, Mon 12 Oct 17:00–23:00")
+        expect(_windows(page, "Thu 15 Oct", "Evenings")).to_have_accessible_name("Evenings, Thu 15 Oct 17:00–23:00")
+        # Made on Wednesday at 18:00: this week's windows until then do not play (R10), and say so.
+        for day in ("Mon 12 Oct", "Wed 14 Oct"):
+            expect(_windows(page, day, "Evenings")).to_have_accessible_name(re.compile(r", so it does not play$"))
 
         form = schedule_program(page, "Late", "calm", "22:00", "02:00", submit=False)
         expect(form.get_by_label("Your answers", exact=True)).to_contain_text("Every day, 22:00–02:00 (ends next day)")
@@ -479,12 +483,18 @@ def test_a_weekday_schedule_shows_on_the_week_monday_to_friday_only(page, regist
 def test_save_and_apply_now_plays_the_new_rule_at_once_and_the_default_scene_is_picked(page, registry):
     """K3: editing the Schedule playing now, Save and apply now (POST …/apply-now) ends the window
     playing now and plays the new rule's window at once (the card's Now is the new window); the
-    week page's Default Scene picker sets the Default Scene ("Nothing" allowed)."""
+    week page's Default Scene picker sets the Default Scene ("Nothing" allowed). The Schedule is
+    made before its window (one made during it starts at its next window, R10)."""
+    from support.house_time import LONDON, at
     _london_evening(registry)
+    registry.clock.wall = at(LONDON, "2026-10-14T16:00")
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin)
         stored = schedule_program(page, "Evenings", "evening", "17:00", "23:00").json()
+        registry.clock.wall = at(LONDON, "2026-10-14T18:00")
+        page.reload()
         evenings = card(page, "Evenings")
+        expect(evenings).to_contain_text("Now")
         expect(evenings).to_contain_text("Wed 14 Oct 17:00–23:00")
 
         edit_button(evenings, "Evenings").click()

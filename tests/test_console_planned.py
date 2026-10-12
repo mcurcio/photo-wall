@@ -20,13 +20,13 @@ import re
 import subprocess
 from pathlib import Path
 
+from support.console_words import SCHEDULE, schedule
 from test_console_flow import _require_node
 
 SRC = Path(__file__).parents[1] / "central/console/src"
 # The console's words for a Schedule (showWords.json): a stored one by its name, never its id.
-_SCHEDULE = json.loads((SRC / "showWords.json").read_text(encoding="utf-8"))["schedule"]
-NAMED = _SCHEDULE["named"].format(name="December evenings")
-REMOVED = _SCHEDULE["sinceRemoved"]
+NAMED = schedule("named", name="December evenings")
+REMOVED = SCHEDULE["sinceRemoved"]
 
 SCRIPT = r"""
 const facts = await import(process.argv[1]);
@@ -171,7 +171,7 @@ def test_the_planned_fact_origins_and_zoned_times():
     assert rows["direct"]["text"] == f"On top: lobby · started directly, by Show now or the API {tail}"
     assert rows["direct"]["phase"] == "outro"
     # A child's origin is read from its ROOT Run (a child's program_id is null).
-    assert rows["child"]["text"] == f"On top: intro · part of xmas's Run, {NAMED} {tail}"
+    assert rows["child"]["text"] == f"On top: intro · part of Scene xmas, {NAMED} {tail}"
     assert rows["unbound"]["text"] == (
         f"On top: xmas · {NAMED} (Central's Runs; this Frame is unbound, so Central "
         "sends it no layers; the Panel is not observed)")
@@ -194,15 +194,15 @@ def test_the_planned_fact_origins_and_zoned_times():
 
     assert out["origins"] == {
         "r-prog": {"kind": "program", "words": NAMED, "programListed": True},
-        "r-child": {"kind": "child", "words": "part of xmas's Run", "programListed": False},
+        "r-child": {"kind": "child", "words": "part of Scene xmas", "programListed": False},
         "r-direct": {"kind": "direct", "words": "started directly (Show now or the API)",
                      "programListed": False},
         "r-gone": {"kind": "program", "words": REMOVED, "programListed": False},
     }
-    assert out["orphanChild"] == "part of another Run"
+    assert out["orphanChild"] == "part of another Scene"
     assert out["rowOrigins"]["r-prog"] == NAMED
     assert out["rowOrigins"]["r-direct"] == "started directly (Show now or the API)"
-    assert out["childRowOrigin"] == "part of xmas's Run"
+    assert out["childRowOrigin"] == "part of Scene xmas"
 
     assert out["heading"] == f"Central's Runs on a: xmas (priority 5, {NAMED}) on top."
     assert out["directHeading"] == (
@@ -210,7 +210,7 @@ def test_the_planned_fact_origins_and_zoned_times():
 
     # A child on top: the heading names its root's Run, as the `planned` fact does (§35).
     assert out["childHeading"] == (
-        f"Central's Runs on c: intro (priority 5, part of xmas's Run, {NAMED}) on top.")
+        f"Central's Runs on c: intro (priority 5, part of Scene xmas, {NAMED}) on top.")
     # The Intended? step says the top Run as the `planned` fact, never Central's plan as the output.
     assert out["intended"] == {"title": "Intended?", "state": "ok",
                                "text": f"On top: xmas · {NAMED} {tail}; priority 5."}

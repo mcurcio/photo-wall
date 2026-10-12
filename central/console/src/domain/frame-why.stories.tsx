@@ -35,3 +35,20 @@ export const NotHeard: Story = {
 };
 /** Central did not answer. */
 export const Unreachable: Story = { args: { read: { ok: false, error: "unreachable" } } };
+const SHOW_NOW = { kind: "show-now" as const, activation_id: "show-1", run_id: "r-2", scene_id: "party",
+  program_id: null, name: "party", rank: 1 };
+/** Two requests at the same priority: the one that started later plays; the other started earlier. */
+export const AdmittedEarlier: Story = {
+  args: { read: { ok: true, why: { ...WHY, content: { winner: SHOW_NOW,
+    beat: [{ request: EVENINGS, because: "admitted-earlier" }] } }, zone: "Europe/London" } },
+};
+/** A Schedule the playing Show now's protected Scene keeps off this Frame is named after it. */
+export const KeptOut: Story = {
+  args: { read: { ok: true, why: { ...WHY, content: { winner: SHOW_NOW,
+    beat: [{ request: EVENINGS, because: "kept-out-by-protected-frames" }] } }, zone: "Europe/London" } },
+};
+/** Central wants the display off and the Pi has not carried it out yet: not Resting. */
+export const TurningOff: Story = {
+  args: { read: { ok: true, why: { ...WHY, power: { ...WHY.power!, pi_says: { kind: "timetable", power: "on" },
+    result: null, resting: false } }, zone: "Europe/London" } },
+};

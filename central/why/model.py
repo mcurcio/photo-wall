@@ -67,7 +67,8 @@ class FrameWhy(Model):
 
 
 class WeekWindow(Model):
-    """One Program window on the week page."""
+    """One Program window on the week page; `plays` is false for a window of the saved rule that
+    started before the rule applies (a creation or a save mid-window: R10), which does not play."""
     program_id: Identifier
     name: str
     scene_id: Identifier
@@ -76,6 +77,7 @@ class WeekWindow(Model):
     end_at: Instant
     start: LocalDateTime
     end: LocalDateTime
+    plays: bool
 
 
 class PowerBand(Model):

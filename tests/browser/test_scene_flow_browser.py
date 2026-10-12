@@ -15,6 +15,7 @@ from uuid import UUID
 import pytest
 from console_tasks import (
     HAND_PICKED,
+    LABELS,
     LIVE,
     author_scene,
     choose_source,
@@ -41,6 +42,7 @@ from photo_seed import connected, filled, in_pool, library_of, saved_source
 from playwright.sync_api import expect
 from psycopg.types.json import Jsonb
 from schedule_page import schedules
+from support.console_words import SCENE, scene_words
 from test_operator_showrunner_browser import (
     INVALID_FRAME,
     LOBBY_FRAME,
@@ -350,9 +352,9 @@ def test_commissioned_frame_opens_a_scene_with_an_explicit_editable_target(page,
         with page.expect_response(lambda response: response.request.method == "PUT"
                                   and response.url.endswith("/v1/operator/scenes/commissioned-content")):
             form.get_by_role("button", name="Save Scene", exact=True).click()
-        next_actions = _scenes(page).get_by_role("group", name="Next for Scene commissioned-content")
+        next_actions = _scenes(page).get_by_role("group", name=scene_words("next", id="commissioned-content"))
         expect(next_actions).to_be_visible()
-        next_actions.get_by_role("button", name="Show now", exact=True).click()
+        next_actions.get_by_role("button", name=SCENE["showNow"], exact=True).click()
         assert current_hash(page) == "#/now/show/scene"
 
 
@@ -730,16 +732,16 @@ def test_saving_returns_to_the_cards_and_offers_show_now_and_schedule_it(page, r
         assert current_hash(page) == "#/scenes"
         scenes = _scenes(page)
         expect(scenes.get_by_role("status")).to_have_text("Saved Scene saved-scene.")
-        next_actions = scenes.get_by_role("group", name="Next for Scene saved-scene")
-        expect(next_actions.get_by_role("button")).to_have_text(["Show now", "Schedule it"])
+        next_actions = scenes.get_by_role("group", name=scene_words("next", id="saved-scene"))
+        expect(next_actions.get_by_role("button")).to_have_text([SCENE["showNow"], SCENE["scheduleIt"]])
         card = scenes.get_by_label("Scene saved-scene", exact=True)
-        expect(card.get_by_role("button")).to_have_text(["Edit", "Show now", "Schedule it", "Delete"])
+        expect(card.get_by_role("button")).to_have_text(["Edit", SCENE["showNow"], SCENE["scheduleIt"], "Delete"])
 
         page.go_back()
         assert not current_hash(page).startswith("#/scenes"), current_hash(page)
         go(page, "scenes")
-        next_actions.get_by_role("button", name="Schedule it", exact=True).click()
-        expect(page.get_by_role("heading", level=1, name="Schedule", exact=True)).to_be_visible()
+        next_actions.get_by_role("button", name=SCENE["scheduleIt"], exact=True).click()
+        expect(page.get_by_role("heading", level=1, name=LABELS["schedule"], exact=True)).to_be_visible()
         # Bead 4: "Schedule it" opens the Schedule flow at its Scene step, prefilled.
         assert current_hash(page) == "#/schedule/new/scene"
         expect(schedules(page).get_by_label("Scene", exact=True)).to_have_value("saved-scene")
@@ -775,8 +777,8 @@ def test_a_save_whose_return_lands_before_its_render_still_offers_the_next_actio
         connect(page, origin, "scenes")
         author_scene(page, "saved-scene", SOURCE, (VALID_FRAME,))
         scenes = _scenes(page)
-        expect(scenes.get_by_role("group", name="Next for Scene saved-scene").get_by_role(
-            "button")).to_have_text(["Show now", "Schedule it"])
+        expect(scenes.get_by_role("group", name=scene_words("next", id="saved-scene")).get_by_role(
+            "button")).to_have_text([SCENE["showNow"], SCENE["scheduleIt"]])
         assert current_hash(page) == "#/scenes"
         expect(_scenes_link(page)).to_have_accessible_description("")
 

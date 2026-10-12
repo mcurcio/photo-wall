@@ -54,7 +54,7 @@ export function SceneStep({ value, patch, problems, definitions, offered, onUseO
         offered={offered}
         current={value.sceneId}
         drafts="schedules"
-        action="Schedule"
+        take="scheduleInstead"
         onTake={onUseOffered}
       />
       <ScenePicker

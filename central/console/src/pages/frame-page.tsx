@@ -168,7 +168,8 @@ export function FramePage({ snapshot, bootFacts, hosts, frameId, tab, onTab, foc
       <Tabs label="Frame settings" tabs={TABS} value={tab} onValueChange={(next) => choose(next as Tab)}>
         {tab === "overview" && (
           <>
-            <FrameOverview snapshot={snapshot} bootFacts={bootFacts} frameId={frameId} hosts={hosts} why={why} />
+            <FrameOverview snapshot={snapshot} bootFacts={bootFacts} frameId={frameId} frameName={frame.name ?? frameId}
+              hosts={hosts} why={why} />
             <FramePhotos key={`${frameId}:photos`} snapshot={snapshot} frameId={frameId} />
           </>
         )}

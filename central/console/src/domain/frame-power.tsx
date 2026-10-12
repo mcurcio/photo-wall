@@ -7,6 +7,7 @@ import { ProblemCard } from "../patterns/problem-card";
 import { SettingRow } from "../patterns/setting-row";
 import { usePolledRead } from "../polledRead.js";
 import { endPowerTest, readFramePower, requestPowerTest, savePowerSettings } from "../powerApi.js";
+import { POWER } from "../powerWords.js";
 import { formatRoute } from "../routes.js";
 import { clockTime } from "../timeWords.js";
 import { Button } from "../ui/button";
@@ -81,7 +82,7 @@ export const DEFAULT_SETTINGS: PowerSettings = {
 };
 
 const RESULT_WORDS: Record<Exclude<PowerResult, "confirmed" | "not-supported" | "signal-stopped">, string> = {
-  "did-not-answer": "Display didn't answer",
+  "did-not-answer": POWER.didNotAnswer,
   "another-input": "Left on: the display is showing another input",
 };
 /** Signal off stops or restarts the Pi's own picture: nothing is claimed about the display. */

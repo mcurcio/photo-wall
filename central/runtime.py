@@ -841,28 +841,29 @@ class Runtime:
             current=view(*playing) if playing else None,
             next=view(following, None if following is None else program.window_id(following.start)))
 
-    def program_windows_between(self, program: Program, start: float, end: float) -> tuple[Window, ...]:
-        """The windows `program` plays over [start, end), by the rule Runtime admits by (R10): its
-        current rule's windows from its `program_from` on, and the window a Run of an earlier
+    def program_windows_between(self, program: Program, start: float, end: float) -> tuple[tuple[Window, bool], ...]:
+        """`program`'s windows over [start, end), each with whether it plays by the rule Runtime
+        admits by (R10): its current rule's windows (those starting before its `program_from`, as
+        one a save or a creation made mid-window, do not play), and the window a Run of an earlier
         revision is still playing (a save keeps that window's end). The week page's one source."""
         since = self._program_from(program)
         try:
-            found = [window for window in calculator.windows(program.when, self._house, start, end)
-                     if window.start >= since]
+            found = [(window, window.start >= since)
+                     for window in calculator.windows(program.when, self._house, start, end)]
         except ValueError:          # a When the house can no longer place
             found = []
         playing = self._playing_window(program)
-        if playing is not None and playing[0] not in found and playing[0].start < end and playing[0].end > start:
-            found.append(playing[0])
-        return tuple(sorted(found, key=lambda window: window.start))
+        if playing is not None and playing[0].start < end and playing[0].end > start:
+            found = [item for item in found if item[0] != playing[0]] + [(playing[0], True)]
+        return tuple(sorted(found, key=lambda item: item[0].start))
 
     def _program_from(self, program: Program) -> float:
         """From when `program`'s current rule is admitted (unbounded for a state stored before it)."""
         return self._state.program_from.get(program.program_id, float("-inf"))
 
     def _playing_window(self, program: Program) -> tuple[Window, str] | None:
-        """The window an active root Run of `program` plays (the current revision's first) and its
-        identity, or None."""
+        """The window an active root Run of `program` plays (the current revision's first; its
+        start from its identity, `Program.window_id`) and its identity, or None."""
         runs = sorted((run for run in self._state.runs.values()
                        if run.parent_id is None and run.active and run.program_id == program.program_id
                        and run.program_ends_at is not None and run.activation_id is not None),
@@ -870,7 +871,9 @@ class Runtime:
         if not runs:
             return None
         run = runs[0]
-        return Window(start=run.started_at, end=run.program_ends_at), run.activation_id
+        # The window's start is its identity's (Save and apply now starts its Run later, at `now`).
+        start = float(run.activation_id.rsplit(":", 1)[1])
+        return Window(start=start, end=run.program_ends_at), run.activation_id
 
     def timeline(
         self, start: float, end: float, *, max_events: int = 10000

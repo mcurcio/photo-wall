@@ -44,6 +44,7 @@ from urllib.parse import quote
 import schedule_page
 from operator_harness import pause_page_clock, sign_in
 from playwright.sync_api import expect
+from support.console_words import SCENE
 
 # The sections of §6, grouped as its route tables group them, and their sidebar labels
 # (each page's <h1> reads the same).
@@ -399,7 +400,7 @@ def start_show_now(page, scene_id=None):
     activate"; returns the flow's form, on its Scene step."""
     go(page, "now")
     page.get_by_role("region", name="Runs", exact=True).get_by_role(
-        "button", name="Show now", exact=True).click()
+        "button", name=SCENE["showNow"], exact=True).click()
     form = show_form(page)
     if scene_id is not None:
         form.get_by_label("Scene", exact=True).select_option(scene_id)

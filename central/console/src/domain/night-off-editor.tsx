@@ -3,8 +3,9 @@ import { useState } from "react";
 import { Note } from "../patterns/fact-row";
 import { OwnerLinks } from "../patterns/link-to-owner";
 import { SaveBar } from "../patterns/save-bar";
+import { POWER } from "../powerWords.js";
 import { SettingRow } from "../patterns/setting-row";
-import { dayOfWords, houseParts, timeOfDayWords } from "../timeWords.js";
+import { dayOfWords, houseParts, localClockWords, timeOfDayWords } from "../timeWords.js";
 import { Button } from "../ui/button";
 import { Field, NumberInput, TextInput } from "../ui/field";
 import { MultiToggle } from "../ui/multi-toggle";
@@ -31,6 +32,8 @@ export interface NightOffDraft {
 /** GET /v1/operator/power/night-off (central/power/views.py `NightOffView`). */
 export interface NightOffView {
   night_off: NightOffDraft & { revision: number };
+  /** Night off switches no display until Settings › House is saved once (the zone confirmed). */
+  waits_for_zone: boolean;
   next_off: string | null;
   next_on: string | null;
 }
@@ -49,8 +52,6 @@ const CHOSEN = ["✓", ""] as const;
 
 export interface TimeOfDayControlProps {
   label: string;
-  /** A clock time the help shows as its example, as "07:00". */
-  example: string;
   value: TimeOfDay;
   onChange: (next: TimeOfDay) => void;
   /** The house has a location: sunrise and sunset can be chosen. */
@@ -69,7 +70,7 @@ export const isBefore = (minutes: number) => minutes < 0 || Object.is(minutes, -
  * A clock time, or sunrise or sunset so many minutes before or after (#80, #81); sun times wait
  * for a Place. The side is chosen, not typed as a sign: a typed "−" was lost on the way.
  */
-export function TimeOfDayControl({ label, example, value, onChange, placeSet, houseHref, resolved = null }: TimeOfDayControlProps) {
+export function TimeOfDayControl({ label, value, onChange, placeSet, houseHref, resolved = null }: TimeOfDayControlProps) {
   const clock = value.at === "clock";
   return (
     <Stack>
@@ -82,9 +83,9 @@ export function TimeOfDayControl({ label, example, value, onChange, placeSet, ho
         </>
       )}
       {value.at === "clock" ? (
-        <Field label={label} help={`On the house clock, as ${example}.`}
-          error={CLOCK.test(value.time) ? undefined : `Enter a time as ${example}.`}>
-          <TextInput value={value.time} onChange={(time) => onChange({ at: "clock", time })} />
+        <Field label={label} help="On the house clock."
+          error={CLOCK.test(value.time) ? undefined : "Enter a time."}>
+          <TextInput type="time" value={value.time} onChange={(time) => onChange({ at: "clock", time })} />
         </Field>
       ) : (
         <>
@@ -107,8 +108,8 @@ export function TimeOfDayControl({ label, example, value, onChange, placeSet, ho
 
 /** The draft's problem before it is sent, or null. */
 function problemOf(draft: NightOffDraft): string | null {
-  if (draft.off.at === "clock" && !CLOCK.test(draft.off.time)) return "Enter when displays turn off, as 23:00.";
-  if (draft.on.at === "clock" && !CLOCK.test(draft.on.time)) return "Enter when displays turn on, as 07:00.";
+  if (draft.off.at === "clock" && !CLOCK.test(draft.off.time)) return "Enter when displays turn off.";
+  if (draft.on.at === "clock" && !CLOCK.test(draft.on.time)) return "Enter when displays turn on.";
   if (draft.days.length === 0) return "Choose at least one night.";
   return null;
 }
@@ -120,6 +121,18 @@ const REFUSALS: Record<string, string> = {
   "unknown-frame": "A chosen Frame no longer exists; choose again.",
   unreachable: "Central did not answer. Save again.",
 };
+
+/**
+ * The draft's off and on in words, on the house clock: "Off 11:00 pm, on 7:00 am the next morning."
+ * (an on at or before a clock off is the next morning, #76: shown, never asked); null while a
+ * clock time is not a time yet.
+ */
+export function overnightWords(off: TimeOfDay, on: TimeOfDay): string | null {
+  if ((off.at === "clock" && !CLOCK.test(off.time)) || (on.at === "clock" && !CLOCK.test(on.time))) return null;
+  const nextMorning = off.at === "clock" && on.at === "clock" && on.time <= off.time;
+  const words = (time: TimeOfDay) => (time.at === "clock" ? localClockWords(time.time) : timeOfDayWords(time));
+  return `Off ${words(off)}, on ${words(on)}${nextMorning ? " the next morning" : ""}.`;
+}
 
 /** A house time as "Mon 12 Oct 23:00". */
 function dayTime(local: string): string {
@@ -206,7 +219,13 @@ export function NightOffEditor({ view, frames, placeSet, houseHref, now = null, 
   };
   const chosen = shown.frames.kind === "frames" ? shown.frames.frame_ids : [];
   return (
-    <Section title="Night off">
+    <Section title={POWER.nightOff}>
+      {view.waits_for_zone && (
+        <Stack label="Night off waits">
+          <Note live>{POWER.waitsForZone}</Note>
+          <OwnerLinks links={[{ text: POWER.confirmZone, href: houseHref, severity: "todo" }]} />
+        </Stack>
+      )}
       <Note>
         {`Displays turn off at ${savedWords(view.night_off.off, view.next_off, now)} and on at `
           + `${savedWords(view.night_off.on, view.next_on, now)}`
@@ -214,15 +233,15 @@ export function NightOffEditor({ view, frames, placeSet, houseHref, now = null, 
       </Note>
       {stale && (
         <Stack label="Night off changed">
-          <Note live>Night off changed since you opened it, in another tab or window. Reload it to see the saved rules; Save waits until you do.</Note>
-          <Button onClick={reload}>Reload Night off</Button>
+          <Note live>{POWER.nightOffChanged}</Note>
+          <Button onClick={reload}>{POWER.reloadNightOff}</Button>
         </Stack>
       )}
-      <TimeOfDayControl label="Turn off" example="23:00" value={shown.off} onChange={(off) => edit({ off })} placeSet={placeSet}
+      <TimeOfDayControl label="Turn off" value={shown.off} onChange={(off) => edit({ off })} placeSet={placeSet}
         houseHref={houseHref} resolved={resolvedOf(shown.off, view.night_off.off, view.next_off, now)} />
-      <TimeOfDayControl label="Turn on" example="07:00" value={shown.on} onChange={(on) => edit({ on })} placeSet={placeSet}
+      <TimeOfDayControl label="Turn on" value={shown.on} onChange={(on) => edit({ on })} placeSet={placeSet}
         houseHref={houseHref} resolved={resolvedOf(shown.on, view.night_off.on, view.next_on, now)} />
-      <Note>An on time at or before the off time is the next morning: off 23:00, on 07:00 the next day.</Note>
+      {overnightWords(shown.off, shown.on) !== null && <Note>{overnightWords(shown.off, shown.on)}</Note>}
       <SettingRow kind="house" label="Nights" help="The nights Night off starts on." defaultLabel="Default: every night"
         state="idle" control={<MultiToggle label="Nights" value={shown.days} options={DAYS} required stateWords={CHOSEN}
           onChange={(days) => edit({ days: DAYS.map((day) => day.value).filter((day) => days.includes(day)) })} />} />
@@ -252,7 +271,7 @@ export function NightOffEditor({ view, frames, placeSet, houseHref, now = null, 
           onChange={(holdLasts) => edit({ hold_lasts: holdLasts })} />} />
       <SaveBar label="Night off actions" message={said !== null && <Note live>{said}</Note>}>
         <Button variant="primary" disabled={!changed || saving || stale} onClick={() => void save()}>
-          {saving ? "Saving…" : "Save Night off"}
+          {saving ? "Saving…" : POWER.saveNightOff}
         </Button>
         <Button variant="ghost" disabled={!changed || saving} onClick={() => { setDraft(null); setSaid(null); }}>
           Discard changes
