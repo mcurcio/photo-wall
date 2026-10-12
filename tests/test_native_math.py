@@ -27,6 +27,7 @@ from player.geometry import (
     picture_source_uv,
     transform,
 )
+from player.luts import PlayerLuts
 from player.native import NativeOutput, NativeRenderer, SampleMailbox, diagnostic_text, packed_rgba
 from player.rendering import REDRAW_RENEWAL, PrepareResult
 
@@ -584,7 +585,7 @@ def test_a_crossfade_step_a_trial_edit_or_a_picture_change_is_a_change_to_redraw
         local = SimpleNamespace(layer="picture", path=None, alpha=alpha)
         composition = SimpleNamespace(binding=SimpleNamespace(output_id="hdmi1"),
                                       calibration=Calibration(), fallback=False, layers=(local,))
-        return native_module._shown(composition, (), (), frames, object())
+        return native_module._shown(composition, (), (), frames, object(), PlayerLuts())
 
     assert shown() == shown()
     assert shown(.5) != shown(1.0)
@@ -612,6 +613,7 @@ def _presenting_renderer(decoders=None):
 
     renderer = NativeRenderer.__new__(NativeRenderer)
     renderer._owner, renderer._closed, renderer._serial = threading.get_ident(), False, 0
+    renderer._luts = PlayerLuts()
     renderer._decoders = decoders or {}
     renderer._surfaces = {"hdmi1": native_module._Surface(output=None, window=None, area=Area())}
     renderer.capacity = lambda compositions: SimpleNamespace(available=True)
@@ -809,14 +811,14 @@ def test_print_operations_and_a_shading_mat_switch_their_steps_on():
     from player.geometry import mat_shadow, peak
 
     operations = PictureOperations("HDMI-A-1", 2, (1.0, 1.0, 1.0), 1.4, 1.0, 1.0, saturation=.8,
-                                   highlight_knee=.6, black_floor=.17)
+                                   highlight_knee=.6, black_floor=.07)
     shadow = mat_shadow(CoverFit(rotation=90), _PROFILE, Mat(depth_mm=2, lights=(Light(
         from_degrees=0, steep_degrees=45, softness_degrees=0, strength_tenths=10, colour_kelvin=2700),)))
     gl = _UniformGL()
     native_module._final_uniforms(gl, 1, operations, CoverFit().corners, shadow, lut_drawn=False)
     assert {name: gl.values[name] for name in _SWITCHES} == {name: (1,) for name in _SWITCHES}
     assert gl.values["saturation"] == (.8,) and gl.values["highlight_knee"] == (.6,)
-    assert gl.values["peak"] == (peak(operations),) and gl.values["black_floor"] == (.17,)
+    assert gl.values["peak"] == (peak(operations),) and gl.values["black_floor"] == (.07,)
     assert gl.values["light_count"] == (1,) and gl.values["mat_size"] == shadow.size_mm
     count, toward = gl.values["light_toward"]
     assert count == 4 and toward[:2] == list(shadow.lights[0].toward) and toward[2:] == [0.0] * 6

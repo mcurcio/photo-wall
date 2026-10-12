@@ -50,11 +50,9 @@ NO_PICTURE_CHANGE: Final = "0"            # tag_picture's text before any pictur
 SATURATION_MAX: Final = 1.5               # saturation in 0..1.5 (Photo Wall's 0..150 %); 1 is skipped
 HIGHLIGHT_KNEE_MIN: Final = 0.18          # highlight_knee in 0.18..1, linear light (0.18: mid-grey); 1 is skipped.
                                           # The rolloff slider's 100 % (a placeholder, tuned on the bench)
-BLACK_FLOOR_MAX: Final = 0.5              # black_floor in 0..0.5, an output value; 0 is skipped
-DISPLAY_GAMMA: Final = 2.2                # the display's response the Player encodes for (light = value ** 2.2):
-                                          # how a share of white light becomes an output value, for the black
-                                          # floor (Display Host) and the mat shadow (the Player). Not Photo
-                                          # Wall's gamma setting, which is a look (2.2 changes nothing)
+BLACK_FLOOR_MAX: Final = 0.1              # black_floor in 0..0.1, a share of white light (Photo Wall's
+                                          # 0..10 % of white); 0 is skipped. The Player lifts in the panel's
+                                          # light (sRGB, the panel its encode is for), never in output values
 
 
 def srgb_to_linear(value: float) -> float:
@@ -85,7 +83,7 @@ class PictureOperations:
     the LUT (`lut`), `saturation` about luminance, multiply linear light by `rgb_multipliers` (white
     balance; the largest is 1) and `light_factor`, roll the highlights off above `highlight_knee`
     (or clamp, as v4, when skipped), encode for the screen, apply `contrast_slope` about mid-grey
-    (0.5), raise to `gamma_exponent`, clamp, lift to `black_floor`, then the Frame's mat shadow
+    (0.5), raise to `gamma_exponent`, clamp, lift black to `black_floor` of white light, then the Frame's mat shadow
     (from its binding, never from here) and black outside the Output's Frame openings. Every value
     at its neutral (multipliers and factors 1, knee 1, floor 0, no LUT) changes nothing.
     `picture_change` is the picture document's change these came from, echoed by the Player's tag.

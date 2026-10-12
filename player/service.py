@@ -57,7 +57,7 @@ from player.cache import Cache, CacheError
 from player.central_link import CentralLink, Session, read_refusal
 from player.executor import AuthorityError, Executor
 from player.identity import Identity, load_identity
-from player.luts import PlayerLuts
+from player.luts import LutWants, PlayerLuts
 from player.mainloop import DispatchRefused, LatePosts, LoopLate, MainLoopDispatcher, Tick
 from player.node_app_link import NodeAppLinkClient
 from player.output_discovery import discover_outputs, output_app_id
@@ -329,10 +329,11 @@ class PlayerService:
                  websocket_connect=None, cache_factory=Cache, executor_factory=Executor,
                  node_link_client: NodeAppLinkClient | None = None,
                  boot_id_path: Path = Path("/proc/sys/kernel/random/boot_id"),
-                 boot_context: BootContext, luts: PlayerLuts | None = None):
+                 boot_context: BootContext, luts: LutWants):
         self.config, self.identity, self.outputs = config, identity, outputs
-        # The LUTs the renderer asks for (print look): fetched here, held there.
-        self.luts = luts if luts is not None else PlayerLuts()
+        # The LUTs the renderer asks for (print look): fetched here, held there. The same
+        # PlayerLuts the renderer was built with (`main`).
+        self.luts = luts
         self.renderer, self.dispatcher = renderer, dispatcher
         self.clock = clock or SystemClock()
         self.mapping = TimeMapping(self.clock)

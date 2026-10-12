@@ -19,7 +19,7 @@ from uuid import UUID
 
 from contracts.lut import LUT_GRID, LutRef
 from contracts.models import MAT_LIGHTS_MAX, AppliedCalibration, Mat
-from contracts.node_frame import DISPLAY_GAMMA, PictureOperations
+from contracts.node_frame import PictureOperations
 from player.geometry import (
     LUMA,
     ROLLOFF_FADE_POWER,
@@ -202,7 +202,7 @@ def _set_matrix(gl, program: int, name: str, matrix: Matrix) -> None:
                           [matrix[row*3+column] for column in range(3) for row in range(3)])
 
 
-def _picture_key(frames, composition: OutputComposition, luts: LutSource | None = None) -> object:
+def _picture_key(frames, composition: OutputComposition, luts: LutSource) -> object:
     """The Output's newest picture operations, so a picture change is a change to redraw; with a
     LUT named, whether it is held yet (the LUTs' generation), so its arrival redraws and the tag
     can then name the change (rule 3)."""
@@ -212,13 +212,13 @@ def _picture_key(frames, composition: OutputComposition, luts: LutSource | None 
         operations = frames.picture(composition.binding.output_id)
     except Exception:
         return object()     # unreadable here: always redraw, and _render reports it
-    if operations is None or operations.lut is None or luts is None:
+    if operations is None or operations.lut is None:
         return operations
     return operations, luts.generation()
 
 
 def _shown(composition: OutputComposition, generations: tuple, sample_serials: tuple,
-           frames, grant, luts: LutSource | None = None) -> tuple:
+           frames, grant, luts: LutSource) -> tuple:
     """Everything that changes a surface's pixels (G8 render on change, E-G8-3): layers,
     decoder generations, alpha, each video's newest sample, the calibration trial and the
     Output's picture operations (1c)."""
@@ -456,8 +456,7 @@ _FINAL_CONSTANTS = (
     f"#define MAT_LIGHTS_MAX {MAT_LIGHTS_MAX}\n"
     f"const float LUT_GRID = {float(LUT_GRID)!r};\n"
     f"const vec3 LUMA = vec3({', '.join(repr(weight) for weight in LUMA)});\n"
-    f"const float ROLLOFF_FADE_POWER = {ROLLOFF_FADE_POWER!r};\n"
-    f"const float DISPLAY_GAMMA = {DISPLAY_GAMMA!r};\n")
+    f"const float ROLLOFF_FADE_POWER = {ROLLOFF_FADE_POWER!r};\n")
 _FINAL = """#version 300 es
 precision highp float;
 precision highp sampler3D;
@@ -505,7 +504,7 @@ vec3 lut_applied(vec3 value) {
 vec3 rolled_off(vec3 value) {
     float x = max(value.r, max(value.g, value.b));
     if (x <= highlight_knee) return value;
-    float t = (x-highlight_knee)/(1.0-highlight_knee);
+    float t = (min(x, peak)-highlight_knee)/(1.0-highlight_knee);
     float w = (peak-highlight_knee)/(1.0-highlight_knee);
     float shortfall = (w-t)*(w+t)/(w*w*(1.0+t));
     float y = 1.0-(1.0-highlight_knee)*shortfall;
@@ -548,12 +547,18 @@ void main() {
         float luminance = dot(LUMA, value);
         value = luminance+saturation*(value-luminance);
     }
-    value = max(value*rgb_multipliers*light_factor, 0.0);
-    if (rolloff_on == 1) value = rolled_off(value);
+    // Steps 3-4: the rolloff on brightness alone, white balance after (its white is the Display's).
+    if (rolloff_on == 1) value = rolled_off(max(value*light_factor, 0.0))*rgb_multipliers;
+    else value = max(value*rgb_multipliers*light_factor, 0.0);
     vec3 contrasted = (srgb_encoded(value)-0.5)*contrast_slope+0.5;
     vec3 adjusted = clamp(pow(max(contrasted, 0.0), vec3(gamma_exponent)), 0.0, 1.0);
-    if (floor_on == 1) adjusted = black_floor+(1.0-black_floor)*adjusted;
-    if (mat_on == 1) adjusted *= pow(mat_shade(uv), vec3(1.0/DISPLAY_GAMMA));
+    // Steps 6-7 in the panel's light (sRGB, the panel the encode is for).
+    if (floor_on == 1 || mat_on == 1) {
+        vec3 light = srgb_decoded(adjusted);
+        if (floor_on == 1) light = black_floor+(1.0-black_floor)*light;
+        if (mat_on == 1) light *= mat_shade(uv);
+        adjusted = srgb_encoded(light);
+    }
     if (!inside_opening(uv)) adjusted = vec3(0.0);
     color=vec4(adjusted, 1.0);
 }
@@ -573,7 +578,7 @@ class NativeRenderer:
 
     def __init__(self, outputs: tuple[NativeOutput, ...], *, decoder_limit: int = 4,
                  texture_budget: int = 512*1024**2, prepare_timeout: float = 5,
-                 serial: str | None = None, luts: LutSource | None = None):
+                 serial: str | None = None, luts: LutSource):
         if (not outputs or len({o.output_id for o in outputs}) != len(outputs)
                 or len({o.app_id for o in outputs}) != len(outputs)):
             raise ValueError("unique Output and app IDs required")
@@ -583,7 +588,7 @@ class NativeRenderer:
         self._closed = False
         self.gl_renderer: str | None = None  # GL_RENDERER of the first realized GL context
         self._serial_label = serial
-        self._luts = luts       # where a picture's LUT comes from (print look); None: never drawn
+        self._luts = luts       # where a picture's LUT comes from (print look; the service's PlayerLuts)
         self.decoder_limit, self.texture_budget = decoder_limit, texture_budget
         self.prepare_timeout = prepare_timeout
         self._decoders: dict[str, _Decoder] = {}
@@ -1046,7 +1051,7 @@ class NativeRenderer:
         # renewal. A static photo is not redrawn every tick (G8).
         shown = _shown(composition, generations,
                        tuple(self._decoders[key].sample_serial for key, _, _ in generations),
-                       frames, grant if frames is not None else None, getattr(self, "_luts", None))
+                       frames, grant if frames is not None else None, self._luts)
         # The newest draw is the pending one, else the acknowledged one: whatever _render
         # dropped or drew, present() reads it from those two and nothing else.
         ack = surface.acknowledged
@@ -1397,8 +1402,8 @@ class NativeRenderer:
         """Bind the LUT `operations` names on _LUT_UNIT, uploading its bytes when the surface holds
         another; False when none is named or its bytes are not held yet (the first ask starts the
         fetch: player/luts.py). Texture unit 0 stays the active unit."""
-        luts = getattr(self, "_luts", None)
-        if operations is None or operations.lut is None or luts is None:
+        luts = self._luts
+        if operations is None or operations.lut is None:
             return False
         table = luts.lut(operations.lut.ref)
         if table is None:

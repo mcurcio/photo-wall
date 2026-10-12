@@ -50,6 +50,12 @@ a 64x48 PNG of four flat quadrants (red, green, blue, white) written here with t
    LUT is held (`PlayerLuts.hold`, as the service does after its digest-checked fetch) the surface
    draws again, the pixels equal `final_pixel` with the table (a steep, channel-turning one,
    mixed in at 0.8, so a half-texel sampling slip fails) and the tag names the change.
+16. two_coloured_lights_match (R6, the owner's window): a cool light from the side (90 degrees,
+   7500 K) and a warm one from the top (0 degrees, 3000 K) on the binding's Mat: every sample,
+   the two bands and the corner both shade included, equals `final_pixel` with `mat_shade`'s
+   shade, so the shader's loop past the first light and its uniform arrays (`light_toward`,
+   `light_band`, `light_weight`) are held to the reference; the side band reads warmer than the
+   top band, and the corner darker than both.
 """
 import ctypes
 import hashlib
@@ -93,6 +99,7 @@ from contracts.photo_crop import CENTRED  # noqa: E402
 from player.geometry import (  # noqa: E402
     compose_pixel,
     decode_channel,
+    encode_srgb,
     final_pixel,
     inside_opening,
     mat_shade,
@@ -219,7 +226,7 @@ def until(call, seconds: float = 8.0):
 
 
 def renderer() -> tuple[CapturingRenderer, Frames]:
-    native = CapturingRenderer((NativeOutput("headless", "photo-wall-headless", 640, 480),))
+    native = CapturingRenderer((NativeOutput("headless", "photo-wall-headless", 640, 480),), luts=PlayerLuts())
     native.set_unbound_outputs((), None)
     frames = Frames()
     native._frames = frames
@@ -461,6 +468,9 @@ PRINT = PictureOperations("headless", 5, (.9, .95, 1.0), 1.1, 1.1, 1.0, saturati
 TOP_LIGHT = Light(from_degrees=0, steep_degrees=30, softness_degrees=20, strength_tenths=15,
                   colour_kelvin=3000)
 DEEP_MAT = Mat(depth_mm=8, lights=(TOP_LIGHT,))      # a band of ~10..22 mm: tens of pixels here
+COOL_SIDE = Light(from_degrees=90, steep_degrees=30, softness_degrees=20, strength_tenths=15,
+                  colour_kelvin=7500)
+WINDOW_MAT = Mat(depth_mm=8, lights=(COOL_SIDE, TOP_LIGHT))
 TRIAL_SHA = "a" * 64
 
 
@@ -472,7 +482,7 @@ def print_sliders_match_the_reference(native, frames, variant) -> None:
     inside, outside = check_fit(native, fit, PRINT)
     red = final_pixel(tuple(decode_channel(v / 255) for v in QUADRANTS[0][:3]), PRINT, inside=True)
     print(f"PRINT inside={inside} outside={outside} red={red}", flush=True)
-    assert red[1] > PRINT.black_floor + .05, red          # the fade toward white lifts green
+    assert red[1] > encode_srgb(PRINT.black_floor) + .05, red   # the fade toward white lifts green
     assert inside > 500 and outside > 100, (inside, outside)
 
 
@@ -501,6 +511,20 @@ def cover_at_90_shades_the_wall_up_edge(native, frames, variant) -> None:
     right, top = mat_shade(shadow, .86, .5), mat_shade(shadow, .5, .12)
     print(f"TURNED inside={inside} right={right} top={top}", flush=True)
     assert right[0] < .8 and top == (1.0, 1.0, 1.0), (right, top)
+    assert inside > 500, inside
+
+
+def two_coloured_lights_match(native, frames, variant) -> None:
+    frames.operations = None
+    fit = CoverFit(corners=OPENING)
+    show(native, composition(variant, Calibration(fit=fit), binding=shaded_binding(WINDOW_MAT)))
+    inside, _ = check_fit(native, fit, None, mat=WINDOW_MAT)
+    shadow = mat_shadow(fit, PROFILE, WINDOW_MAT)
+    side, top, corner = mat_shade(shadow, .86, .5), mat_shade(shadow, .5, .12), mat_shade(shadow, .86, .12)
+    print(f"TWO_LIGHTS inside={inside} side={side} top={top} corner={corner}", flush=True)
+    assert len(shadow.lights) == 2
+    assert side[0] / side[2] > 1 > top[0] / top[2], (side, top)
+    assert all(c < min(s, t) for c, s, t in zip(corner, side, top, strict=True)), (corner, side, top)
     assert inside > 500, inside
 
 
@@ -621,7 +645,7 @@ CASES = (cover_matches_the_reference(0), cover_matches_the_reference(7),
          the_diagnostic_shows_only_while_the_output_is_unbound, crop_offset_keeps_the_left_edge,
          print_sliders_match_the_reference, one_light_from_the_top_matches,
          cover_at_90_shades_the_wall_up_edge, neutral_program_takes_no_new_step, trial_mat_drawn,
-         lut_matches_the_reference)
+         lut_matches_the_reference, two_coloured_lights_match)
 
 
 def main() -> None:

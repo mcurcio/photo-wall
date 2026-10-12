@@ -104,6 +104,7 @@ def static_photo_render_rate(seconds=6.0):
 
     from contracts.models import FrameProfile, Layer, Mat, OutputBinding
     from contracts.photo_crop import CENTRED
+    from player.luts import PlayerLuts
     from player.native import NativeOutput, NativeRenderer
     from player.rendering import LocalLayer, OutputComposition
 
@@ -126,7 +127,7 @@ def static_photo_render_rate(seconds=6.0):
             return original(self, area, context, surface)
 
         NativeRenderer._render = counted
-        renderer = NativeRenderer((NativeOutput("headless", "photo-wall-headless", 640, 480),))
+        renderer = NativeRenderer((NativeOutput("headless", "photo-wall-headless", 640, 480),), luts=PlayerLuts())
         renderer.set_unbound_outputs((), None)
         payload, variant = image_fixture()
         photo = pathlib.Path("/tmp/pw-mainloop-photo.png")

@@ -73,8 +73,20 @@ class SoftwareSetting(StrEnum):
     HIGHLIGHT_ROLLOFF = "highlight-rolloff"     # print look: percent 0..100, 0 = the clip at white
     BLACK_FLOOR = "black-floor"                 # print look: tenths of a percent of white light 0..100
     LUT_AMOUNT = "lut-amount"                   # print look: percent 0..100 of the LUT mixed in
-    LUT = "lut"                                 # print look: the LUT choice (`edited_lut`; touched tracking only,
-                                                # `edited_software` refuses it)
+
+
+class SoftwareChoice(StrEnum):
+    """Photo Wall's picture settings that name a thing rather than set a number, each with its own
+    edit (one route per question): the LUT choice (`edited_lut`, `.../lut-edits`)."""
+    LUT = "lut"
+
+
+SoftwareTouch = SoftwareSetting | SoftwareChoice     # what a session records as touched in the group
+
+
+def software_touch(name: str) -> SoftwareTouch:
+    """A touched software setting by its stored name. ValueError for an unknown one."""
+    return SoftwareChoice(name) if name in SoftwareChoice._value2member_map_ else SoftwareSetting(name)
 
 
 _SOFTWARE_FIELDS: Final[Mapping[SoftwareSetting, str]] = {
@@ -126,7 +138,7 @@ class PictureSession:
     began_at_change: int
     hardware_before: Mapping[VcpCode, int]
     touched_hardware: frozenset[VcpCode]
-    touched_software: frozenset[SoftwareSetting]
+    touched_software: frozenset[SoftwareTouch]
     lease: Lease
 
 
@@ -182,10 +194,9 @@ def edited_hardware(session: PictureSession, code: VcpCode, value: int | None, *
 def edited_software(session: PictureSession, setting: SoftwareSetting, value: int, *,
                     expected_sequence: int, now: float) -> PictureSession:
     """The session after one of Photo Wall's numeric edits. PictureRefused: session_ended,
-    stale_sequence, out_of_range 422 (contracts.node_picture's ranges: `SoftwarePicture`; and
-    SoftwareSetting.LUT, which only `edited_lut` sets)."""
+    stale_sequence, out_of_range 422 (contracts.node_picture's ranges: `SoftwarePicture`)."""
     sequence = _next(session, expected_sequence, now)
-    if not isinstance(setting, SoftwareSetting) or setting not in _SOFTWARE_FIELDS or type(value) is not int:
+    if not isinstance(setting, SoftwareSetting) or type(value) is not int:
         raise PictureRefused("out_of_range", 422)
     try:
         software = replace(session.draft.software, **{_SOFTWARE_FIELDS[setting]: value})
@@ -206,7 +217,7 @@ def edited_lut(session: PictureSession, lut: LutRef | None, *, known: bool, expe
         raise PictureRefused("unknown_lut", 422)
     software = replace(session.draft.software, lut=lut)
     return replace(session, sequence=sequence, draft=replace(session.draft, software=software),
-                   touched_software=session.touched_software | {SoftwareSetting.LUT},
+                   touched_software=session.touched_software | {SoftwareChoice.LUT},
                    lease=touched(session.lease, now, idle_seconds=PICTURE_IDLE_SECONDS))
 
 
@@ -322,7 +333,7 @@ def _in_list_order(hardware: Mapping[VcpCode, int]) -> dict[VcpCode, int]:
 
 
 __all__ = ["PICTURE_IDLE_SECONDS", "DisplayPicture", "PictureRefused", "PictureSession", "PictureStatus",
-           "SoftwareSetting", "answers", "carries", "copied", "default_picture", "edited_hardware", "edited_lut",
-           "edited_software",
+           "SoftwareChoice", "SoftwareSetting", "SoftwareTouch", "answers", "carries", "copied", "default_picture",
+           "edited_hardware", "edited_lut", "edited_software", "software_touch",
            "effective_picture", "hardware_answered", "kept_picture", "picture_digest", "picture_document",
            "picture_status", "presented", "restore_answered", "restore_of", "reverted", "with_befores", "with_restore"]

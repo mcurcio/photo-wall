@@ -86,7 +86,6 @@ from central.displays.picture import (
     DisplayPicture,
     PictureRefused,
     PictureSession,
-    SoftwareSetting,
     copied,
     default_picture,
     edited_hardware,
@@ -101,6 +100,7 @@ from central.displays.picture import (
     presented,
     restore_answered,
     restore_of,
+    software_touch,
     with_befores,
     with_restore,
 )
@@ -466,7 +466,7 @@ def picture_session(row: Mapping[str, Any]) -> PictureSession | None:
                           stored_picture(row["session_draft"]), row["began_at_change"],
                           {code: int(value) for code, value in row["hardware_before"].items()},
                           frozenset(row["touched_hardware"]),
-                          frozenset(SoftwareSetting(name) for name in row["touched_software"]),
+                          frozenset(software_touch(name) for name in row["touched_software"]),
                           Lease(row["session_idle_until"], None))
 
 

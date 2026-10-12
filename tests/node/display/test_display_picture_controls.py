@@ -375,7 +375,7 @@ def test_the_print_look_becomes_operations_and_each_neutral_is_exactly_skipped()
     assert operations_for(OUTPUT, 3, print_look(lut=PAPER, amount=0)) == neutral_operations(OUTPUT, 3)
     most = operations_for(OUTPUT, 3, print_look(saturation=150, rolloff=100, floor=100))
     assert (most.saturation, most.highlight_knee) == (1.5, HIGHLIGHT_KNEE_MIN)
-    assert most.black_floor == pytest.approx(0.1 ** (1 / 2.2), abs=1e-12)
+    assert most.black_floor == 0.1
     grey = operations_for(OUTPUT, 3, print_look(saturation=0, rolloff=40))
     assert grey.saturation == 0.0
     assert grey.highlight_knee == pytest.approx(1 - 0.4 * (1 - HIGHLIGHT_KNEE_MIN), abs=1e-12)
@@ -385,10 +385,10 @@ def test_the_print_look_becomes_operations_and_each_neutral_is_exactly_skipped()
 
 @pytest.mark.parametrize("gamma", [18, 26])
 def test_the_black_floor_is_a_share_of_white_light_whatever_photo_walls_gamma(gamma):
-    """2.0 % of white light is 0.02 ** (1 / 2.2) through the display's response, at any gamma look
-    (errata "the display's response"). Mutation probe: use gamma_tenths / 10 -> 18 and 26 differ."""
-    assert operations_for(OUTPUT, 1, print_look(floor=20, gamma=gamma)).black_floor == pytest.approx(
-        0.02 ** (1 / 2.2), abs=1e-12)
+    """2.0 % of white light is the share 0.02 at any gamma look: the Player lifts in the panel's
+    light (player/geometry.py `floor_lifted`). Mutation probe: scale by gamma_tenths -> 18 and 26
+    differ."""
+    assert operations_for(OUTPUT, 1, print_look(floor=20, gamma=gamma)).black_floor == 0.02
 
 
 def test_the_lut_is_mixed_in_by_its_amount_and_none_at_zero_or_without_a_lut():

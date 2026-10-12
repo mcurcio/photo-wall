@@ -99,11 +99,11 @@ def test_the_largest_operations_fit_the_event():
     raw = encode_picture_operations(_operations(
         output_id=long_id, picture_change=2**63 - 1, rgb_multipliers=(1.0, 1 / 3, 1 / 7), light_factor=1 / 3 + 1,
         contrast_slope=1 / 3 + 1, gamma_exponent=1 / 3 + 1, saturation=1 / 3 + 1, highlight_knee=1 / 3,
-        black_floor=1 / 3, lut=LutMix(LutRef("f" * 64, "z" * 64), 1 / 3)))
+        black_floor=1 / 13, lut=LutMix(LutRef("f" * 64, "z" * 64), 1 / 3)))
     assert len(raw) <= PICTURE_OPERATIONS_BYTES   # the largest real operations fit with room to spare
 
 
-PRINT = _operations(saturation=0.85, highlight_knee=0.6, black_floor=0.169,
+PRINT = _operations(saturation=0.85, highlight_knee=0.6, black_floor=0.02,
                     lut=LutMix(LutRef("ab" * 32, "lut33-perceptual-relcol-bpc-1"), 0.8))
 
 

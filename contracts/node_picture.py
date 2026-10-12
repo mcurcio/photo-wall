@@ -50,6 +50,7 @@ from enum import StrEnum
 from types import MappingProxyType
 from typing import Any, Final
 
+from contracts.kelvin import KELVIN_WHITE
 from contracts.lut import LutRef
 from contracts.node_output import OUTPUT_IDS, DisplayIdentity
 from contracts.wire_codec import decode, encode, fields_of, list_of, object_of, require, whole
@@ -68,7 +69,7 @@ SOFTWARE_PERCENT_NEUTRAL: Final = 100           # changes nothing
 KELVIN_MIN: Final = 3000                        # colour temperature (#113), whole kelvin in KELVIN_STEP
 KELVIN_MAX: Final = 9300
 KELVIN_STEP: Final = 100
-KELVIN_NEUTRAL: Final = 6500                    # changes nothing
+KELVIN_NEUTRAL: Final = KELVIN_WHITE            # changes nothing: the Display's white (contracts/kelvin.py)
 GAMMA_TENTHS_MIN: Final = 18                    # gamma (#114) in tenths: 18..26 is 1.8..2.6
 GAMMA_TENTHS_MAX: Final = 26
 GAMMA_TENTHS_NEUTRAL: Final = 22                # 2.2: changes nothing

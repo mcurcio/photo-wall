@@ -37,6 +37,7 @@ from contracts.models import Commit, Plan, PlayerConfiguration, Revocation
 from contracts.player_control import ControlSelection
 from contracts.time import ManualClock, TimeMapping
 from player.identity import load_identity
+from player.luts import PlayerLuts
 from player.mainloop import CONTROL, DispatchRefused, LoopLate, MainLoopDispatcher
 from player.output_discovery import (
     OUTPUT_IDS,
@@ -305,7 +306,7 @@ async def rig(tmp_path, *, server=None, negotiate=False):
     service = PlayerService(config, load_identity(), (), RecordingRenderer(), immediate,
         find_central=finding("http://central"), trust=TRUST, clock=clock,
         client=client, time_client=client,
-        websocket_connect=False, boot_context=boot_context())
+        websocket_connect=False, boot_context=boot_context(), luts=PlayerLuts())
     await service.locate_central()
     await service.enroll()
     if negotiate:
@@ -481,7 +482,7 @@ async def finder_rig(find, handle=None):
     client = httpx.AsyncClient(transport=httpx.MockTransport(handle or server), trust_env=False)
     service = PlayerService(PlayerConfig(), load_identity(), (), RecordingRenderer(), immediate,
         find_central=find, trust=TRUST, clock=clock, client=client, time_client=client,
-        websocket_connect=False, boot_context=boot_context())
+        websocket_connect=False, boot_context=boot_context(), luts=PlayerLuts())
     return service, server
 
 
@@ -598,7 +599,7 @@ def test_a_run_reaches_a_sustained_session(
         service = PlayerService(config, load_identity(), (), RecordingRenderer(), immediate,
             find_central=finding("http://central"), trust=TRUST, clock=clock,
             client=client, time_client=client, websocket_connect=connect,
-            boot_context=boot_context())
+            boot_context=boot_context(), luts=PlayerLuts())
         task = asyncio.create_task(service.run())
         try:
             async def connected():
@@ -777,7 +778,7 @@ def test_only_connected_unbound_outputs_show_enrollment_diagnostic(tmp_path):
              OutputReport(output_id="hdmi2", width_px=0, height_px=0, connected=False)),
             RecordingRenderer(), immediate, find_central=finding("http://central"),
             trust=TRUST, clock=clock, client=client, time_client=client,
-            websocket_connect=False, boot_context=boot_context(),
+            websocket_connect=False, boot_context=boot_context(), luts=PlayerLuts()
         )
         try:
             assert service.central_link_state == service.renderer.central_link_state == "connecting"
@@ -1539,7 +1540,7 @@ def test_cache_initialization_failure_fails_session_without_local_fallback(tmp_p
             cache_dir=str(directory)), load_identity(), (), RecordingRenderer(), immediate,
             find_central=finding("http://central"), trust=TRUST, clock=clock,
             client=client, time_client=client, cache_factory=fail,
-            boot_context=boot_context())
+            boot_context=boot_context(), luts=PlayerLuts())
         try:
             await service.locate_central()
             with pytest.raises(ServiceError, match="player_initialization"):
@@ -1750,7 +1751,7 @@ def test_the_default_websocket_connector_refuses_redirects(tmp_path, monkeypatch
         service = PlayerService(PlayerConfig(central_origin="http://central"),
             load_identity(), (), RecordingRenderer(), immediate,
             find_central=finding("http://central"), trust=TRUST, clock=clock,
-            client=client, time_client=client, boot_context=boot_context())
+            client=client, time_client=client, boot_context=boot_context(), luts=PlayerLuts())
         assert service.link.websocket_connect is None
         try:
             await service.locate_central()
@@ -1964,7 +1965,7 @@ def test_real_central_http_media_commit_outage_rejoin_and_renewal(registry, tmp_
             RecordingRenderer(), immediate,
             find_central=functools.partial(find_central, Configured(Origin.parse_root(origin)),
                                            transport=transport),
-            trust=trust, clock=registry.clock, client=client, time_client=client, boot_context=context)
+            trust=trust, clock=registry.clock, client=client, time_client=client, boot_context=context, luts=PlayerLuts())
         socket_task = None
         try:
             assert (await service.locate_central()).origin == Origin.parse_root(origin)

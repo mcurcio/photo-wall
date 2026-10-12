@@ -48,6 +48,7 @@ from gi.repository import GLib, Gst  # noqa: E402
 
 from contracts.models import FrameProfile, Layer, Mat, OutputBinding, Variant  # noqa: E402
 from contracts.photo_crop import CENTRED  # noqa: E402
+from player.luts import PlayerLuts  # noqa: E402
 from player.native import NativeOutput, NativeRenderer  # noqa: E402
 from player.rendering import LocalLayer, OutputComposition  # noqa: E402
 
@@ -108,7 +109,7 @@ def until(call, wanted: str, seconds: float = 5.0) -> str:
 
 
 def renderer() -> NativeRenderer:
-    native = NativeRenderer((NativeOutput("headless", "photo-wall-headless", 640, 480),))
+    native = NativeRenderer((NativeOutput("headless", "photo-wall-headless", 640, 480),), luts=PlayerLuts())
     native.set_unbound_outputs((), None)
     spin(1.0)                               # the first render compiles the surface's programs
     return native

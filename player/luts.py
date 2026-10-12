@@ -19,17 +19,36 @@ from contracts.lut import LUT_BYTES, LutRef
 
 
 class LutSource(Protocol):
-    """Where the renderer gets a LUT's bytes."""
+    """Where the renderer gets a LUT's bytes (the renderer's side of PlayerLuts)."""
 
     def lut(self, ref: LutRef) -> bytes | None:
-        """The LUT's bytes, or None while it is loading; never blocks."""
+        """The LUT's bytes, or None while it is loading; never blocks. Records a LUT not held as
+        wanted."""
+        ...
+
+    def generation(self) -> int:
+        """Rises at every hold, so a LUT's arrival redraws."""
+        ...
+
+
+class LutWants(Protocol):
+    """What the service fetches and where it puts it (the service's side of PlayerLuts)."""
+
+    def wanted(self) -> tuple[LutRef, ...]:
+        """Every LUT asked for and not held."""
+        ...
+
+    def hold(self, ref: LutRef, body: bytes) -> None:
+        """Hold `ref`'s bytes, as served and checked."""
         ...
 
 
 class PlayerLuts:
-    """Thread-safe (the renderer asks on the GLib thread, the service fetches on its loop). The
-    held bytes are a copy of what the media cache keeps: lost with the process, fetched or read
-    from the cache again on the next ask."""
+    """Both sides at once (`LutSource` and `LutWants`): built once at the composition root
+    (player/service.py `main`) and handed to both the renderer and the service, each of which
+    requires it. Thread-safe (the renderer asks on the GLib thread, the service fetches on its
+    loop). The held bytes are a copy of what the media cache keeps: lost with the process, fetched
+    or read from the cache again on the next ask."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -66,4 +85,4 @@ class PlayerLuts:
             return self._generation
 
 
-__all__ = ["LutSource", "PlayerLuts"]
+__all__ = ["LutSource", "LutWants", "PlayerLuts"]

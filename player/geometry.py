@@ -17,8 +17,8 @@ pass, each stated once here and mirrored by player/native.py's shaders:
   so the photo is never cropped twice or squeezed.
 
 The print look (design /print-look, 2026-10-12) adds a LUT, saturation, the highlight rolloff
-(which replaces the clamp after white balance x brightness), the black floor and the Frame's mat
-shadow to the final pass, in one order (`final_pixel`), each skipped at its neutral value.
+(which replaces the clamp after brightness, before white balance), the black floor and the Frame's
+mat shadow to the final pass, in one order (`final_pixel`), each skipped at its neutral value.
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ from contracts.frame_fit import Corners, OutputSize, cover_rectangle
 from contracts.kelvin import kelvin_white
 from contracts.lut import LUT_GRID, lut_offset
 from contracts.models import CornersFit, CoverFit, FrameProfile, Mat, PhotoCrop
-from contracts.node_frame import DISPLAY_GAMMA, PictureOperations, srgb_to_linear
+from contracts.node_frame import PictureOperations, srgb_to_linear
 from contracts.photo_crop import CENTRED, crop_window
 
 Matrix = tuple[float, float, float, float, float, float, float, float, float]
@@ -206,37 +206,37 @@ def saturated(linear: Linear, saturation: float) -> Linear:
 
 
 def peak(operations: PictureOperations) -> float:
-    """M, the brightest a channel reaches after steps 2-3 for inputs in [0, 1]:
-    light_factor * max_c(m_c * (1 + max(0, saturation - 1) * (1 - LUMA_c))). Pure.
-
-    Saturation above 1 pushes a pure primary furthest: the channel at 1 with the others at 0
-    reaches s - (s - 1) * LUMA_c."""
-    boost = max(0.0, operations.saturation - 1)
-    return operations.light_factor * max(
-        multiplier * (1 + boost * (1 - weight))
-        for multiplier, weight in zip(operations.rgb_multipliers, LUMA, strict=True))
+    """M, white's level after brightness (design: the largest gain x brightness; the white-balance
+    multipliers' largest is 1 and they act after the rolloff): light_factor. Pure."""
+    return operations.light_factor
 
 
 def rolloff_skipped(operations: PictureOperations) -> bool:
-    """highlight_knee >= 1 or peak(operations) <= 1: step 4 is then v4's clamp to 0..1."""
+    """highlight_knee >= 1 or peak(operations) <= 1 (nothing white passes white): step 4 is then
+    v4's clamp to 0..1 after white balance x brightness. The one home of when the rolloff acts:
+    Central's picture view reports it (central/displays/views.py) through Display Host's
+    operations."""
     return operations.highlight_knee >= 1 or peak(operations) <= 1
 
 
 def rolled_off(linear: Linear, knee: float, peak: float) -> Linear:
-    """Step 4 when not skipped, channels already max(0, c). x = max channel; x <= knee: unchanged.
-    Else t = (x-k)/(1-k), w = (peak-k)/(1-k), g = t*(1 + t/w**2)/(1 + t), y = k + (1-k)*g,
-    fade = g ** ROLLOFF_FADE_POWER, each channel c*y/x*(1-fade) + y*fade. peak -> exactly 1, slope 1 at the knee.
+    """Step 4 when not skipped, on brightness-scaled channels (max(0, c * light_factor)), before
+    white balance. x = max channel; x <= knee: unchanged. Else t = (min(x, peak)-k)/(1-k),
+    w = (peak-k)/(1-k), g = t*(1 + t/w**2)/(1 + t), y = k + (1-k)*g, fade = g ** ROLLOFF_FADE_POWER,
+    each channel c*y/x*(1-fade) + y*fade. peak -> exactly 1, slope 1 at the knee.
 
     Extended Reinhard on the brightest channel with `peak` as its white, every channel scaled
     alike (hue kept) and faded toward white as it nears the top (the path to white of darktable's
-    filmic and AgX). Pure.
+    filmic and AgX). A channel saturation pushed past `peak` is held there (x capped), so it ends
+    at white too, never above it. Pure.
 
     Worked through the shortfall 1 - g = (w - t)(w + t) / (w**2 (1 + t)) (the same g, rearranged),
-    so at x == peak, where t == w, it is exactly 0 and the pixel exactly white."""
+    so at x >= peak, where t == w, it is exactly 0 and the pixel exactly white. White balance comes
+    after, so that white is the Display's white (the colour temperature's tint kept)."""
     x = max(linear)
     if x <= knee:
         return linear
-    t = (x - knee) / (1 - knee)
+    t = (min(x, peak) - knee) / (1 - knee)
     w = (peak - knee) / (1 - knee)
     short = (w - t) * (w + t) / (w * w * (1 + t))
     g = 1 - short
@@ -245,9 +245,20 @@ def rolled_off(linear: Linear, knee: float, peak: float) -> Linear:
     return tuple(value * y / x * (1 - fade) + y * fade for value in linear)
 
 
-def floor_lifted(value: float, floor: float) -> float:
-    """Step 6, output value: floor + (1 - floor) * value."""
-    return floor + (1 - floor) * value
+def floor_lifted(light: float, share: float) -> float:
+    """Step 6, in the panel's light: share + (1 - share) * light (black point compensation: black
+    becomes `share` of white light, white stays white). Pure."""
+    return share + (1 - share) * light
+
+
+def light_colour(kelvin: int) -> Linear:
+    """A mat light's colour at `kelvin`, as light of luminance 1 (sum of LUMA_c * c = 1): the
+    kelvin table's white (contracts/kelvin.py `kelvin_white`, whose largest channel is 1 for the
+    Display's white balance) scaled so a light's strength alone says how bright it is and its
+    kelvin only its colour. Pure."""
+    white = kelvin_white(kelvin)
+    luminance = sum(weight * channel for weight, channel in zip(LUMA, white, strict=True))
+    return tuple(channel / luminance for channel in white)
 
 
 @dataclass(frozen=True)
@@ -256,7 +267,7 @@ class MatLight:
     toward: tuple[float, float]   # unit vector from the opening toward the light (output axes, x right, y down)
     dark_until_mm: float          # s0 = depth * cot(min(90, steep + softness/2)): nearer the edge than this, fully shadowed
     lit_from_mm: float            # s1 = depth * cot(max(LIGHT_ELEVATION_MIN_DEGREES, steep - softness/2)): fully lit from here
-    weight: Linear                # strength_tenths/10 * kelvin_white(colour_kelvin)
+    weight: Linear                # strength_tenths/10 * light_colour(colour_kelvin)
 
 
 @dataclass(frozen=True)
@@ -273,31 +284,36 @@ def _cot(degrees: float) -> float:
 
 
 def mat_shadow(fit: CornersFit | CoverFit, profile: FrameProfile, mat: Mat) -> MatShadow | None:
-    """None when not mat.shades (step 7 skipped). size: diag_mm = diagonal_inches*25.4, a = width_px/height_px,
-    W = diag_mm*a/hypot(a,1), H = diag_mm/hypot(a,1); size_mm = (W, H) when the nearest quarter turn of
-    fit.rotation is 0 or 180, else (H, W). toward: alpha = radians(from_degrees + fit.rotation),
-    (sin alpha, -cos alpha) (wall-up is the picture's up). cot(90) is exactly 0.
+    """None when not mat.shades (step 7 skipped). quarter = the nearest quarter turn of fit.rotation
+    (round(rotation / 90) * 90). size: diag_mm = diagonal_inches*25.4, a = width_px/height_px,
+    W = diag_mm*a/hypot(a,1), H = diag_mm/hypot(a,1); size_mm = (W, H) when quarter is 0 or 180,
+    else (H, W). toward: alpha = radians(from_degrees + quarter), (sin alpha, -cos alpha). cot(90)
+    is exactly 0.
 
-    The distance to the edge is measured in mat space (the opening's own rectangle at its
-    physical size), so a skewed Corners opening still gets an even band. Pure."""
+    Everything is in mat space, the opening's own rectangle at its physical size, whose axes
+    follow the opening's edges: so a skewed Corners opening still gets an even band, and the
+    light's direction turns by the same quarter turn as the rectangle's size. The rest of a Cover
+    rotation is the opening's own tilt on the output, already in its edges: an opening drawn level
+    on the wall is lit from the wall's up whatever its tilt on the panel. Pure."""
     if not mat.shades:
         return None
     diagonal = profile.diagonal_inches * 25.4
     aspect = profile.width_px / profile.height_px
     width, height = diagonal * aspect / math.hypot(aspect, 1), diagonal / math.hypot(aspect, 1)
-    size = (width, height) if round(fit.rotation / 90) % 2 == 0 else (height, width)
+    quarter = round(fit.rotation / 90) * 90
+    size = (width, height) if quarter % 180 == 0 else (height, width)
     lights = []
     for light in mat.lights:
         if light.strength_tenths <= 0:
             continue
-        turn = math.radians(light.from_degrees + fit.rotation)
+        turn = math.radians(light.from_degrees + quarter)
         half = light.softness_degrees / 2
         strength = light.strength_tenths / 10
         lights.append(MatLight(
             toward=(math.sin(turn), -math.cos(turn)),
             dark_until_mm=mat.depth_mm * _cot(min(90, light.steep_degrees + half)),
             lit_from_mm=mat.depth_mm * _cot(max(LIGHT_ELEVATION_MIN_DEGREES, light.steep_degrees - half)),
-            weight=tuple(strength * channel for channel in kelvin_white(light.colour_kelvin))))
+            weight=tuple(strength * channel for channel in light_colour(light.colour_kelvin))))
     return MatShadow(inverse(homography(fit.corners)), size, tuple(lights))
 
 
@@ -371,13 +387,14 @@ def final_pixel(linear: Linear, operations: PictureOperations, *, inside: bool,
                 shade: Linear | None = None, lut: bytes | None = None) -> tuple[float, float, float, float]:
     """One output pixel's final pass, in the print look's order (design "The order"):
     step 1 (`lut_applied`, the LUT `operations.lut` names mixed in by its amount) unless
-    operations.lut is None or its bytes (`lut`) are not held -> step 2 (`saturated`) unless saturation == 1 -> white
-    balance x light_factor (linear light) -> step 4: max(0, .) then `rolled_off` unless
-    `rolloff_skipped`, else clamp 0..1 (v4) -> sRGB encode, contrast about 0.5, gamma exponent,
-    clamp (v4) -> step 6 (`floor_lifted`) unless black_floor == 0 -> step 7 unless `shade` is
-    None: value * shade_c ** (1/DISPLAY_GAMMA) (a shade is light; the display's response turns it
-    into an output factor) -> the per-Output mask LAST: (0, 0, 0, 1) when not `inside` any Frame's
-    opening, whatever the floor and the shadow. Pure.
+    operations.lut is None or its bytes (`lut`) are not held -> step 2 (`saturated`) unless
+    saturation == 1 -> steps 3-4: when `rolloff_skipped`, v4's white balance x light_factor
+    clamped to 0..1; else max(0, c * light_factor), `rolled_off`, then x white balance (the
+    rolloff's white is the Display's white) -> sRGB encode, contrast about 0.5, gamma exponent,
+    clamp (v4) -> steps 6-7 in the panel's light, unless black_floor == 0 and `shade` is None:
+    decode (sRGB, the panel the encode is for), `floor_lifted` unless black_floor == 0, x shade_c
+    unless `shade` is None, encode -> the per-Output mask LAST: (0, 0, 0, 1) when not `inside`
+    any Frame's opening, whatever the floor and the shadow. Pure.
 
     A contrast result below 0 meets the exponent as 0 (a power of a negative number is undefined,
     in GLSL too); with the clamp after, this equals clamping before the exponent."""
@@ -385,20 +402,24 @@ def final_pixel(linear: Linear, operations: PictureOperations, *, inside: bool,
         linear = lut_applied(linear, lut, operations.lut.amount)
     if operations.saturation != 1.0:
         linear = saturated(linear, operations.saturation)
-    gained = tuple(max(0.0, value*multiplier*operations.light_factor)
-                   for value, multiplier in zip(linear, operations.rgb_multipliers, strict=True))
     if rolloff_skipped(operations):
-        gained = tuple(min(1.0, value) for value in gained)
+        gained = tuple(min(1.0, max(0.0, value*multiplier*operations.light_factor))
+                       for value, multiplier in zip(linear, operations.rgb_multipliers, strict=True))
     else:
-        gained = rolled_off(gained, operations.highlight_knee, peak(operations))
+        rolled = rolled_off(tuple(max(0.0, value*operations.light_factor) for value in linear),
+                            operations.highlight_knee, peak(operations))
+        gained = tuple(value*multiplier for value, multiplier in zip(rolled, operations.rgb_multipliers, strict=True))
     pixel = []
     for value in gained:
         value = (encode_srgb(value) - .5)*operations.contrast_slope + .5
         pixel.append(min(1.0, max(0.0, value) ** operations.gamma_exponent))
-    if operations.black_floor != 0:
-        pixel = [floor_lifted(value, operations.black_floor) for value in pixel]
-    if shade is not None:
-        pixel = [value * light ** (1 / DISPLAY_GAMMA) for value, light in zip(pixel, shade, strict=True)]
+    if operations.black_floor != 0 or shade is not None:
+        light = [srgb_to_linear(value) for value in pixel]
+        if operations.black_floor != 0:
+            light = [floor_lifted(value, operations.black_floor) for value in light]
+        if shade is not None:
+            light = [value * factor for value, factor in zip(light, shade, strict=True)]
+        pixel = [encode_srgb(value) for value in light]
     if not inside:
         return (0.0, 0.0, 0.0, 1.0)
     return (*pixel, 1.0)

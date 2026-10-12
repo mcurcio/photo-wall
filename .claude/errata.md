@@ -5771,3 +5771,51 @@ Order: (a) merge the iac PR that switches the factory to `central.app:create_app
 - **The list is read when the page opens and after each Add or Remove, not pushed:** a LUT chosen
   on another tab shows in Used by the next time the page opens. The Picture tab's picker reads the
   list when the tab opens (pictureSession.js), so a LUT added while it is open shows next time.
+
+## print-look review-2 fixes (fix agent, PR 95, 2026-10-12)
+
+- **The design's step 3/4 boundary was wrong: the rolloff erased the colour temperature.** With
+  white balance before the rolloff, its path to white went to (1, 1, 1), so soft highlights on and
+  brightness 100 % -> 101 % flipped paper white from warm to neutral. While the rolloff acts, it now
+  works on the brightness-scaled colour and white balance multiplies after it (their largest is 1,
+  so nothing passes white); when it is skipped the step is v4's, unchanged. 0023's order table and
+  `player/geometry.py` `final_pixel` say so; the shader mirrors it.
+- **M is brightness alone (the design's "largest gain x brightness"), not raised by saturation.**
+  The build's saturation term dimmed paper white at 100 % brightness with saturation above 100 %
+  (0.95 at 120 %). Now white stays exactly white at 100 % for any saturation, and a channel
+  saturation pushes past the peak is held at it (`rolled_off` caps x), so a vivid primary at
+  brightness above 100 % ends at white, as a pure primary at the peak already did. Cost: above
+  100 % brightness the most saturated primaries reach white a little sooner than before.
+- **The black floor lifts light, not the output value (spec error, for the owner's page).** The
+  design's "output: floor + (1 - floor) x value" contradicts the black point compensation it cites
+  and washed shadows out (x1.78 at 1 % light, matte floor). The Pi now sends the floor's share of
+  white light as it is (`black_floor` = tenths / 1000, `BLACK_FLOOR_MAX` 0.1); the Player decodes the
+  output value to the panel's light, lifts it (share + (1 - share) x light), multiplies the mat's
+  shade there, and encodes again. **One panel model:** the sRGB curve its encode already assumes
+  (`contracts/node_frame.py` `srgb_to_linear`, `player/geometry.py` `encode_srgb`);
+  `DISPLAY_GAMMA` (2.2) is gone. This supersedes "the display's response" entry above (its point,
+  that Photo Wall's gamma look is not the panel, stands).
+- **A light's colour has luminance 1** (`player/geometry.py` `light_colour`), not the white
+  balance's largest-channel-1 normalisation, so `Light.strength` means brightness and the kelvin
+  only colour (a 2700 K light was a third as bright as a 6500 K one). The kelvin table keeps its
+  one home (`contracts/kelvin.py`); the two normalisations vary apart.
+- **A light's direction turns by the Frame's nearest quarter turn**, the same as the mat
+  rectangle's size, not the whole rotation: the rest of a Cover rotation is the opening's own tilt
+  on the panel, already in its edges, so an opening level on the wall is lit from the wall's up.
+- **Per-Frame mat uniforms wait with the multi-Frame union mask** (E-1C-R1F-2): the GL final pass
+  carries one Frame's mat as it carries one opening. The design's bead 3 "multi-Frame uniforms" and
+  review-1 #7 were not built; player-architecture.md now says the scalar reference alone carries a
+  shadow per Frame.
+- **The Frame's wires take no default mat.** `OutputBinding.mat`, `TrialCandidate.mat_json` and
+  `candidate_hash`'s mat are required, and `parse_trial` takes exactly the envelope's fields: the
+  interfaces entry's "new fields default to neutral in Python constructors" no longer holds for the
+  Frame's half (the Display's `SoftwarePicture` and `PictureOperations` keep their Python defaults,
+  their decoders strict). 093 gives every stored binding (player_configurations, plan_offers) the
+  no-shadow mat so stored documents still read (the 087 outage's class). Closes slice C3's entry:
+  `commit_calibration_trial_in` requires the mat and writes it (no `COALESCE`).
+- **The LUT source is required on both sides** (`NativeRenderer(luts=...)`, `PlayerService(luts=...)`,
+  built once in `main`); `LutSource` declares `generation`, `LutWants` `wanted` and `hold`.
+- **The LUT choice has its own route, `POST .../picture-sessions/{id}/lut-edits` (`LutEdit`,
+  `PictureCommands.edit_lut`), not the design's `lut` setting on the software edit:** one route per
+  question, because the LUT choice names a LUT where the software edit sets a number. Closes slice
+  C2's `PictureCommands` entry.

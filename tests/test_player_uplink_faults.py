@@ -19,6 +19,7 @@ from uplink_fakes import finding
 from contracts.time import ManualClock
 from player import central_link
 from player.identity import load_identity
+from player.luts import PlayerLuts
 from player.rendering import RecordingRenderer
 from player.service import PlayerConfig, PlayerService
 from uplink.trust import Trust
@@ -63,7 +64,7 @@ def _service(*, find_central, trust, cache_dir=None, client=None, time_client=No
         PlayerConfig(**kwargs), load_identity(), (), RecordingRenderer(), immediate,
         find_central=find_central, trust=trust, client=client, time_client=time_client,
         clock=clock, clock_record=clock_record or (lambda: RECORD),
-        websocket_connect=False, boot_context=boot_context())
+        websocket_connect=False, boot_context=boot_context(), luts=PlayerLuts())
 
 
 # --- AC2: R9's fault table, over a real socket for every case ----------------------------

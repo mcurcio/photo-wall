@@ -58,9 +58,8 @@ Rules this module owns (one home each):
   HIGHLIGHT_KNEE_MIN) with r = highlight_rolloff_percent / ROLLOFF_PERCENT_MAX, worked as (1 - r) +
   r * HIGHLIGHT_KNEE_MIN so 0 % is exactly 1 (skipped) and 100 % exactly HIGHLIGHT_KNEE_MIN (the
   form 1 - r * (1 - HIGHLIGHT_KNEE_MIN) rounds to just below it, which the contract refuses);
-  black floor = (black_floor_tenths / 1000) ** (1 / DISPLAY_GAMMA), the floor's share of white
-  light as an output value through the display's response, never Photo Wall's gamma (a look;
-  errata "the display's response"); the LUT mix is none when there is no LUT or lut_amount_percent is 0, else the LUT at lut_amount_percent / 100.
+  black floor = black_floor_tenths / 1000, the floor's share of white light (the Player lifts in
+  the panel's light, player/geometry.py `floor_lifted`); the LUT mix is none when there is no LUT or lut_amount_percent is 0, else the LUT at lut_amount_percent / 100.
   Each at its neutral value is exactly the neutral operation. Sent to the shell at once on each new
   change, by the shell worker.
 - **Re-sent at start:** the controller restarts with Weston, and sends every Output's operations
@@ -88,7 +87,7 @@ from pathlib import Path
 from typing import Final, Protocol
 
 from contracts.kelvin import kelvin_white
-from contracts.node_frame import DISPLAY_GAMMA, HIGHLIGHT_KNEE_MIN, LutMix, PictureOperations
+from contracts.node_frame import HIGHLIGHT_KNEE_MIN, LutMix, PictureOperations
 from contracts.node_output import DisplayIdentity
 from contracts.node_picture import (
     GAMMA_TENTHS_NEUTRAL,
@@ -130,7 +129,7 @@ def operations_for(output_id: str, picture_change: int, software: SoftwarePictur
                              gamma_exponent=software.gamma_tenths / GAMMA_TENTHS_NEUTRAL,
                              saturation=software.saturation_percent / SATURATION_PERCENT_NEUTRAL,
                              highlight_knee=(1 - rolloff) + rolloff * HIGHLIGHT_KNEE_MIN,
-                             black_floor=(software.black_floor_tenths / 1000) ** (1 / DISPLAY_GAMMA),
+                             black_floor=software.black_floor_tenths / 1000,
                              lut=None if software.lut is None or software.lut_amount_percent == 0
                              else LutMix(software.lut, software.lut_amount_percent / 100))
 

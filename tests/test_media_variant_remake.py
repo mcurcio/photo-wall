@@ -28,6 +28,7 @@ from central.photo_library.rendition import FrameNeed
 from contracts.enrollment import OutputReport
 from media.prepare import PreparationRecipe, recipe_id
 from player.identity import load_identity
+from player.luts import PlayerLuts
 from player.rendering import RecordingRenderer
 from player.service import PlayerConfig, PlayerService
 
@@ -93,7 +94,7 @@ def test_the_player_accepts_a_re_made_copy_under_the_plan_s_name(wall, registry,
                                            height_px=1080),),
             RecordingRenderer(), immediate, find_central=finding("http://central"),
             trust=TRUST, clock=registry.clock, client=client, time_client=client,
-            websocket_connect=False, boot_context=boot_context())
+            websocket_connect=False, boot_context=boot_context(), luts=PlayerLuts())
         try:
             await service.locate_central()
             await service.enroll()

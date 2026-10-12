@@ -19,6 +19,7 @@ from central.content_catalog.catalog import device_id_for_serial
 from contracts.enrollment import OutputReport
 from contracts.equipment import equipment_device_id
 from player.identity import load_identity
+from player.luts import PlayerLuts
 from player.rendering import RecordingRenderer
 from player.service import (
     PlayerConfig,
@@ -112,7 +113,7 @@ def test_hardware_boot_context_enrolls_against_a_real_registry_pending_unbound(r
                 load_identity(), (OutputReport(output_id="HDMI-A-1", width_px=0, height_px=0),),
                 RecordingRenderer(), _immediate, find_central=finding("http://central"),
                 trust=Trust.public(tls.write_bundle(tmp_path / "ca.pem", tls.CA)),
-                clock=registry.clock, client=client, time_client=client, boot_context=context,
+                clock=registry.clock, client=client, time_client=client, boot_context=context, luts=PlayerLuts()
             )
             try:
                 await service.locate_central()

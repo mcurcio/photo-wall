@@ -13,13 +13,14 @@ import pytest
 from contracts.kelvin import kelvin_white
 from contracts.lut import LUT_BYTES, LUT_GRID, LutRef, lut_offset
 from contracts.models import CornersFit, CoverFit, FrameProfile, Light, Mat
-from contracts.node_frame import DISPLAY_GAMMA, LutMix, PictureOperations
+from contracts.node_frame import LutMix, PictureOperations, srgb_to_linear
 from player.geometry import (
     LUMA,
     decode_channel,
     encode_srgb,
     final_pixel,
     homography,
+    light_colour,
     lut_applied,
     lut_sampled,
     mat_shade,
@@ -79,26 +80,28 @@ def test_neutral_print_look_draws_exactly_the_v4_pixels(applied):
 
 # -- 2. The order, by a hand-worked table (design "The order") -----------------------------------
 
-# Saturation 0.8, brightness 1.4, knee 0.6, contrast 1.2, gamma exponent 1, floor 0.1688 and one
-# shade 0.64, worked step by step (bright row): L = 0.2126*0.9 + 0.7152*0.45 + 0.0722*0.18 =
+# Saturation 0.8, brightness 1.4, knee 0.6, contrast 1.2, gamma exponent 1, floor 2 % of white light
+# and one shade 0.64, worked step by step (bright row): L = 0.2126*0.9 + 0.7152*0.45 + 0.0722*0.18 =
 # 0.526176; saturated = L + 0.8 (c - L) = (0.8252352, 0.4652352, 0.2492352); x 1.4 = (1.1553293,
 # 0.6513293, 0.3489293); M = 1.4, so t = (1.1553293 - 0.6)/0.4 = 1.3883232, w = 2, g = t (1 + t/4)
 # / (1 + t) = 0.7830529, y = 0.6 + 0.4 g = 0.9132212, fade = g^2 = 0.6131719, each c y/x (1 - fade)
-# + y fade = (0.9132212, 0.7591155, 0.6666520); sRGB encode, (e - 0.5)*1.2 + 0.5, clamp = (1,
-# 0.9626570, 0.9031986); 0.1688 + 0.8312 v = (1, 0.9689605, 0.9195387); x 0.64^(1/2.2) = the row.
-# Dark row: 0.002 encodes to 0.0258, contrast takes it below 0, so the floor alone is left.
-PRINT = operations(light=1.4, slope=1.2, saturation=.8, knee=.6, floor=.1688)
+# + y fade = (0.9132212, 0.7591155, 0.6666520); white balance (1, 1, 1); sRGB encode, (e - 0.5)*1.2
+# + 0.5, clamp = (1, 0.9626570, 0.9031986); in the panel's light (sRGB decode) 0.02 + 0.98 l, x 0.64,
+# encode = the row. Dark row: 0.002 encodes to 0.0258, contrast takes it below 0, so the floor and
+# the shade alone are left: encode(0.02 * 0.64).
+PRINT = operations(light=1.4, slope=1.2, saturation=.8, knee=.6, floor=.02)
 PRINT_TABLE = (
-    ((0.9, 0.45, 0.18), (0.816394345734772, 0.791053862440259, 0.7507061736875426)),
-    ((0.18, 0.18, 0.18), (0.5089139418972378,) * 3),
-    ((0.002, 0.002, 0.002), (0.1378073655600295,) * 3),
+    ((0.9, 0.45, 0.18), (0.820979848329444, 0.7906092701711199, 0.7423245099634812)),
+    ((0.18, 0.18, 0.18), (0.4564099910864193,) * 3),
+    ((0.002, 0.002, 0.002), (0.11662871345570966,) * 3),
 )
 
 
 @pytest.mark.parametrize("linear, expected", PRINT_TABLE)
 def test_the_print_look_runs_in_the_designs_order(linear, expected):
-    """Order: saturation, white balance x brightness, rolloff, encode, contrast, gamma, black floor,
-    shade. Mutation probe: lift the floor before contrast -> the dark row reads 0.10, not 0.138."""
+    """Order: saturation, brightness, rolloff, white balance, encode, contrast, gamma, then in the
+    panel's light the black floor and the shade. Mutation probe: lift the floor before contrast ->
+    the dark row is no longer the floor's alone."""
     assert final_pixel(linear, PRINT, inside=True, shade=(.64, .64, .64)) == pytest.approx(
         (*expected, 1.0), abs=1e-12)
 
@@ -124,19 +127,51 @@ def test_the_rolloff_brings_the_peak_to_exactly_white_and_leaves_the_knee_smooth
         previous = out[0]
 
 
-def test_the_rolloff_acts_only_where_something_passes_white():
-    """Skipped (v4's clamp) at brightness <= 100 % with saturation <= 100 %, or at knee 1; active
-    at saturation 150 % and brightness 100 %, where a pure blue reaches 1 + 0.5 (1 - 0.0722).
-    Mutation probe: peak = light_factor alone -> the saturation-150 case clips both reds to 1."""
+def test_the_rolloff_acts_only_where_white_passes_white():
+    """M is brightness alone (design: the largest gain x brightness, the largest white-balance
+    multiplier being 1): skipped (v4's clamp) at brightness <= 100 % whatever the saturation, or
+    at knee 1; active above 100 %. Mutation probe: let saturation raise the peak -> the vivid case
+    is not skipped."""
     assert rolloff_skipped(operations(knee=.5))
-    assert rolloff_skipped(operations(light=.8, saturation=.5, knee=.5))
+    assert rolloff_skipped(operations(light=.8, saturation=1.5, knee=.5))
+    assert rolloff_skipped(operations(saturation=1.5, knee=.5))
     assert rolloff_skipped(operations(light=1.5, knee=1.0))
-    vivid = operations(saturation=1.5, knee=.5)
-    assert not rolloff_skipped(vivid)
-    assert peak(vivid) == pytest.approx(1 + .5 * (1 - .0722))
-    assert peak(operations((1.0, .5, .5), 1.2, saturation=1.5)) == pytest.approx(1.2 * (1 + .5 * (1 - .2126)))
-    red, darker_red = (final_pixel(c, vivid, inside=True) for c in ((1.0, 0, 0), (.9, 0, 0)))
-    assert red[0] > darker_red[0], (red, darker_red)            # not clipped flat
+    assert not rolloff_skipped(operations(light=1.01, knee=.5))
+    assert peak(operations((1.0, .5, .5), 1.2, saturation=1.5)) == 1.2
+
+
+@pytest.mark.parametrize("saturation", [.5, 1.0, 1.2, 1.5])
+def test_white_stays_white_at_full_brightness_whatever_the_saturation(saturation):
+    """'White stays white' (design): at brightness 100 % paper white is exactly white for any
+    saturation, with the rolloff at its strongest. Mutation probe: let saturation raise the peak ->
+    white dims (0.95 at saturation 1.2)."""
+    assert final_pixel((1.0, 1.0, 1.0), operations(saturation=saturation, knee=.18), inside=True) == pytest.approx(
+        (1.0, 1.0, 1.0, 1.0), abs=1e-15)
+
+
+@pytest.mark.parametrize("kelvin", [3500, 5000, 9300])
+def test_the_rolloffs_white_is_the_displays_white(kelvin):
+    """The colour temperature is the one home of white: with soft highlights on, white keeps the
+    white balance's tint, and 100 % -> 101 % brightness moves a highlight by a hair, never from
+    warm to neutral. Mutation probe: white balance before the rolloff -> 101 % paper white is
+    (1, 1, 1) and the grey jumps."""
+    balance = kelvin_white(kelvin)
+    at, above = (operations(balance, light, knee=.5) for light in (1.0, 1.01))
+    assert rolloff_skipped(at) and not rolloff_skipped(above)
+    tinted = final_pixel((1.0, 1.0, 1.0), above, inside=True)[:3]
+    assert tinted == pytest.approx(tuple(encode_srgb(channel) for channel in balance), abs=1e-12)
+    for grey in (.8, .95, 1.0):
+        below, over = (final_pixel((grey,) * 3, applied, inside=True) for applied in (at, above))
+        assert over == pytest.approx(below, abs=.01), (grey, below, over)
+
+
+def test_saturation_past_the_peak_ends_at_white_never_above():
+    """A primary saturation pushes past white is held at the peak: exactly white, no channel
+    above 1, and a less bright one keeps its hue."""
+    vivid = operations(light=1.2, saturation=1.5, knee=.5)
+    assert final_pixel((0.0, 0.0, 1.0), vivid, inside=True) == pytest.approx((1.0, 1.0, 1.0, 1.0), abs=1e-15)
+    red = final_pixel((.5, 0.0, 0.0), vivid, inside=True)
+    assert red[0] > red[1] and max(red[:3]) <= 1.0
 
 
 # -- 4. The black floor is the last tone step (R10) -----------------------------------------------
@@ -144,14 +179,25 @@ def test_the_rolloff_acts_only_where_something_passes_white():
 def test_the_floor_lifts_black_keeps_white_and_never_reaches_outside_the_opening():
     """Black in -> exactly the floor; white stays white; outside every opening exactly black with
     the floor and a shadow on. Mutation probe: lift after the mask -> outside pixels non-zero."""
-    lifted = operations(slope=1.5, exponent=26 / 22, floor=.2)
-    assert final_pixel((0.0, 0.0, 0.0), lifted, inside=True) == (.2, .2, .2, 1.0)
+    lifted = operations(slope=1.5, exponent=26 / 22, floor=.05)
+    assert final_pixel((0.0, 0.0, 0.0), lifted, inside=True) == pytest.approx((encode_srgb(.05),) * 3 + (1.0,),
+                                                                             abs=1e-15)
     assert final_pixel((1.0, 1.0, 1.0), lifted, inside=True) == pytest.approx((1.0,) * 4, abs=1e-15)
     assert final_pixel((.3, .6, .9), lifted, inside=False, shade=(.5, .6, .7)) == (0.0, 0.0, 0.0, 1.0)
     fit = CoverFit(corners=((.2, .2), (.8, .2), (.8, .8), (.2, .8)))
     shadow = mat_shadow(fit, SCREEN, Mat(depth_mm=20, lights=(light(steep=5),)))
     for x, y in ((.1, .5), (.5, .1), (.9, .9), (.19, .5)):
         assert output_pixel(x, y, ((fit, 16 / 9, (.4, .4, .4), shadow),), lifted, (1920, 1080)) == (0, 0, 0, 1)
+
+
+@pytest.mark.parametrize("light", [.01, .05, .18, .5])
+def test_the_floor_is_black_point_compensation_in_the_panels_light(light):
+    """2.5 % of white (matte paper): the panel shows share + (1 - share) * L for a pixel of light
+    L, as a print with that black does, never a lift of the output value (which washes shadows
+    out, x1.78 at L = 0.01). Mutation probe: lift the encoded value -> L = 0.01 shows 0.055, not
+    0.035."""
+    pixel = final_pixel((light,) * 3, operations(floor=.025), inside=True)[0]
+    assert srgb_to_linear(pixel) == pytest.approx(.025 + .975 * light, abs=1e-12)
 
 
 # -- 5-8. The mat shadow (R5, R6) ------------------------------------------------------------------
@@ -180,9 +226,9 @@ def test_one_light_from_the_top_shades_a_band_its_depth_times_cot_steep_wide():
     assert mat_shade(steep, .5, 1.5 / HEIGHT_MM) == (1.0, 1.0, 1.0)
     overhead = mat_shadow(CoverFit(), SCREEN, Mat(depth_mm=20, lights=(light(steep=90),)))
     assert mat_shade(overhead, .5, 1e-9) == (1.0, 1.0, 1.0)            # cot 90 is exactly 0
-    # The shade is light: in the output it multiplies by shade ** (1 / DISPLAY_GAMMA).
+    # The shade is light: it multiplies the panel's light (sRGB, the panel the encode is for).
     assert final_pixel((1.0, 1.0, 1.0), operations(), inside=True, shade=(.5, .5, .5))[:3] == pytest.approx(
-        (.5 ** (1 / DISPLAY_GAMMA),) * 3, abs=1e-15)
+        (encode_srgb(.5),) * 3, abs=1e-15)
 
 
 def test_a_soft_light_eases_its_edge_between_its_steepest_and_shallowest_rays():
@@ -195,6 +241,28 @@ def test_a_soft_light_eases_its_edge_between_its_steepest_and_shallowest_rays():
     assert middle == pytest.approx((1 + .5) / 2, abs=1e-9)
     assert mat_shade(shadow, .5, near * .99 / HEIGHT_MM) == (.5, .5, .5)
     assert mat_shade(shadow, .5, far * 1.01 / HEIGHT_MM) == (1.0, 1.0, 1.0)
+
+
+@pytest.mark.parametrize("tilt", [7, 10, -10])
+def test_a_light_from_above_shades_only_the_top_of_an_opening_level_on_the_wall(tilt):
+    """A Cover Frame turned `tilt` degrees on the panel, its opening drawn level on the wall (so
+    tilted on the output by the same angle): a light from straight above shades the opening's top
+    edge and neither side. Mutation probe: turn the light by the whole rotation -> one side edge
+    is shaded too (0.33 at 10 degrees)."""
+    turn = math.radians(tilt)
+    half_w, half_h, cx, cy = .3, .3, .5, .5
+    corners = tuple((cx + x * math.cos(turn) - y * math.sin(turn) * 9 / 16,
+                     cy + (x * math.sin(turn) * 16 / 9 + y * math.cos(turn)))
+                    for x, y in ((-half_w, -half_h), (half_w, -half_h), (half_w, half_h), (-half_w, half_h)))
+    fit = CoverFit(corners=corners, rotation=tilt % 360)
+    shadow = mat_shadow(fit, SCREEN, Mat(depth_mm=8, lights=(light(steep=20),)))
+    to_output = homography(fit.corners)
+    edge = .002
+    for u in (.2, .5, .8):
+        assert mat_shade(shadow, *transform(to_output, u, edge))[0] < 1        # the top edge: shaded
+    for v in (.3, .5, .7):
+        for u in (edge, 1 - edge):                                             # the sides: lit
+            assert mat_shade(shadow, *transform(to_output, u, v)) == (1.0, 1.0, 1.0), (u, v)
 
 
 def test_a_light_from_wall_up_shades_the_edge_that_is_up_on_a_turned_frame():
@@ -216,16 +284,30 @@ def test_two_coloured_lights_tint_each_shadow_away_from_its_light():
     Mutation probe: one denominator per light -> the centre is not exactly 1."""
     shadow = mat_shadow(CoverFit(), SCREEN, Mat(depth_mm=2, lights=(
         light(from_degrees=90, kelvin=7500), light(from_degrees=0, kelvin=2700))))
-    assert shadow.lights[0].weight == kelvin_white(7500)
+    cool, warm = light_colour(7500), light_colour(2700)
+    assert shadow.lights[0].weight == cool
     assert mat_shade(shadow, .5, .5) == (1.0, 1.0, 1.0)
     side = mat_shade(shadow, 1 - 1 / WIDTH_MM, .5)
     top = mat_shade(shadow, .5, 1 / HEIGHT_MM)
     corner = mat_shade(shadow, 1 - 1 / WIDTH_MM, 1 / HEIGHT_MM)
     assert side[0] / side[2] > 1 and top[0] / top[2] < 1, (side, top)
     assert all(c < min(s, t) for c, s, t in zip(corner, side, top, strict=True)), (corner, side, top)
-    assert corner == pytest.approx((1 / (1 + kelvin_white(7500)[0] + 1),
-                                    1 / (1 + kelvin_white(7500)[1] + kelvin_white(2700)[1]),
-                                    1 / (1 + 1 + kelvin_white(2700)[2])))
+    assert corner == pytest.approx(tuple(1 / (1 + c + w) for c, w in zip(cool, warm, strict=True)))
+
+
+@pytest.mark.parametrize("kelvin", [2000, 2700, 4000, 6500, 10000])
+def test_a_lights_strength_is_its_brightness_and_its_kelvin_only_its_colour(kelvin):
+    """Light.strength: 1.0 is as bright as all the room's other light, whatever its colour: each
+    light's colour has luminance 1, so a full shadow from a light of strength 1 is half as bright
+    in luminance at any kelvin. Mutation probe: use kelvin_white (largest channel 1) -> a 2700 K
+    light is a third as bright as a 6500 K one."""
+    colour = light_colour(kelvin)
+    assert sum(weight * channel for weight, channel in zip(LUMA, colour, strict=True)) == pytest.approx(1.0)
+    shadow = mat_shadow(CoverFit(), SCREEN, Mat(depth_mm=2, lights=(light(kelvin=kelvin),)))
+    shaded = mat_shade(shadow, .5, 1 / HEIGHT_MM)
+    lit = sum(weight * (1 + channel) for weight, channel in zip(LUMA, colour, strict=True))
+    assert lit == pytest.approx(2.0)
+    assert [shaded[c] * (1 + colour[c]) for c in range(3)] == pytest.approx([1.0] * 3)
 
 
 def test_a_skewed_corners_opening_gets_an_even_band():

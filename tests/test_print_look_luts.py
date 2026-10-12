@@ -216,6 +216,10 @@ def test_the_lut_choice_reaches_the_document_and_done_waits_for_the_pi(registry)
         session = _begin(client)
         unknown = _lut_edit(client, session, "ab" * 32, 1)
         assert (unknown.status_code, unknown.json()) == (422, {"error": "unknown_lut"})
+        # The LUT choice is its own question: the numeric software edit does not take it.
+        numeric = client.post(f"/v1/operator/picture-sessions/{session['session_id']}/software-edits",
+                              headers=AUTH, json={"setting": "lut", "value": 1, "expected_sequence": 1})
+        assert (numeric.status_code, numeric.json()) == (422, {"error": "invalid_request"})
         assert _lut_edit(client, session, _sha(printer), 1).json() == {"sequence": 2}
         document = _picture(registry)
         assert document.software.lut == LutRef(_sha(printer), LUT_RECIPE_ID)

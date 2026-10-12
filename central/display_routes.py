@@ -133,7 +133,7 @@ def mount_picture_routes(app: FastAPI, *, admin: Any, queries: PictureQueries, c
     @app.post(PICTURE_SESSIONS + "{session_id}/lut-edits", dependencies=[Depends(admin)],
               response_model=PictureSequence)
     def edit_lut(session_id: UUID, request: LutEdit) -> PictureSequence:
-        return commands.edit_lut(session_id, request)  # not on PictureCommands yet (errata, print-look C2)
+        return commands.edit_lut(session_id, request)
 
     @app.post(PICTURE_SESSIONS + "{session_id}/keepalive", dependencies=[Depends(admin)],
               response_model=PictureSessionView)

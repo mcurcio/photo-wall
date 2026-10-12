@@ -26,7 +26,7 @@ that tints only the Output's bottom-right quarter, which no sample reads.
 3. tracer_black_floor_and_one_light (the design's tracer): a document with software black floor
    2 % (black_floor_tenths 20) and all else neutral, on a binding whose Mat is 2 mm deep with one
    light from the wall's up (steep 45, no softness, strength 1.0, 6500 K): presented, and the
-   pixels equal `final_pixel` with the floor 0.02 ** (1 / 2.2) (worked here from the share, so a
+   pixels equal `final_pixel` with the floor share 0.02 (worked here from the tenths, so a
    controller that compiled the floor another way fails) and `mat_shade`'s shade, including the
    point 1 mm below the picture's top edge, in the light's shadow.
 4. lut_leg_waits_for_the_lut (the tracer's second leg): a document naming a LUT (a fixture table)
@@ -533,7 +533,7 @@ def print_look_cases(send, presented, drain, reports, SoftwarePicture) -> None:
     send(5, floored)
     report = presented(5)
     expected = PictureOperations(OUTPUT, 5, (1.0, 1.0, 1.0), 1.0, 1.0, 1.0,
-                                 black_floor=(20 / 1000) ** (1 / 2.2))
+                                 black_floor=20 / 1000)
     shadow = mat_shadow(fit, profile, mat)
 
     def shaded(x: float, y: float) -> tuple[float, float, float]:
@@ -568,7 +568,7 @@ def print_look_cases(send, presented, drain, reports, SoftwarePicture) -> None:
     looked = SoftwarePicture(100, 100, 6500, 22, black_floor_tenths=20, lut=ref, lut_amount_percent=80)
     send(6, looked)
     sliders = PictureOperations(OUTPUT, 6, (1.0, 1.0, 1.0), 1.0, 1.0, 1.0,
-                                black_floor=(20 / 1000) ** (1 / 2.2))
+                                black_floor=20 / 1000)
     inside, _ = await_compare(sliders, drain)
     end = time.monotonic() + 2.0
     while time.monotonic() < end:           # the Player draws on with the sliders; Done waits
