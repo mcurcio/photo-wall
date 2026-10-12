@@ -44,19 +44,21 @@ from typing import Literal
 
 from pydantic import Field
 
-from central.catalog import Candidate
+from central.catalog import Candidate, judged_size
 from central.wall_plan.fit import (
+    DoesNotFit,
     Fits,
     FitTarget,
     FitVerdict,
     MediaKind,
+    band,
     crop_share,
     judge,
     shape_fit,
 )
 from central.wall_plan.fit_settings import FitSettings
 from central.wall_plan.key_content import KeyContent, Measured, MeasureFailed
-from central.wall_plan.order import KeptStill, SceneLine
+from central.wall_plan.order import KeptStill, SceneLine, ShapeBounds, ShapeClass
 from contracts.models import (
     AfterEnd,
     Fraction,
@@ -207,20 +209,31 @@ def variant_usable(candidate: Candidate, target: FitTarget, settings: FitSetting
 def fit_of(candidate: Candidate, target: FitTarget, crop_limit: float,
            settings: FitSettings) -> FitVerdict | None:
     """The photo fit rule's verdict for a hydrated candidate on `target` at `crop_limit` with
-    `settings` (central/wall_plan/fit.py). None: an image that passes on its size alone and
-    whose key content is not measured yet. Memoised: `judge` is pure, so the memo is keyed by
-    every input (`settings` included) and never disagrees with it; an empty memo gives the same
-    answers."""
-    refused = shape_fit(candidate.kind, candidate.original_width, candidate.original_height,
-                        target, crop_limit, settings)
+    `settings` (central/wall_plan/fit.py), judged at its `judged_size`. None: an image that
+    passes on its size alone and whose key content, or readable size, is not measured yet.
+    Memoised: `judge` is pure, so the memo is keyed by every input (`settings` included) and
+    never disagrees with it; an empty memo gives the same answers."""
+    refused = candidate_shape_fit(candidate, target, crop_limit, settings)
     if refused is not None:
         return refused
+    size = judged_size(candidate)
     analysis = candidate.analysis
     key = analysis.key if isinstance(analysis, Measured) else None
-    if candidate.kind == "image" and key is None:
+    if size is None or (candidate.kind == "image" and key is None):
         return None
-    return _judged(candidate.kind, candidate.original_width, candidate.original_height, key,
-                   target, crop_limit, settings)
+    return _judged(candidate.kind, *size, key, target, crop_limit, settings)
+
+
+def candidate_shape_fit(candidate: Candidate, target: FitTarget, crop_limit: float,
+                        settings: FitSettings) -> DoesNotFit | None:
+    """`shape_fit` for a candidate at its `judged_size`. An image whose readable size is not
+    measured yet is judged by shape alone (as a Frame whose output is unknown), so nothing is
+    refused on a size no one measured; it is still never placed (`fit_of` answers None). Pure."""
+    size = judged_size(candidate)
+    if size is None:
+        return shape_fit(candidate.kind, candidate.original_width, candidate.original_height,
+                         target.model_copy(update={"output_px": None}), crop_limit, settings)
+    return shape_fit(candidate.kind, *size, target, crop_limit, settings)
 
 
 def fits_slot(candidate: Candidate, slot: Slot, settings: FitSettings) -> bool:
@@ -228,6 +241,37 @@ def fits_slot(candidate: Candidate, slot: Slot, settings: FitSettings) -> bool:
     screen: measured, it fits, it has not failed, and a prepared copy (if any) is usable. A
     Scene's line counts these as pickable (a pass ends once each is picked)."""
     return _standing(candidate, slot.target, slot.crop_limit, settings, inside=False)[0] == "take"
+
+
+def useful_for(candidate: Candidate, slot: Slot, settings: FitSettings) -> bool:
+    """Whether the fit rule leaves the candidate in play for `slot`: it fits (prepared or not), or
+    it waits for a measurement. False: refused, failed, or a prepared copy the Frame cannot
+    draw. The Planner reads more of a Scene's line while fewer of what it read are useful than
+    the line has slots."""
+    return _standing(candidate, slot.target, slot.crop_limit, settings,
+                     inside=False)[0] in ("take", "measure")
+
+
+# How far a readable copy's ratio may stray from its revision's (rounding a preview's sides).
+SHAPE_RATIO_SLACK = 0.02
+
+
+def shape_bounds(slots: Sequence[Slot]) -> ShapeBounds:
+    """What the store may pre-filter a Scene's line by (follow-up S3): per slot class, the
+    fit rule's ratio band (`band`, widened by `SHAPE_RATIO_SLACK`), whether the Frame shows
+    videos, and for an image the Frame output as a floor on the revision's sides (the window the
+    rule needs is never larger than the photo, and the readable size never larger than the
+    revision). A superset of `shape_fit`'s acceptances, so the exact judgement drops what the
+    store keeps, never the other way. Pure."""
+    classes: dict[ShapeClass, None] = {}
+    for slot in slots:
+        profile = slot.target.profile
+        low, high = band(profile.width_px / profile.height_px, slot.crop_limit)
+        width, height = slot.target.output_px or (0, 0)
+        classes[ShapeClass(video=profile.video, min_ratio=low * (1 - SHAPE_RATIO_SLACK),
+                           max_ratio=high * (1 + SHAPE_RATIO_SLACK), min_width=width,
+                           min_height=height)] = None
+    return ShapeBounds(classes=tuple(classes))
 
 
 @lru_cache(maxsize=65536)
@@ -494,8 +538,9 @@ class _Walk:
             if (asset_id not in pool or asset_id in self.reserved or candidate is None
                     or candidate.kind != "image" or candidate.preparation_failure
                     or isinstance(candidate.analysis, Measured)
-                    or shape_fit("image", candidate.original_width, candidate.original_height,
-                                 slot.target, slot.crop_limit, self.settings) is not None):
+                    or judged_size(candidate) is None
+                    or candidate_shape_fit(candidate, slot.target, slot.crop_limit,
+                                           self.settings) is not None):
                 continue
             if (candidate.variant is not None
                     and not variant_usable(candidate, slot.target, self.settings)):

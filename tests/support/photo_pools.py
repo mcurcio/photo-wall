@@ -16,7 +16,7 @@ from central.db import ProcessTransactionClock
 from central.infra.photo_library_store import PgPhotoLibrary
 from central.media_queue import QueueReceipt
 from central.media_repository import MediaRepository
-from central.photo_library.model import InPool, LibraryAsset, SourceQuery
+from central.photo_library.model import InPool, LibraryAsset, OriginalFile, SourceQuery
 from central.photo_library.ports import CheckComplete, CheckStep
 from central.photo_library.views import ConnectionWrite
 from central.runtime_store import RuntimeStore
@@ -61,11 +61,15 @@ def _uuid(text: str) -> str:
 
 
 def photo(label: str, *, taken_at: float, width: int = 1080, height: int = 1920,
-          kind: str = "image") -> LibraryAsset:
-    """One unedited photo (or video) of the fixture connection, named by `label`."""
+          kind: str = "image", original_type: str | None = None) -> LibraryAsset:
+    """One unedited photo (or video) of the fixture connection, named by `label`. Its original
+    is a JPEG (an MP4 for a video) as Immich's search answer says, unless `original_type` names
+    another: a JPEG original is read at its own size (central/photo_library/rendition.py)."""
+    media_type = original_type or ("video/mp4" if kind == "video" else "image/jpeg")
     return LibraryAsset(connection_ref=FIXTURE_CONNECTION, upstream_id=_uuid(label),
                         revision=sha1(label.encode()).hexdigest(), kind=kind, taken_at=taken_at,
-                        width=width, height=height, duration=10.0 if kind == "video" else None)
+                        width=width, height=height, duration=10.0 if kind == "video" else None,
+                        original=OriginalFile(media_type=media_type, width=width, height=height))
 
 
 def seed_pool(registry, source_ref: str, photos: Iterable[LibraryAsset], *,
@@ -73,7 +77,7 @@ def seed_pool(registry, source_ref: str, photos: Iterable[LibraryAsset], *,
     """Make `source_ref` (`<name>:1`) a saved Source on first use, then record one step of its
     pool's check finding `photos`. `complete` finishes the check, so it sweeps whatever an earlier
     check found; otherwise the check stays running and the next call adds to it. `registry` is
-    anything with the test database's `db` and `clock` (the registry, a MediaStore). Returns the
+    anything with the test database's `db` and `clock` (the registry, a repository). Returns the
     pool key."""
     library = library_of(registry)
     with registry.db.transaction() as conn:
@@ -97,5 +101,10 @@ def seed_pool(registry, source_ref: str, photos: Iterable[LibraryAsset], *,
     assert library.record_step(lease, CheckStep(progress={"page": 1}, marks=(), entries=entries,
                                                 seen_so_far=len(entries), immich_up_to=None))
     if complete:
+        # `photos` is all the library holds: the Re-check phase (follow-up S4) finds every
+        # earlier row this check did not see gone.
+        while unseen := library.unseen_rows(lease, 100):
+            for ref in unseen:
+                assert library.record_recheck(lease, ref, False)
         assert library.finish_check(lease, CheckComplete())
     return key

@@ -35,7 +35,7 @@ from central.photo_library.views import ConnectionWrite
 KEY = "PUBLIC-FIXTURE-KEY-1234"
 ANNA = ImmichUser(user_ref="5b0f3c0e-3d1c-4a8a-9f6e-2a8c1f0f7a11", name="Anna", email="anna@example.com")
 COUNTS = LibraryCounts(photos=41203, videos=2110, albums=212, people=96)
-TESTED = ImmichVersion(major=2, minor=5, patch=6)
+TESTED = ImmichVersion(major=3, minor=1, patch=0)
 
 __all__ = ["ANNA", "COUNTS", "KEY", "CheckMark", "TESTED", "Waiting"]
 
@@ -263,9 +263,15 @@ def finish(library: PgPhotoLibrary, lease, finish=None) -> None:
 
 
 def filled(library: PgPhotoLibrary, pool_key: str, entries, finish_with=None) -> None:
-    """One whole check: every entry in one step, then its finish (complete by default)."""
+    """One whole check: every entry in one step, then its finish (complete by default). The
+    entries are all Immich holds, so a complete check's Re-check phase (follow-up S4) finds
+    every earlier row it did not see gone."""
     lease = begin(library, pool_key)
     step(library, lease, entries, seen=len(entries), up_to=len(entries))
+    if finish_with is None or isinstance(finish_with, CheckComplete):
+        while unseen := library.unseen_rows(lease, 100):
+            for ref in unseen:
+                assert library.record_recheck(lease, ref, False)
     finish(library, lease, finish_with)
 
 

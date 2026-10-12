@@ -2,7 +2,7 @@
 imports fastapi).
 
 Starlette never cancels an endpoint when its client goes away, so `until_disconnect` watches
-`http.disconnect` (the `media_gateway.py` pattern) and cancels the read. A Pi gone at ~10s frees
+`http.disconnect` and cancels the read. A Pi gone at ~10s frees
 its waiter slot at once; the fetch job itself is never cancelled.
 """
 
@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import os
-from collections.abc import Awaitable, Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from contextlib import suppress
 from typing import BinaryIO, Final, TypeVar
 
@@ -76,6 +76,28 @@ def stream_opened(opened: Opened, media_type: str) -> StreamingResponse:
             "Digest": "sha-256=" + base64.b64encode(bytes.fromhex(opened.sha256)).decode(),
         },
         background=BackgroundTask(source.close),  # also after a disconnect mid-stream
+    )
+
+
+def stream_frame_media(opened: Opened, *, release: Callable[[], None]) -> StreamingResponse:
+    """A media variant's body with its `Repr-Digest` (RFC 9530) and `Content-Length`; `release`
+    (blocking) runs once the body ends or the client goes, after the fd is closed."""
+    source = os.fdopen(opened.fd, "rb")  # owns the fd from here on, even if never iterated
+
+    def finish() -> None:
+        try:
+            source.close()
+        finally:
+            release()
+
+    digest = base64.b64encode(bytes.fromhex(opened.sha256)).decode()
+    return StreamingResponse(
+        _chunks(source),
+        media_type=opened.media_type or "application/octet-stream",
+        headers={"Content-Length": str(opened.size), "Repr-Digest": f"sha-256=:{digest}:",
+                 "ETag": f'"{opened.sha256}"', "Cache-Control": "private, no-store",
+                 "Accept-Ranges": "none", "X-Content-Type-Options": "nosniff"},
+        background=BackgroundTask(finish),
     )
 
 

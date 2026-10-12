@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
-from contracts.models import PlayerConfiguration, Variant
+from contracts.models import PlayerConfiguration
 
 
 class ExecutionMediaAuthorization(Protocol):
@@ -14,7 +14,7 @@ class ExecutionMediaAuthorization(Protocol):
         player_id: str,
         authority_epoch: int,
         configuration: PlayerConfiguration,
-        variant: Variant,
+        variant_key: str,
         reference_owners: set[str],
         now: float,
     ) -> bool: ...

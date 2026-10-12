@@ -1,8 +1,9 @@
 """The Immich adapter's LibraryClient surface, offline (roadmap 4, run ledger slice M1).
 
-Every answer is shaped as Immich v2.5.6's OpenAPI document says; the in-memory library orders a
-search newest first by `fileCreatedAt` only and shuffles equal times on every request, as v2.5.6
-does (no secondary order), so a walk that leans on offsets or on a stable order loses rows here.
+Every answer is shaped as Immich v3.1.0's OpenAPI document says; the in-memory library orders a
+search newest first by `fileCreatedAt` only and shuffles equal times on every request (harsher
+than v3.1.0, which then orders by id), so a walk that leans on offsets or on a stable order loses
+rows here.
 All identifiers, keys and bytes are synthetic.
 """
 
@@ -74,10 +75,15 @@ def asset(number: int, *, taken: float = T0, created: float | None = None, kind:
         "isFavorite": False, "isTrashed": False, "visibility": "timeline",
         "originalMimeType": "image/jpeg" if kind == "IMAGE" else "video/mp4",
         "width": 4000, "height": 3000, "livePhotoVideoId": None,
-        "duration": "0:00:10.000000" if kind == "VIDEO" else "0:00:00.00000",
+        "duration": 10_000 if kind == "VIDEO" else None,
     }
     row.update(changes)
     return row
+
+
+def member(user_ref: str, role: str) -> dict:
+    """One v3.1.0 `AlbumUserResponseDto`."""
+    return {"role": role, "user": {"id": user_ref, "name": "", "email": "user@example.test"}}
 
 
 def jpeg(width: int, height: int, *, orientation: int | None = None,
@@ -94,7 +100,7 @@ def jpeg(width: int, height: int, *, orientation: int | None = None,
 
 
 class Library:
-    """An in-memory Immich v2.5.6: the routes the adapter reads, nothing it should not."""
+    """An in-memory Immich v3.1.0: the routes the adapter reads, nothing it should not."""
 
     def __init__(self, rows=(), *, seed: int = 7) -> None:
         self.rows = list(rows)
@@ -103,7 +109,7 @@ class Library:
         self.searches: list[dict] = []
         self.routes: dict[str, object] = {}
         self.permissions = ["all"]
-        # v2.5.6 `ServerFeaturesDto` (a subset): facial recognition on, as Immich ships.
+        # v3.1.0 `ServerFeaturesDto` (a subset): facial recognition on, as Immich ships.
         self.features = {"facialRecognition": True, "smartSearch": True, "map": True,
                          "trash": True, "search": True}
 
@@ -117,7 +123,7 @@ class Library:
         if route is not None:
             return route(request) if callable(route) else route
         if path == "/api/server/version":
-            return self.json({"major": 2, "minor": 5, "patch": 6})
+            return self.json({"major": 3, "minor": 1, "patch": 0, "prerelease": None})
         if path == "/api/users/me":
             return self.json({"id": OWNER, "name": "Owner", "email": "owner@example.test"})
         if path == "/api/api-keys/me":
@@ -204,7 +210,7 @@ def test_contact_reads_version_user_permissions_and_exact_counts():
     statistics(library)
     answer = run(library.client().contact())
     assert isinstance(answer, ContactAnswer)
-    assert (str(answer.version), answer.user.user_ref, answer.user.name) == ("2.5.6", OWNER,
+    assert (str(answer.version), answer.user.user_ref, answer.user.name) == ("3.1.0", OWNER,
                                                                           "Owner")
     assert answer.missing_permissions == ()
     # Albums: the user's own (Immich's `shared` counts albums shared with them, which a Source
@@ -681,9 +687,12 @@ def test_an_empty_plan_is_refused(tmp_path):
 def test_lists_are_read_whole_without_a_count_cap():
     library = Library()
     library.routes["/api/albums"] = library.json(
-        [{"id": ref(30), "albumName": "Garden", "assetCount": 12, "ownerId": OWNER},
-         {"id": ref(31), "albumName": "Mine, shared", "assetCount": 3, "ownerId": OWNER},
-         {"id": ref(32), "albumName": "Shared with me", "assetCount": 5, "ownerId": ref(99)}])
+        [{"id": ref(30), "albumName": "Garden", "assetCount": 12,
+          "albumUsers": [member(OWNER, "owner")]},
+         {"id": ref(31), "albumName": "Mine, shared", "assetCount": 3,
+          "albumUsers": [member(ref(99), "viewer"), member(OWNER, "owner")]},
+         {"id": ref(32), "albumName": "Shared with me", "assetCount": 5,
+          "albumUsers": [member(ref(99), "owner"), member(OWNER, "editor")]}])
     pages = {"1": {"people": [{"id": ref(40 + n), "name": f"P{n:05}", "isHidden": False}
                               for n in range(1000)], "hasNextPage": True,
                    "total": 1002, "hidden": 0},
@@ -809,7 +818,7 @@ def test_listed_tags_are_stripped_of_control_and_bidi_characters_and_sorted():
 
 
 def face(x1, y1, x2, y2, width=1440, height=1080, **changes) -> dict:
-    """One v2.5.6 `AssetFaceResponseDto`."""
+    """One v3.1.0 `AssetFaceResponseDto`."""
     row = {"id": ref(70), "boundingBoxX1": x1, "boundingBoxY1": y1, "boundingBoxX2": x2,
            "boundingBoxY2": y2, "imageWidth": width, "imageHeight": height,
            "person": None, "sourceType": "machine-learning"}

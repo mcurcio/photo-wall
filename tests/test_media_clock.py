@@ -24,7 +24,7 @@ from media import healthcheck
 ROOT = Path(__file__).resolve().parents[1]
 HOUR = 3600
 # The modules that write or compare media times (G11 inventory).
-MEDIA_MODULES = ("central/media_repository.py", "central/media_store.py", "central/app.py",
+MEDIA_MODULES = ("central/media_repository.py", "central/app.py",
                  "central/coordination.py", "central/operator_snapshot.py", "media/worker.py",
                  "media/immich.py", "media/healthcheck.py")
 
@@ -82,7 +82,7 @@ def test_worker_check_in_ages_against_the_media_read_on_one_clock(registry):
     worker.worker_status(None)
     read = central.media_read()
     assert 0 <= read["read_at"] - read["health"]["worker_seen"] < 5
-    worker.set_recipe("a" * 64)
+    worker.worker_status("worker_io")
     read = central.media_read()
     assert 0 <= read["read_at"] - read["health"]["worker_seen"] < 5
 

@@ -21,7 +21,7 @@ from fastapi.testclient import TestClient
 from media_queue import RecordingMediaQueue
 from PIL import Image
 from procrastinate.testing import InMemoryConnector
-from runtime_fakes import apply_procrastinate_schema
+from runtime_fakes import PrepareMediaStub, apply_procrastinate_schema
 from support.library_store_fake import FakeLibraryStore
 from test_media_worker import FakePreparer, worker_storage  # noqa: F401
 
@@ -219,9 +219,8 @@ def test_maintenance_keeps_only_the_files_the_photo_library_still_records(
     (previews / ".tmp-inflight").write_bytes(b"partial")
     library = FakeLibraryStore(worker_storage.clock)
     library.retire_unwanted = lambda: frozenset({kept.asset_id})
-    instance = MediaWorker(worker_storage.repository, worker_storage, library,
+    instance = MediaWorker(worker_storage.repository, library,
                            preparer=FakePreparer(), previews=previews)
-    instance.store.recover = lambda: None
     asyncio.run(instance.maintain())
     assert sorted(p.name for p in previews.iterdir()) == [".tmp-inflight", f"{kept.asset_id}.jpg"]
 
@@ -285,7 +284,7 @@ def test_a_servable_thumbnail_answers_within_about_two_seconds_then_serves(route
         assert not (root / "previews").exists()
         assert stat.S_IMODE(ensure_previews_directory(root).stat().st_mode) == 0o700
         runtime = build_job_runtime(registry.db, registry.clock, cache_root=root, env={},
-                                    thumbnails=FakeOrigin())
+                                    thumbnails=FakeOrigin(), media_maker=PrepareMediaStub())
         job = FetchLibraryThumbnail(asset_id=member.asset_id)
         assert asyncio.run(runtime._executor.execute(job, 0)) == "ok"
         served = client.get(_url(member.asset_id), headers=AUTH)
@@ -323,7 +322,7 @@ def test_a_purged_then_regenerated_thumbnail_serves_again_and_is_not_refetched(r
     member = SimpleNamespace(asset_id=asset_id)
     origin = RegeneratingOrigin()
     runtime = build_job_runtime(registry.db, registry.clock, cache_root=root, env={},
-                                thumbnails=origin)
+                                thumbnails=origin, media_maker=PrepareMediaStub())
     job = FetchLibraryThumbnail(asset_id=member.asset_id)
     previews = ensure_previews_directory(root)
     asyncio.run(build_library_thumbnails(registry.db, registry.clock, cache_root=root)
@@ -359,7 +358,7 @@ def test_a_fetch_for_a_retired_record_never_blocks_the_next_preview(route, regis
     asset_id, draft = _pool_photo(library, 11)
     member = SimpleNamespace(asset_id=asset_id)
     runtime = build_job_runtime(registry.db, registry.clock, cache_root=root, env={},
-                                thumbnails=FakeOrigin())
+                                thumbnails=FakeOrigin(), media_maker=PrepareMediaStub())
     thumbnails = build_library_thumbnails(registry.db, registry.clock, cache_root=root)
     job = FetchLibraryThumbnail(asset_id=member.asset_id)
     asyncio.run(thumbnails.prefetch([member.asset_id]))

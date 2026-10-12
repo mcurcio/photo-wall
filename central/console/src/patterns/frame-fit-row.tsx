@@ -83,6 +83,9 @@ export interface FrameFitView {
   /** The pixels it is judged at, in words ("Frame output 1,512 × 1,008 px, 3:2"), under
    * Details (pixels appear only there, design language §7); null while not known. */
   detail: string | null;
+  /** Photos waiting to be measured, in neutral words, apart from the bar's fits and refusals
+   * (pending, not refused); null or absent when none wait. */
+  waiting?: string | null;
   /** A Frame that will go without or has too few photos, said once where the Frame is drawn;
    * null when it is fine. */
   alert: FitAlert | null;
@@ -253,6 +256,7 @@ export function FrameFitRow({ frame, size, onOpen, onFocus, action, faded = fals
       ) : null}
       <p className="m-0 text-sm text-text tabular-nums">{frame.count}</p>
       <FitBar segments={frame.segments} label={`${frame.name}: fit and left off`} />
+      {frame.waiting != null && <p className="m-0 text-xs text-muted">{frame.waiting}</p>}
     </div>
   );
   return (

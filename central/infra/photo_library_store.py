@@ -86,7 +86,9 @@ from central.photo_library.ports import (
     CheckLease,
     CheckStep,
     KnownRevision,
+    LeanMember,
     LibraryRefused,
+    RankedLine,
 )
 from central.photo_library.rendition import covers, frame_need
 from central.photo_library.views import (
@@ -101,6 +103,18 @@ from central.photo_library.views import (
     PoolItem,
     SourcePoolView,
 )
+from central.wall_plan.order import (
+    ORDERS,
+    SHUFFLE_FIELDS,
+    SHUFFLE_SEPARATOR,
+    TIER_FRESH,
+    TIER_PICKED,
+    TIER_RECENT,
+    LineQuery,
+    ShapeBounds,
+    SourceLine,
+)
+from central.wall_plan.selection import Order
 
 THUMBNAIL_PATH = "/v1/operator/library/thumbnails/"
 # Searchable fields of one list item are joined by this separator (never visible text: the
@@ -117,11 +131,66 @@ _ITEM_TYPES: dict[str, type] = {"albums": LibraryAlbum, "people": LibraryPerson,
 # A pool is wanted (module docstring); `p` names the photo_pools row.
 _WANTED = ("(EXISTS (SELECT 1 FROM photo_drafts d WHERE d.pool_key=p.pool_key) OR EXISTS "
            "(SELECT 1 FROM media_sources s WHERE s.pool_key=p.pool_key AND s.refresh_active))")
+# A pool row `r` carries a mark of check `%(n)s` (an excluded id or a stacked copy): the
+# subtraction's one condition, for the finish and for the Re-check phase's unseen rows.
+_MARKED_BY_CHECK = ("EXISTS (SELECT 1 FROM photo_check_marks m WHERE m.pool_key=r.pool_key AND "
+                    "m.check_number=%(n)s AND m.upstream_id=r.upstream_id)")
 # An in-pool row `r` joined to its revision `a` and the revision's Immich asset `l` (owner item 6:
 # the facts live once, on the revision and its parent), and the columns of a PoolMember.
 _REVISION_JOIN = ("JOIN asset_revisions a USING (asset_id) JOIN library_assets l "
                   "ON l.connection_ref=a.connection_ref AND l.upstream_id=a.upstream_id")
 _MEMBER_COLUMNS = "r.asset_id,a.revision,l.kind,l.taken_at,a.width,a.height"
+
+# A Scene line's rows (follow-up S3): one per asset id of the query's pools, as `m`.
+_LINE_ROWS = ("SELECT a.asset_id,a.revision,l.kind,l.taken_at,a.width,a.height FROM "
+              "(SELECT DISTINCT asset_id FROM photo_pool_rows WHERE pool_key=ANY(%(pools)s) "
+              "AND outcome='in_pool') AS r JOIN asset_revisions a USING (asset_id) "
+              "JOIN library_assets l ON l.connection_ref=a.connection_ref "
+              "AND l.upstream_id=a.upstream_id")
+_ON_THIS_DAY = "to_char(to_timestamp(m.taken_at) AT TIME ZONE 'UTC','MM-DD')=%(today)s"
+_SHUFFLE_TEXT = {"scene_id": "%(scene)s::text", "pass_number": "%(pass)s::text",
+                 "asset_id": "m.asset_id"}
+_ORDER_FIELDS = {
+    "shuffle": "sha256(" + " || %(sep)s::bytea || ".join(
+        f"convert_to({_SHUFFLE_TEXT[name]},'UTF8')" for name in SHUFFLE_FIELDS) + ")",
+    "wrapped": ("CASE WHEN %(mark_id)s::text IS NOT NULL AND (m.taken_at,m.asset_id COLLATE \"C\")"
+                " <= (%(mark_at)s::float8,%(mark_id)s::text COLLATE \"C\") THEN 1 ELSE 0 END"),
+    "captured_at": "m.taken_at",
+    "asset_id": "m.asset_id COLLATE \"C\"",
+    "off_this_day": f"CASE WHEN {_ON_THIS_DAY} THEN 0 ELSE 1 END",
+}
+
+
+def _line_order_sql(order: Order) -> str:
+    """The SQL interpreter of central/wall_plan/order.py's tiers and `ORDERS[order]` (the Python
+    one is `order_key`); tests/test_order_sql_conformance.py holds the two equal."""
+    terms = ["CASE WHEN m.asset_id=ANY(%(picked)s::text[]) THEN %(tier_picked)s "
+             "WHEN m.asset_id=ANY(%(recent)s::text[]) THEN %(tier_recent)s ELSE %(fresh)s END"]
+    for term in ORDERS[order]:
+        expression = _ORDER_FIELDS[term.field]
+        if term.on_this_day_only:
+            expression = f"CASE WHEN {_ON_THIS_DAY} THEN {expression} END"
+        terms.append(expression + (" DESC" if term.descending else ""))
+    return ",".join(terms)
+
+
+def _shape_sql(shape: ShapeBounds, params: dict[str, Any]) -> str:
+    """`ShapeBounds.admits` in SQL over the line's revision sizes; adds its values to `params`."""
+    clauses = []
+    for index, bounds in enumerate(shape.classes):
+        params.update({f"low{index}": bounds.min_ratio, f"high{index}": bounds.max_ratio,
+                       f"width{index}": bounds.min_width, f"height{index}": bounds.min_height})
+        video = "m.kind='video'" if bounds.video else "FALSE"
+        clauses.append(
+            f"(m.width::float8/m.height BETWEEN %(low{index})s AND %(high{index})s AND ({video} "
+            f"OR (m.kind='image' AND m.width>=%(width{index})s AND m.height>=%(height{index})s)))")
+    return "(" + (" OR ".join(clauses) or "FALSE") + ")"
+
+
+def _lean(row: dict, pool_keys: dict[str, list[str]]) -> LeanMember:
+    return LeanMember(asset_id=row["asset_id"], revision=row["revision"], kind=row["kind"],
+                      taken_at=row["taken_at"], width=row["width"], height=row["height"],
+                      pool_keys=tuple(pool_keys.get(row["asset_id"], ())))
 
 
 def _fold(text: str) -> str:
@@ -159,7 +228,7 @@ def library_assets_in(conn: Any, asset_ids: Iterable[str]) -> dict[str, LibraryA
     to its parent `library_assets` row (connection, Immich id, kind, taken time, the original's
     facts as `OriginalFile`, None when every original column is NULL). An id with no row is
     absent. The one place a stored asset becomes a LibraryAsset: job leases
-    (`central.media_repository`, `central.media_store`) and the key content measurement
+    (`central.media_repository`'s variant inputs) and the key content measurement
     (roadmap 5a, `central.infra.key_content_store`) all read here."""
     ids = list(set(asset_ids))
     if not ids:
@@ -580,6 +649,60 @@ class PgPhotoLibrary:
                 answer[ref] = (tuple(members[key]), ready[key])
         return answer
 
+    @classmethod
+    def source_lines_in(cls, conn: Any, source_refs: set[str]) -> dict[str, SourceLine]:
+        """ScenePoolReader (follow-up S3): each named Source revision's pool key (None: no
+        readable query, or no pool yet), whether its pool has a complete check (C7: an unchecked
+        pool still plays what it has) and whether it holds no photo. A ref naming no revision is
+        left out. Read-only, in the caller's transaction."""
+        keys = {row["source_ref"]: cls._query_key(row["query"], row["pool_key"]) for row in
+                conn.execute("SELECT source_ref,query,pool_key FROM media_sources WHERE "
+                             "source_ref=ANY(%s)", (list(source_refs),)).fetchall()}
+        pools = {row["pool_key"]: row for row in conn.execute(
+            "SELECT p.pool_key,p.last_complete_at IS NOT NULL AS ready,EXISTS(SELECT 1 FROM "
+            "photo_pool_rows r WHERE r.pool_key=p.pool_key AND r.outcome='in_pool') AS held "
+            "FROM photo_pools p WHERE p.pool_key=ANY(%s)",
+            (list({key for key in keys.values() if key is not None}),)).fetchall()}
+        answer = {}
+        for ref, key in keys.items():
+            pool = pools.get(key) if key is not None else None
+            answer[ref] = SourceLine(
+                source_ref=ref, pool_key=key if pool is not None else None,
+                ready=pool is not None and pool["ready"],
+                empty=pool is None or not pool["held"])
+        return answer
+
+    @staticmethod
+    def ranked_line_in(conn: Any, q: LineQuery) -> RankedLine:
+        """ScenePoolReader (follow-up S3, design rule 3): the top `q.limit` of a Scene's line in
+        SQL, the in-pool rows of `q.pool_keys` (one per asset id) that `q.shape` admits by
+        revision size, ranked by tier then the pass order: central/wall_plan/order.py's `ORDERS`
+        and tiers, rendered here (`_line_order_sql`). Capture time and size are the rows' now.
+        Also the wrap mark's row (`q.after`, admitted or not). Read-only, in the caller's
+        transaction."""
+        params: dict[str, Any] = {
+            "pools": list(q.pool_keys), "after": q.after, "scene": q.scene_id,
+            "pass": q.pass_number, "sep": SHUFFLE_SEPARATOR, "today": q.today.strftime("%m-%d"),
+            "picked": sorted(q.picked), "recent": sorted(q.recent), "limit": q.limit,
+            "fresh": TIER_FRESH, "tier_recent": TIER_RECENT, "tier_picked": TIER_PICKED}
+        mark = None
+        if q.after is not None:
+            mark = conn.execute(f"SELECT * FROM ({_LINE_ROWS}) AS m WHERE m.asset_id=%(after)s",
+                                params).fetchone()
+        params["mark_at"] = None if mark is None else mark["taken_at"]
+        params["mark_id"] = None if mark is None else mark["asset_id"]
+        shape = _shape_sql(q.shape, params)
+        rows = conn.execute(
+            f"SELECT * FROM ({_LINE_ROWS}) AS m WHERE {shape} "
+            f"ORDER BY {_line_order_sql(q.order)} LIMIT %(limit)s", params).fetchall()
+        ids = [row["asset_id"] for row in rows] + ([] if mark is None else [mark["asset_id"]])
+        pool_keys = {row["asset_id"]: row["keys"] for row in conn.execute(
+            "SELECT asset_id,array_agg(pool_key ORDER BY pool_key) AS keys FROM photo_pool_rows "
+            "WHERE asset_id=ANY(%s) AND pool_key=ANY(%s) AND outcome='in_pool' GROUP BY asset_id",
+            (ids, list(q.pool_keys))).fetchall()}
+        return RankedLine(members=tuple(_lean(row, pool_keys) for row in rows),
+                          after=None if mark is None else _lean(mark, pool_keys))
+
     def _ensure_pool_in(self, conn: Any, query: SourceQuery) -> PoolKey:
         """The query's pool, created (check requested) when no pool has its key yet."""
         self._known_connection(conn, query.connection_ref)
@@ -901,19 +1024,43 @@ class PgPhotoLibrary:
             return (entry.upstream_id, "waiting", None, None)
         return (entry.upstream_id, "left_out", entry.reason, None)
 
+    def unseen_rows(self, lease: CheckLease, limit: int) -> tuple[LibraryRef, ...]:
+        with self.db.transaction() as conn:
+            if not self._fenced(conn, lease):
+                return ()
+            rows = conn.execute(
+                "SELECT r.upstream_id::text AS upstream_id FROM photo_pool_rows r WHERE "
+                f"r.pool_key=%(key)s AND r.seen_check<%(n)s AND NOT {_MARKED_BY_CHECK} "
+                "ORDER BY r.upstream_id LIMIT %(limit)s",
+                {"key": lease.pool_key, "n": lease.check_number, "limit": limit}).fetchall()
+        return tuple(row["upstream_id"] for row in rows)
+
+    def record_recheck(self, lease: CheckLease, ref: LibraryRef, matches: bool) -> bool:
+        queue = self._queue()
+        with self.db.transaction() as conn:
+            if not self._fenced(conn, lease):
+                return False
+            if matches:
+                conn.execute("UPDATE photo_pool_rows SET seen_check=%s WHERE pool_key=%s AND "
+                             "upstream_id=%s", (lease.check_number, lease.pool_key, ref))
+            else:
+                conn.execute("DELETE FROM photo_pool_rows WHERE pool_key=%s AND upstream_id=%s",
+                             (lease.pool_key, ref))
+            queue.enqueue_pool_check_in(conn, lease.pool_key)
+            return True
+
     def finish_check(self, lease: CheckLease, finish: CheckFinish) -> bool:
         with self.db.transaction() as conn:
             if not self._fenced(conn, lease):
                 return False
             now = self.times.now_in(conn)
             if isinstance(finish, CheckComplete):
-                # The sweep (design rule 2): only a complete check removes what it did not see,
-                # and what it subtracted (an id marked after an earlier step of it added a row).
+                # The subtraction (design rule 2): a complete check removes what it marked (an id
+                # marked after an earlier step of it added a row). A row it did not see stays:
+                # only `record_recheck` removes one, after asking Immich (follow-up S4).
                 conn.execute(
                     "DELETE FROM photo_pool_rows r WHERE r.pool_key=%(key)s AND "
-                    "(r.seen_check<%(n)s OR EXISTS (SELECT 1 FROM photo_check_marks m WHERE "
-                    "m.pool_key=r.pool_key AND m.check_number=%(n)s AND "
-                    "m.upstream_id=r.upstream_id))", {"key": lease.pool_key, "n": lease.check_number})
+                    f"{_MARKED_BY_CHECK}", {"key": lease.pool_key, "n": lease.check_number})
                 conn.execute("DELETE FROM photo_check_marks WHERE pool_key=%s AND check_number<%s",
                              (lease.pool_key, lease.check_number))
                 conn.execute("UPDATE photo_pools SET check_state='complete',check_finished_at=%s,"
@@ -959,9 +1106,14 @@ class PgPhotoLibrary:
     def photo_facts(self, asset_id: str) -> PhotoFacts:
         with self.db.transaction() as conn:
             row = conn.execute(
-                "SELECT c.full_size_copies,(SELECT j.made_from FROM media_jobs j WHERE "
-                "j.asset_id=a.asset_id AND j.state='ready' AND j.recipe_id=(SELECT recipe_id "
-                "FROM media_settings WHERE singleton)) AS made_from FROM asset_revisions a "
+                # The copy the wall's newest made variant of this revision was made from
+                # (its `MediaReady.made_from`; a variant 087 migrated names none).
+                "SELECT c.full_size_copies,(SELECT v.produced_detail->>'made_from' FROM assets v "
+                "WHERE v.kind='media-variant' AND v.identity LIKE a.asset_id || '.%%' "
+                "AND v.produced_sha256 IS NOT NULL "
+                "AND v.produced_detail->>'made_from' <> 'legacy' "
+                "ORDER BY v.created_at DESC, v.identity LIMIT 1) AS made_from "
+                "FROM asset_revisions a "
                 "LEFT JOIN library_connections c USING (connection_ref) WHERE a.asset_id=%s "
                 "AND EXISTS (SELECT 1 FROM photo_pool_rows r JOIN photo_pools p USING (pool_key) "
                 f"WHERE r.asset_id=a.asset_id AND r.outcome='in_pool' AND {_WANTED})",

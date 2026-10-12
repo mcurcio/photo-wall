@@ -25,7 +25,7 @@ SHUFFLE = SceneSelection()
 
 def candidate(asset_id: str, captured_at: float = 0.0) -> Candidate:
     return Candidate(asset_id=asset_id, kind="image", original_width=4000, original_height=3000,
-                     captured_at=captured_at)
+                     captured_at=captured_at, readable_size=(4000, 3000))
 
 
 def pool(count: int) -> tuple[Candidate, ...]:

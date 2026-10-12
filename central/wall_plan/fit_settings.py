@@ -16,7 +16,7 @@ planning pass with nothing measured again.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Final
+from typing import Annotated, Final
 
 from pydantic import Field
 
@@ -33,7 +33,11 @@ FIT_SETTING_RANGES: Final[Mapping[str, tuple[float, float]]] = {
     "large_frame_inches": (1.0, 200.0),
     "large_frame_video_short_side": (1, 4320),
     "window_steps": (8, 256),
+    "max_still_edge": (1024, 16384),
 }
+# Each step of `FitSettings.copy_ladder_px`, inclusive (a tuple has no one range the console's
+# controls offer, so it is not in FIT_SETTING_RANGES).
+COPY_STEP_RANGE: Final[tuple[int, int]] = (640, 16384)
 _R = FIT_SETTING_RANGES
 
 
@@ -66,6 +70,24 @@ class FitSettings(Model):
                                               le=_R["large_frame_video_short_side"][1])
     # How many steps the crop window is slid across its free axis (precision, not taste).
     window_steps: int = Field(default=64, ge=_R["window_steps"][0], le=_R["window_steps"][1])
+    # Follow-up to 5a, slice S1: the longest edge a Player shows a still at (a placeholder, to be
+    # measured on the bench Pi 5 from its renderer's texture limit). A Frame whose need for a
+    # photo's copy is longer refuses the photo ("above_player_limit"); no copy is longer.
+    max_still_edge: int = Field(default=4096, ge=_R["max_still_edge"][0],
+                                le=_R["max_still_edge"][1])
+    # The coarse steps of a photo's one copy (owner, 2026-10-12: one copy per photo, the Player
+    # composes): a copy's long edge is the smallest step holding the wall's largest need for it,
+    # so a smaller Frame added, or a photo moved between Frames, prepares nothing again.
+    copy_ladder_px: tuple[Annotated[int, Field(ge=COPY_STEP_RANGE[0], le=COPY_STEP_RANGE[1])],
+                          ...] = Field(default=(1920, 2560, 3840), min_length=1, max_length=8)
+
+    @property
+    def copy_steps(self) -> tuple[int, ...]:
+        """The steps a copy's long edge takes, ascending: each of `copy_ladder_px` below
+        `max_still_edge`, then `max_still_edge` (central/photo_library/rendition.py
+        `wall_need`)."""
+        return (*sorted({step for step in self.copy_ladder_px if step < self.max_still_edge}),
+                self.max_still_edge)
 
 
 class FitSettingsView(Model):
@@ -77,4 +99,4 @@ class FitSettingsView(Model):
     ranges: dict[str, tuple[float, float]]
 
 
-__all__ = ["FIT_SETTING_RANGES", "FitSettings", "FitSettingsView"]
+__all__ = ["COPY_STEP_RANGE", "FIT_SETTING_RANGES", "FitSettings", "FitSettingsView"]

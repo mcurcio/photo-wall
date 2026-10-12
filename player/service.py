@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
+import binascii
 import contextlib
 import functools
 import json
@@ -29,6 +31,7 @@ from contracts.enrollment import OutputReport
 from contracts.equipment import READ_CAP, equipment_device_id
 from contracts.liveness import REPORT_INTERVAL, SESSION_BACKOFF
 from contracts.models import (
+    MAX_VARIANT_BYTES,
     Commit,
     IdentifyOutput,
     Instant,
@@ -76,6 +79,20 @@ from uplink.trust import Trust
 
 MAX_JSON = 1024 * 1024
 CHUNK_SIZE = 64 * 1024
+_REPR_DIGEST_SHA256 = re.compile(r"^sha-256=:([A-Za-z0-9+/]{43}=):(?:;.*)?$")
+
+
+def served_sha256(header: str | None) -> str:
+    """The SHA-256 (hex) a media response's `Repr-Digest` (RFC 9530, a structured Dictionary
+    of algorithm to byte sequence) names; without one the bytes cannot be checked."""
+    for member in (header or "").split(","):
+        match = _REPR_DIGEST_SHA256.fullmatch(member.strip())
+        if match is not None:
+            try:
+                return base64.b64decode(match.group(1), validate=True).hex()
+            except binascii.Error:
+                break
+    raise ServiceError("media_digest")
 # The session-cycle backoff is a liveness contract (Central's silence threshold is derived from
 # it); the name is kept so tests can shorten the session retry.
 BACKOFF = SESSION_BACKOFF
@@ -831,37 +848,44 @@ class PlayerService:
         )
         if cached:
             return True
-        bridge = _ChunkBridge(lambda: self._authorized(job))
-        worker = asyncio.get_running_loop().run_in_executor(self._worker,
-            self.executor.acquire, job.layer.assignment_id, bridge.chunks())
         variant = job.layer.variant
-        target = "/v1/media/" + variant.sha256
+        target = variant.path  # by name: a re-make keeps it
+        bridge = _ChunkBridge(lambda: self._authorized(job))
+        worker = None
         try:
             async with self.link.stream(self.session, "GET", target, timeout=120) as response:
                 await self._check_status(response, target)
                 if (response.headers.get("content-type", "").split(";")[0] != variant.media_type
                         or response.headers.get("content-encoding", "identity") != "identity"):
                     raise ServiceError("media_type")
-                if self._length(response, variant.size) != variant.size:
+                # The bytes are checked against what Central served, not the plan's digest:
+                # a re-made copy is other bytes of the same content.
+                length = self._length(response, MAX_VARIANT_BYTES)
+                if not length:
                     raise ServiceError("media_length")
+                sha256 = served_sha256(response.headers.get("repr-digest"))
+                worker = asyncio.get_running_loop().run_in_executor(self._worker,
+                    functools.partial(self.executor.acquire, job.layer.assignment_id,
+                                      bridge.chunks(), sha256=sha256, size=length))
                 size = 0
                 async for chunk in response.aiter_bytes(CHUNK_SIZE):
                     size += len(chunk)
                     if worker.done():
-                        # Cache may have verified an existing exact blob without
+                        # Cache may have verified an existing whole file without
                         # consuming bytes; it owns this independent success gate.
                         return worker.result()
-                    if size > variant.size:
+                    if size > length:
                         raise ServiceError("media_length")
                     await bridge.put(chunk)
-                if size != variant.size:
+                if size != length:
                     raise ServiceError("media_length")
                 await bridge.put(None)
                 return await asyncio.shield(worker)
         finally:
             # No HTTP failure/cancellation leaves the worker blocked on queue.get.
             bridge.stopped.set()
-            await asyncio.shield(worker)
+            if worker is not None:
+                await asyncio.shield(worker)
 
     async def _media_loop(self):
         attempts: dict[Download, tuple[int, float]] = {}

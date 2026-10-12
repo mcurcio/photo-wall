@@ -1,9 +1,14 @@
-"""A bounded disposable cache for exact Player media variants.
+"""A bounded disposable cache for Player media variants, kept by (key, digest).
 
-The filesystem is never an authority source. Every process builds a fresh in-memory
-index, every candidate is checked against its content-addressed name, and a requested
-variant is returned only after its exact size and SHA-256 digest have been verified.
-Pins and LRU metadata deliberately disappear with the process.
+A variant is named by its inputs (`Variant.key`, `<asset_id>.<recipe_id>`), and Central may
+re-make it and serve other bytes of the same content. So the cache keeps a variant's bytes under
+its name and the digest Central served them with (`Repr-Digest`), checked against that digest
+and size (`Content-Length`) as they arrive, never against the plan's. Any whole file held under
+a variant's name is that variant.
+
+The filesystem is never an authority source. Every process builds a fresh in-memory index, and
+every candidate is checked against the digest in its file name before it is returned. Pins and
+LRU metadata deliberately disappear with the process.
 """
 
 from __future__ import annotations
@@ -22,7 +27,13 @@ from threading import RLock
 from contracts.models import Variant
 
 _DIGEST = re.compile(r"^[a-f0-9]{64}$")
+# `<SHA-256 of the variant's key>.<SHA-256 of the bytes>.blob`: a key can be longer than a file
+# name may be, so the file name carries its hash.
+_BLOB = re.compile(r"^([a-f0-9]{64})\.([a-f0-9]{64})\.blob$")
 _MAX_CHUNK = 1024 * 1024
+
+# One cached file: (the hash of its variant's key, the digest of its bytes).
+_Name = tuple[str, str]
 
 
 class CacheError(ValueError):
@@ -37,6 +48,12 @@ class CacheCapacityError(CacheError):
 class _Entry:
     size: int
     accessed: float
+
+
+def _key_of(variant: Variant) -> str:
+    if not isinstance(variant, Variant):
+        raise TypeError("variant must be a contracts.models.Variant")
+    return hashlib.sha256(variant.key.encode()).hexdigest()
 
 
 class Cache:
@@ -61,7 +78,9 @@ class Cache:
         self.max_bytes = max_bytes
         self._lock = RLock()
         self._closed = False
-        self._entries: dict[str, _Entry] = {}
+        self._entries: dict[_Name, _Entry] = {}
+        # Each owner's pinned variants, by the hash of their key: a pin keeps every whole file
+        # held under that variant's name.
         self._pins: dict[str, set[str]] = {}
         self._temporary_bytes = 0
         self._acquisition_active = False
@@ -85,8 +104,8 @@ class Cache:
             raise CacheError("owner must be a nonempty string of at most 512 characters")
         return owner
 
-    def _blob_path(self, sha256: str) -> Path:
-        return self.directory / f"{sha256}.blob"
+    def _blob_path(self, name: _Name) -> Path:
+        return self.directory / f"{name[0]}.{name[1]}.blob"
 
     def _verify_file(self, path: Path, sha256: str, size: int | None = None) -> int | None:
         descriptor = None
@@ -131,17 +150,13 @@ class Cache:
         finally:
             os.close(descriptor)
 
-    def _unlink(self, sha256: str) -> None:
-        path = self._blob_path(sha256)
+    def _unlink(self, name: _Name) -> None:
+        path = self._blob_path(name)
         try:
             path.unlink(missing_ok=True)
         except OSError as error:
             raise CacheError(f"cannot remove cache file {path.name}") from error
-        self._entries.pop(sha256, None)
-        for owner in tuple(self._pins):
-            self._pins[owner].discard(sha256)
-            if not self._pins[owner]:
-                del self._pins[owner]
+        self._entries.pop(name, None)
 
     def _recover(self) -> None:
         """Rebuild an in-memory index only from independently verified bytes."""
@@ -157,82 +172,86 @@ class Cache:
         self._entries.clear()
         self._pins.clear()
         for blob in self.directory.glob("*.blob"):
-            sha256 = blob.name[:-5]
-            if not _DIGEST.fullmatch(sha256):
-                continue
-            size = self._verify_file(blob, sha256)
-            if size is None:
-                self._unlink(sha256)
-                continue
-            self._entries[sha256] = _Entry(size=size, accessed=time.monotonic())
+            match = _BLOB.fullmatch(blob.name)
+            if match is not None:
+                self._index((match.group(1), match.group(2)))
         self._trim_unpinned()
 
-    def _pinned(self, sha256: str) -> bool:
-        return any(sha256 in digests for digests in self._pins.values())
+    def _index(self, name: _Name) -> None:
+        """Index a file found on disk once its bytes match the digest in its name; remove it
+        otherwise (a symlink is never followed)."""
+        size = self._verify_file(self._blob_path(name), name[1])
+        if size is None:
+            self._unlink(name)
+        else:
+            self._entries[name] = _Entry(size=size, accessed=time.monotonic())
+
+    def _pinned(self, name: _Name) -> bool:
+        return any(name[0] in keys for keys in self._pins.values())
 
     def _indexed_bytes(self) -> int:
         return sum(entry.size for entry in self._entries.values())
 
+    def _least_recent_unpinned(self) -> _Name | None:
+        least = min(((entry.accessed, name) for name, entry in self._entries.items()
+                     if not self._pinned(name)), default=None)
+        return None if least is None else least[1]
+
     def _trim_unpinned(self) -> None:
         while self._indexed_bytes() > self.max_bytes:
-            candidates = (
-                (entry.accessed, sha256)
-                for sha256, entry in self._entries.items()
-                if not self._pinned(sha256)
-            )
-            try:
-                _, sha256 = min(candidates)
-            except ValueError:
+            name = self._least_recent_unpinned()
+            if name is None:
                 return
-            self._unlink(sha256)
+            self._unlink(name)
 
     def _evict_for(self, required: int) -> None:
         while self._indexed_bytes() + self._temporary_bytes + required > self.max_bytes:
-            candidates = (
-                (entry.accessed, sha256)
-                for sha256, entry in self._entries.items()
-                if not self._pinned(sha256)
-            )
-            try:
-                _, sha256 = min(candidates)
-            except ValueError as error:
-                raise CacheCapacityError("cache capacity is protected by pins") from error
-            self._unlink(sha256)
+            name = self._least_recent_unpinned()
+            if name is None:
+                raise CacheCapacityError("cache capacity is protected by pins")
+            self._unlink(name)
 
     def _lookup_valid(self, variant: Variant) -> Path | None:
-        sha256 = self._validate_digest(variant.sha256)
-        path = self._blob_path(sha256)
-        entry = self._entries.get(sha256)
-        # A canonical file can appear after startup. It is still eligible only after
-        # exact validation against the requested variant.
-        if entry is None and (path.is_file() or path.is_symlink()):
-            size = self._verify_file(path, sha256, variant.size)
-            if size is not None:
-                entry = self._entries[sha256] = _Entry(size, time.monotonic())
-        if entry is None:
-            return None
-        if entry.size != variant.size or self._verify_file(path, sha256, variant.size) is None:
-            self._unlink(sha256)
-            return None
-        entry.accessed = time.monotonic()
-        return path
+        """A whole file held under ``variant``'s name (whichever digest it was served with),
+        most recently used first; a damaged one is removed as a miss."""
+        key = _key_of(variant)
+        # A file can appear after startup. It is still eligible only after verification.
+        for blob in self.directory.glob(f"{key}.*.blob"):
+            match = _BLOB.fullmatch(blob.name)
+            if match is not None and (key, match.group(2)) not in self._entries:
+                self._index((key, match.group(2)))
+        held = sorted(((entry.accessed, name) for name, entry in self._entries.items()
+                       if name[0] == key), reverse=True)
+        for _, name in held:
+            entry = self._entries[name]
+            path = self._blob_path(name)
+            if self._verify_file(path, name[1], entry.size) is None:
+                self._unlink(name)
+                continue
+            entry.accessed = time.monotonic()
+            return path
+        return None
 
-    def secure(self, variant: Variant, chunks: Iterable[bytes], pin: str) -> Path:
-        """Store complete exact bytes for ``variant`` and pin them for ``pin``."""
-        if not isinstance(variant, Variant):
-            raise TypeError("variant must be a contracts.models.Variant")
+    def secure(self, variant: Variant, chunks: Iterable[bytes], pin: str, *, sha256: str,
+               size: int) -> Path:
+        """Store the bytes Central served for ``variant`` and pin them for ``pin``: exactly
+        ``size`` bytes whose SHA-256 is ``sha256`` (the response's `Content-Length` and
+        `Repr-Digest`). A whole file of the variant already held is used instead."""
         owner = self._validate_owner(pin)
-        sha256 = self._validate_digest(variant.sha256)
-        if variant.size > self.max_bytes:
+        key = _key_of(variant)
+        sha256 = self._validate_digest(sha256)
+        if isinstance(size, bool) or not isinstance(size, int) or size <= 0:
+            raise CacheError("served size must be a positive integer")
+        if size > self.max_bytes:
             raise CacheCapacityError("variant is larger than cache capacity")
         with self._lock:
             self._ensure_open()
             existing = self._lookup_valid(variant)
             if existing is not None:
-                self._pins.setdefault(owner, set()).add(sha256)
+                self._pins.setdefault(owner, set()).add(key)
                 return existing
-            self._evict_for(variant.size)
-            path = self._blob_path(sha256)
+            self._evict_for(size)
+            name = (key, sha256)
             descriptor, temporary_name = tempfile.mkstemp(
                 prefix=".partial-", suffix=".tmp", dir=self.directory
             )
@@ -246,21 +265,22 @@ class Cache:
                     for chunk in chunks:
                         if not isinstance(chunk, bytes):
                             raise CacheError("byte iterator yielded a non-bytes value")
-                        if count + len(chunk) > variant.size:
-                            raise CacheError("byte stream exceeds declared variant size")
+                        if count + len(chunk) > size:
+                            raise CacheError("byte stream exceeds the served size")
                         stream.write(chunk)
                         digest.update(chunk)
                         count += len(chunk)
                         self._temporary_bytes = count
                     stream.flush()
-                if count != variant.size:
-                    raise CacheError("byte stream is shorter than declared variant size")
+                if count != size:
+                    raise CacheError("byte stream is shorter than the served size")
                 if digest.hexdigest() != sha256:
-                    raise CacheError("byte stream SHA-256 does not match variant")
+                    raise CacheError("byte stream SHA-256 does not match the served digest")
+                path = self._blob_path(name)
                 os.replace(temporary, path)
                 self._fsync_directory(self.directory)
-                self._entries[sha256] = _Entry(variant.size, time.monotonic())
-                self._pins.setdefault(owner, set()).add(sha256)
+                self._entries[name] = _Entry(size, time.monotonic())
+                self._pins.setdefault(owner, set()).add(key)
                 return path
             finally:
                 self._temporary_bytes = 0
@@ -272,28 +292,19 @@ class Cache:
 
     def path_for(self, variant: Variant) -> Path | None:
         """Return a freshly verified ready path, or repair corruption as a miss."""
-        if not isinstance(variant, Variant):
-            raise TypeError("variant must be a contracts.models.Variant")
         with self._lock:
             self._ensure_open()
             return self._lookup_valid(variant)
 
-    def pin(self, sha256: str, owner: str) -> None:
-        """Pin verified bytes for this process; pins never survive restart."""
-        sha256 = self._validate_digest(sha256)
+    def pin(self, variant: Variant, owner: str) -> None:
+        """Pin a verified whole file of ``variant`` for this process; pins never survive
+        restart."""
         owner = self._validate_owner(owner)
         with self._lock:
             self._ensure_open()
-            entry = self._entries.get(sha256)
-            if (
-                entry is None
-                or self._verify_file(self._blob_path(sha256), sha256, entry.size) is None
-            ):
-                if entry is not None:
-                    self._unlink(sha256)
+            if self._lookup_valid(variant) is None:
                 raise CacheError("cannot pin a missing or corrupt variant")
-            entry.accessed = time.monotonic()
-            self._pins.setdefault(owner, set()).add(sha256)
+            self._pins.setdefault(owner, set()).add(_key_of(variant))
 
     def release(self, owner: str) -> None:
         owner = self._validate_owner(owner)
@@ -304,14 +315,12 @@ class Cache:
     def stats(self) -> dict[str, int]:
         with self._lock:
             self._ensure_open()
-            pinned = {sha256 for digests in self._pins.values() for sha256 in digests}
+            pinned = [entry for name, entry in self._entries.items() if self._pinned(name)]
             return {
                 "bytes": self._indexed_bytes(),
                 "entries": len(self._entries),
-                "pinned_bytes": sum(
-                    self._entries[item].size for item in pinned if item in self._entries
-                ),
-                "pinned_entries": sum(item in self._entries for item in pinned),
+                "pinned_bytes": sum(entry.size for entry in pinned),
+                "pinned_entries": len(pinned),
                 "temporary_bytes": self._temporary_bytes,
                 "max_bytes": self.max_bytes,
             }

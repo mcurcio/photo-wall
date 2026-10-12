@@ -187,7 +187,7 @@ def test_the_session_cookie_is_sent_only_under_the_operator_prefix(client, origi
 
     assert sent(READ) == f"{issued.name}={issued.value}"
     assert sent(SESSION_PATH) is not None
-    for path in ("/", "/console", "/healthz", "/v1/media/abc", "/v1/player/config",
+    for path in ("/", "/console", "/healthz", "/v1/media/abc/def", "/v1/player/config",
                  "/v1/operator", "/v1/operatorx/inventory", "/photos/api/assets"):
         assert sent(path) is None, path
 
@@ -456,7 +456,7 @@ def test_no_cors_headers_on_preflight_or_cross_origin_requests(client):
 
 def test_players_ignore_operator_cookies(client):
     cookie = signed_in(client)
-    for path in ("/v1/player/config", "/v1/player/state", "/v1/player/time", "/v1/media/abc"):
+    for path in ("/v1/player/config", "/v1/player/state", "/v1/player/time", "/v1/media/abc/def"):
         assert client.get(path, headers=cookie).status_code == 401, path
 
 

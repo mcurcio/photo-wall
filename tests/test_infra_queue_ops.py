@@ -171,6 +171,7 @@ def test_delete_finished_covers_every_final_status_on_our_queues_only(monkeypatc
     expected = {"nb_hours": 169, "include_failed": True, "include_cancelled": True,
                 "include_aborted": True}
     assert manager.calls == [("delete_old_jobs", {**expected, "queue": "photo-wall-fetch"}),
+                             ("delete_old_jobs", {**expected, "queue": "photo-wall-transcode"}),
                              ("delete_old_jobs", {**expected, "queue": "photo-wall-upkeep"})]
 
 

@@ -237,14 +237,13 @@ def test_a_pool_photos_facts_name_its_original_and_immichs_copies(client):
     library.record_copies(shown.asset_id, [MeasuredCopy(name="preview", media_type="image/jpeg",
                                                         width=1080, height=1440)])
     with library.db.transaction() as conn:
-        conn.execute("INSERT INTO media_settings(singleton,recipe_id,max_bytes) "
-                     "VALUES(TRUE,'current',1) ON CONFLICT (singleton) DO UPDATE "
-                     "SET recipe_id='current'")
-        for job, recipe, made_from in (("old", "earlier", "preview"),
-                                       ("now", "current", "original")):
-            conn.execute("INSERT INTO media_jobs(id,asset_id,recipe_id,state,earliest_start,"
-                         "updated_at,made_from) VALUES(%s,%s,%s,'ready',0,0,%s)",
-                         (job, shown.asset_id, recipe, made_from))
+        # Two made media variants of the revision: an earlier recipe's and the newest one.
+        for recipe, made_from, created in (("a" * 64, "preview", 1), ("b" * 64, "original", 2)):
+            conn.execute("INSERT INTO assets(kind,identity,produced_size,produced_sha256,"
+                         "produced_detail,created_at) VALUES('media-variant',%s,10,%s,%s,%s)",
+                         (shown.asset_id + "." + recipe, recipe,
+                          Jsonb({"media_type": "image/jpeg", "width": 10, "height": 10,
+                                 "duration": None, "made_from": made_from}), created))
 
     answer = test_client.get(PHOTOS + shown.asset_id, headers=AUTH)
     assert answer.status_code == 200

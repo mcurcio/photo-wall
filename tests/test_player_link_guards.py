@@ -21,6 +21,7 @@ from test_player_service import (
     close,
     finder_rig,
     gateway,
+    media_headers,
     rig,
 )
 from test_player_uplink_faults import _BrokenBody
@@ -182,8 +183,8 @@ def test_a_media_body_that_breaks_after_the_status_line_is_a_transfer_failure(tm
         service, server = await rig(tmp_path)
         try:
             service._feedback()
-            server.media_response = httpx.Response(200, stream=_BrokenBody(), headers={
-                "Content-Type": "image/png", "Content-Length": "7"})
+            server.media_response = httpx.Response(200, stream=_BrokenBody(),
+                                                   headers=media_headers(b"picture"))
             with pytest.raises(UplinkError) as excinfo:
                 await service.download(service._jobs[0])
             assert (excinfo.value.cause, excinfo.value.reason) == (Cause.TRANSFER, "short")

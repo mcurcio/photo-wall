@@ -1,16 +1,18 @@
-"""Real PostgreSQL pool, job and queue tests of the media repository; transport and filesystem
-are separate."""
-
+"""Real PostgreSQL tests of the media repository: media variants on Asset records, their
+preparation published in the caller's transaction, pool hydration, health; transport and
+filesystem are separate."""
 
 import pytest
 from media_queue import RecordingMediaQueue
-from psycopg.types.json import Jsonb
+from support.frame_media import a_frame, seed_variant
 from support.photo_pools import photo, seed_pool
 
 from central.db import ProcessTransactionClock
 from central.infra.photo_library_store import library_assets_in
-from central.media_queue import PREPARE_MEDIA_TASK, ProcrastinateMediaQueue, QueueReceipt
-from central.media_repository import MediaRepository, StoreLimits
+from central.kernel.job_types import PrepareMedia
+from central.kernel.types import split_media_variant_key
+from central.media_queue import QueueReceipt
+from central.media_repository import MediaRepository, StoreLimits, prepare_lock
 from central.planner import AcquisitionRequest, MeasureRequest
 from central.registry import RegistryError
 from central.wall_plan.key_content import ANALYSIS_VERSION, InterestGrid, KeyContent, Measured
@@ -18,111 +20,136 @@ from contracts.models import Variant
 
 
 def setup_repository(registry, *, limits=None, count=1, queue=None):
-    """A repository with the recipe set and one saved Source, `source:1`, whose pool holds
-    `count` photos."""
+    """A repository over a wall with one Frame, and one saved Source, `source:1`, whose pool
+    holds `count` photos."""
     repo = MediaRepository(registry.db, registry.clock, limits,
-                           queue=queue or RecordingMediaQueue(), times=ProcessTransactionClock(registry.clock))
+                           queue=queue or RecordingMediaQueue(),
+                           times=ProcessTransactionClock(registry.clock))
+    a_frame(registry)
     photos = tuple(photo(f"photo-{i + 1}", taken_at=900 + i) for i in range(count))
     seed_pool(registry, "source:1", photos)
-    repo.set_recipe("a" * 64)
     return repo, photos
 
 
 def request(original):
-    return AcquisitionRequest(asset_id=original.asset_id, assignment_ids=("assignment",), earliest_start=1005)
+    return AcquisitionRequest(asset_id=original.asset_id, assignment_ids=("assignment",),
+                              earliest_start=1005)
 
 
-def test_queue_idempotency_limit_and_reservation_pressure_are_transactional(registry):
-    limits = StoreLimits(max_bytes=35, max_original_bytes=10, max_image_bytes=20, max_jobs=2)
-    repo, originals = setup_repository(registry, limits=limits, count=3)
-    assert repo.request_acquisitions((request(originals[0]), request(originals[1]))) == 2
-    assert repo.request_acquisitions((request(originals[0]),)) == 0
-    with pytest.raises(RegistryError, match="job_capacity"):
-        repo.request_acquisitions((request(originals[2]),))
-    lease = repo.claim_job()
-    assert lease.reserved_bytes == 30
-    assert repo.claim_job() is None
-    assert repo.health()["accounted_bytes"] == 30
-    assert repo.health()["worker_error"] == "storage_pressure"
-
-
-def test_health_counts_only_the_current_recipes_jobs(registry):
-    """The console's worker line reads these counts (slice 3 §14): a recipe change
-    fails the old recipe's queued jobs, and those are not the worker's failures now."""
-    repo, originals = setup_repository(registry, count=2)
-    repo.request_acquisitions((request(originals[0]),))
-    assert repo.health()["jobs"] == [{"state": "queued", "count": 1}]
-    repo.set_recipe("b" * 64)  # the old recipe's queued job fails as recipe_changed
-    assert repo.health()["jobs"] == []
-    repo.request_acquisitions((request(originals[1]),))
-    assert repo.health()["jobs"] == [{"state": "queued", "count": 1}]
-
-
-def test_procrastinate_enqueue_rolls_back_with_domain_request(registry):
-    queue = ProcrastinateMediaQueue(registry.db.dsn)
-    queue.apply_schema(registry.db.dsn)
-    limits = StoreLimits(max_jobs=1)
-    repo, originals = setup_repository(registry, limits=limits, count=2, queue=queue)
-
-    with pytest.raises(RegistryError, match="job_capacity"):
-        repo.request_acquisitions((request(originals[0]), request(originals[1])))
+def queued_jobs(registry) -> list[dict]:
     with registry.db.transaction() as conn:
-        assert conn.execute("SELECT count(*) AS n FROM media_jobs").fetchone()["n"] == 0
-        assert conn.execute("SELECT count(*) AS n FROM procrastinate_jobs").fetchone()["n"] == 0
+        return conn.execute("SELECT task_name,args,status::text AS status FROM procrastinate_jobs "
+                            "ORDER BY id").fetchall()
 
-    assert repo.request_acquisitions((request(originals[0]),)) == 1
+
+def test_a_planned_photo_is_named_and_its_preparation_published_with_the_callers_cut(registry):
+    """Coordination's transaction holds the reference and the job: a rollback leaves neither,
+    and a repeat merges into the pending copy."""
+    repo, (first, second) = setup_repository(registry, count=2)
+    with pytest.raises(RuntimeError, match="rolled back"), registry.db.transaction() as conn:
+        assert repo.request_preparations_in(conn, (request(first),)) == 1
+        raise RuntimeError("rolled back")
+    assert queued_jobs(registry) == []
     with registry.db.transaction() as conn:
-        queued = conn.execute(
-            "SELECT task_name,args FROM procrastinate_jobs"
-        ).fetchone()
-        domain = conn.execute("SELECT id,state FROM media_jobs").fetchone()
-    assert queued == {"task_name": PREPARE_MEDIA_TASK, "args": {"job_id": domain["id"]}}
-    assert domain["state"] == "queued"
+        assert repo.request_preparations_in(conn, (request(first), request(second))) == 2
+        named = {item.asset_id: repo.variant_key_in(conn, item.asset_id) for item in (first, second)}
+    with registry.db.transaction() as conn:
+        assert repo.request_preparations_in(conn, (request(first),)) == 1  # merged
+        recipes = conn.execute("SELECT recipe_id,need FROM media_recipes").fetchall()
+        references = conn.execute("SELECT identity,owner FROM asset_references "
+                                  "WHERE kind='media-variant' ORDER BY identity").fetchall()
+    keys = sorted(named.values())
+    recipe = split_media_variant_key(keys[0])[1]
+    assert sorted((row["task_name"], row["args"]["key"]) for row in queued_jobs(registry)) == [
+        ("photo_wall." + PrepareMedia.job_name, key) for key in keys]
+    assert [(row["identity"], row["owner"]) for row in references] == [
+        (key, "frame-media") for key in keys]
+    # One copy per photo for the wall (follow-up S1): both 1080 x 1920 photos on the one
+    # 1080 x 1920 Frame share the 1920 step's recipe.
+    assert recipes == [{"recipe_id": recipe, "need": {"long_edge": 1920}}]
+
+
+def test_an_unknown_photo_or_a_wall_without_frames_publishes_nothing(registry):
+    repo = MediaRepository(registry.db, registry.clock, queue=RecordingMediaQueue(),
+                           times=ProcessTransactionClock(registry.clock))
+    pooled = photo("photo-1", taken_at=900)
+    seed_pool(registry, "source:1", (pooled,))
+    with registry.db.transaction() as conn:
+        assert repo.request_preparations_in(conn, (request(pooled),)) == 0  # no Frame yet
+        assert repo.request_preparations_in(conn, ()) == 0
+    a_frame(registry)
+    with registry.db.transaction() as conn:
+        assert repo.request_preparations_in(conn, (AcquisitionRequest(
+            asset_id="asset-" + "0" * 64, assignment_ids=(), earliest_start=0),)) == 0
+    assert queued_jobs(registry) == []
+
+
+def test_a_repository_without_a_publisher_refuses_to_prepare(registry):
+    repo, (pooled,) = setup_repository(registry)
+    repo.publisher = None
+    with pytest.raises(RegistryError, match="media_queue_unconfigured"), \
+            registry.db.transaction() as conn:
+        repo.request_preparations_in(conn, (request(pooled),))
+
+
+def test_health_counts_preparations_by_their_latest_outcome_and_variant_bytes(registry):
+    """The console's worker line reads these counts (slice 3 §14)."""
+    repo, (ready, failed) = setup_repository(registry, count=2)
+    seed_variant(registry, ready.asset_id, "c" * 64, size=10)
+    with registry.db.transaction() as conn:
+        for item, status, reason in ((ready, "ok", None), (failed, "terminal", "unsupported_media")):
+            conn.execute("INSERT INTO job_outcomes(lock_key,job_name,status,reason,"
+                         "retry_not_before,seq,updated_at) VALUES(%s,%s,%s,%s,NULL,"
+                         "nextval('job_outcome_seq'),1000)",
+                         (prepare_lock(repo.variant_key_in(conn, item.asset_id)),
+                          PrepareMedia.job_name, status, reason))
+    health = repo.health()
+    assert health["jobs"] == [{"state": "failed", "count": 1}, {"state": "ready", "count": 1}]
+    assert health["accounted_bytes"] == 10
 
 
 def pool_repository(registry, **limits):
     repo = MediaRepository(registry.db, registry.clock, StoreLimits(**limits),
-                           queue=RecordingMediaQueue(), times=ProcessTransactionClock(registry.clock))
-    repo.set_recipe("a" * 64)
+                           queue=RecordingMediaQueue(),
+                           times=ProcessTransactionClock(registry.clock))
+    a_frame(registry)
     return repo
 
 
-def test_failed_unsecured_candidate_cooldown_is_not_misreported_as_empty_upstream(registry):
+def test_a_failed_preparation_is_reported_until_its_retry_window_ends(registry):
     repo = pool_repository(registry)
     held = photo("held", taken_at=900)
     seed_pool(registry, "family:1", (held,))
-    repo.request_acquisitions((request(held),))
-    lease = repo.claim_job()
-    with repo.transaction() as conn:
-        conn.execute("UPDATE media_jobs SET state='retry',retry_at=1010,failure_code='asset_missing',reserved_bytes=0 WHERE id=%s",
-                     (lease.job_id,))
-    registry.clock.wall = 1000  # the repository's media times follow this clock (ProcessTransactionClock)
+    with registry.db.transaction() as conn:
+        key = repo.variant_key_in(conn, held.asset_id)
+        conn.execute("INSERT INTO job_outcomes(lock_key,job_name,status,reason,retry_not_before,"
+                     "seq,updated_at) VALUES(%s,%s,'transient','asset_missing',1010,"
+                     "nextval('job_outcome_seq'),1000)", (prepare_lock(key), PrepareMedia.job_name))
+    registry.clock.wall = 1000  # the repository's media times follow this clock
     with registry.db.transaction() as conn:
         pool = repo.source_pools_in(conn, {"family:1"})["family:1"]
         assert pool.ready and len(pool.candidates) == 1
         assert pool.candidates[0].preparation_failure == "asset_missing"
         registry.clock.advance(11)
-        assert repo.source_pools_in(conn, {"family:1"})["family:1"].candidates[0].preparation_failure is None
+        assert repo.source_pools_in(conn, {"family:1"})["family:1"].candidates[
+            0].preparation_failure is None
 
 
-def test_source_pools_in_hydrates_a_ready_variant_and_leaves_out_an_unknown_source(registry):
+def test_source_pools_in_hydrates_a_made_variant_and_leaves_out_an_unknown_source(registry):
     repo = pool_repository(registry)
     newer, older = photo("newer", taken_at=990), photo("older", taken_at=900)
     seed_pool(registry, "family:1", (older, newer))
     seed_pool(registry, "garden:1", (), complete=False)
-    variant = Variant(sha256="c" * 64, size=10, media_type="image/jpeg", width=1080, height=1920)
-    with repo.transaction() as conn:
-        conn.execute("INSERT INTO media_blobs VALUES(%s,%s,10,'ready',1000)",
-                     (variant.sha256, Jsonb(variant.model_dump(mode="json"))))
-        conn.execute("INSERT INTO media_jobs(id,asset_id,recipe_id,state,earliest_start,variant_sha,"
-                     "updated_at) VALUES('job-newer',%s,%s,'ready',1000,%s,1000)",
-                     (newer.asset_id, "a" * 64, variant.sha256))
+    variant = seed_variant(registry, newer.asset_id, "c" * 64)
     with registry.db.transaction() as conn:
         pools = repo.source_pools_in(conn, {"family:1", "garden:1", "unknown:1"})
     assert set(pools) == {"family:1", "garden:1"}
     assert pools["family:1"].ready and [c.asset_id for c in pools["family:1"].candidates] == [
         newer.asset_id, older.asset_id]
     assert [c.variant for c in pools["family:1"].candidates] == [variant, None]
+    assert variant == Variant(asset_id=newer.asset_id, recipe_id=variant.recipe_id,
+                              sha256="c" * 64, size=10, media_type="image/jpeg", width=1080,
+                              height=1920)
     assert pools["garden:1"].ready is False and pools["garden:1"].candidates == ()
 
 
@@ -158,12 +185,10 @@ def test_source_pools_in_hydrates_key_content_and_a_measurement_is_requested_onc
 
 
 
-def test_a_job_leases_its_revision_and_its_immich_asset_as_one_library_asset(registry):
-    """`library_assets_in` is the one rule: a job leases its revision's row joined to its Immich
-    asset's row, the LibraryAsset the pool check wrote; an unknown id is absent."""
-    repo, (pooled,) = setup_repository(registry)
-    repo.request_acquisitions((request(pooled),))
-    assert repo.claim_job().asset == pooled
+def test_one_read_turns_a_revision_and_its_immich_asset_into_one_library_asset(registry):
+    """`library_assets_in` is the one rule: a revision's row joined to its Immich asset's row,
+    the LibraryAsset the pool check wrote; an unknown id is absent."""
+    _, (pooled,) = setup_repository(registry)
     with registry.db.transaction() as conn:
         assert library_assets_in(conn, [pooled.asset_id, "unknown"]) == {pooled.asset_id: pooled}
         assert library_assets_in(conn, []) == {}

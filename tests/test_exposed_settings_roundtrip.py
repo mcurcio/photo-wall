@@ -210,7 +210,8 @@ class _Frame:
         if plan is not None:
             for layer in plan.layers:
                 if layer.variant is not None:
-                    self.executor.acquire(layer.assignment_id, [PHOTO])
+                    self.executor.acquire(layer.assignment_id, [PHOTO],
+                                          sha256=layer.variant.sha256, size=layer.variant.size)
             self.executor.prepare_imminent()
             self.coordinator.readiness(self.player["player_id"], self.executor.readiness())
             self._apply()

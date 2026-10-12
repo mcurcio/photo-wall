@@ -20,6 +20,20 @@ class Candidate(Model):
     # the variant; None: not measured yet (the Planner requests a measurement). Never stored in
     # an authored candidate's row.
     analysis: Analysis | None = None
+    # Follow-up S1: an image's readable size, the largest copy of it Photo Wall can read
+    # (central/photo_library/rendition.py `readable_size`), upright, hydrated at read time like
+    # the variant; None: that copy is not measured yet (the photo is not placed, and a
+    # measurement is requested). Never stored in an authored candidate's row. Unused for a video.
+    readable_size: tuple[int, int] | None = None
+
+
+def judged_size(candidate: Candidate) -> tuple[int, int] | None:
+    """The size the photo fit rule judges a candidate at (central/wall_plan/fit.py): an image's
+    readable size (None: not measured, so not judged), a video's original. The one home: the
+    Planner, the wall assignment and the candidates route ask here."""
+    if candidate.kind == "video":
+        return candidate.original_width, candidate.original_height
+    return candidate.readable_size
 
 
 class SourcePool(Model):

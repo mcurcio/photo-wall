@@ -56,12 +56,12 @@ def test_a_key_shows_only_its_last_four_characters() -> None:
 
 
 @pytest.mark.parametrize(("found", "verdict"), [
-    ((2, 4, 9), ImmichTooOld(found="2.4.9", oldest="2.5.0")),
-    ((1, 9, 0), ImmichTooOld(found="1.9.0", oldest="2.5.0")),
-    ((2, 5, 0), None),
-    ((2, 5, 6), None),
-    ((2, 6, 0), UntestedVersion(found="2.6.0")),
-    ((3, 1, 0), UntestedVersion(found="3.1.0")),
+    ((3, 0, 9), ImmichTooOld(found="3.0.9", oldest="3.1.0")),
+    ((2, 5, 6), ImmichTooOld(found="2.5.6", oldest="3.1.0")),
+    ((3, 1, 0), None),
+    ((3, 1, 4), None),
+    ((3, 2, 0), UntestedVersion(found="3.2.0")),
+    ((4, 0, 0), UntestedVersion(found="4.0.0")),
 ])
 def test_versions_older_than_tested_need_a_look_and_newer_get_a_note(
         found: tuple[int, int, int], verdict: object) -> None:
@@ -73,9 +73,9 @@ OWNER = ImmichUser(user_ref="40000000-0000-4000-8000-000000000001", name="Matt",
                    email="matt@example.org")
 STRANGER = ImmichUser(user_ref="40000000-0000-4000-8000-000000000002", name="",
                       email="guest@example.org")
-TESTED = ImmichVersion(major=2, minor=5, patch=6)
-OLD = ImmichVersion(major=2, minor=4, patch=9)
-NEWER = ImmichVersion(major=2, minor=6, patch=0)
+TESTED = ImmichVersion(major=3, minor=1, patch=0)
+OLD = ImmichVersion(major=3, minor=0, patch=9)
+NEWER = ImmichVersion(major=3, minor=2, patch=0)
 
 
 def answer(*, user: ImmichUser = OWNER, version: ImmichVersion = TESTED,
@@ -104,7 +104,7 @@ def test_another_user_beats_an_old_immich_which_beats_missing_permissions() -> N
     assert health(everything_wrong).problem == OtherUser(expected="Matt",
                                                          found="guest@example.org")
     old_and_missing = answer(version=OLD, missing=("face.read",))
-    assert health(old_and_missing).problem == ImmichTooOld(found="2.4.9", oldest="2.5.0")
+    assert health(old_and_missing).problem == ImmichTooOld(found="3.0.9", oldest="3.1.0")
     missing = answer(missing=("user.read", "face.read", "face.read"))
     assert health(missing).problem == MissingPermissions(missing=("face.read", "user.read"))
 
@@ -117,13 +117,13 @@ def test_a_passing_contact_is_ok_with_its_notes_in_order() -> None:
     assert health(answer()) == HealthOk(checked_at=100.0, notes=())
     assert health(answer(full_size=None)) == HealthOk(checked_at=100.0, notes=())
     assert health(answer(version=NEWER, full_size=False)) == HealthOk(
-        checked_at=100.0, notes=(UntestedVersion(found="2.6.0"), NoFullSizeCopies()))
+        checked_at=100.0, notes=(UntestedVersion(found="3.2.0"), NoFullSizeCopies()))
 
 
 @pytest.mark.parametrize(("faces", "notes"), [
-    (False, (UntestedVersion(found="2.6.0"), NoFullSizeCopies(), NoFaceDetection())),
-    (True, (UntestedVersion(found="2.6.0"), NoFullSizeCopies())),
-    (None, (UntestedVersion(found="2.6.0"), NoFullSizeCopies())),
+    (False, (UntestedVersion(found="3.2.0"), NoFullSizeCopies(), NoFaceDetection())),
+    (True, (UntestedVersion(found="3.2.0"), NoFullSizeCopies())),
+    (None, (UntestedVersion(found="3.2.0"), NoFullSizeCopies())),
 ])
 def test_face_detection_off_is_a_note_after_the_others(faces: bool | None,
                                                        notes: tuple[object, ...]) -> None:

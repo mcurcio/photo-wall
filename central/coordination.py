@@ -485,7 +485,7 @@ class Coordinator:
             }
             offers = self._offers(conn, configurations)
             self.media.reconcile_source_activity_in(conn, runtime.planning_source_refs())
-            pools = self.media.source_pools_in(conn, runtime.planning_source_refs())
+            lines = self.media.scene_lines_in(conn)
             authored = self.media.authored_in(conn)
             locks = self._locks(conn, configurations, offers)
             # Renewable extent changes only at a renewal boundary, avoiding heartbeat churn.
@@ -504,7 +504,7 @@ class Coordinator:
                     p: tuple(b for b in config.bindings if b.output_id in config.enabled_outputs)
                     for p, config in configurations.items()
                 },
-                source_pools=pools,
+                lines=lines,
                 authored_candidates=authored,
                 locked_assignments=locks,
                 history=history,
@@ -574,6 +574,8 @@ class Coordinator:
                     )
                 else:
                     self._record_selected(conn, plan, projection)
+            # The planned photos with no variant yet are prepared: published with this cut.
+            self.media.request_preparations_in(conn, projection.acquisitions)
             self._commit_due(conn, configurations, now)
             self.media.expire_pins_in(conn, now)
             self._cleanup(

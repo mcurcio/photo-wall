@@ -6,8 +6,10 @@ Every name is content-keyed: an OS image by the sha256 of its base tarball
 the same file. A library thumbnail (`previews/asset-<id>.jpg`) is keyed by its ORIGINAL's identity
 (Central's one-way asset id), not its own bytes, so its record lives only while a live preview
 selects it (`central.assets.library`) and a re-production replaces its produced facts
-(`AssetKind.keyed_by_content`). Temp files start with `TEMP_PREFIX`, which no final name can, so a temp is never
-mistaken for an asset.
+(`AssetKind.keyed_by_content`). A media variant is stored by its bytes: `media/blobs/<sha256>`
+(the layout the media store wrote before migration 087, so its files stay where they are), named
+by its produced facts' digest, never by its key (`AssetKind.stored_by_digest`). Temp files start
+with `TEMP_PREFIX`, which no final name can, so a temp is never mistaken for an asset.
 """
 
 from __future__ import annotations
@@ -16,8 +18,8 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Final
 
-from central.cache_layout import APPS_SUBDIR, OS_IMAGES_SUBDIR, PREVIEWS_SUBDIR
-from central.kernel.assets import AssetKey, AssetKind
+from central.cache_layout import APPS_SUBDIR, MEDIA_SUBDIR, OS_IMAGES_SUBDIR, PREVIEWS_SUBDIR
+from central.kernel.assets import AssetKey, AssetKind, AssetReady
 
 TEMP_PREFIX: Final = ".tmp-"
 
@@ -25,11 +27,13 @@ _DIRECTORIES: Final[dict[AssetKind, str]] = {
     AssetKind.OS_IMAGE: OS_IMAGES_SUBDIR,
     AssetKind.SEALED_ENVIRONMENT: APPS_SUBDIR,
     AssetKind.LIBRARY_THUMBNAIL: PREVIEWS_SUBDIR,
+    AssetKind.MEDIA_VARIANT: f"{MEDIA_SUBDIR}/blobs",
 }
 _FILE_NAMES: Final[dict[AssetKind, tuple[str, str]]] = {
     AssetKind.OS_IMAGE: ("base-", ".squashfs"),
     AssetKind.SEALED_ENVIRONMENT: ("environment-", ".tar"),
     AssetKind.LIBRARY_THUMBNAIL: ("", ".jpg"),  # `asset-<sha256>.jpg`
+    AssetKind.MEDIA_VARIANT: ("", ""),  # `<produced sha256>`
 }
 
 
@@ -48,8 +52,13 @@ class CacheLayout:
     def directory(self, kind: AssetKind) -> Path:
         return self._root / _DIRECTORIES[kind]
 
-    def path(self, key: AssetKey) -> Path:
+    def path(self, key: AssetKey, facts: AssetReady | None = None) -> Path:
+        """The asset's file. A kind stored by digest needs its produced `facts` to name it."""
         prefix, suffix = _FILE_NAMES[key.kind]
+        if key.kind.stored_by_digest:
+            if facts is None:
+                raise ValueError("facts_required")
+            return self.directory(key.kind) / f"{prefix}{facts.sha256}{suffix}"
         return self.directory(key.kind) / f"{prefix}{key.identity}{suffix}"
 
     def key_of(self, kinds: Iterable[AssetKind], name: str) -> AssetKey | None:

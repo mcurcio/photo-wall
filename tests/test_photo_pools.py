@@ -169,7 +169,9 @@ def test_a_step_adds_its_rows_except_marked_ids_and_queues_the_next_in_one_trans
 
 
 def test_only_a_complete_check_sweeps(pools):
-    """Case 4. Mutation probe: sweep on an incomplete finish."""
+    """Case 4: a row the check did not see leaves through its re-check (follow-up S4), and a
+    complete finish then drops the older checks' marks. Mutation probe: sweep on an incomplete
+    finish."""
     store, _, ref = pools
     key = _draft_pool(store, store.create_draft(SourceQuery(connection_ref=ref), None))
     first = store.begin_check(key)
@@ -186,6 +188,8 @@ def test_only_a_complete_check_sweeps(pools):
     lease = store.begin_check(key)
     store.record_step(lease, step(InPool(asset=asset(ref, 1, 101.0)),
                                   marks=(CheckMark(upstream_id=str(UUID(int=9)), mark="excluded"),)))
+    for unseen in store.unseen_rows(lease, 10):
+        store.record_recheck(lease, unseen, False)
     store.finish_check(lease, CheckComplete())
     assert sorted(_rows(store, key)) == [str(UUID(int=1))]
     assert _pool(store, key)["last_complete_at"] > completed_at
@@ -228,6 +232,8 @@ def test_pages_are_newest_first_and_a_cursor_survives_adds_and_sweeps(pools):
     newer = asset(ref, 500, 5000.0)
     store.record_step(lease, step(InPool(asset=newer),
                                   *(InPool(asset=a) for a in assets if a is not swept)))
+    assert store.unseen_rows(lease, 10) == (swept.upstream_id,)
+    store.record_recheck(lease, swept.upstream_id, False)
     store.finish_check(lease, CheckComplete())
     rest = _all_pages(store, draft, cursor)
     assert rest == [a for a in expected[60:] if a != swept.asset_id]

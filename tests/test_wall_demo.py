@@ -44,6 +44,7 @@ from scripts.demo_wall import (
     main,
     operator_action,
     outage_checks,
+    player_cache_audit_code,
     preserved_locks,
     public_failure,
     read_pool,
@@ -389,7 +390,7 @@ def test_player_runner_recorder_logs_only_successful_presentations():
     renderer = namespace["Recorder"]()
     binding = OutputBinding(output_id="HDMI-A-1", frame_id="frame-1", generation=1,
                             profile=FrameProfile(width_px=64, height_px=48, diagonal_inches=20))
-    variant = Variant(sha256="a" * 64, size=1, media_type="image/png", width=1, height=1)
+    variant = Variant(asset_id="asset-a", recipe_id="e" * 64, sha256="a" * 64, size=1, media_type="image/png", width=1, height=1)
     layer = Layer(assignment_id="assignment-1", run_id="run-1", output_id="HDMI-A-1",
                   frame_id="frame-1", binding_generation=1, start=100, end=110,
                   media_origin=100, variant=variant, crop=CENTRED)
@@ -1427,3 +1428,20 @@ def test_every_demo_upload_fills_the_demo_frame_output_and_none_fills_the_whole_
         refused = shape_fit("image", *size, FitTarget(profile=profile, output_px=whole),
                             DEMO_CROP_LIMIT, FitSettings())
         assert refused is not None and refused.reason == "below_frame_pixels"
+
+
+def test_the_byte_audit_reads_the_files_the_player_cache_writes(tmp_path: Path) -> None:
+    """The demo's byte audit runs over the files a real Player cache wrote, named by its variant
+    key and its bytes' digest, and hashes each against the digest part of its name."""
+    from contracts.models import Variant
+    from player.cache import Cache
+
+    data = b"a photo the Player fetched"
+    digest = hashlib.sha256(data).hexdigest()
+    item = Variant(asset_id="asset-one", recipe_id="e" * 64, sha256=digest, size=len(data),
+                   media_type="image/jpeg", width=2, height=2)
+    Cache(tmp_path, max_bytes=1024).secure(item, [data], pin="audit", sha256=digest, size=len(data))
+    audit = subprocess.run([sys.executable, "-c", player_cache_audit_code(str(tmp_path))],
+                           check=True, capture_output=True, text=True)
+    assert json.loads(audit.stdout) == [dict(key=hashlib.sha256(item.key.encode()).hexdigest(),
+                                             sha256=digest, size=len(data))]

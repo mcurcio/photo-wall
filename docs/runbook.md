@@ -50,7 +50,7 @@ Open **Settings › Photo library** (`#/photo-library`) and press **Add a connec
 |---|---|
 | "Immich rejected the API key." | **Paste a new key** |
 | "The key cannot do everything Photo Wall needs. Make a key with these permissions: …" | Make that key in Immich, then **Paste a new key** |
-| "Immich 2.4.1 is older than 2.5.0. Update Immich, then check again." | Update Immich, then **Check again** |
+| "Immich 3.0.0 is older than 3.1.0. Update Immich, then check again." | Update Immich, then **Check again** |
 | "Photo Wall cannot reach Immich at <address>" | Check the host and network, then **Check again** |
 | "Immich answered in a way Photo Wall does not understand." | **Check again**; **Details** shows the code |
 | "This key belongs to <found>; the connection belongs to <expected>" | **Paste a key for <expected>** |

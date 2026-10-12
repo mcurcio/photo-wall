@@ -15,7 +15,6 @@ from typing import Any, Literal, Protocol
 
 from pydantic import Field
 
-from central.catalog import SourcePool
 from central.installation_models import FrameOutput
 from central.photo_library.model import (
     AlbumRef,
@@ -40,6 +39,7 @@ from central.photo_library.model import (
     PoolCursor,
     PoolEntry,
     PoolKey,
+    PoolMember,
     PoolThumbnail,
     SourceProblem,
     SourceQuery,
@@ -53,6 +53,7 @@ from central.photo_library.views import (
     PhotoFacts,
     SourcePoolView,
 )
+from central.wall_plan.order import LineQuery, SourceLine
 from contracts.models import Instant, Model
 
 
@@ -278,8 +279,22 @@ class LibraryWorkerStore(Protocol):
         and queue the next step."""
         ...
 
+    def unseen_rows(self, lease: CheckLease, limit: int) -> tuple[LibraryRef, ...]:
+        """Up to `limit` of the pool's rows this check has neither seen nor marked, by Immich id
+        (follow-up S4): the rows its Re-check phase must ask Immich about, one at a time. A row
+        marked by this check (excluded, a stacked copy) is not among them: it counts as gone.
+        Empty for a superseded lease."""
+        ...
+
+    def record_recheck(self, lease: CheckLease, ref: LibraryRef, matches: bool) -> bool:
+        """One re-checked row, fenced as `record_step` (False: superseded, nothing written):
+        `matches` keeps the row as seen by this check; otherwise the row is removed, the only
+        removal of a row the check did not see. Queues the next step."""
+        ...
+
     def finish_check(self, lease: CheckLease, finish: CheckFinish) -> bool:
-        """Complete: remove rows this check did not see (the sweep), record the time.
+        """Complete: remove the rows this check marked (the subtraction) and record the time; a
+        row it did not see stays, since only `record_recheck` removes one (follow-up S4).
         Incomplete or failed: remove nothing (design rule 2). Fenced as `record_step`."""
         ...
 
@@ -315,9 +330,31 @@ class LibraryWorkerStore(Protocol):
 # --- Coordination side -------------------------------------------------------------------------
 
 
+class LeanMember(PoolMember):
+    """A Scene line member as the store ranks it (follow-up S3): a pool photo and the query's
+    pool keys that hold it; hydrated apart (central/media_repository.py `hydrate_in`)."""
+
+    pool_keys: tuple[PoolKey, ...]
+
+
+class RankedLine(Model):
+    """`ScenePoolReader.ranked_line_in`'s answer: the ranked top of a line, and the wrap mark's
+    row (the query's `after`, when the line holds it)."""
+
+    members: tuple[LeanMember, ...] = ()
+    after: LeanMember | None = None
+
+
 class ScenePoolReader(Protocol):
-    def source_pools_in(self, conn: Any, source_refs: set[str]) -> dict[str, SourcePool]:
-        """Each saved Source revision's whole pool (in-pool rows only, no window, no limit, C11),
-        hydrated with variants, read in the caller's transaction. A Scene's pool is the union the
-        Planner takes over its contributions' refs, one row per asset id (planner `_pool`)."""
+    """What the Planner reads of the photo library each pass (follow-up S3, design rule 3:
+    only what the plan needs, fresh): never a whole pool."""
+
+    def source_lines_in(self, conn: Any, source_refs: set[str]) -> dict[str, SourceLine]:
+        """Each named saved Source revision's pool key, readiness and emptiness, in the caller's
+        transaction; a ref naming none is left out."""
+        ...
+
+    def ranked_line_in(self, conn: Any, q: LineQuery) -> RankedLine:
+        """The top `q.limit` of a Scene's line in SQL: tier, then pass order
+        (central/wall_plan/order.py `ORDERS`), size and capture time read now."""
         ...

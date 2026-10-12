@@ -10,6 +10,7 @@ It parses answers into per-photo facts, and a malformed photo is only that photo
 
 from __future__ import annotations
 
+import tempfile
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Literal, Protocol
@@ -36,49 +37,36 @@ from central.photo_library.model import (
     Place,
     SourceQuery,
 )
-from central.photo_library.policy import IMMICH_WEB_TYPES
-from central.photo_library.rendition import FrameNeed, covers
+from central.photo_library.rendition import (
+    FetchStep,
+    FrameNeed,
+    copy_ladder,
+    copy_to_measure,
+    covers,
+)
 from contracts.models import Digest, Instant, Model, Positive
 
 # --- The rendition choice (follow-ups 2026-10-11, slice A4; owner, 2026-10-09: "use Immich
 # downsampled copy only if it is at least the visible Frame size, else the original") --------
 
-FetchStep = Literal["preview", "fullsize", "original"]
-
 
 def fetch_plan(asset: LibraryAsset, needs: Sequence[FrameNeed],
-               known: Mapping[MeasurableCopy, CopySize], readable: frozenset[str]
+               known: Mapping[MeasurableCopy, CopySize], full_size_copies: bool | None
                ) -> tuple[FetchStep, ...]:
-    """The copies to try, smallest first; the fetch keeps the first that `covers` the needs and
-    always keeps the last. Pure.
+    """The copies to try, smallest first: the copy ladder (central/photo_library/rendition.py
+    `copy_ladder`, the one home of which copies Photo Wall can read), narrowed by what is known.
+    The fetch keeps the first that `covers` the needs and always keeps the last. Pure.
 
-    - A video: ("original",).
-    - The full-resolution step: "fullsize" for an edited photo (Immich always keeps its edited
-      full-size copy; fetched `size=fullsize&edited=true`); "original" for an unedited photo
-      whose original's type is in `readable` (`media.prepare.STILL_MEDIA_TYPES`; fetched
-      `/assets/{id}/original?edited=false`); otherwise "fullsize" (`size=fullsize&edited=false`;
-      Immich redirects it to the preview when it keeps no full-size copy, and the preview is then
-      the only copy Photo Wall can read).
-    - An unedited photo whose original's type Immich serves as itself (`IMMICH_WEB_TYPES`: it
-      keeps no full-size copy and redirects "fullsize" to the original) but is not in `readable`
-      (a GIF, a BMP): ("preview",) alone, the only copy Photo Wall can read.
-    - No need: the full-resolution step alone.
-    - A known preview size (`known["preview"]`) that does not cover: the full-resolution step
-      alone (the preview is not downloaded again). Otherwise ("preview", <full-resolution step>).
-    The thumbnail is never tried: Immich's thumbnail (long edge 250 by default) is below any
-    Frame output a wall uses, and its size is unknown until downloaded."""
-    if asset.kind == "video":
-        return ("original",)
-    original_type = None if asset.original is None else asset.original.media_type
-    if (not asset.edited and original_type is not None and original_type not in readable
-            and original_type.lower() in IMMICH_WEB_TYPES):
-        return ("preview",)
-    full: FetchStep = ("original" if not asset.edited and original_type in readable
-                       else "fullsize")
+    - No need: the ladder's largest copy alone.
+    - A known preview size (`known["preview"]`) that does not cover: the ladder's largest copy
+      alone (the preview is not downloaded again), unless the preview is all the ladder holds.
+    - Otherwise the whole ladder."""
+    ladder = copy_ladder(asset, full_size_copies)
     preview = known.get("preview")
-    if not needs or (preview is not None and not covers(preview.width, preview.height, needs)):
-        return (full,)
-    return ("preview", full)
+    if len(ladder) > 1 and (not needs or (preview is not None and not covers(
+            preview.width, preview.height, needs))):
+        return (ladder[-1],)
+    return ladder
 
 
 class LibraryUnavailable(Exception):
@@ -244,6 +232,14 @@ class LibraryClient(Protocol):
         timeline only (archived, hidden, locked never: C5), newest first."""
         ...
 
+    async def still_matches(self, query: SourceQuery, upstream_id: LibraryRef) -> bool:
+        """The one-item re-check (follow-up S4): whether Immich's include query, as
+        `search_page` asks it with its window taken now, still answers this one photo
+        (`search/metadata` with `id`). An empty answer is False (deleted, untagged, moved out of
+        the window); a chosen album, person or tag Immich lost raises ChosenItemGone, any other
+        failure LibraryUnavailable, so a failure never reads as gone."""
+        ...
+
     async def edits_fingerprint(self, upstream_id: str) -> str:
         """16 hex of the sha256 of the asset's canonical edit list (assets/{id}/edits)."""
         ...
@@ -276,3 +272,20 @@ class LibraryClient(Protocol):
         ...
 
     async def close(self) -> None: ...
+
+
+async def measure_readable_copy(client: LibraryClient, asset: LibraryAsset,
+                                known: Mapping[MeasurableCopy, CopySize]
+                                ) -> tuple[MeasuredCopy, ...]:
+    """Follow-up S1: download and measure (from its header, with Pillow: `fetch_rendition`) the
+    copy the photo's readable size needs and Photo Wall has not measured
+    (central/photo_library/rendition.py `copy_to_measure`: a RAW photo's preview), in a private
+    temporary folder it removes; () when none is needed. The key content measurement runs it
+    first (media/worker.py `measure`), so a photo the Planner could not size is sized by its
+    next measurement."""
+    if copy_to_measure(asset, None, known) is None:
+        return ()
+    with tempfile.TemporaryDirectory(prefix="photo-wall-measure-") as folder:
+        fetched = await client.fetch_rendition(asset, plan=("preview",), needs=(),
+                                               destination=Path(folder) / "copy")
+    return fetched.measured

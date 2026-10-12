@@ -36,9 +36,11 @@ REQUIRED_PERMISSIONS: Final[tuple[str, ...]] = (
     "album.read", "album.statistics", "asset.download", "asset.edit.get", "asset.read",
     "asset.statistics", "asset.view", "face.read", "person.read", "tag.read", "user.read",
 )
-# C2: 2.5.x is tested; newer works with a note; older than 2.5 is Needs a look ("Update Immich").
-OLDEST_VERSION: Final = ImmichVersion(major=2, minor=5, patch=0)
-TESTED_RELEASE: Final[tuple[int, int]] = (2, 5)
+# C2: 3.1.x is tested (follow-up S4: production runs 3.1, and the adapter reads 3.x answers:
+# durations in milliseconds, an album's owner among its `albumUsers`); newer works with a note;
+# older than 3.1 is Needs a look ("Update Immich").
+OLDEST_VERSION: Final = ImmichVersion(major=3, minor=1, patch=0)
+TESTED_RELEASE: Final[tuple[int, int]] = (3, 1)
 # #12 "Look for new photos every": each connection check and each Source's check (C2).
 CHECK_EVERY_SECONDS: Final = 900
 # A running check whose latest step began this long ago (database time) is due again, so a step
@@ -52,6 +54,13 @@ DRAFT_KEEP_SECONDS: Final = 86400
 IMMICH_WEB_TYPES: Final[frozenset[str]] = frozenset({
     "image/jpeg", "image/jpg", "image/png", "image/webp", "image/gif", "image/avif",
     "image/svg+xml", "image/bmp"})
+# The still types Photo Wall's preparation reads (follow-ups 2026-10-11, slice A5; Pillow decodes
+# each, media/prepare.py STILL_FORMATS): the one home of "Photo Wall can read this file". The copy
+# ladder takes an unedited photo's original only when its type is here
+# (central/photo_library/rendition.py `ladder_of`); the Immich client downloads only these and
+# videos. Here, not in media/, because the ladder is pure and the fit rule reads it too.
+STILL_MEDIA_TYPES: Final[frozenset[str]] = frozenset({
+    "image/jpeg", "image/png", "image/webp", "image/heic", "image/heif", "image/avif"})
 # One page of a pool in the console (newest first).
 POOL_PAGE_SIZE: Final = 60
 # A stored connection URL's longest form (ConnectionSecret.base_url).
