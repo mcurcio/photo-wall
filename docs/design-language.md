@@ -182,7 +182,7 @@ interface SplitProps { children: React.ReactNode; action: React.ReactNode; as?: 
 // control its id, its describedby and the label's id (`labelId`), so a control that is a group is named by the label.
 interface FieldProps { label: string; help?: string; error?: string; notes?: readonly string[]; children: React.ReactElement }
 
-// Slider — shows its value and unit as text; commits on release, previews on drag.
+// Slider — shows its value and unit as text; commits on release, previews on drag; follows the pointer while held whatever the caller does with a preview.
 interface SliderProps { value: number; min: number; max: number; step: number; unit: string; onPreview?(v: number): void; onCommit(v: number): void; disabled?: boolean }
 
 // SegmentedControl — 2 to 5 exclusive choices (rotation, nudge step, fit). Alone it shows and carries its `label`;
