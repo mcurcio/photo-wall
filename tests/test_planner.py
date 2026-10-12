@@ -193,7 +193,7 @@ def test_a_pool_of_fifty_thousand_photos_on_four_frames_plans_an_hour_with_no_bu
         Contribution(target=f"frame:{frame}", source_refs=("holiday:1",)) for frame in frames))
     shared = candidate("photo-0").analysis
     photos = [Candidate(asset_id=f"photo-{n}", kind="image", original_width=1080,
-                        original_height=1920, captured_at=n, analysis=shared)
+                        original_height=1920, captured_at=n, analysis=shared, readable_size=(1080, 1920))
               for n in range(50_000)]
     bindings = {"player-one": tuple(binding(frame, f"hdmi-{n}") for n, frame in enumerate(frames))}
     result = project(

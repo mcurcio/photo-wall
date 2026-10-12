@@ -123,8 +123,9 @@ class FitAnalysisRequest(Model):
 # --- The reader's answers (central/infra/fit_analysis_store.py) ---------------------------------
 
 class SizeGroup(Model):
-    """The selection's in-pool photos of one kind and size (upright, edited): how many, and how
-    many have key content measured at the current analysis version."""
+    """The selection's in-pool photos of one kind and judged size (upright, edited: an image's
+    readable size, central/photo_library/rendition.py `readable_of`; a video's original): how
+    many, and how many have key content measured at the current analysis version."""
 
     kind: MediaKind
     width: int = Field(gt=0)
@@ -138,6 +139,9 @@ class SelectionSizes(Model):
     selection has a check running or has never completed one (the console says "so far")."""
 
     groups: tuple[SizeGroup, ...]
+    # Follow-up S1: in-pool images whose readable size is not measured yet (in no group): the
+    # Planner places none of them until it is (central/wall_plan/assignment.py `fit_of`).
+    size_unknown: int = Field(default=0, ge=0)
     waiting: int = Field(ge=0)
     left_out: int = Field(ge=0)
     reading: bool
@@ -186,8 +190,10 @@ class RefusalCount(Model):
 
 class FrameFit(Model):
     """One Frame's answer. Shape tier (complete): `fit_by_shape` of `photos` pass `shape_fit`;
-    `refused_by_shape` holds no_video_here, beyond_crop_limit and below_frame_pixels in the
-    rule's order (0 included); `measured` of `fit_by_shape` have key content;
+    `refused_by_shape` holds no_video_here, beyond_crop_limit, below_frame_pixels and
+    above_player_limit in the rule's order (0 included); `size_unknown` of `photos` are images
+    whose readable size is not measured yet, so neither fit nor refused; `measured` of
+    `fit_by_shape` have key content;
     `nearest_crop_limit`: when `fit_by_shape` is 0, the smallest crop limit within
     FIT_SETTING_RANGES at which some photo of the selection would pass `shape_fit` (the console's
     "Raise the crop limit to N %"), else None. Content tier
@@ -204,6 +210,7 @@ class FrameFit(Model):
     photos: int = Field(ge=0)
     fit_by_shape: int = Field(ge=0)
     refused_by_shape: tuple[RefusalCount, ...]
+    size_unknown: int = Field(default=0, ge=0)
     measured: int = Field(ge=0)
     nearest_crop_limit: float | None = None
     checked: int = Field(ge=0, le=CONTENT_SAMPLE)
@@ -262,7 +269,8 @@ def analyse(request: FitAnalysisRequest, reader: FitAnalysisReader,
         frames.append(frame)
     return FitAnalysis(
         tier=request.tier, crop_limit=crop_limit, settings=settings,
-        photos=sum(group.photos for group in sizes.groups if group.kind == "image"),
+        photos=sum(group.photos for group in sizes.groups if group.kind == "image")
+        + sizes.size_unknown,
         videos=sum(group.photos for group in sizes.groups if group.kind == "video"),
         waiting=sizes.waiting, left_out=sizes.left_out, reading=sizes.reading,
         bins=_bins(sizes.groups), frames=tuple(frames), read_at=sizes.read_at)
@@ -270,7 +278,7 @@ def analyse(request: FitAnalysisRequest, reader: FitAnalysisReader,
 
 # The refusals each tier counts, in the fit rule's order (central/wall_plan/fit.py).
 _SHAPE_REFUSALS: Final[tuple[FitRefusal, ...]] = ("no_video_here", "beyond_crop_limit",
-                                                  "below_frame_pixels")
+                                                  "below_frame_pixels", "above_player_limit")
 _CONTENT_REFUSALS: Final[tuple[FitRefusal, ...]] = ("face_cut", "interest_cut")
 _Size = tuple[MediaKind, int, int]
 
@@ -334,8 +342,9 @@ def _frame_fit(frame_id: str, target: FitTarget, display_px: tuple[int, int] | N
         frame_id=frame_id, aspect=target.profile.width_px / target.profile.height_px,
         output_px=target.output_px, display_px=display_px, draft=draft,
         band=band(target.profile.width_px / target.profile.height_px, crop_limit),
-        photos=sum(group.photos for group in sizes.groups), fit_by_shape=fit_by_shape,
-        refused_by_shape=by_shape, measured=measured,
+        photos=sum(group.photos for group in sizes.groups) + sizes.size_unknown,
+        fit_by_shape=fit_by_shape, refused_by_shape=by_shape, size_unknown=sizes.size_unknown,
+        measured=measured,
         nearest_crop_limit=None if fit_by_shape else _nearest_crop_limit(
             sizes.groups, target, settings),
         checked=len(judged), fit_checked=len(fitting),

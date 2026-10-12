@@ -31,12 +31,13 @@ from central.wall_plan.assignment import (
     Slot,
     UnfilledReason,
     WallLimits,
+    candidate_shape_fit,
     fits_slot,
     layer_after_end,
     plan_wall,
     variant_usable,
 )
-from central.wall_plan.fit import FitTarget, shape_fit
+from central.wall_plan.fit import FitTarget
 from central.wall_plan.fit_settings import FitSettings
 from central.wall_plan.order import (
     SceneLine,
@@ -171,10 +172,11 @@ class Projection(Model):
 def eligible(candidate: Candidate, target: FitTarget, crop_limit: float,
              settings: FitSettings) -> bool:
     """Hard original-media policy, also applied to every authored alternative: the photo fit
-    rule's size-only part (central/wall_plan/fit.py `shape_fit` is None) on the Frame `target`
-    at `crop_limit` with `settings`. Key content is judged by the wall assignment once measured."""
-    return shape_fit(candidate.kind, candidate.original_width, candidate.original_height,
-                     target, crop_limit, settings) is None
+    rule's size-only part (central/wall_plan/assignment.py `candidate_shape_fit` is None) on the
+    Frame `target` at `crop_limit` with `settings`, at the candidate's readable size (by shape
+    alone while it is not measured). Key content is judged by the wall assignment once
+    measured."""
+    return candidate_shape_fit(candidate, target, crop_limit, settings) is None
 
 
 # What Central may revise on a layer it has already offered (each offered layer is a lock:

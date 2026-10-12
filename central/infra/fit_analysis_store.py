@@ -7,9 +7,17 @@ however many pools hold it, with its kind from its Immich asset (`library_assets
 upright size from its revision (`asset_revisions`): owner item 6, the facts live once. Key content
 counts as measured only at the current ANALYSIS_VERSION. Read-only; each read is one statement
 in its own transaction. The answers carry no Immich id (R22).
+
+Follow-up S1: a photo is judged at its readable size, the largest copy of it Photo Wall can read
+(central/photo_library/rendition.py `readable_of`, the one home of that rule). The reads here
+select the rule's inputs (`READABLE_FACTS`: the revision's size and edit state, its original's
+type, its connection's full-size copies setting and its measured copies) and apply it in Python;
+`readable_sizes_in` is the same read for named photos (the Planner's hydration and its
+measurement requests, central/media_repository.py).
 """
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import Any, Final
 
 from pydantic import ValidationError
@@ -18,6 +26,7 @@ from central.db import Database, TransactionClock
 from central.infra.display_store import frame_outputs_in
 from central.infra.photo_library_store import PgPhotoLibrary
 from central.installation_models import FrameOutput
+from central.photo_library.rendition import Size, readable_of
 from central.wall_plan.fit import MediaKind
 from central.wall_plan.fit_analysis import (
     AnalysisRefused,
@@ -31,12 +40,66 @@ from central.wall_plan.key_content import ANALYSIS_VERSION, KeyContent
 # The selection's in-pool revisions, once each (`%(keys)s`: its pools' keys).
 _MEMBERS: Final = ("WITH members AS (SELECT DISTINCT asset_id FROM photo_pool_rows "
                    "WHERE pool_key = ANY(%(keys)s) AND outcome = 'in_pool' AND asset_id IS NOT NULL) ")
-# Each member's kind, size and (current version, measured) key content.
+# The inputs of `readable_of` for a revision `a` joined to its Immich asset `l`. `edited` is
+# `LibraryAsset.edited`'s test (an edit-list suffix on the revision) in SQL.
+READABLE_FACTS: Final = (
+    "l.kind, a.width, a.height, strpos(a.revision, '-') > 0 AS edited, l.original_media_type, "
+    "c.full_size_copies, pv.width AS preview_width, pv.height AS preview_height, "
+    "fs.width AS fullsize_width, fs.height AS fullsize_height ")
+READABLE_JOINS: Final = (
+    "LEFT JOIN library_connections c ON c.connection_ref = a.connection_ref "
+    "LEFT JOIN asset_copies pv ON pv.asset_id = a.asset_id AND pv.copy = 'preview' "
+    "LEFT JOIN asset_copies fs ON fs.asset_id = a.asset_id AND fs.copy = 'fullsize' ")
+_FACT_COLUMNS: Final = ("kind", "width", "height", "edited", "original_media_type",
+                        "full_size_copies", "preview_width", "preview_height", "fullsize_width",
+                        "fullsize_height")
+_GROUP_BY: Final = "GROUP BY " + ", ".join(str(n) for n in range(1, len(_FACT_COLUMNS) + 1))
+# Each member's kind, size, readable-size facts and (current version, measured) key content.
 _FACTS: Final = ("FROM members m JOIN asset_revisions a USING (asset_id) "
                  "JOIN library_assets l ON l.connection_ref = a.connection_ref "
-                 "AND l.upstream_id = a.upstream_id "
+                 "AND l.upstream_id = a.upstream_id " + READABLE_JOINS +
                  "LEFT JOIN photo_key_content k ON k.asset_id = m.asset_id "
                  "AND k.analysis_version = %(version)s AND k.status = 'measured' ")
+# A row's facts equal to one of the arrays' (`%(f_<column>)s`; NULL equals NULL).
+_FACTS_IN: Final = (
+    "EXISTS (SELECT 1 FROM unnest(%(f_kind)s::text[], %(f_width)s::int[], %(f_height)s::int[], "
+    "%(f_edited)s::bool[], %(f_original_media_type)s::text[], %(f_full_size_copies)s::bool[], "
+    "%(f_preview_width)s::int[], %(f_preview_height)s::int[], %(f_fullsize_width)s::int[], "
+    "%(f_fullsize_height)s::int[]) AS w(kind, width, height, edited, original_type, full_size, "
+    "preview_width, preview_height, fullsize_width, fullsize_height) "
+    "WHERE w.kind = l.kind AND w.width = a.width AND w.height = a.height "
+    "AND w.edited = (strpos(a.revision, '-') > 0) "
+    "AND w.original_type IS NOT DISTINCT FROM l.original_media_type "
+    "AND w.full_size IS NOT DISTINCT FROM c.full_size_copies "
+    "AND w.preview_width IS NOT DISTINCT FROM pv.width "
+    "AND w.preview_height IS NOT DISTINCT FROM pv.height "
+    "AND w.fullsize_width IS NOT DISTINCT FROM fs.width "
+    "AND w.fullsize_height IS NOT DISTINCT FROM fs.height) ")
+
+
+def readable_of_row(row: Any) -> Size | None:
+    """`readable_of` over a row selected with READABLE_FACTS."""
+    def pair(width: str, height: str) -> Size | None:
+        return None if row[width] is None else (row[width], row[height])
+    return readable_of(row["kind"], bool(row["edited"]), row["original_media_type"],
+                       row["full_size_copies"], (row["width"], row["height"]),
+                       pair("preview_width", "preview_height"),
+                       pair("fullsize_width", "fullsize_height"))
+
+
+def readable_sizes_in(conn: Any, asset_ids: Iterable[str]
+                      ) -> dict[str, tuple[MediaKind, Size | None]]:
+    """Each named revision's kind and readable size (None: not measured yet), in the caller's
+    transaction; an id with no revision is absent."""
+    ids = sorted(set(asset_ids))
+    if not ids:
+        return {}
+    rows = conn.execute(
+        "SELECT a.asset_id, " + READABLE_FACTS + "FROM asset_revisions a "
+        "JOIN library_assets l ON l.connection_ref = a.connection_ref "
+        "AND l.upstream_id = a.upstream_id " + READABLE_JOINS + "WHERE a.asset_id = ANY(%s)",
+        (ids,)).fetchall()
+    return {row["asset_id"]: (row["kind"], readable_of_row(row)) for row in rows}
 
 
 class PgFitAnalysisReader:
@@ -48,10 +111,9 @@ class PgFitAnalysisReader:
         """FitAnalysisReader.selection_sizes."""
         with self.db.transaction() as conn:
             keys, reading = self._pools_in(conn, selection)
-            groups = conn.execute(
-                _MEMBERS + "SELECT l.kind, a.width, a.height, count(*) AS photos, "
-                "count(k.asset_id) AS measured " + _FACTS +
-                "GROUP BY l.kind, a.width, a.height ORDER BY l.kind, a.width, a.height",
+            facts = conn.execute(
+                _MEMBERS + "SELECT " + READABLE_FACTS + ", count(*) AS photos, "
+                "count(k.asset_id) AS measured " + _FACTS + _GROUP_BY,
                 {"keys": keys, "version": ANALYSIS_VERSION}).fetchall()
             others = conn.execute(
                 "SELECT outcome, count(DISTINCT (p.connection_ref, r.upstream_id)) AS n "
@@ -60,12 +122,22 @@ class PgFitAnalysisReader:
                 (keys,)).fetchall()
             read_at = self.times.now_in(conn)
         outside = {row["outcome"]: row["n"] for row in others}
+        grouped: dict[tuple[str, int, int], list[int]] = {}
+        unsized = 0
+        for row in facts:
+            size = readable_of_row(row)
+            if size is None:
+                unsized += row["photos"]
+                continue
+            counts = grouped.setdefault((row["kind"], *size), [0, 0])
+            counts[0] += row["photos"]
+            counts[1] += row["measured"]
         return SelectionSizes(
-            groups=tuple(SizeGroup(kind=row["kind"], width=row["width"], height=row["height"],
-                                   photos=row["photos"], measured=row["measured"])
-                         for row in groups),
-            waiting=outside.get("waiting", 0), left_out=outside.get("left_out", 0),
-            reading=reading, read_at=read_at)
+            groups=tuple(SizeGroup(kind=kind, width=width, height=height, photos=photos,
+                                   measured=measured)
+                         for (kind, width, height), (photos, measured) in sorted(grouped.items())),
+            size_unknown=unsized, waiting=outside.get("waiting", 0),
+            left_out=outside.get("left_out", 0), reading=reading, read_at=read_at)
 
     def sample(self, selection: FitSelection, sizes: frozenset[tuple[MediaKind, int, int]], *,
                seed: int, limit: int, measured_only: bool) -> tuple[SamplePhoto, ...]:
@@ -73,20 +145,28 @@ class PgFitAnalysisReader:
         give the same photos. A stored key that no longer reads as KeyContent is not measured."""
         if not sizes or limit <= 0:
             return ()
-        kinds, widths, heights = zip(*sorted(sizes), strict=True)
         with self.db.transaction() as conn:
             keys, _ = self._pools_in(conn, selection)
+            params = {"keys": keys, "version": ANALYSIS_VERSION}
+            # The fact groups whose readable size is asked (`selection_sizes`' grouping, read
+            # again in this transaction), so the sample filters by the rule's own answer.
+            wanted = [row for row in conn.execute(
+                _MEMBERS + "SELECT DISTINCT " + READABLE_FACTS + _FACTS, params).fetchall()
+                if (size := readable_of_row(row)) is not None and (row["kind"], *size) in sizes]
+            if not wanted:
+                return ()
+            arrays = {"f_" + column: [row[column] for row in wanted] for column in _FACT_COLUMNS}
             rows = conn.execute(
-                _MEMBERS + "SELECT m.asset_id, l.kind, a.width, a.height, k.key " + _FACTS +
-                "WHERE (l.kind, a.width, a.height) IN (SELECT * FROM unnest("
-                "%(kinds)s::text[], %(widths)s::int[], %(heights)s::int[])) "
-                + ("AND k.asset_id IS NOT NULL " if measured_only else "") +
+                _MEMBERS + "SELECT m.asset_id, " + READABLE_FACTS + ", k.key " + _FACTS +
+                "WHERE " + _FACTS_IN + ("AND k.asset_id IS NOT NULL " if measured_only else "") +
                 "ORDER BY md5(m.asset_id || ':' || %(seed)s::text), m.asset_id LIMIT %(limit)s",
-                {"keys": keys, "version": ANALYSIS_VERSION, "kinds": list(kinds),
-                 "widths": list(widths), "heights": list(heights), "seed": seed,
-                 "limit": limit}).fetchall()
-        photos = (SamplePhoto(asset_id=row["asset_id"], kind=row["kind"], width=row["width"],
-                              height=row["height"], key=_key(row["key"])) for row in rows)
+                params | arrays | {"seed": seed, "limit": limit}).fetchall()
+        photos = []
+        for row in rows:
+            size = readable_of_row(row)
+            if size is not None:
+                photos.append(SamplePhoto(asset_id=row["asset_id"], kind=row["kind"],
+                                          width=size[0], height=size[1], key=_key(row["key"])))
         return tuple(photo for photo in photos if photo.key is not None or not measured_only)
 
     def frame_outputs(self) -> tuple[FrameOutput, ...]:

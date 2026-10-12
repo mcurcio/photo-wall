@@ -44,7 +44,7 @@ from media.immich import ImmichClient, LibraryLimits
 from media.key_content import MeasureError
 from media.key_content import measure as measure_key_content
 from media.library_checks import LibraryChecks
-from media.library_client import LibraryClient, LibraryUnavailable
+from media.library_client import LibraryClient, LibraryUnavailable, measure_readable_copy
 from media.library_clients import LibraryClients
 from media.library_thumbnails import LibraryThumbnailOrigin
 from media.media_maker import MediaMaker, PreparationClient
@@ -169,6 +169,10 @@ class MediaWorker:
         try:
             async with asyncio.timeout(self.limits.measure_seconds):
                 client = await self._client(asset.connection_ref)
+                # Follow-up S1: the copy the readable size needs (a RAW photo's preview).
+                known = await _blocking(self.library.copy_sizes, asset_id)
+                measured = await measure_readable_copy(client, asset, known)
+                await _blocking(self.library.record_copies, asset_id, measured)
                 boxes = await client.faces(asset.upstream_id)
                 thumbnail = await client.thumbnail(asset.upstream_id, asset.revision)
                 key = await _blocking(measure_key_content, boxes, thumbnail)

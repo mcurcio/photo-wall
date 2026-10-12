@@ -9,7 +9,6 @@ from test_authored_media import asset, setup_source
 from central.coordination import Coordinator
 from central.db import ProcessTransactionClock
 from central.kernel.job_types import PrepareMedia
-from central.kernel.types import media_variant_key
 from central.media_repository import MediaRepository, prepare_lock
 from central.registry import FrameCreate, RegistryError
 from central.runtime import Child, Contribution, Scene
@@ -72,7 +71,7 @@ def _prepared(registry, asset_id, *, variant=None, failure=None, retry_not_befor
     repository = MediaRepository(registry.db, registry.clock,
                                  times=ProcessTransactionClock(registry.clock))
     with registry.db.transaction() as conn:
-        key = media_variant_key(asset_id, repository.wall_recipe_in(conn))
+        key = repository.variant_key_in(conn, asset_id)
         conn.execute("INSERT INTO job_outcomes(lock_key,job_name,status,reason,retry_not_before,"
                      "seq,updated_at) VALUES(%s,%s,%s,%s,%s,nextval('job_outcome_seq'),0)",
                      (prepare_lock(key), PrepareMedia.job_name,
@@ -244,7 +243,7 @@ def test_the_candidates_route_lists_what_fits_and_counts_what_it_skips(registry)
             wide.asset_id: "fits", unmeasured.asset_id: "not_measured"}
         assert answer["count"] == 2
         assert answer["skipped"] == {"beyond_crop_limit": 2, "below_frame_pixels": 1,
-                                     "face_cut": 0, "interest_cut": 1, "no_video_here": 0,
+                                     "above_player_limit": 0, "face_cut": 0, "interest_cut": 1, "no_video_here": 0,
                                      "not_measured": 1}
         looser = client.get(route, params={"frame_id": "wide", "crop_limit": 0.5},
                             headers=headers).json()

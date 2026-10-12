@@ -21,7 +21,7 @@ from central.photo_library.rendition import FrameNeed
 from contracts.time import ManualClock
 from media.immich import ImmichClient
 from media.library_client import fetch_plan
-from media.prepare import STILL_MEDIA_TYPES, Preparer
+from media.prepare import Preparer
 
 if not os.environ.get("PHOTO_WALL_IMMICH_FIXTURE"):
     pytest.skip("set PHOTO_WALL_IMMICH_FIXTURE", allow_module_level=True)
@@ -61,7 +61,7 @@ def need(width: int, height: int) -> tuple[FrameNeed, ...]:
 
 def fetched_for(client, asset, needs, destination):
     """The real choice: the plan from the asset and the needs, then the real fetch."""
-    plan = fetch_plan(asset, needs, {}, STILL_MEDIA_TYPES)
+    plan = fetch_plan(asset, needs, {}, None)
     return run(client.fetch_rendition(asset, plan=plan, needs=needs, destination=destination))
 
 
@@ -100,7 +100,7 @@ def test_the_preview_serves_a_frame_it_covers_and_the_original_a_larger_one(
     assert (full.width, full.height) == (asset.width, asset.height)
     assert [copy.name for copy in full.measured] == ["preview"]
     unread = asset.model_copy(update={"original": None})
-    assert fetch_plan(unread, larger, {}, STILL_MEDIA_TYPES) == ("preview", "fullsize")
+    assert fetch_plan(unread, larger, {}, None) == ("preview", "fullsize")
     redirected = fetched_for(client, unread, larger, tmp_path / "redirected")
     assert (redirected.rendition, redirected.width, redirected.height) == (
         "original", asset.width, asset.height)

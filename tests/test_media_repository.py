@@ -10,7 +10,7 @@ from support.photo_pools import photo, seed_pool
 from central.db import ProcessTransactionClock
 from central.infra.photo_library_store import library_assets_in
 from central.kernel.job_types import PrepareMedia
-from central.kernel.types import media_variant_key
+from central.kernel.types import split_media_variant_key
 from central.media_queue import QueueReceipt
 from central.media_repository import MediaRepository, StoreLimits, prepare_lock
 from central.planner import AcquisitionRequest, MeasureRequest
@@ -52,19 +52,21 @@ def test_a_planned_photo_is_named_and_its_preparation_published_with_the_callers
     assert queued_jobs(registry) == []
     with registry.db.transaction() as conn:
         assert repo.request_preparations_in(conn, (request(first), request(second))) == 2
-        recipe = repo.wall_recipe_in(conn)
+        named = {item.asset_id: repo.variant_key_in(conn, item.asset_id) for item in (first, second)}
     with registry.db.transaction() as conn:
         assert repo.request_preparations_in(conn, (request(first),)) == 1  # merged
         recipes = conn.execute("SELECT recipe_id,need FROM media_recipes").fetchall()
         references = conn.execute("SELECT identity,owner FROM asset_references "
                                   "WHERE kind='media-variant' ORDER BY identity").fetchall()
-    keys = sorted(media_variant_key(item.asset_id, recipe) for item in (first, second))
+    keys = sorted(named.values())
+    recipe = split_media_variant_key(keys[0])[1]
     assert sorted((row["task_name"], row["args"]["key"]) for row in queued_jobs(registry)) == [
         ("photo_wall." + PrepareMedia.job_name, key) for key in keys]
     assert [(row["identity"], row["owner"]) for row in references] == [
         (key, "frame-media") for key in keys]
-    assert recipes == [{"recipe_id": recipe, "need": {"aspect": 1080 / 1920, "width": 1080,
-                                                      "height": 1920}}]
+    # One copy per photo for the wall (follow-up S1): both 1080 x 1920 photos on the one
+    # 1080 x 1920 Frame share the 1920 step's recipe.
+    assert recipes == [{"recipe_id": recipe, "need": {"long_edge": 1920}}]
 
 
 def test_an_unknown_photo_or_a_wall_without_frames_publishes_nothing(registry):
@@ -95,12 +97,11 @@ def test_health_counts_preparations_by_their_latest_outcome_and_variant_bytes(re
     repo, (ready, failed) = setup_repository(registry, count=2)
     seed_variant(registry, ready.asset_id, "c" * 64, size=10)
     with registry.db.transaction() as conn:
-        recipe = repo.wall_recipe_in(conn)
         for item, status, reason in ((ready, "ok", None), (failed, "terminal", "unsupported_media")):
             conn.execute("INSERT INTO job_outcomes(lock_key,job_name,status,reason,"
                          "retry_not_before,seq,updated_at) VALUES(%s,%s,%s,%s,NULL,"
                          "nextval('job_outcome_seq'),1000)",
-                         (prepare_lock(media_variant_key(item.asset_id, recipe)),
+                         (prepare_lock(repo.variant_key_in(conn, item.asset_id)),
                           PrepareMedia.job_name, status, reason))
     health = repo.health()
     assert health["jobs"] == [{"state": "failed", "count": 1}, {"state": "ready", "count": 1}]
@@ -120,7 +121,7 @@ def test_a_failed_preparation_is_reported_until_its_retry_window_ends(registry):
     held = photo("held", taken_at=900)
     seed_pool(registry, "family:1", (held,))
     with registry.db.transaction() as conn:
-        key = media_variant_key(held.asset_id, repo.wall_recipe_in(conn))
+        key = repo.variant_key_in(conn, held.asset_id)
         conn.execute("INSERT INTO job_outcomes(lock_key,job_name,status,reason,retry_not_before,"
                      "seq,updated_at) VALUES(%s,%s,'transient','asset_missing',1010,"
                      "nextval('job_outcome_seq'),1000)", (prepare_lock(key), PrepareMedia.job_name))

@@ -33,7 +33,7 @@ from central.photo_library.model import ConnectionSecret, LibraryAsset
 from central.photo_library.ports import LibraryWorkerStore
 from media.library_client import FetchedRendition, LibraryClient, LibraryUnavailable, fetch_plan
 from media.models import MediaError
-from media.prepare import STILL_MEDIA_TYPES, PreparationRecipe, PreparedMedia
+from media.prepare import PreparationRecipe, PreparedMedia
 
 LEGACY_VARIANT: Final = "legacy_variant"
 VARIANT_INPUTS_UNKNOWN: Final = "variant_inputs_unknown"
@@ -109,7 +109,7 @@ class MediaMaker:
         client = await self._client(secret)
         needs = (inputs.need,)
         known = await _blocking(self._library.copy_sizes, asset_id)
-        plan = fetch_plan(photo, needs, known, STILL_MEDIA_TYPES)
+        plan = fetch_plan(photo, needs, known, inputs.full_size_copies)
         variant = await _blocking(self._store.temp_path, key)
         original = variant.with_name(variant.name + ".original")
         try:

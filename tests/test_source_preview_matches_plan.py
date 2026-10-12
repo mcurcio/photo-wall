@@ -35,7 +35,6 @@ from central.infra.transactions import PgTransaction, PgTransactions
 from central.kernel.handling import TerminalFailure, TransientFailure
 from central.kernel.job_types import PrepareMedia
 from central.kernel.jobs import asset_key
-from central.kernel.types import media_variant_key
 from central.media_queue import QueueReceipt
 from central.media_repository import MediaRepository
 from central.photo_library.model import (
@@ -204,10 +203,11 @@ class Wall:
         maker = self.worker.media_maker(store=self.store,
                                         transactions=PgTransactions(self.registry.db))
         with self.registry.db.transaction() as conn:
-            recipe = self.repository.wall_recipe_in(conn)
+            keys = {asset_id: self.repository.variant_key_in(conn, asset_id)
+                    for asset_id in {request.asset_id for request in acquisitions}}
         results = []
         for asset_id in sorted({request.asset_id for request in acquisitions}):
-            job = PrepareMedia(key=media_variant_key(asset_id, recipe))
+            job = PrepareMedia(key=keys[asset_id])
             try:
                 facts = self.run(maker.handle(job))
             except (TerminalFailure, TransientFailure) as failure:

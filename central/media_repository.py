@@ -5,12 +5,18 @@ A media variant (a prepared copy of a photo) is an Asset record of kind `media-v
 candidates from those records, names the recipe each planned photo is prepared under, publishes
 `PrepareMedia` in coordination's transaction, and pins variants for offers and locks. All
 reference mutation shares Database.MEDIA_LOCK with coordination.
+
+Follow-up S1 (owner, 2026-10-12: "i expect the final composition to be handled on the Player,
+via scaling and masking"): each photo has ONE copy for the whole wall, named by `variant_names_in`
+from the photo's readable size, the wall's Frame outputs and the photo fit settings
+(central/photo_library/rendition.py `wall_need` over central/wall_plan/fit.py
+`fitting_outputs`), so it is the same name whichever Frame shows the photo.
 """
 
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import get_args
@@ -23,6 +29,8 @@ from central.catalog import Candidate, SourcePool
 from central.db import MEDIA_LOCK, Database, TransactionClock
 from central.infra.asset_records import PgAssetRecords
 from central.infra.display_store import frame_outputs_in
+from central.infra.fit_analysis_store import readable_sizes_in
+from central.infra.fit_settings_store import PgFitSettings
 from central.infra.key_content_store import PgKeyContent
 from central.infra.outcomes import JobOutcomes
 from central.infra.photo_library_store import PgPhotoLibrary, library_assets_in
@@ -36,11 +44,11 @@ from central.kernel.publishing import Publisher
 from central.kernel.types import media_variant_key, split_media_variant_key
 from central.media_queue import MediaTaskQueue
 from central.photo_library.model import LibraryAsset, PoolMember
-from central.photo_library.rendition import FrameNeed, frame_need
+from central.photo_library.rendition import FrameNeed, need_at, need_step, wall_need
 from central.planner import AcquisitionRequest, MeasureRequest, candidate_standing
 from central.registry import RegistryError
 from central.wall_plan.assignment import fit_of
-from central.wall_plan.fit import DoesNotFit, FitRefusal, FitTarget
+from central.wall_plan.fit import DoesNotFit, FitRefusal, FitTarget, fitting_outputs
 from central.wall_plan.fit_settings import FitSettings
 from contracts.models import Model, Variant
 from contracts.time import Clock
@@ -60,21 +68,57 @@ class StoreLimits(Model):
 @dataclass(frozen=True, slots=True)
 class VariantInputs:
     """What a media variant's name stands for: the photo revision, and the recipe and need it is
-    prepared for (`media.media_maker` makes it from these alone)."""
+    prepared for, and its connection's full-size copies setting (the copy ladder's input):
+    `media.media_maker` makes it from these alone."""
 
     asset: LibraryAsset
     recipe: PreparationRecipe
     need: FrameNeed
+    full_size_copies: bool | None = None
 
 
-def wall_need(frames: Sequence[FrameOutput]) -> FrameNeed | None:
-    """The wall's largest need (the most pixels, then the widest): one variant per photo for the
-    whole wall, until slice S1 names a variant per Frame need. None without a Frame. Pure."""
-    needs = [frame_need(frame) for frame in frames]
-    if not needs:
-        return None
-    return max(needs, key=lambda need: (need.width * need.height, need.width, need.height,
-                                        need.aspect))
+@dataclass(frozen=True, slots=True)
+class VariantName:
+    """A photo's one copy for the wall now: its name (`<asset_id>.<recipe_id>`), the recipe it
+    is prepared by (the house recipe with its long edge at the step) and that step."""
+
+    key: str
+    recipe_id: str
+    recipe: PreparationRecipe
+    step: int
+
+
+def variant_recipe(base: PreparationRecipe, kind: str, need: FrameNeed) -> PreparationRecipe:
+    """The recipe a photo's one copy is prepared by: `base` with its still long edge at the
+    wall need's step (`need_step`); a video's is `base` (its size is the recipe's). Pure."""
+    if kind == "video":
+        return base
+    return base.model_copy(update={"image_long_edge": need_step(need)})
+
+
+def names_for(base: PreparationRecipe, sized: Mapping[str, tuple[str, tuple[int, int] | None]],
+              frames: Sequence[FrameOutput], settings: FitSettings) -> dict[str, VariantName]:
+    """Each photo's one copy name (module docstring): for each asset id's (kind, judged size),
+    the wall need over the Frames it could fill (`fitting_outputs`) on `settings.copy_steps`.
+    A photo whose size is not measured, or a wall without a Frame, names none. Pure; one need
+    per distinct (kind, size)."""
+    if not frames:
+        return {}
+    steps = settings.copy_steps
+    by_size: dict[tuple[str, tuple[int, int]], tuple[str, PreparationRecipe, int]] = {}
+    names: dict[str, VariantName] = {}
+    for asset_id, (kind, size) in sized.items():
+        if size is None:
+            continue
+        found = by_size.get((kind, size))
+        if found is None:
+            need = wall_need(size, fitting_outputs(kind, *size, frames, settings), steps)
+            recipe = variant_recipe(base, kind, need)
+            found = by_size[(kind, size)] = (recipe_id(recipe, need), recipe, need_step(need))
+        recipe_name, recipe, step = found
+        names[asset_id] = VariantName(key=media_variant_key(asset_id, recipe_name),
+                                      recipe_id=recipe_name, recipe=recipe, step=step)
+    return names
 
 
 def prepare_lock(key: str) -> str:
@@ -155,20 +199,29 @@ class MediaRepository:
         conn.execute("UPDATE media_sources SET refresh_active=(source_ref=ANY(%s)) "
                      "WHERE refresh_active<>(source_ref=ANY(%s))", (needed, needed))
 
-    def wall_recipe_in(self, conn, *, record: bool = False) -> str | None:
-        """The recipe id every planned photo is prepared under now (`wall_need`); None without
-        a Frame. With `record`, its values are written to `media_recipes`, so its variants can
-        be re-made from their names (a read-only transaction only computes it)."""
-        need = wall_need(frame_outputs_in(conn))
-        if need is None:
-            return None
-        recipe = recipe_id(self.recipe, need)
+    def variant_names_in(self, conn, asset_ids, *, record: bool = False,
+                         sized: Mapping[str, tuple[str, tuple[int, int] | None]] | None = None
+                         ) -> dict[str, VariantName]:
+        """Each named photo's one copy for the wall now (`names_for` over its readable size,
+        `readable_sizes_in`, or `sized` when the caller read it). With `record`, each recipe's
+        values are written to `media_recipes` (its step as the need), so its variants can be
+        re-made from their names (a read-only transaction only computes them)."""
+        sized = readable_sizes_in(conn, asset_ids) if sized is None else sized
+        names = names_for(self.recipe, sized, frame_outputs_in(conn),
+                          PgFitSettings.fit_settings_in(conn))
         if record:
-            conn.execute("INSERT INTO media_recipes(recipe_id,recipe,need,created_at) "
-                         "VALUES(%s,%s,%s,%s) ON CONFLICT(recipe_id) DO NOTHING",
-                         (recipe, Jsonb(self.recipe.model_dump(mode="json")),
-                          Jsonb(need.model_dump(mode="json")), self.times.now_in(conn)))
-        return recipe
+            recipes = {name.recipe_id: name for name in names.values()}
+            for recipe_name, name in sorted(recipes.items()):
+                conn.execute("INSERT INTO media_recipes(recipe_id,recipe,need,created_at) "
+                             "VALUES(%s,%s,%s,%s) ON CONFLICT(recipe_id) DO NOTHING",
+                             (recipe_name, Jsonb(name.recipe.model_dump(mode="json")),
+                              Jsonb({"long_edge": name.step}), self.times.now_in(conn)))
+        return names
+
+    def variant_key_in(self, conn, asset_id: str, *, record: bool = False) -> str | None:
+        """`variant_names_in` for one photo: its copy's name, or None."""
+        name = self.variant_names_in(conn, (asset_id,), record=record).get(asset_id)
+        return None if name is None else name.key
 
     def _hydrate_candidates(self, conn, candidates, now):
         """Apply the current variant, preparation failure and key content to every pool and
@@ -183,9 +236,9 @@ class MediaRepository:
             return candidates
         asset_ids = [candidate.asset_id for candidate in candidates]
         analyses = self.key_content.analyses_in(conn, asset_ids, now=now)
-        recipe = self.wall_recipe_in(conn)
-        keys = {} if recipe is None else {
-            asset_id: media_variant_key(asset_id, recipe) for asset_id in set(asset_ids)}
+        sized = readable_sizes_in(conn, asset_ids)
+        keys = {asset_id: name.key for asset_id, name in self.variant_names_in(
+            conn, asset_ids, sized=sized).items()}
         variants = self.variants_in(conn, keys.values())
         locks = {prepare_lock(key): asset_id for asset_id, key in keys.items()}
         failed = {}
@@ -201,6 +254,7 @@ class MediaRepository:
                 "variant": variant,
                 "preparation_failure": failed.get(candidate.asset_id) if variant is None else None,
                 "analysis": analyses.get(candidate.asset_id),
+                "readable_size": sized.get(candidate.asset_id, (None, None))[1],
             }))
         return tuple(hydrated)
 
@@ -300,7 +354,8 @@ class MediaRepository:
             old = existing.get(asset_id)
             if old:
                 prior = Candidate.model_validate(old["candidate"]).model_copy(
-                    update={"variant": None, "preparation_failure": None, "analysis": None})
+                    update={"variant": None, "preparation_failure": None, "analysis": None,
+                            "readable_size": None})
                 if prior != candidate:
                     raise RegistryError("authored_candidate_immutable", 409)
         new = [asset_id for asset_id in asset_ids if asset_id not in existing]
@@ -344,39 +399,44 @@ class MediaRepository:
                          (self.times.now_in(conn), code))
 
     def request_preparations_in(self, conn, requests: Sequence[AcquisitionRequest]) -> int:
-        """Name and publish the `PrepareMedia` of each planned photo that has no variant under
-        the current recipe, in the caller's (coordination's) transaction: its record gains the
+        """Name and publish the `PrepareMedia` of each planned photo's one copy for the wall
+        (`variant_names_in`), in the caller's (coordination's) transaction: its record gains the
         planned reference, then the job is published (a pending copy absorbs a repeat; a
-        terminal failure stays until a Frame's read asks again). Returns how many it published."""
+        terminal failure stays until a Frame's read asks again). A photo that cannot be named
+        yet (its readable size not measured, or no Frame) is skipped. Returns how many it
+        published."""
         if not requests:
             return 0
         if self.publisher is None:
             raise RegistryError("media_queue_unconfigured", 503)
-        recipe = self.wall_recipe_in(conn, record=True)
-        if recipe is None:
-            return 0
-        known = {row["asset_id"] for row in conn.execute(
-            "SELECT asset_id FROM asset_revisions WHERE asset_id=ANY(%s)",
-            ([request.asset_id for request in requests],)).fetchall()}
+        names = self.variant_names_in(conn, [request.asset_id for request in requests],
+                                      record=True)
         tx = PgTransaction(conn)
-        for asset_id in sorted(known):
-            key = media_variant_key(asset_id, recipe)
+        for asset_id in sorted(names):
+            key = names[asset_id].key
             self.records.reference(tx, variant_asset_key(key), VARIANT_REFERENCE)
             self.publisher.publish(PrepareMedia(key=key), within=tx)
-        return len(known)
+        return len(names)
 
     def variant_inputs(self, key: str) -> VariantInputs | None:
-        """The photo revision, recipe and need a variant's name stands for (`media_recipes`),
-        or None when either is unknown (a legacy variant's recipe has no row)."""
+        """The photo revision, recipe and need a variant's name stands for (`media_recipes`: the
+        need is its step, the photo's own shape at that long edge, `need_at`), with its
+        connection's full-size copies setting; None when either is unknown (a legacy variant's
+        recipe has no row)."""
         asset_id, recipe = split_media_variant_key(key)
         with self.db.transaction() as conn:
             row = conn.execute("SELECT recipe,need FROM media_recipes WHERE recipe_id=%s",
                                (recipe,)).fetchone()
             asset = library_assets_in(conn, (asset_id,)).get(asset_id)
-        if row is None or asset is None:
+            full_size = None if asset is None else conn.execute(
+                "SELECT full_size_copies FROM library_connections WHERE connection_ref=%s",
+                (asset.connection_ref,)).fetchone()
+        if row is None or asset is None or not isinstance(row["need"].get("long_edge"), int):
             return None
         return VariantInputs(asset=asset, recipe=PreparationRecipe.model_validate(row["recipe"]),
-                             need=FrameNeed.model_validate(row["need"]))
+                             need=need_at((asset.width, asset.height), row["need"]["long_edge"]),
+                             full_size_copies=None if full_size is None
+                             else full_size["full_size_copies"])
 
     def request_measurements(self, requests: tuple[MeasureRequest, ...]) -> int:
         """Roadmap 5a (slice M1): queue a key content measurement for each requested photo that
@@ -385,9 +445,20 @@ class MediaRepository:
         beside coordination's preparation requests."""
         if not requests:
             return 0
+        wanted = [request.asset_id for request in requests]
         with self.transaction() as conn:
-            return self.key_content.request_in(conn, [request.asset_id for request in requests],
-                                               now=self.times.now_in(conn))
+            # Follow-up S1: a photo whose readable size is not measured is measured again even
+            # when its key content is current (the measurement measures its preview too,
+            # media/worker.py `measure`); the queue absorbs a repeat.
+            unsized = [asset_id for asset_id, (kind, size) in readable_sizes_in(
+                conn, wanted).items() if kind == "image" and size is None]
+            if unsized and self.queue is None:
+                raise RegistryError("media_queue_unconfigured", 503)
+            queued = sum(not self.queue.enqueue_measure_in(conn, asset_id).coalesced
+                         for asset_id in sorted(unsized))
+            return queued + self.key_content.request_in(
+                conn, [asset_id for asset_id in wanted if asset_id not in set(unsized)],
+                now=self.times.now_in(conn))
 
 
     @staticmethod

@@ -49,7 +49,7 @@ def photo(asset: str, shape: str, *, captured: float = 0, prepared: bool = True,
     if is_measured:
         return measured(asset, width, height, faces=faces, captured_at=captured, variant=variant)
     return Candidate(asset_id=asset, kind="image", original_width=width, original_height=height,
-                     captured_at=captured, variant=variant)
+                     captured_at=captured, variant=variant, readable_size=(width, height))
 
 
 @dataclass(frozen=True)

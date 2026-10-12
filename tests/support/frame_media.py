@@ -72,7 +72,7 @@ def offer(registry, repository: MediaRepository, variant: Variant, player_id: st
 
 
 def a_frame(registry, frame_id: str = "portrait") -> None:
-    """A Frame, so the wall has a need and a recipe (`MediaRepository.wall_recipe_in`)."""
+    """A Frame, so the wall has a need and a recipe (`MediaRepository.variant_names_in`)."""
     frame(registry, frame_id)
 
 
@@ -178,14 +178,12 @@ def seed_variant(registry, asset_id: str, sha256: str, *, size: int = 10, width:
     from central.assets.frame_media import VARIANT_REFERENCE, variant_asset_key
     from central.db import ProcessTransactionClock
     from central.infra.transactions import PgTransaction
-    from central.kernel.types import media_variant_key
 
     repository = MediaRepository(registry.db, registry.clock,
                                  times=ProcessTransactionClock(registry.clock))
     with registry.db.transaction() as conn:
-        recipe = repository.wall_recipe_in(conn, record=True)
-        assert recipe is not None, "a variant needs a Frame (the wall's need)"
-        key = media_variant_key(asset_id, recipe)
+        key = repository.variant_key_in(conn, asset_id, record=True)
+        assert key is not None, "a variant needs a Frame (the wall's need) and a size"
         tx = PgTransaction(conn)
         repository.records.reference(tx, variant_asset_key(key), VARIANT_REFERENCE)
         repository.records.record_produced(tx, variant_asset_key(key), MediaReady(

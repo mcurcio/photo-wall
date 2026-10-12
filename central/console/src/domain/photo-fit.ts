@@ -25,11 +25,13 @@ import { countText, countWords, pixelSize, sinceTime } from "../timeWords.js";
 // --- The analysis, as Central answers it ------------------------------------------------------
 
 /** Why the fit rule leaves a photo off a Frame (central/wall_plan/fit.py `FitRefusal`). */
-export type FitRefusal = "no_video_here" | "beyond_crop_limit" | "below_frame_pixels" | "face_cut" | "interest_cut";
+export type FitRefusal = "no_video_here" | "beyond_crop_limit" | "below_frame_pixels" | "above_player_limit"
+  | "face_cut" | "interest_cut";
 export type MediaKind = "image" | "video";
 
 /** Every tuning value of the fit rule (central/wall_plan/fit_settings.py `FitSettings`). */
-export interface FitSettings {
+/** The tuning values with one number each (each has a range, `FitSettingsView.ranges`). */
+export interface FitTuning {
   crop_limit: number;
   face_padding: number;
   min_face_share: number;
@@ -38,6 +40,14 @@ export interface FitSettings {
   large_frame_inches: number;
   large_frame_video_short_side: number;
   window_steps: number;
+  /** The longest edge a Player shows a still at (follow-up S1). */
+  max_still_edge: number;
+}
+
+/** Every tuning value of the photo fit rule (central/wall_plan/fit_settings.py `FitSettings`). */
+export interface FitSettings extends FitTuning {
+  /** The steps of a photo's one copy, in pixels (no range: not a single control). */
+  copy_ladder_px: number[];
 }
 
 export interface FitSelection {
@@ -85,6 +95,8 @@ export interface FrameFit {
   photos: number;
   fit_by_shape: number;
   refused_by_shape: RefusalCount[];
+  /** Photos whose readable size is not measured yet: neither fit nor refused (follow-up S1). */
+  size_unknown: number;
   measured: number;
   nearest_crop_limit: number | null;
   checked: number;
@@ -122,10 +134,15 @@ export type LoadState<T> =
 export const REASON_WORDS: Readonly<Record<FitRefusal, string>> = {
   beyond_crop_limit: "doesn't fit this Frame's shape",
   below_frame_pixels: "too small for this Frame",
+  above_player_limit: "too large for the Player to show on this Frame",
   face_cut: "a face would be cut",
   interest_cut: "the interesting part would be cut",
   no_video_here: "this Frame shows no videos",
 };
+
+/** Photos the fit rule cannot judge yet: the size of the largest copy Photo Wall can read of them
+ * (a RAW photo's preview) is being measured (follow-up S1). */
+export const SIZE_UNKNOWN_WORDS = "size not measured yet";
 
 export function reasonWords(reason: FitRefusal): string {
   return REASON_WORDS[reason];
@@ -180,6 +197,8 @@ export function emptyFrameWords(frame: FrameFit, name: string, most: string | nu
   switch (top?.reason ?? "beyond_crop_limit") {
     case "below_frame_pixels":
       return `Most of these photos are smaller than ${name} needs: add larger photos.`;
+    case "above_player_limit":
+      return `These photos would need a larger picture on ${name} than its Player can show: give it a smaller Frame output.`;
     case "face_cut":
       return `Most of these photos would lose a face on ${name}: add photos closer to ${shape}.`;
     case "interest_cut":
@@ -453,15 +472,18 @@ function alertOf(frame: FrameFit, name: string, sharing: number, most: string | 
 function frameView(frame: FrameFit, name: string, href: string | undefined, alert: FitAlert | null): FrameFitView {
   const aspect = shapeOf(frame);
   const shaped = frame.refused_by_shape.filter((count) => count.photos > 0);
+  const unsized = frame.size_unknown ?? 0;
   const segments: FitSegment[] = [
     { key: "fit", label: "fit", count: frame.fit_by_shape, countText: countText(frame.fit_by_shape) },
     ...shaped.map((count) => ({ key: count.reason, label: reasonWords(count.reason), count: count.photos,
       countText: countText(count.photos) })),
+    ...(unsized > 0 ? [{ key: "size_unknown", label: SIZE_UNKNOWN_WORDS, count: unsized, countText: countText(unsized) }] : []),
   ];
   const content = frame.refused_by_content.filter((count) => count.photos > 0);
   const reasons: FitReason[] = [
     ...shaped.map((count) => ({ key: count.reason, label: reasonWords(count.reason), countText: countText(count.photos),
       samples: count.samples.map((sample) => cropOf(sample, frame.aspect, reasonWords(count.reason), true)) })),
+    ...(unsized > 0 ? [{ key: "size_unknown", label: SIZE_UNKNOWN_WORDS, countText: countText(unsized), samples: [] }] : []),
     ...content.map((count) => ({ key: count.reason, label: `${reasonWords(count.reason)} (of those checked)`,
       countText: countText(count.photos),
       samples: count.samples.map((sample) => cropOf(sample, frame.aspect, reasonWords(count.reason), true)) })),
@@ -664,7 +686,7 @@ export function useFitAnalysis(request: FitAnalysisRequest | null,
 export interface FitSettingsView {
   settings: FitSettings;
   defaults: FitSettings;
-  ranges: Record<keyof FitSettings, [number, number]>;
+  ranges: Record<keyof FitTuning, [number, number]>;
 }
 
 export type SettingsRead =

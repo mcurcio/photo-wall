@@ -9,10 +9,14 @@ no landscape or portrait labels, no mats and no pairs: a photo fits a Frame (a `
 some window with the Frame profile's aspect, slid along the photo's free axis
 (contracts/photo_crop.py):
 1. removes no more than the crop limit of the photo's area (`crop_share`; the backstop),
-2. holds at least the Frame output in the original's pixels (`contracts.frame_fit.window_holds`
-   against `FitTarget.output_px`; owner, 2026-10-11: compatibility "measuring against the Frame
-   output and not the Display"); skipped for a Frame whose Output never reported a size
-   (a guess would refuse photos on a guess; the rendition choice, which only sizes a fetch,
+2. holds at least the Frame output in the pixels of the largest copy Photo Wall can read
+   (`contracts.frame_fit.window_holds` against `FitTarget.output_px`; owner, 2026-10-11:
+   compatibility "measuring against the Frame output and not the Display"; follow-up S1: an
+   unedited RAW photo with full-size copies off is judged at its preview's size, the readable
+   size of central/photo_library/rendition.py `readable_size`, never its original's), and the
+   copy that Frame needs is no longer than the Player shows (`FitSettings.max_still_edge`,
+   "above_player_limit"); both skipped for a Frame whose Output never reported a size
+   (a guess would refuse photos on a guess; the copy's size, which only sizes a fetch,
    guesses the profile's pixels instead: central/photo_library/rendition.py `frame_need`),
 3. keeps every face whole (`faces_judged`: each face of at least `min_face_share` of the photo's
    area, padded by `face_padding` of its own width and height, inside the window), and
@@ -40,10 +44,13 @@ Key content is ignored.
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from functools import lru_cache
 from typing import Final, Literal
 
-from central.wall_plan.fit_settings import FitSettings
+from central.installation_models import FrameOutput
+from central.photo_library.rendition import FrameNeed, copy_edge
+from central.wall_plan.fit_settings import FIT_SETTING_RANGES, FitSettings
 from central.wall_plan.key_content import InterestGrid, KeyContent, UnitBox
 from contracts.frame_fit import window_holds
 from contracts.models import Fraction, FrameProfile, Model, PhotoCrop
@@ -56,6 +63,7 @@ _SLACK: Final = 1e-9
 FitRefusal = Literal[
     "beyond_crop_limit",     # "doesn't fit this Frame's shape"
     "below_frame_pixels",    # "too small for this Frame"
+    "above_player_limit",    # "too large for the Player to show on this Frame"
     "face_cut",              # "a face would be cut"
     "interest_cut",          # "the interesting part would be cut"
     "no_video_here",         # "this Frame shows no videos"
@@ -115,9 +123,12 @@ def shape_fit(kind: MediaKind, width: int, height: int, target: FitTarget, crop_
               settings: FitSettings) -> DoesNotFit | None:
     """The size-only part of the rule, usable before key content is measured: `no_video_here`
     (a video on a profile with `video` off), then `beyond_crop_limit` (rule 1), then
-    `below_frame_pixels` (rule 2 for an image, against `target.output_px` and skipped when it is
-    None; the :186 floor for a video). None: the photo passes on its size alone. `width` and
-    `height` are the original's, upright. Pure."""
+    `below_frame_pixels` (rule 2 for an image, against `target.output_px`; the :186 floor for a
+    video), then `above_player_limit` (an image whose copy for this Frame, `copy_edge`, is longer
+    than `settings.max_still_edge`); an image's two size tests are skipped when `output_px` is
+    None. None: the photo passes on its size alone. `width` and `height` are the size it is
+    judged at, upright: an image's readable size (`central.catalog.judged_size`), a video's
+    original. Pure."""
     profile = target.profile
     if kind == "video" and not profile.video:
         return DoesNotFit(reason="no_video_here")
@@ -128,10 +139,31 @@ def shape_fit(kind: MediaKind, width: int, height: int, target: FitTarget, crop_
         if large and min(width, height) < settings.large_frame_video_short_side:
             return DoesNotFit(reason="below_frame_pixels")
         return None
-    if target.output_px is not None and not window_holds(width, height, _aspect(profile),
-                                                         target.output_px):
+    if target.output_px is None:
+        return None
+    if not window_holds(width, height, _aspect(profile), target.output_px):
         return DoesNotFit(reason="below_frame_pixels")
+    need = FrameNeed(aspect=_aspect(profile), width=target.output_px[0],
+                     height=target.output_px[1])
+    if copy_edge((width, height), need) > settings.max_still_edge:
+        return DoesNotFit(reason="above_player_limit")
     return None
+
+
+def fitting_outputs(kind: MediaKind, width: int, height: int, frames: Sequence[FrameOutput],
+                    settings: FitSettings) -> tuple[FrameOutput, ...]:
+    """The Frames a photo judged at `width` x `height` could fill under any Scene: those whose
+    `shape_fit` passes at the widest crop limit `FIT_SETTING_RANGES` allows. A superset of the
+    Frames any Scene places it on (a Scene's own crop limit, faces and interest only narrow it),
+    so the one copy sized for them (central/photo_library/rendition.py `wall_need`) holds every
+    Frame it is shown on; it may be a step larger than the Scenes playing now need. A video
+    fills none here: its copy's size is the recipe's, never the wall's. Pure."""
+    if kind == "video":
+        return ()
+    widest = FIT_SETTING_RANGES["crop_limit"][1]
+    return tuple(frame for frame in frames if shape_fit(
+        kind, width, height, FitTarget(profile=frame.profile, output_px=frame.output_px),
+        widest, settings) is None)
 
 
 def interest_kept(grid: InterestGrid, window: Window) -> float:

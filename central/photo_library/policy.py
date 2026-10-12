@@ -52,6 +52,13 @@ DRAFT_KEEP_SECONDS: Final = 86400
 IMMICH_WEB_TYPES: Final[frozenset[str]] = frozenset({
     "image/jpeg", "image/jpg", "image/png", "image/webp", "image/gif", "image/avif",
     "image/svg+xml", "image/bmp"})
+# The still types Photo Wall's preparation reads (follow-ups 2026-10-11, slice A5; Pillow decodes
+# each, media/prepare.py STILL_FORMATS): the one home of "Photo Wall can read this file". The copy
+# ladder takes an unedited photo's original only when its type is here
+# (central/photo_library/rendition.py `ladder_of`); the Immich client downloads only these and
+# videos. Here, not in media/, because the ladder is pure and the fit rule reads it too.
+STILL_MEDIA_TYPES: Final[frozenset[str]] = frozenset({
+    "image/jpeg", "image/png", "image/webp", "image/heic", "image/heif", "image/avif"})
 # One page of a pool in the console (newest first).
 POOL_PAGE_SIZE: Final = 60
 # A stored connection URL's longest form (ConnectionSecret.base_url).

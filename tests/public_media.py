@@ -17,7 +17,6 @@ from central.assets.frame_media import variant_asset_key
 from central.assets.layout import CacheLayout
 from central.infra.transactions import PgTransaction
 from central.kernel.assets import AssetKind, MediaReady
-from central.kernel.types import media_variant_key
 from central.media_repository import MediaRepository
 from central.photo_library.model import LibraryAsset
 from contracts.models import Variant
@@ -75,7 +74,7 @@ def request_photo(cache: MediaCache, asset_id: str) -> str:
     with repository.db.transaction() as conn:
         assert repository.request_preparations_in(conn, (AcquisitionRequest(
             asset_id=asset_id, assignment_ids=("assignment",), earliest_start=0),)) == 1
-        return media_variant_key(asset_id, repository.wall_recipe_in(conn))
+        return repository.variant_key_in(conn, asset_id)
 
 
 def make_variant(cache: MediaCache, key: str, derivative: bytes, *, width: int, height: int,
@@ -100,8 +99,7 @@ def publish_photo(cache: MediaCache, photo: PublicPhoto) -> Variant:
     """Make a requested photo's variant; never seed catalog or authored state."""
     repository = cache.repository
     with repository.db.transaction() as conn:
-        recipe = repository.wall_recipe_in(conn)
-        key = media_variant_key(photo.asset_id, recipe)
+        key = repository.variant_key_in(conn, photo.asset_id)
         assert conn.execute("SELECT 1 FROM assets WHERE kind=%s AND identity=%s",
                             (AssetKind.MEDIA_VARIANT.value, key)).fetchone(), "not requested"
     return make_variant(cache, key, photo.derivative, width=photo.asset.width,

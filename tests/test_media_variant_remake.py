@@ -65,7 +65,8 @@ def test_a_deleted_file_is_re_made_and_served_under_the_same_name(wall, registry
     remade = produced(wall, variant.key)
     assert (remade.sha256, remade.size) == (hashlib.sha256(SECOND).hexdigest(), len(SECOND))
     assert remade.made_from == "preview"
-    assert wall.preparer.recipes == [PreparationRecipe(), PreparationRecipe()]
+    # Both made by the variant's own recipe: the wall's 1920 step (follow-up S1).
+    assert wall.preparer.recipes == [PreparationRecipe(image_long_edge=1920)] * 2
 
 
 def test_the_player_accepts_a_re_made_copy_under_the_plan_s_name(wall, registry, tmp_path):

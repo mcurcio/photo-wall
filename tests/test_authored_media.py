@@ -12,7 +12,7 @@ from support.photo_pools import FIXTURE_CONNECTION, seed_pool
 from central.app import create_app
 from central.db import ProcessTransactionClock
 from central.media_repository import MediaRepository
-from central.photo_library.model import LibraryAsset
+from central.photo_library.model import LibraryAsset, OriginalFile
 from central.runtime import Contribution, Runtime, Scene
 
 ADMIN = "test-operator-" + "x" * 40
@@ -31,7 +31,9 @@ def asset(number=1, *, width=1080, height=1920, original_bytes=None, kind="image
                 else f"{number:040x}")
     return LibraryAsset(connection_ref=FIXTURE_CONNECTION, upstream_id=str(uuid.UUID(int=number)),
                         revision=revision, kind=kind, taken_at=900 + number, width=width,
-                        height=height, duration=10.0 if kind == "video" else None)
+                        height=height, duration=10.0 if kind == "video" else None,
+                        original=OriginalFile(media_type="video/mp4" if kind == "video"
+                                              else "image/jpeg", width=width, height=height))
 
 
 def setup_source(registry, count=1, *, limits=None, assets=None, complete=True):
@@ -61,7 +63,8 @@ def test_authored_api_is_neutral_idempotent_and_membership_bound(registry):
         assert source.status_code == 200
         candidate = source.json()["candidates"][0]
         assert set(candidate) == {"asset_id", "kind", "original_width", "original_height",
-                                  "captured_at", "variant", "preparation_failure", "analysis"}
+                                  "captured_at", "variant", "preparation_failure", "analysis",
+                                  "readable_size"}
         assert all(secret not in source.text for secret in ("fixture-1", "connection_ref", "upstream"))
         assert client.post("/v1/operator/authored-candidates", headers=headers,
                            json={"source_ref": spec.source_ref, "asset_ids": [originals[0].asset_id] * 2}).status_code == 422
@@ -115,7 +118,6 @@ def test_a_made_variant_and_a_failure_cooldown_hydrate_authored_refs(registry):
     from support.frame_media import a_frame, seed_variant
 
     from central.kernel.job_types import PrepareMedia
-    from central.kernel.types import media_variant_key
     from central.media_repository import prepare_lock
 
     made, failing = asset(1), asset(2)
@@ -124,7 +126,7 @@ def test_a_made_variant_and_a_failure_cooldown_hydrate_authored_refs(registry):
     a_frame(registry, "need")   # the wall's need names the recipe
     variant = seed_variant(registry, made.asset_id, "c" * 64, width=30, height=50)
     with repo.db.transaction() as conn:
-        key = media_variant_key(failing.asset_id, repo.wall_recipe_in(conn))
+        key = repo.variant_key_in(conn, failing.asset_id)
         conn.execute("INSERT INTO job_outcomes(lock_key,job_name,status,reason,retry_not_before,"
                      "seq,updated_at) VALUES(%s,%s,'transient','asset_missing',1010,"
                      "nextval('job_outcome_seq'),1000)", (prepare_lock(key), PrepareMedia.job_name))

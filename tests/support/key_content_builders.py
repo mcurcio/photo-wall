@@ -58,7 +58,7 @@ def measured(asset_id: str, width: int, height: int, *, faces: tuple[UnitBox, ..
     found them (the fit rule pads them when it judges); `spread` the saliency map's (1.0: the
     grid counts as it is)."""
     return Candidate(asset_id=asset_id, kind=kind, original_width=width, original_height=height,
-                     captured_at=captured_at, variant=variant,
+                     captured_at=captured_at, variant=variant, readable_size=(width, height),
                      analysis=Measured(key=key_content(width, height, faces=faces, grid=grid,
                                                        spread=spread)))
 

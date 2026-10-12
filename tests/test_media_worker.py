@@ -193,9 +193,10 @@ def test_a_planned_photo_is_fetched_for_its_recipes_need_prepared_and_recorded(
     facts = asyncio.run(exercise())
     [(plan, needs)] = source.fetches
     assert [(need.width, need.height) for need in needs] == [(1080, 1920)]
-    assert plan == ("preview", "fullsize")   # the stored asset's original type is not known
+    assert plan == ("preview", "original")   # a JPEG original (the copy ladder)
     assert isinstance(preparer.prepared[0], LibraryAsset)
-    assert preparer.recipes == [PreparationRecipe()]
+    # One copy for the wall (follow-up S1): the 1080 x 1920 Frame's need is the 1920 step.
+    assert preparer.recipes == [PreparationRecipe(image_long_edge=1920)]
     assert [(copy.name, copy.width) for copy in
             instance.library.copy_sizes(picture.asset_id).values()] == [("preview", 810)]
     assert (facts.sha256, facts.size, facts.made_from) == (
@@ -396,6 +397,40 @@ def test_measure_records_the_faces_and_interest_of_the_photo_at_its_revision(wor
                             ("thumbnail", pooled.upstream_id, pooled.revision)]
     asyncio.run(instance.measure("asset-gone"))       # the asset is gone: nothing to do
     assert client.asked[2:] == []
+
+
+class FakePreview(FakeFaces):
+    """A measurement's client that also serves the preview (1440 x 960) when asked."""
+
+    async def fetch_rendition(self, asset, *, plan, needs, destination):
+        self.asked.append(("fetch", tuple(plan)))
+        destination.write_bytes(b"preview")
+        return FetchedRendition(
+            path=destination, rendition="preview", media_type="image/jpeg", size=7,
+            sha256=hashlib.sha256(b"preview").hexdigest(), width=1440, height=960,
+            measured=(MeasuredCopy(name="preview", media_type="image/jpeg", width=1440,
+                                   height=960),))
+
+
+def test_measuring_a_raw_photo_measures_its_preview_once(worker_storage):
+    """Follow-up S1: an unedited RAW photo's readable size is its preview's, so its measurement
+    downloads the preview, records its size (rendition.copy_to_measure) and never again; a JPEG
+    original is read at its own size, so its measurement downloads no copy."""
+    client = FakePreview(_grey_jpeg())
+    raw = photo("raw", taken_at=900, width=6000, height=4000, original_type="image/x-sony-arw")
+    seed_pool(worker_storage, "family:1", (raw,))
+    store = PgKeyContent(worker_storage.db, times=ProcessTransactionClock(worker_storage.clock))
+    instance = worker(worker_storage, client, key_content=store)
+    # The worker's store knows the revision (the PostgreSQL pool seeded above is the one measured).
+    instance.library.revisions[raw.asset_id] = RevisionRecord(
+        raw.connection_ref, raw.upstream_id, raw.revision, raw.width, raw.height, None, None, 0.0)
+    asyncio.run(instance.measure(raw.asset_id))
+    assert ("fetch", ("preview",)) in client.asked
+    assert {name: (copy.width, copy.height) for name, copy in
+            instance.library.copy_sizes(raw.asset_id).items()} == {"preview": (1440, 960)}
+    client.asked.clear()
+    asyncio.run(instance.measure(raw.asset_id))
+    assert all(entry[0] != "fetch" for entry in client.asked)
 
 
 @pytest.mark.parametrize(("client", "limits", "reason"), [

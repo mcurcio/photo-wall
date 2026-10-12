@@ -28,10 +28,11 @@ from pydantic import Field
 
 from central.kernel.assets import MediaReady
 from central.photo_library.model import LibraryAsset
-from central.photo_library.rendition import FrameNeed
+from central.photo_library.policy import STILL_MEDIA_TYPES as STILL_MEDIA_TYPES  # re-exported
+from central.photo_library.rendition import FetchStep, FrameNeed, need_step
 from contracts.models import Digest, Model, Positive
 from contracts.time import Clock, SystemClock
-from media.library_client import FetchedRendition, FetchStep
+from media.library_client import FetchedRendition
 from media.models import MediaError
 
 _TRANSFORMS = {
@@ -51,12 +52,8 @@ _MATRICES = {
 # AVIF is Pillow's own (libavif). Owner, 2026-10-11: "lean on strong foundational libraries".
 pillow_heif.register_heif_opener()
 
-# The still media types preparation reads (follow-ups 2026-10-11, slice A5): the one home of
-# "Photo Wall can read this file". The rendition choice fetches an unedited photo's original only
-# when its type is here (media/library_client.py `fetch_plan`); the Immich client downloads only
-# these and videos. STILL_FORMATS are the Pillow decoders that read them.
-STILL_MEDIA_TYPES: Final[frozenset[str]] = frozenset({
-    "image/jpeg", "image/png", "image/webp", "image/heic", "image/heif", "image/avif"})
+# STILL_MEDIA_TYPES (central/photo_library/policy.py) are the still types preparation reads;
+# STILL_FORMATS are the Pillow decoders that read them.
 STILL_FORMATS: Final = ("JPEG", "PNG", "WEBP", "HEIF", "AVIF")
 # Decoded by Pillow, then handed to ffmpeg as one lossless PNG (ffmpeg reads JPEG, PNG and WEBP).
 _DECODED_ONLY: Final = frozenset({"HEIF", "AVIF"})
@@ -81,12 +78,14 @@ class PreparationRecipe(Model):
 
 
 def recipe_id(recipe: PreparationRecipe, need: FrameNeed) -> str:
-    """The one home of what a media variant's recipe id hashes: the recipe values and the need
-    they size for (`<asset_id>.<recipe_id>` names a variant, kernel/types.py). The renderer
-    build is left out (follow-up design, the owner's open choice, default "drop"): a worker
-    upgrade does not re-name every variant. Keeping it is a change to this body only."""
+    """The one home of what a media variant's recipe id hashes: the recipe values and the step
+    of the wall need they size for (`need_step`, its long edge; follow-up S1: one copy per
+    photo for the whole wall, so photos of every shape on one step share a recipe;
+    `<asset_id>.<recipe_id>` names a variant, kernel/types.py). The renderer build is left out
+    (follow-up design, the owner's open choice, default "drop"): a worker upgrade does not
+    re-name every variant. Keeping it is a change to this body only."""
     return hashlib.sha256(json.dumps(
-        dict(recipe=recipe.model_dump(mode="json"), need=need.model_dump(mode="json")),
+        dict(recipe=recipe.model_dump(mode="json"), need=need_step(need)),
         sort_keys=True, separators=(",", ":"), allow_nan=False,
     ).encode()).hexdigest()
 
