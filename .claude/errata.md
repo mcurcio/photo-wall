@@ -5452,3 +5452,27 @@ Order: (a) merge the iac PR that switches the factory to `central.app:create_app
 - **The Pi now reports did-not-answer when the shell does not confirm the curtain** (an off with no power method;
   an on whose curtain stays up): E-PW-FIX-1's "Resting after not-supported (the Pi shows black)" assumed the
   curtain went up.
+
+## E-PS-S1 (Picture split, slice S1, 2026-10-12) · feat/picture-hardware-and-software
+- **A valid report could outgrow PICTURE_REPORT_BYTES.** The frozen page lets a choice's name be any printable ASCII;
+  `"` and `\` each encode as two bytes, so 30 CHOICE settings of 16 such 24-character names encode to 37,900 bytes,
+  past the 32,768 cap the module says no valid report reaches. Resolution taken (not a stop): `Choice` also refuses
+  `"` and `\` (the cap stays; ordinary worst case 26,500 bytes). S3's `parse_capability_choices` must drop those two
+  characters from a display's names, as it cuts them to CHOICE_NAME_MAX.
+- **The periodic re-read stays (owner addition, main loop, 2026-10-12), against the page's "Dropped from 1c".** S1
+  does not re-add it: the controller's docstring names it as S3's, on the same worker (S3 owns the Pi side; the
+  report's `offered[].current` is where re-read values go).
+- **The PICTURE hold also cuts a write.** `_command` caps every PICTURE run at PICTURE_HOLD_SECONDS, so a `setvcp`
+  slower than 1.5 s is killed (and the read-back judges it not taken); WRITE_SECONDS (10) bounds only the port wait.
+  The bench step should time a real write beside the batch.
+- **A level past the display's maximum with no answer to the read before it** is reported `no-answer` (before = after =
+  None): the page's `not-taken` with before = after = the read cannot be built when there is no read (`HardwareResult`
+  requires `after` for `not-taken`).
+- **A display with no readable EDID identity is never asked** (the page asks "on an appearance with an identity"), so
+  its hardware values wait for ever (`offered` None); software applies. Left as the page says; S3/S4 may name it.
+- **Files beyond the owned list:** `tests/node/display/fake_ddcutil.py` (new: the scripted display shared by
+  `test_display_ddc_port.py` and `test_display_picture_controls.py`). `tests/native_picture_e2e_harness.py` widens
+  `contracts.node_picture.OUTPUT_IDS` by Weston's "headless" for the harness only, because the picture report now
+  names its Output (1c's picture part did not).
+- **Words left for S3/S6:** AGENTS.md's code map still lists `output_report.py` (deleted here); the overlay tests and
+  `tests/native_display_smoke.py` still carry 1c's static line "Brightness: on the display · 60 %".

@@ -8,12 +8,16 @@ count. (2) Central's Output document reaches the display session's desired view 
 same document. (3) A changed projection reaches the Node within 3 s through `DocumentSource.changed()`
 alone: no birth, no new stream, no reconnect, so no reconcile carried it. (4) The session's Output
 report is recorded by Central on the display line's state bucket. (5) A key the display table does
-not list is never sent and is logged as `document_refused`.
+not list is never sent and is logged as `document_refused`. (6) Picture on its own keys (decision
+0022): a picture document Central puts on `picture-HDMI-A-1` reaches the picture controller through
+the runner's document feed, and the picture report the controller puts appears on Central's
+`picture-HDMI-A-1`.
 """
 from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
+from types import SimpleNamespace
 
 from integration.bus_servers import (
     FileLinkStore,
@@ -27,7 +31,13 @@ from integration.bus_servers import (
 )
 from nats.js.errors import NotFoundError
 
-from appliance.display_host.bus import DISPLAY_COMPONENT, DISPLAY_SLICE, DISPLAY_VERSION
+from appliance.display_host.bus import (
+    DISPLAY_COMPONENT,
+    DISPLAY_SLICE,
+    DISPLAY_VERSION,
+    BusPictureSink,
+)
+from appliance.display_host.runner import document_feed
 from appliance.host.bus import HOST_SLICE, host_session
 from contracts.node_link import CENTRAL_WRITER, NODE_MAX_STREAMS, Pipe, account_id
 from contracts.node_output import (
@@ -53,6 +63,21 @@ from contracts.node_output import (
     output_document_key,
     output_report_key,
 )
+from contracts.node_picture import (
+    HardwareRange,
+    HardwareResult,
+    HardwareSetting,
+    PictureDocument,
+    PictureReport,
+    RangeKind,
+    SoftwarePicture,
+    WriteResult,
+    decode_picture_report,
+    encode_picture_document,
+    encode_picture_report,
+    picture_document_key,
+    picture_report_key,
+)
 from nodeapi.hub import NodeLink
 from nodeapi.node import NodeSession, Release
 
@@ -67,6 +92,11 @@ PICTURE = OutputPicture(PictureSetting(ActsOn.DISPLAY, AS_THE_DISPLAY_HAS_IT),
 FIRST = OutputDocument("HDMI-A-1", 1, ALWAYS_ON, BEST_DETECTED, True, True, 1, PICTURE)
 TEST_OFF = OutputDocument("HDMI-A-1", 2, replace(ALWAYS_ON, test=PowerRequest("req-1", Power.OFF, 300)),
                           BEST_DETECTED, True, True, 1, PICTURE)
+PICTURE_KEY = picture_document_key("HDMI-A-1")
+PICTURE_DOCUMENT = PictureDocument("HDMI-A-1", 8, {"10": 46}, SoftwarePicture(114, 100, 6500, 22))
+PICTURE_REPORT = PictureReport("HDMI-A-1", DisplayIdentity("XYM", 5475, "MNN", None),
+                               (HardwareSetting("10", HardwareRange(RangeKind.LEVEL, 100, ()), 46),), 8,
+                               {"10": HardwareResult(WriteResult.TAKEN, 60, 46)}, 8)
 REPORT = OutputReport("HDMI-A-1", True, DisplayIdentity("XYM", 5475, "MNN", None),
                       (DisplayMode(1920, 1080, 60000, preferred=True),), (PowerMethod.DDC_CI, PowerMethod.SIGNAL_OFF),
                       PowerMethod.DDC_CI, 2, None, None)
@@ -121,6 +151,12 @@ def test_the_display_line_carries_centrals_output_document(tmp_path):
         display.start()
         assert await asyncio.to_thread(host.wait_attached, 15)
         assert await asyncio.to_thread(display.wait_attached, 15)
+        pictures: list[tuple[str, PictureDocument]] = []
+        sink = BusPictureSink(display)
+        controller = SimpleNamespace(document=lambda output_id, document: (pictures.append((output_id, document)),
+                                                                          sink.put_picture(PICTURE_REPORT)))
+        display.desired.on_change(document_feed(SimpleNamespace(document=lambda output_id, document: None),
+                                                controller))
 
         # (1) The display line applies beside the host line, inside the store's stream count.
         names = await _names(node)
@@ -185,6 +221,21 @@ def test_the_display_line_carries_centrals_output_document(tmp_path):
             finally:
                 await watcher.close()
             assert display.desired.get(UNLISTED) is None
+
+            # (6) Picture on its own keys: the document reaches the picture controller, its report Central.
+            projection.set(DESIRED, PICTURE_KEY, encode_picture_document(PICTURE_DOCUMENT))
+
+            async def fed():
+                return pictures
+            assert await until(fed, 15, "the picture document at the picture controller") == [
+                ("HDMI-A-1", PICTURE_DOCUMENT)]
+
+            async def pictured():
+                return [row["data"] for row in store.records(STATE)
+                        if row["subject"].endswith("." + picture_report_key("HDMI-A-1"))]
+            [recorded] = await until(pictured, 15, "the picture report recorded")
+            assert recorded == encode_picture_report(PICTURE_REPORT)
+            assert decode_picture_report(recorded) == PICTURE_REPORT
         finally:
             stop.set()
             await asyncio.wait_for(running, 10)

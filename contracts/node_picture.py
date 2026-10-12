@@ -31,9 +31,8 @@ Rules it does NOT own: how the Pi asks and writes (appliance/display_host/pictur
 picture.py, ddc.py); what is stored on a Display, the session, Done, Revert and Copy (Central's
 central/displays/picture.py and hardware.py).
 
-Interface only (the picture split's milestone commit): bodies land in slice S1; slice S2, which
-deletes the Output document's and report's picture part, moves WriteResult and the kelvin and
-gamma constants here from contracts/node_output.py.
+Slice S2, which deletes the Output document's and report's picture part, moves WriteResult and
+the kelvin and gamma constants here from contracts/node_output.py.
 """
 from __future__ import annotations
 
@@ -41,7 +40,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from types import MappingProxyType
-from typing import Final
+from typing import Any, Final
 
 from contracts.node_output import (  # S2 moves these definitions here and deletes them there
     GAMMA_TENTHS_MAX,
@@ -51,9 +50,11 @@ from contracts.node_output import (  # S2 moves these definitions here and delet
     KELVIN_MIN,
     KELVIN_NEUTRAL,
     KELVIN_STEP,
+    OUTPUT_IDS,
     DisplayIdentity,
     WriteResult,
 )
+from contracts.wire_codec import decode, encode, fields_of, list_of, object_of, require, whole
 
 VcpCode = str                                   # VCP_CODE_PATTERN, and on PICTURE_LIST wherever it is used
 VCP_CODE_PATTERN: Final = r"[0-9A-F]{2}"
@@ -123,8 +124,8 @@ class Choice:
 
     def __post_init__(self) -> None:
         """ValueError("choice") unless 0 <= value <= CHOICE_VALUE_MAX and name is 1..CHOICE_NAME_MAX
-        printable ASCII characters."""
-        raise NotImplementedError("picture split S1")
+        printable ASCII characters other than `"` and `\\` (the Pi drops those from a display's name)."""
+        require(whole(self.value, 0, CHOICE_VALUE_MAX) and _ascii(self.name, 1, CHOICE_NAME_MAX), "choice")
 
 
 @dataclass(frozen=True)
@@ -137,7 +138,17 @@ class HardwareRange:
 
     def __post_init__(self) -> None:
         """ValueError("hardware_range") for any combination but the three above."""
-        raise NotImplementedError("picture split S1")
+        kind, maximum, choices = self.kind, self.maximum, self.choices
+        require(isinstance(kind, RangeKind) and isinstance(choices, tuple)
+                and all(isinstance(choice, Choice) for choice in choices), "hardware_range")
+        if kind is RangeKind.LEVEL:
+            require(whole(maximum, 1, LEVEL_MAX) and not choices, "hardware_range")
+        elif kind is RangeKind.CHOICE:
+            values = [choice.value for choice in choices]
+            require(maximum is None and 1 <= len(choices) <= MAX_CHOICES
+                    and all(left < right for left, right in zip(values, values[1:], strict=False)), "hardware_range")
+        else:
+            require(maximum is None and not choices, "hardware_range")
 
 
 @dataclass(frozen=True)
@@ -152,15 +163,17 @@ class HardwareSetting:
     def __post_init__(self) -> None:
         """ValueError("hardware_setting") unless code is on PICTURE_LIST, range is a HardwareRange,
         and current is None or in 0..maximum (LEVEL) or 0..CHOICE_VALUE_MAX (otherwise)."""
-        raise NotImplementedError("picture split S1")
+        require(isinstance(self.code, str) and self.code in PICTURE_LIST and isinstance(self.range, HardwareRange),
+                "hardware_setting")
+        top = self.range.maximum if self.range.kind is RangeKind.LEVEL else CHOICE_VALUE_MAX
+        require(self.current is None or whole(self.current, 0, top or 0), "hardware_setting")
 
 
 @dataclass(frozen=True)
 class SoftwarePicture:
     """Photo Wall's four picture settings, always all present. Each at its neutral value
     (SOFTWARE_PERCENT_NEUTRAL, SOFTWARE_PERCENT_NEUTRAL, KELVIN_NEUTRAL, GAMMA_TENTHS_NEUTRAL)
-    changes nothing. S1 adds `NEUTRAL_SOFTWARE: Final = SoftwarePicture(100, 100, KELVIN_NEUTRAL,
-    GAMMA_TENTHS_NEUTRAL)`."""
+    changes nothing (NEUTRAL_SOFTWARE)."""
     brightness_percent: int
     contrast_percent: int
     colour_temperature_kelvin: int
@@ -170,7 +183,11 @@ class SoftwarePicture:
         """ValueError("software_picture") unless both percents are ints in
         SOFTWARE_PERCENT_MIN..SOFTWARE_PERCENT_MAX, KELVIN_MIN <= kelvin <= KELVIN_MAX in KELVIN_STEP,
         and GAMMA_TENTHS_MIN <= gamma_tenths <= GAMMA_TENTHS_MAX (ints, never bools)."""
-        raise NotImplementedError("picture split S1")
+        require(whole(self.brightness_percent, SOFTWARE_PERCENT_MIN, SOFTWARE_PERCENT_MAX)
+                and whole(self.contrast_percent, SOFTWARE_PERCENT_MIN, SOFTWARE_PERCENT_MAX)
+                and whole(self.colour_temperature_kelvin, KELVIN_MIN, KELVIN_MAX)
+                and (self.colour_temperature_kelvin - KELVIN_MIN) % KELVIN_STEP == 0
+                and whole(self.gamma_tenths, GAMMA_TENTHS_MIN, GAMMA_TENTHS_MAX), "software_picture")
 
 
 @dataclass(frozen=True)
@@ -186,7 +203,10 @@ class PictureDocument:
         """ValueError("picture_document") unless output_id is in OUTPUT_IDS, picture_change >= 1,
         every hardware code is on PICTURE_LIST with an int value in 0..LEVEL_MAX, and software is a
         SoftwarePicture."""
-        raise NotImplementedError("picture split S1")
+        require(self.output_id in OUTPUT_IDS and whole(self.picture_change, 1)
+                and isinstance(self.hardware, Mapping)
+                and all(code in PICTURE_LIST and whole(value, 0, LEVEL_MAX) for code, value in self.hardware.items())
+                and isinstance(self.software, SoftwarePicture), "picture_document")
 
 
 @dataclass(frozen=True)
@@ -202,7 +222,11 @@ class HardwareResult:
         """ValueError("hardware_result") unless result is a WriteResult, before and after are None or
         0..LEVEL_MAX, after is not None when result is TAKEN or NOT_TAKEN, and after is None when it
         is NO_ANSWER."""
-        raise NotImplementedError("picture split S1")
+        answered = self.result in (WriteResult.TAKEN, WriteResult.NOT_TAKEN)
+        require(isinstance(self.result, WriteResult)
+                and (self.before is None or whole(self.before, 0, LEVEL_MAX))
+                and (self.after is None or whole(self.after, 0, LEVEL_MAX))
+                and (self.after is not None) == answered, "hardware_result")
 
 
 @dataclass(frozen=True)
@@ -226,47 +250,110 @@ class PictureReport:
         DisplayIdentity, offered is None or HardwareSettings with unique codes in PICTURE_LIST order,
         for_change and presented_change are None or >= 1, results' codes are on PICTURE_LIST with
         HardwareResult values, and results is empty when for_change is None."""
-        raise NotImplementedError("picture split S1")
+        offered = self.offered
+        require(self.output_id in OUTPUT_IDS
+                and (self.identity is None or isinstance(self.identity, DisplayIdentity))
+                and (offered is None or (isinstance(offered, tuple)
+                                         and all(isinstance(setting, HardwareSetting) for setting in offered)
+                                         and _in_list_order([setting.code for setting in offered])))
+                and (self.for_change is None or whole(self.for_change, 1))
+                and (self.presented_change is None or whole(self.presented_change, 1))
+                and isinstance(self.results, Mapping)
+                and all(code in PICTURE_LIST and isinstance(result, HardwareResult)
+                        for code, result in self.results.items())
+                and (self.for_change is not None or not self.results), "picture_report")
 
 
 def picture_document_key(output_id: str) -> str:
     """The desired-bucket key of `output_id`'s picture document: "picture-HDMI-A-1".
     ValueError("output_id") for an id outside OUTPUT_IDS."""
-    raise NotImplementedError("picture split S1")
+    return _key(output_id)
 
 
 def picture_report_key(output_id: str) -> str:
     """The state-bucket key of `output_id`'s picture report: "picture-HDMI-A-1".
     ValueError("output_id")."""
-    raise NotImplementedError("picture split S1")
+    return _key(output_id)
 
 
 def encode_picture_document(document: PictureDocument) -> bytes:
     """Canonical JSON (contracts.wire_codec) of at most PICTURE_DOCUMENT_BYTES;
     ValueError("picture_document_too_large") past it (never for a valid document)."""
-    raise NotImplementedError("picture split S1")
+    return encode(document, PICTURE_DOCUMENT_BYTES, "picture_document_too_large")
 
 
 def decode_picture_document(raw: bytes) -> PictureDocument:
     """The document `raw` encodes; ValueError("picture_document") for anything else."""
-    raise NotImplementedError("picture split S1")
+    def build(value: dict[str, Any]) -> PictureDocument:
+        return PictureDocument(**{**value, "hardware": dict(object_of(value["hardware"])),
+                                  "software": SoftwarePicture(**fields_of(SoftwarePicture, value["software"]))})
+
+    return decode(raw, PICTURE_DOCUMENT_BYTES, PictureDocument, build, "picture_document")
 
 
 def encode_picture_report(report: PictureReport) -> bytes:
     """Canonical JSON of at most PICTURE_REPORT_BYTES; ValueError("picture_report_too_large")
     (never for a valid report)."""
-    raise NotImplementedError("picture split S1")
+    return encode(report, PICTURE_REPORT_BYTES, "picture_report_too_large")
 
 
 def decode_picture_report(raw: bytes) -> PictureReport:
     """The report `raw` encodes; ValueError("picture_report") for anything else."""
-    raise NotImplementedError("picture split S1")
+    def build(value: dict[str, Any]) -> PictureReport:
+        identity, offered = value["identity"], value["offered"]
+        return PictureReport(**{
+            **value,
+            "identity": None if identity is None else DisplayIdentity(**fields_of(DisplayIdentity, identity)),
+            "offered": None if offered is None else tuple(_hardware_setting(item) for item in list_of(offered)),
+            "results": {code: _hardware_result(result) for code, result in object_of(value["results"]).items()}})
+
+    return decode(raw, PICTURE_REPORT_BYTES, PictureReport, build, "picture_report")
+
+
+NEUTRAL_SOFTWARE: Final = SoftwarePicture(SOFTWARE_PERCENT_NEUTRAL, SOFTWARE_PERCENT_NEUTRAL, KELVIN_NEUTRAL,
+                                          GAMMA_TENTHS_NEUTRAL)
+
+_KEY_PREFIX: Final = "picture-"                 # both buckets: picture-<output_id>
+_LIST_ORDER: Final[Mapping[VcpCode, int]] = MappingProxyType({code: index for index, code in enumerate(PICTURE_LIST)})
+
+
+def _key(output_id: str) -> str:
+    require(output_id in OUTPUT_IDS, "output_id")
+    return _KEY_PREFIX + output_id
+
+
+def _ascii(value: object, shortest: int, longest: int) -> bool:
+    """A str of shortest..longest printable ASCII characters other than `"` and `\\`, the two JSON
+    escapes as two bytes: without them no valid report outgrows PICTURE_REPORT_BYTES."""
+    return (isinstance(value, str) and shortest <= len(value) <= longest
+            and all(" " <= character <= "~" and character not in '"\\' for character in value))
+
+
+def _in_list_order(codes: list[object]) -> bool:
+    """Unique codes on PICTURE_LIST, in its order."""
+    if not all(isinstance(code, str) and code in _LIST_ORDER for code in codes):
+        return False
+    ranks = [_LIST_ORDER[code] for code in codes]  # type: ignore[index]
+    return all(left < right for left, right in zip(ranks, ranks[1:], strict=False))
+
+
+def _hardware_setting(value: object) -> HardwareSetting:
+    setting = fields_of(HardwareSetting, value)
+    hardware_range = fields_of(HardwareRange, setting["range"])
+    return HardwareSetting(**{**setting, "range": HardwareRange(**{
+        **hardware_range, "kind": RangeKind(hardware_range["kind"]),
+        "choices": tuple(Choice(**fields_of(Choice, choice)) for choice in list_of(hardware_range["choices"]))})})
+
+
+def _hardware_result(value: object) -> HardwareResult:
+    result = fields_of(HardwareResult, value)
+    return HardwareResult(**{**result, "result": WriteResult(result["result"])})
 
 
 __all__ = [
     "CHOICE_NAME_MAX", "CHOICE_VALUE_MAX", "GAMMA_TENTHS_MAX", "GAMMA_TENTHS_MIN", "GAMMA_TENTHS_NEUTRAL",
     "KELVIN_MAX", "KELVIN_MIN", "KELVIN_NEUTRAL", "KELVIN_STEP", "LEVEL_MAX", "MAX_CHOICES",
-    "PICTURE_DOCUMENT_BYTES", "PICTURE_LIST", "PICTURE_REPORT_BYTES", "SOFTWARE_PERCENT_MAX",
+    "NEUTRAL_SOFTWARE", "PICTURE_DOCUMENT_BYTES", "PICTURE_LIST", "PICTURE_REPORT_BYTES", "SOFTWARE_PERCENT_MAX",
     "SOFTWARE_PERCENT_MIN", "SOFTWARE_PERCENT_NEUTRAL", "VCP_CODE_PATTERN", "Choice", "HardwareRange",
     "HardwareResult", "HardwareSetting", "PictureDocument", "PictureReport", "RangeKind", "SoftwarePicture",
     "VcpCode", "WriteResult", "decode_picture_document", "decode_picture_report", "encode_picture_document",

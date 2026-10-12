@@ -34,16 +34,17 @@ from contracts.node_output import (
     decode_output_document,
     output_document_key,
 )
+from contracts.node_picture import decode_picture_document, picture_document_key
 from contracts.node_protocol import OutputKey
 from nodeapi.documents import Document
 
-from .bus import DISPLAY_SLICE, BusReportSink, display_session
+from .bus import DISPLAY_SLICE, BusPictureSink, BusReportSink, display_session
 from .ddc import DdcChannel
 from .domain import OutputState
 from .edid import parse_edid, read_edid
 from .output_power import OutputPowerController, PiClock, ReportSink
-from .output_report import OutputReports
-from .picture import DdcPictureAdapter, FileAppliedPictures, PictureController
+from .picture import DdcPictureAdapter, FileAppliedPictures, PictureController, PictureReports
+from .picture_list import PictureListAsker
 from .power_methods import DdcCiAdapter, HdmiCecAdapter, SignalOffAdapter, run_tool
 from .weston import MAX_PACKET, SurfaceGrant, WestonBackend, _pairs, _surface
 
@@ -174,8 +175,8 @@ class PowerObservations:
     """`ReportSink` for the OutputReporter that hands what it saw (connection, EDID identity and
     modes) to the power controller, so the power controller is the one writer of each Output's
     report and the report carries both halves (roadmap 1b, D2); and the connection and identity to
-    the picture controller (roadmap 1c, P1: an appearance reads 0x10 and 0x12, another identity
-    re-applies the picture)."""
+    the picture controller (decision 0022: an identity whose list is not held is asked, another
+    identity carries out the picture again)."""
 
     def __init__(self, power: OutputPowerController, picture: PictureController) -> None:
         self._power = power
@@ -191,20 +192,29 @@ class PowerObservations:
 
 
 def document_feed(power: OutputPowerController, picture: PictureController) -> Callable[[str, Document], None]:
-    """The desired view's callback: each Output document, decoded, to the power controller and the
-    picture controller (each acts on its own change number). A document that does not decode, or
-    sits under another Output's key, is logged and ignored."""
+    """The desired view's callback, routed by key: an Output document (`output-…`), decoded, to the
+    power controller; a picture document (`picture-…`, decision 0022), decoded, to the picture
+    controller (each acts on its own change number). A document that does not decode, sits under
+    another Output's key, or under a key of neither kind, is logged and ignored."""
+    output_keys = {output_document_key(output_id) for output_id in OUTPUT_IDS}
+    picture_keys = {picture_document_key(output_id) for output_id in OUTPUT_IDS}
 
     def on_document(key: str, document: Document) -> None:
         try:
-            decoded = decode_output_document(document.value)
-            if output_document_key(decoded.output_id) != key:
-                raise ValueError("output_document_key")
+            if key in output_keys:
+                decoded = decode_output_document(document.value)
+                if output_document_key(decoded.output_id) != key:
+                    raise ValueError("output_document_key")
+                power.document(decoded.output_id, decoded)
+            elif key in picture_keys:
+                wanted = decode_picture_document(document.value)
+                if picture_document_key(wanted.output_id) != key:
+                    raise ValueError("picture_document_key")
+                picture.document(wanted.output_id, wanted)
+            else:
+                raise ValueError("display_document_key")
         except ValueError as error:
-            log.warning("output document under %s ignored: %s", key, error)
-            return
-        power.document(decoded.output_id, decoded)
-        picture.document(decoded.output_id, decoded)
+            log.warning("display document under %s ignored: %s", key, error)
 
     return on_document
 
@@ -232,14 +242,14 @@ def power_controller(backend: WestonBackend, sink: ReportSink,
                                  ShellBlackPicture(backend)), cec
 
 
-def picture_controller(backend: WestonBackend, reports: OutputReports, ddc: DdcChannel,
+def picture_controller(backend: WestonBackend, sink: PictureReports, ddc: DdcChannel,
                        applied: Path = CONTROLLER_STATE) -> PictureController:
-    """The picture controller on the port's DDC/CI channel (the one the power controller uses) and
-    the shell, remembering each display's applied picture change in `applied` (the controller's
-    preserved runtime directory); it hears the shell's `presented` and `output` events through the
-    backend."""
-    picture = PictureController(DdcPictureAdapter(ddc), backend, reports, FileAppliedPictures(applied),
-                                time.monotonic)
+    """The picture controller on the port's DDC/CI channel (the one the power controller uses, at
+    picture's turn), asking each display's list there (PictureListAsker), and the shell,
+    remembering each display's applied picture change in `applied` (the controller's preserved
+    runtime directory); it hears the shell's `presented` and `output` events through the backend."""
+    picture = PictureController(DdcPictureAdapter(ddc), PictureListAsker(ddc), backend, sink,
+                                FileAppliedPictures(applied), time.monotonic)
     backend.picture_events = picture
     return picture
 
@@ -362,19 +372,19 @@ def main() -> None:
             compositor_pid=int(peer["MainPID"]),
             verify_process=verify_process,
         )
-        # One DDC/CI channel per Pi (one command at a time per port), shared by power and picture;
-        # one report per Output, assembled from both controllers' halves.
+        # One DDC/CI channel per Pi (one command at a time per port, power first), shared by power
+        # and picture; each controller writes its own report key.
         ddc = DdcChannel(run_tool)
-        reports = OutputReports(BusReportSink(session))
-        power, cec = power_controller(backend, reports, ddc)
-        picture = picture_controller(backend, reports, ddc)
+        power, cec = power_controller(backend, BusReportSink(session), ddc)
+        picture = picture_controller(backend, BusPictureSink(session), ddc)
         power.start()
         picture.start()
         feed = document_feed(power, picture)
         session.desired.on_change(feed)
         for output_id in OUTPUT_IDS:     # what arrived before the callback, once more (idempotent)
-            if (present := session.desired.get(output_document_key(output_id))) is not None:
-                feed(output_document_key(output_id), present)
+            for key in (output_document_key(output_id), picture_document_key(output_id)):
+                if (present := session.desired.get(key)) is not None:
+                    feed(key, present)
         controller = Controller(backend, reports=OutputReporter(PowerObservations(power, picture)))
         if config:
             from .service import DisplayService

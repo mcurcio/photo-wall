@@ -380,7 +380,6 @@ def test_one_ddc_channel_feeds_both_the_power_and_the_picture_adapters(tmp_path)
     import subprocess
 
     from appliance.display_host.ddc import DdcChannel
-    from appliance.display_host.output_report import OutputReports
     from contracts.node_output import PowerMethod
 
     (tmp_path / "card1-HDMI-A-1").mkdir()
@@ -393,13 +392,15 @@ def test_one_ddc_channel_feeds_both_the_power_and_the_picture_adapters(tmp_path)
 
     ddc = DdcChannel(run, drm_root=tmp_path, cache_dir=tmp_path / "cache")
     backend = SimpleNamespace(picture_events=None)
-    reports = OutputReports(Reports())
-    power, _cec = runner.power_controller(backend, reports, ddc)
-    picture = runner.picture_controller(backend, reports, ddc)
+    power, _cec = runner.power_controller(backend, Reports(), ddc)
+    picture = runner.picture_controller(backend, SimpleNamespace(put_picture=lambda report: None), ddc,
+                                        applied=tmp_path)
     power._adapters[PowerMethod.DDC_CI].read("HDMI-A-1", timeout=1)
     picture._ddc.read("HDMI-A-1", "10", timeout=1)
-    assert [argv[1:] for argv in ran] == [["--bus", "13", "--noconfig", "getvcp", "D6", "--terse"],
-                                          ["--bus", "13", "--noconfig", "getvcp", "10", "--terse"]]
+    assert picture._ask.ask("HDMI-A-1") == ()        # every batch finished, none answered: offers none
+    assert [argv[1:] for argv in ran][:3] == [["--bus", "13", "--noconfig", "getvcp", "D6", "--terse"],
+                                              ["--bus", "13", "--noconfig", "getvcp", "10", "--terse"],
+                                              ["--bus", "13", "--noconfig", "getvcp", "0C", "10", "12", "14", "--terse"]]
     assert backend.picture_events is picture
 
 
@@ -451,7 +452,10 @@ def test_the_backend_asks_the_shell_for_output_power_from_another_thread():
         assert backend.output_power("HDMI-A-2", Power.OFF, timeout=1) is False   # no such Output
 
 
-def test_the_document_feed_decodes_each_document_and_ignores_the_rest():
+def test_the_document_feed_routes_each_document_by_its_key_and_ignores_the_rest():
+    """`output-…` to the power controller, `picture-…` to the picture controller (decision 0022);
+    a document under another Output's key, under a key of neither kind, or that does not decode
+    reaches neither."""
     from appliance.display_host.runner import document_feed
     from contracts.node_output import (
         AS_THE_DISPLAY_HAS_IT,
@@ -465,6 +469,7 @@ def test_the_document_feed_decodes_each_document_and_ignores_the_rest():
         Power,
         encode_output_document,
     )
+    from contracts.node_picture import NEUTRAL_SOFTWARE, PictureDocument, encode_picture_document
     from nodeapi.documents import Document
 
     got, pictures = [], []
@@ -474,7 +479,13 @@ def test_the_document_feed_decodes_each_document_and_ignores_the_rest():
                             BEST_DETECTED, False, False, 1,
                             OutputPicture(PictureSetting(ActsOn.DISPLAY, AS_THE_DISPLAY_HAS_IT),
                                           PictureSetting(ActsOn.DISPLAY, AS_THE_DISPLAY_HAS_IT), 6500, 22))
+    picture = PictureDocument("HDMI-A-1", 3, {"10": 46}, NEUTRAL_SOFTWARE)
     feed("output-HDMI-A-1", Document(encode_output_document(wanted), "central", None))
     feed("output-HDMI-A-2", Document(encode_output_document(wanted), "central", None))   # another key
     feed("output-HDMI-A-1", Document(b'{"output_id":"HDMI-A-1"}', "central", None))       # undecodable
-    assert got == pictures == [("HDMI-A-1", wanted)]   # each controller acts on its own change number
+    feed("picture-HDMI-A-1", Document(encode_picture_document(picture), "central", None))
+    feed("picture-HDMI-A-2", Document(encode_picture_document(picture), "central", None))  # another key
+    feed("picture-HDMI-A-1", Document(encode_output_document(wanted), "central", None))    # not a picture
+    feed("layout-HDMI-A-1", Document(encode_picture_document(picture), "central", None))   # neither kind
+    assert got == [("HDMI-A-1", wanted)]
+    assert pictures == [("HDMI-A-1", picture)]

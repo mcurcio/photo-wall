@@ -23,7 +23,7 @@ Rules this module owns (one home each):
 - **The last list per display survives a controller restart** (`OfferedCache`,
   `FileOfferedCache`, S3): a cache, correct when empty (the Pi asks again).
 
-Interface only (the picture split's milestone commit): bodies land in slices S1 and S3.
+S1 lands the ask; S3 the capabilities string's choices and the cache.
 """
 from __future__ import annotations
 
@@ -32,9 +32,17 @@ from pathlib import Path
 from typing import Final, Protocol
 
 from contracts.node_output import DisplayIdentity
-from contracts.node_picture import Choice, HardwareSetting, VcpCode
+from contracts.node_picture import (
+    MAX_CHOICES,
+    PICTURE_LIST,
+    Choice,
+    HardwareRange,
+    HardwareSetting,
+    RangeKind,
+    VcpCode,
+)
 
-from .ddc import DdcChannel, VcpAnswer
+from .ddc import PICTURE_HOLD_SECONDS, DdcChannel, Urgency, VcpAnswer, VcpReading
 
 ASK_BATCH: Final = 4                # codes per getvcp (one port hold); the bench step measures it
 ASK_AGAIN_SECONDS: Final = 60.0     # an unknown list is asked again this long after the last try
@@ -44,7 +52,11 @@ def offered_setting(code: VcpCode, answer: VcpAnswer, choices: tuple[Choice, ...
     """The setting one answer offers. A VcpReading is a LEVEL of its maximum, current its current;
     a VcpByte is a CHOICE of `choices` when 1..MAX_CHOICES are named, else READ_ONLY_CHOICE, current
     its value. S1 passes choices None until S3 (every list setting READ_ONLY_CHOICE). Pure."""
-    raise NotImplementedError("picture split S1")
+    if isinstance(answer, VcpReading):
+        return HardwareSetting(code, HardwareRange(RangeKind.LEVEL, answer.maximum, ()), answer.current)
+    if choices is not None and 1 <= len(choices) <= MAX_CHOICES:
+        return HardwareSetting(code, HardwareRange(RangeKind.CHOICE, None, choices), answer.value)
+    return HardwareSetting(code, HardwareRange(RangeKind.READ_ONLY_CHOICE, None, ()), answer.value)
 
 
 def parse_capability_choices(capabilities: str) -> dict[VcpCode, tuple[Choice, ...]]:
@@ -69,10 +81,20 @@ class PictureListAsker:
     """`PictureAsk` over the port's DDC/CI channel, picture's turn (Urgency.PICTURE)."""
 
     def __init__(self, channel: DdcChannel) -> None:
-        raise NotImplementedError("picture split S1")
+        self._channel = channel
 
     def ask(self, output_id: str) -> tuple[HardwareSetting, ...] | None:
-        raise NotImplementedError("picture split S1")
+        if self._channel.bus(output_id) is None:
+            return ()
+        codes = tuple(PICTURE_LIST)
+        answers: dict[VcpCode, VcpAnswer] = {}
+        for start in range(0, len(codes), ASK_BATCH):
+            batch = codes[start:start + ASK_BATCH]
+            read = self._channel.read_many(output_id, batch, urgency=Urgency.PICTURE, timeout=PICTURE_HOLD_SECONDS)
+            if read is None:
+                return None                             # never a partial ask reported as known
+            answers.update({code: answer for code, answer in read.items() if code in batch})
+        return answers_by_code(answers, {})
 
 
 class OfferedCache(Protocol):
@@ -102,7 +124,14 @@ def answers_by_code(answers: Mapping[VcpCode, VcpAnswer], choices: Mapping[VcpCo
                     ) -> tuple[HardwareSetting, ...]:
     """Every answered code on PICTURE_LIST as its offered setting (`offered_setting`), in
     PICTURE_LIST order. Pure."""
-    raise NotImplementedError("picture split S1")
+    offered = []
+    for code in PICTURE_LIST:
+        if code in answers:
+            try:
+                offered.append(offered_setting(code, answers[code], choices.get(code)))
+            except ValueError:
+                continue                                # an answer no setting can hold (past LEVEL_MAX) offers nothing
+    return tuple(offered)
 
 
 __all__ = ["ASK_AGAIN_SECONDS", "ASK_BATCH", "FileOfferedCache", "OfferedCache", "PictureAsk", "PictureListAsker",

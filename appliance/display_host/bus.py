@@ -6,11 +6,13 @@ pipe, 3 streams, 1.5 MiB; the Node store is at 17 of 17 streams, so 1b adds no l
 stream). Its three streams:
 
 - `KV_desired_display`, the desired bucket Central writes: one Output document per Output
-  (`contracts.node_output.output_document_key`). The table leaves the rest of the line to the
+  (`contracts.node_output.output_document_key`) and one picture document per Output
+  (`contracts.node_picture.picture_document_key`, decision 0022). The table leaves the rest of the line to the
   record buffer; decision 0017 C11's later "Output layout" document joins this table as its own key
   per Output (`layout-<output_id>`), which a release that lists it applies with no new stream.
 - `KV_state_display`, the state bucket the controller writes: one Output report per Output
-  (`output_report_key`) beside `birth` and `outbox`.
+  (`output_report_key`) and one picture report per Output (`picture_report_key`) beside `birth`
+  and `outbox`.
 - `RECORD_display`, the circular record buffer: `display.record.power` (one `PowerAttempt` per
   attempt) and the session's own `display.record.call`. The display component registers no method.
 
@@ -34,14 +36,24 @@ from contracts.node_output import (
     output_document_key,
     output_report_key,
 )
+from contracts.node_picture import (
+    PICTURE_DOCUMENT_BYTES,
+    PICTURE_REPORT_BYTES,
+    PictureReport,
+    encode_picture_report,
+    picture_document_key,
+    picture_report_key,
+)
 from nodeapi.buffers import KeyTable, Slice, desired_bucket, event_buffer, state_bucket
 from nodeapi.node import NodeSession, Release
 
 DISPLAY_COMPONENT: Final = "display"
 DISPLAY_VERSION: Final = "1.0.0"                   # the display component's release version (birth)
 POWER_RECORD: Final = "record.power"               # emit subject of a PowerAttempt, under the line
-DISPLAY_STATE: Final = KeyTable({output_report_key(output): OUTPUT_REPORT_BYTES for output in OUTPUT_IDS})
-DISPLAY_DESIRED: Final = KeyTable({output_document_key(output): OUTPUT_DOCUMENT_BYTES for output in OUTPUT_IDS})
+DISPLAY_STATE: Final = KeyTable({**{output_report_key(output): OUTPUT_REPORT_BYTES for output in OUTPUT_IDS},
+                                 **{picture_report_key(output): PICTURE_REPORT_BYTES for output in OUTPUT_IDS}})
+DISPLAY_DESIRED: Final = KeyTable({**{output_document_key(output): OUTPUT_DOCUMENT_BYTES for output in OUTPUT_IDS},
+                                   **{picture_document_key(output): PICTURE_DOCUMENT_BYTES for output in OUTPUT_IDS}})
 
 
 def _display_slice() -> Slice:
@@ -79,3 +91,14 @@ class BusReportSink:
 
     def emit_attempt(self, attempt: PowerAttempt) -> None:
         self._session.events.emit(POWER_RECORD, encode_power_attempt(attempt), schema_major=SCHEMA_MAJOR)
+
+
+class BusPictureSink:
+    """`picture.PictureReports` on the display session: an Output's picture report is its state key
+    (`picture_report_key`). It only queues on the session, so it never blocks."""
+
+    def __init__(self, session: NodeSession) -> None:
+        self._session = session
+
+    def put_picture(self, report: PictureReport) -> None:
+        self._session.state.put(picture_report_key(report.output_id), encode_picture_report(report))
