@@ -6,7 +6,7 @@ use named operations. Media remains the only owner of media persistence details.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -51,11 +51,14 @@ class CoordinationMedia(Protocol):
 
     def expire_pins_in(self, conn: Any, now: float) -> None: ...
 
+    def request_preparations_in(self, conn: Any, requests: Sequence[AcquisitionRequest]) -> int:
+        """Publish `PrepareMedia` for each planned photo with no variant, in coordination's
+        transaction (central/media_repository.py)."""
+        ...
+
 
 class MediaApplication(Protocol):
     """Central application operations exposed to schedulers and operators."""
-
-    def request_acquisitions(self, requests: tuple[AcquisitionRequest, ...]) -> int: ...
 
     def request_measurements(self, requests: tuple[MeasureRequest, ...]) -> int: ...
 

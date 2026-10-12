@@ -13,10 +13,7 @@ from central.app import create_app
 from central.db import ProcessTransactionClock
 from central.media_repository import MediaRepository
 from central.photo_library.model import LibraryAsset
-from central.planner import AcquisitionRequest
 from central.runtime import Contribution, Runtime, Scene
-from contracts.models import Variant
-from media.prepare import BuildIdentity, PreparedMedia
 
 ADMIN = "test-operator-" + "x" * 40
 RECIPE = "a" * 64
@@ -43,7 +40,6 @@ def setup_source(registry, count=1, *, limits=None, assets=None, complete=True):
     repo = MediaRepository(registry.db, registry.clock, limits, queue=RecordingMediaQueue(), times=ProcessTransactionClock(registry.clock))
     originals = tuple(assets) if assets is not None else tuple(asset(i + 1) for i in range(count))
     seed_pool(registry, "source:1", originals, complete=complete)
-    repo.set_recipe(RECIPE)
     return repo, SavedSource("source:1"), originals
 
 
@@ -113,46 +109,32 @@ def test_authored_snapshot_is_immutable_with_no_count_limit(registry):
             "error": "authored_candidate_immutable"}
 
 
-def test_worker_publication_eviction_and_failure_cooldown_hydrate_authored_refs(registry, tmp_path):
-    from central.media_store import MediaStore
+def test_a_made_variant_and_a_failure_cooldown_hydrate_authored_refs(registry):
+    """An authored ref carries its photo's made variant under the wall's recipe, and a failed
+    preparation inside its retry window, read from the records at read time."""
+    from support.frame_media import a_frame, seed_variant
 
-    original_bytes, variant_bytes = b"0123456789", b"prepared"
-    worker_asset = asset(1, original_bytes=original_bytes)
-    repo, spec, originals = setup_source(registry, assets=(worker_asset,))
-    repo.author_authored_candidates(spec.source_ref, (originals[0].asset_id,))
-    store = MediaStore(repo, tmp_path / "media")
-    repo.request_acquisitions((AcquisitionRequest(asset_id=originals[0].asset_id,
-                             assignment_ids=("a",), earliest_start=1000),))
-    with store.worker_lock():
-        lease = repo.claim_job()
-        staged = store.staging(lease)
-        staged.original.write_bytes(original_bytes)
-        staged.variant.write_bytes(variant_bytes)
-        variant = Variant(sha256=hashlib.sha256(variant_bytes).hexdigest(), size=len(variant_bytes),
-                          media_type="image/jpeg", width=30, height=50)
-        build = BuildIdentity(preparation_sha256="a" * 64, ffmpeg_sha256="b" * 64,
-            ffprobe_sha256="c" * 64, ffmpeg_version="fixture", ffprobe_version="fixture",
-            python_version="fixture", pillow_version="fixture", littlecms_version="fixture",
-            libheif_version="fixture",
-            jpeg_version="fixture", zlib_version="fixture", platform="fixture",
-            memory_limit_enforced=False)
-        prepared = PreparedMedia(path=staged.variant, variant=variant,
-            original_sha256=hashlib.sha256(original_bytes).hexdigest(), recipe_id=RECIPE, build=build,
-            made_from="original")
-        store.publish(lease, prepared)
+    from central.kernel.job_types import PrepareMedia
+    from central.kernel.types import media_variant_key
+    from central.media_repository import prepare_lock
+
+    made, failing = asset(1), asset(2)
+    repo, spec, originals = setup_source(registry, assets=(made, failing))
+    repo.author_authored_candidates(spec.source_ref, tuple(o.asset_id for o in originals))
+    a_frame(registry, "need")   # the wall's need names the recipe
+    variant = seed_variant(registry, made.asset_id, "c" * 64, width=30, height=50)
     with repo.db.transaction() as conn:
-        assert repo.authored_in(conn)[originals[0].asset_id].variant == variant
-    with store.worker_lock():
-        store.collect(target_bytes=0)
+        key = media_variant_key(failing.asset_id, repo.wall_recipe_in(conn))
+        conn.execute("INSERT INTO job_outcomes(lock_key,job_name,status,reason,retry_not_before,"
+                     "seq,updated_at) VALUES(%s,%s,'transient','asset_missing',1010,"
+                     "nextval('job_outcome_seq'),1000)", (prepare_lock(key), PrepareMedia.job_name))
+    registry.clock.wall = 1000  # the repository's media times follow this clock
     with repo.db.transaction() as conn:
-        hydrated = repo.authored_in(conn)[originals[0].asset_id]
-        assert hydrated.variant is None
-        conn.execute("UPDATE media_jobs SET state='retry',retry_at=1010,failure_code='asset_missing',"
-                     "variant_sha=NULL WHERE asset_id=%s", (originals[0].asset_id,))
-        registry.clock.wall = 1000  # the repository's media times follow this clock
-        assert repo.authored_in(conn)[originals[0].asset_id].preparation_failure == "asset_missing"
+        authored = repo.authored_in(conn)
+        assert authored[made.asset_id].variant == variant
+        assert authored[failing.asset_id].preparation_failure == "asset_missing"
         registry.clock.advance(11)
-        assert repo.authored_in(conn)[originals[0].asset_id].preparation_failure is None
+        assert repo.authored_in(conn)[failing.asset_id].preparation_failure is None
 
 
 def test_scene_asset_refs_are_per_frame_and_admitted_runs_are_immutable():

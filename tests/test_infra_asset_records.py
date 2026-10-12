@@ -127,7 +127,7 @@ def test_an_identity_keyed_thumbnail_takes_new_produced_facts(repo):
     assert repo.get(key).produced == AssetReady(size=11, sha256=SHA_B)
 
 
-@pytest.mark.parametrize("kind", [k for k in AssetKind if k is not AssetKind.LIBRARY_THUMBNAIL])
+@pytest.mark.parametrize("kind", [k for k in AssetKind if k.keyed_by_content])
 @pytest.mark.parametrize("locator_sha", [None, SHA_B])
 def test_a_reference_whose_locator_does_not_name_its_key_is_refused(repo, kind, locator_sha):
     # 028's CHECK: production may fetch from ANY reference of a key, and `download` checks the
@@ -220,6 +220,8 @@ def test_021_backfill_seeds_references_and_produced_facts(pre_021):
             (SHA_S1, SHA_S1),
         )
         conn.execute((MIGRATIONS / "021_assets.sql").read_text())
+        # The column today's repository reads beside the produced facts (087).
+        conn.execute("ALTER TABLE assets ADD COLUMN produced_detail JSONB NULL")
 
     database = Database(pre_021)
     try:

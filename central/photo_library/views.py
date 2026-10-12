@@ -157,11 +157,11 @@ class FrameCopy(Model):
 class PhotoFacts(Model):
     """`GET /v1/operator/library/photos/{asset_id}` (slice A3): what Photo Wall knows of one pool
     photo and its copies, read from its `library_assets` row, its `asset_revisions` row, that
-    revision's `asset_copies` rows and its `media_jobs` row. `width` x `height` is the photo as
+    revision's `asset_copies` rows and its media variants' records. `width` x `height` is the photo as
     Immich shows it (upright, edited). `original` None: no check with `withExif` has read it yet.
     `copies` lists thumbnail, preview, fullsize, original, in that order. `prepared_from`: the copy
-    the wall's prepared copy was made from (`media_jobs.made_from` of the current recipe's ready
-    job); None before the first preparation. `frames`: each Frame's need and whether the preview
+    the wall's prepared copy was made from (`MediaReady.made_from` of its newest made media
+    variant); None before the first preparation. `frames`: each Frame's need and whether the preview
     holds it (a photo; a video plays from its original, so none): the copy the wall plays is the
     preview when it holds every Frame's need, else a larger one (owner, 2026-10-09: "use Immich
     downsampled copy only if it is at least the visible Frame size, else the original"). No

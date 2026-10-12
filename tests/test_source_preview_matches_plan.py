@@ -25,13 +25,19 @@ from media_queue import RecordingMediaQueue
 from support.position import save_position
 from test_registry import enroll
 
+from central.assets.layout import CacheLayout
+from central.assets.store import CacheStore
 from central.coordination import Coordinator
 from central.db import DatabaseTransactionClock
 from central.infra.key_content_store import PgKeyContent
 from central.infra.photo_library_store import PgPhotoLibrary
+from central.infra.transactions import PgTransaction, PgTransactions
+from central.kernel.handling import TerminalFailure, TransientFailure
+from central.kernel.job_types import PrepareMedia
+from central.kernel.jobs import asset_key
+from central.kernel.types import media_variant_key
 from central.media_queue import QueueReceipt
 from central.media_repository import MediaRepository
-from central.media_store import MediaStore
 from central.photo_library.model import (
     InPool,
     LibraryAsset,
@@ -105,10 +111,10 @@ class Wall:
                                           times=DatabaseTransactionClock())
         self.names = SourceNameService(registry.db, self.repository,
                                        RuntimeStore(registry.db, registry.clock), self.library)
-        self.store = MediaStore(self.repository, tmp_path / "media")
+        self.store = CacheStore(CacheLayout(tmp_path))
         self.preparer = Preparer(ffmpeg=_tool("ffmpeg"), ffprobe=_tool("ffprobe"),
                                  clock=wall_clock)
-        self.worker = MediaWorker(self.repository, self.store, self.library,
+        self.worker = MediaWorker(self.repository, self.library,
                                   preparer=self.preparer,
                                   key_content=PgKeyContent(registry.db,
                                                            times=DatabaseTransactionClock()))
@@ -193,22 +199,28 @@ class Wall:
         raise AssertionError("measurement never settled")
 
     def prepare_all(self, acquisitions) -> list[dict]:
-        """The scheduler's request for each asked-for photo, then the worker's job for each."""
-        recipe, _ = self.run(self.preparer.describe_recipe())
-        self.repository.set_recipe(recipe)
-        assert self.repository.request_acquisitions(acquisitions) == len(acquisitions)
+        """Each asked-for photo's `PrepareMedia` (coordination published it with the advance),
+        run by the worker's media maker and recorded as the job runtime records it."""
+        maker = self.worker.media_maker(store=self.store,
+                                        transactions=PgTransactions(self.registry.db))
         with self.registry.db.transaction() as conn:
-            jobs = [row["id"] for row in conn.execute("SELECT id FROM media_jobs ORDER BY id")]
-
-        async def process():
-            with self.store.worker_lock():
-                for job_id in jobs:
-                    await self.worker.process_job(job_id, attempt=1)
-        self.run(process())
-        with self.registry.db.transaction() as conn:
-            return conn.execute("SELECT j.asset_id,j.state,j.failure_code,b.variant FROM "
-                                "media_jobs j LEFT JOIN media_blobs b ON b.digest=j.variant_sha "
-                                "ORDER BY j.asset_id").fetchall()
+            recipe = self.repository.wall_recipe_in(conn)
+        results = []
+        for asset_id in sorted({request.asset_id for request in acquisitions}):
+            job = PrepareMedia(key=media_variant_key(asset_id, recipe))
+            try:
+                facts = self.run(maker.handle(job))
+            except (TerminalFailure, TransientFailure) as failure:
+                results.append({"asset_id": asset_id, "state": "failed",
+                                "failure_code": failure.reason, "variant": None})
+                continue
+            with self.registry.db.transaction() as conn:
+                self.repository.records.record_produced(PgTransaction(conn), asset_key(job),
+                                                        facts)
+                variant = self.repository.variants_in(conn, (job.key,))[job.key]
+            results.append({"asset_id": asset_id, "state": "ready", "failure_code": None,
+                            "variant": variant.model_dump(mode="json")})
+        return results
 
     def close(self):
         try:

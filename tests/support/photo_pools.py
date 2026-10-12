@@ -73,7 +73,7 @@ def seed_pool(registry, source_ref: str, photos: Iterable[LibraryAsset], *,
     """Make `source_ref` (`<name>:1`) a saved Source on first use, then record one step of its
     pool's check finding `photos`. `complete` finishes the check, so it sweeps whatever an earlier
     check found; otherwise the check stays running and the next call adds to it. `registry` is
-    anything with the test database's `db` and `clock` (the registry, a MediaStore). Returns the
+    anything with the test database's `db` and `clock` (the registry, a repository). Returns the
     pool key."""
     library = library_of(registry)
     with registry.db.transaction() as conn:

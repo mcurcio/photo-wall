@@ -12,7 +12,7 @@ from typing import Any
 import procrastinate
 import psycopg
 
-from central.kernel.assets import AssetReady
+from central.kernel.assets import AssetReady, MediaReady
 from central.kernel.job_types import (
     CATALOG,
     FetchLibraryThumbnail,
@@ -20,6 +20,7 @@ from central.kernel.job_types import (
     FetchSealedEnvironment,
     MaintainCache,
     Prefetch,
+    PrepareMedia,
     PurgeFinishedJobs,
     RescueStalledJobs,
     SyncReleases,
@@ -27,6 +28,9 @@ from central.kernel.job_types import (
 from central.kernel.jobs import Job
 
 FACTS = AssetReady(size=7, sha256="ef" * 32)
+MEDIA_FACTS = MediaReady(size=7, sha256="ef" * 32, media_type="image/jpeg", width=4, height=3,
+                         duration=None, made_from="preview")
+MEDIA_KEY = "asset-" + "56" * 32 + "." + "78" * 32
 
 
 class FetchOsImageStub:
@@ -42,6 +46,11 @@ class FetchSealedEnvironmentStub:
 class FetchLibraryThumbnailStub:
     async def handle(self, job: FetchLibraryThumbnail) -> AssetReady:
         return FACTS
+
+
+class PrepareMediaStub:
+    async def handle(self, job: PrepareMedia) -> MediaReady:
+        return MEDIA_FACTS
 
 
 class SyncReleasesStub:
@@ -71,14 +80,15 @@ class PurgeStub:
 
 def catalog_stubs() -> list[Any]:
     return [FetchOsImageStub(), FetchSealedEnvironmentStub(),
-            FetchLibraryThumbnailStub(), SyncReleasesStub(),
+            FetchLibraryThumbnailStub(), PrepareMediaStub(), SyncReleasesStub(),
             PrefetchStub(), MaintainCacheStub(), RescueStub(), PurgeStub()]
 
 
 def catalog_instances() -> list[Job]:
     samples = {FetchOsImage: FetchOsImage(tarball_sha256="cd" * 32),
                FetchSealedEnvironment: FetchSealedEnvironment(sha256="12" * 32),
-               FetchLibraryThumbnail: FetchLibraryThumbnail(asset_id="asset-" + "34" * 32)}
+               FetchLibraryThumbnail: FetchLibraryThumbnail(asset_id="asset-" + "34" * 32),
+               PrepareMedia: PrepareMedia(key=MEDIA_KEY)}
     return [samples.get(job_type) or job_type() for job_type in CATALOG]
 
 

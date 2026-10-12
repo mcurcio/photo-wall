@@ -114,6 +114,14 @@ class IdentifyOutput(Model):
     remaining_seconds: float = Field(gt=0, le=15, allow_inf_nan=False)
 
 class Variant(Model):
+    """One prepared copy of a photo. It is named by its inputs, `asset_id` (the photo revision)
+    and `recipe_id` (what sizes and encodes it), and Central serves it by that name at
+    `GET /v1/media/{asset_id}/{recipe_id}`; `sha256` and `size` are the bytes current when the
+    plan was issued (a re-make may serve other bytes of the same content, with their own
+    `Repr-Digest`). The name is additive until the Player fetches by it (follow-up T-b)."""
+
+    asset_id: Identifier | None = None
+    recipe_id: Digest | None = None
     sha256: Digest
     size: int = Field(gt=0, le=4 * 1024**3)
     media_type: Literal["image/jpeg", "image/png", "video/mp4"]
@@ -128,8 +136,17 @@ class Variant(Model):
         return self
 
     @property
+    def key(self) -> str | None:
+        """`<asset_id>.<recipe_id>`, the variant's name (None before it has one)."""
+        if self.asset_id is None or self.recipe_id is None:
+            return None
+        return f"{self.asset_id}.{self.recipe_id}"
+
+    @property
     def path(self) -> str:
-        return f"/v1/media/{self.sha256}"
+        if self.key is None:
+            return f"/v1/media/{self.sha256}"
+        return f"/v1/media/{self.asset_id}/{self.recipe_id}"
 
 
 class PlayerConfiguration(Model):

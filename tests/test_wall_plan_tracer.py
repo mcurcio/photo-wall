@@ -19,7 +19,7 @@ import hashlib
 from collections import defaultdict
 
 import pytest
-from psycopg.types.json import Jsonb
+from support.frame_media import seed_variant
 from support.key_content_builders import face, measured
 from support.measured_photos import measure
 from support.photo_pools import photo, seed_pool
@@ -219,25 +219,13 @@ def wall_players(registry):
 
 
 def prepare(registry, photos):
-    """Each photo's prepared copy ready under the current recipe, as a worker leaves it.
-    Returns asset id by prepared digest."""
-    recipe = "f" * 64
+    """Each photo's media variant made under the wall's recipe, as a worker leaves it (the
+    wall's Frames exist first). Returns asset id by prepared digest."""
     digests = {}
-    with registry.db.transaction() as conn:
-        conn.execute("INSERT INTO media_settings(singleton,max_bytes,recipe_id) VALUES(TRUE,%s,%s) "
-                     "ON CONFLICT(singleton) DO UPDATE SET recipe_id=EXCLUDED.recipe_id",
-                     (4 * 1024**3, recipe))
-        for number, item in enumerate(photos):
-            digest = f"{number + 1:064x}"
-            digests[digest] = item.asset_id
-            variant = Variant(sha256=digest, size=10, media_type="image/jpeg",
-                              width=item.width, height=item.height)
-            conn.execute("INSERT INTO media_blobs VALUES(%s,%s,10,'ready',%s)",
-                         (digest, Jsonb(variant.model_dump(mode="json")), registry.clock.utc()))
-            conn.execute("INSERT INTO media_jobs(id,asset_id,recipe_id,state,earliest_start,"
-                         "variant_sha,updated_at) VALUES(%s,%s,%s,'ready',%s,%s,%s)",
-                         ("job-" + item.asset_id[-12:], item.asset_id, recipe,
-                          registry.clock.utc(), digest, registry.clock.utc()))
+    for number, item in enumerate(photos):
+        digest = f"{number + 1:064x}"
+        digests[digest] = item.asset_id
+        seed_variant(registry, item.asset_id, digest, width=item.width, height=item.height)
     return digests
 
 

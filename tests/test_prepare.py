@@ -20,9 +20,12 @@ from uuid import UUID
 import pytest
 
 from central.photo_library.model import LibraryAsset
+from central.photo_library.rendition import FrameNeed
 from contracts.time import ManualClock
 from media.models import MediaError
-from media.prepare import PreparationLimits, PreparationRecipe, Preparer
+from media.prepare import PreparationLimits, PreparationRecipe, Preparer, recipe_id
+
+NEED = FrameNeed(aspect=16 / 9, width=1920, height=1080)
 
 try:
     from PIL import Image, ImageChops, ImageCms, ImageDraw, ImageOps, ImageStat
@@ -115,7 +118,6 @@ def assert_variant_file(result, destination, source_bytes):
     assert result.variant.size == len(data)
     assert result.variant.sha256 == hashlib.sha256(data).hexdigest()
     assert result.original_sha256 == hashlib.sha256(source_bytes).hexdigest()
-    assert result.recipe_id
     assert result.build is not None
 
 
@@ -151,19 +153,20 @@ def test_still_resize_preserves_aspect_ratio_and_does_not_upscale(tmp_path, nati
     assert (small.variant.width, small.variant.height) == (80, 40)
     native = prepare(native_tools, asset, source, tmp_path / "native.jpg")
     assert (native.variant.width, native.variant.height) == (240, 120)
-    assert small.recipe_id != native.recipe_id
 
 
-def test_recipe_identity_is_stable_for_same_build_and_changes_with_quality(tmp_path, native_tools):
+def test_recipe_identity_is_stable_and_changes_with_quality_while_the_build_is_reused(
+        tmp_path, native_tools):
+    """A variant's recipe id names the recipe values and the need only (`recipe_id`); the build
+    a preparation reports is the same for the same tools."""
     source = tmp_path / "original.jpg"
     asset = save_jpeg(source)
     first = prepare(native_tools, asset, source, tmp_path / "first.jpg")
     same = prepare(native_tools, asset, source, tmp_path / "same.jpg")
-    changed = prepare(native_tools, asset, source, tmp_path / "changed.jpg",
-                      recipe=PreparationRecipe(jpeg_quality=7))
-    assert first.recipe_id == same.recipe_id
     assert first.build == same.build
-    assert first.recipe_id != changed.recipe_id
+    assert recipe_id(PreparationRecipe(), NEED) == recipe_id(PreparationRecipe(), NEED)
+    assert recipe_id(PreparationRecipe(), NEED) != recipe_id(PreparationRecipe(jpeg_quality=7),
+                                                              NEED)
 
 
 def png_chunk(kind, data):
@@ -316,7 +319,7 @@ def tool_wrapper(path, executable, body):
     return str(path)
 
 
-def test_describe_recipe_matches_prepared_result_and_reuses_unchanged_build(tmp_path, native_tools):
+def test_an_unchanged_build_is_inspected_once(tmp_path, native_tools):
     source = tmp_path / "original.jpg"
     asset = save_jpeg(source)
     marker = tmp_path / "build-inspection"
@@ -326,37 +329,34 @@ def test_describe_recipe_matches_prepared_result_and_reuses_unchanged_build(tmp_
 
     async def perform():
         instance = preparer((wrapper, native_tools[1]))
-        recipe_id, build = await instance.describe_recipe()
-        assert await instance.describe_recipe() == (recipe_id, build)
-        result = await instance.prepare_rendition(asset, fetched(asset, source),
-                                                  tmp_path / "variant.jpg")
-        assert (result.recipe_id, result.build) == (recipe_id, build)
-        assert build.preparation_sha256
+        first = await instance.prepare_rendition(asset, fetched(asset, source),
+                                                 tmp_path / "first.jpg")
+        second = await instance.prepare_rendition(asset, fetched(asset, source),
+                                                  tmp_path / "second.jpg")
+        assert first.build == second.build
+        assert first.build.preparation_sha256
 
     asyncio.run(perform())
     assert marker.read_text().splitlines() == ["check"]
 
 
-def test_describe_recipe_invalidates_cache_when_executable_bytes_change(tmp_path, native_tools):
+def test_a_changed_executable_is_inspected_again(tmp_path, native_tools):
+    source = tmp_path / "original.jpg"
+    asset = save_jpeg(source)
     wrapper = Path(tool_wrapper(tmp_path / "ffmpeg-wrapper", native_tools[0], ""))
 
     async def perform():
         instance = preparer((str(wrapper), native_tools[1]))
-        first_id, first_build = await instance.describe_recipe()
+        first = await instance.prepare_rendition(asset, fetched(asset, source),
+                                                 tmp_path / "first.jpg")
         with wrapper.open("a") as output:
             output.write("\n# changed trusted tool deployment\n")
-        second_id, second_build = await instance.describe_recipe()
-        assert first_id != second_id
-        assert first_build.ffmpeg_sha256 != second_build.ffmpeg_sha256
-        assert first_build.ffmpeg_version == second_build.ffmpeg_version
+        second = await instance.prepare_rendition(asset, fetched(asset, source),
+                                                  tmp_path / "second.jpg")
+        assert first.build.ffmpeg_sha256 != second.build.ffmpeg_sha256
+        assert first.build.ffmpeg_version == second.build.ffmpeg_version
 
     asyncio.run(perform())
-
-
-def test_recipe_identity_includes_encoder_thread_setting(native_tools):
-    first_id, _ = asyncio.run(preparer(native_tools).describe_recipe())
-    second_id, _ = asyncio.run(preparer(native_tools, limits=PreparationLimits(threads=2)).describe_recipe())
-    assert first_id != second_id
 
 
 def test_build_change_during_conversion_fails_and_removes_output(tmp_path, native_tools):
@@ -793,9 +793,8 @@ def test_a_gain_map_photo_prepares_from_its_base_image(tmp_path, native_tools):
         assert_same_pixels(image, corners())
 
 
-def test_recipe_three_has_its_own_id(native_tools):
+def test_recipe_three_has_its_own_id():
     """A5 case 5: every photo is prepared again once (F-FU-3)."""
     two = PreparationRecipe.model_construct(**{**PreparationRecipe().model_dump(), "version": 2})
-    ids = [asyncio.run(preparer(native_tools, recipe=recipe).describe_recipe())[0]
-           for recipe in (PreparationRecipe(), two)]
+    ids = [recipe_id(recipe, NEED) for recipe in (PreparationRecipe(), two)]
     assert PreparationRecipe().version == 3 and ids[0] != ids[1]

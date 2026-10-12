@@ -159,7 +159,7 @@ def library_assets_in(conn: Any, asset_ids: Iterable[str]) -> dict[str, LibraryA
     to its parent `library_assets` row (connection, Immich id, kind, taken time, the original's
     facts as `OriginalFile`, None when every original column is NULL). An id with no row is
     absent. The one place a stored asset becomes a LibraryAsset: job leases
-    (`central.media_repository`, `central.media_store`) and the key content measurement
+    (`central.media_repository`'s variant inputs) and the key content measurement
     (roadmap 5a, `central.infra.key_content_store`) all read here."""
     ids = list(set(asset_ids))
     if not ids:
@@ -959,9 +959,14 @@ class PgPhotoLibrary:
     def photo_facts(self, asset_id: str) -> PhotoFacts:
         with self.db.transaction() as conn:
             row = conn.execute(
-                "SELECT c.full_size_copies,(SELECT j.made_from FROM media_jobs j WHERE "
-                "j.asset_id=a.asset_id AND j.state='ready' AND j.recipe_id=(SELECT recipe_id "
-                "FROM media_settings WHERE singleton)) AS made_from FROM asset_revisions a "
+                # The copy the wall's newest made variant of this revision was made from
+                # (its `MediaReady.made_from`; a variant 087 migrated names none).
+                "SELECT c.full_size_copies,(SELECT v.produced_detail->>'made_from' FROM assets v "
+                "WHERE v.kind='media-variant' AND v.identity LIKE a.asset_id || '.%%' "
+                "AND v.produced_sha256 IS NOT NULL "
+                "AND v.produced_detail->>'made_from' <> 'legacy' "
+                "ORDER BY v.created_at DESC, v.identity LIMIT 1) AS made_from "
+                "FROM asset_revisions a "
                 "LEFT JOIN library_connections c USING (connection_ref) WHERE a.asset_id=%s "
                 "AND EXISTS (SELECT 1 FROM photo_pool_rows r JOIN photo_pools p USING (pool_key) "
                 f"WHERE r.asset_id=a.asset_id AND r.outcome='in_pool' AND {_WANTED})",

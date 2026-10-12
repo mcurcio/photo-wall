@@ -23,7 +23,6 @@ import httpx
 import pytest
 import tls_fixture as tls
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-from media_queue import RecordingMediaQueue
 from pydantic import ValidationError
 from support.position import save_position
 from test_executor import binding, layer
@@ -1850,37 +1849,38 @@ def test_observation_renewal_race_fetches_current_state_without_reenrollment(tmp
 
 
 def test_real_central_http_media_commit_outage_rejoin_and_renewal(registry, tmp_path):
-    """Loopback TCP + PostgreSQL + actual gateway bytes; RecordingRenderer only."""
+    """Loopback TCP + PostgreSQL + actual Frame media bytes; RecordingRenderer only."""
     import socket
     import threading
     import time
 
     import uvicorn
     from fastapi.responses import JSONResponse
+    from public_media import MediaCache, make_variant, request_photo
     from support.measured_photos import measure
+    from support.photo_pools import photo, seed_pool
     from test_coordination import schedule
-    from test_media_store import RECIPE, VARIANT, staged
     from test_registry import ADMIN, frame
 
     from central.app import create_app
-    from central.media_repository import MediaRepository, StoreLimits
-    from central.media_store import MediaStore
+    from central.media_repository import MediaRepository
     from contracts.enrollment import OutputReport
 
-    repository = MediaRepository(registry.db, registry.clock, StoreLimits(
-        max_bytes=10000, max_original_bytes=1000, max_image_bytes=1000, max_video_bytes=2000),
-        queue=RecordingMediaQueue(), times=ProcessTransactionClock(registry.clock))
-    repository.set_recipe(RECIPE)
-    storage = MediaStore(repository, tmp_path / "central-media")
-    with storage.worker_lock():
-        lease, _, prepared = staged(storage)   # a photo of Source library:1's pool
-        storage.publish(lease, prepared)
-    measure(registry, lease.asset)   # roadmap 5a: the Planner places only measured photos
+    variant_bytes = b"public synthetic prepared bytes"
+    repository = MediaRepository(registry.db, registry.clock,
+                                 times=ProcessTransactionClock(registry.clock))
+    frame(registry, "portrait")  # the wall's need names the recipe the photo is prepared under
+    picture = photo("photo-1", taken_at=1000)   # a photo of Source library:1's pool
+    seed_pool(registry, "library:1", (picture,))
+    cache = MediaCache(repository, tmp_path / "central-cache")
+    prepared = make_variant(cache, request_photo(cache, picture.asset_id), variant_bytes,
+                            width=picture.width, height=picture.height)
+    measure(registry, picture)   # roadmap 5a: the Planner places only measured photos
     app = create_app(
         registry.db,
         registry.clock,
         ADMIN,
-        media_root=storage.root,
+        cache_root=cache.root,
     )
     unavailable = False
 
@@ -1927,7 +1927,6 @@ def test_real_central_http_media_commit_outage_rejoin_and_renewal(registry, tmp_
             await service.probe_time()
             await service.poll_state()
             assert service._plan is None
-            frame(registry, "portrait")
             registry.bind("portrait", registered.player_id, "HDMI-A-1", expected_generation=0)
             save_position(registry, "portrait")
             schedule(app.state.coordinator, ["portrait"], starts=1000, media=True)
@@ -1945,7 +1944,7 @@ def test_real_central_http_media_commit_outage_rejoin_and_renewal(registry, tmp_
             assert observations and observations[0].status == "presented"
             await service.request("POST", "/v1/player/observations",
                                   body=observations[0].model_dump(mode="json"))
-            assert service.cache.path_for(prepared.variant).read_bytes() == VARIANT
+            assert service.cache.path_for(prepared).read_bytes() == variant_bytes
             # Exercise the actual websockets client and central endpoint too.
             socket_task = asyncio.create_task(service._websocket_loop())
             await asyncio.sleep(.15)

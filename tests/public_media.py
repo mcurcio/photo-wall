@@ -1,21 +1,26 @@
-"""Generated public JPEGs published through the production media transaction.
+"""Generated public JPEGs, made into media variants as the media maker records them.
 
-Build metadata is deliberately synthetic: this qualifies publication, never a
-conversion worker, an upstream adapter, or native presentation.
+The bytes are generated, not encoded by a preparer: this qualifies the variant record and the
+read path, never a conversion worker, an upstream adapter, or native presentation.
 """
 
 import hashlib
 import io
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 
 from PIL import Image
 from support.photo_pools import FIXTURE_CONNECTION
 
-from central.media_store import MediaStore
+from central.assets.frame_media import variant_asset_key
+from central.assets.layout import CacheLayout
+from central.infra.transactions import PgTransaction
+from central.kernel.assets import AssetKind, MediaReady
+from central.kernel.types import media_variant_key
+from central.media_repository import MediaRepository
 from central.photo_library.model import LibraryAsset
 from contracts.models import Variant
-from media.prepare import BuildIdentity, PreparedMedia
 
 
 @dataclass(frozen=True)
@@ -27,6 +32,22 @@ class PublicPhoto:
     @property
     def original_sha256(self) -> str:
         return hashlib.sha256(self.original).hexdigest()
+
+    @property
+    def asset_id(self) -> str:
+        return self.asset.asset_id
+
+
+@dataclass(frozen=True)
+class MediaCache:
+    """A repository and the cache root its variants live under (`media/blobs/<sha256>`)."""
+
+    repository: MediaRepository
+    root: Path
+
+    @property
+    def layout(self) -> CacheLayout:
+        return CacheLayout(self.root)
 
 
 # The fixture connection's photos (follow-ups A2: an Immich asset is keyed by its connection, so a
@@ -45,25 +66,43 @@ def public_photo(*, connection_id=FIXTURE_CONNECTION, number=1,
     return PublicPhoto(asset, original, derivative)
 
 
-def publish_photo(storage: MediaStore, photo: PublicPhoto) -> Variant:
-    """Consume a previously requested job; never seed catalog or authored state."""
-    with storage.worker_lock():
-        lease = storage.repository.claim_job()
-        assert lease is not None and lease.asset == photo.asset
-        paths = storage.staging(lease)
-        paths.original.write_bytes(photo.original)
-        paths.variant.write_bytes(photo.derivative)
-        variant = Variant(sha256=hashlib.sha256(photo.derivative).hexdigest(),
-            size=len(photo.derivative), media_type="image/jpeg",
-            width=photo.asset.width, height=photo.asset.height)
-        build = BuildIdentity(preparation_sha256="a" * 64, ffmpeg_sha256="b" * 64,
-            ffprobe_sha256="c" * 64, ffmpeg_version="synthetic", ffprobe_version="synthetic",
-            python_version="synthetic", pillow_version="synthetic", littlecms_version="synthetic",
-            libheif_version="synthetic",
-            jpeg_version="synthetic", zlib_version="synthetic", platform="synthetic",
-            memory_limit_enforced=False)
-        prepared = PreparedMedia(path=paths.variant, variant=variant,
-            original_sha256=photo.original_sha256, recipe_id=lease.recipe_id, build=build,
-            made_from="preview")
-        assert storage.publish(lease, prepared) == variant
-        return variant
+def request_photo(cache: MediaCache, asset_id: str) -> str:
+    """Plan the photo's preparation as coordination does (`request_preparations_in`): its
+    variant's record and `PrepareMedia`. Returns the variant's name."""
+    from central.planner import AcquisitionRequest
+
+    repository = cache.repository
+    with repository.db.transaction() as conn:
+        assert repository.request_preparations_in(conn, (AcquisitionRequest(
+            asset_id=asset_id, assignment_ids=("assignment",), earliest_start=0),)) == 1
+        return media_variant_key(asset_id, repository.wall_recipe_in(conn))
+
+
+def make_variant(cache: MediaCache, key: str, derivative: bytes, *, width: int, height: int,
+                 made_from: str = "preview") -> Variant:
+    """What the media maker records for a variant already requested: its file at its digest and
+    its produced facts."""
+    repository = cache.repository
+    digest = hashlib.sha256(derivative).hexdigest()
+    facts = MediaReady(size=len(derivative), sha256=digest, media_type="image/jpeg",
+                       width=width, height=height, duration=None, made_from=made_from)
+    path = cache.layout.path(variant_asset_key(key), facts)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(derivative)
+    with repository.db.transaction() as conn:
+        tx = PgTransaction(conn)
+        assert repository.records.get(tx, variant_asset_key(key)) is not None
+        repository.records.record_produced(tx, variant_asset_key(key), facts)
+        return repository.variants_in(conn, (key,))[key]
+
+
+def publish_photo(cache: MediaCache, photo: PublicPhoto) -> Variant:
+    """Make a requested photo's variant; never seed catalog or authored state."""
+    repository = cache.repository
+    with repository.db.transaction() as conn:
+        recipe = repository.wall_recipe_in(conn)
+        key = media_variant_key(photo.asset_id, recipe)
+        assert conn.execute("SELECT 1 FROM assets WHERE kind=%s AND identity=%s",
+                            (AssetKind.MEDIA_VARIANT.value, key)).fetchone(), "not requested"
+    return make_variant(cache, key, photo.derivative, width=photo.asset.width,
+                        height=photo.asset.height)

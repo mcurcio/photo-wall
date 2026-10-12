@@ -36,6 +36,7 @@ from psycopg.conninfo import make_conninfo
 
 import central.db
 from central.db import Database
+from central.media_queue import ProcrastinateMediaQueue
 
 DSN_VARIABLE = "PHOTO_WALL_TEST_DATABASE_URL"
 REQUIRE_VARIABLE = "PHOTO_WALL_TEST_REQUIRE_DATABASE"
@@ -45,6 +46,9 @@ REQUIRE_VARIABLE = "PHOTO_WALL_TEST_REQUIRE_DATABASE"
 # production advisory locks (7341183xx).
 TEMPLATE_BUILD_LOCK = 734118390
 
+# The template also holds procrastinate's schema (central/app.py's lifespan applies it): a marker
+# in the template's name, so a template built before it is not reused.
+_PROCRASTINATE_SCHEMA = b"procrastinate-schema-1"
 # Captured at import: a test may point `central.db.__file__` at a historical migration set.
 _RUNNER = Path(central.db.__file__)
 CLONE_PREFIX = "pw_t_"
@@ -68,6 +72,7 @@ def server_dsn() -> str:
 def template_name() -> str:
     """`pw_tmpl_<hash>` of every input that shapes the migrated schema."""
     digest = sha256(_RUNNER.read_bytes())
+    digest.update(_PROCRASTINATE_SCHEMA)
     for path in sorted(_RUNNER.with_name("migrations").glob("*.sql")):
         digest.update(path.name.encode() + b"\0" + path.read_bytes())
     return "pw_tmpl_" + digest.hexdigest()[:16]
@@ -140,11 +145,14 @@ class TestDatabases:
                 sql.Identifier(building)))
             self._admin.execute(sql.SQL("CREATE DATABASE {} TEMPLATE template0").format(
                 sql.Identifier(building)))
-            database = Database(make_conninfo(self.dsn, dbname=building))
+            conninfo = make_conninfo(self.dsn, dbname=building)
+            database = Database(conninfo)
             try:
                 database.migrate()
             finally:
                 database.close()
+            # As Central's start does: coordination publishes jobs into procrastinate's tables.
+            ProcrastinateMediaQueue.apply_schema(conninfo)
             self._admin.execute(sql.SQL("ALTER DATABASE {} RENAME TO {}").format(
                 sql.Identifier(building), sql.Identifier(name)))
         self._admin.execute(sql.SQL(

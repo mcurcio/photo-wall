@@ -128,7 +128,7 @@ def test_070_drops_the_v1_fleet_and_node_boot_keeps_its_quota(before_070, tmp_pa
                           "WHERE job_name='player_deb.fetch'")["n"] == 0
 
     cold_setup(registry)  # a selected node deployment, as the release sync and operator make it
-    app = create_app(registry.db, registry.clock, ADMIN, media_root=tmp_path / "media",
+    app = create_app(registry.db, registry.clock, ADMIN, cache_root=tmp_path,
                      node_control=NodeControlConfig("v1-fleet-test"))
     auth = {"Authorization": "Bearer " + ADMIN}
     with TestClient(app) as client:

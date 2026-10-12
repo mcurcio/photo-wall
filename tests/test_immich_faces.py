@@ -15,7 +15,6 @@ from support.photo_pools import FIXTURE_CONNECTION, seed_pool
 from central.db import ProcessTransactionClock
 from central.infra.key_content_store import PgKeyContent
 from central.media_repository import MediaRepository
-from central.media_store import MediaStore
 from central.photo_library.model import ConnectionSecret, LibraryAsset
 from media.immich import ImmichClient
 from media.worker import MediaWorker
@@ -53,7 +52,7 @@ def test_measuring_the_real_thumbnail_records_one_face_at_the_top_left(
     library = FakeLibraryStore(registry.clock)
     library.add_connection(FIXTURE_CONNECTION, immich_library.base_url, immich_library.api_key)
     store = PgKeyContent(registry.db, times=times)
-    worker = MediaWorker(repository, MediaStore(repository, tmp_path / "media"), library,
+    worker = MediaWorker(repository, library,
                          client_factory=ImmichClient.for_connection, key_content=store)
     try:
         run(worker.measure(asset.asset_id))

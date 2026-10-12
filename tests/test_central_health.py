@@ -26,11 +26,9 @@ class FakeMedia:
     def __init__(self):
         self.fail = False
 
-    def request_acquisitions(self, _requests):
+    def request_measurements(self, _requests):
         if self.fail:
             raise RuntimeError("private worker failure")
-
-    def request_measurements(self, _requests):
         return 0
 
 
@@ -127,7 +125,7 @@ def test_scheduler_failure_is_unhealthy_and_recovery_requires_a_successful_tick(
         assert "last_tick_monotonic" not in recovered.json()["scheduler"]
 
 
-def test_acquisition_failure_is_reported_and_clears_after_complete_tick(monkeypatch):
+def test_measurement_request_failure_is_reported_and_clears_after_complete_tick(monkeypatch):
     coordinator = FakeCoordinator()
     coordinator.media.fail = True
     app = app_with(FakeDatabase(), coordinator, ManualClock(1000), monkeypatch, enabled=True)

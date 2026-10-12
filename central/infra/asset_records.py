@@ -10,10 +10,20 @@ An asset row, once created, is never deleted here, and its produced facts are ne
 
 from __future__ import annotations
 
+from dataclasses import asdict
 from typing import Any
 
+from psycopg.types.json import Jsonb
+
 from central.infra.transactions import pg_connection
-from central.kernel.assets import Asset, AssetKey, AssetReady, AssetReference, OriginLocator
+from central.kernel.assets import (
+    Asset,
+    AssetKey,
+    AssetReady,
+    AssetReference,
+    MediaReady,
+    OriginLocator,
+)
 from central.kernel.handling import ProducedFactsConflict
 from central.kernel.transactions import Transaction
 from contracts.time import Clock
@@ -33,9 +43,22 @@ def _reference(row: dict[str, Any]) -> AssetReference:
 
 
 def _produced(row: dict[str, Any]) -> AssetReady | None:
+    """The produced facts; a media variant's carry its media facts (`produced_detail`, 087)."""
     if row["produced_sha256"] is None:
         return None
+    detail = row.get("produced_detail")
+    if detail is not None:
+        return MediaReady(size=row["produced_size"], sha256=row["produced_sha256"], **detail)
     return AssetReady(size=row["produced_size"], sha256=row["produced_sha256"])
+
+
+def _detail(facts: AssetReady) -> Jsonb | None:
+    """What a richer result adds to size and digest, stored beside them."""
+    if not isinstance(facts, MediaReady):
+        return None
+    values = asdict(facts)
+    del values["size"], values["sha256"]
+    return Jsonb(values)
 
 
 class PgAssetRecords:
@@ -47,7 +70,7 @@ class PgAssetRecords:
     def get(self, tx: Transaction, key: AssetKey) -> Asset | None:
         conn = pg_connection(tx)
         row = conn.execute(
-            "SELECT produced_size, produced_sha256, last_served_at FROM assets "
+            "SELECT produced_size, produced_sha256, produced_detail, last_served_at FROM assets "
             "WHERE kind=%s AND identity=%s",
             (key.kind.value, key.identity),
         ).fetchone()
@@ -96,14 +119,16 @@ class PgAssetRecords:
         # Write-once only where the key fixes the bytes; an identity-keyed kind takes the new
         # facts, so a regenerated file after a purge never wedges its record.
         written = conn.execute(
-            "UPDATE assets SET produced_size=%s, produced_sha256=%s "
+            "UPDATE assets SET produced_size=%s, produced_sha256=%s, produced_detail=%s "
             "WHERE kind=%s AND identity=%s AND (produced_sha256 IS NULL OR NOT %s)",
-            (facts.size, facts.sha256, key.kind.value, key.identity, key.kind.keyed_by_content),
+            (facts.size, facts.sha256, _detail(facts), key.kind.value, key.identity,
+             key.kind.keyed_by_content),
         ).rowcount
         if written:
             return
         row = conn.execute(
-            "SELECT produced_size, produced_sha256 FROM assets WHERE kind=%s AND identity=%s",
+            "SELECT produced_size, produced_sha256, produced_detail FROM assets "
+            "WHERE kind=%s AND identity=%s",
             (key.kind.value, key.identity),
         ).fetchone()
         if row is None:

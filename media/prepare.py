@@ -27,6 +27,7 @@ import pillow_heif
 from pydantic import Field
 
 from central.photo_library.model import LibraryAsset
+from central.photo_library.rendition import FrameNeed
 from contracts.models import Digest, Model, Positive, Variant
 from contracts.time import Clock, SystemClock
 from media.library_client import FetchedRendition, FetchStep
@@ -78,6 +79,17 @@ class PreparationRecipe(Model):
     gop_seconds: Positive = Field(default=2, le=10)
 
 
+def recipe_id(recipe: PreparationRecipe, need: FrameNeed) -> str:
+    """The one home of what a media variant's recipe id hashes: the recipe values and the need
+    they size for (`<asset_id>.<recipe_id>` names a variant, kernel/types.py). The renderer
+    build is left out (follow-up design, the owner's open choice, default "drop"): a worker
+    upgrade does not re-name every variant. Keeping it is a change to this body only."""
+    return hashlib.sha256(json.dumps(
+        dict(recipe=recipe.model_dump(mode="json"), need=need.model_dump(mode="json")),
+        sort_keys=True, separators=(",", ":"), allow_nan=False,
+    ).encode()).hexdigest()
+
+
 class PreparationLimits(Model):
     """What preparation accepts; the home of the size bounds the Immich client's fetch also
     checks (media.immich.LibraryLimits reads its defaults from here)."""
@@ -117,11 +129,9 @@ class PreparedMedia(Model):
     path: Path
     variant: Variant
     original_sha256: Digest
-    recipe_id: Digest
     build: BuildIdentity
     # Which of Immich's copies this was made from (`FetchedRendition.rendition`; follow-ups
-    # 2026-10-11, owner item 6): MediaStore.publish writes it to `media_jobs.made_from`, the
-    # prepared copy's own row.
+    # 2026-10-11, owner item 6): the media maker records it in the variant's `MediaReady`.
     made_from: FetchStep
 
 
@@ -509,32 +519,6 @@ class Preparer:
             self._build_key = key
         return self._build
 
-    async def _describe(self, deadline: _Deadline) -> tuple[str, BuildIdentity]:
-        build = await self._identity(deadline)
-        recipe_id = hashlib.sha256(json.dumps(
-            dict(recipe=self.recipe.model_dump(), threads=self.limits.threads,
-                 build=build.model_dump()),
-            sort_keys=True, separators=(",", ":"), allow_nan=False,
-        ).encode()).hexdigest()
-        return recipe_id, build
-
-    async def describe_recipe(self) -> tuple[str, BuildIdentity]:
-        """Inspect the bounded local build and identify the recipe before leasing work.
-
-        Executable/source content is rehashed before cache reuse. Runtime libraries
-        must be immutable for this Preparer's lifetime; deployment changes restart
-        the worker so inspector versions and linked-library metadata are refreshed.
-        """
-        start = self.clock.monotonic()
-        if not math.isfinite(start):
-            raise MediaError("clock_invalid")
-        deadline = _Deadline(self.clock, start, start + self.limits.wall_seconds)
-        try:
-            async with asyncio.timeout(self.limits.wall_seconds):
-                return await self._describe(deadline)
-        except TimeoutError:
-            raise MediaError("preparation_timeout") from None
-
     def _input_flags(self) -> list[str]:
         return ["-max_alloc", str(self.limits.memory_bytes // 2),
                 "-protocol_whitelist", "file",
@@ -647,17 +631,19 @@ class Preparer:
                     orientation=self._orientation(stream),
                     color_range="pc" if stream.get("color_range") == "pc" else "tv")
 
-    def _size(self, width: int, height: int, *, video: bool, sar: float = 1, orientation: int = 1) -> tuple[int, int]:
+    def _size(self, width: int, height: int, *, video: bool, sar: float = 1, orientation: int = 1,
+              recipe: PreparationRecipe | None = None) -> tuple[int, int]:
+        recipe = recipe or self.recipe
         display_width, display_height = width * sar, float(height)
         if orientation >= 5:
             width, height = height, width
             display_width, display_height = display_height, display_width
-        edge = self.recipe.video_long_edge if video else self.recipe.image_long_edge
+        edge = recipe.video_long_edge if video else recipe.image_long_edge
         # Keep display aspect while fitting the original raster's oriented bounds.
         scale = min(1, width / display_width, height / display_height,
                     edge / max(display_width, display_height))
         if video:
-            scale = min(scale, math.sqrt(self.recipe.video_max_pixels / (display_width * display_height)))
+            scale = min(scale, math.sqrt(recipe.video_max_pixels / (display_width * display_height)))
         step = 2 if video else 1
         result = (math.floor(display_width * scale / step) * step,
                   math.floor(display_height * scale / step) * step)
@@ -666,20 +652,23 @@ class Preparer:
         return result
 
     async def prepare_rendition(self, asset: LibraryAsset, rendition: FetchedRendition,
-                                destination: Path) -> PreparedMedia:
+                                destination: Path, *,
+                                recipe: PreparationRecipe | None = None) -> PreparedMedia:
         """The photo as Immich shows it (C10): a preview, full-size copy or original of any
-        STILL_MEDIA_TYPES type, or a video's original. Integrity is the fetched file's own sha256
-        and size; its size and orientation are the file's (a preview is upright, a JPEG
-        full-size copy may carry EXIF)."""
+        STILL_MEDIA_TYPES type, or a video's original, encoded by `recipe` (the variant's; this
+        Preparer's own when None). Integrity is the fetched file's own sha256 and size; its size
+        and orientation are the file's (a preview is upright, a JPEG full-size copy may carry
+        EXIF)."""
         def verify(size: int, sha1: str, sha256: str) -> None:
             if sha256 != rendition.sha256 or size != rendition.size:
                 raise MediaError("asset_integrity")
         return await self._prepare(rendition.path, destination, video=asset.kind == "video",
                                    verify=verify, duration=asset.duration,
-                                   made_from=rendition.rendition)
+                                   made_from=rendition.rendition, recipe=recipe or self.recipe)
 
     async def _prepare(self, original: Path, destination: Path, *, video: bool,
-                       verify, duration: float | None, made_from: FetchStep) -> PreparedMedia:
+                       verify, duration: float | None, made_from: FetchStep,
+                       recipe: PreparationRecipe) -> PreparedMedia:
         original, destination = Path(original).absolute(), Path(destination).absolute()
         start = self.clock.monotonic()
         if not math.isfinite(start):
@@ -695,7 +684,7 @@ class Preparer:
                 cap = self.limits.max_video_bytes if video else self.limits.max_image_bytes
                 if size + cap > self.limits.max_staging_bytes:
                     raise MediaError("preparation_limit", "incompatible")
-                recipe_id, build = await self._describe(deadline)
+                build = await self._identity(deadline)
                 if video:
                     facts = self._video(await self._probe(original, deadline))
                     if abs(facts["duration"] - duration) > .15:
@@ -717,7 +706,8 @@ class Preparer:
                 raw_width, raw_height, orientation = (facts["width"], facts["height"],
                                                       facts["orientation"])
                 width, height = self._size(raw_width, raw_height, video=video,
-                                           sar=facts.get("sar", 1), orientation=orientation)
+                                           sar=facts.get("sar", 1), orientation=orientation,
+                                           recipe=recipe)
                 try:
                     fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
                 except FileExistsError:
@@ -735,24 +725,24 @@ class Preparer:
                 argv += ["-i", str(source), "-map", "0:v:0", "-an", "-sn", "-dn",
                          "-map_metadata", "-1", "-map_chapters", "-1", "-metadata:s:v:0", "rotate=0"]
                 if video:
-                    fps = min(facts["fps"], self.recipe.video_fps)
+                    fps = min(facts["fps"], recipe.video_fps)
                     filters += [f"fps={fps:.8g}",
                                 f"colorspace=iall=bt709:irange={facts['color_range']}:all=bt709:range=tv:format=yuv420p"]
-                    argv += ["-vf", ",".join(filters), "-c:v", "libx264", "-preset", self.recipe.video_preset,
-                             "-crf", str(self.recipe.video_crf), "-profile:v", "high", "-level:v", "4.2",
-                             "-g", str(max(1, math.ceil(fps * self.recipe.gop_seconds))),
+                    argv += ["-vf", ",".join(filters), "-c:v", "libx264", "-preset", recipe.video_preset,
+                             "-crf", str(recipe.video_crf), "-profile:v", "high", "-level:v", "4.2",
+                             "-g", str(max(1, math.ceil(fps * recipe.gop_seconds))),
                              "-threads", str(self.limits.threads), "-pix_fmt", "yuv420p",
                              "-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709",
                              "-color_range", "tv", "-movflags", "+faststart", "-f", "mp4"]
                 else:
                     argv += ["-vf", ",".join(filters), "-frames:v", "1", "-c:v", "mjpeg",
-                             "-q:v", str(self.recipe.jpeg_quality), "-pix_fmt", "yuvj444p",
+                             "-q:v", str(recipe.jpeg_quality), "-pix_fmt", "yuvj444p",
                              "-threads", str(self.limits.threads), "-f", "image2", "-update", "1"]
                 await self._run(dict(operation="exec", argv=[*argv, str(destination)]), deadline, file_limit=cap)
                 output_size, _, digest = _file_hashes(destination, cap, deadline)
                 if video:
                     verified = self._video(await self._probe(destination, deadline), output=True)
-                    if (verified["fps"] > self.recipe.video_fps + .01 or verified["sar"] != 1
+                    if (verified["fps"] > recipe.video_fps + .01 or verified["sar"] != 1
                             or abs(verified["duration"] - facts["duration"]) > 1 / fps + .05):
                         raise MediaError("preparation_invalid", "incompatible")
                     await self._run(dict(operation="exec", argv=[str(self.ffmpeg), "-nostdin", "-v", "error",
@@ -771,7 +761,7 @@ class Preparer:
                 if await self._identity(deadline) != build:
                     raise MediaError("preparation_build_changed")
                 return PreparedMedia(
-                    path=destination, original_sha256=original_sha256, recipe_id=recipe_id, build=build,
+                    path=destination, original_sha256=original_sha256, build=build,
                     made_from=made_from,
                     variant=Variant(sha256=digest, size=output_size, width=width, height=height,
                                     media_type="video/mp4" if video else "image/jpeg",

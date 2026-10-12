@@ -9,9 +9,9 @@ from __future__ import annotations
 from datetime import timedelta
 from typing import Any, Final, TypeAlias
 
-from central.kernel.assets import AssetKind, AssetReady
+from central.kernel.assets import AssetKind, AssetReady, MediaReady
 from central.kernel.jobs import Delivery, Job, QueueName
-from central.kernel.types import LibraryAssetId, Sha256
+from central.kernel.types import LibraryAssetId, MediaVariantKey, Sha256
 
 _FETCH_RETRY = (timedelta(seconds=5), timedelta(minutes=1), timedelta(minutes=5))
 # A preview tile is picked after every queued boot or environment fetch on the shared FETCH queue
@@ -45,6 +45,15 @@ class FetchLibraryThumbnail(Job[AssetReady], name="library_thumbnail.fetch",
     asset_id: LibraryAssetId
 
 
+class PrepareMedia(Job[MediaReady], name="media_variant.prepare", asset=AssetKind.MEDIA_VARIANT,
+                   delivery=Delivery(queue=QueueName.TRANSCODE, retry=_FETCH_RETRY)):
+    """Make (or re-make) one media variant: its photo revision's copy that holds the recipe's
+    need, encoded by the recipe (`media/media_maker.py`, injected by the media worker). Published
+    by coordination for a planned photo, and by the Frame media read path on a miss."""
+
+    key: MediaVariantKey  # `<asset_id>.<recipe_id>` (kernel/types.py `media_variant_key`)
+
+
 class SyncReleases(Job[None], name="releases.sync",
                    delivery=Delivery(queue=QueueName.FETCH, every=timedelta(minutes=15))):
     pass
@@ -70,7 +79,8 @@ class PurgeFinishedJobs(Job[None], name="queue.purge_finished",
     pass
 
 
-AssetJob: TypeAlias = (FetchOsImage | FetchSealedEnvironment | FetchLibraryThumbnail)
+AssetJob: TypeAlias = (FetchOsImage | FetchSealedEnvironment | FetchLibraryThumbnail
+                       | PrepareMedia)
 CATALOG: Final[tuple[type[Job[Any]], ...]] = (
-    FetchOsImage, FetchSealedEnvironment, FetchLibraryThumbnail,
+    FetchOsImage, FetchSealedEnvironment, FetchLibraryThumbnail, PrepareMedia,
     SyncReleases, Prefetch, MaintainCache, RescueStalledJobs, PurgeFinishedJobs)

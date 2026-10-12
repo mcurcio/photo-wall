@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import logging
 import math
@@ -13,12 +12,13 @@ import signal
 import sys
 from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
-from typing import Final, Protocol
+from typing import Final
 
 from pydantic import Field
 
 from central import cache_layout
 from central.assets.layout import TEMP_PREFIX, CacheLayout
+from central.assets.store import CacheStore
 from central.content_wiring import build_job_runtime
 from central.db import Database, DatabaseTransactionClock
 from central.infra.key_content_store import PgKeyContent
@@ -29,14 +29,13 @@ from central.infra.runtime import (
     JobRuntime,
     until_stopped,
 )
+from central.infra.transactions import PgTransactions
 from central.kernel.assets import AssetKind
 from central.media_queue import MEDIA_QUEUE, ProcrastinateMediaQueue
-from central.media_repository import JobLease, MediaRepository
-from central.media_store import MediaStore, MediaStoreError
+from central.media_repository import MediaRepository
 from central.node_bus_wiring import NodeBus, build_node_bus
-from central.photo_library.model import ConnectionSecret, LibraryAsset
+from central.photo_library.model import ConnectionSecret
 from central.photo_library.ports import LibraryWorkerStore
-from central.photo_library.rendition import rendition_needs
 from central.registry import RegistryError
 from central.wall_plan.ports import KeyContentWriter
 from contracts.models import Model, Positive
@@ -45,24 +44,13 @@ from media.immich import ImmichClient, LibraryLimits
 from media.key_content import MeasureError
 from media.key_content import measure as measure_key_content
 from media.library_checks import LibraryChecks
-from media.library_client import (
-    FetchedRendition,
-    LibraryClient,
-    LibraryUnavailable,
-    fetch_plan,
-)
+from media.library_client import LibraryClient, LibraryUnavailable
 from media.library_clients import LibraryClients
 from media.library_thumbnails import LibraryThumbnailOrigin
+from media.media_maker import MediaMaker, PreparationClient
 from media.models import MediaError
-from media.prepare import (
-    STILL_MEDIA_TYPES,
-    BuildIdentity,
-    PreparationLimits,
-    PreparedMedia,
-    Preparer,
-)
+from media.prepare import PreparationLimits, Preparer
 from media.task_queue import (
-    MediaTaskFailed,
     ProcrastinateCheckQueue,
     RetryableMediaTask,
     create_worker_app,
@@ -73,11 +61,6 @@ logger = logging.getLogger("photo_wall.worker")
 
 # The job runtime's process-ending conditions; any other RuntimeError stays `worker_internal`.
 _RUNTIME_EXITS: Final = frozenset({WORKER_EXITED, COMPLETION_NOT_RECORDED})
-_PERMANENT = frozenset({
-    "asset_integrity", "asset_oversize", "unsupported_media", "unsupported_color",
-    "metadata_invalid", "item_over_limits", "metadata_mismatch", "preparation_limit", "preparation_invalid",
-    "media_original_mismatch", "media_result_mismatch", "media_journal_invalid",
-})
 
 
 class WorkerLimits(Model):
@@ -85,12 +68,6 @@ class WorkerLimits(Model):
     close_seconds: Positive = Field(default=5, le=10)
     # Roadmap 5a: one key content measurement, Immich's two answers and the saliency included.
     measure_seconds: Positive = Field(default=30, le=120)
-
-
-class PreparationClient(Protocol):
-    async def describe_recipe(self) -> tuple[str, BuildIdentity]: ...
-    async def prepare_rendition(self, asset: LibraryAsset, rendition: FetchedRendition,
-                                destination: Path) -> PreparedMedia: ...
 
 
 async def _drain(task: asyncio.Task):
@@ -116,15 +93,13 @@ async def _blocking(function, *args, **kwargs):
 
 
 class MediaWorker:
-    def __init__(self, repository: MediaRepository, store: MediaStore,
+    def __init__(self, repository: MediaRepository,
                  library: LibraryWorkerStore, *,
                  preparer: PreparationClient | None = None,
                  client_factory: Callable[[ConnectionSecret], LibraryClient] | None = None,
                  limits: WorkerLimits = WorkerLimits(), previews: Path | None = None,
                  key_content: KeyContentWriter | None = None):
-        self.repository, self.store, self.clock, self.limits = repository, store, repository.clock, limits
-        if store.repository is not repository or limits.job_seconds + 30 > repository.limits.lease_seconds:
-            raise MediaError("worker_config", "incompatible")
+        self.repository, self.clock, self.limits = repository, repository.clock, limits
         # Roadmap 4: connections and their keys are the photo library store's (no file).
         self.library = library
         self.preparer = preparer or Preparer(clock=self.clock, limits=PreparationLimits(
@@ -144,7 +119,6 @@ class MediaWorker:
         # PostgreSQL store, and `measure` refuses with media_config without one.
         self.key_content = key_content
         self._error: str | None = None
-        self._recipe: str | None = None
 
     @staticmethod
     def _code(error: BaseException) -> str:
@@ -170,82 +144,6 @@ class MediaWorker:
         if secret is None:
             raise MediaError("connection_unknown")
         return await self._clients.for_secret(secret)
-
-    async def _register_recipe(self):
-        self._utc()
-        recipe, _ = await self.preparer.describe_recipe()
-        if recipe != self._recipe:
-            await _blocking(self.repository.set_recipe, recipe)
-            self._recipe = recipe
-
-    async def _fail(self, lease: JobLease, code: str, *, retry: bool = True):
-        try:
-            await _blocking(self.store.fail, lease, code,
-                            retry=code not in _PERMANENT and retry)
-        except RegistryError as error:
-            if error.code != "stale_job":
-                self._error = self._code(error)
-        except Exception as error:
-            self._error = self._code(error)
-
-    async def process_job(self, job_id: str, *, attempt: int) -> None:
-        """Execute the exact job selected by Procrastinate.
-
-        Procrastinate owns dispatch and retry timing. The media journal retains
-        byte reservation and publication fencing only.
-        """
-        await self._register_recipe()
-        lease = await _blocking(self.repository.claim_job, job_id)
-        if lease is None:
-            health = await _blocking(self.repository.health)
-            if health["worker_error"] == "storage_pressure":
-                reserve = self.repository.limits.max_original_bytes + max(
-                    self.repository.limits.max_image_bytes,
-                    self.repository.limits.max_video_bytes,
-                )
-                await _blocking(
-                    self.store.collect,
-                    target_bytes=max(0, health["max_bytes"] - reserve),
-                )
-                lease = await _blocking(self.repository.claim_job, job_id)
-            if lease is None:
-                raise RetryableMediaTask("media_job_unavailable")
-        try:
-            async with asyncio.timeout(self.limits.job_seconds):
-                paths = await _blocking(self.store.staging, lease)
-                client = await self._client(lease.asset.connection_ref)
-                # The copy that holds every Frame output, else the full-resolution one (owner,
-                # 2026-10-09; follow-ups slice A4). Known copy sizes skip a preview too small.
-                needs = rendition_needs(await _blocking(self.library.frame_outputs))
-                known = await _blocking(self.library.copy_sizes, lease.asset.asset_id)
-                plan = fetch_plan(lease.asset, needs, known, STILL_MEDIA_TYPES)
-                fetched = await client.fetch_rendition(lease.asset, plan=plan, needs=needs,
-                                                       destination=paths.original)
-                await _blocking(self.library.record_copies, lease.asset.asset_id,
-                                fetched.measured)
-                if fetched.path.absolute() != paths.original:
-                    raise MediaError("asset_integrity")
-                prepared = await self.preparer.prepare_rendition(lease.asset, fetched,
-                                                                 paths.variant)
-                if prepared.original_sha256 != fetched.sha256:
-                    raise MediaError("asset_integrity")
-                if prepared.recipe_id != lease.recipe_id:
-                    raise MediaError("recipe_changed")
-                await _blocking(self.store.publish, lease, prepared)
-            self._error = None
-        except asyncio.CancelledError:
-            self._error = "worker_cancelled"
-            await _drain(asyncio.create_task(self._fail(lease, self._error, retry=attempt <= 3)))
-            raise
-        except Exception as error:
-            self._error = self._code(error)
-            retry = self._error not in _PERMANENT and attempt <= 3
-            await self._fail(lease, self._error, retry=retry)
-            if retry:
-                raise RetryableMediaTask(self._error) from None
-            raise MediaTaskFailed(self._error) from None
-        finally:
-            await _blocking(self.repository.worker_status, self._error)
 
     async def measure(self, asset_id: str, *, final_attempt: bool = False) -> None:
         """Measure one photo's key content (roadmap 5a, slice M1; MEASURE_KEY_CONTENT_TASK): read
@@ -295,8 +193,16 @@ class MediaWorker:
             return
         raise RetryableMediaTask(retryable) from None
 
+    def media_maker(self, *, store: CacheStore, transactions: PgTransactions) -> MediaMaker:
+        """The `PrepareMedia` handler over this worker's library, clients and preparer."""
+        return MediaMaker(store=store, records=self.repository.records,
+                          transactions=transactions, inputs=self.repository.variant_inputs,
+                          library=self.library, client=self._clients.for_secret,
+                          preparer=self.preparer, job_seconds=self.limits.job_seconds)
+
     async def maintain(self) -> None:
-        await _blocking(self.store.recover)
+        """The thumbnail sweep and the guaranteed check-in. Media variants have no sweep until
+        slice S5's cache budget (the media store's recovery and GC are gone)."""
         # Listed BEFORE the purge: a file written after it is never discarded by this pass.
         files = await _blocking(self._thumbnail_files)
         recorded = await _blocking(self.library.retire_unwanted)
@@ -328,7 +234,6 @@ class MediaWorker:
 
 
 _STOP_SIGNALS = (signal.SIGTERM, signal.SIGINT)
-MEDIA_STANDBY_SECONDS: Final = 5.0
 
 
 async def _media_queue(app, additional_context: dict) -> None:
@@ -341,26 +246,12 @@ async def _media_queue(app, additional_context: dict) -> None:
     )
 
 
-async def _media_writer(worker: MediaWorker, run_queue: Callable[[], Awaitable[None]], *,
-                        standby_seconds: float = MEDIA_STANDBY_SECONDS) -> None:
-    """The legacy media loop, run only while this process holds the media writer lock.
-
-    The lock guards the media store's single writer, NOT the job runtime (design §2: every
-    worker process runs the job runtime). While another process holds it, this one stands by,
-    retrying every `standby_seconds`, and takes over when the holder exits.
-    """
-    with contextlib.ExitStack() as held:
-        while True:
-            try:
-                held.enter_context(worker.store.worker_lock())
-                break
-            except MediaStoreError as error:
-                if error.code != "media_writer_active":
-                    raise
-            await asyncio.sleep(standby_seconds)
-        await worker._register_recipe()
-        await worker.maintain()
-        await run_queue()
+async def _media_loop(worker: MediaWorker, run_queue: Callable[[], Awaitable[None]]) -> None:
+    """The library checks' and measurements' queue, after one boot pass of maintenance (the
+    thumbnail sweep and the guaranteed check-in, `WORKER_CHECK_IN_SECONDS`). Media variants are
+    the job runtime's (`PrepareMedia`), so no process waits for a media writer lock."""
+    await worker.maintain()
+    await run_queue()
 
 
 async def _run_workers(media: Awaitable[None], runtime: JobRuntime,
@@ -416,10 +307,6 @@ async def _entry():
         dsn = os.environ["PHOTO_WALL_DATABASE_URL"]
     except KeyError:
         raise MediaError("worker_config", "incompatible") from None
-    # 0013: the media store lives at the media/ subdir of the one cache root
-    # (PHOTO_WALL_CACHE_ROOT, baked default) -- derived internally, no per-domain
-    # env.
-    root = cache_layout.media_root()
     clock = SystemClock()
     repository = build_repository(dsn, clock, queue=ProcrastinateMediaQueue(dsn))
     db = repository.db
@@ -429,8 +316,8 @@ async def _entry():
                              queue=ProcrastinateMediaQueue(dsn))
     cache_root = cache_layout.cache_root()
     previews = ensure_previews_directory(cache_root)
-    worker = MediaWorker(repository, MediaStore(repository, Path(root)), library,
-                         previews=previews,
+    ensure_media_directory(cache_root)
+    worker = MediaWorker(repository, library, previews=previews,
                          key_content=PgKeyContent(db, times=DatabaseTransactionClock()))
     # The library half of the thumbnail fetch (R22): only this package holds the key.
     thumbnails = LibraryThumbnailOrigin(
@@ -439,8 +326,10 @@ async def _entry():
     # The one worker kind (design §10.5): every asset handler behind JobRuntime, in EVERY worker
     # process; only the legacy media loop is single-writer. Its boot checks run here, so a wiring
     # mistake fails before any job is claimed.
-    runtime = build_job_runtime(db, clock, cache_root=cache_root, env=os.environ,
-                                thumbnails=thumbnails)
+    runtime = build_job_runtime(
+        db, clock, cache_root=cache_root, env=os.environ, thumbnails=thumbnails,
+        media_maker=worker.media_maker(store=CacheStore(CacheLayout(cache_root)),
+                                       transactions=PgTransactions(db)))
     await _blocking(repository.db.migrate)
     await _blocking(ProcrastinateMediaQueue.apply_schema, dsn)
     app = create_worker_app(dsn)
@@ -450,13 +339,20 @@ async def _entry():
     additional_context = {"media_worker": worker, "library_checks": checks}
     try:
         async with app.open_async():
-            await _run_workers(
-                _media_writer(worker, lambda: _media_queue(app, additional_context)), runtime,
-                build_node_bus(dsn, os.environ))
+            await _run_workers(_media_loop(worker, lambda: _media_queue(app, additional_context)),
+                               runtime,
+                               build_node_bus(dsn, os.environ))
     finally:
         await worker._close_clients()
         await checks.close()
         await thumbnails.aclose()
+
+
+def ensure_media_directory(cache_root: Path) -> Path:
+    """Where media variants live (`media/blobs`, `CacheLayout`), created 0700 as the previews."""
+    media = CacheLayout(cache_root).directory(AssetKind.MEDIA_VARIANT)
+    media.mkdir(mode=0o700, parents=True, exist_ok=True)
+    return media
 
 
 def ensure_previews_directory(cache_root: Path) -> Path:

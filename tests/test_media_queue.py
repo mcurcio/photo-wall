@@ -18,7 +18,6 @@ from central.media_queue import (
     MEASURE_KEY_CONTENT_TASK,
     MEDIA_QUEUE,
     MEDIA_STORAGE_LOCK,
-    PREPARE_MEDIA_TASK,
     ProcrastinateMediaQueue,
 )
 from media.task_queue import (
@@ -51,22 +50,6 @@ class App:
     def configure_task(self, name, **kwargs):
         self.configured = {"name": name, **kwargs}
         return Deferrer(self.configured)
-
-
-def test_adapter_passes_the_caller_owned_connection_and_exact_job_identity():
-    queue = object.__new__(ProcrastinateMediaQueue)
-    queue.app = App()
-    connection = object()
-
-    assert queue.enqueue_in(connection, "job-one") == 41
-    assert queue.app.configured == {
-        "name": PREPARE_MEDIA_TASK,
-        "queue": MEDIA_QUEUE,
-        "lock": MEDIA_STORAGE_LOCK,
-        "queueing_lock": "job-one",
-        "connection": connection,
-        "payload": {"job_id": "job-one"},
-    }
 
 
 @pytest.mark.parametrize("enqueue,task,prefix,argument", [
@@ -173,7 +156,6 @@ def test_worker_app_registers_only_domain_work_and_maintenance_tasks():
     assert {
         name for name in app.tasks if name.startswith("photo_wall.")
     } == {
-        PREPARE_MEDIA_TASK,
         "photo_wall.media.refresh",
         CHECK_CONNECTION_TASK,
         CHECK_POOL_TASK,
@@ -181,10 +163,6 @@ def test_worker_app_registers_only_domain_work_and_maintenance_tasks():
         RESCUE_TASK,
         MEASURE_KEY_CONTENT_TASK,
     }
-    assert isinstance(
-        app.tasks[PREPARE_MEDIA_TASK].retry_strategy,
-        procrastinate.BaseRetryStrategy,
-    )
     assert app.tasks["photo_wall.media.refresh"].lock is None
     assert app.tasks[MEASURE_KEY_CONTENT_TASK].lock is None
     assert isinstance(app.tasks[MEASURE_KEY_CONTENT_TASK].retry_strategy, MediaRetryStrategy)

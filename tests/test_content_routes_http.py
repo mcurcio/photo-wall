@@ -168,7 +168,7 @@ def test_readyz_follows_the_real_database_through_the_real_content_services(
     proxy = TcpProxy(target.get("host") or "127.0.0.1", int(target.get("port") or 5432))
     monkeypatch.setenv("PHOTO_WALL_CACHE_ROOT", str(tmp_path))
     db = Database(make_conninfo(registry.db.dsn, host="127.0.0.1", port=str(proxy.port)))
-    app = create_app(db, ManualClock(1000.0), ADMIN, media_root=tmp_path / "media")
+    app = create_app(db, ManualClock(1000.0), ADMIN, cache_root=tmp_path)
     try:
         with TestClient(app) as client:
             assert client.get("/readyz").status_code == 200

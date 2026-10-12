@@ -556,6 +556,8 @@ class Coordinator:
                     )
                 else:
                     self._record_selected(conn, plan, projection)
+            # The planned photos with no variant yet are prepared: published with this cut.
+            self.media.request_preparations_in(conn, projection.acquisitions)
             self._commit_due(conn, configurations, now)
             self.media.expire_pins_in(conn, now)
             self._cleanup(

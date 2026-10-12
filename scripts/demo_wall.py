@@ -997,7 +997,11 @@ def operator_action(action: str):
         raise DemoError("unknown_operator_action")
     database = Database(os.environ["PHOTO_WALL_DATABASE_URL"])
     with database.transaction() as conn:
-        jobs = conn.execute("SELECT state,result,asset_id FROM media_jobs ORDER BY id LIMIT 100").fetchall()
+        # Each made media variant (follow-up to 5a, slice T): `<asset_id>.<recipe_id>`.
+        variants = conn.execute(
+            "SELECT identity,produced_size,produced_sha256,produced_detail FROM assets "
+            "WHERE kind='media-variant' AND produced_sha256 IS NOT NULL "
+            "ORDER BY identity LIMIT 100").fetchall()
         locks = conn.execute("SELECT player_id,authority_epoch,assignment_id,layer,valid_until FROM assignment_locks "
                              "ORDER BY player_id,assignment_id LIMIT 256").fetchall()
         commits = conn.execute("SELECT player_id,authority_epoch,revision,assignment_id,group_id,"
@@ -1010,11 +1014,12 @@ def operator_action(action: str):
                               "ORDER BY player_id,authority_epoch DESC,revision DESC").fetchall()
         groups = conn.execute("SELECT id,members,status FROM coordination_groups ORDER BY starts_at DESC LIMIT 64").fetchall()
     return dict(utc=time.time(), pool=pool(), connection=connection(),
-        jobs=[dict(state=job["state"], asset_id=job["asset_id"],
-                   original_sha256=job["result"].get("original_sha256") if job["result"] else None,
-                   variant=job["result"].get("variant") if job["result"] else None,
-                   recipe_id=job["result"].get("recipe_id") if job["result"] else None,
-                   build=job["result"].get("build") if job["result"] else None) for job in jobs],
+        jobs=[dict(state="ready", asset_id=row["identity"].split(".")[0],
+                   recipe_id=row["identity"].split(".")[1],
+                   variant=dict(sha256=row["produced_sha256"], size=row["produced_size"],
+                                **{name: row["produced_detail"][name] for name in
+                                   ("media_type", "width", "height", "duration")}),
+                   made_from=row["produced_detail"]["made_from"]) for row in variants],
         locks=[dict(player_id=row["player_id"], authority_epoch=row["authority_epoch"],
                     assignment_id=row["assignment_id"], sha256=row["layer"]["variant"]["sha256"],
                     output_id=row["layer"]["output_id"],
@@ -1556,9 +1561,8 @@ def run_demo(state: Path, fixture_state: Path, app_image: Path, scenario: str, k
                 time.sleep(2)
         local_bytes = host.byte_audit()
         # Preparation fetches Immich's rendition, not the original, so no original hash compares.
-        for job in snapshot["jobs"]:
-            if job["state"] == "ready":
-                require(job["build"]["platform"].startswith("Linux-") and job["build"]["memory_limit_enforced"], "linux_conversion_missing")
+        # A media variant records the copy it was made from, not the renderer build (follow-up to
+        # 5a, slice T: the build is out of the recipe id), so no Linux build is checked here.
         require(all(local_bytes.values()), "local_bytes_missing")
         evidence["phases"]["baseline"] = dict(checks=checks, local_bytes=local_bytes, seconds=round(time.monotonic()-started, 3),
             central=snapshot, players=reports)

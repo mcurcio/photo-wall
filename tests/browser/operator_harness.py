@@ -30,13 +30,13 @@ _SEQUENCE = itertools.count(1)
 
 
 @contextmanager
-def operator_server(db, clock, *, media_root=None, media_queue=None, admin_token=ADMIN,
+def operator_server(db, clock, *, cache_root=None, media_queue=None, admin_token=ADMIN,
                     node_control=NODE_CONTROL):
     """Run the production app on an ephemeral loopback listener with real lifespan.
 
     `node_control` is the node control configuration (node-test by default)."""
     app = create_app(db, clock, admin_token, run_scheduler=False,
-                     media_root=media_root, media_queue=media_queue, node_control=node_control)
+                     cache_root=cache_root, media_queue=media_queue, node_control=node_control)
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))
     listener.listen()

@@ -1,4 +1,5 @@
-"""Transactional dispatch port for centrally owned media preparation."""
+"""Transactional dispatch port for the media worker's library checks and measurements
+(media variants are prepared by `PrepareMedia` on the job runtime)."""
 
 from __future__ import annotations
 
@@ -8,7 +9,6 @@ from typing import Any, Protocol
 import procrastinate
 import psycopg
 
-PREPARE_MEDIA_TASK = "photo_wall.media.prepare"
 # Roadmap 4 (run ledger .claude/runs/photo-4.md): a connection check, and one bounded step of a
 # pool's check (each step queues the next through the store, in the step's own transaction).
 CHECK_CONNECTION_TASK = "photo_wall.library.check_connection"
@@ -26,7 +26,6 @@ _SCHEMA_LOCK = 734118326
 
 
 class MediaTaskQueue(Protocol):
-    def enqueue_in(self, conn: Any, job_id: str) -> int: ...
     def enqueue_connection_check_in(self, conn: Any, connection_ref: str) -> "QueueReceipt": ...
     def enqueue_pool_check_in(self, conn: Any, pool_key: str) -> "QueueReceipt": ...
     def enqueue_measure_in(self, conn: Any, asset_id: str) -> "QueueReceipt": ...
@@ -38,20 +37,11 @@ class QueueReceipt:
 
 
 class ProcrastinateMediaQueue:
-    """Defer preparation through the caller's psycopg transaction."""
+    """Defer library checks and measurements through the caller's psycopg transaction."""
 
     def __init__(self, dsn: str):
         connector = procrastinate.SyncPsycopgConnector(conninfo=dsn)
         self.app = procrastinate.App(connector=connector)
-
-    def enqueue_in(self, conn: Any, job_id: str) -> int:
-        return self.app.configure_task(
-            PREPARE_MEDIA_TASK,
-            queue=MEDIA_QUEUE,
-            lock=MEDIA_STORAGE_LOCK,
-            queueing_lock=job_id,
-            connection=conn,
-        ).defer(job_id=job_id)
 
     def enqueue_connection_check_in(self, conn: Any, connection_ref: str) -> QueueReceipt:
         """Queue CHECK_CONNECTION_TASK(connection_ref=...) on MEDIA_QUEUE in the caller's

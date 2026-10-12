@@ -19,12 +19,18 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import Field, model_validator
 
 from central import cache_layout
-from central.content_routes import mount_content_routes
+from central.assets.frame_media import FrameMediaRefused
+from central.assets.reader import Unavailable
+from central.content_routes import (
+    error_response,
+    mount_content_routes,
+    stream_frame_media,
+    until_disconnect,
+)
 from central.content_wiring import ContentServices, build_content_services
 from central.coordination import CoordinationLimits, Coordinator
 from central.db import Database, DatabaseTransactionClock, ProcessTransactionClock, TransactionClock
 from central.display_routes import mount_display_routes, mount_picture_routes
-from central.execution_repository import PostgresExecutionRepository
 from central.fleet.leaf_bridge import mount_leaf_bridge
 from central.fleet.node_routes import mount_node_routes
 from central.fleet.node_sessions import NodeControlConfig
@@ -39,11 +45,9 @@ from central.infra.fit_settings_store import PgFitSettings
 from central.infra.photo_library_store import PgPhotoLibrary
 from central.installation_models import InstallationInventory
 from central.library_routes import mount_library_routes
-from central.media_gateway import MediaGateway
 from central.media_ports import MediaApplication
 from central.media_queue import MediaTaskQueue, ProcrastinateMediaQueue
 from central.media_repository import MediaRepository
-from central.media_store import MediaStore
 from central.node_runtime_reconciliation import NodeRuntimeReconciler
 from central.operator_auth import OperatorAuth
 from central.operator_snapshot import OperatorSnapshot, OperatorSnapshotReader, runtime_document
@@ -132,7 +136,7 @@ def create_app(
     admin_token: str | None = None,
     *,
     run_scheduler: bool | None = None,
-    media_root: Path | None = None,
+    cache_root: Path | None = None,
     media_queue: MediaTaskQueue | None = None,
     content: ContentServices | None = None,
     node_control: NodeControlConfig = NodeControlConfig(),
@@ -186,37 +190,21 @@ def create_app(
     # 0013: the app owns the layout. Every domain root is derived from the ONE
     # optional cache root (PHOTO_WALL_CACHE_ROOT, baked default) as internal
     # constants -- there are no per-domain path envs. A caller may still inject an
-    # explicit media root (tests).
-    media_root = media_root or cache_layout.media_root()
+    # explicit cache root (tests).
+    cache_root = cache_root or cache_layout.cache_root()
     # OS images and Player `.deb`s (design §10.5): the catalog, the read-through
     # reader, the pod probe and this process's one OutcomeFeed. create_app binds
     # no job handlers; the worker runs them. Built only against a real Database;
     # tests inject fakes.
     content = content or (
         build_content_services(
-            db, clock, cache_root=cache_layout.cache_root(),
+            db, clock, cache_root=cache_root,
             servable_thumbnail=lambda asset_id: (
                 photo_library.pool_thumbnail(asset_id) is not None))
         if isinstance(db, Database)
         else None
     )
     feed = content.feed if content is not None else None
-    # 0013: media_root is now always derived from the cache root, so the gateway
-    # is built whenever the app runs against a real Database -- the same gate the
-    # media/release queues use above. (Unit tests that stub the DB out entirely
-    # get no gateway, exactly as when media_root was env-gated.)
-    media_gateway = (
-        MediaGateway(
-            MediaStore(
-                coordinator.media,
-                media_root,
-                installation=coordinator.installation,
-                execution=PostgresExecutionRepository(),
-            )
-        )
-        if media_root and isinstance(db, Database)
-        else None
-    )
     scheduler_health = {
         "enabled": run_scheduler,
         "running": False,
@@ -234,9 +222,6 @@ def create_app(
                 try:
                     await asyncio.to_thread(app.state.node_reconciler.advance)
                     projection = await asyncio.to_thread(coordinator.advance)
-                    await asyncio.to_thread(
-                        media_application.request_acquisitions, projection.acquisitions
-                    )
                     await asyncio.to_thread(
                         media_application.request_measurements, projection.measurements
                     )
@@ -487,19 +472,54 @@ def create_app(
             server_time=clock.utc(),
         )
 
-    @app.get("/v1/media/{digest}")
-    def media_file(
-        digest: str,
-        request: Request,
-        credentials: HTTPAuthorizationCredentials | None = Depends(bearer),
-    ):
+    async def frame_media_response(request: Request, credentials, resolve) -> Response:
+        """One media variant through the one read path: the grant (`FrameMedia`), then the
+        AssetReader (a hit serves, a miss re-makes it and waits). The transfer pin is released
+        when the body ends, or at once when nothing is served."""
         if credentials is None:
             raise RegistryError("unauthorized", 401)
         if "range" in request.headers:
             raise RegistryError("media_range_unsupported", 416)
-        if media_gateway is None:
+        if content is None or content.frame_media is None or content.frame_media_reader is None:
             raise RegistryError("media_unavailable", 503)
-        return media_gateway.response(credentials.credentials, digest)
+        frame_media, reader = content.frame_media, content.frame_media_reader
+        try:
+            grant = await asyncio.to_thread(resolve, frame_media, credentials.credentials)
+        except FrameMediaRefused as refused:
+            return error_response(refused.code, refused.status)
+        try:
+            opened = await until_disconnect(request, reader.read(grant.candidates))
+        except BaseException:
+            await asyncio.to_thread(frame_media.release, grant.transfer_owner)
+            raise
+        if isinstance(opened, Unavailable):
+            await asyncio.to_thread(frame_media.release, grant.transfer_owner)
+            return error_response("media_unavailable", 503,
+                                  retry_after=opened.retry_after_seconds)
+        return stream_frame_media(opened, release=lambda: frame_media.release(
+            grant.transfer_owner))
+
+    @app.get("/v1/media/{asset_id}/{recipe_id}")
+    async def frame_media_file(
+        asset_id: str,
+        recipe_id: str,
+        request: Request,
+        credentials: HTTPAuthorizationCredentials | None = Depends(bearer),
+    ):
+        return await frame_media_response(
+            request, credentials,
+            lambda frame_media, token: frame_media.resolve(token, f"{asset_id}.{recipe_id}"))
+
+    @app.get("/v1/media/{digest}")
+    async def media_file(
+        digest: str,
+        request: Request,
+        credentials: HTTPAuthorizationCredentials | None = Depends(bearer),
+    ):
+        """The digest URL a Player fetches until it fetches by name (follow-up T-b)."""
+        return await frame_media_response(
+            request, credentials,
+            lambda frame_media, token: frame_media.resolve_digest(token, digest))
 
     @app.post("/v1/player/readiness")
     def readiness(request: Readiness, identity: dict = Depends(player)):

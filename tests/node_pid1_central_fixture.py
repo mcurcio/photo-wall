@@ -200,7 +200,7 @@ def _central_fixture(
         clock,
         token,
         run_scheduler=True,
-        media_root=workdir / "media",
+        cache_root=workdir,
         content=content,
         node_control=NodeControlConfig("pid1-real-central-fixture"),
         hub_leaf_url=HUB_LEAF_URL if hub is not None else None,

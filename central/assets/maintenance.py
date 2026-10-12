@@ -7,7 +7,7 @@ cache stays ephemeral: rows, references and produced facts stay, so a key that b
 again re-fetches by Prefetch or read-through.
 
 * **Scope.** Only `os-images/` (OS images) and `apps/` (sealed environments and Player
-  `.deb`s). Never `previews/` (library thumbnails) and never `media/` (`central/media_store.py`).
+  `.deb`s). Never `previews/` (library thumbnails) and never `media/` (media variants: slice S5's cache budget).
 * **Never a desired file: mark and sweep, no lock.** A run reads the desired set once to pick
   its candidates, then reads it again immediately before each unlink and spares a key that
   became desired meanwhile (the repo's old orphan sweep re-confirmed each owner the same way,
