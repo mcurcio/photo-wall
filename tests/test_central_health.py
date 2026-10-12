@@ -1,3 +1,5 @@
+import logging
+import re
 import threading
 import time
 
@@ -109,7 +111,8 @@ def test_database_failure_is_unavailable_even_when_scheduler_is_disabled(monkeyp
         }
 
 
-def test_scheduler_failure_is_unhealthy_and_recovery_requires_a_successful_tick(monkeypatch):
+def test_scheduler_failure_is_unhealthy_and_recovery_requires_a_successful_tick(monkeypatch, caplog):
+    caplog.set_level(logging.ERROR, logger="central.app")
     coordinator = FakeCoordinator()
     coordinator.fail_advance = True
     app = app_with(FakeDatabase(), coordinator, ManualClock(1000), monkeypatch, enabled=True)
@@ -120,6 +123,17 @@ def test_scheduler_failure_is_unhealthy_and_recovery_requires_a_successful_tick(
         assert failed.status_code == 503
         assert failed.json()["scheduler"]["status"] == "coordination_unavailable"
         assert failed.json()["scheduler"]["error"] == "coordination_unavailable"
+        deadline = time.monotonic() + 5
+        while coordinator.calls < 3 and time.monotonic() < deadline:
+            time.sleep(.05)
+        assert coordinator.calls >= 3
+        # Logged once per failure, not once per tick: its type and where, never its message.
+        logged = [record.getMessage() for record in caplog.records
+                  if record.name == "central.app" and "scheduler tick failed" in record.getMessage()]
+        assert len(logged) == 1
+        assert re.fullmatch(r"scheduler tick failed: RuntimeError at central/app\.py:\d+",
+                            logged[0])
+        assert "private coordination failure" not in caplog.text
         coordinator.fail_advance = False
         recovered = wait_for(client, lambda response: response.status_code == 200)
         assert recovered.json()["scheduler"]["status"] == "ok"

@@ -7,6 +7,7 @@ import json
 import logging
 import mimetypes
 import os
+import traceback
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Literal
@@ -79,6 +80,22 @@ from contracts.time import Clock, SystemClock
 LOG = logging.getLogger("central.app")
 
 SCHEDULER_MAX_AGE = 10.0
+_OWN_PACKAGES = ("central", "media", "contracts", "nodeapi")
+
+
+def scheduler_failure(exc: BaseException) -> str:
+    """A scheduler tick's failure as its exception type and the innermost line of this project's
+    code it passed (else the innermost line at all), e.g. `ValidationError at
+    central/coordination.py:231`. Never the message: a driver's may carry a connection string."""
+    frames = traceback.extract_tb(exc.__traceback__)
+    own = [frame for frame in frames if "site-packages" not in frame.filename
+           and any(f"/{package}/" in frame.filename for package in _OWN_PACKAGES)]
+    if not frames:
+        return type(exc).__name__
+    where = (own or frames)[-1]
+    parts = Path(where.filename).parts
+    start = max((i for i, part in enumerate(parts) if part in _OWN_PACKAGES), default=len(parts) - 1)
+    return f"{type(exc).__name__} at {'/'.join(parts[start:])}:{where.lineno}"
 
 
 class Challenge(Model):
@@ -229,6 +246,7 @@ def create_app(
     async def scheduler():
         scheduler_health["running"] = True
         scheduler_health["status"] = "starting"
+        logged = None   # the failure last logged, so a failing tick logs once, not every second
         try:
             while True:
                 try:
@@ -246,8 +264,13 @@ def create_app(
                         error=None,
                         status="ok",
                     )
-                except Exception:
-                    # Sanitized health only: driver exceptions may include connection secrets.
+                    logged = None
+                except Exception as exc:
+                    # Sanitized health and log: driver exceptions may include connection secrets.
+                    failure = scheduler_failure(exc)
+                    if failure != logged:
+                        LOG.error("scheduler tick failed: %s", failure)
+                        logged = failure
                     scheduler_health.update(
                         error="coordination_unavailable", status="coordination_unavailable"
                     )
