@@ -472,10 +472,16 @@ def create_app(
             server_time=clock.utc(),
         )
 
-    async def frame_media_response(request: Request, credentials, resolve) -> Response:
-        """One media variant through the one read path: the grant (`FrameMedia`), then the
-        AssetReader (a hit serves, a miss re-makes it and waits). The transfer pin is released
-        when the body ends, or at once when nothing is served."""
+    @app.get("/v1/media/{asset_id}/{recipe_id}")
+    async def frame_media_file(
+        asset_id: str,
+        recipe_id: str,
+        request: Request,
+        credentials: HTTPAuthorizationCredentials | None = Depends(bearer),
+    ):
+        """One media variant, by its name, through the one read path: the grant
+        (`FrameMedia`), then the AssetReader (a hit serves, a miss re-makes it and waits). The
+        transfer pin is released when the body ends, or at once when nothing is served."""
         if credentials is None:
             raise RegistryError("unauthorized", 401)
         if "range" in request.headers:
@@ -484,7 +490,8 @@ def create_app(
             raise RegistryError("media_unavailable", 503)
         frame_media, reader = content.frame_media, content.frame_media_reader
         try:
-            grant = await asyncio.to_thread(resolve, frame_media, credentials.credentials)
+            grant = await asyncio.to_thread(frame_media.resolve, credentials.credentials,
+                                            f"{asset_id}.{recipe_id}")
         except FrameMediaRefused as refused:
             return error_response(refused.code, refused.status)
         try:
@@ -498,28 +505,6 @@ def create_app(
                                   retry_after=opened.retry_after_seconds)
         return stream_frame_media(opened, release=lambda: frame_media.release(
             grant.transfer_owner))
-
-    @app.get("/v1/media/{asset_id}/{recipe_id}")
-    async def frame_media_file(
-        asset_id: str,
-        recipe_id: str,
-        request: Request,
-        credentials: HTTPAuthorizationCredentials | None = Depends(bearer),
-    ):
-        return await frame_media_response(
-            request, credentials,
-            lambda frame_media, token: frame_media.resolve(token, f"{asset_id}.{recipe_id}"))
-
-    @app.get("/v1/media/{digest}")
-    async def media_file(
-        digest: str,
-        request: Request,
-        credentials: HTTPAuthorizationCredentials | None = Depends(bearer),
-    ):
-        """The digest URL a Player fetches until it fetches by name (follow-up T-b)."""
-        return await frame_media_response(
-            request, credentials,
-            lambda frame_media, token: frame_media.resolve_digest(token, digest))
 
     @app.post("/v1/player/readiness")
     def readiness(request: Readiness, identity: dict = Depends(player)):

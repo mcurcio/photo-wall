@@ -274,10 +274,13 @@ class Executor:
             self._reported.clear()
             return True
 
-    def acquire(self, assignment_id: str, chunks: Iterable[bytes]) -> bool:
-        """Worker-only acquisition; streaming never owns the execution lock."""
+    def acquire(self, assignment_id: str, chunks: Iterable[bytes], *, sha256: str,
+                size: int) -> bool:
+        """Worker-only acquisition of the bytes Central served for the assignment's variant,
+        `size` bytes whose SHA-256 is `sha256` (its `Content-Length` and `Repr-Digest`);
+        streaming never owns the execution lock."""
         with self._cache_work:
-            return self._acquire(assignment_id, chunks)
+            return self._acquire(assignment_id, chunks, sha256=sha256, size=size)
 
     def resolve_cached(self, assignment_id: str) -> bool:
         """Secure already-present exact bytes without starting a network request."""
@@ -294,12 +297,13 @@ class Executor:
                 path = self.cache.path_for(variant)
                 if path is None:
                     return False
-                self.cache.pin(variant.sha256, owner)
+                self.cache.pin(variant, owner)
             except (CacheError, OSError):
                 return False
             return self._accept_acquired_path(assignment_id, assignment, path)
 
-    def _acquire(self, assignment_id: str, chunks: Iterable[bytes]) -> bool:
+    def _acquire(self, assignment_id: str, chunks: Iterable[bytes], *, sha256: str,
+                 size: int) -> bool:
         with self._lock:
             assignment = self._assignments.get(assignment_id)
             if not assignment or not self._current_authority(assignment):
@@ -309,9 +313,10 @@ class Executor:
             if assignment.layer.variant is None:
                 return True
             assignment.acquiring = True
-            self._pin_intents[assignment.owner] = assignment.layer.variant.sha256
+            self._pin_intents[assignment.owner] = assignment.layer.variant.key
         try:
-            path = self.cache.secure(assignment.layer.variant, chunks, assignment.owner)
+            path = self.cache.secure(assignment.layer.variant, chunks, assignment.owner,
+                                     sha256=sha256, size=size)
         except Exception as error:
             with self._lock:
                 assignment.acquiring = False
@@ -337,7 +342,7 @@ class Executor:
             ):
                 return False
             assignment.failure = None
-            self._pin_intents[assignment.owner] = assignment.layer.variant.sha256
+            self._pin_intents[assignment.owner] = assignment.layer.variant.key
             return True
 
     def verify_secured(self) -> None:
@@ -402,7 +407,7 @@ class Executor:
         for item in retained:
             assert item.local.layer.variant is not None
             try:
-                self.cache.pin(item.local.layer.variant.sha256, item.owner)
+                self.cache.pin(item.local.layer.variant, item.owner)
                 with self._lock:
                     self._established_retention.add(item.owner)
             except (CacheError, OSError):
@@ -464,7 +469,7 @@ class Executor:
                     f"{binding.generation}:{layer.assignment_id}")
         owner = (f"pwretain:{self.player_id}:{self._last_epoch}:"
                  f"{hashlib.sha256(identity.encode()).hexdigest()}")
-        self._pin_intents[owner] = layer.variant.sha256
+        self._pin_intents[owner] = layer.variant.key
         self._retained[binding.output_id] = _Retained(
             replace(local, alpha=layer.opacity), binding, owner)
 

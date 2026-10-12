@@ -44,7 +44,7 @@ POOL = "pool:1"
 def photo(asset: str, shape: str, *, captured: float = 0, prepared: bool = True,
           is_measured: bool = True, faces=()) -> Candidate:
     width, height = SIZES[shape]
-    variant = Variant(sha256=hashlib.sha256(asset.encode()).hexdigest(), size=10,
+    variant = Variant(asset_id="asset-" + hashlib.sha256(asset.encode()).hexdigest()[:16], recipe_id="e" * 64, sha256=hashlib.sha256(asset.encode()).hexdigest(), size=10,
                       media_type="image/jpeg", width=width, height=height) if prepared else None
     if is_measured:
         return measured(asset, width, height, faces=faces, captured_at=captured, variant=variant)
@@ -424,7 +424,7 @@ def test_a_kept_scenes_video_keeps_nothing():
     frames = {"left": FrameSetup("wide", after_end="keep_this_photo")}
     video = Candidate(asset_id="clip", kind="video", original_width=1920, original_height=1080,
                       captured_at=5, variant=Variant(
-                          sha256=hashlib.sha256(b"clip").hexdigest(), size=10,
+                          asset_id="asset-" + hashlib.sha256(b"clip").hexdigest()[:16], recipe_id="e" * 64, sha256=hashlib.sha256(b"clip").hexdigest(), size=10,
                           media_type="video/mp4", width=1920, height=1080, duration=4))
     projection = plan(scene(frames), frames, [video, photo("still", "wide", captured=1)],
                       plan_seconds=300)

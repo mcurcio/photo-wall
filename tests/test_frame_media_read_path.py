@@ -101,9 +101,6 @@ def test_a_first_making_is_served_by_its_name(wall, registry):
         assert response.headers["Repr-Digest"] == repr_digest(FIRST)
         assert response.headers["Content-Length"] == str(len(FIRST))
         assert response.headers["Cache-Control"] == "private, no-store"
-        # The Player's digest URL, until it fetches by name (T-b): the same variant.
-        legacy = client.get(f"/v1/media/{variant.sha256}", headers=headers)
-        assert legacy.status_code == 200 and legacy.content == FIRST
     assert wall.client.fetches == 1  # served from the cache, never made twice
     assert wall.transfers() == 0  # every transfer pin is released with its body
 

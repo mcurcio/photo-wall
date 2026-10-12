@@ -49,7 +49,8 @@ def test_087_names_a_secured_locks_variant_and_keeps_serving_its_bytes(empty_dat
             "assignment_id": "assignment", "run_id": "run", "output_id": binding.output_id,
             "frame_id": binding.frame_id, "binding_generation": binding.generation,
             "start": 1000, "end": 1200, "media_origin": 1000, "crop": CENTRED.model_dump(),
-            "variant": stored}).model_dump(mode="json")
+            "variant": {**stored, "asset_id": picture.asset_id, "recipe_id": OLD_RECIPE},
+        }).model_dump(mode="json")
         layer["variant"] = stored  # exactly as the earlier build stored it: no name
         with db.transaction() as conn:
             conn.execute("INSERT INTO media_blobs VALUES(%s,%s,%s,'ready',1)",
@@ -84,8 +85,6 @@ def test_087_names_a_secured_locks_variant_and_keeps_serving_its_bytes(empty_dat
             response = client.get(f"/v1/media/{picture.asset_id}/{OLD_RECIPE}", headers=headers)
             assert response.status_code == 200
             assert response.content == BYTES
-            # The Player before T-b still fetches by digest: the same bytes, the Frame keeps them.
-            assert client.get(f"/v1/media/{digest}", headers=headers).content == BYTES
         assert blob.read_bytes() == BYTES  # no file moved
     finally:
         db.close()

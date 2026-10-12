@@ -115,8 +115,8 @@ def assert_variant_file(result, destination, source_bytes):
     assert result.path == destination
     assert destination.is_file()
     data = destination.read_bytes()
-    assert result.variant.size == len(data)
-    assert result.variant.sha256 == hashlib.sha256(data).hexdigest()
+    assert result.ready.size == len(data)
+    assert result.ready.sha256 == hashlib.sha256(data).hexdigest()
     assert result.original_sha256 == hashlib.sha256(source_bytes).hexdigest()
     assert result.build is not None
 
@@ -132,9 +132,9 @@ def test_all_exif_orientations_match_decoded_original_exactly_once(tmp_path, nat
 
     result = prepare(native_tools, asset, source, destination)
     assert_variant_file(result, destination, original_bytes)
-    assert result.variant.media_type == "image/jpeg"
-    assert result.variant.duration is None
-    assert (result.variant.width, result.variant.height) == expected.size
+    assert result.ready.media_type == "image/jpeg"
+    assert result.ready.duration is None
+    assert (result.ready.width, result.ready.height) == expected.size
     assert source.read_bytes() == original_bytes
     with Image.open(destination) as output:
         output.load()
@@ -150,9 +150,9 @@ def test_still_resize_preserves_aspect_ratio_and_does_not_upscale(tmp_path, nati
     asset = save_jpeg(source, size=(240, 120))
     small = prepare(native_tools, asset, source, tmp_path / "small.jpg",
                     recipe=PreparationRecipe(image_long_edge=80))
-    assert (small.variant.width, small.variant.height) == (80, 40)
+    assert (small.ready.width, small.ready.height) == (80, 40)
     native = prepare(native_tools, asset, source, tmp_path / "native.jpg")
-    assert (native.variant.width, native.variant.height) == (240, 120)
+    assert (native.ready.width, native.ready.height) == (240, 120)
 
 
 def test_recipe_identity_is_stable_and_changes_with_quality_while_the_build_is_reused(
@@ -234,8 +234,8 @@ def test_valid_srgb_icc_and_opaque_png_produce_jpeg(tmp_path, native_tools):
     profile = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes()
     corners().save(source, "PNG", icc_profile=profile)
     result = prepare(native_tools, original_asset(source), source, tmp_path / "variant.jpg")
-    assert result.variant.media_type == "image/jpeg"
-    assert result.variant.duration is None
+    assert result.ready.media_type == "image/jpeg"
+    assert result.ready.duration is None
     with Image.open(result.path) as decoded:
         assert_same_pixels(decoded, corners())
 
@@ -493,9 +493,9 @@ def test_video_with_audio_becomes_silent_sdr_h264_and_is_fully_decodable(tmp_pat
     assert {stream["codec_type"] for stream in probe(source, native_tools)["streams"]} == {"audio", "video"}
     result = prepare(native_tools, video_asset(source, native_tools), source, destination)
     assert_variant_file(result, destination, original_bytes)
-    assert result.variant.media_type == "video/mp4"
-    assert result.variant.duration > 0
-    assert (result.variant.width, result.variant.height) == (160, 96)
+    assert result.ready.media_type == "video/mp4"
+    assert result.ready.duration > 0
+    assert (result.ready.width, result.ready.height) == (160, 96)
     output = probe(destination, native_tools)
     assert len(output["streams"]) == 1
     stream = output["streams"][0]
@@ -509,7 +509,7 @@ def test_video_with_audio_becomes_silent_sdr_h264_and_is_fully_decodable(tmp_pat
     numerator, denominator = map(int, stream["avg_frame_rate"].split("/"))
     assert numerator / denominator <= 30
     assert all(side.get("rotation", 0) == 0 for side in stream.get("side_data_list", []))
-    assert abs(result.variant.duration - float(stream["duration"])) < .05
+    assert abs(result.ready.duration - float(stream["duration"])) < .05
     data = destination.read_bytes()
     assert data.index(b"moov") < data.index(b"mdat")
     run_tool([native_tools[0], "-nostdin", "-v", "error", "-xerror", "-i", str(destination), "-f", "null", "-"])
@@ -533,7 +533,7 @@ def test_rotated_video_matches_the_displayed_original_without_residual_orientati
     orientation = 8 if rotation == 90 else 6
     result = prepare(native_tools, video_asset(source, native_tools, orientation=orientation), source,
                      tmp_path / "variant.mp4")
-    assert (result.variant.width, result.variant.height) == (96, 160)
+    assert (result.ready.width, result.ready.height) == (96, 160)
     assert_same_pixels(first_video_frame(result.path, native_tools), first_video_frame(source, native_tools),
                        tolerance=15)
     output = probe(result.path, native_tools)["streams"][0]
@@ -562,7 +562,7 @@ def test_sdr_hevc_mov_normalizes_sample_aspect_ratio_to_square_pixels(tmp_path, 
     assert source_stream["codec_name"] == "hevc"
     assert source_stream["sample_aspect_ratio"] == "2:1"
     result = prepare(native_tools, video_asset(source, native_tools), source, tmp_path / "variant.mp4")
-    assert (result.variant.width, result.variant.height) == (160, 48)
+    assert (result.ready.width, result.ready.height) == (160, 48)
     output_stream = probe(result.path, native_tools)["streams"][0]
     assert output_stream["codec_name"] == "h264"
     assert output_stream["sample_aspect_ratio"] == "1:1"
@@ -616,7 +616,7 @@ def test_a_webp_preview_prepares_to_a_jpeg_of_the_recipes_size(tmp_path, native_
     result = prepare_rendition(native_tools, pool_asset(width=800, height=400),
                                rendition_of(source, width=800, height=400),
                                tmp_path / "variant", recipe=PreparationRecipe(image_long_edge=200))
-    assert (result.variant.media_type, result.variant.width, result.variant.height) == (
+    assert (result.ready.media_type, result.ready.width, result.ready.height) == (
         "image/jpeg", 200, 100)
     assert result.original_sha256 == hashlib.sha256(source.read_bytes()).hexdigest()
     with Image.open(tmp_path / "variant") as image:
@@ -629,7 +629,7 @@ def test_a_full_size_jpeg_carrying_exif_orientation_six_prepares_upright(tmp_pat
     result = prepare_rendition(native_tools, pool_asset(width=64, height=96),
                                rendition_of(source, rendition="fullsize", width=64, height=96),
                                tmp_path / "variant")
-    assert (result.variant.width, result.variant.height) == (64, 96)
+    assert (result.ready.width, result.ready.height) == (64, 96)
     with Image.open(tmp_path / "variant") as image:
         assert image.size == (64, 96) and image.getexif().get(0x0112, 1) == 1
 
@@ -719,9 +719,9 @@ def test_a_heic_prepares_to_a_jpeg_of_the_recipes_size_upright(tmp_path, native_
                                rendition_of(source, rendition="original", width=400,
                                             height=300, media_type="image/heic"),
                                tmp_path / "variant", recipe=PreparationRecipe(image_long_edge=200))
-    assert (result.variant.media_type, result.variant.width, result.variant.height) == (
+    assert (result.ready.media_type, result.ready.width, result.ready.height) == (
         "image/jpeg", 200, 150)
-    assert result.made_from == "original"
+    assert result.ready.made_from == "original"
     with Image.open(tmp_path / "variant") as image:
         assert image.format == "JPEG"
         assert_same_pixels(image, corners((400, 300)).resize((200, 150)))
@@ -750,7 +750,7 @@ def test_another_rgb_profile_is_converted_too(tmp_path, native_tools):
     source = tmp_path / "original"
     corners().save(source, "JPEG", quality=96, icc_profile=nonidentity_rgb_profile())
     result = prepare(native_tools, original_asset(source), source, tmp_path / "variant.jpg")
-    assert (result.variant.width, result.variant.height) == (96, 64)
+    assert (result.ready.width, result.ready.height) == (96, 64)
 
 
 def test_an_avif_prepares(tmp_path, native_tools):
@@ -761,7 +761,7 @@ def test_an_avif_prepares(tmp_path, native_tools):
                                rendition_of(source, rendition="original",
                                             media_type="image/avif"),
                                tmp_path / "variant")
-    assert (result.variant.width, result.variant.height) == (96, 64)
+    assert (result.ready.width, result.ready.height) == (96, 64)
     with Image.open(result.path) as image:
         assert_same_pixels(image, corners((96, 64)))
 

@@ -91,10 +91,10 @@ def test_source_candidates_serve_the_planners_standing_for_the_frame(registry):
     still = dict(size=10, media_type="image/jpeg")
     add_frame(registry, "need")   # the wall's need names the recipe
     _prepared(registry, usable.asset_id,
-              variant=Variant(sha256="1" * 64, width=30, height=50, **still))
+              variant=Variant(asset_id="asset-1", recipe_id="e" * 64, sha256="1" * 64, width=30, height=50, **still))
     # A still prepared as a video: no version this Frame can draw.
     _prepared(registry, wrong_shape.asset_id,
-              variant=Variant(sha256="2" * 64, width=30, height=50, size=10,
+              variant=Variant(asset_id="asset-2", recipe_id="e" * 64, sha256="2" * 64, width=30, height=50, size=10,
                               media_type="video/mp4", duration=10))
     _prepared(registry, failed.asset_id, failure="asset_missing")
     # A retry not yet due is a failure to planning until then (catalog hydration).

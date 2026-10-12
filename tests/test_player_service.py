@@ -228,6 +228,16 @@ def delivered(**fields) -> State:
     return State(delivery_id=f"{sequence:032x}", delivery_sequence=sequence, **fields)
 
 
+def repr_digest(data: bytes) -> str:
+    return "sha-256=:" + base64.b64encode(hashlib.sha256(data).digest()).decode() + ":"
+
+
+def media_headers(data: bytes, **headers) -> dict:
+    """Central's media answer: the body's type, `Content-Length` and `Repr-Digest` (RFC 9530)."""
+    return {"Content-Type": "image/png", "Content-Length": str(len(data)),
+            "Repr-Digest": repr_digest(data), **headers}
+
+
 class Server:
     def __init__(self, clock):
         self.clock = clock
@@ -269,7 +279,7 @@ class Server:
                                              "schema": 2, "capabilities": []})
         if path.startswith("/v1/media/"):
             return self.media_response or httpx.Response(200, content=self.data,
-                headers={"Content-Type": "image/png", "Content-Length": str(len(self.data))})
+                headers=media_headers(self.data))
         return httpx.Response(200, json={"accepted": True})
 
     def offer(self, *, revision=1, layers=None, commits=(), revocations=(), absent=False):
@@ -850,6 +860,31 @@ def test_valid_surviving_cache_is_verified_before_any_media_request(tmp_path):
     asyncio.run(check())
 
 
+def test_media_is_fetched_by_name_and_a_re_made_copy_is_accepted(tmp_path):
+    """The Player asks for the plan's variant by name and keeps whatever Central served under it,
+    checked against the served `Repr-Digest` and `Content-Length`: a re-make's other bytes (and
+    another length) are the same content. Mutation probe 3 (check against the plan's digest)
+    turns this red."""
+    async def check():
+        service, server = await rig(tmp_path)
+        try:
+            service._feedback()
+            job = service._jobs[0]
+            remade = b"a re-made picture, other bytes"
+            server.media_response = httpx.Response(200, content=remade,
+                                                   headers=media_headers(remade))
+            server.requests.clear()
+            assert await service.download(job)
+            (request,) = [r for r in server.requests if r.url.path.startswith("/v1/media/")]
+            variant = job.layer.variant
+            assert request.url.path == f"/v1/media/{variant.asset_id}/{variant.recipe_id}"
+            assert service.cache.path_for(variant).read_bytes() == remade
+            assert service._feedback()[0].secured == ("picture",)
+        finally:
+            await close(service)
+    asyncio.run(check())
+
+
 def test_volatile_registration_constructs_only_disposable_execution_state(tmp_path):
     async def check():
         service, server = await rig(tmp_path)
@@ -917,18 +952,30 @@ def test_metadata_rejects_unsafe_response_without_following_redirect(tmp_path, k
     asyncio.run(check())
 
 
-@pytest.mark.parametrize("kind", ["redirect", "truncated", "wrong_hash", "wrong_type", "missing_length"])
+@pytest.mark.parametrize("kind", ["redirect", "truncated", "wrong_hash", "wrong_type",
+                                  "missing_length", "missing_digest", "malformed_digest",
+                                  "other_algorithm"])
 def test_failed_download_unblocks_worker_and_never_publishes_readiness(tmp_path, kind):
     async def check():
         service, server = await rig(tmp_path)
         try:
             service._feedback()
+            picture = media_headers(b"picture")
             responses = {
                 "redirect": httpx.Response(302, headers={"Location": "http://upstream/media"}),
-                "truncated": httpx.Response(200, content=b"p", headers={"Content-Type": "image/png", "Content-Length": "7"}),
-                "wrong_hash": httpx.Response(200, content=b"corrupt", headers={"Content-Type": "image/png"}),
-                "wrong_type": httpx.Response(200, content=b"picture", headers={"Content-Type": "text/plain"}),
-                "missing_length": httpx.Response(200, content=b"picture", headers={"Content-Type": "image/png"}),
+                "truncated": httpx.Response(200, content=b"p", headers=picture),
+                # Same length, other bytes than the digest Central named.
+                "wrong_hash": httpx.Response(200, content=b"corrupt", headers=picture),
+                "wrong_type": httpx.Response(200, content=b"picture",
+                                             headers={**picture, "Content-Type": "text/plain"}),
+                "missing_length": httpx.Response(200, content=b"picture", headers=picture),
+                "missing_digest": httpx.Response(200, content=b"picture", headers={
+                    key: value for key, value in picture.items() if key != "Repr-Digest"}),
+                "malformed_digest": httpx.Response(200, content=b"picture", headers={
+                    **picture, "Repr-Digest": "sha-256=:not base64!:"}),
+                "other_algorithm": httpx.Response(200, content=b"picture", headers={
+                    **picture, "Repr-Digest": "sha-512=:" + base64.b64encode(
+                        hashlib.sha512(b"picture").digest()).decode() + ":"}),
             }
             if kind == "missing_length":
                 del responses[kind].headers["Content-Length"]

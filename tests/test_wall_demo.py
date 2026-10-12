@@ -389,7 +389,7 @@ def test_player_runner_recorder_logs_only_successful_presentations():
     renderer = namespace["Recorder"]()
     binding = OutputBinding(output_id="HDMI-A-1", frame_id="frame-1", generation=1,
                             profile=FrameProfile(width_px=64, height_px=48, diagonal_inches=20))
-    variant = Variant(sha256="a" * 64, size=1, media_type="image/png", width=1, height=1)
+    variant = Variant(asset_id="asset-a", recipe_id="e" * 64, sha256="a" * 64, size=1, media_type="image/png", width=1, height=1)
     layer = Layer(assignment_id="assignment-1", run_id="run-1", output_id="HDMI-A-1",
                   frame_id="frame-1", binding_generation=1, start=100, end=110,
                   media_origin=100, variant=variant, crop=CENTRED)

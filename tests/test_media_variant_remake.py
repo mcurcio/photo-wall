@@ -9,10 +9,13 @@ import asyncio
 import hashlib
 import os
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
-from support.frame_media import grant
+from support.frame_media import grant, offer
 from test_frame_media_read_path import FIRST, Wall, repr_digest
+from test_player_service import TRUST, boot_context, close, immediate
+from uplink_fakes import finding
 
 from central.assets.frame_media import variant_asset_key
 from central.assets.layout import CacheLayout
@@ -22,7 +25,11 @@ from central.kernel.assets import AssetKind
 from central.kernel.handling import TerminalFailure
 from central.kernel.job_types import PrepareMedia
 from central.photo_library.rendition import FrameNeed
+from contracts.enrollment import OutputReport
 from media.prepare import PreparationRecipe, recipe_id
+from player.identity import load_identity
+from player.rendering import RecordingRenderer
+from player.service import PlayerConfig, PlayerService
 
 SECOND = b"a re-make's different bytes"
 
@@ -59,6 +66,51 @@ def test_a_deleted_file_is_re_made_and_served_under_the_same_name(wall, registry
     assert (remade.sha256, remade.size) == (hashlib.sha256(SECOND).hexdigest(), len(SECOND))
     assert remade.made_from == "preview"
     assert wall.preparer.recipes == [PreparationRecipe(), PreparationRecipe()]
+
+
+def test_the_player_accepts_a_re_made_copy_under_the_plan_s_name(wall, registry, tmp_path):
+    """A deleted file is re-made, and the Player accepts different bytes: it fetches the plan's
+    variant by name and checks the body against Central's `Repr-Digest` and `Content-Length`,
+    not the plan's digest (a digest that differs from the plan's is still the same content).
+    The real Player service and cache, the real app over ASGI, real PostgreSQL.
+
+    Mutation probe 3: check the bytes against the plan's digest (`variant.sha256`, in
+    `PlayerService.download`) -> the re-made bytes are refused and this test fails."""
+    variant = wall.first_making()
+    CacheLayout(wall.root).path(variant_asset_key(variant.key),
+                                produced(wall, variant.key)).unlink()
+
+    async def check():
+        cache_dir = tmp_path / "player-cache"
+        cache_dir.mkdir(mode=0o700)
+        client = httpx.AsyncClient(transport=httpx.ASGITransport(app=wall.app()),
+                                   trust_env=False)
+        service = PlayerService(
+            PlayerConfig(central_origin="http://central", cache_dir=str(cache_dir),
+                         cache_bytes=1024**2),
+            load_identity(), (OutputReport(output_id="HDMI-A-1", width_px=1920,
+                                           height_px=1080),),
+            RecordingRenderer(), immediate, find_central=finding("http://central"),
+            trust=TRUST, clock=registry.clock, client=client, time_client=client,
+            websocket_connect=False, boot_context=boot_context())
+        try:
+            await service.locate_central()
+            await service.enroll()
+            await service.hello_protocol()
+            plan = offer(registry, wall.repository, variant,
+                         service.registration.player_id)
+            await service.poll_state()
+            service._feedback()
+            (job,) = service._jobs
+            assert job.layer.variant.sha256 == hashlib.sha256(FIRST).hexdigest()  # the plan's
+            assert await service.download(job)
+            assert service.cache.path_for(plan.layers[0].variant).read_bytes() == SECOND
+            assert service._feedback()[0].secured == ("assignment",)
+        finally:
+            await close(service)
+
+    asyncio.run(check())
+    assert wall.client.fetches == 2  # the first making and one re-make
 
 
 def test_a_corrupt_file_is_discarded_and_re_made(wall, registry):

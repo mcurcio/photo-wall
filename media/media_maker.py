@@ -124,12 +124,9 @@ class MediaMaker:
             if prepared.original_sha256 != fetched.sha256:
                 raise MediaError("asset_integrity")
             facts = await _blocking(self._store.measure, variant)
-            made = prepared.variant
-            if (facts.sha256, facts.size) != (made.sha256, made.size):
+            ready = prepared.ready
+            if (facts.sha256, facts.size) != (ready.sha256, ready.size):
                 raise MediaError("asset_integrity")
-            ready = MediaReady(size=facts.size, sha256=facts.sha256, media_type=made.media_type,
-                               width=made.width, height=made.height, duration=made.duration,
-                               made_from=prepared.made_from)
             await _blocking(self._store.install_by_digest, variant, key, ready)
             return ready
         finally:

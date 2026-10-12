@@ -85,11 +85,6 @@ class FrameMediaGrants(Protocol):
 
     def lock_media(self, tx: Transaction) -> None: ...
 
-    def named(self, tx: Transaction, sha256: str) -> str | None:
-        """The variant whose current bytes have `sha256` (the Player's digest URL, until it
-        fetches by name: follow-up T-b), or None."""
-        ...
-
     def live_references(self, tx: Transaction, key: str, now: float) -> set[str]: ...
 
     def authorized(self, tx: Transaction, grantee: Grantee, key: str, references: set[str],
@@ -115,13 +110,6 @@ class FrameMedia:
             asset = variant_asset_key(key)
         except ValueError:
             raise FrameMediaRefused("media_unavailable", 404) from None
-        return self._resolve(token, lambda _tx: asset.identity)
-
-    def resolve_digest(self, token: str, sha256: str) -> FrameGrant:
-        """The digest URL the Player fetches until T-b: the variant holding those bytes now."""
-        return self._resolve(token, lambda tx: self._grants.named(tx, sha256))
-
-    def _resolve(self, token: str, name) -> FrameGrant:
         owner = "transfer:" + secrets.token_hex(24)
         with self._transactions.begin() as tx:
             self._grants.serialize(tx)
@@ -129,8 +117,7 @@ class FrameMedia:
             if grantee is None:
                 raise FrameMediaRefused("unauthorized", 401)
             self._grants.lock_media(tx)
-            key = name(tx)
-            if key is None or self._records.get(tx, variant_asset_key(key)) is None:
+            if self._records.get(tx, asset) is None:
                 raise FrameMediaRefused("media_unavailable", 404)
             now = self._clock.utc()
             references = self._grants.live_references(tx, key, now)

@@ -33,7 +33,9 @@ from player.rendering import (
 
 
 def media(data: bytes = b"picture", video: bool = False) -> Variant:
-    return Variant(sha256=hashlib.sha256(data).hexdigest(), size=len(data),
+    return Variant(asset_id="asset-" + hashlib.sha256(data).hexdigest()[:16],
+                   recipe_id=("f" if video else "e") * 64,
+                   sha256=hashlib.sha256(data).hexdigest(), size=len(data),
                    media_type="video/mp4" if video else "image/png", width=1920, height=1080,
                    duration=120 if video else None)
 
@@ -197,6 +199,16 @@ def test_native_ack_older_than_a_renewal_but_within_freshness_is_presented(tmp_p
     assert any(o.status == "presented" for o in observations)
 
 
+def served(data: bytes = b"picture") -> dict:
+    """Central's answer with `data`: its `Repr-Digest` and `Content-Length`."""
+    return {"sha256": hashlib.sha256(data).hexdigest(), "size": len(data)}
+
+
+def cached(variant: Variant) -> str:
+    """The cache's pin name for a variant (its key, hashed)."""
+    return hashlib.sha256(variant.key.encode()).hexdigest()
+
+
 def binding(output: str = "hdmi1", frame: str = "frame1", **kwargs) -> OutputBinding:
     return OutputBinding(output_id=output, frame_id=frame, generation=1,
                          profile=FrameProfile(width_px=1920, height_px=1080, diagonal_inches=32),
@@ -243,7 +255,7 @@ class Rig:
         return self.plan
 
     def secure(self, key="picture", data=b"picture") -> None:
-        assert self.executor.acquire(key, [data])
+        assert self.executor.acquire(key, [data], **served(data))
 
     def commit(self, *keys: str) -> Commit:
         assert self.plan
@@ -502,7 +514,7 @@ def test_cache_pressure_and_corruption_revoke_precommit_readiness(tmp_path):
     rig = Rig(tmp_path, cache_bytes=7)
     rig.offer(layer(), layer("new", data=b"new"))
     rig.secure()
-    assert not rig.executor.acquire("new", [b"new"])
+    assert not rig.executor.acquire("new", [b"new"], **served(b"new"))
     assert rig.cache.stats()["pinned_bytes"] == 7
     rig.executor.prepare_imminent()
     assert {f.code for f in rig.executor.failures} == {"capacity"}
@@ -524,7 +536,7 @@ def test_download_errors_are_immutable_sanitized_failure_records(tmp_path):
         yield b"pi"
         raise RuntimeError("private upstream details never cross protocol")
 
-    assert rig.executor.acquire("picture", broken()) is False
+    assert rig.executor.acquire("picture", broken(), **served()) is False
     failures = rig.executor.failures
     assert isinstance(failures, tuple)
     assert failures[0].code == "download"
@@ -545,7 +557,7 @@ def test_cancellation_during_blocked_stream_neither_blocks_tick_nor_resurrects(t
         yield b"cture"
 
     with ThreadPoolExecutor(max_workers=2) as pool:
-        acquisition = pool.submit(rig.executor.acquire, "picture", chunks())
+        acquisition = pool.submit(rig.executor.acquire, "picture", chunks(), **served())
         assert entered.wait(3)
         control = pool.submit(lambda: (rig.executor.cancel(["picture"]), rig.executor.tick()))
         control.result(timeout=1)
@@ -752,11 +764,11 @@ def test_retention_created_during_worker_pass_keeps_original_pin(tmp_path, monke
     entered, resume = Event(), Event()
     original_pin = rig.cache.pin
 
-    def paused_pin(digest, owner):
-        if digest == media(b"dummy").sha256:
+    def paused_pin(variant, owner):
+        if variant == media(b"dummy"):
             entered.set()
             assert resume.wait(3)
-        return original_pin(digest, owner)
+        return original_pin(variant, owner)
 
     monkeypatch.setattr(rig.cache, "pin", paused_pin)
     with ThreadPoolExecutor(max_workers=1) as pool:
@@ -767,11 +779,11 @@ def test_retention_created_during_worker_pass_keeps_original_pin(tmp_path, monke
         rig.advance(2)
         resume.set()
         maintenance.result(timeout=3)
-    assert any(media().sha256 in digests for digests in rig.cache._pins.values())
+    assert any(cached(media()) in keys for keys in rig.cache._pins.values())
     monkeypatch.setattr(rig.cache, "pin", original_pin)
     rig.executor.maintain_cache()
-    assert any(owner.startswith("pwretain:") and media().sha256 in digests
-               for owner, digests in rig.cache._pins.items())
+    assert any(owner.startswith("pwretain:") and cached(media()) in keys
+               for owner, keys in rig.cache._pins.items())
 
 
 def test_expired_sequential_decode_resources_are_released(tmp_path):
@@ -816,7 +828,7 @@ def test_capacity_loss_at_intended_start_skips_previously_committed_work(tmp_pat
 def test_executor_never_writes_an_authority_journal(tmp_path):
     rig = Rig(tmp_path)
     rig.offer(layer())
-    assert rig.executor.acquire("picture", [b"picture"])
+    assert rig.executor.acquire("picture", [b"picture"], **served())
     rig.offer(layer(), revision=2)
     assert {path.name for path in tmp_path.iterdir()} == {"cache"}
     assert not list(tmp_path.glob(".executor-*"))

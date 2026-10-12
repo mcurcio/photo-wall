@@ -13,7 +13,7 @@ from test_registry import enroll, frame
 from central.assets.store import CacheStore
 from central.coordination import Coordinator
 from central.infra.transactions import PgTransactions
-from central.kernel.assets import AssetReady
+from central.kernel.assets import AssetReady, MediaReady
 from central.kernel.handling import Handler
 from central.kernel.jobs import Job, asset_key
 from central.kernel.publishing import Ready, SettledHandle
@@ -39,27 +39,36 @@ def grant(registry, repository: MediaRepository, variant: Variant, *, secured: b
     """An enrolled Player bound to `frame_id`, offered (or, `secured`, locked) one layer that
     shows `variant`, pinned as coordination pins it. Returns (player, key, plan)."""
     player, key, _ = enroll(registry)
-    registry.bind(frame_id, player["player_id"], "HDMI-A-1", expected_generation=0)
+    plan = offer(registry, repository, variant, player["player_id"], secured=secured,
+                 frame_id=frame_id)
+    return player, key, plan
+
+
+def offer(registry, repository: MediaRepository, variant: Variant, player_id: str, *,
+          secured: bool = False, frame_id: str = "portrait", epoch: int = 1) -> Plan:
+    """Bind the enrolled `player_id`'s HDMI-A-1 to `frame_id` and offer (or, `secured`, lock) it
+    one layer that shows `variant`, pinned as coordination pins it."""
+    registry.bind(frame_id, player_id, "HDMI-A-1", expected_generation=0)
     save_position(registry, frame_id)
-    binding = registry.bindings_for(player["player_id"], 1)[0]
+    binding = registry.bindings_for(player_id, epoch)[0]
     layer = Layer(assignment_id="assignment", run_id="run", output_id=binding.output_id,
                   frame_id=binding.frame_id, binding_generation=binding.generation,
                   start=1000, end=1200, media_origin=1000, variant=variant, crop=CENTRED)
-    plan = Plan(plan_id="plan", revision=1, player_id=player["player_id"], authority_epoch=1,
+    plan = Plan(plan_id="plan", revision=1, player_id=player_id, authority_epoch=epoch,
                 issued_at=1000, valid_from=1000, valid_until=1200, bindings=(binding,),
                 layers=(layer,))
     with repository.transaction() as conn:
         if secured:
-            conn.execute("INSERT INTO assignment_locks VALUES(%s,1,%s,%s,1000,1200)",
-                         (player["player_id"], layer.assignment_id,
+            conn.execute("INSERT INTO assignment_locks VALUES(%s,%s,%s,%s,1000,1200)",
+                         (player_id, epoch, layer.assignment_id,
                           Jsonb(layer.model_dump(mode="json"))))
             conn.execute("INSERT INTO media_references(owner,variant_key,expires_at) "
                          "VALUES(%s,%s,1200)",
-                         (f"secured:{player['player_id']}:1:{layer.assignment_id}", variant.key))
+                         (f"secured:{player_id}:{epoch}:{layer.assignment_id}", variant.key))
         else:
             Coordinator(registry.db, registry.clock, media=repository)._offer(
                 conn, plan, {layer.assignment_id: "group"})
-    return player, key, plan
+    return plan
 
 
 def a_frame(registry, frame_id: str = "portrait") -> None:
@@ -118,9 +127,9 @@ class FakePreparer:
             stream.write(data)
         return PreparedMedia(
             path=destination, original_sha256=rendition.sha256, build=BUILD,
-            made_from=rendition.rendition,
-            variant=Variant(sha256=hashlib.sha256(data).hexdigest(), size=len(data),
-                            media_type="image/jpeg", width=asset.width, height=asset.height))
+            ready=MediaReady(sha256=hashlib.sha256(data).hexdigest(), size=len(data),
+                             media_type="image/jpeg", width=asset.width, height=asset.height,
+                             duration=None, made_from=rendition.rendition))
 
 
 def media_maker(repository: MediaRepository, cache_root: Path, *, original: bytes,
@@ -169,7 +178,6 @@ def seed_variant(registry, asset_id: str, sha256: str, *, size: int = 10, width:
     from central.assets.frame_media import VARIANT_REFERENCE, variant_asset_key
     from central.db import ProcessTransactionClock
     from central.infra.transactions import PgTransaction
-    from central.kernel.assets import MediaReady
     from central.kernel.types import media_variant_key
 
     repository = MediaRepository(registry.db, registry.clock,

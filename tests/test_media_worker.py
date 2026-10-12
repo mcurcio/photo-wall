@@ -23,12 +23,13 @@ from central.db import Database, ProcessTransactionClock
 from central.infra.key_content_store import PgKeyContent
 from central.infra.transactions import PgTransactions
 from central.installation_models import FrameOutput
+from central.kernel.assets import MediaReady
 from central.kernel.handling import TerminalFailure, TransientFailure
 from central.kernel.job_types import PrepareMedia
 from central.media_queue import MEDIA_QUEUE, ProcrastinateMediaQueue
 from central.media_repository import MediaRepository, StoreLimits
 from central.photo_library.model import LibraryAsset, MeasuredCopy, Unreachable
-from contracts.models import FrameProfile, Variant
+from contracts.models import FrameProfile
 from contracts.time import Clock
 from media.library_client import FaceBox, FetchedRendition, LibraryUnavailable
 from media.models import MediaError
@@ -102,8 +103,6 @@ class FakeLibrary:
 
 class FakePreparer:
     def __init__(self):
-        self.variant = Variant(sha256=hashlib.sha256(VARIANT).hexdigest(), size=len(VARIANT),
-                               media_type="image/jpeg", width=1080, height=1920)
         self.build = BuildIdentity(preparation_sha256="a" * 64, ffmpeg_sha256="b" * 64,
             ffprobe_sha256="c" * 64, ffmpeg_version="synthetic", ffprobe_version="synthetic",
             python_version="synthetic", pillow_version="synthetic", littlecms_version="synthetic",
@@ -121,9 +120,11 @@ class FakePreparer:
         destination.write_bytes(VARIANT)
         if self.fault:
             raise self.fault
-        return PreparedMedia(path=destination, variant=self.variant, build=self.build,
+        return PreparedMedia(path=destination, build=self.build,
             original_sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
-            made_from=rendition.rendition)
+            ready=MediaReady(sha256=hashlib.sha256(VARIANT).hexdigest(), size=len(VARIANT),
+                             media_type="image/jpeg", width=1080, height=1920, duration=None,
+                             made_from=rendition.rendition))
 
 
 @pytest.fixture

@@ -15,5 +15,5 @@ def image_fixture():
         for x in range(size)) for y in range(size))
     data = (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack("!2I5B", size, size, 8, 2, 0, 0, 0))
             + chunk(b"IDAT", zlib.compress(rows)) + chunk(b"IEND", b""))
-    return data, Variant(sha256=hashlib.sha256(data).hexdigest(), size=len(data),
+    return data, Variant(asset_id="asset-" + hashlib.sha256(data).hexdigest()[:16], recipe_id="e" * 64, sha256=hashlib.sha256(data).hexdigest(), size=len(data),
                          media_type="image/png", width=size, height=size)

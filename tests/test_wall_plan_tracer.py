@@ -70,7 +70,7 @@ def pool():
     return {name: measured(name, width, height,
                            faces=LEFT_FACES if name == "two_three" else (),
                            captured_at=index, variant=Variant(
-                               sha256=hashlib.sha256(name.encode()).hexdigest(), size=10,
+                               asset_id="asset-" + hashlib.sha256(name.encode()).hexdigest()[:16], recipe_id="e" * 64, sha256=hashlib.sha256(name.encode()).hexdigest(), size=10,
                                media_type="image/jpeg", width=width, height=height))
             for index, (name, (width, height)) in enumerate(SIZES.items())}
 
@@ -159,7 +159,7 @@ def test_a_mat_opening_frame_plans_a_photo_smaller_than_its_display():
     Mutation probe: judge rule 2 against the profile's pixels -> nothing is placed."""
     mat = Calibration(fit=CoverFit(corners=((.3, .3), (.7, .3), (.7, .7), (.3, .7))))
     small = {"small": measured("small", 1600, 900, variant=Variant(
-        sha256=hashlib.sha256(b"small").hexdigest(), size=10, media_type="image/jpeg",
+        asset_id="asset-" + hashlib.sha256(b"small").hexdigest()[:16], recipe_id="e" * 64, sha256=hashlib.sha256(b"small").hexdigest(), size=10, media_type="image/jpeg",
         width=1600, height=900))}
     instance = Runtime()
     instance.set_scene(Scene(

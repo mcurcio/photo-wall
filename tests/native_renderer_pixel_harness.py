@@ -109,7 +109,7 @@ def png_fixture(path: pathlib.Path = PHOTO, colour=quadrant) -> Variant:
 
 def variant_of(path: pathlib.Path) -> Variant:
     payload = path.read_bytes()
-    return Variant(sha256=hashlib.sha256(payload).hexdigest(), size=len(payload),
+    return Variant(asset_id="asset-" + hashlib.sha256(payload).hexdigest()[:16], recipe_id="e" * 64, sha256=hashlib.sha256(payload).hexdigest(), size=len(payload),
                    media_type="image/png", width=WIDTH, height=HEIGHT)
 
 

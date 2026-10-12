@@ -20,7 +20,7 @@ from contracts.models import FrameProfile, OutputBinding, Plan, Variant
 def candidate(asset="a", *, width=1080, height=1920, kind="image", prepared=True, captured=0,
               variant_width=None, variant_height=None) -> Candidate:
     variant = Variant(
-        sha256=hashlib.sha256(asset.encode()).hexdigest(), size=10,
+        asset_id="asset-" + hashlib.sha256(asset.encode()).hexdigest()[:16], recipe_id="e" * 64, sha256=hashlib.sha256(asset.encode()).hexdigest(), size=10,
         media_type="video/mp4" if kind == "video" else "image/jpeg",
         width=variant_width or width, height=variant_height or height,
         duration=10 if kind == "video" else None,

@@ -77,7 +77,8 @@ def tick():
                     authority_epoch=1, issued_at=clock.utc(), valid_from=1000, valid_until=1100,
                     bindings=(binding,), layers=(layer,))
                 executor.accept_plan(media_plan)
-                assert executor.acquire("fixture-media", [payload])
+                assert executor.acquire("fixture-media", [payload],
+                                        sha256=variant.sha256, size=variant.size)
             if media_plan is not None and not media_committed:
                 executor.prepare_imminent()
                 readiness = executor.readiness()

@@ -26,9 +26,10 @@ from typing import Final, Literal
 import pillow_heif
 from pydantic import Field
 
+from central.kernel.assets import MediaReady
 from central.photo_library.model import LibraryAsset
 from central.photo_library.rendition import FrameNeed
-from contracts.models import Digest, Model, Positive, Variant
+from contracts.models import Digest, Model, Positive
 from contracts.time import Clock, SystemClock
 from media.library_client import FetchedRendition, FetchStep
 from media.models import MediaError
@@ -127,12 +128,12 @@ class BuildIdentity(Model):
 
 class PreparedMedia(Model):
     path: Path
-    variant: Variant
+    # The file's facts as the variant's record keeps them: its bytes, what a Player needs to
+    # show it, and which of Immich's copies it was made from (`FetchedRendition.rendition`;
+    # follow-ups 2026-10-11, owner item 6).
+    ready: MediaReady
     original_sha256: Digest
     build: BuildIdentity
-    # Which of Immich's copies this was made from (`FetchedRendition.rendition`; follow-ups
-    # 2026-10-11, owner item 6): the media maker records it in the variant's `MediaReady`.
-    made_from: FetchStep
 
 
 @dataclass
@@ -762,10 +763,10 @@ class Preparer:
                     raise MediaError("preparation_build_changed")
                 return PreparedMedia(
                     path=destination, original_sha256=original_sha256, build=build,
-                    made_from=made_from,
-                    variant=Variant(sha256=digest, size=output_size, width=width, height=height,
-                                    media_type="video/mp4" if video else "image/jpeg",
-                                    duration=verified["duration"] if video else None),
+                    ready=MediaReady(sha256=digest, size=output_size, width=width, height=height,
+                                     media_type="video/mp4" if video else "image/jpeg",
+                                     duration=verified["duration"] if video else None,
+                                     made_from=made_from),
                 )
         except TimeoutError:
             raise MediaError("preparation_timeout") from None

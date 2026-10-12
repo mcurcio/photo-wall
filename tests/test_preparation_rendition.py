@@ -114,5 +114,5 @@ def test_the_video_is_fetched_as_its_original_and_prepares_to_mp4(
     preparer = Preparer(ffmpeg=_tool("ffmpeg"), ffprobe=_tool("ffprobe"),
                         clock=ManualClock(asset.taken_at))
     prepared = run(preparer.prepare_rendition(asset, fetched, tmp_path / "variant"))
-    assert prepared.variant.media_type == "video/mp4"
+    assert prepared.ready.media_type == "video/mp4"
     assert prepared.original_sha256 == fetched.sha256

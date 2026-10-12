@@ -8,7 +8,6 @@ from central.db import MEDIA_LOCK
 from central.execution_ports import ExecutionMediaAuthorization
 from central.infra.transactions import pg_connection
 from central.installation_ports import InstallationSessions
-from central.kernel.assets import AssetKind
 from central.kernel.transactions import Transaction
 from central.transaction_locks import COORDINATION_LOCK
 from contracts.models import PlayerConfiguration
@@ -46,12 +45,6 @@ class PgFrameMediaGrants:
 
     def lock_media(self, tx: Transaction) -> None:
         pg_connection(tx).execute("SELECT pg_advisory_xact_lock(%s)", (MEDIA_LOCK,))
-
-    def named(self, tx: Transaction, sha256: str) -> str | None:
-        row = pg_connection(tx).execute(
-            "SELECT identity FROM assets WHERE kind=%s AND produced_sha256=%s "
-            "ORDER BY identity LIMIT 1", (AssetKind.MEDIA_VARIANT.value, sha256)).fetchone()
-        return None if row is None else row["identity"]
 
     def live_references(self, tx: Transaction, key: str, now: float) -> set[str]:
         return {row["owner"] for row in pg_connection(tx).execute(
