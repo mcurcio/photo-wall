@@ -1,4 +1,4 @@
-"""090 (Power and the week, #92, #94): every existing Frame is named "Frame 1", "Frame 2", ... in id
+"""091 (Power and the week, #92, #94): every existing Frame is named "Frame 1", "Frame 2", ... in id
 order, and each surface the Frames are on becomes a wall, "Wall 1", ... with no room label.
 
 The migration's SQL runs on the real tables after undoing it (the name column, its index and the
@@ -12,10 +12,10 @@ import pytest
 from psycopg.errors import UniqueViolation
 from test_display_identity import _frame
 
-MIGRATION = Path(__file__).parents[1] / "central/migrations/090_names_and_rooms.sql"
+MIGRATION = Path(__file__).parents[1] / "central/migrations/091_names_and_rooms.sql"
 
 
-def test_090_names_existing_frames_by_id_order_and_their_wall(registry):
+def test_091_names_existing_frames_by_id_order_and_their_wall(registry):
     for frame in ("study", "hall", "attic"):
         _frame(registry, frame)
     with registry.db.transaction() as conn:

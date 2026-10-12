@@ -1,8 +1,8 @@
 """Design §2: one kind of worker, 1+ identical processes on a shared cache disk.
 
 Two real `python -m media.worker` processes share one cache root and one database schema. Both
-must run the job runtime; only the legacy media loop is single-writer (the media lock), and the
-second process stands by for it instead of exiting. PostgreSQL (`registry`) is required.
+run the job runtime and the media loop (no process waits for a media writer lock any more), and
+each stops on SIGTERM. PostgreSQL (`registry`) is required.
 """
 
 from __future__ import annotations
@@ -52,16 +52,14 @@ def test_two_worker_processes_on_one_cache_root_both_run_the_job_runtime(registr
                  first.poll() is not None, seconds=60, what="the first worker")
         assert first.poll() is None, tail(first)
         second = spawn()
-        # Before: the second process exited `media_writer_active` without running any job loop.
-        wait_for(lambda: live_workers(registry.db) == 2 * JOB_LOOPS + MEDIA_LOOP or
+        wait_for(lambda: live_workers(registry.db) == 2 * (JOB_LOOPS + MEDIA_LOOP) or
                  second.poll() is not None, seconds=60, what="the second worker")
         assert second.poll() is None, tail(second)
-        assert live_workers(registry.db) == 2 * JOB_LOOPS + MEDIA_LOOP  # media: one writer only
+        assert live_workers(registry.db) == 2 * (JOB_LOOPS + MEDIA_LOOP)
 
         stops_on_sigterm(first)
-        # The standby takes over the media loop once the writer exits.
         wait_for(lambda: live_workers(registry.db) == JOB_LOOPS + MEDIA_LOOP, seconds=30,
-                 what="the media takeover")
+                 what="the first worker's loops to stop")
         assert second.poll() is None, tail(second)
         stops_on_sigterm(second)
     finally:

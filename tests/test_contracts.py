@@ -45,7 +45,7 @@ def test_clock_uncertainty_is_not_pipeline_position():
     clock.advance(20)  # A paused pipeline cannot stop this clock.
     layer = Layer(assignment_id="a", run_id="run", output_id="hdmi-1", frame_id="f",
                   binding_generation=1, start=1000, end=1100, media_origin=988,
-                  variant=Variant(sha256="a" * 64, size=20, media_type="video/mp4",
+                  variant=Variant(asset_id="asset-a", recipe_id="e" * 64, sha256="a" * 64, size=20, media_type="video/mp4",
                                   width=1920, height=1080, duration=60), crop=CENTRED)
     assert layer.position(clock.utc()) == 32
 
@@ -70,7 +70,7 @@ def test_a_position_is_its_fit_cover_by_default_and_the_retired_fields_are_refus
 
 def test_wire_rejects_upstream_fields_and_failure_text():
     with pytest.raises(ValidationError):
-        Variant(sha256="a" * 64, size=1, media_type="image/jpeg", width=1, height=1,
+        Variant(asset_id="asset-a", recipe_id="e" * 64, sha256="a" * 64, size=1, media_type="image/jpeg", width=1, height=1,
                 url="https://upstream.invalid/secret")
     common = dict(plan_id="p", revision=1, authority_epoch=1, sequence=1,
                   clock_uncertainty=.01, observed_at=100)
@@ -113,7 +113,7 @@ def test_a_media_layer_names_its_crop_and_a_black_layer_names_none():
     no photo. Owner, 2026-10-11: "crop happens directly on the Player"."""
     common = dict(assignment_id="a", run_id="run", output_id="out", frame_id="frame",
                   binding_generation=1, start=100, end=110, media_origin=100)
-    still = Variant(sha256="a" * 64, size=20, media_type="image/jpeg", width=30, height=20)
+    still = Variant(asset_id="asset-a", recipe_id="e" * 64, sha256="a" * 64, size=20, media_type="image/jpeg", width=30, height=20)
     assert Layer(**common, variant=still, crop=PhotoCrop(offset=0)).crop.offset == 0
     with pytest.raises(ValidationError, match="its crop"):
         Layer(**common, variant=still)

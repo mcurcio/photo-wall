@@ -129,7 +129,7 @@ def _ensure_wall(conn, surface_id: str) -> None:
 
 
 def _name_or(exc: UniqueViolation, code: str) -> str:
-    """name_taken when `exc` is migration 090's case-insensitive Frame name index, else `code`."""
+    """name_taken when `exc` is migration 091's case-insensitive Frame name index, else `code`."""
     return "name_taken" if exc.diag.constraint_name == "frames_name" else code
 
 

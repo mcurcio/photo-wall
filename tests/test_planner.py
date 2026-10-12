@@ -12,7 +12,7 @@ from central.planner import PlannerLimits, PlanningBudgetExceeded, PlanningError
 from central.runtime import Child, Contribution, RecordingActuator, Runtime, Scene
 from central.wall_plan.fit import FitTarget
 from central.wall_plan.fit_settings import FitSettings
-from central.wall_plan.order import WallHistory
+from central.wall_plan.order import PoolLines, WallHistory
 from central.wall_plan.selection import SceneSelection
 from contracts.models import FrameProfile, OutputBinding, Plan, Variant
 
@@ -24,7 +24,7 @@ from contracts.models import FrameProfile, OutputBinding, Plan, Variant
 def candidate(asset="a", *, width=1080, height=1920, kind="image", prepared=True, captured=0,
               variant_width=None, variant_height=None) -> Candidate:
     variant = Variant(
-        sha256=hashlib.sha256(asset.encode()).hexdigest(), size=10,
+        asset_id="asset-" + hashlib.sha256(asset.encode()).hexdigest()[:16], recipe_id="e" * 64, sha256=hashlib.sha256(asset.encode()).hexdigest(), size=10,
         media_type="video/mp4" if kind == "video" else "image/jpeg",
         width=variant_width or width, height=variant_height or height,
         duration=10 if kind == "video" else None,
@@ -68,9 +68,9 @@ def propose(instance, *, now=0, horizon=25, assets=None, pools=None, bindings=No
     bindings = bindings or {"player-one": (binding(),)}
     options = dict(
         bindings_by_player=bindings, settings=FitSettings(), frame_outputs=full_screen(bindings),
-        source_pools=pools if pools is not None else {
+        lines=PoolLines(pools if pools is not None else {
             "holiday:1": pool("holiday:1", *(assets or [candidate()])),
-        },
+        }),
         authored_candidates=authored or {}, locked_assignments=locks or {},
         history=WallHistory(), horizon_seconds=horizon, plan_seconds=horizon,
     )
@@ -219,13 +219,13 @@ def test_a_pool_of_fifty_thousand_photos_on_four_frames_plans_an_hour_with_no_bu
         Contribution(target=f"frame:{frame}", source_refs=("holiday:1",)) for frame in frames))
     shared = candidate("photo-0").analysis
     photos = [Candidate(asset_id=f"photo-{n}", kind="image", original_width=1080,
-                        original_height=1920, captured_at=n, analysis=shared)
+                        original_height=1920, captured_at=n, analysis=shared, readable_size=(1080, 1920))
               for n in range(50_000)]
     bindings = {"player-one": tuple(binding(frame, f"hdmi-{n}") for n, frame in enumerate(frames))}
     result = project(
         instance, 0, bindings_by_player=bindings, settings=FitSettings(),
         frame_outputs=full_screen(bindings),
-        source_pools={"holiday:1": pool("holiday:1", *photos)}, authored_candidates={},
+        lines=PoolLines({"holiday:1": pool("holiday:1", *photos)}), authored_candidates={},
         locked_assignments={}, history=WallHistory(), horizon_seconds=300, plan_seconds=3600)
     assert layers(result) == ()
     assert {r.asset_id for r in result.acquisitions} >= {f"photo-{49_999 - n}" for n in range(4)}
@@ -332,18 +332,19 @@ def test_stable_recent_cycle_variety_and_snapshot_order_independence():
     assert [selection.asset_id for selection in first.selections] == ["new", "old", "new"]
 
 
-@pytest.mark.parametrize("limits,overrides", [
+@pytest.mark.parametrize("limits,overrides,scene", [
     (PlannerLimits(max_sources=1), {"pools": {
         "holiday:1": pool("holiday:1"), "other:1": pool("other:1"),
-    }}),
-    (PlannerLimits(max_assignments=1), {}),
-    (PlannerLimits(max_horizon_seconds=5), {}),
-    (PlannerLimits(max_cycle_seconds=5), {}),
-    (PlannerLimits(max_events=1), {}),
-    (PlannerLimits(max_diagnostics=1), {"pools": {}}),
+    }}, {"contributions": (
+        Contribution(target="frame:left", source_refs=("holiday:1", "other:1")),)}),
+    (PlannerLimits(max_assignments=1), {}, {}),
+    (PlannerLimits(max_horizon_seconds=5), {}, {}),
+    (PlannerLimits(max_cycle_seconds=5), {}, {}),
+    (PlannerLimits(max_events=1), {}, {}),
+    (PlannerLimits(max_diagnostics=1), {"pools": {}}, {}),
 ])
-def test_each_planning_budget_fails_without_mutation(limits, overrides):
-    instance = runtime()
+def test_each_planning_budget_fails_without_mutation(limits, overrides, scene):
+    instance = runtime(**scene)
     before = instance.export_state()
     with pytest.raises(PlanningBudgetExceeded):
         propose(instance, limits=limits, **overrides)

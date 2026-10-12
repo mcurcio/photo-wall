@@ -3,7 +3,8 @@ run ledger .claude/runs/photo-4.md). Owner, 2026-10-11: "I would build this as a
 database, with each upstream immich asset being a primary resource".
 
 Proven through the store's own sides (the worker's `record_step`, `record_copies`, the operator's
-pool pages, the Planner's members, `MediaStore.publish`), never by reading the schema. The cases
+pool pages, the Planner's members), never by reading the schema. The copy a media variant
+was made from is its `MediaReady.made_from` (tests/test_media_worker.py). The cases
 that hold for both stores (A2 cases 1, 2, 3 and 5) run in tests/test_library_store_conformance.py
 against the fake and PostgreSQL; this file holds what only PostgreSQL shows.
 """
@@ -13,7 +14,6 @@ from __future__ import annotations
 from uuid import UUID
 
 import pytest
-from test_media_store import staged, storage  # noqa: F401  (the `storage` fixture)
 
 from central.db import ProcessTransactionClock
 from central.infra.photo_library_store import PgPhotoLibrary
@@ -128,17 +128,6 @@ def test_deleting_a_revision_removes_its_copies(library):
         conn.execute("DELETE FROM photo_pool_rows WHERE asset_id=%s", (shown.asset_id,))
         conn.execute("DELETE FROM asset_revisions WHERE asset_id=%s", (shown.asset_id,))
     assert store.copy_sizes(shown.asset_id) == {}
-
-
-def test_a_published_copy_records_the_immich_copy_it_was_made_from(storage):  # noqa: F811
-    """A2 case 6: `media_jobs.made_from`, written by the UPDATE that sets the variant."""
-    with storage.worker_lock():
-        lease, _paths, prepared = staged(storage)
-        storage.publish(lease, prepared.model_copy(update={"made_from": "preview"}))
-    with storage.db.transaction() as conn:
-        job = conn.execute("SELECT made_from,variant_sha FROM media_jobs WHERE id=%s",
-                           (lease.job_id,)).fetchone()
-    assert (job["made_from"], job["variant_sha"]) == ("preview", prepared.variant.sha256)
 
 
 def test_a_step_locks_its_photos_in_immich_id_order_whatever_their_outcomes(library):

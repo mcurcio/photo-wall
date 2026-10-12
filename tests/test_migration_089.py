@@ -1,4 +1,4 @@
-"""088 (Power and the week, A4): Settings › House and Night off's tables; Night off seeded on with
+"""089 (Power and the week, A4): Settings › House and Night off's tables; Night off seeded on with
 every Frame there is, chosen one by one; today's single-window Programs end at deploy while a Run
 already admitted keeps its snapshot end, and the Runtime restores.
 
@@ -18,7 +18,7 @@ from central.runtime import Contribution, Runtime, Scene
 from central.runtime_store import RuntimeStore
 from contracts.node_output import Darkness
 
-MIGRATION = Path(__file__).parents[1] / "central/migrations/088_power_and_the_week.sql"
+MIGRATION = Path(__file__).parents[1] / "central/migrations/089_power_and_the_week.sql"
 # A Program as the previous build stored it: one window timed in the browser's zone.
 OLD_PROGRAM = {"program_id": "evening", "scene_id": "show", "starts_at": 1000.0, "ends_at": 9000.0, "priority": 0}
 
@@ -38,7 +38,7 @@ def _snapshot_with_an_admitted_window() -> dict:
     return state
 
 
-def test_088_seeds_night_off_with_every_frame_and_ends_todays_programs(registry):
+def test_089_seeds_night_off_with_every_frame_and_ends_todays_programs(registry):
     """Mutation probe (P-no-empty): drop the runtime_state UPDATE -> the old Programs stay in the
     snapshot, which no longer restores (a Program is now a repeating rule)."""
     for frame in ("study", "hall", "ba", "b-c", "Attic"):

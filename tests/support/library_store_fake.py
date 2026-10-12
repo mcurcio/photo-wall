@@ -4,7 +4,8 @@ It behaves as the store's protocol docstrings say, and I1's conformance suite
 (tests/test_library_store_conformance.py) holds it equal to the PostgreSQL store: contacts are
 fenced by their number and judged by `policy.contact_health`; a check's steps are fenced by the
 check number; marks subtract (an id marked in a check never becomes a row of that check); a
-complete finish sweeps the rows the check did not see, any other finish removes nothing.
+complete finish removes the rows the check marked, and a row it did not see leaves only through
+`record_recheck` (follow-up S4); any other finish removes nothing.
 Photos are held as PostgreSQL holds them (slice A2): one `assets` record per Immich asset, its
 `revisions` by asset id, and each revision's measured `copies`.
 
@@ -296,16 +297,38 @@ class FakeLibraryStore:
         self.queued.append(lease.pool_key)
         return True
 
+    @staticmethod
+    def _marked(pool: _Pool, lease: CheckLease) -> set[str]:
+        return {ref for ref, (_, number) in pool.marks.items() if number == lease.check_number}
+
+    def unseen_rows(self, lease: CheckLease, limit: int) -> tuple[str, ...]:
+        pool = self._fenced(lease)
+        if pool is None:
+            return ()
+        marked = self._marked(pool, lease)
+        return tuple(sorted(ref for ref, (_, seen) in pool.rows.items()
+                            if seen < lease.check_number and ref not in marked))[:limit]
+
+    def record_recheck(self, lease: CheckLease, ref: str, matches: bool) -> bool:
+        pool = self._fenced(lease)
+        if pool is None:
+            return False
+        if ref in pool.rows:
+            if matches:
+                pool.rows[ref] = (pool.rows[ref][0], lease.check_number)
+            else:
+                del pool.rows[ref]
+        self.queued.append(lease.pool_key)
+        return True
+
     def finish_check(self, lease: CheckLease, finish: CheckFinish) -> bool:
         pool = self._fenced(lease)
         if pool is None:
             return False
         now = self._now()
         if isinstance(finish, CheckComplete):
-            marked = {ref for ref, (_, number) in pool.marks.items()
-                      if number == lease.check_number}
-            pool.rows = {ref: row for ref, row in pool.rows.items()
-                         if row[1] >= lease.check_number and ref not in marked}
+            marked = self._marked(pool, lease)
+            pool.rows = {ref: row for ref, row in pool.rows.items() if ref not in marked}
             pool.marks = {ref: mark for ref, mark in pool.marks.items()
                           if mark[1] >= lease.check_number}
             pool.last_complete_at = now

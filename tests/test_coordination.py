@@ -4,7 +4,7 @@ import math
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
-from psycopg.types.json import Jsonb
+from support.frame_media import seed_variant
 from support.house_time import UTC_HOUSE, daily, set_house, window_program
 from support.key_content_builders import face
 from support.measured_photos import measure, measure_all
@@ -17,7 +17,7 @@ from central.registry import RegistryError
 from central.runtime import Child, Contribution, Program, ProgramDraft, Scene
 from central.runtime_store import RuntimeStore
 from central.wall_plan.selection import SceneSelection
-from contracts.models import Failure, Readiness, Variant
+from contracts.models import Failure, Readiness
 
 
 def setup_players(registry, count=2):
@@ -158,11 +158,11 @@ def test_late_join_has_bounded_preparation_grace_and_keeps_logical_origin(regist
 def publish_fixture_catalog(registry, digest="a" * 64, asset="original-a", *, also=()):
     """Source `library:1`'s pool becomes exactly one photo (`asset`), prepared as `digest`: a
     complete check of the pool through the store's worker side, its key content measured
-    (roadmap 5a: the Planner places only measured photos), then the ready recipe state a
-    completed worker publication exposes (coordination hydrates variants through jobs).
-    `also` names more (asset, digest) photos of the same pool, prepared the same way: one photo
-    is never on two Frames at once (roadmap 5a), so a Scene on N Frames needs N photos."""
-    variant = Variant(sha256=digest, size=10, media_type="image/jpeg", width=1080, height=1920)
+    (roadmap 5a: the Planner places only measured photos), then its media variant made under the
+    wall's current recipe (coordination hydrates variants from their records; the wall needs its
+    Frames first). `also` names more (asset, digest) photos of the same pool, prepared the same
+    way: one photo is never on two Frames at once (roadmap 5a), so a Scene on N Frames needs N
+    photos. Returns the first photo's variant."""
     # 4K portrait: a 9:16 Frame full screen (Cover) on the enrolled 1920 x 1080 Output draws
     # its picture at 1920 x 3414 (its Frame output, follow-ups B1), which this photo holds.
     pool_photo = photo(asset, taken_at=registry.clock.utc(), width=2160, height=3840)
@@ -170,26 +170,9 @@ def publish_fixture_catalog(registry, digest="a" * 64, asset="original-a", *, al
               for label, other in also]
     seed_pool(registry, "library:1", (pool_photo, *(item for item, _ in others)))
     measure_all(registry, (pool_photo, *(item for item, _ in others)))
-    recipe = "f" * 64
-    with registry.db.transaction() as conn:
-        conn.execute("INSERT INTO media_settings(singleton,max_bytes,recipe_id) VALUES(TRUE,%s,%s) "
-                     "ON CONFLICT(singleton) DO UPDATE SET recipe_id=EXCLUDED.recipe_id",
-                     (4 * 1024**3, recipe))
-        conn.execute("INSERT INTO media_blobs VALUES(%s,%s,10,'ready',%s)",
-                     (digest, Jsonb(variant.model_dump(mode="json")), registry.clock.utc()))
-        conn.execute("INSERT INTO media_jobs(id,asset_id,recipe_id,state,earliest_start,variant_sha,updated_at) "
-                     "VALUES(%s,%s,%s,'ready',%s,%s,%s)",
-                     ("fixture-job-" + pool_photo.asset_id, pool_photo.asset_id, recipe,
-                      registry.clock.utc(), digest, registry.clock.utc()))
-        for item, other in others:
-            conn.execute("INSERT INTO media_blobs VALUES(%s,%s,10,'ready',%s)",
-                         (other, Jsonb(variant.model_copy(update={"sha256": other}).model_dump(
-                             mode="json")), registry.clock.utc()))
-            conn.execute("INSERT INTO media_jobs(id,asset_id,recipe_id,state,earliest_start,"
-                         "variant_sha,updated_at) VALUES(%s,%s,%s,'ready',%s,%s,%s)",
-                         ("fixture-job-" + item.asset_id, item.asset_id, recipe,
-                          registry.clock.utc(), other, registry.clock.utc()))
-    return variant
+    for item, other in others:
+        seed_variant(registry, item.asset_id, other)
+    return seed_variant(registry, pool_photo.asset_id, digest)
 
 
 def test_a_scene_naming_two_sources_plays_only_their_pools_and_asks_for_their_photos(registry):
@@ -292,7 +275,8 @@ def test_missing_ready_blob_refuses_whole_offer_but_persists_current_runtime(reg
     original_offer = coordinator._offer
 
     def corrupt_after_planning(conn, plan, groups):
-        conn.execute("UPDATE media_blobs SET state='corrupt'")
+        conn.execute("UPDATE assets SET produced_size=NULL,produced_sha256=NULL "
+                     "WHERE kind='media-variant'")
         original_offer(conn, plan, groups)
 
     # The catalog is hydrated before _offer.  Exercise the publication race so
@@ -723,21 +707,9 @@ def test_a_hand_placed_photo_beyond_the_default_crop_limit_is_refused(registry):
 
 def prepare(registry, photos):
     """Each photo's prepared copy ready under the current recipe, as a worker leaves it."""
-    recipe = "f" * 64
-    with registry.db.transaction() as conn:
-        conn.execute("INSERT INTO media_settings(singleton,max_bytes,recipe_id) VALUES(TRUE,%s,%s) "
-                     "ON CONFLICT(singleton) DO UPDATE SET recipe_id=EXCLUDED.recipe_id",
-                     (4 * 1024**3, recipe))
-        for number, item in enumerate(photos):
-            digest = f"{number + 1:064x}"
-            variant = Variant(sha256=digest, size=10, media_type="image/jpeg",
-                              width=item.width, height=item.height)
-            conn.execute("INSERT INTO media_blobs VALUES(%s,%s,10,'ready',%s)",
-                         (digest, Jsonb(variant.model_dump(mode="json")), registry.clock.utc()))
-            conn.execute("INSERT INTO media_jobs(id,asset_id,recipe_id,state,earliest_start,"
-                         "variant_sha,updated_at) VALUES(%s,%s,%s,'ready',%s,%s,%s)",
-                         ("job-" + item.asset_id[-12:], item.asset_id, recipe,
-                          registry.clock.utc(), digest, registry.clock.utc()))
+    for number, item in enumerate(photos):
+        seed_variant(registry, item.asset_id, f"{number + 1:064x}", width=item.width,
+                     height=item.height)
 
 
 def test_two_frames_of_one_shape_show_different_photos_with_their_crops(registry):

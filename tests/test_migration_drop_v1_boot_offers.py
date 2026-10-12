@@ -175,7 +175,7 @@ def test_069_drops_the_v1_lane_and_keeps_every_node_record(before_069, tmp_path)
         conn.execute("INSERT INTO assets(kind,identity,created_at) "
                      "VALUES('player-payload',%s,1)", (PAYLOAD_SHA,))
 
-    app = create_app(registry.db, registry.clock, ADMIN, media_root=tmp_path / "media")
+    app = create_app(registry.db, registry.clock, ADMIN, cache_root=tmp_path)
     auth = {"Authorization": "Bearer " + ADMIN}
     with TestClient(app) as client:
         for method, path in DELETED_ROUTES:

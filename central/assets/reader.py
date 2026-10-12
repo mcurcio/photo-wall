@@ -26,7 +26,7 @@ from datetime import timedelta
 from typing import Any
 
 from central.assets.store import CacheStore
-from central.kernel.assets import AssetKey, AssetReady
+from central.kernel.assets import AssetKey, AssetReady, MediaReady
 from central.kernel.job_types import AssetJob
 from central.kernel.jobs import asset_key
 from central.kernel.ports import AssetRecords, Candidates
@@ -49,6 +49,7 @@ class Opened:
     fd: int  # the caller owns (closes) it
     size: int
     sha256: str  # -> the Digest header
+    media_type: str | None = None  # a media variant's (`MediaReady`) -> its Content-Type
 
 
 @dataclass(frozen=True, slots=True)
@@ -203,7 +204,8 @@ class AssetReader:
         file = self._store.open(asset_key(job), facts)
         if file is None:
             return None
-        return Opened(job=job, fd=file.fd, size=file.size, sha256=facts.sha256)
+        return Opened(job=job, fd=file.fd, size=file.size, sha256=facts.sha256,
+                      media_type=facts.media_type if isinstance(facts, MediaReady) else None)
 
     async def _touch(self, job: AssetJob) -> None:
         """Record `last_served_at` at most once per interval per key; failures never fail a serve."""

@@ -26,7 +26,7 @@ class PowerRefused(Exception):
 
 class PowerQueries(Protocol):
     def night_off(self) -> NightOffView:
-        """Night off as stored (migration 088 seeds it) and its next on and off times."""
+        """Night off as stored (migration 089 seeds it) and its next on and off times."""
         ...
 
     def holds(self) -> tuple[HoldView, ...]:

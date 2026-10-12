@@ -530,6 +530,25 @@ def composition(project: str, fixture_project: str, scenario: str) -> dict:
                  "fixture_setup": dict(external=True, name=fixture_project + "_setup")})
 
 
+def player_cache_audit_code(directory: str) -> str:
+    """The script the demo runs inside a Player to hash each file in its cache.
+
+    The Player names a cached file `<sha256 of its variant key>.<sha256 of its bytes>.blob`
+    (player/cache.py `_BLOB`), so the audit hashes the bytes against the name's second part.
+    """
+    return f"""import hashlib,json,pathlib,re
+result=[]
+name=re.compile(r'^([a-f0-9]{{64}})[.]([a-f0-9]{{64}})[.]blob$')
+for path in sorted(pathlib.Path({directory!r}).glob('*.blob')):
+    if len(result)>=32: raise RuntimeError('audit_bound')
+    match=name.fullmatch(path.name)
+    assert match is not None, path.name
+    digest=hashlib.file_digest(path.open('rb'),'sha256').hexdigest()
+    assert digest == match.group(2)
+    result.append(dict(key=match.group(1),sha256=digest,size=path.stat().st_size))
+print(json.dumps(result))"""
+
+
 class DemoHost:
     def __init__(self, state: Path):
         self.state = state.resolve()
@@ -682,14 +701,7 @@ class DemoHost:
         return result
 
     def byte_audit(self):
-        code = """import hashlib,json,pathlib
-result=[]
-for path in sorted(pathlib.Path('/tmp/cache').glob('*.blob')):
-    if len(result)>=32: raise RuntimeError('audit_bound')
-    digest=hashlib.file_digest(path.open('rb'),'sha256').hexdigest()
-    assert digest == path.stem
-    result.append(dict(sha256=digest,size=path.stat().st_size))
-print(json.dumps(result))"""
+        code = player_cache_audit_code("/tmp/cache")
         return {name: json.loads(self.compose("exec", "-T", name, "python3", "-c", code))
                 for name in self.players}
 
@@ -780,8 +792,7 @@ def upstream_action(action: str):
         data = filename.read_bytes()
         with filename.open("rb") as stream:
             uploaded = fixture.request("POST", "/assets", (201,), data=dict(
-                deviceAssetId=name, deviceId=project, fileCreatedAt=stamp(30),
-                fileModifiedAt=stamp(30), isFavorite="true"),
+                fileCreatedAt=stamp(30), fileModifiedAt=stamp(30), isFavorite="true"),
                 files={"assetData": (name + ".mp4", stream, "video/mp4")})
         state["assets"][name] = dict(label="video", upstream_id=uploaded["id"],
             sha1=hashlib.sha1(data).hexdigest(), sha256=hashlib.sha256(data).hexdigest(),
@@ -996,7 +1007,11 @@ def operator_action(action: str):
         raise DemoError("unknown_operator_action")
     database = Database(os.environ["PHOTO_WALL_DATABASE_URL"])
     with database.transaction() as conn:
-        jobs = conn.execute("SELECT state,result,asset_id FROM media_jobs ORDER BY id LIMIT 100").fetchall()
+        # Each made media variant (follow-up to 5a, slice T): `<asset_id>.<recipe_id>`.
+        variants = conn.execute(
+            "SELECT identity,produced_size,produced_sha256,produced_detail FROM assets "
+            "WHERE kind='media-variant' AND produced_sha256 IS NOT NULL "
+            "ORDER BY identity LIMIT 100").fetchall()
         locks = conn.execute("SELECT player_id,authority_epoch,assignment_id,layer,valid_until FROM assignment_locks "
                              "ORDER BY player_id,assignment_id LIMIT 256").fetchall()
         commits = conn.execute("SELECT player_id,authority_epoch,revision,assignment_id,group_id,"
@@ -1009,11 +1024,12 @@ def operator_action(action: str):
                               "ORDER BY player_id,authority_epoch DESC,revision DESC").fetchall()
         groups = conn.execute("SELECT id,members,status FROM coordination_groups ORDER BY starts_at DESC LIMIT 64").fetchall()
     return dict(utc=time.time(), pool=pool(), connection=connection(),
-        jobs=[dict(state=job["state"], asset_id=job["asset_id"],
-                   original_sha256=job["result"].get("original_sha256") if job["result"] else None,
-                   variant=job["result"].get("variant") if job["result"] else None,
-                   recipe_id=job["result"].get("recipe_id") if job["result"] else None,
-                   build=job["result"].get("build") if job["result"] else None) for job in jobs],
+        jobs=[dict(state="ready", asset_id=row["identity"].split(".")[0],
+                   recipe_id=row["identity"].split(".")[1],
+                   variant=dict(sha256=row["produced_sha256"], size=row["produced_size"],
+                                **{name: row["produced_detail"][name] for name in
+                                   ("media_type", "width", "height", "duration")}),
+                   made_from=row["produced_detail"]["made_from"]) for row in variants],
         locks=[dict(player_id=row["player_id"], authority_epoch=row["authority_epoch"],
                     assignment_id=row["assignment_id"], sha256=row["layer"]["variant"]["sha256"],
                     output_id=row["layer"]["output_id"],
@@ -1557,9 +1573,8 @@ def run_demo(state: Path, fixture_state: Path, app_image: Path, scenario: str, k
                 time.sleep(2)
         local_bytes = host.byte_audit()
         # Preparation fetches Immich's rendition, not the original, so no original hash compares.
-        for job in snapshot["jobs"]:
-            if job["state"] == "ready":
-                require(job["build"]["platform"].startswith("Linux-") and job["build"]["memory_limit_enforced"], "linux_conversion_missing")
+        # A media variant records the copy it was made from, not the renderer build (follow-up to
+        # 5a, slice T: the build is out of the recipe id), so no Linux build is checked here.
         require(all(local_bytes.values()), "local_bytes_missing")
         evidence["phases"]["baseline"] = dict(checks=checks, local_bytes=local_bytes, seconds=round(time.monotonic()-started, 3),
             central=snapshot, players=reports)

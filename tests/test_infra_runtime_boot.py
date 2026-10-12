@@ -31,7 +31,7 @@ from central.kernel.jobs import Delivery, Job, QueueName, job_keys
 from contracts.time import ManualClock, SystemClock
 
 DSN = "postgresql://unused.invalid/none"
-BOTH = {QueueName.FETCH: 2, QueueName.UPKEEP: 1}
+BOTH = {QueueName.FETCH: 2, QueueName.UPKEEP: 1, QueueName.TRANSCODE: 1}
 
 
 def make(handlers=None, concurrency=None, **kwargs):
@@ -109,14 +109,15 @@ def test_run_starts_one_loop_per_queue_and_stop_is_graceful_and_idempotent(monke
 
     asyncio.run(scenario())
     assert sorted((tuple(s["queues"]), s["concurrency"]) for s in started) == [
-        (("photo-wall-fetch",), 2), (("photo-wall-upkeep",), 1)]
+        (("photo-wall-fetch",), 2), (("photo-wall-transcode",), 1), (("photo-wall-upkeep",), 1)]
     for kwargs in started:
         assert kwargs["install_signal_handlers"] is False
         assert kwargs["update_heartbeat_interval"] == 10
         assert kwargs["stalled_worker_timeout"] == 30
     assert log[0] == "open" and log[-1] == "close"
     assert sorted(entry for entry in log if entry not in ("open", "close")) == [
-        ("stopped", ("photo-wall-fetch",)), ("stopped", ("photo-wall-upkeep",))]
+        ("stopped", ("photo-wall-fetch",)), ("stopped", ("photo-wall-transcode",)),
+        ("stopped", ("photo-wall-upkeep",))]
     runtime.stop()  # after run returned: still a no-op
 
 
@@ -298,7 +299,7 @@ def test_a_lost_completion_ends_run_with_an_error(monkeypatch):
 
     async def scenario():
         running = asyncio.create_task(runtime.run())
-        while len(started) < 2:
+        while len(started) < 3:
             await asyncio.sleep(0)
         runtime._completion_lost()
         await asyncio.wait_for(running, 1)
@@ -306,7 +307,8 @@ def test_a_lost_completion_ends_run_with_an_error(monkeypatch):
     with pytest.raises(RuntimeError, match="completion_not_recorded"):
         asyncio.run(scenario())
     assert sorted(entry for entry in log if entry not in ("open", "close")) == [
-        ("stopped", ("photo-wall-fetch",)), ("stopped", ("photo-wall-upkeep",))]
+        ("stopped", ("photo-wall-fetch",)), ("stopped", ("photo-wall-transcode",)),
+        ("stopped", ("photo-wall-upkeep",))]
 
 
 def test_body_raises_recorded_failure_only_for_failed_outcomes(monkeypatch):

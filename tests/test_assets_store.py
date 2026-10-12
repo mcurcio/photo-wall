@@ -118,3 +118,72 @@ def test_install_renames_over_the_final_path_and_discard_is_idempotent(store):
     store.discard(store.layout.path(OS_KEY))
     store.discard(store.layout.path(OS_KEY))  # missing -> no-op
     assert not store.layout.path(OS_KEY).exists()
+
+
+# A media variant is stored by its bytes' digest (`media/<sha256>`), and a path is never overwritten.
+MEDIA_KEY = AssetKey(AssetKind.MEDIA_VARIANT, "asset-one." + "e" * 64)
+
+
+def _temp_of(store: CacheStore, data: bytes = DATA):
+    temp = store.temp_path(MEDIA_KEY)
+    temp.write_bytes(data)
+    return temp
+
+
+def test_a_second_making_of_the_same_bytes_keeps_the_file_already_at_the_digest(store):
+    """Two makings whose bytes are equal (two ladder steps both capped at a small photo's
+    readable size) name one file: the second is dropped and the first stays, never overwritten."""
+    store.install_by_digest(_temp_of(store), MEDIA_KEY, FACTS)
+    final = store.layout.path(MEDIA_KEY, FACTS)
+    inode = os.stat(final).st_ino
+    temp = _temp_of(store)
+    store.install_by_digest(temp, MEDIA_KEY, FACTS)
+    assert os.stat(final).st_ino == inode
+    assert final.read_bytes() == DATA
+    assert not temp.exists()
+
+
+@pytest.mark.parametrize("held", [b"x" * len(DATA), DATA[:-1]], ids=["same_size", "other_size"])
+def test_a_corrupt_file_at_the_digest_is_replaced_by_the_new_making(store, held):
+    final = store.layout.path(MEDIA_KEY, FACTS)
+    final.parent.mkdir(parents=True, exist_ok=True)
+    final.write_bytes(held)
+    temp = _temp_of(store)
+    store.install_by_digest(temp, MEDIA_KEY, FACTS)
+    assert final.read_bytes() == DATA
+    assert not temp.exists()
+
+
+def test_a_media_file_that_cannot_be_opened_is_a_miss_and_stays(store):
+    """A failure to open (here a permission refused; equally a full descriptor table or an I/O
+    error) says nothing about the bytes: the open answers a miss and leaves the file in place."""
+    store.install_by_digest(_temp_of(store), MEDIA_KEY, FACTS)
+    final = store.layout.path(MEDIA_KEY, FACTS)
+    final.chmod(0)
+    try:
+        if os.access(final, os.R_OK):
+            pytest.skip("running as a user that ignores file permissions")
+        assert store.open(MEDIA_KEY, FACTS) is None
+        assert final.exists()
+    finally:
+        final.chmod(0o644)
+    opened = store.open(MEDIA_KEY, FACTS)
+    assert opened is not None
+    os.close(opened.fd)
+
+
+def test_a_wrong_media_file_at_the_digest_is_discarded(store, tmp_path):
+    """A file opened and found wrong (other bytes, other size), or a symlink at the name, is
+    discarded so the next read re-makes it."""
+    final = store.layout.path(MEDIA_KEY, FACTS)
+    final.parent.mkdir(parents=True, exist_ok=True)
+    for wrong in (b"x" * len(DATA), DATA[:-1]):
+        final.write_bytes(wrong)
+        assert store.open(MEDIA_KEY, FACTS) is None
+        assert not final.exists()
+    outside = tmp_path / "outside"
+    outside.write_bytes(DATA)
+    final.symlink_to(outside)
+    assert store.open(MEDIA_KEY, FACTS) is None
+    assert not os.path.lexists(final)
+    assert outside.read_bytes() == DATA

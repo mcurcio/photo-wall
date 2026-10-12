@@ -64,6 +64,9 @@ def test_081_keeps_hand_placed_photos_as_library_assets_and_retires_the_rest(emp
                              "variant_sha,updated_at) VALUES(%s,%s,%s,%s,1,%s,1)",
                              (f"job-{number}", _identity(metadata), "a" * 64,
                               "queued" if variant is None else "ready", variant))
+        migrate_before(db, "082")  # 081 alone: 088 drops the media store's tables after it
+        with db.transaction() as conn:
+            jobs = conn.execute("SELECT count(*) AS n FROM media_jobs").fetchone()["n"]
         db.migrate()
         with db.transaction() as conn:
             kept = [row["asset_id"] for row in conn.execute(
@@ -72,7 +75,6 @@ def test_081_keeps_hand_placed_photos_as_library_assets_and_retires_the_rest(emp
             parents = {(row["connection_ref"], row["upstream_id"]) for row in conn.execute(
                 "SELECT connection_ref,upstream_id::text AS upstream_id FROM library_assets"
                 ).fetchall()}
-            jobs = conn.execute("SELECT count(*) AS n FROM media_jobs").fetchone()["n"]
             tables = {row["name"] for row in conn.execute(
                 "SELECT table_name AS name FROM information_schema.tables "
                 "WHERE table_schema='public'").fetchall()}

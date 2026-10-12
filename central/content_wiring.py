@@ -20,6 +20,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Final
 
+from central.assets.frame_media import FrameMedia
 from central.assets.handlers import (
     FetchLibraryThumbnailHandler,
     FetchOsImageHandler,
@@ -35,9 +36,11 @@ from central.assets.store import CacheStore
 from central.content_catalog.catalog import ReleaseCatalog
 from central.content_catalog.sync import SyncReleasesHandler
 from central.db import Database
+from central.execution_repository import PostgresExecutionRepository
 from central.health.probe import PodProbe
 from central.infra.asset_records import PgAssetRecords
 from central.infra.catalog_records import PgReleaseRecords
+from central.infra.frame_media_grants import PgFrameMediaGrants
 from central.infra.node_releases import PgNodeReleaseRecords
 from central.infra.outcome_feed import OutcomeFeed
 from central.infra.outcomes import JobOutcomes
@@ -46,6 +49,10 @@ from central.infra.queue_ops import PurgeFinishedJobsHandler, QueueAdmin, Rescue
 from central.infra.runtime import JobRuntime
 from central.infra.stored_assets import DiskStoredAssets
 from central.infra.transactions import PgTransactions
+from central.installation_repository import PostgresInstallationRepository
+from central.kernel.assets import MediaReady
+from central.kernel.handling import Handler
+from central.kernel.job_types import PrepareMedia
 from central.kernel.jobs import QueueName
 from central.kernel.ports import AssetReadiness, ThumbnailOrigin
 from central.kernel.publishing import Publisher
@@ -60,8 +67,12 @@ WAITER_SLOTS: Final = 32  # §2: the per-pod waiter cap for OS images and `.deb`
 # tile holds a FETCH slot for at most its client's metadata budget.
 THUMBNAIL_WAITER_SLOTS: Final = 4
 THUMBNAIL_WAIT: Final = timedelta(seconds=2)
+# Frame media (follow-up to 5a): a Player's miss waits for its re-make in one of 8 slots of its
+# own, up to the read-through bound (`contracts.read_through`), as the media gateway bounded its
+# transfers to 8.
+FRAME_MEDIA_WAITER_SLOTS: Final = 8
 WORKER_CONCURRENCY: Final[Mapping[QueueName, int]] = MappingProxyType(
-    {QueueName.FETCH: 2, QueueName.UPKEEP: 2})
+    {QueueName.FETCH: 2, QueueName.UPKEEP: 2, QueueName.TRANSCODE: 2})
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,6 +87,8 @@ class ContentServices:
     thumbnail_reader: AssetReader | None = None  # its own slots and short wait (§40)
     publisher: Publisher | None = None  # jobs published inside another writer's transaction
     readiness: AssetReadiness | None = None  # the one "is it in the cache now" (release read)
+    frame_media: FrameMedia | None = None  # which Player may read which media variant
+    frame_media_reader: AssetReader | None = None  # its own slots (`FRAME_MEDIA_WAITER_SLOTS`)
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,10 +142,18 @@ def build_content_services(db: Database, clock: Clock, *, cache_root: Path,
         store=core.store, records=core.assets, transactions=core.transactions,
         publisher=core.publisher, slots=WaiterSlots(THUMBNAIL_WAITER_SLOTS), clock=clock,
         wait_timeout=THUMBNAIL_WAIT)
+    frame_media = FrameMedia(
+        transactions=core.transactions, records=core.assets, clock=clock,
+        grants=PgFrameMediaGrants(installation=PostgresInstallationRepository(clock),
+                                  execution=PostgresExecutionRepository()))
+    frame_media_reader = AssetReader(
+        store=core.store, records=core.assets, transactions=core.transactions,
+        publisher=core.publisher, slots=WaiterSlots(FRAME_MEDIA_WAITER_SLOTS), clock=clock)
     return ContentServices(catalog=core.catalog, reader=reader, probe=PodProbe(db.healthy),
                            feed=core.feed, thumbnails=_thumbnails(core, servable_thumbnail),
                            thumbnail_reader=thumbnail_reader, publisher=core.publisher,
-                           readiness=core.stored)
+                           readiness=core.stored, frame_media=frame_media,
+                           frame_media_reader=frame_media_reader)
 
 
 def build_library_thumbnails(db: Database, clock: Clock, *, cache_root: Path) -> LibraryThumbnails:
@@ -143,11 +164,13 @@ def build_library_thumbnails(db: Database, clock: Clock, *, cache_root: Path) ->
 
 
 def build_job_runtime(db: Database, clock: Clock, *, cache_root: Path,
-                      env: Mapping[str, str], thumbnails: ThumbnailOrigin) -> JobRuntime:
+                      env: Mapping[str, str], thumbnails: ThumbnailOrigin,
+                      media_maker: Handler[PrepareMedia, MediaReady]) -> JobRuntime:
     """Every CATALOG handler behind one `JobRuntime`; its boot checks run here.
 
     `thumbnails` is the media worker's library origin (R22): the thumbnail handler is Central's,
-    its library half is injected, so Central imports no library client.
+    its library half is injected, so Central imports no library client. `media_maker` is the
+    media worker's `PrepareMedia` handler (media/media_maker.py), injected for the same reason.
 
     The runtime owns the queue-ops pool (`QueueAdmin`, opened on first use) and closes it when
     `run()` ends, so no caller has a pool to remember.
@@ -165,6 +188,7 @@ def build_job_runtime(db: Database, clock: Clock, *, cache_root: Path,
         FetchOsImageHandler(production=production, origin=origin, store=core.store),
         FetchSealedEnvironmentHandler(production=production, origin=origin),
         FetchLibraryThumbnailHandler(production=production, origin=thumbnails),
+        media_maker,
         PrefetchHandler(catalog=core.catalog, readiness=core.stored,
                         transactions=core.transactions, publisher=core.publisher),
         MaintainCacheHandler(catalog=core.catalog, records=core.assets, store=core.store,

@@ -10,7 +10,7 @@ from contracts.models import AfterEnd, Layer, Variant
 from contracts.on_screen import Extent, kept_from, on_screen_extent
 from contracts.photo_crop import CENTRED
 
-STILL = Variant(sha256="a" * 64, size=1, media_type="image/jpeg", width=4000, height=3000)
+STILL = Variant(asset_id="asset-a", recipe_id="e" * 64, sha256="a" * 64, size=1, media_type="image/jpeg", width=4000, height=3000)
 
 
 def _layer(start: float, end: float, after_end: AfterEnd = "leave_as_is", *,

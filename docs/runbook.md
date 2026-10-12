@@ -50,7 +50,7 @@ Open **Settings › Photo library** (`#/photo-library`) and press **Add a connec
 |---|---|
 | "Immich rejected the API key." | **Paste a new key** |
 | "The key cannot do everything Photo Wall needs. Make a key with these permissions: …" | Make that key in Immich, then **Paste a new key** |
-| "Immich 2.4.1 is older than 2.5.0. Update Immich, then check again." | Update Immich, then **Check again** |
+| "Immich 3.0.0 is older than 3.1.0. Update Immich, then check again." | Update Immich, then **Check again** |
 | "Photo Wall cannot reach Immich at <address>" | Check the host and network, then **Check again** |
 | "Immich answered in a way Photo Wall does not understand." | **Check again**; **Details** shows the code |
 | "This key belongs to <found>; the connection belongs to <expected>" | **Paste a key for <expected>** |
@@ -1051,7 +1051,7 @@ On the Pi, the controller's journal (above) logs each attempt; each is also a `d
 **Deploying 2a and 2b.**
 
 - Central and every Pi run the display line's schema 3 together. A Pi still on an older release refuses the new document and leaves its display as it is, reported, until it reboots onto the release (Central deploys through an iac pull request the owner merges; a Pi takes a new release at its next reboot).
-- Today's Programs end at deploy (migration 088): they were timed in the browser's zone, which Central never recorded. Until a Default Scene is chosen and the routine remade, Frames keep their last photo. After deploy: choose a Default Scene on the week page, then remake each Schedule.
+- Today's Programs end at deploy (migration 089): they were timed in the browser's zone, which Central never recorded. Until a Default Scene is chosen and the routine remade, Frames keep their last photo. After deploy: choose a Default Scene on the week page, then remake each Schedule.
 - Night off is seeded on: 23:00 to 07:00, every day, every Frame there was at deploy, displays off. Check it on the week page's Power lane right after deploy.
 
 **Bench step (2a).** On the test Pi, with a release carrying #86 on it: set Night off's off time two minutes ahead and its on time two minutes after that; confirm the monitor goes off within a minute of the off time and on within a minute of the on time, and read the report's `in_force` at each. NOT RUN until such a release is on the Pi.

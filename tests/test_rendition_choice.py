@@ -11,7 +11,6 @@ from central.photo_library.rendition import FrameNeed, covers, rendition_needs
 from contracts.models import FrameProfile
 from media.library_client import fetch_plan
 
-READABLE = frozenset({"image/jpeg", "image/png", "image/webp"})
 LANDSCAPE = FrameProfile(width_px=3840, height_px=2160, diagonal_inches=55)
 PORTRAIT = FrameProfile(width_px=1080, height_px=1920, diagonal_inches=24)
 UHD = FrameNeed(aspect=16 / 9, width=3840, height=2160)
@@ -36,7 +35,8 @@ def preview(width: int, height: int) -> dict:
     (photo(kind="video", original_type="video/mp4"), (UHD,), {}, ("original",)),
     (photo(), (UHD,), {}, ("preview", "original")),
     (photo(edited=True), (UHD,), {}, ("preview", "fullsize")),
-    (photo(original_type="image/heic"), (UHD,), {}, ("preview", "fullsize")),
+    (photo(original_type="image/heic"), (UHD,), {}, ("preview", "original")),   # A5 reads HEIC
+    (photo(original_type="image/x-canon-cr2"), (UHD,), {}, ("preview", "fullsize")),
     (photo(original_type=None), (UHD,), {}, ("preview", "fullsize")),
     (photo(), (UHD,), preview(1440, 1080), ("original",)),          # a known preview too small
     (photo(), (FrameNeed(aspect=16 / 9, width=1280, height=720),), preview(1440, 1080),
@@ -50,7 +50,7 @@ def preview(width: int, height: int) -> dict:
 ])
 def test_the_plan_tries_the_preview_then_the_full_resolution_copy(asset, needs, known, plan):
     """A4 case 1."""
-    assert fetch_plan(asset, needs, known, READABLE) == plan
+    assert fetch_plan(asset, needs, known, None) == plan
 
 
 @pytest.mark.parametrize("original_type", ["image/gif", "image/bmp", "image/svg+xml"])
@@ -59,16 +59,19 @@ def test_an_unedited_original_immich_serves_as_itself_but_photo_wall_cannot_read
                                                                                  known):
     """Immich keeps no full-size copy of an unedited GIF or BMP and serves its original for
     "fullsize": the preview is the only copy Photo Wall can read, even when it is small."""
-    assert fetch_plan(photo(original_type=original_type), (UHD,), known, READABLE) == ("preview",)
-    assert fetch_plan(photo(original_type=original_type), (), {}, READABLE) == ("preview",)
+    assert fetch_plan(photo(original_type=original_type), (UHD,), known, None) == ("preview",)
+    assert fetch_plan(photo(original_type=original_type), (), {}, None) == ("preview",)
     assert fetch_plan(photo(edited=True, original_type=original_type), (UHD,), {},
-                      READABLE) == ("preview", "fullsize")
+                      None) == ("preview", "fullsize")
 
 
-def test_a_readable_type_is_the_callers_word():
-    """HEIC is fetched as its original once preparation reads it (A5's STILL_MEDIA_TYPES)."""
-    assert fetch_plan(photo(original_type="image/heic"), (UHD,), {},
-                      READABLE | {"image/heic"}) == ("preview", "original")
+@pytest.mark.parametrize(("full_size_copies", "plan"), [
+    (False, ("preview",)), (None, ("preview", "fullsize")), (True, ("preview", "fullsize"))])
+def test_an_unedited_raw_photo_follows_its_connections_full_size_copies(full_size_copies, plan):
+    """Follow-up S1: with full-size copies off Immich redirects "fullsize" to the preview, so
+    the ladder (rendition.copy_ladder) holds the preview alone."""
+    raw = photo(original_type="image/x-canon-cr2")
+    assert fetch_plan(raw, (UHD,), {}, full_size_copies) == plan
 
 
 def test_needs_are_each_frames_output_or_its_profile_until_reported():

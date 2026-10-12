@@ -22,7 +22,8 @@ from central.kernel.assets import AssetKey, AssetKind, AssetReady
 
 class QueueName(StrEnum):
     FETCH = "photo-wall-fetch"
-    UPKEEP = "photo-wall-upkeep"  # TRANSCODE arrives with media
+    UPKEEP = "photo-wall-upkeep"
+    TRANSCODE = "photo-wall-transcode"  # media variants: fetch a photo's copy and encode it
 
 
 # Exactly the cadences a seconds-last croniter expression can say (infra maps them to cron).
@@ -188,7 +189,7 @@ def _check_asset(
         raise TypeError(f"{cls.__name__}: an asset job is not periodic")
     if len(fields) != 1:
         # `asset_key` names the file by that one field; a second field would silently share
-        # the file. A multi-field asset job (media's PrepareMedia) needs an identity encoding.
+        # the file. A multi-part name is one encoded field (PrepareMedia's `MediaVariantKey`).
         raise TypeError(f"{cls.__name__}: an asset job has exactly one field")
     if asset in _ASSET_CLAIMS:
         raise TypeError(f"{cls.__name__}: asset kind {asset.value!r} is already claimed")

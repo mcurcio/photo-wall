@@ -251,7 +251,7 @@ def build(handlers, catalog=CATALOG):
 
 def test_boot_accepts_exactly_one_handler_per_catalog_type():
     executor = build(catalog_stubs())
-    assert executor.queues == frozenset({QueueName.FETCH, QueueName.UPKEEP})
+    assert executor.queues == frozenset({QueueName.FETCH, QueueName.UPKEEP, QueueName.TRANSCODE})
 
 
 def test_boot_refuses_a_handler_without_exact_hints():

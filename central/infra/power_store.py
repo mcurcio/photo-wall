@@ -1,5 +1,5 @@
 """Display power policy over PostgreSQL (Power and the week: slice T for Night off, slice S2 for
-holds; migrations 088 `night_off` and 089 `power_holds`).
+holds; migrations 089 `night_off` and 090 `power_holds`).
 
 `power_policy_in` is the one read of the policy: the Output document source
 (central/infra/display_store.py), Why and the shown-history filter all call it in their own
@@ -30,7 +30,7 @@ _HOLD_COLUMNS = "hold_id, power, source, started_at, ends_at"
 
 
 def night_off_in(conn: Any) -> NightOff:
-    """The stored Night off (migration 088 writes the row; it always exists)."""
+    """The stored Night off (migration 089 writes the row; it always exists)."""
     row = conn.execute("SELECT settings, revision FROM night_off").fetchone()
     return NightOff.model_validate({**row["settings"], "revision": row["revision"]})
 

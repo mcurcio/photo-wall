@@ -33,7 +33,7 @@ Design it twice: the frame weighed where the weekly power rule is evaluated (A, 
 - **Two arbiters, one When** (a design rule). Content: priority (Default Scene < Normal < Special event < Always wins), a tie to the request admitted last, as Runtime did before. Power: the newest hold until the next scheduled change (or until resumed, #90), Night off underneath, on otherwise; the 1b test on top of both. Neither arbiter reads the other.
 - **Programs repeat** (the console's Schedules): a Program is a Scene, a When and a priority; its windows are worked out in house time and never stored; a window's identity is `program:<id>:<revision>:<start>`. The Default Scene is one perpetual Run at the lowest rank. Save applies from the next window; Save and apply now finishes the playing window gracefully and plays the new rule at once ([Runtime](../module-runtime.md#house-time-and-repeating-programs)).
 - **Why explains, never decides** (`central/why/`): each Frame's winner and what it beat, its wanted power with the reason and the next set time, and what the Pi says (a fact that may lag).
-- **Today's Programs end at deploy** (migration 088): they were single windows timed in the browser's zone, which Central never recorded, so they cannot be converted faithfully. No backwards compatibility.
+- **Today's Programs end at deploy** (migration 089): they were single windows timed in the browser's zone, which Central never recorded, so they cannot be converted faithfully. No backwards compatibility.
 
 **Departures from the frame**, recorded here:
 

@@ -11,8 +11,8 @@ from pathlib import Path
 
 from central.infra.runtime import STALLED_WORKER_SECONDS
 
-JOB_LOOPS = 2  # the runtime's loops per process: fetch and upkeep
-MEDIA_LOOP = 1  # the legacy media loop: one per fleet (the media writer lock)
+JOB_LOOPS = 3  # the runtime's loops per process: fetch, upkeep and transcode
+MEDIA_LOOP = 1  # the library checks' and measurements' loop: one per process (no writer lock)
 
 
 def fake_media_tools(directory: Path) -> Path:

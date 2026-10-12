@@ -10,6 +10,8 @@ from pydantic import AfterValidator
 
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _LIBRARY_ASSET_ID = re.compile(r"asset-[0-9a-f]{64}")  # media.models.asset_identity
+# A media variant's name: its photo revision's asset id and its recipe id (kernel/job_types.py).
+_MEDIA_VARIANT_KEY = re.compile(r"(asset-[0-9a-f]{64})\.([0-9a-f]{64})")
 _REASON = re.compile(r"[a-z][a-z0-9_]{0,63}")
 _MAX_TAG_LENGTH = 128
 
@@ -55,6 +57,25 @@ def require_library_asset_id(value: str) -> str:
     return value
 
 
+def require_media_variant_key(value: str) -> str:
+    """`<asset_id>.<recipe_id>`: a photo revision and the recipe that sizes it."""
+    if not isinstance(value, str) or _MEDIA_VARIANT_KEY.fullmatch(value) is None:
+        raise ValueError("invalid_media_variant_key")
+    return value
+
+
+def media_variant_key(asset_id: str, recipe_id: str) -> str:
+    """The one spelling of a media variant's name."""
+    return require_media_variant_key(f"{asset_id}.{recipe_id}")
+
+
+def split_media_variant_key(value: str) -> tuple[str, str]:
+    """(asset_id, recipe_id) of a media variant's name."""
+    match = _MEDIA_VARIANT_KEY.fullmatch(require_media_variant_key(value))
+    assert match is not None
+    return match.group(1), match.group(2)
+
+
 def require_reason(value: str) -> str:
     if not isinstance(value, str) or _REASON.fullmatch(value) is None:
         raise ValueError("invalid_reason")
@@ -70,3 +91,4 @@ ReleaseTag = Annotated[str, AfterValidator(_release_tag)]
 Sha256 = Annotated[str, AfterValidator(require_sha256)]
 ReasonCode = Annotated[str, AfterValidator(require_reason)]
 LibraryAssetId = Annotated[str, AfterValidator(require_library_asset_id)]
+MediaVariantKey = Annotated[str, AfterValidator(require_media_variant_key)]

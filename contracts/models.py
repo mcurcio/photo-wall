@@ -113,9 +113,21 @@ class IdentifyOutput(Model):
     authority_epoch: int = Field(ge=1)
     remaining_seconds: float = Field(gt=0, le=15, allow_inf_nan=False)
 
+# The largest media variant a Player accepts (a prepared copy's bytes).
+MAX_VARIANT_BYTES = 4 * 1024**3
+
+
 class Variant(Model):
+    """One prepared copy of a photo. It is named by its inputs, `asset_id` (the photo revision)
+    and `recipe_id` (what sizes and encodes it), and a Player fetches it by that name at
+    `GET /v1/media/{asset_id}/{recipe_id}`. `sha256` and `size` are the bytes current when the
+    plan was issued; a re-make may serve other bytes of the same content, so a Player checks the
+    body against the `Repr-Digest` and `Content-Length` it is served, never these."""
+
+    asset_id: Identifier
+    recipe_id: Digest
     sha256: Digest
-    size: int = Field(gt=0, le=4 * 1024**3)
+    size: int = Field(gt=0, le=MAX_VARIANT_BYTES)
     media_type: Literal["image/jpeg", "image/png", "video/mp4"]
     width: int = Field(gt=0, le=16384)
     height: int = Field(gt=0, le=16384)
@@ -128,8 +140,13 @@ class Variant(Model):
         return self
 
     @property
+    def key(self) -> str:
+        """`<asset_id>.<recipe_id>`, the variant's name."""
+        return f"{self.asset_id}.{self.recipe_id}"
+
+    @property
     def path(self) -> str:
-        return f"/v1/media/{self.sha256}"
+        return f"/v1/media/{self.asset_id}/{self.recipe_id}"
 
 
 class PlayerConfiguration(Model):

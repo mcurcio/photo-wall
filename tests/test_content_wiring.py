@@ -13,7 +13,7 @@ import signal
 from pathlib import Path
 
 import pytest
-from runtime_fakes import apply_procrastinate_schema
+from runtime_fakes import PrepareMediaStub, apply_procrastinate_schema
 
 from central.content_wiring import (
     WAITER_SLOTS,
@@ -60,15 +60,16 @@ def test_build_job_runtime_passes_every_boot_check(tmp_path):
     # JobRuntime.__init__ raises unless every CATALOG type has exactly one handler and the
     # concurrency map names exactly the catalog's queues.
     runtime = build_job_runtime(StubDatabase(), ManualClock(0.0), cache_root=tmp_path, env=ENV,
-                                thumbnails=NoLibrary())
+                                thumbnails=NoLibrary(), media_maker=PrepareMediaStub())
     assert isinstance(runtime, JobRuntime)
-    assert dict(WORKER_CONCURRENCY) == {QueueName.FETCH: 2, QueueName.UPKEEP: 2}
+    assert dict(WORKER_CONCURRENCY) == {QueueName.FETCH: 2, QueueName.UPKEEP: 2,
+                                        QueueName.TRANSCODE: 2}
 
 
 def test_the_job_runtime_owns_and_closes_its_queue_ops_pool(tmp_path):
     # No caller-held pool: `run()` closes it when the runtime ends (JobRuntime tests prove when).
     runtime = build_job_runtime(StubDatabase(), ManualClock(0.0), cache_root=tmp_path, env=ENV,
-                                thumbnails=NoLibrary())
+                                thumbnails=NoLibrary(), media_maker=PrepareMediaStub())
     assert [type(owned) for owned in runtime._owned] == [QueueAdmin]
 
 
@@ -245,93 +246,22 @@ def test_a_loop_that_returns_while_not_stopping_fails_the_worker(which):
         assert app.stopped_gracefully
 
 
-class HeldLock:
-    """`MediaStore.worker_lock` of a store whose lock another process holds `busy` times."""
+def test_the_media_loop_maintains_once_at_boot_then_runs_its_queue():
+    """The boot pass checks in (the healthcheck's guarantee) before the queue starts; media
+    variants are the job runtime's, so the loop waits for no writer lock."""
+    from media.worker import _media_loop
 
-    def __init__(self, busy: int) -> None:
-        self.busy, self.attempts, self.held = busy, 0, False
+    order = []
 
-    def worker_lock(self):
-        import contextlib
-
-        from central.media_store import MediaStoreError
-
-        self.attempts += 1
-        if self.attempts <= self.busy:
-            raise MediaStoreError("media_writer_active", 503)
-
-        @contextlib.contextmanager
-        def held():
-            self.held = True
-            try:
-                yield self
-            finally:
-                self.held = False
-
-        return held()
-
-
-class MediaStub:
-    def __init__(self, store: HeldLock) -> None:
-        self.store, self.boot = store, []
-
-    async def _register_recipe(self) -> None:
-        self.boot.append(("recipe", self.store.held))
-
-    async def maintain(self) -> None:
-        self.boot.append(("maintain", self.store.held))
-
-
-def test_the_media_loop_stands_by_while_another_process_writes_and_jobs_run_meanwhile():
-    from media.worker import _media_writer, _run_workers
-
-    store = HeldLock(busy=3)
-    media, queue_ran = MediaStub(store), []
-
-    class Started(FakeRuntime):
-        started = False
-
-        async def run(self) -> None:
-            self.started = True
-            await super().run()
-
-    runtime = Started()
+    class Worker:
+        async def maintain(self) -> None:
+            order.append("maintain")
 
     async def queue() -> None:
-        queue_ran.append(store.held)
-        await asyncio.Event().wait()
+        order.append("queue")
 
-    async def main() -> None:
-        running = asyncio.create_task(_run_workers(
-            _media_writer(media, queue, standby_seconds=0.01), runtime))
-        async with asyncio.timeout(5):
-            while not queue_ran:
-                assert runtime.started or store.attempts <= 1
-                await asyncio.sleep(0.005)
-        assert runtime.started  # the job runtime never waited for the media lock
-        os.kill(os.getpid(), signal.SIGTERM)
-        await asyncio.wait_for(running, 5)
-
-    asyncio.run(main())
-    assert store.attempts == 4 and queue_ran == [True]
-    # Boot replaces every connection's tag list (console DDD §38), under the writer lock.
-    assert media.boot == [("recipe", True), ("maintain", True)]
-    assert not store.held  # released on stop
-
-
-def test_the_media_loop_does_not_stand_by_on_other_lock_errors():
-    from central.media_store import MediaStoreError
-    from media.worker import _media_writer
-
-    class Broken:
-        def worker_lock(self):
-            raise MediaStoreError("media_io", 503)
-
-    async def never() -> None:
-        raise AssertionError("the queue must not start")
-
-    with pytest.raises(MediaStoreError, match="media_io"):
-        asyncio.run(_media_writer(MediaStub(Broken()), never, standby_seconds=0.01))
+    asyncio.run(_media_loop(Worker(), queue))
+    assert order == ["maintain", "queue"]
 
 
 # -- migration 022 (PostgreSQL) --------------------------------------------------------------------
@@ -362,10 +292,18 @@ def test_022_cancels_pending_release_queue_tasks_only(registry):
     assert len(events) == 1
 
 
-def test_022_is_a_no_op_before_procrastinate_is_installed(registry):
-    # db.migrate() already ran 022 in the fixture, before any procrastinate schema existed.
-    with registry.db.transaction() as conn:
-        assert conn.execute("SELECT to_regclass('procrastinate_jobs') IS NULL AS absent"
-                            ).fetchone()["absent"]
-        assert conn.execute("SELECT 1 FROM schema_migrations WHERE name = %s",
-                            (MIGRATION_022.name,)).fetchone() is not None
+def test_022_is_a_no_op_before_procrastinate_is_installed(empty_database):
+    # db.migrate() runs 022 before any procrastinate schema exists (the test template installs
+    # it after migrating, as Central's start does).
+    from central.db import Database
+
+    database = Database(empty_database)
+    try:
+        database.migrate()
+        with database.transaction() as conn:
+            assert conn.execute("SELECT to_regclass('procrastinate_jobs') IS NULL AS absent"
+                                ).fetchone()["absent"]
+            assert conn.execute("SELECT 1 FROM schema_migrations WHERE name = %s",
+                                (MIGRATION_022.name,)).fetchone() is not None
+    finally:
+        database.close()

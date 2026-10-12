@@ -1,12 +1,15 @@
 """PostgreSQL checks for Frame-aware authored media validation."""
 
 import pytest
-from psycopg.types.json import Jsonb
+from support.frame_media import seed_variant
 from support.key_content_builders import banded_grid
 from support.measured_photos import measure, measure_all
-from test_authored_media import RECIPE, asset, setup_source
+from test_authored_media import asset, setup_source
 
 from central.coordination import Coordinator
+from central.db import ProcessTransactionClock
+from central.kernel.job_types import PrepareMedia
+from central.media_repository import MediaRepository, prepare_lock
 from central.registry import FrameCreate, RegistryError
 from central.runtime import Child, Contribution, Scene
 from central.wall_plan.fit import FitTarget
@@ -56,17 +59,24 @@ def test_source_candidates_filters_originals_with_the_planner_policy(registry):
         landscape.asset_id]
 
 
-def _prepared(conn, asset_id, *, state="ready", variant=None, failure=None, retry_at=0):
-    """One current-recipe job for an asset, as the worker leaves it: a ready job holds a
-    ready blob of `variant`; any other state holds none."""
-    digest = None
+def _prepared(registry, asset_id, *, variant=None, failure=None, retry_not_before=None):
+    """One photo's preparation under the wall's recipe, as the worker leaves it: a made
+    variant's record, or the latest `PrepareMedia` outcome of a failure (terminal, or transient
+    until `retry_not_before`)."""
     if variant is not None:
-        digest = variant.sha256
-        conn.execute("INSERT INTO media_blobs VALUES(%s,%s,%s,'ready',0)",
-                     (digest, Jsonb(variant.model_dump(mode="json")), variant.size))
-    conn.execute("INSERT INTO media_jobs(id,asset_id,recipe_id,state,retry_at,failure_code,"
-                 "earliest_start,variant_sha,updated_at) VALUES(%s,%s,%s,%s,%s,%s,0,%s,0)",
-                 ("job-" + asset_id[-8:], asset_id, RECIPE, state, retry_at, failure, digest))
+        seed_variant(registry, asset_id, variant.sha256, size=variant.size,
+                     width=variant.width, height=variant.height, media_type=variant.media_type,
+                     duration=variant.duration)
+        return
+    repository = MediaRepository(registry.db, registry.clock,
+                                 times=ProcessTransactionClock(registry.clock))
+    with registry.db.transaction() as conn:
+        key = repository.variant_key_in(conn, asset_id)
+        conn.execute("INSERT INTO job_outcomes(lock_key,job_name,status,reason,retry_not_before,"
+                     "seq,updated_at) VALUES(%s,%s,%s,%s,%s,nextval('job_outcome_seq'),0)",
+                     (prepare_lock(key), PrepareMedia.job_name,
+                      "terminal" if retry_not_before is None else "transient", failure,
+                      retry_not_before))
 
 
 def test_source_candidates_serve_the_planners_standing_for_the_frame(registry):
@@ -78,17 +88,17 @@ def test_source_candidates_serve_the_planners_standing_for_the_frame(registry):
     repo, spec, _ = setup_source(registry, assets=(usable, wrong_shape, failed, retrying, waiting))
     portrait = FrameProfile(width_px=1080, height_px=1920, diagonal_inches=24)
     still = dict(size=10, media_type="image/jpeg")
-    with registry.db.transaction() as conn:
-        _prepared(conn, usable.asset_id,
-                  variant=Variant(sha256="1" * 64, width=30, height=50, **still))
-        # A still prepared as a video: no version this Frame can draw.
-        _prepared(conn, wrong_shape.asset_id,
-                  variant=Variant(sha256="2" * 64, width=30, height=50, size=10,
-                                  media_type="video/mp4", duration=10))
-        _prepared(conn, failed.asset_id, state="failed", failure="asset_missing")
-        # A retry not yet due is a failure to planning until then (catalog hydration).
-        _prepared(conn, retrying.asset_id, state="retry", failure="asset_missing",
-                  retry_at=registry.clock.utc() + 60)
+    add_frame(registry, "need")   # the wall's need names the recipe
+    _prepared(registry, usable.asset_id,
+              variant=Variant(asset_id="asset-1", recipe_id="e" * 64, sha256="1" * 64, width=30, height=50, **still))
+    # A still prepared as a video: no version this Frame can draw.
+    _prepared(registry, wrong_shape.asset_id,
+              variant=Variant(asset_id="asset-2", recipe_id="e" * 64, sha256="2" * 64, width=30, height=50, size=10,
+                              media_type="video/mp4", duration=10))
+    _prepared(registry, failed.asset_id, failure="asset_missing")
+    # A retry not yet due is a failure to planning until then (catalog hydration).
+    _prepared(registry, retrying.asset_id, failure="asset_missing",
+              retry_not_before=registry.clock.utc() + 60)
 
     served = repo.source_candidates(spec.source_ref, target=full_screen(portrait),
                                     settings=HOUSE)["candidates"]
@@ -233,7 +243,7 @@ def test_the_candidates_route_lists_what_fits_and_counts_what_it_skips(registry)
             wide.asset_id: "fits", unmeasured.asset_id: "not_measured"}
         assert answer["count"] == 2
         assert answer["skipped"] == {"beyond_crop_limit": 2, "below_frame_pixels": 1,
-                                     "face_cut": 0, "interest_cut": 1, "no_video_here": 0,
+                                     "above_player_limit": 0, "face_cut": 0, "interest_cut": 1, "no_video_here": 0,
                                      "not_measured": 1}
         looser = client.get(route, params={"frame_id": "wide", "crop_limit": 0.5},
                             headers=headers).json()

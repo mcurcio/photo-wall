@@ -167,7 +167,7 @@ def test_advance_walks_the_phases_in_order():
     assert progress.phase == "include"
     progress = pool_check.advance(progress, source, next_position=edge, seen=3)
     progress = pool_check.advance(progress, source, next_position=None, seen=2)
-    assert (progress.phase, progress.seen_so_far, progress.incomplete) == ("done", 5, False)
+    assert (progress.phase, progress.seen_so_far, progress.incomplete) == ("recheck", 5, False)
     over = pool_check.advance(progress.model_copy(update={"phase": "include"}), source,
                               next_position=None, over_one_instant=True)
     assert (over.phase, over.incomplete) == ("done", True)

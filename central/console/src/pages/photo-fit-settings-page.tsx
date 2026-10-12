@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 
 import { type FitQuestion, PhotoFitBoard, useFitRead } from "../domain/photo-fit-board";
-import { type FitSettings, type FitSettingsView, storedScenes, useFitSettings } from "../domain/photo-fit";
+import { type FitSettings, type FitSettingsView, type FitTuning, storedScenes, useFitSettings } from "../domain/photo-fit";
 import { EmptyState } from "../patterns/entity-page";
 import { Note } from "../patterns/fact-row";
 import { ProblemCard } from "../patterns/problem-card";
@@ -14,7 +14,7 @@ import { Section } from "../ui/section";
 import { Slider } from "../ui/slider";
 import { Inline, Stack } from "../ui/stack";
 
-type Key = keyof FitSettings;
+type Key = keyof FitTuning;
 
 /** One tuning value as the page asks it: its words, its control, and how its stored value
  * (a fraction, a ratio, inches, pixels or steps) is shown (`scale`, `unit`, `step`). */
@@ -53,6 +53,8 @@ const ADVANCED: readonly Row[] = [
 const DETAILS: readonly Row[] = [
   { key: "window_steps", label: "Crop positions tried", control: "number", scale: 1, unit: "positions", step: 1, whole: true,
     help: "How finely a crop is slid across a photo to find its best place." },
+  { key: "max_still_edge", label: "Longest picture a Player shows", control: "number", scale: 1, unit: "px", step: 1, whole: true,
+    help: "No photo's copy is longer than this, and a Frame that would need a longer one shows other photos." },
 ];
 const ROWS = [...SHOWN, ...ADVANCED, ...DETAILS];
 
@@ -80,7 +82,8 @@ function problemOf(row: Row, text: string, view: FitSettingsView): string | null
 /** The draft as settings, or null while a value is not within its range. */
 function settingsOf(draft: Draft, view: FitSettingsView): FitSettings | null {
   if (ROWS.some((row) => problemOf(row, draft[row.key], view) !== null)) return null;
-  return Object.fromEntries(ROWS.map((row) => [row.key, Number(draft[row.key]) / row.scale])) as unknown as FitSettings;
+  // Values the page has no control for (the copy steps) are sent back as read.
+  return { ...view.settings, ...Object.fromEntries(ROWS.map((row) => [row.key, Number(draft[row.key]) / row.scale])) };
 }
 
 function SettingsRow({ row, draft, view, onChange, onDrag }: {

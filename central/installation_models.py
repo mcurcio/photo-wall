@@ -37,7 +37,7 @@ class OutputInventory(Model):
     observation: OutputReport
 
 
-# A Frame's or a wall's name (#92, #94): Frame names are unique ignoring case (migration 090's
+# A Frame's or a wall's name (#92, #94): Frame names are unique ignoring case (migration 091's
 # `frames_name` index, the one home of that rule).
 Name = Annotated[str, Field(min_length=1, max_length=60)]
 

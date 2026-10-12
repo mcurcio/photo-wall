@@ -1,5 +1,5 @@
 """Settings › House over PostgreSQL (Power and the week: slice T reads and seeds, slice S3 saves;
-migration 088's `house_settings`, one row).
+migration 089's `house_settings`, one row).
 
 `house_time_in` is the one read every caller of house time uses inside its own transaction (the
 Runtime store, the Output document source, Why, the Planner's On this day). With no row it answers

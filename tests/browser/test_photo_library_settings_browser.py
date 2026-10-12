@@ -43,7 +43,7 @@ KEY = "PUBLIC-FIXTURE-KEY-1234"
 ANNA = ImmichUser(user_ref="5b0f3c0e-3d1c-4a8a-9f6e-2a8c1f0f7a11", name="Anna", email="anna@example.com")
 BEN = ImmichUser(user_ref="6c1f4d1f-4e2d-4b9b-8a7f-3b9d2a1b8b22", name="Ben", email="ben@example.com")
 COUNTS = LibraryCounts(photos=41203, videos=2110, albums=212, people=96)
-TESTED = ImmichVersion(major=2, minor=5, patch=6)
+TESTED = ImmichVersion(major=3, minor=1, patch=0)
 
 
 @pytest.fixture
@@ -123,7 +123,7 @@ def test_a_pasted_connection_shows_only_its_key_ending_and_no_answer_carries_the
 
 def test_a_passing_check_shows_immich_counts_its_user_and_its_notes(page, registry, library):
     ref = _added(registry)
-    _contact(library, ref, _answer(version=ImmichVersion(major=2, minor=7, patch=0), full_size=False))
+    _contact(library, ref, _answer(version=ImmichVersion(major=3, minor=2, patch=0), full_size=False))
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "photo-library")
         row = _region(page, "Family")
@@ -131,7 +131,7 @@ def test_a_passing_check_shows_immich_counts_its_user_and_its_notes(page, regist
         expect(row.get_by_text("41,203 photos · 2,110 videos · 212 albums · 96 people")).to_be_visible()
         expect(row.get_by_text("Anna (anna@example.com)")).to_be_visible()
         expect(row.get_by_text(
-            "Immich 2.7.0 is newer than Photo Wall has been tested with; it keeps working.")).to_be_visible()
+            "Immich 3.2.0 is newer than Photo Wall has been tested with; it keeps working.")).to_be_visible()
         expect(row.get_by_text(
             "RAW photos without a full-size copy in Immich play at Immich's preview size. "
             "Turn on full-size copies in Immich to show them in full.")).to_be_visible()
@@ -148,8 +148,8 @@ PROBLEMS = {
     "missing_permissions": (lambda library, ref: _contact(library, ref, _answer(missing=("face.read",))),
                             "Make a key with these permissions: face.read.", "Paste a new key"),
     "immich_too_old": (lambda library, ref: _contact(library, ref, _answer(
-        version=ImmichVersion(major=2, minor=4, patch=1))),
-                       "Immich 2.4.1 is older than 2.5.0.", "Check again"),
+        version=ImmichVersion(major=3, minor=0, patch=4))),
+                       "Immich 3.0.4 is older than 3.1.0.", "Check again"),
     "unreachable": (lambda library, ref: _contact(library, ref, ContactRefused(problem=Unreachable())),
                     "Photo Wall cannot reach Immich at http://immich.invalid:2283/api.", "Check again"),
     "unexpected_answer": (lambda library, ref: _contact(library, ref, ContactRefused(

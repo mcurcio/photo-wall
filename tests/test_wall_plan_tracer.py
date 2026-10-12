@@ -19,7 +19,7 @@ import hashlib
 from collections import defaultdict
 
 import pytest
-from psycopg.types.json import Jsonb
+from support.frame_media import seed_variant
 from support.house_time import UTC_HOUSE
 from support.key_content_builders import face, measured
 from support.measured_photos import measure
@@ -40,7 +40,7 @@ from central.registry import FrameCreate
 from central.runtime import Contribution, Runtime, Scene
 from central.wall_plan.fit import Fits, FitTarget, judge
 from central.wall_plan.fit_settings import FitSettings
-from central.wall_plan.order import WallHistory
+from central.wall_plan.order import PoolLines, WallHistory
 from central.wall_plan.selection import SceneSelection
 from contracts.models import (
     Calibration,
@@ -71,7 +71,7 @@ def pool():
     return {name: measured(name, width, height,
                            faces=LEFT_FACES if name == "two_three" else (),
                            captured_at=index, variant=Variant(
-                               sha256=hashlib.sha256(name.encode()).hexdigest(), size=10,
+                               asset_id="asset-" + hashlib.sha256(name.encode()).hexdigest()[:16], recipe_id="e" * 64, sha256=hashlib.sha256(name.encode()).hexdigest(), size=10,
                                media_type="image/jpeg", width=width, height=height))
             for index, (name, (width, height)) in enumerate(SIZES.items())}
 
@@ -100,8 +100,8 @@ def an_hour(instance: Runtime, photos, *, frames=FRAMES, outputs=None) -> Projec
         bindings_by_player={"player": tuple(
             OutputBinding(output_id=f"out-{frame}", frame_id=frame, generation=1,
                           profile=PROFILES[frame]) for frame in frames)},
-        source_pools={POOL: SourcePool(source_ref=POOL, ready=True,
-                                       candidates=tuple(photos.values()))},
+        lines=PoolLines({POOL: SourcePool(source_ref=POOL, ready=True,
+                                          candidates=tuple(photos.values()))}),
         authored_candidates={}, locked_assignments={}, history=WallHistory(),
         horizon_seconds=300, plan_seconds=3600,
         max_clock_uncertainty=UNCERTAINTY, settings=FitSettings(),
@@ -160,7 +160,7 @@ def test_a_mat_opening_frame_plans_a_photo_smaller_than_its_display():
     Mutation probe: judge rule 2 against the profile's pixels -> nothing is placed."""
     mat = Calibration(fit=CoverFit(corners=((.3, .3), (.7, .3), (.7, .7), (.3, .7))))
     small = {"small": measured("small", 1600, 900, variant=Variant(
-        sha256=hashlib.sha256(b"small").hexdigest(), size=10, media_type="image/jpeg",
+        asset_id="asset-" + hashlib.sha256(b"small").hexdigest()[:16], recipe_id="e" * 64, sha256=hashlib.sha256(b"small").hexdigest(), size=10, media_type="image/jpeg",
         width=1600, height=900))}
     instance = Runtime(house=UTC_HOUSE)
     instance.set_scene(Scene(
@@ -220,25 +220,13 @@ def wall_players(registry):
 
 
 def prepare(registry, photos):
-    """Each photo's prepared copy ready under the current recipe, as a worker leaves it.
-    Returns asset id by prepared digest."""
-    recipe = "f" * 64
+    """Each photo's media variant made under the wall's recipe, as a worker leaves it (the
+    wall's Frames exist first). Returns asset id by prepared digest."""
     digests = {}
-    with registry.db.transaction() as conn:
-        conn.execute("INSERT INTO media_settings(singleton,max_bytes,recipe_id) VALUES(TRUE,%s,%s) "
-                     "ON CONFLICT(singleton) DO UPDATE SET recipe_id=EXCLUDED.recipe_id",
-                     (4 * 1024**3, recipe))
-        for number, item in enumerate(photos):
-            digest = f"{number + 1:064x}"
-            digests[digest] = item.asset_id
-            variant = Variant(sha256=digest, size=10, media_type="image/jpeg",
-                              width=item.width, height=item.height)
-            conn.execute("INSERT INTO media_blobs VALUES(%s,%s,10,'ready',%s)",
-                         (digest, Jsonb(variant.model_dump(mode="json")), registry.clock.utc()))
-            conn.execute("INSERT INTO media_jobs(id,asset_id,recipe_id,state,earliest_start,"
-                         "variant_sha,updated_at) VALUES(%s,%s,%s,'ready',%s,%s,%s)",
-                         ("job-" + item.asset_id[-12:], item.asset_id, recipe,
-                          registry.clock.utc(), digest, registry.clock.utc()))
+    for number, item in enumerate(photos):
+        digest = f"{number + 1:064x}"
+        digests[digest] = item.asset_id
+        seed_variant(registry, item.asset_id, digest, width=item.width, height=item.height)
     return digests
 
 

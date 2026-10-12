@@ -17,6 +17,9 @@ class AssetKind(StrEnum):
     OS_IMAGE = "os-image"
     SEALED_ENVIRONMENT = "sealed-environment"
     LIBRARY_THUMBNAIL = "library-thumbnail"  # a preview tile, re-encoded by the media worker
+    # A Frame-sized copy of one photo revision, named by its inputs (`<asset_id>.<recipe_id>`) and
+    # stored by its bytes (`media/blobs/<sha256>`); made and re-made by `PrepareMedia`.
+    MEDIA_VARIANT = "media-variant"
 
     @property
     def keyed_by_content(self) -> bool:
@@ -25,9 +28,19 @@ class AssetKind(StrEnum):
         A library thumbnail is keyed by its ORIGINAL's identity, not its own bytes: the library
         may regenerate it, so after a purged cache a re-production may yield different bytes,
         which REPLACE its produced facts (`AssetProduction`, `AssetRecords.record_produced`).
+        A media variant is keyed by its inputs (photo revision and recipe): a re-make after a
+        purge may encode different bytes, whose facts replace the record's.
         Every other kind is content-keyed (a re-cut is a new key), so differing bytes are a bug.
         """
-        return self is not AssetKind.LIBRARY_THUMBNAIL
+        return self not in (AssetKind.LIBRARY_THUMBNAIL, AssetKind.MEDIA_VARIANT)
+
+    @property
+    def stored_by_digest(self) -> bool:
+        """Whether this kind's file is named by its produced sha256 rather than by its key.
+
+        A media variant's path is `media/blobs/<sha256>`: a re-make writes a NEW path and never
+        overwrites one, so a body always matches the digest read in the same transaction."""
+        return self is AssetKind.MEDIA_VARIANT
 
 
 def _positive_int(value: object, what: str) -> None:
@@ -70,6 +83,29 @@ class AssetReady:
     def __post_init__(self) -> None:
         _positive_int(self.size, "size")
         require_sha256(self.sha256)
+
+
+@dataclass(frozen=True, slots=True)
+class MediaReady(AssetReady):
+    """A media variant's produced facts: its bytes (`AssetReady`) plus what a Player needs to
+    show it and which of the library's copies it was made from (`made_from`)."""
+
+    media_type: str  # "image/jpeg" | "video/mp4"
+    width: int  # > 0
+    height: int  # > 0
+    duration: float | None  # set iff a video
+    made_from: str  # media.library_client.FetchStep, or "legacy" for a pre-087 variant
+
+    def __post_init__(self) -> None:
+        AssetReady.__post_init__(self)
+        if self.media_type not in ("image/jpeg", "image/png", "video/mp4"):
+            raise ValueError("invalid_media_type")
+        _positive_int(self.width, "width")
+        _positive_int(self.height, "height")
+        if (self.media_type == "video/mp4") != (self.duration is not None):
+            raise ValueError("invalid_duration")
+        if not isinstance(self.made_from, str) or not 1 <= len(self.made_from) <= 32:
+            raise ValueError("invalid_made_from")
 
 
 @dataclass(frozen=True, slots=True)

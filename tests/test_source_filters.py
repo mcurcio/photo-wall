@@ -76,7 +76,9 @@ def test_a_place_is_matched_by_immich(immich_library, pool_of):
             return await client.places()
         finally:
             await client.close()
-    (paris,) = [place for place in run(places()) if place.city == "Paris"]
+    # The fixture's only place: Immich 3.1.0 names its Paris coordinates by their
+    # arrondissement ("Paris 04 Hôtel-de-Ville").
+    (paris,) = [place for place in run(places()) if place.country == "France"]
     assert pool_of(place=paris) == {"paris-1", "paris-2"}
 
 

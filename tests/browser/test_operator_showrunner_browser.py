@@ -57,7 +57,7 @@ from operator_harness import (
 from photo_seed import begin, connected, filled, in_pool, library_of, saved_source, step
 from playwright.sync_api import expect
 from psycopg.types.json import Jsonb
-from public_media import public_photo, publish_photo
+from public_media import MediaCache, public_photo, publish_photo, request_photo
 from support.house_time import UTC_HOUSE, set_house, window_program
 from support.photo_pools import FIXTURE_CONNECTION, fixture_connection
 from support.position import save_position
@@ -65,11 +65,10 @@ from test_registry import ADMIN, enroll
 
 from central.db import ProcessTransactionClock
 from central.infra.photo_library_store import library_assets_in
-from central.media_repository import MediaRepository
-from central.media_store import MediaStore
+from central.kernel.job_types import PrepareMedia
+from central.media_repository import MediaRepository, prepare_lock
 from central.photo_library.model import InPool, SourceQuery, TakenBetween
 from central.photo_library.ports import CheckFailed
-from central.planner import AcquisitionRequest
 from central.registry import FrameCreate
 from central.runtime import Child, Contribution, Scene
 from central.runtime_store import RuntimeStore
@@ -1953,15 +1952,16 @@ def test_check_this_frame_counts_as_the_planner_does(page, registry, tmp_path):
             "Check this frame Nothing usable yet: 2 still preparing.")
 
         repository = MediaRepository(registry.db, registry.clock, queue=queue, times=ProcessTransactionClock(registry.clock))
-        repository.set_recipe("a" * 64)  # the worker checks in with its recipe
-        repository.request_acquisitions((AcquisitionRequest(
-            asset_id=portrait_a.asset.asset_id, assignment_ids=("a",), earliest_start=now),))
-        publish_photo(MediaStore(repository, tmp_path / "media"), portrait_a)
-        repository.request_acquisitions((AcquisitionRequest(
-            asset_id=portrait_b.asset.asset_id, assignment_ids=("b",), earliest_start=now),))
-        with registry.db.transaction() as conn:
-            conn.execute("UPDATE media_jobs SET state='failed',failure_code='asset_missing' "
-                         "WHERE asset_id=%s", (portrait_b.asset.asset_id,))
+        repository.worker_status(None)  # the worker checks in
+        cache = MediaCache(repository, tmp_path)
+        request_photo(cache, portrait_a.asset.asset_id)
+        publish_photo(cache, portrait_a)
+        failed = request_photo(cache, portrait_b.asset.asset_id)
+        with registry.db.transaction() as conn:   # its preparation failed for good
+            conn.execute("INSERT INTO job_outcomes(lock_key,job_name,status,reason,"
+                         "retry_not_before,seq,updated_at) VALUES(%s,%s,'terminal',"
+                         "'asset_missing',NULL,nextval('job_outcome_seq'),%s)",
+                         (prepare_lock(failed), PrepareMedia.job_name, now))
         response = page.request.get(
             origin + f"/v1/operator/sources/{quote(SOURCE, safe='')}/candidates"
             f"?frame_id={VALID_FRAME}", headers={"Authorization": "Bearer " + ADMIN})

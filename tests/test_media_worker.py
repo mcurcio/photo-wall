@@ -1,42 +1,59 @@
-"""Procrastinate media task execution with private generated configuration."""
+"""The media worker's media maker (`PrepareMedia`), measurements, maintenance and process entry
+against real PostgreSQL, with fakes of the library client and the preparer."""
 
 import asyncio
 import hashlib
 import inspect
 import io
 import json
+from dataclasses import dataclass
+from pathlib import Path
 
 import pytest
 from media_queue import RecordingMediaQueue
 from PIL import Image
+from public_media import MediaCache, request_photo
+from support.frame_media import a_frame
 from support.library_store_fake import FakeLibraryStore, RevisionRecord
 from support.photo_pools import photo, seed_pool
-from test_media_store import ORIGINAL, RECIPE, VARIANT, grant, queued, ready, row
 
-from central.db import ProcessTransactionClock
+from central.assets.layout import CacheLayout
+from central.assets.store import CacheStore
+from central.db import Database, ProcessTransactionClock
 from central.infra.key_content_store import PgKeyContent
+from central.infra.transactions import PgTransactions
 from central.installation_models import FrameOutput
+from central.kernel.assets import MediaReady
+from central.kernel.handling import TerminalFailure, TransientFailure
+from central.kernel.job_types import PrepareMedia
 from central.media_queue import MEDIA_QUEUE, ProcrastinateMediaQueue
 from central.media_repository import MediaRepository, StoreLimits
-from central.media_store import MediaStore
 from central.photo_library.model import LibraryAsset, MeasuredCopy, Unreachable
-from central.planner import AcquisitionRequest
-from central.registry import RegistryError
 from contracts.models import FrameProfile
+from contracts.time import Clock
 from media.library_client import FaceBox, FetchedRendition, LibraryUnavailable
 from media.models import MediaError
-from media.prepare import BuildIdentity, PreparedMedia
+from media.prepare import BuildIdentity, PreparationRecipe, PreparedMedia
 from media.task_queue import (
-    MediaTaskFailed,
     ProcrastinateCheckQueue,
     RetryableMediaTask,
     create_worker_app,
 )
-from media.worker import MediaWorker, WorkerLimits, _media_writer
+from media.worker import MediaWorker, WorkerLimits, _media_loop
 
 SECRET = "PUBLIC_SYNTHETIC_PRIVATE_KEY"
 PORTRAIT = FrameProfile(width_px=1080, height_px=1920, diagonal_inches=24)
 PREVIEW = MeasuredCopy(name="preview", media_type="image/jpeg", width=810, height=1440)
+ORIGINAL = b"public synthetic original bytes"
+VARIANT = b"public synthetic prepared bytes"
+
+
+@dataclass(frozen=True)
+class WorkerStorage:
+    repository: MediaRepository
+    db: Database
+    clock: Clock
+    root: Path
 
 
 def test_no_environment_variable_names_a_connections_file(worker_storage):
@@ -46,7 +63,6 @@ def test_no_environment_variable_names_a_connections_file(worker_storage):
     source = inspect.getsource(module)
     assert "PHOTO_WALL_CONNECTIONS_FILE" not in source and "load_connections" not in source
     instance = worker(worker_storage, FakeLibrary(worker_storage.clock))
-    instance.store.recover = lambda: None
     asyncio.run(instance.maintain())
     assert "connection_ids" not in worker_storage.repository.health()
 
@@ -87,48 +103,37 @@ class FakeLibrary:
 
 class FakePreparer:
     def __init__(self):
-        from contracts.models import Variant
-        self.variant = Variant(sha256=hashlib.sha256(VARIANT).hexdigest(), size=len(VARIANT),
-                               media_type="image/jpeg", width=1080, height=1920)
         self.build = BuildIdentity(preparation_sha256="a" * 64, ffmpeg_sha256="b" * 64,
             ffprobe_sha256="c" * 64, ffmpeg_version="synthetic", ffprobe_version="synthetic",
             python_version="synthetic", pillow_version="synthetic", littlecms_version="synthetic",
             libheif_version="synthetic",
             jpeg_version="synthetic", zlib_version="synthetic", platform="synthetic",
             memory_limit_enforced=False)
-        self.recipe, self.fault, self.gate = RECIPE, None, None
-        self.entered = asyncio.Event()
-        self.cancelled = False
+        self.fault = None
         self.prepared = []
+        self.recipes = []
 
-    async def describe_recipe(self):
-        return RECIPE, self.build
-
-    async def prepare_rendition(self, asset, rendition, destination):
+    async def prepare_rendition(self, asset, rendition, destination, *, recipe=None):
         self.prepared.append(asset)
+        self.recipes.append(recipe)
         source = rendition.path
         destination.write_bytes(VARIANT)
-        self.entered.set()
-        try:
-            if self.gate:
-                await self.gate.wait()
-        except asyncio.CancelledError:
-            self.cancelled = True
-            raise
         if self.fault:
             raise self.fault
-        return PreparedMedia(path=destination, variant=self.variant, recipe_id=self.recipe,
-            build=self.build, original_sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
-            made_from=rendition.rendition)
+        return PreparedMedia(path=destination, build=self.build,
+            original_sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
+            ready=MediaReady(sha256=hashlib.sha256(VARIANT).hexdigest(), size=len(VARIANT),
+                             media_type="image/jpeg", width=1080, height=1920, duration=None,
+                             made_from=rendition.rendition))
 
 
 @pytest.fixture
 def worker_storage(registry, tmp_path):
     repository = MediaRepository(registry.db, registry.clock, StoreLimits(
         max_bytes=10000, max_original_bytes=1000, max_image_bytes=1000,
-        max_video_bytes=2000), queue=RecordingMediaQueue(), times=ProcessTransactionClock(registry.clock))
-    repository.set_recipe(RECIPE)
-    return MediaStore(repository, tmp_path / "media")
+        max_video_bytes=2000), queue=RecordingMediaQueue(),
+        times=ProcessTransactionClock(registry.clock))
+    return WorkerStorage(repository, registry.db, registry.clock, tmp_path)
 
 
 def library_store(clock):
@@ -142,7 +147,7 @@ def library_store(clock):
 
 
 def worker(storage, source, preparer=None, **kwargs):
-    return MediaWorker(storage.repository, storage, library_store(storage.clock),
+    return MediaWorker(storage.repository, library_store(storage.clock),
                        preparer=preparer or FakePreparer(),
                        client_factory=lambda _: source, **kwargs)
 
@@ -151,206 +156,80 @@ async def close(instance):
     await instance._close_clients()
 
 
-def test_procrastinate_task_processes_only_exact_job_and_publishes(worker_storage):
-    queued(worker_storage)
-    queued(worker_storage, 2)
+# The media maker: one PrepareMedia, made from the variant's name ----------------------------------
+
+
+def planned(storage, registry):
+    """A Frame (the wall's need), one pool photo, and its variant planned (record and job)."""
+    a_frame(registry)
+    picture = photo("photo-1", taken_at=900)
+    seed_pool(registry, "source:1", (picture,))
+    return picture, request_photo(MediaCache(storage.repository, storage.root), picture.asset_id)
+
+
+def maker(storage, instance):
+    return instance.media_maker(store=CacheStore(CacheLayout(storage.root)),
+                                transactions=PgTransactions(storage.db))
+
+
+def test_a_planned_photo_is_fetched_for_its_recipes_need_prepared_and_recorded(
+        worker_storage, registry):
+    """The fetch holds the variant's need (the Frame's output), the measured copies are
+    recorded, and the facts name the copy it was made from; the file lands at its digest."""
+    picture, key = planned(worker_storage, registry)
     source = FakeLibrary(worker_storage.clock)
-    instance = worker(worker_storage, source)
+    preparer = FakePreparer()
+    instance = worker(worker_storage, source, preparer)
+    # The worker's store knows the revision (the PostgreSQL pool seeded above is the variant's).
+    instance.library.revisions[picture.asset_id] = RevisionRecord(
+        picture.connection_ref, picture.upstream_id, picture.revision, picture.width,
+        picture.height, None, None, 0.0)
+
     async def exercise():
         try:
-            with worker_storage.worker_lock():
-                await instance.process_job("job-2", attempt=1)
+            return await maker(worker_storage, instance).handle(PrepareMedia(key=key))
         finally:
             await close(instance)
-    asyncio.run(exercise())
-    assert row(worker_storage, "media_jobs", "id", "job-1")["state"] == "queued"
-    assert row(worker_storage, "media_jobs", "id", "job-2")["state"] == "ready"
-    assert (worker_storage.root / "blobs" / hashlib.sha256(VARIANT).hexdigest()).read_bytes() == VARIANT
-    assert worker_storage.repository.health()["accounted_bytes"] == len(VARIANT)
+    facts = asyncio.run(exercise())
+    [(plan, needs)] = source.fetches
+    assert [(need.width, need.height) for need in needs] == [(1080, 1920)]
+    assert plan == ("preview", "original")   # a JPEG original (the copy ladder)
+    assert isinstance(preparer.prepared[0], LibraryAsset)
+    # One copy for the wall (follow-up S1): the 1080 x 1920 Frame's need is the 1920 step.
+    assert preparer.recipes == [PreparationRecipe(image_long_edge=1920)]
+    assert [(copy.name, copy.width) for copy in
+            instance.library.copy_sizes(picture.asset_id).values()] == [("preview", 810)]
+    assert (facts.sha256, facts.size, facts.made_from) == (
+        hashlib.sha256(VARIANT).hexdigest(), len(VARIANT), "original")
+    blobs = worker_storage.root / "media" / "blobs"
+    assert [path.name for path in blobs.iterdir()] == [facts.sha256]  # no temp left behind
 
 
-def test_retryable_task_cleanup_leaves_domain_job_claimable_without_local_delay(worker_storage):
-    queued(worker_storage)
-    source = FakeLibrary(worker_storage.clock)
-    source.fault = MediaError("upstream_unavailable")
-    instance = worker(worker_storage, source)
-    with worker_storage.worker_lock(), pytest.raises(RetryableMediaTask, match="upstream_unavailable"):
-        asyncio.run(instance.process_job("job-1", attempt=1))
-    job = row(worker_storage, "media_jobs", "id", "job-1")
-    assert job["state"] == "retry" and job["retry_at"] == 0
-    assert job["reserved_bytes"] == 0
-
-
-def test_procrastinate_worker_consumes_deferred_job(worker_storage):
-    queued(worker_storage)
-    queue = ProcrastinateMediaQueue(worker_storage.db.dsn)
-    queue.apply_schema(worker_storage.db.dsn)
-    with worker_storage.repository.transaction() as conn:
-        queue.enqueue_in(conn, "job-1")
-    instance = worker(worker_storage, FakeLibrary(worker_storage.clock))
-
-    async def exercise():
-        app = create_worker_app(worker_storage.db.dsn)
-        try:
-            with worker_storage.worker_lock():
-                async with app.open_async():
-                    await app.run_worker_async(queues=[MEDIA_QUEUE], concurrency=1, wait=False,
-                                               additional_context={"media_worker": instance})
-        finally:
-            await close(instance)
-    asyncio.run(exercise())
-    assert row(worker_storage, "media_jobs", "id", "job-1")["state"] == "ready"
-
-
-@pytest.mark.parametrize("failure,state,error", [
-    (MediaError("unsupported_color", "incompatible"), "failed", MediaTaskFailed),
-    (MediaError("asset_integrity"), "failed", MediaTaskFailed),
-    (MediaError("asset_oversize", "incompatible"), "failed", MediaTaskFailed),
-    (MediaError("asset_unavailable"), "retry", RetryableMediaTask),
-    (MediaError("asset_missing"), "retry", RetryableMediaTask),
-    (MediaError("unsupported_version", "incompatible"), "retry", RetryableMediaTask),
-    (MediaError("upstream_schema", "incompatible"), "retry", RetryableMediaTask),
-    (MediaError("upstream_permission", "permission"), "retry", RetryableMediaTask),
-    (RuntimeError(SECRET), "retry", RetryableMediaTask),
+@pytest.mark.parametrize(("fault", "failure", "reason"), [
+    (MediaError("unsupported_media", "incompatible"), TerminalFailure, "unsupported_media"),
+    (MediaError("upstream_unavailable"), TransientFailure, "upstream_unavailable"),
+    (LibraryUnavailable(Unreachable()), TransientFailure, "unreachable"),
 ])
-def test_task_failures_are_typed_and_do_not_leak(worker_storage, failure, state, error):
-    queued(worker_storage)
+def test_failures_are_typed_and_leave_no_bytes(worker_storage, registry, fault, failure, reason):
+    _, key = planned(worker_storage, registry)
     source = FakeLibrary(worker_storage.clock)
-    source.fault = failure
+    source.fault = fault
     instance = worker(worker_storage, source)
-    with worker_storage.worker_lock(), pytest.raises(error) as caught:
-        asyncio.run(instance.process_job("job-1", attempt=1))
-    job = row(worker_storage, "media_jobs", "id", "job-1")
-    assert job["state"] == state and job["retry_at"] == 0 and job["reserved_bytes"] == 0
-    assert SECRET not in str(caught.value)
-    assert not list((worker_storage.root / "staging").glob("*/*/*"))
+    with pytest.raises(failure) as raised:
+        asyncio.run(maker(worker_storage, instance).handle(PrepareMedia(key=key)))
+    assert raised.value.reason == reason
+    assert not any((worker_storage.root / "media" / "blobs").iterdir())
 
 
-def test_fourth_queue_attempt_becomes_final_domain_failure(worker_storage):
-    queued(worker_storage)
-    source = FakeLibrary(worker_storage.clock)
-    source.fault = MediaError("upstream_unavailable")
-    instance = worker(worker_storage, source)
-    with worker_storage.worker_lock(), pytest.raises(MediaTaskFailed):
-        asyncio.run(instance.process_job("job-1", attempt=4))
-    assert row(worker_storage, "media_jobs", "id", "job-1")["state"] == "failed"
-
-
-def test_cancellation_cleans_partial_bytes_and_keeps_attempt_fence(worker_storage):
-    queued(worker_storage)
-    source = FakeLibrary(worker_storage.clock)
-    source.gate = asyncio.Event()
-    instance = worker(worker_storage, source)
-    async def exercise():
-        with worker_storage.worker_lock():
-            task = asyncio.create_task(instance.process_job("job-1", attempt=1))
-            await asyncio.wait_for(source.entered.wait(), 5)
-            task.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await task
-        await close(instance)
-    asyncio.run(exercise())
-    assert source.cancelled and source.closed
-    assert row(worker_storage, "media_jobs", "id", "job-1")["state"] == "retry"
-    assert worker_storage.repository.health()["accounted_bytes"] == 0
-
-
-def test_recipe_change_between_claim_and_preparation_never_publishes(worker_storage):
-    queued(worker_storage)
-    preparation = FakePreparer()
-    preparation.recipe = "f" * 64
-    instance = worker(worker_storage, FakeLibrary(worker_storage.clock), preparation)
-    with worker_storage.worker_lock(), pytest.raises(RetryableMediaTask, match="recipe_changed"):
-        asyncio.run(instance.process_job("job-1", attempt=1))
-    assert row(worker_storage, "media_jobs", "id", "job-1")["state"] == "retry"
-    assert worker_storage.repository.health()["accounted_bytes"] == 0
-
-
-def test_pressure_collects_unused_content_then_processes_request(worker_storage):
-    with worker_storage.worker_lock():
-        ready(worker_storage)
-    queued(worker_storage, 2)
-    worker_storage.set_quota(2010)
-    instance = worker(worker_storage, FakeLibrary(worker_storage.clock))
-    with worker_storage.worker_lock():
-        asyncio.run(instance.process_job("job-2", attempt=1))
-    assert row(worker_storage, "media_jobs", "id", "job-2")["state"] == "ready"
-    evicted = row(worker_storage, "media_jobs", "id", "job-1")
-    assert evicted["state"] == "evicted" and evicted["variant_sha"] is None
-
-
-def test_pressure_cannot_collect_secured_content(worker_storage, registry):
-    with worker_storage.worker_lock():
-        _, _, prepared = ready(worker_storage)
-        grant(worker_storage, registry, prepared.variant, secured=True)
-    queued(worker_storage, 2)
-    worker_storage.set_quota(2010)
-    source = FakeLibrary(worker_storage.clock)
-    instance = worker(worker_storage, source)
-    with worker_storage.worker_lock(), pytest.raises(RetryableMediaTask, match="media_job_unavailable"):
-        asyncio.run(instance.process_job("job-2", attempt=1))
-    assert source.downloads == 0
-    assert row(worker_storage, "media_jobs", "id", "job-2")["state"] == "queued"
-
-
-def test_evicted_job_only_requeues_on_new_request_and_obeys_capacity(worker_storage):
-    with worker_storage.worker_lock():
-        lease, _, _ = ready(worker_storage)
-        worker_storage.collect(target_bytes=0)
-    queued(worker_storage, 2)
-    worker_storage.repository.limits = worker_storage.repository.limits.model_copy(
-        update={"max_jobs": 1})
-    request = AcquisitionRequest(asset_id=lease.asset.asset_id,
-        assignment_ids=("new-assignment",), earliest_start=1100)
-    with pytest.raises(RegistryError, match="job_capacity"):
-        worker_storage.repository.request_acquisitions((request,))
-    with worker_storage.repository.transaction() as conn:
-        conn.execute("UPDATE media_jobs SET state='failed' WHERE id='job-2'")
-    assert worker_storage.repository.request_acquisitions((request,)) == 1
-    assert row(worker_storage, "media_jobs", "id", "job-1")["state"] == "queued"
-
-
-def test_stale_failure_cleanup_cannot_overwrite_newer_attempt(worker_storage):
-    queued(worker_storage)
-    source = FakeLibrary(worker_storage.clock)
-    source.gate = asyncio.Event()
-    instance = worker(worker_storage, source)
-    async def exercise():
-        with worker_storage.worker_lock():
-            task = asyncio.create_task(instance.process_job("job-1", attempt=1))
-            await asyncio.wait_for(source.entered.wait(), 5)
-            with worker_storage.repository.transaction() as conn:
-                conn.execute("UPDATE media_jobs SET attempt_token='replacement' WHERE id='job-1'")
-            task.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await task
-        await close(instance)
-    asyncio.run(exercise())
-    job = row(worker_storage, "media_jobs", "id", "job-1")
-    assert job["attempt_token"] == "replacement" and job["state"] == "running"
-    assert job["reserved_bytes"] == 2000
-
-
-def test_outer_job_deadline_cancels_partial_download(worker_storage):
-    queued(worker_storage)
+def test_the_job_deadline_cancels_a_partial_download(worker_storage, registry):
+    _, key = planned(worker_storage, registry)
     source = FakeLibrary(worker_storage.clock)
     source.gate = asyncio.Event()
     instance = worker(worker_storage, source, limits=WorkerLimits(job_seconds=.2))
-    with worker_storage.worker_lock(), pytest.raises(RetryableMediaTask, match="worker_timeout"):
-        asyncio.run(instance.process_job("job-1", attempt=1))
+    with pytest.raises(TransientFailure, match="worker_timeout"):
+        asyncio.run(maker(worker_storage, instance).handle(PrepareMedia(key=key)))
     assert source.cancelled
-    job = row(worker_storage, "media_jobs", "id", "job-1")
-    assert job["state"] == "retry" and job["retry_at"] == 0
-    assert worker_storage.repository.health()["accounted_bytes"] == 0
-
-
-def test_nonfinite_clock_cannot_start_task_activity(worker_storage):
-    instance = worker(worker_storage, FakeLibrary(worker_storage.clock))
-    worker_storage.clock.wall = float("nan")
-    with pytest.raises(MediaError, match="clock_invalid"):
-        asyncio.run(instance.process_job("missing", attempt=1))
-    with worker_storage.db.transaction() as conn:
-        assert conn.execute("SELECT worker_seen FROM media_settings WHERE singleton").fetchone()["worker_seen"] == 1000
+    assert not any((worker_storage.root / "media" / "blobs").iterdir())
 
 
 def test_hung_client_close_is_bounded(worker_storage):
@@ -397,13 +276,12 @@ def test_the_boot_path_runs_maintenance_and_checks_the_worker_in_then_runs_the_q
         worker_storage):
     """No refresh, preview or tag list at boot (roadmap 4): the library tick queues checks."""
     instance = worker(worker_storage, FakeLibrary(worker_storage.clock))
-    instance.store.recover = lambda: None
     ran = []
 
     async def queue():
         ran.append(worker_storage.repository.health()["worker_seen"])
 
-    asyncio.run(_media_writer(instance, queue))
+    asyncio.run(_media_loop(instance, queue))
     assert ran == [1000.0]
     for gone in ("refresh_once", "refresh_source", "preview_source", "list_tags"):
         assert not hasattr(instance, gone)
@@ -441,39 +319,9 @@ def test_the_queue_runs_a_deferred_pool_check_step_through_the_library_checks(wo
     assert sorted(checks.calls) == [("connection", "main"), ("pool", "a" * 64)]
 
 
-def test_a_pool_photo_is_fetched_for_every_frame_output_prepared_and_published(worker_storage):
-    """Follow-ups 2026-10-11, slice A4 case 4: the plan holds every Frame output (two Frames of
-    one shape are one need); the copies the fetch measured are recorded, and the copy the
-    prepared one was made from reaches `media_jobs.made_from`."""
-    asset = queued(worker_storage)
-    source = FakeLibrary(worker_storage.clock)
-    preparer = FakePreparer()
-    instance = worker(worker_storage, source, preparer)
-    # The worker's store knows the revision (the PostgreSQL pool seeded above is the job's).
-    instance.library.revisions[asset.asset_id] = RevisionRecord(
-        asset.connection_ref, asset.upstream_id, asset.revision, asset.width, asset.height,
-        None, None, 0.0)
-
-    async def exercise():
-        try:
-            with worker_storage.worker_lock():
-                await instance.process_job("job-1", attempt=1)
-        finally:
-            await close(instance)
-    asyncio.run(exercise())
-    [(plan, needs)] = source.fetches
-    assert [(need.width, need.height) for need in needs] == [(1080, 1920)]
-    assert plan == ("preview", "fullsize")   # the stored asset's original type is not known
-    assert isinstance(preparer.prepared[0], LibraryAsset)
-    assert [(copy.name, copy.width) for copy in
-            instance.library.copy_sizes(asset.asset_id).values()] == [("preview", 810)]
-    job = row(worker_storage, "media_jobs", "id", "job-1")
-    assert (job["state"], job["made_from"]) == ("ready", "original")
-
-
 def test_a_new_key_or_address_gets_a_new_client(worker_storage):
     made = []
-    instance = MediaWorker(worker_storage.repository, worker_storage,
+    instance = MediaWorker(worker_storage.repository,
                            library_store(worker_storage.clock), preparer=FakePreparer(),
                            client_factory=lambda secret: made.append(secret) or FakeLibrary(
                                worker_storage.clock))
@@ -549,6 +397,40 @@ def test_measure_records_the_faces_and_interest_of_the_photo_at_its_revision(wor
                             ("thumbnail", pooled.upstream_id, pooled.revision)]
     asyncio.run(instance.measure("asset-gone"))       # the asset is gone: nothing to do
     assert client.asked[2:] == []
+
+
+class FakePreview(FakeFaces):
+    """A measurement's client that also serves the preview (1440 x 960) when asked."""
+
+    async def fetch_rendition(self, asset, *, plan, needs, destination):
+        self.asked.append(("fetch", tuple(plan)))
+        destination.write_bytes(b"preview")
+        return FetchedRendition(
+            path=destination, rendition="preview", media_type="image/jpeg", size=7,
+            sha256=hashlib.sha256(b"preview").hexdigest(), width=1440, height=960,
+            measured=(MeasuredCopy(name="preview", media_type="image/jpeg", width=1440,
+                                   height=960),))
+
+
+def test_measuring_a_raw_photo_measures_its_preview_once(worker_storage):
+    """Follow-up S1: an unedited RAW photo's readable size is its preview's, so its measurement
+    downloads the preview, records its size (rendition.copy_to_measure) and never again; a JPEG
+    original is read at its own size, so its measurement downloads no copy."""
+    client = FakePreview(_grey_jpeg())
+    raw = photo("raw", taken_at=900, width=6000, height=4000, original_type="image/x-sony-arw")
+    seed_pool(worker_storage, "family:1", (raw,))
+    store = PgKeyContent(worker_storage.db, times=ProcessTransactionClock(worker_storage.clock))
+    instance = worker(worker_storage, client, key_content=store)
+    # The worker's store knows the revision (the PostgreSQL pool seeded above is the one measured).
+    instance.library.revisions[raw.asset_id] = RevisionRecord(
+        raw.connection_ref, raw.upstream_id, raw.revision, raw.width, raw.height, None, None, 0.0)
+    asyncio.run(instance.measure(raw.asset_id))
+    assert ("fetch", ("preview",)) in client.asked
+    assert {name: (copy.width, copy.height) for name, copy in
+            instance.library.copy_sizes(raw.asset_id).items()} == {"preview": (1440, 960)}
+    client.asked.clear()
+    asyncio.run(instance.measure(raw.asset_id))
+    assert all(entry[0] != "fetch" for entry in client.asked)
 
 
 @pytest.mark.parametrize(("client", "limits", "reason"), [

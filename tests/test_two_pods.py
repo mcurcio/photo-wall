@@ -80,7 +80,7 @@ SERIAL = "10000000beef0001"
 SQUASHFS_BYTES = 64 * 1024
 BASE_ABI = "sha256:" + "c" * 64
 ROLE = "manager-primary"
-ALL_LOOPS = 2 * JOB_LOOPS + MEDIA_LOOP  # two job runtimes, ONE media writer
+ALL_LOOPS = 2 * (JOB_LOOPS + MEDIA_LOOP)  # two job runtimes and two media loops
 
 
 # -- the system: processes, probes and clients -------------------------------------------------
@@ -131,7 +131,7 @@ class TwoPods:
         for worker in WORKERS:
             self.spawn_worker(worker)
         wait_for(lambda: self._alive() and live_workers(self.db) == ALL_LOOPS, seconds=90,
-                 what="both workers' job runtimes and one media writer")
+                 what="both workers' job runtimes and media loops")
 
     def _spawn(self, name: str, argv: list[str], port: int | None = None) -> Proc:
         log = self.root / f"{name}.log"
@@ -402,14 +402,10 @@ def test_a3_cache_wipe_keeps_readyz_green_and_prefetch_refills_once(pods, v1):
     assert pods._alive() and all(p.popen.poll() is None for p in pods.procs.values())
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "KNOWN legacy media flock defect (errata 2026-09-23): a cache wipe unlinks the held "
-    "media/.worker.lock (central/media_store.py worker_lock), so the standby media loop "
-    "(media/worker.py _media_writer) locks a NEW file and becomes a second media writer. The "
-    "media retirement removes the flock; this then passes and strict xfail fails: remove the mark."))
-def test_a3_cache_wipe_leaves_exactly_one_media_writer(pods):
-    """After the wipe, the live loops stay two job runtimes and ONE media writer. The standby
-    retries its lock every 5 s, so hold the count over three retries."""
+def test_a3_cache_wipe_leaves_every_loop_running(pods):
+    """After the wipe, the live loops stay two job runtimes and two media loops: no loop holds a
+    lock file on the cache disk any more (the media writer flock went with the media store, the
+    errata 2026-09-23 defect with it). Hold the count over 15 s."""
     deadline = time.monotonic() + 15
     while time.monotonic() < deadline:
         assert live_workers(pods.db) == ALL_LOOPS

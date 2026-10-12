@@ -67,7 +67,7 @@ COUNTS = LibraryCounts(photos=25, videos=1, albums=2, people=2)
 EDITED = "a" * 40 + "-" + "b" * 16   # a checksum, then an edit fingerprint
 
 
-def answer(user=ANNA, *, missing=(), version=(2, 5, 6), counts=COUNTS):
+def answer(user=ANNA, *, missing=(), version=(3, 1, 0), counts=COUNTS):
     return ContactAnswer(version=ImmichVersion(major=version[0], minor=version[1],
                                                patch=version[2]),
                          user=user, missing_permissions=missing,
@@ -318,7 +318,7 @@ def test_health_names_each_problem_and_keeps_its_since_while_the_kind_holds(harn
             (ContactRefused(problem=UnexpectedAnswer(detail="assets")),
              UnexpectedAnswer(detail="assets")),
             (answer(missing=("face.read",)), MissingPermissions(missing=("face.read",))),
-            (answer(version=(1, 140, 0)), ImmichTooOld(found="1.140.0", oldest="2.5.0")),
+            (answer(version=(1, 140, 0)), ImmichTooOld(found="1.140.0", oldest="3.1.0")),
             (answer(BEN), OtherUser(expected="Anna", found="Ben"))):
         clock.advance(60)
         assert store.record_contact(store.begin_contact(ref), result)
@@ -474,9 +474,10 @@ def test_a_step_records_updated_at_as_the_known_revision(harness):
     assert store.known_revisions(ref, []) == {}
 
 
-def test_only_a_complete_check_removes_what_it_did_not_see(harness):
-    """Design rule 2. Mutation probes: sweep on a failed or incomplete check; keep an unseen row
-    after a complete one."""
+def test_no_finish_removes_a_row_it_did_not_see(harness):
+    """Design rule 2 and follow-up S4: a failed or incomplete check removes nothing, and a
+    complete one keeps every row it did not see; only `record_recheck` removes such a row.
+    Mutation probes: sweep on a failed or incomplete check; sweep unseen rows on a complete one."""
     store = harness.store
     ref = harness.connect()
     key = harness.want(SourceQuery(connection_ref=ref))
@@ -485,17 +486,56 @@ def test_only_a_complete_check_removes_what_it_did_not_see(harness):
                                   InPool(asset=photo(ref, 2, 90.0))))
     assert store.finish_check(first, CheckComplete())
     for finish in (CheckFailed(problem="connection"),
-                   CheckIncomplete(reason="over_1000_at_one_instant")):
+                   CheckIncomplete(reason="over_1000_at_one_instant"), CheckComplete()):
         harness.request_check(key)
         lease = store.begin_check(key)
         store.record_step(lease, step(InPool(asset=photo(ref, 3, 80.0))))
         assert store.finish_check(lease, finish)
         assert set(harness.rows(key)) == {uid(1), uid(2), uid(3)}
+
+
+def test_the_re_check_lists_unseen_unmarked_rows_keeps_a_match_and_removes_the_rest(harness):
+    """Follow-up S4. A row this check marked counts as gone without a re-check; a matching row
+    becomes seen by this check (no longer listed, kept at the finish); a row Immich no longer
+    answers is removed at once. Mutation probes: list a marked row; keep a row that no longer
+    matches; leave a matched row unseen."""
+    store = harness.store
+    ref = harness.connect()
+    key = harness.want(SourceQuery(connection_ref=ref))
+    first = store.begin_check(key)
+    store.record_step(first, step(*(InPool(asset=photo(ref, n, 100.0 - n)) for n in range(1, 6))))
+    assert store.finish_check(first, CheckComplete())
     harness.request_check(key)
-    last = store.begin_check(key)
-    store.record_step(last, step(InPool(asset=photo(ref, 2, 90.0))))
-    assert store.finish_check(last, CheckComplete())
-    assert harness.rows(key) == {uid(2): "in_pool"}
+    lease = store.begin_check(key)
+    store.record_step(lease, step(InPool(asset=photo(ref, 2, 98.0)),
+                                  marks=(CheckMark(upstream_id=uid(4), mark="excluded"),)))
+    assert store.unseen_rows(lease, 10) == (uid(1), uid(3), uid(5))
+    assert store.unseen_rows(lease, 1) == (uid(1),)
+    queued = harness.queued(key)
+    assert store.record_recheck(lease, uid(1), True)
+    assert store.record_recheck(lease, uid(3), False)
+    assert harness.queued(key) == queued + 2
+    assert store.unseen_rows(lease, 10) == (uid(5),)
+    assert set(harness.rows(key)) == {uid(1), uid(2), uid(4), uid(5)}
+    assert store.record_recheck(lease, uid(5), True)
+    assert store.unseen_rows(lease, 10) == ()
+    assert store.finish_check(lease, CheckComplete())
+    assert set(harness.rows(key)) == {uid(1), uid(2), uid(5)}
+
+
+def test_a_superseded_lease_re_checks_nothing(harness):
+    store = harness.store
+    ref = harness.connect()
+    key = harness.want(SourceQuery(connection_ref=ref))
+    first = store.begin_check(key)
+    store.record_step(first, step(InPool(asset=photo(ref, 1, 100.0))))
+    assert store.finish_check(first, CheckComplete())
+    harness.request_check(key)
+    second = store.begin_check(key)
+    assert store.unseen_rows(first, 10) == ()
+    assert store.record_recheck(first, uid(1), False) is False
+    assert store.unseen_rows(second, 10) == (uid(1),)
+    assert set(harness.rows(key)) == {uid(1)}
 
 
 def test_a_row_added_before_its_mark_leaves_when_the_check_completes(harness):
@@ -637,7 +677,7 @@ def test_a_copy_is_measured_once_per_revision_and_the_later_size_wins(harness, c
 @pytest.mark.parametrize(("problem", "status"), [
     (KeyRejected(), "permission"),
     (MissingPermissions(missing=("album.read",)), "permission"),
-    (ImmichTooOld(found="1.140.0", oldest="2.5.0"), "incompatible"),
+    (ImmichTooOld(found="1.140.0", oldest="3.1.0"), "incompatible"),
     (UnexpectedAnswer(detail="albums"), "incompatible"),
     (Unreachable(), "unavailable"),
 ])

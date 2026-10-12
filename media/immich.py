@@ -52,6 +52,7 @@ from central.photo_library.model import SourceQuery as LibraryQuery
 from central.photo_library.policy import IMMICH_WEB_TYPES, REQUIRED_PERMISSIONS
 from contracts.models import Model, Positive
 from contracts.time import Clock, SystemClock
+from media import pool_check
 from media.library_client import (
     ChosenItemGone,
     ExclusionQuery,
@@ -223,7 +224,8 @@ class ImmichClient:
     # Immich answers every match question; this surface only parses answers into per-photo facts.
     # A connection-wide failure raises LibraryUnavailable (contact answers ContactRefused); one
     # unusable row is only that row's problem. Pages continue by keyset, never `page` beyond 1:
-    # Immich v2.5.6 orders by `fileCreatedAt` alone, so offsets lose rows between equal times.
+    # Immich orders by `fileCreatedAt` (v3.1.0: then `id`), so offsets lose rows between equal
+    # times as photos arrive.
 
     def _request_timeout(self, remaining: float) -> httpx.Timeout:
         limits = self.library_limits
@@ -360,16 +362,17 @@ class ImmichClient:
     # lists -----------------------------------------------------------------------------------
 
     async def albums(self) -> tuple[LibraryAlbum, ...]:
-        """The albums the key's user owns. An album another user shares with them is not
-        offered: Immich 2.5.6's search (`search/metadata` with `albumIds`) returns only the
-        user's own and their partners' photos, so a Source on someone else's album would show
-        none of its owner's photos (probed against the fixture, 2026-10-11)."""
+        """The albums the key's user owns: Immich 3.1 names an album's owner only as its
+        `albumUsers` member of role `owner`. An album another user shares with them is not
+        offered: Immich's search (`search/metadata` with `albumIds`) returns only the user's own
+        and their partners' photos, so a Source on someone else's album would show none of its
+        owner's photos (probed against the fixture, 2026-10-11)."""
         async def read():
             me = _ref(_mapping(await self._answer("GET", "users/me"), "user").get("id"), "user")
             found: dict[str, LibraryAlbum] = {}
             for row in _array(await self._answer("GET", "albums"), "albums"):
                 row = _mapping(row, "albums")
-                if _ref(row.get("ownerId"), "albums") != me:
+                if _album_owner(row) != me:
                     continue
                 album = _parsed(LibraryAlbum, "albums", album_ref=_ref(row.get("id"), "albums"),
                                 name=_plain(row.get("albumName"), "albums"),
@@ -453,6 +456,14 @@ class ImmichClient:
         rows, position, _ = await self._step(self._keyset(body, TakenWindow(), after))
         return IdsPage(ids=tuple(_ref(row.get("id"), "search") for row in rows), next=position)
 
+    async def still_matches(self, query: LibraryQuery, upstream_id: str) -> bool:
+        """LibraryClient.still_matches: the include body, its window taken now, narrowed to one
+        id (MetadataSearchDto `id`)."""
+        body = {**_filters(query, pool_check.window_of(query, self.clock.utc())),
+                "withStacked": True, "id": _safe_ref(upstream_id)}
+        rows, _ = await self._step(self._search(body))
+        return any(_ref(row.get("id"), "search") == body["id"] for row in rows)
+
     async def _search(self, body: dict) -> tuple[list[dict], bool]:
         """One `search/metadata` page 1: its rows and whether more match. Every search a check
         makes asks `withExif` (follow-ups 2026-10-11, owner item 1: discovery reads each
@@ -533,7 +544,7 @@ class ImmichClient:
 
     def _item(self, row: dict) -> SearchItem:
         """One row's facts; a row that does not parse is only that photo's problem. `width` and
-        `height` are Immich's own, already upright (Immich v2.5.6 metadata.service swaps them for
+        `height` are Immich's own, already upright (Immich's metadata.service swaps them for
         a sideways EXIF orientation when it reads the file) and edited."""
         upstream_id = _ref(row.get("id"), "search")
         try:
@@ -601,7 +612,7 @@ class ImmichClient:
             raise MediaError("asset_changed", "incompatible")
 
     async def faces(self, upstream_id: str) -> tuple[FaceBox, ...]:
-        """LibraryClient.faces (roadmap 5a, slice M1): `GET faces?id=`, each v2.5.6
+        """LibraryClient.faces (roadmap 5a, slice M1): `GET faces?id=`, each v3.1.0
         `AssetFaceResponseDto`'s `boundingBoxX1/Y1/X2/Y2` on its `imageWidth` x `imageHeight`."""
         upstream_id = _safe_ref(upstream_id)
         try:
@@ -878,6 +889,16 @@ def _face_box(row: object) -> FaceBox | None:
         return None
 
 
+def _album_owner(row: dict) -> str:
+    """The id of the album's `albumUsers` member of role `owner` (exactly one)."""
+    owners = [_mapping(_mapping(member, "albums").get("user"), "albums").get("id")
+              for member in _array(row.get("albumUsers"), "albums")
+              if _mapping(member, "albums").get("role") == "owner"]
+    if len(owners) != 1:
+        raise _unexpected("albums")
+    return _ref(owners[0], "albums")
+
+
 def _parsed(model, detail: str, **values):
     try:
         return model(**values)
@@ -973,13 +994,12 @@ def _size(value: object) -> int | None:
 
 
 def _duration(value: object) -> float | None:
-    """Immich's "H:MM:SS.ffffff"; zero (not read yet) is None."""
-    if (not isinstance(value, str) or len(value) > 32
-            or not re.fullmatch(r"[0-9]{1,4}:[0-5][0-9]:[0-5][0-9](\.[0-9]{1,9})?", value)):
+    """Immich 3.1's whole milliseconds, in seconds; null or zero (not read yet) is None."""
+    if value is None:
+        return None
+    if type(value) is not int or value < 0:
         raise _Malformed
-    hours, minutes, seconds = value.split(":")
-    duration = int(hours) * 3600 + int(minutes) * 60 + float(seconds)
-    return duration if duration > 0 else None
+    return value / 1000 if value > 0 else None
 
 
 def _month(value: object) -> str:
@@ -1074,7 +1094,11 @@ def _copy_of(url: httpx.URL) -> FetchStep:
 
 
 def edits_fingerprint(edits: list) -> str:
-    """16 hex of the sha256 of the canonical JSON of Immich's edit list (key order free)."""
+    """16 hex of the sha256 of the canonical JSON of Immich's edit list (key order free). Each
+    edit's own `id` (Immich 3.1 gives every saved edit one) is left out: the fingerprint names
+    what the edits do, so saving the same edits again is the same revision."""
+    edits = [{key: value for key, value in edit.items() if key != "id"}
+             if isinstance(edit, dict) else edit for edit in edits]
     canonical = json.dumps(edits, sort_keys=True, separators=(",", ":"), allow_nan=False)
     return hashlib.sha256(canonical.encode()).hexdigest()[:16]
 

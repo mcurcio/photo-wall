@@ -69,7 +69,7 @@ def jpeg_fixture() -> Variant:
         pipeline.set_state(Gst.State.NULL)
     payload = PHOTO.read_bytes()
     assert payload[:2] == b"\xff\xd8", ("jpeg_fixture", len(payload))
-    return Variant(sha256=hashlib.sha256(payload).hexdigest(), size=len(payload),
+    return Variant(asset_id="asset-" + hashlib.sha256(payload).hexdigest()[:16], recipe_id="e" * 64, sha256=hashlib.sha256(payload).hexdigest(), size=len(payload),
                    media_type="image/jpeg", width=WIDTH, height=HEIGHT)
 
 

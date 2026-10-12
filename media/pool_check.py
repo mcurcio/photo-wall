@@ -9,8 +9,12 @@ hands this module what they answered. A check runs in phases, one bounded step e
 2. **exclusions**: each exclusion query read whole, page by page, its ids marked `excluded`
    (design parked note "Keyset": exclusions first, so nothing joins then leaves).
 3. **include**: the include query page by page; each photo becomes a pool entry or a mark.
-4. **done**: the next step finishes the check (complete, or incomplete when one instant held
-   more than a page).
+4. **recheck** (follow-up S4): each row the walk neither saw nor marked is asked about alone
+   (`LibraryClient.still_matches`), one photo per step; it stays if Immich still answers it and
+   leaves if not. A photo whose capture time moved behind the keyset edge mid-check is missed by
+   the walk, never removed. When no such row is left the check is complete.
+5. **done**: the next step finishes the check as incomplete (one instant held more than a
+   page); nothing is re-checked or removed.
 
 Relative dates resolve on the house calendar (Settings › House's zone, the lease's `zone`) at the
 check's start: "last 1 month" from 12 Oct 23:30 house time is from 12 Sep 23:30 house time.
@@ -46,7 +50,7 @@ from media.library_client import ExclusionQuery, KeysetPosition, SearchItem, Tak
 class CheckProgress(Model):
     """Where a check is; stored as the lease's `progress` JSON between steps."""
 
-    phase: Literal["up_to", "exclusions", "include", "done"]
+    phase: Literal["up_to", "exclusions", "include", "recheck", "done"]
     window: TakenWindow
     exclusion_index: int = Field(default=0, ge=0)
     position: KeysetPosition | None = None
@@ -114,7 +118,7 @@ def advance(progress: CheckProgress, query: SourceQuery, *, next_position: Keyse
                     "phase": "done", "incomplete": True, "position": None,
                     "seen_so_far": seen_so_far})
             return progress.model_copy(update={
-                "phase": "include" if next_position is not None else "done",
+                "phase": "include" if next_position is not None else "recheck",
                 "position": next_position, "seen_so_far": seen_so_far})
     return progress
 

@@ -17,7 +17,7 @@ COMMON = {"run_id": "run-1", "output_id": "HDMI-A-1", "frame_id": "frame-0",
           "binding_generation": 1, "priority": 0, "root_order": 0, "admission_order": 0,
           "opacity": 1.0, "fade_in": 0.0, "fade_out": 0.0, "required": True,
           "after_end": "leave_as_is"}
-STILL = {"sha256": "b" * 64, "size": 10, "media_type": "image/jpeg", "width": 30, "height": 20,
+STILL = {"asset_id": "asset-b", "recipe_id": "e" * 64, "sha256": "b" * 64, "size": 10, "media_type": "image/jpeg", "width": 30, "height": 20,
          "duration": None}
 
 

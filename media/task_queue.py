@@ -17,7 +17,6 @@ from central.media_queue import (
     MEASURE_KEY_CONTENT_TASK,
     MEDIA_QUEUE,
     MEDIA_STORAGE_LOCK,
-    PREPARE_MEDIA_TASK,
 )
 
 # The library tick: due connection and pool checks are queued every 30 seconds (each is due once
@@ -96,13 +95,11 @@ async def rescue_stalled(app: procrastinate.App, *,
     rows, and the copy cannot run while the stalled row holds the lock (the content runtime's
     rescue, central/infra/queue_ops.py, follows the same order for its typed jobs).
 
-    Two differences from that rescue, by design: the copy starts at attempt 0
-    (`defer_job_async` cannot carry `attempts`), and a copy of PREPARE_MEDIA_TASK usually
-    claims nothing, because the job's `media_jobs` row stays `running` (claims take `queued` or
-    `retry` only) until `MediaStore.recover`, run by the maintenance task, hands it back. What
-    this rescue guarantees is the lock: MEDIA_STORAGE_LOCK and a check's lock are free again.
-    The rule has these two bodies until a residual gives it one home (run ledger, maintenance
-    risks)."""
+    One difference from that rescue, by design: the copy starts at attempt 0
+    (`defer_job_async` cannot carry `attempts`). What this rescue guarantees is the lock:
+    MEDIA_STORAGE_LOCK and a check's lock are free again. Media variants are not on this queue
+    (`PrepareMedia` runs on the job runtime, whose rescue is its own). The rule has these two
+    bodies until a residual gives it one home (run ledger, maintenance risks)."""
     periodic = {task.task.name for task in app.periodic_registry.periodic_tasks.values()}
     finished = 0
     for row in await app.job_manager.get_stalled_jobs(
@@ -133,18 +130,7 @@ def create_worker_app(dsn: str) -> procrastinate.App:
         connector=async_connector(dsn),
     )
 
-    @app.task(
-        name=PREPARE_MEDIA_TASK,
-        queue=MEDIA_QUEUE,
-        lock=MEDIA_STORAGE_LOCK,
-        pass_context=True,
-        retry=MediaRetryStrategy(),
-    )
-    async def prepare_media(context, job_id: str):
-        worker = context.additional_context["media_worker"]
-        await worker.process_job(job_id, attempt=max(1, context.job.attempts))
-
-    # Roadmap 5a: one photo's key content. No lock: measurements run beside preparation and the
+    # Roadmap 5a: one photo's key content. No lock: measurements run beside the
     # library checks; the queueing lock (central/media_queue.py) keeps one queued per photo.
     @app.task(name=MEASURE_KEY_CONTENT_TASK, queue=MEDIA_QUEUE, pass_context=True,
               retry=MediaRetryStrategy())

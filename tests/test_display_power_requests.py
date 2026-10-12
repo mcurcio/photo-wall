@@ -306,7 +306,7 @@ def _london(at: str) -> float:
 
 
 def test_the_document_carries_the_frames_timetable_and_its_change_moves_only_at_set_times(registry):
-    """A9: the Frame follows Night off (23:00-07:00, seeded by migration 088) in a Europe/London
+    """A9: the Frame follows Night off (23:00-07:00, seeded by migration 089) in a Europe/London
     house. The document's power part is its timetable in calendar set times; reading it again at
     any moment between two set times gives the same change number; it rises at 23:00 (the power
     now is off) and at house midnight (the horizon moves); the Power tab names the set time the

@@ -270,7 +270,7 @@ def after_end_plan() -> tuple[PlayerConfiguration, Plan]:
                                         configuration_revision=1, bindings=(binding,),
                                         enabled_outputs=("HDMI-A-1",))
     common = dict(run_id="run-1", output_id="HDMI-A-1", frame_id="frame-0", binding_generation=1)
-    photo = Variant(sha256="b" * 64, size=10, media_type="image/jpeg", width=10, height=10)
+    photo = Variant(asset_id="asset-b", recipe_id="e" * 64, sha256="b" * 64, size=10, media_type="image/jpeg", width=10, height=10)
     layers = (
         Layer(assignment_id="kept", start=0, end=10, media_origin=0, variant=photo,
               crop=CENTRED, after_end="keep_this_photo", **common),

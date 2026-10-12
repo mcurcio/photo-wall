@@ -78,7 +78,7 @@ def player() -> None:
     from player.rendering import LocalLayer, OutputComposition
 
     payload = PHOTO.read_bytes()
-    variant = Variant(sha256=hashlib.sha256(payload).hexdigest(), size=len(payload),
+    variant = Variant(asset_id="asset-" + hashlib.sha256(payload).hexdigest()[:16], recipe_id="e" * 64, sha256=hashlib.sha256(payload).hexdigest(), size=len(payload),
                       media_type="image/png", width=64, height=48)
     binding = OutputBinding(output_id=OUTPUT, frame_id="frame", generation=1,
                             profile=FrameProfile(width_px=1600, height_px=900, diagonal_inches=10))
