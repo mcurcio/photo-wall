@@ -280,10 +280,17 @@ class UpstreamFixture:
         }
 
     def tag(self, paths: list[str], asset_ids: list[str]) -> dict[str, str]:
-        """Upsert the tag paths and put each on the assets; tag path -> tag id."""
+        """Upsert the tag paths and put each on the assets; tag path -> tag id.
+
+        Tags only processed assets (`wait_until_processed`): Immich's metadata extraction ends
+        by replacing an asset's tags with the ones it read, so a tag put on while it runs can
+        be dropped."""
         tags = self.request("PUT", "/tags", json={"tags": paths})
         by_path = {tag["value"]: tag["id"] for tag in tags}
         require(set(paths) <= set(by_path), "fixture_document_invalid")
+        deadline = time.monotonic() + METADATA_TIMEOUT
+        for upstream_id in asset_ids:
+            self.wait_until_processed(upstream_id, deadline=deadline)
         if asset_ids:
             self.request("PUT", "/tags/assets",
                          json={"tagIds": [by_path[path] for path in paths],
@@ -322,6 +329,19 @@ class UpstreamFixture:
                              json={"assetIds": [upstream_id], "name": "refresh-metadata"})
                 refreshed = True
             time.sleep(1)
+
+    def wait_until_processed(self, upstream_id: str, *, deadline: float) -> dict:
+        """The asset once Immich has finished its upload jobs, metadata extraction included.
+
+        Immich 2.5.6 runs metadata extraction, then the storage template job, then thumbnail
+        generation, which sets `thumbhash`; extraction writes the size before it applies the
+        file's tags, so a known size alone does not mean extraction is over."""
+        while True:
+            asset = self.request("GET", "/assets/" + upstream_id)
+            if asset.get("thumbhash"):
+                return asset
+            require(deadline - time.monotonic() > 0, "metadata_convergence_timeout")
+            time.sleep(.25)
 
     # --- the content set ----------------------------------------------------------------------
 
