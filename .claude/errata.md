@@ -5311,3 +5311,28 @@ Order: (a) merge the iac PR that switches the factory to `central.app:create_app
   why the media worker (a Central process) is not listed.
 - **Migration 088 sorts the seeded Frame ids with `COLLATE "C"`.** `ChosenFrames.frame_ids` must be sorted as Python
   sorts; the page's `ORDER BY id` follows the database's collation, which may order `-` and digits differently.
+
+## E-PW-T-2 (Power and the week, slice T2, 2026-10-12) · feat/power-and-the-week
+- **Why needs each root Run's activation identity; the frozen signatures had none.** `content_why` names a
+  request's kind by its activation id ("program:", "default:", else Show now) and the Default Scene's "no Run
+  under its identity prefix is active" rule needs it too, but `RunView`/`_Run` carried no activation id. Resolution
+  (not a stop): `_Run.activation_id` and `RunView.activation_id` (both `str | None = None`, so a stored snapshot
+  restores; None for a child and for a Run admitted before 088).
+- **`remove_program` forgets the Program before it advances.** The page orders it "finish its Runs, advance, forget",
+  which admits a window starting at that very instant and at once asks it to finish (a Run that plays a whole
+  cycle). The Program is forgotten first, its active Runs finish at `now`, then Runtime advances.
+- **A Program window wholly missed between two advances** is read as "ended at or before the advance's target":
+  `_advance` carries its target, so a timeline step (target = the step) still admits every window in order.
+- **`mount_program_routes` takes create_app's `runtime_store`, not `coordinator.runtime`** (the same
+  `RuntimeStore(db, clock)`; the health tests' stand-in coordinator has no `runtime`). **`PgWhy` takes
+  `media_times`** (the database's clock in production, the injected test clock in tests), as T1's `PgPower` does;
+  the page's `DatabaseTransactionClock()` would put A5's "test clock" out of reach.
+- **Every DB test that builds a Program sets the house (`tests/support/house_time.py set_house`)**: with no row,
+  Central reads its server zone, which differs between a laptop and CI. A When has minute resolution, so tests that
+  scheduled a window at a sub-minute instant (1010, 1100) move it to the next minute (and the test clock with it).
+- **Not changed (outside T's files):** `central/console/src/join.js` and the facts still name a Program by its
+  `program_id` ("Program p-3fa9…" for one made in the console) on Now, Wall and the Frame page; the console keeps
+  the word "Program" (the owner's "Schedule" is S4's screens); `scripts/harness_failure.py` still lists
+  `run_ended_before_faults_completed`, which the demo no longer raises (the Default Scene never ends).
+- **Deleted, unreachable:** the browser test "a refused Program whose protector is no longer served": a refused
+  window lasts at most about a day, the operator read keeps a Run for a day.
