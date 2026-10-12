@@ -30,15 +30,18 @@ source" opens an unsaved Source whose pool fills as Immich is read; Name and Sav
 time. `add_source` makes one; `start_source` and `source_editor` are its parts. A connection
 must be seeded first (tests/browser/photo_seed.py).
 
-As of bead 4 a Program is scheduled in the Schedule flow (#/schedule/new/<step>): "Schedule
-a Program" on the Schedule page, then Scene → When → Review. `schedule_program` walks it;
-`start_schedule`, `schedule_continue` and `schedule_form` are its parts.
+As of bead 4 a Schedule (Central's Program) is made in the Schedule flow
+(#/schedule/new/<step>): the page's new-Schedule button, then Scene → When → Review.
+`schedule_program` walks it; `start_schedule`, `schedule_continue` and `schedule_form` are its
+parts. The Schedule page's parts and every name they carry are in schedule_page.py, read from
+the console's own words (console_words.py), so these helpers type no Schedule copy.
 """
 
 import re
 from collections.abc import Mapping
 from urllib.parse import quote
 
+import schedule_page
 from operator_harness import pause_page_clock, sign_in
 from playwright.sync_api import expect
 
@@ -65,7 +68,7 @@ TABS = {"overview": "Overview", "position": "Position", "picture": "Picture", "p
 def go(page, section):
     """Show `section`: one of "now", "scenes", "schedule", "sources", "wall", "hardware",
     "releases" or "attention". Name the section the test is about (a Run test goes to "now", a
-    Program test to "schedule").
+    Schedule test to "schedule").
 
     Clicks the section's sidebar link by its accessible name; on a narrow screen, where
     the sidebar is a drawer, opens the drawer with "Menu" first. Waits for the page's
@@ -129,6 +132,20 @@ def player_name(registry, player_id, serial=None):
         return f"Player …{serial[-6:]}"
     device_id = next(p.device_id for p in registry.inventory().players if p.id == player_id)
     return f"Player {device_id}"
+
+
+def frame_name(registry, frame_id):
+    """A Frame's name (#94), its page's heading: Central names a new Frame "Frame N" until it is
+    renamed."""
+    return next(frame.name for frame in registry.inventory().frames if frame.id == frame_id)
+
+
+def frame_heading(page, name=None):
+    """The Frame page's level-1 heading: the Frame's name (`frame_name`), or, with no name, any
+    Frame page's (a level-1 heading other than the Wall's)."""
+    if name is None:
+        return page.get_by_role("heading", level=1, name=re.compile(r"^(?!Wall$).+"))
+    return page.get_by_role("heading", level=1, name=name, exact=True)
 
 
 def hardware_list(page):
@@ -306,11 +323,9 @@ def add_source(page, name, *, submit=True):
 
 
 def schedule_form(page):
-    """The Schedule flow's current step: the form "Schedule a Program" in the Programs region.
-    Every step renders it, with the step's fields and its Back and Continue (Review:
-    "Schedule Program")."""
-    return page.get_by_role("region", name="Programs", exact=True).get_by_role(
-        "form", name="Schedule a Program", exact=True)
+    """The Schedule flow's current step for a new Schedule (schedule_page.create_form). Every
+    step renders it, with the step's fields and its Back and Continue (Review: the save)."""
+    return schedule_page.create_form(page)
 
 
 def schedule_continue(page, step=None):
@@ -323,11 +338,10 @@ def schedule_continue(page, step=None):
 
 
 def start_schedule(page):
-    """Go to Schedule and press "Schedule a Program"; returns the flow's form, on the Scene
+    """Go to Schedule and press its new-Schedule button; returns the flow's form, on the Scene
     step (prefilled with the Scene last saved or picked on a Scene card, if any)."""
     go(page, "schedule")
-    page.get_by_role("region", name="Programs", exact=True).get_by_role(
-        "button", name="Schedule a Program", exact=True).click()
+    schedule_page.new_button(page).click()
     return schedule_form(page)
 
 
@@ -335,17 +349,17 @@ DAY_NAMES = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday",
 
 
 def schedule_program(page, name, scene_id, start, end, priority=None, *, days=None, submit=True):
-    """Schedule Program `name` of Scene `scene_id`: every week on `days` (day names; None keeps
+    """Make Schedule `name` of Scene `scene_id`: every week on `days` (day names; None keeps
     every day), from `start` to `end` ("HH:MM" on the house clock), at `priority` (its words:
     "Normal", "Special event", "Always wins"; None keeps Normal).
 
     Walks the Schedule flow (flow design §7 J6): Scene → When → Review. `scene_id` None keeps
-    the Scene step's prefill. The Program name is typed on Review; the priority is chosen under
+    the Scene step's prefill. The name is typed on Review; the priority is chosen under
     Review's Advanced.
 
-    With `submit`, sends it ("Schedule Program": one POST /v1/operator/programs), waits (on
-    success) for that Program's card and returns the POST response; without it, returns the
-    flow's form on Review, filled and unsent.
+    With `submit`, saves it (one POST /v1/operator/programs), waits (on success) for that
+    Schedule's card and returns the POST response; without it, returns the flow's form on
+    Review, filled and unsent.
     """
     form = start_schedule(page)
     if scene_id is not None:
@@ -357,7 +371,7 @@ def schedule_program(page, name, scene_id, start, end, priority=None, *, days=No
     form.get_by_label("Starts", exact=True).fill(start)
     form.get_by_label("Ends", exact=True).fill(end)
     schedule_continue(page, "Review")
-    form.get_by_label("Program name", exact=True).fill(name)
+    schedule_page.name_field(form).fill(name)
     if priority is not None:
         form.get_by_role("button", name="Advanced", exact=True).click()
         form.get_by_label("Priority", exact=True).select_option(label=priority)
@@ -366,11 +380,10 @@ def schedule_program(page, name, scene_id, start, end, priority=None, *, days=No
     with page.expect_response(
         lambda r: r.url.endswith("/v1/operator/programs") and r.request.method == "POST"
     ) as info:
-        form.get_by_role("button", name="Schedule Program", exact=True).click()
+        schedule_page.save_button(form).click()
     if info.value.ok:
         # Listed before anything can use it (the refresh after the save landed).
-        expect(page.get_by_role("region", name="Programs", exact=True).get_by_label(
-            f"Program {name}", exact=True)).to_be_visible()
+        expect(schedule_page.card(page, name)).to_be_visible()
     return info.value
 
 
@@ -441,13 +454,15 @@ def open_frame(page, frame_id, tab):
     "hardware", the Frame page's keys); returns the page on screen.
 
     Follows the frame's route, `#/wall/frames/<id>/<tab>`, as a typed URL would, and waits for
-    the Frame's heading and the tab.
+    the route, a Frame's heading (its name, `frame_heading`) and the tab.
     """
     if tab not in TABS:
         raise ValueError(f"unknown Frame page tab {tab!r}; expected one of {sorted(TABS)}")
     expect(page.get_by_role("banner")).to_be_visible()  # the shell is shown (signed in)
-    visit(page, f"#/wall/frames/{quote(frame_id, safe='')}/{tab}")
-    expect(page.get_by_role("heading", level=1, name=f"Frame {frame_id}", exact=True)).to_be_visible()
+    route = f"#/wall/frames/{quote(frame_id, safe='')}/{tab}"
+    visit(page, route)
+    expect(page).to_have_url(re.compile(re.escape(route) + "$"))
+    expect(frame_heading(page)).to_be_visible()
     expect(page.get_by_role("tablist", name="Frame settings", exact=True).get_by_role(
         "tab", name=TABS[tab], exact=True)).to_have_attribute("aria-selected", "true")
     return visible_page(page)

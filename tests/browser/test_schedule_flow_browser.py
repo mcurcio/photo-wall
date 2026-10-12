@@ -1,12 +1,15 @@
-"""Behavioral checks for the Schedule flow and the Program cards (flow design §7 J6; Power and
-the week, A10).
+"""Behavioral checks for the Schedule flow and the Schedule cards (flow design §7 J6; Power and
+the week, A10). The console calls Central's Program a Schedule.
 
 Reuses the operator browser harness (real Chromium against the production create_app, the
 disposable-schema `registry` fixture and the autouse `page_errors` guard) and the Showrunner
-file's seeding (its house is UTC, the test clock 1 Jan 1970). A Program is a Scene every week
+file's seeding (its house is UTC, the test clock 1 Jan 1970). A Schedule is a Scene every week
 on its days, from a start to an end on the house clock, at a priority: one POST, with Central
-naming it; an edit sends the Program it loaded and the draft; the card shows Central's words
+naming it; an edit sends the Schedule it loaded and the draft; the card shows Central's words
 for its next window, whatever the browser's time zone.
+
+The Schedule page's parts are located through schedule_page.py and its words come from
+console_words.py (the console's showWords.json): no test here types the console's Schedule copy.
 """
 
 import os
@@ -24,10 +27,22 @@ from console_tasks import (
     start_schedule,
     visit,
 )
+from console_words import schedule, schedule_pattern
 from operator_harness import answer_first, operator_server
 from playwright.sync_api import expect
+from schedule_page import (
+    card,
+    edit_button,
+    edit_form,
+    new_button,
+    remove_button,
+    said,
+    save_button,
+    schedules,
+)
 from support.house_time import daily, window_program
 from test_operator_showrunner_browser import (
+    SCENE_ID,
     SOURCE,
     VALID_FRAME,
     _console_scene,
@@ -44,10 +59,6 @@ pytestmark = pytest.mark.skipif(
 )
 
 WEEKDAYS = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday")
-
-
-def _programs(page):
-    return page.get_by_role("region", name="Programs", exact=True)
 
 
 def _schedule_link(page):
@@ -76,7 +87,7 @@ def test_a_weekday_schedule_is_one_post_and_its_card_shows_the_house_clock(page,
         expect(form.get_by_label("Number of windows", exact=True)).to_have_count(0)
         expect(form.get_by_label("Id", exact=True)).to_have_count(0)
         with _post(page) as info:
-            form.get_by_role("button", name="Schedule Program", exact=True).click()
+            save_button(form).click()
         assert info.value.status == 201
         assert info.value.request.post_data_json == {
             "name": "Evenings", "scene_id": "evening", "priority": "normal", "when": {
@@ -84,28 +95,27 @@ def test_a_weekday_schedule_is_one_post_and_its_card_shows_the_house_clock(page,
                 "start": {"at": "clock", "time": "17:00"}, "end": {"at": "clock", "time": "23:00"}}}
         stored = info.value.json()
 
-        card = _programs(page).get_by_label("Program Evenings", exact=True)
-        expect(card).to_contain_text("Mon–Fri, 17:00–23:00")
-        expect(card).to_contain_text("Thu 1 Jan 17:00–23:00")     # Thursday 1 Jan 1970, UTC house
-        expect(card).to_contain_text("Normal")
+        evenings = card(page, "Evenings")
+        expect(evenings).to_contain_text("Mon–Fri, 17:00–23:00")
+        expect(evenings).to_contain_text("Thu 1 Jan 17:00–23:00")     # Thursday 1 Jan 1970, UTC house
+        expect(evenings).to_contain_text("Normal")
 
-        card.get_by_role("button", name="Edit program Evenings", exact=True).click()
+        edit_button(evenings, "Evenings").click()
         assert current_hash(page) == f"#/schedule/{stored['program_id']}/edit/review"
-        edit = _programs(page).get_by_role("form", name="Edit Program Evenings", exact=True)
+        edit = edit_form(page, "Evenings")
         edit.get_by_role("button", name="Change When", exact=True).click()
         edit.get_by_label("Ends", exact=True).fill("22:00")
         schedule_continue_edit(page, edit)
         with page.expect_response(lambda r: r.request.method == "PUT"
                                   and r.url.endswith(f"/v1/operator/programs/{stored['program_id']}")) as saved:
-            edit.get_by_role("button", name="Save Program", exact=True).click()
+            save_button(edit).click()
         assert saved.value.status == 200
         request = saved.value.request.post_data_json
         assert request["expected"] == stored
         assert request["next"]["when"]["end"] == {"at": "clock", "time": "22:00"}
         assert saved.value.json()["revision"] == 2
-        expect(_programs(page).get_by_role("status")).to_have_text(
-            "Saved Program Evenings. It applies from its next window; a window playing now keeps its end.")
-        expect(card).to_contain_text("Mon–Fri, 17:00–22:00")
+        expect(said(page)).to_have_text(schedule("saved", name="Evenings"))
+        expect(evenings).to_contain_text("Mon–Fri, 17:00–22:00")
 
 
 def schedule_continue_edit(page, form):
@@ -165,7 +175,7 @@ def test_priority_defaults_to_normal_shown_on_review_and_changes_under_advanced(
         advanced = form.get_by_role("button", name="Advanced", exact=True)
         expect(advanced).to_have_attribute("aria-expanded", "false")
         with _post(page) as info:
-            form.get_by_role("button", name="Schedule Program", exact=True).click()
+            save_button(form).click()
         assert info.value.request.post_data_json["priority"] == "normal"
 
         form = schedule_program(page, "second", "evening", "09:00", "11:00", submit=False)
@@ -176,9 +186,9 @@ def test_priority_defaults_to_normal_shown_on_review_and_changes_under_advanced(
         priority.select_option(label="Always wins")
         expect(answers).to_contain_text(re.compile(r"PriorityAlways winsChange"))
         with _post(page) as info:
-            form.get_by_role("button", name="Schedule Program", exact=True).click()
+            save_button(form).click()
         assert info.value.request.post_data_json["priority"] == "always-wins"
-        expect(_programs(page).get_by_label("Program second", exact=True)).to_contain_text("Always wins")
+        expect(card(page, "second")).to_contain_text("Always wins")
 
 
 def test_continue_checks_only_its_own_step(page, registry):
@@ -224,7 +234,7 @@ def test_review_routes_each_problem_to_its_step(page, registry):
         for day in ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"):
             form.get_by_label(day, exact=True).uncheck()
         visit(page, "#/schedule/new/review")      # past When by a typed URL
-        form.get_by_role("button", name="Schedule Program", exact=True).click()
+        save_button(form).click()
         summary = form.get_by_role("alert")
         expect(summary).to_be_focused()
         summary.get_by_role("button", name="Tick at least one day.", exact=True).click()
@@ -232,7 +242,7 @@ def test_review_routes_each_problem_to_its_step(page, registry):
         form.get_by_label("Monday", exact=True).check()
         schedule_continue(page, "Review")
         with _post(page) as info:
-            form.get_by_role("button", name="Schedule Program", exact=True).click()
+            save_button(form).click()
         assert info.value.request.post_data_json["when"]["days"] == ["mon"]
         assert posts == [info.value.url]
 
@@ -248,35 +258,34 @@ def test_a_refusal_central_routes_to_a_field_returns_to_its_step(page, registry)
             status=422, content_type="application/json", body='{"error": "unknown-scene"}'))
         form = schedule_program(page, "Show", "evening", "09:00", "11:00", submit=False)
         with _post(page):
-            form.get_by_role("button", name="Schedule Program", exact=True).click()
+            save_button(form).click()
         expect(page).to_have_url(re.compile(r"#/schedule/new/scene$"))
         expect(form.get_by_label("Scene", exact=True)).to_have_accessible_description(
             re.compile("That Scene no longer exists"))
 
 
 def test_an_edit_that_meets_a_newer_save_offers_reload(page, registry):
-    """A save whose expected Program is no longer the stored one is refused 409 "changed" with
-    the stored Program; the editor says so and Reload reseeds from it, after which Save works."""
+    """A save whose expected Schedule is no longer the stored one is refused 409 "changed" with
+    the stored Schedule; the editor says so and Reload reseeds from it, after which Save works."""
     _seed(registry)
     runtime = _runtime(registry)
     runtime.command("set_scene", _console_scene("evening"))
     created = runtime.command_current("create_program", window_program("late-show", "evening", 3600, 7200))
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "schedule")
-        card = _programs(page).get_by_label("Program late-show", exact=True)
-        card.get_by_role("button", name="Edit program late-show", exact=True).click()
-        edit = _programs(page).get_by_role("form", name="Edit Program late-show", exact=True)
+        edit_button(card(page, "late-show"), "late-show").click()
+        edit = edit_form(page, "late-show")
         # Someone else saves first.
         runtime.command_current("save_program", created, ProgramDraft(
             name="late-show", scene_id="evening", when=daily("01:00", "03:00")))
         with page.expect_response(lambda r: r.request.method == "PUT") as refused:
-            edit.get_by_role("button", name="Save Program", exact=True).click()
+            save_button(edit).click()
         assert refused.value.status == 409
-        expect(edit).to_contain_text("Program late-show changed since you opened it.")
+        expect(edit).to_contain_text(schedule("changed", name="late-show"))
         edit.get_by_role("button", name="Reload", exact=True).click()
         expect(edit.get_by_label("Your answers", exact=True)).to_contain_text("Every day, 01:00–03:00")
         with page.expect_response(lambda r: r.request.method == "PUT") as saved:
-            edit.get_by_role("button", name="Save Program", exact=True).click()
+            save_button(edit).click()
         assert saved.value.status == 200
         assert saved.value.request.post_data_json["expected"]["revision"] == 2
 
@@ -298,7 +307,7 @@ def test_the_draft_survives_a_section_change_and_the_sidebar_says_draft(page, re
         go(page, "now")
         go(page, "wall")
         go(page, "schedule")
-        resume = _programs(page).get_by_role("button", name="Resume draft (Draft)", exact=True)
+        resume = schedules(page).get_by_role("button", name="Resume draft (Draft)", exact=True)
         expect(resume).to_be_visible()
         resume.click()
         assert current_hash(page) == "#/schedule/new/when"
@@ -310,30 +319,29 @@ def test_the_draft_survives_a_section_change_and_the_sidebar_says_draft(page, re
 
 def test_save_lands_on_the_schedule_and_back_never_reenters_the_flow(page, registry):
     """§6 History: Save replaces the flow's entry with #/schedule, which lists the new
-    Program's card and says what was scheduled; Back never re-enters the finished flow."""
+    Schedule's card and says what was saved; Back never re-enters the finished flow."""
     _seed(registry)
     _runtime(registry).command("set_scene", _console_scene("evening"))
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin)
         schedule_program(page, "Morning", "evening", "09:00", "11:00")
-        programs = _programs(page)
-        expect(programs.get_by_role("status")).to_have_text("Scheduled Program Morning.")
+        expect(said(page)).to_have_text(schedule("created", name="Morning"))
         assert current_hash(page) == "#/schedule"
-        card = programs.get_by_label("Program Morning", exact=True)
-        expect(card).to_contain_text("Scene evening")
-        expect(card.get_by_role("button")).to_have_text(["Edit", "Remove"])
+        morning = card(page, "Morning")
+        expect(morning).to_contain_text("Scene evening")
+        expect(morning.get_by_role("button")).to_have_text(["Edit", "Remove"])
         expect(_schedule_link(page)).to_have_accessible_description("")
 
         page.go_back()  # one Back leaves the section: no second #/schedule entry
         assert not current_hash(page).startswith("#/schedule"), current_hash(page)
         expect(schedule_form(page)).to_have_count(0)
         go(page, "schedule")
-        expect(programs.get_by_role("button", name="Schedule a Program", exact=True)).to_be_visible()
+        expect(new_button(page)).to_be_visible()
 
 
-def test_a_program_central_did_not_answer_says_it_may_have_been_saved(page, registry):
-    """A Schedule Program that got no answer (a 5xx after Central stored it) says it may have
-    been saved and stays on Review; the stored Program lists once the snapshot refreshes."""
+def test_a_schedule_central_did_not_answer_says_it_may_have_been_saved(page, registry):
+    """A save that got no answer (a 5xx after Central stored it) says it may have been saved
+    and stays on Review; the stored Schedule lists once the snapshot refreshes."""
     _seed(registry)
     _runtime(registry).command("set_scene", _console_scene("evening"))
     with operator_server(registry.db, registry.clock) as origin:
@@ -346,13 +354,79 @@ def test_a_program_central_did_not_answer_says_it_may_have_been_saved(page, regi
         answer_first(page, "**/v1/operator/programs", committed_then_500)
         form = schedule_program(page, "Morning", "evening", "09:00", "11:00", submit=False)
         with _post(page):
-            form.get_by_role("button", name="Schedule Program", exact=True).click()
-        expect(_programs(page).get_by_role("status").filter(has_text="may have been saved")).to_have_text(
-            "Program Morning may have been saved: Central did not answer. "
-            "Check the Programs before scheduling it again.")
+            save_button(form).click()
+        expect(said(page)).to_have_text(schedule_pattern("createUnconfirmed", name="Morning"))
         assert current_hash(page) == "#/schedule/new/review"
         visit(page, "#/schedule")
-        expect(_programs(page).get_by_label("Program Morning", exact=True)).to_be_visible()
+        expect(card(page, "Morning")).to_be_visible()
+
+
+def test_remove_refusal_and_unknown_outcome_can_be_retried(page, registry):
+    """Remove sends DELETE …/programs/{id}?revision=N. A refusal says nothing was removed; a
+    server error stays unknown and allows an explicit retry; the retry removes the card. A later
+    Schedule may reuse the name, and the old receipt never shows on it. Mutation probe: drop
+    outcome feedback or treat a 5xx as success."""
+    _seed(registry)
+    _runtime(registry).command("set_scene", _console_scene(SCENE_ID))
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin)
+        program_id = schedule_program(page, "Morning", SCENE_ID, "09:00", "11:00").json()["program_id"]
+        morning = card(page, "Morning")
+        remove = remove_button(morning, "Morning")
+        delete_url = f"/v1/operator/programs/{program_id}?revision=1"
+        responses = iter((409, 500, None))
+
+        def fail_then_delete(route):
+            if route.request.method != "DELETE":
+                route.continue_()
+                return
+            status = next(responses)
+            if status is None:
+                route.continue_()
+            else:
+                route.fulfill(status=status, content_type="application/json",
+                              body='{"error":"changed"}' if status == 409 else '{"error":"temporary_failure"}')
+
+        page.route(f"**{delete_url}", fail_then_delete)
+        remove.click()
+        expect(morning.get_by_role("status")).to_have_text(
+            schedule("removeRefused", name="Morning", reason="it changed since this card was loaded"))
+        expect(remove).to_be_enabled()
+
+        remove.click()
+        expect(morning.get_by_role("status")).to_have_text(schedule("removeUnknown", name="Morning"))
+        expect(remove).to_be_enabled()
+
+        with page.expect_response(
+            lambda r: r.url.endswith(delete_url) and r.request.method == "DELETE"
+        ) as info:
+            remove.click()
+        assert info.value.status == 204
+        expect(morning).to_have_count(0)
+
+        schedule_program(page, "Morning", SCENE_ID, "09:00", "11:00")
+        expect(remove).to_be_enabled()
+        expect(morning.get_by_role("status")).to_have_count(0)
+
+
+def test_a_scene_delete_refusal_names_the_schedule_that_plays_it(page, registry):
+    """Deleting a Scene a Schedule plays is refused (409), and both the confirmation and the
+    refusal name that Schedule by its name."""
+    _seed(registry)
+    _runtime(registry).command("set_scene", _console_scene(SCENE_ID))
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin)
+        schedule_program(page, "Morning", SCENE_ID, "09:00", "11:00")
+        go(page, "scenes")
+        scenes = page.get_by_role("region", name="Scenes", exact=True)
+        with page.expect_response(lambda r: r.request.method == "DELETE"
+                                  and f"/v1/operator/scenes/{SCENE_ID}?" in r.url) as info:
+            scenes.get_by_role("button", name=f"Delete Scene {SCENE_ID}", exact=True).click()
+            dialog = page.get_by_role("dialog")
+            expect(dialog).to_contain_text(schedule("named", name="Morning"))
+            dialog.get_by_role("button", name="Confirm delete", exact=True).click()
+        assert info.value.status == 409
+        expect(page.get_by_role("alert")).to_contain_text(schedule("named", name="Morning"))
 
 
 # --- The week page (Power and the week, roadmap 2b; slice S4 K3). The house is London, the clock
@@ -410,11 +484,11 @@ def test_save_and_apply_now_plays_the_new_rule_at_once_and_the_default_scene_is_
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin)
         stored = schedule_program(page, "Evenings", "evening", "17:00", "23:00").json()
-        card = _programs(page).get_by_label("Program Evenings", exact=True)
-        expect(card).to_contain_text("Wed 14 Oct 17:00–23:00")
+        evenings = card(page, "Evenings")
+        expect(evenings).to_contain_text("Wed 14 Oct 17:00–23:00")
 
-        card.get_by_role("button", name="Edit program Evenings", exact=True).click()
-        edit = _programs(page).get_by_role("form", name="Edit Program Evenings", exact=True)
+        edit_button(evenings, "Evenings").click()
+        edit = edit_form(page, "Evenings")
         expect(edit.get_by_label("Saved windows", exact=True)).to_contain_text(
             "Playing now (as saved, worked out by Central): Wed 14 Oct 17:00–23:00")
         edit.get_by_role("button", name="Change When", exact=True).click()
@@ -422,10 +496,10 @@ def test_save_and_apply_now_plays_the_new_rule_at_once_and_the_default_scene_is_
         schedule_continue_edit(page, edit)
         with page.expect_response(lambda r: r.request.method == "POST"
                                   and r.url.endswith(f"/v1/operator/programs/{stored['program_id']}/apply-now")) as sent:
-            _programs(page).get_by_role("button", name="Save and apply now", exact=True).click()
+            schedules(page).get_by_role("button", name="Save and apply now", exact=True).click()
         assert sent.value.status == 200
-        expect(card).to_contain_text("Now")
-        expect(card).to_contain_text("Wed 14 Oct 17:00–21:00")      # the new rule's window, at once
+        expect(evenings).to_contain_text("Now")
+        expect(evenings).to_contain_text("Wed 14 Oct 17:00–21:00")      # the new rule's window, at once
 
         picker = _week(page).get_by_role("region", name="Default Scene", exact=True).get_by_label(
             "Default Scene", exact=True)

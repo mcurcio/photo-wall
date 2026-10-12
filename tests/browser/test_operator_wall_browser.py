@@ -15,7 +15,15 @@ import re
 import time
 
 import pytest
-from console_tasks import connect, current_hash, edit_layout, visible_page
+from console_tasks import (
+    connect,
+    current_hash,
+    edit_layout,
+    frame_heading,
+    frame_name,
+    visible_page,
+)
+from console_words import SCHEDULE
 from operator_harness import (
     operator_server,
     pause_page_clock,
@@ -169,7 +177,7 @@ def test_clicking_a_frame_opens_its_page_at_overview_with_hardware_and_position(
 
         # One click on the frame on the plan (by identity) opens its page at Overview.
         page.get_by_role("button", name=f"Frame {SHOWING}", exact=True).click()
-        expect(page.get_by_role("heading", level=1, name=f"Frame {SHOWING}", exact=True)).to_be_visible()
+        expect(frame_heading(page, frame_name(registry, SHOWING))).to_be_visible()
         inspector = visible_page(page)
 
         # The five tabs, Overview first.
@@ -220,7 +228,7 @@ def test_an_unbound_frames_planned_fact_says_central_sends_it_no_layers(page, re
         connect(page, origin, "wall")
         expect(page.get_by_role("group", name="Frame spare-frame status", exact=True)).to_contain_text(planned)
         page.get_by_role("button", name="Frame spare-frame", exact=True).click()
-        expect(page.get_by_role("heading", level=1, name="Frame spare-frame", exact=True)).to_be_visible()
+        expect(frame_heading(page, frame_name(registry, "spare-frame"))).to_be_visible()
         inspector = visible_page(page)
         expect(inspector).to_contain_text("No Pi feeds this Frame yet, so Photo Wall sends it nothing.")
         inspector.get_by_role("region", name="Now", exact=True).get_by_role(
@@ -632,7 +640,8 @@ def test_delete_clear_frame_removes_it_from_the_plan(page, registry):
         expect(plan.get_by_role("status")).to_have_text(f"Frame {CLEAR} deleted.")
 
 
-def test_delete_frame_lists_stored_scene_roots_and_the_programs_playing_them(page, registry):
+def test_delete_frame_lists_stored_scene_roots_and_the_schedules_playing_them(page, registry):
+    """The confirmation and the refusal name the Schedules playing those Scenes by their names."""
     registry.create_frame(FrameCreate(
         id=CLEAR, surface_id="wall", x_mm=100, y_mm=100,
         width_mm=300, height_mm=500, profile=PORTRAIT))
@@ -640,7 +649,7 @@ def test_delete_frame_lists_stored_scene_roots_and_the_programs_playing_them(pag
     store.command("set_scene", Scene(scene_id="nested-gallery", children=(Child(scene=Scene(
         scene_id="inline", contributions=(Contribution(
             target="frame:" + CLEAR, kind="black"),))),)))
-    store.command_current("create_program", window_program("morning-show", "nested-gallery", 1080, 1140))
+    store.command_current("create_program", window_program("morning-show", "nested-gallery", 1080, 1140, name="Morning show"))
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall")
         edit_layout(page)
@@ -649,13 +658,13 @@ def test_delete_frame_lists_stored_scene_roots_and_the_programs_playing_them(pag
         dialog = page.get_by_role("dialog")
         expect(dialog).to_contain_text("Saved Scenes targeting this Frame must be edited or removed")
         expect(dialog.get_by_text("nested-gallery", exact=True)).to_be_visible()
-        expect(dialog).to_contain_text("Programs playing those Scenes")
-        expect(dialog.get_by_text("morning-show", exact=True)).to_be_visible()
+        expect(dialog).to_contain_text(SCHEDULE["dependents"])
+        expect(dialog.get_by_text("Morning show", exact=True)).to_be_visible()
         expect(dialog).to_contain_text("Central checks references again when you confirm")
         _confirm_delete(page)
         alert = _plan(page).get_by_role("alert")
         expect(alert).to_contain_text("saved Scenes: nested-gallery")
-        expect(alert).to_contain_text("Programs: morning-show")
+        expect(alert).to_contain_text(f"{SCHEDULE['referenced']}: Morning show")
         assert any(frame.id == CLEAR for frame in registry.inventory().frames)
 
 
@@ -676,10 +685,10 @@ def test_delete_frame_referenced_refusal_gives_refresh_and_edit_guidance(page, r
         _confirm_delete(page)
         alert = _plan(page).get_by_role("alert")
         expect(alert).to_contain_text("saved Scenes: new-scene")
-        expect(alert).to_contain_text("Programs: new-program")
+        expect(alert).to_contain_text(f"{SCHEDULE['referenced']}: new-program")   # not served: its id
         expect(alert).to_contain_text("queued activations: queued-show")
         expect(alert).to_contain_text("Press Refresh. Edit or remove the saved Scenes")
-        expect(alert).to_contain_text("Edit or remove the Programs")
+        expect(alert).to_contain_text(SCHEDULE["editOrRemove"])
         expect(alert).to_contain_text("retry after Central resolves them")
         assert any(frame.id == CLEAR for frame in registry.inventory().frames)
 

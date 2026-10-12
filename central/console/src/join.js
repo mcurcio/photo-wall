@@ -1,5 +1,6 @@
 import { fact, plannedNothing } from "./facts.js";
 import { runOrigin } from "./showState.js";
+import { SCHEDULE } from "./showWords.js";
 
 /**
  * Planned-intent + bound-output joins (shared primitive #4).
@@ -193,8 +194,7 @@ export function explainPrecedence(runtime, frameId) {
     if (intent.root_order !== winner.root_order) {
       return (
         `${lead} same priority, and Central admitted ${winner.scene_id}'s Run later. ` +
-        "Admission order, not the Program's start time; Programs starting at the same " +
-        "instant are admitted in Program-id order."
+        SCHEDULE.adjudication
       );
     }
     const root = runs.get(winner.root_id)?.scene_id ?? winner.scene_id;

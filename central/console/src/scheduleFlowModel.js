@@ -16,6 +16,7 @@
  */
 
 import { editedId, flowKeys } from "./flow/instance.js";
+import { SCHEDULE } from "./showWords.js";
 
 /** @typedef {import("./flow/steps.js").Step} Step */
 
@@ -43,7 +44,7 @@ export const SCHEDULE_ADVANCED_FIELDS = Object.freeze(new Set(["priority"]));
 export const SCHEDULE_KEYS = flowKeys({
   section: "schedule",
   firstStep: { create: SCENE.id, edit: REVIEW.id },
-  describe: { create: "a new Program", edit: (id) => `Program ${id}` },
+  describe: { create: SCHEDULE.describeNew, edit: () => SCHEDULE.describeEdit },
 });
 
 /** The days of a When, Monday first, as Central names them (central/house_time/model.py). */

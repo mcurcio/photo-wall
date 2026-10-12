@@ -1,6 +1,7 @@
 import { ageAt, formatAge } from "./health.js";
 import { frameOf, LIVE_PHASES, toTarget } from "./join.js";
 import { sceneFrames } from "./sceneTargets.js";
+import { SCHEDULE, schedule, scheduleName } from "./showWords.js";
 import { clockTime, windowWords } from "./timeWords.js";
 
 export { sceneFrames, sceneSourceRefs, sceneHasAuthoredMedia } from "./sceneTargets.js";
@@ -55,7 +56,7 @@ export function runOrigin(runtime, run) {
     const listed = runtime?.programs?.[run.program_id] !== undefined;
     return {
       kind: "program",
-      words: listed ? `Program ${run.program_id}` : `Program ${run.program_id}, since removed`,
+      words: listed ? schedule("named", { name: scheduleName(runtime, run.program_id) }) : SCHEDULE.sinceRemoved,
       programListed: listed,
     };
   }

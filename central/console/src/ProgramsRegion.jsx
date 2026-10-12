@@ -29,6 +29,7 @@ import { priorityWords, ReviewStep, SceneStep, TimeZoneNote, WhenStep } from "./
 import { programState } from "./showState.js";
 import { whenWords, windowWords } from "./timeWords.js";
 import { useCardMutation } from "./useCardMutation.js";
+import { SCHEDULE, schedule } from "./showWords.js";
 import { SaveBar } from "./patterns/save-bar.tsx";
 
 const EMPTY = {};
@@ -37,12 +38,13 @@ const EMPTY = {};
 const HEADINGS = {
   scene: "Which Scene?",
   when: "When should it show?",
-  review: "Check your Program",
+  review: SCHEDULE.reviewHeading,
 };
 
 /**
  * The Schedule section (flow design §7 J6, "Schedule it"; Power and the week): the region
- * "Programs", with the Program cards and the Schedule flow, Scene → When → Review.
+ * "Schedules", with the Schedule cards and the Schedule flow, Scene → When → Review. The
+ * console calls a Program a Schedule; every word it shows comes from showWords.js.
  *
  * A Program shows one Scene every week on its days, from its start to its end on the house
  * clock (central/runtime.py `Program`), at a priority. Central works out every window in the
@@ -112,7 +114,7 @@ export function ProgramsRegion({ snapshot, route, navigate, recentScene, markDra
     request.after !== undefined ? request.after() : focusRegion(),
   );
 
-  const write = useFlowWrite({ draft, confirm, failure: "Could not save Program" });
+  const write = useFlowWrite({ draft, confirm, failure: SCHEDULE.failure });
   // A refusal Central routed to a field stands until the draft changes.
   const refusedFor = useRef(null);
   useEffect(() => {
@@ -175,9 +177,9 @@ export function ProgramsRegion({ snapshot, route, navigate, recentScene, markDra
       sent.say(`Not saved: ${routed.message}`);
     } else if (result.error === "changed" && result.data?.current) {
       setCurrent(result.data.current);
-      sent.say(`Program ${value.name} changed since you opened it. Reload it to review the saved Program.`);
+      sent.say(schedule("changedReload", { name: value.name }));
     } else if (result.error === "missing") {
-      sent.say(`Program ${value.name} no longer exists.`);
+      sent.say(schedule("missing", { name: value.name }));
     } else {
       sent.refused(result);
     }
@@ -192,7 +194,7 @@ export function ProgramsRegion({ snapshot, route, navigate, recentScene, markDra
     draft.reseed();
     problems.reset();
     setCurrent(null);
-    setReloaded(`Reloaded Program ${value.name} from Central.`);
+    setReloaded(schedule("reloaded", { name: value.name }));
   };
 
   // An edit saves from the next window (PUT), or saves and applies now (POST …/apply-now): the
@@ -205,13 +207,11 @@ export function ProgramsRegion({ snapshot, route, navigate, recentScene, markDra
         method: applyNow ? "POST" : "PUT", body: { expected: value.expected, next: buildProgram(value) },
       }));
       if (result?.ok) {
-        sent.say(applyNow
-          ? `Saved Program ${result.data.name} and applied it now: the window playing now finishes and the new rule plays.`
-          : `Saved Program ${result.data.name}. It applies from its next window; a window playing now keeps its end.`);
+        sent.say(schedule(applyNow ? "savedNow" : "saved", { name: result.data.name }));
         sent.finish();
       } else if (result === null || result.status >= 500) {
         sent.attempted([editingId]);
-        sent.say(`Program ${value.name} ${NOT_CONFIRMED} Save again to confirm.`);
+        sent.say(schedule("editUnconfirmed", { name: value.name, unconfirmed: NOT_CONFIRMED }));
       } else refused(sent, result);
     });
   };
@@ -227,11 +227,11 @@ export function ProgramsRegion({ snapshot, route, navigate, recentScene, markDra
         body: buildProgram(value),
       }));
       if (result?.ok) {
-        sent.say(`Scheduled Program ${result.data.name}.`);
+        sent.say(schedule("created", { name: result.data.name }));
         handOver.clear();
         sent.finish();
       } else if (result === null || result.status >= 500) {
-        sent.say(`Program ${value.name} ${NOT_CONFIRMED} Check the Programs before scheduling it again.`);
+        sent.say(schedule("createUnconfirmed", { name: value.name, unconfirmed: NOT_CONFIRMED }));
       } else refused(sent, result);
     });
   };
@@ -246,18 +246,20 @@ export function ProgramsRegion({ snapshot, route, navigate, recentScene, markDra
       ),
       (result) => {
         if (result.ok) {
-          return { kind: "accepted", message: `Central removed Program ${program.name}. Waiting for the Program list to update.` };
+          return { kind: "accepted", message: schedule("removeAccepted", { name: program.name }) };
         }
         if (result.status === 0 || result.status >= 500) {
           return {
             kind: "unknown",
-            message: `Removal outcome for Program ${program.name} is unknown. Check the current Program before retrying.`,
+            message: schedule("removeUnknown", { name: program.name }),
           };
         }
         return {
           kind: "refused",
-          message: `Program ${program.name} was not removed: ${result.error === "changed" ? "it changed since this card was loaded"
-            : result.error ?? `HTTP ${result.status}`}. Check the current Program before retrying.`,
+          message: schedule("removeRefused", {
+            name: program.name,
+            reason: result.error === "changed" ? "it changed since this card was loaded" : result.error ?? `HTTP ${result.status}`,
+          }),
         };
       },
     ),
@@ -289,16 +291,15 @@ export function ProgramsRegion({ snapshot, route, navigate, recentScene, markDra
     when: () => <WhenStep {...stepProps} />,
     review: () => <>
       {stale && <div className="notice notice--warn" role="status">
-        <p>{storedProgram === undefined ? `Program ${value.name} no longer exists.` :
-          `Program ${value.name} changed since you opened it.`}</p>
-        <p>Reload it to review the saved Program; Save Program waits until you do.</p>
+        <p>{schedule(storedProgram === undefined ? "missing" : "changed", { name: value.name })}</p>
+        <p>{SCHEDULE.staleNote}</p>
         {storedProgram !== undefined && <button type="button" onClick={reload}>Reload</button>}
       </div>}
       {reloaded !== null && <p role="status">{reloaded}</p>}
       <ReviewStep {...stepProps} advanced={advanced("review")} onChange={flow.openField}
         windows={editingId === null ? null : snapshot?.runtime?.program_windows?.[editingId] ?? {}} />
       {editingId !== null && (
-        <SaveBar label="Apply now" message="Save Program applies from the next window; the window playing now keeps its end.">
+        <SaveBar label="Apply now" message={SCHEDULE.applyNowNote}>
           <button type="button" disabled={write.busy || stale} onClick={() => saveEdit(true)}>Save and apply now</button>
         </SaveBar>
       )}
@@ -311,28 +312,25 @@ export function ProgramsRegion({ snapshot, route, navigate, recentScene, markDra
       tabIndex={-1}
       className="showrunner__region"
       role="region"
-      aria-label="Programs"
+      aria-label={SCHEDULE.region}
     >
-      <h2 className="showrunner__region-title">Programs</h2>
+      <h2 className="showrunner__region-title">{SCHEDULE.region}</h2>
       <FlowFrame
         flow={flow}
         draft={draft}
         keys={SCHEDULE_KEYS}
-        noun="Program"
+        noun={SCHEDULE.one}
         sectionLabel="Schedule"
         confirm={confirm}
         problems={problems}
         writeRef={saveRef}
-        newLabel="Schedule a Program"
+        newLabel={SCHEDULE.newButton}
         cards={
           <>
-            <p className="field__hint program-flow__intro">
-              Each Program shows one Scene every week on its days, from its start to its end.
-              Where none plays, the Default Scene does.
-            </p>
+            <p className="field__hint program-flow__intro">{SCHEDULE.intro}</p>
             <TimeZoneNote />
             {programs.length === 0 ? (
-              <p className="program-scheduling__empty">No Programs yet.</p>
+              <p className="program-scheduling__empty">{SCHEDULE.empty}</p>
             ) : (
               <ProgramCards programs={programs} snapshot={snapshot} onRemove={onRemove}
                 onEdit={(id, event) => flow.start(editKey(id), event)}
@@ -340,16 +338,16 @@ export function ProgramsRegion({ snapshot, route, navigate, recentScene, markDra
             )}
           </>
         }
-        unavailableReason="this Program has no When to edit"
-        title={editingId === null ? "New Program" : `Edit Program ${storedProgram?.name ?? editingId}`}
+        unavailableReason={SCHEDULE.unavailable}
+        title={editingId === null ? SCHEDULE.createForm : schedule("editForm", { name: storedProgram?.name ?? editingId })}
         steps={SCHEDULE_STEPS}
-        formLabel={editingId === null ? "Schedule a Program" : `Edit Program ${storedProgram?.name ?? editingId}`}
+        formLabel={editingId === null ? SCHEDULE.createForm : schedule("editForm", { name: storedProgram?.name ?? editingId })}
         heading={HEADINGS[step]}
         busy={write.busy}
         onWrite={onSave}
-        writeLabel={editingId !== null ? "Save Program" : "Schedule Program"}
+        writeLabel={SCHEDULE.save}
         writeDisabled={write.busy || stale}
-        problemsLabel="Program problems"
+        problemsLabel={SCHEDULE.problems}
       >
         {step !== null && views[step]()}
       </FlowFrame>
@@ -381,7 +379,7 @@ function ProgramCards({ programs, snapshot, onRemove, onEdit, removing = new Set
         return (
           <li key={id} className="card-grid__item">
             <SummaryCard
-              title={`Program ${program.name}`}
+              title={schedule("card", { name: program.name })}
               chip={STATE_CHIPS[state.state] ?? null}
               lines={[
                 { label: "Scene", value: `Scene ${program.scene_id}` },
@@ -410,15 +408,13 @@ function ProgramCards({ programs, snapshot, onRemove, onEdit, removing = new Set
               actions={
                 <>
                   {programEditDraft(program) !== null ? (
-                    <button type="button" aria-label={`Edit program ${program.name}`} onClick={(event) => onEdit(id, event)}>Edit</button>
+                    <button type="button" aria-label={schedule("editButton", { name: program.name })} onClick={(event) => onEdit(id, event)}>Edit</button>
                   ) : (
-                    <p className="field__hint program-list__edit-hint">
-                      Editing unavailable: this Program has no When.
-                    </p>
+                    <p className="field__hint program-list__edit-hint">{SCHEDULE.editUnavailable}</p>
                   )}
                   <button
                     type="button"
-                    aria-label={`Remove program ${program.name}`}
+                    aria-label={schedule("removeButton", { name: program.name })}
                     aria-busy={removing.has(id)}
                     disabled={removing.has(id) || feedback?.kind === "accepted"}
                     onClick={(event) => onRemove(event, program)}
@@ -439,7 +435,7 @@ function ProgramCards({ programs, snapshot, onRemove, onEdit, removing = new Set
 function removeRunningRequest(program) {
   return {
     key: `remove-program:${program.program_id}`,
-    title: `Remove program ${program.name}?`,
+    title: schedule("removeDialog", { name: program.name }),
     confirmLabel: "Confirm remove",
     body: (
       <p>
@@ -453,7 +449,7 @@ function removeRunningRequest(program) {
         { method: "DELETE" },
       );
       if (result.ok) {
-        return { state: "done", message: `Program ${program.name} removed.` };
+        return { state: "done", message: schedule("removed", { name: program.name }) };
       }
       if (result.status >= 500) {
         return { state: "unknown", message: UNKNOWN_MESSAGE };

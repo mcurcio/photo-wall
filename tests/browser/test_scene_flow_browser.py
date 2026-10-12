@@ -40,6 +40,7 @@ from operator_harness import (
 from photo_seed import connected, filled, in_pool, library_of, saved_source
 from playwright.sync_api import expect
 from psycopg.types.json import Jsonb
+from schedule_page import schedules
 from test_operator_showrunner_browser import (
     INVALID_FRAME,
     LOBBY_FRAME,
@@ -741,8 +742,7 @@ def test_saving_returns_to_the_cards_and_offers_show_now_and_schedule_it(page, r
         expect(page.get_by_role("heading", level=1, name="Schedule", exact=True)).to_be_visible()
         # Bead 4: "Schedule it" opens the Schedule flow at its Scene step, prefilled.
         assert current_hash(page) == "#/schedule/new/scene"
-        expect(page.get_by_role("region", name="Programs", exact=True).get_by_label(
-            "Scene", exact=True)).to_have_value("saved-scene")
+        expect(schedules(page).get_by_label("Scene", exact=True)).to_have_value("saved-scene")
 
 
 

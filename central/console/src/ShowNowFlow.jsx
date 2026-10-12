@@ -42,6 +42,7 @@ import {
   underneathSentence,
 } from "./showState.js";
 import { sourceName } from "./sourceNames.js";
+import { schedule } from "./showWords.js";
 import { FrameChips } from "./TargetPicker.jsx";
 
 const EMPTY = {};
@@ -435,8 +436,7 @@ function ReviewStep({
           ))}
           {value.repeat === "restart" && (
             <p id={hintId} className="field__hint">
-              {"Ends the current Run and starts a new one now. A restarted Run has no Program " +
-                `end; it ${restartsFor}.`}
+              {schedule("restartHint", { length: restartsFor })}
             </p>
           )}
         </fieldset>

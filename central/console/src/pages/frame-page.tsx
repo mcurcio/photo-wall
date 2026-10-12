@@ -91,7 +91,6 @@ function FrameName({ frameId, name }: { frameId: string; name: string }) {
   if (draft === null) {
     return (
       <Inline label="Frame name">
-        <Note>{`Name: ${name}`}</Note>
         <Button variant="ghost" onClick={() => { setDraft(name); setProblem(null); }}>Rename</Button>
       </Inline>
     );
@@ -197,7 +196,7 @@ export function FramePage({ snapshot, bootFacts, hosts, frameId, tab, onTab, foc
   const piHref = isBound(frame) ? playerPageHref(snapshot, frame.player_id as string) : null;
   return (
     <EntityPage header={
-      <EntityHeader title={`Frame ${frameId}`} level={1} headingRef={headingRef} back={back}>
+      <EntityHeader title={frame.name ?? `Frame ${frameId}`} level={1} headingRef={headingRef} back={back}>
         {health !== null && <HealthBadge verdict={{ severity: health.severity, label: health.label, receipt: null }} />}
         <FrameName key={frame.name ?? frameId} frameId={frameId} name={frame.name ?? frameId} />
         {walls.size > 1 && <Note>{`On the “${frame.surface_id}” wall`}</Note>}

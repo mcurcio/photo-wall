@@ -31,6 +31,7 @@ import {
   seedScene,
 } from "./sceneFlowModel.js";
 import { SceneList } from "./SceneList.jsx";
+import { SCHEDULE } from "./showWords.js";
 import { FramesStep, KindStep, MediaStep, PhotosStep, PlaybackStep, ReviewStep } from "./SceneSteps.jsx";
 import { useCandidates } from "./useCandidates.js";
 import { useHouseCropLimit } from "./domain/photo-fit.ts";
@@ -614,8 +615,7 @@ function replaceRequest(sceneId, revision, { path, body }, reload, after) {
     confirmLabel: "Confirm replace",
     body: (
       <p>
-        {"Runs already going keep what they started with; Programs that start later use " +
-          "the saved changes."}
+        {SCHEDULE.replaceNote}
       </p>
     ),
     run: async () => {

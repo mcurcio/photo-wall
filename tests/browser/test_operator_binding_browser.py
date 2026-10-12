@@ -24,6 +24,8 @@ import re
 import pytest
 from console_tasks import (
     connect,
+    frame_heading,
+    frame_name,
     go,
     hardware_list,
     open_frame,
@@ -869,8 +871,7 @@ def test_output_first_bind_opens_the_frame(page, registry):
         open_player(page, name)
         _frame_select(page, player_id).select_option("lobby-left")
         _card_outputs(page, name).get_by_role("button", name="Bind HDMI-A-1", exact=True).click()
-        expect(page.get_by_role("heading", level=1, name="Frame lobby-left", exact=True)
-               ).to_be_focused()
+        expect(frame_heading(page, frame_name(registry, "lobby-left"))).to_be_focused()
         expect(page.get_by_role("tab", name="Hardware", exact=True)
                ).to_have_attribute("aria-selected", "true")
         frame = registry.inventory().frames[0]

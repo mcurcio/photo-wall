@@ -6,6 +6,7 @@ import { CheckAnswers, NotChosen } from "./flow/CheckAnswers.jsx";
 import { OfferedScene } from "./flow/InstanceNotice.jsx";
 import { buildProgram, DAY_KEYS, PRIORITIES, TIME_ATS } from "./scheduleFlowModel.js";
 import { ScenePicker } from "./ScenePicker.jsx";
+import { SCHEDULE } from "./showWords.js";
 import { whenWords, windowWords } from "./timeWords.js";
 
 /**
@@ -226,11 +227,11 @@ export function ReviewStep({ value, patch, problems, advanced, onChange, windows
       <CheckAnswers rows={rows} onChange={onChange} />
       {windows !== null && (
         <p className="field__hint" aria-label="Saved windows">
-          {stored === null ? "The saved Program has no window in the coming week."
+          {stored === null ? SCHEDULE.noSavedWindow
             : `${windows.current ? "Playing now" : "Next window"} (as saved, worked out by Central): ${windowWords(stored)}`}
         </p>
       )}
-      <Field id={problems.idFor("name")} label="Program name" reason={problems.reasonFor("name")}>
+      <Field id={problems.idFor("name")} label={SCHEDULE.nameField} reason={problems.reasonFor("name")}>
         {(props) => (
           <input
             {...props}

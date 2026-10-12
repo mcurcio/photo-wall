@@ -7,6 +7,7 @@ import { SummaryCard } from "./flow/SummaryCard.jsx";
 import { LIVE_PHASES } from "./join.js";
 import { sceneContentSummary } from "./sceneTargets.js";
 import { cycleWording } from "./showState.js";
+import { SCHEDULE, schedule, scheduleName } from "./showWords.js";
 import { FrameChips } from "./TargetPicker.jsx";
 import { sourceName } from "./sourceNames.js";
 
@@ -49,7 +50,7 @@ export function SceneList({ snapshot, editDisabled = false, onEdit, onShowNow, o
     const parents = scenes.filter((candidate) => candidate.scene_id !== id && containsScene(candidate));
     const editingThisDirty = editingId === id && editingDirty;
     const dependentNames = [
-      ...programsForScene.map((item) => `Program ${item.name}`),
+      ...programsForScene.map((item) => schedule("named", { name: item.name })),
       ...(runtime?.default_scene?.scene_id === id ? ["the Default Scene"] : []),
       ...runsForScene.map((item) => `active Run ${item.run_id}`),
       ...parents.map((item) => `stored Scene ${item.scene_id}`),
@@ -71,7 +72,7 @@ export function SceneList({ snapshot, editDisabled = false, onEdit, onShowNow, o
         if (result.error === "scene_in_use") {
           const ids = result.data ?? {};
           const names = [
-            ...(ids.program_ids ?? []).map((value) => `Program ${runtime?.programs?.[value]?.name ?? value}`),
+            ...(ids.program_ids ?? []).map((value) => schedule("named", { name: scheduleName(runtime, value) })),
             ...(ids.default_scene ? ["the Default Scene"] : []),
             ...(ids.run_ids ?? []).map((value) => `Run ${value}`),
             ...(ids.queued_activation_ids ?? []).map((value) => `queued activation ${value}`),
@@ -138,15 +139,14 @@ function SceneCard({ scene, snapshot, usedBy, running, editDisabled, onEdit, onS
           label: "Cycle",
           value:
             once ??
-            `${Number(filled.cycle_seconds)} s per cycle, keeps playing until its Program ends ` +
-              "or, when started by hand, until you Finish or Cancel it",
+            schedule("untilItEnds", { seconds: Number(filled.cycle_seconds) }),
         },
         {
           label: "Used by",
           value:
             usedBy.length > 0
-              ? `Programs ${usedBy.map((program) => program.name).join(", ")}`
-              : "no Program",
+              ? schedule("namedMany", { names: usedBy.map((program) => program.name).join(", ") })
+              : SCHEDULE.none,
         },
       ]}
       actions={

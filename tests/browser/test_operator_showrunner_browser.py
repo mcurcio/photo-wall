@@ -34,7 +34,6 @@ from console_tasks import (
     go,
     scene_continue,
     scene_form,
-    schedule_form,
     schedule_program,
     show_advanced,
     show_now,
@@ -45,6 +44,7 @@ from console_tasks import (
     visible_page,
     visit,
 )
+from console_words import SCHEDULE, schedule
 from media_queue import RecordingMediaQueue
 from operator_harness import (
     RequestGate,
@@ -58,6 +58,7 @@ from photo_seed import begin, connected, filled, in_pool, library_of, saved_sour
 from playwright.sync_api import expect
 from psycopg.types.json import Jsonb
 from public_media import MediaCache, public_photo, publish_photo, request_photo
+from schedule_page import card, remove_button, remove_dialog, said
 from support.house_time import UTC_HOUSE, set_house, window_program
 from support.photo_pools import FIXTURE_CONNECTION, fixture_connection
 from support.position import save_position
@@ -207,7 +208,7 @@ def test_showrunner_hides_wall_surfaces_and_shows_regions(page, registry):
         # Each Show region has its own page, and none of them holds a Wall-only surface
         # (not even hidden: include_hidden and get_by_label count hidden DOM too).
         for section, region in (("now", "Runs"), ("scenes", "Scenes"),
-                                ("schedule", "Programs"), ("sources", "Sources")):
+                                ("schedule", SCHEDULE["region"]), ("sources", "Sources")):
             go(page, section)
             expect(page.get_by_role("region", name=region, exact=True)).to_be_visible()
             expect(page.get_by_role("group", name="Wall plan for surface wall", include_hidden=True)).to_have_count(0)
@@ -503,127 +504,6 @@ def test_a_get_through_apiwrite_does_not_drop_a_poll(page, registry):
         expect(page.get_by_text(re.compile(r"updated 0 s ago"))).to_be_visible()
 
 
-# Programs (Power and the week): a Scene every week on its days, from a start to an end on the
-# house clock, at a priority. Central names the Program; the console shows its name.
-
-PROGRAM_ID = "morning-show"            # the Program's name in the console
-PROGRAM_PRIORITY = "Special event"
-WINDOW_START = "09:00"
-WINDOW_END = "11:00"
-WINDOW = (WINDOW_START, WINDOW_END, PROGRAM_PRIORITY)
-
-
-def test_program_schedules_a_weekly_rule_and_lists(page, registry):
-    """A Program is one POST of a Scene, a weekly When of clock times and a priority; Central
-    names it, and the card lists its When, its next window (Central's, on the house clock) and
-    its priority."""
-    _seed(registry)
-    queue = _seed_source(registry)
-    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
-        connect(page, origin)
-        author_scene(page, SCENE_ID, SOURCE, (VALID_FRAME,))
-
-        go(page, "schedule")
-        programs = page.get_by_role("region", name="Programs", exact=True)
-        expect(programs).to_be_visible()
-        expect(programs.get_by_label(f"Program {PROGRAM_ID}", exact=True)).to_have_count(0)
-
-        response = schedule_program(page, PROGRAM_ID, SCENE_ID, *WINDOW)
-        assert response.status == 201
-        assert response.request.post_data_json == {
-            "name": PROGRAM_ID, "scene_id": SCENE_ID, "priority": "special-event", "when": {
-                "days": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
-                "start": {"at": "clock", "time": "09:00"}, "end": {"at": "clock", "time": "11:00"}}}
-        assert response.json()["program_id"].startswith("p-")
-
-        row = programs.get_by_label(f"Program {PROGRAM_ID}", exact=True)
-        expect(row).to_contain_text("Every day, 09:00–11:00")
-        expect(row).to_contain_text("Thu 1 Jan 09:00–11:00")      # the test clock: 1 Jan 1970
-        expect(row.get_by_text("Special event", exact=True)).to_be_visible()
-
-
-def test_program_remove_deletes_it(page, registry):
-    """Remove issues DELETE …/programs/{id}?revision=N and the Program leaves the list."""
-    _seed(registry)
-    queue = _seed_source(registry)
-    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
-        connect(page, origin)
-        author_scene(page, SCENE_ID, SOURCE, (VALID_FRAME,))
-
-        programs = page.get_by_role("region", name="Programs", exact=True)
-        program_id = schedule_program(page, PROGRAM_ID, SCENE_ID, *WINDOW).json()["program_id"]
-
-        row = programs.get_by_label(f"Program {PROGRAM_ID}", exact=True)
-        expect(row).to_be_visible()
-
-        with page.expect_response(
-            lambda r: r.url.endswith(f"/v1/operator/programs/{program_id}?revision=1")
-            and r.request.method == "DELETE"
-        ) as info:
-            programs.get_by_role(
-                "button", name=f"Remove program {PROGRAM_ID}", exact=True).click()
-        assert info.value.status == 204
-
-        expect(programs.get_by_label(f"Program {PROGRAM_ID}", exact=True)).to_have_count(0)
-
-
-def test_program_remove_refusal_and_unknown_outcome_can_be_retried(page, registry):
-    """A refusal explains that nothing was removed; a server error stays unknown,
-    refreshes the list, and allows an explicit retry. Mutation probe: drop outcome
-    feedback or treat a 5xx as success."""
-    _seed(registry)
-    queue = _seed_source(registry)
-    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
-        connect(page, origin)
-        author_scene(page, SCENE_ID, SOURCE, (VALID_FRAME,))
-        programs = page.get_by_role("region", name="Programs", exact=True)
-        program_id = schedule_program(page, PROGRAM_ID, SCENE_ID, *WINDOW).json()["program_id"]
-        row = programs.get_by_label(f"Program {PROGRAM_ID}", exact=True)
-        remove_url = f"**/v1/operator/programs/{program_id}?revision=1"
-        responses = iter((409, 500, None))
-
-        def fail_then_delete(route):
-            if route.request.method != "DELETE":
-                route.continue_()
-                return
-            status = next(responses)
-            if status is None:
-                route.continue_()
-            elif status == 409:
-                route.fulfill(status=status, content_type="application/json",
-                              body='{"error":"changed"}')
-            else:
-                route.fulfill(status=status, content_type="application/json",
-                              body='{"error":"temporary_failure"}')
-
-        page.route(remove_url, fail_then_delete)
-        row.get_by_role("button", name=f"Remove program {PROGRAM_ID}", exact=True).click()
-        expect(row.get_by_role("status")).to_have_text(
-            f"Program {PROGRAM_ID} was not removed: it changed since this card was loaded. "
-            "Check the current Program before retrying.")
-        expect(row.get_by_role("button", name=f"Remove program {PROGRAM_ID}", exact=True)).to_be_enabled()
-
-        row.get_by_role("button", name=f"Remove program {PROGRAM_ID}", exact=True).click()
-        expect(row.get_by_role("status")).to_have_text(
-            f"Removal outcome for Program {PROGRAM_ID} is unknown. Check the current Program before retrying.")
-        expect(row.get_by_role("button", name=f"Remove program {PROGRAM_ID}", exact=True)).to_be_enabled()
-
-        with page.expect_response(
-            lambda response: response.url.endswith(f"/v1/operator/programs/{program_id}?revision=1")
-            and response.request.method == "DELETE"
-        ) as info:
-            row.get_by_role("button", name=f"Remove program {PROGRAM_ID}", exact=True).click()
-        assert info.value.status == 204
-        expect(programs.get_by_label(f"Program {PROGRAM_ID}", exact=True)).to_have_count(0)
-
-        # A later Program may reuse the name; the old accepted receipt must not disable its
-        # Remove control or appear on the new card.
-        schedule_program(page, PROGRAM_ID, SCENE_ID, *WINDOW)
-        row = programs.get_by_label(f"Program {PROGRAM_ID}", exact=True)
-        expect(row.get_by_role("button", name=f"Remove program {PROGRAM_ID}", exact=True)).to_be_enabled()
-        expect(row.get_by_role("status")).to_have_count(0)
-
-
 def test_scene_delete_removes_unused_scene_with_revision_guard(page, registry):
     _seed(registry)
     queue = _seed_source(registry)
@@ -640,42 +520,6 @@ def test_scene_delete_removes_unused_scene_with_revision_guard(page, registry):
         assert info.value.status == 200
         assert info.value.request.url.endswith("expected_revision=1")
         expect(scenes.get_by_role("heading", name="Scene delete-unused", exact=True)).to_have_count(0)
-
-
-def test_scene_delete_refusal_names_dependent_program(page, registry):
-    _seed(registry)
-    queue = _seed_source(registry)
-    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
-        connect(page, origin, "scenes")
-        author_scene(page, SCENE_ID, SOURCE, (VALID_FRAME,))
-        go(page, "schedule")
-        schedule_program(page, PROGRAM_ID, SCENE_ID, *WINDOW)
-        go(page, "scenes")
-        scenes = page.get_by_role("region", name="Scenes", exact=True)
-        with page.expect_response(lambda r: r.request.method == "DELETE" and f"/v1/operator/scenes/{SCENE_ID}?" in r.url) as info:
-            scenes.get_by_role("button", name=f"Delete Scene {SCENE_ID}", exact=True).click()
-            dialog = page.get_by_role("dialog")
-            expect(dialog).to_contain_text(f"Program {PROGRAM_ID}")
-            dialog.get_by_role("button", name="Confirm delete", exact=True).click()
-        assert info.value.status == 409
-        expect(page.get_by_role("alert")).to_contain_text(f"Program {PROGRAM_ID}")
-
-
-def test_programs_region_offers_no_count_or_id_field(page, registry):
-    """A Program repeats by the week (Central works out its windows): the flow asks no "Number
-    of windows" and no id, and the region no longer speaks of separate windows."""
-    _seed(registry)
-    with operator_server(registry.db, registry.clock) as origin:
-        connect(page, origin, "schedule")
-        programs = page.get_by_role("region", name="Programs", exact=True)
-        expect(programs).to_be_visible()
-        visit(page, "#/schedule/new/when")
-        form = schedule_form(page)
-        expect(form.get_by_role("group", name="Days", exact=True)).to_be_visible()
-        expect(form.get_by_label("Number of windows", exact=True)).to_have_count(0)
-        visit(page, "#/schedule/new/review")
-        expect(form.get_by_label("Id", exact=True)).to_have_count(0)
-        assert "separate windows" not in programs.inner_text().lower()
 
 
 # Bead 16 — Run control + activation outcome + "why" panel (SR-runs).
@@ -732,8 +576,7 @@ def test_runs_region_shows_only_synchronous_outcomes(page, registry):
         expect(runs.get_by_label("Activation outcome", exact=True)).to_have_count(0)
 
         go(page, "schedule")
-        programs = page.get_by_role("region", name="Programs", exact=True)
-        expect(programs.get_by_label("Program later", exact=True)).to_contain_text(
+        expect(card(page, "later")).to_contain_text(
             "Next: Thu 1 Jan 01:00–02:00")
 
         # The outcome appears ONLY at the synchronous moment of activation.
@@ -1039,7 +882,7 @@ def test_each_show_region_is_a_page_beside_the_sidebar_wide_and_full_width_narro
         nav = page.get_by_role("navigation", name="Sections", exact=True).bounding_box()
         boxes = {}
         for section, region in (("now", "Runs"), ("scenes", "Scenes"),
-                                ("schedule", "Programs"), ("sources", "Sources")):
+                                ("schedule", SCHEDULE["region"]), ("sources", "Sources")):
             go(page, section)
             boxes[region] = _box(page, region)
             assert nav["x"] + nav["width"] <= boxes[region]["x"], region
@@ -1061,7 +904,7 @@ def test_long_ids_never_scroll_the_showrunner_sideways_at_phone_width(page, regi
         connect(page, origin, "now")
         # Every Show page, each showing a long id: a Run, a Scene, a Program, a Source.
         for section, text in (
-                              ("schedule", f"Program {LONG_ID[:80]}"), ("sources", LONG_ID)):
+                              ("schedule", schedule("card", name=LONG_ID[:80])), ("sources", LONG_ID)):
             go(page, section)
             expect(visible_page(page).get_by_text(text, exact=True).first).to_be_visible()
             assert_fits_width(page, section)
@@ -1103,8 +946,7 @@ def test_a_refused_program_names_its_protector(page, registry):
     runtime.command("set_scene", _scene(SCENE_ID, frame=INVALID_FRAME, revision=2))
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         connect(page, origin, "schedule")
-        row = page.get_by_role("region", name="Programs", exact=True).get_by_label(
-            "Program blocked", exact=True)
+        row = card(page, "blocked")
         expect(row).to_contain_text(
             f"Did not start: {VALID_FRAME} was protected by the Run of guard.")
         go(page, "now")
@@ -1164,9 +1006,13 @@ def test_why_states_admission_order_and_the_limit_line(page, registry):
         expect(why).to_contain_text("An unbound frame gets no layers at all.")
 
 
+EVENINGS = "Weekday evenings"     # the Schedule's name; its id is weekday-evenings
+
+
 def test_why_names_the_winning_program_from_its_root_run(page, registry):
-    """The winner's Program is read from its root Run (`program_id`), never from
-    the Intent (mutation-probe target). Removing its running Program is confirmed."""
+    """The winner's Schedule is read from its root Run (`program_id`), never from the Intent
+    (mutation-probe target), and named by its name, never its id. Removing its running Schedule
+    is confirmed."""
     _seed(registry)
     queue = _seed_source(registry)
     runtime = _runtime(registry)
@@ -1174,26 +1020,26 @@ def test_why_names_the_winning_program_from_its_root_run(page, registry):
     runtime.command("set_scene", _scene("morning"))
     now = registry.clock.utc()
     runtime.command_current("create_program", window_program(
-        "weekday-evenings", "evening", 1020, 8160, priority="always-wins"))
+        "weekday-evenings", "evening", 1020, 8160, priority="always-wins", name=EVENINGS))
     runtime.command("activate", "morning", "morning-act", now, priority=1)
     registry.clock.advance(60)
+    named = schedule("named", name=EVENINGS)
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         connect(page, origin, "now")
         runs = page.get_by_role("region", name="Runs", exact=True)
         why = runs.get_by_role("group", name="Why", exact=True)
         why.get_by_role("button", name=f"Why? {VALID_FRAME}", exact=True).click()
         expect(why).to_contain_text(
-            f"Central's Runs on {VALID_FRAME}: evening (priority 3, Program weekday-evenings) on top.")
+            f"Central's Runs on {VALID_FRAME}: evening (priority 3, {named}) on top.")
         expect(why.get_by_role("list", name="Contribution precedence").get_by_role("listitem").nth(1)).to_have_text(
             "morning (priority 1) is underneath: evening has priority 3.")
-        expect(runs.get_by_role("listitem").filter(has_text="Scene evening")).to_contain_text(
-            "Program weekday-evenings")
+        expect(runs.get_by_role("listitem").filter(has_text="Scene evening")).to_contain_text(named)
         # The Now page names the zone its clock times use.
         expect(runs).to_contain_text(re.compile(r"Times in .+ \(this browser's time zone\)"))
 
         # The Program's Run is the planned fact on the read-only Wall tile and on the Frame
         # page's Overview (console DDD §35): Central's Runs, never what the Panel shows.
-        planned = ("On top: evening · Program weekday-evenings (Central's Runs; media not "
+        planned = (f"On top: evening · {named} (Central's Runs; media not "
                    "checked; the Panel is not observed)")
         go(page, "wall")
         tile = page.get_by_role("group", name=f"Frame {VALID_FRAME} status", exact=True)
@@ -1207,20 +1053,18 @@ def test_why_names_the_winning_program_from_its_root_run(page, registry):
             "button", name="Details", exact=True).click()
         expect(inspector).to_contain_text(planned)
         expect(inspector).to_contain_text(
-            f"Central's Runs on {VALID_FRAME}: evening (priority 3, Program weekday-evenings) on top.")
+            f"Central's Runs on {VALID_FRAME}: evening (priority 3, {named}) on top.")
 
         go(page, "schedule")
-        programs = page.get_by_role("region", name="Programs", exact=True)
-        row = programs.get_by_label("Program weekday-evenings", exact=True)
+        row = card(page, EVENINGS)
         expect(row).to_contain_text("Playing now · Thu 1 Jan 00:17–02:16")
-        row.get_by_role("button", name="Remove program weekday-evenings", exact=True).click()
-        dialog = page.get_by_role("dialog", name="Remove program weekday-evenings?")
+        remove_button(row, EVENINGS).click()
         with page.expect_response(
             lambda r: r.url.endswith("/v1/operator/programs/weekday-evenings?revision=1")
             and r.request.method == "DELETE"
         ):
-            dialog.get_by_role("button", name="Confirm remove", exact=True).click()
-        expect(programs.get_by_role("status")).to_have_text("Program weekday-evenings removed.")
+            remove_dialog(page, EVENINGS).get_by_role("button", name="Confirm remove", exact=True).click()
+        expect(said(page)).to_have_text(schedule("removed", name=EVENINGS))
 
 
 def test_the_target_picker_groups_by_surface_with_health_in_the_description(page, registry):
@@ -1342,9 +1186,7 @@ def test_restart_states_that_the_new_run_has_no_program_end(page, registry):
         expect(form.get_by_label("Leave it running", exact=True)).to_be_checked()
         restart = form.get_by_label("Restart it", exact=True)
         restart.check()
-        expect(restart).to_have_accessible_description(
-            "Ends the current Run and starts a new one now. A restarted Run has no Program "
-            "end; it plays until finished.")
+        expect(restart).to_have_accessible_description(schedule("restartHint", length="plays until finished"))
 
 
 def test_a_one_cycle_restart_says_it_plays_one_cycle(page, registry):
@@ -1357,8 +1199,7 @@ def test_a_one_cycle_restart_says_it_plays_one_cycle(page, registry):
         restart = form.get_by_label("Restart it", exact=True)
         restart.check()
         expect(restart).to_have_accessible_description(
-            "Ends the current Run and starts a new one now. A restarted Run has no Program "
-            "end; it plays one 20 s cycle, then ends.")
+            schedule("restartHint", length="plays one 20 s cycle, then ends"))
 
 
 def test_an_ended_protecting_run_says_protected_in_the_past(page, registry):
@@ -1395,19 +1236,6 @@ def test_a_protected_refusal_names_the_protecting_run(page, registry):
 
 
 # §7 windows helper and Source form.
-
-
-def _program_puts(page):
-    """Collect every Program PUT body the console sends, in order."""
-    bodies = []
-    page.on("request", lambda request: bodies.append(request.post_data_json)
-            if request.method == "PUT" and "/v1/operator/programs/" in request.url else None)
-    return bodies
-
-
-def _windows(page):
-    return page.get_by_role("region", name="Programs", exact=True).get_by_role(
-        "group", name="Create separate windows", exact=True)
 
 
 def test_the_source_form_sends_favourites_and_a_capture_window(page, registry):
@@ -1508,7 +1336,7 @@ def test_editing_a_scene_replaces_it_under_its_stored_id_at_the_next_revision(pa
         row = _scene_row(page, STORED_ID)
         expect(row).to_contain_text("live from holiday")
         expect(row.get_by_text("Revision", exact=True)).to_have_count(0)
-        expect(row).to_contain_text("no Program")
+        expect(row).to_contain_text(SCHEDULE["none"])
         row.get_by_role("button", name=f"Edit Scene {STORED_ID}", exact=True).click()
 
         form = _scenes_form(page)
@@ -1537,9 +1365,7 @@ def test_editing_a_scene_replaces_it_under_its_stored_id_at_the_next_revision(pa
         form.get_by_role("button", name="Replace Scene", exact=True).click()
 
         dialog = page.get_by_role("dialog", name=f"Replace Scene {STORED_ID}?")
-        expect(dialog).to_contain_text(
-            "Runs already going keep what they started with; Programs that start later use "
-            "the saved changes.")
+        expect(dialog).to_contain_text(SCHEDULE["replaceNote"])
         with page.expect_response(
             lambda r: "/v1/operator/scenes/" in r.url and r.request.method == "PUT"
         ) as info:
