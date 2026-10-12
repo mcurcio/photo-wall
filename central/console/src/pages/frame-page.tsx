@@ -8,6 +8,7 @@ import { FrameDraftFit, FramePhotos } from "../domain/frame-photos";
 import { FramePicture } from "../domain/frame-picture";
 import { FramePosition, type PixelSize } from "../domain/frame-position";
 import { FramePower } from "../domain/frame-power";
+import { useFrameWhy } from "../domain/frame-why";
 import { FrameProfile, type Readiness } from "../domain/frame-profile";
 import type { HostsRead } from "../domain/hosts-read";
 import { frameHealth } from "../health.js";
@@ -16,17 +17,13 @@ import { useFrameAdjustment } from "../liveAdjustment.js";
 import { renameFrame } from "../framesApi.js";
 import { EntityHeader } from "../patterns/entity-header";
 import { EmptyState, EntityPage } from "../patterns/entity-page";
-import { Note } from "../patterns/fact-row";
-import { HealthBadge } from "../patterns/health-badge";
 import { LeaveGuard } from "../patterns/leave-guard";
 import { usePictureSession } from "../pictureSession.js";
 import { useMutate } from "../useMutate.js";
 import { playerPageHref } from "../players.js";
 import { formatRoute, routeIdName, type Tab } from "../routes.js";
-import { Button } from "../ui/button";
-import { Field, TextInput } from "../ui/field";
-import { Inline } from "../ui/stack";
 import { Tabs } from "../ui/tabs";
+import { FramePageHeader, type RenameAnswer } from "./frame-page-header";
 
 export interface FramePageProps {
   snapshot: object | null;
@@ -71,53 +68,6 @@ const TABS = [
   { value: "hardware", label: "Hardware" },
 ] as const;
 
-/** Central's refusal of a Frame name (central/registry.py `rename_frame`), in words. */
-const NAME_REFUSALS: Record<string, string> = {
-  name_taken: "That name is taken",
-  unknown_frame: "This Frame no longer exists",
-  unreachable: "Central did not answer. Save again.",
-};
-
-/**
- * The Frame's name in its header (#94), renamed in place: Rename opens the name, Save sends it, and
- * a name another Frame has (ignoring case) is refused with "That name is taken". The snapshot
- * carries the saved name everywhere a Frame is listed.
- */
-function FrameName({ frameId, name }: { frameId: string; name: string }) {
-  const [draft, setDraft] = useState<string | null>(null);
-  const [problem, setProblem] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const mutate = useMutate() as <T>(op: () => Promise<T>) => Promise<T>;
-  if (draft === null) {
-    return (
-      <Inline label="Frame name">
-        <Button variant="ghost" onClick={() => { setDraft(name); setProblem(null); }}>Rename</Button>
-      </Inline>
-    );
-  }
-  const save = async () => {
-    const next = draft.trim();
-    if (next === "" || next.length > 60) {
-      setProblem("A name has 1 to 60 characters");
-      return;
-    }
-    setBusy(true);
-    const answer = await mutate(() => renameFrame(frameId, next)) as { ok: true } | { ok: false; error: string };
-    setBusy(false);
-    if (answer.ok) setDraft(null);
-    else setProblem(NAME_REFUSALS[answer.error] ?? `Central refused it (${answer.error})`);
-  };
-  return (
-    <Inline label="Frame name">
-      <Field label="Frame name" error={problem ?? undefined}>
-        <TextInput value={draft} onChange={(text) => { setDraft(text); setProblem(null); }} />
-      </Field>
-      <Button variant="primary" disabled={busy} onClick={() => void save()}>Save name</Button>
-      <Button variant="ghost" disabled={busy} onClick={() => setDraft(null)}>Cancel</Button>
-    </Inline>
-  );
-}
-
 /**
  * The output's size in pixels, as the Pi reported it; null when it reported none. Position's
  * steps and corner pixels are pixels of the output, whatever way the picture is turned in it.
@@ -155,6 +105,11 @@ export function FramePage({ snapshot, bootFacts, hosts, frameId, tab, onTab, foc
   const frames = ((snapshot as { inventory?: { frames?: Frame[] } } | null)?.inventory?.frames ?? []);
   const frame = frames.find((candidate) => candidate.id === frameId);
   const adjustment = useFrameAdjustment({ frameId, frame, open: tab === "position" });
+  // The Frame's Why, read once for the page: the header's Resting, Overview's sentence, Power's line.
+  const { read: why, refresh: rereadWhy } = useFrameWhy(frameId);
+  // A tab shown reads Why again: what it says is as of now, not the last poll's.
+  useEffect(() => { void rereadWhy(); }, [tab, rereadWhy]);
+  const mutate = useMutate() as <T>(op: () => Promise<T>) => Promise<T>;
   const picture = usePictureSession({ frameId, open: tab === "picture" && frame !== undefined });
   // The shown tab's live session, if it has one: the one a tab change would leave.
   const guarded = tab === "position" ? adjustment : tab === "picture" ? picture : null;
@@ -192,15 +147,15 @@ export function FramePage({ snapshot, bootFacts, hosts, frameId, tab, onTab, foc
   }
   const walls = new Set(frames.map((candidate) => candidate.surface_id));
   const classified = frameHealth(snapshot, frameId) as FrameHealth | null;
-  const health = classified === null ? null : frameChip(classified);
+  // Resting is Central's one answer (Why's `power.resting`), never worked out here.
+  const resting = why !== null && why.ok && why.why.power?.resting === true;
+  const health = classified === null ? null : frameChip(classified, false, resting);
   const piHref = isBound(frame) ? playerPageHref(snapshot, frame.player_id as string) : null;
   return (
     <EntityPage header={
-      <EntityHeader title={frame.name ?? `Frame ${frameId}`} level={1} headingRef={headingRef} back={back}>
-        {health !== null && <HealthBadge verdict={{ severity: health.severity, label: health.label, receipt: null }} />}
-        <FrameName key={frame.name ?? frameId} frameId={frameId} name={frame.name ?? frameId} />
-        {walls.size > 1 && <Note>{`On the “${frame.surface_id}” wall`}</Note>}
-      </EntityHeader>
+      <FramePageHeader name={frame.name ?? frameId} chip={health} wall={walls.size > 1 ? frame.surface_id : null}
+        back={back} headingRef={headingRef}
+        onRename={(next) => mutate(() => renameFrame(frameId, next)) as Promise<RenameAnswer>} />
     }>
       <LeaveGuard
         open={leaving !== null}
@@ -213,7 +168,7 @@ export function FramePage({ snapshot, bootFacts, hosts, frameId, tab, onTab, foc
       <Tabs label="Frame settings" tabs={TABS} value={tab} onValueChange={(next) => choose(next as Tab)}>
         {tab === "overview" && (
           <>
-            <FrameOverview snapshot={snapshot} bootFacts={bootFacts} frameId={frameId} hosts={hosts} />
+            <FrameOverview snapshot={snapshot} bootFacts={bootFacts} frameId={frameId} hosts={hosts} why={why} />
             <FramePhotos key={`${frameId}:photos`} snapshot={snapshot} frameId={frameId} />
           </>
         )}
@@ -230,7 +185,7 @@ export function FramePage({ snapshot, bootFacts, hosts, frameId, tab, onTab, foc
             otherFrames={frames.filter((other) => other.id !== frameId).map((other) => other.id)} />
         )}
         {tab === "power" && (
-          <FramePower key={`${frameId}:power`} frameId={frameId}
+          <FramePower key={`${frameId}:power`} frameId={frameId} why={why}
             readAt={(snapshot as { readAt?: number } | null)?.readAt ?? null} />
         )}
         {tab === "hardware" && (

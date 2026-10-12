@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { NightOffEditor, type NightOffDraft, type NightOffView } from "../domain/night-off-editor";
-import { heldWords, holdUntilWords, type HoldView, PowerButtons, PowerLane, scheduleLane, type Week } from "../domain/power-lane";
+import { HoldBanner, holdUntilWords, type HoldView, PowerButtons, PowerLane, scheduleLane, type Week } from "../domain/power-lane";
 import { readHouse } from "../houseApi.js";
 import { EntityHeader } from "../patterns/entity-header";
 import { Note } from "../patterns/fact-row";
@@ -10,7 +10,8 @@ import { SettingRow } from "../patterns/setting-row";
 import { usePolledRead } from "../polledRead.js";
 import { hold, readHolds, readNightOff, resumeSchedule, saveNightOff } from "../powerScheduleApi.js";
 import { formatRoute } from "../routes.js";
-import { addDays, houseDayWords, houseLocal, mondayOf } from "../timeWords.js";
+import { SCHEDULE } from "../showWords.js";
+import { addDays, houseDayWords, houseLocal, mondayOf, zoneNote } from "../timeWords.js";
 import { Button } from "../ui/button";
 import { Select } from "../ui/select";
 import { Section } from "../ui/section";
@@ -23,10 +24,11 @@ interface Snapshot {
   runtime?: { definitions?: Record<string, unknown>; default_scene?: string | null };
 }
 
-type Read =
-  | { ok: true; week: Week; holds: HoldView[]; nightOff: NightOffView; zone: string; placeSet: boolean }
-  | { ok: false; error: string }
-  | null;
+type Read = WeekRead | { ok: false; error: string } | null;
+
+/** One read of the week page. */
+export type WeekRead =
+  { ok: true; week: Week; holds: HoldView[]; nightOff: NightOffView; zone: string; placeSet: boolean };
 
 const NOTHING = "nothing";
 
@@ -92,7 +94,6 @@ export function WeekPage({ snapshot }: { snapshot: object | null }) {
   const nowWords = () => (readAt.current === null || read === null || !read.ok ? null : houseLocal(readAt.current, read.zone));
   const [sceneSaid, setSceneSaid] = useState<string | null>(null);
   const frames = (served?.inventory?.frames ?? []).map((frame) => ({ id: frame.id, name: frame.name ?? frame.id }));
-  const names = Object.fromEntries(frames.map((frame) => [frame.id, frame.name]));
 
   const onHold = async (power: "on" | "off") => {
     // A fresh request id per press; a press retried after Central did not answer reuses it.
@@ -125,42 +126,91 @@ export function WeekPage({ snapshot }: { snapshot: object | null }) {
         details={<Note>{`Photo Wall's answer: ${read.error}`}</Note>} />
     );
   }
-  const { week, holds, nightOff, zone, placeSet } = read;
-  const now = readAt.current === null ? null : houseLocal(readAt.current, zone);
-  const title = `Week of ${houseDayWords(week.first_day)}`;
-  const held = heldWords(holds, now);
   const definitions = served?.runtime?.definitions ?? {};
+  const onDefaultScene = async (next: string, label: string) => {
+    const answer = await setDefaultScene(next === NOTHING ? null : next) as { ok: true } | { ok: false; error: string };
+    setSceneSaid(answer.ok ? `The Default Scene is now ${label}.`
+      : answer.error === "unreachable" ? "Not changed: Central did not answer. Choose it again."
+        : `Not changed: Central refused it (${answer.error}).`);
+    void refresh();
+  };
+  return (
+    <WeekView read={read} now={readAt.current === null ? null : houseLocal(readAt.current, read.zone)}
+      frames={frames} sceneIds={Object.keys(definitions)} busy={busy} said={said} sceneSaid={sceneSaid}
+      thisWeek={firstDay === null} onWeek={setFirstDay} onHold={(power) => void onHold(power)}
+      onResume={(held) => void onResume(held)} onDefaultScene={(next, label) => void onDefaultScene(next, label)}
+      onSaveNightOff={onSaveNightOff} />
+  );
+}
+
+export interface WeekViewProps {
+  read: WeekRead;
+  /** Central's read time on the house clock; null before a read. */
+  now: string | null;
+  /** Every current Frame, by name. */
+  frames: readonly { id: string; name: string }[];
+  /** The Scenes the Default Scene may be. */
+  sceneIds: readonly string[];
+  busy: boolean;
+  /** A press's outcome (All off, All on, Resume schedule). */
+  said: string | null;
+  /** The Default Scene choice's outcome. */
+  sceneSaid: string | null;
+  /** The house's current week is shown. */
+  thisWeek: boolean;
+  /** Show the week from this Monday; null: the house's current week. */
+  onWeek: (firstDay: string | null) => void;
+  onHold: (power: "on" | "off") => void;
+  onResume: (hold: HoldView) => void;
+  onDefaultScene: (sceneId: string, label: string) => void;
+  onSaveNightOff: (revision: number, draft: NightOffDraft) => Promise<{ ok: true } | { ok: false; error: string }>;
+}
+
+/**
+ * The week page for one read: what a story draws. The header (All off, All on, the weeks), the hold
+ * banner while one is in force, the calendar with its colour key (a day at a time on a phone), a
+ * line on how to add a Schedule when none plays this week, the Default Scene and Night off.
+ */
+export function WeekView({
+  read, now, frames, sceneIds, busy, said, sceneSaid, thisWeek, onWeek, onHold, onResume, onDefaultScene, onSaveNightOff,
+}: WeekViewProps) {
+  const { week, holds, nightOff, placeSet } = read;
+  const title = `Week of ${houseDayWords(week.first_day)}`;
+  const names = Object.fromEntries(frames.map((frame) => [frame.id, frame.name]));
   const scenes = [{ value: NOTHING, label: "Nothing" },
-    ...Object.keys(definitions).sort().map((sceneId) => ({ value: sceneId, label: `Scene ${sceneId}` }))];
+    ...[...sceneIds].sort().map((sceneId) => ({ value: sceneId, label: `Scene ${sceneId}` }))];
   const houseHref = formatRoute({ section: "house" } as never);
   return (
     <Stack>
       <EntityHeader title={title}>
-        <Note>{`Times on the house clock (${zone}).`}</Note>
-        {held !== null && <Note>{held}</Note>}
-        <PowerButtons busy={busy} onHold={(power) => void onHold(power)} />
+        <Note>{`${zoneNote(read.zone)}.`}</Note>
+        <PowerButtons busy={busy} onHold={onHold} />
         <Inline label="Weeks">
-          <Button variant="ghost" onClick={() => setFirstDay(addDays(week.first_day, -7))}>Previous week</Button>
-          <Button variant="ghost" disabled={firstDay === null} onClick={() => setFirstDay(null)}>This week</Button>
-          <Button variant="ghost" onClick={() => setFirstDay(addDays(week.first_day, 7))}>Next week</Button>
+          <Button variant="ghost" onClick={() => onWeek(addDays(week.first_day, -7))}>Previous week</Button>
+          <Button variant="ghost" disabled={thisWeek} onClick={() => onWeek(null)}>This week</Button>
+          <Button variant="ghost" onClick={() => onWeek(addDays(week.first_day, 7))}>Next week</Button>
         </Inline>
       </EntityHeader>
-      <PowerLane week={week} names={names} holds={holds} now={now} below={[scheduleLane(week)]}
-        calendarLabel={title} busy={busy} onResume={(hold) => void onResume(hold)} said={said} />
+      <HoldBanner holds={holds} names={names} now={now} busy={busy} onResume={onResume} />
+      {said !== null && <Note live>{said}</Note>}
+      <PowerLane week={week} names={names} now={now} below={[scheduleLane(week)]} calendarLabel={title} />
+      {week.windows.length === 0 && (
+        <Note>
+          {`No Schedule plays this week. To play a Scene on set days and times, press ${SCHEDULE.newButton} under `
+            + `${SCHEDULE.region}; ${week.default_scene_id === null ? "until then the Frames keep their last photo"
+              : "the Default Scene plays wherever none does"}.`}
+        </Note>
+      )}
       <Section title="Default Scene">
         <SettingRow kind="house" label="Default Scene" state="idle" defaultLabel="Default: Nothing"
           help="Plays wherever no Schedule does. Nothing leaves those Frames with their last photo."
-          control={<Select value={week.default_scene_id ?? NOTHING} options={scenes} onChange={async (next) => {
-            const answer = await setDefaultScene(next === NOTHING ? null : next) as { ok: true } | { ok: false; error: string };
-            const label = scenes.find((scene) => scene.value === next)?.label ?? next;
-            setSceneSaid(answer.ok ? `The Default Scene is now ${label}.`
-              : answer.error === "unreachable" ? "Not changed: Central did not answer. Choose it again."
-                : `Not changed: Central refused it (${answer.error}).`);
-            void refresh();
+          control={<Select value={week.default_scene_id ?? NOTHING} options={scenes} onChange={(next) => {
+            onDefaultScene(next, scenes.find((scene) => scene.value === next)?.label ?? next);
           }} />} />
         {sceneSaid !== null && <Note live>{sceneSaid}</Note>}
       </Section>
-      <NightOffEditor view={nightOff} frames={frames} placeSet={placeSet} houseHref={houseHref} onSave={onSaveNightOff} />
+      <NightOffEditor view={nightOff} frames={frames} placeSet={placeSet} houseHref={houseHref} now={now}
+        onSave={onSaveNightOff} />
     </Stack>
   );
 }

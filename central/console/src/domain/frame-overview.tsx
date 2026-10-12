@@ -10,7 +10,7 @@ import { formatRoute, sceneCreationRoute } from "../routes.js";
 import { Disclosure } from "../ui/disclosure";
 import { Section } from "../ui/section";
 import { FactLine } from "./fact-line";
-import { FrameWhy, useFrameWhy } from "./frame-why";
+import { FrameWhy, type WhyRead } from "./frame-why";
 import { frameHost, HostHealthLink } from "./host-health-link";
 import type { HostsRead } from "./hosts-read";
 
@@ -19,6 +19,8 @@ export interface FrameOverviewProps {
   bootFacts: object | null;
   frameId: string;
   hosts: HostsRead | null;
+  /** The Frame's Why (the page reads it once). */
+  why: WhyRead;
 }
 
 interface Runtime {
@@ -51,7 +53,7 @@ function sendingWords(sceneId: string | null, phase: string | null, bound: boole
  * **Details**. Above it, "Why is this playing?" (E6): Central's Why, the winner, what it beat and the
  * display's power line.
  */
-export function FrameOverview({ snapshot, bootFacts, frameId, hosts }: FrameOverviewProps) {
+export function FrameOverview({ snapshot, bootFacts, frameId, hosts, why }: FrameOverviewProps) {
   const served = snapshot as Runtime | null;
   const frame = (served?.inventory?.frames ?? []).find((candidate) => candidate.id === frameId);
   const bound = isBound(frame);
@@ -60,7 +62,6 @@ export function FrameOverview({ snapshot, bootFacts, frameId, hosts }: FrameOver
     .slice(1).map((intent) => `“${intent.scene_id}”`);
   const host = frameHost({ snapshot, bootFacts, frameId, hosts });
   const readiness = readinessReportForFrame(snapshot, frameId);
-  const why = useFrameWhy(frameId);
   const readAt = (snapshot as { readAt?: number } | null)?.readAt ?? null;
   return (
     <>

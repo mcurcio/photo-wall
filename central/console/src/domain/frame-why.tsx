@@ -92,9 +92,11 @@ export function powerWhyWords(power: NonNullable<FrameWhyView["power"]>, now: st
   return until === null ? "On" : `On: Night off starts at ${until}`;
 }
 
-type Read = { ok: true; why: FrameWhyView; zone: string | null } | { ok: false; error: string } | null;
+/** The Frame's Why as read (null: not yet). */
+export type WhyRead = { ok: true; why: FrameWhyView; zone: string | null } | { ok: false; error: string } | null;
+type Read = WhyRead;
 
-/** The Frame's Why and the house zone, re-read while shown. */
+/** The Frame's Why and the house zone, re-read while shown and on `refresh` (a tab shown). */
 export function useFrameWhy(frameId: string) {
   const load = useCallback(async (): Promise<Read> => {
     const [why, house] = await Promise.all([readFrameWhy(frameId), readHouse()]) as [
@@ -104,7 +106,8 @@ export function useFrameWhy(frameId: string) {
     if (!why.ok) return why;
     return { ok: true, why: why.why, zone: house.ok ? house.settings.time.zone : null };
   }, [frameId]);
-  return usePolledRead(load, { cadenceMs: 10000, initial: null as Read }).value;
+  const { value, refresh } = usePolledRead(load, { cadenceMs: 10000, initial: null as Read });
+  return { read: value, refresh };
 }
 
 export interface FrameWhyProps {

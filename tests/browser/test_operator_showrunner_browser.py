@@ -1034,8 +1034,8 @@ def test_why_names_the_winning_program_from_its_root_run(page, registry):
         expect(why.get_by_role("list", name="Contribution precedence").get_by_role("listitem").nth(1)).to_have_text(
             "morning (priority 1) is underneath: evening has priority 3.")
         expect(runs.get_by_role("listitem").filter(has_text="Scene evening")).to_contain_text(named)
-        # The Now page names the zone its clock times use.
-        expect(runs).to_contain_text(re.compile(r"Times in .+ \(this browser's time zone\)"))
+        # The Now page names the zone its clock times use: the house's, one clock (Settings › House).
+        expect(runs).to_contain_text(re.compile(r"Times on the house clock \(.+\)"))
 
         # The Program's Run is the planned fact on the read-only Wall tile and on the Frame
         # page's Overview (console DDD §35): Central's Runs, never what the Panel shows.
@@ -1693,7 +1693,7 @@ def test_why_nothing_new_stops_at_a_one_cycle_run_that_ended_and_its_still(page,
         chain = _why_chain(page)
         expect(_stop(chain)).to_have_count(1)
         expect(_stop(chain)).to_contain_text(re.compile(
-            rf"Run ended\? {SCENE_ID}'s Run ended at \d\d:\d\d(:\d\d)? \S+ after one cycle; if its "
+            rf"Run ended\? {SCENE_ID}'s Run ended at \d\d:\d\d(:\d\d)? after one cycle; if its "
             r"last item was a photo, the frame keeps that still \(a video is not kept\)\."))
         expect(chain.get_by_role("listitem").first).to_contain_text(
             "On top: nothing · no Run puts a layer on this Frame now")
@@ -1876,7 +1876,8 @@ def test_the_chooser_says_dated_and_readiness_and_waits_while_loading(page, regi
         reads.release()
         expect(choice.get_by_role("option").first).to_have_text("Choose compatible media")
         labels = sorted(choice.get_by_role("option").all_inner_texts()[1:])
-        taken = r" · dated .+ \d\d:\d\d(:\d\d)? \S+ · preparing"
+        # On the house clock once Settings › House is read: no zone abbreviation (one clock).
+        taken = r" · dated .+ \d\d:\d\d(:\d\d)? · preparing"
         assert len(labels) == 3, labels
         assert re.fullmatch(r"Photo 108×192" + taken, labels[0]), labels
         assert re.fullmatch(r"Photo 108×192" + taken + r" \(2\)", labels[1]), labels

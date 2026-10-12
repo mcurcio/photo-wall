@@ -95,10 +95,8 @@ SHARED_WITH_SHOW = {
     # A Frame's health as a chip (design review round 2): the Frame page header's words and
     # severity, also the Show side's Frame chips and the Scene's Frame picker. Words only.
     "frame-health-chip.ts",
-    # Power and the week: the house's zone (the week page's today; the Frame's Why says "until
-    # 07:00" on the house clock) and the one call fold its API modules share. Reads only.
-    "houseApi.js",
-    "weekApi.js",
+    # (Power and the week's houseApi.js and weekApi.js are the shell's own: its house clock,
+    # houseClock.js, reads Settings › House for every time the console shows.)
 }
 # The console's write modules: the operator write primitive and every module that wraps a
 # write (framesApi writes, the delete confirmation, refresh-after-write, equipment writes).
@@ -825,8 +823,10 @@ PHOTO_PAGE_IMPORTS = {
 # Power and the week's pages, each with the legacy modules it alone may import: their routes and
 # the one polled read. The Frame's Why reads its power result (powerApi.js) and the house's zone.
 POWER_WEEK_IMPORTS = {
-    "week-page.tsx": {"houseApi.js", "polledRead.js", "powerScheduleApi.js", "weekApi.js"},
-    "house-settings-page.tsx": {"houseApi.js"},
+    # The week page names the Schedule's button from the Show's one copy home (showWords.js).
+    "week-page.tsx": {"houseApi.js", "polledRead.js", "powerScheduleApi.js", "showWords.js", "weekApi.js"},
+    # A save tells the shell's house clock to read again (houseClock.js).
+    "house-settings-page.tsx": {"houseApi.js", "houseClock.js"},
     "frame-why.tsx": {"houseApi.js", "polledRead.js", "whyApi.js"},
 }
 DECLARED_IMPORTS = {**FRAME_PAGE_IMPORTS, **PHOTO_PAGE_IMPORTS, **POWER_WEEK_IMPORTS}

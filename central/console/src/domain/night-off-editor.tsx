@@ -4,7 +4,7 @@ import { Note } from "../patterns/fact-row";
 import { OwnerLinks } from "../patterns/link-to-owner";
 import { SaveBar } from "../patterns/save-bar";
 import { SettingRow } from "../patterns/setting-row";
-import { houseParts, timeOfDayWords } from "../timeWords.js";
+import { dayOfWords, houseParts, timeOfDayWords } from "../timeWords.js";
 import { Button } from "../ui/button";
 import { Field, NumberInput, TextInput } from "../ui/field";
 import { MultiToggle } from "../ui/multi-toggle";
@@ -56,6 +56,9 @@ export interface TimeOfDayControlProps {
   /** The house has a location: sunrise and sunset can be chosen. */
   placeSet: boolean;
   houseHref: string;
+  /** When the saved sun time next falls, in words ("18:12 today"), from Central; null: a clock
+   * time, or not known (a change not saved yet). */
+  resolved?: string | null;
 }
 
 const SIDES = [{ value: "before", label: "Before" }, { value: "after", label: "After" }] as const;
@@ -66,7 +69,7 @@ export const isBefore = (minutes: number) => minutes < 0 || Object.is(minutes, -
  * A clock time, or sunrise or sunset so many minutes before or after (#80, #81); sun times wait
  * for a Place. The side is chosen, not typed as a sign: a typed "−" was lost on the way.
  */
-export function TimeOfDayControl({ label, example, value, onChange, placeSet, houseHref }: TimeOfDayControlProps) {
+export function TimeOfDayControl({ label, example, value, onChange, placeSet, houseHref, resolved = null }: TimeOfDayControlProps) {
   const clock = value.at === "clock";
   return (
     <Stack>
@@ -95,6 +98,7 @@ export function TimeOfDayControl({ label, example, value, onChange, placeSet, ho
                 onChange({ ...value, offset_minutes: isBefore(value.offset_minutes) ? -minutes : minutes });
               }} />
           </Field>
+          <Note>{resolved === null ? `Save to see when ${timeOfDayWords(value)} falls.` : `Next: about ${resolved}.`}</Note>
         </>
       )}
     </Stack>
@@ -123,6 +127,20 @@ function dayTime(local: string): string {
   return `${day} ${time}`;
 }
 
+/**
+ * A saved off or on time in words, a sun time with when it next falls from Central's next time:
+ * "sunset −30 min, about 18:12 today" (design language §8 E3); a clock time as it is, "23:00".
+ */
+function savedWords(time: TimeOfDay, next: string | null, now: string | null): string {
+  if (time.at === "clock" || next === null) return timeOfDayWords(time);
+  return `${timeOfDayWords(time)}, about ${dayOfWords(next, now)}`;
+}
+
+/** When a shown sun time next falls, from Central's next time, only while it is the saved one. */
+function resolvedOf(shown: TimeOfDay, saved: TimeOfDay, next: string | null, now: string | null): string | null {
+  return next === null || JSON.stringify(shown) !== JSON.stringify(saved) ? null : dayOfWords(next, now);
+}
+
 const draftOf = (view: NightOffView): NightOffDraft => {
   const { off, on, days, frames, darkness, hold_lasts: holdLasts } = view.night_off;
   return { off, on, days: [...days], frames, darkness, hold_lasts: holdLasts };
@@ -134,6 +152,8 @@ export interface NightOffEditorProps {
   frames: readonly { id: string; name: string }[];
   placeSet: boolean;
   houseHref: string;
+  /** Central's read time on the house clock, for "today" and "tomorrow"; null: not known. */
+  now?: string | null;
   /** Save from the revision the editor opened at; resolves with Central's answer. */
   onSave: (revision: number, draft: NightOffDraft) => Promise<{ ok: true } | { ok: false; error: string }>;
 }
@@ -146,7 +166,7 @@ export interface NightOffEditorProps {
  * Save sends the revision the editor opened at: a save from another tab since answers "changed",
  * and the editor offers Reload rather than overwrite it.
  */
-export function NightOffEditor({ view, frames, placeSet, houseHref, onSave }: NightOffEditorProps) {
+export function NightOffEditor({ view, frames, placeSet, houseHref, now = null, onSave }: NightOffEditorProps) {
   const [draft, setDraft] = useState<NightOffDraft | null>(null);
   const [openedAt, setOpenedAt] = useState(view.night_off.revision);
   const [stale, setStale] = useState(false);
@@ -188,8 +208,9 @@ export function NightOffEditor({ view, frames, placeSet, houseHref, onSave }: Ni
   return (
     <Section title="Night off">
       <Note>
-        {`Displays turn off at ${timeOfDayWords(view.night_off.off)} and on at ${timeOfDayWords(view.night_off.on)}`
-          + (view.next_off === null ? "." : `; next off ${dayTime(view.next_off)}.`)}
+        {`Displays turn off at ${savedWords(view.night_off.off, view.next_off, now)} and on at `
+          + `${savedWords(view.night_off.on, view.next_on, now)}`
+          + (view.next_off === null || view.night_off.off.at !== "clock" ? "." : `; next off ${dayTime(view.next_off)}.`)}
       </Note>
       {stale && (
         <Stack label="Night off changed">
@@ -197,8 +218,10 @@ export function NightOffEditor({ view, frames, placeSet, houseHref, onSave }: Ni
           <Button onClick={reload}>Reload Night off</Button>
         </Stack>
       )}
-      <TimeOfDayControl label="Turn off" example="23:00" value={shown.off} onChange={(off) => edit({ off })} placeSet={placeSet} houseHref={houseHref} />
-      <TimeOfDayControl label="Turn on" example="07:00" value={shown.on} onChange={(on) => edit({ on })} placeSet={placeSet} houseHref={houseHref} />
+      <TimeOfDayControl label="Turn off" example="23:00" value={shown.off} onChange={(off) => edit({ off })} placeSet={placeSet}
+        houseHref={houseHref} resolved={resolvedOf(shown.off, view.night_off.off, view.next_off, now)} />
+      <TimeOfDayControl label="Turn on" example="07:00" value={shown.on} onChange={(on) => edit({ on })} placeSet={placeSet}
+        houseHref={houseHref} resolved={resolvedOf(shown.on, view.night_off.on, view.next_on, now)} />
       <Note>An on time at or before the off time is the next morning: off 23:00, on 07:00 the next day.</Note>
       <SettingRow kind="house" label="Nights" help="The nights Night off starts on." defaultLabel="Default: every night"
         state="idle" control={<MultiToggle label="Nights" value={shown.days} options={DAYS} required stateWords={CHOSEN}

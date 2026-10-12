@@ -1,9 +1,9 @@
 import { Note } from "../patterns/fact-row";
-import { type CalendarBand, type CalendarLane, WeekCalendar } from "../patterns/week-calendar";
-import { addDays, houseDayWords, untilWords, windowWords } from "../timeWords.js";
+import { OverrideBanner } from "../patterns/override-banner";
+import { type CalendarBand, type CalendarKeyEntry, type CalendarLane, WeekCalendar } from "../patterns/week-calendar";
+import { addDays, houseDayWords, hourWords, localClockWords, untilWords, windowWords } from "../timeWords.js";
 import { Button } from "../ui/button";
-import { Section } from "../ui/section";
-import { Inline, Stack } from "../ui/stack";
+import { Inline } from "../ui/stack";
 
 type Power = "on" | "off";
 type Because = "night-off" | "hold" | "test" | "on-underneath";
@@ -167,45 +167,67 @@ export function PowerButtons({ busy, onHold }: PowerButtonsProps) {
   );
 }
 
+/** The colour key of the week page's lanes: what each tone means. */
+export const POWER_KEY: readonly CalendarKeyEntry[] = [
+  { tone: "on", label: "Displays on" },
+  { tone: "off", label: "Night off: displays off" },
+  { tone: "held", label: "Held by All off or All on" },
+  { tone: "window", label: "A Schedule plays" },
+];
+
+export interface HoldBannerProps {
+  holds: readonly HoldView[];
+  /** Every current Frame's name, by id. */
+  names: Readonly<Record<string, string>>;
+  /** Central's read time on the house clock. */
+  now: string | null;
+  busy: boolean;
+  /** Resume schedule (#91) on a hold's Frames. */
+  onResume: (hold: HoldView) => void;
+}
+
+/**
+ * The week page's hold banner (F5): while All off or All on is in force, what is held and until
+ * when ("Held off until 23:00"), each hold with who set it, its Frames and Resume schedule. No
+ * hold: nothing is drawn.
+ */
+export function HoldBanner({ holds, names, now, busy, onResume }: HoldBannerProps) {
+  const title = heldWords(holds, now);
+  if (title === null) return null;
+  return (
+    <OverrideBanner label="Holds" title={title}>
+      {holds.map((hold) => (
+        <Inline key={hold.hold_id} label={holdWords(hold.power, hold.source)}>
+          <Note>
+            {`${holdWords(hold.power, hold.source)} · until ${holdUntilWords(hold, now)}`
+              + ` · ${hold.frame_ids.map((frameId) => names[frameId] ?? frameId).join(", ")}`}
+          </Note>
+          <Button disabled={busy} onClick={() => onResume(hold)}>Resume schedule</Button>
+        </Inline>
+      ))}
+    </OverrideBanner>
+  );
+}
+
 export interface PowerLaneProps {
   week: Week;
   /** Every current Frame's name, by id. */
   names: Readonly<Record<string, string>>;
-  holds: readonly HoldView[];
   /** Central's read time on the house clock. */
   now: string | null;
   /** Lanes drawn under the Power lane in every day (the Schedules). */
   below?: readonly CalendarLane[];
   calendarLabel: string;
-  busy: boolean;
-  /** Resume schedule (#91) on a hold's Frames. */
-  onResume: (hold: HoldView) => void;
-  /** A line after a press: its outcome. */
-  said?: string | null;
 }
 
 /**
- * The week page's Power lane (roadmap 2a): every live hold with who set it and Resume schedule,
- * then the week calendar, the Power lane on top: solid while displays should be on, grey in Night
- * off, hatched while held.
+ * The week page's calendar (roadmap 2a): the Power lane on top (solid while displays should be
+ * on, grey in Night off, hatched while held), the lanes below it, the colour key, and every time on
+ * the house's clock (timeWords.js).
  */
-export function PowerLane({ week, names, holds, now, below = [], calendarLabel, busy, onResume, said = null }: PowerLaneProps) {
+export function PowerLane({ week, names, now, below = [], calendarLabel }: PowerLaneProps) {
   return (
-    <Stack>
-      <Section title="Holds">
-        {holds.length === 0 ? <Note>No hold: the displays follow Night off.</Note> : holds.map((hold) => (
-          <Inline key={hold.hold_id} label={holdWords(hold.power, hold.source)}>
-            <Note>
-              {`${holdWords(hold.power, hold.source)} · until ${hold.until === null ? "you resume" : untilWords(hold.until, now)}`
-                + ` · ${hold.frame_ids.map((frameId) => names[frameId] ?? frameId).join(", ")}`}
-            </Note>
-            <Button disabled={busy} onClick={() => onResume(hold)}>Resume schedule</Button>
-          </Inline>
-        ))}
-        {said !== null && <Note live>{said}</Note>}
-      </Section>
-      <WeekCalendar label={calendarLabel} days={weekDays(week)}
-        lanes={[...powerLanes(week, names), ...below]} now={now} />
-    </Stack>
+    <WeekCalendar label={calendarLabel} days={weekDays(week)} lanes={[...powerLanes(week, names), ...below]}
+      now={now} nowWords={now === null ? null : localClockWords(now)} hourWords={hourWords} colourKey={POWER_KEY} />
   );
 }

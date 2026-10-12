@@ -14,6 +14,7 @@ fails.
 """
 
 import os
+import re
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -100,7 +101,8 @@ def test_test_off_waits_for_the_pi_then_reads_confirmed_off_and_turn_on_ends_it(
         assert _rows(registry, "SELECT id FROM power_requests") == []
         _reported(registry, _change(registry), PowerResult.CONFIRMED, InForce(InForceKind.TIMETABLE, Power.ON, None, None, None))
         expect(status).to_have_text("Display confirmed on")
-        expect(power.locator("p", has_text="Now: ")).to_have_text("Now: On")       # the request underneath
+        # The tab's one power line (Why's): the request underneath is in force.
+        expect(power.locator("p", has_text="Display power: ")).to_have_text(re.compile(r"^Display power: On\b"))
         expect(turn_on).to_be_disabled()
         assert sent == ["POST", "DELETE"]
 

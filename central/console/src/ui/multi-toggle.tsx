@@ -50,6 +50,7 @@ export function MultiToggle<V extends string>({ label, value, options, onChange,
             value={option.value}
             className={cn(
               "inline-flex cursor-pointer items-baseline gap-1.5 border-0 border-l border-line-input bg-surface-input px-3 py-1.5 first:border-l-0",
+              "max-md:min-h-11 max-md:items-center",
               "font-sans text-sm text-text",
               "focus-visible:relative focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus",
               "data-pressed:bg-accent data-pressed:text-on-accent",

@@ -31,6 +31,10 @@ const meta = {
         short: "Evenings", tone: "window" as const })) },
     ],
     now: "2026-10-14T12:00",
+    colourKey: [
+      { tone: "on", label: "Displays on" }, { tone: "off", label: "Night off: displays off" },
+      { tone: "held", label: "Held by All off or All on" }, { tone: "window", label: "A Schedule plays" },
+    ],
   },
 } satisfies Meta<typeof WeekCalendar>;
 
@@ -49,3 +53,5 @@ export const Held: Story = {
 };
 /** Another week: no now line, nothing scheduled. */
 export const Empty: Story = { args: { lanes: [{ key: "schedules", label: "Schedules", bands: [] }], now: null } };
+/** At phone width: one day at a time (today's, Wednesday), chosen from seven day buttons. */
+export const Phone: Story = { parameters: { phone: true } };

@@ -9,9 +9,13 @@ export interface FrameChip { severity: "ok" | "todo" | "notice" | "alarm"; label
  * Frame picker, a Scene's Frame chips, the Now page's badges): unfinished setup (a Pi to choose,
  * its Position again) stays `todo` (design language §6), drawn in its own colour, never the
  * accent's; a Pi enrolled that has not reported yet is "Getting ready" (a status word, `notice`),
- * not its enrollment age. `short`: the plan tile's words, without the age.
+ * not its enrollment age. `short`: the plan tile's words, without the age. `resting`: Central's
+ * Resting (Why's `power.resting`, central/why/explain.py `is_resting`, its one home): dark on
+ * purpose, so the chip says **Resting** (design language §6) instead of what the dark display
+ * would otherwise read as; unfinished setup stays `todo`.
  */
-export function frameChip(health: FrameHealth, short = false): FrameChip {
+export function frameChip(health: FrameHealth, short = false, resting = false): FrameChip {
+  if (resting && health.severity !== "todo") return { severity: "ok", label: "Resting" };
   if (health.state === "awaiting-report" && health.severity === "todo") return { severity: "notice", label: "Getting ready" };
   return { severity: health.severity, label: short ? health.tileLabel : health.label };
 }

@@ -30,7 +30,7 @@ export function useFieldControl(): FieldWiring {
 
 /** The look every text-like control shares (an input, a select). */
 export const controlClass = cn(
-  "min-w-0 rounded-input border border-line-input bg-surface-input px-3 py-1.5",
+  "min-w-0 rounded-input border border-line-input bg-surface-input px-3 py-1.5 max-md:min-h-11",
   "font-sans text-sm text-text",
   "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus",
   "disabled:cursor-not-allowed disabled:opacity-60 aria-invalid:border-alarm",

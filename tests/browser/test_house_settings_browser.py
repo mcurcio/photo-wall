@@ -63,6 +63,16 @@ def test_house_offers_the_browsers_zone_lists_zones_by_city_and_saves_zone_and_p
         expect(week(page)).to_contain_text("Times on the house clock (America/New_York).")
         expect(week(page)).to_contain_text("The upright line is now: 07:00 on the house clock.")
 
+        # The 12-hour clock applies to every time the console shows, from the shell's one read.
+        go(page, "house")
+        house(page).get_by_role("radiogroup", name="Clock", exact=True).get_by_role(
+            "radio", name="12-hour", exact=True).click()
+        assert save(page).json()["clock"] == "12h"
+        go(page, "schedule")
+        expect(week(page)).to_contain_text("The upright line is now: 7:00 am on the house clock.")
+        expect(week(page).get_by_role("group", name="Wed 14 Oct", exact=True).get_by_role(
+            "img", name="Off · Night off, Wed 14 Oct 11:00 pm – Thu 15 Oct 7:00 am")).to_have_count(1)
+
         go(page, "house")
         house(page).get_by_role("button", name="Clear location", exact=True).click()
         assert save(page).json()["time"]["place"] is None

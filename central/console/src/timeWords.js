@@ -1,31 +1,104 @@
 /**
- * Clock times in words (console DDD §35, §41): the ONE module that turns an instant into
- * display words. Every clock time it returns carries the browser's zone abbreviation, so two
- * operators in different zones never read one time as if it were the other's.
+ * Clock times in words (console DDD §35, §41; design language §7, Units, times and numbers): the
+ * ONE module that turns an instant or a house time into display words, on the house's clock.
  * tests/test_console_planned.py scans the console and fails when any other module calls a
  * display formatter (`toLocaleTimeString`, `toLocaleString`, `toLocaleDateString`,
- * `Intl.DateTimeFormat`). Field arithmetic (`getHours` and friends) that builds
- * `datetime-local` input values is not display and stays where it is.
+ * `Intl.DateTimeFormat`).
  *
- * Pure: every function reads only its argument and the browser's zone and locale.
+ * The house's clock is Settings › House (#2 its zone, #5 its 12- or 24-hour clock), set once read
+ * (houseClock.js `useHouseClock`, the one caller of `setHouseClock`): every instant is shown in the
+ * house's zone and every time in its clock, so the console shows one clock. Until the House is read,
+ * times are in this browser's zone with its abbreviation ("18:00 BST"), on a 24-hour clock.
+ *
+ * Every function reads only its argument, the house's clock set here and the browser's locale.
  */
 
 const pad = (value) => String(value).padStart(2, "0");
 
 const toDate = (epochSeconds) => new Date(epochSeconds * 1000);
 
-/** The browser's time zone, "Europe/London": every entered and shown time uses it. */
-export function zoneName() {
+/** The house's zone (null until Settings › House is read) and its clock. */
+let house = { zone: null, clock: "24h" };
+
+/**
+ * The house's clock from Central's Settings › House: its zone and "12h" or "24h". Only
+ * houseClock.js calls it.
+ *
+ * @param {{zone: string|null, clock: "12h"|"24h"}} settings
+ */
+export function setHouseClock({ zone, clock }) {
+  house = { zone: zone || null, clock: clock === "12h" ? "12h" : "24h" };
+}
+
+/** This browser's own time zone, "Europe/London": only offered on Settings › House. */
+export function browserZone() {
   return Intl.DateTimeFormat().resolvedOptions().timeZone;
 }
 
-/** "Times in Europe/London (this browser's time zone)": the zone line on Schedule and Now. */
-export function zoneNote() {
-  return `Times in ${zoneName()} (this browser's time zone)`;
+/** The zone every time is shown in: the house's, or this browser's before the House is read. */
+export function zoneName() {
+  return house.zone ?? browserZone();
+}
+
+/**
+ * The one zone line, on every page that shows times: "Times on the house clock (Europe/London)";
+ * `zone`, a house zone a page read itself (the week page's).
+ *
+ * @param {string|null} [zone]
+ */
+export function zoneNote(zone = house.zone) {
+  return zone === null ? `Times in ${zoneName()} (this browser's time zone)` : `Times on the house clock (${zone})`;
+}
+
+/**
+ * A time of day on the house's clock: "18:05" or "6:05 pm"; with `seconds`, "18:05:07" or
+ * "6:05:07 pm". The one place the 12- or 24-hour clock is applied.
+ *
+ * @param {number} hours 0-23
+ * @param {number} minutes
+ * @param {number|null} [seconds]
+ * @returns {string}
+ */
+export function clockWords(hours, minutes, seconds = null) {
+  const tail = seconds === null ? "" : `:${pad(seconds)}`;
+  if (house.clock === "24h") return `${pad(hours)}:${pad(minutes)}${tail}`;
+  return `${hours % 12 === 0 ? 12 : hours % 12}:${pad(minutes)}${tail} ${hours < 12 ? "am" : "pm"}`;
+}
+
+/** An hour mark on a day's axis: "06:00" or "6 am". */
+export function hourWords(hour) {
+  const hours = hour % 24;
+  if (house.clock === "24h") return `${pad(hours)}:00`;
+  return `${hours % 12 === 0 ? 12 : hours % 12} ${hours < 12 ? "am" : "pm"}`;
+}
+
+/** A house time string's clock part ("2026-10-12T17:05" or "17:05") on the house's clock. */
+export function localClockWords(local) {
+  if (!/\d\d:\d\d$/.test(local)) return local;
+  const [hours, minutes] = local.slice(-5).split(":").map(Number);
+  return clockWords(hours, minutes);
+}
+
+const formatters = new Map();
+
+/** The parts of `date` in the shown zone, on a 24-hour clock. */
+function zonedParts(date) {
+  const key = zoneName();
+  if (!formatters.has(key)) {
+    formatters.set(key, new Intl.DateTimeFormat("en-GB", {
+      timeZone: key, year: "numeric", month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit",
+      second: "2-digit", hourCycle: "h23",
+    }));
+  }
+  const parts = Object.fromEntries(formatters.get(key).formatToParts(date).map((part) => [part.type, part.value]));
+  return {
+    year: Number(parts.year), month: Number(parts.month), day: Number(parts.day),
+    hours: Number(parts.hour), minutes: Number(parts.minute), seconds: Number(parts.second),
+  };
 }
 
 function zonePart(date, timeZoneName) {
-  return new Intl.DateTimeFormat(undefined, { timeZoneName })
+  return new Intl.DateTimeFormat(undefined, { timeZoneName, timeZone: zoneName() })
     .formatToParts(date)
     .find((part) => part.type === "timeZoneName")?.value ?? null;
 }
@@ -50,25 +123,26 @@ export function offsetLabel(date) {
  */
 export function zoneLabel(date) {
   const short = zonePart(date, "short");
-  return short === null || /^(GMT|UTC)[+\-\u2212]/.test(short) ? offsetLabel(date) : short;
+  return short === null || /^(GMT|UTC)[+\-−]/.test(short) ? offsetLabel(date) : short;
 }
 
-/** "18:00", with seconds only when they are not zero; no zone. */
+/** "18:00" or "6:00 pm", with seconds only when they are not zero; no zone. */
 function hourMinute(date) {
-  const time = `${pad(date.getHours())}:${pad(date.getMinutes())}`;
-  return date.getSeconds() === 0 ? time : `${time}:${pad(date.getSeconds())}`;
+  const { hours, minutes, seconds } = zonedParts(date);
+  return clockWords(hours, minutes, seconds === 0 ? null : seconds);
 }
 
 /**
- * One of Central's times as a clock time in the browser's zone: "18:00 BST", with seconds
- * only when they are not zero ("18:00:05 BST").
+ * One of Central's times as a clock time on the house's clock: "18:00", with seconds only when
+ * they are not zero ("18:00:05"). Before the House is read, in this browser's zone with its
+ * abbreviation ("18:00 BST").
  *
  * @param {number} epochSeconds
  * @returns {string}
  */
 export function clockTime(epochSeconds) {
   const date = toDate(epochSeconds);
-  return `${hourMinute(date)} ${zoneLabel(date)}`;
+  return house.zone === null ? `${hourMinute(date)} ${zoneLabel(date)}` : hourMinute(date);
 }
 
 /**
@@ -79,13 +153,13 @@ export function clockTime(epochSeconds) {
  * @returns {string}
  */
 export function timeOfDay(epochSeconds) {
-  const date = toDate(epochSeconds);
-  return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+  const { hours, minutes, seconds } = zonedParts(toDate(epochSeconds));
+  return clockWords(hours, minutes, seconds);
 }
 
 /**
  * When a check or a contact last happened, or since when something needs a look (design
- * language §7, "Since"): the weekday and a 24-hour time, "Sun 03:39". With `nowSeconds` (a
+ * language §7, "Since"): the weekday and a time, "Sun 03:39". With `nowSeconds` (a
  * served read time on the same clock, never this browser's: R10), a day more than six days
  * before it names its date instead, "12 Sep 03:39". No zone abbreviation and no seconds: seconds
  * are for acknowledgements ({@link timeOfDay}). The one format of every check and contact time
@@ -97,11 +171,11 @@ export function timeOfDay(epochSeconds) {
  */
 export function sinceTime(epochSeconds, nowSeconds) {
   const date = toDate(epochSeconds);
-  const time = `${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  const { hours, minutes } = zonedParts(date);
   const options = Number.isFinite(nowSeconds) && nowSeconds - epochSeconds > 6 * 86400
     ? { day: "numeric", month: "short" }
     : { weekday: "short" };
-  return `${date.toLocaleDateString("en-GB", options)} ${time}`;
+  return `${date.toLocaleDateString("en-GB", { ...options, timeZone: zoneName() })} ${clockWords(hours, minutes)}`;
 }
 
 /** "Tue 2 Mar". */
@@ -110,14 +184,9 @@ export function dayLabel(epochSeconds) {
     weekday: "short",
     day: "numeric",
     month: "short",
+    timeZone: zoneName(),
   });
 }
-
-/**
- * The label beside capture days (§37): a day depends on the zone it is read in, and these
- * are read in the browser's (an Installation time zone is deferred, PR 37 Q5).
- */
-export const DATES_NOTE = "Dates in this browser's time zone";
 
 /** A capture date, "12 Dec 2024": a day, not a clock time, so it carries no zone. */
 export function captureDay(epochSeconds) {
@@ -125,11 +194,12 @@ export function captureDay(epochSeconds) {
     day: "numeric",
     month: "short",
     year: "numeric",
+    timeZone: zoneName(),
   });
 }
 
 /**
- * A day and a clock time: "Tue 2 Mar 18:00 BST"; with `year`, "Tue 2 Mar 2027 18:00 BST".
+ * A day and a clock time: "Tue 2 Mar 18:00"; with `year`, "Tue 2 Mar 2027 18:00".
  *
  * @param {number} epochSeconds
  * @param {{year?: boolean}} [options]
@@ -142,6 +212,7 @@ export function dateTime(epochSeconds, { year = false } = {}) {
       day: "numeric",
       month: "short",
       year: "numeric",
+      timeZone: zoneName(),
     })
     : dayLabel(epochSeconds);
   return `${day} ${clockTime(epochSeconds)}`;
@@ -169,9 +240,9 @@ function dayWords(days) {
     : run.map((day) => DAY_NAMES[day]).join(", "))).join(", ");
 }
 
-/** A start or end of a When: "17:00", "sunset", "sunrise +15 min", "sunset −30 min". */
+/** A start or end of a When: "17:00" (or "5:00 pm"), "sunset", "sunrise +15 min", "sunset −30 min". */
 export function timeOfDayWords(time) {
-  if (time.at === "clock") return time.time;
+  if (time.at === "clock") return localClockWords(time.time);
   const offset = time.offset_minutes ?? 0;
   if (offset === 0) return time.at;
   return `${time.at} ${offset > 0 ? "+" : "−"}${Math.abs(offset)} min`;
@@ -190,12 +261,12 @@ export function whenWords(when) {
     (crosses ? " (ends next day)" : "");
 }
 
-/** "2026-10-12T17:00" (house clock) as its day, "Mon 12 Oct", and its time, "17:00". */
+/** "2026-10-12T17:00" (house clock) as its day, "Mon 12 Oct", and its time, "17:00" or "5:00 pm". */
 export function houseParts(local) {
   const [date, time] = local.split("T");
   const [year, month, day] = date.split("-").map(Number);
   const weekday = DAY_KEYS[(new Date(Date.UTC(year, month - 1, day)).getUTCDay() + 6) % 7];
-  return { day: `${DAY_NAMES[weekday]} ${day} ${MONTHS[month - 1]}`, time };
+  return { day: `${DAY_NAMES[weekday]} ${day} ${MONTHS[month - 1]}`, time: localClockWords(time) };
 }
 
 /**
@@ -292,5 +363,21 @@ export function untilWords(local, now) {
   if (now !== null && local.slice(0, 10) <= addDays(now.slice(0, 10), 1) && local > now) {
     return local.slice(0, 10) === now.slice(0, 10) || local.slice(11) <= now.slice(11) ? time : `${day} ${time}`;
   }
+  return `${day} ${time}`;
+}
+
+/**
+ * When a house time falls, from the house time `now` (both Central's strings): "18:12 today",
+ * "07:00 tomorrow", else "Tue 13 Oct 07:00". The resolved time beside a sunrise or sunset rule
+ * (design language §8 E3), from Central's next time, never worked out here.
+ *
+ * @param {string} local
+ * @param {string|null} now
+ * @returns {string}
+ */
+export function dayOfWords(local, now) {
+  const { day, time } = houseParts(local);
+  if (now !== null && local.slice(0, 10) === now.slice(0, 10)) return `${time} today`;
+  if (now !== null && local.slice(0, 10) === addDays(now.slice(0, 10), 1)) return `${time} tomorrow`;
   return `${day} ${time}`;
 }

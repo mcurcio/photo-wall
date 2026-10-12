@@ -4,6 +4,7 @@ import { AttentionStrip } from "./AttentionStrip.jsx";
 import { bootFactsFrom } from "./bootFacts.js";
 import { fleetRoutes } from "./fleetRoutes.jsx";
 import { useHandOff } from "./flow/useHandOff.js";
+import { useHouseClock } from "./houseClock.js";
 import { CloseIcon, MenuIcon } from "./icons.jsx";
 import { neutralRoutes } from "./neutralRoutes.jsx";
 import { useFleetHosts } from "./fleetHosts.js";
@@ -26,7 +27,8 @@ import { wallRoutes } from "./wallRoutes.jsx";
  *            rememberScene: (sceneId: string) => void,
  *            markDraft: (section: import("./routes.js").Section, dirty: boolean) => void,
  *            handOffs: ReturnType<typeof import("./flow/useHandOff.js").useHandOff>,
- *            hosts: import("./fleetHosts.js").FleetHosts|null}} RouteContext
+ *            hosts: import("./fleetHosts.js").FleetHosts|null,
+ *            houseClock: string|null}} RouteContext
  *   `recentScene` is the Scene the operator last saved or picked on a Scene card
  *   (`rememberScene`, called by the Scene flow): the Schedule and Show-now flows
  *   prefill their Scene step from its `sceneId`. Each hand-over is an event with its own
@@ -35,7 +37,8 @@ import { wallRoutes } from "./wallRoutes.jsx";
  *   `handOffs` is the one pending inline hand-off between flows (flow/handOff.js: the
  *   Scene flow's "New selection from your photo library" runs the Source flow inline).
  *   `hosts` is the shell's one fleet host read (fleetHosts.js), null until sign-in is
- *   confirmed.
+ *   confirmed. `houseClock` keys the house's clock (houseClock.js): when Settings › House
+ *   changes the zone or the 12- or 24-hour clock, every page renders its times again.
  * @typedef {{section: import("./routes.js").Section, label: string,
  *            render: (ctx: RouteContext) => React.ReactNode,
  *            samplePaths: string[], inSidebar?: boolean,
@@ -211,6 +214,8 @@ export function Shell({ hidden = false }) {
   // Boot facts (slice 2 §5): each box's serial from the host read, shared by the fleet pages
   // and the output chooser.
   const bootFacts = useMemo(() => bootFactsFrom(hosts), [hosts]);
+  // The house's clock for every time shown (Settings › House): one read, here.
+  const houseClock = useHouseClock({ skip: hostsSkipped });
   const wall = useWallMemory(route, snapshot, navigate);
   // Flow hand-offs (see RouteContext): the Scene last saved or picked, and the Show
   // sections holding an unsaved draft. Log out remounts the shell and clears both.
@@ -342,9 +347,10 @@ export function Shell({ hidden = false }) {
       markDraft,
       handOffs,
       hosts,
+      houseClock,
     }),
     [snapshot, bootFacts, health, route, navigate, wall, recentScene, rememberScene, markDraft, handOffs,
-      hosts],
+      hosts, houseClock],
   );
 
   return (

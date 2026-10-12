@@ -14,7 +14,7 @@ import { Select } from "../ui/select";
 import { Section } from "../ui/section";
 import { Inline } from "../ui/stack";
 import { Switch } from "../ui/switch";
-import { FrameWhy, useFrameWhy } from "./frame-why";
+import { FrameWhy, type WhyRead } from "./frame-why";
 
 /** How the Pi turns a display off and on (contracts/node_output.py `PowerMethod`). */
 export type PowerMethod = "hdmi-cec" | "ddc-ci" | "signal-off";
@@ -118,17 +118,6 @@ export function testWords(view: FramePowerView, sent: string | null, turnedOn = 
   return resultWords(view.test.power, view.result);
 }
 
-/** What the Pi says it carries out now, in words; null when it named nothing. */
-function nowWords(view: FramePowerView): string | null {
-  const { in_force: force } = view;
-  if (force === null) return null;
-  if (force.power === null) return "Left as it is · no power times from Central for now";
-  const state = force.power === "on" ? "On" : "Off";
-  if (force.kind !== "test") return state;
-  const minutes = force.remaining_seconds === null ? null : Math.max(1, Math.ceil(force.remaining_seconds / 60));
-  return `${state} · by a test on this tab${minutes === null ? "" : `, ${minutes} min left`}`;
-}
-
 export interface PowerPanelProps {
   view: FramePowerView;
   /** The settings shown: the saved ones, or a change being saved. */
@@ -168,7 +157,6 @@ export function PowerPanel({
     );
   }
   const words = testWords(view, sent, turnedOn);
-  const now = nowWords(view);
   const change = (patch: Partial<PowerSettings>, label: string) => onSettings({ ...settings, ...patch }, label);
   const method = "Power method";
   const input = "Switch the display to this input on power-on";
@@ -221,7 +209,6 @@ export function PowerPanel({
         </FactRow>
       )}
       {view.method_in_use !== null && <FactRow label="In use" tone="reported">{METHOD_WORDS[view.method_in_use]}</FactRow>}
-      {now !== null && <FactRow label="Now" tone="reported">{now}</FactRow>}
       <FactGroup title="Test">
         <Note>Test: turn off turns the display off for 5 min, or until you press Turn on.</Note>
         <Inline>
@@ -257,10 +244,10 @@ const sameSettings = (a: PowerSettings, b: PowerSettings) => a.power_method === 
  * The Frame page's Power tab (roadmap 1b, slice K2): read from GET …/power while it is shown (more
  * often while a test waits for the Pi), the display's power settings saved on change, and the two
  * test buttons. A changed setting shows at once and stays shown until a read carries it. Its first
- * line is the Frame's power line from Why (the Overview's; this tab only reads it).
+ * line is the Frame's one power line, from Why (the Overview's; the page reads it once): what
+ * the display should be and what the Pi carries out, a test included, are that one line.
  */
-export function FramePower({ frameId, readAt = null }: { frameId: string; readAt?: number | null }) {
-  const why = useFrameWhy(frameId);
+export function FramePower({ frameId, why, readAt = null }: { frameId: string; why: WhyRead; readAt?: number | null }) {
   const [sent, setSent] = useState<string | null>(null);
   const [turnedOn, setTurnedOn] = useState(false);
   const [sending, setSending] = useState(false);

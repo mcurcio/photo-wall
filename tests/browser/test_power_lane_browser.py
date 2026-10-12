@@ -67,15 +67,15 @@ def test_the_lane_draws_night_off_and_holds_with_resume_schedule(page, registry)
         # All off: a hatched hold labelled with who set it, until the next change (23:00).
         week(page).get_by_role("button", name="All off", exact=True).click()
         expect(band(page, "Wed 14 Oct", r"^Held off · console, Wed 14 Oct 12:00–23:00$")).to_have_count(1)
-        expect(week(page)).to_contain_text("Held off until 23:00")
+        holds = week(page).get_by_role("region", name="Holds", exact=True)     # the hold banner
+        expect(holds.get_by_role("heading", name="Held off until 23:00", exact=True)).to_be_visible()
         expect(week(page)).to_contain_text("Holding every display off until 23:00.")     # Central's until
-        holds = week(page).get_by_role("region", name="Holds", exact=True)
         expect(holds).to_contain_text("Held off · console · until 23:00 · Frame 1")
 
-        # Resume schedule removes it at once.
+        # Resume schedule removes it at once, and the hold banner with it.
         holds.get_by_role("button", name="Resume schedule", exact=True).click()
         expect(band(page, "Wed 14 Oct", "^Held")).to_have_count(0)
-        expect(holds).to_contain_text("No hold: the displays follow Night off.")
+        expect(holds).to_have_count(0)
         expect(week(page)).not_to_contain_text("Held off until")
 
         # All on, then All off: only the newest hold shows.
@@ -134,3 +134,39 @@ def test_night_off_saves_moves_the_lane_and_a_stale_tab_reloads(page, registry):
         expect(editor.get_by_role("status")).to_have_text("Saved. The displays follow it from its next off or on.")
         assert page.request.get(origin + "/v1/operator/power/night-off").json()["night_off"]["off"] == {
             "at": "sunset", "offset_minutes": -30}
+
+
+PHONE = {"width": 390, "height": 844}
+
+
+def _small_targets(scope):
+    """The visible controls in `scope` under 44 px tall or wide (design language §2)."""
+    return scope.evaluate("""root => [...root.querySelectorAll(
+        'button, input, select, [role=radio], [role=checkbox], [role=switch]')]
+        .filter(el => el.offsetParent !== null)
+        .map(el => [el.getAttribute('aria-label') || el.textContent.trim() || el.tagName, el.getBoundingClientRect()])
+        .filter(([, box]) => box.height < 44 || box.width < 44)
+        .map(([name, box]) => `${name}: ${Math.round(box.width)} x ${Math.round(box.height)}`)""")
+
+
+@pytest.mark.browser_context_args(timezone_id="Pacific/Auckland", viewport=PHONE)
+def test_at_phone_width_the_week_is_a_day_at_a_time_with_no_sideways_scroll_and_44px_targets(page, registry):
+    seed_house(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "schedule")
+        days = week(page).get_by_role("group", name="Week of Mon 12 Oct: choose a day", exact=True)
+        # Today (the house's Wednesday) is shown first; only its bands are drawn.
+        expect(days.get_by_role("button", name="Wed 14 Oct", exact=True)).to_have_attribute("aria-pressed", "true")
+        expect(band(page, "Wed 14 Oct", "^Off · Night off, Wed 14 Oct 23:00 – Thu 15 Oct 07:00$")).to_have_count(1)
+        expect(week(page).get_by_role("group", name="Thu 15 Oct", exact=True)).to_have_count(0)
+        days.get_by_role("button", name="Thu 15 Oct", exact=True).click()
+        expect(band(page, "Thu 15 Oct", "^Off · Night off, Thu 15 Oct 23:00 – Fri 16 Oct 07:00$")).to_have_count(1)
+        expect(week(page).get_by_role("group", name="Wed 14 Oct", exact=True)).to_have_count(0)
+        # The colour key says what each band means.
+        expect(week(page).get_by_role("list", name="Colour key", exact=True).get_by_role("listitem")).to_have_count(4)
+
+        week(page).get_by_role("button", name="All off", exact=True).click()
+        expect(week(page).get_by_role("region", name="Holds", exact=True)).to_be_visible()
+        assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth"), "the page scrolls sideways"
+        small = _small_targets(week(page).element_handle())
+        assert small == [], small

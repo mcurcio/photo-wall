@@ -15,6 +15,7 @@ did-not-answer case no longer says "Display didn't answer".
 """
 
 import os
+import re
 
 import pytest
 from console_tasks import connect, open_frame
@@ -52,6 +53,11 @@ def _scene(scene_id, frame):
         Contribution(target=f"frame:{frame}", source_refs=("library:1",)),))
 
 
+def _chip(page, words):
+    """The Frame page's status chip (StatusChip: its severity's mark, then `words`)."""
+    return page.get_by_role("main").locator("[data-severity]", has_text=re.compile(rf"^\W*{words}\s*$"))
+
+
 def _why(page):
     return page.get_by_role("region", name="Why is this playing?", exact=True)
 
@@ -78,6 +84,8 @@ def test_the_overview_names_the_winner_and_resting_and_a_display_that_did_not_an
         why = _why(overview)
         expect(why).to_contain_text("Evenings is playing; it beat calm, the Default Scene, which has lower priority.")
         expect(why).to_contain_text("Display power: Resting: Night off until 07:00")
+        # The header's status chip says Resting from the same answer (Why's `resting`).
+        expect(_chip(page, "Resting")).to_be_visible()
 
         power = open_frame(page, frame, "power").get_by_role("region", name="Power", exact=True)
         expect(power).to_contain_text("Display power: Resting: Night off until 07:00")
@@ -87,3 +95,4 @@ def test_the_overview_names_the_winner_and_resting_and_a_display_that_did_not_an
         why = _why(open_frame(page, frame, "overview"))
         expect(why).to_contain_text("Display power: Display didn't answer")
         expect(why).not_to_contain_text("Resting")
+        expect(_chip(page, "Resting")).to_have_count(0)

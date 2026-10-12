@@ -136,6 +136,18 @@ out.time = {
   zone: time.zoneName(),
   note: time.zoneNote(),
 };
+// Settings › House read (houseClock.js): every time on the house's zone and its 12-hour clock.
+time.setHouseClock({ zone: "Europe/London", clock: "12h" });
+out.house = {
+  clock: time.clockTime(winter),
+  seconds: time.timeOfDay(winter + 5),
+  since: time.sinceTime(winter),
+  window: time.windowWords({ start: "2026-10-12T17:00", end: "2026-10-13T00:30" }),
+  hour: [time.hourWords(0), time.hourWords(12), time.hourWords(18)],
+  resolved: [time.dayOfWords("2026-10-12T18:12", "2026-10-12T09:00"),
+             time.dayOfWords("2026-10-13T07:00", "2026-10-12T09:00")],
+  note: time.zoneNote(),
+};
 
 console.log(JSON.stringify(out));
 """
@@ -215,6 +227,16 @@ def test_the_planned_fact_origins_and_zoned_times():
     assert time["sunset"] == "Every day, sunset −30 min–23:00"
     assert time["zone"] == "America/Los_Angeles"
     assert time["note"] == "Times in America/Los_Angeles (this browser's time zone)"
+    # The house's clock, once read: its zone (London, 02:00 when Los Angeles reads 18:00), no
+    # abbreviation (every time is the house's), and its 12-hour clock on instants and house times.
+    house = out["house"]
+    assert house["clock"] == "2:00 am"
+    assert house["seconds"] == "2:00:05 am"
+    assert house["since"] == "Tue 2:00 am"
+    assert house["window"] == "Mon 12 Oct 5:00 pm – Tue 13 Oct 12:30 am"
+    assert house["hour"] == ["12 am", "12 pm", "6 pm"]
+    assert house["resolved"] == ["6:12 pm today", "7:00 am tomorrow"]
+    assert house["note"] == "Times on the house clock (Europe/London)"
 
 
 DISPLAY_FORMATTERS = re.compile(r"toLocaleTimeString|toLocaleString|toLocaleDateString|Intl\.DateTimeFormat")
