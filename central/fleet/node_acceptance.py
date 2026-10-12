@@ -70,7 +70,6 @@ class NodeAcceptance:
 
     def begin(self, device_id: str, qualification_id: UUID, environment_sha256: str,
               operator_audit_ref: str) -> dict:
-        self.sessions.require_enabled()
         identifier(qualification_id)
         digest(environment_sha256)
         token(operator_audit_ref, 256)
@@ -92,7 +91,6 @@ class NodeAcceptance:
         return {"qualification_id": str(qualification_id), "status": "awaiting_representative_media"}
 
     def sample(self, qualification_id: UUID) -> dict:
-        self.sessions.require_enabled()
         identifier(qualification_id)
         with self.sessions.db.transaction() as conn:
             acquire_runtime_locks(conn)

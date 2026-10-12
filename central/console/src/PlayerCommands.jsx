@@ -12,7 +12,6 @@ import {
   rebootTarget,
   sendReboot,
 } from "./fleetCommands.js";
-import { useNodeControlValue } from "./nodeControl.js";
 import { nodeUnknown } from "./nodeRead.js";
 import { formatRoute } from "./routes.js";
 import { RESEND_LABEL } from "./sendOutcome.js";
@@ -20,7 +19,7 @@ import { useSendDialog } from "./useSendDialog.js";
 
 const tail = (id) => `…${String(id).slice(-6)}`;
 
-// The fleet-wide aggregates' home: the boot selection and the effect gate (Part E §25).
+// The fleet-wide aggregates' home: the boot selection (Part E §25).
 const RELEASES = formatRoute({ section: "releases" });
 
 /** One command's named state and its evidence (fleetCommands.js `CommandState`). */
@@ -41,19 +40,18 @@ function StateEntry({ state, children }) {
  * (fleetCommands.js `rebootRequest`); RESEND_LABEL (sendOutcome.js) re-sends that body
  * unchanged. Esc and Cancel are blocked while a send is in flight (useSendDialog.js). Send is disabled by
  * `rebootRefusal` on the read on screen; the send itself is judged again by `sendReboot` on
- * the hooks' newest reads (§10), so the dialog never decides which read counts. The effect
- * gate is the shell's (`control`, nodeControl.js), its one source.
+ * the hook's newest read (§10), so the dialog never decides which read counts.
  *
  * @param {{deviceId: string, name: string, request: import("./fleetCommands.js").FrozenRebootRequest,
- *          retry: boolean, node: object, control: import("./nodeControl.js").NodeControl,
+ *          retry: boolean, node: object,
  *          onSent: (result: import("./fleetCommands.js").RebootResult) => void,
  *          onClose: (result: import("./fleetCommands.js").RebootResult|null) => void}} props
  */
-function RebootDialog({ deviceId, name, request, retry, node, control, onSent, onClose }) {
+function RebootDialog({ deviceId, name, request, retry, node, onSent, onClose }) {
   const titleId = useId();
   const { dialogRef, cancelRef, phase, result, run, close } = useSendDialog(onClose);
-  const stale = rebootRefusal(request, node, control.gate);
-  const send = () => run(() => sendReboot(deviceId, request, node, control), onSent);
+  const stale = rebootRefusal(request, node);
+  const send = () => run(() => sendReboot(deviceId, request, node), onSent);
 
   const body = request.body;
   return (
@@ -90,7 +88,7 @@ function RebootDialog({ deviceId, name, request, retry, node, control, onSent, o
           <ul>
             <li>{`Audit reference ${body.operator_audit_ref}`}</li>
             <li>{`Command ${body.command_id}`}</li>
-            <li>{`Session ${body.session_id} · device generation ${body.device_generation} · gate generation ${body.rollout_generation}`}</li>
+            <li>{`Session ${body.session_id} · device generation ${body.device_generation}`}</li>
           </ul>
         </details>
       </div>
@@ -119,8 +117,7 @@ function RebootDialog({ deviceId, name, request, retry, node, control, onSent, o
  * and the reboot history with one named state per request. While any command on the target
  * session is outstanding the only offer is a retry of the request this page sent (its
  * frozen body); one this page does not hold cannot be resent, so Reboot waits for it to
- * expire. Retry is derived from the held request (fleetCommands.js `rebootOffer`). The effect
- * gate comes from the shell's node control, which is read again when the dialog opens.
+ * expire. Retry is derived from the held request (fleetCommands.js `rebootOffer`).
  *
  * @param {{deviceId: string, name: string, node: object, snapshot: object,
  *          playerId: string|null}} props
@@ -133,18 +130,15 @@ export function RebootSection({ deviceId, name, node, snapshot, playerId }) {
   const [dialog, setDialog] = useState(/** @type {{request: object, retry: boolean}|null} */ (null));
   const [reason, setReason] = useState("");
   const [status, setStatus] = useState(/** @type {string|null} */ (null));
-  const control = useNodeControlValue();
 
   const commands = node.read?.reboot_commands ?? [];
-  const target = rebootTarget(node, control.gate);
+  const target = rebootTarget(node);
   const offer = rebootOffer(target, commands, node.readAt, held);
   const retryHeld = offer.offer === "retry";
   const blocked = offer.offer === "blocked" ? offer.reason : null;
-  const gateBlocked = offer.offer === "blocked" && offer.gate === true;
 
   const open = () => {
     setStatus(null);
-    void control.refresh(); // the gate, read again on demand when a dialog opens (§25)
     if (retryHeld) {
       setDialog({ request: held, retry: true });
       return;
@@ -184,10 +178,7 @@ export function RebootSection({ deviceId, name, node, snapshot, playerId }) {
           {retryHeld ? "Send the reboot request again" : "Reboot Player"}
         </button>
         {blocked !== null && (
-          <p id={reasonId} className="roster__note">
-            {`Reboot unavailable: ${blocked}.`}
-            {gateBlocked && <>{" "}<a href={RELEASES}>See Releases › Effect gate</a></>}
-          </p>
+          <p id={reasonId} className="roster__note">{`Reboot unavailable: ${blocked}.`}</p>
         )}
       </div>
       {status !== null && <p className="roster__status-line" role="status">{status}</p>}
@@ -199,7 +190,7 @@ export function RebootSection({ deviceId, name, node, snapshot, playerId }) {
       ) : (
         <ul className="player__commands" aria-label="Reboot history">
           {commands.map((command) => (
-            <StateEntry key={command.command_id} state={rebootCommandState(command, node.readAt, { nodeDevice: node, gate: control.gate })}>
+            <StateEntry key={command.command_id} state={rebootCommandState(command, node.readAt, { nodeDevice: node })}>
               <details className="player__details">
                 <summary>{`Request ${tail(command.command_id)}`}</summary>
                 <ul>
@@ -214,7 +205,7 @@ export function RebootSection({ deviceId, name, node, snapshot, playerId }) {
       )}
       {dialog !== null && (
         <RebootDialog key={dialog.request.body.command_id} deviceId={deviceId} name={name}
-          request={dialog.request} retry={dialog.retry} node={node} control={control} onSent={onSent} onClose={onClose} />
+          request={dialog.request} retry={dialog.retry} node={node} onSent={onSent} onClose={onClose} />
       )}
     </>
   );

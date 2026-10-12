@@ -130,9 +130,9 @@ out.layers = rows(reporting);
 out.silentApp = rows(reporting, "p-b").map((row) => row.facts[0][1]);
 out.noHostSample = rows({ ...reporting, read: { ...read, sessions: [session("host_core")] } })
   .map((row) => row.facts[0][1]);
-// A read refused node_control_disabled mid-session is an ordinary failed read (Part E §25).
+// An unreachable read mid-session is an ordinary failed read (Part E §25).
 out.disabled = rows({ read: null, operations: null, readAt: null,
-                      error: { code: "node_control_disabled", status: 503 } }).map((row) => row.facts[0][1]);
+                      error: { code: "unanswered", status: null } }).map((row) => row.facts[0][1]);
 out.noRecord = rows({ read: null, operations: null, readAt: null,
                       error: { code: "node_device_unavailable", status: 403 } }).map((row) => row.facts[0][1]);
 out.notYet = rows({ read: null, operations: null, readAt: null, error: null })
@@ -182,7 +182,7 @@ const boot = (nodeDevice) => {
 out.boot = [
   boot(reporting),
   boot({ ...reporting, read: { ...read, sessions: [{ ...session("host_core"), current: false }] } }),
-  boot({ read: null, error: { code: "node_control_disabled", status: 503 } }),
+  boot({ read: null, error: { code: "unanswered", status: null } }),
 ];
 // --- panelAtEnrollment: one wording; connected=false is Central's own record, not a report.
 out.panel = [
@@ -369,7 +369,7 @@ def test_layer_evidence_names_what_it_cannot_read():
     out = _run()
     assert out["noHostSample"][0] == "Unknown: host_observation.received_at not served"
     assert out["noHostSample"][1] == "Unknown: no current App Manager session"
-    disabled = "Unknown: the node read failed (node_control_disabled)"
+    disabled = "Unknown: the node read failed (unanswered)"
     assert out["disabled"][:4] == [disabled] * 4
     assert out["disabled"][4] == "Unknown: no readiness report on the current enrollment (epoch 3)"
     record = "Unknown: no current node record for this box"
@@ -399,7 +399,7 @@ def test_the_current_session_boot_is_a_claim_or_no_current_session():
         {"kernelBootId": "boot-2",
          "text": "Boot boot-2 (claimed at boot by the box, unverified) · first received 10 min ago"},
         {"kernelBootId": None, "text": "No current node session"},
-        {"kernelBootId": None, "text": "Unknown: the node read failed (node_control_disabled)"},
+        {"kernelBootId": None, "text": "Unknown: the node read failed (unanswered)"},
     ]
 
 

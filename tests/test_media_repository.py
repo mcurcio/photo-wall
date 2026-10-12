@@ -1,174 +1,40 @@
-"""Real PostgreSQL membership/queue tests; transport and filesystem are separate."""
+"""Real PostgreSQL pool, job and queue tests of the media repository; transport and filesystem
+are separate."""
 
-import uuid
-from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from media_queue import RecordingMediaQueue
 from psycopg.types.json import Jsonb
+from support.photo_pools import photo, seed_pool
 
-from central.catalog import CatalogSnapshot
 from central.db import ProcessTransactionClock
-from central.media_ports import RefreshReceipt
-from central.media_queue import (
-    MEDIA_REFRESH_LOCK_PREFIX,
-    PREPARE_MEDIA_TASK,
-    REFRESH_MEDIA_SOURCE_TASK,
-    ProcrastinateMediaQueue,
-)
+from central.infra.photo_library_store import library_assets_in
+from central.media_queue import PREPARE_MEDIA_TASK, ProcrastinateMediaQueue, QueueReceipt
 from central.media_repository import MediaRepository, StoreLimits
-from central.planner import AcquisitionRequest
+from central.planner import AcquisitionRequest, MeasureRequest
 from central.registry import RegistryError
-from media.models import (
-    OriginalAsset,
-    RefreshResult,
-    SourcePreview,
-    SourcePreviewQuery,
-    SourcePreviewResult,
-    SourceSpec,
-    StoredPreviewMember,
-)
-
-TAG = str(uuid.UUID(int=77))
-
-
-def stored_member(number=1, *, kind="image", captured_at=900.0):
-    original = asset(number)
-    return StoredPreviewMember(asset_id=original.asset_id, kind=kind, captured_at=captured_at, width=30,
-                               height=50, duration_seconds=4.0 if kind == "video" else None,
-                               upstream_id=original.upstream_id, checksum=original.original_sha1)
-
-
-def sample(*members, image_count=None, video_count=None, limited=False):
-    images = sum(member.kind == "image" for member in members) if image_count is None else image_count
-    videos = sum(member.kind == "video" for member in members) if video_count is None else video_count
-    return SourcePreview(result=SourcePreviewResult(
-        count=images + videos, image_count=images, video_count=videos,
-        shown=tuple(member.served() for member in members), limited=limited), members=members)
-
-
-def asset(number=1):
-    return OriginalAsset(connection_id="fixture", upstream_id=str(uuid.UUID(int=number)),
-        original_sha1=f"{number:040x}", kind="image", raw_width=30, raw_height=50,
-        orientation=1, captured_at=900, file_size=10)
-
-
-def result(spec, *assets, status="ok"):
-    return RefreshResult(snapshot=CatalogSnapshot(source_ref=spec.source_ref, refreshed_at=1000,
-        status=status, candidates=tuple(a.candidate for a in assets)), assets=assets)
+from central.wall_plan.key_content import ANALYSIS_VERSION, InterestGrid, KeyContent, Measured
+from contracts.models import Variant
 
 
 def setup_repository(registry, *, limits=None, count=1, queue=None):
+    """A repository with the recipe set and one saved Source, `source:1`, whose pool holds
+    `count` photos."""
     repo = MediaRepository(registry.db, registry.clock, limits,
                            queue=queue or RecordingMediaQueue(), times=ProcessTransactionClock(registry.clock))
-    spec = SourceSpec(source_ref="source:1", connection_ref="fixture", favorites=True)
-    repo.configure_source(spec)
-    lease = repo.begin_scheduled_refresh()
-    originals = tuple(asset(i+1) for i in range(count))
-    repo.publish_refresh(lease, result(spec, *originals))
+    photos = tuple(photo(f"photo-{i + 1}", taken_at=900 + i) for i in range(count))
+    seed_pool(registry, "source:1", photos)
     repo.set_recipe("a" * 64)
-    return repo, spec, originals
+    return repo, photos
 
 
 def request(original):
     return AcquisitionRequest(asset_id=original.asset_id, assignment_ids=("assignment",), earliest_start=1005)
 
 
-def test_worker_connection_projection_distinguishes_unreported_empty_and_configured(registry):
-    repo = MediaRepository(registry.db, registry.clock, queue=RecordingMediaQueue(), times=ProcessTransactionClock(registry.clock))
-    repo.configure_source(SourceSpec(source_ref="source:1", connection_ref="fixture"))
-    assert repo.health()["connection_ids"] is None
-
-    repo.worker_status(None, ())
-    assert repo.health()["connection_ids"] == []
-
-    repo.worker_status("source_unavailable", ("immich-main", "fixture"))
-    health = repo.health()
-    assert health["connection_ids"] == ["immich-main", "fixture"]
-    assert health["worker_error"] == "source_unavailable"
-    assert health["worker_seen"] == registry.clock.utc()
-
-    # A status-only check-in from an older worker cannot renew a stale list.
-    registry.clock.advance(1)
-    repo.worker_status(None)
-    assert repo.health()["connection_ids"] is None
-
-
-@pytest.mark.parametrize("connection_ids", [
-    ("duplicate", "duplicate"),
-    ("invalid id",),
-    ("x" * 129,),
-    ("ok", 1),
-    tuple(str(index) for index in range(129)),
-])
-def test_worker_status_rejects_invalid_connection_projection(registry, connection_ids):
-    repo = MediaRepository(registry.db, registry.clock, queue=RecordingMediaQueue(), times=ProcessTransactionClock(registry.clock))
-    with pytest.raises(ValueError, match="connection identifiers"):
-        repo.worker_status(None, connection_ids)
-
-
-def test_source_versions_are_immutable_and_stale_refresh_cannot_replace_members(registry):
-    repo, spec, originals = setup_repository(registry)
-    assert not repo.configure_source(spec)
-    with pytest.raises(RegistryError, match="source_revision_immutable"):
-        repo.configure_source(spec.model_copy(update={"favorites": False}))
-    registry.clock.advance(31)
-    first = repo.begin_scheduled_refresh()
-    registry.clock.advance(91)
-    newer = repo.begin_scheduled_refresh()
-    assert not repo.publish_refresh(first, result(spec))
-    assert repo.publish_refresh(newer, result(spec, *originals))
-    with registry.db.transaction() as conn:
-        snapshots, _ = repo.catalog_in(conn)
-        assert [c.asset_id for c in snapshots[spec.source_ref].candidates] == [originals[0].asset_id]
-
-
-def test_failed_refresh_preserves_membership_and_distinct_latest_status(registry):
-    repo, spec, originals = setup_repository(registry)
-    registry.clock.advance(31)
-    repo.publish_refresh(repo.begin_scheduled_refresh(), result(spec, status="permission"))
-    with registry.db.transaction() as conn:
-        snapshot = repo.catalog_in(conn)[0][spec.source_ref]
-        assert snapshot.status == "permission" and len(snapshot.candidates) == 1
-    assert repo.sources()[0]["last_success"] == 1000
-
-
-def test_refresh_capacity_rejects_replacement_before_displacing_catalog(registry):
-    limits = StoreLimits(max_authored_candidates=2)
-    repo, spec, originals = setup_repository(registry, limits=limits)
-    extra = asset(2)
-    with repo.transaction() as conn:
-        conn.execute("INSERT INTO authored_candidates(asset_id,candidate,source_ref,authored_at) "
-                     "VALUES(%s,%s,%s,%s)",
-                     (extra.asset_id, Jsonb(extra.candidate.model_dump(mode="json")), spec.source_ref, 1000))
-    registry.clock.advance(31)
-    lease = repo.begin_scheduled_refresh()
-    with pytest.raises(RegistryError, match="metadata_capacity"):
-        repo.publish_refresh(lease, result(spec, originals[0], extra))
-    with registry.db.transaction() as conn:
-        snapshot = CatalogSnapshot.model_validate(conn.execute(
-            "SELECT snapshot FROM catalog_snapshots WHERE source_ref=%s", (spec.source_ref,)
-        ).fetchone()["snapshot"])
-        assert [candidate.asset_id for candidate in snapshot.candidates] == [originals[0].asset_id]
-        assert conn.execute("SELECT count(*) AS n FROM source_members WHERE source_ref=%s",
-                            (spec.source_ref,)).fetchone()["n"] == 1
-
-
-def test_original_geometry_cannot_change_without_new_byte_revision(registry):
-    repo, spec, originals = setup_repository(registry)
-    registry.clock.advance(31)
-    lease = repo.begin_scheduled_refresh()
-    changed = originals[0].model_copy(update={"raw_width": 50, "raw_height": 30})
-    with pytest.raises(RegistryError, match="original_metadata_conflict"):
-        repo.publish_refresh(lease, result(spec, changed))
-    with registry.db.transaction() as conn:
-        candidate = repo.catalog_in(conn)[0][spec.source_ref].candidates[0]
-        assert (candidate.original_width, candidate.original_height) == (30, 50)
-
-
 def test_queue_idempotency_limit_and_reservation_pressure_are_transactional(registry):
     limits = StoreLimits(max_bytes=35, max_original_bytes=10, max_image_bytes=20, max_jobs=2)
-    repo, spec, originals = setup_repository(registry, limits=limits, count=3)
+    repo, originals = setup_repository(registry, limits=limits, count=3)
     assert repo.request_acquisitions((request(originals[0]), request(originals[1]))) == 2
     assert repo.request_acquisitions((request(originals[0]),)) == 0
     with pytest.raises(RegistryError, match="job_capacity"):
@@ -183,7 +49,7 @@ def test_queue_idempotency_limit_and_reservation_pressure_are_transactional(regi
 def test_health_counts_only_the_current_recipes_jobs(registry):
     """The console's worker line reads these counts (slice 3 §14): a recipe change
     fails the old recipe's queued jobs, and those are not the worker's failures now."""
-    repo, _spec, originals = setup_repository(registry, count=2)
+    repo, originals = setup_repository(registry, count=2)
     repo.request_acquisitions((request(originals[0]),))
     assert repo.health()["jobs"] == [{"state": "queued", "count": 1}]
     repo.set_recipe("b" * 64)  # the old recipe's queued job fails as recipe_changed
@@ -196,7 +62,7 @@ def test_procrastinate_enqueue_rolls_back_with_domain_request(registry):
     queue = ProcrastinateMediaQueue(registry.db.dsn)
     queue.apply_schema(registry.db.dsn)
     limits = StoreLimits(max_jobs=1)
-    repo, _, originals = setup_repository(registry, limits=limits, count=2, queue=queue)
+    repo, originals = setup_repository(registry, limits=limits, count=2, queue=queue)
 
     with pytest.raises(RegistryError, match="job_capacity"):
         repo.request_acquisitions((request(originals[0]), request(originals[1])))
@@ -214,282 +80,90 @@ def test_procrastinate_enqueue_rolls_back_with_domain_request(registry):
     assert domain["state"] == "queued"
 
 
-def test_refresh_request_and_queue_job_commit_and_roll_back_atomically(registry):
-    queue = ProcrastinateMediaQueue(registry.db.dsn)
-    queue.apply_schema(registry.db.dsn)
-    repo, spec, _ = setup_repository(registry, queue=queue)
-    before = repo.sources()[0]["next_refresh"]
-
-    class FailingQueue:
-        def enqueue_in(self, conn, job_id):
-            return queue.enqueue_in(conn, job_id)
-
-        def enqueue_refresh_in(self, conn, source_ref):
-            queue.enqueue_refresh_in(conn, source_ref)
-            raise RuntimeError("forced_rollback")
-
-    repo.queue = FailingQueue()
-    with pytest.raises(RuntimeError, match="forced_rollback"):
-        repo.request_refresh(spec.source_ref)
-    with registry.db.transaction() as conn:
-        source = conn.execute(
-            "SELECT next_refresh,refresh_requested_revision FROM media_sources"
-        ).fetchone()
-        assert source == {"next_refresh": before, "refresh_requested_revision": 0}
-        assert conn.execute(
-            "SELECT count(*) AS n FROM procrastinate_jobs"
-        ).fetchone()["n"] == 0
-
-    repo.queue = queue
-    receipt = repo.request_refresh(spec.source_ref)
-    with registry.db.transaction() as conn:
-        source = conn.execute(
-            "SELECT next_refresh,refresh_requested_revision FROM media_sources"
-        ).fetchone()
-        job = conn.execute(
-            "SELECT task_name,args,status FROM procrastinate_jobs"
-        ).fetchone()
-    assert receipt.requested_revision == 1 and not receipt.coalesced
-    assert source == {"next_refresh": before, "refresh_requested_revision": 1}
-    assert job == {
-        "task_name": REFRESH_MEDIA_SOURCE_TASK,
-        "args": {"source_ref": spec.source_ref},
-        "status": "todo",
-    }
-
-
-def test_refresh_receipt_requires_a_newer_requested_revision():
-    with pytest.raises(ValueError, match="completed_revision must precede requested_revision"):
-        RefreshReceipt(
-            source_ref="source:1",
-            requested_revision=2,
-            completed_revision=2,
-            coalesced=True,
-        )
-
-
-def test_concurrent_refresh_requests_coalesce_per_source_without_losing_versions(registry):
-    queue = ProcrastinateMediaQueue(registry.db.dsn)
-    queue.apply_schema(registry.db.dsn)
-    repo, spec, _ = setup_repository(registry, queue=queue)
-
-    with ThreadPoolExecutor(max_workers=6) as pool:
-        receipts = list(pool.map(lambda _: repo.request_refresh(spec.source_ref), range(6)))
-
-    assert sorted(receipt.requested_revision for receipt in receipts) == list(range(1, 7))
-    assert sum(not receipt.coalesced for receipt in receipts) == 1
-    assert repo.refresh_revisions(spec.source_ref) == (6, 0)
-    with registry.db.transaction() as conn:
-        assert conn.execute(
-            "SELECT count(*) AS n FROM procrastinate_jobs WHERE status='todo'"
-        ).fetchone()["n"] == 1
-
-
-def test_refresh_queueing_is_source_scoped(registry):
-    queue = ProcrastinateMediaQueue(registry.db.dsn)
-    queue.apply_schema(registry.db.dsn)
-    repo, _, _ = setup_repository(registry, queue=queue)
-    other = SourceSpec(source_ref="source:2", connection_ref="fixture")
-    repo.configure_source(other)
-
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        receipts = list(pool.map(repo.request_refresh, ("source:1", "source:2")))
-
-    assert {receipt.source_ref for receipt in receipts} == {"source:1", "source:2"}
-    with registry.db.transaction() as conn:
-        jobs = conn.execute(
-            "SELECT args,lock FROM procrastinate_jobs WHERE task_name=%s ORDER BY args->>'source_ref'",
-            (REFRESH_MEDIA_SOURCE_TASK,),
-        ).fetchall()
-    assert jobs == [
-        {"args": {"source_ref": "source:1"}, "lock": MEDIA_REFRESH_LOCK_PREFIX + "source:1"},
-        {"args": {"source_ref": "source:2"}, "lock": MEDIA_REFRESH_LOCK_PREFIX + "source:2"},
-    ]
-
-
-def test_request_during_active_refresh_waits_then_eventually_completes(registry):
-    queue = RecordingMediaQueue()
-    repo, spec, originals = setup_repository(registry, queue=queue)
-
-    first = repo.request_refresh(spec.source_ref)
-    active = repo.begin_requested_refresh(spec.source_ref)
-    second = repo.request_refresh(spec.source_ref)
-
-    assert (first.requested_revision, second.requested_revision) == (1, 2)
-    assert repo.begin_requested_refresh(spec.source_ref) is None
-    assert repo.publish_refresh(active, result(spec, *originals))
-    assert repo.refresh_revisions(spec.source_ref) == (2, 1)
-    follow_up = repo.begin_requested_refresh(spec.source_ref)
-    assert follow_up is not None and follow_up.request_revision == 2
-    assert repo.publish_refresh(follow_up, result(spec, *originals))
-    assert repo.refresh_revisions(spec.source_ref) == (2, 2)
-
-
-def test_stale_requested_lease_cannot_overwrite_newer_completed_revision(registry):
-    queue = RecordingMediaQueue()
-    repo, spec, originals = setup_repository(registry, queue=queue)
-    repo.request_refresh(spec.source_ref)
-    stale = repo.begin_requested_refresh(spec.source_ref)
-    registry.clock.advance(91)
-    repo.request_refresh(spec.source_ref)
-    current = repo.begin_requested_refresh(spec.source_ref)
-
-    assert current.request_revision == 2
-    assert repo.publish_refresh(current, result(spec, *originals))
-    assert repo.refresh_revisions(spec.source_ref) == (2, 2)
-    assert not repo.publish_refresh(stale, result(spec, status="permission"))
-    assert repo.refresh_revisions(spec.source_ref) == (2, 2)
-    with registry.db.transaction() as conn:
-        source = repo.catalog_in(conn)[0][spec.source_ref]
-    assert source.status == "ok"
-    assert [candidate.asset_id for candidate in source.candidates] == [originals[0].asset_id]
-
-
-def test_source_preview_request_is_transactionally_enqueued(registry):
-    queue = ProcrastinateMediaQueue(registry.db.dsn)
-    queue.apply_schema(registry.db.dsn)
-    repo = MediaRepository(registry.db, registry.clock, queue=queue, times=ProcessTransactionClock(registry.clock))
-    repo.worker_status(None, ("fixture",))
-    receipt = repo.request_source_preview(SourcePreviewQuery(connection_ref="fixture"))
-    with registry.db.transaction() as conn:
-        row = conn.execute("SELECT task_name,args FROM procrastinate_jobs "
-                           "WHERE args->>'request_id'=%s", (receipt.request_id,)).fetchone()
-    assert row == {
-        "task_name": "photo_wall.media.preview_source",
-        "args": {"request_id": receipt.request_id},
-    }
+def pool_repository(registry, **limits):
+    repo = MediaRepository(registry.db, registry.clock, StoreLimits(**limits),
+                           queue=RecordingMediaQueue(), times=ProcessTransactionClock(registry.clock))
+    repo.set_recipe("a" * 64)
+    return repo
 
 
 def test_failed_unsecured_candidate_cooldown_is_not_misreported_as_empty_upstream(registry):
-    repo, spec, originals = setup_repository(registry)
-    repo.request_acquisitions((request(originals[0]),))
+    repo = pool_repository(registry)
+    held = photo("held", taken_at=900)
+    seed_pool(registry, "family:1", (held,))
+    repo.request_acquisitions((request(held),))
     lease = repo.claim_job()
     with repo.transaction() as conn:
         conn.execute("UPDATE media_jobs SET state='retry',retry_at=1010,failure_code='asset_missing',reserved_bytes=0 WHERE id=%s",
                      (lease.job_id,))
     registry.clock.wall = 1000  # the repository's media times follow this clock (ProcessTransactionClock)
     with registry.db.transaction() as conn:
-        snapshot = repo.catalog_in(conn)[0][spec.source_ref]
-        assert snapshot.status == "ok" and len(snapshot.candidates) == 1
-        assert snapshot.candidates[0].preparation_failure == "asset_missing"
+        pool = repo.source_pools_in(conn, {"family:1"})["family:1"]
+        assert pool.ready and len(pool.candidates) == 1
+        assert pool.candidates[0].preparation_failure == "asset_missing"
         registry.clock.advance(11)
-        assert repo.catalog_in(conn)[0][spec.source_ref].candidates[0].preparation_failure is None
+        assert repo.source_pools_in(conn, {"family:1"})["family:1"].candidates[0].preparation_failure is None
 
 
-def test_source_preview_lifecycle_is_short_lived_and_does_not_create_a_source(registry):
-    queue = RecordingMediaQueue()
-    repo = MediaRepository(registry.db, registry.clock, queue=queue, times=ProcessTransactionClock(registry.clock))
-    repo.worker_status(None, ("fixture",))
-    query = SourcePreviewQuery(connection_ref="fixture", media_types=("image",), favorites=True)
-    receipt = repo.request_source_preview(query)
-    assert receipt.status == "pending"
-    assert repo.source_preview(receipt.request_id) == {"request_id": receipt.request_id, "status": "pending",
-                                                       "read_at": 1000.0}
-    assert queue.previews[-1][1] == receipt.request_id
-    with registry.db.transaction() as conn:
-        assert conn.execute("SELECT count(*) AS n FROM media_sources").fetchone()["n"] == 0
-
-    assert repo.begin_source_preview(receipt.request_id) == query
-    assert repo.begin_source_preview(receipt.request_id) == query  # safe task retry after worker restart
-    member = stored_member()
-    registry.clock.advance(4)
-    assert repo.finish_source_preview(receipt.request_id, sample(member, image_count=3))
-    registry.clock.advance(2)
-    assert repo.source_preview(receipt.request_id) == {
-        "request_id": receipt.request_id, "status": "complete",
-        "count": 3, "image_count": 3, "video_count": 0, "limited": False,
-        "shown": [member.served().model_dump(mode="json")],
-        "observed_at": 1004.0, "read_at": 1006.0,
-    }
-
-
-def test_source_preview_rejects_unreported_connection_ids_and_bounds_pending(registry):
-    queue = RecordingMediaQueue()
-    repo = MediaRepository(registry.db, registry.clock, StoreLimits(max_pending_previews=1), queue=queue, times=ProcessTransactionClock(registry.clock))
-    repo.worker_status(None, ())
-    with pytest.raises(RegistryError, match="source_connection_unavailable"):
-        repo.request_source_preview(SourcePreviewQuery(connection_ref="fixture"))
-    repo.worker_status(None, ("fixture",))
-    first = repo.request_source_preview(SourcePreviewQuery(connection_ref="fixture"))
-    with pytest.raises(RegistryError, match="source_preview_capacity"):
-        repo.request_source_preview(SourcePreviewQuery(connection_ref="fixture"))
-    registry.clock.advance(601)
-    assert repo.source_preview(first.request_id) == {
-        "request_id": first.request_id, "status": "failed", "error": "preview_expired", "read_at": 1601.0,
-    }
-
-
-def test_preview_expired_records_do_not_exhaust_total_storage_capacity(registry):
-    queue = RecordingMediaQueue()
-    repo = MediaRepository(registry.db, registry.clock,
-                           StoreLimits(max_source_preview_records=1), queue=queue, times=ProcessTransactionClock(registry.clock))
-    repo.worker_status(None, ("fixture",))
-    first = repo.request_source_preview(SourcePreviewQuery(connection_ref="fixture"))
-    assert repo.begin_source_preview(first.request_id) is not None
-    assert repo.finish_source_preview(first.request_id, sample())
-    registry.clock.advance(601)
-    second = repo.request_source_preview(SourcePreviewQuery(connection_ref="fixture"))
-    assert second.request_id != first.request_id
-
-
-def test_a_tagged_preview_stores_its_criteria_and_its_job_carries_only_the_request_id(registry):
-    queue = ProcrastinateMediaQueue(registry.db.dsn)
-    queue.apply_schema(registry.db.dsn)
-    repo = MediaRepository(registry.db, registry.clock, queue=queue, times=ProcessTransactionClock(registry.clock))
-    repo.worker_status(None, ("fixture",))
-    query = SourcePreviewQuery(connection_ref="fixture", media_types=("image",), tags=(TAG,))
-    receipt = repo.request_source_preview(query)
-    with registry.db.transaction() as conn:
-        job = conn.execute("SELECT args FROM procrastinate_jobs WHERE args->>'request_id'=%s",
-                           (receipt.request_id,)).fetchone()
-        stored = conn.execute("SELECT query FROM source_previews").fetchone()["query"]
-    assert job == {"args": {"request_id": receipt.request_id}}
-    assert stored["tags"] == [TAG]
-    assert repo.begin_source_preview(receipt.request_id) == query
-
-
-def test_the_preview_read_serves_the_sample_and_never_its_library_identity(registry):
-    repo = MediaRepository(registry.db, registry.clock, queue=RecordingMediaQueue(), times=ProcessTransactionClock(registry.clock))
-    repo.worker_status(None, ("fixture",))
-    receipt = repo.request_source_preview(SourcePreviewQuery(connection_ref="fixture"))
-    members = (stored_member(2, kind="video", captured_at=950.0), stored_member(1))
-    assert repo.finish_source_preview(receipt.request_id, sample(*members, limited=True))
-    answer = repo.source_preview(receipt.request_id)
-    assert answer["limited"] is True
-    assert [item["asset_id"] for item in answer["shown"]] == [member.asset_id for member in members]
-    text = repr(answer)
-    for member in members:
-        assert member.upstream_id not in text and member.checksum not in text
-    with registry.db.transaction() as conn:
-        kept = conn.execute("SELECT members FROM source_previews").fetchone()["members"]
-    assert [item["upstream_id"] for item in kept] == [member.upstream_id for member in members]
-
-
-def test_resaving_an_equivalent_spec_is_accepted_by_its_canonical_form(registry):
-    repo = MediaRepository(registry.db, registry.clock, queue=RecordingMediaQueue(), times=ProcessTransactionClock(registry.clock))
-    spec = SourceSpec(source_ref="source:1", connection_ref="fixture", tags=(TAG,))
-    assert repo.configure_source(spec)
+def test_source_pools_in_hydrates_a_ready_variant_and_leaves_out_an_unknown_source(registry):
+    repo = pool_repository(registry)
+    newer, older = photo("newer", taken_at=990), photo("older", taken_at=900)
+    seed_pool(registry, "family:1", (older, newer))
+    seed_pool(registry, "garden:1", (), complete=False)
+    variant = Variant(sha256="c" * 64, size=10, media_type="image/jpeg", width=1080, height=1920)
     with repo.transaction() as conn:
-        # The same meaning, written by an older or different writer: other key order,
-        # kinds reversed, explicit nulls.
-        conn.execute("UPDATE media_sources SET spec=%s::jsonb WHERE source_ref='source:1'", (
-            '{"tags":["%s"],"source_ref":"source:1","schema":1,"media_types":["video","image"],'
-            '"captured_until":null,"favorites":null,"connection_ref":"fixture"}' % TAG,))
-    assert not repo.configure_source(spec)
-    with pytest.raises(RegistryError, match="source_revision_immutable"):
-        repo.configure_source(spec.model_copy(update={"tags": ()}))
+        conn.execute("INSERT INTO media_blobs VALUES(%s,%s,10,'ready',1000)",
+                     (variant.sha256, Jsonb(variant.model_dump(mode="json"))))
+        conn.execute("INSERT INTO media_jobs(id,asset_id,recipe_id,state,earliest_start,variant_sha,"
+                     "updated_at) VALUES('job-newer',%s,%s,'ready',1000,%s,1000)",
+                     (newer.asset_id, "a" * 64, variant.sha256))
+    with registry.db.transaction() as conn:
+        pools = repo.source_pools_in(conn, {"family:1", "garden:1", "unknown:1"})
+    assert set(pools) == {"family:1", "garden:1"}
+    assert pools["family:1"].ready and [c.asset_id for c in pools["family:1"].candidates] == [
+        newer.asset_id, older.asset_id]
+    assert [c.variant for c in pools["family:1"].candidates] == [variant, None]
+    assert pools["garden:1"].ready is False and pools["garden:1"].candidates == ()
 
 
-def test_one_unreadable_spec_does_not_block_the_refresh_tick(registry):
-    repo = MediaRepository(registry.db, registry.clock, queue=RecordingMediaQueue(), times=ProcessTransactionClock(registry.clock))
-    for ref in ("a:1", "b:1"):
-        repo.configure_source(SourceSpec(source_ref=ref, connection_ref="fixture"))
-    with repo.transaction() as conn:
-        conn.execute("UPDATE media_sources SET refresh_active=TRUE")
-        conn.execute("UPDATE media_sources SET spec=spec||'{\"albums\":[\"x\"]}' WHERE source_ref='a:1'")
-    lease = repo.begin_scheduled_refresh()
-    assert lease is not None and lease.source.source_ref == "b:1"
-    unreadable = next(row for row in repo.sources() if row["source_ref"] == "a:1")
-    assert unreadable["status"] == "incompatible"
-    assert [item["code"] for item in unreadable["diagnostics"]] == ["spec_unsupported"]
-    assert repo.begin_scheduled_refresh() is None
+class MeasureQueue(RecordingMediaQueue):
+    def __init__(self):
+        super().__init__()
+        self.measured = []
+
+    def enqueue_measure_in(self, conn, asset_id):
+        self.measured.append(asset_id)
+        return QueueReceipt(coalesced=False)
+
+
+def test_source_pools_in_hydrates_key_content_and_a_measurement_is_requested_once(registry):
+    """Roadmap 5a (M1): a measured photo carries its analysis; an unmeasured one carries None,
+    and the scheduler's request queues it once."""
+    queue = MeasureQueue()
+    repo = MediaRepository(registry.db, registry.clock, StoreLimits(), queue=queue,
+                           times=ProcessTransactionClock(registry.clock))
+    measured, unmeasured = photo("measured", taken_at=990), photo("unmeasured", taken_at=900)
+    seed_pool(registry, "family:1", (unmeasured, measured))
+    key = KeyContent(analysis_version=ANALYSIS_VERSION,
+                     interest=InterestGrid(columns=1, rows=1, weights=(1.0,)), spread=0.0)
+    repo.key_content.record_measured(measured.asset_id, key)
+    with registry.db.transaction() as conn:
+        pool = repo.source_pools_in(conn, {"family:1"})["family:1"]
+    assert [(c.asset_id, c.analysis) for c in pool.candidates] == [
+        (measured.asset_id, Measured(key=key)), (unmeasured.asset_id, None)]
+    wanted = tuple(MeasureRequest(asset_id=c.asset_id) for c in pool.candidates)
+    assert repo.request_measurements(wanted) == 1
+    assert repo.request_measurements(()) == 0
+    assert queue.measured == [unmeasured.asset_id]
+
+
+
+def test_a_job_leases_its_revision_and_its_immich_asset_as_one_library_asset(registry):
+    """`library_assets_in` is the one rule: a job leases its revision's row joined to its Immich
+    asset's row, the LibraryAsset the pool check wrote; an unknown id is absent."""
+    repo, (pooled,) = setup_repository(registry)
+    repo.request_acquisitions((request(pooled),))
+    assert repo.claim_job().asset == pooled
+    with registry.db.transaction() as conn:
+        assert library_assets_in(conn, [pooled.asset_id, "unknown"]) == {pooled.asset_id: pooled}
+        assert library_assets_in(conn, []) == {}

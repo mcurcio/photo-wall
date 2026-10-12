@@ -68,9 +68,10 @@
   --color-accent-tint: color-mix(in srgb, var(--color-accent) 10%, transparent);
   --color-on-accent: #000000;
   --color-focus: var(--color-accent);
-  /* Severity (Severity in tokens.ts): only an alarm is red; a to-do is work, not a fault. */
+  /* Severity (Severity in tokens.ts): only an alarm is red; a to-do is work, not a fault, in
+     orchid, so it never reads as the accent's blue (owner, 2026-10-11: "Recolour it"). */
   --color-ok: #48ed98;
-  --color-todo: #7ab7ff;
+  --color-todo: #e7a3f5;
   --color-notice: #ffd198;
   --color-alarm: #f67d7d;
   --color-unknown: var(--color-muted);
@@ -116,7 +117,7 @@
     --color-accent: #4250af;
     --color-on-accent: #ffffff;
     --color-ok: #07702a;
-    --color-todo: #0a4e8e;
+    --color-todo: #8e2a9e;
     --color-notice: #805700;
     --color-alarm: #b91c1c;
     --color-on-alarm: #ffffff;

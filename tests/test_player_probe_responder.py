@@ -376,13 +376,6 @@ def test_relink_request_clears_the_recorded_link_on_the_next_turn(tmp_path, monk
                                          delivery_sequence=5, state_digest="f" * 64,
                                          ack_nonce="b" * 64)
 
-    class Proof:
-        def exchange(self, **_kwargs):
-            return "recorded"
-
-        def exchange_applied(self, **_kwargs):
-            return "recorded"
-
     class Link:
         def __init__(self):
             self.calls = 0
@@ -394,7 +387,7 @@ def test_relink_request_clears_the_recorded_link_on_the_next_turn(tmp_path, monk
     async def run():
         service, server = await rig(tmp_path)
         link = Link()
-        service.app_proof_client, service.node_link_client = Proof(), link
+        service.node_link_client = link
         service.boot_id = BOOT_ID
         service._proof_active = True
         registration = service.registration
@@ -402,8 +395,8 @@ def test_relink_request_clears_the_recorded_link_on_the_next_turn(tmp_path, monk
         service._highest_control_sequence = 5
         service._highest_control_delivery_id = "e" * 32
         service._applied_proof_receipt = (service._session, receipt)
-        monkeypatch.setattr("player.service.LOCAL_PROOF_RETRY", .01)
-        task = asyncio.create_task(service._local_app_proof_loop())
+        monkeypatch.setattr("player.service.APP_LINK_RETRY", .01)
+        task = asyncio.create_task(service._app_link_loop())
         try:
             await asyncio.sleep(.08)
             assert link.calls == 1          # recorded once, then held

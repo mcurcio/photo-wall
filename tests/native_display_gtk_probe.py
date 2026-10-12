@@ -15,6 +15,7 @@ import contracts.node_frame
 import player.native
 import player.wayland_frames
 from contracts.models import Commit, Layer, Plan, PlayerConfiguration
+from contracts.photo_crop import CENTRED
 from contracts.time import TimeMapping
 from player.cache import Cache
 from player.executor import Executor
@@ -71,7 +72,7 @@ def tick():
                 layer = Layer(assignment_id="fixture-media", run_id="fixture-run",
                     output_id=binding.output_id, frame_id=binding.frame_id,
                     binding_generation=binding.generation, start=clock.utc(), end=1100,
-                    media_origin=clock.utc(), variant=variant)
+                    media_origin=clock.utc(), variant=variant, crop=CENTRED)
                 media_plan = Plan(plan_id="fixture-plan", revision=1, player_id=config.player_id,
                     authority_epoch=1, issued_at=clock.utc(), valid_from=1000, valid_until=1100,
                     bindings=(binding,), layers=(layer,))

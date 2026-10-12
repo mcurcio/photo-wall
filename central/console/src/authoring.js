@@ -96,16 +96,22 @@ export function identityProblems(kind, draft, existingIds) {
 /**
  * The labels of a Scene's playback fields (slice 3 §4): the one wording wherever they
  * are asked (CycleInput.jsx, SceneSettings.jsx), answered (the Scene flow's Review) or
- * named (Reload). The last five are delivery 1x's (settings catalogue #41, #62–#65).
+ * named (Reload), the Playback step's Advanced summary included (one name per setting; the
+ * designer review of follow-ups C2 renamed "Seconds per cycle" and "Keep playing until the
+ * Program ends", whose words were internal). Five are delivery 1x's (settings catalogue #41, #62–#65); the last three are
+ * roadmap 5a's selection (#43 Order, #44 Don't repeat within, and the one Crop limit row).
  */
 export const PLAYBACK_LABELS = Object.freeze({
-  cycle: "Seconds per cycle",
-  loop: "Keep playing until the Program ends",
+  cycle: "Each photo shows for",
+  loop: "Keep repeating",
   fade: "Fade between photos",
   ending: "How it ends",
   endingSeconds: "Ending length",
   keepLastPhoto: "Keep the last photo up",
   keepTogether: "Keep these Frames together",
+  order: "Order",
+  noRepeatDays: "Don't repeat within",
+  cropLimit: "Crop limit",
 });
 
 /**
@@ -118,30 +124,38 @@ export const PLAYBACK_LABELS = Object.freeze({
 export const ENDINGS = Object.freeze(["none", "black", "fade"]);
 
 /**
- * The defaults of delivery 1x's Scene settings (settings catalogue): a 1.5 s fade between
- * photos (#41); no ending (#62, #63: the catalogue's "dissolve 3 s" and "black" are one
- * choice in the built model and disagree, so the built behaviour stays until the owner
- * picks); 3 s once an ending is chosen; the last photo kept up (#64); Frames not held
- * together (#65).
+ * How a Scene's Frames pick from its photos (roadmap 5a, central/wall_plan/selection.py
+ * `Order`): shuffled, reshuffled once every photo has had its turn; oldest first; newest
+ * first; or photos taken on today's date in earlier years first.
+ *
+ * @typedef {"shuffle"|"chronological"|"newest_first"|"on_this_day"} Order
+ */
+export const ORDERS = Object.freeze(["shuffle", "chronological", "newest_first", "on_this_day"]);
+
+/**
+ * The ranges of the Scene settings with one. The selection's are central/wall_plan/selection.py's
+ * bounds (pinned by tests/test_console_flow.py): Don't repeat within, whole days 0–365; Crop
+ * limit, a fraction 0.05–0.60, set in whole percent (the step).
  */
 export const SETTING_RANGES = Object.freeze({
   fadeSeconds: Object.freeze({ min: 0, max: 5, step: 0.5 }),
   endingSeconds: Object.freeze({ min: 0.5, max: 10, step: 0.5 }),
+  noRepeatDays: Object.freeze({ min: 0, max: 365, step: 1 }),
+  cropLimit: Object.freeze({ min: 0.05, max: 0.6, step: 0.01 }),
 });
 
-/** Whether `value` is one the setting's slider can show exactly (in range, on a step). */
+/** Whether `value` is one the setting's control can show exactly (in range, on a step). */
 export function inRange(value, { min, max, step }) {
   const number = Number(value);
-  return number >= min && number <= max && Number.isInteger((number - min) / step);
+  const steps = (number - min) / step;
+  // A step of 0.01 is not exact in binary: 0.3 is 25.000000000000004 steps above 0.05.
+  return number >= min && number <= max && Math.abs(steps - Math.round(steps)) < 1e-9;
 }
 
-export const SCENE_SETTING_DEFAULTS = Object.freeze({
-  fadeSeconds: 1.5,
-  ending: "none",
-  endingSeconds: 3,
-  keepLastPhoto: true,
-  keepTogether: false,
-});
+/** A crop limit (a fraction) in whole percent, as its control and Review show it: 0.35 → 35. */
+export function cropPercent(cropLimit) {
+  return Math.round(Number(cropLimit) * 100);
+}
 
 /**
  * A Scene draft's problems (§6 Scene), in form order. Editing a stored Scene
@@ -151,7 +165,7 @@ export const SCENE_SETTING_DEFAULTS = Object.freeze({
  * nothing to choose: its problem belongs to the frame choice (field `targets`).
  *
  * @param {{name: string, idOverride: string|null, mode: "live"|"authored",
- *          sourceRef: string, targets: string[], cycleSeconds: string|number,
+ *          sourceRefs: string[], targets: string[], cycleSeconds: string|number,
  *          selections: Record<string, string>, loadingMedia?: boolean,
  *          noMedia?: string[]}} draft
  * @param {Set<string>} existingIds the stored Scene ids
@@ -160,20 +174,20 @@ export const SCENE_SETTING_DEFAULTS = Object.freeze({
  */
 export function sceneProblems(draft, existingIds, { editing = false } = {}) {
   const problems = editing ? [] : identityProblems("Scene", draft, existingIds);
-  if (draft.sourceRef === "") {
+  if (draft.sourceRefs.length === 0) {
     problems.push({ field: "source", message: "Choose a Source." });
   }
   if (draft.targets.length === 0) {
     problems.push({ field: "targets", message: "Choose at least one frame." });
   }
   if (!(Number(draft.cycleSeconds) > 0)) {
-    problems.push({ field: "cycle", message: `${PLAYBACK_LABELS.cycle} must be more than 0.` });
+    problems.push({ field: "cycle", message: `${PLAYBACK_LABELS.cycle}: choose more than 0 seconds.` });
   } else if (Number(draft.fadeSeconds) > Number(draft.cycleSeconds)) {
     // A photo's fade out and the next one's fade in share its cycle (central/planner.py
     // refuses fades longer than the cycle).
     problems.push({
       field: "fade",
-      message: `${PLAYBACK_LABELS.fade} must be no longer than ${PLAYBACK_LABELS.cycle}.`,
+      message: `${PLAYBACK_LABELS.fade} must be no longer than each photo shows for.`,
     });
   }
   if (draft.ending === "fade" && Number(draft.endingSeconds) < Number(draft.fadeSeconds) / 2) {
@@ -181,6 +195,13 @@ export function sceneProblems(draft, existingIds, { editing = false } = {}) {
     problems.push({
       field: "endingSeconds",
       message: `${PLAYBACK_LABELS.endingSeconds} must be at least half of ${PLAYBACK_LABELS.fade}.`,
+    });
+  }
+  if (!inRange(draft.noRepeatDays, SETTING_RANGES.noRepeatDays) || String(draft.noRepeatDays).trim() === "") {
+    const { min, max } = SETTING_RANGES.noRepeatDays;
+    problems.push({
+      field: "noRepeatDays",
+      message: `${PLAYBACK_LABELS.noRepeatDays} must be a whole number of days from ${min} to ${max}.`,
     });
   }
   if (draft.mode === "authored") {
@@ -195,7 +216,7 @@ export function sceneProblems(draft, existingIds, { editing = false } = {}) {
         problems.push({
           field: "targets",
           message:
-            `No compatible media for ${frameId} in ${sourceName(draft.sourceRef)}. ` +
+            `No compatible media for ${frameId} in ${sourceName(draft.sourceRefs[0])}. ` +
             "Choose another frame, or another Source.",
         });
       } else {
@@ -208,9 +229,11 @@ export function sceneProblems(draft, existingIds, { editing = false } = {}) {
 
 /**
  * Build the save {path, body} for the given authoring mode (the 14a/14b seam).
- * "live": the plain scene route with the Scene as the body. "authored": the
- * authored route with a {scene, source_ref, asset_ids} body — one media
- * Contribution per target Frame carrying that Frame's chosen asset ref.
+ * "live": the plain scene route with the Scene as the body; every media Contribution
+ * carries the Scene's Photo sources, in the order chosen (roadmap 4, #36: the Scene plays
+ * the photos of all of them). "authored": the authored route with a {scene, source_ref,
+ * asset_ids} body — one media Contribution per target Frame carrying that Frame's chosen
+ * asset ref, chosen from the first Source.
  * `revision` is 1 for a new Scene; an edit sends the stored revision + 1 (§13).
  *
  * Delivery 1x's settings (an omitted one writes what the console always wrote):
@@ -223,20 +246,25 @@ export function sceneProblems(draft, existingIds, { editing = false } = {}) {
  *   nothing after it (`after_end: "keep_nothing"`): the Frame is black once it has shown;
  * - `keepLastPhoto` (#64): every body Contribution keeps its photo after it
  *   (`after_end: "keep_this_photo"`);
- * - `keepTogether` (#65): the Scene's `protect_frames`.
+ * - `keepTogether` (#65): the Scene's `protect_frames`;
+ * - `order`, `noRepeatDays` and `cropLimit` (roadmap 5a): the Scene's `selection`, always
+ *   written (`crop_limit` is the fraction, never the percent the control shows).
  *
  * @param {"live"|"authored"} mode
- * @param {{sceneId: string, sourceRef: string, targetIds: string[], cycleSeconds: number,
+ * @param {{sceneId: string, sourceRefs: string[], targetIds: string[], cycleSeconds: number,
  *          loop: boolean, selections?: Record<string,string>, revision?: number,
  *          fadeSeconds?: number, ending?: Ending, endingSeconds?: number,
- *          keepLastPhoto?: boolean, keepTogether?: boolean}} draft
+ *          keepLastPhoto?: boolean, keepTogether?: boolean, order?: Order,
+ *          noRepeatDays?: number|string, cropLimit?: number}} draft
  * @returns {{path: string, body: object}}
  */
 export function buildSave(
   mode,
   {
-    sceneId, sourceRef, targetIds, cycleSeconds, loop, selections = {}, revision = 1,
+    sceneId, sourceRefs, targetIds, cycleSeconds, loop, selections = {}, revision = 1,
     fadeSeconds = 0, ending = "none", endingSeconds = 0, keepLastPhoto = true, keepTogether = false,
+    order = SCENE_DEFAULTS.selection.order, noRepeatDays = SCENE_DEFAULTS.selection.no_repeat_days,
+    cropLimit = SCENE_DEFAULTS.selection.crop_limit,
   },
 ) {
   if (mode !== "live" && mode !== "authored") {
@@ -247,7 +275,7 @@ export function buildSave(
   // role carries the frame id.
   const media = (frameId) => (mode === "authored"
     ? { asset_refs: [selections[frameId]] }
-    : { source_refs: [sourceRef] });
+    : { source_refs: [...sourceRefs] });
   const half = Number(fadeSeconds) / 2;
   const contributions = targetIds.map((frameId) => ({
     target: toTarget(frameId),
@@ -257,7 +285,14 @@ export function buildSave(
     ...(half > 0 ? { fade_in_seconds: half, fade_out_seconds: half } : {}),
     ...(keepLastPhoto ? { after_end: "keep_this_photo" } : {}),
   }));
-  const scene = { scene_id: sceneId, revision, cycle_seconds: cycleSeconds, loop, contributions };
+  const scene = {
+    scene_id: sceneId, revision, cycle_seconds: cycleSeconds, loop, contributions,
+    selection: {
+      order, no_repeat_days: Number(noRepeatDays),
+      // null: the Scene follows the house crop limit (Settings › Photo fit, follow-ups B1).
+      crop_limit: cropLimit === null || cropLimit === undefined ? null : Number(cropLimit),
+    },
+  };
   if (ending !== "none") {
     const seconds = Number(endingSeconds);
     scene.outro_seconds = seconds;
@@ -275,7 +310,7 @@ export function buildSave(
     const assetIds = [...new Set(targetIds.map((frameId) => selections[frameId]))];
     return {
       path: `/v1/operator/scenes/${encodeURIComponent(sceneId)}/authored`,
-      body: { scene, source_ref: sourceRef, asset_ids: assetIds },
+      body: { scene, source_ref: sourceRefs[0], asset_ids: assetIds },
     };
   }
   return { path: `/v1/operator/scenes/${encodeURIComponent(sceneId)}`, body: scene };
@@ -296,7 +331,12 @@ export const SCENE_DEFAULTS = {
   "duration_seconds": null,
   "outro_seconds": 0,
   "outro_contributions": [],
-  "protect_frames": false
+  "protect_frames": false,
+  "selection": {
+    "order": "shuffle",
+    "no_repeat_days": 7,
+    "crop_limit": null
+  }
 };
 
 export const CONTRIBUTION_DEFAULTS = {
@@ -311,6 +351,27 @@ export const CONTRIBUTION_DEFAULTS = {
   "ramp_from": 0,
   "ramp_to": 0
 };
+
+/**
+ * The defaults of the Scene settings the console sets (settings catalogue): a 1.5 s fade
+ * between photos (#41); no ending (#62, #63: the catalogue's "dissolve 3 s" and "black" are
+ * one choice in the built model and disagree, so the built behaviour stays until the owner
+ * picks); 3 s once an ending is chosen; the last photo kept up (#64); Frames not held
+ * together (#65); and the selection's order and no-repeat, which are the Scene model's own
+ * ({@link SCENE_DEFAULTS}`.selection`: shuffle, 7 days). The crop limit is the model's own
+ * default, null: a new Scene follows the house crop limit (Settings › Photo fit; follow-ups B1
+ * and C1), so the value lives in one place until a Scene sets its own.
+ */
+export const SCENE_SETTING_DEFAULTS = Object.freeze({
+  fadeSeconds: 1.5,
+  ending: "none",
+  endingSeconds: 3,
+  keepLastPhoto: true,
+  keepTogether: false,
+  order: SCENE_DEFAULTS.selection.order,
+  noRepeatDays: SCENE_DEFAULTS.selection.no_repeat_days,
+  cropLimit: SCENE_DEFAULTS.selection.crop_limit,
+});
 
 export const UNAUTHORABLE_REASON =
   "Uses features the console can't edit yet (child Scenes, see-through photos, " +
@@ -346,18 +407,20 @@ function canonical(value) {
  *
  * Delivery 1x's settings are read from the first Contribution (fade, keep the last photo)
  * and the first outro Contribution (how it ends); a Scene whose other Contributions differ
- * does not rebuild to itself, so {@link editableDraft} withholds Edit.
+ * does not rebuild to itself, so {@link editableDraft} withholds Edit. Roadmap 5a's are its
+ * `selection` (the model's default when it has none).
  *
  * @param {object} scene a served Scene definition
- * @returns {{mode: "live"|"authored", sourceRef: string, targetIds: string[],
+ * @returns {{mode: "live"|"authored", sourceRefs: string[], targetIds: string[],
  *            cycleSeconds: number, loop: boolean, selections: Record<string, string>,
  *            fadeSeconds: number, ending: Ending, endingSeconds: number,
- *            keepLastPhoto: boolean, keepTogether: boolean}}
+ *            keepLastPhoto: boolean, keepTogether: boolean, order: Order,
+ *            noRepeatDays: number, cropLimit: number}}
  */
 export function decodeScene(scene) {
   const {
     contributions, cycle_seconds: cycleSeconds, loop, outro_seconds: outroSeconds,
-    outro_contributions: outro, protect_frames: keepTogether,
+    outro_contributions: outro, protect_frames: keepTogether, selection,
   } = normalizeScene(scene);
   const authored = contributions.length > 0 && contributions[0].asset_refs.length > 0;
   const frameIdOf = (entry) => frameOf(entry.target) ?? entry.target;
@@ -365,7 +428,7 @@ export function decodeScene(scene) {
   const ending = outroSeconds === 0 ? "none" : outro[0]?.kind === "black" ? "black" : "fade";
   return {
     mode: authored ? "authored" : "live",
-    sourceRef: authored ? "" : (first?.source_refs[0] ?? ""),
+    sourceRefs: authored ? [] : [...(first?.source_refs ?? [])],
     targetIds: contributions.map(frameIdOf),
     cycleSeconds,
     loop,
@@ -377,6 +440,9 @@ export function decodeScene(scene) {
     endingSeconds: ending === "none" ? SCENE_SETTING_DEFAULTS.endingSeconds : outroSeconds,
     keepLastPhoto: first ? first.after_end === "keep_this_photo" : SCENE_SETTING_DEFAULTS.keepLastPhoto,
     keepTogether,
+    order: selection.order,
+    noRepeatDays: selection.no_repeat_days,
+    cropLimit: selection.crop_limit,
   };
 }
 
@@ -393,10 +459,14 @@ export function decodeScene(scene) {
  */
 export function editableDraft(scene) {
   const draft = decodeScene(scene);
-  // A value the sliders cannot show exactly (a 12 s ending, a 1.3 s fade) would be moved by
-  // the first touch, so such a Scene is not the console's to edit.
+  // A value the controls cannot show exactly (a 12 s ending, a 1.3 s fade, a 33.3 % crop
+  // limit) would be moved by the first touch, so such a Scene is not the console's to edit.
   if (!inRange(draft.fadeSeconds, SETTING_RANGES.fadeSeconds)
-      || (draft.ending !== "none" && !inRange(draft.endingSeconds, SETTING_RANGES.endingSeconds))) {
+      || (draft.ending !== "none" && !inRange(draft.endingSeconds, SETTING_RANGES.endingSeconds))
+      || !ORDERS.includes(draft.order)
+      || !inRange(draft.noRepeatDays, SETTING_RANGES.noRepeatDays)
+      // null: the Scene follows the house crop limit (follow-ups B1), which it keeps on save.
+      || (draft.cropLimit !== null && !inRange(draft.cropLimit, SETTING_RANGES.cropLimit))) {
     return null;
   }
   const { body } = buildSave(draft.mode, { ...draft, sceneId: scene.scene_id });
@@ -407,15 +477,17 @@ export function editableDraft(scene) {
 
 /**
  * A Scene draft (flow design §7 J4): its kind (`mode`), name and id, Source, target
- * frames, per-frame choices, cycle and loop, delivery 1x's settings ({@link buildSave}),
+ * frames, per-frame choices, cycle and loop, delivery 1x's settings and roadmap 5a's
+ * selection ({@link buildSave}; `noRepeatDays` as typed, `cropLimit` a fraction),
  * and the stored `revision` it was seeded from (null for a new Scene; the flow's
  * `baseRevision`).
  *
  * @typedef {{mode: "live"|"authored", name: string, idOverride: string|null,
- *            sourceRef: string, targets: string[], selections: Record<string, string>,
+ *            sourceRefs: string[], targets: string[], selections: Record<string, string>,
  *            cycleSeconds: string|number, loop: boolean, fadeSeconds: number,
  *            ending: Ending, endingSeconds: number, keepLastPhoto: boolean,
- *            keepTogether: boolean, revision: number|null}} SceneDraft
+ *            keepTogether: boolean, order: Order, noRepeatDays: number|string,
+ *            cropLimit: number, revision: number|null}} SceneDraft
  */
 
 /**
@@ -429,7 +501,7 @@ export const NEW_SCENE_DRAFT = Object.freeze({
   mode: "live",
   name: "",
   idOverride: null,
-  sourceRef: "",
+  sourceRefs: Object.freeze([]),
   targets: Object.freeze([]),
   selections: Object.freeze({}),
   cycleSeconds: 30,
@@ -649,50 +721,5 @@ export function windowProblems(draft, existingIds, now) {
       problems.push({ field: idField, message: `${windowId} already exists.` });
     }
   });
-  return problems;
-}
-
-// --- Sources (§6 Source, §7).
-
-/**
- * A `date` input value ("2024-03-01") as the POSIX seconds of that day's local
- * midnight; null when empty.
- *
- * @param {string} value
- * @returns {number|null}
- */
-export function localDayStart(value) {
-  if (!value) {
-    return null;
-  }
-  const [year, month, day] = value.split("-").map(Number);
-  return new Date(year, month - 1, day).getTime() / 1000;
-}
-
-/**
- * A Source draft's problems (§6 Source).
- *
- * @param {{sourceName: string, connectionRef: string, capturedFrom: string,
- *          capturedUntil: string}} draft
- * @returns {Problem[]}
- */
-export function sourceProblems({ sourceName, connectionRef, capturedFrom, capturedUntil }) {
-  const problems = [];
-  if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,119}$/.test(sourceName.trim())) {
-    problems.push({
-      field: "ref",
-      message: "Choose a Source name of up to 120 letters, digits, hyphens, underscores or dots, starting with a letter or digit.",
-    });
-  }
-  if (connectionRef.trim() === "") {
-    problems.push({ field: "connection", message: "Connection name is required." });
-  } else if (!IDENTIFIER_PATTERN.test(connectionRef.trim())) {
-    problems.push({ field: "connection", message: ID_RULE });
-  }
-  const from = localDayStart(capturedFrom);
-  const until = localDayStart(capturedUntil);
-  if (from !== null && until !== null && until <= from) {
-    problems.push({ field: "until", message: "'Dated until' must be after 'Dated from'." });
-  }
   return problems;
 }

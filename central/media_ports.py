@@ -8,14 +8,13 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any, Literal, Protocol
+from typing import Any, Protocol
 
-from pydantic import Field, StrictBool, model_validator
-
-from central.catalog import Candidate, CatalogSnapshot
-from central.planner import AcquisitionRequest
-from contracts.models import FrameProfile, Identifier, Model, Variant
-from media.models import SourcePreviewQuery, SourceSpec
+from central.catalog import Candidate, SourcePool
+from central.planner import AcquisitionRequest, MeasureRequest
+from central.wall_plan.fit import FitTarget
+from central.wall_plan.fit_settings import FitSettings
+from contracts.models import Variant
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,39 +24,18 @@ class MediaPin:
     expires_at: float
 
 
-class RefreshReceipt(Model):
-    source_ref: Identifier
-    requested_revision: int = Field(ge=1)
-    completed_revision: int = Field(ge=0)
-    coalesced: bool
-
-    @model_validator(mode="after")
-    def request_is_pending(self):
-        if self.completed_revision >= self.requested_revision:
-            raise ValueError("completed_revision must precede requested_revision")
-        return self
-
-
-class SourceConfigurationReceipt(Model):
-    """Exact operator transport result for a configured source."""
-
-    source_ref: Identifier
-    created: StrictBool
-
-
-class SourcePreviewReceipt(Model):
-    request_id: Identifier
-    status: Literal["pending"] = "pending"
-
-
 class CoordinationMedia(Protocol):
     """Media capabilities needed by execution coordination."""
 
     def reconcile_source_activity_in(self, conn: Any, runtime_refs: set[str]) -> None: ...
 
-    def catalog_in(
-        self, conn: Any, source_refs: set[str] | None = None,
-    ) -> tuple[dict[str, CatalogSnapshot], dict[str, Candidate]]: ...
+    def source_pools_in(self, conn: Any, source_refs: set[str]) -> dict[str, SourcePool]:
+        """central.photo_library.ports.ScenePoolReader.source_pools_in (roadmap 4, C11)."""
+        ...
+
+    def authored_in(self, conn: Any) -> dict[str, Candidate]:
+        """Every authored candidate, hydrated with its variant."""
+        ...
 
     def authored_candidates_in(
         self, conn: Any, asset_ids: tuple[str, ...],
@@ -79,24 +57,15 @@ class MediaApplication(Protocol):
 
     def request_acquisitions(self, requests: tuple[AcquisitionRequest, ...]) -> int: ...
 
-    def configure_source(self, spec: SourceSpec) -> bool: ...
-
-    def request_refresh(self, source_ref: str) -> RefreshReceipt: ...
-
-    def request_source_preview(self, query: SourcePreviewQuery) -> SourcePreviewReceipt: ...
-
-    def source_preview(self, request_id: str) -> dict: ...
-
-    def library_tags(self, connection_ref: str, q: str = "", limit: int = 20) -> dict: ...
-
-    def library_tags_by_id(self, connection_ref: str, tag_refs: tuple[str, ...]) -> dict: ...
+    def request_measurements(self, requests: tuple[MeasureRequest, ...]) -> int: ...
 
     def sources(self) -> list[dict]: ...
 
     def media_read(self) -> dict: ...
 
     def source_candidates(
-        self, source_ref: str, *, profile: FrameProfile | None = None,
+        self, source_ref: str, *, target: FitTarget | None = None,
+        crop_limit: float | None = None, settings: FitSettings,
     ) -> dict: ...
 
     def author_authored_candidates(

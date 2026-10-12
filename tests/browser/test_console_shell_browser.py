@@ -25,12 +25,14 @@ from console_tasks import (
     LABELS,
     add_source,
     author_scene,
+    choose_source,
     connect,
     current_hash,
     go,
     scene_continue,
     scene_form,
     section_heading,
+    source_choice,
     start_scene,
     visible_page,
     visit,
@@ -44,6 +46,7 @@ from operator_harness import (
     sign_in,
     submit_sign_in,
 )
+from photo_seed import connected, library_of
 from playwright.sync_api import expect
 from support.position import save_position
 from test_operator_showrunner_browser import (
@@ -178,14 +181,16 @@ def test_landing_is_always_the_wall(page, registry):
         expect(page.get_by_role("note", name="Getting started")).to_have_count(0)
 
 
-def test_the_sidebar_groups_wall_show_fleet_and_needs_attention_in_a_fixed_order(page, registry):
+def test_the_sidebar_groups_wall_show_fleet_settings_and_needs_attention_in_a_fixed_order(
+        page, registry):
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
         nav = page.get_by_role("navigation", name="Sections", exact=True)
-        expect(nav.get_by_role("list")).to_have_count(4)
+        expect(nav.get_by_role("list")).to_have_count(5)
         for group, labels in (("Wall", ["Wall"]),
                               ("Show", [LABELS[s] for s in ("now", "scenes", "schedule", "sources")]),
                               ("Fleet", ["Hardware", "Releases"]),
+                              ("Settings", ["Photo library", "Photo fit"]),
                               ("Needs attention", ["Needs attention"])):
             expect(nav.get_by_role("list", name=group, exact=True).get_by_role("link")
                    ).to_have_text(labels)
@@ -296,7 +301,8 @@ def test_the_poll_keeps_running_across_sections(page, registry):
         connect(page, origin, "now", paused_at=registry.clock.utc())
         badge = page.get_by_role("group", name="Frame health", exact=True).get_by_label(
             re.compile(r"^Frame first: "))
-        expect(badge).to_have_accessible_name("Frame first: Enrolled 0 s ago, no report yet")
+        # The badge is the one Frame chip (domain/frame-health-chip.ts): a Pi enrolled, no report yet.
+        expect(badge).to_have_accessible_name("Frame first: Getting ready")
         for section in ("wall", "attention", "hardware", "schedule"):
             go(page, section)
             count = len(reads)
@@ -347,7 +353,7 @@ def test_a_scene_draft_survives_a_wall_visit_a_section_change_and_a_refresh(page
 
         expect(form.get_by_label("Scene name", exact=True)).to_have_value("evening-draft")
         form.get_by_role("button", name="Change Photos", exact=True).click()
-        expect(form.get_by_label("Source", exact=True)).to_have_value(SOURCE)
+        expect(source_choice(form, SOURCE)).to_be_checked()
         scene_continue(page, "Review")
         form.get_by_role("button", name="Change Frames", exact=True).click()
         expect(form.get_by_label(f"Target frame {VALID_FRAME}", exact=True)).to_be_checked()
@@ -356,9 +362,10 @@ def test_a_scene_draft_survives_a_wall_visit_a_section_change_and_a_refresh(page
 
 def test_hidden_show_pages_announce_no_status(page, registry):
     _frame(registry, "first")
+    connected(library_of(registry))
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin)
-        add_source(page, "spring", "fixture-library")
+        add_source(page, "spring")
         saved = "Saved Source spring."
         expect(page.get_by_role("status").filter(has_text=saved)).to_be_visible()
 
@@ -399,7 +406,7 @@ def test_no_show_fleet_or_neutral_route_holds_display_controls(page, registry):
             expect(landmark).to_have_count(1)
 
         visited = 0
-        for table in ("show", "fleet", "neutral"):
+        for table in ("show", "fleet", "settings", "neutral"):
             for section, paths in SAMPLES[table].items():
                 for path in paths:
                     visit(page, path)
@@ -408,7 +415,7 @@ def test_no_show_fleet_or_neutral_route_holds_display_controls(page, registry):
                     for landmark in commissioning:
                         expect(landmark).to_have_count(0)
                     visited += 1
-        assert visited == sum(len(paths) for table in ("show", "fleet", "neutral")
+        assert visited == sum(len(paths) for table in ("show", "fleet", "settings", "neutral")
                               for paths in SAMPLES[table].values())
 
 
@@ -522,10 +529,10 @@ def test_skip_to_content_focuses_main_without_changing_the_route(page, registry)
 def _fill_hand_picked_draft(page, portrait_a, portrait_b):
     """A hand-picked Scene draft named "kept-draft", left on its Review step."""
     form = start_scene(page, hand_picked=True)
-    form.get_by_label("Source", exact=True).select_option(SOURCE)
-    scene_continue(page, "Frames")
     form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
     form.get_by_label(f"Target frame {INVALID_FRAME}", exact=True).check()
+    scene_continue(page, "Photos")
+    choose_source(form, SOURCE)
     scene_continue(page, "Media per frame")
     valid = form.get_by_label(f"Media for frame {VALID_FRAME}", exact=True)
     invalid = form.get_by_label(f"Media for frame {INVALID_FRAME}", exact=True)
@@ -578,7 +585,8 @@ def test_a_session_ending_mid_draft_overlays_sign_in_and_keeps_the_draft(page, r
         steps.get_by_role("button", name="Media per frame", exact=True).click()
         expect(valid).to_have_value(portrait_a.asset.asset_id)
         expect(invalid).to_have_value(portrait_b.asset.asset_id)
-        form.get_by_role("button", name="Back", exact=True).click()
+        form.get_by_role("button", name="Back", exact=True).click()  # Photos
+        form.get_by_role("button", name="Back", exact=True).click()  # Frames
         expect(form.get_by_label(f"Target frame {VALID_FRAME}", exact=True)).to_be_checked()
         expect(form.get_by_label(f"Target frame {INVALID_FRAME}", exact=True)).to_be_checked()
         page.get_by_role("navigation", name="Steps", exact=True).get_by_role(
@@ -592,9 +600,9 @@ def test_log_out_discards_the_draft(page, registry):
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         connect(page, origin, "scenes")
         form = start_scene(page)
-        form.get_by_label("Source", exact=True).select_option(SOURCE)
-        scene_continue(page, "Frames")
         form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
+        scene_continue(page, "Photos")
+        choose_source(form, SOURCE)
         scenes_link = page.get_by_role("navigation", name="Sections", exact=True).get_by_role(
             "link", name="Scenes", exact=True)
         expect(scenes_link).to_have_accessible_description("Draft")
@@ -610,7 +618,7 @@ def test_log_out_discards_the_draft(page, registry):
         scenes = page.get_by_role("region", name="Scenes", exact=True)
         expect(scenes.get_by_role("button", name=re.compile("^Resume draft"))).to_have_count(0)
         form = start_scene(page)
-        expect(form.get_by_label("Source", exact=True)).to_have_value("")
-        form.get_by_label("Source", exact=True).select_option(SOURCE)
-        scene_continue(page, "Frames")
         expect(form.get_by_label(f"Target frame {VALID_FRAME}", exact=True)).not_to_be_checked()
+        form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
+        scene_continue(page, "Photos")
+        expect(form.get_by_role("group", name="Photo sources", exact=True).locator("input:checked")).to_have_count(0)

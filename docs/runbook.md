@@ -17,7 +17,7 @@ curl --fail http://127.0.0.1:8000/healthz
 
 Open `http://127.0.0.1:8000`. Read the operator token from the private `.env` file and enter it once to sign in; the browser stays signed in for 30 days ([signing in and Log out](#operator-console-signing-in-and-log-out)). The script creates `.env` with mode 0600 and never overwrites it. No credentials are committed. The development listener and database port bind only to loopback. Appliance deployment requires the separately configured HTTPS/PXE trust boundary; this local listener is not that deployment.
 
-The operator interface lists Players and Outputs, creates persistent Frames, binds equipment, retires a Player, and sets each Frame's position and brightness on its page (live on the Display, then Done). It creates and edits Sources and Scenes, schedules Programs, starts/finishes/cancels Runs, and shows source/worker health. Program timestamps use the browser's displayed local time zone. Configure the private upstream connection on the worker before creating a Source; after the worker checks in, the Source flow offers its configured connection name. The disposable browser walkthrough below covers these controls; final-revision delivery evidence remains separate. With the scheduler enabled, `/healthz` is green only when the database is reachable and a scheduler tick completed successfully within the last 10 monotonic seconds; `starting`, `coordination_unavailable`, `stale`, and `stopped` states return 503 with fixed sanitized status fields. Explicit test mode can disable the scheduler and retain database-only health semantics. A green `/healthz` reports service liveness, not observed presentation.
+The operator interface lists Players and Outputs, creates persistent Frames, binds equipment, retires a Player, and sets each Frame's position and brightness on its page (live on the Display, then Done). It creates and edits Sources and Scenes, schedules Programs, starts/finishes/cancels Runs, and shows source/worker health. Program timestamps use the browser's displayed local time zone. Connect Immich in **Settings › Photo library** before creating a Photo source ([connecting Immich](#connecting-immich)); no file and no restart. The disposable browser walkthrough below covers these controls; final-revision delivery evidence remains separate. With the scheduler enabled, `/healthz` is green only when the database is reachable and a scheduler tick completed successfully within the last 10 monotonic seconds; `starting`, `coordination_unavailable`, `stale`, and `stopped` states return 503 with fixed sanitized status fields. Explicit test mode can disable the scheduler and retain database-only health semantics. A green `/healthz` reports service liveness, not observed presentation.
 
 When a calibrated Frame shows a current readiness failure, follow the
 Frame-specific guidance on its Frame page: reduce concurrent video/effect work
@@ -32,93 +32,57 @@ connected-Output observation confirm visible pixels. See the
 [readiness projection contract](operator-console-ux-design.md#current-player-readiness-failures)
 for the epoch, offer, binding and time filters.
 
-The worker starts with an empty private connection list and remains healthy while idle. Its Compose healthcheck is the module entry point `python -m media.healthcheck`, which composes the repository through the worker's own `build_repository` and exits 0 only when the last worker check-in (`media_settings.worker_seen`) is fresh. The age is read on the database clock in one read-only transaction that takes no media lock ([one media clock](module-media-worker.md#one-media-clock)), so the probe container's clock is never compared with a database time. A missing database URL, an unreachable database, or no check-in yet exits 1. Freshness follows the worker's guaranteed check-in cadence, not the refresh tick: an idle worker (no Source due) checks in only at boot and at each 5-minute maintenance pass, so the window is the console's worker-quiet window (two maintenance intervals plus a minute, 660 s; a test pins the two equal). The cost: a hung worker can read healthy for up to 11 minutes. Compose consumes worker health only for `--wait`; nothing restarts an unhealthy worker. Never write a healthcheck as an inline `python -c` snippet that imports first-party code; `tests/test_compose_healthchecks.py` refuses one. Its configuration is described in [the worker module](module-media-worker.md); a deployment must provision that file as UID 10001, mode 0600 in the `connections` volume and restart `worker`. Never put an upstream API key in operator forms, Source definitions, Player configuration, Git or command-line arguments. The [Immich fixture](module-immich-fixture.md) generates its own synthetic media and disposable private configuration for reproducible adapter tests.
+The worker needs no connection configuration: connections are rows in Central's database, and it remains healthy while none exists. Its Compose healthcheck is the module entry point `python -m media.healthcheck`, which composes the repository through the worker's own `build_repository` and exits 0 only when the last worker check-in (`media_settings.worker_seen`) is fresh. The age is read on the database clock in one read-only transaction that takes no media lock ([one media clock](module-media-worker.md#one-media-clock)), so the probe container's clock is never compared with a database time. A missing database URL, an unreachable database, or no check-in yet exits 1. Freshness follows the worker's guaranteed check-in cadence, not the refresh tick: an idle worker (no Source due) checks in only at boot and at each 5-minute maintenance pass, so the window is the console's worker-quiet window (two maintenance intervals plus a minute, 660 s; a test pins the two equal). The cost: a hung worker can read healthy for up to 11 minutes. Compose consumes worker health only for `--wait`; nothing restarts an unhealthy worker. Never write a healthcheck as an inline `python -c` snippet that imports first-party code; `tests/test_compose_healthchecks.py` refuses one. Its configuration is described in [the worker module](module-media-worker.md). Never put an Immich API key in Source definitions, Player configuration, the repository, logs or command-line arguments; its one way in is the key field of Settings › Photo library. The [Immich fixture](module-immich-fixture.md) generates its own synthetic media and disposable keys for reproducible tests.
 
-To provision a real worker connection, use the Compose service's mounted
-`connections` volume and feed a separately prepared private file through
-Docker standard input. This keeps the API key out of shell arguments, history
-and Docker output. Prepare the source file outside the repository with the
-deployment's approved secret editor or secret manager, and make it mode 0600
-before using it:
+### Connecting Immich
 
-```sh
-python3 - <<'PY'
-import os
-from pathlib import Path
-path = Path.home() / ".photo-wall-connections.json"
-fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-os.fchmod(fd, 0o600)
-os.close(fd)
-print("Created private connection file with mode 0600.")
-PY
-```
+Open **Settings › Photo library** (`#/photo-library`) and press **Add a connection**. Enter a name, the Immich address (for example `http://immich.local:2283`; Photo Wall appends `/api` when it is missing, and plain `http` is accepted) and an API key made in Immich (Account settings › API keys) with the [permissions below](#the-library-key). **Save** stores the connection and asks the media worker to check it at once: within about a minute the row reads Immich's own counts ("41,203 photos · 2,110 videos · 212 albums · 96 people") and the Immich user the key belongs to. These are Immich's totals, archived photos included; a pool never includes archived photos, so a Source of everything can show fewer photos than this count. No file and no restart: the worker picks a new or changed connection up at its next task.
 
-The command refuses to overwrite an existing file. Do not place that file in
-Git or a shared temporary directory; populate it with the deployment's approved secret
-editor or secret manager, keep it for the next command only, and remove it
-with the deployment's secret-management procedure afterward.
+- **The key is never shown again.** After Save the row reads only "Key ending …1234". To change it, press **Paste a new key**; leaving the key empty while you rename or re-address the connection keeps the stored one. The key is kept in Central's database, written through the API and never read back ([decision 0020](decisions/0020-immich-key-in-central-database.md)): a database backup holds it, so treat backups as secret.
+- **Check now** asks the worker to check the connection again; it also checks every 15 minutes on its own.
+- **Remove** is refused, in plain words, while a Photo source or an unsaved draft uses the connection.
+- **A connection belongs to the Immich user of its first passing check.** Pasting a key of another Immich user reads as a problem (below); a second Immich user is a second connection.
+- **A private certificate authority** must be in the media worker's system trust store; there is no per-connection CA file.
 
-Use this shape as the file contents, replacing only the values in the approved
-private editor. `base_url` must end in `/api` (or `/api/`), and `ca_file` is a path
-inside the worker container when a separately provisioned private CA is
-required:
+**Needs a look.** Each row carries one state: **Connected** (with when it was checked), **Checking** (not checked yet), **Paste the address and key** (a row waiting since the upgrade, below) or **Needs a look**. A connection whose check fails shows a card, on the page and on **Needs attention**, with one fix. **Photos keep playing** while it does: each Source's last pool stays on the wall, and new photos wait until the connection is healthy again.
 
-```json
-{"schema":1,"connections":[{"connection_id":"immich-main","base_url":"https://immich.example.test/api","owner_id":"00000000-0000-4000-8000-000000000000","api_key":"PASTE_KEY_HERE","allow_http":false,"ca_file":null}]}
-```
+| Card | Fix |
+|---|---|
+| "Immich rejected the API key." | **Paste a new key** |
+| "The key cannot do everything Photo Wall needs. Make a key with these permissions: …" | Make that key in Immich, then **Paste a new key** |
+| "Immich 2.4.1 is older than 2.5.0. Update Immich, then check again." | Update Immich, then **Check again** |
+| "Photo Wall cannot reach Immich at <address>" | Check the host and network, then **Check again** |
+| "Immich answered in a way Photo Wall does not understand." | **Check again**; **Details** shows the code |
+| "This key belongs to <found>; the connection belongs to <expected>" | **Paste a key for <expected>** |
 
-Validate and publish the staged file as the worker UID. The existing worker
-loader performs the schema, ownership, mode, size, URL/TLS-policy and
-secret-shape checks; it does not replace an actual upstream TLS connection
-test. A failed check removes the staged file without printing its contents.
+Two notes are shown without stopping anything: "Immich 2.7.0 is newer than Photo Wall has been tested with; it keeps working", and the full-size-copies note (Immich keeps full-size copies only when its image settings say so). Only RAW needs them: Photo Wall reads JPEG, PNG, WebP, HEIC and AVIF originals itself and fetches an edited photo's full-size copy, which Immich always keeps, so with full-size copies off only an unedited RAW photo plays at Immich's preview size on a Frame larger than the preview. Turn on full-size copies in Immich to show RAW photos in full.
 
-```sh
-docker compose run --rm --no-deps -T --user 10001:10001 \
-  --entrypoint /bin/sh worker -c '
-set -eu
-trap "rm -f /etc/photo-wall/private/.connections.json.new" EXIT
-umask 077
-cat > /etc/photo-wall/private/.connections.json.new
-chmod 0600 /etc/photo-wall/private/.connections.json.new
-python -c "from pathlib import Path; from media.worker import load_connections; load_connections(Path(\"/etc/photo-wall/private/.connections.json.new\"))" >/dev/null 2>&1
-mv /etc/photo-wall/private/.connections.json.new /etc/photo-wall/private/connections.json
-' < ~/.photo-wall-connections.json
-docker compose restart worker
-docker compose exec -T worker stat -c '%u:%g %a' /etc/photo-wall/private/connections.json
-```
-
-The final command must report `10001:10001 600`. Updating this file takes
-effect after a worker restart.
+**After upgrading to delivery 4.** The private connections file, its `connections` volume and `PHOTO_WALL_CONNECTIONS_FILE` are gone. Each connection name in use becomes an empty row on Settings › Photo library reading "Paste the address and key of this Immich to start new photos again"; existing Photo sources keep pointing at it. Until you paste the address and key once, no new photos play and Frames keep their last photo. Existing Sources are converted to the new queries: a Source that asked for non-favourites only now selects all photos, and every Source now leaves out screenshots, so a pool may shrink. A photo placed by hand on a Scene before the upgrade keeps playing and can still be prepared; if it was edited in Immich since, its preparation fails and you pick it again ([authored media](module-authored-media.md)). **The owner's deployment:** the worker environment in the infrastructure repository (`mcurcio/iac`) still names the connections file and mounts its volume; a follow-up pull request there removes both, and the owner merges it once this release is deployed. The old private file can then be deleted with the deployment's secret-management procedure.
 
 ### The library key
 
-The worker's library key needs exactly these permissions and no upload,
-modification, deletion, sharing or administration permission:
+Make the key in Immich with exactly these permissions and no upload, edit, delete, share or administration permission. The list has one home in code, `central/photo_library/policy.py` (`REQUIRED_PERMISSIONS`); a key missing any of them reads "The key cannot …" with the missing ones listed, and its connection needs a look until a key with all of them is pasted.
 
-| Permission | Used for | Without it |
-|---|---|---|
-| `user.read` | Checking the configured owner (`GET /users/me`) | Every Source reports "Your photo library refused access" |
-| `asset.read` | Searching the library for a Source's members | Every Source reports "refused access" |
-| `asset.download` | Fetching originals for preparation | Media cannot be prepared |
-| `tag.read` | The Source flow's tag list and tagged Sources | The tag picker and the preview read "Your library connection's key isn't allowed to list tags or show previews." A tagged Source's refresh and preview report that the library refused access; untagged Sources keep working |
-| `asset.view` | Preview thumbnails in the Source flow | Tiles read "Preview not ready yet"; the counts still show |
+| Permission | Used for |
+|---|---|
+| `user.read` | Which Immich user the key belongs to |
+| `asset.read` | Searching Immich for a Source's photos, and its places |
+| `asset.statistics` | The photo and video counts, and a Source's "up to N" |
+| `album.read`, `album.statistics` | The album list and count |
+| `person.read` | The people list and count |
+| `tag.read` | The tag list |
+| `asset.view` | Thumbnails and Immich's previews, which preparation fetches when they cover the wall's largest Frame |
+| `asset.download` | Full-size copies and videos for preparation |
+| `asset.edit.get` | Reading a photo's Immich edits, so an edit makes a new revision |
+| `face.read` | Where faces are in a photo (read by delivery 5a's photo fit) |
 
-Missing `tag.read` or `asset.view` degrades only tags and thumbnails; nothing else
-breaks, and no failure is ever shown as "nothing matches". After you add a
-permission in the library, no restart is needed: the worker re-lists each
-connection's tags at most five minutes after its last attempt, and the next preview
-fetches its thumbnails again. What these features read is in the
-[media module](module-media.md#tags-previews-and-thumbnails). Do not use `cat` to display the private document,
-an inline heredoc, or a command argument for the private document or API key.
-Worker diagnostics are sanitized, but never send the private document to a log
-command. The fixture helpers remain disposable test configuration and do not
-provision a deployment worker.
+What each feature reads is in the [media module](module-media.md#connections-and-health). Never put the key in a command argument, a log or a committed file.
 
 In the Scene form, keep live source selection for a changing collection, or
 select **Choose a photo or video for each Frame** to keep a specific current
 asset for each participating Frame. Each chooser lists only media compatible
-with that Frame. The Scene and its references save together; source freshness,
-membership and compatibility are rechecked centrally. Playback still requires
+with that Frame. The Scene and its references save together; pool membership
+and compatibility are rechecked centrally. Playback still requires
 prepared media.
 The [authored-media contract](module-authored-media.md) describes retention and
 capacity. Development checks for this form require Node.js and execute its
@@ -130,27 +94,23 @@ should be ignored, restarted, or queued. Queue requests require an expiry;
 **Force** is an explicit override. Queued and ignored requests report their
 actual outcome without claiming that a new Run started.
 
-`PHOTO_WALL_HORIZON_SECONDS` defaults to 300 seconds and `PHOTO_WALL_RENEWAL_SECONDS`, the plan renewal quantum (at most 60), to 30; the [wall demo](module-wall-demo.md) shortens both. In the scheduler's PostgreSQL transaction, the media repository records each bounded preparation request and defers its exact job ID through Procrastinate. The separate worker publishes verified derivatives into the `media` volume. Central mounts it read-only and serves exact authorized bytes; Players never receive an upstream URL or credential. Procrastinate owns dispatch, retry timing, and queue-worker liveness. Photo Wall schedules only domain preparation, source refresh, and publication/storage maintenance tasks; it retains publication recovery, reservations, and stale-attempt fencing. The worker has a read-only runtime, a private writable media volume, and container CPU/memory limits.
+`PHOTO_WALL_HORIZON_SECONDS` defaults to 300 seconds and `PHOTO_WALL_RENEWAL_SECONDS`, the plan renewal quantum (at most 60), to 30; the [wall demo](module-wall-demo.md) shortens both. In the scheduler's PostgreSQL transaction, the media repository records each bounded preparation request and defers its exact job ID through Procrastinate. The separate worker publishes verified derivatives into the `media` volume. Central mounts it read-only and serves exact authorized bytes; Players never receive an upstream URL or credential. Procrastinate owns dispatch, retry timing, and queue-worker liveness. Photo Wall schedules only domain preparation, Immich connection and pool checks, and publication/storage maintenance tasks; it retains publication recovery, reservations, and stale-attempt fencing. The worker has a read-only runtime, a private writable media volume, and container CPU/memory limits.
 
-Fresh key-proof enrollment uses `/v1/enrollment/challenge` plus `/v1/enrollment/register`. The single-process Player entry point is `python -m player.service --config /etc/photo-wall/public.json`; see [service configuration and runtime requirements](module-player-service.md). The Player reads its RAM boot context, creates a new process key, and receives a new central authority epoch. A recognized returning equipment observation restores central bindings; unknown equipment remains unbound. `/v1/player/time` supplies independent authenticated clock samples. Base images are fetched from `/v1/netboot/base` (by content hash). Physical Pi/PXE and complete current-image qualification remain pending. Startup-only DRM discovery currently requires a Player restart after connector topology changes.
+Fresh key-proof enrollment uses `/v1/enrollment/challenge` plus `/v1/enrollment/register`. The single-process Player entry point is `python -m player.service --config /etc/photo-wall/public.json`; see [service configuration and runtime requirements](module-player-service.md). The Player derives its boot context from the Pi's serial and a fresh boot id, creates a new process key, says hello on its control session before Central answers any state, and receives a new central authority epoch. A recognized returning equipment observation restores central bindings; unknown equipment remains unbound. `/v1/player/time` supplies independent authenticated clock samples. Base images are fetched through the node boot offer (`/v2/node/boot-offers/{offer_id}/artifacts/{role}`, by content hash). Physical Pi/PXE and complete current-image qualification remain pending. Startup-only DRM discovery currently requires a Player restart after connector topology changes.
 
-The `database` volume persists all authoritative state, including Procrastinate jobs and release/trial records. `media` holds central authoritative media blobs and preparation files, and `connections` holds private worker configuration. Central and worker startup apply forward Photo Wall SQL migrations under a database advisory lock and check hashes of already-applied migrations; they also install/upgrade Procrastinate's versioned schema. Do not edit an applied Photo Wall migration; add another numbered migration. Both containers run as an unprivileged user. The exact Python dependency graph is in `uv.lock`.
+The `database` volume persists all authoritative state, including Procrastinate jobs and release/trial records. The `cache` volume holds the cache root; its `media/` subdirectory holds central authoritative media blobs and preparation files ([decision 0013](decisions/0013-unified-cache-root.md)). There is no `connections` volume any more: Immich connections, keys included, are database rows. Central and worker startup apply forward Photo Wall SQL migrations under a database advisory lock and check hashes of already-applied migrations; they also install/upgrade Procrastinate's versioned schema. Do not edit an applied Photo Wall migration; add another numbered migration. Both containers run as an unprivileged user. The exact Python dependency graph is in `uv.lock`.
 
-## Player provisioning: flash and go
+## Player provisioning: netboot and enroll
 
-The baseline Player path (0008) is flash-and-go: no boot ticket, no pre-registration. Central advertises itself over mDNS (`_photowall._tcp`) once its process starts, unless `PHOTO_WALL_MDNS_ADVERTISE=false` is set. If the deployment serves central on a port other than the default `8000`, also set `PHOTO_WALL_HTTP_PORT` to that real port, or the advertisement points a discovering player at a dead port.
+A Player has one way in: it netboots. There is no flashed image, no boot ticket, no pre-registration and no mDNS discovery; the kernel command line names Central (`photowall.central=…`, [step 2 below](#player-provisioning-stage-the-netboot-bundle-and-read-its-console-0014)).
 
-1. **Flash the generic image** to an SD card or USB drive (build it per the [README's provisioning section](../README.md#provision-player-appliances); there is no published release artifact yet) and boot the Pi on the same trusted LAN as central.
-2. **Watch the pending queue.** The Pi derives its `device_id` from its own hardware serial, finds central by mDNS (only because no explicit origin is configured on the card), and enrolls over plain HTTP. It appears in the operator inventory (`/v1/operator/inventory`, or the operator UI's Players list) as **unbound** — no prior registration required.
+1. **Netboot the Pi** on the same trusted LAN as Central. Stage 1 locates Central from the command line and mounts the base; the Player app root and the App Manager root arrive as squashfs images through [Node control](#node-control). Nothing installs a `.deb` on a Node: the 0009 bootstrapper, `photo-wall-provision.service`, the OS agent, Central's `/v1/app/*` and `/v1/netboot/*` routes and the Player `.deb` are gone ([0019](decisions/0019-debian-packaging-with-debhelper.md)).
+2. **Watch the pending queue.** The Player derives its `device_id` from its own hardware serial and enrolls. It appears in the operator inventory (`/v1/operator/inventory`, or the console's Hardware list) as **unbound**; no prior registration is required.
 3. **Bind** the pending Player's Output to a Frame from the operator interface, the same control used for any equipment change, then calibrate it.
-4. **Unbind** (`DELETE /v1/operator/frames/{frame_id}/binding`) releases a Frame's binding without retiring the Player — the serial can be re-bound later, to the same or a different Frame. This is distinct from **retire**, which is permanent and refuses the serial's re-enrollment.
+4. **Unbind** (`DELETE /v1/operator/frames/{frame_id}/binding`) releases a Frame's binding without retiring the Player: the serial can be re-bound later, to the same or a different Frame. This is distinct from **retire**, which is permanent and refuses the serial's re-enrollment.
 5. **Reboot** of an already-bound Pi re-associates with its Frame automatically by serial; no operator action is required unless the binding itself needs to change.
 
-Netboot (PXE) is the opt-in enhancement path in place of flashing — see the [PXE service module](module-pxe-service.md). Certificate-based identity and pinned/explicit transport trust are further opt-in enhancements described in [decision 0008](decisions/0008-generic-image-and-serial-identity.md); they are designed but not yet implemented, so do not rely on them today. Physical Pi boot of either the flash image or the netboot tree is not yet hardware-qualified.
-
-## Player provisioning: the V1 netboot and promote path (removed)
-
-[Decision 0009](decisions/0009-minimal-base-and-app-package.md) shipped the Player as a `.deb` that a base-owned bootstrapper downloaded and installed with `dpkg --install`. That path is gone ([0019](decisions/0019-debian-packaging-with-debhelper.md)): the bootstrapper, `photo-wall-provision.service`, the OS agent, Central's `/v1/app/*` and `/v1/netboot/*` routes, the `.deb` promotion and the Player `.deb`, bootstrapper `.deb` and Player payload release files no longer exist. A Node boots by [stage 1](#player-provisioning-stage-the-netboot-bundle-and-read-its-console-0014), mounts its base, and its release roots (the Player app root and the AppManager root) arrive as squashfs images through [Node control](#node-control). A Pi enrolls by serial and appears **unbound** in the operator inventory (`/v1/operator/inventory`); bind it to a Frame and calibrate it as in the flash-and-go flow above.
+Physical Pi boot of the netboot tree is not yet hardware-qualified.
 
 ## Player provisioning: stage the netboot bundle and read its console (0014)
 
@@ -294,7 +254,7 @@ The design, its protocol and its failure table are owned by [pass A](operator-co
 
 ## Operator console: sections, links and drafts
 
-The console is one page: a header (Central's health, the snapshot age with **Refresh**, **Log out**, and the [attention strip](#operator-console-wall-health-and-the-attention-strip)) and a sidebar of sections in four fixed groups: **Wall**; **Show** (Now, Scenes, Schedule, Sources); **Fleet** (Players, Releases); **Needs attention**. Nothing in the sidebar reorders or counts on state, and there is no Set up section: each home lists its own unfinished items ([console DDD §48](operator-console-ddd.md#48-the-proposed-shape)). Under 850 px wide the sidebar is a drawer behind **Menu**. Each section, and each step of a flow, has its own address after `#`, so you can bookmark it, type it or send it to someone signed in to the same Central. The design is owned by [passes C and D](operator-console-ux-pass2-flow.md#6-navigation-routes-and-modules).
+The console is one page: a header (Central's health, the snapshot age with **Refresh**, **Log out**, and the [attention strip](#operator-console-wall-health-and-the-attention-strip)) and a sidebar of sections in five fixed groups: **Wall**; **Show** (Now, Scenes, Schedule, Sources); **Fleet** (Players, Releases); **Settings** (Photo library); **Needs attention**. Nothing in the sidebar reorders or counts on state, and there is no Set up section: each home lists its own unfinished items ([console DDD §48](operator-console-ddd.md#48-the-proposed-shape)). Under 850 px wide the sidebar is a drawer behind **Menu**. Each section, and each step of a flow, has its own address after `#`, so you can bookmark it, type it or send it to someone signed in to the same Central. The design is owned by [passes C and D](operator-console-ux-pass2-flow.md#6-navigation-routes-and-modules).
 
 | Section | Addresses | For |
 |---|---|---|
@@ -302,11 +262,12 @@ The console is one page: a header (Central's health, the snapshot age with **Ref
 | **Now** | `#/now`; Show now: `#/now/show/scene`, `#/now/show/review` | Central's live Runs, [Show now](#now-show-a-scene-now), Run cards, and why a frame shows what it does. |
 | **Scenes** | `#/scenes`; `#/scenes/new/<step>` (optionally `?target=<frame-id>` when started from a Frame); `#/scenes/<id>/edit/<step>` | [Making and editing Scenes](#scenes-make-a-scene-step-by-step). Steps: `kind`, `photos`, `frames`, `media` (hand-picked only), `playback`, `review`. |
 | **Schedule** | `#/schedule`; `#/schedule/new/<step>` | [Programs](#schedule-a-program-step-by-step). Steps: `scene`, `when`, `review`. |
-| **Sources** | `#/sources`; `#/sources/new/<step>`; `#/sources/<name>/edit/<step>` | [Sources](#sources-add-and-manage-a-source). Steps: `library` (skipped with one known connection), `tags`, `narrow`, `name`, `review`. |
+| **Sources** | `#/sources`; a new Source and an edit open the Photo source editor | [Sources](#sources-add-and-manage-a-source): one editor with Include, Exclude and the pool as it fills. |
 | **Hardware** | `#/hardware`; one Pi in focus: `#/hardware?pi=<device-id>`; one Pi: `#/hardware/<device-id>` | The [Hardware list and Hardware pages](#the-hardware-list-and-the-hardware-pages). |
 | *Software and screens* (no sidebar entry) | one Pi: `#/players/<device-id>` | The [Software and screens page](#the-software-and-screens-page), reached from a Pi's Hardware page. There is no list at `#/players`, and the old `#/equipment` and `#/players` addresses open the Wall. |
 | **Releases** | `#/releases`; Update the wall: `#/releases/update/<tag>…` | [Releases, Stage app and Update the wall](#releases-stage-app-and-update-the-wall). |
-| **Needs attention** | `#/attention` | Every Frame and Player incident, each linked to where it shows. |
+| **Photo library** (group Settings) | `#/photo-library` | [Connecting Immich](#connecting-immich): connections, keys, counts, health. |
+| **Needs attention** | `#/attention` | Every Frame and Player incident, and every Immich connection that needs a look, each linked to where it shows. |
 
 **Show and Wall are organization, not permission.** There is one shared admin token and no roles (design D-c/Q5 in the [console design](operator-console-ux-design.md)); the sections change what you are looking at, never what you may do. Display controls ([a Frame's Position and Picture tabs](#operator-console-calibration-and-conflict-states)) are reachable only from the Wall. The four Show sections and Needs attention show frame health as status only (R4). This is checked by a test that walks what the Show and Needs attention pages import, and a browser test that visits each of their sample addresses (`tests/test_console_routes_r4.py`, `tests/browser/test_console_shell_browser.py`).
 
@@ -316,7 +277,7 @@ The console is one page: a header (Central's health, the snapshot age with **Ref
 - An address naming a step that does not exist, or does not apply (`media` for a live Scene), opens the step the draft last showed, or its first step. An address may skip ahead; the steps it skipped are not ticked in the stepper.
 - On the Wall, one click on a Frame opens its page as a new history entry (Back returns to the plan); choosing a tab updates the address in place, and going back to the plan from a Frame shows its Surface. A Frame opens on **Overview** unless the visit comes from the attention strip, Needs attention or a Player page, which open the tab that shows the cause (Hardware for Player, Output and Panel problems, Position for calibration). The Wall link in the sidebar opens the Wall as last shown from another section, the plan from a Frame page, and never Edit layout.
 
-**Drafts.** Each flow (a Scene, a Program, a Source, Show now) holds one unsaved draft. It survives moving between steps, going to another section (the Wall included), a refresh, and a session that ends (above). A section holding one is marked "Draft" in the sidebar and offers **Resume draft (Draft)** and **Discard draft** in place of its New button. Only saving (or Activate now with a known outcome), Discard, Log out or reloading the page ends a draft. **A reload loses every draft**: drafts live only in this tab's memory (flow design Question 5, built on its default).
+**Drafts.** Each flow (a Scene, a Program, a Source, Show now) holds one unsaved draft. It survives moving between steps, going to another section (the Wall included), a refresh, and a session that ends (above). A section holding one is marked "Draft" in the sidebar and offers **Resume draft (Draft)** and **Discard draft** in place of its New button. Only saving (or Activate now with a known outcome), Discard, Log out or reloading the page ends a draft. **A reload loses every draft**: drafts live only in this tab's memory (flow design Question 5, built on its default). A Photo source's unsaved draft is also kept in Central, so its check can run before Save; a reload loses this tab's hold on it, and Central removes it after a day.
 
 **Back and Forward.** A flow is one history entry: its steps replace each other, so browser **Back leaves the flow and keeps the draft**; it does not go to the previous step. Use the flow's own **Back** button, or an earlier step in the stepper, for that. After a save, Back never re-enters the finished flow; a save that lands after you went elsewhere leaves you where you are.
 
@@ -398,7 +359,7 @@ The **Hardware** section (`#/hardware`) has one row per physical box (a **Pi**),
 **A Pi's Hardware page** (`#/hardware/<device-id>`) is the one home for the box itself. Each section shows its own read time and fails on its own ("This section could not be shown"):
 
 - **Header**: name, standing, the serial **labelled as a claim**, **Enrollment**, links to the bound Frames' Bindings, the full device and Player ids under **Identifiers**, and a link to the Pi's Software and screens page.
-- **Reboot** (with its history): **Reboot Player** targets Host Management's one current session; when it cannot, the button is disabled and says why (for example, Central's effect gate is closed). The dialog names the bound Frames and their live Runs: the Run stays active and no other Frame or Actuator gets a command. Each request then reads one state: Requested · delivery unknown, Outcome unknown, Received, Accepted or Rejected by Host Management, or Host Management reported the reboot started · completion unknown. If the answer is lost, **Retry the same request** resends the identical request. A **new** request cannot be sent while another reboot request for the same session is outstanding (unexpired on Central's clock and not rejected; Accepted and started requests count). The console checks Central's served `outstanding` at the moment of sending, and Central refuses a new command id with 409 `node_reboot_outstanding`, which reads "Another reboot request for this Player is outstanding; close this dialog and review it."
+- **Reboot** (with its history): **Reboot Player** targets Host Management's one current session; when it cannot, the button is disabled and says why (for example, Host Management has no current session on this boot). The dialog names the bound Frames and their live Runs: the Run stays active and no other Frame or Actuator gets a command. Each request then reads one state: Requested · delivery unknown, Outcome unknown, Received, Accepted or Rejected by Host Management, or Host Management reported the reboot started · completion unknown. If the answer is lost, **Retry the same request** resends the identical request. A **new** request cannot be sent while another reboot request for the same session is outstanding (unexpired on Central's clock and not rejected; Accepted and started requests count). The console checks Central's served `outstanding` at the moment of sending, and Central refuses a new command id with 409 `node_reboot_outstanding`, which reads "Another reboot request for this Player is outstanding; close this dialog and review it."
 - **Health**: the box's [host health](#host-health-on-the-players-pages) in groups (Thermal, Power and throttling, Compute, Storage, Network, Software), the host facts' one receipt line, and an **Every reported metric** disclosure with the raw sample, its fault code and "Host samples do not show visible pixels." Health is hidden while node control is not on and for a retired box.
 - **Link and sessions**: whether Central's hub holds the Node API link, and Host Management's session: when it last reported, and which session and boot.
 - **Danger zone**: **Retire player** (Unbound only). A Bound Pi shows links to its Frames' Bindings instead: unbind it there first.
@@ -414,9 +375,9 @@ The **Hardware** section (`#/hardware`) has one row per physical box (a **Pi**),
 - **App**: the node app operations, each with its named state (for example "Rejected by App Effect Broker", or "Ended by a later boot" for a stage that ran before the Player rebooted). **Stage app** switches this Player's app for this boot only (see [Releases, Stage app and Update the wall](#releases-stage-app-and-update-the-wall)). **Qualified fallback** shows the app environment the Player app linked, lets you qualify it, and lists the stored acceptances.
 - **Danger zone**: **Unbind all outputs** (Bound only). Retire is on the Pi's Hardware page.
 
-A Pi's pages read that box's node state every 5 s while it is open and visible. If Central was started without node control, a banner sits above every page ("Node management is off on this Central …"), the Player page shows one line, "Node records are not shown: node management is off (see the banner).", in place of its node sections, and its header, Outputs, Bind, Identify and Unbind still work. That is a misconfiguration: start Central as [Node control](#node-control) describes. A failed read keeps the last rows, marked "refresh failed". A retired Player is not read ("Not read: Player retired").
+A Pi's pages read that box's node state every 5 s while it is open and visible. A failed read keeps the last rows, marked "refresh failed". A retired Player is not read ("Not read: Player retired").
 
-The serial comes from a separate, optional read of `GET /v1/operator/netboot`, refreshed at most every 30 s or when the set of Players changes. If that read fails, the Hardware list says **"Boot records unavailable"** and keeps the last serials it knew; you stay signed in and everything else works.
+The serial comes from the console's one fleet host read (`GET /v1/operator/node/hosts`, every 15 s once you are signed in). If that read fails, the Hardware list says **"Boot records unavailable"** and keeps the last serials it knew; you stay signed in and everything else works.
 
 ### Host health on the Players pages
 
@@ -460,15 +421,14 @@ The console owns node releases; no step needs curl or a hand-written request. Th
 - **Boot selection**: the one deployment Central offers every node-path boot from now on, its revision and the previous selection. On a wall that has never had a selection, Central selects the newest stable release by itself once it is downloaded, and this line says which release and how much is left (or why it cannot); after that, upgrades are always your choice.
 - **Deployments**: newest first, the selected one always listed. **Select for every boot…** sets the boot selection. Its dialog states the scope: every Player that boots by node path from now on is offered it, including Players Central has not seen, and Central cannot list which Players will boot. A deployment with no app says every boot from now on is offered no app. If another operator selected meanwhile, nothing is sent: "The boot selection changed meanwhile; review it".
 - **Release catalog**: the releases GitHub releases reported, via the media worker. Central turns each valid release into its deployment by itself and downloads the newest three stable releases, the current selection and the previous one in the background; pre-releases are listed but not downloaded ahead. Each row shows one download fact: **Ready**, **Downloading · N GB left**, **Not downloaded**, **Failed: reason**, or **Rejected: reason** (a malformed manifest or a tag conflict; only that release is affected). **Put vX on the wall…** opens Update the wall for that release; on the selected release it reads **Continue putting vX on the wall…**, the way back into a paused rollout. **Check GitHub releases now** queues a catalog check; new releases appear when the worker records them.
-- **Effect gate**: Central's gate state and reason. Reboot and Stage app are refused while it is closed. Central opens it only from a deployment certification; the console cannot open it ([verifier](#optional-read-only-kubernetes-node-verifier)). Until a deployment controller exists, every real Central reads "Effect gate closed · Central's reason: no deployment certification has opened it".
 
 A rebooted Player is offered the boot selection current at its next boot; the reboot dialog says so and links here.
 
-**Stage app** (Player page › App) switches the Player's app **for this boot only**; any later boot, including an unplanned one, is offered the boot selection. It is disabled, with its reason, while the Player is retired, the effect gate is closed, App Effect Broker has no current session on this boot, or a switch is in progress. Pick a deployment that carries an app; Central judges it when you send and the dialog shows Central's answer in its words (for example "No qualified fallback for this Player's current Outputs and base: qualify the running app first"). On a Player that drives Frames, each Frame shows the base page while the app switches, then rejoins its Run at the current point, as on Reboot; missed content is not replayed, and bindings and calibration are kept. Only Central's half of this is qualified so far (the dialog says so): the Player's side of a bound switch has no automated scenario yet.
+**Stage app** (Player page › App) switches the Player's app **for this boot only**; any later boot, including an unplanned one, is offered the boot selection. It is disabled, with its reason, while the Player is retired, App Effect Broker has no current session on this boot, or a switch is in progress. Pick a deployment that carries an app; Central judges it when you send and the dialog shows Central's answer in its words (for example "No qualified fallback for this Player's current Outputs and base: qualify the running app first"). On a Player that drives Frames, each Frame shows the base page while the app switches, then rejoins its Run at the current point, as on Reboot; missed content is not replayed, and bindings and calibration are kept. Only Central's half of this is qualified so far (the dialog says so): the Player's side of a bound switch has no automated scenario yet.
 
-**Qualified fallback** (Player page › App) qualifies the app the Player is running now, so that Stage has a fallback. The Player must be bound and show one steady photo or looping video on every Output for 30 s. **Begin** starts it, and the page asks Central for a sample every 2 s while it stays open and visible. It stops with a reason on a terminal answer or after 2 minutes without progress (a slideshow that changes within 30 s never progresses). Qualification needs no effect gate.
+**Qualified fallback** (Player page › App) qualifies the app the Player is running now, so that Stage has a fallback. The Player must be bound and show one steady photo or looping video on every Output for 30 s. **Begin** starts it, and the page asks Central for a sample every 2 s while it stays open and visible. It stops with a reason on a terminal answer or after 2 minutes without progress (a slideshow that changes within 30 s never progresses).
 
-**Update the wall** (Releases › **Update the wall…**, or **Put vX on the wall…** on a catalog row) walks one release onto the wall: optionally **Try it on one Frame** (the page qualifies the running app if needed, then stages the release on that Player), **Look**, and then **Put vX on the wall** or **Back out**. Put on the wall asks for one confirmation, which names the Players it will reboot and that each Frame is blank while its Player reboots. It then sends one Select and reboots the Players this console knows one at a time (the first reboot waits until Central has downloaded the release), the tried Player first, each waiting until the previous one has rejoined (Central's snapshot lists the Player app on its new boot, the target app is linked, every bound Frame is live and no readiness failure is reported; the page's judgement, not proof each Output shows its assignment). You can skip a Player before its reboot; skips are kept in the page's address. Only the Players the confirmation named are rebooted: a Player that enrolls later reads "Not in this rollout", and after a reload Resume names the Players again before rebooting any. A reported readiness failure on the new boot pauses the rollout too. A Player that has not rejoined after 10 minutes, a rejected or unknown reboot, or a hidden tab pauses the rollout with Retry, Skip and Stop. Back out reboots the tried Player; its next boot is offered the current selection. One reboot at a time holds per page only: a second page, or a Player-page Reboot, can reboot another Player at the same time. Nothing about the rollout is stored in Central: closing the page stops further reboots, and on reopening the page re-derives each row and waits for **Resume**. Select is fleet-wide, so any Player that restarts for any reason is offered the new deployment at that boot. With the effect gate closed, Try is unavailable and Put on the wall is Select alone: each Player is offered the release at its next boot. **Undo**, when the rollout is done, selects the previous selection again.
+**Update the wall** (Releases › **Update the wall…**, or **Put vX on the wall…** on a catalog row) walks one release onto the wall: optionally **Try it on one Frame** (the page qualifies the running app if needed, then stages the release on that Player), **Look**, and then **Put vX on the wall** or **Back out**. Put on the wall asks for one confirmation, which names the Players it will reboot and that each Frame is blank while its Player reboots. It then sends one Select and reboots the Players this console knows one at a time (the first reboot waits until Central has downloaded the release), the tried Player first, each waiting until the previous one has rejoined (Central's snapshot lists the Player app on its new boot, the target app is linked, every bound Frame is live and no readiness failure is reported; the page's judgement, not proof each Output shows its assignment). You can skip a Player before its reboot; skips are kept in the page's address. Only the Players the confirmation named are rebooted: a Player that enrolls later reads "Not in this rollout", and after a reload Resume names the Players again before rebooting any. A reported readiness failure on the new boot pauses the rollout too. A Player that has not rejoined after 10 minutes, a rejected or unknown reboot, or a hidden tab pauses the rollout with Retry, Skip and Stop. Back out reboots the tried Player; its next boot is offered the current selection. One reboot at a time holds per page only: a second page, or a Player-page Reboot, can reboot another Player at the same time. Nothing about the rollout is stored in Central: closing the page stops further reboots, and on reopening the page re-derives each row and waits for **Resume**. Select is fleet-wide, so any Player that restarts for any reason is offered the new deployment at that boot. **Undo**, when the rollout is done, selects the previous selection again.
 
 ### Identify an Output and bind it
 
@@ -537,7 +497,7 @@ A Frame whose Pi runs software without Display Host says "This Frame's Pi runs s
 
 **Hardware** holds the Pi and HDMI port feeding the Frame (**Connect Frame …** from a free port, **Disconnect from this Pi**, **Identify display** on a free port, and the Display the Pi reported when its photo app last started; Central's record, the Player app's last enrollment, is under **Details**) the **Display** the Pi reports on that port (make, model, serial or "Recognised by make and model on this Frame", and the modes it lists, read-only; with a **Display changed** card when it is not the one the Position was set against), and the **Frame profile** (pixel width and height, diagonal, video capable). The Frame profile is **operator-declared at Frame creation and persists across a Display swap**; **Edit Frame profile** works on a Frame with no Pi, or while its display has changed, and clears its position. When both resolutions are known, the Frame profile is compared with the resolution the Pi last reported, in the saved rotation when the position is set; a mismatch is a "Check the Display" card naming both values, with **Edit Frame profile** as its action and how to restart the photo app or change the profile under Details. The record may be stale; it never changes the profile.
 
-Frames whose Pi reports only the older preview path (`legacy_preview`) cannot be positioned from the console: they are told so and linked to their Pi's software page. That is the V2-only cost of this page. The `POST /v1/operator/frames/{id}/calibration` route stays for scripts (`scripts/demo_wall.py`) and tests.
+A Frame whose Pi did not start from Photo Wall (Central holds no node boot for it, `not_admitted`: a Compose or demo Player) cannot be positioned from the console: it is told so and linked to its Pi's page. Central has no other calibration path; the legacy preview and its `POST /v1/operator/frames/{id}/calibration` route were deleted in PR 45. The wall demo and the tests save a Frame's Position through Registry's Save compare-and-set, the one a trial's Save crosses (`tests/support/position.py`).
 
 The page has no colour or hardware brightness controls yet ([roadmap 1c](roadmap.md#1c-brightness-contrast-and-colour)); power is on the Power tab.
 
@@ -573,7 +533,7 @@ Press **Show now** on Now, on a Scene's card, or after saving a Scene. The flow 
 
 1. **Scene to activate**, with the frames it reaches and their health. A Frame that needs attention links to its Frame page's recovery tab; a healthy Frame remains informational. The health label is Central's latest accepted Player readiness report, not confirmation of visible pixels. Opening a recovery link and returning keeps the Show now draft. From a Scene's card or a Scene's Save it is already chosen.
 
-Both Show now steps also show **Saved Source freshness** for the selected Scene's live Source references. It reads Central's latest completed catalog status for each Source and may offer **Refresh Source** when the status needs attention. A **202** response means Central accepted the refresh request; the displayed Source status remains the last completed worker result until a later snapshot carries the requested completion. A refresh receipt does not mean the catalog has refreshed, media is prepared for a Frame, or anything is visible. A missing historical Source has no current status or refresh action. Hand-picked media is described separately because refreshing a Source does not change its saved choices. The status is advisory: it does not block **Activate now**.
+Both Show now steps also show a **Saved Sources** panel: "A Source keeps playing what it has found while it is checked, and while Immich cannot be read." It lists each live Source of the selected Scene with its check state in the [media pipeline's](#the-media-pipeline) words and **Check now**. Check now asks Central once (`POST /v1/operator/sources/{ref}/checks`) and shows "Check requested. Photos keep playing while Photo Wall reads Immich." until Central serves a different check for that Source; then the row shows the new state. The comparison is with what Central served, never with the browser's clock. If the request's outcome is unknown, it says "The request's outcome is unknown. Look at the Source's state before asking again." The state does not mean media is prepared for a Frame, or that anything is visible. A hand-picked Scene reads "This Scene uses hand-picked media; checking a Source does not change its chosen items." The state is advisory: it does not block **Activate now**.
 2. **Review** lists the Scene, its frames, the **Priority** and **If it is already running**. Under **Advanced** are **Activation priority** and **If it is already running**. Press **Activate now**.
 
 **The priority defaults to the Run already on top.** Review reads, for example, "5 (the default: the highest Run on its frames has priority 5; at equal priority the newer Run shows on top)", or "0 (the default: no Run covers its frames)". It is the highest priority among the live Runs covering any of the Scene's frames. That is enough to show on top, and one more is not needed: Central ranks layers by priority, then by admission order, and at equal priority the Run admitted later wins, so the new Run shows over the one already there ([flow design §7 J7](operator-console-ux-pass2-flow.md#7-the-flows-defaults-have-a-source)). Until you type a priority, the default follows the Runs as they change, even while Review is showing. A priority below it holds Advanced open and says where the Run would stay, for example "At priority 3 this stays underneath the Run of evening (priority 5) on lobby-left." No priority shows it on top of a Run that **protects** one of its frames: Central refuses the activation at any priority, so Review drops "shows on top", holds Advanced open and says, for example, "Central will refuse this at any priority: lobby-left is protected by the Run of evening." Finish or cancel that Run first.
@@ -616,8 +576,8 @@ On Now, open **Why nothing new?** on the frame's row. It opens its own group bes
 | 1. Intended? | "On top: nothing · no Run puts a layer on this Frame now". (If a Run on the frame ended, this step is only informational and the chain stops at step 2.) | [Show a Scene now](#now-show-a-scene-now), or [schedule a Program](#schedule-a-program-step-by-step), that targets the frame. |
 | 2. Run ended? | The last Run on the frame ended ("evening's Run ended at 18:00:30 after one cycle") or was cancelled. If the Scene keeps its last still, it adds "if its last item was a photo, the frame keeps that still (a video is not kept)". | "After one cycle" means Keep playing was off: edit the Scene and turn it on, then start it again. |
 | 3. Authored? | The winning Scene uses fixed, hand-picked media ("new photos never appear by design"), or shows black by design. | Nothing is wrong. To show new photos, use a live-source Scene. |
-| 4. The Source | None of the Scene's Sources is ok. | Read the [Source states](#the-media-pipeline) below. |
-| 5. Check this frame | Press **Check this frame**. It reads each ok Source's items that fit the frame's shape and counts what Central would do with them: "12 usable · 3 still preparing · 1 failed to prepare · 2 with no compatible version". It stops on "Nothing usable yet: …" or "No item in the Source fits lobby-left's shape." | Still preparing: wait for the worker. Failed to prepare: read the worker line. No compatible version, or nothing fits: the frame's shape (for example portrait) excludes the Source's items; widen the Source. An item two Sources share is counted once; a failing Source is left out, as planning leaves it out. |
+| 4. The Source | None of the Scene's Sources has photos in its pool: "None of this Scene's Sources has photos yet.", or "Photo Wall is still reading this Scene's Sources." while a check runs. Each Source is named with its pool's count and its check state. A Source whose last check failed but whose pool has photos passes: its photos keep playing. | Read the [Source states](#the-media-pipeline) below; an empty complete check means the Source matches nothing, so widen it. |
+| 5. Check this frame | Press **Check this frame**. It reads every Source's pool items that fit the frame's shape and counts what Central would do with them: "12 usable · 3 still preparing · 1 failed to prepare · 2 with no compatible version". It stops on "Nothing usable yet: …" or "No item in the Source fits lobby-left's shape." | Still preparing: wait for the worker. Failed to prepare: read the worker line. No compatible version, or nothing fits: the frame's shape (for example portrait) excludes the Source's items; widen the Source. An item two Sources share is counted once; a Source whose last check failed still counts, as planning still plays its pool. |
 | 6. The worker | The worker is not ok. | See the worker line below. |
 | 7. Frame health | The frame's health is not ok. | Fix it on the Wall ([wall health](#operator-console-wall-health-and-the-attention-strip)). |
 
@@ -631,15 +591,20 @@ The **Media pipeline** panel is at the foot of Now (it is left out while the Sho
 - "Media worker last reported 40 s ago · preparing 3 · waiting 12 · failed 2 · failed, retry pending 1 · cache 4.1 of 8 GB" when it is healthy. Preparing is running or publishing; waiting is queued; "failed, retry pending" appears only when a failed job is waiting to be retried (planning treats it as failed until then). Only jobs of the **current preparation recipe** are counted; a recipe change fails the old recipe's queued jobs and planning asks for them again.
 - "never checked in", "reported: storage is full" (or another reported error), or "quiet for 14 min" (no check-in for over 11 min; it checks in every 5 min) is an alarm, and a separate **Jobs and cache** line shows the counts. Check the worker process and its logs; for storage pressure, free space or raise the cache limit.
 
-**Each Source** gets a row: its plain name, a **State**, the **Last refresh** counts ("found 800 · valid 790 · pending 4 · rejected 6"), any **Reported** diagnostic codes in words, and when it next refreshes. The State carries the Source's **selection** in the Source flow's own words (tags, favourites, a single media type, "dated" window), for example "2 tags · favourites only · photos only · dated 2024":
+**Each Source** gets a row: its plain name, its state, how far a running check has read ("Checking: 12,400 photos so far") and "Last complete check 21:04". A **check** is one complete read of the Source's queries from Immich, which runs every 15 minutes, on Save and on **Check now** ([how a check works](module-media.md#live-discovery-pagination-and-metadata)). The pool is what the checks confirmed; **a check removes photos only when it completes**, so a failed or half-done check never empties a Source, and the wall keeps playing the pool it has. That is why a failed check is a notice, never an alarm.
 
-| State | Reads | What to do |
+| Check | Reads | What to do |
 |---|---|---|
-| Awaiting refresh (to-do) | "Awaiting refresh" | New Source; wait for its first refresh, or press Refresh on its card in Sources. |
-| Failing (alarm) | Said by who refused it. The library's answers: "Your photo library is unreachable", "Your photo library refused access", "Your photo library no longer has a tag this Source uses · edit its tags". Photo Wall's own refusals, never worded as the library's: "This Photo Wall release doesn't support your photo library's version · check the supported versions", "Over Photo Wall's current size limits for one Source (at most 1,000 matches) · narrow it with tags or dates", "Over Photo Wall's current time limit for one refresh · narrow it with tags or dates", "No item this Source found could be used · see each item's reason" (each item's own reason is on its card, for example "An item is over Photo Wall's current size or length limits"), "This media worker can't read this Source's settings · update the media worker", "The media worker's library connection doesn't match this Source · check the worker's connections" and other media worker sentences; a code Photo Wall does not know reads "Refresh failed (…)"; then "· last good refresh 2 h ago" | Unreachable: check the library host and network. Refused: check the worker's [library key](#the-library-key) and its permissions. Unsupported version: check the library version against this Photo Wall release's supported versions. Over the time limit: narrow the Source, or check why the library answers slowly. No item usable: read each item's reason on the Source card. A tag gone: edit the Source's tags. Over the size limits: edit the Source and narrow it with tags or dates (the worker's current limits, not a library fault). Can't read the settings: update the media worker to match Central. Connection or settings sentences: check the worker's connections file and configuration. Hand-picked Scenes from this Source cannot be saved until it succeeds. |
-| Overdue (alarm) | "Refresh overdue by 6 min" | Refreshes run every 30 s; check that the worker is running. |
-| Nothing valid (to-do) | "nothing valid in the last refresh" | The query found no acceptable item: widen the filters, or read the Reported codes. |
-| OK | "Your photo library last reported 1 min ago · the media worker accepted 790 in that refresh", then the selection | Nothing. The count is the items the refresh accepted, not items ready for a particular frame. |
+| Never checked (to-do) | "Not checked yet" | A new Source, or one on a connection that has no key yet ([connecting Immich](#connecting-immich)). |
+| Checking | "Checking: 12,400 photos so far", with " · last complete check 21:04" after an earlier one | Nothing: photos join page by page and play from the first page. |
+| Complete | "Checked 21:04" (with its day when not today) | Nothing. |
+| Incomplete | "Checked part of it: more than 1,000 photos share one moment" | Nothing removed; the pool keeps what it found. Narrow the Source (for example by dates) around that moment. |
+| Failed | "Immich could not be read: see Photo library. Photos keep playing." | The connection needs a look; its card on [Settings › Photo library](#connecting-immich) names the fix. |
+| Failed | "An album, person or tag in this Source was deleted in Immich. Photos keep playing." | Edit the Source and choose again. |
+
+**A check never stays stuck.** A check whose next step has not begun for 15 minutes (its worker died, say) is resumed from where it stopped by the next 30-second tick, and a dead worker's unfinished media job, preparation included, is handed back to the queue within about a minute ([the media queue's rescue](module-media-worker.md#the-media-queues-rescue)). Neither needs Check now or a restart.
+
+**The pool beside the Photo source editor** words the same check with its counts: "12,400 in the pool so far · up to 41,203 in Immich" while checking ("up to" is Immich's own count, which includes partners' photos, stacked copies and exclusions), "2,301 photos · 14 videos · checked 21:04" when complete (zero here is truly empty: "No photos match."; widen the Source). Under the counts: "Immich is still reading 37 photos" (Immich has not read their size yet; they join once it has), and the photos left out by reason, "2 could not be read" (Immich's answer for that photo did not parse) and "1 is too large" (over Photo Wall's pixel, size or video-length limits). The counts are photos in the pool, not photos ready for a particular Frame.
 
 ### Scenes: make a Scene step by step
 
@@ -648,18 +613,18 @@ A Scene is a per-frame composition. Scenes lists every stored Scene as a card, t
 | Step | Asks | Default |
 |---|---|---|
 | 1 Kind | **Live from a Source** (each frame shows the Source's media as it changes, re-checked centrally) or **Hand-picked per frame** (you choose one item for each frame). It comes first because it decides whether step 3b is asked. | Live |
-| 2 Photos | **Which Source?**: a saved selection from your photo library. Or **New selection from your photo library**, which adds one [inline](#sources-add-and-manage-a-source) and brings you back with it chosen. | none: required |
-| 3 Frames | The target frames, grouped **"Frames on `<surface>`"** and **"Frames not on any wall"**, each with its [health label](#operator-console-wall-health-and-the-attention-strip). | none: required |
+| 2 Frames | The target frames, grouped **"Frames on `<surface>`"** and **"Frames not on any wall"**, each with its [health label](#operator-console-wall-health-and-the-attention-strip). Asked before Photos (follow-ups C1), so Photos can show what fits them. | none: required |
+| 3 Photos | **Photos from**: one or more saved Photo sources as cards, chosen by checkbox; several Sources play the photos of all of them. **New Photo source** opens the [Photo source editor](#sources-add-and-manage-a-source) and brings you back with it chosen. Under them the Fit board: how the chosen Sources' photos fit the chosen Frames. | none: at least one |
 | 3b Media per frame | Hand-picked only: one chooser per frame. | none: required per frame |
-| 4 Playback | **Seconds per cycle**; under Advanced, **Keep playing until the Program ends**. | 30 s; Keep playing on |
-| 5 Review | Every answer with Change; **Scene name**; under Advanced, its **Id** (derived from the name). Then **Save Scene**. | — |
+| 4 Playback | **Each photo shows for** (seconds); the Crop limit (unset follows Settings › Photo fit) with the Fit board answering it as you drag; under Advanced, **Keep repeating**. | 30 s; Keep repeating on |
+| 5 Review | **Scene name** first; under Advanced, its **Id** (derived from the name); every answer grouped by step, one **Change** per step; the compact Fit board, with **Raise the crop limit to N %** for a Frame nothing fits. Then **Save Scene**. | — |
 
-- **Source readiness.** Photos and Review show the chosen Source's current refresh state and what it may mean for visible content. A Source that is awaiting refresh, failing, overdue or empty offers **Refresh Source** there; a 202 response means Central accepted the request, while the worker's later status shows its outcome. When the worker completes that requested refresh, the hand-picked candidate lists are read again once for the current Source and target Frames. **Manage in Sources** opens the Source list to edit filters or connection details, and the Scene draft stays in this tab for when you return. An older saved Source reference that is absent from the current list has no current status or inline refresh action. Live Scenes can still be saved while a Source is not ready; saving does not guarantee a panel has usable content. Hand-picked Scenes still require valid Source membership and compatible choices at save time.
+- **Source readiness.** Photos and Review show each chosen Source with its check state in the [media pipeline's](#the-media-pipeline) words, **Check now** (with the same receipt as on Show now), **Remove** on Photos, and its readiness: "Still being read: what is found so far plays." while a check runs, or "This Source has no photos." when its pool is empty. **Manage in Sources** opens the Source list, and the Scene draft stays in this tab for when you return. Live Scenes can be saved while a Source is not ready; saving does not guarantee a panel has usable content. Every Frame of the Scene gets the same Sources, in the order chosen. Hand-picked Scenes still require that each choice is in its Source's pool and compatible at save time.
 - **Frames.** A legacy frame id containing `:` (or longer than 96 characters) is listed with the reason no Scene can target it, and cannot be ticked. A frame you ticked that is deleted while you draft is dropped and announced on whichever step shows ("lobby-left was deleted and removed from this Scene.").
-- **Media per frame.** Each chooser lists **only media compatible with that frame's profile**: Central hard-filters the candidates by profile (`GET /v1/operator/sources/{ref}/candidates?frame_id=`), so an incompatible item cannot be chosen. While they load it reads "Loading compatible media…"; a frame with none is a problem routed to Frames; a failed read offers Retry. **Reload compatible media** rereads a successful list when a refresh outcome is unknown or another operator changes the Source. Each choice is labelled with its kind, size, capture time and what Central would do with it on that frame, for example "Photo 108×192 · dated 3 Mar 2025 14:02 · ready" (or "preparing", "failed to prepare", "no compatible version"); "(2)" is added only when two labels would otherwise read the same. A chosen item that is no longer among a frame's candidates is dropped from the draft, whichever step shows.
-- **Save** stores the Scene and every per-frame choice in **one request** (`PUT /v1/operator/scenes/{id}`, or `…/authored` for a hand-picked Scene); Central re-checks Source freshness, membership and compatibility. The flow returns to the cards with "Saved Scene X." and offers **Show now** and **Schedule it**.
+- **Media per frame.** Each chooser lists **only media compatible with that frame's profile**: Central hard-filters the candidates by profile (`GET /v1/operator/sources/{ref}/candidates?frame_id=`), so an incompatible item cannot be chosen. While they load it reads "Loading compatible media…"; a frame with none is a problem routed to Frames; a failed read offers Retry. **Reload compatible media** rereads a successful list, for example after a check or when another operator changes the Source. Each choice is labelled with its kind, size, capture time and what Central would do with it on that frame, for example "Photo 108×192 · dated 3 Mar 2025 14:02 · ready" (or "preparing", "failed to prepare", "no compatible version"); "(2)" is added only when two labels would otherwise read the same. A chosen item that is no longer among a frame's candidates is dropped from the draft, whichever step shows.
+- **Save** stores the Scene and every per-frame choice in **one request** (`PUT /v1/operator/scenes/{id}`, or `…/authored` for a hand-picked Scene); Central re-checks pool membership and compatibility. The flow returns to the cards with "Saved Scene X." and offers **Show now** and **Schedule it**.
 
-**Keep playing until the Program ends** is **on by default** for new Scenes (slice 3 Question 1, pending owner confirmation):
+**Keep repeating** (until the Program's window ends) is **on by default** for new Scenes (slice 3 Question 1, pending owner confirmation):
 - **On.** In a Program, the Run keeps cycling until the window ends, then stops at the end of the cycle running at that moment, so it can **overrun the window by up to one cycle**. Shown without a Program, it plays until you Finish or Cancel it.
 - **Off.** The Run plays **one cycle, then ends**: a 30 s Scene in an 18:00–20:00 Program ends at 18:00:30. Its Run card reads "plays one 30 s cycle, then ends". Scenes saved by earlier console versions were always saved this way.
 
@@ -667,7 +632,7 @@ Playback also holds the Scene settings Central already played but the console co
 
 | Setting | Default | What Central plays |
 |---|---|---|
-| **Fade between photos** (0–5 s) | 1.5 s for a new Scene | Each photo fades out over half of it and the next fades in over the other half, through black or what plays beneath (every body Contribution's `fade_out_seconds` and `fade_in_seconds`). It must be no longer than **Seconds per cycle**. |
+| **Fade between photos** (0–5 s) | 1.5 s for a new Scene | Each photo fades out over half of it and the next fades in over the other half, through black or what plays beneath (every body Contribution's `fade_out_seconds` and `fade_in_seconds`). It must be no longer than **Each photo shows for**. |
 | **How it ends**: Stops, Black or Fades out, with **Ending length** (0.5–10 s) | Stops; 3 s once chosen | The Scene's outro after a Finish or its Program's end: **Black** is opaque black covering the Frames for the length; **Fades out**: the last photo returns over half the fade between photos, then fades out over the rest of the length to reveal what plays beneath (the length must be at least half the fade). Either ending keeps nothing after it (`after_end: keep_nothing`): the Frame is then black, never this Scene's kept photo again, during an outage too. When another Scene plays beneath, the ending gets out of its way instead: that Scene takes over, its own kept photo included ([what a Frame keeps](execution-contract.md#what-a-frame-keeps)). |
 | **Keep the last photo up** (Advanced) | On | When nothing new can play on a Frame, even after the Scene stops, it keeps its last photo instead of going dark (`after_end: keep_this_photo`); when nothing else plays on the Frame after the Scene, Central plans its last cycle with no fade-out, so the kept photo never dips to black and snaps back. While another Scene plays beneath it, the photo is that Scene's to keep: when this Scene ends, the one beneath takes over, its own kept photo included. Central owns these rules and the Player applies them ([what a Frame keeps](execution-contract.md#what-a-frame-keeps)). |
 | **Keep these Frames together** (Advanced) | Off | While the Scene plays, Central turns away other Scenes that need any of its Frames, and does not start it while something more important covers them (`protect_frames`). |
@@ -693,8 +658,7 @@ To edit:
 |---|---|---|
 | "Scene evening saved." | Stored. | Nothing. |
 | "This Scene was changed since you opened it; nothing was replaced. Review now offers Reload." | Someone replaced this Scene between two refreshes. Central refused yours (409 `scene_revision_conflict`), so their version stands. | Close; focus moves to **Reload**. Reload, then redo your change if it still applies. |
-| "Not replaced. The Source's last refresh failed; authored choices can be saved once it succeeds." | A hand-picked Scene's Source is failing. | Fix the Source (see [the media pipeline](#the-media-pipeline)), Refresh it, then try again. |
-| "Not replaced. That item is no longer in the Source; choose again." | A chosen item left the Source. The choosers reload. | Pick again and Replace. |
+| "Not replaced. That item is no longer in the Source; choose again." | A chosen item left the Source's pool. The choosers reload. | Pick again and Replace. |
 | "Central did not answer. Check this after the next refresh." | Central answered with a server error, so the save may or may not have been stored. | After the next refresh, review the Scene card and its saved answers. An identical retry is safe if the outcome is still unclear. |
 
 Pressing Replace again with exactly the same Scene after an outcome you did not see is safe: Central accepts an identical save of the stored revision.
@@ -741,28 +705,28 @@ Each Program card, `Program X`, shows its Scene, its window in local time, its p
 
 ### Sources: add and manage a Source
 
-The page opens with: "Photo Wall selects media that lives in your photo library. It never uploads, edits or deletes anything there." A Source is a **saved live query** with a plain name (for example, `holiday`): never a downloaded album and never something a Player browses or opens; its membership is re-evaluated centrally. Each Source is a card with its status, its last successful refresh ("Awaiting refresh" before any attempt, or "No successful refresh" after a failed first attempt), a short issue when refresh failed, what it selects and its connection, and **Refresh**, **Edit** and **Delete**. Cards show no thumbnails. Refresh re-runs its query (`POST /v1/operator/sources/{ref}/refresh`). The card reports whether Central accepted or refused the request, or whether its outcome is unknown. An accepted message is a request receipt; the Source status and issue remain the authority on the latest completed worker refresh. Central manages internal Source revisions; the console does not ask you to number them.
+The page opens with: "A Photo source asks Immich for photos: albums, people, a place, dates, favourites and tags, minus what you leave out. Photo Wall never uploads, edits or deletes anything there." A Photo source is **a saved question to Immich** with a plain name (for example, `holiday`): never a downloaded album and never something a Player browses or opens. Its answer, the **pool**, updates by itself ([how a check works](module-media.md#live-discovery-pagination-and-metadata)). Sources lists each Source with its [check](#the-media-pipeline), what it includes in one line ("Anna and Ben · last 3 years · no screenshots"), **Check now**, **Edit** and **Delete**. Central manages internal Source revisions; the console does not ask you to number them.
 
-Press **New Source**. The flow (`#/sources/new/<step>`) asks one question per step ([console design §37](operator-console-ddd.md#37-pass-5-sources-screens-and-the-progressive-source-flow)):
+**New Source** and **Edit** both open the **Photo source editor**. Every change is checked by Immich straight away: the editor keeps an unsaved **draft** whose check really runs, so the pool beside the form fills page by page as Immich is read, before you save. Name it and **Save Source** (or **Save changes** when editing) at any time, even mid-check; the saved Source keeps the pool found so far. An unsaved draft is removed after a day.
 
-| Step | Asks | Default |
+| Part | Asks | Default |
 |---|---|---|
-| 1 Which library connection? | The connection, as the rule below says. **Skipped** when exactly one connection is known: the flow opens on Choose tags, and the connection stays under Name's **Advanced** | the one known connection |
-| 2 Choose tags | **Tags in your library**: type to search the library's own tag list and pick up to four. A photo must carry all of them; each tag includes everything nested under it, so picking a nested tag replaces its ancestor, and an ancestor of a chosen tag is refused with its reason. For media with *any* of several tags, give those photos one shared tag in your library | no tags: everything in the library |
-| 3 Narrow it down (optional) | **Media type** (Photos and videos, Photos only, Videos only); **Favourites** (Any, Only favourites, Not favourites); **Dated from** and **Dated until** | Photos and videos; Any; no dates |
-| 4 Name this Source | **Source name** (like `holiday`) | none: required |
-| 5 Check your Source | Every answer with Change, and the selection summary ("Selects media tagged Family/Christmas (and nested tags) · favourites only · …"). Then **Save Source**. | — |
+| Photo library | Which Immich (#14). Hidden when there is only one; choosing another starts the query again. | the only one |
+| **Include** | Albums (#15) and people (#16): "All of these must be in the photo", with "For any of them, add another Source to the Scene" (#17). A place (#18): city, state and country chosen together. Dates (#19, #20): **Any time**, **Between** two dates (in this browser's time zone), or **In the last** N years and months (counted back from each check; the worker counts in UTC until the house has a time zone). **Favourites only** (#22). Tags (#23): every chosen tag, each including its nested tags. Media types (#25): **Photos**, **Live photos**, **Videos** (at least one). **Include partners' photos** (#32). | everything in the library; all three media types; partners off |
+| **Exclude** | **Leave out albums** (#26), **Leave out people** (#27), **Leave out tags** (#28), **Leave out screenshots** (#31) | none; screenshots left out |
+| The fixed line | "Archived, hidden and locked photos are never included" (#29, #30): not a switch | — |
+| Name | **Name**: what Scenes and Show now call this Source (like `holiday`) | none: required to save |
 
-- **The preview panel** sits beside Choose tags, Narrow it down and Check your Source, and follows every change (after a short pause). It shows what your photo library reported for the current answers, for example "Your photo library reported 128 photos and 4 videos · first received 12 s ago", and the newest 24 matches as tiles ("Photo dated 12 Dec 2024"); "Showing the newest 24." when more match. The counts are what the media worker observed; they do not promise the items are prepared or suit a particular Frame. "Nothing matching yet" with "New matches appear automatically once saved." is a real empty answer. A failure is never shown as empty: with an earlier answer on screen it stays, followed by "Photo Wall can't reach your photo library right now."; with none it reads "Unknown: Photo Wall can't reach your photo library right now; retrying". After two minutes with no answer it reads "Still looking. Photo Wall will keep trying." More than 1,000 matches reads "Photo Wall currently refuses a Source with more than 1,000 matches; saved like this it selects nothing. Narrow it with tags or dates.": that is the worker's current limit, not a product rule ([open gaps](module-media.md#open-gaps)). The preview only shows the newest matches; a saved Source over the limit is refused by its refresh and selects nothing, and its state reads "Over Photo Wall's current size limits for one Source (at most 1,000 matches) · narrow it with tags or dates". If the library key belongs to another user, the preview says "The library key belongs to a different user." A tile not fetched yet reads "Preview not ready yet" and is tried once more. Previewing does not save a Source or start a refresh. If the panel says the key isn't allowed, see [the library key](#the-library-key).
-- **The tag list's age.** Tags come from a list the media worker reads from your library about every five minutes; when it is older than that, the picker says when your library last reported its tags. A tag added in the library a moment ago may need a few minutes to appear.
-- **The dates.** Dated from and Dated until are local days and use the library's own dates. The window runs from the start of the "from" day **up to the start of** the "until" day (the "until" day itself is excluded), so "Dated until" must be after "Dated from". Either may be left empty.
-- **The connection rule.** Connection name is the exact `connection_id` provisioned in the private worker connection file; choosing it does not set a library address or key. Once the worker reports its configuration, the console offers those names even before any Source exists. One configured name skips the connection step; several names appear in a chooser. An empty reported list tells you to provision the worker first. A name the worker's reported list does not include reads "This connection isn't set up yet, so tags and previews aren't available. You can still save; the Source starts selecting once the connection is set up." Before the worker has reported its connections at all, the step reads instead "The media worker hasn't reported its library connections yet, so tags and previews aren't available yet. You can still save." If a saved Source names a connection removed from the worker, edit it to choose a current name before saving. A worker check-in confirms configuration, not library reachability or key permissions; the key's permissions are listed in [the library key](#the-library-key).
-- **Save** writes `PUT /v1/operator/source-names/{name}` and returns to the cards with "Saved Source holiday.". A new Source starts its first refresh automatically when the worker queue is available; its card may briefly say "Awaiting refresh".
-- **Edit** opens the saved Source at Check your Source. Use **Change** to revise its name, tags, narrowing or connection, then **Save changes**. Central makes the next internal revision, updates stored Scenes that use the Source for future Runs, and keeps already admitted Runs on their prior selection. If another operator changed the Source while you were editing, Reload the current version and review it again. A saved tag reads by its path: the card, Check your Source and the tag chips look each saved tag up by id in the worker's stored tag list, however many tags the library has. While that list has not been read (or its last read failed) it reads "a tag Photo Wall has not looked up yet", and it reads "a tag that no longer exists in your library" only when the library's current list lacks it. A tag deleted in the library also fails the Source's next refresh, so it never reads as an empty Source: its state reads "Your photo library no longer has a tag this Source uses · edit its tags".
-- **Delete** asks for confirmation ("This removes Source holiday from new selections. It does not delete anything in your photo library.") and removes the Source from new selections. If a Scene still uses it, the delete is refused with the Scene names; edit those Scenes to choose another Source first.
-- **From a Scene.** **New selection from your photo library** on the Scene flow's Photos step opens this flow for your Scene: "This Source is for your Scene. Saving it takes you back there, with it chosen." Save returns to the Scene's Photos step with the new Source chosen. Back on the first step, or **Discard and return to your Scene**, returns with nothing chosen. If you had gone to another page by the time the Save lands, the Scene draft only takes the new Source; if the Scene draft was discarded meanwhile, the Source is simply saved.
+- **The pool beside the form** shows the check as the [media pipeline](#the-media-pipeline) words it, the counts by outcome, and the photos in the pool as thumbnails, newest first, 60 at a time with **Show more**. The thumbnails are Immich's own, edits included, fetched by the media worker; the browser never talks to Immich. Changing the query starts its pool again from the top (a query you had before reuses what was found for it).
+- **Pickers.** Albums, people, places and tags are searched by name from lists the media worker reads from Immich with each connection check (every 15 minutes). Something made in Immich a moment ago may need up to 15 minutes, or **Check now** on Settings › Photo library, to appear.
+- **"Any of them".** Several albums, people or tags in one Source mean all of them, as Immich searches. For photos of Anna *or* Ben, make one Source for each and put both on the Scene (Scene editor › Photos).
+- **Screenshots** are files whose name contains "screenshot", and PNGs with no camera model (the editor's hint says "camera maker"; Immich can only be asked for a missing model). A scanned PNG with no camera details is therefore left out too; turn Screenshots off for a Source that needs one.
+- **Save** makes the Source (or its next revision, keeping its name) and returns to the list with "Saved Source holiday.". Scenes that use the Source move to the new revision for future Runs; already admitted Runs keep their prior selection.
+- **Check now** on a saved Source asks for a check at once and shows "Check requested. Photos keep playing while Photo Wall reads Immich." until Central serves the new check.
+- **Delete** asks for confirmation ("Delete Source holiday?", "Photo Wall stops using Source holiday. Nothing in Immich changes.", **Confirm delete**) and removes the Source from new selections. If a Scene still uses it, the delete is refused: "Used by Scenes evening, morning. Edit them to choose another Source first."
+- **From a Scene.** **New Source…** on the Scene editor's Photos step opens this editor for your Scene; Save returns there with the new Source chosen.
 
-**Albums are not supported:** a Source has no album filter. There is deliberately **no** album, "open in the library" or credential field anywhere in the flow (the media boundary, design decision D-e in the [console design](operator-console-ux-design.md)); the library key is provisioned into the worker out of band (see [Connecting a real media library, in the README](../README.md#connect-a-real-media-library-immich)).
+There is deliberately **no** "open in Immich" link and no key field in the editor: the key lives only in [Settings › Photo library](#connecting-immich). On this day (#21) waits for delivery 5a's Order; a minimum rating (#24) and skipping blurry photos and duplicates (#33) are deferred.
 
 ## Tests and local development
 
@@ -791,7 +755,7 @@ The [test database](../tests/integration/compose.test-database.yml) runs the dep
 
 A test that observes a lock wait counts only its own database's waiters through `support.database.waiting_backends`; `pg_locks` is cluster-wide, so an unscoped count also sees other workers' tests. `tests/test_lock_observation_scope.py` refuses unscoped queries of `pg_locks` or `pg_stat_activity`.
 
-CI runs the [checks](../.github/workflows/checks.yml) as parallel jobs: `static` (ruff, import contracts, documentation links), `unit` and `db` (four xdist workers each), `browser` (below), `image-smoke` (builds the central and media worker images, starts Compose and checks central HTTP health, the served console, and that the worker reached the hub and created WALL), `node-bus` and `bus-fence` ([the Node bus](#the-node-bus-and-centrals-hub)), and `linux-media`, which runs all preparation tests inside the pinned Linux worker image, so missing host FFmpeg cannot silently remove that gate. Each tier job's timeout is about twice its expected time and it prints its 25 slowest test phases. The Immich adapter checks and the two fault segments of the two-Player/three-Output wall scenario run as three parallel jobs of the [software e2e](../.github/workflows/software-e2e.yml) (see the [wall demo](module-wall-demo.md)). Passing CI does not establish physical Pi/PXE, rendering or visible timing.
+CI runs the [checks](../.github/workflows/checks.yml) as parallel jobs: `static` (ruff, import contracts, documentation links), `unit` and `db` (four xdist workers each), `browser` (below), `image-smoke` (builds the central and media worker images, starts Compose and checks central HTTP health, the served console, and that the worker reached the hub and created WALL), `node-bus` and `bus-fence` ([the Node bus](#the-node-bus-and-centrals-hub)), and `linux-media`, which runs all preparation tests inside the pinned Linux worker image, so missing host FFmpeg cannot silently remove that gate. Each tier job's timeout is about twice its expected time and it prints its 25 slowest test phases. The named photo-source tests against one real Immich (the `photo-sources` job, [Immich fixture](module-immich-fixture.md#the-photo-source-content-set)) and the two fault segments of the two-Player/three-Output wall scenario run as three parallel jobs of the [software e2e](../.github/workflows/software-e2e.yml) (see the [wall demo](module-wall-demo.md)); the `db` job leaves the `immich` tests to it. Passing CI does not establish physical Pi/PXE, rendering or visible timing.
 
 All CI worker builds reuse the architecture-matched native media base through
 the [shared dependency workflow](module-appliance-ci.md#shared-service-and-test-dependencies).
@@ -828,7 +792,7 @@ together so the browser binaries match. See the official
 
 The registry walkthrough proves rejected/accepted authentication, reconnection after a rejected token, rejection of delayed failures from an earlier login attempt even when the same token is reused, two-Player/three-Output inventory, Frame creation/binding, calibration preview/revert/commit, stale-tab conflict recovery, replacement/retirement, and persistence through a fresh server/connection pool. It checks preview expiry using controlled time. The content walkthrough creates a Source, saves live and per-Frame authored Scenes, checks compatible prepared-photo choices and current selection guidance, schedules and removes Programs using the browser's local time zone, and starts, ignores, queues, naturally finishes, and cancels Runs. Definitions, Programs, and Run history survive a fresh server/connection pool.
 
-All operator mutations use browser controls, and every page rejects uncaught JavaScript errors. The fixtures supply simulated equipment and generated public JPEGs through production source-refresh, acquisition-request, and publication transactions with an explicitly synthetic recipe and preparation metadata. Elapsed time advances through the production Runtime owner; natural finish waits for the current cycle boundary. The server binds an ephemeral loopback port, preserving the separate full demo's network isolation. These checks qualify operator controls and persistence. They do not run an upstream adapter, conversion worker, background scheduler, Player, or renderer, and do not qualify scheduled playback, PXE, or physical output. Run browser checks separately from the ordinary suite: synchronous Playwright owns an event loop for its session, while ordinary Player integration tests create their own loops.
+All operator mutations use browser controls, and every page rejects uncaught JavaScript errors. The fixtures supply simulated equipment and generated public JPEGs through the photo library store's worker side (pool check steps written as the worker would), acquisition-request, and publication transactions with an explicitly synthetic recipe and preparation metadata. Elapsed time advances through the production Runtime owner; natural finish waits for the current cycle boundary. The server binds an ephemeral loopback port, preserving the separate full demo's network isolation. These checks qualify operator controls and persistence. They do not run an upstream adapter, conversion worker, background scheduler, Player, or renderer, and do not qualify scheduled playback, PXE, or physical output. Run browser checks separately from the ordinary suite: synchronous Playwright owns an event loop for its session, while ordinary Player integration tests create their own loops.
 
 The bounded schema-2 `operator-browser.json` report records named assertions, pass/failure status, browser version, PostgreSQL/fixture scope, generated-media and controlled-time inputs, checkout revision, dirty state, and GitHub event/SHA. CI always uploads available reports and retains traces only for failed tests. Pull-request runs identify the synthetic merge checkout. A dirty local run is diagnostic evidence, not final committed-revision acceptance. Reports and failure traces contain only the disposable fixture's public test token and synthetic records; keep unrelated deployment data out of the fixture.
 
@@ -857,20 +821,18 @@ so both know migrations 053–054 and the sealed-environment job kind. Keep the
 ordinary `PHOTO_WALL_DATABASE_URL` and `PHOTO_WALL_ADMIN_TOKEN` configuration in
 its existing protected deployment settings. No token is placed in a command line.
 
-Node control is the one supported configuration. Set an installation-specific
-`PHOTO_WALL_NODE_AUDIENCE` and run Central with the node factory:
+Central always runs node control; there is no switch to turn it off and no
+other factory. Run Central with its one factory (the image's own command):
 
 ```sh
-uvicorn central.node_app:create_app --factory --host 0.0.0.0 --port 8000 --ws-max-size 16777216
+uvicorn central.app:create_app --factory --host 0.0.0.0 --port 8000 --ws-max-size 16777216
 ```
 
-Keep `--ws-max-size` at 16 MiB (the image's own command uses the same value): a Node's bus leaf rides Central's WebSocket, and nats-server sends a connection's whole backlog as one frame ([the Node bus](#the-node-bus-and-centrals-hub)).
+Keep `--ws-max-size` at 16 MiB: a Node's bus leaf rides Central's WebSocket, and nats-server sends a connection's whole backlog as one frame ([the Node bus](#the-node-bus-and-centrals-hub)).
 
-The ordinary `central.app:create_app` factory (still the default image and Compose
-command until the [V1 follow-up](player-fleet-implementation-map.md) switches them)
-keeps node transport disabled. That is a **misconfiguration**: Players that boot by
-node path are refused, and the console shows one banner ("Node management is off on
-this Central") above every page. Every Pi boots by the node path: the V1 boot offer
+The node session audience is the product constant `photo-wall` (`NODE_AUDIENCE` in
+`central/fleet/node_sessions.py`), one Central per wall; no environment variable sets it.
+Every Pi boots by the node path: the V1 boot offer
 and the `photowall.node=v2` switch are gone ([0019](decisions/0019-debian-packaging-with-debhelper.md)),
 so the command line needs no flag. Do not add `cgroup_enable=memory`: every release's
 command line carries it, once, and it must stay. Boot trees staged from an earlier
@@ -878,11 +840,10 @@ release do not; restage them. Without the memory controller, which the Pi 5's de
 tree turns off, the base still mounts its store but no memory limit is enforced, and
 the console warns
 ([step 2](#player-provisioning-stage-the-netboot-bundle-and-read-its-console-0014)).
-A node release's boot tree carries both. The node factory enables observation, explicit session enrollment, immutable V2 boot
-offers and scoped command routes; it does **not** open the durable effect gate.
-`/healthz` remains process/service health. Authenticated
-`GET /v1/operator/node/status` reports transport selection and the persistent gate
-state separately. A running HTTP server, accepted serial claim, stored sample, or
+Node control serves observation, explicit session enrollment, immutable V2 boot
+offers and scoped command routes. The operator's word admits Reboot and Stage app:
+there is no effect gate (owner answer G-A). `/healthz` remains process/service
+health. A running HTTP server, accepted serial claim, stored sample, or
 catalogued artifact is not command qualification, authenticated physical identity,
 verified downloaded bytes, or observed pixels.
 
@@ -912,9 +873,7 @@ supersedes the prior boot and revokes that boot's sessions, so the operator neve
 chooses which boot of a box is current (the fleet-wide boot selection above chooses
 what every boot is offered). Two Pis claiming one serial flap visibly, each enrollment revoking
 the other. This does not prove which physical Pi exists or that an
-already-delivered effect stopped. Effect rollout still requires the
-existing D17 all-serving/rollback certification and a real injected serving-image
-verifier; there is no environment-variable bypass. The automated node scenarios and
+already-delivered effect stopped. The automated node scenarios and
 their limits are listed in [validation](validation.md).
 
 
@@ -964,53 +923,6 @@ systemctl list-units --type=mount | grep photo                         # the tra
 **A refused online stage stalls without a report.** When staging refuses inside the import worker, the worker exits without its result, the broker raises `root_import_outcome_unknown` on every tick, and the operation stays `preparing` on the Node while the console shows it staged. The fault is only in the worker's journal: `journalctl -u 'photo-wall-root-import-*'`. Stage again from the console, or reboot the Player. The owner accepted this as a cost of E2c (2026-10-09); it is fixed when the effect protocol is rebuilt ([0017](decisions/0017-node-redesign-r3.md#costs)).
 
 Superseded images stay in the pool until the next reboot. A third distinct app image in one boot is refused as an App Manager storage refusal with both numbers; reboot the Player to clear the pool.
-
-### Optional read-only Kubernetes node verifier
-
-The node factory accepts `PHOTO_WALL_NODE_VERIFIER_CONFIG`, the path to a
-read-only deployment-owned JSON file. Its exact keys are `identity_directory`,
-`namespace`, `ci_record`, `guard_record`, `ci_public_key`, `guard_public_key`, and
-`audience`. Public keys are distinct raw Ed25519 keys encoded as hex. The identity
-directory provides `namespace`, `pod_name`, `pod_uid`, `container_name`,
-`deployment_name`, and `deployment_uid`; populate Pod identity through the
-[Kubernetes downward API](https://kubernetes.io/docs/concepts/workloads/pods/downward-api/).
-The reader checks the actual Pod owner chain and registry-qualified
-[`status.containerStatuses.imageID`](https://kubernetes.io/docs/reference/kubernetes-api/workload-resources/pod-v1/).
-A mutable image tag or runtime config hash is insufficient.
-
-The service-account reader uses verified Kubernetes TLS and GET only. It needs
-complete Pod/ReplicaSet/Deployment, Service/EndpointSlice, Ingress/NetworkPolicy,
-API discovery and supported Gateway resource inventories, plus the two named
-public evidence ConfigMaps. It never reads Secrets. Unknown custom API groups,
-unsupported route resources, forbidden lists or incomplete pagination refuse
-certification. This conservative adapter needs extension and corresponding tests
-before using a cluster with other routing controllers.
-
-Each ConfigMap contains `data["evidence.json"]` with exact `payload` and hex
-`signature` fields. Sign canonical sorted compact JSON after the domain prefix
-`photo-wall-rollout-ci-v1` or `photo-wall-rollout-guard-v1`, each followed by a NUL
-byte. The source `SignedRolloutEvidence` defines the exact payload fields. Both
-records bind audience, record UID, increasing generation, active/revoked state,
-issue/expiry times (at most 300 seconds). CI binds all exact serving and rollback
-image digests plus immutable compatibility, fence and readiness evidence hashes.
-The guard binds Deployment UID/generation, complete endpoint/route hashes, CI
-payload hash, exact image sets, and an irrevocable `mutation_not_before` equal to
-its expiry. Revocation blocks new observation/admission but cannot shorten this
-promised no-mutation interval. The durable local watermark records revocation
-before returning refusal, and rejects earlier signed active records after restart.
-Key rotation or ConfigMap replacement fails closed and requires explicit operator
-reprovisioning; deleting replay floors is not a normal recovery action.
-
-**External implementation dependency:** the separate IaC owner must implement
-and deploy a controller that closes the durable effect gate before changing any
-certified direct Service/Pod/Gateway path, waits out outstanding signed holds,
-prevents uncertified rollback, and retains fenced images while any effect remains
-unreconciled even after certification expiry. It must produce truthful exact-image
-CI matrices and signed guard records from those enforcement results. The adapter
-and signatures do not implement that controller. No real such controller or
-qualification is established by the local tests. An unconfigured or uncertified
-node factory therefore continues to serve observations with effects closed.
-
 
 ## Reaching a Node over SSH
 

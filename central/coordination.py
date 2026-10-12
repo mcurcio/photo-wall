@@ -16,14 +16,17 @@ from psycopg.types.json import Jsonb
 from pydantic import Field
 
 from central.db import Database, DatabaseTransactionClock
-from central.equipment_drain import fenced_players_in
 from central.execution_outcomes import ExecutionOutcome, ExecutionOutcomeRouter
+from central.infra.display_store import frame_outputs_in
+from central.infra.fit_settings_store import PgFitSettings
+from central.infra.shown_history_store import PgShownHistory
 from central.installation_models import OutputInterruption, PlayerReports
 from central.installation_ports import InstallationSessions
 from central.installation_repository import PostgresInstallationRepository
 from central.media_ports import CoordinationMedia, MediaPin
 from central.media_repository import MediaRepository
 from central.planner import (
+    PLAN_SECONDS,
     PlannerLimits,
     Projection,
     assignment_id,
@@ -39,6 +42,10 @@ from central.runtime import Scene
 from central.runtime import handle_execution_outcome as handle_runtime_outcome
 from central.runtime_store import RuntimeStore
 from central.transaction_locks import COORDINATION_LOCK, holds_runtime_locks_in
+from central.wall_plan.fit import FitTarget
+from central.wall_plan.order import PhotoShowing
+from central.wall_plan.ports import FitSettingsStore, ShownHistory
+from central.wall_plan.selection import crop_limit_of
 from contracts.models import (
     Commit,
     IdentifyOutput,
@@ -60,6 +67,9 @@ class CoordinationLimits(Model):
     readiness_seconds: float = Field(default=2, gt=0, le=10)
     max_uncertainty: float = Field(default=0.1, gt=0, le=1)
     max_offers: int = Field(default=64, ge=1, le=256)
+    # Roadmap 5a (slice W1): how far ahead the wall plan reaches, every Frame together; layers
+    # are still offered only inside `horizon_seconds`.
+    plan_seconds: float = Field(default=PLAN_SECONDS, gt=0, le=PLAN_SECONDS)
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,12 +102,18 @@ class Coordinator:
         media: CoordinationMedia | None = None,
         outcomes: ExecutionOutcomeRouter | None = None,
         installation: InstallationSessions | None = None,
+        shown: ShownHistory | None = None,
+        fit: FitSettingsStore | None = None,
     ):
         self.db, self.clock = db, clock
         self.limits = limits or CoordinationLimits()
         self.runtime = RuntimeStore(db, clock)
         self.media: CoordinationMedia = media or MediaRepository(db, clock, times=DatabaseTransactionClock())
         self.installation = installation or PostgresInstallationRepository(clock)
+        # Roadmap 5a: what each offered layer shows and which were displayed (shown history).
+        self.shown: ShownHistory = shown or PgShownHistory()
+        # Follow-ups B1: the photo fit settings, read once per planning pass and authoring check.
+        self.fit: FitSettingsStore = fit or PgFitSettings(db, times=DatabaseTransactionClock())
         self.outcomes = outcomes or ExecutionOutcomeRouter(
             handle_runtime_outcome,
             handle_planning_outcome,
@@ -136,9 +152,15 @@ class Coordinator:
         self, conn, scene: Scene, asset_ids: tuple[str, ...], profiles
     ) -> None:
         candidates = self.media.authored_candidates_in(conn, asset_ids)
+        settings = self.fit.fit_settings_in(conn)
+        crop_limit = crop_limit_of(scene.selection, settings)
+        outputs = {output.frame_id: output.output_px for output in frame_outputs_in(conn)}
         for contribution in self._scene_contributions(scene):
-            if contribution.asset_refs and not any(
-                eligible(candidates[asset_id], profiles[contribution.target.removeprefix("frame:")])
+            frame_id = contribution.target.removeprefix("frame:")
+            target = FitTarget(profile=profiles[frame_id], output_px=outputs.get(frame_id)) \
+                if contribution.asset_refs else None
+            if target is not None and not any(
+                eligible(candidates[asset_id], target, crop_limit, settings)
                 for asset_id in contribution.asset_refs
             ):
                 raise RegistryError("authored_incompatible", 409)
@@ -267,9 +289,6 @@ class Coordinator:
             result[layer.assignment_id] = layer
         return result
 
-    def _catalog(self, conn, runtime):
-        return self.media.catalog_in(conn, runtime.planning_source_refs())
-
     def _groups(self, conn, runtime, now, horizon_end, configurations) -> dict[str, str]:
         owners = {
             f"frame:{b.frame_id}": (p, c.authority_epoch, b.output_id, b.generation)
@@ -387,7 +406,7 @@ class Coordinator:
             ),
         ).fetchone()["sequence"]
 
-    def _skip_group(self, conn, group_id, code, *, cancel=False, root=None):
+    def _skip_group(self, conn, group_id, code, *, root=None):
         cue_key = conn.execute(
             "SELECT cue_key FROM coordination_groups WHERE id=%s", (group_id,)
         ).fetchone()["cue_key"]
@@ -396,9 +415,8 @@ class Coordinator:
             detail["root"] = root
         sequence = self._event(conn, "group_skipped", detail=detail)
         conn.execute(
-            "UPDATE coordination_groups SET status='skipped',skip_sequence=%s,drain_cancel=%s "
-            "WHERE id=%s",
-            (sequence, cancel, group_id),
+            "UPDATE coordination_groups SET status='skipped',skip_sequence=%s WHERE id=%s",
+            (sequence, group_id),
         )
         conn.execute("UPDATE execution_commits SET valid=FALSE WHERE group_id=%s", (group_id,))
 
@@ -443,36 +461,51 @@ class Coordinator:
             # serialization cut, not at the time it first requested the cut.
             now = self.clock.utc()
             runtime.advance(now)
-            fenced = fenced_players_in(conn)
             configurations = {
                 p["id"]: self._configuration(conn, p["id"], p["authority_epoch"])
                 for p in self._players(conn)
             }
             offers = self._offers(conn, configurations)
             self.media.reconcile_source_activity_in(conn, runtime.planning_source_refs())
-            snapshots, authored = self._catalog(conn, runtime)
+            pools = self.media.source_pools_in(conn, runtime.planning_source_refs())
+            authored = self.media.authored_in(conn)
             locks = self._locks(conn, configurations, offers)
             # Renewable extent changes only at a renewal boundary, avoiding heartbeat churn.
             quantum = self.limits.renewal_seconds
             horizon_end = (math.floor(now / quantum) + 1) * quantum + self.limits.horizon_seconds
+            selections = runtime.planning_selections()
+            history = self.shown.wall_history_in(
+                conn, selections, now=now,
+                window_seconds=86400 * max(
+                    (selection.no_repeat_days for selection in selections.values()), default=0),
+            )
             projection = project(
                 runtime,
                 now,
                 bindings_by_player={
-                    p: tuple(b for b in config.bindings
-                             if p not in fenced and b.output_id in config.enabled_outputs)
+                    p: tuple(b for b in config.bindings if b.output_id in config.enabled_outputs)
                     for p, config in configurations.items()
                 },
-                catalog_snapshots=snapshots,
+                source_pools=pools,
                 authored_candidates=authored,
                 locked_assignments=locks,
+                history=history,
+                settings=self.fit.fit_settings_in(conn),
+                frame_outputs={output.frame_id: output.output_px
+                               for output in frame_outputs_in(conn)},
                 horizon_seconds=horizon_end - now,
-                limits=PlannerLimits(max_horizon_seconds=self.limits.horizon_seconds + quantum),
+                plan_seconds=self.limits.plan_seconds,
+                max_clock_uncertainty=self.limits.max_uncertainty,
+                limits=PlannerLimits(
+                    max_horizon_seconds=max(
+                        self.limits.plan_seconds, self.limits.horizon_seconds + quantum),
+                    # Roadmap 5a: the Runtime's transition budget was sized for the
+                    # preparation horizon; the wall plan reads its timeline that many times
+                    # further ahead.
+                    max_events=PlannerLimits().max_events * math.ceil(
+                        self.limits.plan_seconds / (self.limits.horizon_seconds + quantum))),
             )
-            groups = self._groups(conn, runtime, now, horizon_end, {
-                p: config.model_copy(update={"enabled_outputs": ()}) if p in fenced else config
-                for p, config in configurations.items()
-            })
+            groups = self._groups(conn, runtime, now, horizon_end, configurations)
             for proposal in projection.players:
                 config = configurations[proposal.player_id]
                 # Historical offers feed content locks only. Reconciliation,
@@ -521,6 +554,8 @@ class Coordinator:
                     self._event(
                         conn, "offer_unavailable", proposal.player_id, detail={"code": exc.code}
                     )
+                else:
+                    self._record_selected(conn, plan, projection)
             self._commit_due(conn, configurations, now)
             self.media.expire_pins_in(conn, now)
             self._cleanup(
@@ -533,9 +568,28 @@ class Coordinator:
             )
             return projection
 
-    @staticmethod
-    def _cleanup(conn, now, active_sessions: set[tuple[str, int]]):
+    def _record_selected(self, conn, plan: Plan, projection: Projection) -> None:
+        """Roadmap 5a: record what each layer of an offered plan shows, for the layers whose
+        selection names its photo, Scene and pass (a re-offered locked layer keeps its first
+        row)."""
+        selections = {selection.assignment_id: selection for selection in projection.selections}
+        showings = []
+        for layer in plan.layers:
+            selection = selections.get(layer.assignment_id)
+            if (selection is None or selection.asset_id is None or selection.scene_id is None
+                    or selection.pass_number is None):
+                continue
+            showings.append(PhotoShowing(
+                assignment_id=layer.assignment_id, asset_id=selection.asset_id,
+                frame_id=layer.frame_id, scene_id=selection.scene_id,
+                pass_number=selection.pass_number, start=layer.start, end=layer.end,
+                fade_in=layer.fade_in, after_end=layer.after_end,
+            ))
+        self.shown.record_selected_in(conn, showings)
+
+    def _cleanup(self, conn, now, active_sessions: set[tuple[str, int]]):
         """Expiry releases leases, while one latest manifest preserves revision high-water."""
+        self.shown.prune_in(conn, now=now)
         conn.execute("DELETE FROM assignment_locks WHERE valid_until<=%s", (now,))
         conn.execute(
             "DELETE FROM execution_commits c USING plan_offers o WHERE "
@@ -578,6 +632,29 @@ class Coordinator:
             "DELETE FROM execution_events WHERE sequence<(SELECT COALESCE(max(sequence),0)-10000 "
             "FROM execution_events)"
         )
+
+    def _presented_from_an_earlier_offer(self, conn, player_id: str, observation: Observation,
+                                         config) -> bool:
+        """Roadmap 5a: a "presented" report stamped with a revision this Player was offered
+        before the latest still counts as shown (a new revision is offered every cycle, so a
+        report often races the next offer; losing it would let the photo come back sooner).
+        Only the shown history is written, and the report is still refused as stale."""
+        if observation.status != "presented":
+            return False
+        row = conn.execute(
+            "SELECT manifest FROM plan_offers WHERE player_id=%s AND authority_epoch=%s "
+            "AND revision=%s", (player_id, observation.authority_epoch, observation.revision),
+        ).fetchone()
+        if row is None:
+            return False
+        offered = Plan.model_validate(row["manifest"])
+        layer = next((a for a in offered.layers
+                      if a.assignment_id == observation.assignment_id), None)
+        if (offered.plan_id != observation.plan_id or layer is None
+                or not self._authorized(layer, config)):
+            return False
+        self.shown.record_presented_in(conn, layer.assignment_id, self.clock.utc())
+        return True
 
     def _current_plan(self, conn, player_id, epoch) -> Plan | None:
         row = conn.execute(
@@ -634,7 +711,7 @@ class Coordinator:
             if plan:
                 membership = self._plan_groups(conn, plan)
                 skipped = conn.execute(
-                    "SELECT id,skip_sequence,drain_cancel FROM coordination_groups "
+                    "SELECT id,skip_sequence FROM coordination_groups "
                     "WHERE status='skipped' AND skip_sequence IS NOT NULL"
                 ).fetchall()
                 revocations = tuple(
@@ -643,7 +720,7 @@ class Coordinator:
                         revision=plan.revision,
                         authority_epoch=epoch,
                         sequence=g["skip_sequence"],
-                        mode="cancel" if g["drain_cancel"] else "invalidate",
+                        mode="invalidate",
                         assignment_ids=tuple(
                             sorted(a for a, group in membership.items() if group == g["id"])
                         ),
@@ -731,8 +808,6 @@ class Coordinator:
     def readiness(self, player_id: str, report: Readiness) -> bool:
         now = self.clock.utc()
         with self._transaction() as conn:
-            if player_id in fenced_players_in(conn):
-                raise CoordinationError("equipment_draining")
             configurations = {
                 p["id"]: self._configuration(conn, p["id"], p["authority_epoch"])
                 for p in self._players(conn)
@@ -851,8 +926,7 @@ class Coordinator:
         """Authorize an exact operational surface, never an execution Commit.
 
         Caller holds Coordination→Runtime before authenticating the node session.
-        A live app linkage and Registry tuple are necessary. V1 drain rows cannot
-        authorize V2 starting-new candidates; that requires the V2 lifecycle port.
+        A live app linkage and Registry tuple are necessary.
         """
         from central.fleet.node_app_links import load_current_node_app_link_for_player_in
 
@@ -869,8 +943,6 @@ class Coordinator:
         if link is None or (link.process, link.app_epoch, link.environment_sha256) != (
                 process, app_epoch, environment_sha256):
             return DisplayAdmission(False, "", "app_process_link_changed")
-        if player_id in fenced_players_in(conn):
-            return DisplayAdmission(False, "", "equipment_drain_requires_v2_target_reservation")
         fence = identity("display-", [player_id, authority_epoch, output_id, frame_id, binding_generation,
             config_revision, link.producer.device_generation, str(link.producer.kernel_boot_id),
             link.process.pid, link.process.start_ticks, str(link.process.invocation_id),
@@ -1067,6 +1139,15 @@ class Coordinator:
                 self._skip_group(conn, group["id"], "not_ready")
 
     def observe(self, player_id: str, observation: Observation):
+        if not self._observe(player_id, observation):
+            # Refused after its transaction committed, so a stale "presented" report's shown
+            # row stays written while the Player still hears stale_observation (its cue to
+            # fetch the newer plan).
+            raise CoordinationError("stale_observation")
+
+    def _observe(self, player_id: str, observation: Observation) -> bool:
+        """Record one observation; False when it names a plan revision other than the latest
+        (a stale "presented" one still counts as shown, `_presented_from_an_earlier_offer`)."""
         with self._transaction() as conn:
             self._players(conn)
             config = self._configuration(conn, player_id, observation.authority_epoch)
@@ -1075,7 +1156,8 @@ class Coordinator:
                 observation.plan_id,
                 observation.revision,
             ):
-                raise CoordinationError("stale_observation")
+                self._presented_from_an_earlier_offer(conn, player_id, observation, config)
+                return False
             layer = next(
                 (a for a in plan.layers if a.assignment_id == observation.assignment_id), None
             )
@@ -1088,3 +1170,7 @@ class Coordinator:
                 layer.assignment_id,
                 observation.model_dump(mode="json"),
             )
+            if observation.status == "presented":
+                # Roadmap 5a: "Shown" means it was displayed on a frame (owner, 2026-10-11).
+                self.shown.record_presented_in(conn, layer.assignment_id, self.clock.utc())
+        return True

@@ -6,7 +6,8 @@ name: MVP checks
 #
 # The suite runs as three tiers in parallel jobs, each test in exactly one: tests/conftest.py
 # derives `browser` from the path (tests/browser) and `db` from the fixtures, and everything
-# else is `unit` (the runbook's test section). Each tier job's timeout is about twice its budget, and prints
+# else is `unit` (the runbook's test section); the db leg leaves the `immich` tests (real Immich,
+# derived from their fixtures) to software-e2e.yml's photo-sources job. Each tier job's timeout is about twice its budget, and prints
 # its 25 slowest phases. In every job a test that reaches a database where none is provided
 # fails, and a skip no allowlist owns fails the run (tests/conftest.py).
 on:
@@ -133,11 +134,17 @@ jobs:
           PHOTO_WALL_RELEASE_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           .venv/bin/python scripts/test_local.py -q --tb=short --durations=25 \
-            -m db -n 4 --dist loadgroup
+            -m "db and not immich" -n 4 --dist loadgroup
 
+  # Three shards (PHOTO_WALL_BROWSER_SHARD, tests/browser/conftest.py: a test belongs to the shard
+  # its name hashes to), so each leg stays near the ~4 min budget; each writes its shard's evidence.
   browser:
     runs-on: ubuntu-24.04
     timeout-minutes: 7
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - id: docker-hub-mirror
@@ -156,6 +163,7 @@ jobs:
             --volume "$GITHUB_WORKSPACE:/work:ro" \
             --volume "$RUNNER_TEMP/operator-browser:/evidence" --workdir /work \
             --env PHOTO_WALL_BROWSER_TESTS=1 --env PYTHONDONTWRITEBYTECODE=1 \
+            --env PHOTO_WALL_BROWSER_SHARD=${{ matrix.shard }}/3 \
             --env PHOTO_WALL_TEST_REQUIRE_DATABASE --env CI \
             --env GITHUB_SHA --env GITHUB_EVENT_NAME --env GITHUB_ACTIONS \
             --env UV_PROJECT_ENVIRONMENT=/tmp/photo-wall-browser-venv \
@@ -184,7 +192,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: operator-browser-${{ github.sha }}
+          name: operator-browser-${{ github.sha }}-shard-${{ matrix.shard }}
           path: ${{ runner.temp }}/operator-browser
           if-no-files-found: ignore
           retention-days: 7
@@ -288,6 +296,21 @@ jobs:
           tags: photo-wall-ci-central
       - run: docker compose up -d --no-build --wait
       - run: curl --fail http://127.0.0.1:8000/healthz
+      # The shipped image, on its own command, runs node control: a first boot request on a
+      # fresh Central is refused for the unselected boot policy.
+      - name: Node control answers on the image's own command
+        run: |
+          set -eu
+          boot_id=$(python3 -c 'import uuid; print(uuid.uuid4())')
+          nonce=$(python3 -c 'import secrets; print(secrets.token_hex(32))')
+          status=$(curl --silent --output "$RUNNER_TEMP/boot-offer.json" --write-out '%{http_code}' \
+            -H 'Content-Type: application/json' \
+            --data "{\"schema\":2,\"kind\":\"node_boot_request\",\"serial\":\"1a2b3c4d\",\"kernel_boot_id\":\"$boot_id\",\"boot_nonce\":\"$nonce\"}" \
+            http://127.0.0.1:8000/v2/node/boot-offers)
+          cat "$RUNNER_TEMP/boot-offer.json"; echo
+          [ "$status" = 503 ]
+          python3 -c 'import json, sys; assert json.load(open(sys.argv[1]))["error"] == "node_boot_policy_unconfigured"' \
+            "$RUNNER_TEMP/boot-offer.json"
         # GET / must serve the console shell (HTTP 200), not 500. Because
         # central/console/dist/ is .dockerignore'd, the compose central image
         # gets its bundle SOLELY from the Dockerfile's console-builder stage --

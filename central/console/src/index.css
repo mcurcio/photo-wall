@@ -9,6 +9,9 @@
   --sidebar-width: 16rem;
   --header-height: calc(4.5rem + 4px);
   --breakpoint-sidebar: 850px;
+  /* The flow's sticky Back and Continue bar below the sidebar breakpoint: a 44 px button
+     between 12 px paddings. */
+  --flow-footer-height: 68px;
 
   /* The font's licence ships beside it: this reference makes the build emit
      OFL.txt into dist/assets/. The property is never used, so never fetched. */
@@ -442,10 +445,17 @@ label {
   --status: var(--color-ok);
 }
 
-.health--todo,
-.health--notice,
-.health--unknown {
+.health--todo {
   --status: var(--color-todo);
+}
+
+/* Each severity in its own colour (design language §6), as the catalog's StatusChip draws it. */
+.health--notice {
+  --status: var(--color-notice);
+}
+
+.health--unknown {
+  --status: var(--color-unknown);
 }
 
 .health--alarm {
@@ -489,10 +499,16 @@ label {
   content: "●" / "";
 }
 
-.health--todo::before,
-.health--notice::before,
-.health--unknown::before {
+.health--todo::before {
   content: "■" / "";
+}
+
+.health--notice::before {
+  content: "◆" / "";
+}
+
+.health--unknown::before {
+  content: "○" / "";
 }
 
 .health--alarm::before {
@@ -689,6 +705,13 @@ label {
   min-width: 0;
   margin: 0;
   overflow-wrap: anywhere;
+}
+
+/* A record whose label and value read at one size (Show now's Frames and Photos from). */
+.record--even dt,
+.record--even dd {
+  font-size: 14px;
+  line-height: 1.5;
 }
 
 .record__actions {
@@ -908,6 +931,39 @@ label {
   font-size: 12px;
 }
 
+/* The Scene's Frames step: each Frame a card, its tile at its Frame output's shape above its
+   checkbox and name; a chosen card's border is the selection (the accent). */
+.target-picker--tiles .target-picker__surface {
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.target-picker--tiles .target-picker__surface-name {
+  flex-basis: 100%;
+}
+
+.target-picker--tiles .target-picker__frame {
+  flex-direction: row;
+  align-items: center;
+  align-content: flex-start;
+  max-width: 18rem;
+  padding: 10px 12px;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-card);
+  background: var(--color-surface-raised);
+  cursor: pointer;
+}
+
+.target-picker--tiles .target-picker__frame:has(input:checked) {
+  border-color: var(--color-accent);
+  box-shadow: inset 0 0 0 1px var(--color-accent);
+}
+
+.target-picker__tile {
+  flex-basis: 100%;
+}
+
 /* Run rows (slice 3 §9): frame chips carry the plan tile's health label. */
 .run-control__frames {
   display: flex;
@@ -915,14 +971,39 @@ label {
   gap: 4px;
 }
 
+/* A Frame chip is status only: one line, never wrapped (a long id is cut with an ellipsis);
+   its "Open Frame" link sits on the line of links under the chips. */
 .run-control__frame {
+  max-width: 100%;
+  overflow: hidden;
   padding: 1px 8px;
   font-size: 12px;
-  overflow-wrap: anywhere;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
-.run-control__frame a {
-  margin-inline-start: 0.5em;
+.run-control__frames-block {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.run-control__recovery {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+}
+
+.run-control__recovery a {
+  color: var(--color-accent);
+  font-size: 14px;
+  font-weight: 500;
+  text-decoration: none;
+  overflow-wrap: normal;
+}
+
+.run-control__recovery a:hover {
+  text-decoration: underline;
 }
 
 .run-control__ended {
@@ -1081,19 +1162,6 @@ label {
   overflow-wrap: anywhere;
 }
 
-.scene-flow__chosen {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px 8px;
-  align-items: baseline;
-  margin: 8px 0 0;
-}
-
-.scene-flow__chosen-label {
-  color: var(--color-label);
-  font-weight: 500;
-}
-
 /* A notice: a sentence and its actions in a tinted, bordered box; the warn tone for
    something the operator must decide (a changed Scene, a draft in the way). */
 .notice {
@@ -1115,6 +1183,78 @@ label {
 
 .notice--warn {
   border-color: var(--color-notice);
+}
+
+/* The Scene's chosen Photo sources' actions, on one line under the Fit board (design fix
+   round 3): each Source's name, a note when its photos are not ready, Check now and Remove,
+   then Manage in Sources at the end; wrapping on a phone. */
+.chosen-sources {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  align-items: center;
+  margin: 0;
+  padding: 6px 8px 6px 14px;
+  background: var(--color-surface-raised);
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-input);
+  font-size: 14px;
+}
+
+.chosen-sources__list {
+  display: flex;
+  flex: 1 1 auto;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.chosen-sources__item {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 4px;
+  align-items: center;
+  min-width: 0;
+}
+
+.chosen-sources__name {
+  margin-right: 4px;
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
+.chosen-sources__note {
+  margin-right: 4px;
+  color: var(--color-muted);
+  font-size: 13px;
+}
+
+/* Its buttons are text actions in the accent (a record's other actions). */
+:where(.chosen-sources button) {
+  min-height: 44px;
+  padding: 0 10px;
+  background: transparent;
+  border-color: transparent;
+}
+
+:where(.chosen-sources button:hover) {
+  background: var(--color-accent-tint);
+}
+
+.chosen-sources__manage {
+  margin-left: auto;
+}
+
+/* A failed Source's error template (SourceCheckProblem), under the line, full width. */
+.chosen-sources__problems {
+  display: flex;
+  flex: 1 0 100%;
+  flex-direction: column;
+  gap: 8px;
+  padding: 4px 0 6px;
 }
 
 /* The flow kit (flow design §6): step form, stepper, Advanced, summary card. */
@@ -1361,6 +1501,42 @@ label {
   background: var(--color-accent-tint);
 }
 
+/* A number field with its unit after it ("30 s"). */
+.field__with-unit {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.field__with-unit > input {
+  width: 8rem;
+}
+
+/* Review's groups (follow-ups C2): the answers of one step under its name, one Change each. */
+.review__group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 12px;
+  min-width: 0;
+}
+
+.review__group-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.review__group-title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 400;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: var(--color-muted);
+}
+
 .review__missing {
   color: var(--color-notice);
   font-weight: 600;
@@ -1427,15 +1603,28 @@ label {
     display: block;
   }
 
-  /* Back and Continue stay in reach at the bottom of the screen. */
+  /* Back and Continue stay in reach at the bottom of the screen, one bar high
+     (--flow-footer-height). */
   .flow__footer {
     position: sticky;
     bottom: 0;
     z-index: 1;
+    box-sizing: border-box;
+    min-height: var(--flow-footer-height);
     margin: 0 -16px;
     padding: 12px 16px;
     background: var(--color-surface-raised);
     box-shadow: 0 -2px 8px var(--color-shadow);
+  }
+
+  /* So nothing stays hidden under the bar (design fix round 3): the page ends one bar
+     lower, and a field scrolled into view (focus, a refusal) stops above the bar. */
+  html:has(.flow__footer) {
+    scroll-padding-bottom: var(--flow-footer-height);
+  }
+
+  .shell__main:has(.flow__footer) {
+    padding-bottom: calc(48px + var(--flow-footer-height));
   }
 
   .review {
@@ -1825,126 +2014,6 @@ label {
   color: var(--color-muted);
 }
 
-/* The Sources section (console DDD §37): Source cards, then the Source flow, Library →
-   Tags → Narrow → Name → Review, with the preview beside the criteria. */
-.source-flow__split {
-  display: grid;
-  gap: 16px;
-  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-  align-items: start;
-}
-
-.source-flow__selects {
-  margin: 0 0 12px;
-  font-weight: 600;
-}
-
-/* The tag picker (TagCombobox.jsx): a combobox, its listbox, the chosen tags as chips. */
-.tag-picker {
-  position: relative;
-  display: grid;
-  gap: 8px;
-}
-
-/* Over what follows (its static position), so opening or closing it never moves a chip. */
-.tag-picker__options {
-  position: absolute;
-  left: 0;
-  right: 0;
-  z-index: 5;
-  margin: 0;
-  padding: 4px 0;
-  list-style: none;
-  max-height: 16rem;
-  overflow-y: auto;
-  border: 1px solid var(--color-line);
-  border-radius: var(--radius-card);
-  background: var(--color-surface-raised);
-}
-
-.tag-picker__option {
-  padding: 6px 10px;
-  cursor: pointer;
-}
-
-.tag-picker__option--active,
-.tag-picker__option:hover {
-  background: var(--color-surface);
-  outline: 2px solid var(--color-accent, currentColor);
-  outline-offset: -2px;
-}
-
-.tag-picker__option[aria-selected="true"] {
-  font-weight: 600;
-}
-
-.tag-picker__chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.tag-picker__chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 2px 4px 2px 10px;
-  border: 1px solid var(--color-line);
-  border-radius: 999px;
-}
-
-.tag-picker__said,
-.tag-picker p {
-  margin: 0;
-}
-
-/* The preview's tiles (PreviewPanel.jsx): fixed-size, so a late image never moves the page. */
-.source-tiles {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, 96px);
-  gap: 6px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.source-tile img,
-.source-tile__missing {
-  display: grid;
-  place-items: center;
-  width: 96px;
-  height: 96px;
-  object-fit: cover;
-  border-radius: 4px;
-  background: var(--color-surface);
-  color: var(--color-muted);
-  font-size: 0.75em;
-  text-align: center;
-}
-
-.source-preview {
-  display: grid;
-  gap: 8px;
-  margin-top: 12px;
-  padding: 14px;
-  border: 1px solid var(--color-line);
-  border-radius: var(--radius-card);
-  background: var(--color-surface-raised);
-}
-
-.source-preview h3,
-.source-preview p {
-  margin: 0;
-}
-
-.source-preview__note {
-  color: var(--color-muted);
-  font-size: 0.9em;
-}
-
 /* Now (flow design §7 J7, bead 5): the Show-now flow, Run cards and the
    per-frame Why disclosures (their toggles reuse the Advanced toggle's look). */
 .show-now {
@@ -1953,24 +2022,6 @@ label {
 
 .show-now__underneath {
   margin: 8px 0;
-}
-
-.show-now__source-list {
-  margin: 0;
-  padding-left: 20px;
-}
-
-.show-now__source-list li + li {
-  margin-top: 8px;
-}
-
-.show-now__source-list button {
-  margin-left: 8px;
-  padding: 4px 8px;
-}
-
-.show-now__source-list p {
-  margin: 4px 0 0;
 }
 
 .run-cards {
@@ -2032,17 +2083,6 @@ label {
   padding: 0 0 0 16px;
   border-left: 2px solid var(--color-line);
 }
-
-/* Node control off (Part E §25): the one banner above every page. It names a
-   misconfiguration, so it reads as a warning. */
-.node-banner {
-  margin: 0 0 16px;
-  padding: 12px 16px;
-  border: 1px solid var(--color-notice);
-  border-left-width: 4px;
-  border-radius: 6px;
-}
-.node-banner p { margin: 0; }
 
 /* The Player page (console DDD §9): one section per aggregate part, each with its own
    read time; facts carry their truth kind (FactLine.jsx). */

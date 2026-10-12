@@ -1,13 +1,15 @@
 """The operator's library routes (console DDD §38 shape A, §40, G10; a composition-root module).
 
-`GET /v1/operator/library/tags` reads the tag list the media worker stored: it publishes nothing,
-so pass A's GET rule holds (admin; no marker). With `ids=` (one to four tag ids, repeated, and
-never with `q`) it answers exactly those tags and `absent[]`, named only from an `ok` list (C5),
-so a saved tag is named however long the library's list is. `GET /v1/operator/library/thumbnails/{asset_id}`
+`GET /v1/operator/library/tags` reads the tag list the media worker stored (roadmap 4: the photo
+library store's lists, central/infra/photo_library_store.py): it publishes nothing, so pass A's
+GET rule holds (admin; no marker). It answers the one list shape (`ListAnswer`, `items`). With `ids=` (one to MAX_CHOSEN tag ids, repeated, and never with `q`) it answers exactly those
+tags and `absent[]`, named only from an `ok` list (C5), so a saved tag is named however long the
+library's list is. `GET /v1/operator/library/thumbnails/{asset_id}`
 is loaded by `<img>`, which cannot send the marker, so it carries PR 37's gate instead: the admin
 check first (signed out, every id gets the same 401 and nothing is queued), then `Sec-Fetch-Site`
-must say `same-origin` when it is sent, then servability (a member of a live preview), so an id
-no live preview selects is 404 `thumbnail_unknown` and queues nothing. A servable miss waits at
+must say `same-origin` when it is sent, then servability (an in-pool row of a wanted pool,
+`PgPhotoLibrary.pool_thumbnail`), so an id no wanted pool selects is 404 `thumbnail_unknown` and
+queues nothing. A servable miss waits at
 most 2 s in the thumbnails' own four slots (`content_wiring.THUMBNAIL_*`), then 503s with
 `Retry-After`. Every answer carries `Cross-Origin-Resource-Policy: same-origin`; a served image is
 only Photo Wall's re-encoding, with `nosniff` and a sandbox CSP. On plain http the cross-site
@@ -30,15 +32,13 @@ from central.assets.reader import Unavailable
 from central.content_routes import ClientDisconnected, until_disconnect
 from central.content_wiring import ContentServices
 from central.kernel.ports import THUMBNAIL_UNKNOWN
-from central.media_ports import MediaApplication
 from central.operator_auth import OPERATOR_PREFIX, add_prefix_headers
+from central.photo_library.model import MAX_CHOSEN, TagRef
+from central.photo_library.ports import PhotoLibraryQueries
+from central.photo_library_routes import MAX_LIST_QUERY, MAX_LIST_RESULTS, list_query
 from contracts.models import Identifier
-from media.models import MAX_SOURCE_TAGS, TagRef
 
 LIBRARY_PREFIX: Final = OPERATOR_PREFIX + "library/"
-MAX_TAG_QUERY: Final = 128
-MAX_TAG_RESULTS: Final = 20
-MAX_TAG_IDS: Final = MAX_SOURCE_TAGS
 _CLIENT_GONE: Final = 499
 _CORP: Final = {"Cross-Origin-Resource-Policy": "same-origin"}
 _IMAGE_HEADERS: Final = {**_CORP, "X-Content-Type-Options": "nosniff",
@@ -75,7 +75,7 @@ def _read_all(fd: int) -> bytes:
         return source.read()
 
 
-def mount_library_routes(app: FastAPI, *, admin: Any, media: MediaApplication,
+def mount_library_routes(app: FastAPI, *, admin: Any, library: PhotoLibraryQueries,
                          content: ContentServices | None) -> None:
     install_access_log_filter()
     # Every answer under the prefix, the admin dependency's 401, FastAPI's 422 and an
@@ -83,15 +83,12 @@ def mount_library_routes(app: FastAPI, *, admin: Any, media: MediaApplication,
     add_prefix_headers(app, LIBRARY_PREFIX, _CORP)
 
     @app.get(LIBRARY_PREFIX + "tags", dependencies=[Depends(admin)])
-    def library_tags(connection: Identifier,
-                     q: str = Query("", max_length=MAX_TAG_QUERY),
-                     limit: int = Query(MAX_TAG_RESULTS, ge=1, le=MAX_TAG_RESULTS),
-                     ids: list[TagRef] | None = Query(None, min_length=1, max_length=MAX_TAG_IDS)):
-        if ids is None:
-            return media.library_tags(connection, q, limit)
-        if q:
-            return _refusal("ids_with_query", 422)
-        return media.library_tags_by_id(connection, tuple(dict.fromkeys(ids)))
+    def tag_list(connection: Identifier,
+                 q: str = Query("", max_length=MAX_LIST_QUERY),
+                 limit: int = Query(MAX_LIST_RESULTS, ge=1, le=MAX_LIST_RESULTS),
+                 ids: list[TagRef] | None = Query(None, min_length=1, max_length=MAX_CHOSEN)):
+        return list_query(connection, q, ids, search=library.tags, by_id=library.tags_by_id,
+                          limit=limit)
 
     @app.get(LIBRARY_PREFIX + "thumbnails/{asset_id}", dependencies=[Depends(admin)])
     async def library_thumbnail(request: Request, asset_id: str) -> Response:

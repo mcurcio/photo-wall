@@ -10,7 +10,6 @@ outcome, and new whenever the form changes (slice 3B §11).
 
 import os
 import re
-from urllib.parse import quote
 
 import pytest
 from console_tasks import (
@@ -33,11 +32,11 @@ from operator_harness import (
     report_readiness,
     submit_sign_in,
 )
+from photo_seed import connected, filled, library_of, saved_source
 from playwright.sync_api import expect
 from test_operator_showrunner_browser import (
     INVALID_FRAME,
     SCENE_ID,
-    SOURCE,
     VALID_FRAME,
     _runs_of,
     _runtime,
@@ -46,6 +45,8 @@ from test_operator_showrunner_browser import (
     _seed_source,
 )
 
+from central.photo_library.model import SourceQuery
+from central.photo_library.ports import CheckFailed
 from central.runtime import Contribution, Scene
 
 pytestmark = pytest.mark.skipif(
@@ -87,33 +88,66 @@ def _covered(registry):
     return runtime
 
 
-def test_show_now_reports_saved_source_freshness_and_refresh_receipt(page, registry):
+def _garden(registry):
+    """A saved Photo source "garden" (roadmap 4) and a Scene on VALID_FRAME playing it."""
+    library = library_of(registry)
+    ref = connected(library)
+    garden = saved_source(registry, library, "garden", SourceQuery(connection_ref=ref))
+    return library, garden
+
+
+def _on(scene_id, source_ref, frame=VALID_FRAME):
+    return Scene(scene_id=scene_id, loop=True, contributions=(
+        Contribution(target=f"frame:{frame}", source_refs=(source_ref,)),))
+
+
+def test_show_now_names_the_scenes_sources_in_one_line_with_no_check_now(page, registry):
+    """K4, after the designer review (follow-ups D1): Show now names the chosen Scene's Sources
+    with their state in one line ("Photos from garden (Not checked yet)"), with no boilerplate
+    and no Check now (the Sources page checks a Source), and none of the words Run, Runs or
+    "Scene to activate" while the quick action shows.
+
+    Mutation probe: render the old Saved Sources section -> the boilerplate assertion fails."""
     _seed(registry)
-    queue = _seed_source(registry)
-    _runtime(registry).command("set_scene", _scene(SCENE_ID))
-    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+    _library, garden = _garden(registry)
+    _runtime(registry).command("set_scene", _on(SCENE_ID, garden))
+    with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "now")
         form = start_show_now(page, SCENE_ID)
-        freshness = form.get_by_role("region", name="Saved Source freshness", exact=True)
-        expect(freshness).to_contain_text("holiday: Awaiting refresh")
-        expect(freshness).to_contain_text("does not confirm prepared media or visible playback")
-        expect(freshness).not_to_contain_text(SOURCE)
-
-        with page.expect_response(lambda response: response.url.endswith(
-                f"/v1/operator/sources/{quote(SOURCE, safe='')}/refresh") and
-                response.request.method == "POST") as info:
-            freshness.get_by_role("button", name="Refresh holiday", exact=True).click()
-        assert info.value.status == 202
-        expect(freshness).to_contain_text(
-            "Refresh requested. The status will update when the media worker finishes.")
+        line = form.get_by_role("definition").filter(has_text="garden")
+        expect(line).to_have_text("garden (Not checked yet)")
+        expect(form).not_to_contain_text("A Source keeps playing what it has found")
+        expect(form.get_by_role("button", name=re.compile("Check"))).to_have_count(0)
+        expect(form.get_by_label("Scene", exact=True)).to_have_value(SCENE_ID)
+        shown = page.get_by_role("region", name="Runs", exact=True).inner_text()   # visible text only
+        assert not re.search(r"\bRuns\b|Scene to activate", shown), shown
         form.get_by_role("button", name="Continue", exact=True).click()
-        freshness = form.get_by_role("region", name="Saved Source freshness", exact=True)
-        expect(freshness).to_contain_text("holiday: Awaiting refresh")
-        expect(freshness).to_contain_text("Refresh requested.")
+        expect(form.get_by_role("definition").filter(has_text="garden")).to_have_text("garden (Not checked yet)")
         expect(form.get_by_role("button", name="Activate now", exact=True)).to_be_enabled()
 
 
-def test_show_now_handles_historical_and_authored_scenes_without_refresh(page, registry):
+def test_show_now_shows_a_failed_check_as_its_problem_naming_immich(page, registry):
+    """A Source whose check failed reads as the error template under the one line, naming who
+    failed (Immich) with its one fix; the line says only "Check failed" (owner, 2026-10-09).
+    Mutation probe: drop SourceCheckProblem from ShowNowFlow.jsx's SceneSources."""
+    _seed(registry)
+    library, garden = _garden(registry)
+    with registry.db.transaction() as conn:
+        key = conn.execute("SELECT pool_key FROM media_sources WHERE source_ref=%s",
+                           (garden,)).fetchone()["pool_key"]
+    filled(library, key, [], CheckFailed(problem="connection"))
+    _runtime(registry).command("set_scene", _on(SCENE_ID, garden))
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "now")
+        form = start_show_now(page, SCENE_ID)
+        expect(form.get_by_role("definition").filter(has_text="garden")).to_have_text("garden (Check failed)")
+        problem = form.get_by_role("group", name="Check failed")
+        expect(problem).to_contain_text("garden: Check failed.")
+        expect(problem).to_contain_text("Immich could not be read: see Photo library. Photos keep playing.")
+        expect(problem.get_by_role("link", name="Open Photo library")).to_be_visible()
+
+
+def test_show_now_handles_historical_and_authored_scenes(page, registry):
     _seed(registry)
     runtime = _runtime(registry)
     runtime.command("set_scene", Scene(scene_id="historical", contributions=(
@@ -123,43 +157,11 @@ def test_show_now_handles_historical_and_authored_scenes_without_refresh(page, r
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "now")
         form = start_show_now(page, "historical")
-        freshness = form.get_by_role("region", name="Saved Source freshness", exact=True)
-        expect(freshness).to_contain_text("gone: Current Source status is unavailable.")
-        expect(freshness).not_to_contain_text("gone:1")
-        expect(freshness.get_by_role("button", name=re.compile("Refresh"))).to_have_count(0)
-        form.get_by_role("button", name="Continue", exact=True).click()
-        expect(form.get_by_role("region", name="Saved Source freshness", exact=True)).to_contain_text(
-            "Current Source status is unavailable.")
-        page.get_by_role("navigation", name="Steps", exact=True).get_by_role(
-            "button", name="Scene", exact=True).click()
-        form.get_by_label("Scene to activate", exact=True).select_option("fixed")
-        freshness = form.get_by_role("region", name="Saved Source freshness", exact=True)
-        expect(freshness).to_contain_text(
-            "This Scene uses hand-picked media; refreshing a Source does not change its chosen items.")
-        expect(freshness.get_by_role("button", name=re.compile("Refresh"))).to_have_count(0)
-
-
-def test_show_now_ignores_refresh_receipt_after_scene_change(page, registry):
-    _seed(registry)
-    _seed_source(registry)
-    runtime = _runtime(registry)
-    runtime.command("set_scene", _scene("first"))
-    runtime.command("set_scene", _scene("second"))
-    with operator_server(registry.db, registry.clock) as origin:
-        connect(page, origin, "now")
-        form = start_show_now(page, "first")
-        freshness = form.get_by_role("region", name="Saved Source freshness", exact=True)
-        gate = RequestGate(page, "**/v1/operator/sources/*/refresh")
-        gate.holding = True
-        freshness.get_by_role("button", name="Refresh holiday", exact=True).click()
-        gate.wait_held()
-        expect(freshness.get_by_role("button", name="Refresh holiday", exact=True)).to_be_disabled()
-        form.get_by_label("Scene to activate", exact=True).select_option("second")
-        gate.release(status=202, content_type="application/json", body='{"requested_revision": 1}')
-        freshness = form.get_by_role("region", name="Saved Source freshness", exact=True)
-        expect(freshness).to_contain_text("holiday: Awaiting refresh")
-        expect(freshness).not_to_contain_text("Refresh requested.")
-        expect(freshness.get_by_role("button", name="Refresh holiday", exact=True)).to_be_enabled()
+        sources = form.get_by_label("Photos from", exact=True)
+        expect(sources).to_contain_text("gone (its state is not served)")
+        expect(sources).not_to_contain_text("gone:1")
+        form.get_by_label("Scene", exact=True).select_option("fixed")
+        expect(form.get_by_label("Photos from", exact=True)).to_contain_text("Hand-picked photos")
 
 
 def test_the_default_priority_is_the_covering_runs_so_the_new_run_shows_on_top(page, registry):
@@ -216,9 +218,13 @@ def test_unhealthy_scene_frame_opens_its_recovery_tab_and_keeps_show_draft(page,
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "now", paused_at=registry.clock.utc())
         form = show_now(page, SCENE_ID, submit=False)
-        expect(form).to_contain_text(f"{INVALID_FRAME}: No report yet")
+        # Enrolled, no report yet: "Getting ready", the Frame page header's words
+        # (domain/frame-health-chip.ts).
+        expect(form).to_contain_text(f"{INVALID_FRAME}: Getting ready")
         expect(form.get_by_role("link", name=f"Open Frame {INVALID_FRAME}", exact=True)).to_have_attribute(
             "href", f"#/wall/frames/{INVALID_FRAME}/hardware")
+        # A chip is status only (design fix round 4): its link sits on the line under the chips.
+        expect(form.get_by_text(f"{INVALID_FRAME}: Getting ready", exact=True).get_by_role("link")).to_have_count(0)
 
         for player_id in players:
             report_readiness(registry, player_id)
@@ -247,7 +253,7 @@ def test_unhealthy_scene_frame_opens_its_recovery_tab_and_keeps_show_draft(page,
         # Selecting a healthy Frame leaves its chip informational.
         page.get_by_role("navigation", name="Steps", exact=True).get_by_role(
             "button", name="Scene", exact=True).click()
-        form.get_by_label("Scene to activate", exact=True).select_option("healthy")
+        form.get_by_label("Scene", exact=True).select_option("healthy")
         expect(form).to_contain_text(f"{VALID_FRAME}: Heard recently")
         expect(form.get_by_role("link", name=f"Open Frame {VALID_FRAME}", exact=True)).to_have_count(0)
 
@@ -398,11 +404,11 @@ def test_a_scene_cards_show_now_opens_the_flow_on_that_scene(page, registry):
         scenes.get_by_role("button", name=f"Show Scene {SCENE_ID} now", exact=True).click()
         expect(page.get_by_role("heading", level=1, name="Now", exact=True)).to_be_visible()
         assert current_hash(page) == "#/now/show/scene"
-        expect(show_form(page).get_by_label("Scene to activate", exact=True)).to_have_value(SCENE_ID)
+        expect(show_form(page).get_by_label("Scene", exact=True)).to_have_value(SCENE_ID)
 
         go(page, "scenes")
         scenes.get_by_role("button", name="Show Scene elsewhere now", exact=True).click()
-        expect(show_form(page).get_by_label("Scene to activate", exact=True)).to_have_value(
+        expect(show_form(page).get_by_label("Scene", exact=True)).to_have_value(
             "elsewhere")
 
 
@@ -551,7 +557,7 @@ def test_a_card_show_now_offers_its_scene_to_a_changed_draft(page, registry):
         form = show_now(page, SCENE_ID, priority=2, submit=False)
         _show_scene_card(page, "elsewhere")
         assert current_hash(page) == "#/now/show/scene"
-        scene = form.get_by_label("Scene to activate", exact=True)
+        scene = form.get_by_label("Scene", exact=True)
         expect(scene).to_have_value(SCENE_ID)
         expect(form).to_contain_text(f"Your unsaved draft shows Scene {SCENE_ID}.")
         form.get_by_role("button", name="Show Scene elsewhere instead", exact=True).click()
@@ -571,7 +577,7 @@ def test_the_same_scene_handed_over_again_is_offered_again(page, registry):
         connect(page, origin, "now")
         _show_scene_card(page, "elsewhere")
         form = show_form(page)
-        scene = form.get_by_label("Scene to activate", exact=True)
+        scene = form.get_by_label("Scene", exact=True)
         expect(scene).to_have_value("elsewhere")
         scene.select_option(SCENE_ID)  # a changed draft
         _show_scene_card(page, "elsewhere")
@@ -597,7 +603,7 @@ def test_a_card_show_now_keeps_a_draft_whose_outcome_is_unknown(page, registry):
         # so the draft is clean (the sidebar does not say "Draft").
         _show_scene_card(page, SCENE_ID)
         form = show_form(page)
-        expect(form.get_by_label("Scene to activate", exact=True)).to_have_value(SCENE_ID)
+        expect(form.get_by_label("Scene", exact=True)).to_have_value(SCENE_ID)
         form.get_by_role("button", name="Continue", exact=True).click()
         form.get_by_role("button", name="Activate now", exact=True).click()
         expect(_outcome(page)).to_have_text(UNKNOWN)
@@ -607,7 +613,7 @@ def test_a_card_show_now_keeps_a_draft_whose_outcome_is_unknown(page, registry):
 
         _show_scene_card(page, "elsewhere")
         assert current_hash(page) == "#/now/show/scene"
-        expect(form.get_by_label("Scene to activate", exact=True)).to_have_value(SCENE_ID)
+        expect(form.get_by_label("Scene", exact=True)).to_have_value(SCENE_ID)
         expect(form).to_contain_text(f"Your unsaved draft shows Scene {SCENE_ID}.")
         expect(form.get_by_role("button", name="Show Scene elsewhere instead", exact=True)
                ).to_be_visible()
@@ -660,7 +666,7 @@ def test_a_card_show_now_during_an_activation_in_flight_keeps_its_draft_and_key(
         gate.holding = True
         _show_scene_card(page, SCENE_ID)  # a clean draft on SCENE_ID
         form = show_form(page)
-        scene = form.get_by_label("Scene to activate", exact=True)
+        scene = form.get_by_label("Scene", exact=True)
         form.get_by_role("button", name="Continue", exact=True).click()
         form.get_by_role("button", name="Activate now", exact=True).click()
         gate.wait_held()

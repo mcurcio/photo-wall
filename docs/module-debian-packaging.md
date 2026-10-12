@@ -8,7 +8,7 @@ One source package, `photo-wall` (`debian/`, `3.0 (native)`, `debhelper-compat (
 
 | Package | Holds | Installed in |
 |---|---|---|
-| `photo-wall-common` | `contracts`, `nodeapi`, less the modules only Central imports (`debian/rules` `CENTRAL_ONLY`: `nodeapi/hub.py`, `contracts/node_release.py`, `contracts/os_attempt_report.py`) | base, app root, manager root |
+| `photo-wall-common` | `contracts`, `nodeapi`, less the modules only Central imports (`debian/rules` `CENTRAL_ONLY`: `nodeapi/hub.py`, `contracts/node_release.py`) | base, app root, manager root |
 | `photo-wall-uplink` | `uplink` (stdlib-only) | base, app root, manager root |
 | `photo-wall-node-kernel`, `-central-session`, `-host`, `-display`, `-health`, `-apps`, `-boot`, `-manager` | one Node context each; `-display` is the one architecture-dependent context (the Meson-built shell, the diagnostic client and `abi.json`) | base; the manager root takes the manager's imports |
 | `photo-wall-frame-client` | the frame client's `.so` | app root |

@@ -7,12 +7,13 @@ import { cn } from "./cn";
 /**
  * Button (console design system). `outline` (border and tint) is the default, for a
  * secondary action; `primary` (filled) is a form's one forward action; `ghost` is a
- * record's other actions; `danger` is only a destructive confirmation's confirm.
+ * record's other actions; `danger` is only a destructive confirmation's confirm. A label
+ * wraps only between words, never inside one, whatever its container allows.
  */
 export const buttonVariants = cva(
   [
     "inline-flex cursor-pointer items-center justify-center gap-2 rounded-button border px-5 py-2",
-    "font-sans text-sm font-medium",
+    "font-sans text-sm font-medium wrap-normal",
     "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus",
     "disabled:cursor-not-allowed disabled:opacity-60",
   ],

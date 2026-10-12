@@ -1,23 +1,35 @@
 import hashlib
 
 import pytest
+from support.key_content_builders import measured
 
-from central.catalog import Candidate, CatalogSnapshot
+from central.catalog import Candidate, SourcePool
 from central.planner import PlannerLimits, PlanningBudgetExceeded, PlanningError, eligible, project
 from central.runtime import Child, Contribution, RecordingActuator, Runtime, Scene
+from central.wall_plan.fit import FitTarget
+from central.wall_plan.fit_settings import FitSettings
+from central.wall_plan.order import WallHistory
+from central.wall_plan.selection import SceneSelection
 from contracts.models import FrameProfile, OutputBinding, Plan, Variant
 
+# Roadmap 5a: a photo is placed only once its key content is measured and it fills its Frame
+# (central/wall_plan/assignment.py), so these candidates are measured, with an even interest
+# grid, and default to the default Frame's 9:16 shape and pixels.
 
-def candidate(asset="a", *, width=1200, height=1800, kind="image", prepared=True, captured=0,
-              variant_width=None, variant_height=None):
+
+def candidate(asset="a", *, width=1080, height=1920, kind="image", prepared=True, captured=0,
+              variant_width=None, variant_height=None) -> Candidate:
     variant = Variant(
         sha256=hashlib.sha256(asset.encode()).hexdigest(), size=10,
         media_type="video/mp4" if kind == "video" else "image/jpeg",
         width=variant_width or width, height=variant_height or height,
         duration=10 if kind == "video" else None,
     ) if prepared else None
-    return Candidate(asset_id=asset, kind=kind, original_width=width, original_height=height,
-                     captured_at=captured, variant=variant)
+    return measured(asset, width, height, kind=kind, captured_at=captured, variant=variant)
+
+
+def pool(source="holiday:1", *candidates, ready=True):
+    return SourcePool(source_ref=source, ready=ready, candidates=candidates)
 
 
 def binding(frame="left", output="hdmi-1", *, width=1080, height=1920, diagonal=40,
@@ -27,10 +39,12 @@ def binding(frame="left", output="hdmi-1", *, width=1080, height=1920, diagonal=
                                               diagonal_inches=diagonal, video=video))
 
 
-def runtime(*, cycle=10, contributions=None, children=()):
+def runtime(*, cycle=10, contributions=None, children=(), order="newest_first"):
+    """One looping Scene; newest first unless named (its order is roadmap 5a's Scene setting)."""
     instance = Runtime()
     instance.set_scene(Scene(
         scene_id="scene", cycle_seconds=cycle, loop=True, children=children,
+        selection=SceneSelection(order=order),
         contributions=contributions if contributions is not None else (
             Contribution(target="frame:left", source_refs=("holiday:1",)),
         ),
@@ -39,16 +53,22 @@ def runtime(*, cycle=10, contributions=None, children=()):
     return instance
 
 
-def propose(instance, *, now=0, horizon=25, assets=None, snapshots=None, bindings=None,
+def full_screen(bindings) -> dict:
+    """Each bound Frame full screen on a Display of its profile's size (its Frame output)."""
+    return {item.frame_id: (item.profile.width_px, item.profile.height_px)
+            for items in bindings.values() for item in items}
+
+
+def propose(instance, *, now=0, horizon=25, assets=None, pools=None, bindings=None,
             authored=None, locks=None, limits=None):
+    bindings = bindings or {"player-one": (binding(),)}
     options = dict(
-        bindings_by_player=bindings or {"player-one": (binding(),)},
-        catalog_snapshots=snapshots if snapshots is not None else {
-            "holiday:1": CatalogSnapshot(source_ref="holiday:1", refreshed_at=now,
-                                         candidates=tuple(assets or [candidate()])),
+        bindings_by_player=bindings, settings=FitSettings(), frame_outputs=full_screen(bindings),
+        source_pools=pools if pools is not None else {
+            "holiday:1": pool("holiday:1", *(assets or [candidate()])),
         },
         authored_candidates=authored or {}, locked_assignments=locks or {},
-        horizon_seconds=horizon,
+        history=WallHistory(), horizon_seconds=horizon, plan_seconds=horizon,
     )
     if limits:
         options["limits"] = limits
@@ -72,28 +92,33 @@ def test_live_results_change_unsecured_cycles_same_run_and_locks_preserve_delete
     assert by_start[20].variant == candidate("new").variant
     assert layers(first)[0].assignment_id == by_start[0].assignment_id
     assert instance.advance(5).for_target("frame:left").source_refs == ("holiday:1",)
-    empty = propose(instance, now=5, snapshots={
-        "holiday:1": CatalogSnapshot(source_ref="holiday:1", refreshed_at=5, candidates=()),
-    }, locks={locked.assignment_id: locked})
+    empty = propose(instance, now=5, pools={"holiday:1": pool()}, locks={locked.assignment_id: locked})
     assert layers(empty) == (locked,)
     assert {d.code for d in empty.diagnostics} >= {"source_empty", "no_eligible_candidates"}
 
 
 @pytest.mark.parametrize("kind,width,height,diagonal,video,expected", [
-    ("image", 2000, 1000, 20, True, False),
-    ("image", 1000, 2000, 50, True, True),
-    ("image", 1000, 1000, 50, True, True),
-    ("video", 1280, 720, 40, True, False),
-    ("video", 1280, 720, 39, True, True),
-    ("video", 1920, 1080, 40, True, True),
-    ("video", 1920, 1080, 20, False, False),
+    ("image", 2000, 1000, 20, True, False),     # 2:1 on 9:16 crops beyond the limit
+    ("image", 2160, 3840, 50, True, True),
+    ("image", 2400, 3600, 50, True, True),      # 2:3 on 9:16 crops 16 %
+    ("image", 1000, 2000, 50, True, False),     # the kept window has fewer than the Frame's pixels
+    ("image", 2000, 2000, 50, True, False),     # 1:1 on 9:16 crops 44 %
+    ("video", 720, 1280, 40, True, False),
+    ("video", 720, 1280, 39, True, True),
+    ("video", 1080, 1920, 40, True, True),
+    ("video", 1080, 1920, 20, False, False),
 ])
 def test_original_eligibility_precedes_derivative_dimensions(kind, width, height, diagonal,
                                                            video, expected):
+    """Roadmap 5a: eligibility is the photo fit rule's size-only part on the original (ratio,
+    not orientation labels; the Frame's pixels; requirements :186's video floor)."""
     asset = candidate(kind=kind, width=width, height=height,
                       variant_width=3840, variant_height=2160)
     profile = binding(diagonal=diagonal, video=video).profile
-    assert eligible(asset, profile) is expected
+    target, house = FitTarget(profile=profile, output_px=(profile.width_px, profile.height_px)), \
+        FitSettings()
+    assert eligible(asset, target, house.crop_limit, house) is expected
+    assert eligible(asset, target, 0.5, house) is (expected or (width, height) == (2000, 2000))
 
 
 def test_upscaled_720p_is_never_sent_to_large_frame_and_authored_alternative_stays_on_role():
@@ -103,32 +128,85 @@ def test_upscaled_720p_is_never_sent_to_large_frame_and_authored_alternative_sta
     instance = runtime(contributions=(Contribution(
         target="frame:left", asset_refs=("low", "proper"), role="left-speaker",
     ),))
-    result = propose(instance, authored={"low": low, "proper": proper},
-                     bindings={"player-one": (binding(), binding("right", "hdmi-2"))})
+    landscape = {"player-one": (binding(width=1920, height=1080),
+                                binding("right", "hdmi-2", width=1920, height=1080))}
+    result = propose(instance, authored={"low": low, "proper": proper}, bindings=landscape)
     assert {layer.frame_id for layer in layers(result)} == {"left"}
     assert all(layer.variant == proper.variant for layer in layers(result))
     assert all(selection.asset_id == "proper" for selection in result.selections)
-    missing = propose(instance, authored={"low": low})
+    missing = propose(instance, authored={"low": low}, bindings=landscape)
     assert layers(missing) == ()
     assert "authored_no_eligible_alternative" in {d.code for d in missing.diagnostics}
 
 
-@pytest.mark.parametrize("status", ["unavailable", "permission", "incompatible"])
-def test_failed_sources_do_not_use_stale_candidates_or_masquerade_as_empty(status):
+def test_a_pool_not_yet_complete_still_plays_and_an_empty_one_says_which_it_is():
+    """C7: the last pool keeps playing while Immich is down, so a pool with no complete check
+    assigns what it has. Empty, it is `source_not_ready` until a check completes, then
+    `source_empty`. Mutation probe: skip pools that are not ready (nothing is assigned)."""
     instance = runtime()
-    result = propose(instance, snapshots={
-        "holiday:1": CatalogSnapshot(source_ref="holiday:1", refreshed_at=0,
-                                     status=status, candidates=(candidate(),)),
-    })
-    assert layers(result) == ()
-    codes = {diagnostic.code for diagnostic in result.diagnostics}
-    assert f"source_{status}" in codes
-    assert "source_empty" not in codes
+    playing = propose(instance, pools={"holiday:1": pool("holiday:1", candidate(), ready=False)})
+    assert [layer.variant for layer in layers(playing)] == [candidate().variant] * 3
+    assert not {d.code for d in playing.diagnostics} & {"source_not_ready", "source_empty"}
+    waiting = propose(instance, pools={"holiday:1": pool(ready=False)})
+    assert layers(waiting) == ()
+    codes = {diagnostic.code for diagnostic in waiting.diagnostics}
+    assert "source_not_ready" in codes and "source_empty" not in codes
+    empty = propose(instance, pools={"holiday:1": pool()})
+    codes = {diagnostic.code for diagnostic in empty.diagnostics}
+    assert "source_empty" in codes and "source_not_ready" not in codes
     first = layers(propose(instance))[0]
-    locked = propose(instance, snapshots={
-        "holiday:1": CatalogSnapshot(source_ref="holiday:1", refreshed_at=0, status=status),
-    }, locks={first.assignment_id: first})
+    locked = propose(instance, pools={"holiday:1": pool(ready=False)},
+                     locks={first.assignment_id: first})
     assert layers(locked) == (first,)
+
+
+def test_two_sources_sharing_a_photo_give_one_candidate_newest_first_across_sources():
+    """F-1: a contribution's photos are the union of its Sources' pools, one per asset id.
+    Mutation probe: union without dedup (the shared photo takes two of the cycles)."""
+    instance = runtime(contributions=(
+        Contribution(target="frame:left", source_refs=("holiday:1", "garden:1")),))
+    shared, older, newest = (candidate("shared", captured=2), candidate("older", captured=1),
+                             candidate("newest", captured=3))
+    result = propose(instance, horizon=35, pools={
+        "holiday:1": pool("holiday:1", older, shared),
+        "garden:1": pool("garden:1", shared, newest),
+    })
+    assert [s.asset_id for s in result.selections] == ["newest", "shared", "older", "newest"]
+
+
+def test_a_photo_only_in_a_source_the_contribution_does_not_name_is_never_assigned():
+    instance = runtime(contributions=(
+        Contribution(target="frame:left", source_refs=("holiday:1",)),))
+    result = propose(instance, pools={
+        "holiday:1": pool("holiday:1", candidate("mine", captured=1)),
+        "garden:1": pool("garden:1", candidate("theirs", captured=9)),
+    })
+    assert {s.asset_id for s in result.selections} == {"mine"}
+
+
+def test_a_pool_of_fifty_thousand_photos_on_four_frames_plans_an_hour_with_no_budget_error():
+    """C11: no window and no candidate cap; roadmap 5a: the whole wall an hour ahead. Inside the
+    preparation horizon no photo is prepared, so the newest are requested; beyond it the plan
+    is tentative. Mutation probe: keep a candidate-count bound."""
+    frames = ("left", "right", "top", "bottom")
+    instance = runtime(cycle=30, contributions=tuple(
+        Contribution(target=f"frame:{frame}", source_refs=("holiday:1",)) for frame in frames))
+    shared = candidate("photo-0").analysis
+    photos = [Candidate(asset_id=f"photo-{n}", kind="image", original_width=1080,
+                        original_height=1920, captured_at=n, analysis=shared)
+              for n in range(50_000)]
+    bindings = {"player-one": tuple(binding(frame, f"hdmi-{n}") for n, frame in enumerate(frames))}
+    result = project(
+        instance, 0, bindings_by_player=bindings, settings=FitSettings(),
+        frame_outputs=full_screen(bindings),
+        source_pools={"holiday:1": pool("holiday:1", *photos)}, authored_candidates={},
+        locked_assignments={}, history=WallHistory(), horizon_seconds=300, plan_seconds=3600)
+    assert layers(result) == ()
+    assert {r.asset_id for r in result.acquisitions} >= {f"photo-{49_999 - n}" for n in range(4)}
+    assert len(result.plan) == 4 * 120
+    tentative = [photo for photo in result.plan if photo.state == "tentative"]
+    assert len(tentative) == 4 * 110
+    assert len({photo.asset_id for photo in tentative}) == len(tentative)
 
 
 def test_missing_source_diagnosed_and_missing_variant_requests_deduplicated_acquisition():
@@ -142,8 +220,8 @@ def test_missing_source_diagnosed_and_missing_variant_requests_deduplicated_acqu
     assert len(result.acquisitions) == 1
     assert len(result.acquisitions[0].assignment_ids) == 6
     assert result.acquisitions[0].earliest_start == 0
-    assert {d.code for d in result.diagnostics} == {"preparation_pending"}
-    missing = propose(instance, snapshots={})
+    assert {d.code for d in result.diagnostics} == {"no_photo_free"}
+    missing = propose(instance, pools={})
     assert "source_missing" in {d.code for d in missing.diagnostics}
 
 
@@ -229,18 +307,14 @@ def test_stable_recent_cycle_variety_and_snapshot_order_independence():
 
 
 @pytest.mark.parametrize("limits,overrides", [
-    (PlannerLimits(max_candidates=1), {"assets": [candidate("a"), candidate("b")]}),
-    (PlannerLimits(max_sources=1), {"snapshots": {
-        "holiday:1": CatalogSnapshot(source_ref="holiday:1", refreshed_at=0),
-        "other:1": CatalogSnapshot(source_ref="other:1", refreshed_at=0),
+    (PlannerLimits(max_sources=1), {"pools": {
+        "holiday:1": pool("holiday:1"), "other:1": pool("other:1"),
     }}),
     (PlannerLimits(max_assignments=1), {}),
-    (PlannerLimits(max_acquisitions=1), {"assets": [candidate("a", prepared=False),
-                                                candidate("b", prepared=False)]}),
     (PlannerLimits(max_horizon_seconds=5), {}),
     (PlannerLimits(max_cycle_seconds=5), {}),
     (PlannerLimits(max_events=1), {}),
-    (PlannerLimits(max_diagnostics=1), {"snapshots": {}}),
+    (PlannerLimits(max_diagnostics=1), {"pools": {}}),
 ])
 def test_each_planning_budget_fails_without_mutation(limits, overrides):
     instance = runtime()
@@ -255,16 +329,14 @@ def test_invalid_input_and_prepared_variant_fail_safely():
     with pytest.raises(PlanningError, match="one current binding"):
         propose(instance, bindings={"one": (binding(),), "two": (binding(),)})
     with pytest.raises(PlanningError, match="immutable source"):
-        propose(instance, snapshots={
-            "holiday:1": CatalogSnapshot(source_ref="wrong:1", refreshed_at=0),
-        })
+        propose(instance, pools={"holiday:1": pool("wrong:1")})
     for invalid in (0, -1, float("nan"), float("inf"), True):
         with pytest.raises(PlanningError):
             propose(instance, horizon=invalid)
     bad = candidate().model_copy(update={"variant": candidate(kind="video").variant})
     result = propose(instance, assets=[bad])
     assert layers(result) == ()
-    assert "variant_incompatible" in {d.code for d in result.diagnostics}
+    assert "no_photo_free" in {d.code for d in result.diagnostics}
 
 
 def test_secured_delayed_child_keeps_exact_layer_across_unrelated_activation():
@@ -309,16 +381,18 @@ def test_authored_reference_input_budget_is_explicit():
     instance = runtime(contributions=(Contribution(target="frame:left", source_refs=("holiday:1",) * 3),))
     with pytest.raises(PlanningBudgetExceeded, match="authored source reference"):
         propose(instance, limits=PlannerLimits(max_sources=2))
+    authored = runtime(contributions=(Contribution(target="frame:left", asset_refs=("a", "b")),))
+    with pytest.raises(PlanningBudgetExceeded, match="authored asset reference"):
+        propose(authored, authored={"a": candidate("a")}, limits=PlannerLimits(max_authored_refs=1))
 
 
 def test_source_health_remains_observable_when_entire_projection_is_locked():
     instance = runtime()
     lock = layers(propose(instance, horizon=5))[0]
-    result = propose(instance, horizon=5, locks={lock.assignment_id: lock}, snapshots={
-        "holiday:1": CatalogSnapshot(source_ref="holiday:1", refreshed_at=0, status="unavailable"),
-    })
+    result = propose(instance, horizon=5, locks={lock.assignment_id: lock},
+                     pools={"holiday:1": pool(ready=False)})
     assert layers(result) == (lock,)
-    assert "source_unavailable" in {diagnostic.code for diagnostic in result.diagnostics}
+    assert "source_not_ready" in {diagnostic.code for diagnostic in result.diagnostics}
 
 
 def test_a_locked_layer_takes_a_revised_fade_out_and_nothing_else():

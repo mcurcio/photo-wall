@@ -3,26 +3,22 @@
 import hashlib
 import json
 
-from contracts.player_control import ControlSelection, plan_for_selection
+from contracts.player_control import ControlSelection
 
 
 def project_state(delivery: dict, selection: ControlSelection) -> dict:
-    """Keep the published v0.12 envelope exactly four fields for legacy sessions, and each
-    plan layer in the shape the session's Player parses (`plan_for_selection`)."""
-    state = {
+    """The state a negotiated session reads; the Identify cue only where it was selected."""
+    cue = delivery["identify_output"] if "identify_output" in selection.capabilities else None
+    return {
         "configuration": delivery["configuration"].model_dump(mode="json"),
-        "plan": plan_for_selection(delivery["plan"].model_dump(mode="json"), selection)
-        if delivery["plan"] else None,
+        "plan": delivery["plan"].model_dump(mode="json") if delivery["plan"] else None,
         "commits": [item.model_dump(mode="json") for item in delivery["commits"]],
         "revocations": [item.model_dump(mode="json") for item in delivery["revocations"]],
+        "identify_output": cue.model_dump(mode="json") if cue else None,
     }
-    if selection.schema_version == 2:
-        cue = delivery["identify_output"] if "identify_output" in selection.capabilities else None
-        state["identify_output"] = cue.model_dump(mode="json") if cue else None
-    return state
 
 
-def state_digest(state: dict, *, control_fence: dict | None = None) -> str:
+def state_digest(state: dict) -> str:
     """Bind an acknowledgment to semantic state, excluding the cue's live countdown.
 
     `remaining_seconds` is only a display deadline hint. It changes on every
@@ -38,7 +34,5 @@ def state_digest(state: dict, *, control_fence: dict | None = None) -> str:
     if cue is not None:
         semantic["identify_output"] = {key: value for key, value in cue.items()
                                        if key != "remaining_seconds"}
-    if control_fence is not None:
-        semantic["_control_fence"] = control_fence
     encoded = json.dumps(semantic, sort_keys=True, separators=(",", ":"), allow_nan=False)
     return hashlib.sha256(encoded.encode()).hexdigest()

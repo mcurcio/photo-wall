@@ -7,7 +7,7 @@ samples, manager preparation and broker evidence recorded through Central's own 
 services, and a real Registry Player enrolled on the same device. It proves the device-keyed
 join, the node read (only on an open Player page), the facts' labels and their Unknowns, the
 per-section error boundary and the retired `#/equipment` and `#/players` bookmarks (no aliases);
-and (B2) Reboot Player against Central's real reboot owner behind an open effect gate: the
+and (B2) Reboot Player against Central's real reboot owner: the
 frozen request, its retry, its window, late responses and the app operations' named states,
 and (R0) the one send rule: a dialog frozen at an older read sends nothing once the newest read
 lists another outstanding request;
@@ -17,12 +17,10 @@ and (NS1, Part E) Stage app against Central's real stage owner: a Frame-bound Pl
 Ended by a later boot, a switch in progress refuses a stale dialog with zero POSTs, a lost answer
 resends the identical body, and refusals read in Central's words;
 and (NS2, Part E) Qualified fallback: Begin names the linked app, this page samples every 2 s
-only while visible, stops with zero further samples on a terminal, unlisted or
-node_control_disabled answer and after 2 minutes without progress, and a qualification Central
+only while visible, stops with zero further samples on a terminal or unlisted answer and
+after 2 minutes without progress, and a qualification Central
 accepts is listed and admits a following Stage as its fallback;
-and (NV1, Part E) the V2 posture: a Central without node control shows one banner, one "not
-shown" line and sends no node read; the Boot section holds node records only; the effect gate
-comes from the shell's one status read.
+and (NV1, Part E) the V2 posture: the Boot section holds node records only.
 
 Every assertion is behavioural (role, text, outcome); ages are Central's read time minus
 Central's receipt time, driven by the registry's controlled clock.
@@ -45,7 +43,6 @@ from operator_harness import (
 )
 from playwright.sync_api import expect
 from test_fleet_attempts import BOOT_ID, DEVICE_ID, SERIAL
-from test_fleet_rollout_gate import _certificate, _gate, _LocalImageVerifier
 from test_node_acceptance import Witnesses
 from test_node_boot import claim_for, cold_setup, environment, publish_deployment
 from test_node_lifecycle import Rig
@@ -80,12 +77,6 @@ pytestmark = pytest.mark.skipif(
 NODE = NodeControlConfig("node-test")
 NAME = f"Player …{SERIAL[-6:]}"
 DEVICE_READ = f"**/v1/operator/node/devices/{DEVICE_ID}"
-BANNER = ("Node management is off on this Central. It was started without node control: Players "
-          "that boot by node path are refused, and node records, Reboot, App operations and Releases "
-          "have nothing to read. Start Central with central.node_app and set PHOTO_WALL_NODE_AUDIENCE "
-          "(runbook › Node control).")
-NOT_SHOWN = "Node records are not shown: node management is off (see the banner)."
-STATUS_READ = "/v1/operator/node/status"
 HOSTS_READ = "/v1/operator/node/hosts"
 
 
@@ -144,19 +135,10 @@ class Box:
 
 
 def _node_reads(page):
-    """Every node read the pages send, in order, except the shell's node status read and its
-    fleet host read (HOSTS_READ, gated with it on node control)."""
+    """Every node read the pages send, in order, except the shell's fleet host read (HOSTS_READ)."""
     sent = []
     page.on("request", lambda request: sent.append(request.url)
-            if "/v1/operator/node/" in request.url and STATUS_READ not in request.url
-            and HOSTS_READ not in request.url else None)
-    return sent
-
-
-def _status_reads(page):
-    """Every node status read the console sends (the shell's, and nobody else's)."""
-    sent = []
-    page.on("request", lambda request: sent.append(request.url) if STATUS_READ in request.url else None)
+            if "/v1/operator/node/" in request.url and HOSTS_READ not in request.url else None)
     return sent
 
 
@@ -279,93 +261,6 @@ def test_a_malformed_read_blanks_one_section_only(page, registry):
         expect(page.get_by_role("region", name="Outputs", exact=True)).to_contain_text("HDMI-A-1")
         go(page, "hardware")
         expect(hardware_list(page).get_by_role("link", name=NAME, exact=True)).to_be_visible()
-
-
-def test_with_node_control_off_one_banner_one_line_no_node_reads_and_the_page_works(page, registry):
-    identity, _, request = enroll(registry, count=2)
-    player_id = identity["player_id"]
-    registry.create_frame(FrameCreate(id="off-1", surface_id="wall", x_mm=100, y_mm=100, width_mm=400,
-                                      height_mm=300, profile=FrameProfile(width_px=1920, height_px=1080,
-                                                                          diagonal_inches=24)))
-    page.route(f"**/v1/operator/players/{player_id}/outputs/HDMI-A-2/identify", lambda route: route.fulfill(
-        status=202, content_type="application/json", body=json.dumps({
-            "request_id": "synthetic-request", "output_id": "HDMI-A-2",
-            "expires_at": registry.clock.utc() + 15})))
-    name = f"Player {request.device_id}"
-    with operator_server(registry.db, registry.clock, node_control=None) as origin:
-        sent = _node_reads(page)
-        host_reads = []
-        page.on("request", lambda request: host_reads.append(request.url)
-                if HOSTS_READ in request.url else None)
-        connect(page, origin)
-        banner = page.get_by_role("region", name="Node control", exact=True)
-        expect(banner).to_have_text(BANNER)
-        expect(banner).to_have_count(1)
-        pi = open_pi(page, name)
-        expect(banner).to_have_count(1)
-        # In place of each page's node sections, exactly one line.
-        expect(pi.get_by_text(NOT_SHOWN, exact=True)).to_have_count(1)
-        for section in ("Health", "Link and sessions", "Reboot"):
-            expect(page.get_by_role("region", name=section, exact=True)).to_have_count(0)
-        expect(pi).not_to_contain_text("Unknown: node management")
-        _software(page, name)
-        player = page.locator("main > section:not([hidden])")
-        expect(player.get_by_text(NOT_SHOWN, exact=True)).to_have_count(1)
-        for section in ("Layers", "Boot", "App"):
-            expect(page.get_by_role("region", name=section, exact=True)).to_have_count(0)
-        expect(player).not_to_contain_text("Unknown: node management")
-        # Identify, Bind, Unbind and Retire still work.
-        outputs = page.get_by_role("list", name=f"Outputs of {name}", exact=True)
-        outputs.get_by_role("button", name="Identify Panel HDMI-A-2", exact=True).click()
-        expect(outputs.get_by_role("status")).to_contain_text("Identify requested for HDMI-A-2.")
-        page.get_by_role("combobox", name=f"Frame for {player_id[-6:]} · HDMI-A-1 · Free", exact=True
-                         ).select_option("off-1")
-        outputs.get_by_role("button", name="Bind HDMI-A-1", exact=True).click()
-        expect(page.get_by_role("heading", level=1, name="Frame off-1", exact=True)).to_be_visible()
-        assert registry.inventory().frames[0].player_id == player_id
-        player = open_player(page, name)
-        player.get_by_role("button", name=f"Unbind all outputs of {player_id}", exact=True).click()
-        dialog = page.get_by_role("dialog")
-        dialog.get_by_role("button", name="Confirm unbind all", exact=True).click()
-        expect(dialog.get_by_role("status")).to_have_text("1 of 1 unbound")
-        assert registry.inventory().frames[0].player_id is None
-        dialog.get_by_role("button", name="Close", exact=True).click()
-        # Retire lives on the Pi's Hardware page.
-        pi = open_pi(page, name)
-        pi.get_by_role("button", name=f"Retire player {player_id}", exact=True).click()
-        dialog = page.get_by_role("dialog")
-        dialog.get_by_label(f"Type {player_id[-6:]} to confirm", exact=True).fill(player_id[-6:])
-        dialog.get_by_role("button", name="Confirm retire", exact=True).click()
-        expect(pi).to_contain_text("Standing: Retired")
-        page.wait_for_timeout(300)
-        assert sent == [], "a node read was sent to a Central without node control"
-        assert host_reads == [], "the shell read fleet hosts from a Central without node control"
-
-
-def test_with_node_control_on_there_is_no_banner_and_the_player_page_reads_no_status_itself(
-        page, registry):
-    box = Box(registry)
-    box.host_sample()
-    with operator_server(registry.db, registry.clock, node_control=NODE) as origin:
-        status = _status_reads(page)
-        connect(page, origin)
-        expect(page.get_by_role("heading", level=1)).to_be_visible()
-        expect(page.get_by_role("region", name="Node control", exact=True)).to_have_count(0)
-        go(page, "hardware")
-        page.wait_for_timeout(200)
-        shell_reads = len(status)
-        assert shell_reads >= 1, "the shell did not read node status"
-        with page.expect_response(DEVICE_READ):
-            open_pi(page, NAME)
-        expect(_host(page)).to_contain_text("Host Management last reported")
-        with page.expect_response(DEVICE_READ):
-            _software(page)
-        expect(_layer(page, "App Manager")).to_contain_text("Last reported")
-        # A second device read (5 s cadence) sends no status read of the page's own.
-        with page.expect_response(DEVICE_READ, timeout=10_000):
-            pass
-        assert len(status) == shell_reads, "the Player page read node status itself"
-        expect(page.get_by_role("region", name="Node control", exact=True)).to_have_count(0)
 
 
 def test_the_boot_section_holds_node_records_only(page, registry):
@@ -510,15 +405,8 @@ APP_READ = f"**/v1/operator/node/devices/{DEVICE_ID}/app-attempts"
 RUN_STAYS = "The Run stays active. Central sends no command to other Frames or Actuators."
 
 
-def _open_gate(registry):
-    """Open the fleet effect gate, as a certified deployment does; returns its generation."""
-    gate, _ = _gate(registry, _certificate(expires_in=300))
-    return gate, gate.open(expected_revision=0).generation
-
-
-def _gated_server(registry):
-    return operator_server(registry.db, registry.clock, node_control=NODE,
-                           node_serving_verifier=_LocalImageVerifier())
+def _node_server(registry):
+    return operator_server(registry.db, registry.clock, node_control=NODE)
 
 
 def _respond(box, command_id, decision, reason="reboot_scope_or_expiry"):
@@ -617,8 +505,7 @@ def test_the_reboot_dialog_names_frames_and_a_recorded_reboot_is_requested(page,
                                       height_mm=300, profile=FrameProfile(width_px=1920, height_px=1080,
                                                                           diagonal_inches=24)))
     registry.bind("lobby", box.player_id, "HDMI-A-1", expected_generation=0)
-    _open_gate(registry)
-    with _gated_server(registry) as origin:
+    with _node_server(registry) as origin:
         sent = _reboot_posts(page)
         connect(page, origin)
         open_pi(page, NAME)
@@ -653,8 +540,7 @@ def test_the_reboot_dialog_names_frames_and_a_recorded_reboot_is_requested(page,
 
 def test_a_lost_answer_is_retried_with_the_identical_body_inside_the_window(page, registry):
     Box(registry)
-    _open_gate(registry)
-    with _gated_server(registry) as origin:
+    with _node_server(registry) as origin:
         sent = _reboot_posts(page)
         _lose_first_response(page)
         connect(page, origin)
@@ -673,8 +559,7 @@ def test_a_double_click_on_reboot_player_sends_one_post(page, registry):
     """R1: the dialog's send, double-clicked, sends one reboot request (the dialog's hold and the
     per-device guard inside `sendReboot`, tests/test_console_fleet_commands.py)."""
     Box(registry)
-    _open_gate(registry)
-    with _gated_server(registry) as origin:
+    with _node_server(registry) as origin:
         sent = _reboot_posts(page)
         connect(page, origin)
         open_pi(page, NAME)
@@ -690,8 +575,7 @@ def test_a_double_click_on_reboot_player_sends_one_post(page, registry):
 
 def test_a_retry_after_the_window_is_outcome_unknown_and_a_late_response_moves_it_on(page, registry):
     box = Box(registry)
-    _open_gate(registry)
-    with _gated_server(registry) as origin:
+    with _node_server(registry) as origin:
         sent = _reboot_posts(page)
         _lose_first_response(page)
         held = _HeldDeviceRead(page)
@@ -727,29 +611,12 @@ def test_a_retry_after_the_window_is_outcome_unknown_and_a_late_response_moves_i
         expect(history).to_contain_text("Accepted by Host Management, not yet started", timeout=10_000)
 
 
-def test_a_closed_gate_disables_reboot_with_its_reason(page, registry):
-    Box(registry)
-    with _gated_server(registry) as origin:
-        sent = _reboot_posts(page)
-        connect(page, origin)
-        open_pi(page, NAME)
-        expect(_reboot(page).get_by_role("button", name="Reboot Player", exact=True)).to_be_disabled()
-        expect(_reboot(page)).to_contain_text(
-            "Reboot unavailable: Effect gate closed · Central's reason: no deployment certification has opened it")
-        # NR2: the gate reason links to the gate's home, which shows the same words.
-        _reboot(page).get_by_role("link", name="See Releases › Effect gate", exact=True).click()
-        expect(page.get_by_role("region", name="Effect gate", exact=True)).to_contain_text(
-            "Effect gate: Effect gate closed · Central's reason: no deployment certification has opened it")
-        assert sent == []
-
-
 def test_rejected_reboots_and_app_operations_show_their_named_states(page, registry):
     box = Box(registry)
-    gate, generation = _open_gate(registry)
     _, grant = box.claims["host_core"]
     command_id = uuid4()
-    NodeCommands(box.sessions, gate).request_reboot(
-        DEVICE_ID, OperatorReboot(command_id, grant.session_id, 1, "operator:fixture", generation))
+    NodeCommands(box.sessions).request_reboot(
+        DEVICE_ID, OperatorReboot(command_id, grant.session_id, 1, "operator:fixture"))
     registry.clock.advance(2)
     _respond(box, command_id, "rejected")
 
@@ -765,7 +632,7 @@ def test_rejected_reboots_and_app_operations_show_their_named_states(page, regis
         route.fulfill(status=200, content_type="application/json", body=json.dumps(data))
 
     page.route(APP_READ, rejected_stage)
-    with _gated_server(registry) as origin:
+    with _node_server(registry) as origin:
         connect(page, origin)
         open_pi(page, NAME)
         history = _reboot(page).get_by_role("list", name="Reboot history", exact=True)
@@ -791,8 +658,7 @@ def test_a_dialog_frozen_at_an_older_read_sends_nothing_once_another_request_is_
     a different reboot request, which the next read lists as outstanding. Send is disabled, and
     the dialog's own send handler, called directly, refuses inside `sendReboot`: zero POSTs."""
     box = Box(registry)
-    gate, generation = _open_gate(registry)
-    with _gated_server(registry) as origin:
+    with _node_server(registry) as origin:
         sent = _reboot_posts(page)
         connect(page, origin)
         open_pi(page, NAME)
@@ -802,8 +668,8 @@ def test_a_dialog_frozen_at_an_older_read_sends_nothing_once_another_request_is_
         expect(send).to_be_enabled()
         # Another tab's request, recorded by Central's real reboot owner after the dialog froze.
         _, grant = box.claims["host_core"]
-        NodeCommands(box.sessions, gate).request_reboot(
-            DEVICE_ID, OperatorReboot(uuid4(), grant.session_id, 1, "operator:other-tab", generation))
+        NodeCommands(box.sessions).request_reboot(
+            DEVICE_ID, OperatorReboot(uuid4(), grant.session_id, 1, "operator:other-tab"))
         registry.clock.advance(5)
         expect(dialog.get_by_role("alert")).to_have_text(
             "Another reboot request for this Player is outstanding; close this dialog and review it.", timeout=10_000)
@@ -820,8 +686,7 @@ def test_centrals_outstanding_fence_reads_as_changed(page, registry):
     """A 409 node_reboot_outstanding (another page's request committed after this page's newest
     read) reads as changed, never as a refusal of this Player."""
     box = Box(registry)
-    gate, generation = _open_gate(registry)
-    with _gated_server(registry) as origin:
+    with _node_server(registry) as origin:
         sent = _reboot_posts(page)
         held = _HeldDeviceRead(page)
         connect(page, origin)
@@ -830,8 +695,8 @@ def test_centrals_outstanding_fence_reads_as_changed(page, registry):
         dialog = page.get_by_role("dialog", name=f"Reboot {NAME}?", exact=True)
         held.freeze()  # the other page's commit lands after this page's newest read
         _, grant = box.claims["host_core"]
-        NodeCommands(box.sessions, gate).request_reboot(
-            DEVICE_ID, OperatorReboot(uuid4(), grant.session_id, 1, "operator:other-tab", generation))
+        NodeCommands(box.sessions).request_reboot(
+            DEVICE_ID, OperatorReboot(uuid4(), grant.session_id, 1, "operator:other-tab"))
         dialog.get_by_role("button", name="Reboot Player", exact=True).click()
         expect(dialog.get_by_role("status")).to_have_text(
             "Another reboot request for this Player is outstanding; close this dialog and review it.")
@@ -840,7 +705,7 @@ def test_centrals_outstanding_fence_reads_as_changed(page, registry):
         assert conn.execute("SELECT count(*) AS n FROM node_reboot_commands").fetchone()["n"] == 1
 
 
-# --- NS1 (Part E): Stage app against Central's real stage owner behind an open effect gate.
+# --- NS1 (Part E): Stage app against Central's real stage owner.
 
 STAGES = f"**/v1/operator/node/devices/{DEVICE_ID}/app-stages"
 BOUND_RULE = ("Each Frame this Player drives shows the base page while the app switches, then rejoins its Run "
@@ -875,8 +740,8 @@ def test_a_bound_player_stages_with_the_bound_rule_and_renders_every_served_stat
     """D16 (G6): a Frame-bound Player is staged; the dialog states this boot only and the bound
     rule; a stranded Staged offers a newer stage saying what it replaces; the operation then reads
     switching (Stage disabled), the target running, and ended by a later boot (G2)."""
-    fixture = Rig(registry, unbound=False, gate_seconds=300)
-    with _gated_server(registry) as origin:
+    fixture = Rig(registry, unbound=False)
+    with _node_server(registry) as origin:
         sent = _stage_posts(page)
         connect(page, origin)
         open_player(page, NAME)
@@ -918,29 +783,15 @@ def test_a_bound_player_stages_with_the_bound_rule_and_renders_every_served_stat
         expect(operations).to_contain_text("a later boot was admitted; Central offers each boot the boot selection")
         assert len(sent) == 1
         assert sent[0]["deployment_id"] == str(fixture.deployments[0].deployment_id)
-        assert sent[0]["rollout_generation"] == fixture.generation
+        assert "rollout_generation" not in sent[0]
         assert sent[0]["operator_audit_ref"].startswith("console/")
-
-
-def test_a_closed_gate_disables_stage_with_its_reason_and_a_link_to_the_gate(page, registry):
-    fixture = Rig(registry, gate_seconds=300)
-    fixture.service.gate.close()
-    with _gated_server(registry) as origin:
-        sent = _stage_posts(page)
-        connect(page, origin)
-        open_player(page, NAME)
-        expect(_app(page).get_by_role("button", name="Stage app…", exact=True)).to_be_disabled()
-        expect(_app(page)).to_contain_text("Stage app unavailable: Effect gate closed · Central's reason:")
-        _app(page).get_by_role("link", name="See Releases › Effect gate", exact=True).click()
-        expect(page.get_by_role("region", name="Effect gate", exact=True)).to_contain_text("Effect gate closed")
-        assert sent == []
 
 
 def test_a_stale_stage_dialog_sends_nothing_once_a_switch_is_in_progress(page, registry):
     """The dialog froze while nothing was switching; another tab's stage then starts switching. Send
     is disabled, and the dialog's own send handler, called directly, refuses inside sendStage."""
-    fixture = Rig(registry, gate_seconds=300)
-    with _gated_server(registry) as origin:
+    fixture = Rig(registry)
+    with _node_server(registry) as origin:
         sent = _stage_posts(page)
         connect(page, origin)
         open_player(page, NAME)
@@ -966,8 +817,8 @@ def test_a_lost_stage_answer_resends_the_identical_body_and_a_recorded_one_is_no
     Central did record is settled by the next read, which lists it, and is never re-sent."""
     # Name a deployment whose app is not the qualified one: the release read lists deployments
     # published at one instant in no fixed order, so "the first radio" may be the running app.
-    fixture = Rig(registry, gate_seconds=300)
-    with _gated_server(registry) as origin:
+    fixture = Rig(registry)
+    with _node_server(registry) as origin:
         sent = _stage_posts(page)
         answer_first(page, STAGES, lambda route: route.fulfill(status=502, body=""))  # never reaches Central
         connect(page, origin)
@@ -1003,20 +854,20 @@ def test_a_lost_stage_answer_resends_the_identical_body_and_a_recorded_one_is_no
 
 
 def test_stage_refusals_read_in_centrals_words_and_unlisted_codes_are_refused(page, registry):
-    Rig(registry, gate_seconds=300)
-    answers = iter([(503, "rollout_serving_verifier_unavailable"), (422, "node_app_stage_invalid"),
+    Rig(registry)
+    answers = iter([(503, "node_unlisted_refusal"), (422, "node_app_stage_invalid"),
                     (409, "node_app_qualified_fallback_required")])
 
     def refuse(route):
         status, code = next(answers)
         route.fulfill(status=status, content_type="application/json", body=json.dumps({"error": code}))
 
-    with _gated_server(registry) as origin:
+    with _node_server(registry) as origin:
         sent = _stage_posts(page)
         page.route(STAGES, refuse)
         connect(page, origin)
         open_player(page, NAME)
-        for words in ("Central refused the effect: rollout_serving_verifier_unavailable.",
+        for words in ("Central refused: node_unlisted_refusal.",
                       "Central refused: node_app_stage_invalid.",
                       "No qualified fallback for this Player's current Outputs and base: qualify the running app first."):
             dialog = _stage_dialog(page)
@@ -1089,7 +940,7 @@ def _begun(registry):
 def test_begin_names_the_linked_app_and_samples_every_two_seconds_only_while_visible(page, registry):
     fixture = Rig(registry, unbound=False)
     linked = fixture.proof.challenge.environment_sha256
-    with _gated_server(registry) as origin:
+    with _node_server(registry) as origin:
         samples = _Samples(page)
         connect(page, origin, paused_at=registry.clock.utc())
         open_player(page, NAME)
@@ -1118,12 +969,12 @@ def test_begin_names_the_linked_app_and_samples_every_two_seconds_only_while_vis
 @pytest.mark.parametrize("status, code, words", [
     (409, "node_qualification_process_changed", "Stopped: the Player app's linked process changed or unlinked."),
     (409, "node_something_new", "Stopped: Central refused: node_something_new."),
-    (503, "node_control_disabled", "Stopped: Central refused: node_control_disabled."),
+    (503, "node_unlisted_refusal", "Stopped: Central refused: node_unlisted_refusal."),
 ])
 def test_a_terminal_or_unlisted_sample_answer_stops_sampling_with_zero_further_posts(
         page, registry, status, code, words):
     fixture = Rig(registry, unbound=False)
-    with _gated_server(registry) as origin:
+    with _node_server(registry) as origin:
         samples = _Samples(page, (status, {"error": code}))
         connect(page, origin, paused_at=registry.clock.utc())
         open_player(page, NAME)
@@ -1141,7 +992,7 @@ def test_a_terminal_or_unlisted_sample_answer_stops_sampling_with_zero_further_p
 
 def test_two_minutes_of_waiting_answers_stop_sampling_with_zero_further_posts(page, registry):
     fixture = Rig(registry, unbound=False)
-    with _gated_server(registry) as origin:
+    with _node_server(registry) as origin:
         samples = _Samples(page)
         connect(page, origin, paused_at=registry.clock.utc())
         open_player(page, NAME)
@@ -1171,8 +1022,7 @@ def test_an_accepted_qualification_is_listed_and_a_following_stage_is_admitted_a
         base.manager_primary.environment_sha256: base.environment_sources[base.manager_primary.environment_sha256],
         target.environment_sha256: "https://example.invalid/target"})
     publish_deployment(registry.db, selected, registry.clock)
-    _open_gate(registry)
-    with _gated_server(registry) as origin:
+    with _node_server(registry) as origin:
         samples = _Samples(page)
         sent = _stage_posts(page)
         connect(page, origin)

@@ -4,7 +4,6 @@ import pytest
 from test_authored_media import setup_source
 
 from central.coordination import Coordinator
-from central.media_repository import StoreLimits
 from central.registry import RegistryError
 from central.runtime import Contribution, Runtime, Scene
 
@@ -76,28 +75,15 @@ def test_authored_scene_requires_exact_asset_refs_and_no_live_refs(registry):
     assert count_authored(registry) == 0
 
 
-def test_authored_scene_preserves_media_freshness_membership_and_capacity_checks(registry):
+def test_authored_scene_preserves_media_membership_checks(registry):
     repo, spec, originals = setup_source(registry)
     coordinator = Coordinator(registry.db, registry.clock)
-    with repo.transaction() as conn:
-        conn.execute("UPDATE media_sources SET status='permission' WHERE source_ref=%s", (spec.source_ref,))
-    with pytest.raises(RegistryError, match="source_not_fresh"):
-        coordinator.configure_authored_scene(authored_scene(originals[0].asset_id),
-                                             spec.source_ref, (originals[0].asset_id,))
-    assert count_authored(registry) == 0
-
-    with repo.transaction() as conn:
-        conn.execute("UPDATE media_sources SET status='ok' WHERE source_ref=%s", (spec.source_ref,))
     missing = "asset-never-seen"
     with pytest.raises(RegistryError, match="authored_asset_not_found"):
         coordinator.configure_authored_scene(authored_scene(missing), spec.source_ref, (missing,))
-    assert count_authored(registry) == 0
-
-    limited = StoreLimits(max_authored_candidates=1)
-    coordinator.media.limits = limited
-    with pytest.raises(RegistryError, match="authored_candidate_limit"):
+    with pytest.raises(RegistryError, match="source_not_found"):
         coordinator.configure_authored_scene(authored_scene(originals[0].asset_id),
-                                             spec.source_ref, (originals[0].asset_id,))
+                                             "unknown:1", (originals[0].asset_id,))
     assert count_authored(registry) == 0
 
 
@@ -147,7 +133,8 @@ def test_refresh_membership_change_serializes_before_atomic_scene(registry, monk
             assert entered.wait(2), "composite operation did not enter its Runtime transaction"
             with pytest.raises(TimeoutError):
                 future.result(timeout=.1)
-            conn.execute("DELETE FROM source_members WHERE source_ref=%s", (spec.source_ref,))
+            # A completed check's sweep, committed while the authoring waits on the media lock.
+            conn.execute("DELETE FROM photo_pool_rows WHERE asset_id=%s", (originals[0].asset_id,))
         with pytest.raises(RegistryError, match="authored_asset_not_member"):
             future.result(timeout=3)
     assert count_authored(registry) == 0

@@ -11,9 +11,10 @@ pass, each stated once here and mirrored by player/native.py's shaders:
 - **Final pass** (`final_pixel`): contracts/node_frame.py PictureOperations in their stated
   order, then the per-Output mask LAST, so black stays black outside every opening whatever
   the picture settings.
-- **Photo fit** (`photo_rect`): each photo's source rectangle, centred cover of the Frame
-  profile's aspect (Photo fit #48/#102; no trim, owner q3). It is the one crop in either fit: in
-  Cover the drawn rectangle has that same aspect, so the photo is never cropped twice or squeezed.
+- **Photo fit** (`photo_rect`): each photo's source rectangle, the window `Layer.crop` names, cut
+  from the Frame profile's aspect (contracts/photo_crop.py, the one home of the window; no trim,
+  owner q3). It is the one crop in either fit: in Cover the drawn rectangle has that same aspect,
+  so the photo is never cropped twice or squeezed.
 """
 
 from __future__ import annotations
@@ -22,8 +23,9 @@ import math
 from collections.abc import Iterable, Sequence
 
 from contracts.frame_fit import Corners, OutputSize, cover_rectangle
-from contracts.models import CornersFit, CoverFit
+from contracts.models import CornersFit, CoverFit, PhotoCrop
 from contracts.node_frame import PictureOperations, srgb_to_linear
+from contracts.photo_crop import CENTRED, crop_window
 
 Matrix = tuple[float, float, float, float, float, float, float, float, float]
 Linear = tuple[float, float, float]     # linear-light RGB, each 0..1
@@ -155,34 +157,27 @@ def inside_opening(corners: Corners, x: float, y: float) -> bool:
     return True
 
 
-def photo_rect(frame_aspect: float, source_width: int, source_height: int) -> tuple[float, float, float, float]:
-    """The photo's source UV rectangle (left, top, right, bottom) for centred cover of
-    `frame_aspect` (Photo fit). Pure; ValueError for a non-positive or non-finite aspect or size."""
-    if not math.isfinite(frame_aspect) or frame_aspect <= 0:
-        raise ValueError("positive finite Frame aspect required")
-    if source_width <= 0 or source_height <= 0:
-        raise ValueError("positive source dimensions required")
-    width = height = 1.0
-    aspect = source_width / source_height
-    if aspect > frame_aspect:
-        width = frame_aspect / aspect
-    else:
-        height = aspect / frame_aspect
-    return ((1-width)/2, (1-height)/2, (1+width)/2, (1+height)/2)
+def photo_rect(frame_aspect: float, source_width: int, source_height: int,
+               crop: PhotoCrop) -> tuple[float, float, float, float]:
+    """The photo's source UV rectangle (left, top, right, bottom): the window `crop` names for
+    `frame_aspect` (contracts/photo_crop.py `crop_window`). Pure; ValueError for a non-positive
+    or non-finite aspect or size."""
+    return crop_window(crop, source_width, source_height, frame_aspect)
 
 
 def picture_source_uv(x: float, y: float, fit: CornersFit | CoverFit, output: OutputSize, profile_aspect: float,
-                      source_width: int, source_height: int) -> tuple[float, float] | None:
+                      source_width: int, source_height: int,
+                      crop: PhotoCrop) -> tuple[float, float] | None:
     """The source UV one Frame samples at output point (x, y); None outside its opening or its
     picture. The per-Frame mask (the opening) comes first, so a Frame never
     draws over its neighbour, then the picture's unit square. The photo is cropped to the Frame
-    profile's aspect (`profile_aspect`), in either fit."""
+    profile's aspect (`profile_aspect`), in either fit, at the window `crop` names (`photo_rect`)."""
     if not inside_opening(fit.corners, x, y):
         return None
     u, v = transform(output_to_picture(fit, output, profile_aspect), x, y)
     if not (0 <= u <= 1 and 0 <= v <= 1):
         return None
-    left, top, right, bottom = photo_rect(profile_aspect, source_width, source_height)
+    left, top, right, bottom = photo_rect(profile_aspect, source_width, source_height, crop)
     return left + u*(right-left), top + v*(bottom-top)
 
 
@@ -212,7 +207,7 @@ def output_pixel(x: float, y: float, frames: Sequence[tuple[CornersFit | CoverFi
     decides what a Frame paints; the per-Output mask is the union of the openings."""
     colour: Linear = (0.0, 0.0, 0.0)
     for fit, aspect, flat in frames:
-        if picture_source_uv(x, y, fit, output, aspect, 1, 1) is not None:
+        if picture_source_uv(x, y, fit, output, aspect, 1, 1, CENTRED) is not None:
             colour = flat
     inside = any(inside_opening(fit.corners, x, y) for fit, _, _ in frames)
     return final_pixel(colour, operations, inside=inside)

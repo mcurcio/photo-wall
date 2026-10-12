@@ -6,7 +6,6 @@ from pydantic import ValidationError
 
 from central.runtime import (
     OPERATOR_HISTORY_SECONDS,
-    AdmissionPolicy,
     Child,
     Contribution,
     Program,
@@ -17,6 +16,7 @@ from central.runtime import (
     RunView,
     Scene,
 )
+from central.wall_plan.selection import SceneSelection
 
 
 def media(target="frame:left", source="holiday:v1", **kwargs):
@@ -29,60 +29,6 @@ def lamp(start=0, end=1):
 
 def get_run(view, run_id):
     return next(run for run in view.runs if run.run_id == run_id)
-
-
-def test_drain_policy_rejects_manual_force_restart_and_explicit_queue_before_admission():
-    scene = Scene(scene_id="nested", loop=True, children=(Child(scene=Scene(
-        scene_id="child", contributions=(media("frame:drained"),),
-    )),))
-    runtime = Runtime()
-    runtime.set_scene(scene)
-    existing = runtime.activate("nested", "existing", 0)
-    policy = AdmissionPolicy(frozenset({"frame:drained"}))
-    guarded = Runtime.restore(runtime.export_state(), admission_policy=policy)
-
-    for identity, options in (
-        ("manual", {}),
-        ("forced-restart", {"repeat": "restart", "force": True}),
-        ("explicit-queue", {"repeat": "queue", "expires_at": 20}),
-    ):
-        refusal = guarded.activate("nested", identity, 0, **options)
-        assert (refusal.status, refusal.reason) == ("rejected", "equipment_draining")
-    assert [run.run_id for run in guarded.project(0).runs
-            if run.ended_at is None and run.parent_id is None] == [
-        existing.run_id
-    ]
-    assert guarded.export_state()["queue"] == []
-    assert guarded.project(0).now == 0
-    assert guarded._copy().admission_policy == policy
-
-    guarded.set_scene(Scene(scene_id="unrelated", contributions=(media("frame:open"),)))
-    assert guarded.activate("unrelated", "unrelated", 0).status == "admitted"
-
-
-def test_preexisting_queued_activation_waits_behind_drain_until_expiry_without_spin():
-    runtime = Runtime()
-    runtime.set_scene(Scene(scene_id="queued", loop=True, cycle_seconds=100,
-                            contributions=(media("frame:open"),)))
-    existing = runtime.activate("queued", "existing", 0)
-    runtime.set_scene(Scene(scene_id="queued", revision=2, loop=True, cycle_seconds=100,
-                            contributions=(media("frame:drained"),)))
-    assert runtime.activate("queued", "pending", 0, repeat="queue", expires_at=10).status == (
-        "queued"
-    )
-    guarded = Runtime.restore(
-        runtime.export_state(), admission_policy=AdmissionPolicy(frozenset({"frame:drained"}))
-    )
-    guarded.cancel(existing.run_id, 0)
-
-    before = guarded.export_state()
-    assert guarded.project(5, max_events=2).now == 5
-    assert guarded.export_state() == before
-    assert guarded.advance(5, max_events=2).now == 5
-    assert guarded.export_state()["admissions"]["pending"]["status"] == "queued"
-    assert guarded.advance(10, max_events=2).now == 10
-    assert guarded.export_state()["admissions"]["pending"]["status"] == "expired"
-    assert guarded.export_state()["queue"] == []
 
 
 def test_frame_references_include_nested_outro_and_upcoming_program_context():
@@ -1132,3 +1078,46 @@ def test_a_photo_is_kept_only_when_no_run_beneath_it_plays_on():
     assert after_ends(None) == [("kept", "keep_this_photo")]
     assert after_ends("after") == [("kept", "keep_this_photo")]
     assert after_ends("beneath") == [("other", "keep_this_photo"), ("kept", "leave_as_is")]
+
+
+# Roadmap 5a (slice O1): each Intent carries its own Scene's selection, and coordination reads the
+# shown history of every Scene Runtime can plan.
+
+def test_an_intent_carries_its_own_scenes_selection_and_a_childs_carries_the_childs():
+    parent_selection = SceneSelection(order="chronological", no_repeat_days=3, crop_limit=0.5)
+    child_selection = SceneSelection(order="on_this_day", no_repeat_days=0, crop_limit=0.2)
+    runtime = Runtime()
+    runtime.set_scene(Scene(
+        scene_id="parent", cycle_seconds=60, selection=parent_selection,
+        contributions=(media("frame:left"),),
+        children=(Child(scene=Scene(scene_id="child", cycle_seconds=60, selection=child_selection,
+                                    contributions=(media("frame:right"),))),),
+    ))
+    runtime.activate("parent", "parent-start", 0)
+    view = runtime.project(10)
+    assert view.for_target("frame:left").selection == parent_selection
+    assert view.for_target("frame:right").scene_id == "child"
+    assert view.for_target("frame:right").selection == child_selection
+    timeline = runtime.timeline(0, 30)
+    assert {intent.scene_id: intent.selection for v in timeline for intent in v.contributions} == {
+        "parent": parent_selection, "child": child_selection}
+
+
+def test_planning_selections_name_configured_child_and_admitted_scenes():
+    configured = SceneSelection(crop_limit=0.4)
+    child = SceneSelection(order="newest_first")
+    admitted = SceneSelection(crop_limit=0.5)
+    runtime = Runtime()
+    runtime.set_scene(Scene(scene_id="show", cycle_seconds=60, selection=admitted,
+                            contributions=(media("frame:left"),)))
+    runtime.activate("show", "show-start", 0)
+    # A later edit changes the configured Scene; the running Run keeps its admitted snapshot.
+    runtime.set_scene(Scene(scene_id="show", revision=2, cycle_seconds=60, selection=configured,
+                            contributions=(media("frame:left"),)))
+    runtime.set_scene(Scene(
+        scene_id="family", cycle_seconds=60,
+        children=(Child(scene=Scene(scene_id="kids", cycle_seconds=60, selection=child,
+                                    contributions=(media("frame:right"),))),),
+    ))
+    assert runtime.planning_selections() == {
+        "show": admitted, "family": SceneSelection(), "kids": child}

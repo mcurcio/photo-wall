@@ -6,7 +6,7 @@ import { FactGroup, FactRow, Note } from "../patterns/fact-row";
 import { ProblemCard } from "../patterns/problem-card";
 import { usePolledRead } from "../polledRead.js";
 import { orientationCoherent } from "../projection.js";
-import { clockTime } from "../timeWords.js";
+import { clockTime, pixelSize } from "../timeWords.js";
 import { Button } from "../ui/button";
 import { Section } from "../ui/section";
 import { Stack } from "../ui/stack";
@@ -56,7 +56,7 @@ export function preferredMode(display: DisplayView | null): ModeView | null {
   return display?.modes.find((mode) => mode.preferred) ?? display?.modes[0] ?? null;
 }
 
-const size = (mode: { width: number; height: number }) => `${mode.width} × ${mode.height}`;
+const size = (mode: { width: number; height: number }) => pixelSize(mode.width, mode.height);
 const rate = (mode: ModeView) => `${Math.round(mode.refresh_millihertz / 1000)} Hz`;
 const named = (display: DisplayView) => display.name || `${display.maker} ${display.product}`;
 

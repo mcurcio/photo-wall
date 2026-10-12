@@ -28,7 +28,6 @@ def test_read_only_media_health_uses_the_same_defaults_without_initializing_row(
         "max_bytes": StoreLimits().max_bytes,
         "worker_seen": None,
         "worker_error": None,
-        "connection_ids": None,
         "accounted_bytes": 0,
         "jobs": [],
     }

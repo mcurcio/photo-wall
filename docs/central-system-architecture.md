@@ -2,7 +2,7 @@
 
 **Status:** Approved by the owner: the shape, the module contracts (§10) and the five decisions (§9).
 Amended by [idempotent jobs](central-idempotent-jobs.md) (#26, implemented).
-**Scope:** how Central serves photos, videos, the OS image and the Player `.deb`. Playback
+**Scope:** how Central serves photos, videos, the OS image and the node release roots (the Player `.deb` of the original scope was removed with the V1 boot path, [0019](decisions/0019-debian-packaging-with-debhelper.md); the per-device pins and `.deb` rows below are that design's record, and a Pi now fetches the base through its node boot offer). Playback
 coordination, enrollment and the console UI are out of scope; they are neighbours only.
 **What it gives up:** a waiting request keeps a connection open for up to 30s. Two or more
 pods only work if they share one disk, and the code cannot check that (§6). Central writes
@@ -103,6 +103,7 @@ the worker calls it for jobs.
 | --- | --- | --- | --- | --- |
 | **Catalog & release policy** | Releases, media sources and recipes, devices, pins, promotion | Resolve a request to **candidate asset keys** (pinned: exactly one; unpinned: newest first, may substitute; an unseen serial is registered and an invalid one is still served; *Unknown* → 404 only when nothing matches: an empty catalog, or a `.deb` neither desired nor on disk). Per-device `.deb` manifest. Operator: pin/unpin, promote, refresh, media source settings. A promotion records who set it (`auto` or `operator`); `SyncReleases` never moves an `operator` one. `SyncReleases` applies a release observation only if its upstream version is not older. | `SyncReleases`, `SyncMediaSources`, `SyncMediaSource` | Look at the disk or download bytes. |
 | **Assets & cache** | Asset records, disk layout, the read path, production, the byte budget | Serve bytes for a key through the **read-through** path: open (serving a substitute also publishes the wanted asset's fetch job, in the open's transaction), else publish the asset's fetch job and await its handle ≤30s, then open it whatever the outcome says: serve, or 503. Record `last_served_at` (throttled). | `FetchOsImage`, `FetchPackage`, `PrepareMedia`, `Prefetch`, `MaintainCache` | Decide which version a device gets. Keep any "is cached" state. |
+| **Photo library** (built in delivery 4; [media module](module-media.md)) | Immich connections and their write-only keys and health; Photo source queries, drafts, and one pool per distinct query (`central/photo_library/`, pure; its store `central/infra/photo_library_store.py`) | Connections (add, change, remove, Check now), the stored album, people, place and tag lists, drafts and Save, pool pages, Check now for a Source. Reads only stored rows. | `CheckConnection`, `CheckPool` (`media/library_checks.py` over the `LibraryClient` port) | Call Immich from the HTTP process. Return a key. Remove a pool row before a check completes. |
 | **Health & signals** | Probes, fleet health, metrics | `/livez`; `/readyz` = the process is up and can reach the DB. Fleet health view for the console. | none: fleet health is **computed when read** from job outcomes and worker heartbeats | Put cache contents, origins or convergence into a probe. |
 | **Queue operations** (infrastructure in `central.infra`, not a domain) | Queue hygiene | none | `RescueStalledJobs`, `PurgeFinishedJobs` | Touch domain records. |
 
@@ -132,6 +133,8 @@ finished run leaves a **job outcome** that waiters read (§10.2).
 | `SyncReleases` | Tick; operator refresh (HTTP) | (none) | Catalog | Release rows, each applied only if its upstream version is not older, and their Asset references (add; retire on a re-cut). Withdrawal of tags gone upstream is not in the MVP. Then publishes `Prefetch` | yes |
 | `SyncMediaSources` | Tick | (none) | Catalog | Nothing except one `SyncMediaSource(source)` per enabled source (cron fan-out) | yes |
 | `SyncMediaSource(source)` | `SyncMediaSources`; operator source change | `source` | Catalog | Media catalog + `media-variant` Asset rows, then publishes `Prefetch` | no |
+| `CheckConnection(connection_ref)` (built in 4 as `photo_wall.library.check_connection`) | The media tick for a due connection; operator add, change, Check now | `connection_ref` | Photo library | One contact with Immich: health (the latest-started contact wins, by number), counts, the bound Immich user; then the album, people, place and tag lists | via the media tick (every 15 min per connection) |
+| `CheckPool(pool_key)` (built in 4 as `photo_wall.library.check_pool`) | The media tick for a due pool (also a check with no step begun for 15 minutes, which resumes it); a new draft, a changed query, Save, Check now; the previous step | `pool_key` | Photo library | One bounded step of a check (up to N, one exclusion page, or one keyset include page): pool rows and marks, and the next step queued in the same transaction; a complete finish sweeps rows the check did not see | via the media tick (every 15 min per wanted pool) |
 | `Prefetch` | Tick; after sync, pin, promote, plan change | (none) | Assets & cache | Nothing except the fetch job of each desired asset missing from disk | yes + on change |
 | `MaintainCache` | Tick | (none) | Assets & cache | Removes release files nothing wants: an eager keep-set sweep, not budget-gated. Desired = the window of the 3 newest stable node releases + the selected + the previous deployment + the V1 roots (`desired_in`), read once to pick candidates and again immediately before each unlink (mark and sweep, no lock: a root committed in the remaining instant costs one read-through re-download). Spares a file whose mtime is within `SERVE_GRACE` (1 h) of the run's marker file (both the cache filesystem's clock) or whose `last_served_at` is within 1 h of the database's clock (the clock that wrote it), and a temp file not idle past `TEMP_GRACE` (1 h); at most 50 unlinks per run. Only `os-images/` and `apps/`: never `previews/` or `media/`. Rows, references and produced facts stay. | yes |
 | `RescueStalledJobs` | Tick | (none) | Queue ops (infra) | Re-publishes jobs whose worker's heartbeat stopped, then closes their rows | yes |
@@ -147,6 +150,8 @@ finished run leaves a **job outcome** that waiters read (§10.2).
 | **Asset** (one table, every kind) | `(kind, identity)`: `(os-image, tarball sha256)`, `(player-deb, sha256)`, `(media-variant, original+recipe)` | What *should* exist and what it *is*: **references** (one per owning tag or media source: its origin locator and expected size/digest); **produced facts** (the job's result: digest, size, and for media type/dimensions/duration), which are write-once and never cleared; `last_served_at`. A row and its facts outlive their last reference (nothing removes them before `MaintainCache`), but a key with no reference is not an asset: nothing serves or fetches it. **The file path is computed from the key.** | `Sync*` adds and retires references. The job runtime writes produced facts. HTTP writes only `last_served_at`. |
 | **Job outcome** (one table, every job type) | `(job type, subject)` | The latest written *status* only: `ok`, or `transient` + `retry_not_before`, or `terminal` + reason; a global sequence number. Never facts, and never "is cached". Last write wins, so a late run's note may replace a newer one: readers decide from the data (facts plus file) first. | The job runtime only, with NOTIFY in the same transaction |
 | **Job** | procrastinate job row | **All** pending, running and retrying state. It is stored nowhere else. | procrastinate |
+| **Photo pool** (built in 4) | `pool_key` (sha256 of the query's canonical form) | One row per Immich photo the last checks saw: its outcome (in the pool, waiting, left out with a reason), its asset id (the revision it names) and the number of the check that last saw it. Membership only: no copy of the photo's facts, no file, no "is cached". | The media worker's check steps; a complete check's sweep |
+| **Library asset** and its children (built in 4, normalized by the follow-ups of 2026-10-11) | `library_assets`: (connection, Immich asset id); children by `asset_id` | One parent row per Immich asset (kind, taken time, the original file's type, size, orientation and bytes); its revisions (`asset_revisions`, one per edit: upright size, duration, Immich's `updatedAt`); each revision's Immich copies Photo Wall measured (`asset_copies`) and prepared copies (`media_jobs`, with the Immich copy each was made from). One home per fact; a cache of Immich, rewritten by every check or fetch ([media module](module-media.md#the-asset-tables)). | The media worker's check steps (parent, revision); its fetches (copies); MediaStore (prepared copies) |
 | **Desired set** | a query | Pinned tags; current OS and `.deb` for unpinned devices (a last served tag only within 30 days of its serve); exact fleet roots, including the bases and sealed environments of the newest 3 stable node releases, the selected and the previous V2 node deployment (so `Prefetch` warms them before a node boots: every missing selected or previous file, and at most one window-only file per tick; serving never depends on it); media that active plans reference | nobody (computed) |
 
 Each record's identity and write rule, and why any order of job runs converges on it, are in
@@ -180,7 +185,7 @@ sequenceDiagram
   participant Q as Job queue
   participant W as A worker (any pod)
   participant D as Cache disk (shared)
-  Pi->>C: GET /v1/netboot/base
+  Pi->>C: GET /v2/node/boot-offers/{id}/artifacts/base
   C->>C: resolve → key (Unknown → 404, stop)
   C->>D: open(key) → missing
   C->>C: take a waiter slot (full → 503 Retry-After)
@@ -240,10 +245,11 @@ work runs inside the serving process, and N pods multiply the load on the origin
 
 ## 8. Today vs target
 
-- **Two job systems and four state stores → one queue and one Asset table.** Media runs a
-  hand-built lease queue beside procrastinate (`media_repository.py:450-470`). State is
+- **Two job systems and four state stores → one queue and one Asset table.** Media ran a
+  hand-built lease queue beside procrastinate (`media_repository.py:450-470`). State was
   spread across `base_cache`, `app_releases.mirror_state`, `app_packages`, and
-  `media_jobs`/`media_blobs`.
+  `media_jobs`/`media_blobs` (a snapshot from when this page was approved; the V1 `.deb`
+  and per-device base stores went with [0019](decisions/0019-debian-packaging-with-debhelper.md)).
 - **Jobs are not single-purpose.** The release poll also runs failed-boot sweeps,
   self-heal, OS GC and the orphan sweep (`app_release_service.py:190-217`). The target
   splits these into `SyncReleases`, `Prefetch` and `MaintainCache`.
@@ -262,6 +268,8 @@ work runs inside the serving process, and N pods multiply the load on the origin
   its existing pollers.
 - **The hand-upload route still exists, and there is no `.deb` budget or orphan sweep.**
   An unknown netboot serial gets 503 before any release exists; the target returns 404.
+- **Photo sources were built by delivery 4 without `SyncMediaSource`.** Membership lives in the photo pools above, filled by `CheckPool` steps on the media queue, and the Planner reads the pools directly; there is no media catalog snapshot and no `Prefetch` from a source sync. Preparation stays a planner-requested `media_jobs` job ([media module](module-media.md)).
+- **How a selection fits the Frames is one synchronous read** (follow-ups 2026-10-11): `POST /v1/operator/photo-fit/analysis` judges the stored pools and key content with the photo fit rule in the HTTP process, a grouped statement and a bounded sample, no job and no Immich call ([the fit analysis](module-planner.md#the-fit-analysis)).
 - **Media is served by output hash (`/v1/media/{sha256}`).** The target uses
   `/v1/media/{original}/{recipe}`. This is a **coordinated player + Central change**: the plan's
   media reference and the player's download and cache paths move in the same release.
@@ -399,9 +407,9 @@ class Publisher(Protocol):
   `TerminalFailure("not_reproducible")`. So a plan never holds an unservable digest, and nothing
   erases facts: an OS image is keyed by its tarball's sha256, so a release re-cut is a new key.
   The one exception is a kind not `keyed_by_content` (`AssetKind`, only `library-thumbnail`,
-  keyed by its original's identity): a later production's facts replace the recorded ones,
-  because the library may regenerate the bytes; its record lives only while a live preview
-  selects it, and a fetch that finds it retired is terminal `thumbnail_unknown`.
+  keyed by its photo's asset id): a later production's facts replace the recorded ones,
+  because the library may regenerate the bytes; its record lives only while a wanted pool
+  holds its photo, and a fetch that finds it retired is terminal `thumbnail_unknown`.
   **`job_outcomes`** holds only the latest written *status* per `(job type, subject)`, last write
   wins. The runtime writes the facts, the status and `NOTIFY job_outcome, <lock key>` in one
   transaction, and `Ready.result` is read from the Asset record. Status is stored

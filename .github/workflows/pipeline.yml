@@ -286,23 +286,7 @@ jobs:
         run: |
           .venv/bin/python scripts/node_rollout_image_check.py --image "$CENTRAL" \
             --revision "$REVISION" --output "$RUNNER_TEMP/node-image-qualification"
-      - name: Sign qualification only with the separately provisioned CI authority
-        env:
-          CI_QUALIFICATION_KEY: ${{ secrets.PHOTO_WALL_CI_QUALIFICATION_KEY }}
-        run: |
-          if [ -z "$CI_QUALIFICATION_KEY" ]; then
-            echo "::notice::D17 image reports are unsigned and unqualified: CI authority is not provisioned"
-          else
-            umask 077
-            key_file="$RUNNER_TEMP/node-ci-qualification-key"
-            trap 'rm -f "$key_file"' EXIT
-            printf '%s' "$CI_QUALIFICATION_KEY" > "$key_file"
-            .venv/bin/python scripts/node_rollout_ci_evidence.py sign \
-              --input "$RUNNER_TEMP/node-image-qualification/qualification.json" \
-              --reports "$RUNNER_TEMP/node-image-qualification/reports" --key "$key_file" \
-              --output "$RUNNER_TEMP/node-image-qualification/qualification.signed.json"
-          fi
-      - name: Retain exact-image qualification independently of unsigned release assets
+      - name: Retain exact-image qualification independently of release assets
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: node-image-qualification-${{ needs.plan.outputs.revision }}

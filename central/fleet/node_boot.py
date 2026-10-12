@@ -92,7 +92,6 @@ class NodeBootService:
         self.sessions, self.publisher = sessions, publisher
 
     def select(self, deployment_id: UUID, expected_revision: int) -> dict:
-        self.sessions.require_enabled()
         identifier(deployment_id)
         counter(expected_revision)
         try:
@@ -107,7 +106,7 @@ class NodeBootService:
         return {"revision": revision, "deployment_id": str(deployment_id)}
 
     def offer(self, request: NodeBootRequestV2) -> NodeBootOfferV2:
-        config = self.sessions.require_enabled()
+        config = self.sessions.config
         serial = sanitize_serial(request.serial)
         device_id = device_id_for_serial(serial)
         if serial != request.serial or device_id is None:
@@ -158,7 +157,6 @@ class NodeBootService:
         return result
 
     def asset(self, offer_id: UUID, role: str) -> OfferAsset:
-        self.sessions.require_enabled()
         with self.sessions.db.transaction() as conn:
             lock_fleet_assets_in(conn)
             row = conn.execute("SELECT * FROM node_boot_offers WHERE offer_id=%s", (offer_id,)).fetchone()

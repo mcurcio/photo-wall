@@ -18,7 +18,7 @@ type Story = StoryObj<typeof meta>;
 export const Groups: Story = {};
 /** Focused on one Pi (`?pi=`). */
 export const Focused: Story = { args: { focus: "device-a" } };
-/** Node control not on: the host columns are not shown. */
+/** No host read yet (sign-in not confirmed): the host columns are not shown. */
 export const NoHostRead: Story = { args: { hosts: null } };
 /** The fleet host read failed with no earlier result. */
 export const ReadFailed: Story = { args: { hosts: HOSTS_FAILED } };

@@ -9,11 +9,11 @@ from __future__ import annotations
 import hashlib
 import math
 from collections.abc import Mapping
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Annotated, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, FiniteFloat, model_validator
 
+from central.wall_plan.selection import SceneSelection
 from contracts.models import TARGET_ID_PATTERN, AfterEnd
 
 if TYPE_CHECKING:
@@ -88,6 +88,8 @@ class Scene(FrozenModel):
     outro_seconds: Seconds = 0
     outro_contributions: tuple[Contribution, ...] = ()
     protect_frames: bool = False
+    # Roadmap 5a: how this Scene's Frames pick from its photos (order, no-repeat days, crop limit).
+    selection: SceneSelection = SceneSelection()
 
     @model_validator(mode="after")
     def coherent_cycle(self) -> Self:
@@ -171,6 +173,9 @@ class Intent(FrozenModel):
     after_end: AfterEnd = "leave_as_is"
     actuator_value: Unit | None = None
     phase: Literal["body", "outro"]
+    # Roadmap 5a: the Intent's own Scene's selection (a child Scene's is its own), copied by
+    # `timeline` (slice O1); the Planner reads it.
+    selection: SceneSelection = SceneSelection()
 
     @property
     def precedence(self) -> tuple[int, int, int]:
@@ -348,24 +353,6 @@ class RuntimeBudgetExceeded(RuntimeError):
     """A projection/current advance exceeded its explicit transition budget."""
 
 
-@dataclass(frozen=True, slots=True)
-class AdmissionPolicy:
-    """Current equipment barriers, supplied by the owner of Runtime state.
-
-    This is a read constraint derived from active drains, not part of an
-    authored or persisted Runtime snapshot. A Scene's participant set includes
-    all nested children and outro contributions.
-    """
-
-    blocked_targets: frozenset[str] = frozenset()
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "blocked_targets", frozenset(self.blocked_targets))
-
-    def blocks(self, scene: Scene) -> bool:
-        return not self.blocked_targets.isdisjoint(scene.participants)
-
-
 class _TransitionBudget:
     def __init__(self, limit: int) -> None:
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
@@ -381,13 +368,8 @@ class _TransitionBudget:
 class Runtime:
     """Single-owner mutable domain state, with pure immutable observations."""
 
-    def __init__(self, admission_policy: AdmissionPolicy | None = None) -> None:
+    def __init__(self) -> None:
         self._state = _State()
-        self._admission_policy = admission_policy or AdmissionPolicy()
-
-    @property
-    def admission_policy(self) -> AdmissionPolicy:
-        return self._admission_policy
 
     def set_scene(self, scene: Scene) -> None:
         """Store a Scene; a save must move its revision past the stored one.
@@ -493,6 +475,27 @@ class Runtime:
             refs.update(self._scene_source_refs(queued.scene))
         return refs
 
+    def planning_selections(self) -> dict[str, SceneSelection]:
+        """Roadmap 5a (slice O1): the selection of every Scene that can contribute to a current
+        or future Run projection (configured Scenes, active Runs' and queued Scenes, each with
+        its children), by scene id; a Run's admitted snapshot wins over the configured Scene of
+        the same id. Coordination reads the shown history for these Scenes."""
+        selections: dict[str, SceneSelection] = {}
+
+        def walk(scene: Scene) -> None:
+            selections[scene.scene_id] = scene.selection
+            for child in scene.children:
+                walk(child.scene)
+
+        for scene in self._state.scenes.values():
+            walk(scene)
+        for queued in self._state.queue:
+            walk(queued.scene)
+        for run in self._state.runs.values():
+            if run.active:
+                walk(run.scene)
+        return selections
+
     def revise_source_refs(self, old_refs: set[str], new_ref: str) -> tuple[str, ...]:
         """Revise future Scene definitions; admitted and queued snapshots stay intact."""
         def revise(scene: Scene) -> Scene:
@@ -585,8 +588,8 @@ class Runtime:
         return state
 
     @classmethod
-    def restore(cls, state: dict, *, admission_policy: AdmissionPolicy | None = None) -> Runtime:
-        runtime = cls(admission_policy)
+    def restore(cls, state: dict) -> Runtime:
+        runtime = cls()
         runtime._state = _State.model_validate(state)
         # Early MVP v1 exports used only global descendant order. Adopt that
         # established ordering once, then allocate independently within a root.
@@ -602,7 +605,7 @@ class Runtime:
 
     def _copy(self) -> Runtime:
         """A detached copy, so a projection never touches the owned state."""
-        return self.restore(self.export_state(), admission_policy=self._admission_policy)
+        return self.restore(self.export_state())
 
     def project(self, now: float, *, max_events: int = 10000) -> RuntimeView:
         return self._copy().advance(now, max_events=max_events)
@@ -665,12 +668,6 @@ class Runtime:
         if scene_id not in self._state.scenes:
             raise ValueError(f"unknown Scene: {scene_id}")
         scene = self._state.scenes[scene_id]
-        if self._admission_policy.blocks(scene):
-            result = Admission(
-                activation_id=activation_id, status="rejected", reason="equipment_draining"
-            )
-            self._state.admissions[activation_id] = result
-            return result
         matches = self._matching(scene_id)
         if matches and repeat == "ignore":
             result = Admission(
@@ -865,8 +862,7 @@ class Runtime:
         # A newly freed matching/protected predecessor can release queued work immediately.
         for item in self._state.queue:
             if (
-                not self._admission_policy.blocks(item.scene)
-                and not self._matching(item.scene.scene_id)
+                not self._matching(item.scene.scene_id)
                 and not self._protected_conflict(item.scene, item.priority, item.force)
             ):
                 releases = [r.ended_at for r in self._state.runs.values() if r.ended_at is not None]
@@ -944,8 +940,6 @@ class Runtime:
                 self._state.admissions[item.activation_id] = Admission(
                     activation_id=item.activation_id, status="expired"
                 )
-            elif self._admission_policy.blocks(item.scene):
-                continue
             elif self._matching(item.scene.scene_id) or self._protected_conflict(
                 item.scene, item.priority, item.force
             ):
@@ -1030,6 +1024,7 @@ class Runtime:
                     fade_out_seconds=fade_out,
                     after_end=after_end,
                     actuator_value=value, phase=run.phase,
+                    selection=run.scene.selection,
                 ))
         winners: dict[str, Intent] = {}
         for intent in intents:

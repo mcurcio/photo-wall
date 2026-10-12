@@ -59,7 +59,7 @@ import { STAGE_REFUSAL } from "./stage.js";
  *   `planned`: the rollout reboots it; `skipped`: the operator skipped it; `outside`: no
  *   confirmation named it (it appeared after the rollout was frozen)
  * @typedef {{playerId: string, state: RowName, label: string, pause: string|null,
- *            gate?: true, evidence?: import("./facts.js").Fact}} RowState
+ *            evidence?: import("./facts.js").Fact}} RowState
  *   `evidence`: the page's inference behind an on-the-selection or Not rejoined row, as a
  *   `derived` fact naming its basis (rule 2: an inference never reads as device truth)
  *   `pause`: why rolling must stop on this row (a rejected or unknown reboot, a stall)
@@ -131,16 +131,16 @@ export function journeyTarget(read, tag) {
   });
 }
 
-/** What every boot meets while the gate is closed: Select alone, no reboot. */
-export const PUT_GATE_CLOSED = "No Player is rebooted; each gets it at its next boot.";
-/** The reboot plan's cost, said before anything is sent (gate open). */
+/** What Select alone (Undo) says: no reboot. */
+export const SELECT_ALONE = "No Player is rebooted; each gets it at its next boot.";
+/** The reboot plan's cost, said before anything is sent. */
 export const PUT_REBOOTS = "Then this page reboots these Players one at a time, each after the previous one "
   + "rejoins. Each Frame a Player drives is blank while it reboots. Keep this tab open: hiding or closing it "
   + "pauses the rollout.";
 
 /**
- * Whether the first reboot must wait for Central's download (§6.5): the gate is open and
- * Central serves the target as not Ready. Unserved readiness does not wait (Central's own
+ * Whether the first reboot must wait for Central's download (§6.5): Central serves the target
+ * as not Ready. Unserved readiness does not wait (Central's own
  * read-through still serves a boot), and the confirmation says it was not served.
  *
  * @param {Target} target
@@ -155,27 +155,24 @@ export function downloadWait(target) {
 }
 
 /**
- * The ONE confirmation of "Put vX on the wall" (§6.5, R7), in its two forms. Gate closed:
- * Select's own words (R17), "selects vX for every boot", that no Player is rebooted, and the
- * readiness line. Gate open: Select's words, the Players the page will reboot (the page renders
- * the frozen plan between `lines` and `after`), the reboot cost, and the readiness line.
+ * The ONE confirmation of "Put vX on the wall" (§6.5, R7): Select's own words (R17), "selects
+ * vX for every boot", the Players the page will reboot (the page renders the frozen plan
+ * between `lines` and `after`), the reboot cost, and the readiness line.
  *
  * @param {{contents: string, noApp: boolean}} request `selectionRequest`'s frozen request
  * @param {Target} target
- * @param {boolean} canReboot the shell's gate is open
  * @returns {{title: string, lines: string[], after: string[], confirmLabel: string}}
  */
-export function putConfirmation(request, target, canReboot) {
+export function putConfirmation(request, target) {
   const tag = target.release.tag;
-  const wait = canReboot ? downloadWait(target) : null;
+  const wait = downloadWait(target);
   return {
     title: `Put release ${tag} on the wall?`,
     lines: [...selectionConfirmation(request), `Selects ${tag} for every boot.`,
-      ...(canReboot ? ["These are the Players this console knows; this page reboots them in this order:"]
-        : [PUT_GATE_CLOSED])],
-    after: [...(canReboot ? [PUT_REBOOTS] : []), readinessLine(target.release),
+      "These are the Players this console knows; this page reboots them in this order:"],
+    after: [PUT_REBOOTS, readinessLine(target.release),
       ...(wait === null ? [] : ["The first reboot waits until Central has downloaded it."])],
-    confirmLabel: canReboot ? "Put it on the wall and reboot" : "Select for every boot",
+    confirmLabel: "Put it on the wall and reboot",
   };
 }
 
@@ -369,11 +366,10 @@ const row = (playerId, state, label, extra = {}) => Object.freeze({ playerId, st
 
 /**
  * One Player's Keep row (§25a Keep table), from its newest node read, the snapshot, the
- * target, the shell's gate and the reboot this page sent it in this rollout.
+ * target and the reboot this page sent it in this rollout.
  *
  * @param {{node: import("./nodeRead.js").NodeDevice, snapshot: object|null, playerId: string,
- *          target: Target, gate: import("./nodeControl.js").EffectGate|null,
- *          sent: SentReboot|null, waitedMs: number, skipped: boolean, outside?: boolean}} input
+ *          target: Target, sent: SentReboot|null, waitedMs: number, skipped: boolean, outside?: boolean}} input
  *   `outside`: the Player is not in the frozen rollout (`rolloutMembers`), so no reboot is
  *   ever judged for it
  *   `waitedMs`: the page's monotonic time since `sent`, or, without one, since rolling began
@@ -381,14 +377,14 @@ const row = (playerId, state, label, extra = {}) => Object.freeze({ playerId, st
  *   stalls too
  * @returns {RowState}
  */
-export function keepRow({ node, snapshot, playerId, target, gate, sent, waitedMs, skipped, outside = false }) {
+export function keepRow({ node, snapshot, playerId, target, sent, waitedMs, skipped, outside = false }) {
   if (skipped) return row(playerId, "skipped", "Skipped");
   if (outside) {
     return row(playerId, "not_in_rollout", "Not in this rollout: no confirmation named it; this page never reboots it");
   }
   if (node?.read == null) {
     if (node?.error == null) return row(playerId, "reading", "Reading its node records…");
-    return row(playerId, "cannot_reboot", `Cannot reboot: ${rebootTarget(node, gate).reason}`);
+    return row(playerId, "cannot_reboot", `Cannot reboot: ${rebootTarget(node).reason}`);
   }
   const linked = linkedApp(node.operations);
   const appLinked = target.app === null || linked === target.app;
@@ -438,7 +434,7 @@ export function keepRow({ node, snapshot, playerId, target, gate, sent, waitedMs
   }
   if (sent != null) {
     const record = (node.read.reboot_commands ?? []).find((entry) => entry.command_id === sent.request.body.command_id);
-    const state = record === undefined ? null : rebootCommandState(record, node.readAt, { nodeDevice: node, gate });
+    const state = record === undefined ? null : rebootCommandState(record, node.readAt, { nodeDevice: node });
     if (state?.state === "rejected" || state?.state === "outcome_unknown") {
       return row(playerId, "rebooting", state.label, { pause: state.label });
     }
@@ -450,10 +446,8 @@ export function keepRow({ node, snapshot, playerId, target, gate, sent, waitedMs
     }
     return row(playerId, "rebooting", state?.label ?? "Reboot sent by this page; Central has not listed it yet");
   }
-  const reboot = rebootTarget(node, gate);
-  if (!reboot.available) {
-    return row(playerId, "cannot_reboot", `Cannot reboot: ${reboot.reason}`, reboot.gate ? { gate: true } : {});
-  }
+  const reboot = rebootTarget(node);
+  if (!reboot.available) return row(playerId, "cannot_reboot", `Cannot reboot: ${reboot.reason}`);
   const offer = rebootOffer(reboot, node.read.reboot_commands, node.readAt, null);
   if (offer.offer !== "new") return row(playerId, "rebooting", `Rebooting: ${offer.reason}`);
   if (stagedThisBoot) {
@@ -490,13 +484,13 @@ export function nextReboot(rows) {
  * its reason when it cannot be rebooted.
  *
  * @param {RowState[]} rows
- * @returns {{playerId: string, reason: string, gate?: true}|null}
+ * @returns {{playerId: string, reason: string}|null}
  */
 export function keepPause(rows) {
   const first = rows.find((entry) => !SETTLED.has(entry.state));
   if (first === undefined) return null;
   if (first.pause !== null) return { playerId: first.playerId, reason: first.pause };
-  if (first.state === "cannot_reboot") return { playerId: first.playerId, reason: first.label, ...(first.gate ? { gate: true } : {}) };
+  if (first.state === "cannot_reboot") return { playerId: first.playerId, reason: first.label };
   return null;
 }
 

@@ -30,11 +30,15 @@ from __future__ import annotations
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Final
+from typing import Final, Literal
 
 Point = tuple[float, float]                             # (x, y), fractions of the output, origin top-left
 Corners = tuple[Point, Point, Point, Point]             # top-left, top-right, bottom-right, bottom-left
 OutputSize = tuple[int, int]                            # (width, height) in output pixels, each >= 1
+# The Frame output (owner, 2026-10-11: compatibility "measuring against the Frame output and not
+# the Display"): the Frame's picture as drawn, its width and height in output pixels along the
+# picture's own axes (u, v), each >= 1. Rounded up, so a photo holding it is never upscaled.
+PictureSize = tuple[int, int]
 
 FULL_SCREEN: Final[Corners] = ((0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0))
 CONVEX_EPSILON: Final = 1e-6                            # the smallest cross product of a usable corner
@@ -91,5 +95,64 @@ def cover_rectangle(corners: Corners, rotation: float, output: OutputSize, aspec
                           width=aspect * tall, height=tall, rotation=float(rotation))
 
 
-__all__ = ["CONVEX_EPSILON", "FULL_SCREEN", "Corners", "CoverRectangle", "OutputSize", "Point",
-           "convex_clockwise", "cover_rectangle"]
+def picture_size(mode: Literal["cover", "corners"], corners: Corners, rotation: float,
+                 output: OutputSize, aspect: float) -> PictureSize:
+    """The Frame output: how many output pixels the Frame's picture spans along its own width
+    and height (follow-ups 2026-10-11, slice A1; run ledger .claude/runs/photo-4.md). Pure.
+
+    - "cover": `cover_rectangle(corners, rotation, output, aspect)`'s width and height. It is
+      smaller than the Output when the corners are inset (a mat opening) and larger than the
+      opening when the picture is turned off-axis (the rectangle holds every corner).
+    - "corners": the picture is stretched onto the quad, so each axis needs its longer pair edge,
+      in output pixels: width = max(|TR - TL|, |BR - BL|), height = max(|BL - TL|, |BR - TR|);
+      `rotation` (0, 90, 180 or 270 only) picks which edge is the picture's top, so 90 and 270
+      swap the two.
+    Each side is rounded up after subtracting 1e-6 (a float just over an integer is that
+    integer), and is at least 1.
+
+    ValueError as `cover_rectangle` ("cover_rotation", "cover_output", "cover_aspect",
+    "cover_corners") for either mode; ValueError("corners_rotation") for "corners" with a
+    rotation other than a quarter turn."""
+    rect = cover_rectangle(corners, rotation, output, aspect)   # the one validation of the inputs
+    if mode == "cover":
+        return _pixels_up(rect.width), _pixels_up(rect.height)
+    if rotation not in (0, 90, 180, 270):
+        raise ValueError("corners_rotation")
+    width, height = output
+    tl, tr, br, bl = ((x * width, y * height) for x, y in corners)
+    across = max(math.dist(tl, tr), math.dist(bl, br))
+    down = max(math.dist(tl, bl), math.dist(tr, br))
+    if rotation in (90, 270):                # a quarter turn: the picture's top is a side edge
+        across, down = down, across
+    return _pixels_up(across), _pixels_up(down)
+
+
+def _pixels_up(length: float) -> int:
+    """`length` output pixels rounded up (a float within 1e-6 above an integer is that integer),
+    at least 1."""
+    return max(1, math.ceil(length - 1e-6))
+
+
+def window_holds(width: int, height: int, aspect: float, need: PictureSize) -> bool:
+    """Whether the largest window of width-to-height `aspect` cut from a `width` x `height` image
+    (the window the Player draws: the whole short side along the cut, contracts/photo_crop.py in
+    roadmap 5a) holds `need` = (need width, need height) pixels on both axes, within 1e-9 of
+    each. The one home of "a photo, or a copy of it, is at least the Frame output" (owner,
+    2026-10-09: Immich's downsampled copy "only if it is at least the visible Frame size"): the
+    rendition choice (media/library_client.py `covers`) and the photo fit rule's pixel floor
+    (roadmap 5a, central/wall_plan/fit.py) both ask here. Pure; ValueError("window_size") unless
+    every size is >= 1 and `aspect` is finite and above 0."""
+    need_width, need_height = need
+    if not (all(type(side) is int and side >= 1 for side in (width, height, need_width, need_height))
+            and isinstance(aspect, (int, float)) and not isinstance(aspect, bool)
+            and math.isfinite(aspect) and aspect > 0):
+        raise ValueError("window_size")
+    if width / height > aspect:              # wider than the window: it spans the whole height
+        window_width, window_height = aspect * height, float(height)
+    else:                                    # taller, or the same shape: the whole width
+        window_width, window_height = float(width), width / aspect
+    return window_width >= need_width - 1e-9 and window_height >= need_height - 1e-9
+
+
+__all__ = ["CONVEX_EPSILON", "FULL_SCREEN", "Corners", "CoverRectangle", "OutputSize",
+           "PictureSize", "Point", "convex_clockwise", "cover_rectangle", "picture_size", "window_holds"]

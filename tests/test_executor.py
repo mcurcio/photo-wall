@@ -20,6 +20,7 @@ from contracts.models import (
     Revocation,
     Variant,
 )
+from contracts.photo_crop import CENTRED
 from contracts.time import ManualClock, TimeMapping
 from player.cache import Cache
 from player.executor import AuthorityError, Executor
@@ -132,6 +133,22 @@ def test_retained_fallback_waits_for_native_draw_without_overwriting_with_black(
     assert shown.fallback and shown.layers[0].layer.assignment_id == "picture"
 
 
+@pytest.mark.parametrize(("first_draw_after_start", "kept"), [(1.9, False), (2, True)])
+def test_kept_still_takes_effect_from_its_first_draw_at_or_after_its_fade_in(
+        tmp_path, first_draw_after_start, kept):
+    """A "keep_this_photo" layer with fade-in 2 is kept from its first draw at or after start + 2
+    (contracts/on_screen.py `kept_from`), never from a draw before it."""
+    rig = Rig(tmp_path)
+    rig.play(layer(end=102.5, fade_in=2, after_end="keep_this_photo"))
+    rig.advance(first_draw_after_start)
+    rig.executor.tick()
+    rig.advance(3 - first_draw_after_start)
+    rig.executor.tick()
+    shown = rig.renderer.outputs["hdmi1"]
+    assert shown.fallback
+    assert [local.layer.assignment_id for local in shown.layers] == (["picture"] if kept else [])
+
+
 @pytest.mark.parametrize("fault", ["old", "future", "binding", "layer", "calibration"])
 def test_native_ack_rejects_stale_or_different_authority(tmp_path, fault):
     rig = Rig(tmp_path)
@@ -190,8 +207,10 @@ def layer(key: str = "picture", *, output: str = "hdmi1", frame: str = "frame1",
           data: bytes = b"picture", video: bool = False, **kwargs) -> Layer:
     fields = dict(assignment_id=key, run_id="run", output_id=output, frame_id=frame,
                   binding_generation=1, start=100, end=200, media_origin=100,
-                  variant=media(data, video))
+                  variant=media(data, video), crop=CENTRED)
     fields.update(kwargs)
+    if fields.get("presentation") == "black":
+        fields["crop"] = None
     return Layer(**fields)
 
 

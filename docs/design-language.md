@@ -28,7 +28,7 @@ The values live in [`tokens.css`](../central/console/src/design/tokens.css) and 
 
 | Foundation | Today (tokens.css) | Rule | Gap to close |
 |---|---|---|---|
-| **Colour roles** | Surfaces (`surface`, `-raised`, `-sunken`, `-input`); text (`text`, `label`, `muted`); lines (`line`, `line-input`); `accent`, `accent-tint`, `on-accent`, `focus`; severity (`ok`, `todo`, `notice`, `alarm`, `unknown`, `on-alarm`); truth kinds; `shadow` | Page = `surface`; a card or tile = `surface-raised`; a well (preview, log) = `surface-sunken`. Severity colours only through `StatusChip`, `HealthBadge` and the helpers in `ui/severity.tsx`. Accent only for actions, links, selection and focus, and only inside the primitives that draw them. | A `Link` primitive, so patterns stop writing `text-accent` ([§9](#9-enforcement)) |
+| **Colour roles** | Surfaces (`surface`, `-raised`, `-sunken`, `-input`); text (`text`, `label`, `muted`); lines (`line`, `line-input`); `accent`, `accent-tint`, `on-accent`, `focus`; severity (`ok`, `todo`, `notice`, `alarm`, `unknown`, `on-alarm`); truth kinds; `shadow` | Page = `surface`; a card or tile = `surface-raised`; a well (preview, log) = `surface-sunken`. Severity colours only through `StatusChip`, `HealthBadge` and the helpers in `ui/severity.tsx`; `todo` is orchid, its own hue, so unfinished setup never reads as the accent's blue (owner, 2026-10-11: "Recolour it"). Accent only for actions, links, selection and focus, and only inside the primitives that draw them. | A `Link` primitive, so patterns stop writing `text-accent` ([§9](#9-enforcement)) |
 | **Type scale** | Console Sans (Immich's Google Sans); sizes are Tailwind's defaults, used 25 times across `ui` and `patterns` | Five roles: page title, section title, body, label, meta (receipts, units). Pages never choose a size (S2 already forbids `className` there). | Role tokens; the cost and the alternative are in [§9](#9-enforcement) |
 | **Spacing and density** | `--spacing: 4px` (Tailwind step); `--spacing-row: 8px` | One density. Touch targets at least 44 px on phone (WCAG 2.5.5, Apple HIG); table rows keep `spacing-row` on desktop. A density toggle stays deferred (0018). | none |
 | **Radius** | `button`, `input`, `card`, `pill` | Chips are `pill`; tiles and cards are `card`. | none |
@@ -112,7 +112,7 @@ Each template's stories include `Loading`, `Empty`, `Error`, `Ready`, `CantTell`
 ### T6 Layout canvas
 
 - **Anatomy:** a Wall tab per wall plus "+ Wall"; a canvas drawn to real scale in house units; `WallTile`s dragged and resized, with keyboard nudge; overlaps flagged; a side panel for the selected Frame's placement fields; Identify on each Frame.
-- **Use** for Frames › wall layout (C1) and, later, spanning (C5). **Not** for Home's live map (T1 uses `WallMap` read-only).
+- **Use** for Frames › wall layout (C1). **Not** for Home's live map (T1 uses `WallMap` read-only).
 - **States:** Empty = "Add your first Frame"; Can't tell does not apply (placement is Central's own data).
 - **Phone:** view and select only; placement edits through the side panel's fields, not drag.
 - **Prior art:** macOS Displays arrangement; Home Assistant floor plans.
@@ -171,6 +171,12 @@ interface TabsProps { label: string; tabs: readonly { value: string; label: stri
 interface InlineProps { label?: string; children: React.ReactNode }
 interface StackProps { label?: string; children: React.ReactNode }
 
+// Split — content and its trailing action on one line ("Show ›", a "More" menu, a checkbox, Close, Undo): the
+// action never shrinks and never breaks inside a word, even under a container that wraps text anywhere; when the line
+// is too narrow for both, the action moves to a row of its own, at the end. Every strip and card header with an action
+// is a Split (EditorPage's and FitBoard's lines, MediaCard's header, Sheet's title, UndoToast).
+interface SplitProps { children: React.ReactNode; action: React.ReactNode; as?: "div" | "span"; align?: "center" | "start" }
+
 // Field — owns label, help and error wiring for one control (aria-describedby). `notes` are short facts on one
 // line under the help (a setting's default, where it acts) that also describe the control. Its context gives the
 // control its id, its describedby and the label's id (`labelId`), so a control that is a group is named by the label.
@@ -195,7 +201,7 @@ interface ToastProps { message: string; action?: { label: string; onAction(): vo
 // Select — one choice from a list too long for SegmentedControl (the waiting Pi in Replace with…). Field owns its label.
 interface SelectProps<V extends string> { value: V | null; options: readonly { value: V; label: string; hint?: string }[]; onChange(v: V): void; placeholder?: string; disabled?: boolean }
 
-// NumberInput — a number with its unit, for corner pixels, the rotation angle and the Frame display profile. Field owns its
+// NumberInput — a number with its unit, for corner pixels, the rotation angle, the Frame display profile and Scene settings in days or percent. Field owns its
 // label and error; arrow keys step by `step`, and the value commits on blur or Enter.
 interface NumberInputProps { value: number | null; unit: string; min?: number; max?: number; step?: number; onCommit(v: number): void; disabled?: boolean }
 
@@ -381,15 +387,33 @@ interface TargetPickerProps { frames: readonly { key: string; name: string; room
 
 Stories: `Default`, `GroupChosen`, `AllFramesChosen`, `ExcludesThisFrame`.
 
+### Members for delivery 4's photo pages (follow-ups D1)
+
+| Member | Layer | Purpose | Stories |
+|---|---|---|---|
+| `MultiToggle` | ui | Two to five choices any of which can be on together (Base UI ToggleGroup); each says "on" or "off" in words, not by the accent alone; `required` keeps one on | Default, AllOn, InField, Disabled |
+| `Sheet` | ui | The sheet of §2: from the bottom on a phone, from the side above `md`, above the page's sticky bars | Default |
+| `Menu` | ui | Overflow actions behind a "More" button named for what it acts on ("More actions for garden") | Default |
+| `EditorPage` | patterns | T4: form and preview side by side from `lg` (the preview sticky), stacked from `md`, a count line opening the preview in a `Sheet` on a phone; the `SaveBar` last | Default |
+| `SaveBar` | patterns | An editor's Save and Discard, kept at the bottom of the view, with the refusal beside them | Default, Refused |
+| `UndoToast` | patterns | As specified above; the count pauses while hovered or focused, and `onExpire` makes the action final (a Source's Delete is sent then) | Default |
+| `MediaGrid` | patterns | Thumbnails in justified rows, each at its photo's own ratio (Immich's timeline), never a square crop, since a photo's shape is what a Frame judges it by; "Show more" | Default, WithMore, ReadingMore |
+| `FitBoard` | patterns | How a selection of photos fits the Frames, composed for its moment (follow-ups C1 and two design reviews; owner, 2026-10-11: "allow me to preview the content selections and transient Frame compatibility"; "preview is an idea, rather than a specific widget. Because what is being previewed is context dependent"). Its `lead` says what leads: `shapes` (a Source being edited: the selection's `ShapeMap` first, then the Frames it can feed), `wall` (a Scene's Photos step: its Frames side by side in a `WallStrip`, each Frame's counts and reasons under "Each Frame"), `crop` (right under a crop limit being set: the shapes each Frame takes at it, then each Frame's count), `frame` (a Frame's own page, one board per Scene: the Frame's tile and the photos it would show lead, then its counts) or `frames` (the rows, the `ShapeMap` under **Why**). A Frame nothing fits (`alarm`, "Nothing fits") or with too few photos to change (`notice`, "Few photos": fewer than two, or fewer than the Frames sharing the selection, as a photo never shows on two Frames at once) says so **once**, where the Frame is drawn (its tile on a wall, else its row), on a `StatusChip` with one plain sentence and its action; never a separate warning card. `named={false}` on a Frame's own page. Sizes `full`, `compact`, `strip` (Review, Show now: one line and the Frames side by side, small, opening the full board in a `Sheet`; the line over a strip is a neutral count, "Fits 1 of 2 Frames", or with one Frame the selection's count, as each tile says its own alert) and `line` (a `full` board is its line below `md`, a `wall` and a Frame's own page keeping a strip of small tiles); the last answer stays, dimmed under a thin line, while a newer one is read, and greyed as Can't tell when a read fails. It judges nothing: `src/domain/photo-fit.ts` is the one home of its words (every sentence, the "Judged at …" line from the host's `JudgedAt`, and the photo sheet's "Plays from" clause per Frame; each starts with a capital, a Frame's name turned inside the sentence) and its read (Central's one analysis, `POST /v1/operator/photo-fit/analysis`) | Ready, Partial, NoneFit, Reading, Loading, Empty, CantTell, Error at each size; SourceEditor, SceneWall, PlaybackCrop, ReviewStrip, FramePageRow, FramePageNoneFit |
+| `WallStrip` (+ `FrameFitTile`) | patterns | A selection's Frames side by side (follow-ups review): each a `FrameFitTile` at its Frame output's shape, filled with a different photo it would show (the answer's leads are distinct, as the Planner's picks are), its name, "N of M fit", and its alert (chip, sentence and action; the chip alone when small). `FrameFitTile` is also the Scene's Frames step's tile beside each checkbox | Wall, AllFit, Small, Faded, PickerTile |
+| `FrameFitRow` | patterns | One Frame of a Fit board: its tile at its output's shape filled with what it would show (`FrameTile`; left to the strip under a wall), name and ratio (left out on the Frame's own page), "N of M fit", a bar of fits and refusals in neutral patterns (never a severity colour) with its legend, its alert, at `full` photos cropped as it crops them (beside a large tile in the `pictures` layout), "Why N don't fit" with each reason's photos, the Frame output it is judged at in pixels under **Details** (or, not reported yet, "Judged at hall's planned 9:16 shape; hall hasn't reported its output yet."), never the Display's mode | Ready, NoneFit, FewPhotos, Unmeasured, Compact, Draft, Unnamed, UnderWall, Pictures |
+| `ShapeMap` | patterns | The selection's photo ratios as bars on a log axis (9:16 and 16:9 either side of 1:1), and under them each Frame's band of ratios at the crop limit judged; the accent only on a focused Frame's band; the same figures as a table under **Details**; ratios as numbers, never orientation words | Default, OneFrameFocused, Empty |
+| `CropThumb` (+ `FrameTile`) | patterns | A photo at its own ratio with the Frame's window drawn where Central put it: the kept part clear, the cut-away dimmed (Immich's crop tool look), a window the Frame would not show dashed; it opens the photo sheet | Fits, RefusedFace, RefusedShape, Video, Openable, Tiles |
+| `MediaCard` (+ `MediaCardAdd`, `MediaCardList`) | patterns | T2's card for a thing made of photos: a four-photo mosaic, its name, its count, what it holds, its status chip and More; or, in a form, a choice by checkbox or radio; "+ New …" as the list's last card | Default, Empty, Chosen, List |
+
 ### Later patterns (props written when their delivery starts)
 
 | Pattern | Purpose | Delivery |
 |---|---|---|
 | `OverrideBanner` | Something overriding the plan, with an explicit `kind`: `"power-hold"` ("Off — by Home Assistant (Away mode) · **Resume schedule**"), `"takeover"` (Show now: countdown and **Back to normal**) or `"pause"` ("Paused until 22:04 · **Carry on**") | 2a (power-hold); 3b-i (takeover, pause) |
 | `TimelineLane` | One lane of blocks on a time axis (power on/off, content, holds, Default Scene); blocks are also a text list | 2a |
-| `SaveBar` | Explicit Save / Save and apply now, or Change now / From the next block | 2b |
+| `SaveBar` (the Schedule's pairs) | Explicit Save / Save and apply now, or Change now / From the next block; the editor's bar of delivery 4 is above | 2b |
 | `WallMap`, `WallTile` | Frames to scale; a tile shows the status, what the Pi is presenting and its actions; read-only on Home, editable in T6 | 3b-i (status and actions); 3b-ii (what the Pi presents); 6 (T6) |
-| `IncludeExcludePicker`, `MediaGrid` | Photo source filters paired with excludes; a thumbnail grid with a live count | 4 |
+| `IncludeExcludePicker` | Photo source filters paired with excludes | 4 |
 | `Checklist` | Steps from real checks: T7's body and a settings area's live checks | 3 (Integrations); 6 (T7) |
 | `StepProgress` | Long actions across the network ("Reboot requested → started → back online") | 3b-i (G3); 7 (G6) |
 | `AppShell` | Rail on desktop, bottom tabs on phone, house word in the top bar | 3b-i |
@@ -454,7 +478,7 @@ The six status words are the domain's verdict on a Frame's live health ([0019 de
 
 - **The house word** is the worst Frame word by this order; when every Frame is Showing or Resting it is **All good** (design §9). This order is a decision of this document: it ranks Can't tell above Needs a look because a silent Frame may be dark. It is the domain's order over words and differs on purpose from `WORST_FIRST` in `tokens.ts`, which orders severities for lists.
 - **Where it lives in code:** a `StatusWord` union, an exhaustive `Record<StatusWord, Severity>`, the order and the house roll-up in `src/domain` (one module, like `domain/host-health.tsx`'s `hostVerdict`). It emits the existing `Verdict` branded as a status verdict, which only that module can construct, so a domain component that shows live Frame health cannot pass free text. The design layer stays free of Photo Wall concepts.
-- **Setup is not status:** the scale's `todo` marks unfinished setup (no Pi yet, Position not checked); it appears as a setup step or a `todo` chip with its own words, never as one of the six.
+- **Setup is not status:** the scale's `todo` marks unfinished setup (no Pi yet, Position not checked); it appears as a setup step or a `todo` chip with its own words, never as one of the six. A Frame's chip is drawn the same way everywhere (`domain/frame-health-chip.ts`): "Needs a Player" is `todo`, a Pi enrolled with no report yet is **Getting ready**.
 - **One chip:** `StatusChip` (through `HealthBadge`) is the only thing that draws a severity colour on text; rows may add a severity bar for `notice` and `alarm` only.
 - **One colour meaning:** severity colours mean status; the accent means "you can act here" and never status; there is no decorative colour (S3).
 - **Never by colour alone:** the word is always present (WCAG 1.4.1).
@@ -510,6 +534,7 @@ Never claim what the display lights up, and never offer a fix the system cannot 
 |---|---|
 | Clock time | One formatter (`timeWords.js`). Until the House timezone and clock format exist (2b, [settings catalogue](operator-console-design.md#11-settings-catalogue) #2, #5) it uses the browser's zone and 24-hour time; then the House's: "21:04" or "9:04 pm". Acknowledgement times carry seconds ("21:04:07") |
 | Since / last heard | Absolute beyond an hour ("since 21:04", "since Tue 09:12"); "3 min ago" only within the hour; always Central's receive time, never a Pi's clock |
+| Check and contact times | `timeWords.js` `sinceTime`: the weekday and a 24-hour time, "Checked Sun 03:39", "Needs a look since Sun 03:39"; no zone abbreviation, no seconds; a date instead of the weekday only when a served read time says it is more than six days old. One time per page: the pool's line carries no second copy of its check's time |
 | Durations | "30 s", "1 h", "1 h 30 min" |
 | Lengths | House units (cm or in), one decimal at most |
 | Counts | Locale grouping ("41,203 photos"); exact, never "many" |
@@ -525,7 +550,7 @@ Every journey step in the [roadmap](roadmap.md#the-journey), one row per home (p
 | A1 Install Central | Setup checklist › Server | T7 | Checklist, ProblemCard | none | each step green from a real check | "Network boot files not staged" with the fix |
 | A2 Sign in | Sign-in page | exception (no template) | Field, Button | Action | lands on Home | wrong password inline, without saying which part was wrong |
 | A2 Owner account | Settings › People and access | T8 | SettingRow | Autosave | "Signed in as …" | none |
-| A3 Connect Immich | Settings › Photo library | T8 | SettingRow, Field, Button (Test) | Autosave | Test: "41,203 photos, 212 albums, 96 people" | EmptyState "Connect your photo library"; "Immich rejected the API key" |
+| A3 Connect Immich | Settings › Photo library | T8 | SettingRow, Field (the key a password field, then "Key ending …1234"), Button (Check now), ProblemCard | Save (Save checks at once) | "41,203 photos · 2,110 videos · 212 albums · 96 people" (Immich's totals, archived photos included) and the Immich user; Connected, Checking, Paste the address and key, or Needs a look | EmptyState "Connect your photo library: paste the address of your Immich and an API key below."; a ProblemCard per problem with its one fix, for example "Immich rejected the API key." → Paste a new key, each saying "Photos keep playing." |
 | A4 House basics | Settings › House | T8 | SettingRow, SegmentedControl | Autosave | none | browser-derived defaults shown as defaults |
 | A5 Ready for Pis | Setup checklist › Ready for Pis | T7 | Checklist, ProblemCard | none | "Network boot OK · release 1.4.2 ready" | the problem names the piece (DHCP, files, release) |
 | B1 Pi appears | Pis › New Pis waiting | T2 | EntityList, HealthBadge | none | the display shows its code; "Waiting · seen 21:04" | EmptyState "Plug a Pi into a display and power"; "2 GB, needs 4 GB" |
@@ -542,11 +567,12 @@ Every journey step in the [roadmap](roadmap.md#the-journey), one row per home (p
 | C3 Copy settings | Frame page › Picture | T3 + QuickActionSheet | TargetPicker, AckBadge per Frame | Action + Undo | per Frame: requested → acknowledged | a display that refuses a value: that Frame's row says so |
 | C4 Two displays per Pi | Frame page › Hardware | T3 | SettingRow, LinkToOwner (Pi page lists ports read-only) | Autosave | "Fed by Pi pw-3f2a · HDMI 2" | port in use: the picker shows by which Frame |
 | C5 Span | Frames › wall layout | T6 | WallTile | Autosave | deferred ([roadmap](roadmap.md#deferred-and-what-that-costs)) | none |
-| D1 Pick photos | Photo source editor › Include | T4 | IncludeExcludePicker, MediaGrid, SaveBar | Save | live count and thumbnails | "No photos match" naming the narrowest filter |
-| D2 Exclude | Photo source editor › Exclude | T4 | IncludeExcludePicker, SettingRow | Save | count before and after | archived, hidden, screenshots shown as defaults |
-| D3 Photo fit | Scene editor › Photo fit | T4 | SettingRow, SegmentedControl | Save | preview shows the fit | none |
-| D3 Photo fit | Frame page › Photo fit (override) | T3 | SettingRow (content, inherited), SegmentedControl | Autosave | skipped counts, each a link | "312 too small" opens the list |
-| D4 Order | Scene editor › Order | T4 | SettingRow, SegmentedControl | Save | preview order | none |
+| D1 Pick photos | Photo source editor › Include | T4 (`EditorPage`) | IncludeExcludePicker, MultiToggle, MediaGrid, SaveBar, Sheet | Save | live count and thumbnails at each photo's ratio | "No photos match all of these: …" naming every choice the query makes, each with a Clear (per-choice counts are not built: each would be one more Immich search) |
+| D2 Exclude | Photo source editor › Exclude | T4 | IncludeExcludePicker, SettingRow | Save | the pool beside the form is read again from the top | Leave out albums, people and tags (none by default) and Leave out screenshots (on by default); one fixed line, not a switch: "Archived, hidden and locked photos are never included." |
+| D3 Photo fit | Scene editor › Photo fit (the flow's Playback step; the flow runs Kind → Frames → Photos → Playback → Review since follow-ups C1) | T4 | SettingRow, Slider (Crop limit, whole percent, its range from Settings › Photo fit; unset follows the house crop limit and says so, Reset follows it again; help: "The most of a photo a Frame may cut away to fill itself. Faces and the interesting part are always kept."), each step previewing its own question from one read: Frames, each Frame a `FrameFitTile` beside its checkbox, its count once the Scene has photos; Photos, the Source cards, then right under them FitBoard led by the wall (the Scene's Frames side by side, each with a different photo; a strip below `md`), then one line of the chosen Sources' actions (Check now, Remove, Manage in Sources; the cards say each check's state); Playback, FitBoard led by the crop limit right under its slider (the shapes each Frame takes, then each Frame's count, its drag answered by shape before it is let go); a strip on Review, its sheet with "Raise the crop limit to N %") | Save | the board | a Frame nothing fits: said once, where it is drawn: "Most of these photos are 3:2 and hall's Frame output is 9:16: add photos closer to 9:16 or raise the crop limit." (before hall reports its output: "hall is planned at 9:16") |
+| D3 Photo fit | Frame page › Overview › Photos | T3 | one row per Scene showing photos here: how it relates to now ("Playing now", "Scheduled …", "Not scheduled"), LinkToOwner to the Scene, what this Frame gets from it (FitBoard led by the Frame: its tile and the photos it would show, then its counts, not naming the Frame again; its Frame output in pixels under Details; a small tile of its own below `md`); the Position and Frame profile editors a line judged with the unsaved values ("Judged at its Frame output as you set it, 16:9"), its pixels under the Details of the board it opens | none (read-only) | the board | "No Scene shows photos from a Source on this Frame yet" with "Put content on this Frame" |
+| D3 Photo fit | Settings › Photo fit (`#/photo-fit`) | T8 | SettingRow (house) per tuning value, its range Central's (`FitSettingsView.ranges`): Crop limit, Space kept around a face, Smallest face that counts; under Advanced the rest, Crop positions tried under its Details; a compact FitBoard judged with the values as typed | Save ("Each Frame uses it from its next photo; the photos showing now finish their turn.") | the board | a value outside its range: its field's error |
+| D4 Order | Scene editor › Order (the flow's Playback step) | T4 | SettingRow, SegmentedControl (Order: Shuffle, Oldest first, Newest first, On this day), NumberInput (Don't repeat within, days; 0 reads "Off"; help: "A photo shown recently waits its turn, but a Frame never goes blank because of it.") | Save | Review lists both | none |
 | D5 Timing and transitions | Scene editor › Timing | T4 | SettingRow, Slider | Save | preview plays the timing | none |
 | D6 Video | Scene editor › Video | T4 | SettingRow, Slider, Switch | Save | share also shown as a count | no videos match: one-line note |
 | D7 Captions | Scene editor › Captions | T4 | SettingRow, SegmentedControl | Save | preview shows a caption | none |

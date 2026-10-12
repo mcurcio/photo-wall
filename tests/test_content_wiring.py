@@ -281,13 +281,6 @@ class MediaStub:
     async def maintain(self) -> None:
         self.boot.append(("maintain", self.store.held))
 
-    async def list_tags(self, *, boot: bool = False) -> None:
-        self.boot.append(("tags" if boot else "tick tags", self.store.held))
-
-    async def refresh_once(self) -> bool:
-        self.boot.append(("refresh", self.store.held))
-        return False
-
 
 def test_the_media_loop_stands_by_while_another_process_writes_and_jobs_run_meanwhile():
     from media.worker import _media_writer, _run_workers
@@ -322,7 +315,7 @@ def test_the_media_loop_stands_by_while_another_process_writes_and_jobs_run_mean
     asyncio.run(main())
     assert store.attempts == 4 and queue_ran == [True]
     # Boot replaces every connection's tag list (console DDD §38), under the writer lock.
-    assert media.boot == [("recipe", True), ("maintain", True), ("tags", True), ("refresh", True)]
+    assert media.boot == [("recipe", True), ("maintain", True)]
     assert not store.held  # released on stop
 
 

@@ -23,7 +23,7 @@ export interface FrameHost {
  * The bound Pi's worst host item from the one classifier (hostHealth.js `classifyHost`), "pi-07 ·
  * throttled now", "pi-07 · Host Management silent 3 min", else its receipt, and the Pi's Hardware
  * page, where host health is judged and explained. Null for an unbound Frame, and while the
- * shell's fleet host read is skipped (node control off: its banner names that) or has not
+ * shell's fleet host read is skipped (sign-in not confirmed) or has not
  * loaded. A failed read says so rather than judging the last good values: "pi-07 · host health
  * not read".
  */

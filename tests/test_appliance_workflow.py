@@ -16,10 +16,11 @@ def test_software_e2e_uploads_sanitized_docker_failure_diagnostics():
     job_prefix = workflow.split("    steps:", 1)[0]
     assert "runner.temp" not in job_prefix
     # Each fixture-driving job records its Docker diagnostics privately and uploads them only
-    # when it fails: the wall scenario (fixture, scenario, cleanup) and the adapter checks.
-    scenario, adapter = workflow.split("\n  immich-adapter:\n")
+    # when it fails: the wall scenario (fixture, scenario, cleanup) and the named Immich tests
+    # (fixture, cleanup).
+    scenario, photos = workflow.split("\n  photo-sources:\n")
     for job, steps, log in [(scenario, 3, "photo-wall-software-e2e"),
-                            (adapter, 1, "photo-wall-immich-adapter")]:
+                            (photos, 2, "photo-wall-photo-sources")]:
         assert job.count("PHOTO_WALL_DOCKER_DEBUG: '1'") == steps
         assert job.count(
             f"PHOTO_WALL_DOCKER_DEBUG_LOG: ${{{{ runner.temp }}}}/{log}/docker-debug.log") == steps

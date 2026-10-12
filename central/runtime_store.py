@@ -1,15 +1,13 @@
 """Transactional current Runtime ownership; never persist a future projection."""
 
-import re
 from contextlib import contextmanager
 
 from psycopg.types.json import Jsonb
 
 from central.db import Database
-from central.runtime import AdmissionPolicy, Runtime
+from central.runtime import Runtime
 from central.transaction_locks import RUNTIME_LOCK as RUNTIME_LOCK
 from central.transaction_locks import acquire_runtime_locks
-from contracts.models import TARGET_ID_PATTERN
 from contracts.time import Clock
 
 _RUNTIME_COMMANDS = frozenset({
@@ -47,32 +45,9 @@ class RuntimeStore:
 
     @staticmethod
     def read_in(conn) -> Runtime:
-        """Restore one MVCC cut of Runtime and active barriers in a caller transaction."""
-        row = conn.execute(
-            "SELECT (SELECT snapshot FROM runtime_state WHERE singleton) AS snapshot,"
-            "COALESCE((SELECT jsonb_agg(snapshot ORDER BY player_id) "
-            "FROM active_equipment_drains),'[]'::jsonb) AS drains"
-        ).fetchone()
-        targets = set()
-        for snapshot in row["drains"]:
-            if not isinstance(snapshot, dict) or not isinstance(snapshot.get("outputs"), list):
-                raise ValueError("invalid active equipment drain snapshot")
-            # Future interruption scopes need an explicit target contract before
-            # they may participate in admission; refuse rather than miss a fence.
-            if snapshot.get("run_participants") or snapshot.get("actuators"):
-                raise ValueError("unsupported active equipment drain admission scope")
-            for output in snapshot["outputs"]:
-                if not isinstance(output, dict):
-                    raise ValueError("invalid active equipment drain output")
-                frame_id = output.get("frame_id")
-                if frame_id is None:
-                    continue
-                if not isinstance(frame_id, str) or not re.fullmatch(TARGET_ID_PATTERN, frame_id):
-                    raise ValueError("invalid active equipment drain Frame")
-                targets.add(f"frame:{frame_id}")
-        policy = AdmissionPolicy(frozenset(targets))
-        return (Runtime.restore(row["snapshot"], admission_policy=policy)
-                if row["snapshot"] is not None else Runtime(policy))
+        """Restore one MVCC cut of Runtime in a caller transaction."""
+        row = conn.execute("SELECT snapshot FROM runtime_state WHERE singleton").fetchone()
+        return Runtime.restore(row["snapshot"]) if row is not None else Runtime()
 
     def read_locked(self, conn) -> Runtime:
         """Read current state while serializing with Runtime writers, without saving it."""
@@ -90,7 +65,7 @@ class RuntimeStore:
         """Apply a wall-clock command at the post-lock serialization cut.
 
         Explicit-time ``command`` remains available for controllable-clock
-        simulation. Operator routes must use this path so a concurrent drain
+        simulation. Operator routes must use this path so a concurrent writer
         cannot advance persisted Runtime past a time sampled before lock wait.
         """
         if method not in _TIMED_COMMANDS or "now" in kwargs:

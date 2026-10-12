@@ -30,6 +30,9 @@ class FakeMedia:
         if self.fail:
             raise RuntimeError("private worker failure")
 
+    def request_measurements(self, _requests):
+        return 0
+
 
 class FakeCoordinator:
     def __init__(self):
@@ -51,7 +54,12 @@ class FakeCoordinator:
         if self.block_first or (self.block_after_first and self.calls > 1):
             self.blocked.set()
             self.release.wait(10)
-        return type("Projection", (), {"acquisitions": ()})()
+        return type("Projection", (), {"acquisitions": (), "measurements": ()})()
+
+
+class NoReconciliation:
+    def advance(self):
+        return 0
 
 
 def app_with(fake_db, fake_coordinator, clock, monkeypatch, *, enabled):
@@ -61,6 +69,8 @@ def app_with(fake_db, fake_coordinator, clock, monkeypatch, *, enabled):
         "MediaRepository",
         lambda *_args, **_kwargs: fake_coordinator.media,
     )
+    # A fake database cannot serve the node reconciler's tick: it reconciles nothing here.
+    monkeypatch.setattr(central_app, "NodeRuntimeReconciler", lambda *_args, **_kwargs: NoReconciliation())
     return central_app.create_app(fake_db, clock, ADMIN, run_scheduler=enabled)
 
 

@@ -67,8 +67,8 @@ def enroll_pi(registry, serial: str) -> str:
     nonce = registry.challenge(public)["nonce"]
     outputs = tuple(OutputReport(output_id=f"HDMI-A-{i + 1}", width_px=1920, height_px=1080) for i in range(2))
     request = Enrollment(public_key=public, nonce=nonce, outputs=outputs, device_id=device_id, boot_id=boot_id,
-                         ticket_id=None, signature=base64.b64encode(key.sign(enrollment_message(
-                             nonce, outputs, device_id, boot_id, None))).decode())
+                         signature=base64.b64encode(key.sign(enrollment_message(
+                             nonce, outputs, device_id, boot_id))).decode())
     return registry.enroll(request)["player_id"]
 
 

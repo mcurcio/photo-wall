@@ -170,6 +170,19 @@ def test_native_capability_survives_generation_revocation_without_current_boot(r
     assert registry.calibration_capability("node-f0")["mode"] == "native_trial"
 
 
+def test_a_frame_whose_player_never_booted_a_node_is_not_admitted(registry):
+    """A Player with no node admission (a Compose or demo Player) has no calibration protocol:
+    Central offers its Frame none, and an unbound Frame none either. Mutation probe: answer
+    `native_trial` for every bound Frame."""
+    from test_registry import enroll, frame
+
+    identity, _, _ = enroll(registry)
+    frame(registry, "plain")
+    assert registry.calibration_capability("plain")["mode"] == "not_admitted"
+    registry.bind("plain", identity["player_id"], "HDMI-A-1", expected_generation=0)
+    assert registry.calibration_capability("plain")["mode"] == "not_admitted"
+
+
 def test_keepalive_slides_the_idle_deadline_up_to_the_hard_one(registry):
     """An open Position or Picture tab keeps its trial alive with `keepalive` (the console's
     Frame page): the idle deadline slides, the candidate and its sequence stay, and the Node is

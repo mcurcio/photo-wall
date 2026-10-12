@@ -19,8 +19,9 @@ from uuid import UUID
 
 import pytest
 
+from central.photo_library.model import LibraryAsset
 from contracts.time import ManualClock
-from media.models import MediaError, OriginalAsset
+from media.models import MediaError
 from media.prepare import PreparationLimits, PreparationRecipe, Preparer
 
 try:
@@ -57,13 +58,19 @@ def probe(path, tools):
 
 
 def original_asset(path, *, width=96, height=64, orientation=1, kind="image", duration=None):
-    data = path.read_bytes()
-    return OriginalAsset(
-        connection_id="fixture", upstream_id=str(UUID(int=1)),
-        original_sha1=hashlib.sha1(data).hexdigest(), kind=kind,
-        raw_width=width, raw_height=height, orientation=orientation,
-        captured_at=1767225600, file_size=len(data), duration=duration,
-    )
+    """The pool photo whose fetched file is `path` (its size as Immich shows it: upright)."""
+    upright = (height, width) if orientation >= 5 else (width, height)
+    return LibraryAsset(connection_ref="fixture", upstream_id=str(UUID(int=1)),
+                        revision=hashlib.sha1(path.read_bytes()).hexdigest(), kind=kind,
+                        taken_at=1767225600, width=upright[0], height=upright[1],
+                        duration=duration)
+
+
+def fetched(asset, path):
+    """The rendition preparation reads: `path` as the worker fetched it for `asset`."""
+    return rendition_of(path, rendition="original" if asset.kind == "video" else "preview",
+                        media_type="video/mp4" if asset.kind == "video" else "image/jpeg",
+                        width=asset.width, height=asset.height)
 
 
 def preparer(tools, **changes):
@@ -71,7 +78,8 @@ def preparer(tools, **changes):
 
 
 def prepare(tools, asset, original, destination, **changes):
-    return asyncio.run(preparer(tools, **changes).prepare(asset, original, destination))
+    return asyncio.run(preparer(tools, **changes).prepare_rendition(
+        asset, fetched(asset, original), destination))
 
 
 def corners(size=(96, 64)):
@@ -158,24 +166,6 @@ def test_recipe_identity_is_stable_for_same_build_and_changes_with_quality(tmp_p
     assert first.recipe_id != changed.recipe_id
 
 
-@pytest.mark.parametrize("fault", ["sha1", "size", "width", "height", "orientation"])
-def test_original_revision_and_metadata_mismatch_fail_before_publication(tmp_path, native_tools, fault):
-    source = tmp_path / "original.jpg"
-    destination = tmp_path / "variant.jpg"
-    asset = save_jpeg(source)
-    replacement = {
-        "sha1": {"original_sha1": "0" * 40}, "size": {"file_size": asset.file_size + 1},
-        "width": {"raw_width": 97}, "height": {"raw_height": 65}, "orientation": {"orientation": 6},
-    }[fault]
-    with pytest.raises(MediaError) as error:
-        prepare(native_tools, asset.model_copy(update=replacement), source, destination)
-    assert not destination.exists()
-    if fault == "sha1":
-        assert error.value.code == "asset_integrity"
-    if fault in {"width", "height", "orientation"}:
-        assert error.value.code == "metadata_mismatch"
-
-
 def png_chunk(kind, data):
     return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
 
@@ -208,7 +198,7 @@ def nonidentity_rgb_profile():
 
 
 @pytest.mark.parametrize("profile", [
-    "alpha", "animated", "rgb16", "cmyk", "nonidentity_icc", "hdr_png", "conflicting_gamma",
+    "alpha", "animated", "rgb16", "cmyk", "hdr_png", "conflicting_gamma",
 ])
 def test_unsupported_still_formats_and_color_are_rejected(tmp_path, native_tools, profile):
     source = tmp_path / "original"
@@ -224,8 +214,6 @@ def test_unsupported_still_formats_and_color_are_rejected(tmp_path, native_tools
             assert decoded.mode == "RGB"
     elif profile == "cmyk":
         corners().convert("CMYK").save(source, "JPEG")
-    elif profile == "nonidentity_icc":
-        corners().save(source, "JPEG", icc_profile=nonidentity_rgb_profile())
     else:
         corners().save(source, "PNG")
         raw = source.read_bytes()
@@ -340,7 +328,8 @@ def test_describe_recipe_matches_prepared_result_and_reuses_unchanged_build(tmp_
         instance = preparer((wrapper, native_tools[1]))
         recipe_id, build = await instance.describe_recipe()
         assert await instance.describe_recipe() == (recipe_id, build)
-        result = await instance.prepare(asset, source, tmp_path / "variant.jpg")
+        result = await instance.prepare_rendition(asset, fetched(asset, source),
+                                                  tmp_path / "variant.jpg")
         assert (result.recipe_id, result.build) == (recipe_id, build)
         assert build.preparation_sha256
 
@@ -440,7 +429,8 @@ def test_cancellation_reaps_active_native_process_and_cleans_destination(tmp_pat
                            "    time.sleep(30)")
 
     async def perform():
-        task = asyncio.create_task(preparer((wrapper, native_tools[1])).prepare(asset, source, destination))
+        task = asyncio.create_task(preparer((wrapper, native_tools[1])).prepare_rendition(
+            asset, fetched(asset, source), destination))
         try:
             # Generous: this asserts reaping, not start-up speed under a loaded -n auto runner.
             async with asyncio.timeout(30):
@@ -594,3 +584,218 @@ def test_invalid_recipe_settings_are_rejected_without_native_tools(recipe):
 def test_invalid_preparation_limits_are_rejected_without_native_tools(limits):
     with pytest.raises(ValueError):
         PreparationLimits(**limits)
+
+
+# -- roadmap 4 (M3): the photo Immich shows, as fetched ---------------------------------------
+
+
+def rendition_of(path, *, rendition="preview", media_type="image/jpeg", size=None, width=96,
+                 height=64):
+    from media.library_client import FetchedRendition
+    data = path.read_bytes()
+    return FetchedRendition(path=path, rendition=rendition, media_type=media_type,
+                            size=len(data) if size is None else size,
+                            sha256=hashlib.sha256(data).hexdigest(), width=width, height=height,
+                            measured=())
+
+
+def pool_asset(*, width=96, height=64):
+    return LibraryAsset(connection_ref="fixture", upstream_id=str(UUID(int=1)),
+                        revision="a" * 40, kind="image", taken_at=1767225600,
+                        width=width, height=height)
+
+
+def prepare_rendition(tools, asset, rendition, destination, **changes):
+    return asyncio.run(preparer(tools, **changes).prepare_rendition(asset, rendition,
+                                                                    destination))
+
+
+def test_a_webp_preview_prepares_to_a_jpeg_of_the_recipes_size(tmp_path, native_tools):
+    source = tmp_path / "preview"
+    corners((800, 400)).save(source, "WEBP", quality=90)
+    result = prepare_rendition(native_tools, pool_asset(width=800, height=400),
+                               rendition_of(source, width=800, height=400),
+                               tmp_path / "variant", recipe=PreparationRecipe(image_long_edge=200))
+    assert (result.variant.media_type, result.variant.width, result.variant.height) == (
+        "image/jpeg", 200, 100)
+    assert result.original_sha256 == hashlib.sha256(source.read_bytes()).hexdigest()
+    with Image.open(tmp_path / "variant") as image:
+        assert image.format == "JPEG" and image.size == (200, 100)
+
+
+def test_a_full_size_jpeg_carrying_exif_orientation_six_prepares_upright(tmp_path, native_tools):
+    source = tmp_path / "fullsize"
+    save_jpeg(source, orientation=6, size=(96, 64))
+    result = prepare_rendition(native_tools, pool_asset(width=64, height=96),
+                               rendition_of(source, rendition="fullsize", width=64, height=96),
+                               tmp_path / "variant")
+    assert (result.variant.width, result.variant.height) == (64, 96)
+    with Image.open(tmp_path / "variant") as image:
+        assert image.size == (64, 96) and image.getexif().get(0x0112, 1) == 1
+
+
+def test_a_rendition_whose_size_differs_from_the_fetch_is_an_integrity_failure(
+        tmp_path, native_tools):
+    source = tmp_path / "preview"
+    save_jpeg(source)
+    with pytest.raises(MediaError) as caught:
+        prepare_rendition(native_tools, pool_asset(),
+                          rendition_of(source, size=source.stat().st_size + 1),
+                          tmp_path / "variant")
+    assert caught.value.code == "asset_integrity"
+    assert not (tmp_path / "variant").exists()
+
+
+# -- follow-ups 2026-10-11 (slice A5): the originals Immich keeps -----------------------------
+# Owner, 2026-10-11: "I would rather lean on strong foundational libraries than reinvent the
+# wheel": HEIC through libheif (pillow-heif), AVIF through Pillow's libavif, colour through
+# LittleCMS (Pillow's ImageCms).
+
+
+def s15(value):
+    return struct.pack(">i", round(value * 65536))
+
+
+def icc_tag(kind, body):
+    data = kind + b"\0\0\0\0" + body
+    return data + b"\0" * (-len(data) % 4)
+
+
+def mluc(text):
+    encoded = text.encode("utf-16-be")
+    return icc_tag(b"mluc", struct.pack(">II2s2sII", 1, 12, b"en", b"US", len(encoded), 28)
+                   + encoded)
+
+
+def display_p3_profile():
+    """A Display P3 matrix/TRC ICC v4 profile: Apple's D50-adapted P3 colorants and the sRGB
+    tone curve (a parametric curve of type 3)."""
+    xyz = {name: icc_tag(b"XYZ ", b"".join(s15(v) for v in values)) for name, values in {
+        b"wtpt": (0.964203, 1.0, 0.824905), b"rXYZ": (0.515102, 0.241182, -0.001050),
+        b"gXYZ": (0.291965, 0.692236, 0.041882), b"bXYZ": (0.157153, 0.066582, 0.784186),
+    }.items()}
+    curve = icc_tag(b"para", struct.pack(">HH", 3, 0) + b"".join(
+        s15(v) for v in (2.4, 1 / 1.055, 0.055 / 1.055, 1 / 12.92, 0.04045)))
+    tags = [(b"desc", mluc("Display P3 (test)")), (b"cprt", mluc("Public domain")), *xyz.items(),
+            (b"rTRC", curve), (b"gTRC", curve), (b"bTRC", curve)]
+    table, data = b"", b""
+    start = 128 + 4 + 12 * len(tags)
+    for name, body in tags:
+        table += struct.pack(">4sII", name, start + len(data), len(body))
+        data += body
+    size = start + len(data)
+    header = (struct.pack(">I4sI4s4s4s", size, b"\0\0\0\0", 0x04300000, b"mntr", b"RGB ",
+                          b"XYZ ") + b"\0" * 12 + b"acsp" + b"\0" * 24 + struct.pack(">I", 0)
+              + s15(0.9642) + s15(1.0) + s15(0.8249) + b"\0" * 48)
+    assert len(header) == 128
+    return header + struct.pack(">I", len(tags)) + table + data
+
+
+def p3_to_srgb(colour):
+    """The Display P3 colour as sRGB (both D65, linear-light matrix; the colour is in gamut)."""
+    def linear(value):
+        value /= 255
+        return value / 12.92 if value <= 0.04045 else ((value + 0.055) / 1.055) ** 2.4
+
+    def encoded(value):
+        value = 12.92 * value if value <= 0.0031308 else 1.055 * value ** (1 / 2.4) - 0.055
+        return round(255 * value)
+    red, green, blue = (linear(value) for value in colour)
+    matrix = ((1.2249401, -0.2249404, 0.0), (-0.0420569, 1.0420571, 0.0),
+              (-0.0196376, -0.0786361, 1.0982735))
+    return tuple(encoded(row[0] * red + row[1] * green + row[2] * blue) for row in matrix)
+
+
+def heif_file(path, image, **options):
+    import pillow_heif
+    pillow_heif.from_pillow(image).save(path, quality=95, **options)
+
+
+def test_a_heic_prepares_to_a_jpeg_of_the_recipes_size_upright(tmp_path, native_tools):
+    """A5 case 1. Mutation probe: drop `register_heif_opener` and the inspector cannot open it."""
+    source = tmp_path / "original"
+    heif_file(source, corners((400, 300)))
+    result = prepare_rendition(native_tools, pool_asset(width=400, height=300),
+                               rendition_of(source, rendition="original", width=400,
+                                            height=300, media_type="image/heic"),
+                               tmp_path / "variant", recipe=PreparationRecipe(image_long_edge=200))
+    assert (result.variant.media_type, result.variant.width, result.variant.height) == (
+        "image/jpeg", 200, 150)
+    assert result.made_from == "original"
+    with Image.open(tmp_path / "variant") as image:
+        assert image.format == "JPEG"
+        assert_same_pixels(image, corners((400, 300)).resize((200, 150)))
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["original", "variant"]
+
+
+def test_a_display_p3_jpeg_prepares_to_its_srgb_colour(tmp_path, native_tools):
+    """A5 case 2: LittleCMS converts it (perceptual), and no profile is left. Mutation probe:
+    skip the conversion and the P3 values pass through, about 10 off in red."""
+    colour = (170, 110, 90)
+    source = tmp_path / "original"
+    Image.new("RGB", (64, 48), colour).save(source, "JPEG", quality=100, subsampling=0,
+                                            icc_profile=display_p3_profile())
+    result = prepare_rendition(native_tools, pool_asset(width=64, height=48),
+                               rendition_of(source, width=64, height=48), tmp_path / "variant")
+    expected = p3_to_srgb(colour)
+    assert max(abs(a - b) for a, b in zip(expected, colour, strict=True)) > 5
+    with Image.open(result.path) as image:
+        assert "icc_profile" not in image.info
+        mean = ImageStat.Stat(image.convert("RGB")).mean
+    assert all(abs(a - b) <= 2 for a, b in zip(mean, expected, strict=True)), (mean, expected)
+
+
+def test_another_rgb_profile_is_converted_too(tmp_path, native_tools):
+    """An RGB profile that is not sRGB was refused before A5 (unsupported_color)."""
+    source = tmp_path / "original"
+    corners().save(source, "JPEG", quality=96, icc_profile=nonidentity_rgb_profile())
+    result = prepare(native_tools, original_asset(source), source, tmp_path / "variant.jpg")
+    assert (result.variant.width, result.variant.height) == (96, 64)
+
+
+def test_an_avif_prepares(tmp_path, native_tools):
+    """A5 case 3."""
+    source = tmp_path / "original"
+    corners((96, 64)).save(source, "AVIF", quality=90)
+    result = prepare_rendition(native_tools, pool_asset(),
+                               rendition_of(source, rendition="original",
+                                            media_type="image/avif"),
+                               tmp_path / "variant")
+    assert (result.variant.width, result.variant.height) == (96, 64)
+    with Image.open(result.path) as image:
+        assert_same_pixels(image, corners((96, 64)))
+
+
+@pytest.mark.parametrize("transfer", [16, 18])
+def test_a_pq_or_hlg_still_is_refused(tmp_path, native_tools, transfer):
+    """A5 case 4: Photo Wall does not tone-map HDR stills."""
+    source = tmp_path / "original"
+    heif_file(source, corners(), color_primaries=9, transfer_characteristics=transfer,
+              matrix_coefficients=9)
+    with pytest.raises(MediaError) as caught:
+        prepare_rendition(native_tools, pool_asset(),
+                          rendition_of(source, rendition="original", media_type="image/heic"),
+                          tmp_path / "variant")
+    assert caught.value.code == "unsupported_color"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["original"]
+
+
+def test_a_gain_map_photo_prepares_from_its_base_image(tmp_path, native_tools):
+    """An Ultra HDR or Apple adaptive HDR JPEG names its gain map in XMP; its base image is an
+    ordinary SDR photo (refused before A5)."""
+    source = tmp_path / "original"
+    xmp = (b'<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/'
+           b'02/22-rdf-syntax-ns#"><rdf:Description xmlns:hdrgm="http://ns.adobe.com/hdr-gain-'
+           b'map/1.0/" hdrgm:Version="1.0"/></rdf:RDF></x:xmpmeta>')
+    corners().save(source, "JPEG", quality=96, xmp=xmp)
+    result = prepare(native_tools, original_asset(source), source, tmp_path / "variant.jpg")
+    with Image.open(result.path) as image:
+        assert_same_pixels(image, corners())
+
+
+def test_recipe_three_has_its_own_id(native_tools):
+    """A5 case 5: every photo is prepared again once (F-FU-3)."""
+    two = PreparationRecipe.model_construct(**{**PreparationRecipe().model_dump(), "version": 2})
+    ids = [asyncio.run(preparer(native_tools, recipe=recipe).describe_recipe())[0]
+           for recipe in (PreparationRecipe(), two)]
+    assert PreparationRecipe().version == 3 and ids[0] != ids[1]

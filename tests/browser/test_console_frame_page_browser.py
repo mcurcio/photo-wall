@@ -354,15 +354,15 @@ def test_every_tab_speaks_plain_words(page, registry, sessions):
                 r"Surface|enrollment|Unbind", re.I))
 
 
-def test_a_pi_that_cannot_show_changes_live_says_so_and_offers_no_controls(page, registry):
-    """The real server: an enrolled Player without Display Host answers `legacy_preview`."""
+def test_a_pi_that_did_not_start_from_photo_wall_says_so_and_offers_no_controls(page, registry):
+    """The real server: an enrolled Player with no node admission answers `not_admitted`."""
     _seed(registry)
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
         frame = open_frame(page, FRAME, "position")
         expect(frame.get_by_role("status")).to_contain_text(
-            "This Frame's Pi runs software that cannot show changes live")
-        expect(frame.get_by_role("link", name="Open the Pi's software page", exact=True)).to_have_attribute(
+            "This Frame's Pi did not start from Photo Wall")
+        expect(frame.get_by_role("link", name="Open the Pi's page", exact=True)).to_have_attribute(
             "href", re.compile(r"^#/players/device-"))
         expect(frame.get_by_role("img", name="Picture position")).to_have_count(0)
         expect(frame.get_by_role("button", name="Done")).to_have_count(0)
@@ -396,7 +396,7 @@ def test_hardware_keeps_the_frame_profile_apart_from_the_panel_record(page, regi
         expect(port).to_contain_text("Fed by: Pi")
         expect(port).to_contain_text(f"Pi {player_id[-6:]} · HDMI 1")  # the port, not "HDMI-A-1"
         expect(port).not_to_contain_text(OUTPUT)
-        expect(port).to_contain_text("Display, when the Pi last started: Connected, 1920 × 1080")
+        expect(port).to_contain_text("Display, when the Pi last started: Connected, 1,920 × 1,080")
         expect(port).not_to_contain_text("24")
         # Central's own words are under Details.
         port.get_by_role("button", name="Details", exact=True).click()
@@ -418,7 +418,7 @@ def test_the_frame_profile_notes_a_reported_resolution_it_does_not_match(page, r
         problem = _mismatch(frame)
         expect(problem).to_contain_text("Frame profile: Check the Display.")
         expect(problem).to_contain_text(
-            "The Pi reported its Display at 1920 × 1080, but this Frame's profile is 1080 × 1920.")
+            "The Pi reported its Display at 1,920 × 1,080, but this Frame's profile is 1,080 × 1,920.")
         expect(problem).to_contain_text("The saved rotation 0° was considered")
         # One action: edit the profile; the how-to is under Details.
         problem.get_by_role("button", name="Edit Frame profile", exact=True).click()

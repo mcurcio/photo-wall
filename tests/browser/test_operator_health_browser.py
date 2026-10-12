@@ -116,12 +116,10 @@ def test_a_silent_players_binding_line_links_to_its_player_page_without_a_node_r
     report_readiness(registry, player_id)
     registry.clock.advance(40)
     with operator_server(registry.db, registry.clock) as origin:
-        # The shell's one node status read (node control and the effect gate) and its one fleet
-        # host read are not a page's node record read.
+        # The shell's one fleet host read is not a page's node record read.
         node_reads = []
         page.on("request", lambda request: node_reads.append(request.url)
                 if "/v1/operator/node/" in request.url
-                and "/v1/operator/node/status" not in request.url
                 and "/v1/operator/node/hosts" not in request.url else None)
         connect(page, origin, "wall")
         inspector = open_frame(page, FRAME, "hardware")
@@ -329,7 +327,8 @@ def test_a_poll_in_flight_when_a_bind_completes_is_dropped_and_polling_continues
         expect(health).to_contain_text("Needs a Player")
         # The refresh the bind issued lands.
         reads.release(0)
-        expect(health).to_contain_text("Enrolled 0 s ago, no report yet")
+        # A Pi enrolled within the silence limit with no report yet: "Getting ready" (follow-ups C2).
+        expect(health).to_contain_text("Getting ready")
 
         # The dropped poll released its slot: the next tick reads and applies.
         report_readiness(registry, identity["player_id"])

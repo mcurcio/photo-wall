@@ -19,8 +19,6 @@ SCRIPT = r"""
 const stage = await import(process.argv[1]);
 const out = {};
 
-const open = { effective_state: "open", state: "open", generation: 7 };
-const closed = { effective_state: "closed", state: "closed", reason: "never_certified", generation: 6, changed_at: 900 };
 const broker = (extra = {}) => ({ session_id: "s-broker", current: true, scope: "app_effect",
   producer: { owner: "app_effect_broker" }, ...extra });
 const host = { session_id: "s-host", current: true, scope: "operator_reboot", producer: { owner: "host_core" } };
@@ -33,18 +31,16 @@ const device = (sessions = [host, broker()], operations = [], extra = {}) => ({
 
 // --- stageBlocker: served facts only.
 out.blockers = {
-  ok: stage.stageBlocker(device(), device().operations, open, { retired_at: null }),
-  retired: stage.stageBlocker(device(), device().operations, open, { retired_at: 5 }),
-  notRead: stage.stageBlocker({ read: null, operations: null, readAt: null, error: null }, null, open, null),
-  gateClosed: stage.stageBlocker(device(), device().operations, closed, null),
-  gateUnread: stage.stageBlocker(device(), device().operations, null, null),
-  noBroker: stage.stageBlocker(device([host]), device().operations, open, null),
-  twoBrokers: stage.stageBlocker(device([broker(), broker({ session_id: "s-2" })]), device().operations, open, null),
-  switching: stage.stageBlocker(device(undefined, [op("switching")]), device(undefined, [op("switching")]).operations, open, null),
+  ok: stage.stageBlocker(device(), device().operations, { retired_at: null }),
+  retired: stage.stageBlocker(device(), device().operations, { retired_at: 5 }),
+  notRead: stage.stageBlocker({ read: null, operations: null, readAt: null, error: null }, null, null),
+  noBroker: stage.stageBlocker(device([host]), device().operations, null),
+  twoBrokers: stage.stageBlocker(device([broker(), broker({ session_id: "s-2" })]), device().operations, null),
+  switching: stage.stageBlocker(device(undefined, [op("switching")]), device(undefined, [op("switching")]).operations, null),
   // A stranded stage, Staged with no response, does not block: a newer stage replaces it.
-  staged: stage.stageBlocker(device(undefined, [op("staged")]), device(undefined, [op("staged")]).operations, open, null),
+  staged: stage.stageBlocker(device(undefined, [op("staged")]), device(undefined, [op("staged")]).operations, null),
   effectUnknown: stage.stageBlocker(device(undefined, [op("effect_unknown")]),
-    device(undefined, [op("effect_unknown")]).operations, open, null),
+    device(undefined, [op("effect_unknown")]).operations, null),
 };
 
 // --- stageTargets: deployments carrying an app, no verdict.
@@ -67,13 +63,13 @@ out.replaces = [
 // --- stageRequest: fences from the reads at open, ids fixed, the same inputs build the same body.
 const ids = { operationId: "o-new", commandId: "c-new" };
 const atOpen = device(undefined, [op("staged")]);
-const built = stage.stageRequest(atOpen, open, "d-app-1", ids);
+const built = stage.stageRequest(atOpen, "d-app-1", ids);
 out.request = built;
 out.frozen = Object.isFrozen(built) && Object.isFrozen(built.body);
-out.sameBody = JSON.stringify(stage.stageRequest(atOpen, open, "d-app-1", ids).body) === JSON.stringify(built.body);
-out.refusedRequest = [stage.stageRequest(atOpen, closed, "d-app-1", ids), stage.stageRequest(atOpen, open, "", ids)];
+out.sameBody = JSON.stringify(stage.stageRequest(atOpen, "d-app-1", ids).body) === JSON.stringify(built.body);
+out.refusedRequest = [stage.stageRequest(device([host]), "d-app-1", ids), stage.stageRequest(atOpen, "", ids)];
 
-// --- sendStage: judged on node.latest(), control.latest() and the held stage; refuses without a POST.
+// --- sendStage: judged on node.latest() and the held stage; refuses without a POST.
 const posts = [];
 let answer = () => new Response(JSON.stringify({ command: {}, duplicate: false }), { status: 200 });
 globalThis.fetch = async (url, init) => {
@@ -84,49 +80,46 @@ const heldBox = () => {
   let value = null;
   return { get: () => value, set: (request, state) => { value = state === null ? null : { request, state }; } };
 };
-const hooks = (dev, gate = open) => ({ node: { latest: () => dev }, control: { latest: () => ({ state: "on", gate }) } });
-const send = async (request, dev, gate, held = heldBox()) => {
+const hooks = (dev) => ({ node: { latest: () => dev } });
+const send = async (request, dev, held = heldBox()) => {
   const before = posts.length;
-  const result = await stage.sendStage("d-1", request, hooks(dev, gate), held);
+  const result = await stage.sendStage("d-1", request, hooks(dev), held);
   return { ...result, posts: posts.length - before, held: held.get()?.state ?? null };
 };
 out.send = {
   // The latest operation turned switching after the dialog froze: no POST.
   switching: await send(built, device(undefined, [op("switching")])),
-  gateClosed: await send(built, atOpen, closed),
-  // The gate reopened at a new generation: the frozen request is out of date.
-  gateMoved: await send(built, atOpen, { ...open, generation: 8 }),
+  // The device generation moved after the dialog froze: the frozen request is out of date.
+  generationMoved: await send(built, { ...atOpen, read: { ...atOpen.read, device_generation: 4 } }),
   sessionChanged: await send(built, device([host, broker({ session_id: "s-later" })], [op("staged")])),
   ok: await send(built, atOpen),
 };
 // A lost answer is held unknown; only that very request may be sent again, byte-identical.
 const held = heldBox();
 answer = () => { throw new TypeError("network"); };
-out.lost = await send(built, atOpen, open, held);
-const other = stage.stageRequest(atOpen, open, "d-app-2", { operationId: "o-other", commandId: "c-other" });
-out.otherWhileHeld = await send(other, atOpen, open, held);
+out.lost = await send(built, atOpen, held);
+const other = stage.stageRequest(atOpen, "d-app-2", { operationId: "o-other", commandId: "c-other" });
+out.otherWhileHeld = await send(other, atOpen, held);
 answer = () => new Response(JSON.stringify({ command: {}, duplicate: true }), { status: 200 });
-out.again = await send(built, atOpen, open, held);
-out.whileRecorded = await send(built, atOpen, open, held);
+out.again = await send(built, atOpen, held);
+out.whileRecorded = await send(built, atOpen, held);
 // Once the read lists the operation, Central's record is the authority: no resend.
-out.listed = await send(built, device(undefined, [op("staged", { operation_id: "o-new" })]), open, held);
+out.listed = await send(built, device(undefined, [op("staged", { operation_id: "o-new" })]), held);
 out.sentBodies = posts.map((post) => JSON.stringify(post.body));
 out.sentUrl = posts[0]?.url;
 
 // --- stageResult: §26's codes, keyed on the code; unlisted codes refused.
-const result = (status, error) => stage.stageResult({ ok: false, status, error, data: null }, closed);
+const result = (status, error) => stage.stageResult({ ok: false, status, error, data: null });
 out.results = Object.fromEntries([
   ["node_app_current_process_unlinked", 409], ["node_app_target_base_mismatch", 409],
-  ["node_app_qualified_fallback_required", 409], ["node_app_existing_drain", 409],
+  ["node_app_qualified_fallback_required", 409],
   ["node_app_operator_target_changed", 403], ["node_session_unavailable", 403], ["node_session_superseded", 403],
   ["node_deployment_unknown", 404], ["node_environment_unknown", 404], ["node_app_operation_identity_conflict", 409],
-  ["rollout_gate_closed", 503], ["rollout_serving_verifier_unavailable", 503], ["rollout_measured_evidence_expired", 503],
-  ["bound_switch_policy_unselected", 409], ["node_control_disabled", 503], ["node_app_stage_invalid", 422],
+  ["bound_switch_policy_unselected", 409], ["node_app_stage_invalid", 422],
 ].map(([code, status]) => [code, result(status, code)]));
-out.results.gateClosedWhileShellOpen = stage.stageResult({ ok: false, status: 503, error: "rollout_gate_closed" }, open);
-out.results.gateway = stage.stageResult({ ok: false, status: 502, error: null }, open);
-out.results.lost = stage.stageResult(null, open);
-out.results.done = stage.stageResult({ ok: true, status: 200, data: { duplicate: false } }, open);
+out.results.gateway = stage.stageResult({ ok: false, status: 502, error: null });
+out.results.lost = stage.stageResult(null);
+out.results.done = stage.stageResult({ ok: true, status: 200, data: { duplicate: false } });
 // --- boundRuleLines: the rule, then its caveat; neither text is exported alone.
 out.boundRuleLines = stage.boundRuleLines();
 out.boundExports = ["BOUND_RULE", "BOUND_PROVEN"].filter((name) => name in stage);
@@ -142,16 +135,11 @@ def _run():
     return json.loads(result.stdout)
 
 
-GATE_CLOSED = "Effect gate closed · Central's reason: no deployment certification has opened it"
-
-
-def test_stage_is_blocked_only_on_served_facts_with_the_gate_flagged():
+def test_stage_is_blocked_only_on_served_facts():
     blockers = _run()["blockers"]
     assert blockers["ok"] is None
     assert blockers["retired"] == {"reason": "this Player is retired"}
     assert blockers["notRead"] == {"reason": "not read yet"}
-    assert blockers["gateClosed"]["gate"] is True and blockers["gateClosed"]["reason"].startswith(GATE_CLOSED)
-    assert blockers["gateUnread"] == {"reason": "Central's effect gate is not readable", "gate": True}
     assert blockers["noBroker"] == {"reason": "App Effect Broker has no current session on this boot"}
     assert blockers["twoBrokers"] == {"reason": "Central holds more than one current App Effect Broker session"}
     assert blockers["switching"] == {"reason": "A switch is in progress; wait for it to finish"}
@@ -183,10 +171,10 @@ def test_the_stage_request_binds_centrals_fences_and_fixed_ids():
     out = _run()
     assert out["request"] == {
         "body": {"operation_id": "o-new", "command_id": "c-new", "session_id": "s-broker", "device_generation": 3,
-                 "deployment_id": "d-app-1", "rollout_generation": 7, "operator_audit_ref": "console/2025-10-02"},
+                 "deployment_id": "d-app-1", "operator_audit_ref": "console/2025-10-02"},
         "replaces": "Sends a newer stage. It replaces stage o-st…, which App Effect Broker has not responded to."}
     assert out["frozen"] is True and out["sameBody"] is True
-    assert out["refusedRequest"][0]["refused"].startswith(GATE_CLOSED)
+    assert out["refusedRequest"][0] == {"refused": "App Effect Broker has no current session on this boot"}
     assert out["refusedRequest"][1] == {"refused": "choose a deployment"}
 
 
@@ -194,9 +182,7 @@ def test_send_stage_judges_the_newest_reads_and_refuses_without_a_post():
     send = _run()["send"]
     assert send["switching"] == {"outcome": "changed", "posts": 0, "held": None,
                                  "message": "A switch is in progress; wait for it to finish."}
-    assert send["gateClosed"]["posts"] == 0
-    assert send["gateClosed"]["message"].startswith("This request is out of date; close and reopen (" + GATE_CLOSED)
-    assert send["gateMoved"] == {"outcome": "changed", "posts": 0, "held": None,
+    assert send["generationMoved"] == {"outcome": "changed", "posts": 0, "held": None,
                                  "message": "This request is out of date; close and reopen."}
     assert send["sessionChanged"]["posts"] == 0
     assert send["ok"] == {"outcome": "done", "posts": 1, "held": "recorded", "code": None,
@@ -228,25 +214,15 @@ def test_every_stage_code_maps_to_its_words_and_an_unlisted_one_is_refused():
         "This deployment's base differs from the base this Player booted, or it has no app.")
     assert refused["node_app_qualified_fallback_required"] == (
         "No qualified fallback for this Player's current Outputs and base: qualify the running app first.")
-    assert refused["node_app_existing_drain"] == "An equipment drain is active on this Player."
     assert refused["node_deployment_unknown"] == "Central has no such deployment."
     assert refused["node_environment_unknown"] == "Central does not know this app environment."
     assert refused["node_app_operation_identity_conflict"] == "This request id was already used for another stage."
     for code in ("node_app_operator_target_changed", "node_session_unavailable", "node_session_superseded"):
         assert results[code] == {"outcome": "changed", "code": code,
                                  "message": "App Effect Broker's session changed; close and reopen."}
-    assert refused["rollout_gate_closed"] == (
-        "Effect gate closed: no deployment certification has opened it (see Releases › Effect gate).")
-    # Central re-checks its serving evidence while the gate row reads open: never "gate closed".
-    assert refused["rollout_serving_verifier_unavailable"] == (
-        "Central refused the effect: rollout_serving_verifier_unavailable.")
-    assert refused["rollout_measured_evidence_expired"] == (
-        "Central refused the effect: rollout_measured_evidence_expired.")
-    # Unlisted, including the deleted G6 code and node_control_disabled: the default, refused.
-    for code in ("bound_switch_policy_unselected", "node_control_disabled", "node_app_stage_invalid"):
+    # Unlisted, including the deleted G6 code: the default, refused.
+    for code in ("bound_switch_policy_unselected", "node_app_stage_invalid"):
         assert refused[code] == f"Central refused: {code}."
-    assert results["gateClosedWhileShellOpen"]["message"] == (
-        "Effect gate closed: its reason is not readable here (see Releases › Effect gate).")
     assert results["gateway"]["outcome"] == results["lost"]["outcome"] == "unknown"
     assert results["done"]["outcome"] == "done"
 
@@ -263,8 +239,7 @@ def test_send_stage_is_the_only_caller_of_the_app_stages_route():
     start = source.index("export async function sendStage(")
     at = route.search(source).start()
     assert start < at < source.index("\n}\n", start)
-    assert "stageRefusal(request, node.latest(), gate, held.get())" in source[start:at]
-    assert "const gate = control.latest().gate;" in source[start:at]
+    assert "stageRefusal(request, node.latest(), held.get())" in source[start:at]
 
 
 # Fragments of the bound rule (§25, D16) and its caveat: any one names the text.

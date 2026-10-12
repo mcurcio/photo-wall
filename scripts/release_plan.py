@@ -329,7 +329,7 @@ NOT_SHIPPED: Final = (
     "scripts/boot_time_fixture.py", "scripts/check_docs.py",
     "scripts/configure.py", "scripts/container_build.py", "scripts/demo_wall.py",
     "scripts/node_control_demo.py",  # Opt-in software simulator, never a runtime artifact.
-    "scripts/node_rollout_image_check.py", "scripts/node_rollout_ci_evidence.py",
+    "scripts/node_rollout_image_check.py",
     "scripts/harness_bundle.py", "scripts/harness_failure.py",
     "scripts/immich_actions.py", "scripts/immich_fixture.py", "scripts/immich_runtime.py",
     "scripts/provenance_models.py",
@@ -413,7 +413,7 @@ SUITES: Final = (
                  "tests/display_harness_health_client.py", "tests/display_harness_judge_feeder.py",
                  "scripts/run_display_harness.py",
                  "tests/content_db.py", "tests/runtime_fakes.py", "tests/test_assets_handlers.py",
-                 "tests/test_fleet_attempts.py", "tests/test_fleet_rollout_gate.py",
+                 "tests/test_fleet_attempts.py",
                  "tests/test_node_boot.py", "tests/test_registry.py",
                  # the join's hub harness and its pinned nats-server
                  "tests/integration/bus_servers.py", "tests/systemd_environment.py",
@@ -426,7 +426,8 @@ SUITES: Final = (
                  ".github/actions/docker-hub-mirror/action.yml",
                  ".github/actions/node-builder/action.yml",
                  "central/**/*.py", "appliance/*.py", "media/__init__.py", "media/models.py",
-                 "media/prepare.py", "central/migrations/*_node_*.sql", "uv.lock")),
+                 "media/prepare.py", "media/library_client.py", "central/migrations/*_node_*.sql",
+                 "uv.lock")),
 )
 SUITE_JOBS: Final = frozenset(suite.job for suite in SUITES)
 # The jobs that build for others, and the jobs they build for: each runs when the plan lists one

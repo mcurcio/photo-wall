@@ -22,9 +22,8 @@ from test_registry import enroll
 
 import central.db as database_module
 from central.db import Database
-from central.equipment_drain import fenced_players_in, require_unfenced_player_in
 from central.fleet.node_ingest import NodeIngest
-from central.registry import Registry, RegistryError
+from central.registry import Registry
 from contracts.node_protocol import NodeEventV2, RebootFact, encode_node_message
 from contracts.time import ManualClock
 
@@ -105,9 +104,9 @@ def seed_historical_v1_offer(registry, *, session: bool = True) -> None:
                          "900,1100)", (SESSION_ID, DEVICE_ID, BOOT_ID, OFFER_ID, "f" * 64))
 
 
-def test_049_to_current_preserves_committed_legacy_stop_and_identity(history):
-    # A committed drain row written before the node migrations still fences its Player; the V1
-    # offer goes (069) and so does the OS command session that named it (070).
+def test_049_to_current_drops_the_v1_offer_session_and_drain(history):
+    # The V1 offer goes (069), so does the OS command session that named it (070), and the
+    # committed drain row written before the node migrations goes with the drain table (078).
     with history(49) as (registry, _through):
         _seed(registry)
         seed_historical_release(registry)
@@ -116,21 +115,19 @@ def test_049_to_current_preserves_committed_legacy_stop_and_identity(history):
         seed_historical_committed_stop(registry, player, request)
         before = ledger(registry.db)
         with registry.db.transaction() as conn:
-            drain = conn.execute("SELECT * FROM equipment_drains").fetchone()
+            assert conn.execute("SELECT * FROM equipment_drains").fetchone()
             assert conn.execute("SELECT * FROM fleet_os_command_sessions").fetchone()
         registry.db.migrate()
         registry.db.migrate()
         assert ledger(registry.db)[:len(before)] == before
         with registry.db.transaction() as conn:
-            assert conn.execute("SELECT * FROM equipment_drains").fetchone() == drain
-            for table in ("fleet_boot_offers", "fleet_os_command_sessions"):
+            # The effect gate and its verifier chain go too (079, owner answer G-A).
+            for table in ("fleet_boot_offers", "fleet_os_command_sessions", "equipment_drains",
+                          "active_equipment_drains", "fleet_effect_gate",
+                          "node_rollout_evidence_heads"):
                 assert conn.execute("SELECT to_regclass(%s) AS name", (table,)).fetchone()[
                     "name"] is None
-            assert fenced_players_in(conn) == frozenset({player["player_id"]})
-            with pytest.raises(RegistryError, match="equipment_draining"):
-                require_unfenced_player_in(conn, player["player_id"])
             assert conn.execute("SELECT count(*) AS n FROM node_sessions").fetchone()["n"] == 0
-            assert conn.execute("SELECT state FROM fleet_effect_gate").fetchone()["state"] == "closed"
 
 
 def test_053_admission_offer_fk_backfill_preserves_legacy_identity(history):
@@ -158,10 +155,9 @@ def test_053_admission_offer_fk_backfill_preserves_legacy_identity(history):
                     conn.execute("UPDATE node_boot_admissions SET offer_id=%s", (uuid4(),))
         registry.db.migrate()
         with registry.db.transaction() as conn:
-            # 069: the adopted context stays as history without the V1 offer it named.
-            assert conn.execute("SELECT * FROM node_boot_admissions").fetchone() == original
-            assert conn.execute("SELECT * FROM node_offer_contexts").fetchone() == {
-                "offer_id": OFFER_ID, "basis": "legacy_adoption", "node_offer_id": None}
+            # 077: the adopted context and its admission are V1 history, deleted.
+            assert conn.execute("SELECT * FROM node_boot_admissions").fetchall() == []
+            assert conn.execute("SELECT * FROM node_offer_contexts").fetchall() == []
             assert conn.execute("SELECT count(*) AS n FROM node_sessions").fetchone()["n"] == 0
 
 
@@ -250,25 +246,3 @@ def test_062_applies_forward_on_a_database_at_061(history):
                              "first_received_at,received_at) VALUES(%s,2,'{}'::bytea,2,2)", (producer,))
             with pytest.raises(psycopg.errors.CheckViolation), conn.transaction():
                 conn.execute("UPDATE node_host_facts SET payload=%s", (b"x" * 2049,))
-
-
-def test_063_retires_a_completed_count_only_preview_and_keeps_pending_ones(history):
-    # A completed preview from before 063 has no sample; it becomes expired, never a fake
-    # empty sample. A pending one stays pending, and a complete write now needs the sample.
-    with history(62) as (registry, _):
-        with registry.db.transaction() as conn:
-            for request_id, status, counts in ((uuid4(), "complete", (1, 1, 0)),
-                                               (uuid4(), "pending", (None, None, None))):
-                conn.execute("INSERT INTO source_previews(request_id,query,status,count,image_count,"
-                             "video_count,created_at,expires_at) VALUES(%s,'{}',%s,%s,%s,%s,1,2)",
-                             (request_id, status, *counts))
-        registry.db.migrate()
-        with registry.db.transaction() as conn:
-            assert sorted((row["status"], row["error"]) for row in conn.execute(
-                "SELECT status,error FROM source_previews").fetchall()) == [
-                ("failed", "preview_expired"), ("pending", None)]
-            with pytest.raises(psycopg.errors.CheckViolation), conn.transaction():
-                conn.execute("UPDATE source_previews SET status='complete',count=0,image_count=0,"
-                             "video_count=0 WHERE status='pending'")
-            conn.execute("UPDATE source_previews SET status='complete',count=0,image_count=0,video_count=0,"
-                         "shown='[]',members='[]',limited=FALSE,observed_at=1 WHERE status='pending'")

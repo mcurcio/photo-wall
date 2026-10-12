@@ -4,6 +4,8 @@ import { apiWrite } from "./apiWrite.js";
 import { activationProblems } from "./authoring.js";
 import { useConfirm } from "./ConfirmAction.jsx";
 import { PriorityField, useProblems } from "./Field.jsx";
+import { SourceCheckProblem } from "./domain/source-check-problem.tsx";
+import { CHECK_FAILED } from "./sourceWords.js";
 import { Advanced } from "./flow/Advanced.jsx";
 import { CheckAnswers, NotChosen } from "./flow/CheckAnswers.jsx";
 import { FlowFrame } from "./flow/FlowFrame.jsx";
@@ -14,6 +16,7 @@ import { useFlowInstance, useFlowRefs } from "./flow/useFlowInstance.js";
 import { useFlowWrite } from "./flow/useFlowWrite.js";
 import { useSceneHandOver } from "./flow/useSceneHandOver.js";
 import { mediaNow, sourceState } from "./mediaHealth.js";
+import { FitBoardFor } from "./domain/photo-fit-board.tsx";
 import { ScenePicker } from "./ScenePicker.jsx";
 import {
   activationAnswer,
@@ -40,7 +43,6 @@ import {
 } from "./showState.js";
 import { sourceName } from "./sourceNames.js";
 import { FrameChips } from "./TargetPicker.jsx";
-import { sourceRefreshMessage, useSourceRefresh } from "./useSourceRefresh.js";
 
 const EMPTY = {};
 
@@ -100,7 +102,6 @@ export function ShowNowFlow({ snapshot, route, navigate, recentScene, markDraft 
   const frames = useMemo(() => sceneFrames(scene), [scene]);
   const sourceRefs = useMemo(() => sceneSourceRefs(scene), [scene]);
   const authoredMedia = useMemo(() => sceneHasAuthoredMedia(scene), [scene]);
-  const sourceRefresh = useSourceRefresh(JSON.stringify([value.sceneId, scene?.revision ?? null]));
   const covering = coveringPriority(snapshot, frames);
   // Whether a live Run covers the frames at all: one may itself have priority 0.
   const covered = coveringRuns(snapshot, frames).length > 0;
@@ -198,7 +199,7 @@ export function ShowNowFlow({ snapshot, route, navigate, recentScene, markDraft 
     });
 
   const priorityValid = !problemList.some((problem) => problem.field === "priority");
-  const stepProps = { value, problems, edit, snapshot, frames, sourceRefs, authoredMedia, sourceRefresh };
+  const stepProps = { value, problems, edit, snapshot, frames, sourceRefs, authoredMedia };
   const views = {
     scene: () => (
       <SceneStep
@@ -273,7 +274,7 @@ function SceneFramesValue({ snapshot, frames }) {
  * Step 1, Scene: the one Scene picker (slice 3 §3), then the frames it reaches. `offered`
  * is a Scene handed over while the draft keeps its own: a button offers it instead.
  */
-function SceneStep({ value, problems, edit, snapshot, frames, sourceRefs, authoredMedia, sourceRefresh, definitions, offered, onTake }) {
+function SceneStep({ value, problems, edit, snapshot, frames, sourceRefs, authoredMedia, definitions, offered, onTake }) {
   return (
     <>
       <OfferedScene
@@ -285,7 +286,7 @@ function SceneStep({ value, problems, edit, snapshot, frames, sourceRefs, author
       />
       <ScenePicker
         id={problems.idFor("scene")}
-        label="Scene to activate"
+        label="Scene"
         reason={problems.reasonFor("scene")}
         definitions={definitions}
         value={value.sceneId}
@@ -293,16 +294,37 @@ function SceneStep({ value, problems, edit, snapshot, frames, sourceRefs, author
       />
       {value.sceneId !== "" && (
         <>
-          <dl className="record">
+          <dl className="record record--even">
             <dt>Frames</dt>
             <dd>
               <SceneFramesValue snapshot={snapshot} frames={frames} />
             </dd>
           </dl>
-          <SourceFreshness snapshot={snapshot} refs={sourceRefs} authoredMedia={authoredMedia} refresh={sourceRefresh} />
+          <SceneSources snapshot={snapshot} refs={sourceRefs} authoredMedia={authoredMedia} />
+          {sourceRefs.length > 0 && frames.length > 0 && (
+            <SceneFit sceneId={value.sceneId} scene={definitions[value.sceneId]} sourceRefs={sourceRefs} frames={frames} />
+          )}
         </>
       )}
     </>
+  );
+}
+
+/**
+ * How the chosen Scene's photos fit its Frames, in one line that opens its Fit board
+ * (follow-ups C1): "Fits 3 of 4 Frames · Hall has no photo that fits". At the Scene's crop
+ * limit, or the house's when it has none.
+ */
+function SceneFit({ sceneId, scene, sourceRefs, frames }) {
+  const cropLimit = typeof scene?.selection?.crop_limit === "number" ? scene.selection.crop_limit : null;
+  const sourceKey = sourceRefs.join("\n");
+  const frameKey = frames.join("\n");
+  const question = useMemo(() => ({
+    selection: { sources: sourceKey.split("\n") }, frames: frameKey.split("\n"), crop_limit: cropLimit,
+  }), [sourceKey, frameKey, cropLimit]);
+  return (
+    <FitBoardFor question={question} size="strip" lead="wall" title={`How ${sceneId} fills its Frames`}
+      judged={{ at: "show-now", ownCrop: cropLimit !== null }} />
   );
 }
 
@@ -338,7 +360,6 @@ function ReviewStep({
   frames,
   sourceRefs,
   authoredMedia,
-  sourceRefresh,
   definitions,
   covering,
   covered,
@@ -375,7 +396,7 @@ function ReviewStep({
         ]}
       />
       {value.sceneId !== "" && (
-        <SourceFreshness snapshot={snapshot} refs={sourceRefs} authoredMedia={authoredMedia} refresh={sourceRefresh} />
+        <SceneSources snapshot={snapshot} refs={sourceRefs} authoredMedia={authoredMedia} />
       )}
       <Advanced
         summary={`Priority ${priority} · ${REPEAT_LABELS[value.repeat]}`}
@@ -424,50 +445,35 @@ function ReviewStep({
   );
 }
 
-/** Current catalog freshness for the selected Scene's saved live Source refs. */
-function SourceFreshness({ snapshot, refs, authoredMedia, refresh }) {
+/**
+ * The chosen Scene's Photo sources (roadmap 4, K4; follow-ups D1), one line: each by its name and
+ * its check's state in words ("garden (Checked Sun 03:39)"). Checking a Source is the Sources
+ * page's action, not this quick action's.
+ */
+function SceneSources({ snapshot, refs, authoredMedia }) {
   const sources = snapshot?.media?.sources ?? [];
   const now = mediaNow(snapshot);
-  const rows = refs.map((ref) => {
-    const source = sources.find((candidate) => candidate.source_ref === ref) ?? null;
-    return { ref, source, state: source === null ? null : sourceState(source, now, false) };
+  const chosen = refs.map((ref) => sources.find((candidate) => candidate.source_ref === ref) ?? null);
+  const words = refs.map((ref, index) => {
+    const source = chosen[index];
+    const state = source === null ? null : sourceState(source, now);
+    // A failed check is said once, as its problem below (SourceCheckProblem).
+    const label = state === null ? "its state is not served" : state.state === "failed" ? CHECK_FAILED : state.label;
+    return `${sourceName(source ?? ref)} (${label})`;
   });
-  const needsAttention = rows.some(({ state }) => state === null || state.severity !== "ok");
   return (
-    <section
-      className={`notice show-now__sources${needsAttention ? " notice--warn" : ""}`}
-      aria-label="Saved Source freshness"
-    >
-      <p><strong>Saved Source freshness</strong> is Central's latest catalog status. It does not confirm prepared media or visible playback.</p>
-      {refs.length === 0 ? (
-        <p>{authoredMedia
-          ? "This Scene uses hand-picked media; refreshing a Source does not change its chosen items."
-          : "This Scene has no live Sources to refresh."}</p>
-      ) : (
-        <ul className="show-now__source-list">
-          {rows.map(({ ref, source, state }) => {
-            const feedback = refresh.feedback[ref] ?? null;
-            const message = sourceRefreshMessage(feedback, source, state);
-            return (
-              <li key={ref}>
-                <span>{sourceName(source ?? ref)}: {state?.label ?? "Current Source status is unavailable."}</span>
-                {state !== null && state.state !== "ok" && (
-                  <button
-                    type="button"
-                    disabled={refresh.pending !== null}
-                    aria-label={`Refresh ${sourceName(source)}`}
-                    onClick={() => refresh.run(ref)}
-                  >
-                    {refresh.pending === ref ? "Requesting refresh…" : "Refresh Source"}
-                  </button>
-                )}
-                {message !== null && <p role="status">{message}</p>}
-              </li>
-            );
-          })}
-        </ul>
-      )}
-    </section>
+    <>
+      <dl className="record record--even" aria-label="Photos from">
+        <dt>Photos from</dt>
+        <dd>
+          {refs.length > 0 ? words.join(", ")
+            : authoredMedia ? "Hand-picked photos" : "No Photo source"}
+        </dd>
+      </dl>
+      {chosen.map((source, index) => source !== null && (
+        <SourceCheckProblem key={refs[index]} name={sourceName(source)} check={source.check} />
+      ))}
+    </>
   );
 }
 

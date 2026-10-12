@@ -23,8 +23,11 @@ const MEDIA = Object.freeze({ id: "media", label: "Media per frame" });
 const PLAYBACK = Object.freeze({ id: "playback", label: "Playback" });
 const REVIEW = Object.freeze({ id: "review", label: "Review" });
 
-const LIVE_STEPS = Object.freeze([KIND, PHOTOS, FRAMES, PLAYBACK, REVIEW]);
-const HAND_PICKED_STEPS = Object.freeze([KIND, PHOTOS, FRAMES, MEDIA, PLAYBACK, REVIEW]);
+// Frames before Photos (follow-ups C1): photos are chosen against known Frames, so the Photos
+// step can show which of them fit (owner, 2026-10-11, the preview of "transient Frame
+// compatibility").
+const LIVE_STEPS = Object.freeze([KIND, FRAMES, PHOTOS, PLAYBACK, REVIEW]);
+const HAND_PICKED_STEPS = Object.freeze([KIND, FRAMES, PHOTOS, MEDIA, PLAYBACK, REVIEW]);
 
 /**
  * The steps of a Scene of kind `mode`: "Media per frame" only for a hand-picked one.
@@ -52,6 +55,9 @@ export const SCENE_FIELD_STEP = Object.freeze({
   endingSeconds: "playback",
   keepLastPhoto: "playback",
   keepTogether: "playback",
+  order: "playback",
+  noRepeatDays: "playback",
+  cropLimit: "playback",
   name: "review",
   id: "review",
 });
@@ -100,7 +106,7 @@ export function seedScene(definitions, initialTarget = null) {
  */
 export const SCENE_ANSWER_LABELS = Object.freeze({
   mode: KIND.label,
-  source: PHOTOS.label,
+  source: "Photos from",
   targets: FRAMES.label,
   media: MEDIA.label,
   cycle: PLAYBACK_LABELS.cycle,
@@ -109,12 +115,15 @@ export const SCENE_ANSWER_LABELS = Object.freeze({
   ending: PLAYBACK_LABELS.ending,
   keepLastPhoto: PLAYBACK_LABELS.keepLastPhoto,
   keepTogether: PLAYBACK_LABELS.keepTogether,
+  order: PLAYBACK_LABELS.order,
+  noRepeatDays: PLAYBACK_LABELS.noRepeatDays,
+  cropLimit: PLAYBACK_LABELS.cropLimit,
 });
 
 // The authored values a Reload can change, each by its answer label.
 const RELOADED = [
   [SCENE_ANSWER_LABELS.mode, (draft) => draft.mode],
-  [SCENE_ANSWER_LABELS.source, (draft) => draft.sourceRef],
+  [SCENE_ANSWER_LABELS.source, (draft) => draft.sourceRefs],
   [SCENE_ANSWER_LABELS.targets, (draft) => [...draft.targets].sort()],
   [SCENE_ANSWER_LABELS.media, (draft) => draft.selections],
   [SCENE_ANSWER_LABELS.cycle, (draft) => Number(draft.cycleSeconds)],
@@ -124,6 +133,9 @@ const RELOADED = [
     (draft.ending === "none" ? "none" : `${draft.ending}:${Number(draft.endingSeconds)}`)],
   [SCENE_ANSWER_LABELS.keepLastPhoto, (draft) => draft.keepLastPhoto],
   [SCENE_ANSWER_LABELS.keepTogether, (draft) => draft.keepTogether],
+  [SCENE_ANSWER_LABELS.order, (draft) => draft.order],
+  [SCENE_ANSWER_LABELS.noRepeatDays, (draft) => Number(draft.noRepeatDays)],
+  [SCENE_ANSWER_LABELS.cropLimit, (draft) => Number(draft.cropLimit)],
 ];
 
 /**

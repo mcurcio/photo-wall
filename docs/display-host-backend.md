@@ -8,7 +8,7 @@ Save qualification is established by this source.
 
 ## Selected backend and responsibilities
 
-The opt-in node display service uses a base-owned Weston **14** shell module,
+The node display service uses a base-owned Weston **14** shell module,
 `photo-wall-shell.so`, replacing kiosk-shell for this path. libweston has a
 versioned native ABI; Meson requires `libweston-14`; Weston 14 includes its desktop API in that library.
 The native Debian build locks the actual package versions from the repository's

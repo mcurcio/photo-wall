@@ -15,9 +15,13 @@ dependencies = [
   "fastapi==0.115.12", "uvicorn==0.34.2", "pydantic==2.11.4",
   "psycopg[binary]==3.2.9", "psycopg-pool==3.3.1", "httpx==0.28.1", "websockets==15.0.1",
   "cryptography==44.0.3", "Pillow==12.3.0",
-  "procrastinate==3.9.0", "zeroconf==0.151.3",
+  "pillow-heif==1.8.0",  # HEIC and HEIF originals (libheif), follow-ups A5
+  "procrastinate==3.9.0",
   "semver>=3,<4",
   "nats-py==2.16.0",  # the Node API library's client: the worker's hub side (E3d S5)
+  # Roadmap 5a: the key content analyser's interest grid (OpenCV static saliency, spectral
+  # residual; the saliency module ships only in the contrib build). Media worker only.
+  "opencv-contrib-python-headless==5.0.0.93",
 ]
 
 [dependency-groups]
@@ -125,7 +129,8 @@ layers = ["central.app : central.content_wiring : central.content_routes : centr
 name = "Kernel, origins and domains have no persistence, queue or HTTP-framework dependency"
 type = "forbidden"
 source_modules = ["central.kernel", "central.origins", "central.content_catalog",
-                  "central.assets", "central.health", "central.displays"]
+                  "central.assets", "central.health", "central.displays", "central.photo_library",
+                  "central.wall_plan"]
 forbidden_modules = ["procrastinate", "psycopg", "psycopg_pool", "fastapi", "starlette"]
 
 [[tool.importlinter.contracts]]
@@ -134,6 +139,25 @@ name = "Displays are pure domain"
 type = "forbidden"
 source_modules = ["central.displays"]
 forbidden_modules = ["nodeapi", "central.infra", "central.db", "central.registry", "central.app"]
+
+[[tool.importlinter.contracts]]
+# Roadmap 4 (run ledger .claude/runs/photo-4.md): the photo library's vocabulary and rules are pure;
+# the media worker imports them, never the other way, and Central reaches the store through infra.
+name = "The photo library domain is pure"
+type = "forbidden"
+source_modules = ["central.photo_library"]
+forbidden_modules = ["media", "httpx", "nodeapi", "central.infra", "central.db", "central.registry",
+                     "central.app", "central.media_repository"]
+
+[[tool.importlinter.contracts]]
+# Roadmap 5a (run ledger .claude/runs/photo-5a.md): the wall plan's rules are pure; the Planner and
+# Runtime import them, never the other way, and the stores live in central.infra.
+name = "The wall plan is pure"
+type = "forbidden"
+source_modules = ["central.wall_plan"]
+forbidden_modules = ["media", "httpx", "nodeapi", "cv2", "numpy", "central.infra", "central.db",
+                     "central.registry", "central.app", "central.planner", "central.runtime",
+                     "central.coordination", "central.media_repository"]
 
 [[tool.importlinter.contracts]]
 # R22: only the media worker holds a library's address and key. Central's thumbnail handler gets

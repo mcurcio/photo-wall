@@ -11,8 +11,9 @@ import pytest
 
 import player.native as native_module
 from contracts.frame_fit import cover_rectangle
-from contracts.models import Calibration, CornersFit, CoverFit
+from contracts.models import Calibration, CornersFit, CoverFit, PhotoCrop
 from contracts.node_frame import PictureOperations
+from contracts.photo_crop import CENTRED
 from player.geometry import (
     compose_pixel,
     decode_channel,
@@ -133,13 +134,13 @@ def test_singular_or_nonfinite_homography_rejected():
                                                  (180, (.8, .7)), (270, (.7, .2))])
 def test_corners_undoes_the_quarter_turn(rotation, expected):
     fit = CornersFit(rotation=rotation)
-    assert picture_source_uv(.2, .3, fit, (100, 100), 1, 100, 100) == pytest.approx(expected)
+    assert picture_source_uv(.2, .3, fit, (100, 100), 1, 100, 100, CENTRED) == pytest.approx(expected)
 
 
 def test_the_opening_clips_before_the_quarter_turn():
     fit = CornersFit(corners=((.2, .2), (.8, .2), (.8, .8), (.2, .8)), rotation=90)
-    assert picture_source_uv(.1, .4, fit, (100, 100), 1, 100, 100) is None
-    assert picture_source_uv(.5, .5, fit, (100, 100), 1, 100, 100) == pytest.approx((.5, .5))
+    assert picture_source_uv(.1, .4, fit, (100, 100), 1, 100, 100, CENTRED) is None
+    assert picture_source_uv(.5, .5, fit, (100, 100), 1, 100, 100, CENTRED) == pytest.approx((.5, .5))
 
 
 # -- roadmap 1c R1: one matrix per Frame fit, masks per Frame and per Output, the final pass ------
@@ -176,7 +177,7 @@ def test_corners_fit_stretches_the_picture_onto_the_corners(corners, rotation):
     for _ in range(200):
         s, t = rng.uniform(.01, .99), rng.uniform(.01, .99)
         x, y = transform(forward, *TURNED[rotation](s, t))
-        assert picture_source_uv(x, y, fit, HD, 1.6, 320, 200) == pytest.approx((s, t), abs=1e-9)
+        assert picture_source_uv(x, y, fit, HD, 1.6, 320, 200, CENTRED) == pytest.approx((s, t), abs=1e-9)
 
 
 def _picture_edges(matrix) -> tuple[tuple[float, float], tuple[float, float]]:
@@ -224,8 +225,9 @@ def test_cover_crops_the_photo_once_to_the_profiles_aspect(rotation):
     x, y = rectangle.centre_x / HD[0], rectangle.centre_y / HD[1]
 
     def photo_step(dx: float, dy: float) -> float:
-        here = picture_source_uv(x, y, fit, HD, 16 / 9, *source)
-        there = picture_source_uv(x + dx / HD[0], y + dy / HD[1], fit, HD, 16 / 9, *source)
+        here = picture_source_uv(x, y, fit, HD, 16 / 9, *source, CENTRED)
+        there = picture_source_uv(x + dx / HD[0], y + dy / HD[1], fit, HD, 16 / 9, *source,
+                                  CENTRED)
         return math.hypot((there[0] - here[0]) * source[0], (there[1] - here[1]) * source[1])
     along_width = photo_step(step * math.cos(turn), step * math.sin(turn))
     along_height = photo_step(-step * math.sin(turn), step * math.cos(turn))
@@ -248,8 +250,8 @@ def test_a_frame_draws_nothing_outside_its_opening():
     x, y = transform(backward, .1, .1)          # near the picture's top-left, outside the opening
     assert 0 <= x <= 1 and 0 <= y <= 1
     assert 0 < transform(output_to_picture(fit, HD, 16 / 9), x, y)[0] < 1
-    assert picture_source_uv(x, y, fit, HD, 16 / 9, 100, 100) is None
-    assert picture_source_uv(.5, .5, fit, HD, 16 / 9, 100, 100) is not None
+    assert picture_source_uv(x, y, fit, HD, 16 / 9, 100, 100, CENTRED) is None
+    assert picture_source_uv(.5, .5, fit, HD, 16 / 9, 100, 100, CENTRED) is not None
 
 
 def test_two_frames_on_one_output_keep_to_their_openings():
@@ -310,14 +312,40 @@ def test_neutral_operations_change_nothing(encoded):
 
 
 def test_photo_rect_is_centred_cover_without_trim():
-    assert photo_rect(1, 200, 100) == pytest.approx((.25, 0, .75, 1))
-    assert photo_rect(2, 200, 100) == pytest.approx((0, 0, 1, 1))
-    assert photo_rect(4, 200, 100) == pytest.approx((0, .25, 1, .75))
-    assert photo_rect(.5, 200, 100) == pytest.approx((.375, 0, .625, 1))
+    crop = CENTRED
+    assert photo_rect(1, 200, 100, crop) == pytest.approx((.25, 0, .75, 1))
+    assert photo_rect(2, 200, 100, crop) == pytest.approx((0, 0, 1, 1))
+    assert photo_rect(4, 200, 100, crop) == pytest.approx((0, .25, 1, .75))
+    assert photo_rect(.5, 200, 100, crop) == pytest.approx((.375, 0, .625, 1))
     with pytest.raises(ValueError):
-        photo_rect(0, 200, 100)
+        photo_rect(0, 200, 100, CENTRED)
     with pytest.raises(ValueError):
-        photo_rect(1, 0, 100)
+        photo_rect(1, 0, 100, CENTRED)
+
+
+def test_photo_rect_draws_the_window_the_crop_names():
+    """Roadmap 5a P1: offset 0 keeps the left (wide source) or top (tall source) edge, offset 1
+    the right or bottom one (contracts/photo_crop.py `crop_window`)."""
+    wide, tall = (200, 100), (100, 200)
+    assert photo_rect(1, *wide, PhotoCrop(offset=0)) == pytest.approx((0, 0, .5, 1))
+    assert photo_rect(1, *wide, PhotoCrop(offset=1)) == pytest.approx((.5, 0, 1, 1))
+    assert photo_rect(1, *tall, PhotoCrop(offset=0)) == pytest.approx((0, 0, 1, .5))
+    assert photo_rect(1, *tall, PhotoCrop(offset=1)) == pytest.approx((0, .5, 1, 1))
+
+
+def test_picture_source_uv_samples_inside_the_crop_window():
+    """A 2:1 source on a 1:1 Frame with offset 0 samples u in [0, .5] across the whole picture,
+    offset 1 u in [.5, 1]; v is the full height."""
+    fit = CornersFit()
+    for offset, low in ((0, 0), (1, .5)):
+        crop = PhotoCrop(offset=offset)
+        samples = [picture_source_uv(x / 10, y / 10, fit, (100, 100), 1, 200, 100, crop)
+                   for x in range(11) for y in range(11)]
+        assert all(low - 1e-9 <= u <= low + .5 + 1e-9 for u, _ in samples)
+        assert min(u for u, _ in samples) == pytest.approx(low)
+        assert max(u for u, _ in samples) == pytest.approx(low + .5)
+        assert min(v for _, v in samples) == pytest.approx(0)
+        assert max(v for _, v in samples) == pytest.approx(1)
 
 
 def test_srgb_and_bt709_transfer():

@@ -8,7 +8,6 @@ import { clock, fact, words } from "./facts.js";
 import {
   interruptionFor, isBound, outputLabel, outputStates,
 } from "./health.js";
-import { NodeRecords, nodeReadsAllowed, useNodeControlValue } from "./nodeControl.js";
 import { currentSessionBoot, layerEvidence, useNodeDevice } from "./nodeRead.js";
 import { AppOperationsSection } from "./PlayerCommands.jsx";
 import { QualifiedFallback } from "./QualifiedFallback.jsx";
@@ -291,8 +290,7 @@ function OutputsSection({ snapshot, bootFacts, row, wall, setStatus }) {
  * its app (Stage app and its operations) and Unbind all. It keeps what belongs to Software and
  * Screens until their own pages land. Each section shows its own read time and sits behind its
  * own error boundary. Node records are read only on a Pi's pages, for that box only
- * (nodeRead.js), never for a retired box and never while the shell's node control is not on;
- * with node control off the node sections give way to one "not shown" line (nodeControl.js).
+ * (nodeRead.js), never for a retired box.
  * Writes stay with their aggregate: Bind goes to the Frame, Stage app to the fleet.
  *
  * @param {{deviceId: string, snapshot: object, bootFacts: object|null,
@@ -302,8 +300,7 @@ export function PlayerPage({ deviceId, snapshot, bootFacts, wall }) {
   const row = playersByDevice(snapshot, bootFacts).find((candidate) => candidate.deviceId === deviceId)
     ?? null;
   const retired = row?.standing === "retired";
-  const control = useNodeControlValue();
-  const node = useNodeDevice(deviceId, { skip: row === null || retired || !nodeReadsAllowed(control) });
+  const node = useNodeDevice(deviceId, { skip: row === null || retired });
   const nameRef = useRef(/** @type {HTMLHeadingElement|null} */ (null));
   const focusName = () => nameRef.current?.focus();
   const { open: openDialog, setStatus, confirmation } = useConfirm(focusName, focusName);
@@ -349,11 +346,9 @@ export function PlayerPage({ deviceId, snapshot, bootFacts, wall }) {
         </PiHeader>
       </div>
 
-      <NodeRecords>
-        <SectionBoundary title="Layers" resetKey={node.readAt}>
-          <LayersSection node={node} snapshot={snapshot} playerId={player?.id ?? null} retired={retired} />
-        </SectionBoundary>
-      </NodeRecords>
+      <SectionBoundary title="Layers" resetKey={node.readAt}>
+        <LayersSection node={node} snapshot={snapshot} playerId={player?.id ?? null} retired={retired} />
+      </SectionBoundary>
 
       <SectionBoundary title="Outputs" resetKey={snapshot?.at}>
         {player === null ? (
@@ -363,21 +358,19 @@ export function PlayerPage({ deviceId, snapshot, bootFacts, wall }) {
         )}
       </SectionBoundary>
 
-      <NodeRecords quiet>
-        <SectionBoundary title="Boot" resetKey={node.readAt}>
-          <BootSection node={node} retired={retired} />
-        </SectionBoundary>
+      <SectionBoundary title="Boot" resetKey={node.readAt}>
+        <BootSection node={node} retired={retired} />
+      </SectionBoundary>
 
-        {!retired && (
-          <SectionBoundary title="App" resetKey={node.operations?.read_at}>
-            <StageApp key={deviceId} deviceId={deviceId} name={row.name} node={node} snapshot={snapshot}
-              player={player} />
-            <AppOperationsSection node={node} />
-            <QualifiedFallback key={deviceId} deviceId={deviceId} node={node} snapshot={snapshot}
-              playerId={player?.id ?? null} />
-          </SectionBoundary>
-        )}
-      </NodeRecords>
+      {!retired && (
+        <SectionBoundary title="App" resetKey={node.operations?.read_at}>
+          <StageApp key={deviceId} deviceId={deviceId} name={row.name} node={node} snapshot={snapshot}
+            player={player} />
+          <AppOperationsSection node={node} />
+          <QualifiedFallback key={deviceId} deviceId={deviceId} node={node} snapshot={snapshot}
+            playerId={player?.id ?? null} />
+        </SectionBoundary>
+      )}
 
       {player !== null && row.standing === "bound" && (
         <SectionBoundary title="Danger zone">

@@ -31,8 +31,7 @@ from contracts.node_app_link import (
     parse_node_app_link_result,
     parse_node_probe_channel_message,
 )
-from player.local_app_proof import _root_socket
-from player.node_app_link import DEFAULT_NODE_LINK_SOCKET
+from player.node_app_link import DEFAULT_NODE_LINK_SOCKET, root_socket
 
 LOG = logging.getLogger("photo_wall.player.probe")
 # Slow and capped (below the broker's startup budget S): a broker that refuses
@@ -51,7 +50,7 @@ class Dispatcher(Protocol):
 class ProbeResponder:
     def __init__(self, dispatcher: Dispatcher, *,
                  on_relink: Callable[[], None], path: Path = DEFAULT_NODE_LINK_SOCKET,
-                 connector: Callable[[Path], socket.socket] = _root_socket,
+                 connector: Callable[[Path], socket.socket] = root_socket,
                  sleep: Callable[[float], None] = time.sleep,
                  gl_renderer: Callable[[], str | None] = lambda: None) -> None:
         # Own one-slot lane: a queued probe can never take one of the control slots.

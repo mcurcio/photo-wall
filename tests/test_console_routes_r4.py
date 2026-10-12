@@ -56,7 +56,7 @@ ESBUILD = CONSOLE / "node_modules/.bin/esbuild"
 SOURCE_SUFFIXES = (".js", ".jsx", ".ts", ".tsx")
 SAMPLES = json.loads((SRC / "routeSamples.json").read_text())
 TABLES = {"show": "showRoutes.jsx", "wall": "wallRoutes.jsx", "fleet": "fleetRoutes.jsx",
-          "neutral": "neutralRoutes.jsx"}
+          "settings": "settingsRoutes.jsx", "neutral": "neutralRoutes.jsx"}
 # The Frame page, its Position tab and the live adjustment that writes a Frame's calibration,
 # and its Picture tab with the session and routes that write the display's picture (1c K1).
 DISPLAY_CONTROLS = {"frame-page.tsx", "frame-position.tsx", "liveAdjustment.js", "frame-picture.tsx",
@@ -82,6 +82,19 @@ SHARED_WITH_SHOW = {
     "ReadinessNotice.jsx",  # shared read-only Player failure explanation
     "readinessRecovery.js",  # plain-language failure mapping; no controls
     "useMutate.js",  # refresh after a write
+    "sourceNames.js",  # a Source's plain name: the Show side's lists and the Frame page's Photos
+    # The Fit board (follow-ups C1): one read of how a selection fits the Frames, hosted by the
+    # Show side (Photo source editor, Sources, Scene editor, Show now), Settings › Photo fit and
+    # the Frame page (its Photos, and its profile and Position as drafts). Reads only: the
+    # analysis is a question in a body, the settings write is Settings' own.
+    "photo-fit.ts",
+    "photo-fit-board.tsx",
+    "photoFitApi.js",
+    "photo-sheet.tsx",  # the photo a Fit board's sample opens
+    "libraryApi.js",  # the photo sheet's one photo's facts
+    # A Frame's health as a chip (design review round 2): the Frame page header's words and
+    # severity, also the Show side's Frame chips and the Scene's Frame picker. Words only.
+    "frame-health-chip.ts",
 }
 # The console's write modules: the operator write primitive and every module that wraps a
 # write (framesApi writes, the delete confirmation, refresh-after-write, equipment writes).
@@ -513,6 +526,14 @@ def test_show_fleet_and_neutral_routes_never_reach_the_wall_only_closure(graph, 
     assert naming == [], f"{naming} name the display's calibration route"
 
 
+def test_the_settings_routes_never_reach_the_wall_only_closure(graph):
+    # Settings › Photo library (roadmap 4) is house-wide: it reaches no Frame page or display write.
+    modules = reachable(graph, TABLES["settings"])
+    assert "photo-library-page.tsx" in modules  # the walk reached past the table itself
+    assert not modules & _wall_only(graph), sorted(modules & _wall_only(graph))
+    assert not any(CALIBRATION_ROUTE in module.read_text() for module in graph if module.name in modules)
+
+
 def test_the_shell_reaches_the_wall_only_closure_only_through_the_wall_routes(graph):
     # From the entry point, with the Wall table reached but not followed: the shell's own
     # modules (App, Shell, the Wall's memory) import nothing only the Wall needs.
@@ -526,7 +547,7 @@ def test_the_modules_shared_with_the_show_side_are_declared_and_control_nothing(
     # closure (a module no longer shared is taken off), and none of it is a display control.
     wall = reachable(graph, TABLES["wall"]) - _shell_own(graph)
     shown = (reachable(graph, TABLES["show"]) | reachable(graph, TABLES["fleet"])
-             | reachable(graph, TABLES["neutral"]))
+             | reachable(graph, TABLES["settings"]) | reachable(graph, TABLES["neutral"]))
     assert wall & shown - _catalog(graph) == SHARED_WITH_SHOW
     assert not (SHARED_WITH_SHOW | _catalog(graph)) & DISPLAY_CONTROLS
 
@@ -585,8 +606,9 @@ def test_g1_catches_the_classifier_reaching_the_polling_hook(tmp_path):
 @pytest.mark.parametrize("table", sorted(TABLES))
 def test_each_route_table_takes_its_sections_and_samples_from_its_own_group(table):
     source = (SRC / TABLES[table]).read_text()
-    declared = re.findall(r'^\s*section: "(\w+)",$', source, re.M)
-    referenced = re.findall(r"\bSAMPLES\.(\w+)\.(\w+)\b", source)
+    declared = re.findall(r'^\s*section: "([\w-]+)",$', source, re.M)
+    referenced = re.findall(r'\bSAMPLES\.(\w+)(?:\.(\w+)\b|\["([\w-]+)"\])', source)
+    referenced = [(group, dotted or quoted) for group, dotted, quoted in referenced]
     assert declared and sorted(declared) == sorted(SAMPLES[table])
     assert referenced == [(table, section) for section in declared]
 
@@ -594,7 +616,8 @@ def test_each_route_table_takes_its_sections_and_samples_from_its_own_group(tabl
 def test_every_section_is_in_exactly_one_route_table():
     sections = [section for group in SAMPLES.values() for section in group]
     assert sorted(sections) == sorted(
-        ["now", "scenes", "schedule", "sources", "wall", "hardware", "players", "releases", "attention"])
+        ["now", "scenes", "schedule", "sources", "wall", "hardware", "players", "releases",
+         "photo-library", "photo-fit", "attention"])
 
 
 ROUND_TRIP = r"""
@@ -633,7 +656,8 @@ console.log(JSON.stringify(out));
 
 ROUTES = [
     {"section": section} for section in
-    ("now", "scenes", "schedule", "sources", "wall", "hardware", "releases", "attention")
+    ("now", "scenes", "schedule", "sources", "wall", "hardware", "releases", "photo-library",
+     "photo-fit", "attention")
 ] + [
     {"section": "hardware", "id": "device-" + "a" * 64},
     {"section": "hardware", "id": "a/b ç?#%"},
@@ -750,9 +774,10 @@ MODELS = {"facts.js", "health.js", "hostHealth.js", "join.js", "players.js", "ro
 PAGE_IMPORTS = MODELS | {"nodeRead.js", "timeWords.js"}
 # Legacy modules that render markup the Hardware Pi page still composes: the confirmation
 # dialog (ConfirmAction.jsx, whose typed handle, terminal phases and page-hidden suspension the
-# Dialog primitive does not carry yet), the Reboot section and the node-control gate's notice.
-# Declared in .claude/errata.md E-CDS-FIX-1; the dialogs' migration (DS2) empties this set.
-LEGACY_MARKUP = {"ConfirmAction.jsx", "PlayerCommands.jsx", "nodeControl.js"}
+# Dialog primitive does not carry yet) and the Reboot section. Declared in .claude/errata.md
+# E-CDS-FIX-1 (the node-control notice it also listed is deleted); the dialogs' migration (DS2)
+# empties this set.
+LEGACY_MARKUP = {"ConfirmAction.jsx", "PlayerCommands.jsx"}
 # The Frame page's modules, each with the legacy modules it alone may import, until they move
 # to the catalog: the page composes the bind chooser and the live adjustment (a hook); the
 # Overview the two read-only explanations the Now page shares, the readiness report and the
@@ -774,6 +799,26 @@ FRAME_PAGE_IMPORTS = {
     "live-adjustment.tsx": {"liveAdjustment.js"},
     "frame-power.tsx": {"polledRead.js", "powerApi.js"},
 }
+# Roadmap 4's photo library pages, each with the legacy modules it alone may import: their routes
+# (libraryApi.js, photoSourcesApi.js) and hooks.
+PHOTO_PAGE_IMPORTS = {
+    "photo-library-page.tsx": {"libraryApi.js"},
+    "photo-source-page.tsx": {"libraryApi.js", "photoSourcesApi.js", "useDraftPool.js", "useSourceCheck.js"},
+    # A Source's words have one home (sourceWords.js), which the Show side's models read too.
+    "source-pool-view.tsx": {"sourceWords.js"},
+    "source-query-editor.tsx": {"sourceWords.js"},
+    # A saved Source as a card (follow-ups D1): its counts and first photos (its pool route).
+    "source-card.tsx": {"photoSourcesApi.js", "sourceWords.js"},
+    # How a selection fits the Frames (follow-ups C1): the fit analysis and settings routes,
+    # and a Source's plain name (a Scene names a Source's revision). Every Fit board host reads
+    # through this one module; the Frame page's Photos among them (domain/frame-photos.tsx).
+    "photo-fit.ts": {"photoFitApi.js", "sourceNames.js"},
+    # The photo sheet (follow-ups C2): one photo's facts and Immich's copies.
+    "photo-sheet.tsx": {"libraryApi.js"},
+    # A failed check as the error template where a Source is chosen or shown (Scene, Show now).
+    "source-check-problem.tsx": {"sourceWords.js"},
+}
+DECLARED_IMPORTS = {**FRAME_PAGE_IMPORTS, **PHOTO_PAGE_IMPORTS}
 
 
 def _layer(module, src=SRC):
@@ -872,12 +917,12 @@ def test_pages_and_domain_components_import_only_models_and_declared_legacy_mark
         if _layer(module) not in ("pages", "domain"):
             continue
         extra = {imported.name for imported in imports if _layer(imported) is None} - PAGE_IMPORTS
-        if module.name in FRAME_PAGE_IMPORTS:
+        if module.name in DECLARED_IMPORTS:
             frame[module.name] = extra
         else:
             legacy |= extra
     assert legacy == LEGACY_MARKUP, sorted(legacy)
-    assert frame == FRAME_PAGE_IMPORTS, frame
+    assert frame == DECLARED_IMPORTS, frame
 
 
 def test_reboot_and_retire_have_one_home_and_it_is_not_the_software_page(graph):
