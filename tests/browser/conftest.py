@@ -25,7 +25,7 @@ from test_registry import enroll
 # The two console tests whose green result qualifies the authored-media and program
 # control surfaces, respectively (see `qualification` in pytest_sessionfinish).
 AUTHORED_MEDIA_CHECK = "test_author_authored_scene_saves_per_frame_choices_in_one_request"
-PROGRAM_CONTROL_CHECK = "test_program_schedules_single_window_and_lists"
+PROGRAM_CONTROL_CHECK = "test_program_schedules_a_weekly_rule_and_lists"
 
 CHECKS = {
     # Registry / equipment / authentication walkthrough (binding + wall).
@@ -60,7 +60,7 @@ CHECKS = {
     AUTHORED_MEDIA_CHECK: ("authored_scene_single_request_save",),
     PROGRAM_CONTROL_CHECK: ("program_local_time_authoring_removal",),
     "test_activation_shows_synchronous_outcome_truthfully": ("immediate_activation_ignore_queue",),
-    "test_runs_region_shows_only_synchronous_outcomes_no_missed_window": ("natural_cycle_completion",),
+    "test_runs_region_shows_only_synchronous_outcomes": ("natural_cycle_completion",),
     "test_cancel_removes_live_run": ("run_cancellation",),
     "test_finish_live_run_posts": ("controlled_program_admission_completion",),
 }
