@@ -7,9 +7,11 @@ import { PrecedenceExplanation } from "../PrecedenceExplanation.jsx";
 import { ReadinessNotice } from "../ReadinessNotice.jsx";
 import { readinessReportForFrame } from "../readinessRecovery.js";
 import { formatRoute, sceneCreationRoute } from "../routes.js";
+import { SCENE } from "../showWords.js";
 import { Disclosure } from "../ui/disclosure";
 import { Section } from "../ui/section";
 import { FactLine } from "./fact-line";
+import { FrameWhy, type WhyRead } from "./frame-why";
 import { frameHost, HostHealthLink } from "./host-health-link";
 import type { HostsRead } from "./hosts-read";
 
@@ -17,7 +19,11 @@ export interface FrameOverviewProps {
   snapshot: object | null;
   bootFacts: object | null;
   frameId: string;
+  /** The Frame's name as its page heading shows it (never its id). */
+  frameName: string;
   hosts: HostsRead | null;
+  /** The Frame's Why (the page reads it once). */
+  why: WhyRead;
 }
 
 interface Runtime {
@@ -47,9 +53,10 @@ function sendingWords(sceneId: string | null, phase: string | null, bound: boole
  * wait underneath, how its Pi is (a link to the Pi's Hardware page), whether the Pi reported a
  * problem getting content ready, and how to put content on the Frame. Central's own account
  * (its Runs, their priorities, the Pi's classifier words, the readiness report) is under
- * **Details**.
+ * **Details**. Above it, "Why is this playing?" (E6): Central's Why, the winner, what it beat and the
+ * display's power line.
  */
-export function FrameOverview({ snapshot, bootFacts, frameId, hosts }: FrameOverviewProps) {
+export function FrameOverview({ snapshot, bootFacts, frameId, frameName, hosts, why }: FrameOverviewProps) {
   const served = snapshot as Runtime | null;
   const frame = (served?.inventory?.frames ?? []).find((candidate) => candidate.id === frameId);
   const bound = isBound(frame);
@@ -58,8 +65,10 @@ export function FrameOverview({ snapshot, bootFacts, frameId, hosts }: FrameOver
     .slice(1).map((intent) => `“${intent.scene_id}”`);
   const host = frameHost({ snapshot, bootFacts, frameId, hosts });
   const readiness = readinessReportForFrame(snapshot, frameId);
+  const readAt = (snapshot as { readAt?: number } | null)?.readAt ?? null;
   return (
     <>
+      <FrameWhy read={why} readAt={readAt} />
       <Section title="Now">
         <Note>{sendingWords(planned.sceneId, planned.phase, bound)}</Note>
         {underneath.length > 0 && <Note>{`Waiting underneath it: ${[...new Set(underneath)].join(", ")}.`}</Note>}
@@ -74,7 +83,7 @@ export function FrameOverview({ snapshot, bootFacts, frameId, hosts }: FrameOver
       </Section>
       <Section title="Put content on this Frame">
         <Note>
-          {`Make a Scene; Frame ${frameId} starts selected on its Frames step. The Scene chooses the photos or videos; after saving it, choose Show now or Schedule it.`}
+          {`Make a Scene; ${frameName} starts selected on its Frames step. The Scene chooses the photos or videos; after saving it, choose ${SCENE.choose}.`}
         </Note>
         {FRAME_ID_PATTERN.test(frameId) ? (
           <OwnerLinks links={[

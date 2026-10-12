@@ -20,6 +20,7 @@ from test_display_identity import ADMIN, AUTH, MODE, NO_SERIAL, enroll_pi
 from appliance.display_host.bus import DISPLAY_COMPONENT, DISPLAY_SLICE, DISPLAY_VERSION
 from central.app import create_app
 from central.content_catalog.catalog import device_id_for_serial
+from central.db import DatabaseTransactionClock
 from central.infra.display_store import (
     REPORT_STREAM,
     DisplayDocuments,
@@ -98,7 +99,7 @@ def test_a_picture_edit_and_a_probe_cross_the_display_line(database, tmp_path, m
         before_listening = wakes.count(device)
         listening = asyncio.create_task(wakes.listen(database.dsn))
         stores = PgLinkStores(database, {REPORT_STREAM: OutputReportJudge(wakes)})
-        links = NodeLinks(Pipe.FLEET, hub.client_url, stores, DisplayDocuments(stores, wakes))
+        links = NodeLinks(Pipe.FLEET, hub.client_url, stores, DisplayDocuments(stores, wakes, times=DatabaseTransactionClock()))
         stop = asyncio.Event()
         running = asyncio.create_task(links.run(stop))
         try:

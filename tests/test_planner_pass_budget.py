@@ -11,6 +11,7 @@ from __future__ import annotations
 import time
 
 from psycopg.types.json import Jsonb
+from support.house_time import UTC_HOUSE
 from support.key_content_builders import key_content
 from support.photo_pools import library_of, photo, seed_pool
 from test_planner_pool_reads import CountingLines
@@ -54,7 +55,7 @@ def test_a_pass_over_fifty_thousand_photos_reads_only_the_top_of_its_line(regist
         conn.execute("ANALYZE")
     repository = MediaRepository(registry.db, registry.clock,
                                  times=ProcessTransactionClock(registry.clock))
-    runtime = Runtime()
+    runtime = Runtime(house=UTC_HOUSE)
     runtime.set_scene(Scene(
         scene_id="scene", cycle_seconds=60, loop=True, selection=SceneSelection(),
         contributions=tuple(Contribution(target=f"frame:f{n}", source_refs=("family:1",))

@@ -37,6 +37,7 @@ from test_display_identity import (
 
 from central.app import create_app
 from central.coordination import Coordinator
+from central.db import DatabaseTransactionClock
 from central.displays.model import Readiness
 from central.infra.display_store import DOCUMENT_STREAM, DisplayDocuments, DisplayWakes
 from central.infra.node_link_store import PgLinkStores
@@ -65,7 +66,8 @@ SKEWED_CORNERS = [[0.1, 0.05], [0.95, 0.0], [1.0, 1.0], [0.0, 0.9]]
 
 def _projected(registry, serial: str = SERIAL, output_id: str = "HDMI-A-1") -> OutputDocument:
     """The Output's document as the worker's source projects (and records) it now."""
-    source = DisplayDocuments(PgLinkStores(registry.db), DisplayWakes()).source(serial, Pipe.FLEET)
+    source = DisplayDocuments(PgLinkStores(registry.db), DisplayWakes(),
+                              times=DatabaseTransactionClock()).source(serial, Pipe.FLEET)
     return decode_output_document(asyncio.run(source.documents(DOCUMENT_STREAM))[output_document_key(output_id)])
 
 
@@ -393,7 +395,8 @@ def test_the_sources_wait_ends_at_a_sessions_idle_deadline(registry):
     with _client(registry) as client:
         _begin(client)
     _sql(registry, "UPDATE picture_sessions SET idle_until = EXTRACT(EPOCH FROM clock_timestamp()) + 1")
-    source = DisplayDocuments(PgLinkStores(registry.db), DisplayWakes()).source(SERIAL, Pipe.FLEET)
+    source = DisplayDocuments(PgLinkStores(registry.db), DisplayWakes(),
+                              times=DatabaseTransactionClock()).source(SERIAL, Pipe.FLEET)
 
     async def ended() -> None:
         await asyncio.wait_for(source.changed(), 5)

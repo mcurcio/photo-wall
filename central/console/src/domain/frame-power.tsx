@@ -7,6 +7,7 @@ import { ProblemCard } from "../patterns/problem-card";
 import { SettingRow } from "../patterns/setting-row";
 import { usePolledRead } from "../polledRead.js";
 import { endPowerTest, readFramePower, requestPowerTest, savePowerSettings } from "../powerApi.js";
+import { POWER } from "../powerWords.js";
 import { formatRoute } from "../routes.js";
 import { clockTime } from "../timeWords.js";
 import { Button } from "../ui/button";
@@ -14,6 +15,7 @@ import { Select } from "../ui/select";
 import { Section } from "../ui/section";
 import { Inline } from "../ui/stack";
 import { Switch } from "../ui/switch";
+import { FrameWhy, type WhyRead } from "./frame-why";
 
 /** How the Pi turns a display off and on (contracts/node_output.py `PowerMethod`). */
 export type PowerMethod = "hdmi-cec" | "ddc-ci" | "signal-off";
@@ -39,9 +41,22 @@ export interface FramePowerView extends PowerSettings {
   method_in_use: PowerMethod | null;
   test: { request_id: string; power: Power; for_seconds: number; ends_at: number } | null;
   result: PowerResult | null;
-  in_force: { request_id: string; reason: "standing" | "console-test"; power: Power; remaining_seconds: number | null } | null;
+  in_force: InForceView | null;
   linked: boolean | null;
   last_heard_at: number | null;
+}
+
+/**
+ * What the Pi says it carries out (central/displays/views.py InForceView): the console test, the
+ * power timetable at the Pi's clock (`since`: the set time in force, house time), or nothing when
+ * the timetable ran out (a week without Central: the display is left as it is).
+ */
+export interface InForceView {
+  kind: "test" | "timetable" | "timetable-ran-out";
+  power: Power | null;
+  request_id: string | null;
+  remaining_seconds: number | null;
+  since: string | null;
 }
 
 /** A save in flight or done, per setting row. */
@@ -67,7 +82,7 @@ export const DEFAULT_SETTINGS: PowerSettings = {
 };
 
 const RESULT_WORDS: Record<Exclude<PowerResult, "confirmed" | "not-supported" | "signal-stopped">, string> = {
-  "did-not-answer": "Display didn't answer",
+  "did-not-answer": POWER.didNotAnswer,
   "another-input": "Left on: the display is showing another input",
 };
 /** Signal off stops or restarts the Pi's own picture: nothing is claimed about the display. */
@@ -97,21 +112,11 @@ export function testWords(view: FramePowerView, sent: string | null, turnedOn = 
   if (sent !== null && view.test?.request_id !== sent) return WAITING;
   if (turnedOn) {
     if (view.test !== null || view.result === null || view.in_force === null) return WAITING;
-    return resultWords(view.in_force.power, view.result);
+    return view.in_force.power === null ? null : resultWords(view.in_force.power, view.result);
   }
   if (view.status === "waiting") return WAITING;
   if (view.status !== "answered" || view.test === null || view.result === null) return null;
   return resultWords(view.test.power, view.result);
-}
-
-/** What the Pi says it carries out now, in words; null when it named nothing. */
-function nowWords(view: FramePowerView): string | null {
-  const { in_force: force } = view;
-  if (force === null) return null;
-  const state = force.power === "on" ? "On" : "Off";
-  if (force.reason !== "console-test") return state;
-  const minutes = force.remaining_seconds === null ? null : Math.max(1, Math.ceil(force.remaining_seconds / 60));
-  return `${state} · by a test on this tab${minutes === null ? "" : `, ${minutes} min left`}`;
 }
 
 export interface PowerPanelProps {
@@ -153,7 +158,6 @@ export function PowerPanel({
     );
   }
   const words = testWords(view, sent, turnedOn);
-  const now = nowWords(view);
   const change = (patch: Partial<PowerSettings>, label: string) => onSettings({ ...settings, ...patch }, label);
   const method = "Power method";
   const input = "Switch the display to this input on power-on";
@@ -206,7 +210,6 @@ export function PowerPanel({
         </FactRow>
       )}
       {view.method_in_use !== null && <FactRow label="In use" tone="reported">{METHOD_WORDS[view.method_in_use]}</FactRow>}
-      {now !== null && <FactRow label="Now" tone="reported">{now}</FactRow>}
       <FactGroup title="Test">
         <Note>Test: turn off turns the display off for 5 min, or until you press Turn on.</Note>
         <Inline>
@@ -241,9 +244,11 @@ const sameSettings = (a: PowerSettings, b: PowerSettings) => a.power_method === 
 /**
  * The Frame page's Power tab (roadmap 1b, slice K2): read from GET …/power while it is shown (more
  * often while a test waits for the Pi), the display's power settings saved on change, and the two
- * test buttons. A changed setting shows at once and stays shown until a read carries it.
+ * test buttons. A changed setting shows at once and stays shown until a read carries it. Its first
+ * line is the Frame's one power line, from Why (the Overview's; the page reads it once): what
+ * the display should be and what the Pi carries out, a test included, are that one line.
  */
-export function FramePower({ frameId }: { frameId: string }) {
+export function FramePower({ frameId, why, readAt = null }: { frameId: string; why: WhyRead; readAt?: number | null }) {
   const [sent, setSent] = useState<string | null>(null);
   const [turnedOn, setTurnedOn] = useState(false);
   const [sending, setSending] = useState(false);
@@ -328,6 +333,7 @@ export function FramePower({ frameId }: { frameId: string }) {
   }
   return (
     <Section title="Power">
+      <FrameWhy read={why} readAt={readAt} powerOnly />
       {body}
       {problem !== null && (
         <ProblemCard

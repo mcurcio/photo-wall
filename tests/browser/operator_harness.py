@@ -25,6 +25,10 @@ from contracts.models import Readiness
 # Central always runs node control (console DDD Part E, R20); tests pick its audience.
 NODE_CONTROL = NodeControlConfig("node-test")
 
+# How long a stopping server waits for open connections before it closes them (uvicorn's
+# timeout_graceful_shutdown); the thread join below allows it and the lifespan's shutdown.
+GRACE_SECONDS = 2
+
 # Readiness sequences only ever rise, as a live Player's do (player/executor.py).
 _SEQUENCE = itertools.count(1)
 
@@ -51,8 +55,14 @@ def operator_server(db, clock, *, cache_root=None, media_queue=None, admin_token
     listener.bind(("127.0.0.1", 0))
     listener.listen()
     origin = f"http://127.0.0.1:{listener.getsockname()[1]}"
+    # A connection the browser opens in the same loop turn as the shutdown is never asked to
+    # close (uvicorn accepts it in a task that runs after it closes the others), and the
+    # console's polls reuse it inside the keep-alive window, so uvicorn would wait for it
+    # without end. The grace period bounds that wait; requests in flight finish well inside it.
+    # Idle connections stay open for the server's whole life (_IDLE_CONNECTION_SECONDS).
     server = uvicorn.Server(uvicorn.Config(app, log_level="warning", access_log=False,
-                                           timeout_keep_alive=_IDLE_CONNECTION_SECONDS))
+                                           timeout_keep_alive=_IDLE_CONNECTION_SECONDS,
+                                           timeout_graceful_shutdown=GRACE_SECONDS))
     thread = threading.Thread(target=lambda: server.run(sockets=[listener]), daemon=True)
     thread.start()
     try:

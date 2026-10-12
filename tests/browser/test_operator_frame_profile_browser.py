@@ -3,7 +3,7 @@
 import os
 
 import pytest
-from console_tasks import connect, open_frame, visit
+from console_tasks import connect, frame_heading, frame_name, open_frame, visit
 from operator_harness import operator_server
 from playwright.sync_api import expect
 from test_registry import enroll
@@ -91,7 +91,7 @@ def test_switching_frames_discards_the_previous_frame_profile_editor(page, regis
 
         # Change the route to another Frame's page at the same tab.
         visit(page, "#/wall/frames/second-profile/hardware")
-        expect(page.get_by_role("heading", level=1, name="Frame second-profile", exact=True)).to_be_visible()
+        expect(frame_heading(page, frame_name(registry, "second-profile"))).to_be_visible()
         second = page.locator("main > section:not([hidden])")
         expect(second.get_by_role("form", name="Edit Frame profile", exact=True)).to_have_count(0)
         second_form = _editor(second)

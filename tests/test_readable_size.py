@@ -9,6 +9,7 @@ preview is measured nothing guesses it, the photo is not placed and a measuremen
 from __future__ import annotations
 
 import pytest
+from support.house_time import UTC_HOUSE
 from support.key_content_builders import key_content
 
 from central.catalog import Candidate, SourcePool
@@ -73,7 +74,7 @@ def test_the_raw_preview_is_refused_on_1080p_and_accepted_on_720p(profile, fits)
 
 
 def _plan(photo: Candidate, profile: FrameProfile):
-    runtime = Runtime()
+    runtime = Runtime(house=UTC_HOUSE)
     runtime.set_scene(Scene(scene_id="scene", cycle_seconds=30, loop=True,
                             selection=SceneSelection(),
                             contributions=(Contribution(target="frame:f", source_refs=("pool",)),)))

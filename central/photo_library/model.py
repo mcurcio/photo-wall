@@ -174,7 +174,8 @@ class TakenBetween(Model):
 
 
 class TakenLast(Model):
-    """#20, relative dates ("last 3 years"), resolved in UTC at each check (until 2b's timezone).
+    """#20, relative dates ("last 3 years"), resolved on the house calendar (Settings › House's
+    zone) at each check's start (media/pool_check.py `window_of`).
 
     Invariant (validator): `years + months > 0`.
     """

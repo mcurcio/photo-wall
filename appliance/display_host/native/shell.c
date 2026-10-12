@@ -46,6 +46,8 @@ struct output {
     int mode_width, mode_height, mode_scale;
     uint32_t mode_refresh, mode_transform;
     struct weston_curtain *curtain, *fallback; /* fallback: health tint while no health surface shows */
+    struct weston_curtain *black; /* the controller's `black` op: opaque black above every view */
+    bool black_on;                /* wanted by the controller; kept across a hot-plug of the Output */
     struct health *health;
     struct wl_listener destroyed;
     json_t *identity, *revision_identity, *trial_baseline;
@@ -102,7 +104,7 @@ struct feedback {
 struct shell {
     struct weston_compositor *compositor;
     struct weston_desktop *desktop;
-    struct weston_layer app_layer, diagnostic_layer, health_layer;
+    struct weston_layer app_layer, diagnostic_layer, health_layer, black_layer;
     struct output outputs[MAX_OUTPUTS];
     struct app_surface *surfaces[MAX_SURFACES];
     struct feedback feedbacks[MAX_FEEDBACK];
@@ -195,11 +197,11 @@ static const char *output_power_state(struct output *o) {
     return o->weston && o->weston->power_state == WESTON_OUTPUT_POWER_FORCED_OFF ? "off" : "on";
 }
 static void output_event(struct output *o) {
-    send_event(o->shell, json_pack("{s:s,s:o,s:b,s:i,s:i,s:s}", "event", "output",
+    send_event(o->shell, json_pack("{s:s,s:o,s:b,s:i,s:i,s:s,s:b}", "event", "output",
         "output", output_key(o), "connected", o->weston != NULL,
         "width", o->weston ? o->weston->width : 0,
         "height", o->weston ? o->weston->height : 0,
-        "power", output_power_state(o)));
+        "power", output_power_state(o), "black", o->black != NULL));
 }
 static void diagnostic_configure(struct output *o) {
     if (o->shell->diagnostic_resource)
@@ -239,6 +241,22 @@ static void fallback_sync(struct output *o) {
     weston_view_move_to_layer(o->fallback->view, &s->health_layer.view_list);
     weston_view_set_output(o->fallback->view, o->weston);
     weston_surface_damage(o->fallback->view->surface);
+}
+/* Black picture (2a, #83): an opaque black solid-colour view (never a shm buffer) above every other
+ * view on the Output while the controller wants it; rebuilt at the Output's current size. */
+static void black_sync(struct output *o) {
+    struct shell *s = o->shell;
+    if (o->black) { weston_shell_utils_curtain_destroy(o->black); o->black = NULL; }
+    if (!o->black_on || !o->weston || s->shutting_down) return;
+    struct weston_curtain_params p = {
+        .r = 0.0f, .g = 0.0f, .b = 0.0f, .a = 1.0f, .pos = o->weston->pos,
+        .width = o->weston->width, .height = o->weston->height, .capture_input = false
+    };
+    o->black = weston_shell_utils_curtain_create(s->compositor, &p);
+    if (!o->black) abort(); /* compositor failure is output_unknown */
+    weston_view_move_to_layer(o->black->view, &s->black_layer.view_list);
+    weston_view_set_output(o->black->view, o->weston);
+    weston_surface_damage(o->black->view->surface);
 }
 static bool client_matches(struct output *o, struct wl_client *client) {
     pid_t pid; uid_t uid; gid_t gid;
@@ -772,6 +790,15 @@ static bool command(struct shell *s, json_t *j) {
             "output_id", o->name, "power", output_power_state(o)));
         return true;
     }
+    /* Black picture (2a): the curtain up or down; the `black` event says which, ahead of the response. */
+    if (!strcmp(op, "black")) {
+        json_t *on = json_object_get(j, "on");
+        if (!json_is_boolean(on)) return false;
+        o->black_on = json_is_true(on);
+        black_sync(o);
+        send_event(s, json_pack("{s:s,s:s,s:b}", "event", "black", "output_id", o->name, "on", o->black != NULL));
+        return true;
+    }
     /* Picture (1c P2): the controller's operations for the Output's app and its base page line for
      * the private client, stored and forwarded verbatim; the shell never parses `operations`. */
     if (!strcmp(op, "picture")) {
@@ -949,6 +976,7 @@ static void output_destroyed(struct wl_listener *l, void *data) {
     o->weston = NULL;
     if (o->health) weston_surface_unmap(o->health->view->surface); /* re-maps on its next commit */
     invalidate(o, "output_disconnected"); /* drops o->fallback: no Output */
+    black_sync(o); /* drops o->black: no Output; black_on stays for its return */
     o->generation++;
     output_event(o);
 }
@@ -975,6 +1003,7 @@ static void add_output(struct shell *s, struct weston_output *w) {
     o->destroyed.notify = output_destroyed;
     wl_signal_add(&w->destroy_signal, &o->destroyed);
     curtain(o, 1.0f);
+    black_sync(o);
     snprintf(o->reason, sizeof o->reason, "app_absent");
     diagnostic_configure(o);
     output_event(o);
@@ -987,7 +1016,8 @@ static void output_resized(struct wl_listener *l, void *data) {
     struct weston_output *w = data;
     struct output *o = find_output(s, w->name);
     if (!o) return;
-    invalidate(o, "output_mode_changed"); o->generation++; record_mode(o); diagnostic_configure(o); output_event(o);
+    invalidate(o, "output_mode_changed"); o->generation++; record_mode(o); black_sync(o); diagnostic_configure(o);
+    output_event(o);
 }
 static void diagnostic_client_gone(struct wl_listener *l, void *data) {
     (void)data;
@@ -1028,14 +1058,16 @@ static int lease_tick(void *data) {
         struct output *o = &s->outputs[i];
         if (mode_changed(o)) {
             invalidate(o, "output_mode_changed"); o->generation++;
-            record_mode(o); diagnostic_configure(o); output_event(o);
+            record_mode(o); black_sync(o); diagnostic_configure(o); output_event(o);
         }
         if (o->trial_json[0] && boot_ms() >= o->trial_until) trial_end(o);
         if (o->revision_identity && now_ms() >= o->revision_until) revision_clear(o, true);
-        /* A forced-off output (signal off, `output_power`) presents nothing, so no presentation
-         * can renew the lease: it holds while the output is off and runs again from power on.
+        /* A forced-off output (signal off, `output_power`) presents nothing, and an app under the
+         * black curtain (`black`) may have its presentation discarded, so no presentation can
+         * renew the lease: it holds while the output is off or black and runs again after.
          * The app's process is still checked. */
-        if (o->identity && o->weston && o->weston->power_state == WESTON_OUTPUT_POWER_FORCED_OFF)
+        if (o->identity && o->weston &&
+            (o->weston->power_state == WESTON_OUTPUT_POWER_FORCED_OFF || o->black))
             o->lease_until = now_ms() + LEASE_MS;
         if (o->identity && (now_ms() >= o->lease_until || process_start(o->pid) != o->start_ticks))
             invalidate(o, "surface_lease_or_process_lost");
@@ -1078,6 +1110,7 @@ static void shell_destroyed(struct wl_listener *l, void *data) {
         if (o->weston) wl_list_remove(&o->destroyed.link);
         if (o->curtain) weston_shell_utils_curtain_destroy(o->curtain);
         if (o->fallback) weston_shell_utils_curtain_destroy(o->fallback);
+        if (o->black) weston_shell_utils_curtain_destroy(o->black);
         json_decref(o->identity);
         json_decref(o->revision_identity);
         json_decref(o->trial_baseline);
@@ -1085,6 +1118,7 @@ static void shell_destroyed(struct wl_listener *l, void *data) {
     weston_layer_fini(&s->app_layer);
     weston_layer_fini(&s->diagnostic_layer);
     weston_layer_fini(&s->health_layer);
+    weston_layer_fini(&s->black_layer);
     weston_desktop_destroy(s->desktop);
     free(s);
 }
@@ -1110,10 +1144,13 @@ WL_EXPORT int wet_shell_init(struct weston_compositor *ec, int *argc, char *argv
     weston_layer_init(&s->app_layer, ec);
     weston_layer_init(&s->diagnostic_layer, ec);
     weston_layer_init(&s->health_layer, ec);
+    weston_layer_init(&s->black_layer, ec);
     weston_layer_set_position(&s->app_layer, WESTON_LAYER_POSITION_NORMAL);
     weston_layer_set_position(&s->diagnostic_layer, WESTON_LAYER_POSITION_LOCK);
     /* Above the protected slate, below Weston's own cursor and fade. */
     weston_layer_set_position(&s->health_layer, WESTON_LAYER_POSITION_LOCK + 1);
+    /* Black picture above everything of ours, health included: a dark room shows nothing. */
+    weston_layer_set_position(&s->black_layer, WESTON_LAYER_POSITION_LOCK + 2);
     s->desktop = weston_desktop_create(ec, &desktop_api, s);
     if (!s->desktop) return -1;
     s->frame_global = wl_global_create(ec->wl_display, &pw_frame_manager_v1_interface, FRAME_VERSION, s, bind_frame);

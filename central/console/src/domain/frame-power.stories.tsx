@@ -17,13 +17,13 @@ const IDLE: FramePowerView = {
   method_in_use: "ddc-ci",
   test: null,
   result: null,
-  in_force: { request_id: "standing", reason: "standing", power: "on", remaining_seconds: null },
+  in_force: { kind: "timetable", power: "on", request_id: null, remaining_seconds: null, since: null },
   linked: true,
   last_heard_at: 1_791_000_000,
 };
 
-const OFF_IN_FORCE = { request_id: TEST.request_id, reason: "console-test" as const, power: "off" as const,
-  remaining_seconds: 287 };
+const OFF_IN_FORCE = { kind: "test" as const, request_id: TEST.request_id, power: "off" as const,
+  remaining_seconds: 287, since: null };
 
 const meta = {
   title: "Domain/FramePower",

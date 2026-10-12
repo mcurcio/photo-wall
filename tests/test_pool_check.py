@@ -2,6 +2,7 @@
 
 from datetime import UTC, datetime
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from central.photo_library.model import (
     Exclusions,
@@ -43,14 +44,28 @@ def entries(items, **changes):
     return pool_check.entries_of(items, **arguments)
 
 
-def test_last_three_years_resolves_in_utc_calendar_years():
+def test_last_three_years_resolves_in_calendar_years():
     now = datetime(2026, 10, 11, tzinfo=UTC).timestamp()
-    window = pool_check.start(query(taken=TakenLast(years=3)), now).window
+    window = pool_check.start(query(taken=TakenLast(years=3)), now, "UTC").window
     assert window.after == datetime(2023, 10, 11, tzinfo=UTC).timestamp()
     assert window.before is None
     leap = datetime(2024, 3, 31, tzinfo=UTC).timestamp()
-    assert pool_check.window_of(query(taken=TakenLast(months=1)), leap).after == datetime(
+    assert pool_check.window_of(query(taken=TakenLast(months=1)), leap, "UTC").after == datetime(
         2024, 2, 29, tzinfo=UTC).timestamp()
+
+
+def test_last_one_month_counts_back_on_the_house_calendar():
+    """Roadmap 2b: relative dates follow Settings › House. At 22:00 on 31 March in New York it is
+    already 1 April in UTC; "last 1 month" counts back to 28 February 22:00 on the house's
+    calendar (EST, before the spring change), not to 1 March as the UTC calendar would.
+
+    Mutation probe (P-utc-today, its check-side half): count back on the UTC calendar -> the
+    house's 28 February fails."""
+    house = ZoneInfo("America/New_York")
+    now = datetime(2026, 3, 31, 22, tzinfo=house).timestamp()
+    assert datetime.fromtimestamp(now, UTC).date().isoformat() == "2026-04-01"
+    window = pool_check.start(query(taken=TakenLast(months=1)), now, "America/New_York").window
+    assert window.after == datetime(2026, 2, 28, 22, tzinfo=house).timestamp()
 
 
 def test_two_excluded_people_and_screenshots_are_four_queries():
@@ -139,7 +154,7 @@ def test_stacked_copies_are_those_the_timeline_hides_near_a_stacked_month():
 
 def test_advance_walks_the_phases_in_order():
     source = query(exclude=Exclusions(screenshots=True))
-    progress = pool_check.start(source, T0)
+    progress = pool_check.start(source, T0, "UTC")
     edge = KeysetPosition(edge=T0)
     progress = pool_check.advance(progress, source, next_position=None,
                                   stacked_months=["2026-01-01"])

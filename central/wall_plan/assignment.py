@@ -36,6 +36,7 @@ Frame replaces what the Frame keeps (`contracts.on_screen.replaces_kept_at`).
 from __future__ import annotations
 
 import math
+from bisect import bisect_left, bisect_right
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -317,6 +318,41 @@ class _Showing:
 
 
 @dataclass(slots=True)
+class _Spans:
+    """One photo's fixed extents (each closed: a fixed extent always ends), sorted by start, with
+    the running latest end, so an overlap query reads back from the last extent starting before
+    the query ends and stops once none earlier can reach the query's start. The same half-open
+    overlap as `Extent.overlaps`."""
+
+    starts: list[float] = field(default_factory=list)
+    ends: list[float] = field(default_factory=list)
+    frames: list[str] = field(default_factory=list)
+    reach: list[float] = field(default_factory=list)     # max(ends[:k + 1])
+
+    def add(self, extent: Extent, frame_id: str) -> None:
+        if extent.end is None:
+            raise AssertionError("a fixed extent always ends")
+        at = bisect_right(self.starts, extent.start)
+        self.starts.insert(at, extent.start)
+        self.ends.insert(at, extent.end)
+        self.frames.insert(at, frame_id)
+        self.reach.insert(at, 0.0)
+        for index in range(at, len(self.ends)):          # appends in time order: usually one
+            earlier = self.reach[index - 1] if index else -math.inf
+            self.reach[index] = max(earlier, self.ends[index])
+
+    def overlaps_another(self, frame_id: str, extent: Extent) -> bool:
+        """Whether an extent on another Frame than `frame_id` overlaps `extent`."""
+        last = len(self.starts) if extent.end is None else bisect_left(self.starts, extent.end)
+        for index in range(last - 1, -1, -1):
+            if self.reach[index] <= extent.start:
+                return False
+            if self.ends[index] > extent.start and self.frames[index] != frame_id:
+                return True
+        return False
+
+
+@dataclass(slots=True)
 class _Wall:
     """Every decided showing by Frame and by photo, and each Frame's kept still from the
     history. Extents are computed from what is decided so far: a later decision on a Frame can
@@ -324,6 +360,8 @@ class _Wall:
 
     uncertainty: float
     on_frame: dict[str, list[_Showing]] = field(default_factory=dict)
+    # Each photo's showings that keep it after their end ("keep_this_photo": a later showing on
+    # their Frame ends them); the others are in `_spans`.
     of_asset: dict[str, list[tuple[str, _Showing]]] = field(default_factory=dict)
     kept: dict[str, list[KeptStill]] = field(default_factory=dict)
     kept_on: dict[str, KeptStill] = field(default_factory=dict)
@@ -332,12 +370,23 @@ class _Wall:
     # later showing on its own Frame changes an extent. Decided showings stay referenced in
     # `on_frame`, so an identity is never reused while its entry exists.
     _extents: dict[str, dict[int, Extent]] = field(default_factory=dict)
+    # Each photo's extents that no later showing can change (every after-state but
+    # "keep_this_photo": `on_screen_extent` reads no other showing for them), computed once and
+    # indexed by start (`_Spans`), so rule 1 reads only the ones that can overlap. Without it a
+    # long plan on a small pool rechecked every earlier showing of a photo at every slot (a
+    # perpetual Default Scene on an 8 s cycle: seconds per pass, holding the coordination lock).
+    _spans: dict[str, _Spans] = field(default_factory=dict)
 
     def add(self, frame_id: str, showing: _Showing) -> None:
         self.on_frame.setdefault(frame_id, []).append(showing)
         self._extents.pop(frame_id, None)
-        if showing.asset_id is not None:
+        if showing.asset_id is None:
+            return
+        if showing.after_end == "keep_this_photo":
             self.of_asset.setdefault(showing.asset_id, []).append((frame_id, showing))
+        else:
+            self._spans.setdefault(showing.asset_id, _Spans()).add(
+                self.extent(frame_id, showing), frame_id)
 
     def add_kept(self, still: KeptStill) -> None:
         self.kept.setdefault(still.asset_id, []).append(still)
@@ -370,7 +419,10 @@ class _Wall:
     def free(self, asset_id: str, frame_id: str, extent: Extent) -> bool:
         """Rule 1: no extent of `asset_id` on another Frame overlaps `extent`."""
         guard = 2 * self.uncertainty
-        for other, showing in self.of_asset.get(asset_id, ()):
+        spans = self._spans.get(asset_id)
+        if spans is not None and spans.overlaps_another(frame_id, extent):
+            return False
+        for other, showing in self.of_asset.get(asset_id, ()):   # kept stills: they may grow
             if other == frame_id:
                 continue
             # Every extent starts at its showing's start less the guard: one that starts at or

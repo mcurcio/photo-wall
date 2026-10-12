@@ -11,7 +11,8 @@ Rules this module owns (one home each):
   adds or removes photos keeps the others' relative order; a new pass reshuffles). Chronological:
   ascending (captured_at, asset_id), starting after `after` (the Scene's last shown photo) and
   wrapping. Newest first: descending captured_at, then asset_id. On this day: the photos whose
-  UTC capture month and day equal `today`'s, newest year first, then the rest in shuffle order.
+  capture month and day on the house calendar equal `today`'s (the house's date, Settings › House),
+  newest year first, then the rest in shuffle order.
 - **A Scene's pass** (`scene_passes`): from the history, its current pass number (the highest
   among its shown rows and live selections; 1 when it has none), the assets picked in that pass
   (shown in it, or selected in it by a live offered layer), and its last shown asset.
@@ -26,20 +27,22 @@ Rules this module owns (one home each):
   holds every member it has not picked when its last member is picked (`SceneLine`'s
   `complete`); only then may its pass end in this plan.
 
-Dates are UTC until roadmap 2b gives the wall a time zone (the photo library's relative dates do
-the same, central/photo_library/model.py).
+Dates are the house's (roadmap 2b; central/house_time/calculator.py `house_date`, the one home of
+an instant's house date), as the photo library's relative dates are (media/pool_check.py).
 """
 from __future__ import annotations
 
 import hashlib
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import date
 from typing import Final, Literal, Protocol
 
 from pydantic import Field
 
 from central.catalog import Candidate, SourcePool
+from central.house_time.calculator import house_date
+from central.house_time.model import HouseTime
 from central.wall_plan.selection import Order, SceneSelection
 from contracts.models import AfterEnd, Identifier, Instant, Model
 
@@ -140,7 +143,7 @@ OrderField = Literal[
     "wrapped",        # chronological's wrap: 1 at or before the mark (the last shown photo)
     "captured_at",
     "asset_id",       # code-point order (SQL: COLLATE "C")
-    "off_this_day",   # 0 for a photo whose UTC capture month and day are today's, else 1
+    "off_this_day",   # 0 for a photo whose house capture month and day are today's, else 1
 ]
 
 
@@ -191,20 +194,26 @@ def shuffle_key(scene_id: str, pass_number: PassNumber, asset_id: str) -> str:
         values[name].encode() for name in SHUFFLE_FIELDS)).hexdigest()
 
 
-def on_day(captured_at: float, today: date) -> bool:
-    """Whether a photo's UTC capture month and day are `today`'s."""
-    taken = datetime.fromtimestamp(captured_at, UTC)
+# The house a caller that names none is in (tests of the order alone); the Planner always passes
+# Runtime's house.
+UTC_HOUSE: Final = HouseTime(zone="UTC")
+
+
+def on_day(captured_at: float, today: date, house: HouseTime = UTC_HOUSE) -> bool:
+    """Whether a photo's capture month and day on the house calendar are `today`'s."""
+    taken = house_date(house, captured_at)
     return (taken.month, taken.day) == (today.month, today.day)
 
 
 def order_key(order: Order, *, scene_id: str, pass_number: PassNumber,
-              mark: tuple[float, str] | None, today: date) -> Callable[[Candidate], tuple]:
+              mark: tuple[float, str] | None, today: date,
+              house: HouseTime = UTC_HOUSE) -> Callable[[Candidate], tuple]:
     """The Python interpreter of `ORDERS[order]`: one candidate's sort key. `mark`:
     (captured_at, asset_id) of the Scene's last shown photo, chronological's wrap point."""
     terms = ORDERS[order]
 
     def key(candidate: Candidate) -> tuple:
-        today_photo = on_day(candidate.captured_at, today)
+        today_photo = on_day(candidate.captured_at, today, house)
         values: list = []
         for term in terms:
             if term.on_this_day_only and not today_photo:
@@ -233,13 +242,15 @@ def order_key(order: Order, *, scene_id: str, pass_number: PassNumber,
 
 
 def pass_sequence(candidates: Sequence[Candidate], selection: SceneSelection, *, scene_id: str,
-                  pass_number: PassNumber, after: Candidate | None, today: date) -> tuple[str, ...]:
+                  pass_number: PassNumber, after: Candidate | None, today: date,
+                  house: HouseTime = UTC_HOUSE) -> tuple[str, ...]:
     """Every candidate's asset id once, in the Scene's order for this pass (module docstring),
-    by `order_key`. `after` is used by chronological only. Pure and deterministic."""
+    by `order_key`. `after` is used by chronological only; `today` and `house` by On this day.
+    Pure and deterministic."""
     unique = list({candidate.asset_id: candidate for candidate in reversed(candidates)}.values())
     mark = (after.captured_at, after.asset_id) if after is not None else None
     key = order_key(selection.order, scene_id=scene_id, pass_number=pass_number, mark=mark,
-                    today=today)
+                    today=today, house=house)
     return tuple(candidate.asset_id for candidate in sorted(unique, key=key))
 
 
@@ -277,7 +288,8 @@ class LineQuery(Model):
     """One read of a Scene's line: the members of `pool_keys` that `shape` admits, ranked by tier
     (`tier_of` over `picked` and `recent`) then the pass order (`ORDERS[order]` for `scene_id`
     and `pass_number`; the wrap mark is `after`, looked up in the line; On this day's date is
-    `now`'s UTC date), the first `limit`. Capture time and size are read at query time."""
+    `now`'s date on `house`'s calendar), the first `limit`. Capture time and size are read at
+    query time."""
 
     pool_keys: tuple[str, ...]
     scene_id: str = Field(min_length=1, max_length=160)
@@ -289,10 +301,11 @@ class LineQuery(Model):
     recent: frozenset[str] = frozenset()
     shape: ShapeBounds
     limit: int = Field(ge=1)
+    house: HouseTime = UTC_HOUSE
 
     @property
     def today(self) -> date:
-        return datetime.fromtimestamp(self.now, UTC).date()
+        return house_date(self.house, self.now)
 
 
 class LineMember(Model):
@@ -357,7 +370,7 @@ class PoolLines:
         after = members.get(query.after) if query.after is not None else None
         mark = (after.captured_at, after.asset_id) if after is not None else None
         order = order_key(query.order, scene_id=query.scene_id, pass_number=query.pass_number,
-                          mark=mark, today=query.today)
+                          mark=mark, today=query.today, house=query.house)
         admitted = [candidate for candidate in members.values() if query.shape.admits(
             candidate.kind, candidate.original_width, candidate.original_height)]
         admitted.sort(key=lambda c: (tier_of(c.asset_id, query.picked, query.recent), order(c)))
@@ -373,7 +386,7 @@ class SceneLine:
     def __init__(self, scene_id: str, selection: SceneSelection, candidates: Sequence[Candidate],
                  scene_pass: ScenePass, shown_at: Mapping[str, float], *, now: float, today: date,
                  pickable: frozenset[str], whole: bool = True, complete: bool | None = None,
-                 mark: Candidate | None = None) -> None:
+                 mark: Candidate | None = None, house: HouseTime = UTC_HOUSE) -> None:
         """`candidates`: the Scene's line members the Planner read (one per asset id): the whole
         union of its contributions' pools when `whole`, else the top of it (follow-up S3).
         `complete` (default `whole`): every member not picked in the current pass is among
@@ -395,7 +408,7 @@ class SceneLine:
         last = scene_pass.last_shown
         self._after = None if last is None else self._candidates.get(last) or (
             mark if mark is not None and mark.asset_id == last else None)
-        self._today = today
+        self._today, self._house = today, house
         self._recent = recent_assets(shown_at, selection.no_repeat_days, now=now)
         self._pass = scene_pass.pass_number
         self._picked = set(scene_pass.picked)
@@ -407,7 +420,7 @@ class SceneLine:
     def _pass_sequence(self) -> tuple[str, ...]:
         return pass_sequence(tuple(self._candidates.values()), self._selection,
                              scene_id=self._scene_id, pass_number=self._pass, after=self._after,
-                             today=self._today)
+                             today=self._today, house=self._house)
 
     def _roll(self) -> bool:
         if not self._complete or not self._pickable or not self._pickable <= self._picked:

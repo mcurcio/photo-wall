@@ -36,6 +36,7 @@ from pydantic import SecretStr, TypeAdapter, ValidationError
 
 from central.db import Database, TransactionClock
 from central.infra.display_store import frame_outputs_in
+from central.infra.house_store import house_time_in
 from central.installation_models import FrameOutput
 from central.media_queue import MediaTaskQueue
 from central.photo_library import policy
@@ -149,7 +150,8 @@ _LINE_ROWS = ("SELECT a.asset_id,a.revision,l.kind,l.taken_at,a.width,a.height F
               "AND outcome='in_pool') AS r JOIN asset_revisions a USING (asset_id) "
               "JOIN library_assets l ON l.connection_ref=a.connection_ref "
               "AND l.upstream_id=a.upstream_id")
-_ON_THIS_DAY = "to_char(to_timestamp(m.taken_at) AT TIME ZONE 'UTC','MM-DD')=%(today)s"
+# On this day on the house calendar (roadmap 2b): `order.py` `on_day` reads the same zone.
+_ON_THIS_DAY = "to_char(to_timestamp(m.taken_at) AT TIME ZONE %(zone)s,'MM-DD')=%(today)s"
 _SHUFFLE_TEXT = {"scene_id": "%(scene)s::text", "pass_number": "%(pass)s::text",
                  "asset_id": "m.asset_id"}
 _ORDER_FIELDS = {
@@ -754,7 +756,7 @@ class PgPhotoLibrary:
         transaction."""
         params: dict[str, Any] = {
             "pools": list(q.pool_keys), "after": q.after, "scene": q.scene_id,
-            "pass": q.pass_number, "sep": SHUFFLE_SEPARATOR, "today": q.today.strftime("%m-%d"),
+            "pass": q.pass_number, "sep": SHUFFLE_SEPARATOR, "today": q.today.strftime("%m-%d"), "zone": q.house.zone,
             "picked": sorted(q.picked), "recent": sorted(q.recent), "limit": q.limit,
             "fresh": TIER_FRESH, "tier_recent": TIER_RECENT, "tier_picked": TIER_PICKED}
         mark = None
@@ -968,9 +970,10 @@ class PgPhotoLibrary:
             else:
                 conn.execute("UPDATE photo_pools SET step_at=%s WHERE pool_key=%s",
                              (now, pool_key))
+            zone = house_time_in(conn).zone
         return CheckLease(pool_key=pool_key, query=SourceQuery.model_validate(row["query"]),
                           connection=self._secret(row), check_number=row["check_number"],
-                          started_at=row["check_started_at"], progress=row["progress"])
+                          started_at=row["check_started_at"], zone=zone, progress=row["progress"])
 
     def known_revisions(self, connection_ref: ConnectionRef,
                         upstream_ids: Sequence[LibraryRef]) -> dict[str, KnownRevision]:

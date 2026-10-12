@@ -178,9 +178,10 @@ def test_covering_priority_and_the_show_now_model():
 
     # The highest priority among the LIVE ROOT Runs covering any of the frames; 0 when
     # none does. An ended Run (9) and a child Run (8) never count; an outro still does;
-    # a lone negative priority is the highest there is. Max, not max + 1: at equal
-    # priority the later admission is on top (central/runtime.py:174,576,587,794).
-    assert out["covering"] == [5, 5, 3, -2, 0, 0, 0]
+    # a negative priority (the Default Scene's, -1) asks 0, the lowest Central accepts, which
+    # is above it. Max, not max + 1: at equal priority the later admission is on top
+    # (central/runtime.py `Intent.precedence`).
+    assert out["covering"] == [5, 5, 3, 0, 0, 0, 0]
     # Highest first; at equal priority the later admission first. Each with its frames.
     assert out["runs"] == [
         ["r-later", ["lobby", "hall"]], ["r-high", ["hall"]], ["r-low", ["lobby"]]]

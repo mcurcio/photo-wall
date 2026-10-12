@@ -232,9 +232,10 @@ class LibraryClient(Protocol):
         timeline only (archived, hidden, locked never: C5), newest first."""
         ...
 
-    async def still_matches(self, query: SourceQuery, upstream_id: LibraryRef) -> bool:
+    async def still_matches(self, query: SourceQuery, window: TakenWindow, upstream_id: LibraryRef) -> bool:
         """The one-item re-check (follow-up S4): whether Immich's include query, as
-        `search_page` asks it with its window taken now, still answers this one photo
+        `search_page` asks it with the check's `window` (taken at its start, on the house
+        calendar: media/pool_check.py `window_of`), still answers this one photo
         (`search/metadata` with `id`). An empty answer is False (deleted, untagged, moved out of
         the window); a chosen album, person or tag Immich lost raises ChosenItemGone, any other
         failure LibraryUnavailable, so a failure never reads as gone."""

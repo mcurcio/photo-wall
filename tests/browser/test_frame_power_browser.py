@@ -14,17 +14,20 @@ fails.
 """
 
 import os
+import re
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from console_tasks import connect, current_hash, open_frame
 from operator_harness import operator_server
 from playwright.sync_api import expect
+from power_page import power_line
+from support.console_words import POWER
 from test_display_identity import NO_SERIAL, _frame, enroll_pi
 from test_display_identity import _report as _recorded
 from test_display_power_requests import SERIAL, _answer, _bound_frame, _projected, _rows
 
-from contracts.node_output import InForce, PowerMethod, PowerResult
+from contracts.node_output import InForce, InForceKind, Power, PowerMethod, PowerResult
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("PHOTO_WALL_BROWSER_TESTS") != "1",
@@ -53,7 +56,7 @@ def _seen_frame(registry) -> str:
     """A bound Frame whose Pi reported a no-serial display and answered the standing document."""
     frame, _ = _bound_frame(registry)
     _off_thread(_recorded, registry, SERIAL, "HDMI-A-1", NO_SERIAL)
-    _reported(registry, _change(registry), PowerResult.CONFIRMED, InForce("standing", None))
+    _reported(registry, _change(registry), PowerResult.CONFIRMED, InForce(InForceKind.TIMETABLE, Power.ON, None, None, None))
     return frame
 
 
@@ -90,7 +93,7 @@ def test_test_off_waits_for_the_pi_then_reads_confirmed_off_and_turn_on_ends_it(
         expect(status).to_have_text(WAITING)
         expect(power).not_to_contain_text("Display confirmed")
 
-        _reported(registry, carrying, PowerResult.CONFIRMED, InForce(str(test_id), 299))
+        _reported(registry, carrying, PowerResult.CONFIRMED, InForce(InForceKind.TEST, Power.OFF, str(test_id), 299, None))
         expect(status).to_have_text("Display confirmed off")
         assert sent == ["POST"]                         # posted once
 
@@ -98,9 +101,11 @@ def test_test_off_waits_for_the_pi_then_reads_confirmed_off_and_turn_on_ends_it(
         turn_on.click()
         expect(status).to_have_text(WAITING)
         assert _rows(registry, "SELECT id FROM power_requests") == []
-        _reported(registry, _change(registry), PowerResult.CONFIRMED, InForce("standing", None))
+        _reported(registry, _change(registry), PowerResult.CONFIRMED, InForce(InForceKind.TIMETABLE, Power.ON, None, None, None))
         expect(status).to_have_text("Display confirmed on")
-        expect(power.locator("p", has_text="Now: ")).to_have_text("Now: On")       # the request underneath
+        # The tab's one power line (Why's): the request underneath is in force.
+        line = power_line("On")
+        expect(power.locator("p", has_text=line)).to_have_text(re.compile("^" + re.escape(line) + r"\b"))
         expect(turn_on).to_be_disabled()
         assert sent == ["POST", "DELETE"]
 
@@ -113,8 +118,8 @@ def test_an_unanswered_test_reads_display_did_not_answer(page, registry):
         power.get_by_role("button", name="Test: turn off", exact=True).click()
         expect(power.get_by_role("status")).to_have_text(WAITING)
         test_id = _rows(registry, "SELECT id FROM power_requests")[0]["id"]
-        _reported(registry, _change(registry), PowerResult.DID_NOT_ANSWER, InForce(str(test_id), 299))
-        expect(power.get_by_role("status")).to_have_text("Display didn't answer")
+        _reported(registry, _change(registry), PowerResult.DID_NOT_ANSWER, InForce(InForceKind.TEST, Power.OFF, str(test_id), 299, None))
+        expect(power.get_by_role("status")).to_have_text(POWER["didNotAnswer"])
 
 
 def test_a_method_change_saves_by_itself(page, registry):

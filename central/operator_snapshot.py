@@ -42,9 +42,10 @@ def runtime_document(runtime: Runtime, read_at: float) -> dict[str, Any]:
     return {
         "definitions": state["scenes"],
         "programs": state["programs"],
+        "default_scene": projection.default_scene,
         "current": projection.current,
         "protected_frames": projection.protected_frames,
-        "program_outcomes": projection.program_outcomes,
+        "program_windows": projection.program_windows,
     }
 
 

@@ -28,6 +28,8 @@ from console_tasks import (
     choose_source,
     connect,
     current_hash,
+    frame_heading,
+    frame_name,
     go,
     scene_continue,
     scene_form,
@@ -190,7 +192,7 @@ def test_the_sidebar_groups_wall_show_fleet_settings_and_needs_attention_in_a_fi
         for group, labels in (("Wall", ["Wall"]),
                               ("Show", [LABELS[s] for s in ("now", "scenes", "schedule", "sources")]),
                               ("Fleet", ["Hardware", "Releases"]),
-                              ("Settings", ["Photo library", "Photo fit"]),
+                              ("Settings", ["Photo library", "Photo fit", "House"]),
                               ("Needs attention", ["Needs attention"])):
             expect(nav.get_by_role("list", name=group, exact=True).get_by_role("link")
                    ).to_have_text(labels)
@@ -259,7 +261,7 @@ def test_back_and_forward_move_between_sections(page, registry):
         # A tile click opens the Frame's page as a new entry; a tab change replaces it.
         before = page.evaluate("history.length")
         page.get_by_role("button", name="Frame first", exact=True).click()
-        frame = page.get_by_role("heading", level=1, name="Frame first", exact=True)
+        frame = frame_heading(page, frame_name(registry, "first"))
         expect(frame).to_be_visible()
         assert current_hash(page) == "#/wall/frames/first/overview"
         page.get_by_role("tab", name="Hardware", exact=True).click()
@@ -450,7 +452,7 @@ def test_needs_attention_links_each_frame_to_the_tab_showing_its_cause(page, reg
         _expect_on(page, "wall")
         expect(page.get_by_role("tab", name="Hardware", exact=True)).to_have_attribute(
             "aria-selected", "true")
-        expect(page.get_by_role("heading", name="Frame silent", exact=True)).to_be_focused()
+        expect(frame_heading(page, frame_name(registry, "silent"))).to_be_focused()
         assert current_hash(page) == "#/wall/frames/silent/hardware"
 
 

@@ -707,6 +707,25 @@ try:
     resumed = read_until(lambda e: e["event"] == "presented" and e["frame_tag"] == "authored-probe")
     assert resumed["grant_id"] == grant and not any(e["event"] == "invalidated" for e in events[powered:])
     print("PASS signal_off_holds_the_apps_grant_past_its_lease", flush=True)
+    # Black picture (2a, #83): the `black` op maps an opaque black solid-colour view above every
+    # view on the Output, the health surface included, and unmaps it; the shell's `black` event
+    # (sent ahead of the op's response) says which. The app's grant holds past its lease under it.
+    # Mutation probe (P-no-event): drop the answering event -> read_until times out.
+    def black(on):
+        sent = len(events)
+        assert request("black", on=on)["accepted"]
+        said = [e for e in events[sent:] if e["event"] == "black"]
+        assert (said or [read_until(lambda e: e["event"] == "black")])[0]["on"] is on
+
+    blacked = len(events)
+    black(True)
+    await_pixel(320, 240, (0, 0, 0), 2, tolerance=0)
+    assert_pixel(*HEALTH, (0, 0, 0), tolerance=0)
+    hold_pixel(320, 240, (0, 0, 0), 6.5, tolerance=0)
+    black(False)
+    await_pixel(320, 240, PROBE_APP, 3, tolerance=0, drained=True)
+    assert not any(e["event"] == "invalidated" for e in events[blacked:]), events[-12:]
+    print("PASS black_picture_curtain_over_every_view_holds_the_apps_grant", flush=True)
     revision = {**identity, "config_revision": 2}
     revision_grant = str(uuid.uuid4())
     assert request(

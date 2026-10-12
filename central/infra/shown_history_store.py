@@ -7,6 +7,9 @@
 - `shown_photos`: one row per layer its Player reported presented (owner, 2026-10-11: "“Shown”
   means it was displayed on a frame"), copied from its selection, written by coordination's
   `observe`.
+A layer planned wholly into wanted-off time (Night off, a hold: `power_store.wanted_off_in`) is
+never recorded shown: planning carries on through Night off so the morning reveals current state,
+but a photo shown to a dark room was not seen (Power and the week, F3).
 Times are the layers' planned intervals on Central's clock (the coordinator's), as the Planner
 compares them; `presented_at` is the observation's receipt time on that same clock.
 """
@@ -15,6 +18,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import Any, Final
 
+from central.infra.power_store import wanted_off_in
 from central.wall_plan.order import KeptStill, PhotoShowing, WallHistory
 
 # How long a shown row is kept. Longer than the longest no-repeat window (365 days), so a pass
@@ -52,9 +56,11 @@ class PgShownHistory:
 
     def record_presented_in(self, conn: Any, assignment_id: str, presented_at: float) -> bool:
         selected = conn.execute(
-            "SELECT 1 FROM photo_selections WHERE assignment_id=%s", (assignment_id,)
+            "SELECT frame_id, starts_at, ends_at FROM photo_selections WHERE assignment_id=%s",
+            (assignment_id,),
         ).fetchone()
-        if selected is None:
+        if selected is None or wanted_off_in(conn, selected["frame_id"], selected["starts_at"],
+                                             selected["ends_at"]):
             return False
         conn.execute(
             f"INSERT INTO shown_photos ({_COLUMNS}, presented_at) "

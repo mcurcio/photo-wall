@@ -42,6 +42,7 @@ import {
   underneathSentence,
 } from "./showState.js";
 import { sourceName } from "./sourceNames.js";
+import { SCENE, schedule } from "./showWords.js";
 import { FrameChips } from "./TargetPicker.jsx";
 
 const EMPTY = {};
@@ -247,7 +248,7 @@ export function ShowNowFlow({ snapshot, route, navigate, recentScene, markDraft 
           </p>
         )
       }
-      newLabel="Show now"
+      newLabel={SCENE.showNow}
       replace
       title="Show a Scene now"
       steps={SHOW_STEPS}
@@ -281,7 +282,7 @@ function SceneStep({ value, problems, edit, snapshot, frames, sourceRefs, author
         offered={offered}
         current={value.sceneId}
         drafts="shows"
-        action="Show"
+        take="showInstead"
         onTake={onTake}
       />
       <ScenePicker
@@ -435,8 +436,7 @@ function ReviewStep({
           ))}
           {value.repeat === "restart" && (
             <p id={hintId} className="field__hint">
-              {"Ends the current Run and starts a new one now. A restarted Run has no Program " +
-                `end; it ${restartsFor}.`}
+              {schedule("restartHint", { length: restartsFor })}
             </p>
           )}
         </fieldset>

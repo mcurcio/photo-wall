@@ -76,6 +76,13 @@
   --color-alarm: #f67d7d;
   --color-unknown: var(--color-muted);
   --color-on-alarm: #000000;
+  /* The week calendar's bands are status, never the accent (which is for actions, links and
+     selection): displays on in the ok family, held in the notice family, a Schedule's window
+     neutral. Each mixes with the page's surface, so text on it keeps the body's contrast. */
+  --color-band-on: color-mix(in srgb, var(--color-ok) 30%, var(--color-surface));
+  --color-band-held: var(--color-notice);
+  --color-band-held-tint: color-mix(in srgb, var(--color-notice) 18%, var(--color-surface));
+  --color-band-window: color-mix(in srgb, var(--color-text) 10%, var(--color-surface));
   /* Truth kinds (TruthKind in tokens.ts, the six of facts.js): a fact's value colour. */
   --color-truth-set: var(--color-text);
   --color-truth-reported: var(--color-text);

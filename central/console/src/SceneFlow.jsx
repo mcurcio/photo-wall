@@ -31,6 +31,7 @@ import {
   seedScene,
 } from "./sceneFlowModel.js";
 import { SceneList } from "./SceneList.jsx";
+import { SCENE, SCHEDULE, scene as sceneWords } from "./showWords.js";
 import { FramesStep, KindStep, MediaStep, PhotosStep, PlaybackStep, ReviewStep } from "./SceneSteps.jsx";
 import { useCandidates } from "./useCandidates.js";
 import { useHouseCropLimit } from "./domain/photo-fit.ts";
@@ -510,12 +511,12 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft,
         place === "list" &&
         saved !== null &&
         !draft.dirty && (
-          <div className="record__actions flow__said" role="group" aria-label={`Next for Scene ${saved}`}>
+          <div className="record__actions flow__said" role="group" aria-label={sceneWords("next", { id: saved })}>
             <button type="button" onClick={() => showNow(saved)}>
-              Show now
+              {SCENE.showNow}
             </button>
             <button type="button" onClick={() => schedule(saved)}>
-              Schedule it
+              {SCENE.scheduleIt}
             </button>
           </div>
         )
@@ -614,8 +615,7 @@ function replaceRequest(sceneId, revision, { path, body }, reload, after) {
     confirmLabel: "Confirm replace",
     body: (
       <p>
-        {"Runs already going keep what they started with; Programs that start later use " +
-          "the saved changes."}
+        {SCHEDULE.replaceNote}
       </p>
     ),
     run: async () => {

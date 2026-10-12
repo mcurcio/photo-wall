@@ -10,8 +10,10 @@ from uuid import UUID
 
 from pydantic import Field
 
-from central.displays.model import PowerStatus, Readiness
+from central.displays.model import PowerStatus, PowerTest, Readiness, remaining_seconds
 from central.displays.picture import PictureStatus, Setting
+from central.house_time.calculator import local_date_time
+from central.house_time.model import HouseTime, LocalDateTime
 from contracts.models import Identifier, Instant, Model
 from contracts.node_output import (
     GAMMA_TENTHS_MAX,
@@ -20,11 +22,13 @@ from contracts.node_output import (
     KELVIN_MIN,
     PERCENT_MAX,
     ActsOn,
+    InForceKind,
+    OutputReport,
     Power,
     PowerMethod,
     PowerResult,
-    RequestReason,
     WriteResult,
+    decode_set_time,
 )
 
 
@@ -62,10 +66,28 @@ class FrameDisplayView(Model):
 
 
 class InForceView(Model):
-    request_id: str
-    reason: RequestReason
-    power: Power
-    remaining_seconds: int | None                 # Central's count for its live console test, else the Pi's
+    """What the Pi says it is carrying out (contracts.node_output.InForce), for the Power tab."""
+    kind: InForceKind
+    power: Power | None                           # None exactly when the timetable ran out
+    request_id: str | None                        # the test's, else None
+    remaining_seconds: int | None                 # Central's count for its live test, else the Pi's
+    since: LocalDateTime | None                   # the set time in force, on the house clock
+
+
+def in_force_view(report: OutputReport | None, house: HouseTime, live: PowerTest | None,
+                  now: float) -> InForceView | None:
+    """What the Pi says it carries out (None when it names nothing), for the Power tab and Why. A
+    test's count is Central's for its live console test (the Pi reports only on a change, so its
+    own count would stand still), else the Pi's; the set time in force is shown on the house clock."""
+    if report is None or report.in_force is None:
+        return None
+    in_force = report.in_force
+    remaining = in_force.remaining_seconds
+    if live is not None and in_force.request_id == str(live.request_id):
+        remaining = remaining_seconds(live, now)
+    since = None if in_force.since is None else local_date_time(house, decode_set_time(in_force.since))
+    return InForceView(kind=in_force.kind, power=in_force.power, request_id=in_force.request_id,
+                       remaining_seconds=remaining, since=since)
 
 
 class PowerTestView(Model):

@@ -9,10 +9,15 @@ from __future__ import annotations
 import hashlib
 import math
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Annotated, Literal, Self
+from datetime import timedelta
+from functools import lru_cache
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Annotated, Final, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, FiniteFloat, model_validator
 
+from central.house_time import calculator
+from central.house_time.model import HouseTime, LocalDateTime, When, Window
 from central.wall_plan.selection import SceneSelection
 from contracts.models import TARGET_ID_PATTERN, AfterEnd
 
@@ -119,22 +124,73 @@ class Scene(FrozenModel):
 Child.model_rebuild()
 
 
-class Program(FrozenModel):
-    program_id: Identifier
-    scene_id: Identifier
-    starts_at: FiniteFloat
-    ends_at: FiniteFloat
-    priority: int = 0
+def _unprotected(scene: Scene) -> Scene:
+    """`scene` with no protection at any depth (its own `protect_frames` and every child's)."""
+    children = tuple(child.model_copy(update={"scene": _unprotected(child.scene)}) for child in scene.children)
+    return scene.model_copy(update={"protect_frames": False, "children": children})
 
-    @model_validator(mode="after")
-    def window(self) -> Self:
-        if self.ends_at <= self.starts_at:
-            raise ValueError("Program end must follow start")
-        return self
+
+# Power and the week (roadmap 2b; frozen page /Volumes/Dock/tmp/power-week/slices/T.md). Slice T
+# reshapes `Program` below into a repeating rule: {program_id, name, scene_id, when, priority,
+# revision}, its windows derived from `when` in house time, never stored. Content's arbiter
+# (frame design rule 3): the highest rank wins, a tie to the request admitted last.
+Priority = Literal["normal", "special-event", "always-wins"]          # #78; "normal" is the default
+PRIORITY_RANK: Final[Mapping[str, int]] = MappingProxyType(
+    {"normal": 1, "special-event": 2, "always-wins": 3})
+# The Default Scene plays under every Schedule and every operator request (E5): its rank is below
+# any priority `activate` accepts (0 and up), so it never wins a tie.
+DEFAULT_SCENE_RANK: Final = -1
+
+
+class ProgramDraft(FrozenModel):
+    """What the Schedule flow saves (#72-#76, #78): a Scene, its weekly When and a priority. Slice T
+    makes `Program` this plus `program_id` (Central's, assigned at create) and `revision` (1 at
+    create, +1 per save)."""
+    name: Annotated[str, Field(min_length=1, max_length=80)]
+    scene_id: Identifier
+    when: When
+    priority: Priority = "normal"
+
+
+class DefaultScene(FrozenModel):
+    """The Scene that plays wherever no Schedule does (E5). `revision` rises at every change, so
+    each choice's Runs have their own identity `default:<scene_id>:<revision>:<scene revision>:
+    <start>` (`Runtime._default_prefix`): an edit of its Scene is a new identity too."""
+    scene_id: Identifier
+    revision: Annotated[int, Field(ge=1)]
+
+
+class ProgramRefused(Exception):
+    """A Program or Default Scene command refused; nothing changed. `code`: "changed" (the stored
+    Program is not the expected one; `current` is it), "missing", "unknown-scene", "no-days",
+    "needs-place". The routes answer {"error": code} (409 changed, 404 missing, 422 the rest),
+    with "current" for "changed"."""
+
+    def __init__(self, code: Literal["changed", "missing", "unknown-scene", "no-days", "needs-place"],
+                 current: Program | None = None) -> None:
+        super().__init__(code)
+        self.code = code
+        self.current = current
+
+
+class Program(ProgramDraft):
+    """A repeating Schedule (#72-#78): its windows come from `when` in house time, never stored.
+    A window's activation identity is `window_id(start)`; `revision` is part of it, so a saved
+    rule's windows never alias the previous rule's."""
+    program_id: Identifier
+    revision: Annotated[int, Field(ge=1)] = 1
+
+    def window_id(self, start: float) -> str:
+        return f"{self.window_prefix}{start:.17g}"
 
     @property
-    def activation_id(self) -> str:
-        return f"program:{self.program_id}:{self.starts_at:.17g}"
+    def window_prefix(self) -> str:
+        """What every window identity of this revision starts with."""
+        return f"{PROGRAM_PREFIX}{self.program_id}:{self.revision}:"
+
+
+DEFAULT_PREFIX: Final = "default:"
+PROGRAM_PREFIX: Final = "program:"
 
 
 class Admission(FrozenModel):
@@ -196,6 +252,9 @@ class RunView(FrozenModel):
     ended_at: FiniteFloat | None
     program_id: str | None
     priority: int
+    # The root Run's activation identity ("program:...", "default:..." or Show now's); None for a
+    # child, and for a Run admitted before Power and the week.
+    activation_id: str | None = None
 
 
 class RuntimeView(FrozenModel):
@@ -208,8 +267,24 @@ class RuntimeView(FrozenModel):
         return next((intent for intent in self.visible if intent.target == target), None)
 
 
-# The operator's read keeps ended Runs, and Program outcomes, for this long.
+# The operator's read keeps ended Runs for this long, and Runtime forgets a root Run (with its
+# admission) once it and its Program window, if any, ended this long ago (`Runtime._forget`).
 OPERATOR_HISTORY_SECONDS = 86400.0
+
+
+class ProgramWindowView(FrozenModel):
+    """One window of a Program, worked out in Central: UTC instants and the house clock's text."""
+    start_at: FiniteFloat
+    end_at: FiniteFloat
+    start: LocalDateTime                             # house clock, display only
+    end: LocalDateTime
+    admission: Admission | None                      # this window's, None until it starts
+
+
+class ProgramWindows(FrozenModel):
+    current: ProgramWindowView | None                # start_at <= now < end_at
+    next: ProgramWindowView | None                   # the first window starting after now that its
+                                                     # current rule plays (at or after program_from)
 
 
 class OperatorProjection(FrozenModel):
@@ -218,15 +293,16 @@ class OperatorProjection(FrozenModel):
     `current` is the projected view with its Runs bounded to the live ones plus
     those ended in the last `OPERATOR_HISTORY_SECONDS`. `protected_frames` maps
     each served Run that protects frames to those targets; it is computed only
-    here, never on the scheduler's path. `program_outcomes` maps each Program
-    ending within the same bound, or later, to the Admission of its window
-    (None while it has none). Both bounds are read filters: stored Runs,
-    Programs and admissions are untouched.
+    here, never on the scheduler's path. `program_windows` maps each Program to
+    its current and next window (house time worked out here, never in the
+    console); `default_scene` is the Default Scene. Runtime itself forgets what
+    ended longer ago than the bound (`Runtime._forget`).
     """
 
     current: RuntimeView
     protected_frames: Mapping[str, frozenset[str]]
-    program_outcomes: Mapping[str, Admission | None]
+    program_windows: Mapping[str, ProgramWindows]
+    default_scene: DefaultScene | None
 
 
 class _MutableModel(BaseModel):
@@ -246,6 +322,7 @@ class _Run(_MutableModel):
     descendant_sequence: int = 0
     program_id: str | None = None
     program_ends_at: FiniteFloat | None = None
+    activation_id: str | None = None
     scheduled_finish_at: FiniteFloat | None = None
     phase: Literal["body", "outro", "completed", "cancelled"] = "body"
     cycle_index: int = 0
@@ -307,9 +384,33 @@ class _State(_MutableModel):
     sequence: int = 0
     scenes: dict[str, Scene] = Field(default_factory=dict)
     programs: dict[str, Program] = Field(default_factory=dict)
+    # A Program's windows are admitted only from this instant (its create, or the end of the
+    # window playing at its save: R10).
+    program_from: dict[str, FiniteFloat] = Field(default_factory=dict)
+    default_scene: DefaultScene | None = None
     runs: dict[str, _Run] = Field(default_factory=dict)
     admissions: dict[str, Admission] = Field(default_factory=dict)
     queue: list[_Queued] = Field(default_factory=list)
+
+
+# Windows are worked out per house day and reused: a lookup per event must not redo the calendar.
+_WINDOW_DAYS: Final = calculator.LOOKAHEAD_DAYS + 2
+
+
+@lru_cache(maxsize=512)
+def _windows_from_day(when: When, house: HouseTime, day_start: float) -> tuple[Window, ...]:
+    day = calculator.house_date(house, day_start)
+    end = calculator.day_start(house, day + timedelta(days=_WINDOW_DAYS))
+    try:
+        return calculator.windows(when, house, day_start, end)
+    except ValueError:      # a When the house can no longer place (its Place removed): no windows
+        return ()
+
+
+def _windows_after(when: When, house: HouseTime, floor: float) -> tuple[Window, ...]:
+    """The windows of `when` ending after `floor`, looking LOOKAHEAD_DAYS house days ahead."""
+    first = calculator.day_start(house, calculator.house_date(house, floor))
+    return tuple(window for window in _windows_from_day(when, house, first) if window.end > floor)
 
 
 def _finite(value: float) -> float:
@@ -341,7 +442,9 @@ class RuntimeConflict(Exception):
 class SceneInUse(RuntimeConflict):
     """A stored Scene definition is still referenced by durable runtime state."""
 
-    def __init__(self, *, program_ids=(), run_ids=(), queued_activation_ids=(), scene_ids=()) -> None:
+    def __init__(self, *, program_ids=(), run_ids=(), queued_activation_ids=(), scene_ids=(),
+                 default_scene: bool = False) -> None:
+        self.default_scene = default_scene
         self.program_ids = tuple(sorted(program_ids))
         self.run_ids = tuple(sorted(run_ids))
         self.queued_activation_ids = tuple(sorted(queued_activation_ids))
@@ -366,10 +469,19 @@ class _TransitionBudget:
 
 
 class Runtime:
-    """Single-owner mutable domain state, with pure immutable observations."""
+    """Single-owner mutable domain state, with pure immutable observations. `house` turns each
+    Program's When into windows (injected per load, never stored in the state)."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, house: HouseTime) -> None:
+        if not isinstance(house, HouseTime):
+            raise TypeError("house must be a HouseTime")
         self._state = _State()
+        self._house = house
+        self._target: float | None = None     # the instant an advance is moving to (transient)
+
+    @property
+    def house(self) -> HouseTime:
+        return self._house
 
     def set_scene(self, scene: Scene) -> None:
         """Store a Scene; a save must move its revision past the stored one.
@@ -405,9 +517,12 @@ class Runtime:
                                  if scene_id in self._scene_ids(q.scene)]
         scene_ids = [parent_id for parent_id, scene in self._state.scenes.items()
                      if parent_id != scene_id and scene_id in self._scene_ids(scene)]
-        if program_ids or run_ids or queued_activation_ids or scene_ids:
+        default_scene = (self._state.default_scene is not None
+                         and self._state.default_scene.scene_id == scene_id)
+        if program_ids or run_ids or queued_activation_ids or scene_ids or default_scene:
             raise SceneInUse(program_ids=program_ids, run_ids=run_ids,
-                             queued_activation_ids=queued_activation_ids, scene_ids=scene_ids)
+                             queued_activation_ids=queued_activation_ids, scene_ids=scene_ids,
+                             default_scene=default_scene)
         del self._state.scenes[scene_id]
 
     def frame_references(self, frame_id: str, now: float | None = None) -> dict[str, tuple[str, ...]]:
@@ -442,7 +557,7 @@ class Runtime:
         ))
         program_ids = tuple(sorted(
             program.program_id for program in self._state.programs.values()
-            if program.scene_id in scene_ids and (now is None or program.starts_at > now)
+            if program.scene_id in scene_ids
         ))
         return {
             "scene_ids": scene_ids,
@@ -522,57 +637,134 @@ class Runtime:
                 changed.append(scene_id)
         return tuple(sorted(changed))
 
-    def set_program(self, program: Program) -> None:
-        if program.scene_id not in self._state.scenes:
-            raise ValueError(f"unknown Scene: {program.scene_id}")
+    def _check_program(self, draft: ProgramDraft) -> None:
+        """ProgramRefused for a draft that cannot be stored: an unknown Scene, then the first
+        When problem (central.house_time.calculator.when_problems, their one home)."""
+        if draft.scene_id not in self._state.scenes:
+            raise ProgramRefused("unknown-scene")
+        problems = calculator.when_problems(draft.when, self._house)
+        if problems:
+            raise ProgramRefused(problems[0])
+
+    def program_whens(self) -> tuple[When, ...]:
+        """Every stored Program's When (Settings › House checks them before the location goes)."""
+        return tuple(program.when for program in self._state.programs.values())
+
+    def create_program(self, program: Program, now: float) -> Program:
+        """Store a new Program at revision 1. A window of it covering `now` is admitted at once,
+        from `now` to its end (owner, 2026-10-12: "Start right away, for the rest of tonight's
+        window"); later windows follow from `now`. The same Program again is an idempotent
+        retry; another under a taken id is refused "changed"."""
+        if program.revision != 1:
+            raise ValueError("a new Program has revision 1")
+        self.advance(now)
+        stored = self._state.programs.get(program.program_id)
+        if stored is not None:
+            if stored == program:
+                return stored
+            raise ProgramRefused("changed", stored)
+        self._check_program(program)
         self._state.programs[program.program_id] = program
-        if self._state.now is not None and program.ends_at <= self._state.now:
-            self._state.admissions.setdefault(program.activation_id, Admission(
-                activation_id=program.activation_id, status="expired", reason="missed_window"
-            ))
+        self._admit_covering(program, set())
+        self._state.program_from[program.program_id] = self._state.now
+        self.advance(now)
+        return program
 
-    def replace_program(self, expected: Program, replacement: Program, now: float) -> None:
-        """Compare and replace a future Program without reconciling Runtime time.
+    def save_program(self, expected: Program, draft: ProgramDraft, now: float) -> Program:
+        """Replace `expected` with `draft` at the next revision. The window playing now keeps its
+        end (R10): the new rule's windows are admitted from the later of now and that end."""
+        saved, playing = self._replace_program(expected, draft, now)
+        if playing is not None:
+            ends = [run.program_ends_at for run in playing if run.program_ends_at is not None]
+            self._state.program_from[saved.program_id] = max([self._state.now, *ends])
+            self.advance(now)
+        return saved
 
-        `expected` is the complete version the editor loaded. A matching stored
-        replacement is an idempotent retry, including after its start time.
-        """
-        now = max(_finite(now), self._state.now or 0.0)
-        if expected.program_id != replacement.program_id:
-            raise ValueError("Program identity mismatch")
+    def save_program_and_apply_now(self, expected: Program, draft: ProgramDraft, now: float) -> Program:
+        """As `save_program`, but applied at once: the Program's playing Runs finish gracefully at
+        `now`, and the new rule's window covering `now`, if any, is admitted at once (from `now`
+        to its end, under its own identity), the finishing Runs left out of the protection check
+        (as `activate`'s restart leaves out the Runs it replaces). Later windows follow the new
+        rule from `now`."""
+        saved, playing = self._replace_program(expected, draft, now)
+        if playing is None:
+            return saved
+        for run in playing:
+            run.scheduled_finish_at = min(run.scheduled_finish_at or now, now)
+        self._admit_covering(saved, {run.run_id for run in playing})
+        self._state.program_from[saved.program_id] = self._state.now
+        self.advance(now)
+        return saved
+
+    def _admit_covering(self, program: Program, finishing: set[str]) -> None:
+        """Admit `program`'s window covering the processed instant, if any, at once: from that
+        instant to the window's end, under the window's own identity, or record its refusal. The
+        Runs in `finishing` are left out of the protection check (as `activate`'s restart leaves
+        out the Runs it replaces). Creation and Save and apply now share it."""
+        now = self._state.now
+        window = calculator.window_at(program.when, self._house, now)
+        if window is None:
+            return
+        identity = program.window_id(window.start)
+        scene = self._state.scenes[program.scene_id]
+        rank = PRIORITY_RANK[program.priority]
+        denial = self._protected_conflict(scene, rank, False, finishing)
+        self._state.admissions[identity] = (
+            _refusal(identity, denial) if denial else self._admit(
+                scene, identity, now, rank, program_id=program.program_id, program_end=window.end))
+
+    def _replace_program(self, expected: Program, draft: ProgramDraft,
+                         now: float) -> tuple[Program, list[_Run] | None]:
+        """Store `draft` as `expected`'s next revision after advancing to `now`, and answer it with
+        the Program's playing root Runs; None for them when the same save was already stored (an
+        idempotent retry, nothing changed). ProgramRefused "missing", "changed" or a draft refusal."""
+        self.advance(now)
         stored = self._state.programs.get(expected.program_id)
         if stored is None:
-            raise RuntimeConflict("program_missing")
-        if stored == replacement:
-            return
+            raise ProgramRefused("missing")
+        saved = Program(**draft.model_dump(), program_id=expected.program_id,
+                        revision=expected.revision + 1)
+        if stored == saved:
+            return stored, None
         if stored != expected:
-            raise RuntimeConflict("program_changed")
-        if stored.starts_at <= now:
-            raise RuntimeConflict("program_started")
-        if replacement.starts_at <= now:
-            raise RuntimeConflict("program_window_started")
-        if replacement.scene_id not in self._state.scenes:
-            raise ValueError(f"unknown Scene: {replacement.scene_id}")
-        self._state.programs[replacement.program_id] = replacement
+            raise ProgramRefused("changed", stored)
+        self._check_program(draft)
+        playing = [run for run in self._state.runs.values()
+                   if run.parent_id is None and run.active and run.program_id == saved.program_id]
+        self._state.programs[saved.program_id] = saved
+        return saved, playing
 
-    def remove_program(self, program_id: str, now: float) -> RuntimeView:
+    def remove_program(self, program_id: str, revision: int, now: float) -> RuntimeView:
+        """Forget a Program; its active Runs finish gracefully at `now`. It is forgotten before
+        Runtime advances to `now`, so no window of it starts then."""
         now = _finite(now)
         if self._state.now is not None and now < self._state.now:
             raise ValueError("Runtime cannot move backwards in UTC")
-        program = self._state.programs.get(program_id)
-        if program is not None and program.starts_at < now:
-            # Reconcile any intervening start before removing its definition;
-            # the removal itself is a stop event, before same-time new work.
-            if program.ends_at > now:
-                self._state.programs[program_id] = program.model_copy(update={"ends_at": now})
-        else:
-            self._state.programs.pop(program_id, None)
+        stored = self._state.programs.get(program_id)
+        if stored is None:
+            raise ProgramRefused("missing")
+        if stored.revision != revision:
+            raise ProgramRefused("changed", stored)
+        del self._state.programs[program_id]
+        self._state.program_from.pop(program_id, None)
         for run in self._state.runs.values():
             if run.program_id == program_id and run.active:
                 run.scheduled_finish_at = min(run.scheduled_finish_at or now, now)
-        view = self.advance(now)
-        self._state.programs.pop(program_id, None)
-        return view
+        return self.advance(now)
+
+    def set_default_scene(self, scene_id: str | None, now: float) -> RuntimeView:
+        """Choose the Scene that plays wherever no Schedule does (E5), or none. The previous
+        choice's Run finishes gracefully at `now` and the new one is admitted then
+        (`_process`)."""
+        self.advance(now)
+        current = self._state.default_scene
+        if scene_id is not None and scene_id not in self._state.scenes:
+            raise ProgramRefused("unknown-scene")
+        if (current.scene_id if current else None) == scene_id:
+            return self.advance(now)
+        self._state.default_scene = None if scene_id is None else DefaultScene(
+            scene_id=scene_id, revision=current.revision + 1 if current else 1)
+        return self.advance(now)
 
     def export_state(self) -> dict:
         """The persisted form; the only path by which runtime state is stored.
@@ -588,8 +780,8 @@ class Runtime:
         return state
 
     @classmethod
-    def restore(cls, state: dict) -> Runtime:
-        runtime = cls()
+    def restore(cls, state: dict, *, house: HouseTime) -> Runtime:
+        runtime = cls(house=house)
         runtime._state = _State.model_validate(state)
         # Early MVP v1 exports used only global descendant order. Adopt that
         # established ordering once, then allocate independently within a root.
@@ -605,7 +797,7 @@ class Runtime:
 
     def _copy(self) -> Runtime:
         """A detached copy, so a projection never touches the owned state."""
-        return self.restore(self.export_state())
+        return self.restore(self.export_state(), house=self._house)
 
     def project(self, now: float, *, max_events: int = 10000) -> RuntimeView:
         return self._copy().advance(now, max_events=max_events)
@@ -623,11 +815,76 @@ class Runtime:
                 run.run_id: protected for run in runs
                 if (protected := state.runs[run.run_id].scene.protected_frames)
             },
-            program_outcomes={
-                program.program_id: state.admissions.get(program.activation_id)
-                for program in state.programs.values() if program.ends_at >= since
+            program_windows={
+                program.program_id: projected._program_windows(program, view.now)
+                for program in state.programs.values()
             },
+            default_scene=state.default_scene,
         )
+
+    def _program_windows(self, program: Program, now: float) -> ProgramWindows:
+        """The card's windows by the rule Runtime admits by (R10): `current` is the window the
+        Program is playing (under whichever revision admitted it), else its current rule's window
+        covering `now` once that rule applies (a refused one shows its refusal); `next` is the
+        current rule's first window starting after `now` and at or after its `program_from`."""
+        since = self._program_from(program)
+        playing = self._playing_window(program)
+        try:
+            covering = calculator.window_at(program.when, self._house, now)
+            following = next((window for window in _windows_after(program.when, self._house, now)
+                              if window.start > now and window.start >= since), None)
+        except ValueError:          # a When the house can no longer place
+            covering = following = None
+        if playing is None and covering is not None and covering.start >= since:
+            playing = (covering, program.window_id(covering.start))
+
+        def view(window: Window | None, identity: str | None) -> ProgramWindowView | None:
+            if window is None or identity is None:
+                return None
+            return ProgramWindowView(
+                start_at=window.start, end_at=window.end,
+                start=calculator.local_date_time(self._house, window.start),
+                end=calculator.local_date_time(self._house, window.end),
+                admission=self._state.admissions.get(identity))
+
+        return ProgramWindows(
+            current=view(*playing) if playing else None,
+            next=view(following, None if following is None else program.window_id(following.start)))
+
+    def program_windows_between(self, program: Program, start: float, end: float) -> tuple[tuple[Window, bool], ...]:
+        """`program`'s windows over [start, end), each with whether it plays by the rule Runtime
+        admits by (R10): its current rule's windows (those starting before its `program_from`, as
+        one a save made mid-window, do not play), and the window a Run of it is playing (a save
+        keeps that window's end; a creation or Save and apply now plays the window covering its
+        moment at once). The week page's one source."""
+        since = self._program_from(program)
+        try:
+            found = [(window, window.start >= since)
+                     for window in calculator.windows(program.when, self._house, start, end)]
+        except ValueError:          # a When the house can no longer place
+            found = []
+        playing = self._playing_window(program)
+        if playing is not None and playing[0].start < end and playing[0].end > start:
+            found = [item for item in found if item[0] != playing[0]] + [(playing[0], True)]
+        return tuple(sorted(found, key=lambda item: item[0].start))
+
+    def _program_from(self, program: Program) -> float:
+        """From when `program`'s current rule is admitted (unbounded for a state stored before it)."""
+        return self._state.program_from.get(program.program_id, float("-inf"))
+
+    def _playing_window(self, program: Program) -> tuple[Window, str] | None:
+        """The window an active root Run of `program` plays (the current revision's first; its
+        start from its identity, `Program.window_id`) and its identity, or None."""
+        runs = sorted((run for run in self._state.runs.values()
+                       if run.parent_id is None and run.active and run.program_id == program.program_id
+                       and run.program_ends_at is not None and run.activation_id is not None),
+                      key=lambda run: (not run.activation_id.startswith(program.window_prefix), -run.started_at))
+        if not runs:
+            return None
+        run = runs[0]
+        # The window's start is its identity's (Save and apply now starts its Run later, at `now`).
+        start = float(run.activation_id.rsplit(":", 1)[1])
+        return Window(start=start, end=run.program_ends_at), run.activation_id
 
     def timeline(
         self, start: float, end: float, *, max_events: int = 10000
@@ -660,8 +917,10 @@ class Runtime:
             raise ValueError("unknown repeat policy")
         if not activation_id or not isinstance(activation_id, str):
             raise ValueError("activation_id must be a nonempty string")
-        if activation_id.startswith("program:"):
-            raise ValueError("program activation identities are reserved for scheduled ingress")
+        if activation_id.startswith((PROGRAM_PREFIX, DEFAULT_PREFIX)):
+            raise ValueError("program and Default Scene identities are reserved for scheduled ingress")
+        if priority <= DEFAULT_SCENE_RANK:
+            raise ValueError("an operator request ranks above the Default Scene (priority 0 and up)")
         self.advance(now)
         if activation_id in self._state.admissions:
             return self._state.admissions[activation_id]
@@ -727,22 +986,114 @@ class Runtime:
         now = _finite(now)
         if self._state.now is not None and now < self._state.now:
             raise ValueError("Runtime cannot move backwards in UTC")
-        if self._state.now is None:
-            # A cold authority does not replay completely missed Program windows.
-            for program in self._state.programs.values():
-                if program.ends_at <= now:
-                    self._state.admissions[program.activation_id] = Admission(
-                        activation_id=program.activation_id, status="expired", reason="missed_window"
-                    )
-        while True:
-            self._skip_leaf_cycles(now)
-            event = self._next_event()
-            if event is None or event > now:
-                break
-            budget.consume()
-            self._process(event, budget)
+        # A Program window wholly missed by this advance (ended at or before `now`) is skipped;
+        # on a cold start that leaves only the window covering `now`.
+        self._target = now
+        try:
+            while True:
+                self._skip_leaf_cycles(now)
+                event = self._next_event()
+                if event is None or event > now:
+                    break
+                budget.consume()
+                self._process(event, budget)
+        finally:
+            self._target = None
         self._state.now = now
+        self._forget(now)
         return self._view(now, budget=budget if holds else None)
+
+    def _forget(self, now: float) -> None:
+        """The one retention rule (Runtime's state stays bounded however long it runs): a root
+        Run that ended, and whose Program window (if any) ended, more than
+        OPERATOR_HISTORY_SECONDS before `now` is forgotten with its admission; so is a refused
+        Program window's admission once no window of its Program's current revision ending
+        after that instant has its identity. A forgotten identity is never consulted again:
+        only windows ending after the floor are admitted. An operator retry of a forgotten
+        activation id is a new request."""
+        cutoff = now - OPERATOR_HISTORY_SECONDS
+        for run in list(self._state.runs.values()):
+            if (run.parent_id is None and not run.active and run.ended_at is not None
+                    and run.ended_at < cutoff
+                    and (run.program_ends_at is None or run.program_ends_at < cutoff)):
+                del self._state.runs[run.run_id]
+                if run.activation_id is not None:
+                    self._state.admissions.pop(run.activation_id, None)
+        recent = {program.window_id(window.start)
+                  for program in self._state.programs.values()
+                  for window in _windows_after(program.when, self._house, cutoff)}
+        for identity, admission in list(self._state.admissions.items()):
+            if (identity.startswith(PROGRAM_PREFIX) and admission.run_id is None
+                    and identity not in recent):
+                del self._state.admissions[identity]
+
+    def _floor(self) -> float | None:
+        """The instant before which no Program window or Default Scene is admitted: the advance's
+        target while advancing, else the processed instant."""
+        candidates = [t for t in (self._state.now, self._target) if t is not None]
+        return max(candidates, default=None)
+
+    def _pending_windows(self) -> list[tuple[float, str, Program, Window]]:
+        """Every Program window still to be admitted, (start, program_id, Program, Window), in
+        start order: it ends after the floor, starts at or after its Program's `program_from`
+        and at or after the processed instant (a window is never admitted backdated, e.g. one a
+        house zone or place change moved into the past: the change applies from the next
+        window, as a save does, R10), and its identity has no admission yet."""
+        floor = self._floor()
+        if floor is None:
+            return []
+        processed = self._state.now
+        pending = []
+        for program in self._state.programs.values():
+            since = self._state.program_from.get(program.program_id, floor)
+            if processed is not None:
+                since = max(since, processed)
+            for window in _windows_after(program.when, self._house, floor):
+                if window.start >= since and program.window_id(window.start) not in self._state.admissions:
+                    pending.append((window.start, program.program_id, program, window))
+        pending.sort(key=lambda item: item[:2])
+        return pending
+
+    def _default_runs(self) -> list[_Run]:
+        return [run for run in self._state.runs.values()
+                if run.parent_id is None and run.active and run.activation_id is not None
+                and run.activation_id.startswith(DEFAULT_PREFIX)]
+
+    def _default_prefix(self) -> str | None:
+        """What the identity of a Run of the Default Scene as chosen and stored now starts with:
+        the choice's revision and its Scene's revision, so a new choice or an edit of its Scene
+        is the next Run (requirements: "Authored configuration edits default to the next
+        Run"). None when none is chosen or its Scene is gone."""
+        chosen = self._state.default_scene
+        if chosen is None or chosen.scene_id not in self._state.scenes:
+            return None
+        scene = self._state.scenes[chosen.scene_id]
+        return f"{DEFAULT_PREFIX}{chosen.scene_id}:{chosen.revision}:{scene.revision}:"
+
+    def _stale_defaults(self) -> list[_Run]:
+        """The active Default Scene Runs not under the current prefix, not yet asked to finish."""
+        prefix = self._default_prefix()
+        return [run for run in self._default_runs()
+                if (prefix is None or not run.activation_id.startswith(prefix))
+                and run.scheduled_finish_at is None and run.finish_requested_at is None]
+
+    def _default_due(self) -> Scene | None:
+        """The Default Scene's Scene, repeating until replaced (it never ends by itself: one
+        perpetual Run), when it is set, none of its Runs under the current prefix is active, and
+        no protection refuses it (a refusal is never recorded: it is retried at the next
+        event)."""
+        prefix = self._default_prefix()
+        if prefix is None:
+            return None
+        if any(run.activation_id.startswith(prefix) for run in self._default_runs()):
+            return None
+        chosen = self._state.scenes[self._state.default_scene.scene_id]
+        # It never protects either (frame design rule 3: it is beneath every Schedule): a
+        # protecting copy would refuse every Schedule on its Frames for as long as it plays.
+        scene = _unprotected(chosen).model_copy(update={"loop": True, "duration_seconds": None})
+        if self._protected_conflict(scene, DEFAULT_SCENE_RANK, False):
+            return None
+        return scene
 
     def _matching(self, scene_id: str) -> list[_Run]:
         return [
@@ -785,6 +1136,7 @@ class Runtime:
             root_order=parent.root_order if parent else self._state.sequence,
             local_order=local_order,
             program_id=program_id, program_ends_at=program_end,
+            activation_id=None if parent else identity,
         )
         self._state.runs[run_id] = run
         if parent:
@@ -815,10 +1167,7 @@ class Runtime:
 
     def _skip_leaf_cycles(self, until: float) -> None:
         """A month-long background needs no per-cycle lifecycle history."""
-        boundaries = [
-            p.starts_at for p in self._state.programs.values()
-            if p.activation_id not in self._state.admissions
-        ]
+        boundaries = [start for start, *_ in self._pending_windows()]
         for run in self._state.runs.values():
             if (
                 run.parent_id is not None or run.phase != "body" or not run.scene.loop
@@ -838,10 +1187,9 @@ class Runtime:
             run.cycle_index = max(run.cycle_index, index, 0)
 
     def _next_event(self) -> float | None:
-        events = [
-            p.starts_at for p in self._state.programs.values()
-            if p.activation_id not in self._state.admissions
-        ]
+        events = [start for start, *_ in self._pending_windows()[:1]]
+        if self._default_due() is not None or self._stale_defaults():
+            events.append(self._floor())
         events.extend(item.expires_at for item in self._state.queue)
         for run in self._state.runs.values():
             if run.phase == "outro":
@@ -908,20 +1256,31 @@ class Runtime:
                     else:
                         self._end(run, start, "completed")
                     changed = True
-        for program in sorted(self._state.programs.values(), key=lambda p: (p.starts_at, p.program_id)):
-            if program.starts_at > at or program.activation_id in self._state.admissions:
-                continue
+        for start, _, program, window in self._pending_windows():
+            if start > at:
+                break
             budget.consume()
+            identity = program.window_id(window.start)
             scene = self._state.scenes[program.scene_id]
-            denial = self._protected_conflict(scene, program.priority, False)
+            rank = PRIORITY_RANK[program.priority]
+            denial = self._protected_conflict(scene, rank, False)
             result = (
-                _refusal(program.activation_id, denial)
+                _refusal(identity, denial)
                 if denial else self._admit(
-                    scene, program.activation_id, program.starts_at, program.priority,
-                    program_id=program.program_id, program_end=program.ends_at,
+                    scene, identity, window.start, rank,
+                    program_id=program.program_id, program_end=window.end,
                 )
             )
-            self._state.admissions[program.activation_id] = result
+            self._state.admissions[identity] = result
+        # A Default Scene Run of an earlier choice or Scene revision finishes gracefully; the
+        # current one is admitted once no protection refuses it.
+        for run in self._stale_defaults():
+            budget.consume()
+            run.scheduled_finish_at = at
+        if (default := self._default_due()) is not None:
+            budget.consume()
+            identity = f"{self._default_prefix()}{at:.17g}"
+            self._state.admissions[identity] = self._admit(default, identity, at, DEFAULT_SCENE_RANK)
         for run in list(self._state.runs.values()):
             if run.phase != "body" or run.finish_requested_at is not None:
                 continue
@@ -1038,6 +1397,7 @@ class Runtime:
                 started_at=r.started_at, phase=r.phase, participants=r.scene.participants,
                 children=tuple(r.children), finish_requested_at=r.finish_requested_at,
                 ended_at=r.ended_at, program_id=r.program_id, priority=r.priority,
+                activation_id=r.activation_id,
             ) for r in runs),
             contributions=tuple(intents), visible=tuple(winners[k] for k in sorted(winners)),
         )

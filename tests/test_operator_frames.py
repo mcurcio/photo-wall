@@ -18,6 +18,7 @@ from threading import Event
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi.testclient import TestClient
+from support.house_time import window_program
 
 from central.app import create_app
 from central.displays.model import Readiness
@@ -27,7 +28,7 @@ from central.registry import (
     OutputReport,
     enrollment_message,
 )
-from central.runtime import Child, Contribution, Program, Scene
+from central.runtime import Child, Contribution, Scene
 from contracts.models import FrameProfile
 
 ADMIN = "test-operator-" + "x" * 40
@@ -293,9 +294,7 @@ def test_delete_frame_refuses_stored_nested_outro_scene_and_names_program(regist
             outro_contributions=(Contribution(target="frame:portrait", asset_refs=("a",)),),
         )),),
     ))
-    runtime.command("set_program", Program(
-        program_id="evening", scene_id="parent", starts_at=1100, ends_at=1200,
-    ))
+    runtime.command_current("create_program", window_program("evening", "parent", 1140, 1200))
     with TestClient(app) as client:
         response = client.delete("/v1/operator/frames/portrait", headers=AUTH)
     assert response.status_code == 409

@@ -13,6 +13,7 @@ not list is never sent and is logged as `document_refused`.
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 
 from integration.bus_servers import (
     FileLinkStore,
@@ -34,16 +35,17 @@ from contracts.node_output import (
     BEST_DETECTED,
     SCHEMA_MAJOR,
     ActsOn,
+    Darkness,
     DisplayIdentity,
     DisplayMode,
     OutputDocument,
     OutputPicture,
+    OutputPower,
     OutputReport,
     PictureSetting,
     Power,
     PowerMethod,
     PowerRequest,
-    RequestReason,
     decode_output_document,
     decode_output_report,
     encode_output_document,
@@ -59,11 +61,11 @@ DESIRED = "KV_desired_display"
 STATE = "KV_state_display"
 KEY = output_document_key("HDMI-A-1")
 UNLISTED = "output-HDMI-A-3"
-STANDING = PowerRequest("standing", Power.ON, RequestReason.STANDING)
+ALWAYS_ON = OutputPower(Power.ON, (), "2099-01-01T00:00:00Z", Darkness.DISPLAY_OFF, None)
 PICTURE = OutputPicture(PictureSetting(ActsOn.DISPLAY, AS_THE_DISPLAY_HAS_IT),
                         PictureSetting(ActsOn.DISPLAY, AS_THE_DISPLAY_HAS_IT), 6500, 22)
-FIRST = OutputDocument("HDMI-A-1", 1, (STANDING,), BEST_DETECTED, True, True, 1, PICTURE)
-TEST_OFF = OutputDocument("HDMI-A-1", 2, (PowerRequest("req-1", Power.OFF, RequestReason.CONSOLE_TEST, 300), STANDING),
+FIRST = OutputDocument("HDMI-A-1", 1, ALWAYS_ON, BEST_DETECTED, True, True, 1, PICTURE)
+TEST_OFF = OutputDocument("HDMI-A-1", 2, replace(ALWAYS_ON, test=PowerRequest("req-1", Power.OFF, 300)),
                           BEST_DETECTED, True, True, 1, PICTURE)
 REPORT = OutputReport("HDMI-A-1", True, DisplayIdentity("XYM", 5475, "MNN", None),
                       (DisplayMode(1920, 1080, 60000, preferred=True),), (PowerMethod.DDC_CI, PowerMethod.SIGNAL_OFF),

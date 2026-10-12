@@ -113,8 +113,10 @@ class _Pool:
 
 
 class FakeLibraryStore:
-    def __init__(self, clock) -> None:
+    def __init__(self, clock, *, zone: str = "UTC") -> None:
+        """`zone`: the house zone a check's lease carries (PgPhotoLibrary reads Settings › House)."""
         self.clock = clock
+        self.zone = zone
         self.connections: dict[str, _Connection] = {}
         self.pools: dict[str, _Pool] = {}
         self.assets: dict[tuple[str, str], LibraryAssetRecord] = {}
@@ -223,7 +225,7 @@ class FakeLibraryStore:
         pool.step_at = self._now()
         return CheckLease(pool_key=pool_key, query=pool.query, connection=secret,
                           check_number=pool.check_number, started_at=pool.started_at,
-                          progress=pool.progress)
+                          zone=self.zone, progress=pool.progress)
 
     def known_revisions(self, connection_ref: str,
                         upstream_ids: Sequence[str]) -> dict[str, KnownRevision]:

@@ -4,6 +4,7 @@ with the Planner's projection scripted (its selections carry a Scene and a pass,
 will)."""
 
 import pytest
+from support.house_time import UTC_HOUSE, at, set_house
 from test_coordination import publish_fixture_catalog, schedule, setup_players
 
 import central.coordination as coordination
@@ -65,6 +66,28 @@ def test_presented_copies_the_selection_once_and_refuses_an_unknown_layer(regist
         history = store.wall_history_in(conn, ["scene"], now=NOW, window_seconds=WEEK)
     assert [(row["assignment_id"], row["presented_at"]) for row in rows] == [("a-1", NOW - 29)]
     assert history.shown == (offered,)
+
+
+def test_a_layer_planned_into_night_off_is_not_shown_and_one_outside_it_is(registry, store):
+    """Power and the week (F3): planning carries on through Night off, but a photo planned wholly
+    into wanted-off time was shown to a dark room. Night off is 23:00 to 07:00 on frame-1 only.
+    Mutation probe (P-filter-gone): remove the filter -> the in-Night-off layer is recorded."""
+    set_house(registry.db, UTC_HOUSE)
+    with registry.db.transaction() as conn:
+        conn.execute("""UPDATE night_off SET settings = jsonb_set(settings, '{frames}',
+                        '{"kind": "frames", "frame_ids": ["frame-1"]}')""")
+    night = at(UTC_HOUSE, "2001-09-09T23:30")
+    dark = showing("dark", "photo-1", start=night)
+    day = showing("day", "photo-2", start=at(UTC_HOUSE, "2001-09-09T15:00"))
+    elsewhere = showing("elsewhere", "photo-3", start=night, frame="frame-2")
+    straddling = showing("dawn", "photo-4", start=at(UTC_HOUSE, "2001-09-10T06:59:50"))
+    with registry.db.transaction() as conn:
+        store.record_selected_in(conn, [dark, day, elsewhere, straddling])
+        assert not store.record_presented_in(conn, "dark", night)
+        for layer in (day, elsewhere, straddling):
+            assert store.record_presented_in(conn, layer.assignment_id, layer.start)
+        shown = conn.execute("SELECT assignment_id FROM shown_photos ORDER BY assignment_id").fetchall()
+    assert [row["assignment_id"] for row in shown] == ["dawn", "day", "elsewhere"]
 
 
 def test_wall_history_holds_the_window_the_current_pass_live_selections_and_kept_stills(

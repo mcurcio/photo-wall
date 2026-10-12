@@ -13,6 +13,8 @@ import { cn } from "./cn";
 export const buttonVariants = cva(
   [
     "inline-flex cursor-pointer items-center justify-center gap-2 rounded-button border px-5 py-2",
+    // A 44 px target on a phone (design language §2, Spacing and density; WCAG 2.5.5).
+    "max-md:min-h-11",
     "font-sans text-sm font-medium wrap-normal",
     "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus",
     "disabled:cursor-not-allowed disabled:opacity-60",

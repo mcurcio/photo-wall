@@ -5329,3 +5329,126 @@ Order: (a) merge the iac PR that switches the factory to `central.app:create_app
 - **S3's "within a placeholder budget of 0.5 s" is not a CI assertion.** Shared CI runners took
   1.09 s where a laptop took 0.31-0.45 s. `test_planner_pass_budget` keeps the member-count gate
   and prints the read's time; the 0.5 s budget is a bench measurement ("to be measured").
+
+## E-PW-T-1 (Power and the week, slice T, 2026-10-12) · feat/power-and-the-week
+- **Import-linter contract "Sun times and the zone database are Central's" cannot list `media`.** The slice page T.md
+  ("Dependencies") forbids `astral` from `media`, but the media worker imports `central.media_repository` ->
+  `central.planner` -> `central.runtime`, and Runtime works out Program windows with the house-time calculator
+  (which imports astral) — the same page says the worker "builds Runtime". Resolution taken (not a stop): the
+  contract's sources are `contracts, appliance, player, uplink, nodeapi` (the Pi and the wire), and its comment says
+  why the media worker (a Central process) is not listed.
+- **Migration 088 sorts the seeded Frame ids with `COLLATE "C"`.** `ChosenFrames.frame_ids` must be sorted as Python
+  sorts; the page's `ORDER BY id` follows the database's collation, which may order `-` and digits differently.
+
+## E-PW-T-2 (Power and the week, slice T2, 2026-10-12) · feat/power-and-the-week
+- **Why needs each root Run's activation identity; the frozen signatures had none.** `content_why` names a
+  request's kind by its activation id ("program:", "default:", else Show now) and the Default Scene's "no Run
+  under its identity prefix is active" rule needs it too, but `RunView`/`_Run` carried no activation id. Resolution
+  (not a stop): `_Run.activation_id` and `RunView.activation_id` (both `str | None = None`, so a stored snapshot
+  restores; None for a child and for a Run admitted before 088).
+- **`remove_program` forgets the Program before it advances.** The page orders it "finish its Runs, advance, forget",
+  which admits a window starting at that very instant and at once asks it to finish (a Run that plays a whole
+  cycle). The Program is forgotten first, its active Runs finish at `now`, then Runtime advances.
+- **A Program window wholly missed between two advances** is read as "ended at or before the advance's target":
+  `_advance` carries its target, so a timeline step (target = the step) still admits every window in order.
+- **`mount_program_routes` takes create_app's `runtime_store`, not `coordinator.runtime`** (the same
+  `RuntimeStore(db, clock)`; the health tests' stand-in coordinator has no `runtime`). **`PgWhy` takes
+  `media_times`** (the database's clock in production, the injected test clock in tests), as T1's `PgPower` does;
+  the page's `DatabaseTransactionClock()` would put A5's "test clock" out of reach.
+- **Every DB test that builds a Program sets the house (`tests/support/house_time.py set_house`)**: with no row,
+  Central reads its server zone, which differs between a laptop and CI. A When has minute resolution, so tests that
+  scheduled a window at a sub-minute instant (1010, 1100) move it to the next minute (and the test clock with it).
+- **Not changed (outside T's files):** `central/console/src/join.js` and the facts still name a Program by its
+  `program_id` ("Program p-3fa9…" for one made in the console) on Now, Wall and the Frame page; the console keeps
+  the word "Program" (the owner's "Schedule" is S4's screens); `scripts/harness_failure.py` still lists
+  `run_ended_before_faults_completed`, which the demo no longer raises (the Default Scene never ends).
+- **Deleted, unreachable:** the browser test "a refused Program whose protector is no longer served": a refused
+  window lasts at most about a day, the operator read keeps a Run for a day.
+
+## E-PW-FIX-1 (Power and the week, end-review fix round, 2026-10-12) · feat/power-and-the-week (PR 86)
+- **Main's PR 84 took migration numbers 087 and 088.** This branch's `088_power_and_the_week`, `089_power_holds`
+  and `090_names_and_rooms` are renumbered 089, 090 and 091 (none was applied outside a test database); every
+  "migration 088/089/090" in this branch's code and docs now says 089/090/091. The entries above that say 088 for
+  Night off's seed mean 089. `tests/test_upgrade_087.py` (main's) seeds through today's code, so it applies the
+  power migrations first (`migrate_before(..., also=...)`).
+- **Main's ranked line read (PR 84) moved On this day into SQL in UTC.** The merge keeps 2b's house calendar in both
+  interpreters: `LineQuery.house`, and the SQL reads `AT TIME ZONE` the house zone.
+- **T page, "its Scene may end; it starts again" (the Default Scene) was wrong.** A non-repeating Default Scene
+  added a root Run and an admission per cycle, never pruned (2,880 a day at a 30 s cycle). The Default Scene is now
+  what 0021 says, one perpetual Run: its Scene repeats until replaced (loop on, no duration). Its identity is
+  `default:<scene_id>:<choice revision>:<Scene revision>:<start>`, so an edit of its Scene is the next Run (the
+  old one finishes gracefully). Its rank is -1, below every operator request (`activate` and the route accept
+  priority 0 and up), so a new Default Scene never wins the tie against a Show now at 0.
+- **The pages left Runtime's state unbounded** ("stored Runs, Programs and admissions are not pruned"). One
+  retention rule, `Runtime._forget`: a root Run that ended, and whose window ended, more than 24 h ago is forgotten
+  with its admission; a refused window's admission likewise. An operator retry of an id whose Run ended over a day
+  ago is a new request (stated in 0021's costs).
+- **A Program window is never admitted before the processed instant** (a house zone or place change applies from
+  the next window), which the pages did not say.
+- **The frozen `is_resting(wanted, pi_says)` had no result, but the frame says "did not answer" is not Resting.**
+  `is_resting(wanted, pi_says, result)` and `PowerWhy.result` (the report's result for the latest change): not
+  Resting after "did-not-answer" or "another-input"; Resting after "not-supported" (the Pi shows black). The console
+  renders Why's answer and no longer reads the Power tab for it.
+- **T page's contracts docstring credited the wire rule to the owner** ("durations and calendar set times; never a
+  clock reading", owner 2026-10-12); D's D2 forbids that. It is the design's rule, from his "Yes, send 7 days of set
+  times".
+- **Display store: `_until_next_deadline` never returns None** (house midnight always comes); the hold-end deadline
+  is dropped: a hold end that changes the power is already the timetable's next change, and one that does not
+  changes no document.
+- **Settings › House refuses clearing the location while Night off or a Schedule uses a sun time**
+  (`place-in-use`, 409); a deleted Frame leaves Night off's chosen Frames in the delete's transaction.
+- **S3's C3 probe P-apply-later is an equivalent mutant** (apply-now admits the covering window itself); the
+  real probes are "no exclusion" and "never refuse", now in tests/test_runtime.py. **S4's K2 P-no-reload** is
+  better named "retry a 409 at the re-read revision".
+- **S4 item 4 asked for "an IANA picker"; the page had a text box.** It is a native Select over the browser's
+  zones, labelled by city. **S4 item 2 puts "A hold lasts" in the Night off editor**, though it governs All off and
+  All on (left there; a UX finding to take to the owner).
+- **The merge left main's one-item Re-check (`ImmichClient.still_matches`) calling `window_of` without the house
+  zone** (a TypeError on every Re-check, red in CI's photo-sources and upstream-faults legs). `LibraryClient.
+  still_matches(query, window, upstream_id)` takes the check's own window, as `search_page` does.
+- **Wall e2e (upstream-faults) regression, found in CI: the Default Scene made every pass plan a whole hour of 8 s
+  cycles** (main's demo used a 600 s Program window), and rule 1 (never on two Frames at once) rechecked every
+  earlier showing of a photo at each slot, recomputing extents: 1.5 s a pass locally, holding the coordination lock,
+  so Players' readiness calls waited, their clock mapping aged out (`readiness_lost: clock`) and every other layer
+  fell back. `_Spans` (central/wall_plan/assignment.py) indexes the fixed extents: 0.23 s a pass; the same plans
+  (every planner test unchanged). Not a spec contradiction; a latent 5a cost that a perpetual Run exposes.
+- **`tests/test_fit_analysis_budget.py` (main's, 5 s) read 5.4-6.0 s on this branch's CI runners** while every DB
+  test there ran about twice as long as on main's run (test_node_fleet_hosts 176 s vs 95 s); locally it reads 1.7 s on
+  both trees (A/B with a main worktree), and nothing this branch changed is on its path. Runner speed, not the PR;
+  left to CI.
+
+## E-PW-FIX-2 (Power and the week, final fix round, 2026-10-12) · feat/power-and-the-week (PR 86)
+- **T page's `ProgramWindows.next` ("the first window starting after now") ignored R10.** After a save mid-window
+  the card and the week named a window Runtime never admits. `next` is now the current rule's first window
+  starting after now and at or after its `program_from`; `current` is the window a Run of the Program plays
+  (under whichever revision admitted it). The week's windows carry `plays` (`Runtime.program_windows_between`,
+  the week's one source): a window of the saved rule that started before the rule applies is drawn dashed.
+  Consequence the pages never stated: **a Schedule created during one of its own windows starts at the next one**
+  (it already did in Runtime; the card used to say "Now"). Owner question, left as built: should creating one
+  mid-window play it at once, as Save and apply now does for an edit?
+- **Night off was seeded on in Central's server zone** (UTC in the deploy's container: 23:00 UTC is 16:00 in Los
+  Angeles), and nothing asked the operator to confirm it. Resolution taken (option B; owner question): migration
+  089 (never applied outside a test database) adds `house_settings.zone_confirmed`, false until Settings › House is
+  saved; `power.timetable.night_off_in_force` is the rule's one home (no Night off span, and a hold lasts to the
+  horizon, until then); Night off's read carries `waits_for_zone` and the console says so on the Night off editor
+  and Settings › House. Not chosen: the iac deploy supplying the zone (option A, an iac pull request).
+- **The Default Scene kept its Scene's protection**, so a protecting Scene chosen as Default refused every Schedule
+  on its Frames for as long as it played. It is admitted unprotected, at any depth.
+- **The frame's `Hold.source: {kind, by}` lost `by`** (one operator today; migration 090 stores only the kind).
+  Recorded here: the slice pages follow the code.
+- **S4 says the console never reads the browser's zone except to offer it.** Until the shell's first read of
+  Settings › House answers (a moment after sign-in, or while Central does not answer it), `timeWords.js` shows times
+  in the browser's zone with its abbreviation, so a time is never shown in a zone it does not name. Kept and
+  written into design-language §7's clock-time row; not a house time in another zone.
+- **The browser harness's "operator server did not stop" (CI browser (3) on 2c56054) was a uvicorn race, not a
+  flake:** a connection accepted in the same loop turn as the shutdown is registered after uvicorn asks the others
+  to close, so it is never asked; the console's 5 s snapshot poll reuses it inside the 5 s keep-alive, and uvicorn
+  waits on it without end. Diagnosed by dumping the open connections at the join (an idle keep-alive connection,
+  not closing, no task in flight), 2-3 in 240 runs at -n 8 before the fix, 0 in 240 after: the harness sets
+  `timeout_graceful_shutdown`. Production's `uvicorn` has no such bound either (a rollout waits for the pod's grace
+  period); left as remaining work.
+- **The output power worker's sleep goes through its `Clock` port** (`wait`; `PiClock` in production), so the
+  timetable tests step it by its looks and assert the tick cap from the waits it asked for, with no real sleeps.
+- **The Pi now reports did-not-answer when the shell does not confirm the curtain** (an off with no power method;
+  an on whose curtain stays up): E-PW-FIX-1's "Resting after not-supported (the Pi shows black)" assumed the
+  curtain went up.

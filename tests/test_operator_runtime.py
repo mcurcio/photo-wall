@@ -5,14 +5,16 @@ import re
 from pathlib import Path
 
 from fastapi.testclient import TestClient
+from support.house_time import UTC_HOUSE, set_house, window_program
 from test_operator_frames import ADMIN, AUTH, _portrait
 
 from central.app import create_app
-from central.runtime import Child, Contribution, Program, Scene
+from central.runtime import Child, Contribution, Scene
 
 
-def test_the_runtime_read_serves_protection_and_program_outcomes(registry):
+def test_the_runtime_read_serves_protection_and_program_windows(registry):
     _portrait(registry)
+    set_house(registry.db, UTC_HOUSE)
     app = create_app(registry.db, registry.clock, ADMIN, run_scheduler=False)
     runtime = app.state.coordinator.runtime
     now = registry.clock.utc()
@@ -21,18 +23,20 @@ def test_the_runtime_read_serves_protection_and_program_outcomes(registry):
                                        contributions=target))
     runtime.command("set_scene", Scene(scene_id="evening", loop=True, contributions=target))
     runtime.command("activate", "guard", "guard-act", now, priority=5)
-    runtime.command("set_program", Program(
-        program_id="evening", scene_id="evening", starts_at=now + 10, ends_at=now + 100))
-    registry.clock.advance(20)
+    runtime.command("create_program", window_program("evening", "evening", 1020, 1080), now)
+    registry.clock.advance(30)
     with TestClient(app) as client:
         body = client.get("/v1/operator/runtime", headers=AUTH).json()
         refused = client.post("/v1/operator/activations", headers=AUTH, json={
             "scene_id": "evening", "activation_id": "evening-act"}).json()
-    assert {"definitions", "programs", "current"} <= set(body)
+    assert set(body) == {"definitions", "programs", "default_scene", "current", "protected_frames",
+                         "program_windows"}
     guard = next(run for run in body["current"]["runs"] if run["scene_id"] == "guard")
     assert (guard["program_id"], guard["priority"]) == (None, 5)
     assert body["protected_frames"] == {guard["run_id"]: ["frame:portrait"]}
-    outcome = body["program_outcomes"]["evening"]
+    window = body["program_windows"]["evening"]["current"]
+    assert (window["start"], window["end"]) == ("1970-01-01T00:17", "1970-01-01T00:18")
+    outcome = window["admission"]
     assert (outcome["status"], outcome["reason"]) == ("rejected", "protected_frames")
     assert outcome["blocking_run_id"] == guard["run_id"]
     assert (refused["reason"], refused["blocking_run_id"]) == ("protected_frames", guard["run_id"])
@@ -63,10 +67,8 @@ def test_scene_delete_route_checks_revision_and_returns_sorted_dependencies(regi
     runtime.command("set_scene", Scene(scene_id="a-parent", children=(
         Child(scene=Scene(scene_id="to-delete")),
     )))
-    runtime.command("set_program", Program(
-        program_id="z-program", scene_id="to-delete", starts_at=100, ends_at=200))
-    runtime.command("set_program", Program(
-        program_id="a-program", scene_id="to-delete", starts_at=300, ends_at=400))
+    runtime.command_current("create_program", window_program("z-program", "to-delete", 1020, 1080))
+    runtime.command_current("create_program", window_program("a-program", "to-delete", 1080, 1140))
     with TestClient(app) as client:
         stale = client.delete("/v1/operator/scenes/to-delete?expected_revision=1", headers=AUTH)
         in_use = client.delete("/v1/operator/scenes/to-delete?expected_revision=2", headers=AUTH)
@@ -75,7 +77,7 @@ def test_scene_delete_route_checks_revision_and_returns_sorted_dependencies(regi
     assert in_use.status_code == 409
     assert in_use.json() == {
         "error": "scene_in_use", "program_ids": ["a-program", "z-program"],
-        "run_ids": [], "queued_activation_ids": [], "scene_ids": ["a-parent"],
+        "run_ids": [], "queued_activation_ids": [], "scene_ids": ["a-parent"], "default_scene": False,
     }
     assert (missing.status_code, missing.json()) == (409, {"error": "scene_missing"})
 

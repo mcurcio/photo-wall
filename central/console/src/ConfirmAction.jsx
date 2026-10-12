@@ -7,6 +7,7 @@ import { liveRunsFor } from "./join.js";
 import { usePageHidden } from "./pageVisibility.js";
 import { CHANGED_MESSAGE, UNKNOWN_MESSAGE } from "./sendOutcome.js";
 import { frameStoredReferences } from "./sceneTargets.js";
+import { SCHEDULE, scheduleName } from "./showWords.js";
 import { useMutate } from "./useMutate.js";
 
 /**
@@ -358,17 +359,17 @@ function RunList({ runs, lead }) {
   );
 }
 
-function frameReferenceRefusal(result) {
+function frameReferenceRefusal(result, runtime) {
   const details = [
     ["saved Scenes", result.scene_ids],
-    ["Programs", result.program_ids],
+    [SCHEDULE.referenced, result.program_ids.map((id) => scheduleName(runtime, id))],
     ["queued activations", result.queued_activation_ids],
   ].filter(([, ids]) => ids.length > 0)
     .map(([label, ids]) => `${label}: ${ids.join(", ")}`);
   const reported = details.length > 0 ? ` Central reports ${details.join("; ")}.` : "";
   const actions = [];
   if (result.scene_ids.length > 0) actions.push("Edit or remove the saved Scenes.");
-  if (result.program_ids.length > 0) actions.push("Edit or remove the Programs.");
+  if (result.program_ids.length > 0) actions.push(SCHEDULE.editOrRemove);
   if (result.queued_activation_ids.length > 0) {
     actions.push("Review the queued activations and retry after Central resolves them.");
   }
@@ -412,9 +413,11 @@ export function deleteFrameRequest(snapshot, frameId) {
         )}
         {programs.length > 0 && (
           <>
-            <p>Upcoming Programs using those Scenes also need review:</p>
+            <p>{SCHEDULE.dependents}</p>
             <ul className="confirm__runs">
-              {programs.map((programId) => <li key={programId}>{programId}</li>)}
+              {programs.map((programId) => (
+                <li key={programId}>{scheduleName(snapshot?.runtime, programId)}</li>
+              ))}
             </ul>
           </>
         )}
@@ -433,7 +436,7 @@ export function deleteFrameRequest(snapshot, frameId) {
       if (result.code === "frame_referenced") {
         return {
           state: "refused",
-          message: frameReferenceRefusal(result),
+          message: frameReferenceRefusal(result, snapshot?.runtime),
         };
       }
       return { state: "refused", message: result.message };
