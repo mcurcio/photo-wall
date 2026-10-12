@@ -18,7 +18,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Final
 
-from central.db import Database
+from central.db import Database, DatabaseTransactionClock
 from central.fleet.node_bus_hub import HUB_LISTENERS, FleetHub
 from central.infra.display_store import (
     REPORT_STREAM,
@@ -101,7 +101,7 @@ def build_node_bus(dsn: str, env: Mapping[str, str]) -> NodeBus | None:
     db = Database(dsn, pool_size=LINK_STORE_CONCURRENCY + 2)
     wakes = DisplayWakes()
     stores = PgLinkStores(db, {REPORT_STREAM: OutputReportJudge(wakes)})
-    documents = DisplayDocuments(stores, wakes)
+    documents = DisplayDocuments(stores, wakes, times=DatabaseTransactionClock())
     links = tuple(NodeLinks(pipe, hub_url, stores, documents) for pipe in (Pipe.FLEET, Pipe.SHOW))
     fleet = FleetHub(db, hub_url, Path(env.get(HUB_CONFIG_ENV) or DEFAULT_HUB_CONFIG), HUB_LISTENERS,
                      WALL_TABLE, PgWallMarks(db, _NoDocuments()), links)

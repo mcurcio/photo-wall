@@ -14,19 +14,22 @@ from typing import Any
 from uuid import UUID
 
 from central.db import Database, TransactionClock
+from central.house_time.calculator import local_date_time, next_window, window_at
+from central.infra.house_store import house_time_in
 from central.power.model import NightOff, PowerPolicy
 from central.power.views import HoldView, NightOffSave, NightOffView
 
 
 def night_off_in(conn: Any) -> NightOff:
     """The stored Night off (migration 088 writes the row; it always exists)."""
-    raise NotImplementedError
+    row = conn.execute("SELECT settings, revision FROM night_off").fetchone()
+    return NightOff.model_validate({**row["settings"], "revision": row["revision"]})
 
 
 def power_policy_in(conn: Any, now: float) -> PowerPolicy:
     """Night off and the holds live at Central's `now` (ends_at after it, or until resumed). Slice T
     answers no holds; slice S2 reads `power_holds`."""
-    raise NotImplementedError
+    return PowerPolicy(night_off_in(conn), holds=())
 
 
 def wanted_off_in(conn: Any, frame_id: str, start: float, end: float) -> bool:
@@ -43,7 +46,18 @@ class PgPower:
         self._db, self._times = db, times
 
     def night_off(self) -> NightOffView:
-        raise NotImplementedError
+        with self._db.transaction() as conn:
+            night_off, house, now = night_off_in(conn), house_time_in(conn), self._times.now_in(conn)
+        try:
+            following, current = next_window(night_off.when, house, now), window_at(night_off.when, house, now)
+        except ValueError:          # no days, or a sun time with no Place: no times to show
+            following = current = None
+        # The next off is the next window's start; the next on ends the window in force, else the next.
+        on_window = current if current is not None else following
+        return NightOffView(
+            night_off=night_off,
+            next_off=None if following is None else local_date_time(house, following.start),
+            next_on=None if on_window is None else local_date_time(house, on_window.end))
 
     def holds(self) -> tuple[HoldView, ...]:
         raise NotImplementedError

@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from contracts.node_output import InForceKind, OutputPower, Power
+from contracts.node_output import InForceKind, OutputPower, Power, decode_set_time
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,19 +34,30 @@ class Wanted:
 
 def wanted(power: OutputPower, wall_now: float) -> Wanted:
     """The timetable's wanted power at the Pi's wall clock `wall_now` (UTC seconds)."""
-    raise NotImplementedError
+    if wall_now >= decode_set_time(power.until):
+        return Wanted(InForceKind.TIMETABLE_RAN_OUT, None, None)
+    reached = [change for change in power.changes if decode_set_time(change.at) <= wall_now]
+    if reached:
+        return Wanted(InForceKind.TIMETABLE, reached[-1].power, reached[-1].at)
+    return Wanted(InForceKind.TIMETABLE, power.now, None)
 
 
 def next_set_time(power: OutputPower, wall_now: float) -> float | None:
     """The first change's set time, or `until`, strictly after `wall_now`, as UTC seconds; None past
     `until`."""
-    raise NotImplementedError
+    moments = [decode_set_time(change.at) for change in power.changes] + [decode_set_time(power.until)]
+    return next((float(moment) for moment in moments if moment > wall_now), None)
 
 
 def acts_on_new_document(previous: OutputPower | None, current: OutputPower, wall_now: float) -> bool:
     """Whether a document whose `change` rose is carried out at once: no previous document, or
-    `wanted(previous, wall_now) != wanted(current, wall_now)`, or the test part differs."""
-    raise NotImplementedError
+    `wanted(previous, wall_now) != wanted(current, wall_now)`, or the test part differs. "Wanted"
+    compares what is carried out (kind and power), never `since`: a rewrite that moves `now` past a
+    set time already reached wants the same."""
+    if previous is None or previous.test != current.test:
+        return True
+    before, after = wanted(previous, wall_now), wanted(current, wall_now)
+    return (before.kind, before.power) != (after.kind, after.power)
 
 
 __all__ = ["Wanted", "acts_on_new_document", "next_set_time", "wanted"]

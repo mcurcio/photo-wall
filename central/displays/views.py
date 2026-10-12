@@ -12,6 +12,7 @@ from pydantic import Field
 
 from central.displays.model import PowerStatus, Readiness
 from central.displays.picture import PictureStatus, Setting
+from central.house_time.model import LocalDateTime
 from contracts.models import Identifier, Instant, Model
 from contracts.node_output import (
     GAMMA_TENTHS_MAX,
@@ -20,10 +21,10 @@ from contracts.node_output import (
     KELVIN_MIN,
     PERCENT_MAX,
     ActsOn,
+    InForceKind,
     Power,
     PowerMethod,
     PowerResult,
-    RequestReason,
     WriteResult,
 )
 
@@ -62,10 +63,12 @@ class FrameDisplayView(Model):
 
 
 class InForceView(Model):
-    request_id: str
-    reason: RequestReason
-    power: Power
-    remaining_seconds: int | None                 # Central's count for its live console test, else the Pi's
+    """What the Pi says it is carrying out (contracts.node_output.InForce), for the Power tab."""
+    kind: InForceKind
+    power: Power | None                           # None exactly when the timetable ran out
+    request_id: str | None                        # the test's, else None
+    remaining_seconds: int | None                 # Central's count for its live test, else the Pi's
+    since: LocalDateTime | None                   # the set time in force, on the house clock
 
 
 class PowerTestView(Model):

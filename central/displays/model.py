@@ -19,16 +19,18 @@ One home each for:
   been seen there. A Display first seen on an Output (none before) is adopted by the Frame bound
   there when its Position commit names none: a Frame committed before 1b, or against a display
   with no EDID, is not made "display changed" by the first report.
-- **The Output document** (C1, C3). The stack is the Frame's live console test (if any), then
-  standing on; method and switches come from the Display last seen on the Output (defaults when
-  none). The console's one test is Test: turn off. It lasts TEST_SECONDS, "or less if you press
-  Turn on. When the test ends, the request underneath takes over" (owner q1, 2026-10-10): Turn on
-  ends the live test and puts nothing on top, so the stack is the request underneath again; with
-  no live test there is nothing to end. The Pi counts a test on its own clock, and Central drops
-  it from the stack at its own `ends_at` (Central's clock, compared only with itself) or at Turn
-  on, whichever comes first.
+- **The Output document** (C1, C3; roadmap 2a). Its power part is the Frame's power timetable
+  (central/power/timetable.py: Central's decision now, the set times it changes at, `until`, the
+  darkness), with the Frame's live console test on top; method and switches come from the Display
+  last seen on the Output (defaults when none). The console's one test is Test: turn off. It
+  lasts TEST_SECONDS, "or less if you press Turn on. When the test ends, the request underneath
+  takes over" (owner q1, 2026-10-10): Turn on ends the live test, so the timetable is underneath
+  again. The Pi counts a test on its own clock, and Central drops it from the document at its own
+  `ends_at` (Central's clock, compared only with itself) or at Turn on, whichever comes first.
+  No reading of Central's clock is in the document: its set times are calendar times, so its
+  digest moves only at a set time, a house midnight or an edit.
 - **Power status** (C3): what the Power tab says about the latest test, and the Pi's result for
-  the request Central has in force (`power_result`), which after Turn on is the request underneath.
+  what Central has in force (`power_result`): the live test, else the timetable.
 """
 from __future__ import annotations
 
@@ -41,28 +43,26 @@ from enum import StrEnum
 from typing import Final, TypeGuard
 from uuid import UUID
 
+from central.power.timetable import Timetable
 from contracts.node_output import (
     BEST_DETECTED,
     DisplayIdentity,
+    InForceKind,
     OutputDocument,
     OutputPicture,
+    OutputPower,
     OutputReport,
     Power,
+    PowerChange,
     PowerMethod,
     PowerRequest,
     PowerResult,
-    RequestReason,
     encode_output_document,
+    encode_set_time,
 )
 
 TEST_SECONDS: Final = 300                    # owner q1, 2026-10-10
-STANDING_REQUEST_ID: Final = "standing"
 _DIGEST_CHANGE: Final = 1                    # any fixed change number: neither digest covers it
-
-
-def standing_on() -> PowerRequest:
-    """The bottom of every 1b stack: PowerRequest(STANDING_REQUEST_ID, Power.ON, RequestReason.STANDING)."""
-    return PowerRequest(STANDING_REQUEST_ID, Power.ON, RequestReason.STANDING)
 
 
 class Readiness(StrEnum):
@@ -183,7 +183,7 @@ class ProjectedOutput:
     never raises `change` (a picture change never re-runs power) and a power change never raises
     `picture_change` (1c design rule 3)."""
     output_id: str
-    power: tuple[PowerRequest, ...]
+    power: OutputPower
     settings: DisplaySettings
     picture: OutputPicture
 
@@ -215,46 +215,53 @@ def _sha256(value: object) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
-def project_output(output_id: str, *, test: PowerTest | None, settings: DisplaySettings | None,
-                   picture: OutputPicture, now: float) -> ProjectedOutput:
-    """The Output's document body at Central's `now`: `test` (when given and now < ends_at) on top
-    of standing on; `settings` or DEFAULT_SETTINGS; `picture`, the Display's picture part
-    (central/displays/picture.py `output_picture`)."""
-    return ProjectedOutput(output_id, power_stack(test, now), DEFAULT_SETTINGS if settings is None else settings,
-                           picture)
+def output_power(timetable: Timetable, test: PowerTest | None, now: float) -> OutputPower:
+    """The document's power part at Central's `now`: `now`, the changes (set times via
+    `encode_set_time`), `until` and the darkness from `timetable`; `test` on top while it is live."""
+    live = live_test(test, now)
+    return OutputPower(
+        now=timetable.now,
+        changes=tuple(PowerChange(encode_set_time(_whole(change.at)), change.power) for change in timetable.changes),
+        until=encode_set_time(_whole(timetable.until)), darkness=timetable.darkness,
+        test=None if live is None else PowerRequest(str(live.request_id), live.power, live.for_seconds))
 
 
-def power_stack(test: PowerTest | None, now: float) -> tuple[PowerRequest, ...]:
-    """The Output's power requests at Central's `now`, first in force: the live test (if any), then
-    standing on, the request underneath. A test Turn on ended is no longer stored, so it is absent."""
-    if not _live(test, now):
-        return (standing_on(),)
-    return (PowerRequest(str(test.request_id), test.power, RequestReason.CONSOLE_TEST, test.for_seconds),
-            standing_on())
+def project_output(output_id: str, *, timetable: Timetable, test: PowerTest | None,
+                   settings: DisplaySettings | None, picture: OutputPicture, now: float) -> ProjectedOutput:
+    """The Output's document body at Central's `now`: its power part (`output_power`); `settings`
+    or DEFAULT_SETTINGS; `picture`, the Display's picture part (central/displays/picture.py
+    `output_picture`)."""
+    return ProjectedOutput(output_id, output_power(timetable, test, now),
+                           DEFAULT_SETTINGS if settings is None else settings, picture)
 
 
 def power_status(*, bound: bool, test: PowerTest | None, document: OutputDocument | None,
                  report: OutputReport | None, now: float) -> PowerStatus:
     """UNBOUND without an Output; IDLE without a live test; ANSWERED when the report's for_change is
-    the document's change and that document carries the test's request; else WAITING."""
+    the document's change and that document's test is the live test; else WAITING."""
     if not bound:
         return PowerStatus.UNBOUND
     if not _live(test, now):
         return PowerStatus.IDLE
     if (document is not None and report is not None and report.for_change == document.change
-            and any(request.request_id == str(test.request_id) for request in document.power)):
+            and document.power.test is not None and document.power.test.request_id == str(test.request_id)):
         return PowerStatus.ANSWERED
     return PowerStatus.WAITING
 
 
 def power_result(*, test: PowerTest | None, document: OutputDocument | None, report: OutputReport | None,
                  now: float) -> PowerResult | None:
-    """The Pi's result for the request Central has in force (the first of `power_stack`: the live
-    test, else the request underneath, as after Turn on): set only when the report answers the
-    latest document and names that request in force; None while the Pi has not caught up."""
+    """The Pi's result for what Central has in force: set only when the report answers the latest
+    document and its in-force is the live test (kind TEST, the same id), or, with no live test, the
+    timetable (kind TIMETABLE); None while the Pi has not caught up."""
     if document is None or report is None or report.in_force is None or report.for_change != document.change:
         return None
-    return report.result if report.in_force.request_id == power_stack(test, now)[0].request_id else None
+    in_force = report.in_force
+    if _live(test, now):
+        answers = in_force.kind is InForceKind.TEST and in_force.request_id == str(test.request_id)
+    else:
+        answers = in_force.kind is InForceKind.TIMETABLE
+    return report.result if answers else None
 
 
 def live_test(test: PowerTest | None, now: float) -> PowerTest | None:
@@ -271,3 +278,8 @@ def remaining_seconds(test: PowerTest, now: float) -> int:
 def _live(test: PowerTest | None, now: float) -> TypeGuard[PowerTest]:
     """Whether `test` is still on the stack at Central's `now` (it ends at its own `ends_at`)."""
     return test is not None and now < test.ends_at
+
+
+def _whole(seconds: float) -> int:
+    """A set time's whole second (the timetable's are whole already; a float carries them)."""
+    return math.ceil(seconds)

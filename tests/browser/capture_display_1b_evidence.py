@@ -126,7 +126,7 @@ def test_after_power(page, registry, scheme):
     from test_display_power_requests import _rows
     from test_frame_power_browser import WAITING, _change, _power, _reported, _seen_frame
 
-    from contracts.node_output import InForce, PowerResult
+    from contracts.node_output import InForce, InForceKind, Power, PowerResult
 
     frame = _seen_frame(registry)
     unbound = _frame(registry, "hallway")
@@ -143,20 +143,20 @@ def test_after_power(page, registry, scheme):
         _shot(page, "after-power-waiting", scheme)
 
         test_id = _rows(registry, "SELECT id FROM power_requests")[0]["id"]
-        _reported(registry, _change(registry), PowerResult.CONFIRMED, InForce(str(test_id), 299))
+        _reported(registry, _change(registry), PowerResult.CONFIRMED, InForce(InForceKind.TEST, Power.OFF, str(test_id), 299, None))
         expect(status).to_have_text("Display confirmed off")
         _shot(page, "after-power-confirmed-off", scheme)
 
         power.get_by_role("button", name="Turn on", exact=True).click()
         expect(status).to_have_text(WAITING)
-        _reported(registry, _change(registry), PowerResult.CONFIRMED, InForce("standing", None))
+        _reported(registry, _change(registry), PowerResult.CONFIRMED, InForce(InForceKind.TIMETABLE, Power.ON, None, None, None))
         expect(status).to_have_text("Display confirmed on")
         _shot(page, "after-power-confirmed-on", scheme)
 
         power.get_by_role("button", name="Test: turn off", exact=True).click()
         expect(status).to_have_text(WAITING)
         test_id = _rows(registry, "SELECT id FROM power_requests")[0]["id"]
-        _reported(registry, _change(registry), PowerResult.DID_NOT_ANSWER, InForce(str(test_id), 299))
+        _reported(registry, _change(registry), PowerResult.DID_NOT_ANSWER, InForce(InForceKind.TEST, Power.OFF, str(test_id), 299, None))
         expect(status).to_have_text("Display didn't answer")
         _shot(page, "after-power-did-not-answer", scheme)
 

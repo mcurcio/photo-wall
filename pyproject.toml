@@ -22,6 +22,10 @@ dependencies = [
   # Roadmap 5a: the key content analyser's interest grid (OpenCV static saliency, spectral
   # residual; the saliency module ships only in the contrib build). Media worker only.
   "opencv-contrib-python-headless==5.0.0.93",
+  # Power and the week (roadmap 2a + 2b): house time's sun times and the zone database zoneinfo
+  # reads (the slim image has none). Central only; the Pi never imports them.
+  "astral==3.2",
+  "tzdata==2026.3",
 ]
 
 [dependency-groups]
@@ -186,6 +190,15 @@ type = "forbidden"
 source_modules = ["central.why"]
 forbidden_modules = ["media", "httpx", "nodeapi", "central.infra", "central.db", "central.registry",
                      "central.app", "central.coordination", "central.planner"]
+
+[[tool.importlinter.contracts]]
+# Power and the week: sun times and the IANA zone database are Central's house-time calculator's;
+# the Pi and the wire never work out a time of day. The media worker is a Central process: it runs
+# the Planner and Runtime, which read house time, so it is not listed.
+name = "Sun times and the zone database are Central's"
+type = "forbidden"
+source_modules = ["contracts", "appliance", "player", "uplink", "nodeapi"]
+forbidden_modules = ["astral"]
 
 [[tool.importlinter.contracts]]
 # R22: only the media worker holds a library's address and key. Central's thumbnail handler gets

@@ -10,30 +10,36 @@ is refused. (4) Past `ends_at` the projection drops the test and the change rise
 `changed()` returns at that end. (5) The Power tab's status waits until a report names the change
 carrying the test, then answers with its result; a report naming an older change keeps waiting.
 (6) Each command wakes the worker through PostgreSQL's notification. (7) The power settings change
-the document.
+the document. Roadmap 2a (Power and the week, A9): the test sits on top of the Frame's power
+timetable; the document's `change` rises at a set time and at house midnight, never between, and the
+Power tab reads what the Pi carries out through InForceView.
 """
 from __future__ import annotations
 
 import asyncio
 import uuid
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from fastapi.testclient import TestClient
 from test_display_identity import ADMIN, AUTH, NO_SERIAL, _bind, _frame, _report, enroll_pi
 
 from central.app import create_app
 from central.content_catalog.catalog import device_id_for_serial
+from central.db import DatabaseTransactionClock
 from central.displays.model import TEST_SECONDS
 from central.infra.display_store import DOCUMENT_STREAM, DisplayDocuments, DisplayWakes
 from central.infra.node_link_store import PgLinkStores
 from contracts.node_link import Pipe
 from contracts.node_output import (
     InForce,
+    InForceKind,
     OutputDocument,
     Power,
+    PowerChange,
     PowerMethod,
     PowerRequest,
     PowerResult,
-    RequestReason,
     decode_output_document,
     encode_output_report,
     output_document_key,
@@ -41,13 +47,28 @@ from contracts.node_output import (
 from contracts.node_output import OutputReport as WireReport
 
 SERIAL = "pi-power"
-STANDING = PowerRequest("standing", Power.ON, RequestReason.STANDING)
+ON_BY_TIMETABLE = InForce(InForceKind.TIMETABLE, Power.ON, None, None, None)
 
 
-def _projected(registry) -> OutputDocument:
+class FixedClock:
+    """A TransactionClock held at `now` (Central's clock in a test)."""
+
+    def __init__(self, now: float) -> None:
+        self.now = now
+
+    def now_in(self, conn) -> float:
+        return self.now
+
+
+def _projected(registry, times=None) -> OutputDocument:
     """HDMI-A-1's document as the worker's source projects (and records) it now."""
-    source = DisplayDocuments(PgLinkStores(registry.db), DisplayWakes()).source(SERIAL, Pipe.FLEET)
+    source = DisplayDocuments(PgLinkStores(registry.db), DisplayWakes(),
+                              times=times or DatabaseTransactionClock()).source(SERIAL, Pipe.FLEET)
     return decode_output_document(asyncio.run(source.documents(DOCUMENT_STREAM))[output_document_key("HDMI-A-1")])
+
+
+def _test(registry, test_id: str) -> InForce:
+    return InForce(InForceKind.TEST, Power.OFF, test_id, 299, None)
 
 
 def _answer(registry, for_change: int, result: PowerResult, in_force: InForce | None) -> None:
@@ -75,22 +96,22 @@ def test_a_test_off_goes_on_top_of_standing_on_and_turn_on_ends_it(registry):
     ends, the request underneath takes over." Turn on ends the live test; it puts nothing on top."""
     frame, _ = _bound_frame(registry)
     with TestClient(create_app(registry.db, registry.clock, ADMIN, run_scheduler=False)) as client:
-        assert _projected(registry).power == (STANDING,)
+        assert _projected(registry).power.test is None
 
         response = client.post(f"/v1/operator/frames/{frame}/power-tests", headers=AUTH)
         assert response.status_code == 202
         accepted = response.json()
         assert accepted["for_seconds"] == TEST_SECONDS
         off = _projected(registry)
-        assert off.power == (PowerRequest(accepted["request_id"], Power.OFF, RequestReason.CONSOLE_TEST,
-                                          TEST_SECONDS), STANDING)
+        assert off.power.test == PowerRequest(accepted["request_id"], Power.OFF, TEST_SECONDS)
+        assert off.power.now is Power.ON                          # the timetable underneath
         assert off.change == 2
 
         turned_on = client.delete(f"/v1/operator/frames/{frame}/power-tests", headers=AUTH)
         assert turned_on.status_code == 204
         assert _rows(registry, "SELECT id FROM power_requests") == []
         on = _projected(registry)
-        assert (on.power, on.change) == ((STANDING,), 3)          # the request underneath takes over
+        assert (on.power.test, on.change) == (None, 3)            # the timetable underneath takes over
 
         # With no live test there is nothing to end: the request underneath is already in force.
         assert client.delete(f"/v1/operator/frames/{frame}/power-tests", headers=AUTH).status_code == 204
@@ -112,18 +133,19 @@ def test_after_turn_on_the_tab_reads_the_pis_answer_for_the_request_underneath(r
             return client.get(f"/v1/operator/frames/{frame}/power", headers=AUTH).json()
 
         test_id = client.post(f"/v1/operator/frames/{frame}/power-tests", headers=AUTH).json()["request_id"]
-        _answer(registry, _projected(registry).change, PowerResult.CONFIRMED, InForce(test_id, 299))
+        _answer(registry, _projected(registry).change, PowerResult.CONFIRMED, _test(registry, test_id))
         assert (power()["status"], power()["result"]) == ("answered", "confirmed")
 
         client.delete(f"/v1/operator/frames/{frame}/power-tests", headers=AUTH)
         dropped = _projected(registry).change
         ending = power()                                           # the Pi still names the test
-        assert (ending["status"], ending["test"], ending["result"], ending["in_force"]) == ("idle", None, None, None)
+        assert (ending["status"], ending["test"], ending["result"]) == ("idle", None, None)
+        assert ending["in_force"]["kind"] == "test"                # what the Pi last said, as it said it
 
-        _answer(registry, dropped, PowerResult.DID_NOT_ANSWER, InForce("standing", None))
+        _answer(registry, dropped, PowerResult.DID_NOT_ANSWER, ON_BY_TIMETABLE)
         answered = power()
         assert (answered["status"], answered["test"], answered["result"]) == ("idle", None, "did-not-answer")
-        assert (answered["in_force"]["reason"], answered["in_force"]["power"]) == ("standing", "on")
+        assert (answered["in_force"]["kind"], answered["in_force"]["power"]) == ("timetable", "on")
 
 
 def test_a_test_is_refused_for_an_unknown_or_unbound_frame(registry):
@@ -144,18 +166,19 @@ def test_past_its_end_the_test_leaves_the_projection_and_the_change_rises(regist
     frame, _ = _bound_frame(registry)
     with TestClient(create_app(registry.db, registry.clock, ADMIN, run_scheduler=False)) as client:
         client.post(f"/v1/operator/frames/{frame}/power-tests", headers=AUTH)
-    assert _projected(registry).change == 1 and len(_projected(registry).power) == 2
+    assert _projected(registry).change == 1 and _projected(registry).power.test is not None
 
     # The source's changed() returns at the earliest live end of its Node's tests, with no wake.
     _rows(registry, "UPDATE power_requests SET ends_at = EXTRACT(EPOCH FROM clock_timestamp()) + 1")
-    source = DisplayDocuments(PgLinkStores(registry.db), DisplayWakes()).source(SERIAL, Pipe.FLEET)
+    source = DisplayDocuments(PgLinkStores(registry.db), DisplayWakes(),
+                              times=DatabaseTransactionClock()).source(SERIAL, Pipe.FLEET)
 
     async def ended() -> None:
         await asyncio.wait_for(source.changed(), 5)
     asyncio.run(ended())
 
     after = _projected(registry)
-    assert (after.power, after.change) == ((STANDING,), 2)
+    assert (after.power.test, after.change) == (None, 2)
     assert _projected(registry).change == 2
 
 
@@ -169,12 +192,12 @@ def test_the_power_tab_waits_for_the_report_on_the_change_carrying_the_test(regi
             return response.json()
 
         before = _projected(registry).change
-        _answer(registry, before, PowerResult.CONFIRMED, InForce("standing", None))
+        _answer(registry, before, PowerResult.CONFIRMED, ON_BY_TIMETABLE)
         idle = power()
         assert (idle["status"], idle["test"], idle["result"], idle["player_id"], idle["output_id"]) == (
-            "idle", None, "confirmed", player, "HDMI-A-1")   # the request underneath, answered
-        assert idle["in_force"] == {"request_id": "standing", "reason": "standing", "power": "on",
-                                    "remaining_seconds": None}
+            "idle", None, "confirmed", player, "HDMI-A-1")   # the timetable underneath, answered
+        assert idle["in_force"] == {"kind": "timetable", "power": "on", "request_id": None,
+                                    "remaining_seconds": None, "since": None}
 
         test_id = client.post(f"/v1/operator/frames/{frame}/power-tests",
                               headers=AUTH).json()["request_id"]
@@ -186,12 +209,12 @@ def test_the_power_tab_waits_for_the_report_on_the_change_carrying_the_test(regi
         assert (waiting["status"], waiting["result"], waiting["test"]["request_id"]) == ("waiting", None, test_id)
         assert waiting["test"]["for_seconds"] == TEST_SECONDS
 
-        _answer(registry, carrying, PowerResult.DID_NOT_ANSWER, InForce(test_id, 299))
+        _answer(registry, carrying, PowerResult.DID_NOT_ANSWER, _test(registry, test_id))
         answered = power()
         assert (answered["status"], answered["result"]) == ("answered", "did-not-answer")
         assert (answered["answers"], answered["method_in_use"]) == (["ddc-ci"], "ddc-ci")
         assert answered["in_force"]["request_id"] == test_id
-        assert (answered["in_force"]["reason"], answered["in_force"]["power"]) == ("console-test", "off")
+        assert (answered["in_force"]["kind"], answered["in_force"]["power"]) == ("test", "off")
         assert answered["display_id"] is not None
 
 
@@ -204,7 +227,8 @@ def test_the_power_tab_counts_down_on_centrals_clock_and_drops_an_ended_test(reg
     with TestClient(create_app(registry.db, registry.clock, ADMIN, run_scheduler=False)) as client:
         test_id = client.post(f"/v1/operator/frames/{frame}/power-tests",
                               headers=AUTH).json()["request_id"]
-        _answer(registry, _projected(registry).change, PowerResult.CONFIRMED, InForce(test_id, 300))
+        _answer(registry, _projected(registry).change, PowerResult.CONFIRMED,
+                InForce(InForceKind.TEST, Power.OFF, test_id, 300, None))
         _rows(registry, "UPDATE power_requests SET ends_at = EXTRACT(EPOCH FROM clock_timestamp()) + 90")
         counted = client.get(f"/v1/operator/frames/{frame}/power", headers=AUTH).json()
         assert counted["status"] == "answered" and counted["test"]["request_id"] == test_id
@@ -275,3 +299,48 @@ def test_power_settings_change_the_output_document(registry):
         assert {key: tab[key] for key in settings} == settings
         unknown = client.put(f"/v1/operator/displays/{uuid.uuid4()}/power-settings", headers=AUTH, json=settings)
         assert (unknown.status_code, unknown.json()) == (404, {"error": "unknown_display"})
+
+
+def _london(at: str) -> float:
+    return datetime.fromisoformat(at).replace(tzinfo=ZoneInfo("Europe/London")).timestamp()
+
+
+def test_the_document_carries_the_frames_timetable_and_its_change_moves_only_at_set_times(registry):
+    """A9: the Frame follows Night off (23:00-07:00, seeded by migration 088) in a Europe/London
+    house. The document's power part is its timetable in calendar set times; reading it again at
+    any moment between two set times gives the same change number; it rises at 23:00 (the power
+    now is off) and at house midnight (the horizon moves); the Power tab names the set time the
+    Pi says is in force on the house clock."""
+    frame, _ = _bound_frame(registry)
+    _rows(registry, "INSERT INTO house_settings(singleton, zone, units, clock_format, updated_at) "
+                    "VALUES (TRUE, 'Europe/London', 'cm', '24h', 0) ON CONFLICT (singleton) DO UPDATE SET zone=EXCLUDED.zone")
+    _rows(registry, "UPDATE night_off SET settings = jsonb_set(settings, '{frames}', "
+                    "jsonb_build_object('kind', 'frames', 'frame_ids', jsonb_build_array(%s::text)))", (frame,))
+    clock = FixedClock(_london("2026-10-12T16:00"))
+    first = _projected(registry, clock)
+    assert first.power.now is Power.ON and first.power.test is None
+    assert first.power.changes[:2] == (PowerChange("2026-10-12T22:00:00Z", Power.OFF),
+                                       PowerChange("2026-10-13T06:00:00Z", Power.ON))
+    assert first.power.until == "2026-10-19T23:00:00Z"              # the start of house day 20 Oct
+    for later in ("2026-10-12T16:00:01", "2026-10-12T20:00", "2026-10-12T22:59:59"):
+        clock.now = _london(later)
+        assert _projected(registry, clock).change == first.change   # Central's clock is not in it
+    clock.now = _london("2026-10-12T23:00")
+    night = _projected(registry, clock)
+    assert (night.change, night.power.now, night.power.changes[0].at) == (
+        first.change + 1, Power.OFF, "2026-10-13T06:00:00Z")
+    clock.now = _london("2026-10-12T23:59:59")
+    assert _projected(registry, clock).change == night.change
+    clock.now = _london("2026-10-13T00:00")
+    midnight = _projected(registry, clock)
+    assert (midnight.change, midnight.power.until) == (night.change + 1, "2026-10-20T23:00:00Z")
+
+    _answer(registry, midnight.change, PowerResult.CONFIRMED,
+            InForce(InForceKind.TIMETABLE, Power.OFF, None, None, "2026-10-12T22:00:00Z"))
+    with TestClient(create_app(registry.db, registry.clock, ADMIN, run_scheduler=False)) as client:
+        tab = client.get(f"/v1/operator/frames/{frame}/power", headers=AUTH).json()
+        assert tab["in_force"] == {"kind": "timetable", "power": "off", "request_id": None,
+                                   "remaining_seconds": None, "since": "2026-10-12T23:00"}
+        night_off = client.get("/v1/operator/power/night-off", headers=AUTH)
+        assert night_off.status_code == 200
+        assert night_off.json()["night_off"]["frames"] == {"kind": "frames", "frame_ids": [frame]}

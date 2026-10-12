@@ -39,9 +39,22 @@ export interface FramePowerView extends PowerSettings {
   method_in_use: PowerMethod | null;
   test: { request_id: string; power: Power; for_seconds: number; ends_at: number } | null;
   result: PowerResult | null;
-  in_force: { request_id: string; reason: "standing" | "console-test"; power: Power; remaining_seconds: number | null } | null;
+  in_force: InForceView | null;
   linked: boolean | null;
   last_heard_at: number | null;
+}
+
+/**
+ * What the Pi says it carries out (central/displays/views.py InForceView): the console test, the
+ * power timetable at the Pi's clock (`since`: the set time in force, house time), or nothing when
+ * the timetable ran out (a week without Central: the display is left as it is).
+ */
+export interface InForceView {
+  kind: "test" | "timetable" | "timetable-ran-out";
+  power: Power | null;
+  request_id: string | null;
+  remaining_seconds: number | null;
+  since: string | null;
 }
 
 /** A save in flight or done, per setting row. */
@@ -97,7 +110,7 @@ export function testWords(view: FramePowerView, sent: string | null, turnedOn = 
   if (sent !== null && view.test?.request_id !== sent) return WAITING;
   if (turnedOn) {
     if (view.test !== null || view.result === null || view.in_force === null) return WAITING;
-    return resultWords(view.in_force.power, view.result);
+    return view.in_force.power === null ? null : resultWords(view.in_force.power, view.result);
   }
   if (view.status === "waiting") return WAITING;
   if (view.status !== "answered" || view.test === null || view.result === null) return null;
@@ -108,8 +121,9 @@ export function testWords(view: FramePowerView, sent: string | null, turnedOn = 
 function nowWords(view: FramePowerView): string | null {
   const { in_force: force } = view;
   if (force === null) return null;
+  if (force.power === null) return "Left as it is · no power times from Central for now";
   const state = force.power === "on" ? "On" : "Off";
-  if (force.reason !== "console-test") return state;
+  if (force.kind !== "test") return state;
   const minutes = force.remaining_seconds === null ? null : Math.max(1, Math.ceil(force.remaining_seconds / 60));
   return `${state} · by a test on this tab${minutes === null ? "" : `, ${minutes} min left`}`;
 }

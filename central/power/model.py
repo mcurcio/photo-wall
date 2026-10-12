@@ -6,7 +6,7 @@ on: F5) is pressed now and lasts until Night off's next on or off time, the same
 Frame, or until resumed (#90). The newest hold on a Frame wins; Night off is underneath; a Frame
 that follows neither is on.
 
-Invariants the validators enforce (slice T implements them):
+Invariants the validators enforce:
 - `NightOffDraft.days` unique in WEEKDAYS order; empty is the problem "no-days"
   (central/house_time/calculator.py `when_problems`, through `NightOffDraft.when`).
 - `ChosenFrames.frame_ids` unique and sorted.
@@ -19,9 +19,17 @@ from dataclasses import dataclass
 from typing import Annotated, Final, Literal
 from uuid import UUID
 
-from pydantic import Field
+from pydantic import Field, field_validator, model_validator
 
-from central.house_time.model import WEEKDAYS, ClockAt, HouseModel, TimeOfDay, Weekday, When
+from central.house_time.model import (
+    WEEKDAYS,
+    ClockAt,
+    HouseModel,
+    TimeOfDay,
+    Weekday,
+    When,
+    canonical_days,
+)
 from contracts.models import Identifier
 from contracts.node_output import Darkness, Power
 
@@ -37,6 +45,11 @@ class ChosenFrames(HouseModel):
     """Frames chosen one by one (#82; the default: every Frame there was at deploy)."""
     kind: Literal["frames"] = "frames"
     frame_ids: tuple[Identifier, ...]
+
+    @field_validator("frame_ids")
+    @classmethod
+    def _sorted(cls, frame_ids: tuple[str, ...]) -> tuple[str, ...]:
+        return _unique_sorted(frame_ids, "frame_ids")
 
 
 class AllFrames(HouseModel):
@@ -56,10 +69,15 @@ class NightOffDraft(HouseModel):
     darkness: Darkness
     hold_lasts: HoldLasts
 
+    @field_validator("days")
+    @classmethod
+    def _canonical(cls, days: tuple[Weekday, ...]) -> tuple[Weekday, ...]:
+        return canonical_days(days)
+
     @property
     def when(self) -> When:
         """Night off as a When: When(days, start=off, end=on). The calculator's one shape."""
-        raise NotImplementedError
+        return When(days=self.days, start=self.off, end=self.on)
 
 
 class NightOff(NightOffDraft):
@@ -82,6 +100,25 @@ class Hold(HouseModel):
     source: HoldSource
     started_at: Annotated[float, Field(allow_inf_nan=False)]
     ends_at: Annotated[float, Field(allow_inf_nan=False)] | None
+
+    @field_validator("frame_ids")
+    @classmethod
+    def _frames(cls, frame_ids: tuple[str, ...]) -> tuple[str, ...]:
+        if not frame_ids:
+            raise ValueError("frame_ids")
+        return _unique_sorted(frame_ids, "frame_ids")
+
+    @model_validator(mode="after")
+    def _ends_after_start(self) -> Hold:
+        if self.ends_at is not None and not self.ends_at > self.started_at:
+            raise ValueError("ends_at")
+        return self
+
+
+def _unique_sorted(values: tuple[str, ...], code: str) -> tuple[str, ...]:
+    if list(values) != sorted(set(values)):
+        raise ValueError(code)
+    return values
 
 
 @dataclass(frozen=True, slots=True)

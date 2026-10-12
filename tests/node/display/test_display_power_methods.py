@@ -4,7 +4,9 @@ The tools are real executables: fake `ddcutil` and `cec-ctl` scripts that record
 answer from a scripted display (its power, whether it answers each channel, whether the tool
 hangs), run through the production `run_tool` (its timeout kills a hung tool). The sysfs and /dev
 the adapters map an Output through are a temp tree; signal off goes to a fake compositor; the
-controller counts on a fake clock.
+controller counts on a fake clock (its monotonic count and its wall clock). Roadmap 2a: a
+document's power part is a timetable; these tests keep it "on, no set times" with the console test on
+top (the timetable's own crossings are tests/node/display/test_display_power_timetable.py).
 """
 from __future__ import annotations
 
@@ -15,6 +17,7 @@ import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
+from typing import Final
 
 import pytest
 from node.display.fake_display_state import SOURCE as STATE_SOURCE
@@ -34,15 +37,19 @@ from contracts.node_output import (
     AS_THE_DISPLAY_HAS_IT,
     BEST_DETECTED,
     ActsOn,
+    Darkness,
     DisplayIdentity,
+    InForceKind,
     OutputDocument,
     OutputPicture,
+    OutputPower,
     PictureSetting,
     Power,
+    PowerChange,
     PowerMethod,
     PowerRequest,
     PowerResult,
-    RequestReason,
+    encode_set_time,
 )
 
 OUTPUT = "HDMI-A-1"
@@ -169,12 +176,21 @@ class Compositor:
         return self.powered.get(output_id)
 
 
+WALL_START: Final = 1_791_820_800          # 2026-10-12T16:00:00Z, the Pi's wall clock at the start
+
+
 class Clock:
+    """The Pi's two clocks: `now` the monotonic count, `wall` the wall clock (UTC seconds)."""
+
     def __init__(self) -> None:
         self.now = 1_000.0
+        self.wall = float(WALL_START)
 
     def monotonic(self) -> float:
         return self.now
+
+    def time(self) -> float:
+        return self.wall
 
 
 class Sink:
@@ -197,19 +213,26 @@ def cec(display: Display) -> HdmiCecAdapter:
     return HdmiCecAdapter(display.run, dev_root=display.dev, drm_root=display.drm)
 
 
-def document(change: int, *requests: PowerRequest, method=BEST_DETECTED, never_off_on_other_input=False,
-             switch_input_on_power_on=False) -> OutputDocument:
-    return OutputDocument(OUTPUT, change, (*requests, STANDING), method, switch_input_on_power_on,
-                          never_off_on_other_input, 1, PICTURE)
+def timetable(now: Power = Power.ON, *changes: tuple[float, Power], test: PowerRequest | None = None,
+              until: float = WALL_START + 8 * 86400, darkness: Darkness = Darkness.DISPLAY_OFF) -> OutputPower:
+    """A power part: `now`, set times (wall-clock seconds, power) and `until`, `test` on top."""
+    return OutputPower(now, tuple(PowerChange(encode_set_time(int(at)), power) for at, power in changes),
+                       encode_set_time(int(until)), darkness, test)
 
 
-STANDING = PowerRequest("standing", Power.ON, RequestReason.STANDING)
+def document(change: int, test: PowerRequest | None = None, *, power: OutputPower | None = None,
+             method=BEST_DETECTED, never_off_on_other_input=False, switch_input_on_power_on=False) -> OutputDocument:
+    """A document whose timetable is on with no set times (or `power`), `test` on top."""
+    part = timetable(test=test) if power is None else power
+    return OutputDocument(OUTPUT, change, part, method, switch_input_on_power_on, never_off_on_other_input, 1, PICTURE)
+
+
 PICTURE = OutputPicture(PictureSetting(ActsOn.DISPLAY, AS_THE_DISPLAY_HAS_IT),
                         PictureSetting(ActsOn.DISPLAY, AS_THE_DISPLAY_HAS_IT), 6500, 22)
 
 
 def console_off(seconds: int = 300, request_id: str = "17") -> PowerRequest:
-    return PowerRequest(request_id, Power.OFF, RequestReason.CONSOLE_TEST, seconds)
+    return PowerRequest(request_id, Power.OFF, seconds)
 
 
 
@@ -415,12 +438,12 @@ def test_a_change_that_arrives_while_a_look_probes_is_acted_on_once(display, run
     assert held.probing.wait(15)
     subject.controller.document(OUTPUT, document(1, console_off()))   # ... and the document lands
     held.go.set()
-    assert subject.attempts(1)[0].request_id == "17"
+    assert subject.attempts(1)[0].in_force.request_id == "17"
     time.sleep(1.5)                              # longer than a worker tick: no second look acts
     assert len(subject.sink.attempts) == 1 and len(display.writes()) == 1
 
 
-def test_a_console_test_off_ends_on_the_pis_clock_and_the_standing_on_comes_back(display, running):
+def test_a_console_test_off_ends_on_the_pis_clock_and_the_timetable_comes_back(display, running):
     clock = Clock()
     subject = running([ddc(display)], clock)
     subject.connect()
@@ -433,9 +456,10 @@ def test_a_console_test_off_ends_on_the_pis_clock_and_the_standing_on_comes_back
     assert len(subject.sink.attempts) == 1
     clock.now += 1                               # no new document: Central is away
     attempt = subject.attempts(2)[1]
-    assert (attempt.request_id, attempt.power, attempt.result) == ("standing", Power.ON, PowerResult.CONFIRMED)
+    assert (attempt.in_force.kind, attempt.in_force.power, attempt.result) == (
+        InForceKind.TIMETABLE, Power.ON, PowerResult.CONFIRMED)
     assert display.power == "on"
-    assert subject.controller.report(OUTPUT).in_force.request_id == "standing"
+    assert subject.controller.report(OUTPUT).in_force.kind is InForceKind.TIMETABLE
 
 
 def test_a_re_put_of_the_same_request_keeps_its_count(display, running):
@@ -447,10 +471,11 @@ def test_a_re_put_of_the_same_request_keeps_its_count(display, running):
     clock.now += 200
     subject.controller.document(OUTPUT, document(1, console_off(300)))   # a new bus epoch
     subject.controller.document(OUTPUT, document(2, console_off(300)))   # and a change around it
-    subject.attempts(2)
-    assert subject.controller.report(OUTPUT).in_force.remaining_seconds == 100
-    clock.now += 100
-    assert subject.attempts(3)[2].request_id == "standing" and display.power == "on"
+    # The same test and timetable: the change is answered with what is carried out, no new attempt.
+    until(lambda: subject.controller.report(OUTPUT).for_change == 2, 15)
+    assert len(subject.sink.attempts) == 1
+    clock.now += 100                             # the count kept running from the first apply
+    assert subject.attempts(2)[1].in_force.kind is InForceKind.TIMETABLE and display.power == "on"
 
 
 def test_a_restart_with_the_document_present_acts_once(display, running):
@@ -481,13 +506,18 @@ def test_no_document_leaves_the_display_as_it_is_and_reports_the_methods(display
 
 
 def test_in_force_and_next_deadline_follow_the_pis_own_count():
-    stack = document(3, console_off(300))
-    assert in_force(None, {}, 0).in_force is None
-    assert in_force(stack, {}, 50).in_force.request_id == "17"
-    assert in_force(stack, {"17": 10.0}, 309.5).remaining_seconds == 1
-    assert in_force(stack, {"17": 10.0}, 310.0).in_force.request_id == "standing"
-    assert next_deadline(stack, {}) is None and next_deadline(stack, {"17": 10.0}) == 310.0
-    assert next_deadline(document(3), {}) is None
+    tested = document(3, console_off(300))
+    wall = float(WALL_START)
+    until_seconds = 8 * 86400
+    assert in_force(None, {}, 0, wall) == in_force(None, {}, 0, wall)
+    assert in_force(None, {}, 0, wall).in_force is None and in_force(None, {}, 0, wall).power is None
+    assert in_force(tested, {}, 50, wall).in_force.request_id == "17"
+    assert in_force(tested, {"17": 10.0}, 309.5, wall).in_force.remaining_seconds == 1
+    after = in_force(tested, {"17": 10.0}, 310.0, wall)
+    assert (after.in_force.kind, after.power) == (InForceKind.TIMETABLE, Power.ON)
+    assert next_deadline(tested, {}, 50, wall) == until_seconds          # not started: only `until`
+    assert next_deadline(tested, {"17": 10.0}, 300, wall) == 10.0
+    assert next_deadline(document(3), {}, 0, wall) == until_seconds
 
 
 @pytest.mark.skipif(not os.access("/bin/sh", os.X_OK), reason="needs a POSIX shell")

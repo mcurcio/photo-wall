@@ -360,7 +360,7 @@ def test_power_reports_carry_what_the_output_reporter_saw():
     from appliance.display_host.runner import PowerObservations
 
     sink = Reports()
-    power = OutputPowerController({}, sink, SimpleNamespace(monotonic=lambda: 0.0))
+    power = OutputPowerController({}, sink, SimpleNamespace(monotonic=lambda: 0.0, time=lambda: 0.0))
     seen = []
     picture = SimpleNamespace(output=lambda output_id, **observed: seen.append((output_id, observed)))
     backend = FakeBackend()
@@ -455,12 +455,12 @@ def test_the_document_feed_decodes_each_document_and_ignores_the_rest():
         AS_THE_DISPLAY_HAS_IT,
         BEST_DETECTED,
         ActsOn,
+        Darkness,
         OutputDocument,
         OutputPicture,
+        OutputPower,
         PictureSetting,
         Power,
-        PowerRequest,
-        RequestReason,
         encode_output_document,
     )
     from nodeapi.documents import Document
@@ -468,7 +468,7 @@ def test_the_document_feed_decodes_each_document_and_ignores_the_rest():
     got, pictures = [], []
     feed = document_feed(SimpleNamespace(document=lambda output_id, document: got.append((output_id, document))),
                          SimpleNamespace(document=lambda output_id, document: pictures.append((output_id, document))))
-    wanted = OutputDocument("HDMI-A-1", 2, (PowerRequest("standing", Power.ON, RequestReason.STANDING),),
+    wanted = OutputDocument("HDMI-A-1", 2, OutputPower(Power.ON, (), "2099-01-01T00:00:00Z", Darkness.DISPLAY_OFF, None),
                             BEST_DETECTED, False, False, 1,
                             OutputPicture(PictureSetting(ActsOn.DISPLAY, AS_THE_DISPLAY_HAS_IT),
                                           PictureSetting(ActsOn.DISPLAY, AS_THE_DISPLAY_HAS_IT), 6500, 22))

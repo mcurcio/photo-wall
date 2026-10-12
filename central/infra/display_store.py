@@ -49,6 +49,7 @@ import threading
 import uuid
 from collections.abc import Mapping
 from dataclasses import replace
+from datetime import timedelta
 from typing import Any, Final
 from uuid import UUID
 
@@ -56,7 +57,7 @@ import psycopg
 from psycopg.types.json import Jsonb
 
 from central.content_catalog.catalog import device_id_for_serial
-from central.db import Database, DatabaseTransactionClock
+from central.db import Database, DatabaseTransactionClock, TransactionClock
 from central.displays.model import (
     DEFAULT_SETTINGS,
     TEST_SECONDS,
@@ -115,9 +116,14 @@ from central.displays.views import (
     PowerTestView,
 )
 from central.fleet.node_bus_presence import bus_links_in
+from central.house_time.calculator import day_start, house_date, local_date_time
+from central.house_time.model import HouseTime
+from central.infra.house_store import house_time_in
 from central.infra.node_link_store import PgLinkStores
+from central.infra.power_store import power_policy_in
 from central.installation_models import FrameOutput
 from central.live_session import Lease, begin_lease, touched
+from central.power.timetable import frame_timetable, unbound_timetable
 from contracts.models import Calibration, FrameProfile, frame_output
 from contracts.node_link import Pipe
 from contracts.node_output import (
@@ -132,10 +138,10 @@ from contracts.node_output import (
     PictureReport,
     Power,
     PowerMethod,
-    RequestReason,
     SettingReport,
     decode_output_document,
     decode_output_report,
+    decode_set_time,
     encode_output_document,
     encode_output_report,
     output_document_key,
@@ -154,6 +160,7 @@ _CLOCK: Final = DatabaseTransactionClock()
 OUTPUT_DOCUMENTS_CHANNEL: Final = "photo_wall_output_documents"   # payload: the Node's device id
 _LISTEN_RETRY_SECONDS: Final = 1.0
 _LISTEN_APPLICATION: Final = "photo-wall-output-documents"
+_CONSOLE_TEST: Final = "console-test"            # power_requests.reason of 1b's console test
 
 
 # --- Readiness facts -----------------------------------------------------------------------------
@@ -561,9 +568,10 @@ class DisplayDocuments:
     document; every other stream, and the show pipe, is `{}`. Reads run behind the link stores'
     gate, in one transaction each."""
 
-    def __init__(self, stores: PgLinkStores, wakes: DisplayWakes) -> None:
+    def __init__(self, stores: PgLinkStores, wakes: DisplayWakes, *, times: TransactionClock) -> None:
         self._stores = stores
         self._wakes = wakes
+        self._times = times
 
     def source(self, serial: str, pipe: Pipe) -> DocumentSource:
         device_id = device_id_for_serial(serial)
@@ -571,7 +579,7 @@ class DisplayDocuments:
             raise ValueError("node_link_serial")
         if Pipe(pipe) is not Pipe.FLEET:
             return _NoDocuments()
-        return _OutputDocuments(self._stores, self._wakes, device_id)
+        return _OutputDocuments(self._stores, self._wakes, device_id, self._times)
 
 
 class _NoDocuments:
@@ -583,34 +591,38 @@ class _NoDocuments:
 
 
 class _OutputDocuments:
-    def __init__(self, stores: PgLinkStores, wakes: DisplayWakes, device_id: str) -> None:
+    def __init__(self, stores: PgLinkStores, wakes: DisplayWakes, device_id: str, times: TransactionClock) -> None:
         self._stores = stores
         self._wakes = wakes
         self._device_id = device_id
+        self._times = times
         self._seen = wakes.count(device_id)
 
     async def documents(self, stream: str) -> Mapping[str, bytes]:
         if stream != DOCUMENT_STREAM:
             return {}
-        return await self._stores.run(lambda conn: output_documents(conn, self._device_id))
+        return await self._stores.run(
+            lambda conn: output_documents(conn, self._device_id, self._times.now_in(conn)))
 
     async def changed(self) -> None:
-        """When this Node's facts are woken, or at the earliest end of its live tests or idle
-        deadline of a picture session on its Outputs' Displays (measured from Central's clock,
-        slept on this process's), so an ended test, and an abandoned session's revert, reach the Pi
-        with no other write and no reaper."""
+        """When this Node's facts are woken, or at its next deadline (`_until_next_deadline`,
+        measured from Central's clock, slept on this process's), so an ended test, an abandoned
+        session's revert and the timetable's roll forward reach the Pi with no other write and no
+        reaper."""
         seen = self._seen
-        remaining = await self._stores.run(lambda conn: _until_next_deadline(conn, self._device_id))
+        remaining = await self._stores.run(
+            lambda conn: _until_next_deadline(conn, self._device_id, self._times.now_in(conn)))
         try:
             self._seen = await asyncio.wait_for(self._wakes.after(self._device_id, seen), remaining)
         except TimeoutError:
             return
 
 
-def _until_next_deadline(conn: Any, device_id: str) -> float | None:
-    """Seconds until the earliest live console test on the Node's Outputs ends, or the earliest idle
-    deadline of a picture session on a Display last seen on them; None without either."""
-    now = _CLOCK.now_in(conn)
+def _until_next_deadline(conn: Any, device_id: str, now: float) -> float | None:
+    """Seconds from Central's `now` until the earliest of: a live console test on the Node's
+    Outputs ends, a picture session's idle deadline on a Display last seen on them, the Node's
+    timetables' first change after now, the next house midnight (the horizon moves), the earliest
+    live hold end. None without any."""
     row = conn.execute(
         "SELECT least((SELECT min(r.ends_at) FROM players p JOIN bindings b ON b.player_id=p.id "
         "JOIN power_requests r ON r.frame_id=b.frame_id WHERE p.device_id=%(device)s "
@@ -619,7 +631,22 @@ def _until_next_deadline(conn: Any, device_id: str) -> float | None:
         "JOIN picture_sessions ps ON ps.display_id=o.display_id WHERE p.device_id=%(device)s "
         "AND p.retired_at IS NULL AND ps.idle_until > %(now)s)) AS deadline",
         {"device": device_id, "now": now}).fetchone()
-    return None if row["deadline"] is None else row["deadline"] - now
+    deadlines = [] if row["deadline"] is None else [row["deadline"]]
+    house = house_time_in(conn)
+    policy = power_policy_in(conn, now)
+    deadlines.append(day_start(house, house_date(house, now) + timedelta(days=1)))
+    deadlines.extend(hold.ends_at for hold in policy.holds if hold.ends_at is not None and hold.ends_at > now)
+    for frame_id in _bound_frames(conn, device_id):
+        following = frame_timetable(frame_id, policy, house, now).next_change_after(now)
+        if following is not None:
+            deadlines.append(following.at)
+    return max(0.0, min(deadlines) - now)
+
+
+def _bound_frames(conn: Any, device_id: str) -> tuple[str, ...]:
+    return tuple(row["frame_id"] for row in conn.execute(
+        "SELECT b.frame_id FROM players p JOIN bindings b ON b.player_id=p.id "
+        "WHERE p.device_id=%s AND p.retired_at IS NULL ORDER BY b.frame_id", (device_id,)).fetchall())
 
 
 def _power_test(row: Mapping[str, Any]) -> PowerTest | None:
@@ -631,18 +658,21 @@ def _power_test(row: Mapping[str, Any]) -> PowerTest | None:
 
 
 _TEST_COLUMNS: Final = "r.id AS test_id, r.power AS test_power, r.for_seconds, r.ends_at"
-_TEST_JOIN: Final = "LEFT JOIN power_requests r ON r.frame_id=b.frame_id AND r.reason='console-test'"
+_TEST_JOIN: Final = f"LEFT JOIN power_requests r ON r.frame_id=b.frame_id AND r.reason='{_CONSOLE_TEST}'"
 
 
-def output_documents(conn: Any, device_id: str) -> dict[str, bytes]:
-    """key -> encoded Output document for each Output of the Node, raising an Output's `change` only
-    when its body differs from the one recorded."""
+def output_documents(conn: Any, device_id: str, now: float) -> dict[str, bytes]:
+    """key -> encoded Output document for each Output of the Node at Central's `now`, raising an
+    Output's `change` only when its body differs from the one recorded. A bound Output carries its
+    Frame's timetable (`frame_timetable` over `power_policy_in` and `house_time_in`), an unbound
+    one `unbound_timetable`."""
     player_id = _player_of(conn, device_id, "FOR SHARE")
     if player_id is None:
         return {}
-    now = _CLOCK.now_in(conn)
+    house = house_time_in(conn)
+    policy = power_policy_in(conn, now)
     rows = conn.execute(
-        "SELECT o.output_id, d.power_method, d.switch_input_on_power_on, d.never_off_on_other_input, "
+        "SELECT o.output_id, b.frame_id, d.power_method, d.switch_input_on_power_on, d.never_off_on_other_input, "
         f"{_PICTURE_COLUMNS}, {_SESSION_COLUMNS}, w.change, w.digest, w.picture_change, w.picture_digest, "
         f"{_TEST_COLUMNS} FROM (SELECT output_id FROM outputs WHERE player_id=%(player)s "
         "UNION SELECT output_id FROM output_displays WHERE player_id=%(player)s) o "
@@ -655,8 +685,10 @@ def output_documents(conn: Any, device_id: str) -> dict[str, bytes]:
     for row in rows:
         if row["output_id"] not in OUTPUT_IDS:
             continue
-        projected = project_output(row["output_id"], test=_power_test(row), settings=_settings(row),
-                                   picture=_picture_in_force(row, now), now=now)
+        timetable = (unbound_timetable(house, now) if row["frame_id"] is None
+                     else frame_timetable(row["frame_id"], policy, house, now))
+        projected = project_output(row["output_id"], timetable=timetable, test=_power_test(row),
+                                   settings=_settings(row), picture=_picture_in_force(row, now), now=now)
         digest, picture_digest = projected.digest(), projected.picture_digest()
         change = (row["change"] or 0) + (row["digest"] != digest)
         picture_change = (row["picture_change"] or 0) + (row["picture_digest"] != picture_digest)
@@ -743,18 +775,18 @@ class PgDisplayQueries:
                 f"LEFT JOIN players p ON p.id=b.player_id {SEEN_DISPLAY_JOIN} "
                 f"LEFT JOIN displays d ON d.id=seen.display_id LEFT JOIN output_documents w "
                 f"ON w.player_id=b.player_id AND w.output_id=b.output_id "
-                f"LEFT JOIN power_requests r ON r.frame_id=f.id AND r.reason='console-test' WHERE f.id=%s",
+                f"LEFT JOIN power_requests r ON r.frame_id=f.id AND r.reason='{_CONSOLE_TEST}' WHERE f.id=%s",
                 (frame_id,)).fetchone()
             if frame is None:
                 raise DisplayRefused("unknown_frame", 404)
             now = _CLOCK.now_in(conn)
+            house = house_time_in(conn)
             presence = None if frame["device_id"] is None else (
                 bus_links_in(conn, (frame["device_id"],))[frame["device_id"]])
         test = _power_test(frame)
         live = live_test(test, now)
         linked = None if presence is None else presence["linked"]
-        document = None if frame["document"] is None else decode_output_document(_json_bytes(frame["document"]))
-        report = None if frame["report"] is None else decode_output_report(_json_bytes(frame["report"]))
+        document, report = _stored_document(frame), _stored_report(frame)
         status = power_status(bound=frame["player_id"] is not None, test=test, document=document,
                               report=report, now=now)
         settings = _settings(frame) or DEFAULT_SETTINGS
@@ -768,7 +800,7 @@ class PgDisplayQueries:
             test=None if live is None else PowerTestView(request_id=live.request_id, power=live.power,
                                                          for_seconds=live.for_seconds, ends_at=live.ends_at),
             result=power_result(test=test, document=document, report=report, now=now),
-            in_force=_in_force_view(report, document, live, now), linked=linked,
+            in_force=_in_force_view(report, house, live, now), linked=linked,
             # The link's presence row changed to unlinked when Central's hub last saw the Pi's leaf
             # go: the last time Central heard it. A report time would be the last change the Pi
             # put, hours old on a quiet display.
@@ -780,20 +812,20 @@ def _json_bytes(value: Mapping[str, Any]) -> bytes:
     return json.dumps(value, ensure_ascii=False).encode()
 
 
-def _in_force_view(report: OutputReport | None, document: OutputDocument | None, live: PowerTest | None,
+def _in_force_view(report: OutputReport | None, house: HouseTime, live: PowerTest | None,
                    now: float) -> InForceView | None:
-    """The request the Pi says it carries out, named from the latest document's stack (None when the
-    Pi names none, or a request that document no longer holds). Its count is Central's for its live
-    console test (the Pi reports only on a change, so its own count would stand still), else the Pi's."""
-    if report is None or report.in_force is None or document is None:
+    """What the Pi says it carries out (None when it names nothing). A test's count is Central's for
+    its live console test (the Pi reports only on a change, so its own count would stand still),
+    else the Pi's; the set time in force is shown on the house clock."""
+    if report is None or report.in_force is None:
         return None
-    for request in document.power:
-        if request.request_id == report.in_force.request_id:
-            remaining = (remaining_seconds(live, now) if live is not None and str(live.request_id) == request.request_id
-                         else report.in_force.remaining_seconds)
-            return InForceView(request_id=request.request_id, reason=request.reason, power=request.power,
-                               remaining_seconds=remaining)
-    return None
+    in_force = report.in_force
+    remaining = in_force.remaining_seconds
+    if live is not None and in_force.request_id == str(live.request_id):
+        remaining = remaining_seconds(live, now)
+    since = None if in_force.since is None else local_date_time(house, decode_set_time(in_force.since))
+    return InForceView(kind=in_force.kind, power=in_force.power, request_id=in_force.request_id,
+                       remaining_seconds=remaining, since=since)
 
 
 class PgDisplayCommands:
@@ -818,7 +850,7 @@ class PgDisplayCommands:
                 "VALUES (%s, %s, %s, %s, %s, %s, %s) ON CONFLICT (frame_id, reason) DO UPDATE SET "
                 "id=EXCLUDED.id, power=EXCLUDED.power, for_seconds=EXCLUDED.for_seconds, "
                 "created_at=EXCLUDED.created_at, ends_at=EXCLUDED.ends_at",
-                (request_id, frame_id, Power.OFF.value, RequestReason.CONSOLE_TEST.value, TEST_SECONDS, now,
+                (request_id, frame_id, Power.OFF.value, _CONSOLE_TEST, TEST_SECONDS, now,
                  now + TEST_SECONDS))
             _notify(conn, "SELECT device_id FROM players WHERE id=%s", (frame["player_id"],))
         return PowerTestAccepted(request_id=request_id, for_seconds=TEST_SECONDS)
@@ -830,7 +862,7 @@ class PgDisplayCommands:
             if frame is None:
                 raise DisplayRefused("unknown_frame", 404)
             ended = conn.execute("DELETE FROM power_requests WHERE frame_id=%s AND reason=%s RETURNING id",
-                                 (frame_id, RequestReason.CONSOLE_TEST.value)).fetchone()
+                                 (frame_id, _CONSOLE_TEST)).fetchone()
             if ended is not None and frame["player_id"] is not None:
                 _notify(conn, "SELECT device_id FROM players WHERE id=%s", (frame["player_id"],))
 
@@ -871,11 +903,20 @@ _NODES_SEEING: Final = ("SELECT DISTINCT p.device_id FROM output_displays o JOIN
 
 
 def _stored_document(row: Mapping[str, Any]) -> OutputDocument | None:
-    return None if row["document"] is None else decode_output_document(_json_bytes(row["document"]))
+    """The recorded document; None when there is none, or it was written under an older schema
+    major (the source rewrites it at its next read: no backwards compatibility)."""
+    try:
+        return None if row["document"] is None else decode_output_document(_json_bytes(row["document"]))
+    except ValueError:
+        return None
 
 
 def _stored_report(row: Mapping[str, Any]) -> OutputReport | None:
-    return None if row["report"] is None else decode_output_report(_json_bytes(row["report"]))
+    """The recorded report; None when there is none, or it was written under an older schema major."""
+    try:
+        return None if row["report"] is None else decode_output_report(_json_bytes(row["report"]))
+    except ValueError:
+        return None
 
 
 def _presented(picture: DisplayPicture, document: OutputDocument | None, report: OutputReport | None) -> bool:

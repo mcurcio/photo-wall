@@ -37,7 +37,9 @@ from central.infra.display_store import (
 )
 from central.infra.fit_analysis_store import PgFitAnalysisReader
 from central.infra.fit_settings_store import PgFitSettings
+from central.infra.house_store import seed_house
 from central.infra.photo_library_store import PgPhotoLibrary
+from central.infra.power_store import PgPower
 from central.installation_models import InstallationInventory
 from central.library_routes import mount_library_routes
 from central.media_gateway import MediaGateway
@@ -52,6 +54,7 @@ from central.photo_fit_routes import mount_photo_fit_routes
 from central.photo_library_routes import mount_photo_library_routes, mount_photo_source_routes
 from central.photo_sources import PhotoSources
 from central.player_control_protocol import project_state, state_digest
+from central.power_routes import mount_power_routes
 from central.registry import (
     Enrollment,
     FrameCreate,
@@ -281,6 +284,8 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app):
         db.migrate()
+        if isinstance(db, Database):    # Settings › House starts from Central's own zone (a stand-in has none)
+            seed_house(db, DatabaseTransactionClock())
         if isinstance(media_queue, ProcrastinateMediaQueue) or (
             content is not None and isinstance(db, Database)
         ):
@@ -779,6 +784,8 @@ def create_app(
         analysis=lambda request: analyse(request, fit_analysis_reader, fit_settings.fit_settings()))
     mount_library_routes(app, admin=admin, library=photo_library, content=content)
     mount_display_routes(app, admin=admin, queries=PgDisplayQueries(db), commands=PgDisplayCommands(db))
+    power = PgPower(db, times=media_times)
+    mount_power_routes(app, admin=admin, queries=power, commands=power)
     pictures = PgPictureSessions(db)
     mount_picture_routes(app, admin=admin, queries=pictures, commands=pictures)
     if content is not None:

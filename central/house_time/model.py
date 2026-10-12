@@ -4,8 +4,7 @@ Prior art: iCalendar (RFC 5545) weekly recurrence. A When is the weekly subset a
 BYDAY is `days`, DTSTART's time of day is `start`, DTEND's is `end`; its daylight-saving rule is
 the calculator's (central/house_time/calculator.py). Sun times are astral's.
 
-Invariants each model's validator enforces (slice T implements them; until then they are stated
-here only):
+Invariants each model's validator enforces:
 - `When.days`: unique, in WEEKDAYS order (its canonical form); empty is allowed at parse time and
   is the problem "no-days" (`calculator.when_problems`, the one home of When problems).
 - `HouseTime.zone`: a zone the IANA database knows (`calculator.known_zone`); else
@@ -18,7 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Annotated, Final, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 Weekday = Literal["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 WEEKDAYS: Final[tuple[Weekday, ...]] = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")  # date.weekday() order
@@ -49,6 +48,14 @@ class HouseTime(HouseModel):
     zone: IanaZone
     place: Place | None = None
 
+    @field_validator("zone")
+    @classmethod
+    def _known(cls, zone: str) -> str:
+        from central.house_time.calculator import known_zone  # the calculator imports this module
+        if not known_zone(zone):
+            raise ValueError("unknown-zone")
+        return zone
+
 
 class ClockAt(HouseModel):
     """A clock time on the house clock (#74)."""
@@ -72,6 +79,19 @@ class When(HouseModel):
     days: tuple[Weekday, ...]
     start: TimeOfDay
     end: TimeOfDay
+
+    @field_validator("days")
+    @classmethod
+    def _canonical(cls, days: tuple[Weekday, ...]) -> tuple[Weekday, ...]:
+        return canonical_days(days)
+
+
+def canonical_days(days: tuple[Weekday, ...]) -> tuple[Weekday, ...]:
+    """`days` when unique and in WEEKDAYS order (a When's and Night off's canonical form), else
+    ValueError("days"). Empty passes: it is the problem "no-days" (calculator.when_problems)."""
+    if list(days) != sorted(set(days), key=WEEKDAYS.index):
+        raise ValueError("days")
+    return days
 
 
 class HouseSettingsDraft(HouseModel):
@@ -97,6 +117,6 @@ class Window:
 
 __all__ = [
     "WEEKDAYS", "ClockAt", "ClockFormat", "ClockTime", "HouseModel", "HouseSettings", "HouseSettingsDraft",
-    "HouseTime", "IanaZone", "LocalDateTime", "OffsetMinutes", "Place", "SunAt", "TimeOfDay", "Units",
+    "HouseTime", "IanaZone", "canonical_days", "LocalDateTime", "OffsetMinutes", "Place", "SunAt", "TimeOfDay", "Units",
     "Weekday", "When", "WhenProblem", "Window",
 ]
