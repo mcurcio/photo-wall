@@ -7,7 +7,7 @@ import { FrameOverview } from "../domain/frame-overview";
 import { FrameDraftFit, FramePhotos } from "../domain/frame-photos";
 import { FramePicture } from "../domain/frame-picture";
 import { FramePosition, type PixelSize } from "../domain/frame-position";
-import { FramePower } from "../domain/frame-power";
+import { FrameInput, FramePower } from "../domain/frame-power";
 import { useFrameWhy } from "../domain/frame-why";
 import { FrameProfile, type Readiness } from "../domain/frame-profile";
 import type { HostsRead } from "../domain/hosts-read";
@@ -182,8 +182,12 @@ export function FramePage({ snapshot, bootFacts, hosts, frameId, tab, onTab, foc
             )} />
         )}
         {tab === "picture" && (
-          <FramePicture frameId={frameId} piHref={piHref} session={picture}
-            otherFrames={frames.filter((other) => other.id !== frameId).map((other) => other.id)} />
+          <>
+            <FramePicture frameId={frameId} piHref={piHref} session={picture}
+              otherFrames={frames.filter((other) => other.id !== frameId).map((other) => other.id)} />
+            {/* The display's input on both tabs (decision 0022 R10): Power's own row. */}
+            <FrameInput key={`${frameId}:input`} frameId={frameId} />
+          </>
         )}
         {tab === "power" && (
           <FramePower key={`${frameId}:power`} frameId={frameId} why={why}

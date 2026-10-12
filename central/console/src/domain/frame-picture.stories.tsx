@@ -6,9 +6,11 @@ type View = NonNullable<PictureSession["view"]>;
 type Row = View["hardware"][number];
 
 const LEVEL_100 = { kind: "level" as const, maximum: 100, choices: [] };
+// A display counting brightness to 255 (the owner's example, 2026-10-12: "46 %  (117 of 255)").
+const LEVEL_255 = { kind: "level" as const, maximum: 255, choices: [] };
 const BRIGHTNESS: Row = {
-  code: "10", name: "Brightness", value: 46,
-  offered: { range: LEVEL_100, current: 46 }, result: { result: "taken", before: 60, after: 46 },
+  code: "10", name: "Brightness", value: 117,
+  offered: { range: LEVEL_255, current: 117 }, result: { result: "taken", before: 153, after: 117 },
   changed_on_buttons: false,
 };
 const CONTRAST: Row = {
@@ -66,7 +68,7 @@ const meta = {
 export default meta;
 type Story = StoryObj<typeof meta>;
 
-/** Display brightness 46 of 100, colour preset "6500 K" and Photo Wall brightness 114 %: nothing changed yet. */
+/** Display brightness 46 % (117 of 255), colour preset "6500 K" and Photo Wall brightness 114 %: nothing changed yet. */
 export const Shown: Story = {};
 /** A display brightness change the Pi has not shown yet: Done waits. */
 export const Waiting: Story = {

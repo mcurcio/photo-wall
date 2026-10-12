@@ -10,7 +10,8 @@ Central's real status, never from the console alone.
 
 Mutation probes: enable Done before the phase is `shown` -> the Done case fails; send every drag
 event -> the rate case fails; one edit route for both groups -> the two-groups case fails; render a
-READ_ONLY_CHOICE row with a select -> the list-settings case's "no control" assertion fails.
+READ_ONLY_CHOICE row with a select -> the list-settings case's "no control" assertion fails; drop
+FrameInput from the Picture tab (pages/frame-page.tsx) -> the input case fails.
 """
 
 import os
@@ -184,7 +185,7 @@ def test_the_tab_shows_both_groups_and_each_slider_sends_its_own_edit(page, regi
 
         hardware, software = _edits(page, "hardware-edits"), _edits(page, "software-edits")
         _press(page, DISPLAY, "Brightness", "ArrowRight")
-        expect(_row(page, DISPLAY, "Brightness")).to_contain_text(re.compile(r"\b61 of 100"))
+        expect(_row(page, DISPLAY, "Brightness")).to_contain_text("61 % (61 of 100)")
         _press(page, PHOTO_WALL, "Brightness", "ArrowRight")
         expect(_row(page, PHOTO_WALL, "Brightness")).to_contain_text("101 %")
         expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
@@ -248,7 +249,7 @@ def test_done_waits_until_the_pi_shows_the_latest_change_then_keeps_both_groups(
         stored = _display(registry)
         assert (stored["hardware_picture"], stored["software_brightness_percent"]) == ({"10": 53}, 114)
         expect(_slider(page, DISPLAY, "Brightness")).to_have_value("53")
-        expect(_row(page, DISPLAY, "Brightness")).to_contain_text("53 of 100")
+        expect(_row(page, DISPLAY, "Brightness")).to_contain_text("53 % (53 of 100)")
 
 
 def test_revert_puts_back_the_kept_values(page, registry):
@@ -278,7 +279,7 @@ def test_as_the_display_has_it_hands_a_display_setting_back(page, registry):
         connect(page, origin, "wall")
         open_frame(page, FRAME, "picture")
         bar = _bar(page)
-        expect(_row(page, DISPLAY, "Brightness")).to_contain_text("60 of 100")
+        expect(_row(page, DISPLAY, "Brightness")).to_contain_text("60 % (60 of 100)")
         _group(page, DISPLAY).get_by_role("button", name="As the display has it: brightness", exact=True).click()
         expect(_row(page, DISPLAY, "Brightness")).to_contain_text("As the display has it")
         expect(bar.get_by_role("status")).to_have_text(PRESENTED)
@@ -332,10 +333,10 @@ def test_a_value_changed_on_the_displays_buttons_is_shown_not_fought(page, regis
         connect(page, origin, "wall")
         open_frame(page, FRAME, "picture")
         expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
-        expect(_row(page, DISPLAY, "Brightness")).to_contain_text("40 of 100")
+        expect(_row(page, DISPLAY, "Brightness")).to_contain_text("40 % (40 of 100)")
         edits = _edits(page, "hardware-edits")
         pi.buttons = {"10": 35}
-        expect(_row(page, DISPLAY, "Brightness")).to_contain_text("Changed on the display's buttons: 35 of 100")
+        expect(_row(page, DISPLAY, "Brightness")).to_contain_text("Changed on the display's buttons: 35 % (35 of 100)")
         page.wait_for_timeout(600)
         assert edits == []
         assert _display(registry)["hardware_picture"] == {"10": 40}
@@ -381,6 +382,34 @@ def test_copy_to_two_frames_copies_photo_walls_values_and_never_position(page, r
                 display["colour_temperature_kelvin"], display["gamma_tenths"]) == (120, 30, 5000, 24)
         assert display["hardware_picture"] == hardware
     assert _positions(registry) == before
+
+
+INPUT = "Switch the display to this input on power-on"
+
+
+def test_the_input_setting_is_on_both_tabs_and_a_change_on_picture_shows_on_power(page, registry):
+    """Decision 0022 R10 (owner, 2026-10-12: "Let’s put it on both. That seems like the optimal
+    UX"): the display's input setting (#117) is on the Picture tab as well as the Power tab, one
+    stored setting: turned off on Picture, it is saved by itself (outside Done and Revert) and the
+    Power tab shows it off."""
+    _seen(registry)
+    with FakePi(registry), operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "wall")
+        open_frame(page, FRAME, "picture")
+        expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
+        on_picture = page.get_by_role("region", name="Input", exact=True).get_by_role("switch", name=INPUT)
+        expect(on_picture).to_be_checked()
+        with page.expect_request(lambda request: "/power-settings" in request.url
+                                 and request.method == "PUT") as captured:
+            on_picture.click()
+        assert captured.value.post_data_json["switch_input_on_power_on"] is False
+        expect(page.locator(f'[data-setting="{INPUT}"]')).to_contain_text("Saved")
+        expect(_bar(page).get_by_role("button", name="Done", exact=True)).to_be_disabled()  # nothing to keep
+        assert _display(registry)["switch_input_on_power_on"] is False
+
+        power = open_frame(page, FRAME, "power").get_by_role("region", name="Power", exact=True)
+        expect(power.get_by_role("switch", name=INPUT)).not_to_be_checked()
+        expect(power.get_by_role("button", name=f"Reset {INPUT} (Default: On)")).to_be_visible()
 
 
 def test_an_unbound_frame_is_sent_to_its_hardware_tab(page, registry):

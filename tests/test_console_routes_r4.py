@@ -791,9 +791,9 @@ LEGACY_MARKUP = {"ConfirmAction.jsx", "PlayerCommands.jsx"}
 # view the hook's type. No other page or domain module may import any of them.
 FRAME_PAGE_IMPORTS = {
     "frame-page.tsx": {"BindingFacet.jsx", "liveAdjustment.js", "pictureSession.js", "framesApi.js", "useMutate.js"},
-    # The Picture tab (1c K1): its routes and the session hook's type; Position (1c K2): the
-    # quarter turns its draft takes.
-    "frame-picture.tsx": {"pictureApi.js", "pictureSession.js"},
+    # The Picture tab (1c K1): its routes, the session hook's type and a display level's words
+    # (0022 R11); Position (1c K2): the quarter turns its draft takes.
+    "frame-picture.tsx": {"pictureApi.js", "pictureSession.js", "levelWords.js"},
     "frame-position.tsx": {"useDraft.js"},
     "frame-overview.tsx": {"PrecedenceExplanation.jsx", "ReadinessNotice.jsx", "readinessRecovery.js",
                            "frameIds.js"},

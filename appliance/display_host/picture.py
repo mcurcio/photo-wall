@@ -640,9 +640,8 @@ class PictureController:
         offered = port.offered() or ()
         setting = next((item for item in offered if item.code == BRIGHTNESS_CODE), None)
         percent = None
-        if (setting is not None and setting.range.kind is RangeKind.LEVEL and setting.range.maximum
-                and setting.current is not None):
-            percent = round(setting.current * 100 / setting.range.maximum)
+        if setting is not None and setting.range.kind is RangeKind.LEVEL and setting.current is not None:
+            percent = setting.range.percent(setting.current)
         display = DisplayBrightness(percent, BRIGHTNESS_CODE in document.hardware, port.brightness_took)
         return brightness_line(document.software.brightness_percent, display)
 

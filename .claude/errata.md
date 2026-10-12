@@ -5606,3 +5606,25 @@ Order: (a) merge the iac PR that switches the factory to `central.app:create_app
   and the 1c evidence script is deleted.
 - **One home for the range rule:** `contracts.node_picture.HardwareRange.holds`, asked by Central's
   edit check, Copy and the Pi's write; an answer's value is `ddc.answer_value`.
+
+## E-PS-R10 (Picture split, input on both tabs and level units, 2026-10-12) · feat/picture-hardware-and-software
+
+- **E-PS-FIX's "Not built on this branch: the Picture tab has no input control" is closed.** R10 is
+  built: #117 is one row (`frame-power.tsx` `InputSettingRow`, saved by `usePowerSettingsSave`
+  through `PUT …/power-settings`) on the Power tab and in an Input section below the Picture tab's
+  live editor (`FrameInput`), saved on change outside Done and Revert. 0022 wrote "(#117, #118)";
+  #118 stays on Power only, since it decides a power-off and R3 says "power doesnt make sense" on
+  Picture (a design choice the owner may reopen).
+- **A level's percent had a float rounding with no named home** (`round(current * 100 / maximum)`
+  in the Pi's `_line`, half to even). It is now `HardwareRange.percent`, whole percent rounded half
+  up in integers, which the console's `levelWords.js` mirrors under a Node test; the base page can
+  read one percent higher than before at an exact half (1 of 8: 13 %, was 12 %).
+- **CI run 38291987976's red `test_the_session_is_handed_over_with_the_draft_while_the_tab_stays_open`
+  is a race in `liveAdjustment.js`, unchanged by this branch and present on main:** Done pressed
+  while the page's `renew` is in flight waits for it (`act`), then saves against the new session,
+  which no Pi has presented yet, and Central refuses it (`trial_latest_not_presented`). A held
+  `renew` fails the same way on origin/main and on this branch. Not fixed here.
+- **`test_a_passing_refusal_keeps_the_session_and_clears_itself` failed once locally (1 of 24 under
+  load) and fails the same way on origin/main (1 of 96):** the alert it waits for lives one
+  keepalive tick (about 500 ms) and Playwright's `expect` polls at widening intervals (up to 1 s),
+  so a poll can miss it. Test-side, not this branch; not fixed here.

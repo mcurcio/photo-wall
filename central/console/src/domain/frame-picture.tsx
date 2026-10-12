@@ -1,5 +1,6 @@
 import { useState } from "react";
 
+import { levelWords } from "../levelWords.js";
 import { copyPicture } from "../pictureApi.js";
 import type { HardwareSettingView, PictureCopyResult } from "../pictureApi.js";
 import type { usePictureSession } from "../pictureSession.js";
@@ -50,11 +51,12 @@ const COPY_WORDS: Record<CopyOutcome, string> = {
   "session-open": "Not copied: someone is adjusting that display now",
 };
 
-/** A display value in the display's own words: "46 of 100" for a level, a choice's name ("6500 K"),
- * else the number it answered. */
+/** A display value in the display's own words: a level as a percent of its range, its own count
+ * second ("46 % (117 of 255)", levelWords.js), a choice's name ("6500 K"), else the number it
+ * answered. */
 function displayValue(row: HardwareSettingView, value: number): string {
   const range = row.offered?.range;
-  if (range?.kind === "level" && range.maximum !== null) return `${value} of ${range.maximum}`;
+  if (range?.kind === "level" && range.maximum !== null) return levelWords(value, range.maximum);
   return range?.choices.find((choice) => choice.value === value)?.name ?? String(value);
 }
 
@@ -65,9 +67,10 @@ function displayValue(row: HardwareSettingView, value: number): string {
  * here alone; set here but not offered at the display's last check; whether the display took the
  * latest write or was changed on its own buttons since (Central's judgement,
  * central/displays/hardware.py `changed_on_buttons`; never while the operator's own change is in
- * flight); else the value set in Photo Wall on the display's own count ("46 of 100") or by its
- * choice's name ("6500 K"). Three states never share one null: not connected (the tab's own
- * line), not checked yet (`offeredKnown` false) and not offered at the last check.
+ * flight); else the value set in Photo Wall, a level as a percent of its range with the display's
+ * own count second ("46 % (117 of 255)"), a list setting by its choice's name ("6500 K"). Three
+ * states never share one null: not connected (the tab's own line), not checked yet (`offeredKnown`
+ * false) and not offered at the last check.
  */
 export function hardwareWords(row: HardwareSettingView, draft: number | null | undefined, offeredKnown = true): string {
   const value = draft === undefined ? row.value : draft;
@@ -123,7 +126,7 @@ function HardwareSettingRow({ row, session, ready, offeredKnown }: {
       <Stack>
         <Field label={row.name} notes={[words]}>
           <Slider min={0} max={range.maximum} step={1} unit="" value={value ?? row.offered?.current ?? 0}
-            disabled={!ready} onPreview={set} onCommit={set} />
+            format={(shown) => levelWords(shown, range.maximum!)} disabled={!ready} onPreview={set} onCommit={set} />
         </Field>
         {handBack}
       </Stack>

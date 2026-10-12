@@ -141,6 +141,31 @@ function rowState(saving: SaveState, label: string): { state: "idle" | "saving" 
   return saving?.label === label ? saving : { state: "idle" };
 }
 
+/** The display's input setting (#117): the one control the Power and Picture tabs share. */
+export const INPUT_LABEL = "Switch the display to this input on power-on";
+
+/**
+ * The display's input setting (#117) as one SettingRow, saved on change with the display's other
+ * power settings (one stored setting, one route: PUT …/power-settings). The Power tab and the
+ * Picture tab both show this row (owner, 2026-10-12: "Let’s put it on both. That seems like the
+ * optimal UX"; decision 0022 R10).
+ */
+export function InputSettingRow({ settings, saving, onSettings }: {
+  settings: PowerSettings; saving: SaveState; onSettings: (next: PowerSettings, label: string) => void;
+}) {
+  const state = rowState(saving, INPUT_LABEL);
+  const change = (on: boolean) => onSettings({ ...settings, switch_input_on_power_on: on }, INPUT_LABEL);
+  return (
+    <SettingRow
+      kind="equipment" belongsTo="display" actsOn="display-hardware" label={INPUT_LABEL}
+      defaultLabel="Default: On"
+      onReset={settings.switch_input_on_power_on ? undefined : () => change(true)}
+      state={state.state} error={state.error}
+      control={<Switch checked={settings.switch_input_on_power_on} onChange={change} />}
+    />
+  );
+}
+
 /**
  * The Power tab's content for one read (design-language §8 row B6; console design §5 Power):
  * the power method and its two switches, saved on change, then Test: turn off and Turn on with
@@ -160,10 +185,8 @@ export function PowerPanel({
   const words = testWords(view, sent, turnedOn);
   const change = (patch: Partial<PowerSettings>, label: string) => onSettings({ ...settings, ...patch }, label);
   const method = "Power method";
-  const input = "Switch the display to this input on power-on";
   const other = "Never power off while the display shows another input";
   const methodState = rowState(saving, method);
-  const inputState = rowState(saving, input);
   const otherState = rowState(saving, other);
   return (
     <>
@@ -185,14 +208,7 @@ export function PowerPanel({
               />
             )}
           />
-          <SettingRow
-            kind="equipment" belongsTo="display" actsOn="display-hardware" label={input}
-            defaultLabel="Default: On"
-            onReset={settings.switch_input_on_power_on ? undefined : () => change({ switch_input_on_power_on: true }, input)}
-            state={inputState.state} error={inputState.error}
-            control={<Switch checked={settings.switch_input_on_power_on}
-              onChange={(next) => change({ switch_input_on_power_on: next }, input)} />}
-          />
+          <InputSettingRow settings={settings} saving={saving} onSettings={onSettings} />
           <SettingRow
             kind="equipment" belongsTo="display" actsOn="display-hardware" label={other}
             help="Someone may be watching something else on it. When the display can't say which input it shows, the off goes ahead."
@@ -231,8 +247,6 @@ export function PowerPanel({
   );
 }
 
-type Read = { ok: true; view: FramePowerView } | { ok: false; error: string } | null;
-
 const settingsOf = (view: FramePowerView): PowerSettings => ({
   power_method: view.power_method,
   switch_input_on_power_on: view.switch_input_on_power_on,
@@ -240,6 +254,36 @@ const settingsOf = (view: FramePowerView): PowerSettings => ({
 });
 const sameSettings = (a: PowerSettings, b: PowerSettings) => a.power_method === b.power_method
   && a.switch_input_on_power_on === b.switch_input_on_power_on && a.never_off_on_other_input === b.never_off_on_other_input;
+
+type Read = { ok: true; view: FramePowerView } | { ok: false; error: string } | null;
+
+/**
+ * A display's power settings as a tab shows and saves them, from the tab's own read of GET …/power
+ * (`refresh` re-reads it): the saved ones, or a change being saved, shown at once and until a read
+ * carries it. Both tabs that show the input row save through this, so the rule has one home.
+ */
+export function usePowerSettingsSave(view: FramePowerView | null, refresh: () => Promise<void>) {
+  const [edited, setEdited] = useState<PowerSettings | null>(null);
+  const [saving, setSaving] = useState<SaveState>(null);
+  useEffect(() => {
+    if (view !== null && edited !== null && sameSettings(edited, settingsOf(view))) setEdited(null);
+  }, [view, edited]);
+  const save = async (next: PowerSettings, label: string) => {
+    if (view?.display_id == null) return;
+    setEdited(next);
+    setSaving({ label, state: "saving" });
+    const result = await savePowerSettings(view.display_id, next) as { ok: true } | { ok: false; error: string };
+    if (result.ok) {
+      setSaving({ label, state: "saved" });
+    } else {
+      setEdited(null);
+      setSaving({ label, state: "error", error: result.error === "unreachable"
+        ? "Photo Wall's server did not answer." : `Photo Wall's answer: ${result.error}` });
+    }
+    void refresh();
+  };
+  return { settings: view === null ? null : edited ?? settingsOf(view), saving, save };
+}
 
 /**
  * The Frame page's Power tab (roadmap 1b, slice K2): read from GET …/power while it is shown (more
@@ -252,8 +296,6 @@ export function FramePower({ frameId, why, readAt = null }: { frameId: string; w
   const [sent, setSent] = useState<string | null>(null);
   const [turnedOn, setTurnedOn] = useState(false);
   const [sending, setSending] = useState(false);
-  const [edited, setEdited] = useState<PowerSettings | null>(null);
-  const [saving, setSaving] = useState<SaveState>(null);
   const [problem, setProblem] = useState<string | null>(null);
   const [waiting, setWaiting] = useState(false);
 
@@ -262,13 +304,13 @@ export function FramePower({ frameId, why, readAt = null }: { frameId: string; w
     cadenceMs: waiting ? WAITING_CADENCE_MS : CADENCE_MS, initial: null as Read,
   });
   const view = read?.ok ? read.view : null;
+  const { settings, saving, save } = usePowerSettingsSave(view, refresh);
 
   useEffect(() => {
     if (view === null) return;
     if (sent !== null && view.test?.request_id === sent) setSent(null);
-    if (edited !== null && sameSettings(edited, settingsOf(view))) setEdited(null);
     setWaiting(testWords(view, sent, turnedOn) === WAITING);
-  }, [view, sent, turnedOn, edited]);
+  }, [view, sent, turnedOn]);
 
   const test = async (power: Power) => {
     if (sending) return;
@@ -284,21 +326,6 @@ export function FramePower({ frameId, why, readAt = null }: { frameId: string; w
       setProblem(result.error);
     }
     setSending(false);
-    void refresh();
-  };
-
-  const save = async (next: PowerSettings, label: string) => {
-    if (view?.display_id == null) return;
-    setEdited(next);
-    setSaving({ label, state: "saving" });
-    const result = await savePowerSettings(view.display_id, next) as { ok: true } | { ok: false; error: string };
-    if (result.ok) {
-      setSaving({ label, state: "saved" });
-    } else {
-      setEdited(null);
-      setSaving({ label, state: "error", error: result.error === "unreachable"
-        ? "Photo Wall's server did not answer." : `Photo Wall's answer: ${result.error}` });
-    }
     void refresh();
   };
 
@@ -320,7 +347,7 @@ export function FramePower({ frameId, why, readAt = null }: { frameId: string; w
     body = (
       <PowerPanel
         view={read.view}
-        settings={edited ?? settingsOf(read.view)}
+        settings={settings ?? settingsOf(read.view)}
         saving={saving}
         sent={sent}
         turnedOn={turnedOn}
@@ -346,6 +373,25 @@ export function FramePower({ frameId, why, readAt = null }: { frameId: string; w
           details={<Note>{`Photo Wall's answer: ${problem}`}</Note>}
         />
       )}
+    </Section>
+  );
+}
+
+/**
+ * The Picture tab's input setting (decision 0022 R10): the Power tab's own row (InputSettingRow),
+ * read from the same GET …/power and saved through the same route, so a change on either tab shows
+ * on the other. Shown once the Pi has reported a display on this Frame's HDMI port; the picture
+ * editor above already says why there is none.
+ */
+export function FrameInput({ frameId }: { frameId: string }) {
+  const load = useCallback(async () => (await readFramePower(frameId)) as Read, [frameId]);
+  const { value: read, refresh } = usePolledRead(load, { cadenceMs: CADENCE_MS, initial: null as Read });
+  const view = read?.ok ? read.view : null;
+  const { settings, saving, save } = usePowerSettingsSave(view, refresh);
+  if (view === null || view.display_id === null || settings === null) return null;
+  return (
+    <Section title="Input">
+      <InputSettingRow settings={settings} saving={saving} onSettings={(next, label) => { void save(next, label); }} />
     </Section>
   );
 }

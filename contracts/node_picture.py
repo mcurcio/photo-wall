@@ -25,6 +25,8 @@ Rules this module owns (one home each):
 - **which value a setting takes** (`HardwareRange.holds`): a level 0..its maximum, a choice the
   display lists, nothing on a read-only list; Central's edit check and Copy and the Pi's write all
   ask it;
+- **a level as a percent** (`HardwareRange.percent`): a whole percent of the display's maximum,
+  half up, which the base page and the console show first, the display's own count second;
 - the software ranges (brightness and contrast SOFTWARE_PERCENT_MIN..SOFTWARE_PERCENT_MAX, 100
   changes nothing; colour temperature and gamma as before);
 - the wire shapes, their size caps (which the bounds below make every valid value fit, so no
@@ -163,6 +165,15 @@ class HardwareRange:
         if self.kind is RangeKind.LEVEL:
             return 0 <= value <= (self.maximum or 0)
         return any(choice.value == value for choice in self.choices)
+
+    def percent(self, value: int) -> int:
+        """A LEVEL's `value` as a whole percent of its maximum, rounded half up (117 of 255 is 46):
+        how the console and the base page show a display's own level. The console's
+        central/console/src/levelWords.js `levelPercent` is the same rule (tests hold the two to
+        each other). ValueError("level_value") unless this is a LEVEL that holds `value`. Pure."""
+        require(self.kind is RangeKind.LEVEL and self.holds(value), "level_value")
+        maximum = self.maximum or 1
+        return (value * 200 + maximum) // (2 * maximum)
 
 
 @dataclass(frozen=True)
