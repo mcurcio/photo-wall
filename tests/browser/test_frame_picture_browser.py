@@ -179,7 +179,8 @@ def test_the_tab_shows_both_groups_and_each_slider_sends_its_own_edit(page, regi
         expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
         expect(_row(page, DISPLAY, "Brightness")).to_contain_text("As the display has it")
         expect(_row(page, DISPLAY, "Contrast")).to_contain_text("As the display has it")
-        expect(_row(page, PHOTO_WALL, "Brightness")).to_contain_text("100 % · 100 % changes nothing")
+        expect(_row(page, PHOTO_WALL, "Brightness")).to_contain_text("100 % changes nothing")
+        expect(_slider(page, PHOTO_WALL, "Brightness")).to_have_attribute("aria-valuetext", "100 %")
         for label in ("Contrast", "Colour temperature", "Gamma"):
             expect(_slider(page, PHOTO_WALL, label)).to_be_visible()
         expect(_picture_tab(page)).not_to_contain_text(re.compile(
@@ -345,7 +346,7 @@ def test_a_value_changed_on_the_displays_buttons_is_shown_not_fought(page, regis
         assert _display(registry)["hardware_picture"] == {"10": 40}
 
 
-ACTS_ABOVE = "acts above 100 % brightness"
+ACTS_ABOVE = "acts only above 100 % brightness"
 
 
 def test_black_floor_is_sent_in_tenths_and_reads_as_a_percent_once_kept(page, registry):
@@ -359,10 +360,12 @@ def test_black_floor_is_sent_in_tenths_and_reads_as_a_percent_once_kept(page, re
         open_frame(page, FRAME, "picture")
         bar = _bar(page)
         expect(bar.get_by_role("status")).to_have_text(PRESENTED)
-        expect(_row(page, PHOTO_WALL, "Black floor")).to_contain_text("0.0 % of white · 0.0 % changes nothing")
+        expect(_row(page, PHOTO_WALL, "Black floor")).to_contain_text("0.0 % changes nothing")
+        floor = _slider(page, PHOTO_WALL, "Black floor")
+        expect(floor).to_have_accessible_description(re.compile("share of white light"))
         software = _edits(page, "software-edits")
-        _slider(page, PHOTO_WALL, "Black floor").fill("2")
-        expect(_row(page, PHOTO_WALL, "Black floor")).to_contain_text("2.0 % of white")
+        floor.fill("2")
+        expect(floor).to_have_attribute("aria-valuetext", "2.0 %")
         expect(bar.get_by_role("status")).to_have_text(PRESENTED)
         page.wait_for_timeout(600)
         assert [(body["setting"], body["value"]) for _at, body in software] == [("black-floor", 20)], software
@@ -381,7 +384,7 @@ def test_black_floor_is_sent_in_tenths_and_reads_as_a_percent_once_kept(page, re
         page.reload()
         open_frame(page, FRAME, "picture")
         expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
-        expect(_row(page, PHOTO_WALL, "Black floor")).to_contain_text("2.0 % of white")
+        expect(_slider(page, PHOTO_WALL, "Black floor")).to_have_attribute("aria-valuetext", "2.0 %")
 
 
 def test_saturation_drags_at_most_two_edits_a_second_and_revert_puts_back_the_stored_values(page, registry):
@@ -421,11 +424,12 @@ def test_saturation_drags_at_most_two_edits_a_second_and_revert_puts_back_the_st
         assert (stored["software_saturation_percent"], stored["software_highlight_rolloff_percent"]) == (100, 30)
 
 
-def test_soft_highlights_says_where_it_acts_only_while_nothing_passes_white(page, registry):
-    """Soft highlights acts only above 100 % brightness (or saturation): at 100 % both, its row says
-    so; with Photo Wall brightness at 120 % it does not.
+def test_soft_highlights_states_where_it_acts_and_decides_nothing(page, registry):
+    """Soft highlights acts only above 100 % brightness, the Pi's rule (player/geometry.py
+    `rolloff_skipped`): its row states the condition whatever the values, so the console keeps no
+    second copy of the rule that could disagree with the Pi. The notes never repeat a slider's value.
 
-    Mutation: show the words always -> the second assertion fails."""
+    Mutation: hide the words at brightness 120 % -> the second assertion fails."""
     _seen(registry)
     with FakePi(registry), operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall")
@@ -433,8 +437,9 @@ def test_soft_highlights_says_where_it_acts_only_while_nothing_passes_white(page
         expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
         expect(_row(page, PHOTO_WALL, "Soft highlights")).to_contain_text(ACTS_ABOVE)
         _slider(page, PHOTO_WALL, "Brightness").fill("120")
-        expect(_row(page, PHOTO_WALL, "Soft highlights")).not_to_contain_text(ACTS_ABOVE)
-        expect(_row(page, PHOTO_WALL, "Saturation")).to_contain_text("100 % · 100 % changes nothing")
+        expect(_row(page, PHOTO_WALL, "Soft highlights")).to_contain_text(ACTS_ABOVE)
+        expect(_row(page, PHOTO_WALL, "Saturation")).to_contain_text("100 % changes nothing")
+        expect(_row(page, PHOTO_WALL, "Saturation")).not_to_contain_text("100 % · 100 %")
 
 
 def test_the_lut_picker_sends_the_profiles_digest_and_done_waits_until_the_pi_shows_it(page, registry):
@@ -476,6 +481,23 @@ def test_the_lut_picker_sends_the_profiles_digest_and_done_waits_until_the_pi_sh
         expect(_picture_tab(page).get_by_role("status").filter(has_text="Saved at")).to_be_visible()
         assert _display(registry)["software_lut_profile"] == paper.profile_sha256
         expect(picker).to_have_value(paper.profile_sha256)
+
+
+def test_an_empty_lut_list_says_what_a_lut_is_and_leads_to_settings_luts(page, registry):
+    """The LUT picker with no LUT on the list is not a dead end: its help says what a LUT is, and a
+    link leads to the list's home, Settings › LUTs (design language P1, the empty state).
+
+    Mutation: drop the link -> it is not found."""
+    _seen(registry)
+    with FakePi(registry), operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "wall")
+        open_frame(page, FRAME, "picture")
+        expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
+        picker = _group(page, PHOTO_WALL).get_by_role("combobox", name="LUT", exact=True)
+        expect(picker).to_have_accessible_description(re.compile("Makes photos look printed on one paper"))
+        expect(_group(page, PHOTO_WALL)).to_contain_text("No LUTs on the list yet")
+        _group(page, PHOTO_WALL).get_by_role("link", name="Add a paper profile in Settings › LUTs").click()
+        expect(page).to_have_url(re.compile(r"#/luts$"))
 
 
 def _positions(registry):

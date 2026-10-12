@@ -5,8 +5,10 @@ import { copyPicture } from "../pictureApi.js";
 import type { HardwareSettingView, PictureCopyResult, SoftwareSetting } from "../pictureApi.js";
 import type { usePictureSession } from "../pictureSession.js";
 import { FactGroup, FactRow, Note } from "../patterns/fact-row";
+import { OwnerLinks } from "../patterns/link-to-owner";
 import { LivePreviewEditor } from "../patterns/live-preview-editor";
 import { ProblemCard } from "../patterns/problem-card";
+import { formatRoute } from "../routes.js";
 import { timeOfDay } from "../timeWords.js";
 import { Button } from "../ui/button";
 import { Disclosure } from "../ui/disclosure";
@@ -39,10 +41,16 @@ const AS_IT_HAS_IT = "As the display has it";
 const NOT_CONNECTED = "Applies when the display is connected";
 const NO_CHANGE = "100 % changes nothing";
 const ZERO_NO_CHANGE = "0 % changes nothing";
-const ACTS_ABOVE_100 = "acts above 100 % brightness";
+// Where Soft highlights can act: the Pi's rule (player/geometry.py `rolloff_skipped`) is brightness
+// above 100 %, so the row states the condition and never decides it.
+const ACTS_ABOVE_100 = "acts only above 100 % brightness";
+const BLACK_FLOOR_HELP = "How light black is, as a share of white light";
+const ZERO_TENTHS_NO_CHANGE = "0.0 % changes nothing";
 // The LUT picker's "None" (a choice's own value is its paper profile's digest).
 const NO_LUT = "none";
+const LUT_HELP = "Makes photos look printed on one paper";
 const NO_LUTS = "No LUTs on the list yet";
+const ADD_A_LUT = "Add a paper profile in Settings › LUTs";
 const LUT_WAITS = "The sliders show at once; the LUT joins when the Pi has it, and Done waits for it";
 const CHECKING = "Checking what this display offers…";
 const CHECKED_WHEN_CONNECTED = "Photo Wall checks what this display offers when it is connected";
@@ -179,12 +187,6 @@ function DisplaySettings({ view, session, ready }: { view: View; session: Pictur
   );
 }
 
-/** Whether Soft highlights acts: only where Photo Wall can push a value past white, its brightness
- * or saturation above 100 % (design "Highlight rolloff, defined for SDR"; the Pi skips it otherwise). */
-export function softHighlightsAct(brightnessPercent: number, saturationPercent: number): boolean {
-  return brightnessPercent > 100 || saturationPercent > 100;
-}
-
 /** Black floor's words: tenths of a percent of white light as a percent with one decimal ("2.0 %"). */
 export function blackFloorWords(tenths: number): string {
   return `${(tenths / 10).toFixed(1)} %`;
@@ -214,12 +216,13 @@ export function LutSettings({ view, session, ready }: { view: View; session: Pic
   const send = (next: number) => session.changeSoftware("lut-amount", next);
   return (
     <Stack>
-      <Field label="LUT" notes={notes}>
-        <Select value={lut ?? NO_LUT} options={options} disabled={!ready}
+      <Field label="LUT" help={LUT_HELP} notes={notes}>
+        <Select value={lut ?? NO_LUT} options={options} disabled={!ready} width="fit"
           onChange={(next) => session.changeLut(next === NO_LUT ? null : next)} />
       </Field>
+      {options.length === 1 && <OwnerLinks links={[{ text: ADD_A_LUT, href: formatRoute({ section: "luts" }) }]} />}
       {lut !== null && (
-        <Field label="LUT amount" notes={[`${amount} % · 0 % changes nothing`]}>
+        <Field label="LUT amount" notes={[ZERO_NO_CHANGE]}>
           <Slider min={0} max={100} step={1} unit="%" value={amount} disabled={!ready} onPreview={send} onCommit={send} />
         </Field>
       )}
@@ -229,15 +232,17 @@ export function LutSettings({ view, session, ready }: { view: View; session: Pic
 
 /** Photo Wall (software): brightness and contrast 0–150 % (100 % changes nothing), colour
  * temperature and gamma, then the print look (design R2, R3, R4): saturation 0–150 % (100 % changes
- * nothing), soft highlights 0–100 % (acts above 100 % brightness), the black floor, 0.0–10.0 % of
- * white in 0.1 steps, sent as tenths, and the LUT: None or one on the LUTs list, with its amount
- * 0–100 % shown only with a LUT. A LUT the Pi has not fetched yet leaves the sliders showing at once;
- * Done waits for it. The picture Photo Wall sends, never the display's own brightness. */
+ * nothing), soft highlights 0–100 % (acts only above 100 % brightness, the Pi's rule, stated and
+ * never decided here), the black floor, 0.0–10.0 % of white in 0.1 steps, sent as tenths, and the
+ * LUT: None or one on the LUTs list, with its amount 0–100 % shown only with a LUT. A LUT the Pi has
+ * not fetched yet leaves the sliders showing at once; Done waits for it. Each slider shows its own
+ * value; the notes say only what changes nothing and where a setting acts. The picture Photo Wall
+ * sends, never the display's own brightness. */
 export function PhotoWallSettings({ view, session, ready }: { view: View; session: PictureSession; ready: boolean }) {
   const { software } = session.draft;
   const send = (setting: SoftwareSetting) => (next: number) => session.changeSoftware(setting, next);
   const percent = (setting: SoftwareSetting, label: string, value: number, max: number, notes: string[]) => (
-    <Field label={label} notes={[[`${value} %`, ...notes].join(" · ")]}>
+    <Field label={label} notes={notes}>
       <Slider min={0} max={max} step={1} unit="%" value={value} disabled={!ready}
         onPreview={send(setting)} onCommit={send(setting)} />
     </Field>
@@ -255,19 +260,19 @@ export function PhotoWallSettings({ view, session, ready }: { view: View; sessio
       <Stack>
         {percent("brightness", "Brightness", brightness, 150, [NO_CHANGE])}
         {percent("contrast", "Contrast", contrast, 150, [NO_CHANGE])}
-        <Field label="Colour temperature" notes={[`${kelvin} K`]}>
+        <Field label="Colour temperature">
           <Slider min={3000} max={9300} step={100} unit="K" disabled={!ready} value={kelvin}
             onPreview={send("colour-temperature")} onCommit={send("colour-temperature")} />
         </Field>
-        <Field label="Gamma" notes={[(gamma / 10).toFixed(1)]}>
+        <Field label="Gamma">
           <Slider min={1.8} max={2.6} step={0.1} unit="" disabled={!ready} value={gamma / 10}
+            format={(shown) => shown.toFixed(1)}
             onPreview={(next) => session.changeSoftware("gamma", Math.round(next * 10))}
             onCommit={(next) => session.changeSoftware("gamma", Math.round(next * 10))} />
         </Field>
         {percent("saturation", "Saturation", saturation, 150, [NO_CHANGE])}
-        {percent("highlight-rolloff", "Soft highlights", rolloff, 100,
-          [ZERO_NO_CHANGE, ...(softHighlightsAct(brightness, saturation) ? [] : [ACTS_ABOVE_100])])}
-        <Field label="Black floor" notes={[`${blackFloorWords(floor)} of white · 0.0 % changes nothing`]}>
+        {percent("highlight-rolloff", "Soft highlights", rolloff, 100, [ZERO_NO_CHANGE, ACTS_ABOVE_100])}
+        <Field label="Black floor" help={BLACK_FLOOR_HELP} notes={[ZERO_TENTHS_NO_CHANGE]}>
           <Slider min={0} max={10} step={0.1} unit="" disabled={!ready} value={floor / 10}
             format={(shown) => blackFloorWords(Math.round(shown * 10))} onPreview={tenths} onCommit={tenths} />
         </Field>

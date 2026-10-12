@@ -200,8 +200,6 @@ export function FramePosition({ adjustment, size: reported, piHref, readiness, w
           </Inline>
         )}
         {whatFits}
-        <FrameMat mat={adjustment.draft.mat} onChange={adjustment.changeMat}
-          disabled={adjustment.busy || adjustment.phase === "stopped"} />
         <Disclosure summary="Exact values">
           <Note>{`Corners, in pixels of the ${pixelSize(size.width, size.height)} display`}</Note>
           <Inline>
@@ -218,6 +216,9 @@ export function FramePosition({ adjustment, size: reported, piHref, readiness, w
             ))}
           </Inline>
         </Disclosure>
+        {/* The mat after the corners and their exact values: its own concern, the same session's Done and Revert. */}
+        <FrameMat mat={adjustment.draft.mat} onChange={adjustment.changeMat}
+          disabled={adjustment.busy || adjustment.phase === "stopped"} />
       </LiveAdjustment>
     </Section>
   );

@@ -3,7 +3,9 @@
 The built catalog (central/console/storybook-static) is served from a loopback listener and its
 index.json lists the stories, so a new story is covered with no edit here. Each story in each
 scheme must (a) render with no console error, page error or Storybook error overlay, (b) pass
-axe-core, and (c) match its baseline screenshot in tests/browser/catalog-baselines.
+axe-core, and (c) match its baseline screenshot in tests/browser/catalog-baselines: the 800 x 600
+view, or the whole page for a story tagged "full-page" (one taller than the view whose state is
+below its fold).
 
 Baselines render differently per platform, so they are made, and checked in CI, only in the
 pinned Playwright container: `python3 scripts/catalog_baselines.py` rewrites them there
@@ -85,6 +87,16 @@ def stories():
     return sorted(e["id"] for e in build_catalog().values() if e["type"] == "story")
 
 
+FULL_PAGE_TAG = "full-page"
+
+
+@functools.cache
+def full_page() -> frozenset[str]:
+    """The stories screenshot whole: tagged FULL_PAGE_TAG in their story file."""
+    return frozenset(e["id"] for e in build_catalog().values()
+                     if e["type"] == "story" and FULL_PAGE_TAG in e.get("tags", ()))
+
+
 @pytest.fixture(scope="session")
 def catalog_origin():
     handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(CATALOG))
@@ -131,7 +143,8 @@ def test_story_renders_clean_passes_axe_and_matches_its_baseline(
         "nodes: v.nodes.map(n => n.target.join(' '))})))", AXE_OPTIONS)
     assert not violations, json.dumps(violations, indent=2)
 
-    shot = Image.open(io.BytesIO(page.screenshot(animations="disabled", caret="hide")))
+    shot = Image.open(io.BytesIO(page.screenshot(animations="disabled", caret="hide",
+                                                 full_page=story in full_page())))
     baseline = BASELINES / f"{story}.{scheme}.png"
     if UPDATE:
         BASELINES.mkdir(exist_ok=True)

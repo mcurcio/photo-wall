@@ -5833,3 +5833,22 @@ Order: (a) merge the iac PR that switches the factory to `central.app:create_app
   moved to central/infra/lut_rows.py so display_store and lut_store do not import each other.
 - **A capped request body has one home**, central/request_body.py `capped_body`, used by the Node's
   control routes and the paper profile's upload.
+- **Soft highlights' note states the Pi's rule and decides nothing:** "acts only above 100 %
+  brightness" always shows; the console's `softHighlightsAct` copy is gone. With M = brightness the
+  rule is exactly that condition, so no Central view field was added.
+- **The LUT picker's empty state links to Settings › LUTs** (`LinkToOwner` "Add a paper profile in
+  Settings › LUTs"), its field says "Makes photos look printed on one paper", and `Select` gained
+  `width="fit"` (a primitive parameter, no consumer branch) so long paper names show whole.
+- **Notes no longer repeat a slider's value** on the Photo Wall (software) rows (the slider shows
+  it); colour temperature and gamma carry no note; black floor's help says it is a share of white.
+- **The Mat sits after the corners' exact values** on Position, inside the same live editor.
+- **Catalogue stories taller than 800 x 600 are screenshot whole** when tagged `full-page`
+  (FrameMat OneLight, Window, Full, Disabled; FramePosition WithMat), so their baselines hold the
+  state they exist to show. Baselines regenerated with scripts/catalog_baselines.py (linux/amd64);
+  48 unrelated baselines it rewrote byte-wise but with 0 % differing pixels were put back.
+- **Applied to their homes:** the LUTs list's read-on-open (not push) is an exception written in
+  design-language "Live updates" and its `LutsSettings` row; a mat's depth in millimetres is a row
+  in design-language §7 Units. The console's slider ranges are pinned to the contracts by
+  tests/test_console_print_look_ranges.py.
+- **Left for the owner:** "Soft highlights" (UI) vs "Highlight rolloff" (approved design, code) is a
+  rename he has not confirmed; a clock-face picker and direction markers for lights are not built.

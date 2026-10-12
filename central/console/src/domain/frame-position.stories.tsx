@@ -48,8 +48,10 @@ export const CoverTurned: Story = {
 export const Corners: Story = {
   args: { adjustment: { ...ADJUSTMENT, draft: { fit: { mode: "corners", corners: OPENING, rotation: 90 }, mat: NO_MAT } } },
 };
-/** A mat 2.0 mm deep with a cool light from the right and a warm one from the top, a change the Pi has shown. */
+/** A mat 2.0 mm deep with a cool light from the right and a warm one from the top, a change the Pi
+ * has shown; screenshot whole (tag "full-page"), since the Mat sits below the corners' exact values. */
 export const WithMat: Story = {
+  tags: ["full-page"],
   args: {
     adjustment: {
       ...ADJUSTMENT, dirty: true, latest: 2, ack: { revision: 2, at: 1_791_000_000 },
