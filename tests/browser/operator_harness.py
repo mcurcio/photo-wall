@@ -32,6 +32,16 @@ GRACE_SECONDS = 2
 # Readiness sequences only ever rise, as a live Player's do (player/executor.py).
 _SEQUENCE = itertools.count(1)
 
+# How long the test server keeps an idle connection open: longer than any one server's life
+# (one `with operator_server(...)` block), so it never closes one under a test. uvicorn's
+# default is 5 s, the console's poll cadence, and a route handler's `route.fetch()` reuses an
+# idle connection: a poll that lands as the server closes it fails in Playwright with "socket
+# hang up" (ECONNRESET on Linux), where a browser would retry the request. The handler then
+# raises, its route is never answered and the page's single-flight read waits forever (main
+# red after PR 87: the Player page never saw a late reboot response). Production keeps the
+# default: there the browser itself talks to Central.
+_IDLE_CONNECTION_SECONDS = 600
+
 
 @contextmanager
 def operator_server(db, clock, *, cache_root=None, media_queue=None, admin_token=ADMIN,
@@ -49,7 +59,9 @@ def operator_server(db, clock, *, cache_root=None, media_queue=None, admin_token
     # close (uvicorn accepts it in a task that runs after it closes the others), and the
     # console's polls reuse it inside the keep-alive window, so uvicorn would wait for it
     # without end. The grace period bounds that wait; requests in flight finish well inside it.
+    # Idle connections stay open for the server's whole life (_IDLE_CONNECTION_SECONDS).
     server = uvicorn.Server(uvicorn.Config(app, log_level="warning", access_log=False,
+                                           timeout_keep_alive=_IDLE_CONNECTION_SECONDS,
                                            timeout_graceful_shutdown=GRACE_SECONDS))
     thread = threading.Thread(target=lambda: server.run(sockets=[listener]), daemon=True)
     thread.start()
