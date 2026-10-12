@@ -5700,3 +5700,20 @@ Order: (a) merge the iac PR that switches the factory to `central.app:create_app
 - **A LUT's `used_by` names a Display by its EDID name, else "<maker> <product>"**, and counts a
   Display whose live picture session's draft chooses it (the lease on PostgreSQL's clock, as the
   session reads it), the same rule Remove refuses by.
+
+## print-look console lane (implementer, 2026-10-12)
+
+- **U3's owned paths cannot land the Settings › LUTs section green:** a new section must be in
+  `central/console/src/routes.js` `SECTIONS` (and its `Section` typedef), or `#/luts` does not parse
+  and `tests/test_console_routes_r4.py::test_routes_parse_format_and_round_trip` fails on the new
+  sample; `test_every_section_is_in_exactly_one_route_table` lists every section by name; and a
+  page that imports its routes module (`lutsApi.js`, as `house-settings-page.tsx` imports
+  `houseApi.js`) must be declared in that test's `DECLARED_IMPORTS`. Neither file is in U3's list.
+  The slice is built with those three one-line additions and saved to `wip/print-look-console`,
+  not landed; landing needs `routes.js` and `tests/test_console_routes_r4.py` added to U3's paths.
+- **Mat depth reads in millimetres** (design `Mat.depthMm`, 0..20 in 0.5), where design-language §7
+  "Units" says lengths are in the house's units (cm or in). Built as the design says ("2.5 mm");
+  D1's console design rows should state the exception or the rule should change.
+- **The catalogue's 800 × 600 screenshot ends above the Picture tab's Photo Wall section**, so the
+  print look rows have their own stories (`PhotoWallSettings`, exported from
+  domain/frame-picture.tsx); the whole-tab stories' baselines cannot show them.
