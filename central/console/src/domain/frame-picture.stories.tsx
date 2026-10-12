@@ -1,6 +1,6 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
 
-import { FramePicture, PhotoWallSettings, type PictureSession } from "./frame-picture";
+import { FramePicture, LutSettings, PhotoWallSettings, type PictureSession } from "./frame-picture";
 
 type View = NonNullable<PictureSession["view"]>;
 type Row = View["hardware"][number];
@@ -44,13 +44,21 @@ const VIEW: View = {
   session: { session_id: "5b7f0c1e-2d4a-4f6b-9c8e-1a2b3c4d5e6f", sequence: 1, idle_until: 1_791_000_005 },
 };
 
+// Two paper profiles on the LUTs list.
+const LUTS = [
+  { profile_sha256: "a".repeat(64), name: "Hahnemühle Photo Rag 308 (matte)" },
+  { profile_sha256: "b".repeat(64), name: "Canson Baryta Photographique II" },
+];
+
 const SESSION: PictureSession = {
   view: VIEW,
   phase: "shown",
-  draft: { hardware: {}, software: {} },
+  draft: { hardware: {}, software: {}, lut: {} },
   dirty: false,
   changeHardware: () => {},
   changeSoftware: () => {},
+  changeLut: () => {},
+  luts: [],
   done: async () => true,
   revert: async () => {},
   busy: false,
@@ -75,13 +83,13 @@ type Story = StoryObj<typeof meta>;
 export const Shown: Story = {};
 /** A display brightness change the Pi has not shown yet: Done waits. */
 export const Waiting: Story = {
-  args: { session: { ...SESSION, phase: "waiting", dirty: true, latest: 1, draft: { hardware: { "10": 75 }, software: {} } } },
+  args: { session: { ...SESSION, phase: "waiting", dirty: true, latest: 1, draft: { hardware: { "10": 75 }, software: {}, lut: {} } } },
 };
 /** The Pi showed the latest change: Done is offered. */
 export const ChangeShown: Story = {
   args: {
     session: {
-      ...SESSION, dirty: true, latest: 1, draft: { hardware: {}, software: { brightness: 130 } },
+      ...SESSION, dirty: true, latest: 1, draft: { hardware: {}, software: { brightness: 130 }, lut: {} },
       view: { ...VIEW, software: { ...VIEW.software, brightness_percent: 130 } },
     },
   },
@@ -140,7 +148,7 @@ export const Refused: Story = {
 };
 /** A list setting: its choices and "As the display has it", one being chosen in this visit. */
 export const Choices: Story = {
-  args: { session: { ...SESSION, phase: "waiting", dirty: true, latest: 1, draft: { hardware: { "14": 4 }, software: {} } } },
+  args: { session: { ...SESSION, phase: "waiting", dirty: true, latest: 1, draft: { hardware: { "14": 4 }, software: {}, lut: {} } } },
 };
 /** Settings the display answers but lists no choices for, or no longer offers: shown, no control. */
 export const ReadOnly: Story = {
@@ -171,7 +179,7 @@ export const PhotoWallSection: Story = {
 export const PhotoWallPrintLook: Story = {
   render: () => (
     <PhotoWallSettings view={VIEW} ready
-      session={{ ...SESSION, dirty: true, draft: { hardware: {}, software: { saturation: 85, "highlight-rolloff": 40, "black-floor": 20 } } }} />
+      session={{ ...SESSION, dirty: true, draft: { hardware: {}, software: { saturation: 85, "highlight-rolloff": 40, "black-floor": 20 }, lut: {} } }} />
   ),
 };
 /** Brightness and saturation at 100 % or below: nothing passes white, so soft highlights says where it acts. */
@@ -179,6 +187,29 @@ export const PhotoWallSoftHighlightsIdle: Story = {
   render: () => (
     <PhotoWallSettings view={{ ...VIEW, software: { ...VIEW.software, brightness_percent: 90, highlight_rolloff_percent: 30 } }}
       session={SESSION} ready />
+  ),
+};
+/** The LUT picker with no LUT chosen: None and each LUT on the list. */
+export const LutNone: Story = {
+  render: () => <LutSettings view={VIEW} session={{ ...SESSION, luts: LUTS }} ready />,
+};
+/** No LUT on the list yet: the picker offers None alone. */
+export const LutNoneListed: Story = {
+  render: () => <LutSettings view={VIEW} session={SESSION} ready />,
+};
+/** A LUT chosen in this visit that the Pi has not fetched yet: the sliders show alone, Done waits;
+ * its amount at 80 %. */
+export const LutWaiting: Story = {
+  render: () => (
+    <LutSettings view={VIEW} ready
+      session={{ ...SESSION, phase: "waiting", dirty: true, luts: LUTS,
+        draft: { hardware: {}, software: { "lut-amount": 80 }, lut: { lut: LUTS[0].profile_sha256 } } }} />
+  ),
+};
+/** A LUT in force and shown, at 100 %. */
+export const LutShown: Story = {
+  render: () => (
+    <LutSettings ready session={{ ...SESSION, luts: LUTS }} view={{ ...VIEW, software: { ...VIEW.software, lut: LUTS[1] } }} />
   ),
 };
 /** No session (the Pi is not connected, or someone else is adjusting): the values in force, nothing can change. */

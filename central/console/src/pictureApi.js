@@ -2,11 +2,12 @@ import { apiWrite } from "./apiWrite.js";
 
 /**
  * The Picture tab's read and writes (roadmap 1c's Live model; decision 0022, the picture split,
- * slices S2 and S5): the eight routes of central/display_routes.py `mount_picture_routes`, answered with the
+ * slices S2 and S5; the print look's LUT choice): the routes of central/display_routes.py
+ * `mount_picture_routes`, answered with the
  * shapes of central/displays/views.py (their one home). Each returns `{ok: true, …}` or
  * `{ok: false, error}`: a refusal answers its code (`unknown_frame`, `frame_unbound`, `no_display`,
  * `session_open`, `unknown_session`, `session_ended`, `stale_sequence`, `not_offered`,
- * `out_of_range`, `not_presented_yet`); a lost request answers `unreachable`.
+ * `out_of_range`, `not_presented_yet`, `unknown_lut`); a lost request answers `unreachable`.
  *
  * @typedef {string} VcpCode   An MCCS code, two upper-case hex digits ("10" brightness).
  * @typedef {"brightness"|"contrast"|"colour-temperature"|"gamma"|"saturation"|"highlight-rolloff"
@@ -100,6 +101,18 @@ export function editHardware(sessionId, edit) {
  */
 export function editSoftware(sessionId, edit) {
   return call("sequence", `${session(sessionId)}/software-edits`, { method: "POST", body: edit });
+}
+
+/**
+ * The LUT choice: a listed paper profile's digest, or null for no LUT (POST …/lut-edits). Refused
+ * `unknown_lut` for a profile no longer on the LUTs list.
+ *
+ * @param {string} sessionId
+ * @param {{profile_sha256: string|null, expected_sequence: number}} edit
+ * @returns {Promise<{ok: true, sequence: PictureSequence}|{ok: false, error: string}>}
+ */
+export function editLut(sessionId, edit) {
+  return call("sequence", `${session(sessionId)}/lut-edits`, { method: "POST", body: edit });
 }
 
 /**

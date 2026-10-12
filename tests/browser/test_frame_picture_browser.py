@@ -28,7 +28,9 @@ from operator_harness import operator_server
 from playwright.sync_api import expect
 from test_display_identity import NO_SERIAL, _bind, _frame, _report, _sql, enroll_pi
 from test_display_picture_settings import OFFERED, _picture, _picture_report
+from test_print_look_luts import _as_printer, _monitor, _reduced_gamut
 
+from central.infra.lut_store import PgLuts
 from contracts.node_picture import (
     Choice,
     HardwareRange,
@@ -423,6 +425,47 @@ def test_soft_highlights_says_where_it_acts_only_while_nothing_passes_white(page
         _slider(page, PHOTO_WALL, "Brightness").fill("120")
         expect(_row(page, PHOTO_WALL, "Soft highlights")).not_to_contain_text(ACTS_ABOVE)
         expect(_row(page, PHOTO_WALL, "Saturation")).to_contain_text("100 % · 100 % changes nothing")
+
+
+def test_the_lut_picker_sends_the_profiles_digest_and_done_waits_until_the_pi_shows_it(page, registry):
+    """Print look R3: the Photo Wall section lists None and each LUT on the list; choosing one sends
+    its paper profile's digest to lut-edits, LUT amount appears only with a LUT, the tab says it is
+    waiting for the Pi until the Pi presents it, and Done keeps it.
+
+    Mutation: send the LUT's name instead of its digest -> Central's 422, the choice is dropped."""
+    luts = PgLuts(registry.db, registry.clock)
+    paper, _ = luts.add_lut(_as_printer(_monitor()))
+    reduced, _ = luts.add_lut(_reduced_gamut())
+    # Both fixtures are LittleCMS's sRGB under its own name: the list orders by name, then digest.
+    listed = [lut.name for lut in sorted((paper, reduced), key=lambda lut: (lut.name, lut.profile_sha256))]
+    _seen(registry)
+    with FakePi(registry) as pi, operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "wall")
+        open_frame(page, FRAME, "picture")
+        bar = _bar(page)
+        expect(bar.get_by_role("status")).to_have_text(PRESENTED)
+        picker = _group(page, PHOTO_WALL).get_by_role("combobox", name="LUT", exact=True)
+        expect(picker.locator("option")).to_have_text(["None", *listed])
+        expect(picker).to_have_value("none")
+        expect(_slider(page, PHOTO_WALL, "LUT amount")).to_have_count(0)
+
+        sent = _edits(page, "lut-edits")
+        pi.presenting = False
+        picker.select_option(value=paper.profile_sha256)
+        expect(bar.get_by_role("status")).to_have_text(WAITING)
+        expect(_slider(page, PHOTO_WALL, "LUT amount")).to_have_value("100")
+        expect(_group(page, PHOTO_WALL)).to_contain_text("Done waits for it")
+        page.wait_for_timeout(1200)
+        expect(bar.get_by_role("button", name="Done", exact=True)).to_be_disabled()
+        assert [body["profile_sha256"] for _at, body in sent] == [paper.profile_sha256], sent
+        assert _off_thread(_picture, registry).software.lut.profile_sha256 == paper.profile_sha256
+
+        pi.presenting = True
+        expect(bar.get_by_role("status")).to_have_text(PRESENTED)
+        bar.get_by_role("button", name="Done", exact=True).click()
+        expect(_picture_tab(page).get_by_role("status").filter(has_text="Saved at")).to_be_visible()
+        assert _display(registry)["software_lut_profile"] == paper.profile_sha256
+        expect(picker).to_have_value(paper.profile_sha256)
 
 
 def _positions(registry):

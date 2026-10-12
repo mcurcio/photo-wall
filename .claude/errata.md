@@ -5717,3 +5717,10 @@ Order: (a) merge the iac PR that switches the factory to `central.app:create_app
 - **The catalogue's 800 × 600 screenshot ends above the Picture tab's Photo Wall section**, so the
   print look rows have their own stories (`PhotoWallSettings`, exported from
   domain/frame-picture.tsx); the whole-tab stories' baselines cannot show them.
+- **Correction to the first bullet above:** the Settings › LUTs half of U3 was not built and nothing
+  went to `wip/print-look-console`. U3's LUT picker (and its amount) landed alone, in U3's paths,
+  with a read-only `lutsApi.js` (`listLuts`). The Settings half needs, besides `routes.js` and
+  `tests/test_console_routes_r4.py`: a body that is not JSON (`apiWrite.js` JSON-encodes every body,
+  so `addLut`'s `application/vnd.iccprofile` upload needs an `apiWrite` option, not a second fetch
+  path) and a file chooser primitive in `src/ui` with its stories (S2: a page writes no className,
+  so it cannot hide a native file input), plus its design-language §4 row.

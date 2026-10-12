@@ -40,6 +40,10 @@ const NOT_CONNECTED = "Applies when the display is connected";
 const NO_CHANGE = "100 % changes nothing";
 const ZERO_NO_CHANGE = "0 % changes nothing";
 const ACTS_ABOVE_100 = "acts above 100 % brightness";
+// The LUT picker's "None" (a choice's own value is its paper profile's digest).
+const NO_LUT = "none";
+const NO_LUTS = "No LUTs on the list yet";
+const LUT_WAITS = "The sliders show at once; the LUT joins when the Pi has it, and Done waits for it";
 const CHECKING = "Checking what this display offers…";
 const CHECKED_WHEN_CONNECTED = "Photo Wall checks what this display offers when it is connected";
 const NOT_OFFERED = "Not offered by this display at its last check";
@@ -186,10 +190,49 @@ export function blackFloorWords(tenths: number): string {
   return `${(tenths / 10).toFixed(1)} %`;
 }
 
+/** The LUT picker's choices: None, each LUT on the list, and the one in force if the list (not read
+ * yet, or changed since) lacks it. */
+export function lutOptions(luts: readonly { profile_sha256: string; name: string }[] | null,
+  inForce: { profile_sha256: string; name: string } | null): { value: string; label: string }[] {
+  const listed = luts ?? [];
+  const extra = inForce !== null && !listed.some((lut) => lut.profile_sha256 === inForce.profile_sha256) ? [inForce] : [];
+  return [{ value: NO_LUT, label: "None" },
+    ...[...listed, ...extra].map((lut) => ({ value: lut.profile_sha256, label: lut.name }))];
+}
+
+/** The LUT (print look R3): None or one on the LUTs list, with its amount 0–100 % only with a LUT.
+ * A LUT the Pi has not fetched yet leaves the sliders showing at once; Done waits for it. */
+export function LutSettings({ view, session, ready }: { view: View; session: PictureSession; ready: boolean }) {
+  const lutDraft = session.draft.lut;
+  const lut = "lut" in lutDraft ? lutDraft.lut ?? null : view.software.lut?.profile_sha256 ?? null;
+  const amount = session.draft.software["lut-amount"] ?? view.software.lut_amount_percent;
+  const options = lutOptions(session.luts, view.software.lut);
+  const notes = [
+    ...(options.length === 1 ? [NO_LUTS] : []),
+    ...("lut" in lutDraft && lutDraft.lut != null && session.phase === "waiting" ? [LUT_WAITS] : []),
+  ];
+  const send = (next: number) => session.changeSoftware("lut-amount", next);
+  return (
+    <Stack>
+      <Field label="LUT" notes={notes}>
+        <Select value={lut ?? NO_LUT} options={options} disabled={!ready}
+          onChange={(next) => session.changeLut(next === NO_LUT ? null : next)} />
+      </Field>
+      {lut !== null && (
+        <Field label="LUT amount" notes={[`${amount} % · 0 % changes nothing`]}>
+          <Slider min={0} max={100} step={1} unit="%" value={amount} disabled={!ready} onPreview={send} onCommit={send} />
+        </Field>
+      )}
+    </Stack>
+  );
+}
+
 /** Photo Wall (software): brightness and contrast 0–150 % (100 % changes nothing), colour
- * temperature and gamma, then the print look (design R2, R4): saturation 0–150 % (100 % changes
- * nothing), soft highlights 0–100 % (acts above 100 % brightness) and the black floor, 0.0–10.0 % of
- * white in 0.1 steps, sent as tenths. The picture Photo Wall sends, never the display's own brightness. */
+ * temperature and gamma, then the print look (design R2, R3, R4): saturation 0–150 % (100 % changes
+ * nothing), soft highlights 0–100 % (acts above 100 % brightness), the black floor, 0.0–10.0 % of
+ * white in 0.1 steps, sent as tenths, and the LUT: None or one on the LUTs list, with its amount
+ * 0–100 % shown only with a LUT. A LUT the Pi has not fetched yet leaves the sliders showing at once;
+ * Done waits for it. The picture Photo Wall sends, never the display's own brightness. */
 export function PhotoWallSettings({ view, session, ready }: { view: View; session: PictureSession; ready: boolean }) {
   const { software } = session.draft;
   const send = (setting: SoftwareSetting) => (next: number) => session.changeSoftware(setting, next);
@@ -228,6 +271,7 @@ export function PhotoWallSettings({ view, session, ready }: { view: View; sessio
           <Slider min={0} max={10} step={0.1} unit="" disabled={!ready} value={floor / 10}
             format={(shown) => blackFloorWords(Math.round(shown * 10))} onPreview={tenths} onCommit={tenths} />
         </Field>
+        <LutSettings view={view} session={session} ready={ready} />
       </Stack>
     </FactGroup>
   );
