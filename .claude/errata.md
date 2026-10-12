@@ -5724,3 +5724,27 @@ Order: (a) merge the iac PR that switches the factory to `central.app:create_app
   so `addLut`'s `application/vnd.iccprofile` upload needs an `apiWrite` option, not a second fetch
   path) and a file chooser primitive in `src/ui` with its stories (S2: a page writes no className,
   so it cannot hide a native file input), plus its design-language §4 row.
+
+## print-look docs lane, slice D1 (implementer, 2026-10-12)
+
+- **The final pass's order had its home in docs/architecture.md › Player and rendering (line 125),
+  which D1 does not own:** it still states the v4 order (white balance, light factor, clamp, encode,
+  contrast, gamma, clamp, mask), now wrong (the rolloff replaces the first clamp; the LUT,
+  saturation, floor and mat shadow are missing). D1 made 0023 the one home of the order and
+  player-architecture.md links to it; architecture.md's sentence should become a link to 0023
+  (and `player/geometry.py` `final_pixel`). docs/execution-contract.md line 48 ("Photo Wall's four
+  (brightness, contrast, colour temperature and gamma)") and .claude/skills/display-control/SKILL.md
+  line 123 ("Photo Wall's four") are stale the same way; neither is in D1's paths.
+- **Settings › LUTs is not built** (console lane's errata above), so D1 documents it as not built:
+  catalogue #153 says so, design-language §4 lists `LutsSettings` under Later patterns with what it
+  needs, and §8's row names it; the runbook gives the `curl` upload against `/v1/operator/luts`.
+- **The roadmap's Developed column names a merged pull request; feat/print-look has none yet:**
+  the 1c row says "its pull request not opened yet". Whoever opens the PR replaces that with its
+  link.
+- **Mat depth in millimetres** (console lane's finding): stated as an exception to design-language
+  §7's house units in catalogue #151 and in `FrameMat`'s row, not a rule change.
+- **The acceptance probe "remove the 0023 link from 0022 -> check_docs flags it" does not hold:**
+  scripts/check_docs.py checks only that relative links resolve, so removing a link passes (exit 0,
+  run); a broken one fails (exit 1, run). Only review catches a removed link.
+- **design-decisions.md's index lists only 0001-0005**; later records are named in the D rows, so
+  0023 joined D12 beside 0022.

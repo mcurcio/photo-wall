@@ -1012,7 +1012,7 @@ Roadmap 1b: each Pi reports the display on each HDMI port, Central recognises it
 | Output report (connected, EDID identity and modes, methods that answered, what is in force, last result) | the Pi's display controller | the worker's report judge | `node_link_records` (every report), `displays`, `shared_serials`, `output_displays` (the Display last seen per port) |
 | Power attempt (`display.record.power`) | the Pi's display controller | recorded only | `node_link_records` |
 | Output document (the power timetable with the test on top, method, switches) | the worker, from Displays, bindings, Night off, holds and `power_requests` (the test) | the Pi's display controller | `output_documents` (the latest per port) |
-| Picture document (`picture-HDMI-A-1`, …: the hardware values set in Photo Wall by code, the four software values, `picture_change`) | the worker, from the Display recorded on the port and its open picture session | the Pi's display controller | `picture_documents` (the latest per port; `picture_change` rises only when the picture differs) |
+| Picture document (`picture-HDMI-A-1`, …: the hardware values set in Photo Wall by code, every software value (the print look's included, [0023](decisions/0023-print-look.md)), `picture_change`) | the worker, from the Display recorded on the port and its open picture session | the Pi's display controller | `picture_documents` (the latest per port; `picture_change` rises only when the picture differs) |
 | Picture report (`picture-HDMI-A-1`, …: what the display offers from the picture list, each write's result for `for_change`, the Player's `presented_change`) | the Pi's display controller | the worker's report judge | `picture_reports` (the latest per port; a report whose list is not known yet keeps the known list of the same display) |
 
 **Readiness.** Nothing stores whether a Frame is ready: `frames.position_generation` and `frames.position_display_id` record each Position commit, and readiness is worked out when read (`unbound`, `display-changed`, `position-needed`, `ready`; `central/displays/model.py`). Migration 073 dropped `frames.calibration_valid`, marking every Frame that was ready as committed at its current generation; at the first report each Frame adopts the display on its port. **Rolling Central back past 073 is not supported:** the previous build reads `calibration_valid`, which no longer exists, and no reverse SQL is kept.
@@ -1030,9 +1030,41 @@ Roadmap 1b: each Pi reports the display on each HDMI port, Central recognises it
 
 **On the Pi.** The display controller (`photo-wall-display-controller.service`) runs the display session and the power methods. Read it with `sudo journalctl -b --no-pager -u photo-wall-display-controller.service` ([Reaching a Node over SSH](#reaching-a-node-over-ssh)). Its device access: `DevicePolicy=closed` with `DeviceAllow=char-cec rw` and `DeviceAllow=char-i2c rw`, the `video` group for `/dev/cecN` and the `i2c` group for `/dev/i2c-N` (declared by `debian/photo-wall-node.sysusers`; [gap G15](player-architecture.md#observed-gaps)). `id pw-display` does not list them: the groups are the unit's own, so check the running process with `grep Groups /proc/$(systemctl show -p MainPID --value photo-wall-display-controller.service)/status`. The base loads `i2c-dev` at boot (`/etc/modules-load.d/photo-wall-ddc.conf`); `ls /dev/i2c-*` shows `/dev/i2c-13` and `/dev/i2c-14` on a Pi 5 when it did.
 
-**Picture.** The Picture tab reads `GET /v1/operator/frames/{id}/picture`: the status (`no-display`, `waiting`, `shown`), whether the display's list is known (`offered_known`), one row per hardware setting (offered, the value in force, the last write's result) and the software values. A session posts each change to `…/picture-sessions/{session_id}/hardware-edits` (`code`, `value`, `null` to hand it back) or `…/software-edits`; Done is refused (`not_presented_yet`) until the Pi reports the latest picture change written and presented. To see what a display answered, read `picture_reports.report->'offered'` for its Pi and port. "Checking what this display offers" that never clears means the Pi has not finished asking: the display gives no EDID identity, or a batch keeps timing out (read the controller's journal); the Photo Wall (software) section works meanwhile.
+**Picture.** The Picture tab reads `GET /v1/operator/frames/{id}/picture`: the status (`no-display`, `waiting`, `shown`), whether the display's list is known (`offered_known`), one row per hardware setting (offered, the value in force, the last write's result) and the software values. A session posts each change to `…/picture-sessions/{session_id}/hardware-edits` (`code`, `value`, `null` to hand it back) or `…/software-edits` (`setting`: `brightness`, `contrast`, `colour-temperature`, `gamma`, `saturation`, `highlight-rolloff`, `black-floor`, `lut-amount`), the LUT choice to `…/lut-edits` (`unknown_lut` for one not on the LUTs list); Done is refused (`not_presented_yet`) until the Pi reports the latest picture change written and presented. To see what a display answered, read `picture_reports.report->'offered'` for its Pi and port. "Checking what this display offers" that never clears means the Pi has not finished asking: the display gives no EDID identity, or a batch keeps timing out (read the controller's journal); the Photo Wall (software) section works meanwhile.
 
 **Not built:** setting the HDMI mode and the smart plug ([roadmap 1b](roadmap.md#1b-display-identity-and-power)); Night off, All off and holds came with 2a ([below](#night-off-and-the-week)). The bench check (Test off and on against the test Pi's monitor) waits for a deployed release.
+
+## LUTs: paper profiles
+
+The print look's LUT ([0023](decisions/0023-print-look.md)) is made from a **paper profile**: the free ICC file a paper maker publishes for each paper and printer (search the maker's site for "ICC profiles", for example Hahnemühle, Canson or Ilford, and take the profile for your paper on any printer; the printer matters little here). Central keeps the profile (`luts`, migration 093) and bakes the LUT from it whenever a Player asks, so there is nothing else to keep or back up.
+
+**Add one.** The console has no Settings › LUTs page yet; add a profile through the operator route, then choose it on a Frame's Picture tab (Photo Wall (software) › LUT):
+
+```sh
+curl --fail-with-body -X POST -H 'Authorization: Bearer <admin-token>' \
+  --data-binary @'Hahnemuhle Photo Rag.icc' http://<central>/v1/operator/luts
+curl -H 'Authorization: Bearer <admin-token>' http://<central>/v1/operator/luts     # the list, with each LUT's Displays
+curl -X DELETE -H 'Authorization: Bearer <admin-token>' http://<central>/v1/operator/luts/<profile sha256>
+```
+
+Add answers 201 with the LUT (its name is the profile's own description), or 200 when the same file is already listed.
+
+| Refusal | Means | What to do |
+|---|---|---|
+| 413 `too_large` | The file is over 8 MiB | A paper profile is a few hundred KB: check it is the `.icc`/`.icm` file and not an archive |
+| 422 `not_a_colour_profile` | Not an ICC file | Unzip the maker's download and send the profile itself |
+| 422 `not_a_printer_profile` | An ICC file, but not an RGB or CMYK printer (output) profile, or it does not bake | A monitor or camera profile is not a paper; take the paper's printer profile |
+| 409 `lut_in_use` (with `displays`) | A Display uses it, stored or in an open Picture session | Choose None or another LUT on those Displays first |
+| 404 `lut_unknown` | No LUT with that digest | Read the list for the digest |
+
+**On the Pi.** The Player fetches `GET /v1/luts/<profile sha256>/<recipe>` with its own bearer and checks it against the served `Repr-Digest`, then keeps it in its media cache. Until it has it, the Frame shows the sliders without the LUT and the Picture tab's Done waits ("The sliders show at once; the LUT joins when the Pi has it, and Done waits for it"). A Done that never unlocks with a LUT chosen: read the Player's journal for the fetch's fault (`lut_type`, `lut_length`, `lut_digest` or `media_digest` name the refusal; it is retried on the media backoff).
+
+**Bench check (agent-driven, never automated; NOT RUN until a release with the print look is on the test Pi).** On the test Pi 5 and its monitor ([Reaching a Node over SSH](#reaching-a-node-over-ssh)):
+
+1. Black floor 2 % on the Picture tab and one light from above (depth 2 mm) on Position: the black lifts and a soft shadow shows along the opening's top edge; Done unlocks for each.
+2. A paper profile added (above) and chosen at 100 %: the picture changes once the Pi has it, and Done waited for it.
+3. A 4K video with every step on and four lights: compare frame time with everything neutral (0023's per-step cost is not measured; if it is too slow, 0023's alternative, one baked LUT for the whole colour chain, is the fallback).
+4. Show a grey ramp through the LUT: look for banding from its 8-bit entries.
 
 ## Night off and the week
 

@@ -53,7 +53,7 @@ Prior art: VESA MCCS and ddcutil (`getvcp`, `capabilities`, the colour feature g
 
 ## Costs
 
-- Software brightness above 100 % clips the brightest parts of a photo to flat white.
+- Software brightness above 100 % clipped the brightest parts of a photo to flat white. **Fixed by the highlight rolloff** of [0023](0023-print-look.md): the Display's Soft highlights setting eases values past white into white instead.
 - Asking the list holds the DDC/CI port for seconds per new display; power always goes first, but the times are measured on the bench before they are trusted. A picture `setvcp` or `capabilities` slower than the 1.5 s hold is cut (the write is judged by its read-back; list settings stay read-only), and each cut run is logged.
 - The re-read holds the port for up to 1.5 s per batch of four codes every 60 s per display, and the report is put again whenever a value changed.
 - A value changed on the display's buttons is not put back by a change to other settings, only when that setting is set again or the display is carried out anew. A Revert's instruction a Pi never answers stays pending (it rides each later document) until one does.
