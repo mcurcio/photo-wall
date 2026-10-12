@@ -131,6 +131,17 @@ class Witnesses:
         self.coordinator.readiness(self.player['player_id'],report(self.coordinator,self.player,sequence=self.sequence))
 
 
+def assert_qualified_evidence(registry, witness):
+    with registry.db.transaction() as conn:
+        row = conn.execute('SELECT evidence FROM node_environment_acceptances').fetchone()
+        assert row['evidence']['physical_pixels']=='unknown'
+        assert len(row['evidence']['sample_ids'])==7
+    # G4: the operator read lists the qualified environment (the gate plays no part in a read).
+    from central.fleet.node_lifecycle import NodeLifecycle
+    [listed] = NodeLifecycle(witness.sessions).status(DEVICE_ID)['qualification']['acceptances']
+    assert listed['environment_sha256']==witness.proof.challenge.environment_sha256 and listed['base_tag'] is not None
+
+
 def test_advancing_real_owner_witnesses_qualify_without_cached_repeats(registry):
     witness = Witnesses(registry)
     result = witness.advance()
@@ -139,6 +150,7 @@ def test_advancing_real_owner_witnesses_qualify_without_cached_repeats(registry)
     for _ in range(6):
         result = witness.advance()
     assert result['status']=='accepted' and result['fleet_frontier_changed'] is False
+    assert_qualified_evidence(registry, witness)
 
 
 def test_an_unchanged_control_state_still_qualifies(registry):
@@ -149,14 +161,7 @@ def test_an_unchanged_control_state_still_qualifies(registry):
     for _ in range(7):
         result = witness.advance(digest='f'*64)
     assert result['status']=='accepted' and result['fleet_frontier_changed'] is False
-    with registry.db.transaction() as conn:
-        row = conn.execute('SELECT evidence FROM node_environment_acceptances').fetchone()
-        assert row['evidence']['physical_pixels']=='unknown'
-        assert len(row['evidence']['sample_ids'])==7
-    # G4: the operator read lists the qualified environment (the gate plays no part in a read).
-    from central.fleet.node_lifecycle import NodeLifecycle
-    [listed] = NodeLifecycle(witness.sessions).status(DEVICE_ID)['qualification']['acceptances']
-    assert listed['environment_sha256']==witness.proof.challenge.environment_sha256 and listed['base_tag'] is not None
+    assert_qualified_evidence(registry, witness)
 
 
 @pytest.mark.parametrize('tag',['synthetic','trial-not-normal-media'])

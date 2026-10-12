@@ -232,6 +232,50 @@ def test_delivery_sequence_and_applied_receipt_remain_distinct_from_latest_resul
     assert fact["last_result"] == "rejected"
 
 
+@pytest.mark.parametrize("newer", ["pending", "rejected"])
+def test_a_state_changed_back_after_a_newer_delivery_is_a_new_delivery(registry, newer):
+    """Only the applied delivery that is still the latest is re-sent. Once a newer one was
+    issued, a return to the applied state is a newer sequence, never the old one the Player
+    would drop as superseded. Mutation probe: reuse on `applied_delivery_id` alone."""
+    player, _, _ = enroll(registry)
+    player_id, epoch = player["player_id"], player["authority_epoch"]
+    registry.control_hello(player_id, ControlHello(
+        authority_epoch=epoch, schemas=(2,), capabilities=()))
+    first = registry.issue_control_delivery_record(player_id, epoch, "a" * 64)
+    assert registry.control_ack_response(player_id, ControlAck(
+        authority_epoch=epoch, delivery_id=first["delivery_id"], result="applied")).accepted
+    assert registry.issue_control_delivery_record(player_id, epoch, "a" * 64) == first
+    second = registry.issue_control_delivery_record(player_id, epoch, "b" * 64)
+    if newer == "rejected":
+        assert registry.control_ack_response(player_id, ControlAck(
+            authority_epoch=epoch, delivery_id=second["delivery_id"], result="rejected")).accepted
+    back = registry.issue_control_delivery_record(player_id, epoch, "a" * 64)
+    assert back["delivery_sequence"] == 3 and back["delivery_id"] != first["delivery_id"]
+
+
+@pytest.mark.parametrize("result", ["rejected", "parsed_execution_unavailable"])
+def test_a_resent_delivery_that_does_not_take_is_recorded_and_reissued(registry, result):
+    """The Player re-applies a re-sent delivery; if that fails, the failure is the latest
+    result, the old receipt stops being current and the next poll is a fresh delivery.
+    Mutation probe: drop the negative-result branch for the applied delivery."""
+    player, _, _ = enroll(registry)
+    player_id, epoch = player["player_id"], player["authority_epoch"]
+    registry.control_hello(player_id, ControlHello(
+        authority_epoch=epoch, schemas=(2,), capabilities=()))
+    first = registry.issue_control_delivery_record(player_id, epoch, "a" * 64)
+    applied = ControlAck(authority_epoch=epoch, delivery_id=first["delivery_id"],
+                         result="applied")
+    assert registry.control_ack_response(player_id, applied).receipt is not None
+    assert registry.issue_control_delivery_record(player_id, epoch, "a" * 64) == first
+    failed = registry.control_ack_response(player_id, ControlAck(
+        authority_epoch=epoch, delivery_id=first["delivery_id"], result=result))
+    assert failed.model_dump(exclude_none=True) == {"accepted": True}
+    assert registry.control_fact(player_id)["last_result"] == result
+    assert not registry.control_ack_response(player_id, applied).accepted
+    fresh = registry.issue_control_delivery_record(player_id, epoch, "a" * 64)
+    assert fresh["delivery_sequence"] == 2 and fresh["delivery_id"] != first["delivery_id"]
+
+
 @pytest.mark.parametrize("operation", ["ack", "reissue"])
 def test_control_expiry_is_sampled_after_waiting_for_player_lock(
         registry, monkeypatch, operation):
