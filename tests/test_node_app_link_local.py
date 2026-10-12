@@ -151,6 +151,36 @@ def test_a_newer_proof_replaces_the_slot(monkeypatch, node):
     assert second != first and '\\"delivery\\":2' in second
 
 
+def _raise(error):
+    raise error
+
+
+@pytest.mark.parametrize(("receive", "logged"), [
+    (None, "node_link_peer"),
+    # Not a bare code (raw text, a path): the journal gets the exception type alone.
+    (lambda *args, **kwargs: _raise(OSError(5, "I/O error", "/run/photo-wall/secret")), "OSError"),
+    (lambda *args, **kwargs: _raise(ValueError("Expecting value: line 1 column 1")), "ValueError"),
+])
+def test_a_local_refusal_is_logged_with_its_code(monkeypatch, node, caplog, receive, logged):
+    """The peer gets a bare `refused`; the journal names why, and never raw exception text.
+    Mutation probes: drop the log; log the message whether or not it is a code."""
+    running, connection = running_app(), Connection()
+    connection.setsockopt = connection.settimeout = connection.close = lambda *args: None
+    links = BrokerLinkService.__new__(BrokerLinkService)
+    links.driver, links.probes = SimpleNamespace(current=lambda: running), None
+    links.session, links.feed = Session(node.store, node.grant), None
+    links.listener = SimpleNamespace(accept=lambda: (connection, None))
+    begin = encode_node_app_link_begin(player_id=PLAYER, authority_epoch=1,
+                                       control_receipt='{"authority_epoch":1}')
+    monkeypatch.setattr(app_link, "receive_credential_packet", receive or (
+        lambda *args, **kwargs: ((running.process.pid + 1, 10004, 10004), begin)))
+    monkeypatch.setattr(app_link.socket, "SO_PASSCRED", 16, raising=False)  # Linux's; macOS lacks it
+    with caplog.at_level("WARNING", logger=app_link.__name__):
+        links.serve_one()
+    assert connection.sent[-1][1] == b'{"schema":2,"kind":"result","status":"refused"}'
+    assert caplog.messages == [f"broker: app link refused locally ({logged})"]
+
+
 # -- delivered until Central acknowledges ---------------------------------------------------
 
 

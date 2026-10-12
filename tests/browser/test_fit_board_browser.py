@@ -514,3 +514,40 @@ def test_settings_photo_fit_reset_range_error_and_save(page, registry):
             page.get_by_role("button", name="Save photo fit", exact=True).click()
         assert saved.value.ok and saved.value.json()["settings"]["crop_limit"] == 0.5
         expect(page.get_by_role("status").filter(has_text="Saved.")).to_be_visible()
+
+
+def _drag(page, slider, to):
+    """Press `slider` at its middle and drag it to `to` (a fraction of its width), held."""
+    slider.scroll_into_view_if_needed()
+    box = slider.bounding_box()
+    page.mouse.move(box["x"] + box["width"] * 0.5, box["y"] + box["height"] / 2)
+    page.mouse.down()
+    page.mouse.move(box["x"] + box["width"] * to, box["y"] + box["height"] / 2, steps=8)
+
+
+def test_settings_photo_fit_sliders_move_under_the_pointer_and_the_keys(page, registry):
+    """Owner, 2026-10-12: "Photo fit sliders dont work -- i cant adjust the values". A slider
+    follows the pointer while it is held, keeps where it was let go, and steps with the arrow
+    keys; Save then sends what it shows. (The Settings case above sets the crop limit with
+    `fill`, which never moved a pointer, so it stayed green while dragging did nothing.)"""
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin)
+        go(page, "photo-fit")
+        settings = page.get_by_role("region", name="Photo fit", exact=True)
+        crop = settings.get_by_role("slider", name="Crop limit", exact=True)
+        expect(crop).to_have_value("35")
+        _drag(page, crop, 1.0)
+        expect(crop).to_have_value("60")            # held: under the pointer
+        page.mouse.up()
+        expect(crop).to_have_value("60")            # let go: kept
+        expect(crop).to_have_attribute("aria-valuetext", "60 %")
+        crop.press("ArrowLeft")
+        expect(crop).to_have_value("59")
+        faces = settings.get_by_role("slider", name="Space kept around a face", exact=True)
+        _drag(page, faces, 1.0)
+        page.mouse.up()
+        expect(faces).to_have_value("50")
+        with page.expect_response(lambda r: r.url.endswith("/settings/photo-fit") and r.request.method == "PUT") as saved:
+            page.get_by_role("button", name="Save photo fit", exact=True).click()
+        assert saved.value.ok
+        assert (saved.value.json()["settings"]["crop_limit"], saved.value.json()["settings"]["face_padding"]) == (0.59, 0.5)

@@ -8,7 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 from starlette.websockets import WebSocketDisconnect
-from test_registry import ADMIN, enroll
+from test_registry import ADMIN, enroll, frame
 
 from central.app import create_app
 from central.player_control_protocol import project_state, state_digest
@@ -176,6 +176,13 @@ def test_v2_applied_ack_replays_exact_receipt_until_superseded_and_epoch_fenced(
                 (player["player_id"],),
             ).fetchone()
         assert repeated == first
+        # Unchanged state is the same delivery again, so its receipt stays current.
+        assert client.get("/v1/player/state", headers=headers).json() == state
+        assert client.post("/v1/player/control-acks", json=report,
+                           headers=headers).json() == accepted
+        # A real change is a new delivery, and the old receipt is no longer current.
+        frame(registry, "changed")
+        registry.bind("changed", player["player_id"], "HDMI-A-1", expected_generation=0)
         assert client.get("/v1/player/state", headers=headers).json()["delivery_id"] != state[
             "delivery_id"]
         assert client.post("/v1/player/control-acks", json=report, headers=headers).json() == {
@@ -223,6 +230,50 @@ def test_delivery_sequence_and_applied_receipt_remain_distinct_from_latest_resul
     assert fact["last_result_sequence"] == 2
     assert fact["last_result_digest"] == "b" * 64
     assert fact["last_result"] == "rejected"
+
+
+@pytest.mark.parametrize("newer", ["pending", "rejected"])
+def test_a_state_changed_back_after_a_newer_delivery_is_a_new_delivery(registry, newer):
+    """Only the applied delivery that is still the latest is re-sent. Once a newer one was
+    issued, a return to the applied state is a newer sequence, never the old one the Player
+    would drop as superseded. Mutation probe: reuse on `applied_delivery_id` alone."""
+    player, _, _ = enroll(registry)
+    player_id, epoch = player["player_id"], player["authority_epoch"]
+    registry.control_hello(player_id, ControlHello(
+        authority_epoch=epoch, schemas=(2,), capabilities=()))
+    first = registry.issue_control_delivery_record(player_id, epoch, "a" * 64)
+    assert registry.control_ack_response(player_id, ControlAck(
+        authority_epoch=epoch, delivery_id=first["delivery_id"], result="applied")).accepted
+    assert registry.issue_control_delivery_record(player_id, epoch, "a" * 64) == first
+    second = registry.issue_control_delivery_record(player_id, epoch, "b" * 64)
+    if newer == "rejected":
+        assert registry.control_ack_response(player_id, ControlAck(
+            authority_epoch=epoch, delivery_id=second["delivery_id"], result="rejected")).accepted
+    back = registry.issue_control_delivery_record(player_id, epoch, "a" * 64)
+    assert back["delivery_sequence"] == 3 and back["delivery_id"] != first["delivery_id"]
+
+
+@pytest.mark.parametrize("result", ["rejected", "parsed_execution_unavailable"])
+def test_a_resent_delivery_that_does_not_take_is_recorded_and_reissued(registry, result):
+    """The Player re-applies a re-sent delivery; if that fails, the failure is the latest
+    result, the old receipt stops being current and the next poll is a fresh delivery.
+    Mutation probe: drop the negative-result branch for the applied delivery."""
+    player, _, _ = enroll(registry)
+    player_id, epoch = player["player_id"], player["authority_epoch"]
+    registry.control_hello(player_id, ControlHello(
+        authority_epoch=epoch, schemas=(2,), capabilities=()))
+    first = registry.issue_control_delivery_record(player_id, epoch, "a" * 64)
+    applied = ControlAck(authority_epoch=epoch, delivery_id=first["delivery_id"],
+                         result="applied")
+    assert registry.control_ack_response(player_id, applied).receipt is not None
+    assert registry.issue_control_delivery_record(player_id, epoch, "a" * 64) == first
+    failed = registry.control_ack_response(player_id, ControlAck(
+        authority_epoch=epoch, delivery_id=first["delivery_id"], result=result))
+    assert failed.model_dump(exclude_none=True) == {"accepted": True}
+    assert registry.control_fact(player_id)["last_result"] == result
+    assert not registry.control_ack_response(player_id, applied).accepted
+    fresh = registry.issue_control_delivery_record(player_id, epoch, "a" * 64)
+    assert fresh["delivery_sequence"] == 2 and fresh["delivery_id"] != first["delivery_id"]
 
 
 @pytest.mark.parametrize("operation", ["ack", "reissue"])

@@ -156,6 +156,85 @@ def test_link_failure_does_not_stall_control_or_mark_player_offline(tmp_path):
     asyncio.run(run())
 
 
+def test_the_link_is_tried_as_soon_as_a_receipt_or_relink_arrives(tmp_path):
+    """Startup responsiveness: the Player links on its first applied receipt, and proves the
+    link again the moment the broker asks, rather than on a 5 s poll. Mutation probes: drop
+    the wake in `_ack_control` or in `request_relink`; sleep the full retry when idle."""
+    class RecordingLink:
+        def __init__(self):
+            self.calls = Queue()
+
+        def exchange_applied(self, **kwargs):
+            self.calls.put(kwargs["receipt"])
+            return "recorded"
+
+    async def attempted(link, since):
+        while link.calls.empty():
+            assert time.monotonic() - since < 1.0, "the app link waited for its 5 s net"
+            await asyncio.sleep(.01)
+        return link.calls.get()
+
+    async def run():
+        service, _ = await rig(tmp_path, server=ReceiptServer(ManualClock(100)), negotiate=True)
+        receipt = service._applied_proof_receipt
+        assert receipt is not None
+        service._applied_proof_receipt = None  # as at start, before the first applied ACK
+        link = RecordingLink()
+        service.node_link_client, service.boot_id, service._proof_active = link, BOOT_ID, True
+        task = asyncio.create_task(service._app_link_loop())
+        try:
+            await asyncio.sleep(.05)  # the loop is idle: nothing applied yet
+            assert link.calls.empty()
+            since = time.monotonic()
+            await service.poll_state()  # the real applied ACK path stores the receipt
+            assert await attempted(link, since) == receipt[1]
+            since = time.monotonic()
+            threading.Thread(target=service.request_relink).start()  # the broker's thread
+            assert await attempted(link, since) == receipt[1]
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            await close(service)
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(("outcome", "level", "message"), [
+    ("rejected", "WARNING", "player: the broker refused the app link; retrying in 5 s"),
+    ("stale", "INFO", "player: app link stale (a newer control delivery or enrollment); "
+                      "retrying on the next applied delivery"),
+])
+def test_a_missed_link_is_logged(tmp_path, caplog, outcome, level, message):
+    """A link that did not take is in the journal, not only at DEBUG. Mutation probe: drop
+    either log line."""
+    class MissingLink:
+        def __init__(self):
+            self.done = threading.Event()
+
+        def exchange_applied(self, **_kwargs):
+            self.done.set()
+            return outcome
+
+    async def run():
+        service, _ = await rig(tmp_path, server=ReceiptServer(ManualClock(100)), negotiate=True)
+        link = MissingLink()
+        service.node_link_client, service.boot_id, service._proof_active = link, BOOT_ID, True
+        task = asyncio.create_task(service._app_link_loop())
+        try:
+            for _ in range(100):
+                if link.done.is_set() and message in caplog.messages:
+                    break
+                await asyncio.sleep(.01)
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            await close(service)
+
+    with caplog.at_level("INFO", logger="photo_wall.player"):
+        asyncio.run(run())
+    assert (level, message) in [(r.levelname, r.getMessage()) for r in caplog.records]
+
+
 def test_service_exit_invalidates_in_flight_socket_worker(tmp_path):
     class WaitingLink:
         def __init__(self):

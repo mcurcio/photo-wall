@@ -17,6 +17,7 @@ from pydantic import Field, model_validator
 
 from central.db import Database
 from central.displays.model import Readiness
+from central.fleet.acceptance_evidence import applied_is_latest
 from central.infra.asset_roots import lock_fleet_assets_in
 from central.infra.display_store import (
     POSITION_COLUMNS,
@@ -329,6 +330,11 @@ class Registry:
                 and row["pending_expires"] > now):
             return ControlDelivery(delivery_id=row["pending_id"],
                                    delivery_sequence=row["issued_sequence"]).model_dump()
+        if applied_is_latest(row) and row["applied_digest"] == digest:
+            # Unchanged since the Player applied it: the same delivery again, so its receipt
+            # (and an app link proved with it) stays current until the state really changes.
+            return ControlDelivery(delivery_id=row["applied_delivery_id"],
+                                   delivery_sequence=row["applied_sequence"]).model_dump()
         delivery_id = secrets.token_hex(16)
         issued = conn.execute(
             "UPDATE player_control_sessions SET issued_sequence=issued_sequence+1,"
@@ -343,17 +349,8 @@ class Registry:
     @staticmethod
     def _current_applied_receipt(row: dict, report: ControlAck) -> ControlAppliedReceipt | None:
         """Replay only a receipt for the exact still-current applied delivery."""
-        if (report.result != "applied" or row["status"] != "negotiated"
-                or row["pending_id"] is not None or row["pending_digest"] is not None
-                or row["pending_expires"] is not None
-                or row["issued_sequence"] != row["applied_sequence"]
-                or row["last_result_sequence"] != row["applied_sequence"]
-                or row["last_result"] != "applied"
-                or row["applied_at"] is None or row["last_result_at"] is None
-                or row["applied_delivery_id"] != report.delivery_id
-                or row["last_delivery_id"] != report.delivery_id
-                or row["last_result_digest"] != row["applied_digest"]
-                or row["applied_ack_nonce"] is None):
+        if (report.result != "applied" or not applied_is_latest(row)
+                or row["applied_delivery_id"] != report.delivery_id):
             return None
         return ControlAppliedReceipt(
             authority_epoch=row["authority_epoch"],
@@ -373,6 +370,16 @@ class Registry:
                     or row["status"] != "negotiated"):
                 return ControlAckResponse(accepted=False)
             if row["pending_id"] != report.delivery_id:
+                if (report.result != "applied" and applied_is_latest(row)
+                        and row["applied_delivery_id"] == report.delivery_id):
+                    # The Player re-applied the re-sent delivery and it did not take: that is
+                    # the latest result, so the receipt is no longer current and the next
+                    # poll issues a fresh delivery. A partial application never counts.
+                    conn.execute(
+                        "UPDATE player_control_sessions SET last_result=%s,last_result_at=%s,"
+                        "applied_ack_nonce=NULL WHERE player_id=%s",
+                        (report.result, now, player_id))
+                    return ControlAckResponse(accepted=True)
                 receipt = self._current_applied_receipt(row, report)
                 return ControlAckResponse(accepted=receipt is not None, receipt=receipt)
             if row["pending_expires"] is None or row["pending_expires"] <= now:

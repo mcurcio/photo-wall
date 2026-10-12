@@ -182,7 +182,7 @@ interface SplitProps { children: React.ReactNode; action: React.ReactNode; as?: 
 // control its id, its describedby and the label's id (`labelId`), so a control that is a group is named by the label.
 interface FieldProps { label: string; help?: string; error?: string; notes?: readonly string[]; children: React.ReactElement }
 
-// Slider — shows its value and unit as text; commits on release, previews on drag.
+// Slider — shows its value and unit as text; commits on release, previews on drag; follows the pointer while held whatever the caller does with a preview.
 interface SliderProps { value: number; min: number; max: number; step: number; unit: string; onPreview?(v: number): void; onCommit(v: number): void; disabled?: boolean }
 
 // SegmentedControl — 2 to 5 exclusive choices (rotation, nudge step, fit). Alone it shows and carries its `label`;
@@ -322,22 +322,25 @@ The Position controls, as patterns (they know geometry, not Frames). Prior art: 
 
 ```ts
 type Point = readonly [number, number];
-// QuadEditor — four draggable corners over an outline of the output, at its aspect. No crop edges since 1c
-// (Trim edges removed): the corners set every visible edge.
+// QuadEditor — four draggable corners and four draggable edges over an outline of the output, at its aspect.
+// An edge (its midpoint handle or the line) moves its two corners together by the drag's step (owner,
+// 2026-10-12: "i want to be able to drag "edges" of a frame position and not just the corners"). No crop
+// edges since 1c (Trim edges removed): the corners set every visible edge.
+type QuadPart = { kind: "corner" | "edge"; index: number };  // edge i runs from corner i to the next
 interface QuadEditorProps {
   label: string;
   corners: readonly Point[];                        // four, in output coordinates
   aspect: number;
-  selected: number | null; onSelect(corner: number | null): void;
-  onCorner(corner: number, point: Point): void;
-  onArrow(dx: number, dy: number): void;            // arrow keys on the selected corner
+  selected: QuadPart | null; onSelect(part: QuadPart | null): void;  // null: the whole quad
+  onCorners(corners: Point[]): void;                // a drag's proposed corners; the caller may refuse them
+  onArrow(dx: number, dy: number): void;            // arrow keys on the selected corner or edge
   disabled?: boolean;
 }
 // NudgePad — four labelled arrow buttons; each press is one step, the caller decides its size (1, 10 or 50 px).
 interface NudgePadProps { label: string; subject: string; onNudge(dx: number, dy: number): void; disabled?: boolean }
 ```
 
-Stories: `QuadEditor/Default`, `/CornerSelected`, `/Rotated`, `/Disabled`; `NudgePad/Default`, `/Disabled`. A11y: every corner is reachable by keyboard; each NudgePad button names its direction and subject ("Move up: top-left corner").
+Stories: `QuadEditor/Default`, `/CornerSelected`, `/EdgeSelected`, `/Rotated`, `/Disabled`; `NudgePad/Default`, `/Disabled`. A11y: every corner and edge is a focusable, named handle that focus selects, and is in the Move list; each NudgePad button names its direction and subject ("Move up: top-left corner").
 
 #### Dialog guards
 
