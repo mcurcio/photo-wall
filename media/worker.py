@@ -18,10 +18,12 @@ from pydantic import Field
 
 from central import cache_layout
 from central.assets.layout import TEMP_PREFIX, CacheLayout
+from central.assets.maintenance import CacheSettings, MediaCacheBudget
 from central.assets.store import CacheStore
 from central.content_wiring import build_job_runtime
 from central.db import Database, DatabaseTransactionClock
 from central.infra.key_content_store import PgKeyContent
+from central.infra.media_cache_records import PgMediaVariantUse
 from central.infra.photo_library_store import PgPhotoLibrary
 from central.infra.runtime import (
     COMPLETION_NOT_RECORDED,
@@ -98,7 +100,8 @@ class MediaWorker:
                  preparer: PreparationClient | None = None,
                  client_factory: Callable[[ConnectionSecret], LibraryClient] | None = None,
                  limits: WorkerLimits = WorkerLimits(), previews: Path | None = None,
-                 key_content: KeyContentWriter | None = None):
+                 key_content: KeyContentWriter | None = None,
+                 media_cache: MediaCacheBudget | None = None):
         self.repository, self.clock, self.limits = repository, repository.clock, limits
         # Roadmap 4: connections and their keys are the photo library store's (no file).
         self.library = library
@@ -118,6 +121,8 @@ class MediaWorker:
         # Roadmap 5a (slice M1): where measurements are read and recorded; `_entry` passes the
         # PostgreSQL store, and `measure` refuses with media_config without one.
         self.key_content = key_content
+        # Follow-up S5: the media cache's one budget, kept on every maintenance pass.
+        self.media_cache = media_cache
         self._error: str | None = None
 
     @staticmethod
@@ -205,13 +210,17 @@ class MediaWorker:
                           preparer=self.preparer, job_seconds=self.limits.job_seconds)
 
     async def maintain(self) -> None:
-        """The thumbnail sweep and the guaranteed check-in. Media variants have no sweep until
-        slice S5's cache budget (the media store's recovery and GC are gone)."""
+        """The thumbnail sweep, the guaranteed check-in, then the media cache's budget
+        (`MediaCacheBudget`: pinned variants kept, the others least recently served first)."""
         # Listed BEFORE the purge: a file written after it is never discarded by this pass.
         files = await _blocking(self._thumbnail_files)
         recorded = await _blocking(self.library.retire_unwanted)
         await _blocking(self._discard_thumbnails, files, recorded)
         await _blocking(self.repository.worker_status, self._error)
+        if self.media_cache is not None:
+            removed = await _blocking(self.media_cache.enforce)
+            if removed:
+                logger.info("media cache: removed %d file(s)", len(removed))
 
     def _thumbnail_files(self) -> dict[str, Path]:
         """Thumbnail files by asset id (temps excluded: their writer removes them)."""
@@ -252,7 +261,8 @@ async def _media_queue(app, additional_context: dict) -> None:
 
 async def _media_loop(worker: MediaWorker, run_queue: Callable[[], Awaitable[None]]) -> None:
     """The library checks' and measurements' queue, after one boot pass of maintenance (the
-    thumbnail sweep and the guaranteed check-in, `WORKER_CHECK_IN_SECONDS`). Media variants are
+    thumbnail sweep, the guaranteed check-in, `WORKER_CHECK_IN_SECONDS`, and the media cache's
+    budget). Media variants are
     the job runtime's (`PrepareMedia`), so no process waits for a media writer lock."""
     await worker.maintain()
     await run_queue()
@@ -321,8 +331,13 @@ async def _entry():
     cache_root = cache_layout.cache_root()
     previews = ensure_previews_directory(cache_root)
     ensure_media_directory(cache_root)
-    worker = MediaWorker(repository, library, previews=previews,
-                         key_content=PgKeyContent(db, times=DatabaseTransactionClock()))
+    media_store = CacheStore(CacheLayout(cache_root))
+    worker = MediaWorker(
+        repository, library, previews=previews,
+        key_content=PgKeyContent(db, times=DatabaseTransactionClock()),
+        media_cache=MediaCacheBudget(
+            store=media_store, use=PgMediaVariantUse(times=DatabaseTransactionClock()),
+            transactions=PgTransactions(db), settings=CacheSettings.from_env(os.environ)))
     # The library half of the thumbnail fetch (R22): only this package holds the key.
     thumbnails = LibraryThumbnailOrigin(
         library.pool_thumbnail, library.connection_secret,
@@ -332,7 +347,7 @@ async def _entry():
     # mistake fails before any job is claimed.
     runtime = build_job_runtime(
         db, clock, cache_root=cache_root, env=os.environ, thumbnails=thumbnails,
-        media_maker=worker.media_maker(store=CacheStore(CacheLayout(cache_root)),
+        media_maker=worker.media_maker(store=media_store,
                                        transactions=PgTransactions(db)))
     await _blocking(repository.db.migrate)
     await _blocking(ProcrastinateMediaQueue.apply_schema, dsn)

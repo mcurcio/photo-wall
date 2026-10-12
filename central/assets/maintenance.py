@@ -1,4 +1,6 @@
-"""`MaintainCacheHandler`: remove cached release files nothing wants (auto-ingest design §6.3).
+"""The cache cleaners: `MaintainCacheHandler` removes cached release files nothing wants
+(auto-ingest design §6.3); `MediaCacheBudget` keeps media variants under one byte budget (the
+media rule, below).
 
 The keep-set is the ONE desired set (`ContentCatalog.desired_assets`, which is `desired_in`): what
 Prefetch downloads, the cleaner keeps. The sweep is eager, not budget-gated: every release file
@@ -7,7 +9,8 @@ cache stays ephemeral: rows, references and produced facts stay, so a key that b
 again re-fetches by Prefetch or read-through.
 
 * **Scope.** Only `os-images/` (OS images) and `apps/` (sealed environments and Player
-  `.deb`s). Never `previews/` (library thumbnails) and never `media/` (media variants: slice S5's cache budget).
+  `.deb`s). Never `previews/` (library thumbnails) and never `media/` (media variants: the
+  media rule's).
 * **Never a desired file: mark and sweep, no lock.** A run reads the desired set once to pick
   its candidates, then reads it again immediately before each unlink and spares a key that
   became desired meanwhile (the repo's old orphan sweep re-confirmed each owner the same way,
@@ -29,6 +32,24 @@ clock, possibly), so it is compared only with another mtime on that filesystem: 
 `CLOCK_MARKER` in the cache root first and measures every age against the marker's mtime.
 `last_served_at` is written and compared by the database alone. This worker's clock is never
 compared with either.
+
+**The media rule** (`MediaCacheBudget`, follow-up to 5a, slice S5). A media variant is made on
+demand from its name (`PrepareMedia`), so its file is evictable whenever no plan needs it now:
+
+* **Kept: every file a live pin holds** (`media_references`: an offer, a secured lock, a
+  transfer; by variant name, so a pin holds the file its record's produced digest names).
+* **Evicted: the others, least recently served first** (`assets.last_served_at`, the database's
+  clock; never served goes first), until the variant directory is at or under
+  `CacheSettings.media_budget_bytes`. A file no record names (a re-make's predecessor) was never
+  served by any name, so it goes first as well.
+* **Grace.** A temp file is removed only when idle past `TEMP_GRACE`, as above, and counts
+  against the budget until then. A final file installed within `SERVE_GRACE` (by the cache
+  filesystem's clock, `CLOCK_MARKER`) is spared: the maker installs before it records, and a
+  making just finished has not been served yet.
+* **Race-free with a pin.** Each unlink runs in a transaction holding the media lock, after
+  re-reading the file's pins: every pin is written under that lock (`FrameMedia`, coordination),
+  so a pin committed first spares the file, and a read granted after finds the file gone and
+  re-makes it (the AssetReader's miss). An open descriptor keeps its inode on POSIX anyway.
 """
 
 from __future__ import annotations
@@ -37,10 +58,11 @@ import asyncio
 import logging
 import os
 import stat
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
-from typing import Final
+from typing import Final, Protocol
 
 from central.assets.layout import TEMP_PREFIX
 from central.assets.store import CacheStore
@@ -48,7 +70,7 @@ from central.kernel.assets import AssetKey, AssetKind
 from central.kernel.job_types import MaintainCache
 from central.kernel.jobs import asset_key
 from central.kernel.ports import AssetRecords, ContentCatalog
-from central.kernel.transactions import Transactions
+from central.kernel.transactions import Transaction, Transactions
 
 LOG = logging.getLogger("central.assets.maintenance")
 
@@ -170,3 +192,117 @@ def _unlink_if_older(candidate: _Candidate) -> bool:
     except FileNotFoundError:
         return False
     return True
+
+
+# The media rule ------------------------------------------------------------------------------
+
+MEDIA_BUDGET_ENV: Final = "PHOTO_WALL_MEDIA_CACHE_BYTES"
+
+
+@dataclass(frozen=True, slots=True)
+class CacheSettings:
+    """The media cache's one budget: bytes in the variant directory (`media/blobs`)."""
+
+    media_budget_bytes: int = 4 * 1024**3
+
+    def __post_init__(self) -> None:
+        if type(self.media_budget_bytes) is not int or self.media_budget_bytes < 0:
+            raise ValueError("invalid_media_budget_bytes")
+
+    @classmethod
+    def from_env(cls, env: Mapping[str, str]) -> CacheSettings:
+        """`PHOTO_WALL_MEDIA_CACHE_BYTES` (a whole number of bytes), else the default."""
+        raw = env.get(MEDIA_BUDGET_ENV)
+        if raw is None:
+            return cls()
+        if not raw.isdigit():
+            raise ValueError("invalid_media_budget_bytes")
+        return cls(media_budget_bytes=int(raw))
+
+
+@dataclass(frozen=True, slots=True)
+class VariantFileUse:
+    """What the records say of one variant file (by its digest)."""
+
+    pinned: bool  # a live pin holds a variant whose produced digest names it
+    last_served_at: float | None  # the latest serve of any such variant (database clock)
+
+
+class MediaVariantUse(Protocol):
+    def uses(self, tx: Transaction) -> Mapping[str, VariantFileUse]:
+        """Every recorded variant file, by produced digest."""
+        ...
+
+    def lock(self, tx: Transaction) -> None:
+        """The media lock, under which every pin is written."""
+        ...
+
+    def pinned(self, tx: Transaction, digest: str) -> bool:
+        """Whether a live pin holds the file named `digest` now."""
+        ...
+
+
+@dataclass(frozen=True, slots=True)
+class _MediaFile:
+    path: Path
+    size: int
+    mtime: float
+
+
+class MediaCacheBudget:
+    """The media rule (module docstring). `enforce` blocks: async callers run it in a thread."""
+
+    def __init__(self, *, store: CacheStore, use: MediaVariantUse, transactions: Transactions,
+                 settings: CacheSettings) -> None:
+        self._store = store
+        self._use = use
+        self._transactions = transactions
+        self._settings = settings
+
+    def enforce(self) -> list[Path]:
+        """One run: the removed paths (idle temps first, then evictions in order)."""
+        layout = self._store.layout
+        now = _filesystem_now(layout.root)
+        installed_before = now - SERVE_GRACE.total_seconds()
+        idle_before = now - TEMP_GRACE.total_seconds()
+        files: list[_MediaFile] = []
+        removed: list[Path] = []
+        for path, metadata in _regular_files(layout.directory(AssetKind.MEDIA_VARIANT)):
+            if path.name.startswith(TEMP_PREFIX) and metadata.st_mtime < idle_before:
+                if _unlink_if_older(_Candidate(path, None, idle_before)):
+                    removed.append(path)
+                    continue
+            files.append(_MediaFile(path, metadata.st_size, metadata.st_mtime))
+        total = sum(file.size for file in files)
+        if total <= self._settings.media_budget_bytes:
+            return removed
+        with self._transactions.begin() as tx:
+            uses = dict(self._use.uses(tx))
+        unserved = VariantFileUse(pinned=False, last_served_at=None)
+        candidates = sorted(
+            (file for file in files
+             if not file.path.name.startswith(TEMP_PREFIX) and file.mtime < installed_before
+             and not uses.get(file.path.name, unserved).pinned),
+            key=lambda file: _served_order(uses.get(file.path.name, unserved), file))
+        for file in candidates:
+            if total <= self._settings.media_budget_bytes:
+                break
+            if self._evict(file, installed_before):
+                removed.append(file.path)
+                total -= file.size
+        return removed
+
+    def _evict(self, file: _MediaFile, installed_before: float) -> bool:
+        """Unlink `file` under the media lock unless a pin now holds it (module docstring)."""
+        with self._transactions.begin() as tx:
+            self._use.lock(tx)
+            if self._use.pinned(tx, file.path.name):
+                return False
+            return _unlink_if_older(_Candidate(file.path, None, installed_before))
+
+
+def _served_order(use: VariantFileUse, file: _MediaFile) -> tuple[bool, float, str]:
+    """Never served first, then by last serve; the name breaks a tie (never the mtime: a serve
+    time is the database's clock, an mtime the cache filesystem's)."""
+    served = use.last_served_at
+    return (served is not None, served or 0.0, file.path.name)
