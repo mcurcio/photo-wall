@@ -4,7 +4,8 @@
 A Display keeps two groups of picture settings, never coupled (owner, 2026-10-12: "i want to
 independently control the hardware from the software"): **hardware values**, only the display
 settings someone set in Photo Wall, by MCCS code (an absent code is "as the display has it": the
-Pi never writes it), and **software values**, Photo Wall's four, always complete. No rule here
+Pi never writes it), and **software values**, Photo Wall's group (the picture split's four and the
+print look's: saturation, highlight rolloff, black floor, the LUT and its amount), always complete. No rule here
 reads one group to decide the other. What a display offers, and whether a hardware value may be
 set on it, is central/displays/hardware.py's.
 
@@ -32,7 +33,7 @@ One home each for:
 - **Done waits for the Pi** (`presented`, `picture_status`): SHOWN once the report answers the
   document that carries exactly the picture Done would keep and the Player presented it.
 - **Copy** (#119; owner, 2026-10-12: "Both (Recommended)"; "Only ones set in Photo Wall
-  (Recommended)"): all four software values; the hardware values set on the source where the
+  (Recommended)"): every software value, the print look's included; the hardware values set on the source where the
   target offers them (hardware.py's rule, slice S4); never position.
 """
 from __future__ import annotations
@@ -47,6 +48,7 @@ from uuid import UUID
 
 from central.displays.hardware import copied_hardware, edit_refusal
 from central.live_session import Lease, StaleSequence, next_sequence, touched
+from contracts.lut import LutRef
 from contracts.node_picture import (
     NEUTRAL_SOFTWARE,
     PICTURE_LIST,
@@ -61,11 +63,30 @@ PICTURE_IDLE_SECONDS: Final = 5.0     # a picture session ends this long after i
 
 
 class SoftwareSetting(StrEnum):
-    """Photo Wall's four picture settings, as the routes name them."""
+    """Photo Wall's picture settings, as the routes name them (the ranges are
+    contracts.node_picture's `SoftwarePicture`)."""
     BRIGHTNESS = "brightness"                   # #111, percent 0..150 (100 changes nothing)
     CONTRAST = "contrast"                       # #112, percent 0..150
     COLOUR_TEMPERATURE = "colour-temperature"   # #113, kelvin
     GAMMA = "gamma"                             # #114, tenths
+    SATURATION = "saturation"                   # print look: percent 0..150, 100 changes nothing
+    HIGHLIGHT_ROLLOFF = "highlight-rolloff"     # print look: percent 0..100, 0 = the clip at white
+    BLACK_FLOOR = "black-floor"                 # print look: tenths of a percent of white light 0..100
+    LUT_AMOUNT = "lut-amount"                   # print look: percent 0..100 of the LUT mixed in
+
+
+class SoftwareChoice(StrEnum):
+    """Photo Wall's picture settings that name a thing rather than set a number, each with its own
+    edit (one route per question): the LUT choice (`edited_lut`, `.../lut-edits`)."""
+    LUT = "lut"
+
+
+SoftwareTouch = SoftwareSetting | SoftwareChoice     # what a session records as touched in the group
+
+
+def software_touch(name: str) -> SoftwareTouch:
+    """A touched software setting by its stored name. ValueError for an unknown one."""
+    return SoftwareChoice(name) if name in SoftwareChoice._value2member_map_ else SoftwareSetting(name)
 
 
 _SOFTWARE_FIELDS: Final[Mapping[SoftwareSetting, str]] = {
@@ -73,6 +94,10 @@ _SOFTWARE_FIELDS: Final[Mapping[SoftwareSetting, str]] = {
     SoftwareSetting.CONTRAST: "contrast_percent",
     SoftwareSetting.COLOUR_TEMPERATURE: "colour_temperature_kelvin",
     SoftwareSetting.GAMMA: "gamma_tenths",
+    SoftwareSetting.SATURATION: "saturation_percent",
+    SoftwareSetting.HIGHLIGHT_ROLLOFF: "highlight_rolloff_percent",
+    SoftwareSetting.BLACK_FLOOR: "black_floor_tenths",
+    SoftwareSetting.LUT_AMOUNT: "lut_amount_percent",
 }
 
 
@@ -85,7 +110,7 @@ class PictureStatus(StrEnum):
 
 class PictureRefused(Exception):
     """A refusal the routes answer as {"error": code}: stale_sequence 409, not_offered 409,
-    out_of_range 422, session_ended 410, not_presented_yet 409."""
+    out_of_range 422, unknown_lut 422, session_ended 410, not_presented_yet 409."""
 
     def __init__(self, code: str, status: int) -> None:
         super().__init__(code)
@@ -113,7 +138,7 @@ class PictureSession:
     began_at_change: int
     hardware_before: Mapping[VcpCode, int]
     touched_hardware: frozenset[VcpCode]
-    touched_software: frozenset[SoftwareSetting]
+    touched_software: frozenset[SoftwareTouch]
     lease: Lease
 
 
@@ -168,7 +193,7 @@ def edited_hardware(session: PictureSession, code: VcpCode, value: int | None, *
 
 def edited_software(session: PictureSession, setting: SoftwareSetting, value: int, *,
                     expected_sequence: int, now: float) -> PictureSession:
-    """The session after one of Photo Wall's four edits. PictureRefused: session_ended,
+    """The session after one of Photo Wall's numeric edits. PictureRefused: session_ended,
     stale_sequence, out_of_range 422 (contracts.node_picture's ranges: `SoftwarePicture`)."""
     sequence = _next(session, expected_sequence, now)
     if not isinstance(setting, SoftwareSetting) or type(value) is not int:
@@ -179,6 +204,20 @@ def edited_software(session: PictureSession, setting: SoftwareSetting, value: in
         raise PictureRefused("out_of_range", 422) from None
     return replace(session, sequence=sequence, draft=replace(session.draft, software=software),
                    touched_software=session.touched_software | {setting},
+                   lease=touched(session.lease, now, idle_seconds=PICTURE_IDLE_SECONDS))
+
+
+def edited_lut(session: PictureSession, lut: LutRef | None, *, known: bool, expected_sequence: int,
+               now: float) -> PictureSession:
+    """The session after the LUT choice: `lut` None is no LUT; `known` says the LUTs list holds
+    `lut`'s paper profile (the caller's read, in the edit's transaction). PictureRefused:
+    session_ended, stale_sequence, then unknown_lut 422 for a LUT not on the list."""
+    sequence = _next(session, expected_sequence, now)
+    if lut is not None and not known:
+        raise PictureRefused("unknown_lut", 422)
+    software = replace(session.draft.software, lut=lut)
+    return replace(session, sequence=sequence, draft=replace(session.draft, software=software),
+                   touched_software=session.touched_software | {SoftwareChoice.LUT},
                    lease=touched(session.lease, now, idle_seconds=PICTURE_IDLE_SECONDS))
 
 
@@ -294,6 +333,7 @@ def _in_list_order(hardware: Mapping[VcpCode, int]) -> dict[VcpCode, int]:
 
 
 __all__ = ["PICTURE_IDLE_SECONDS", "DisplayPicture", "PictureRefused", "PictureSession", "PictureStatus",
-           "SoftwareSetting", "answers", "carries", "copied", "default_picture", "edited_hardware", "edited_software",
+           "SoftwareChoice", "SoftwareSetting", "SoftwareTouch", "answers", "carries", "copied", "default_picture",
+           "edited_hardware", "edited_lut", "edited_software", "software_touch",
            "effective_picture", "hardware_answered", "kept_picture", "picture_digest", "picture_document",
            "picture_status", "presented", "restore_answered", "restore_of", "reverted", "with_befores", "with_restore"]

@@ -11,11 +11,14 @@ report is recorded by Central on the display line's state bucket. (5) A key the 
 not list is never sent and is logged as `document_refused`. (6) Picture on its own keys (decision
 0022): a picture document Central puts on `picture-HDMI-A-1` reaches the picture controller through
 the runner's document feed, and the picture report the controller puts appears on Central's
-`picture-HDMI-A-1`.
+`picture-HDMI-A-1`. (7) The print look ships together (picture operations v5): a picture document
+with saturation, highlight rolloff, black floor and a LUT reaches the real picture controller, whose
+`picture` op gives the shell v5 operations text that `decode_picture_operations` accepts.
 """
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -37,8 +40,12 @@ from appliance.display_host.bus import (
     DISPLAY_VERSION,
     BusPictureSink,
 )
+from appliance.display_host.picture import FileAppliedPictures, PictureController, operations_for
+from appliance.display_host.picture_list import FileOfferedCache
 from appliance.display_host.runner import document_feed
 from appliance.host.bus import HOST_SLICE, host_session
+from contracts.lut import LutRef
+from contracts.node_frame import LutMix, decode_picture_operations, encode_picture_operations
 from contracts.node_link import CENTRAL_WRITER, NODE_MAX_STREAMS, Pipe, account_id
 from contracts.node_output import (
     BEST_DETECTED,
@@ -91,6 +98,8 @@ PICTURE_DOCUMENT = PictureDocument("HDMI-A-1", 8, {"10": 46}, SoftwarePicture(11
 PICTURE_REPORT = PictureReport("HDMI-A-1", DisplayIdentity("XYM", 5475, "MNN", None),
                                (HardwareSetting("10", HardwareRange(RangeKind.LEVEL, 100, ()), 46),), 8,
                                {"10": HardwareResult(WriteResult.TAKEN, 60, 46)}, 8)
+PAPER = LutRef("ab" * 32, "lut33-perceptual-relcol-bpc-1")
+PRINT_LOOK = PictureDocument("HDMI-A-1", 9, {"10": 46}, SoftwarePicture(114, 100, 6500, 22, 85, 40, 20, PAPER, 80))
 REPORT = OutputReport("HDMI-A-1", True, DisplayIdentity("XYM", 5475, "MNN", None),
                       (DisplayMode(1920, 1080, 60000, preferred=True),), (PowerMethod.DDC_CI, PowerMethod.SIGNAL_OFF),
                       PowerMethod.DDC_CI, 2, None, None)
@@ -103,6 +112,17 @@ async def _names(node) -> frozenset[str]:
         return frozenset(info.config.name for info in names)
     finally:
         await client.close()
+
+
+class TextShell:
+    """The shell's `picture` op as Weston's backend sends it: the operations as their wire text."""
+
+    def __init__(self) -> None:
+        self.texts: list[str] = []
+
+    def picture(self, operations, *, timeout, brightness):
+        self.texts.append(encode_picture_operations(operations))
+        return True
 
 
 class CountingStore(FileLinkStore):
@@ -147,8 +167,15 @@ def test_the_display_line_carries_centrals_output_document(tmp_path):
         assert await asyncio.to_thread(display.wait_attached, 15)
         pictures: list[tuple[str, PictureDocument]] = []
         sink = BusPictureSink(display)
+        shell = TextShell()
+        unused = SimpleNamespace()       # no display is connected: no DDC/CI, no ask
+        picture = PictureController(unused, unused, FileOfferedCache(tmp_path), shell,
+                                    SimpleNamespace(put_picture=lambda report: None),
+                                    FileAppliedPictures(tmp_path), time.monotonic)
+        picture.start()
         controller = SimpleNamespace(document=lambda output_id, document: (pictures.append((output_id, document)),
-                                                                          sink.put_picture(PICTURE_REPORT)))
+                                                                          sink.put_picture(PICTURE_REPORT),
+                                                                          picture.document(output_id, document)))
         display.desired.on_change(document_feed(SimpleNamespace(document=lambda output_id, document: None),
                                                 controller))
 
@@ -230,7 +257,19 @@ def test_the_display_line_carries_centrals_output_document(tmp_path):
             [recorded] = await until(pictured, 15, "the picture report recorded")
             assert recorded == encode_picture_report(PICTURE_REPORT)
             assert decode_picture_report(recorded) == PICTURE_REPORT
+
+            # (7) The print look ships together: v5 operations text at the shell's `picture` op.
+            projection.set(DESIRED, PICTURE_KEY, encode_picture_document(PRINT_LOOK))
+
+            async def drawn():
+                return [operations for operations in map(decode_picture_operations, shell.texts)
+                        if operations.picture_change == 9]
+            [operations] = (await until(drawn, 15, "the print look's operations at the shell"))[:1]
+            assert operations == operations_for("HDMI-A-1", 9, PRINT_LOOK.software)
+            assert (operations.saturation, operations.lut) == (0.85, LutMix(PAPER, 0.8))
+            assert operations.highlight_knee < 1 and operations.black_floor > 0
         finally:
+            picture.stop()
             stop.set()
             await asyncio.wait_for(running, 10)
             await client.close()

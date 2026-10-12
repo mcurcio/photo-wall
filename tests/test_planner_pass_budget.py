@@ -26,7 +26,7 @@ from central.wall_plan.fit_settings import FitSettings
 from central.wall_plan.key_content import ANALYSIS_VERSION
 from central.wall_plan.order import WallHistory
 from central.wall_plan.selection import SceneSelection
-from contracts.models import FrameProfile, OutputBinding
+from contracts.models import FrameProfile, Mat, OutputBinding
 
 PHOTOS = 50_000
 STEP = 1_000
@@ -62,7 +62,7 @@ def test_a_pass_over_fifty_thousand_photos_reads_only_the_top_of_its_line(regist
                             for n in range(FRAMES))))
     runtime.activate("scene", "run", 0)
     bindings = {"player": tuple(OutputBinding(output_id=f"out-{n}", frame_id=f"f{n}",
-                                              generation=1, profile=WIDE)
+                                              generation=1, profile=WIDE, mat=Mat())
                                 for n in range(FRAMES))}
 
     def one_pass():

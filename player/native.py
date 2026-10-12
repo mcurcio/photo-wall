@@ -17,9 +17,21 @@ from pathlib import Path
 from typing import Any, Literal
 from uuid import UUID
 
-from contracts.models import AppliedCalibration
+from contracts.lut import LUT_GRID, LutRef
+from contracts.models import MAT_LIGHTS_MAX, AppliedCalibration, Mat
 from contracts.node_frame import PictureOperations
-from player.geometry import output_to_picture, photo_rect
+from player.geometry import (
+    LUMA,
+    ROLLOFF_FADE_POWER,
+    Matrix,
+    MatShadow,
+    mat_shadow,
+    output_to_picture,
+    peak,
+    photo_rect,
+    rolloff_skipped,
+)
+from player.luts import LutSource
 from player.mainloop import Tick, watch_bus
 from player.rendering import (
     PRESENTATION_FRESHNESS,
@@ -131,37 +143,89 @@ def _drawn_fit(draw: _Draw):
             else draw.composition.calibration).fit
 
 
-def _final_uniforms(gl, program: int, operations: PictureOperations | None, opening) -> None:
-    """The final pass's operations (neutral when None) and the per-Output mask's opening."""
+def _drawn_mat(draw: _Draw) -> Mat:
+    """The mat a draw shows: its trial's (Position's trial carries the draft mat), else its
+    binding's."""
+    return draw.applied_mat if draw.applied_mat is not None else draw.composition.binding.mat
+
+
+def _final_uniforms(gl, program: int, operations: PictureOperations | None, opening,
+                    shadow: MatShadow | None, *, lut_drawn: bool) -> None:
+    """The final pass's operations (neutral when None), the Frame's mat shadow (None: none) and the
+    per-Output mask's opening. Each step's switch is player/geometry.py's skip rule, worked here,
+    so a neutral step is never computed by the shader either. `lut_drawn`: the LUT
+    `operations.lut` names is bound on texture unit 1 (`NativeRenderer._bind_lut`), so step 1
+    mixes it in; otherwise step 1 is skipped."""
+    def uniform(name: str) -> int:
+        return gl.glGetUniformLocation(program, name)
+
     multipliers, light, contrast, gamma = _NEUTRAL if operations is None else (
         operations.rgb_multipliers, operations.light_factor, operations.contrast_slope,
         operations.gamma_exponent)
-    gl.glUniform3f(gl.glGetUniformLocation(program, "rgb_multipliers"), *multipliers)
-    gl.glUniform1f(gl.glGetUniformLocation(program, "light_factor"), light)
-    gl.glUniform1f(gl.glGetUniformLocation(program, "contrast_slope"), contrast)
-    gl.glUniform1f(gl.glGetUniformLocation(program, "gamma_exponent"), gamma)
+    gl.glUniform3f(uniform("rgb_multipliers"), *multipliers)
+    gl.glUniform1f(uniform("light_factor"), light)
+    gl.glUniform1f(uniform("contrast_slope"), contrast)
+    gl.glUniform1f(uniform("gamma_exponent"), gamma)
+    lut_on = lut_drawn and operations is not None and operations.lut is not None
+    gl.glUniform1i(uniform("lut_on"), int(lut_on))
+    gl.glUniform1i(uniform("lut"), _LUT_UNIT)       # never unit 0: two sampler types may not share one
+    gl.glUniform1f(uniform("lut_amount"), operations.lut.amount if lut_on else 0.0)
+    saturation_on = operations is not None and operations.saturation != 1.0
+    gl.glUniform1i(uniform("saturation_on"), int(saturation_on))
+    gl.glUniform1f(uniform("saturation"), operations.saturation if saturation_on else 1.0)
+    rolloff_on = operations is not None and not rolloff_skipped(operations)
+    gl.glUniform1i(uniform("rolloff_on"), int(rolloff_on))
+    gl.glUniform1f(uniform("highlight_knee"), operations.highlight_knee if rolloff_on else 1.0)
+    gl.glUniform1f(uniform("peak"), peak(operations) if rolloff_on else 1.0)
+    floor_on = operations is not None and operations.black_floor > 0
+    gl.glUniform1i(uniform("floor_on"), int(floor_on))
+    gl.glUniform1f(uniform("black_floor"), operations.black_floor if floor_on else 0.0)
+    gl.glUniform1i(uniform("mat_on"), int(shadow is not None))
+    if shadow is not None:
+        lights = shadow.lights + (None,) * (MAT_LIGHTS_MAX - len(shadow.lights))
+        _set_matrix(gl, program, "to_opening", shadow.to_opening)
+        gl.glUniform2f(uniform("mat_size"), *shadow.size_mm)
+        gl.glUniform1i(uniform("light_count"), len(shadow.lights))
+        gl.glUniform2fv(uniform("light_toward"), MAT_LIGHTS_MAX,
+                        [v for light in lights for v in (light.toward if light else (0.0, 0.0))])
+        gl.glUniform2fv(uniform("light_band"), MAT_LIGHTS_MAX,
+                        [v for light in lights for v in ((light.dark_until_mm, light.lit_from_mm)
+                                                         if light else (0.0, 0.0))])
+        gl.glUniform3fv(uniform("light_weight"), MAT_LIGHTS_MAX,
+                        [v for light in lights for v in (light.weight if light else (0.0, 0.0, 0.0))])
     _set_opening(gl, program, opening)
 
 
-def _picture_key(frames, composition: OutputComposition) -> object:
-    """The Output's newest picture operations, so a picture change is a change to redraw."""
+def _set_matrix(gl, program: int, name: str, matrix: Matrix) -> None:
+    """A player/geometry.py row-major 3x3 as a GLSL mat3 uniform (column-major, untransposed)."""
+    gl.glUniformMatrix3fv(gl.glGetUniformLocation(program, name), 1, False,
+                          [matrix[row*3+column] for column in range(3) for row in range(3)])
+
+
+def _picture_key(frames, composition: OutputComposition, luts: LutSource) -> object:
+    """The Output's newest picture operations, so a picture change is a change to redraw; with a
+    LUT named, whether it is held yet (the LUTs' generation), so its arrival redraws and the tag
+    can then name the change (rule 3)."""
     if frames is None:
         return None
     try:
-        return frames.picture(composition.binding.output_id)
+        operations = frames.picture(composition.binding.output_id)
     except Exception:
         return object()     # unreadable here: always redraw, and _render reports it
+    if operations is None or operations.lut is None:
+        return operations
+    return operations, luts.generation()
 
 
 def _shown(composition: OutputComposition, generations: tuple, sample_serials: tuple,
-           frames, grant) -> tuple:
+           frames, grant, luts: LutSource) -> tuple:
     """Everything that changes a surface's pixels (G8 render on change, E-G8-3): layers,
     decoder generations, alpha, each video's newest sample, the calibration trial and the
     Output's picture operations (1c)."""
     return (_fingerprint(composition), generations,
             tuple(local.alpha for local in composition.layers), sample_serials,
             _trial_key(frames, composition, grant),
-            _picture_key(frames, composition))
+            _picture_key(frames, composition, luts))
 
 
 def _visible(composition: OutputComposition) -> tuple[LocalLayer, ...]:
@@ -247,6 +311,9 @@ class _Draw:
     generations: tuple[tuple[str, int, int], ...]
     completed_at: float = 0
     applied_calibration: AppliedCalibration | None = None
+    # The trial's mat while a trial is drawn (Position's trial carries the draft mat); None: the
+    # binding's (`_drawn_mat`).
+    applied_mat: Mat | None = None
     primitives: tuple | None = None
     # What this draw shows (_shown): the one record present() compares against, so "a draw
     # is owed" is just "the newest draw, pending or else acknowledged, shows something else".
@@ -277,6 +344,11 @@ class _Surface:
     # The Output's picture operations from the display host's shell (frame protocol v4), read
     # each render; None: neutral (none received yet, or no display host).
     operations: PictureOperations | None = None
+    # The newest picture change this surface drew complete (`_tagged_change`); None before any.
+    complete_change: int | None = None
+    # The LUT texture (GL_TEXTURE_3D on _LUT_UNIT) and the LUT it holds; 0 and None: none yet.
+    lut_texture: int = 0
+    lut_ref: LutRef | None = None
 
     def fail(self, reason: str) -> None:
         self.failure, self.failed_episode = reason, self.episode
@@ -290,6 +362,16 @@ class _Surface:
 
     def begin_episode(self) -> None:
         self.episode += 1
+
+    def _tagged_change(self, operations: PictureOperations | None, lut_drawn: bool) -> int | None:
+        """The picture change a draw's tag names (the one home of the Done rule, design rule 3:
+        "only Done waits for" a LUT): `operations.picture_change` when the draw was complete (no
+        LUT named, or its LUT drawn), else the newest change this surface drew complete; None
+        before any. A change whose LUT is still loading is drawn with the sliders but never
+        claimed, so the picture report's presented change, and so Done, waits for the LUT."""
+        if operations is not None and (operations.lut is None or lut_drawn):
+            self.complete_change = operations.picture_change
+        return self.complete_change
 
 
 def _observe_grant(surface: _Surface, grant) -> None:
@@ -365,26 +447,118 @@ void main() {
 }
 """
 # The final pass (player/geometry.py `final_pixel`): contracts/node_frame.py PictureOperations
-# in their order, then the per-Output mask LAST, so black stays black outside the opening
-# whatever the picture settings (owner 2026-10-10 q2).
+# in the print look's order, each step switched off (never computed) at its neutral value, then
+# the Frame's mat shadow, then the per-Output mask LAST, so black stays black outside the opening
+# whatever the picture settings and the shadow (owner 2026-10-10 q2). geometry.py's constants are
+# written in (`_FINAL_CONSTANTS`), so each has one home.
+_LUT_UNIT = 1      # the LUT's texture unit; the picture is on unit 0
+_FINAL_CONSTANTS = (
+    f"#define MAT_LIGHTS_MAX {MAT_LIGHTS_MAX}\n"
+    f"const float LUT_GRID = {float(LUT_GRID)!r};\n"
+    f"const vec3 LUMA = vec3({', '.join(repr(weight) for weight in LUMA)});\n"
+    f"const float ROLLOFF_FADE_POWER = {ROLLOFF_FADE_POWER!r};\n")
 _FINAL = """#version 300 es
 precision highp float;
+precision highp sampler3D;
 in vec2 uv;
 out vec4 color;
+""" + _FINAL_CONSTANTS + """
 uniform sampler2D picture;
 uniform vec3 rgb_multipliers;
 uniform float light_factor;
 uniform float contrast_slope;
 uniform float gamma_exponent;
+uniform int lut_on;
+uniform sampler3D lut;
+uniform float lut_amount;
+uniform int saturation_on;
+uniform float saturation;
+uniform int rolloff_on;
+uniform float highlight_knee;
+uniform float peak;
+uniform int floor_on;
+uniform float black_floor;
+uniform int mat_on;
+uniform mat3 to_opening;
+uniform vec2 mat_size;
+uniform int light_count;
+uniform vec2 light_toward[MAT_LIGHTS_MAX];
+uniform vec2 light_band[MAT_LIGHTS_MAX];
+uniform vec3 light_weight[MAT_LIGHTS_MAX];
 """ + _OPENING + """
+vec3 srgb_encoded(vec3 value) {
+    value = clamp(value, 0.0, 1.0);
+    return mix(1.055*pow(value, vec3(1.0/2.4))-0.055, 12.92*value, lessThanEqual(value, vec3(0.0031308)));
+}
+vec3 srgb_decoded(vec3 value) {
+    value = clamp(value, 0.0, 1.0);
+    return mix(pow((value+0.055)/1.055, vec3(2.4)), value/12.92, lessThanEqual(value, vec3(0.04045)));
+}
+// Step 1 (geometry.py `lut_applied`): the grid's points sit at texel centres.
+vec3 lut_applied(vec3 value) {
+    vec3 encoded = srgb_encoded(value);
+    vec3 sampled = texture(lut, encoded*((LUT_GRID-1.0)/LUT_GRID)+0.5/LUT_GRID).rgb;
+    return srgb_decoded(mix(encoded, sampled, lut_amount));
+}
+// Step 4 (geometry.py `rolled_off`), through the shortfall 1 - g, so the peak is exactly white.
+vec3 rolled_off(vec3 value) {
+    float x = max(value.r, max(value.g, value.b));
+    if (x <= highlight_knee) return value;
+    float t = (min(x, peak)-highlight_knee)/(1.0-highlight_knee);
+    float w = (peak-highlight_knee)/(1.0-highlight_knee);
+    float shortfall = (w-t)*(w+t)/(w*w*(1.0+t));
+    float y = 1.0-(1.0-highlight_knee)*shortfall;
+    float fade = pow(max(1.0-shortfall, 0.0), ROLLOFF_FADE_POWER);
+    return value*(y/x)*(1.0-fade)+y*fade;
+}
+// Step 7 (geometry.py `mat_shade`): the shade at an output point, measured in mat space.
+vec3 mat_shade(vec2 point) {
+    vec3 q = to_opening*vec3(point, 1.0);
+    vec2 m = q.xy/q.z*mat_size;
+    vec3 lit = vec3(1.0);
+    vec3 total = vec3(1.0);
+    for (int j = 0; j < MAT_LIGHTS_MAX; j++) {
+        if (j >= light_count) break;
+        vec2 toward = light_toward[j];
+        float reach = 3.0e38;
+        if (toward.x > 0.0) reach = min(reach, (mat_size.x-m.x)/toward.x);
+        else if (toward.x < 0.0) reach = min(reach, m.x/-toward.x);
+        if (toward.y > 0.0) reach = min(reach, (mat_size.y-m.y)/toward.y);
+        else if (toward.y < 0.0) reach = min(reach, m.y/-toward.y);
+        float s = max(reach, 0.0);
+        vec2 band = light_band[j];          // (dark until, lit from), mm
+        float reached;
+        if (s >= band.y) reached = 1.0;
+        else if (s < band.x) reached = 0.0;
+        else {
+            float k = (s-band.x)/(band.y-band.x);
+            reached = k*k*(3.0-2.0*k);
+        }
+        lit += light_weight[j]*reached;
+        total += light_weight[j];
+    }
+    return lit/total;
+}
 void main() {
     // Composition targets use OpenGL's lower-left orientation, unlike decoded bytes.
-    vec3 value = clamp(texture(picture, vec2(uv.x, 1.0-uv.y)).rgb*rgb_multipliers*light_factor,
-                       0.0, 1.0);
-    vec3 encoded = mix(1.055*pow(value, vec3(1.0/2.4))-0.055, 12.92*value,
-                       lessThanEqual(value, vec3(0.0031308)));
-    vec3 contrasted = (encoded-0.5)*contrast_slope+0.5;
+    vec3 value = texture(picture, vec2(uv.x, 1.0-uv.y)).rgb;
+    if (lut_on == 1) value = lut_applied(value);
+    if (saturation_on == 1) {
+        float luminance = dot(LUMA, value);
+        value = luminance+saturation*(value-luminance);
+    }
+    // Steps 3-4: the rolloff on brightness alone, white balance after (its white is the Display's).
+    if (rolloff_on == 1) value = rolled_off(max(value*light_factor, 0.0))*rgb_multipliers;
+    else value = max(value*rgb_multipliers*light_factor, 0.0);
+    vec3 contrasted = (srgb_encoded(value)-0.5)*contrast_slope+0.5;
     vec3 adjusted = clamp(pow(max(contrasted, 0.0), vec3(gamma_exponent)), 0.0, 1.0);
+    // Steps 6-7 in the panel's light (sRGB, the panel the encode is for).
+    if (floor_on == 1 || mat_on == 1) {
+        vec3 light = srgb_decoded(adjusted);
+        if (floor_on == 1) light = black_floor+(1.0-black_floor)*light;
+        if (mat_on == 1) light *= mat_shade(uv);
+        adjusted = srgb_encoded(light);
+    }
     if (!inside_opening(uv)) adjusted = vec3(0.0);
     color=vec4(adjusted, 1.0);
 }
@@ -404,7 +578,7 @@ class NativeRenderer:
 
     def __init__(self, outputs: tuple[NativeOutput, ...], *, decoder_limit: int = 4,
                  texture_budget: int = 512*1024**2, prepare_timeout: float = 5,
-                 serial: str | None = None):
+                 serial: str | None = None, luts: LutSource):
         if (not outputs or len({o.output_id for o in outputs}) != len(outputs)
                 or len({o.app_id for o in outputs}) != len(outputs)):
             raise ValueError("unique Output and app IDs required")
@@ -414,6 +588,7 @@ class NativeRenderer:
         self._closed = False
         self.gl_renderer: str | None = None  # GL_RENDERER of the first realized GL context
         self._serial_label = serial
+        self._luts = luts       # where a picture's LUT comes from (print look; the service's PlayerLuts)
         self.decoder_limit, self.texture_budget = decoder_limit, texture_budget
         self.prepare_timeout = prepare_timeout
         self._decoders: dict[str, _Decoder] = {}
@@ -876,7 +1051,7 @@ class NativeRenderer:
         # renewal. A static photo is not redrawn every tick (G8).
         shown = _shown(composition, generations,
                        tuple(self._decoders[key].sample_serial for key, _, _ in generations),
-                       frames, grant if frames is not None else None)
+                       frames, grant if frames is not None else None, self._luts)
         # The newest draw is the pending one, else the acknowledged one: whatever _render
         # dropped or drew, present() reads it from those two and nothing else.
         ack = surface.acknowledged
@@ -1064,9 +1239,7 @@ class NativeRenderer:
         fit = _drawn_fit(draw)
         profile = draw.composition.binding.profile
         aspect = profile.width_px / profile.height_px      # the Frame's aspect: Cover's and the photo's
-        matrix = output_to_picture(fit, surface.size, aspect)
-        gl.glUniformMatrix3fv(gl.glGetUniformLocation(program, "output_to_picture"), 1, False,
-                              [matrix[row*3+column] for column in range(3) for row in range(3)])
+        _set_matrix(gl, program, "output_to_picture", output_to_picture(fit, surface.size, aspect))
         _set_opening(gl, program, fit.corners)
         gl.glUniform1i(gl.glGetUniformLocation(program, "media"), 0)
         # An explicit Trial may render a procedural commissioning canvas when
@@ -1150,6 +1323,7 @@ class NativeRenderer:
                 draw = _Draw(self._serial, logical, self._generations(logical))
             if draw is not None:
                 draw.applied_calibration = applied
+                draw.applied_mat = trial.mat if trial else None
                 draw.primitives = trial.primitives if trial else None
         candidate_ok = False
         try:
@@ -1174,8 +1348,12 @@ class NativeRenderer:
             gl.glBindTexture(gl.GL_TEXTURE_2D, surface.targets[1 if candidate_ok else 0][1])
             gl.glUniform1i(gl.glGetUniformLocation(surface.programs[1], "picture"), 0)
             shown = draw if candidate_ok else surface.acknowledged
+            shadow = (mat_shadow(_drawn_fit(shown), shown.composition.binding.profile, _drawn_mat(shown))
+                      if shown else None)
+            lut_drawn = self._bind_lut(surface, surface.operations)
             _final_uniforms(gl, surface.programs[1], surface.operations,
-                            _drawn_fit(shown).corners if shown else _NO_OPENING)
+                            _drawn_fit(shown).corners if shown else _NO_OPENING, shadow,
+                            lut_drawn=lut_drawn)
             gl.glDrawArrays(gl.GL_TRIANGLES, 0, 3)
             gl.glFlush()
             if gl.glGetError() != gl.GL_NO_ERROR:
@@ -1207,10 +1385,9 @@ class NativeRenderer:
                 metadata = surface.acknowledged.applied_calibration
                 tag = ("trial-" + metadata.candidate_sha256 if metadata and metadata.trial_id
                        else composition_tag(actual, _visible(actual)))
-                operations = surface.operations
                 frames.tag_rendered_buffer(surface.window.get_window(), grant, tag,
                                            surface.acknowledged.primitives,
-                                           picture_change=operations.picture_change if operations else None)
+                                           picture_change=surface._tagged_change(surface.operations, lut_drawn))
         except Exception as error:
             surface.pending = None
             surface.fail(type(error).__name__)
@@ -1221,11 +1398,46 @@ class NativeRenderer:
             gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, gtk_framebuffer)
         return True
 
+    def _bind_lut(self, surface: _Surface, operations: PictureOperations | None) -> bool:
+        """Bind the LUT `operations` names on _LUT_UNIT, uploading its bytes when the surface holds
+        another; False when none is named or its bytes are not held yet (the first ask starts the
+        fetch: player/luts.py). Texture unit 0 stays the active unit."""
+        luts = self._luts
+        if operations is None or operations.lut is None:
+            return False
+        table = luts.lut(operations.lut.ref)
+        if table is None:
+            return False
+        gl = self.GL
+        gl.glActiveTexture(gl.GL_TEXTURE0 + _LUT_UNIT)
+        try:
+            if not surface.lut_texture:
+                surface.lut_texture, surface.lut_ref = int(gl.glGenTextures(1)), None
+            gl.glBindTexture(gl.GL_TEXTURE_3D, surface.lut_texture)
+            if surface.lut_ref != operations.lut.ref:
+                for parameter, value in ((gl.GL_TEXTURE_MIN_FILTER, gl.GL_LINEAR),
+                                         (gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR),
+                                         (gl.GL_TEXTURE_WRAP_S, gl.GL_CLAMP_TO_EDGE),
+                                         (gl.GL_TEXTURE_WRAP_T, gl.GL_CLAMP_TO_EDGE),
+                                         (gl.GL_TEXTURE_WRAP_R, gl.GL_CLAMP_TO_EDGE)):
+                    gl.glTexParameteri(gl.GL_TEXTURE_3D, parameter, value)
+                gl.glPixelStorei(gl.GL_UNPACK_ALIGNMENT, 1)      # a row is 33 * 3 bytes
+                # contracts/lut.py's layout as served: red fastest (width), then green, then blue.
+                gl.glTexImage3D(gl.GL_TEXTURE_3D, 0, gl.GL_RGB8, LUT_GRID, LUT_GRID, LUT_GRID, 0,
+                                gl.GL_RGB, gl.GL_UNSIGNED_BYTE, table)
+                surface.lut_ref = operations.lut.ref
+        finally:
+            gl.glActiveTexture(gl.GL_TEXTURE0)
+        return True
+
     def _unrealize(self, area, surface) -> None:
         area.make_current()
         if area.get_error() is not None:
             return
         gl = self.GL
+        if surface.lut_texture:
+            gl.glDeleteTextures([surface.lut_texture])
+        surface.lut_texture, surface.lut_ref = 0, None
         for texture, _, _ in surface.textures.values():
             gl.glDeleteTextures([texture])
         for framebuffer, texture in surface.targets:

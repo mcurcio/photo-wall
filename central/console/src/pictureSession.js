@@ -1,20 +1,22 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { TICK_MS, useVisible } from "./liveAdjustment.js";
+import { listLuts } from "./lutsApi.js";
 import {
-  beginPicture, editHardware, editSoftware, keepPictureAlive, pictureDone, readFramePicture, revertPicture,
+  beginPicture, editHardware, editLut, editSoftware, keepPictureAlive, pictureDone, readFramePicture, revertPicture,
 } from "./pictureApi.js";
 
 /*
  * The Picture tab's live session (roadmap 1c's Live model, design language §8 row B5; decision
  * 0022, the picture split, slice S2): the operator's draft of the Display's two groups, the
- * display's own settings (hardware) and Photo Wall's four (software), shown on the display while
+ * display's own settings (hardware) and Photo Wall's (software), shown on the display while
  * the tab is open, then kept (Done) or put back (Revert). Central's rules are
  * central/displays/picture.py's and hardware.py's; this module only drives the routes
  * (pictureApi.js).
  *
  * THE DRAFT IS THE OPERATOR'S. A draft holds only what the operator changed in this visit: a value
- * per display setting (null hands it back: as the display has it) and per Photo Wall setting. Every
+ * per display setting (null hands it back: as the display has it), per Photo Wall setting, and the
+ * LUT choice (`lut.lut`: a paper profile's digest, or null for no LUT; print look). Every
  * session begun while the tab is open is sent the whole draft, so the draft outlives a session that
  * ended by itself (the browser tab hidden, the Pi restarted, Central's idle window). Done and Revert
  * clear it.
@@ -31,6 +33,8 @@ import {
  * value where it was let go is always the last one sent. Both groups share the gap. One request is
  * in flight at a time, so each edit names the sequence the previous one answered.
  *
+ * THE LUTS. While the tab is open the LUTs list is read once (lutsApi.js), for the picker.
+ *
  * SHOWN. The latest change counts as shown only when nothing is waiting to be sent, a read begun
  * after the last accepted change says `shown`, and that read carries the draft's values. Done is
  * offered only then; Central checks it again (`not_presented_yet`).
@@ -40,8 +44,10 @@ import {
 export const EDIT_GAP_MS = 500;
 const RETRY_MS = 2000;
 
-/** Photo Wall's four, as Central names them (central/displays/picture.py `SoftwareSetting`). */
-export const SOFTWARE_SETTINGS = /** @type {const} */ (["brightness", "contrast", "colour-temperature", "gamma"]);
+/** Photo Wall's settings, as Central names them (central/displays/picture.py `SoftwareSetting`). */
+export const SOFTWARE_SETTINGS = /** @type {const} */ ([
+  "brightness", "contrast", "colour-temperature", "gamma", "saturation", "highlight-rolloff", "black-floor", "lut-amount",
+]);
 
 /** Central's refusals, in the operator's words; `stops`: the session waits for the operator. */
 const REFUSALS = {
@@ -52,6 +58,7 @@ const REFUSALS = {
   not_offered: "This display does not offer that setting, so Photo Wall cannot set it.",
   out_of_range: "Photo Wall refused this value.",
   not_presented_yet: "The Pi has not shown the latest change yet. Wait a moment, then press Done again.",
+  unknown_lut: "That LUT is no longer on the LUTs list, so Photo Wall cannot use it.",
   unreachable: "Photo Wall's server did not answer.",
 };
 // Begin refusals that leave the tab without a session until something changes on the Pi's side.
@@ -59,7 +66,7 @@ const UNAVAILABLE = new Set(["frame_unbound", "no_display", "unknown_frame"]);
 // The session is gone: begin again (with the draft).
 const GONE = new Set(["session_ended", "unknown_session"]);
 // Refused values the draft drops (the slider goes back to what Central has).
-const DROPPED = new Set(["out_of_range", "not_offered"]);
+const DROPPED = new Set(["out_of_range", "not_offered", "unknown_lut"]);
 
 // The pages left with changes not kept, by Frame, and when (this browser's clock, epoch seconds,
 // only ever shown): the next visit says the display went back then.
@@ -74,11 +81,20 @@ const SOFTWARE_FIELDS = {
   contrast: "contrast_percent",
   "colour-temperature": "colour_temperature_kelvin",
   gamma: "gamma_tenths",
+  saturation: "saturation_percent",
+  "highlight-rolloff": "highlight_rolloff_percent",
+  "black-floor": "black_floor_tenths",
+  "lut-amount": "lut_amount_percent",
 };
 
 /** A Photo Wall setting's value as a read shows it: a percent, kelvin or tenths. */
 export function softwareValue(view, setting) {
   return view.software[SOFTWARE_FIELDS[setting]];
+}
+
+/** The LUT a read shows in force: its paper profile's digest, or null for none. */
+export function lutValue(view) {
+  return view.software.lut?.profile_sha256 ?? null;
 }
 
 /** A display setting's value as a read shows it; null: as the display has it. */
@@ -90,22 +106,25 @@ export function hardwareValue(view, code) {
  * @typedef {import("./pictureApi.js").FramePictureView} FramePictureView
  * @typedef {import("./pictureApi.js").SoftwareSetting} SoftwareSetting
  * @typedef {import("./pictureApi.js").VcpCode} VcpCode
- * @typedef {{hardware: Record<VcpCode, number|null>, software: Partial<Record<SoftwareSetting, number>>}} Draft
+ * @typedef {{hardware: Record<VcpCode, number|null>, software: Partial<Record<SoftwareSetting, number>>,
+ *            lut: {lut?: string|null}}} Draft
+ * @typedef {{profile_sha256: string, name: string}} LutChoice   a LUT the picker offers
  * @typedef {"idle"|"live"|"waiting"|"shown"} Phase
  *   `idle`: no session (not open, no display, or someone else's session); `live`: a session and
  *   no change to judge; `waiting`: the Pi has not shown the latest change; `shown`: it has.
  * @typedef {{words: string, code: string}} Problem   `code` is Central's, for Details only.
  */
 
-const EMPTY = /** @type {Draft} */ ({ hardware: {}, software: {} });
-const isEmpty = (draft) => Object.keys(draft.hardware).length === 0 && Object.keys(draft.software).length === 0;
+const EMPTY = /** @type {Draft} */ ({ hardware: {}, software: {}, lut: {} });
+const PARTS = /** @type {const} */ (["hardware", "software", "lut"]);
+const isEmpty = (draft) => PARTS.every((part) => Object.keys(draft[part]).length === 0);
 
 /**
  * The draft's next request against what this session already took; null when it has taken it all.
- * @returns {{kind: "hardware"|"software", key: string, value: number|null}|null}
+ * @returns {{kind: "hardware"|"software"|"lut", key: string, value: number|string|null}|null}
  */
 function nextWrite(draft, taken) {
-  for (const kind of /** @type {const} */ (["hardware", "software"])) {
+  for (const kind of PARTS) {
     for (const [key, value] of Object.entries(draft[kind])) {
       if (!(key in taken[kind]) || taken[kind][key] !== value) return { kind, key, value };
     }
@@ -116,7 +135,8 @@ function nextWrite(draft, taken) {
 /** Whether a read carries every part of the draft. */
 function carries(view, draft) {
   return Object.entries(draft.hardware).every(([code, value]) => hardwareValue(view, code) === value)
-    && Object.entries(draft.software).every(([setting, value]) => softwareValue(view, setting) === value);
+    && Object.entries(draft.software).every(([setting, value]) => softwareValue(view, setting) === value)
+    && (!("lut" in draft.lut) || lutValue(view) === draft.lut.lut);
 }
 
 /**
@@ -124,11 +144,13 @@ function carries(view, draft) {
  * @returns {{view: FramePictureView|null, phase: Phase, draft: Draft, dirty: boolean,
  *            changeHardware: (code: VcpCode, value: number|null) => void,
  *            changeSoftware: (setting: SoftwareSetting, value: number) => void,
+ *            changeLut: (profileSha256: string|null) => void, luts: LutChoice[]|null,
  *            done: () => Promise<boolean>, revert: () => Promise<void>, busy: boolean,
  *            error: Problem|null, unavailable: Problem|null, waitingFor: string|null,
  *            latest: number|null, savedAt: number|null, leftAt: number|null}}
  *   `unavailable`: why no session can begin (no Pi, no display); `waitingFor`: someone else's
- *   session, in words; `latest` counts this session's changes, for the bar (null: no session).
+ *   session, in words; `latest` counts this session's changes, for the bar (null: no session);
+ *   `luts` the LUTs list (null until read).
  */
 export function usePictureSession({ frameId, open }) {
   const visible = useVisible();
@@ -145,6 +167,7 @@ export function usePictureSession({ frameId, open }) {
   const [busy, setBusy] = useState(false);
   const [savedAt, setSavedAt] = useState(/** @type {number|null} */ (null));
   const [leftAt, setLeftAt] = useState(/** @type {number|null} */ (null));
+  const [luts, setLuts] = useState(/** @type {LutChoice[]|null} */ (null));
   // Read by the loop between renders. `taken`: what this session has accepted; `wrote` counts
   // accepted writes and `readFor` is the count a read began after, so a read older than the last
   // write never says shown. `flight` is the request in flight; `acting` holds the loop.
@@ -202,7 +225,9 @@ export function usePictureSession({ frameId, open }) {
     const expected = { expected_sequence: open_.sequence, value: next.value };
     const result = next.kind === "hardware"
       ? await editHardware(open_.session_id, { ...expected, code: next.key })
-      : await editSoftware(open_.session_id, { ...expected, setting: next.key });
+      : next.kind === "lut"
+        ? await editLut(open_.session_id, { profile_sha256: next.value, expected_sequence: open_.sequence })
+        : await editSoftware(open_.session_id, { ...expected, setting: next.key });
     current.editAt = performance.now() + EDIT_GAP_MS;
     if (!current.mounted || current.session !== open_) return;
     const part = next.kind;
@@ -303,6 +328,16 @@ export function usePictureSession({ frameId, open }) {
     return () => clearInterval(timer);
   }, [live, step]);
 
+  // The LUTs list, read once each time the tab is opened.
+  useEffect(() => {
+    if (!open) return undefined;
+    let current = true;
+    void listLuts().then((result) => {
+      if (current && result.ok) setLuts(result.luts.map(({ profile_sha256, name }) => ({ profile_sha256, name })));
+    });
+    return () => { current = false; };
+  }, [open]);
+
   // Leaving the tab, hiding the browser tab or leaving the page ends the session now (Revert).
   useEffect(() => {
     if (live) return;
@@ -358,6 +393,7 @@ export function usePictureSession({ frameId, open }) {
   }, [setDraft, step]);
   const changeHardware = useCallback((code, value) => change("hardware", code, value), [change]);
   const changeSoftware = useCallback((setting, value) => change("software", setting, value), [change]);
+  const changeLut = useCallback((profileSha256) => change("lut", "lut", profileSha256), [change]);
 
   const done = useCallback(() => act(async () => {
     const open_ = state.current.session;
@@ -391,7 +427,8 @@ export function usePictureSession({ frameId, open }) {
   /** @type {Phase} */
   const phase = session === null ? "idle" : shown ? "shown" : dirty ? "waiting" : "live";
   return {
-    view, phase, draft, dirty, changeHardware, changeSoftware, done, revert, busy, error, unavailable, waitingFor,
+    view, phase, draft, dirty, changeHardware, changeSoftware, changeLut, luts, done, revert, busy, error, unavailable,
+    waitingFor,
     latest: session === null ? null : changes, savedAt, leftAt,
   };
 }

@@ -99,6 +99,7 @@ import player.service
 from contracts.enrollment import OutputReport
 from player.identity import load_identity
 from player.rendering import RecordingRenderer
+from player.luts import PlayerLuts
 from player.service import BootContext, PlayerConfig, PlayerService, central_finder
 from uplink.resolver import read_kernel_command_line, resolve_central
 from uplink.transport import HttpTransport
@@ -215,7 +216,7 @@ find_central = central_finder(config, resolve_central(read_kernel_command_line()
                               transport=HttpTransport(trust=trust))
 service = AuditedService(config, load_identity(), outputs, renderer, dispatcher,
                          find_central=find_central, trust=trust,
-                         boot_context=boot_context)
+                         boot_context=boot_context, luts=PlayerLuts())
 stopping = [False]
 def stop(*_):
     stopping[0] = True

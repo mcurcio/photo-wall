@@ -223,6 +223,7 @@ try:
                         "mode": "corners", "corners": [[0, 0], [1, 0], [1, 1], [0, 1]], "rotation": 180}}
                     status, raw = transport.request("POST", trial_path, json.dumps({
                         "operation": "edit", "expected_sequence": 1, "calibration": calibration,
+                        "mat": trial["mat"],  # the whole draft, as the console sends it: the saved mat
                     }).encode())
                     assert status == 200, (status, raw)
                     trial = json.loads(raw)

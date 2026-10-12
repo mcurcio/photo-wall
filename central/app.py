@@ -45,11 +45,13 @@ from central.infra.display_store import (
 from central.infra.fit_analysis_store import PgFitAnalysisReader
 from central.infra.fit_settings_store import PgFitSettings
 from central.infra.house_store import PgHouse, seed_house
+from central.infra.lut_store import PgLuts
 from central.infra.photo_library_store import PgPhotoLibrary
 from central.infra.power_store import PgPower
 from central.infra.why_store import PgWhy
 from central.installation_models import FrameName, InstallationInventory, WallInventory, WallNaming
 from central.library_routes import mount_library_routes
+from central.lut_routes import mount_lut_routes
 from central.media_ports import MediaApplication
 from central.media_queue import MediaTaskQueue, ProcrastinateMediaQueue
 from central.media_repository import MediaRepository
@@ -792,6 +794,7 @@ def create_app(
     mount_house_routes(app, admin=admin, queries=house, commands=house)
     pictures = PgPictureSessions(db)
     mount_picture_routes(app, admin=admin, queries=pictures, commands=pictures)
+    mount_lut_routes(app, admin=admin, player=player, luts=PgLuts(db, clock))
     if content is not None:
         mount_content_routes(app, content)
     mount_node_routes(app, db=db, clock=clock, admin=admin, coordinator=coordinator, config=node_control,

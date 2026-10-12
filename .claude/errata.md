@@ -5628,3 +5628,227 @@ Order: (a) merge the iac PR that switches the factory to `central.app:create_app
   load) and fails the same way on origin/main (1 of 96):** the alert it waits for lives one
   keepalive tick (about 500 ms) and Playwright's `expect` polls at widening intervals (up to 1 s),
   so a poll can miss it. Test-side, not this branch; not fixed here.
+
+## print-look interfaces (code architect, 2026-10-12)
+
+- **"Frame protocol v5" is picture operations v5, not a Wayland interface bump.** No frame-protocol
+  message changes shape: only the `picture` event's operations text grows (512 to 1024 bytes,
+  `MAX_OPERATIONS` in shell.c and frame-client.c, `PICTURE_OPERATIONS_BYTES`). The interface stays
+  version 4; a display host and a Player of different releases refuse each other's operations
+  through the strict codec (exactly the ten fields), and a Pi's release ships whole. The design's
+  cost line "frame protocol v5" reads as this.
+- **The LUTs routes follow the repo's operator prefix:** `/v1/operator/luts` (list, add, remove),
+  not the design sketch's `/api/luts`; the Player's fetch is `/v1/luts/{profile_sha256}/{recipe_id}`
+  (`contracts/lut.py` `LutRef.path`), beside `/v1/media/...`.
+- **The kelvin table moved to `contracts/kelvin.py` and widened to 2000-10000 K** for the lights'
+  range (the design's 2000..10000; a warm white bulb is 2700 K). The rows 3000-9300 are unchanged
+  (4900 K blue stays 0.5796, the source reads 0.5797). The software colour temperature keeps
+  3000-9300 (`SoftwarePicture` checks it).
+- **Light strength is `strength_tenths` (0..100) and a light's colour `colour_kelvin`:** the design
+  sketch's `strength: number // 0..10 in 0.1` cannot be a float without rounding; the console shows
+  0.0..10.0. The mat's depth stays `depth_mm` in 0.5 steps (exact in binary).
+- **New fields default to neutral in Python constructors** (`SoftwarePicture`, `PictureOperations`,
+  `TrialCandidate.mat_json`, `OutputBinding.mat`): the wire never defaults (strict decoders), so a
+  mixed release is refused; the cost is that a constructor that forgets a field still runs. Each
+  lane's page names its constructors, with a mutation probe per field.
+- **The black floor's light share becomes an output value through the display's response, not
+  Photo Wall's gamma setting.** The design says "the Pi turns it into the output value using the
+  display gamma setting"; Photo Wall's gamma (1.8-2.6, 2.2 changes nothing) is a look applied
+  before the floor, not the panel's response, so using it would make "2 % of white" mean another
+  light level at every gamma. Both the floor (Display Host: `black_floor = share ** (1 /
+  DISPLAY_GAMMA)`) and the mat shadow (the Player: an output value times `shade ** (1 /
+  DISPLAY_GAMMA)`) use `contracts/node_frame.py` `DISPLAY_GAMMA` (2.2), so the floor's 2 % and a
+  shadow's darkness are light on the panel whatever the gamma look. The bench may tune it.
+
+## print-look central lane, slice C3 (implementer, 2026-10-12)
+
+- **`Registry.commit_calibration_trial_in(..., mat)` takes `mat: Mat | None = None`, not a required
+  `mat: Mat`:** five callers outside the slice's files cross the same Save CAS directly
+  (tests/support/position.py `save_position`, tests/test_node_display.py,
+  tests/test_display_changed_readiness.py, tests/test_node_runtime_reconciliation.py and the tests
+  built on `save_position`). `None` keeps the Frame's saved mat (`mat=COALESCE(%s, mat)`), never
+  resets it; Position's trial Save always passes the trial's mat.
+- **"No plan revision is issued for the Frame" is not observable per Frame:** the Coordinator offers
+  a new plan revision every cycle (central/coordination.py, `_presented_from_an_earlier_offer`), so
+  no revision is tied to a Save. The Planner's input from a Frame's Position is `frame_outputs_in`;
+  tests/test_print_look_mat.py proves it equal before and after a mat-only Save, and the saved fit
+  unchanged.
+- **`edit` and `renew` now refuse a body without `mat` (`trial_mat_required`), so every caller must
+  send it:** the console (central/console/src/liveAdjustment.js `payload()`; browser tests that
+  drive it against the real app) and the Linux-only native probe tests/native_display_service_probe.py
+  (run by tests/test_node_display_native.py) send only `calibration`, so they are refused until
+  their owners add `mat`. Not in C3's files; left to the console lane and the probe's owner.
+
+## print-look central lane, slice C2 (implementer, 2026-10-12)
+
+- **The recipe is two LittleCMS transforms through the paper's device values, not one
+  `buildProofTransform`:** the one-step proof transform runs as one unbounded floating-point
+  pipeline, so a matrix-shaper paper hands an out-of-gamut colour back unchanged: the brief's own
+  reduced-gamut fixture (sRGB with rXYZ moved halfway to wtpt) baked pure red to (255, 0, 0) with
+  and without NOOPTIMIZE. `central/displays/lut.py` now goes into the paper perceptually (8-bit
+  device values, held to their range as ink is) and back relative colorimetric, black point
+  compensation both ways: the design's "Intent, settled" words. Red comes back (255, 188, 188),
+  greys and the printer-sRGB identity exact, ~0.02 s. `LUT_RECIPE_ID` is unchanged (nothing was
+  baked under it before). Cost: the device values are 8-bit between the steps (at most 1/255 of
+  rounding on top of the 33-point grid's own).
+- **A paper profile's device values may be RGB or CMYK** (bytes 16..20): the two steps need the
+  intermediate image mode; any other colour space is `not_a_printer_profile`. CMYK has no fixture
+  (Pillow cannot create one); it is exercised only by real profiles.
+- **`PictureCommands` (central/displays/ports.py, not in C2's files) does not declare `edit_lut`:**
+  the route calls `PgPictureSessions.edit_lut` through the protocol-typed `commands` (no type
+  checker runs, so it works); ports.py should gain the method in its next edit.
+- **A LUT's `used_by` names a Display by its EDID name, else "<maker> <product>"**, and counts a
+  Display whose live picture session's draft chooses it (the lease on PostgreSQL's clock, as the
+  session reads it), the same rule Remove refuses by.
+
+## print-look console lane (implementer, 2026-10-12)
+
+- **U3's owned paths cannot land the Settings › LUTs section green:** a new section must be in
+  `central/console/src/routes.js` `SECTIONS` (and its `Section` typedef), or `#/luts` does not parse
+  and `tests/test_console_routes_r4.py::test_routes_parse_format_and_round_trip` fails on the new
+  sample; `test_every_section_is_in_exactly_one_route_table` lists every section by name; and a
+  page that imports its routes module (`lutsApi.js`, as `house-settings-page.tsx` imports
+  `houseApi.js`) must be declared in that test's `DECLARED_IMPORTS`. Neither file is in U3's list.
+  The slice is built with those three one-line additions and saved to `wip/print-look-console`,
+  not landed; landing needs `routes.js` and `tests/test_console_routes_r4.py` added to U3's paths.
+- **Mat depth reads in millimetres** (design `Mat.depthMm`, 0..20 in 0.5), where design-language §7
+  "Units" says lengths are in the house's units (cm or in). Built as the design says ("2.5 mm");
+  D1's console design rows should state the exception or the rule should change.
+- **The catalogue's 800 × 600 screenshot ends above the Picture tab's Photo Wall section**, so the
+  print look rows have their own stories (`PhotoWallSettings`, exported from
+  domain/frame-picture.tsx); the whole-tab stories' baselines cannot show them.
+- **Correction to the first bullet above:** the Settings › LUTs half of U3 was not built and nothing
+  went to `wip/print-look-console`. U3's LUT picker (and its amount) landed alone, in U3's paths,
+  with a read-only `lutsApi.js` (`listLuts`). The Settings half needs, besides `routes.js` and
+  `tests/test_console_routes_r4.py`: a body that is not JSON (`apiWrite.js` JSON-encodes every body,
+  so `addLut`'s `application/vnd.iccprofile` upload needs an `apiWrite` option, not a second fetch
+  path) and a file chooser primitive in `src/ui` with its stories (S2: a page writes no className,
+  so it cannot hide a native file input), plus its design-language §4 row.
+
+## print-look docs lane, slice D1 (implementer, 2026-10-12)
+
+- **The final pass's order had its home in docs/architecture.md › Player and rendering (line 125),
+  which D1 does not own:** it still states the v4 order (white balance, light factor, clamp, encode,
+  contrast, gamma, clamp, mask), now wrong (the rolloff replaces the first clamp; the LUT,
+  saturation, floor and mat shadow are missing). D1 made 0023 the one home of the order and
+  player-architecture.md links to it; architecture.md's sentence should become a link to 0023
+  (and `player/geometry.py` `final_pixel`). docs/execution-contract.md line 48 ("Photo Wall's four
+  (brightness, contrast, colour temperature and gamma)") and .claude/skills/display-control/SKILL.md
+  line 123 ("Photo Wall's four") are stale the same way; neither is in D1's paths.
+- **Settings › LUTs is not built** (console lane's errata above), so D1 documents it as not built:
+  catalogue #153 says so, design-language §4 lists `LutsSettings` under Later patterns with what it
+  needs, and §8's row names it; the runbook gives the `curl` upload against `/v1/operator/luts`.
+- **The roadmap's Developed column names a merged pull request; feat/print-look has none yet:**
+  the 1c row says "its pull request not opened yet". Whoever opens the PR replaces that with its
+  link.
+- **Mat depth in millimetres** (console lane's finding): stated as an exception to design-language
+  §7's house units in catalogue #151 and in `FrameMat`'s row, not a rule change.
+- **The acceptance probe "remove the 0023 link from 0022 -> check_docs flags it" does not hold:**
+  scripts/check_docs.py checks only that relative links resolve, so removing a link passes (exit 0,
+  run); a broken one fails (exit 1, run). Only review catches a removed link.
+- **design-decisions.md's index lists only 0001-0005**; later records are named in the D rows, so
+  0023 joined D12 beside 0022.
+
+## print-look console lane, slice U3 Settings › LUTs (implementer, 2026-10-12)
+
+- **The re-cut paths still miss five files the section needs, all edited here:** the Settings route
+  table is `central/console/src/settingsRoutes.jsx` and its sample `src/routeSamples.json`
+  (`test_each_route_table_takes_its_sections_and_samples_from_its_own_group`); `lutsApi.js` is now
+  reached from Settings and from the Wall's Picture tab, so it joins `SHARED_WITH_SHOW` in
+  `tests/test_console_routes_r4.py`; the sidebar's Settings list is asserted by
+  `tests/browser/test_console_shell_browser.py` (one word, "LUTs"); and `go(page, "luts")` needs the
+  section in `tests/browser/console_tasks.py` (`SETTINGS_SECTIONS`, `LABELS`). The file chooser is
+  `src/ui/file-chooser.tsx` with its stories (console lane's finding).
+- **Docs that said "not built" are corrected in the same commit** (console-ux skill step 1: a §8
+  row changes with what was built): design-language §4 (`LutsSettings`, `FileChooser` join the
+  print look's members; the Later row is gone) and §8 row B5 (FileChooser and Dialog, not
+  "Button" and "ConfirmDangerous", which is not a member), operator-console-design #153,
+  runbook › LUTs, roadmap's print-look line, 0023's costs and deferred list.
+- **Remove is offered on a LUT a Display uses and Central refuses it** (409, the Displays named):
+  the DL §8 row's "the refusal in plain words"; the list's Used by column says who uses it before
+  Remove is pressed. Not disabled, so the rule keeps one home (Central's, which also counts an open
+  Picture session's draft).
+- **The list is read when the page opens and after each Add or Remove, not pushed:** a LUT chosen
+  on another tab shows in Used by the next time the page opens. The Picture tab's picker reads the
+  list when the tab opens (pictureSession.js), so a LUT added while it is open shows next time.
+
+## print-look review-2 fixes (fix agent, PR 95, 2026-10-12)
+
+- **The design's step 3/4 boundary was wrong: the rolloff erased the colour temperature.** With
+  white balance before the rolloff, its path to white went to (1, 1, 1), so soft highlights on and
+  brightness 100 % -> 101 % flipped paper white from warm to neutral. While the rolloff acts, it now
+  works on the brightness-scaled colour and white balance multiplies after it (their largest is 1,
+  so nothing passes white); when it is skipped the step is v4's, unchanged. 0023's order table and
+  `player/geometry.py` `final_pixel` say so; the shader mirrors it.
+- **M is brightness alone (the design's "largest gain x brightness"), not raised by saturation.**
+  The build's saturation term dimmed paper white at 100 % brightness with saturation above 100 %
+  (0.95 at 120 %). Now white stays exactly white at 100 % for any saturation, and a channel
+  saturation pushes past the peak is held at it (`rolled_off` caps x), so a vivid primary at
+  brightness above 100 % ends at white, as a pure primary at the peak already did. Cost: above
+  100 % brightness the most saturated primaries reach white a little sooner than before.
+- **The black floor lifts light, not the output value (spec error, for the owner's page).** The
+  design's "output: floor + (1 - floor) x value" contradicts the black point compensation it cites
+  and washed shadows out (x1.78 at 1 % light, matte floor). The Pi now sends the floor's share of
+  white light as it is (`black_floor` = tenths / 1000, `BLACK_FLOOR_MAX` 0.1); the Player decodes the
+  output value to the panel's light, lifts it (share + (1 - share) x light), multiplies the mat's
+  shade there, and encodes again. **One panel model:** the sRGB curve its encode already assumes
+  (`contracts/node_frame.py` `srgb_to_linear`, `player/geometry.py` `encode_srgb`);
+  `DISPLAY_GAMMA` (2.2) is gone. This supersedes "the display's response" entry above (its point,
+  that Photo Wall's gamma look is not the panel, stands).
+- **A light's colour has luminance 1** (`player/geometry.py` `light_colour`), not the white
+  balance's largest-channel-1 normalisation, so `Light.strength` means brightness and the kelvin
+  only colour (a 2700 K light was a third as bright as a 6500 K one). The kelvin table keeps its
+  one home (`contracts/kelvin.py`); the two normalisations vary apart.
+- **A light's direction turns by the Frame's nearest quarter turn**, the same as the mat
+  rectangle's size, not the whole rotation: the rest of a Cover rotation is the opening's own tilt
+  on the panel, already in its edges, so an opening level on the wall is lit from the wall's up.
+- **Per-Frame mat uniforms wait with the multi-Frame union mask** (E-1C-R1F-2): the GL final pass
+  carries one Frame's mat as it carries one opening. The design's bead 3 "multi-Frame uniforms" and
+  review-1 #7 were not built; player-architecture.md now says the scalar reference alone carries a
+  shadow per Frame.
+- **The Frame's wires take no default mat.** `OutputBinding.mat`, `TrialCandidate.mat_json` and
+  `candidate_hash`'s mat are required, and `parse_trial` takes exactly the envelope's fields: the
+  interfaces entry's "new fields default to neutral in Python constructors" no longer holds for the
+  Frame's half (the Display's `SoftwarePicture` and `PictureOperations` keep their Python defaults,
+  their decoders strict). 093 gives every stored binding (player_configurations, plan_offers) the
+  no-shadow mat so stored documents still read (the 087 outage's class). Closes slice C3's entry:
+  `commit_calibration_trial_in` requires the mat and writes it (no `COALESCE`).
+- **The LUT source is required on both sides** (`NativeRenderer(luts=...)`, `PlayerService(luts=...)`,
+  built once in `main`); `LutSource` declares `generation`, `LutWants` `wanted` and `hold`.
+- **The LUT choice has its own route, `POST .../picture-sessions/{id}/lut-edits` (`LutEdit`,
+  `PictureCommands.edit_lut`), not the design's `lut` setting on the software edit:** one route per
+  question, because the LUT choice names a LUT where the software edit sets a number. Closes slice
+  C2's `PictureCommands` entry.
+- **The LUT recipe's intents and black point compensation are now held by a test** on a synthetic
+  LUT-based paper (tests/support/icc_paper.py: a raised paper black, a perceptual table that
+  compresses chroma). The review's "paper black bakes to (0, 0, 0)" does not hold for LittleCMS:
+  its black point compensation estimates the paper's black (Adobe's algorithm), so this paper's
+  black bakes to (8, 8, 8), not 0; without compensation back it bakes to 58. The test asserts
+  "near" (at most 12) and pins one colour within 3.
+- **`LUT_RECIPE_ID` ends with the LittleCMS version** (`lut33-perceptual-relcol-bpc-1-lcms2.19`): the
+  library that bakes is part of the recipe, so a Pillow/LittleCMS upgrade names a new table and a
+  Player never holds other bytes under a name it cached. Cost: an upgrade re-fetches every LUT once.
+- **The LUTs list's "in use" reads the open sessions through display_store** (`live_drafts_in`: the
+  session's own lease rule and draft parser), not its own SQL; `lut_known_in` and `lut_name_in`
+  moved to central/infra/lut_rows.py so display_store and lut_store do not import each other.
+- **A capped request body has one home**, central/request_body.py `capped_body`, used by the Node's
+  control routes and the paper profile's upload.
+- **Soft highlights' note states the Pi's rule and decides nothing:** "acts only above 100 %
+  brightness" always shows; the console's `softHighlightsAct` copy is gone. With M = brightness the
+  rule is exactly that condition, so no Central view field was added.
+- **The LUT picker's empty state links to Settings › LUTs** (`LinkToOwner` "Add a paper profile in
+  Settings › LUTs"), its field says "Makes photos look printed on one paper", and `Select` gained
+  `width="fit"` (a primitive parameter, no consumer branch) so long paper names show whole.
+- **Notes no longer repeat a slider's value** on the Photo Wall (software) rows (the slider shows
+  it); colour temperature and gamma carry no note; black floor's help says it is a share of white.
+- **The Mat sits after the corners' exact values** on Position, inside the same live editor.
+- **Catalogue stories taller than 800 x 600 are screenshot whole** when tagged `full-page`
+  (FrameMat OneLight, Window, Full, Disabled; FramePosition WithMat), so their baselines hold the
+  state they exist to show. Baselines regenerated with scripts/catalog_baselines.py (linux/amd64);
+  48 unrelated baselines it rewrote byte-wise but with 0 % differing pixels were put back.
+- **Applied to their homes:** the LUTs list's read-on-open (not push) is an exception written in
+  design-language "Live updates" and its `LutsSettings` row; a mat's depth in millimetres is a row
+  in design-language §7 Units. The console's slider ranges are pinned to the contracts by
+  tests/test_console_print_look_ranges.py.
+- **Left for the owner:** "Soft highlights" (UI) vs "Highlight rolloff" (approved design, code) is a
+  rename he has not confirmed; a clock-face picker and direction markers for lights are not built.

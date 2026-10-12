@@ -31,7 +31,33 @@ a 64x48 PNG of four flat quadrants (red, green, blue, white) written here with t
    reference (`picture_source_uv` with that crop) and show only the left quadrants' colours
    (red, blue); with offset 1 only the right ones (green, white). A renderer that ignored the
    crop, or swapped its axes, draws the centre's four colours.
+10. print_sliders_match_the_reference (print look, 2026-10-12, P1): saturation 120 %, brightness
+   110 % with the highlight rolloff's knee at 0.4, a cool white balance, contrast 1.1 and a black floor 0.1 equal
+   `final_pixel` (steps 2, 4, 6): the saturated red rolls off toward white, so its green and blue
+   rise above the floor only through the rolloff's fade.
+11. one_light_from_the_top_matches: the binding's Mat (8 mm deep, one soft light from the wall's
+   up) shades a band under the top edge, equal to `final_pixel` with `mat_shade`'s shade.
+12. cover_at_90_shades_the_wall_up_edge: the same light on a Frame turned 90 degrees shades the
+   output's right edge (the picture's up), not its top.
+13. neutral_program_takes_no_new_step: neutral v5 operations and Mat() leave every new step's
+   switch (lut_on, saturation_on, rolloff_on, floor_on, mat_on) at 0 in the linked program, and
+   the pixels are the v4 reference's.
+14. trial_mat_drawn: while Position's trial is drawn its mat shades the picture, though the
+   binding's Mat() casts none; when the trial ends the binding's (no shadow) is drawn again.
+15. lut_matches_the_reference (slice P2, rule 3): a picture of four mid-tone quadrants whose
+   operations name a LUT the Player does not hold yet is drawn at once with the sliders alone
+   (lut_on 0, pixels = `final_pixel` without the LUT) and its tag never names the change; once the
+   LUT is held (`PlayerLuts.hold`, as the service does after its digest-checked fetch) the surface
+   draws again, the pixels equal `final_pixel` with the table (a steep, channel-turning one,
+   mixed in at 0.8, so a half-texel sampling slip fails) and the tag names the change.
+16. two_coloured_lights_match (R6, the owner's window): a cool light from the side (90 degrees,
+   7500 K) and a warm one from the top (0 degrees, 3000 K) on the binding's Mat: every sample,
+   the two bands and the corner both shade included, equals `final_pixel` with `mat_shade`'s
+   shade, so the shader's loop past the first light and its uniform arrays (`light_toward`,
+   `light_band`, `light_weight`) are held to the reference; the side band reads warmer than the
+   top band, and the corner darker than both.
 """
+import ctypes
 import hashlib
 import os
 import pathlib
@@ -41,6 +67,7 @@ import sys
 import time
 import uuid
 import zlib
+from types import SimpleNamespace
 
 sys.path[:0] = ["/repo", "/smoke"]
 RUNTIME = pathlib.Path("/tmp/pw-pixels")
@@ -54,25 +81,32 @@ os.environ.update(XDG_RUNTIME_DIR=str(RUNTIME), WAYLAND_DISPLAY=SOCKET,
 
 from gi.repository import GLib  # noqa: E402
 
+from contracts.lut import LUT_BYTES, LUT_GRID, LutRef, lut_offset  # noqa: E402
 from contracts.models import (  # noqa: E402
     Calibration,
     CornersFit,
     CoverFit,
     FrameProfile,
     Layer,
+    Light,
+    Mat,
     OutputBinding,
     PhotoCrop,
     Variant,
 )
-from contracts.node_frame import PictureOperations  # noqa: E402
+from contracts.node_frame import LutMix, PictureOperations  # noqa: E402
 from contracts.photo_crop import CENTRED  # noqa: E402
 from player.geometry import (  # noqa: E402
     compose_pixel,
     decode_channel,
+    encode_srgb,
     final_pixel,
     inside_opening,
+    mat_shade,
+    mat_shadow,
     picture_source_uv,
 )
+from player.luts import PlayerLuts  # noqa: E402
 from player.native import NativeOutput, NativeRenderer  # noqa: E402
 from player.rendering import LocalLayer, OutputComposition  # noqa: E402
 from player.wayland_frames import FrameGrant  # noqa: E402
@@ -81,15 +115,15 @@ WIDTH, HEIGHT = 64, 48                      # the picture
 TOLERANCE = 0.015
 QUADRANTS = ((255, 0, 0, 255), (0, 255, 0, 255), (0, 0, 255, 255), (255, 255, 255, 255))
 PROFILE = FrameProfile(width_px=1600, height_px=900, diagonal_inches=10)   # 16:9 trims the photo
-BINDING = OutputBinding(output_id="headless", frame_id="frame", generation=1, profile=PROFILE)
+BINDING = OutputBinding(output_id="headless", frame_id="frame", generation=1, profile=PROFILE, mat=Mat())
 OPENING = ((.1, .12), (.85, .08), (.9, .9), (.12, .82))
 SMALL_OPENING = ((.2, .2), (.8, .25), (.75, .8), (.25, .75))
 SKEWED = ((.1, .1), (.9, .2), (.8, .9), (.2, .8))
 OPERATIONS = PictureOperations("headless", 3, (.9, .95, 1.0), 1.2, .8, 24 / 22)
 
 
-def quadrant(x: int, y: int) -> tuple[int, int, int, int]:
-    return QUADRANTS[(x >= WIDTH // 2) + 2 * (y >= HEIGHT // 2)]
+def quadrant(x: int, y: int, palette=QUADRANTS) -> tuple[int, int, int, int]:
+    return palette[(x >= WIDTH // 2) + 2 * (y >= HEIGHT // 2)]
 
 
 def png_fixture(path: pathlib.Path = PHOTO, colour=quadrant) -> Variant:
@@ -192,7 +226,7 @@ def until(call, seconds: float = 8.0):
 
 
 def renderer() -> tuple[CapturingRenderer, Frames]:
-    native = CapturingRenderer((NativeOutput("headless", "photo-wall-headless", 640, 480),))
+    native = CapturingRenderer((NativeOutput("headless", "photo-wall-headless", 640, 480),), luts=PlayerLuts())
     native.set_unbound_outputs((), None)
     frames = Frames()
     native._frames = frames
@@ -225,13 +259,13 @@ def samples(native: CapturingRenderer, corners, step: int = 7):
                 yield i, j, x, y
 
 
-def texel_colour(u: float, v: float) -> tuple[float, float, float] | None:
+def texel_colour(u: float, v: float, palette=QUADRANTS) -> tuple[float, float, float] | None:
     """The picture's linear colour at source UV (u, v); None within 2 texels of a quadrant seam
     (where linear filtering blends two quadrants)."""
     tx, ty = u * WIDTH, v * HEIGHT
     if abs(tx - WIDTH / 2) < 2 or abs(ty - HEIGHT / 2) < 2:
         return None
-    rgba = quadrant(min(WIDTH - 1, int(tx)), min(HEIGHT - 1, int(ty)))
+    rgba = quadrant(min(WIDTH - 1, int(tx)), min(HEIGHT - 1, int(ty)), palette)
     return tuple(decode_channel(value / 255) for value in rgba[:3])
 
 
@@ -240,9 +274,11 @@ def close(actual, expected) -> bool:
 
 
 def check_fit(native: CapturingRenderer, fit, operations: PictureOperations | None, *,
-              profile: FrameProfile = PROFILE, crop: PhotoCrop = CENTRED) -> tuple[int, int]:
-    """Every sample equals the reference: inside, the picture through `final_pixel`; outside,
-    opaque black. The (inside, outside) sample counts."""
+              profile: FrameProfile = PROFILE, crop: PhotoCrop = CENTRED,
+              mat: Mat = Mat(), palette=QUADRANTS, lut: bytes | None = None) -> tuple[int, int]:
+    """Every sample equals the reference: inside, the picture through `final_pixel` (shaded by
+    `mat`'s shadow on this fit); outside, opaque black. The (inside, outside) sample counts."""
+    shadow = mat_shadow(fit, profile, mat)
     width, height, _ = native.captured
     applied = operations or PictureOperations("headless", 1, (1.0, 1.0, 1.0), 1.0, 1.0, 1.0)
     counts = [0, 0]
@@ -253,10 +289,11 @@ def check_fit(native: CapturingRenderer, fit, operations: PictureOperations | No
             expected = final_pixel((0.0, 0.0, 0.0), applied, inside=False)
             counts[1] += 1
         else:
-            linear = texel_colour(*uv)
+            linear = texel_colour(*uv, palette)
             if linear is None:
                 continue
-            expected = final_pixel(linear, applied, inside=True)
+            shade = None if shadow is None else mat_shade(shadow, x, y)
+            expected = final_pixel(linear, applied, inside=True, shade=shade, lut=lut)
             counts[0] += 1
         actual = pixel(native, i, j)
         assert close(actual, expected), ("pixel", fit.mode, fit.rotation, i, j, actual, expected)
@@ -392,7 +429,7 @@ def the_diagnostic_shows_only_while_the_output_is_unbound(native, frames, varian
 
 
 TALL = FrameProfile(width_px=900, height_px=1600, diagonal_inches=10)     # 9:16 cuts the sides
-TALL_BINDING = OutputBinding(output_id="headless", frame_id="frame", generation=1, profile=TALL)
+TALL_BINDING = OutputBinding(output_id="headless", frame_id="frame", generation=1, profile=TALL, mat=Mat())
 
 
 def crop_offset_keeps_the_left_edge(native, frames, variant) -> None:
@@ -424,12 +461,191 @@ def crop_offset_keeps_the_left_edge(native, frames, variant) -> None:
         native.release(f"crop{offset}")
 
 
+# -- The print look (design /print-look, 2026-10-12, slice P1) ------------------------------------
+
+PRINT = PictureOperations("headless", 5, (.9, .95, 1.0), 1.1, 1.1, 1.0, saturation=1.2,
+                          highlight_knee=.4, black_floor=.1)
+TOP_LIGHT = Light(from_degrees=0, steep_degrees=30, softness_degrees=20, strength_tenths=15,
+                  colour_kelvin=3000)
+DEEP_MAT = Mat(depth_mm=8, lights=(TOP_LIGHT,))      # a band of ~10..22 mm: tens of pixels here
+COOL_SIDE = Light(from_degrees=90, steep_degrees=30, softness_degrees=20, strength_tenths=15,
+                  colour_kelvin=7500)
+WINDOW_MAT = Mat(depth_mm=8, lights=(COOL_SIDE, TOP_LIGHT))
+TRIAL_SHA = "a" * 64
+
+
+def print_sliders_match_the_reference(native, frames, variant) -> None:
+    frames.operations = PRINT
+    fit = CoverFit(corners=OPENING)
+    show(native, composition(variant, Calibration(fit=fit)))
+    until(lambda: frames.tags and frames.tags[-1][1] == 5)
+    inside, outside = check_fit(native, fit, PRINT)
+    red = final_pixel(tuple(decode_channel(v / 255) for v in QUADRANTS[0][:3]), PRINT, inside=True)
+    print(f"PRINT inside={inside} outside={outside} red={red}", flush=True)
+    assert red[1] > encode_srgb(PRINT.black_floor) + .05, red   # the fade toward white lifts green
+    assert inside > 500 and outside > 100, (inside, outside)
+
+
+def shaded_binding(mat: Mat) -> OutputBinding:
+    return BINDING.model_copy(update={"mat": mat})
+
+
+def one_light_from_the_top_matches(native, frames, variant) -> None:
+    frames.operations = None
+    fit = CoverFit(corners=OPENING)
+    show(native, composition(variant, Calibration(fit=fit), binding=shaded_binding(DEEP_MAT)))
+    inside, _ = check_fit(native, fit, None, mat=DEEP_MAT)
+    shadow = mat_shadow(fit, PROFILE, DEEP_MAT)
+    top, middle = mat_shade(shadow, .5, .12), mat_shade(shadow, .5, .5)
+    print(f"ONE_LIGHT inside={inside} top={top} middle={middle}", flush=True)
+    assert top[0] < .8 and middle == (1.0, 1.0, 1.0), (top, middle)
+    assert inside > 500, inside
+
+
+def cover_at_90_shades_the_wall_up_edge(native, frames, variant) -> None:
+    frames.operations = None
+    fit = CoverFit(corners=OPENING, rotation=90)
+    show(native, composition(variant, Calibration(fit=fit), binding=shaded_binding(DEEP_MAT)))
+    inside, _ = check_fit(native, fit, None, mat=DEEP_MAT)
+    shadow = mat_shadow(fit, PROFILE, DEEP_MAT)
+    right, top = mat_shade(shadow, .86, .5), mat_shade(shadow, .5, .12)
+    print(f"TURNED inside={inside} right={right} top={top}", flush=True)
+    assert right[0] < .8 and top == (1.0, 1.0, 1.0), (right, top)
+    assert inside > 500, inside
+
+
+def two_coloured_lights_match(native, frames, variant) -> None:
+    frames.operations = None
+    fit = CoverFit(corners=OPENING)
+    show(native, composition(variant, Calibration(fit=fit), binding=shaded_binding(WINDOW_MAT)))
+    inside, _ = check_fit(native, fit, None, mat=WINDOW_MAT)
+    shadow = mat_shadow(fit, PROFILE, WINDOW_MAT)
+    side, top, corner = mat_shade(shadow, .86, .5), mat_shade(shadow, .5, .12), mat_shade(shadow, .86, .12)
+    print(f"TWO_LIGHTS inside={inside} side={side} top={top} corner={corner}", flush=True)
+    assert len(shadow.lights) == 2
+    assert side[0] / side[2] > 1 > top[0] / top[2], (side, top)
+    assert all(c < min(s, t) for c, s, t in zip(corner, side, top, strict=True)), (corner, side, top)
+    assert inside > 500, inside
+
+
+def neutral_program_takes_no_new_step(native, frames, variant) -> None:
+    neutral = PictureOperations("headless", 6, (1.0, 1.0, 1.0), 1.0, 1.0, 1.0)
+    frames.operations = neutral
+    fit = CoverFit(corners=OPENING)
+    show(native, composition(variant, Calibration(fit=fit)))
+    until(lambda: frames.tags and frames.tags[-1][1] == 6)
+    check_fit(native, fit, neutral)
+    surface = native._surfaces["headless"]
+    surface.area.make_current()
+    gl = native.GL
+    final = surface.programs[1]
+    switches = {name: switch(native, name)
+                for name in ("lut_on", "saturation_on", "rolloff_on", "floor_on", "mat_on")}
+    print(f"NEUTRAL switches={switches}", flush=True)
+    assert switches == dict.fromkeys(switches, 0), switches
+    for name in ("lut", "lut_amount", "saturation", "highlight_knee", "peak", "black_floor", "to_opening", "mat_size",
+                 "light_count", "light_toward", "light_band", "light_weight"):
+        assert gl.glGetUniformLocation(final, name) != -1, ("missing_uniform", name)
+
+
+class TrialFrames(Frames):
+    """The display host with Position's trial drawn: its calibration and its draft mat."""
+
+    def __init__(self, fit, mat: Mat):
+        super().__init__()
+        self.active = SimpleNamespace(
+            candidate=SimpleNamespace(trial_id=uuid.uuid4(), generation=1, sequence=1,
+                                      candidate_sha256=TRIAL_SHA),
+            calibration=Calibration(fit=fit), primitives=fit.corners, mat=mat)
+
+    def trial(self, _composition, _grant):
+        return self.active
+
+
+def trial_mat_drawn(native, frames, variant) -> None:
+    fit = CoverFit(corners=OPENING)
+    trial = TrialFrames(fit, DEEP_MAT)
+    native._frames = trial
+    shown = composition(variant, Calibration(fit=fit))       # the binding's mat is Mat()
+    show(native, shown)
+    assert until(lambda: trial.tags and trial.tags[-1][0] == "trial-" + TRIAL_SHA), trial.tags[-3:]
+    spin(0.3)
+    during, _ = check_fit(native, fit, None, mat=DEEP_MAT)
+    trial.active = None
+    native.present(shown)
+    assert until(lambda: trial.tags and not trial.tags[-1][0].startswith("trial-")), trial.tags[-3:]
+    spin(0.3)
+    after, _ = check_fit(native, fit, None)
+    print(f"TRIAL_MAT during={during} after={after}", flush=True)
+    assert during > 500 and after > 500, (during, after)
+
+
+MIDTONES = ((40, 90, 200, 255), (230, 140, 20, 255), (120, 200, 60, 255), (180, 60, 150, 255))
+LUT_REF = LutRef("cd" * 32, "lut33-perceptual-relcol-bpc-1")
+
+
+def steep(index: int) -> int:
+    """Black up to encoded 0.75, then four times the identity's slope to white: a sampling slip
+    of half a texel (where the grid's points sit) moves the bright quadrants' colour by ~0.04,
+    past the tolerance. (On an identity table the slip is at most 1/64, under it.)"""
+    return round(255 * min(1.0, max(0.0, 4 * index / (LUT_GRID - 1) - 3)))
+
+
+def turning_table() -> bytes:
+    """contracts/lut.py's layout: grid point (r, g, b) holds (steep(g), steep(b), steep(r))."""
+    body = bytearray(LUT_BYTES)
+    for r in range(LUT_GRID):
+        for g in range(LUT_GRID):
+            for b in range(LUT_GRID):
+                offset = lut_offset(r, g, b)
+                body[offset:offset + 3] = bytes((steep(g), steep(b), steep(r)))
+    return bytes(body)
+
+
+def switch(native: CapturingRenderer, name: str) -> int:
+    surface = native._surfaces["headless"]
+    surface.area.make_current()
+    gl = native.GL
+    value = (ctypes.c_int * 1)()
+    gl.glGetUniformiv(surface.programs[1], gl.glGetUniformLocation(surface.programs[1], name), value)
+    return value[0]
+
+
+def lut_matches_the_reference(native, frames, variant) -> None:
+    luts = PlayerLuts()
+    native._luts = luts
+    picture = png_fixture(RUNTIME / "midtones.png", lambda x, y: quadrant(x, y, MIDTONES))
+    looked = PictureOperations("headless", 8, (1.0, 1.0, 1.0), 1.0, 1.0, 1.0, saturation=1.1,
+                               black_floor=.02, lut=LutMix(LUT_REF, .8))
+    frames.operations = looked
+    fit = CoverFit(corners=OPENING)
+    shown = composition(picture, Calibration(fit=fit), layer("midtones", RUNTIME / "midtones.png", picture))
+    show(native, shown)
+    spin(0.3)
+    before, _ = check_fit(native, fit, looked, palette=MIDTONES)
+    assert luts.wanted() == (LUT_REF,), luts.wanted()
+    assert switch(native, "lut_on") == 0
+    assert frames.tags and all(change is None for _, change in frames.tags), ("claimed_early", frames.tags[-3:])
+    table = turning_table()
+    luts.hold(LUT_REF, table)
+    native.present(shown)
+    assert until(lambda: frames.tags and frames.tags[-1][1] == 8), ("tag_after_hold", frames.tags[-3:])
+    spin(0.2)
+    after, _ = check_fit(native, fit, looked, palette=MIDTONES, lut=table)
+    assert switch(native, "lut_on") == 1
+    print(f"LUT before={before} after={after}", flush=True)
+    assert before > 500 and after > 500, (before, after)
+
+
 CASES = (cover_matches_the_reference(0), cover_matches_the_reference(7),
          cover_matches_the_reference(90), outside_the_opening_stays_black_at_low_contrast,
          corners_fit_matches_the_reference, operations_change_the_picture_and_the_tag,
          no_trim_and_no_gain_uniforms, alpha_and_black_layers_compose_as_the_reference,
          a_corrupt_picture_fails_and_the_frame_still_presents,
-         the_diagnostic_shows_only_while_the_output_is_unbound, crop_offset_keeps_the_left_edge)
+         the_diagnostic_shows_only_while_the_output_is_unbound, crop_offset_keeps_the_left_edge,
+         print_sliders_match_the_reference, one_light_from_the_top_matches,
+         cover_at_90_shades_the_wall_up_edge, neutral_program_takes_no_new_step, trial_mat_drawn,
+         lut_matches_the_reference, two_coloured_lights_match)
 
 
 def main() -> None:

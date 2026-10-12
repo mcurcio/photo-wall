@@ -7,8 +7,9 @@ import { useMutate } from "./useMutate.js";
 
 /*
  * A Frame's live adjustment (the Frame page's Position tab): the operator's draft of the
- * Frame's position, its fit (useDraft.js), and the live session that shows it on the Frame's
- * Display while that tab is open. Central calls the session a calibration trial
+ * Frame's position, its fit, and its mat and lights (useDraft.js; print look R5), and the live
+ * session that shows both on the Frame's Display while that tab is open. Every request that hands
+ * Central a draft carries both, `{calibration, mat}`, and Done saves both. Central calls the session a calibration trial
  * (central/fleet/node_calibration.py); none of that wording reaches the page.
  *
  * THE DRAFT IS THE OPERATOR'S, THE SESSION ONLY SHOWS IT. A draft carries its base, the saved
@@ -40,7 +41,7 @@ import { useMutate } from "./useMutate.js";
  * Pi): the session is ended and the page waits for Revert.
  *
  * DONE (`save`) is offered only once the Pi has shown the latest change (Central refuses it
- * otherwise); REVERT ends the session and returns the draft to the saved calibration. Both are
+ * otherwise); REVERT ends the session and returns the draft to the saved calibration and mat. Both are
  * the operator's: `busy` is true only while one runs, never for the loop's own requests, and
  * each waits for a loop request in flight rather than being dropped.
  */
@@ -100,8 +101,9 @@ export function useVisible() {
 }
 
 /**
- * @typedef {import("./useDraft.js").Trying} Draft   `{fit}`: the Frame fit being tried
+ * @typedef {import("./useDraft.js").Trying} Draft   `{fit, mat}`: the Frame fit and mat being tried
  * @typedef {import("./useDraft.js").Fit} Fit
+ * @typedef {import("./useDraft.js").Mat} Mat
  * @typedef {"checking"|"not_admitted"|"unavailable"|"unbound"|"idle"|"connecting"|"waiting"
  *           |"stopped"|"sending"|"shown"} Phase
  *   `not_admitted`: the Pi did not start from Photo Wall, so Central offers it no live
@@ -115,7 +117,7 @@ export function useVisible() {
 /**
  * @param {{frameId: string, frame: object|undefined, open: boolean}} props
  * @returns {{draft: Draft, change: (patch: Partial<Fit>) => {valid: boolean, reason?: string},
- *            dirty: boolean, phase: Phase, error: Problem|null, busy: boolean,
+ *            changeMat: (mat: Mat) => void, dirty: boolean, phase: Phase, error: Problem|null, busy: boolean,
  *            ack: {revision: number, at: number}|null, latest: number|null,
  *            done: () => Promise<boolean>, revert: () => Promise<void>, retry: () => void,
  *            savedAt: number|null, leftAt: number|null}}
@@ -127,8 +129,8 @@ export function useVisible() {
  */
 export function useFrameAdjustment({ frameId, frame, open }) {
   const committed = frame?.calibration ?? null;
-  const { trying: draft, base, dirty, updateHandles: change, clearDraft, adopt } =
-    useDraft(frameId, committed);
+  const { trying: draft, base, dirty, updateHandles: change, changeMat, clearDraft, adopt } =
+    useDraft(frameId, committed, frame?.mat ?? null);
   const bound = isBound(frame);
   const generation = frame?.generation ?? null;
   const path = `/v1/operator/frames/${encodeURIComponent(frameId)}/calibration-trials`;
@@ -181,16 +183,21 @@ export function useFrameAdjustment({ frameId, frame, open }) {
     return done;
   }, [path]);
 
-  /** The draft as Central takes it: its fit and its base, the saved revision it was made from. */
-  const payload = () => ({ revision: state.current.base, fit: state.current.draft.fit });
+  /** The draft as Central takes it: its fit with its base, the saved revision it was made from,
+   * and its mat. */
+  const payload = () => ({
+    calibration: { revision: state.current.base, fit: state.current.draft.fit },
+    mat: state.current.draft.mat,
+  });
 
-  /** One request; null when it failed (the problem is set) or the page went away. */
-  const send = useCallback(async (operation, calibration) => {
+  /** One request; null when it failed (the problem is set) or the page went away. `candidate`
+   * is the draft (`payload()`), or none for the saved values (begin) or none to send (keepalive, save). */
+  const send = useCallback(async (operation, candidate) => {
     const current = state.current;
     const before = current.row;
     const begin = operation === "begin";
-    const body = begin ? (calibration ? { calibration } : {}) : {
-      operation, expected_sequence: before.sequence, ...(calibration ? { calibration } : {}),
+    const body = begin ? (candidate ?? {}) : {
+      operation, expected_sequence: before.sequence, ...(candidate ?? {}),
     };
     const request = () => apiWrite(begin ? path : `${path}/${before.trial_id}`, { method: "POST", body });
     let result;
@@ -260,8 +267,8 @@ export function useFrameAdjustment({ frameId, frame, open }) {
         if (!state.current.live) return;
         const changed = current.dirty;
         const begun = await send("begin", changed ? payload() : undefined);
-        // A session begun for an unchanged draft is at the saved calibration: adopt it.
-        if (begun !== null && !changed && !state.current.dirty) adopt(begun.calibration);
+        // A session begun for an unchanged draft is at the saved calibration and mat: adopt them.
+        if (begun !== null && !changed && !state.current.dirty) adopt(begun.calibration, begun.mat);
         return;
       }
       if (current.resync) {
@@ -274,7 +281,7 @@ export function useFrameAdjustment({ frameId, frame, open }) {
         await send("renew", payload());
         return;
       }
-      if (draftKey(current.draft) !== draftKey(session.calibration)) {
+      if (draftKey(current.draft) !== draftKey(session.calibration, session.mat)) {
         if (performance.now() < current.editAt) return;
         await send("edit", payload());
         return;
@@ -341,7 +348,7 @@ export function useFrameAdjustment({ frameId, frame, open }) {
   }, [fly]);
 
   const active = row?.state === "active";
-  const changed = active && draftKey(draft) !== draftKey(row.calibration);
+  const changed = active && draftKey(draft) !== draftKey(row.calibration, row.mat);
   const presented = active && row.presented_sequence != null && row.presented_sha256 === row.candidate_sha256;
   const latest = active ? row.sequence + (changed ? 1 : 0) : null;
   const ack = presented ? { revision: row.presented_sequence, at: row.presented_at ?? null } : null;
@@ -363,7 +370,7 @@ export function useFrameAdjustment({ frameId, frame, open }) {
     const result = await send("save");
     if (result?.state !== "saved") return false;
     setSavedAt(Date.now() / 1000);
-    adopt(result.saved_calibration);
+    adopt(result.saved_calibration, result.saved_mat);
     return true;
   }), [act, send, adopt]);
   // Revert also clears a refusal: the next session begins at the saved calibration, which the
@@ -385,7 +392,7 @@ export function useFrameAdjustment({ frameId, frame, open }) {
   }, [capability]);
 
   return {
-    draft, change, dirty, phase, error, busy, ack, latest, savedAt, leftAt,
+    draft, change, changeMat, dirty, phase, error, busy, ack, latest, savedAt, leftAt,
     done, revert, retry,
   };
 }

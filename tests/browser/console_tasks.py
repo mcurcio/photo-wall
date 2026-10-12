@@ -51,12 +51,12 @@ from support.console_words import SCENE
 SHOW_SECTIONS = frozenset({"now", "scenes", "schedule", "sources"})
 WALL_SECTIONS = frozenset({"wall"})
 FLEET_SECTIONS = frozenset({"hardware", "releases"})
-SETTINGS_SECTIONS = frozenset({"photo-library", "photo-fit", "house"})
+SETTINGS_SECTIONS = frozenset({"photo-library", "photo-fit", "house", "luts"})
 SECTIONS = SHOW_SECTIONS | WALL_SECTIONS | FLEET_SECTIONS | SETTINGS_SECTIONS | {"attention"}
 LABELS = {
     "now": "Now", "scenes": "Scenes", "schedule": "Schedule", "sources": "Sources",
     "wall": "Wall", "hardware": "Hardware", "releases": "Releases", "attention": "Needs attention",
-    "photo-library": "Photo library", "photo-fit": "Photo fit", "house": "House",
+    "photo-library": "Photo library", "photo-fit": "Photo fit", "house": "House", "luts": "LUTs",
     # No sidebar link: one Pi's Software and screens page, reached from its Pi header.
     "players": "Software and screens",
 }

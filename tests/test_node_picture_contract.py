@@ -11,6 +11,7 @@ import json
 
 import pytest
 
+from contracts.lut import LutRef
 from contracts.node_output import DisplayIdentity
 from contracts.node_picture import (
     CHOICE_NAME_MAX,
@@ -48,10 +49,13 @@ REPORT = PictureReport("HDMI-A-1", IDENTITY,
                         HardwareSetting("DC", READ_ONLY, None)),
                        8, {"10": HardwareResult(WriteResult.TAKEN, 60, 46)}, 8)
 
-# The frozen page's wire shapes, byte for byte.
+# The frozen page's wire shapes, byte for byte (schema major 5: the print look's fields).
 DOCUMENT_BYTES = (b'{"hardware":{"10":46},"output_id":"HDMI-A-1","picture_change":8,"software":'
-                  b'{"brightness_percent":114,"colour_temperature_kelvin":6500,"contrast_percent":100,'
-                  b'"gamma_tenths":22}}')
+                  b'{"black_floor_tenths":0,"brightness_percent":114,"colour_temperature_kelvin":6500,'
+                  b'"contrast_percent":100,"gamma_tenths":22,"highlight_rolloff_percent":0,"lut":null,'
+                  b'"lut_amount_percent":100,"saturation_percent":100}}')
+PAPER = LutRef("ab" * 32, "lut33-perceptual-relcol-bpc-1")
+PRINT_LOOK = PictureDocument("HDMI-A-1", 9, {}, SoftwarePicture(114, 100, 6500, 22, 85, 40, 20, PAPER, 80))
 
 
 def test_the_document_is_the_frozen_wire_shape_and_round_trips():
@@ -59,6 +63,26 @@ def test_the_document_is_the_frozen_wire_shape_and_round_trips():
     assert decode_picture_document(DOCUMENT_BYTES) == DOCUMENT
     reordered = json.dumps(json.loads(DOCUMENT_BYTES), sort_keys=False, indent=1).encode()
     assert encode_picture_document(decode_picture_document(reordered)) == DOCUMENT_BYTES
+
+
+def test_the_print_look_rides_the_software_group_and_round_trips():
+    """The print look's fields and the LUT by name. Mutation probe: decode the lut as its dict
+    (not a LutRef) -> the round trip differs."""
+    raw = encode_picture_document(PRINT_LOOK)
+    assert json.loads(raw)["software"]["lut"] == {"profile_sha256": "ab" * 32,
+                                                  "recipe_id": "lut33-perceptual-relcol-bpc-1"}
+    assert decode_picture_document(raw) == PRINT_LOOK
+    without = json.loads(raw)
+    del without["software"]["saturation_percent"]
+    with pytest.raises(ValueError, match="^picture_document$"):
+        decode_picture_document(json.dumps(without).encode())
+    for bad in ({"saturation_percent": 151}, {"highlight_rolloff_percent": 101}, {"black_floor_tenths": 101},
+                {"lut_amount_percent": -1}, {"saturation_percent": True}):
+        with pytest.raises(ValueError, match="^software_picture$"):
+            SoftwarePicture(**{**{"brightness_percent": 100, "contrast_percent": 100,
+                                  "colour_temperature_kelvin": 6500, "gamma_tenths": 22}, **bad})
+    with pytest.raises(ValueError, match="^lut_ref$"):
+        LutRef("AB" * 32, "lut33")
 
 
 def test_the_report_is_the_frozen_wire_shape_and_round_trips():
@@ -96,7 +120,7 @@ def test_the_worst_valid_report_fits_the_bus():
     raw = encode_picture_report(worst)
     assert len(raw) <= PICTURE_REPORT_BYTES and decode_picture_report(raw) == worst
     every_code = PictureDocument("Virtual-2", 2**62, dict.fromkeys(PICTURE_LIST, LEVEL_MAX),
-                                 SoftwarePicture(150, 150, 9300, 26))
+                                 SoftwarePicture(150, 150, 9300, 26, 150, 100, 100, LutRef("f" * 64, "z" * 64), 100))
     assert len(encode_picture_document(every_code)) <= PICTURE_DOCUMENT_BYTES
 
 

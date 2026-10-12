@@ -99,6 +99,9 @@ SHARED_WITH_SHOW = {
     # the Frame page's Why, Power tab and status chip. Words only.
     "powerWords.js",
     "powerWords.json",
+    # The LUTs list's routes (print look): Settings › LUTs lists, adds and removes; the Frame
+    # page's Picture tab reads the list for its LUT picker (pictureSession.js).
+    "lutsApi.js",
     # (Power and the week's houseApi.js and weekApi.js are the shell's own: its house clock,
     # houseClock.js, reads Settings › House for every time the console shows.)
 }
@@ -623,7 +626,7 @@ def test_every_section_is_in_exactly_one_route_table():
     sections = [section for group in SAMPLES.values() for section in group]
     assert sorted(sections) == sorted(
         ["now", "scenes", "schedule", "sources", "wall", "hardware", "players", "releases",
-         "photo-library", "photo-fit", "house", "attention"])
+         "photo-library", "photo-fit", "house", "luts", "attention"])
 
 
 ROUND_TRIP = r"""
@@ -663,7 +666,7 @@ console.log(JSON.stringify(out));
 ROUTES = [
     {"section": section} for section in
     ("now", "scenes", "schedule", "sources", "wall", "hardware", "releases", "photo-library",
-     "photo-fit", "attention")
+     "photo-fit", "luts", "attention")
 ] + [
     {"section": "hardware", "id": "device-" + "a" * 64},
     {"section": "hardware", "id": "a/b ç?#%"},
@@ -832,7 +835,11 @@ POWER_WEEK_IMPORTS = {
     "house-settings-page.tsx": {"houseApi.js", "houseClock.js"},
     "frame-why.tsx": {"houseApi.js", "polledRead.js", "whyApi.js"},
 }
-DECLARED_IMPORTS = {**FRAME_PAGE_IMPORTS, **PHOTO_PAGE_IMPORTS, **POWER_WEEK_IMPORTS}
+# The print look's Settings › LUTs: the LUTs list's routes.
+PRINT_LOOK_IMPORTS = {
+    "luts-settings-page.tsx": {"lutsApi.js"},
+}
+DECLARED_IMPORTS = {**FRAME_PAGE_IMPORTS, **PHOTO_PAGE_IMPORTS, **POWER_WEEK_IMPORTS, **PRINT_LOOK_IMPORTS}
 
 
 def _layer(module, src=SRC):

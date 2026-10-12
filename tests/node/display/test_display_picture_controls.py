@@ -30,7 +30,6 @@ from appliance.display_host.picture import (
     PictureController,
     brightness_line,
     judged,
-    kelvin_multipliers,
     operations_for,
     write_order,
 )
@@ -39,7 +38,15 @@ from appliance.display_host.picture_list import (
     FileOfferedCache,
     PictureListAsker,
 )
-from contracts.node_frame import PictureOperations, decode_picture_operations, neutral_operations
+from contracts.kelvin import kelvin_white
+from contracts.lut import LutRef
+from contracts.node_frame import (
+    HIGHLIGHT_KNEE_MIN,
+    LutMix,
+    PictureOperations,
+    decode_picture_operations,
+    neutral_operations,
+)
 from contracts.node_output import DisplayIdentity
 from contracts.node_picture import (
     NEUTRAL_SOFTWARE,
@@ -331,7 +338,7 @@ def test_colour_temperature_shows_white_as_charitys_table(kelvin):
     the encoded rows -> 3000 K white shows green 0.75 where the table's is 0.53."""
     ratio = [_linear(value) / _linear(neutral) for value, neutral in zip(CHARITY[kelvin], CHARITY[6500], strict=True)]
     expected = [value / max(ratio) for value in ratio]
-    multipliers = kelvin_multipliers(kelvin)
+    multipliers = kelvin_white(kelvin)
     assert multipliers == pytest.approx(expected, abs=1e-3)
     assert max(multipliers) == 1.0
     operations = operations_for(OUTPUT, 1, software(kelvin=kelvin))
@@ -341,15 +348,55 @@ def test_colour_temperature_shows_white_as_charitys_table(kelvin):
 
 
 def test_the_neutral_values_change_nothing_and_the_ranges_hold():
-    assert kelvin_multipliers(6500) == (1.0, 1.0, 1.0)
+    assert kelvin_white(6500) == (1.0, 1.0, 1.0)
     assert operations_for(OUTPUT, 3, NEUTRAL_SOFTWARE) == neutral_operations(OUTPUT, 3)
     widest = operations_for(OUTPUT, 3, software(150, 0, 6500, 18))
     assert (widest.light_factor, widest.contrast_slope, widest.gamma_exponent) == (1.5, 0.0, 18 / 22)
     for kelvin in range(3000, 9301, 100):
-        assert max(kelvin_multipliers(kelvin)) == 1.0
-    for kelvin in (2900, 6550, 9400, 6500.0, True):
+        assert max(kelvin_white(kelvin)) == 1.0
+    for kelvin in (1900, 6550, 10100, 6500.0, True):
         with pytest.raises(ValueError, match="^kelvin$"):
-            kelvin_multipliers(kelvin)
+            kelvin_white(kelvin)
+
+
+PAPER = LutRef("ab" * 32, "lut33-perceptual-relcol-bpc-1")
+
+
+def print_look(saturation: int = 100, rolloff: int = 0, floor: int = 0, lut: LutRef | None = None,
+               amount: int = 100, gamma: int = 22) -> SoftwarePicture:
+    return SoftwarePicture(100, 100, 6500, gamma, saturation, rolloff, floor, lut, amount)
+
+
+def test_the_print_look_becomes_operations_and_each_neutral_is_exactly_skipped():
+    """Each print-look field at its neutral is the neutral operation exactly (so the Player skips
+    the step); the ends of each range hold in the contract. Mutation probe: knee = 1 - rolloff / 100
+    (no HIGHLIGHT_KNEE_MIN) -> rolloff 100 gives knee 0, which the contract refuses."""
+    assert operations_for(OUTPUT, 3, print_look()) == neutral_operations(OUTPUT, 3)
+    assert operations_for(OUTPUT, 3, print_look(lut=PAPER, amount=0)) == neutral_operations(OUTPUT, 3)
+    most = operations_for(OUTPUT, 3, print_look(saturation=150, rolloff=100, floor=100))
+    assert (most.saturation, most.highlight_knee) == (1.5, HIGHLIGHT_KNEE_MIN)
+    assert most.black_floor == 0.1
+    grey = operations_for(OUTPUT, 3, print_look(saturation=0, rolloff=40))
+    assert grey.saturation == 0.0
+    assert grey.highlight_knee == pytest.approx(1 - 0.4 * (1 - HIGHLIGHT_KNEE_MIN), abs=1e-12)
+    for rolloff in range(101):                                     # every step stays inside the contract
+        assert HIGHLIGHT_KNEE_MIN <= operations_for(OUTPUT, 3, print_look(rolloff=rolloff)).highlight_knee <= 1
+
+
+@pytest.mark.parametrize("gamma", [18, 26])
+def test_the_black_floor_is_a_share_of_white_light_whatever_photo_walls_gamma(gamma):
+    """2.0 % of white light is the share 0.02 at any gamma look: the Player lifts in the panel's
+    light (player/geometry.py `floor_lifted`). Mutation probe: scale by gamma_tenths -> 18 and 26
+    differ."""
+    assert operations_for(OUTPUT, 1, print_look(floor=20, gamma=gamma)).black_floor == 0.02
+
+
+def test_the_lut_is_mixed_in_by_its_amount_and_none_at_zero_or_without_a_lut():
+    """Mutation probe: emit LutMix at amount 0 -> the contract's ValueError."""
+    assert operations_for(OUTPUT, 1, print_look(lut=PAPER, amount=0)).lut is None
+    assert operations_for(OUTPUT, 1, print_look(lut=PAPER, amount=80)).lut == LutMix(PAPER, 0.8)
+    assert operations_for(OUTPUT, 1, print_look(lut=PAPER)).lut == LutMix(PAPER, 1.0)
+    assert operations_for(OUTPUT, 1, print_look(amount=100)).lut is None
 
 
 def test_the_base_page_names_each_brightness_and_never_the_software_as_the_panels():
@@ -418,6 +465,26 @@ def test_presented_follows_the_shells_echo_and_equal_operations_count_at_once(di
     assert report.presented_change == 7
     run.controller.presented(OUTPUT, 8)
     assert run.reports.latest().presented_change == 8
+
+
+@pytest.mark.parametrize("look", [print_look(saturation=85), print_look(rolloff=40), print_look(floor=20),
+                                  print_look(lut=PAPER, amount=80)])
+def test_a_change_to_the_print_look_only_waits_for_the_shell_to_present_it(display, running, look):
+    """A document that moves only a print-look field sends new operations to the shell, and Done
+    waits: presented_change reaches it only when the shell echoes it. Mutation probe: compare only
+    the four v4 fields in `_values` -> presented_change advances at once."""
+    run = running()
+    run.controller.document(OUTPUT, document(6, {}, NEUTRAL_SOFTWARE))
+    run.reported(6)
+    run.controller.presented(OUTPUT, 6)
+    assert run.reports.latest().presented_change == 6
+    run.controller.document(OUTPUT, document(7, {}, look))
+    until(lambda: run.shell.sent and run.shell.last()[0].picture_change == 7)
+    assert run.shell.last()[0] == operations_for(OUTPUT, 7, look) != neutral_operations(OUTPUT, 7)
+    time.sleep(0.2)
+    assert run.reported(7).presented_change == 6
+    run.controller.presented(OUTPUT, 7)
+    assert run.reports.latest().presented_change == 7
 
 
 def test_an_older_or_equal_picture_change_writes_nothing(display, running):

@@ -6,7 +6,7 @@ import hashlib
 
 from central.displays.model import Readiness
 from central.infra.display_store import POSITION_COLUMNS, SEEN_DISPLAY_JOIN, frame_readiness
-from contracts.models import Calibration, FrameProfile, OutputBinding
+from contracts.models import Calibration, FrameProfile, Mat, OutputBinding
 from contracts.time import Clock
 
 
@@ -88,6 +88,7 @@ class PostgresInstallationRepository:
                 configuration_revision=row["configuration_revision"],
                 profile=FrameProfile.model_validate(row["profile"]),
                 calibration=Calibration.model_validate(row["calibration"]),
+                mat=Mat.model_validate(row["mat"]),
             )
             for row in rows
         ]

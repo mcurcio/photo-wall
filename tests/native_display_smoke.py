@@ -130,14 +130,14 @@ int main(int argc, char **argv) {
     struct wl_shm_pool *pool = wl_shm_create_pool(shm, fd, size);
     struct wl_buffer *b = wl_shm_pool_create_buffer(pool, 0, 640, 480, 640 * 4, WL_SHM_FORMAT_XRGB8888);
     close(fd);
-    char printed[513] = "";
+    char printed[1025] = "";
     for (int n = 0; n < 3000; n++) {
         usleep(30000);
         wl_display_dispatch_pending(d);
         struct pollfd pollfd = {.fd = wl_display_get_fd(d), .events = POLLIN};
         wl_display_flush(d);
         if (poll(&pollfd, 1, 100) > 0 && wl_display_dispatch(d) < 0) return 7;
-        char operations[513], grant[37], frame[97];
+        char operations[1025], grant[37], frame[97];
         uint64_t generation, revision;
         uint32_t state;
         int picture = pw_frame_client_picture(c, "headless", operations, sizeof operations);
@@ -556,7 +556,7 @@ def picture_v4():
     time.sleep(0.5)
     before = capture_box(*BRIGHTNESS_BOX)
     assert request("picture", operations=OPERATIONS, brightness="Brightness: display 46 % \u00b7 Photo Wall 114 %")["accepted"]
-    assert not request("picture", operations="x" * 513, brightness="")["accepted"]
+    assert not request("picture", operations="x" * 1025, brightness="")["accepted"]
     assert not request("picture", operations=OPERATIONS, brightness="b" * 129)["accepted"]
     end = time.monotonic() + 5
     while capture_box(*BRIGHTNESS_BOX) == before:

@@ -102,8 +102,9 @@ def saturated_control(seconds=3.0):
 def static_photo_render_rate(seconds=6.0):
     from native_display_media import image_fixture
 
-    from contracts.models import FrameProfile, Layer, OutputBinding
+    from contracts.models import FrameProfile, Layer, Mat, OutputBinding
     from contracts.photo_crop import CENTRED
+    from player.luts import PlayerLuts
     from player.native import NativeOutput, NativeRenderer
     from player.rendering import LocalLayer, OutputComposition
 
@@ -126,14 +127,14 @@ def static_photo_render_rate(seconds=6.0):
             return original(self, area, context, surface)
 
         NativeRenderer._render = counted
-        renderer = NativeRenderer((NativeOutput("headless", "photo-wall-headless", 640, 480),))
+        renderer = NativeRenderer((NativeOutput("headless", "photo-wall-headless", 640, 480),), luts=PlayerLuts())
         renderer.set_unbound_outputs((), None)
         payload, variant = image_fixture()
         photo = pathlib.Path("/tmp/pw-mainloop-photo.png")
         photo.write_bytes(payload)
         binding = OutputBinding(output_id="headless", frame_id="frame", generation=1,
                                 profile=FrameProfile(width_px=640, height_px=480,
-                                                     diagonal_inches=10))
+                                                     diagonal_inches=10), mat=Mat())
         layer = Layer(assignment_id="photo", run_id="run", output_id="headless",
                       frame_id="frame", binding_generation=1, start=0, end=10**9,
                       media_origin=0, variant=variant, crop=CENTRED)

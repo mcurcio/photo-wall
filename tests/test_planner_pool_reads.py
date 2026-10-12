@@ -36,7 +36,7 @@ from central.wall_plan.order import (
     WallHistory,
 )
 from central.wall_plan.selection import SceneSelection
-from contracts.models import FrameProfile, OutputBinding, Variant
+from contracts.models import FrameProfile, Mat, OutputBinding, Variant
 from contracts.on_screen import Extent
 
 PROFILES = {
@@ -96,7 +96,7 @@ def plan(instance: Runtime, frames: dict[str, str], lines: SceneLines, *, now: f
     return project(
         instance, now,
         bindings_by_player={"player": tuple(OutputBinding(
-            output_id=f"out-{frame}", frame_id=frame, generation=1, profile=PROFILES[shape])
+            output_id=f"out-{frame}", frame_id=frame, generation=1, profile=PROFILES[shape], mat=Mat())
             for frame, shape in frames.items())},
         lines=lines, authored_candidates={}, locked_assignments={}, history=history,
         horizon_seconds=horizon, plan_seconds=plan_seconds, max_clock_uncertainty=0.1,

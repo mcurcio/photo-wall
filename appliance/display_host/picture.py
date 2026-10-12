@@ -2,7 +2,7 @@
 Photo Wall's, each on its own) and reports back (decision 0022; the picture split, slices S1 and
 S3; from roadmap 1c's controller).
 
-Pure core, effects at the edges. `operations_for`, `kelvin_multipliers`, `judged`, `write_order`
+Pure core, effects at the edges. `operations_for`, `judged`, `write_order`
 and `brightness_line` are pure. `PictureController` applies them through six ports: `PictureDdc`
 (one code's read and write over the port's DDC/CI channel, picture's turn), `PictureAsk` (which
 settings on the picture list the display offers, and their values read again;
@@ -51,15 +51,23 @@ Rules this module owns (one home each):
 - **The shell never waits on the display:** each Output's operations and line go to the shell from
   their own worker, at once on each new change, never queued behind an ask, a re-read or a write.
 - **Operations from the software group** (`operations_for`): white balance from colour
-  temperature (`kelvin_multipliers`, in linear light, normalised so KELVIN_NEUTRAL is exactly
-  (1, 1, 1) and the largest is 1); light factor = brightness / SOFTWARE_PERCENT_NEUTRAL; contrast
-  slope = contrast / SOFTWARE_PERCENT_NEUTRAL; gamma exponent = gamma_tenths / GAMMA_TENTHS_NEUTRAL. Sent to the shell
-  at once on each new change, by the shell worker.
+  temperature (contracts/kelvin.py `kelvin_white`, in linear light, normalised so KELVIN_NEUTRAL is
+  exactly (1, 1, 1) and the largest is 1); light factor = brightness / SOFTWARE_PERCENT_NEUTRAL; contrast
+  slope = contrast / SOFTWARE_PERCENT_NEUTRAL; gamma exponent = gamma_tenths / GAMMA_TENTHS_NEUTRAL;
+  saturation = saturation_percent / SATURATION_PERCENT_NEUTRAL; highlight knee = 1 - r * (1 -
+  HIGHLIGHT_KNEE_MIN) with r = highlight_rolloff_percent / ROLLOFF_PERCENT_MAX, worked as (1 - r) +
+  r * HIGHLIGHT_KNEE_MIN so 0 % is exactly 1 (skipped) and 100 % exactly HIGHLIGHT_KNEE_MIN (the
+  form 1 - r * (1 - HIGHLIGHT_KNEE_MIN) rounds to just below it, which the contract refuses);
+  black floor = black_floor_tenths / 1000, the floor's share of white light (the Player lifts in
+  the panel's light, player/geometry.py `floor_lifted`); the LUT mix is none when there is no LUT or lut_amount_percent is 0, else the LUT at lut_amount_percent / 100.
+  Each at its neutral value is exactly the neutral operation. Sent to the shell at once on each new
+  change, by the shell worker.
 - **Re-sent at start:** the controller restarts with Weston, and sends every Output's operations
   to the shell when it starts and whenever the shell reports an Output (re)created.
 - **Presented:** `presented_change` is the newest picture change the shell's `presented` events
   echoed for the Output (frame protocol v4 `tag_picture`), or the new change when its operations
-  equal the ones last presented.
+  equal the ones last presented, every operation compared (`_values`), the print look's too: a
+  change that moves only a print-look field waits for the shell's echo.
 - **The base page's line** (`brightness_line`): the display's own brightness and Photo Wall's,
   each named; it rides the shell's `picture` op beside the operations, and the shell forwards it to
   the overlay client (frame protocol v4 `brightness`).
@@ -74,17 +82,18 @@ import os
 import threading
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
-from types import MappingProxyType
 from typing import Final, Protocol
 
-from contracts.node_frame import PictureOperations, srgb_to_linear
+from contracts.kelvin import kelvin_white
+from contracts.node_frame import HIGHLIGHT_KNEE_MIN, LutMix, PictureOperations
 from contracts.node_output import DisplayIdentity
 from contracts.node_picture import (
     GAMMA_TENTHS_NEUTRAL,
-    KELVIN_NEUTRAL,
     PICTURE_LIST,
+    ROLLOFF_PERCENT_MAX,
+    SATURATION_PERCENT_NEUTRAL,
     SOFTWARE_PERCENT_NEUTRAL,
     HardwareResult,
     HardwareSetting,
@@ -110,56 +119,19 @@ _HISTORY: Final = 16                # picture changes remembered per Output for 
 
 log = logging.getLogger(__name__)
 
-# Mitchell Charity's blackbody colours (http://www.vendian.org/mncharity/dir3/blackbody/,
-# bbr_color.txt version 2001-Jun-22): the CIE 1931 2-degree rows, R G B normalised, sRGB primaries
-# with a D65 white point, KELVIN_MIN..KELVIN_MAX in KELVIN_STEP.
-_CHARITY: Final[Mapping[int, tuple[float, float, float]]] = MappingProxyType({
-    3000: (1.0000, 0.4870, 0.1411), 3100: (1.0000, 0.5067, 0.1602), 3200: (1.0000, 0.5259, 0.1800),
-    3300: (1.0000, 0.5447, 0.2005), 3400: (1.0000, 0.5630, 0.2216), 3500: (1.0000, 0.5809, 0.2433),
-    3600: (1.0000, 0.5983, 0.2655), 3700: (1.0000, 0.6153, 0.2881), 3800: (1.0000, 0.6318, 0.3112),
-    3900: (1.0000, 0.6480, 0.3346), 4000: (1.0000, 0.6636, 0.3583), 4100: (1.0000, 0.6789, 0.3823),
-    4200: (1.0000, 0.6938, 0.4066), 4300: (1.0000, 0.7083, 0.4310), 4400: (1.0000, 0.7223, 0.4556),
-    4500: (1.0000, 0.7360, 0.4803), 4600: (1.0000, 0.7494, 0.5051), 4700: (1.0000, 0.7623, 0.5299),
-    4800: (1.0000, 0.7750, 0.5548), 4900: (1.0000, 0.7872, 0.5796), 5000: (1.0000, 0.7992, 0.6045),
-    5100: (1.0000, 0.8108, 0.6293), 5200: (1.0000, 0.8221, 0.6541), 5300: (1.0000, 0.8330, 0.6787),
-    5400: (1.0000, 0.8437, 0.7032), 5500: (1.0000, 0.8541, 0.7277), 5600: (1.0000, 0.8642, 0.7519),
-    5700: (1.0000, 0.8740, 0.7760), 5800: (1.0000, 0.8836, 0.8000), 5900: (1.0000, 0.8929, 0.8238),
-    6000: (1.0000, 0.9019, 0.8473), 6100: (1.0000, 0.9107, 0.8707), 6200: (1.0000, 0.9193, 0.8939),
-    6300: (1.0000, 0.9276, 0.9168), 6400: (1.0000, 0.9357, 0.9396), 6500: (1.0000, 0.9436, 0.9621),
-    6600: (1.0000, 0.9513, 0.9844), 6700: (0.9937, 0.9526, 1.0000), 6800: (0.9726, 0.9395, 1.0000),
-    6900: (0.9526, 0.9270, 1.0000), 7000: (0.9337, 0.9150, 1.0000), 7100: (0.9157, 0.9035, 1.0000),
-    7200: (0.8986, 0.8925, 1.0000), 7300: (0.8823, 0.8819, 1.0000), 7400: (0.8668, 0.8718, 1.0000),
-    7500: (0.8520, 0.8621, 1.0000), 7600: (0.8379, 0.8527, 1.0000), 7700: (0.8244, 0.8437, 1.0000),
-    7800: (0.8115, 0.8351, 1.0000), 7900: (0.7992, 0.8268, 1.0000), 8000: (0.7874, 0.8187, 1.0000),
-    8100: (0.7761, 0.8110, 1.0000), 8200: (0.7652, 0.8035, 1.0000), 8300: (0.7548, 0.7963, 1.0000),
-    8400: (0.7449, 0.7894, 1.0000), 8500: (0.7353, 0.7827, 1.0000), 8600: (0.7260, 0.7762, 1.0000),
-    8700: (0.7172, 0.7699, 1.0000), 8800: (0.7086, 0.7638, 1.0000), 8900: (0.7004, 0.7579, 1.0000),
-    9000: (0.6925, 0.7522, 1.0000), 9100: (0.6848, 0.7467, 1.0000), 9200: (0.6774, 0.7414, 1.0000),
-    9300: (0.6703, 0.7362, 1.0000),
-})
-
-
-def kelvin_multipliers(kelvin: int) -> tuple[float, float, float]:
-    """White balance for `kelvin` (KELVIN_MIN..KELVIN_MAX in KELVIN_STEP), in linear light as the
-    Player applies it: Mitchell Charity's blackbody table (vendian.org, CIE 1931 2-degree, D65
-    white; its R G B are gamma-encoded sRGB) taken to linear light (`srgb_to_linear`), divided by
-    its linear KELVIN_NEUTRAL entry and scaled so the largest is 1, so white shows as the table's
-    colour. Pure. ValueError("kelvin") outside the range or step."""
-    if type(kelvin) is not int or kelvin not in _CHARITY:
-        raise ValueError("kelvin")
-    red, green, blue = (srgb_to_linear(value) / srgb_to_linear(neutral)
-                        for value, neutral in zip(_CHARITY[kelvin], _CHARITY[KELVIN_NEUTRAL], strict=True))
-    largest = max(red, green, blue)
-    return red / largest, green / largest, blue / largest
-
-
 def operations_for(output_id: str, picture_change: int, software: SoftwarePicture) -> PictureOperations:
     """The Player's operations for one Output's software group (the module's rule). Pure."""
+    rolloff = software.highlight_rolloff_percent / ROLLOFF_PERCENT_MAX
     return PictureOperations(output_id=output_id, picture_change=picture_change,
-                             rgb_multipliers=kelvin_multipliers(software.colour_temperature_kelvin),
+                             rgb_multipliers=kelvin_white(software.colour_temperature_kelvin),
                              light_factor=software.brightness_percent / SOFTWARE_PERCENT_NEUTRAL,
                              contrast_slope=software.contrast_percent / SOFTWARE_PERCENT_NEUTRAL,
-                             gamma_exponent=software.gamma_tenths / GAMMA_TENTHS_NEUTRAL)
+                             gamma_exponent=software.gamma_tenths / GAMMA_TENTHS_NEUTRAL,
+                             saturation=software.saturation_percent / SATURATION_PERCENT_NEUTRAL,
+                             highlight_knee=(1 - rolloff) + rolloff * HIGHLIGHT_KNEE_MIN,
+                             black_floor=software.black_floor_tenths / 1000,
+                             lut=None if software.lut is None or software.lut_amount_percent == 0
+                             else LutMix(software.lut, software.lut_amount_percent / 100))
 
 
 def judged(written: int, after: VcpAnswer | None) -> WriteResult:
@@ -298,9 +270,10 @@ _NEVER: Final = object()            # no display carried out yet (an identity ma
 
 
 def _values(operations: PictureOperations) -> tuple:
-    """What the Player does, without which change it came from."""
-    return (operations.rgb_multipliers, operations.light_factor, operations.contrast_slope,
-            operations.gamma_exponent)
+    """What the Player does, without which change it came from: every field but output_id and
+    picture_change, so a new operation is compared the moment the contract grows it."""
+    return tuple(getattr(operations, item.name) for item in fields(PictureOperations)
+                 if item.name not in ("output_id", "picture_change"))
 
 
 @dataclass
@@ -684,4 +657,4 @@ class PictureController:
 __all__ = ["BRIGHTNESS_CODE", "READ_SECONDS", "REREAD_SECONDS", "SHELL_SECONDS",
            "TICK_SECONDS", "WRITE_GAP_SECONDS", "WRITE_SECONDS", "Applied", "AppliedPictures", "DdcPictureAdapter", "DisplayBrightness",
            "FileAppliedPictures", "PictureController", "PictureDdc", "PictureReports", "PictureShell",
-           "brightness_line", "judged", "kelvin_multipliers", "operations_for", "write_order"]
+           "brightness_line", "judged", "operations_for", "write_order"]

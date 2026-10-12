@@ -14,6 +14,7 @@ from contracts.models import (
     CornersFit,
     FrameProfile,
     Layer,
+    Mat,
     OutputBinding,
     Plan,
     PlayerConfiguration,
@@ -212,7 +213,7 @@ def cached(variant: Variant) -> str:
 def binding(output: str = "hdmi1", frame: str = "frame1", **kwargs) -> OutputBinding:
     return OutputBinding(output_id=output, frame_id=frame, generation=1,
                          profile=FrameProfile(width_px=1920, height_px=1080, diagonal_inches=32),
-                         **kwargs)
+                         **{"mat": Mat(), **kwargs})
 
 
 def layer(key: str = "picture", *, output: str = "hdmi1", frame: str = "frame1",

@@ -6,6 +6,7 @@ from pydantic import ValidationError
 from contracts.models import (
     Calibration,
     Layer,
+    Mat,
     OutputBinding,
     PhotoCrop,
     Plan,
@@ -95,7 +96,7 @@ def test_readiness_distinguishes_file_from_preparation_and_is_deeply_immutable()
 
 def test_plan_rejects_old_binding_generation_and_outside_validity():
     binding = OutputBinding(output_id="out", frame_id="frame", generation=2,
-                            profile=dict(width_px=1080, height_px=1920, diagonal_inches=24))
+                            profile=dict(width_px=1080, height_px=1920, diagonal_inches=24), mat=Mat())
     common = dict(plan_id="p", revision=1, player_id="player", authority_epoch=1,
                   issued_at=100, valid_from=100, valid_until=400, bindings=(binding,))
     layer = Layer(assignment_id="a", run_id="run", output_id="out", frame_id="frame",

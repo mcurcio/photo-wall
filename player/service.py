@@ -30,6 +30,7 @@ from contracts.clock_record import ClockRecord
 from contracts.enrollment import OutputReport
 from contracts.equipment import READ_CAP, equipment_device_id
 from contracts.liveness import REPORT_INTERVAL, SESSION_BACKOFF
+from contracts.lut import LUT_BYTES, LUT_MEDIA_TYPE, LutRef
 from contracts.models import (
     MAX_VARIANT_BYTES,
     Commit,
@@ -52,10 +53,11 @@ from contracts.player_control import (
     ControlSelection,
 )
 from contracts.time import Clock, SystemClock, TimeMapping
-from player.cache import Cache
+from player.cache import Cache, CacheError
 from player.central_link import CentralLink, Session, read_refusal
 from player.executor import AuthorityError, Executor
 from player.identity import Identity, load_identity
+from player.luts import LutWants, PlayerLuts
 from player.mainloop import DispatchRefused, LatePosts, LoopLate, MainLoopDispatcher, Tick
 from player.node_app_link import NodeAppLinkClient
 from player.output_discovery import discover_outputs, output_app_id
@@ -327,8 +329,11 @@ class PlayerService:
                  websocket_connect=None, cache_factory=Cache, executor_factory=Executor,
                  node_link_client: NodeAppLinkClient | None = None,
                  boot_id_path: Path = Path("/proc/sys/kernel/random/boot_id"),
-                 boot_context: BootContext):
+                 boot_context: BootContext, luts: LutWants):
         self.config, self.identity, self.outputs = config, identity, outputs
+        # The LUTs the renderer asks for (print look): fetched here, held there. The same
+        # PlayerLuts the renderer was built with (`main`).
+        self.luts = luts
         self.renderer, self.dispatcher = renderer, dispatcher
         self.clock = clock or SystemClock()
         self.mapping = TimeMapping(self.clock)
@@ -893,31 +898,83 @@ class PlayerService:
             if worker is not None:
                 await asyncio.shield(worker)
 
+    async def fetch_lut(self, ref: LutRef) -> bool:
+        """Hold the LUT `ref` names for the renderer (print look, rule 3), from Central only (R11).
+        A whole verified file the cache holds under `ref.key` is used with no request; otherwise
+        GET `ref.path`, refused unless it is LUT_MEDIA_TYPE, identity-encoded, exactly LUT_BYTES
+        long (`Content-Length`) and its bytes match the served `Repr-Digest`, as for a Variant;
+        then kept through the media cache (pinned "luts") and held. False when there is no cache
+        yet (before enrollment)."""
+        cache = self.cache
+        if cache is None:
+            return False
+        loop = asyncio.get_running_loop()
+        held = await loop.run_in_executor(self._worker, cache.path_named, ref.key)
+        if held is not None:
+            body = await loop.run_in_executor(self._worker, held.read_bytes)
+            if len(body) == LUT_BYTES:
+                self.luts.hold(ref, body)
+                return True
+        async with self.link.stream(self.session, "GET", ref.path, timeout=30) as response:
+            await self._check_status(response, ref.path)
+            if (response.headers.get("content-type", "").split(";")[0] != LUT_MEDIA_TYPE
+                    or response.headers.get("content-encoding", "identity") != "identity"):
+                raise ServiceError("lut_type")
+            if self._length(response, LUT_BYTES) != LUT_BYTES:
+                raise ServiceError("lut_length")
+            sha256 = served_sha256(response.headers.get("repr-digest"))
+            body = bytearray()
+            async for chunk in response.aiter_bytes(CHUNK_SIZE):
+                if len(body) + len(chunk) > LUT_BYTES:
+                    raise ServiceError("lut_length")
+                body.extend(chunk)
+        if len(body) != LUT_BYTES:
+            raise ServiceError("lut_length")
+        try:
+            await loop.run_in_executor(self._worker, functools.partial(
+                cache.secure_named, ref.key, (bytes(body),), "luts", sha256=sha256, size=LUT_BYTES))
+        except CacheError as error:
+            raise ServiceError("lut_digest") from error
+        self.luts.hold(ref, bytes(body))
+        return True
+
+    async def _attempt(self, attempts: dict, key, fetch: Callable[[], Awaitable[bool]],
+                       fault: str) -> None:
+        """One fetch of `key` (a media download or a LUT) on its own retry schedule: a failure is
+        the `fault` and retried after MEDIA_RETRY_BACKOFF; a 401 or a redirect ends the cycle."""
+        count, _ = attempts.get(key, (0, 0))
+        try:
+            success = await fetch()
+        except Unauthorized:
+            raise
+        except UplinkError as error:
+            if error.cause is Cause.REDIRECT:
+                raise           # ends the cycle: run() locates again (0014)
+            success = False
+            self._uplink_fault(fault, error)
+        except (httpx.HTTPError, ServiceError, TimeoutError, OSError, AuthorityError):
+            success = False
+            self.fault(fault)
+        attempts[key] = (min(count + 1, 3), self.clock.monotonic()
+            + (1 if success else MEDIA_RETRY_BACKOFF[min(count, 3)]))
+
     async def _media_loop(self):
         attempts: dict[Download, tuple[int, float]] = {}
+        lut_attempts: dict[LutRef, tuple[int, float]] = {}
         maintained_at, verified_at = -math.inf, -math.inf
         while not self._stop.is_set():
             with self._lock:
                 jobs = self._jobs
             attempts = {job: value for job, value in attempts.items() if job in jobs}
             for job in jobs:
-                count, retry_at = attempts.get(job, (0, 0))
-                if self.clock.monotonic() < retry_at or not self._authorized(job):
+                if self.clock.monotonic() < attempts.get(job, (0, 0))[1] or not self._authorized(job):
                     continue
-                try:
-                    success = await self.download(job)
-                except Unauthorized:
-                    raise
-                except UplinkError as error:
-                    if error.cause is Cause.REDIRECT:
-                        raise           # ends the cycle: run() locates again (0014)
-                    success = False
-                    self._uplink_fault("media_download", error)
-                except (httpx.HTTPError, ServiceError, TimeoutError, OSError, AuthorityError):
-                    success = False
-                    self.fault("media_download")
-                attempts[job] = (min(count + 1, 3), self.clock.monotonic()
-                    + (1 if success else MEDIA_RETRY_BACKOFF[min(count, 3)]))
+                await self._attempt(attempts, job, functools.partial(self.download, job), "media_download")
+            wanted = self.luts.wanted()
+            lut_attempts = {ref: value for ref, value in lut_attempts.items() if ref in wanted}
+            for ref in wanted:
+                if self.clock.monotonic() >= lut_attempts.get(ref, (0, 0))[1]:
+                    await self._attempt(lut_attempts, ref, functools.partial(self.fetch_lut, ref), "lut_download")
             if self.executor is not None and self.clock.monotonic() - maintained_at >= 2:
                 await asyncio.get_running_loop().run_in_executor(self._worker,
                                                                self.executor.maintain_cache)
@@ -1317,6 +1374,7 @@ def main():
     from player.native import NativeOutput, NativeRenderer
 
     renderer = UnavailableRenderer()
+    luts = PlayerLuts()         # one for both: the renderer asks, the service fetches
     native_fault = None
     connected_outputs = tuple(output for output in discovery.outputs if output.connected)
     if connected_outputs:
@@ -1325,7 +1383,7 @@ def main():
                 output_app_id(output.output_id), output.width_px or 1920,
                 output.height_px or 1080) for output in connected_outputs),
                 decoder_limit=config.decoder_limit, texture_budget=config.texture_budget,
-                serial=display_serial(read_pi_serial()))
+                serial=display_serial(read_pi_serial()), luts=luts)
         except Exception:
             native_fault = "native_initialization"
     dispatcher = MainLoopDispatcher(GLib)
@@ -1338,6 +1396,7 @@ def main():
         boot_context=boot_context,
         find_central=find,
         trust=trust,
+        luts=luts,
     )
     for fault in (discovery.fault, native_fault):
         if fault:

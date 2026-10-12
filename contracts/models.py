@@ -7,6 +7,7 @@ from typing import Annotated, Literal, Self
 from pydantic import BaseModel, ConfigDict, Field, model_serializer, model_validator
 
 from contracts.frame_fit import FULL_SCREEN, OutputSize, PictureSize, convex_clockwise, picture_size
+from contracts.kelvin import KELVIN_TABLE_MAX, KELVIN_TABLE_MIN, KELVIN_TABLE_STEP
 
 # The API identifier rule (path parameters, Scene/Program/Source ids). The console's
 # IDENTIFIER_PATTERN (authoring.js) is pinned equal to it by a test.
@@ -82,6 +83,43 @@ class Calibration(Model):
     fit: FrameFit = Field(default_factory=CoverFit)
 
 
+MAT_LIGHTS_MAX = 4          # a cap on the final pass's per-pixel cost (print look design)
+MAT_DEPTH_MM_MAX = 20.0     # allows exaggeration: a real flush 45-degree bevel casts millimetres
+
+
+class Light(Model):
+    """A light the room shines on one Frame (print look; owner, 2026-10-12: "a directional light
+    source (or multiple)"; "cool white light coming from the side AND warm white coming from the
+    top"). Directional: far away, so it falls on the whole Frame at one angle. What each field does
+    to the picture (the shadow's width, edge and darkness, and how lights combine) is the Player's
+    (player/geometry.py, the mat shadow); this is its shape and ranges only."""
+
+    from_degrees: int = Field(ge=0, le=359)        # clockwise from the wall's up (0 above, 90 from the right);
+                                                   # wall-referenced through the Frame's rotation
+    steep_degrees: int = Field(ge=5, le=90)        # off the wall: low is grazing (a long shadow), 90 straight on (none)
+    softness_degrees: int = Field(ge=0, le=45)     # the light's apparent size: a bare bulb ~1, a window ~30
+    strength_tenths: int = Field(ge=0, le=100)     # 0.0..10.0 against the room's general light (10 = as bright as it)
+    colour_kelvin: int = Field(ge=KELVIN_TABLE_MIN, le=KELVIN_TABLE_MAX, multiple_of=KELVIN_TABLE_STEP)
+                                                   # contracts/kelvin.py `kelvin_white`; 6500 is the Display's white
+
+
+class Mat(Model):
+    """A Frame's mat (print look; owner, 2026-10-12: "the mat shadow is definitely a Frame
+    quality"): how far its inner edge stands in front of the picture, and the lights that fall on it.
+    On the Frame's binding beside its profile and Position, saved through Position's trial; it never
+    changes the Frame output, so it never re-plans photos. `Mat()` (depth 0, no lights) casts no
+    shadow, and the Player skips the step (`shades`)."""
+
+    depth_mm: float = Field(default=0.0, ge=0, le=MAT_DEPTH_MM_MAX, multiple_of=0.5, allow_inf_nan=False)
+    lights: tuple[Light, ...] = Field(default=(), max_length=MAT_LIGHTS_MAX)
+
+    @property
+    def shades(self) -> bool:
+        """Whether the mat casts any shadow: a depth above 0 and a light of strength above 0. The one
+        skip rule of the Player's mat-shadow step."""
+        return self.depth_mm > 0 and any(light.strength_tenths > 0 for light in self.lights)
+
+
 class OutputBinding(Model):
     output_id: Identifier
     frame_id: Identifier
@@ -89,6 +127,7 @@ class OutputBinding(Model):
     configuration_revision: int = Field(default=1, ge=1)
     profile: FrameProfile
     calibration: Calibration = Field(default_factory=Calibration)
+    mat: Mat
 
 
 def frame_output(profile: FrameProfile, calibration: Calibration,

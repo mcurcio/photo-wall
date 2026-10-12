@@ -33,6 +33,7 @@ from central.fleet.node_release_catalog import NodeReleaseCatalog
 from central.fleet.node_sessions import NodeControlConfig, NodeControlError, NodeSessions
 from central.fleet.principal import PrincipalError
 from central.registry import Registry
+from central.request_body import capped_body
 from contracts.node_app_link import MAX_NODE_LINK_BYTES
 from contracts.node_boot import MAX_NODE_BOOT_BYTES, encode_node_boot_offer, parse_node_boot_request
 from contracts.node_commands import MAX_COMMAND_BYTES, encode_session_grant, parse_session_claim
@@ -117,15 +118,7 @@ def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
 
     async def body(request: Request, limit: int) -> bytes:
         """Bound streamed content even when Content-Length is absent or dishonest."""
-        declared = request.headers.get("content-length")
-        if declared is not None and declared.isdigit() and int(declared) > limit:
-            raise NodeControlError("node_body_too_large", 413)
-        data = bytearray()
-        async for chunk in request.stream():
-            if len(data) + len(chunk) > limit:
-                raise NodeControlError("node_body_too_large", 413)
-            data.extend(chunk)
-        return bytes(data)
+        return await capped_body(request, limit, lambda: NodeControlError("node_body_too_large", 413))
 
     @app.post("/v2/node/boot-offers")
     async def boot_offer(request: Request):
@@ -268,19 +261,20 @@ def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
 
     @app.post("/v1/operator/frames/{frame_id}/calibration-trials", dependencies=[Depends(admin)])
     async def calibration_begin(frame_id: str, request: Request):
-        # An empty body, or `{}`, begins at the saved calibration; `{"calibration": draft}` at
-        # the operator's draft, whose `revision` is the saved revision it was made from.
+        # An empty body, or `{}`, begins at the saved calibration and mat; `{"calibration": draft}`
+        # at the operator's draft, whose `revision` is the saved revision it was made from, and
+        # `{"mat": draft}` at the operator's draft mat (print look).
         raw = await body(request, 4096)
         value = loads_object(raw, max_bytes=4096) if raw.strip() else {}
-        if value is None or set(value) - {"calibration"}:
+        if value is None or set(value) - {"calibration", "mat"}:
             raise NodeControlError("node_trial_operation_invalid", 422)
-        return await invoke(trials.begin, frame_id, value.get("calibration"))
+        return await invoke(trials.begin, frame_id, value.get("calibration"), value.get("mat"))
 
     @app.post("/v1/operator/frames/{frame_id}/calibration-trials/{trial_id}", dependencies=[Depends(admin)])
     async def calibration_operate(frame_id: str, trial_id: UUID, request: Request):
         value = loads_object(await body(request, 4096), max_bytes=4096)
         try:
-            if value is None or set(value)-{"operation", "expected_sequence", "calibration"} or not {
+            if value is None or set(value)-{"operation", "expected_sequence", "calibration", "mat"} or not {
                     "operation", "expected_sequence"} <= set(value):
                 raise ValueError("shape")
         except (TypeError, ValueError) as exc:

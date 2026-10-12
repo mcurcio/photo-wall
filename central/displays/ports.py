@@ -13,6 +13,7 @@ from central.displays.views import (
     FramePictureView,
     FramePowerView,
     HardwareEdit,
+    LutEdit,
     PictureCopyRequest,
     PictureCopyResult,
     PictureSequence,
@@ -86,8 +87,14 @@ class PictureCommands(Protocol):
         ...
 
     def edit_software(self, session_id: UUID, edit: SoftwareEdit) -> PictureSequence:
-        """One of Photo Wall's four, live on the Display. unknown_session, session_ended,
-        stale_sequence, out_of_range."""
+        """One of Photo Wall's numeric settings (its four, the print sliders and the LUT's
+        amount), live on the Display. unknown_session, session_ended, stale_sequence,
+        out_of_range."""
+        ...
+
+    def edit_lut(self, session_id: UUID, edit: LutEdit) -> PictureSequence:
+        """The LUT choice, live on the Display: a listed paper profile's LUT under the current
+        recipe, or none. unknown_session, session_ended, stale_sequence, unknown_lut."""
         ...
 
     def keep_picture_alive(self, session_id: UUID) -> PictureSessionView:

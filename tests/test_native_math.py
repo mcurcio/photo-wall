@@ -27,6 +27,7 @@ from player.geometry import (
     picture_source_uv,
     transform,
 )
+from player.luts import PlayerLuts
 from player.native import NativeOutput, NativeRenderer, SampleMailbox, diagnostic_text, packed_rgba
 from player.rendering import REDRAW_RENEWAL, PrepareResult
 
@@ -261,8 +262,8 @@ def test_two_frames_on_one_output_keep_to_their_openings():
     reaches over A's opening and only the per-Frame mask keeps it out."""
     a = ((.04, .1), (.46, .1), (.46, .9), (.04, .9))
     b = ((.54, .15), (.95, .1), (.92, .9), (.58, .85))
-    frames = ((CoverFit(corners=a), 9 / 16, (1.0, 0.0, 0.0)),
-              (CoverFit(corners=b, rotation=30), 9 / 16, (0.0, 1.0, 0.0)))
+    frames = ((CoverFit(corners=a), 9 / 16, (1.0, 0.0, 0.0), None),
+              (CoverFit(corners=b, rotation=30), 9 / 16, (0.0, 1.0, 0.0), None))
     operations = _operations(slope=.5)
     red, green, black = (.75, .25, .25, 1), (.25, .75, .25, 1), (0, 0, 0, 1)   # worked by hand
     seen = set()
@@ -584,7 +585,7 @@ def test_a_crossfade_step_a_trial_edit_or_a_picture_change_is_a_change_to_redraw
         local = SimpleNamespace(layer="picture", path=None, alpha=alpha)
         composition = SimpleNamespace(binding=SimpleNamespace(output_id="hdmi1"),
                                       calibration=Calibration(), fallback=False, layers=(local,))
-        return native_module._shown(composition, (), (), frames, object())
+        return native_module._shown(composition, (), (), frames, object(), PlayerLuts())
 
     assert shown() == shown()
     assert shown(.5) != shown(1.0)
@@ -612,6 +613,7 @@ def _presenting_renderer(decoders=None):
 
     renderer = NativeRenderer.__new__(NativeRenderer)
     renderer._owner, renderer._closed, renderer._serial = threading.get_ident(), False, 0
+    renderer._luts = PlayerLuts()
     renderer._decoders = decoders or {}
     renderer._surfaces = {"hdmi1": native_module._Surface(output=None, window=None, area=Area())}
     renderer.capacity = lambda compositions: SimpleNamespace(available=True)
@@ -767,3 +769,97 @@ def test_a_new_picture_change_is_drawn_again_at_once():
     assert renderer.present(photo).status == "presented" and surface.area.renders == 2
     _acknowledge(surface)
     assert renderer.present(photo).status == "presented" and surface.area.renders == 2
+
+
+# -- The print look (design /print-look, 2026-10-12): the final pass's switches, the drawn mat and
+# the Done rule ------------------------------------------------------------------------------------
+
+class _UniformGL:
+    """The GL calls _final_uniforms makes, by uniform name."""
+
+    def __init__(self):
+        self.values: dict[str, tuple] = {}
+
+    def glGetUniformLocation(self, _program, name):
+        return name
+
+    def __getattr__(self, call):
+        if call.startswith("glUniform"):
+            return lambda location, *values: self.values.__setitem__(location, values)
+        raise AttributeError(call)
+
+
+_SWITCHES = ("saturation_on", "rolloff_on", "floor_on", "mat_on")
+
+
+def test_neutral_operations_and_no_mat_switch_every_print_step_off():
+    """Rule 2: each step's switch is geometry.py's skip rule, so neutral v5 operations and Mat()
+    run v4's shader path. Mutation probe: switch saturation on whenever operations arrive ->
+    saturation_on is 1 here."""
+    from contracts.models import Mat
+    from player.geometry import mat_shadow
+
+    for operations in (None, _operations(), _operations(light=1.5)):
+        gl = _UniformGL()
+        native_module._final_uniforms(gl, 1, operations, native_module._NO_OPENING,
+                                      mat_shadow(CoverFit(), _PROFILE, Mat()), lut_drawn=False)
+        assert {name: gl.values[name] for name in _SWITCHES} == {name: (0,) for name in _SWITCHES}
+
+
+def test_print_operations_and_a_shading_mat_switch_their_steps_on():
+    from contracts.models import Light, Mat
+    from player.geometry import mat_shadow, peak
+
+    operations = PictureOperations("HDMI-A-1", 2, (1.0, 1.0, 1.0), 1.4, 1.0, 1.0, saturation=.8,
+                                   highlight_knee=.6, black_floor=.07)
+    shadow = mat_shadow(CoverFit(rotation=90), _PROFILE, Mat(depth_mm=2, lights=(Light(
+        from_degrees=0, steep_degrees=45, softness_degrees=0, strength_tenths=10, colour_kelvin=2700),)))
+    gl = _UniformGL()
+    native_module._final_uniforms(gl, 1, operations, CoverFit().corners, shadow, lut_drawn=False)
+    assert {name: gl.values[name] for name in _SWITCHES} == {name: (1,) for name in _SWITCHES}
+    assert gl.values["saturation"] == (.8,) and gl.values["highlight_knee"] == (.6,)
+    assert gl.values["peak"] == (peak(operations),) and gl.values["black_floor"] == (.07,)
+    assert gl.values["light_count"] == (1,) and gl.values["mat_size"] == shadow.size_mm
+    count, toward = gl.values["light_toward"]
+    assert count == 4 and toward[:2] == list(shadow.lights[0].toward) and toward[2:] == [0.0] * 6
+    assert gl.values["light_band"][1][:2] == [shadow.lights[0].dark_until_mm, shadow.lights[0].lit_from_mm]
+    assert gl.values["light_weight"][1][:3] == list(shadow.lights[0].weight)
+    # The same column-major upload as output_to_picture's.
+    columns = gl.values["to_opening"][2]
+    assert [columns[column*3 + row] for row in range(3) for column in range(3)] == list(shadow.to_opening)
+
+
+_PROFILE = SimpleNamespace(width_px=1920, height_px=1080, diagonal_inches=27)
+
+
+def test_a_draw_shows_its_trials_mat_while_the_trial_is_drawn_and_the_bindings_after():
+    """Position's trial carries the draft mat: a draw with an applied (trial) mat shows it; with
+    none, the binding's."""
+    from contracts.models import Light, Mat
+
+    binding_mat = Mat(depth_mm=1, lights=(Light(from_degrees=0, steep_degrees=45, softness_degrees=0,
+                                                strength_tenths=10, colour_kelvin=6500),))
+    trial_mat = Mat(depth_mm=3, lights=binding_mat.lights)
+    composition = SimpleNamespace(binding=SimpleNamespace(mat=binding_mat))
+    draw = native_module._Draw(1, composition, ())
+    assert native_module._drawn_mat(draw) == binding_mat
+    draw.applied_mat = trial_mat
+    assert native_module._drawn_mat(draw) == trial_mat
+
+
+def test_the_tag_never_claims_a_change_whose_lut_is_not_drawn():
+    """Rule 3 (only Done waits for a LUT): the tag names a change only when its draw was complete;
+    while its LUT is loading, the newest complete change ("0" before any). Mutation probe: tag
+    operations.picture_change unconditionally -> 4 is named before its LUT is drawn."""
+    from contracts.lut import LutRef
+    from contracts.node_frame import LutMix, picture_change_text
+
+    mix = LutMix(LutRef("ab" * 32, "lut33-perceptual-relcol-bpc-1"), .8)
+    surface = native_module._Surface(output=None, window=None, area=None)
+    with_lut = PictureOperations("HDMI-A-1", 2, (1.0, 1.0, 1.0), 1.0, 1.0, 1.0, lut=mix)
+    assert picture_change_text(surface._tagged_change(with_lut, False)) == "0"
+    assert surface._tagged_change(None, False) is None
+    assert surface._tagged_change(PictureOperations("HDMI-A-1", 3, (1.0, 1.0, 1.0), 1.0, 1.0, 1.0), False) == 3
+    later = PictureOperations("HDMI-A-1", 4, (1.0, 1.0, 1.0), 1.0, 1.0, 1.0, lut=mix)
+    assert surface._tagged_change(later, False) == 3
+    assert surface._tagged_change(later, True) == 4

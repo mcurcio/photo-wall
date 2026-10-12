@@ -8,19 +8,23 @@ export interface SelectProps<V extends string> {
   /** Shown while nothing is chosen. */
   placeholder?: string;
   disabled?: boolean;
+  /** "fixed" (the default): one width for every Select, so a column of them lines up; "fit":
+   * as wide as its longest choice, up to its column, for choices whose names are long and alike
+   * (two papers from one maker). */
+  width?: "fixed" | "fit";
 }
 
 /**
  * Select (design language §4): one choice from a list too long for a SegmentedControl, inside a
  * Field (the Field names it). A native select, so every platform's own picker opens.
  */
-export function Select<V extends string>({ value, options, onChange, placeholder, disabled }: SelectProps<V>) {
+export function Select<V extends string>({ value, options, onChange, placeholder, disabled, width = "fixed" }: SelectProps<V>) {
   const { id, describedBy } = useFieldControl();
   return (
     <select
       id={id}
       aria-describedby={describedBy}
-      className={cn(controlClass, "w-48")}
+      className={cn(controlClass, width === "fit" ? "w-auto max-w-full self-start" : "w-48")}
       value={value ?? ""}
       disabled={disabled}
       onChange={(event) => onChange(event.target.value as V)}
