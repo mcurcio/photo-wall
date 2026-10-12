@@ -1,7 +1,7 @@
 import { ageAt, formatAge } from "./health.js";
 import { frameOf, LIVE_PHASES, toTarget } from "./join.js";
 import { sceneFrames } from "./sceneTargets.js";
-import { clockTime, windowLabel } from "./timeWords.js";
+import { clockTime, windowWords } from "./timeWords.js";
 
 export { sceneFrames, sceneSourceRefs, sceneHasAuthoredMedia } from "./sceneTargets.js";
 
@@ -81,13 +81,11 @@ export function protectorOf(snapshot, admission) {
   return { run, frames: frames.join(", ") };
 }
 
-const RAN_HINT =
-  "Central's Runs: if Central was down during the window, it caught up without showing anything.";
-
 /**
- * One stored Program's display state (§9), first match: details older than a
- * day (no served outcome), upcoming, due (transient), running, ran, cancelled,
- * refused, missed.
+ * One stored Program's display state (§9; Power and the week): from Central's current and next
+ * window (`runtime.program_windows`, house-clock words worked out in Central), first match:
+ * playing (its current window's Run is live), refused (its current window was refused), upcoming
+ * (its next window), or none (no window in the coming week). A repeating Program is never past.
  *
  * @param {object|null} snapshot
  * @param {string} programId
@@ -99,65 +97,25 @@ export function programState(snapshot, programId) {
   if (program === undefined) {
     return null;
   }
-  const now = runtime.current?.now;
-  const outcomes = runtime.program_outcomes ?? {};
+  const { current = null, next = null } = runtime.program_windows?.[programId] ?? {};
+  const nextHint = next === null ? null : `Next: ${windowWords(next)}.`;
   const state = (name, label, severity = "ok", hint = null) => ({ state: name, label, severity, hint });
-  if (!(programId in outcomes)) {
-    return state("old", "Ended over a day ago; details older than a day");
-  }
-  const outcome = outcomes[programId];
-  if (outcome == null) {
-    return now < program.starts_at
-      ? state("upcoming", `Starts in ${formatAge(ageAt(program.starts_at, now))} · ${windowLabel(program)}`)
-      : state("due", "Due now");
-  }
-  if (outcome.status === "admitted") {
-    const run = (runtime.current?.runs ?? []).find((candidate) => candidate.run_id === outcome.run_id);
-    if (run === undefined) {
-      return state("ran", "Ran; details older than a day", "ok", RAN_HINT);
+  const admission = current?.admission ?? null;
+  if (admission?.status === "admitted") {
+    const run = (runtime.current?.runs ?? []).find((candidate) => candidate.run_id === admission.run_id);
+    if (run !== undefined && LIVE_PHASES.has(run.phase)) {
+      return state("running", `Playing now · ${windowWords(current)}`, "ok", nextHint);
     }
-    if (LIVE_PHASES.has(run.phase)) {
-      return state("running", `Running since ${clockTime(run.started_at)}`);
-    }
-    if (run.phase === "cancelled") {
-      return state("ran", `Cancelled at ${clockTime(run.ended_at)}`, "ok", RAN_HINT);
-    }
-    const once = cycleWording(runScene(snapshot, run)) !== null ? " (one cycle, then ended)" : "";
-    return state(
-      "ran",
-      `Ran ${clockTime(run.started_at)}–${clockTime(run.ended_at)}${once}`,
-      "ok",
-      RAN_HINT,
-    );
   }
-  if (outcome.status === "rejected" && outcome.reason in REFUSALS) {
-    return state("refused", REFUSALS[outcome.reason](protectorOf(snapshot, outcome)), "alarm");
+  if (admission?.status === "rejected") {
+    const refusal = REFUSALS[admission.reason];
+    return state("refused", refusal !== undefined ? refusal(protectorOf(snapshot, admission))
+      : `Did not start: ${admission.reason ?? admission.status}.`, "alarm", nextHint);
   }
-  if (outcome.status === "expired" && outcome.reason === "missed_window") {
-    return state(
-      "missed",
-      "Missed: its window had ended before Central first scheduled it.",
-      "todo",
-    );
+  if (next === null) {
+    return state("none", "No window in the coming week", "todo");
   }
-  return state("refused", `Did not start: ${outcome.reason ?? outcome.status}.`, "alarm");
-}
-
-/**
- * Whether a stored Program is filed under "Past" (§9, flow design §7 J6): its window has
- * ended on Central's clock and it is neither running (its Run is asked to finish at the
- * window's end and may play on to the end of its cycle and its outro) nor due.
- *
- * @param {object|null} snapshot
- * @param {{program_id: string, ends_at: number}} program
- * @returns {boolean}
- */
-export function isPastProgram(snapshot, program) {
-  if (!(program.ends_at <= snapshot?.runtime?.current?.now)) {
-    return false;
-  }
-  const state = programState(snapshot, program.program_id)?.state;
-  return state !== "running" && state !== "due";
+  return state("upcoming", `Next: ${windowWords(next)}`);
 }
 
 const REFUSALS = {

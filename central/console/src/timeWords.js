@@ -147,38 +147,69 @@ export function dateTime(epochSeconds, { year = false } = {}) {
   return `${day} ${clockTime(epochSeconds)}`;
 }
 
-/**
- * A Program window: "Tue 2 Mar 18:00–20:00 BST"; across days or a zone change, each end in
- * full: "Tue 2 Mar 23:00 GMT – Wed 3 Mar 01:00 GMT".
- *
- * @param {{starts_at: number, ends_at: number}} window
- * @returns {string}
- */
-export function windowLabel({ starts_at: startsAt, ends_at: endsAt }) {
-  const start = toDate(startsAt);
-  const end = toDate(endsAt);
-  const startDay = dayLabel(startsAt);
-  const zone = zoneLabel(start);
-  return startDay === dayLabel(endsAt) && zone === zoneLabel(end)
-    ? `${startDay} ${hourMinute(start)}–${hourMinute(end)} ${zone}`
-    : `${dateTime(startsAt)} – ${dateTime(endsAt)}`;
+// --- House-clock words (Power and the week): a Program's When and its windows are on the house
+// clock, worked out in Central; these words only spell them out and never read the browser's zone.
+
+const DAY_KEYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+const DAY_NAMES = { mon: "Mon", tue: "Tue", wed: "Wed", thu: "Thu", fri: "Fri", sat: "Sat", sun: "Sun" };
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/** Days in words: "Every day", "Mon–Fri" (a run of three or more), "Mon, Wed, Fri". */
+function dayWords(days) {
+  const ticked = DAY_KEYS.filter((day) => days.includes(day));
+  if (ticked.length === DAY_KEYS.length) return "Every day";
+  if (ticked.length === 0) return "No day";
+  const runs = [];
+  ticked.forEach((day) => {
+    const last = runs.at(-1);
+    if (last !== undefined && DAY_KEYS.indexOf(last.at(-1)) === DAY_KEYS.indexOf(day) - 1) last.push(day);
+    else runs.push([day]);
+  });
+  return runs.map((run) => (run.length >= 3 ? `${DAY_NAMES[run[0]]}–${DAY_NAMES[run.at(-1)]}`
+    : run.map((day) => DAY_NAMES[day]).join(", "))).join(", ");
+}
+
+/** A start or end of a When: "17:00", "sunset", "sunrise +15 min", "sunset −30 min". */
+function timeOfDayWords(time) {
+  if (time.at === "clock") return time.time;
+  const offset = time.offset_minutes ?? 0;
+  if (offset === 0) return time.at;
+  return `${time.at} ${offset > 0 ? "+" : "−"}${Math.abs(offset)} min`;
 }
 
 /**
- * A saved repeated occurrence's clock time with its offset, "1:30 AM PST (GMT-08:00)", so a
- * wall-clock time that occurs twice (a daylight-saving change) names which one it is.
+ * A Program's When: "Mon–Fri, 17:00–23:00", with " (ends next day)" when a clock end is at or
+ * before its start (#76: crossing midnight is shown, never asked).
  *
- * @param {number} epochSeconds
+ * @param {{days: string[], start: object, end: object}} when
  * @returns {string}
  */
-export function occurrenceTime(epochSeconds) {
-  const date = toDate(epochSeconds);
-  const clock = new Intl.DateTimeFormat(undefined, {
-    hour: "numeric",
-    minute: "2-digit",
-    timeZoneName: "short",
-  }).format(date);
-  return `${clock} (${zonePart(date, "longOffset") ?? "local time"})`;
+export function whenWords(when) {
+  const crosses = when.start.at === "clock" && when.end.at === "clock" && when.end.time <= when.start.time;
+  return `${dayWords(when.days)}, ${timeOfDayWords(when.start)}–${timeOfDayWords(when.end)}` +
+    (crosses ? " (ends next day)" : "");
+}
+
+/** "2026-10-12T17:00" (house clock) as its day, "Mon 12 Oct", and its time, "17:00". */
+function houseParts(local) {
+  const [date, time] = local.split("T");
+  const [year, month, day] = date.split("-").map(Number);
+  const weekday = DAY_KEYS[(new Date(Date.UTC(year, month - 1, day)).getUTCDay() + 6) % 7];
+  return { day: `${DAY_NAMES[weekday]} ${day} ${MONTHS[month - 1]}`, time };
+}
+
+/**
+ * One Program window on the house clock, from Central's ProgramWindowView: "Mon 12 Oct
+ * 17:00–23:00"; across days, "Mon 12 Oct 22:00 – Tue 13 Oct 02:00".
+ *
+ * @param {{start: string, end: string}} window
+ * @returns {string}
+ */
+export function windowWords(window) {
+  const start = houseParts(window.start);
+  const end = houseParts(window.end);
+  return start.day === end.day ? `${start.day} ${start.time}–${end.time}`
+    : `${start.day} ${start.time} – ${end.day} ${end.time}`;
 }
 
 /**

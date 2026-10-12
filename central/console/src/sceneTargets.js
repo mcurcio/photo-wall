@@ -35,7 +35,7 @@ export function sceneFrames(scene) {
   return sceneContentSummary(scene).frames;
 }
 
-/** Saved Scene roots and future Programs that still target a Frame in this snapshot. */
+/** Saved Scene roots, and the Programs that play them (each repeats), that target a Frame. */
 export function frameStoredReferences(snapshot, frameId) {
   const runtime = snapshot?.runtime;
   const scenes = Object.entries(runtime?.definitions ?? {})
@@ -43,10 +43,8 @@ export function frameStoredReferences(snapshot, frameId) {
     .map(([sceneId]) => sceneId)
     .sort();
   const sceneIds = new Set(scenes);
-  const now = runtime?.current?.now;
   const programs = Object.entries(runtime?.programs ?? {})
-    .filter(([, program]) => sceneIds.has(program.scene_id)
-      && (!Number.isFinite(now) || program.starts_at > now))
+    .filter(([, program]) => sceneIds.has(program.scene_id))
     .map(([programId]) => programId)
     .sort();
   return { scenes, programs };

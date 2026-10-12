@@ -34,7 +34,6 @@ from console_tasks import (
     go,
     scene_continue,
     scene_form,
-    schedule_continue,
     schedule_form,
     schedule_program,
     show_advanced,
@@ -42,7 +41,6 @@ from console_tasks import (
     source_card_action,
     source_choice,
     start_scene,
-    start_schedule,
     start_source,
     visible_page,
     visit,
@@ -60,6 +58,7 @@ from photo_seed import begin, connected, filled, in_pool, library_of, saved_sour
 from playwright.sync_api import expect
 from psycopg.types.json import Jsonb
 from public_media import public_photo, publish_photo
+from support.house_time import UTC_HOUSE, set_house, window_program
 from support.photo_pools import FIXTURE_CONNECTION, fixture_connection
 from support.position import save_position
 from test_registry import ADMIN, enroll
@@ -72,7 +71,7 @@ from central.photo_library.model import InPool, SourceQuery, TakenBetween
 from central.photo_library.ports import CheckFailed
 from central.planner import AcquisitionRequest
 from central.registry import FrameCreate
-from central.runtime import Child, Contribution, Program, Scene
+from central.runtime import Child, Contribution, Scene
 from central.runtime_store import RuntimeStore
 from contracts.models import FrameProfile
 
@@ -191,6 +190,8 @@ def _seed(registry):
 
     # INVALID_FRAME: bind only -> it still needs its position.
     registry.bind(INVALID_FRAME, id_b["player_id"], OUTPUT, expected_generation=0)
+    # A Program's windows are on the house clock: UTC, so the test clock's instants read plainly.
+    set_house(registry.db, UTC_HOUSE)
     return id_a["player_id"], id_b["player_id"]
 
 
@@ -503,22 +504,20 @@ def test_a_get_through_apiwrite_does_not_drop_a_poll(page, registry):
         expect(page.get_by_text(re.compile(r"updated 0 s ago"))).to_be_visible()
 
 
-# Bead 15 — Programs (single window + priority) + optional N-window helper.
+# Programs (Power and the week): a Scene every week on its days, from a start to an end on the
+# house clock, at a priority. Central names the Program; the console shows its name.
 
-PROGRAM_ID = "morning-show"
-PROGRAM_PRIORITY = 5
-# Two datetime-local field values (operator-local time); the console converts
-# them to POSIX-epoch seconds for the stored Program window (starts_at/ends_at).
-WINDOW_START = "2027-03-01T09:00"
-WINDOW_END = "2027-03-01T11:00"
+PROGRAM_ID = "morning-show"            # the Program's name in the console
+PROGRAM_PRIORITY = "Special event"
+WINDOW_START = "09:00"
+WINDOW_END = "11:00"
 WINDOW = (WINDOW_START, WINDOW_END, PROGRAM_PRIORITY)
 
 
-def test_program_schedules_single_window_and_lists(page, registry):
-    """Bead 15: bind a Scene to a SINGLE time window with a priority via
-    PUT …/programs/{id}; the stored Program then lists with its window + priority
-    (design J4).
-    """
+def test_program_schedules_a_weekly_rule_and_lists(page, registry):
+    """A Program is one POST of a Scene, a weekly When of clock times and a priority; Central
+    names it, and the card lists its When, its next window (Central's, on the house clock) and
+    its priority."""
     _seed(registry)
     queue = _seed_source(registry)
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
@@ -528,32 +527,24 @@ def test_program_schedules_single_window_and_lists(page, registry):
         go(page, "schedule")
         programs = page.get_by_role("region", name="Programs", exact=True)
         expect(programs).to_be_visible()
-        # Not vacuously true: no Program exists yet.
         expect(programs.get_by_label(f"Program {PROGRAM_ID}", exact=True)).to_have_count(0)
 
         response = schedule_program(page, PROGRAM_ID, SCENE_ID, *WINDOW)
-        assert response.url.endswith(f"/v1/operator/programs/{PROGRAM_ID}")
-        assert response.status == 200
-        # A single-window Program: the body is exactly one Scene bound to ONE
-        # [starts_at, ends_at) window with a priority — no recurrence field.
-        body = response.request.post_data_json
-        assert body["program_id"] == PROGRAM_ID
-        assert body["scene_id"] == SCENE_ID
-        assert body["priority"] == PROGRAM_PRIORITY
-        assert body["ends_at"] > body["starts_at"]
-        assert "recurrence" not in body
-        assert "rrule" not in body
+        assert response.status == 201
+        assert response.request.post_data_json == {
+            "name": PROGRAM_ID, "scene_id": SCENE_ID, "priority": "special-event", "when": {
+                "days": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+                "start": {"at": "clock", "time": "09:00"}, "end": {"at": "clock", "time": "11:00"}}}
+        assert response.json()["program_id"].startswith("p-")
 
-        # After the useMutate() refresh the Program lists with its priority.
         row = programs.get_by_label(f"Program {PROGRAM_ID}", exact=True)
-        expect(row).to_be_visible()
-        expect(row.get_by_text(f"Priority {PROGRAM_PRIORITY}", exact=True)).to_be_visible()
+        expect(row).to_contain_text("Every day, 09:00–11:00")
+        expect(row).to_contain_text("Thu 1 Jan 09:00–11:00")      # the test clock: 1 Jan 1970
+        expect(row.get_by_text("Special event", exact=True)).to_be_visible()
 
 
 def test_program_remove_deletes_it(page, registry):
-    """Bead 15: Remove issues DELETE …/programs/{id} and the Program leaves the
-    list.
-    """
+    """Remove issues DELETE …/programs/{id}?revision=N and the Program leaves the list."""
     _seed(registry)
     queue = _seed_source(registry)
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
@@ -561,20 +552,19 @@ def test_program_remove_deletes_it(page, registry):
         author_scene(page, SCENE_ID, SOURCE, (VALID_FRAME,))
 
         programs = page.get_by_role("region", name="Programs", exact=True)
-        schedule_program(page, PROGRAM_ID, SCENE_ID, *WINDOW)
+        program_id = schedule_program(page, PROGRAM_ID, SCENE_ID, *WINDOW).json()["program_id"]
 
         row = programs.get_by_label(f"Program {PROGRAM_ID}", exact=True)
         expect(row).to_be_visible()
 
         with page.expect_response(
-            lambda r: r.url.endswith(f"/v1/operator/programs/{PROGRAM_ID}")
+            lambda r: r.url.endswith(f"/v1/operator/programs/{program_id}?revision=1")
             and r.request.method == "DELETE"
         ) as info:
             programs.get_by_role(
                 "button", name=f"Remove program {PROGRAM_ID}", exact=True).click()
-        assert info.value.status == 200
+        assert info.value.status == 204
 
-        # After the refresh the Program is gone.
         expect(programs.get_by_label(f"Program {PROGRAM_ID}", exact=True)).to_have_count(0)
 
 
@@ -588,9 +578,9 @@ def test_program_remove_refusal_and_unknown_outcome_can_be_retried(page, registr
         connect(page, origin)
         author_scene(page, SCENE_ID, SOURCE, (VALID_FRAME,))
         programs = page.get_by_role("region", name="Programs", exact=True)
-        schedule_program(page, PROGRAM_ID, SCENE_ID, *WINDOW)
+        program_id = schedule_program(page, PROGRAM_ID, SCENE_ID, *WINDOW).json()["program_id"]
         row = programs.get_by_label(f"Program {PROGRAM_ID}", exact=True)
-        remove_url = f"**/v1/operator/programs/{PROGRAM_ID}"
+        remove_url = f"**/v1/operator/programs/{program_id}?revision=1"
         responses = iter((409, 500, None))
 
         def fail_then_delete(route):
@@ -602,7 +592,7 @@ def test_program_remove_refusal_and_unknown_outcome_can_be_retried(page, registr
                 route.continue_()
             elif status == 409:
                 route.fulfill(status=status, content_type="application/json",
-                              body='{"error":"program_started"}')
+                              body='{"error":"changed"}')
             else:
                 route.fulfill(status=status, content_type="application/json",
                               body='{"error":"temporary_failure"}')
@@ -610,24 +600,25 @@ def test_program_remove_refusal_and_unknown_outcome_can_be_retried(page, registr
         page.route(remove_url, fail_then_delete)
         row.get_by_role("button", name=f"Remove program {PROGRAM_ID}", exact=True).click()
         expect(row.get_by_role("status")).to_have_text(
-            f"Program {PROGRAM_ID} was not removed: program started. Check the current Program state before retrying.")
+            f"Program {PROGRAM_ID} was not removed: it changed since this card was loaded. "
+            "Check the current Program before retrying.")
         expect(row.get_by_role("button", name=f"Remove program {PROGRAM_ID}", exact=True)).to_be_enabled()
 
         row.get_by_role("button", name=f"Remove program {PROGRAM_ID}", exact=True).click()
         expect(row.get_by_role("status")).to_have_text(
-            f"Removal outcome for Program {PROGRAM_ID} is unknown. Check the current Program state before retrying.")
+            f"Removal outcome for Program {PROGRAM_ID} is unknown. Check the current Program before retrying.")
         expect(row.get_by_role("button", name=f"Remove program {PROGRAM_ID}", exact=True)).to_be_enabled()
 
         with page.expect_response(
-            lambda response: response.url.endswith(f"/v1/operator/programs/{PROGRAM_ID}")
+            lambda response: response.url.endswith(f"/v1/operator/programs/{program_id}?revision=1")
             and response.request.method == "DELETE"
         ) as info:
             row.get_by_role("button", name=f"Remove program {PROGRAM_ID}", exact=True).click()
-        assert info.value.status == 200
+        assert info.value.status == 204
         expect(programs.get_by_label(f"Program {PROGRAM_ID}", exact=True)).to_have_count(0)
 
-        # A later Program may reuse the plain id; the old accepted receipt must
-        # not disable its Remove control or appear on the new card.
+        # A later Program may reuse the name; the old accepted receipt must not disable its
+        # Remove control or appear on the new card.
         schedule_program(page, PROGRAM_ID, SCENE_ID, *WINDOW)
         row = programs.get_by_label(f"Program {PROGRAM_ID}", exact=True)
         expect(row.get_by_role("button", name=f"Remove program {PROGRAM_ID}", exact=True)).to_be_enabled()
@@ -671,72 +662,21 @@ def test_scene_delete_refusal_names_dependent_program(page, registry):
         expect(page.get_by_role("alert")).to_contain_text(f"Program {PROGRAM_ID}")
 
 
-def test_n_window_helper_creates_separate_programs(page, registry):
-    """Bead 15 / Q2: the optional helper creates N SEPARATE windows in one action
-    — N independent, individually-stored single-window Programs (each a real
-    PUT …/programs/{id}), NOT one recurring rule.
-    """
-    _seed(registry)
-    queue = _seed_source(registry)
-    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
-        connect(page, origin)
-        author_scene(page, SCENE_ID, SOURCE, (VALID_FRAME,))
-
-        programs = page.get_by_role("region", name="Programs", exact=True)
-        # Bead 4: "Number of windows" sits under the When step's Advanced, and the write
-        # is Review's "Add separate windows".
-        form = schedule_program(page, PROGRAM_ID, SCENE_ID, *WINDOW, windows=3, submit=False)
-
-        # The helper fans out into N discrete PUTs — one stored Program each.
-        seen = []
-        page.on("request", lambda req: (
-            seen.append(req.url)
-            if req.method == "PUT" and "/v1/operator/programs/" in req.url
-            else None))
-        form.get_by_role("button", name="Add separate windows", exact=True).click()
-
-        # Three separate Programs are now listed, by three distinct ids.
-        for index in (1, 2, 3):
-            expect(
-                programs.get_by_label(f"Program {PROGRAM_ID}-{index}", exact=True)
-            ).to_be_visible()
-
-
-def test_programs_region_implies_no_recurrence_rule(page, registry):
-    """Bead 15 honesty (design R2 / Q2): central stores single windows only, so
-    NOTHING in the Programs region implies a stored recurrence rule. The N-window
-    helper is described only as creating SEPARATE windows / INDIVIDUAL Programs;
-    the words "recurring"/"recurrence" appear nowhere in the region.
-
-    This is the mutation-probe target: labelling the helper a "recurring rule"
-    turns this test red.
-    """
+def test_programs_region_offers_no_count_or_id_field(page, registry):
+    """A Program repeats by the week (Central works out its windows): the flow asks no "Number
+    of windows" and no id, and the region no longer speaks of separate windows."""
     _seed(registry)
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "schedule")
-
         programs = page.get_by_role("region", name="Programs", exact=True)
         expect(programs).to_be_visible()
-
-        # Bead 4: the helper lives under the When step's Advanced; the Schedule page
-        # names it, and so does the helper itself. Both are held to the same honesty.
         visit(page, "#/schedule/new/when")
-        schedule_form(page).get_by_role("button", name="Advanced", exact=True).click()
-        expect(programs.get_by_role("group", name="Create separate windows", exact=True)
-               ).to_be_visible()
-        helper_copy = programs.inner_text().lower()
-        go(page, "schedule")
-        page_copy = programs.inner_text().lower()
-
-        for copy in (page_copy, helper_copy):
-            # The honest N-window copy is present (so the negative assertions below
-            # are not vacuously true): separate windows / individual Programs.
-            assert "separate windows" in copy
-            assert "individual programs" in copy
-
-            # No recurrence language anywhere in the region.
-            assert "recurring" not in copy
-            assert "recurrence" not in copy
+        form = schedule_form(page)
+        expect(form.get_by_role("group", name="Days", exact=True)).to_be_visible()
+        expect(form.get_by_label("Number of windows", exact=True)).to_have_count(0)
+        visit(page, "#/schedule/new/review")
+        expect(form.get_by_label("Id", exact=True)).to_have_count(0)
+        assert "separate windows" not in programs.inner_text().lower()
 
 
 # Bead 16 — Run control + activation outcome + "why" panel (SR-runs).
@@ -778,27 +718,14 @@ def test_activation_shows_synchronous_outcome_truthfully(page, registry):
             f"Not started: {SCENE_ID} is already running, left as is.")
 
 
-def test_runs_region_shows_only_synchronous_outcomes_no_missed_window(page, registry):
-    """Slice 3 §9 (rewrites Bead 16's no-missed-row check): an activation outcome
-    still appears only at the moment of activation, and a Program reads "Missed"
-    only for a missed_window outcome Central served. A window Central slept
-    through after a tick is a warm restart: it caught up logically, so the row
-    reads "Ran" (never "Missed"), with the limit stated in its hint.
-
-    Mutation-probe target: treating any past window with no live Run as missed
-    turns the "slept" assertions red.
-    """
+def test_runs_region_shows_only_synchronous_outcomes(page, registry):
+    """Slice 3 §9: an activation outcome appears only at the moment of activation; a Program
+    whose window has not started reads its next window, never an outcome."""
     _seed(registry)
     queue = _seed_source(registry)
     runtime = _runtime(registry)
     runtime.command("set_scene", _scene(SCENE_ID, loop=False))
-    now = registry.clock.utc()
-    runtime.command("advance", now)  # Central has ticked: a warm Runtime
-    runtime.command("set_program", Program(  # saved after its window ended
-        program_id="late", scene_id=SCENE_ID, starts_at=now - 600, ends_at=now - 300))
-    runtime.command("set_program", Program(
-        program_id="slept", scene_id=SCENE_ID, starts_at=now + 60, ends_at=now + 120))
-    registry.clock.advance(300)  # Central is down across "slept"
+    runtime.command_current("create_program", window_program("later", SCENE_ID, 3600, 7200))
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         connect(page, origin, "now")
 
@@ -807,15 +734,8 @@ def test_runs_region_shows_only_synchronous_outcomes_no_missed_window(page, regi
 
         go(page, "schedule")
         programs = page.get_by_role("region", name="Programs", exact=True)
-        # Past Programs are collapsed until asked for.
-        expect(programs.get_by_label("Program late", exact=True)).not_to_be_visible()
-        programs.get_by_text("Past (2)", exact=True).click()
-        missed = "Missed: its window had ended before Central first scheduled it."
-        expect(programs.get_by_label("Program late", exact=True)).to_contain_text(missed)
-        slept = programs.get_by_label("Program slept", exact=True)
-        expect(slept).to_contain_text(re.compile(r"Ran \d\d:\d\d.*\(one cycle, then ended\)"))
-        expect(slept).to_contain_text("if Central was down during the window")
-        expect(slept).not_to_contain_text("Missed")
+        expect(programs.get_by_label("Program later", exact=True)).to_contain_text(
+            "Next: Thu 1 Jan 01:00–02:00")
 
         # The outcome appears ONLY at the synchronous moment of activation.
         response = show_now(page, SCENE_ID, 0)
@@ -937,8 +857,6 @@ def _epoch(page, local):
     return page.evaluate("(value) => new Date(value).getTime() / 1000", local)
 
 
-
-
 def test_tracer_a_named_scene_keeps_playing_through_its_program(page, registry):
     """§15 tracer: the operator names a Scene, sees the id it saves under, keeps
     "Keep playing" on and saves; the flow's draft is discarded and the list shows the id.
@@ -980,12 +898,8 @@ def test_tracer_a_named_scene_keeps_playing_through_its_program(page, registry):
         expect(scenes.get_by_role("button", name=re.compile("^Resume draft"))).to_have_count(0)
         expect(scenes.get_by_text(re.compile("already exists"))).to_have_count(0)
 
-        start = _epoch(page, "2027-03-01T18:00")
-        registry.clock.advance(start + 300 - registry.clock.utc())
-        # A wall-clock jump of years ends the 30-day session (pass A §8): sign in again.
-        connect(page, origin)
-        schedule_program(page, "evening-show", "family-evening",
-                         "2027-03-01T18:00", "2027-03-01T20:00", 0)
+        schedule_program(page, "evening-show", "family-evening", "00:17", "02:00")   # 1020 s on
+        registry.clock.advance(1020 + 300 - registry.clock.utc())    # 5 min into the window
         go(page, "now")
         runs = page.get_by_role("region", name="Runs", exact=True)
         expect(runs.get_by_text("Scene family-evening", exact=True)).to_be_visible()
@@ -1105,8 +1019,7 @@ def _seed_long_ids(registry):
         scene_id=LONG_ID, loop=True,
         contributions=(Contribution(target=f"frame:{VALID_FRAME}", source_refs=(SOURCE,)),)))
     now = registry.clock.utc()
-    runtime.command("set_program", Program(
-        program_id=LONG_ID, scene_id=LONG_ID, starts_at=now + 3600, ends_at=now + 7200))
+    runtime.command_current("create_program", window_program(LONG_ID, LONG_ID, 3600, 7200, name=LONG_ID[:80]))
     runtime.command("activate", LONG_ID, "long-act", now)
 
 
@@ -1149,7 +1062,7 @@ def test_long_ids_never_scroll_the_showrunner_sideways_at_phone_width(page, regi
         connect(page, origin, "now")
         # Every Show page, each showing a long id: a Run, a Scene, a Program, a Source.
         for section, text in (
-                              ("schedule", f"Program {LONG_ID}"), ("sources", LONG_ID)):
+                              ("schedule", f"Program {LONG_ID[:80]}"), ("sources", LONG_ID)):
             go(page, section)
             expect(visible_page(page).get_by_text(text, exact=True).first).to_be_visible()
             assert_fits_width(page, section)
@@ -1174,8 +1087,7 @@ def _refused_by_guard(registry):
     runtime.command("set_scene", _scene(SCENE_ID))
     now = registry.clock.utc()
     runtime.command("activate", "guard", "guard-act", now, priority=5)
-    runtime.command("set_program", Program(
-        program_id="blocked", scene_id=SCENE_ID, starts_at=now + 60, ends_at=now + 200000))
+    runtime.command_current("create_program", window_program("blocked", SCENE_ID, 1080, 86340))
     return runtime, now
 
 
@@ -1201,25 +1113,6 @@ def test_a_refused_program_names_its_protector(page, registry):
             "listitem").filter(has_text="Scene guard")
         expect(guard).to_contain_text(f"protects {VALID_FRAME}")
         expect(guard).to_contain_text("priority 5")
-
-
-def test_a_refused_program_whose_protector_is_no_longer_served_names_none(page, registry):
-    """The protector ended over a day ago, so it is not served: the row never names
-    a Run it cannot show (mutation-probe target: a name without a served Run)."""
-    _seed(registry)
-    queue = _seed_source(registry)
-    runtime, now = _refused_by_guard(registry)
-    guard = next(run.run_id for run in runtime.read().project(now).runs if run.scene_id == "guard")
-    registry.clock.advance(100)
-    runtime.command("cancel", guard, registry.clock.utc())  # refuses "blocked" at +60 first
-    registry.clock.advance(86400 + 60)
-    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
-        connect(page, origin, "schedule")
-        row = page.get_by_role("region", name="Programs", exact=True).get_by_label(
-            "Program blocked", exact=True)
-        expect(row).to_contain_text(
-            "Did not start: its frames were protected by another Run, no longer listed.")
-        expect(row).not_to_contain_text("guard")
 
 
 def test_a_one_cycle_scene_says_so_on_the_scene_and_its_run(page, registry):
@@ -1281,9 +1174,8 @@ def test_why_names_the_winning_program_from_its_root_run(page, registry):
     runtime.command("set_scene", _scene("evening"))
     runtime.command("set_scene", _scene("morning"))
     now = registry.clock.utc()
-    runtime.command("set_program", Program(
-        program_id="weekday-evenings", scene_id="evening", starts_at=now + 10,
-        ends_at=now + 7200, priority=5))
+    runtime.command_current("create_program", window_program(
+        "weekday-evenings", "evening", 1020, 8160, priority="always-wins"))
     runtime.command("activate", "morning", "morning-act", now, priority=1)
     registry.clock.advance(60)
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
@@ -1292,9 +1184,9 @@ def test_why_names_the_winning_program_from_its_root_run(page, registry):
         why = runs.get_by_role("group", name="Why", exact=True)
         why.get_by_role("button", name=f"Why? {VALID_FRAME}", exact=True).click()
         expect(why).to_contain_text(
-            f"Central's Runs on {VALID_FRAME}: evening (priority 5, Program weekday-evenings) on top.")
+            f"Central's Runs on {VALID_FRAME}: evening (priority 3, Program weekday-evenings) on top.")
         expect(why.get_by_role("list", name="Contribution precedence").get_by_role("listitem").nth(1)).to_have_text(
-            "morning (priority 1) is underneath: evening has priority 5.")
+            "morning (priority 1) is underneath: evening has priority 3.")
         expect(runs.get_by_role("listitem").filter(has_text="Scene evening")).to_contain_text(
             "Program weekday-evenings")
         # The Now page names the zone its clock times use.
@@ -1316,16 +1208,16 @@ def test_why_names_the_winning_program_from_its_root_run(page, registry):
             "button", name="Details", exact=True).click()
         expect(inspector).to_contain_text(planned)
         expect(inspector).to_contain_text(
-            f"Central's Runs on {VALID_FRAME}: evening (priority 5, Program weekday-evenings) on top.")
+            f"Central's Runs on {VALID_FRAME}: evening (priority 3, Program weekday-evenings) on top.")
 
         go(page, "schedule")
         programs = page.get_by_role("region", name="Programs", exact=True)
         row = programs.get_by_label("Program weekday-evenings", exact=True)
-        expect(row).to_contain_text(re.compile(r"Running since \d\d:\d\d"))
+        expect(row).to_contain_text("Playing now · Thu 1 Jan 00:17–02:16")
         row.get_by_role("button", name="Remove program weekday-evenings", exact=True).click()
         dialog = page.get_by_role("dialog", name="Remove program weekday-evenings?")
         with page.expect_response(
-            lambda r: r.url.endswith("/v1/operator/programs/weekday-evenings")
+            lambda r: r.url.endswith("/v1/operator/programs/weekday-evenings?revision=1")
             and r.request.method == "DELETE"
         ):
             dialog.get_by_role("button", name="Confirm remove", exact=True).click()
@@ -1519,155 +1411,6 @@ def _windows(page):
         "group", name="Create separate windows", exact=True)
 
 
-def test_the_windows_helper_follows_the_weekday_mask(page, registry):
-    _seed(registry)
-    queue = _seed_source(registry)
-    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
-        connect(page, origin)
-        author_scene(page, SCENE_ID, SOURCE, (VALID_FRAME,))
-        # 1 March 2027 is a Monday.
-        form = schedule_program(page, "Weekday Show", SCENE_ID, "2027-03-01T18:00",
-                                "2027-03-01T20:00", 0, windows=6, submit=False)
-        # Review's Change opens When's Advanced at the mask (bead 4).
-        form.get_by_role("button", name="Change Repeat on", exact=True).click()
-        repeat = _windows(page).get_by_role("group", name="Repeat on", exact=True)
-        expect(repeat.get_by_label("Monday", exact=True)).to_be_focused()
-        for day in ("Saturday", "Sunday"):
-            repeat.get_by_label(day, exact=True).uncheck()
-        schedule_continue(page, "Review")
-        bodies = _program_puts(page)
-        form.get_by_role("button", name="Add separate windows", exact=True).click()
-        programs = page.get_by_role("region", name="Programs", exact=True)
-        expect(programs.get_by_role("status")).to_have_text("Created 6 separate Programs.")
-        days = ("01", "02", "03", "04", "05", "08")
-        expected = {f"weekday-show-{n}": _epoch(page, f"2027-03-{day}T18:00")
-                    for n, day in enumerate(days, start=1)}
-        assert {body["program_id"]: body["starts_at"] for body in bodies} == expected
-
-
-@pytest.mark.browser_context_args(timezone_id="Europe/London")
-def test_the_windows_helper_keeps_local_time_across_a_dst_change(page, registry):
-    _seed(registry)
-    queue = _seed_source(registry)
-    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
-        connect(page, origin)
-        author_scene(page, SCENE_ID, SOURCE, (VALID_FRAME,))
-        go(page, "schedule")
-        programs = page.get_by_role("region", name="Programs", exact=True)
-        expect(programs).to_contain_text("Times in Europe/London (this browser's time zone)")
-        # British Summer Time starts at 01:00 UTC on Sunday 28 March 2027.
-        form = schedule_program(page, "Evening", SCENE_ID, "2027-03-27T18:00",
-                                "2027-03-27T20:00", 0, windows=2, submit=False)
-        # Review names the zone too, beside the times it lists (bead 4).
-        expect(form).to_contain_text("Times in Europe/London")
-        bodies = _program_puts(page)
-        form.get_by_role("button", name="Add separate windows", exact=True).click()
-        expect(programs.get_by_label("Program evening-2", exact=True)).to_be_visible()
-        # Every Program card's clock times carry their zone (console DDD §35): GMT before the
-        # change, BST (or its offset, in a locale with no abbreviation for it) after.
-        expect(programs.get_by_label("Program evening-1", exact=True)).to_contain_text(
-            re.compile(r"18:00–20:00 GMT"))
-        expect(programs.get_by_label("Program evening-2", exact=True)).to_contain_text(
-            re.compile(r"18:00–20:00 (BST|UTC\+01:00)"))
-        first, second = sorted(bodies, key=lambda body: body["program_id"])
-        # 18:00 GMT then 18:00 BST: 23 hours apart, not 24.
-        assert second["starts_at"] - first["starts_at"] == 23 * 3600
-        assert second["ends_at"] - first["ends_at"] == 23 * 3600
-
-
-def test_the_windows_helper_refuses_overlap_and_overlong_ids(page, registry):
-    _seed(registry)
-    queue = _seed_source(registry)
-    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
-        connect(page, origin)
-        author_scene(page, SCENE_ID, SOURCE, (VALID_FRAME,))
-        bodies = _program_puts(page)
-        # Bead 4: the overlap is the When step's (it asks the window and the helper), so
-        # its Continue refuses it before the name is asked.
-        form = start_schedule(page)
-        form.get_by_label("Scene", exact=True).select_option(SCENE_ID)
-        schedule_continue(page, "When")
-        # A 25 h window repeated daily: each would overlap the next.
-        form.get_by_label("Window start", exact=True).fill("2027-03-01T18:00")
-        form.get_by_label("Window end", exact=True).fill("2027-03-02T19:00")
-        form.get_by_role("button", name="Advanced", exact=True).click()
-        _windows(page).get_by_label("Number of windows", exact=True).fill("3")
-        form.get_by_role("button", name="Continue", exact=True).click()
-        expect(form.get_by_role("alert")).to_contain_text(
-            "Each window must end before the next starts.")
-
-        # An id whose window ids pass 128 characters.
-        form.get_by_label("Window end", exact=True).fill("2027-03-01T20:00")
-        schedule_continue(page, "Review")
-        form.get_by_label("Program name", exact=True).fill("Marathon")
-        form.get_by_role("button", name="Change", exact=True).click()
-        form.get_by_label("Id", exact=True).fill("x" * 127)
-        form.get_by_role("button", name="Add separate windows", exact=True).click()
-        expect(form.get_by_role("alert")).to_contain_text(
-            f"Name too long: {'x' * 127}-3 must be at most 128 characters.")
-        assert bodies == []
-
-
-def test_the_windows_helper_retries_only_the_unconfirmed_windows(page, registry):
-    """One window's PUT answers 500 without reaching Central: it is "not
-    confirmed", never "not created", and adding again sends only that window —
-    the confirmed ones are neither resent nor read as collisions."""
-    _seed(registry)
-    queue = _seed_source(registry)
-    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
-        connect(page, origin)
-        author_scene(page, SCENE_ID, SOURCE, (VALID_FRAME,))
-        programs = page.get_by_role("region", name="Programs", exact=True)
-        form = schedule_program(page, PROGRAM_ID, SCENE_ID, *WINDOW, windows=3, submit=False)
-        answer_first(page, f"**/v1/operator/programs/{PROGRAM_ID}-2", lambda route: route.fulfill(
-            status=500, content_type="application/json", body='{"error": "internal"}'))
-        bodies = _program_puts(page)
-        send = form.get_by_role("button", name="Add separate windows", exact=True)
-        send.click()
-        expect(programs.get_by_role("status")).to_have_text(
-            f"Created 2 of 3 separate Programs. Not confirmed: {PROGRAM_ID}-2; Central did "
-            "not answer. Add separate windows again to send only these.")
-        # Bead 4: the flow stays on Review with the draft, so it can be sent again.
-        expect(send).to_be_enabled()
-        assert page.evaluate("window.location.hash") == "#/schedule/new/review"
-        # The cards, shown beside the kept draft, list the stored windows only.
-        go(page, "schedule")
-        expect(programs.get_by_label(f"Program {PROGRAM_ID}-1", exact=True)).to_be_visible()
-        expect(programs.get_by_label(f"Program {PROGRAM_ID}-3", exact=True)).to_be_visible()
-        expect(programs.get_by_label(f"Program {PROGRAM_ID}-2", exact=True)).to_have_count(0)
-        programs.get_by_role("button", name="Resume draft (Draft)", exact=True).click()
-        assert page.evaluate("window.location.hash") == "#/schedule/new/review"
-
-        bodies.clear()
-        send.click()
-        expect(programs.get_by_role("status")).to_have_text("Created 3 separate Programs.")
-        assert [body["program_id"] for body in bodies] == [f"{PROGRAM_ID}-2"]
-        for index in (1, 2, 3):
-            expect(programs.get_by_label(f"Program {PROGRAM_ID}-{index}", exact=True)).to_be_visible()
-
-
-def test_an_invalid_window_count_gives_a_reason_and_is_never_reset(page, registry):
-    _seed(registry)
-    queue = _seed_source(registry)
-    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
-        connect(page, origin)
-        author_scene(page, SCENE_ID, SOURCE, (VALID_FRAME,))
-        bodies = _program_puts(page)
-        form = schedule_program(page, PROGRAM_ID, SCENE_ID, *WINDOW, submit=False)
-        # Bead 4: the count is When's (under Advanced); its Continue refuses it.
-        form.get_by_role("button", name="Change Number of windows", exact=True).click()
-        count = _windows(page).get_by_label("Number of windows", exact=True)
-        expect(count).to_be_focused()
-        count.fill("0")
-        expect(count).to_have_accessible_description("Between 1 and 60 windows.")
-        form.get_by_role("button", name="Continue", exact=True).click()
-        expect(count).to_have_value("0")
-        expect(count).to_be_focused()
-        count.fill("61")
-        expect(count).to_have_accessible_description("Between 1 and 60 windows.")
-        assert bodies == []
-
-
 def test_the_source_form_sends_favourites_and_a_capture_window(page, registry):
     _seed(registry)
     connected(library_of(registry))
@@ -1746,7 +1489,6 @@ def _scene_row(page, scene_id):
     """A Scene's card (bead 2: a summary card, no longer a disclosure to open)."""
     return page.get_by_role("region", name="Scenes", exact=True).get_by_label(
         f"Scene {scene_id}", exact=True)
-
 
 
 def test_editing_a_scene_replaces_it_under_its_stored_id_at_the_next_revision(page, registry):

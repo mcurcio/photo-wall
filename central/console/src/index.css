@@ -1048,17 +1048,6 @@ label {
   font-weight: 500;
 }
 
-.program-flow__windows {
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.program-scheduling__multi-note {
-  margin: 0 0 8px;
-  color: var(--color-muted);
-}
-
 .program-scheduling__weekdays {
   display: flex;
   flex-wrap: wrap;
@@ -1069,15 +1058,6 @@ label {
   display: inline-flex;
   gap: 6px;
   align-items: center;
-}
-
-.program-cards__past > summary {
-  font-weight: 500;
-  cursor: pointer;
-}
-
-.program-cards__past > .card-grid {
-  margin-top: 12px;
 }
 
 /* A flow's section (flow design §6, §7; flow/FlowFrame.jsx), the same for every flow:

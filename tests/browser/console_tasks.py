@@ -37,7 +37,7 @@ a Program" on the Schedule page, then Scene → When → Review. `schedule_progr
 
 import re
 from collections.abc import Mapping
-from urllib.parse import quote, unquote
+from urllib.parse import quote
 
 from operator_harness import pause_page_clock, sign_in
 from playwright.sync_api import expect
@@ -308,7 +308,7 @@ def add_source(page, name, *, submit=True):
 def schedule_form(page):
     """The Schedule flow's current step: the form "Schedule a Program" in the Programs region.
     Every step renders it, with the step's fields and its Back and Continue (Review:
-    "Schedule Program", or "Add separate windows" for more than one window)."""
+    "Schedule Program")."""
     return page.get_by_role("region", name="Programs", exact=True).get_by_role(
         "form", name="Schedule a Program", exact=True)
 
@@ -331,51 +331,46 @@ def start_schedule(page):
     return schedule_form(page)
 
 
-def schedule_program(page, program, scene_id, start, end, priority=None, *, windows=None,
-                     submit=True):
-    """Schedule Program `program` of Scene `scene_id` over one window, at `priority`.
+DAY_NAMES = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
 
-    Walks the Schedule flow (flow design §7 J6): Scene → When → Review. `scene_id` None
-    keeps the Scene step's prefill. `start` and `end` are `datetime-local` values in the
-    browser's time zone. `windows` fills "Number of windows" under When's Advanced (the
-    separate-windows helper); None keeps the default, one window. The Program name is
-    typed on Review; `priority` fills "Priority" under Review's Advanced (None keeps the
-    default, 0).
 
-    With `submit`, sends it ("Schedule Program", or "Add separate windows" for more than
-    one window), waits (on success) for that Program's card and returns the first Program
-    PUT response; without it, returns the flow's
-    form on Review, filled and unsent.
+def schedule_program(page, name, scene_id, start, end, priority=None, *, days=None, submit=True):
+    """Schedule Program `name` of Scene `scene_id`: every week on `days` (day names; None keeps
+    every day), from `start` to `end` ("HH:MM" on the house clock), at `priority` (its words:
+    "Normal", "Special event", "Always wins"; None keeps Normal).
+
+    Walks the Schedule flow (flow design §7 J6): Scene → When → Review. `scene_id` None keeps
+    the Scene step's prefill. The Program name is typed on Review; the priority is chosen under
+    Review's Advanced.
+
+    With `submit`, sends it ("Schedule Program": one POST /v1/operator/programs), waits (on
+    success) for that Program's card and returns the POST response; without it, returns the
+    flow's form on Review, filled and unsent.
     """
     form = start_schedule(page)
     if scene_id is not None:
         form.get_by_label("Scene", exact=True).select_option(scene_id)
     schedule_continue(page, "When")
-    form.get_by_label("Window start", exact=True).fill(start)
-    form.get_by_label("Window end", exact=True).fill(end)
-    if windows is not None:
-        form.get_by_role("button", name="Advanced", exact=True).click()
-        form.get_by_label("Number of windows", exact=True).fill(str(windows))
+    if days is not None:
+        for day in DAY_NAMES:
+            form.get_by_label(day, exact=True).set_checked(day in days)
+    form.get_by_label("Starts", exact=True).fill(start)
+    form.get_by_label("Ends", exact=True).fill(end)
     schedule_continue(page, "Review")
-    form.get_by_label("Program name", exact=True).fill(program)
+    form.get_by_label("Program name", exact=True).fill(name)
     if priority is not None:
         form.get_by_role("button", name="Advanced", exact=True).click()
-        form.get_by_label("Priority", exact=True).fill(str(priority))
+        form.get_by_label("Priority", exact=True).select_option(label=priority)
     if not submit:
         return form
-    action = "Schedule Program" if windows in (None, 1) else "Add separate windows"
     with page.expect_response(
-        lambda r: "/v1/operator/programs/" in r.url and r.request.method == "PUT"
+        lambda r: r.url.endswith("/v1/operator/programs") and r.request.method == "POST"
     ) as info:
-        form.get_by_role("button", name=action, exact=True).click()
+        form.get_by_role("button", name="Schedule Program", exact=True).click()
     if info.value.ok:
-        # Listed before anything can use it (the refresh after the save landed): the
-        # answer arrives before the console's refresh read does. The card is visible only
-        # for a window not yet ended: a past Program renders inside the closed "Past (N)"
-        # disclosure (ProgramsRegion.jsx), so this wait suits future windows only.
-        program_id = unquote(info.value.url.rsplit("/", 1)[-1])
+        # Listed before anything can use it (the refresh after the save landed).
         expect(page.get_by_role("region", name="Programs", exact=True).get_by_label(
-            f"Program {program_id}", exact=True)).to_be_visible()
+            f"Program {name}", exact=True)).to_be_visible()
     return info.value
 
 

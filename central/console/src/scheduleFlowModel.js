@@ -1,22 +1,19 @@
 /**
- * The Schedule flow's shape (flow design §7 J6): its steps, which step asks each field
- * (`FIELD_STEP`), its instance and route, its seed, and which of the Program rules
- * applies to a draft. Pure: no React; tests/test_console_schedule_flow.py drives it
- * under Node. The Program rules themselves (window, priority, the separate-windows
- * helper) stay in authoring.js. Edits retain an exact expected Program snapshot and are
- * always one Program, never the multi-window helper.
+ * The Schedule flow's shape (flow design §7 J6; Power and the week, roadmap 2b): its steps,
+ * which step asks each field (`SCHEDULE_FIELD_STEP`), its instance and route, its seed, the
+ * problems a draft has before it is sent, and the body it sends. Pure: no React;
+ * tests/test_console_schedule_flow.py drives it under Node.
  *
- * ONE WRITE, TWO SHAPES. A draft with "Number of windows" 1 (the default) schedules
- * ONE Program under its id; any other number is the separate-windows helper: that many
- * independent single-window Programs `<id>-1` … `<id>-<n>` (never a recurring rule,
- * design R2/Q2), checked by authoring.js `windowProblems` (an invalid number is its
- * reason there, never silently read as 1).
+ * A Program is a Scene, a weekly When on the house clock and a priority (central/runtime.py
+ * `ProgramDraft`): Central works out every window from the When in the house's time zone, so
+ * the console sends clock times ("17:00") and works out no instant. Central names the Program
+ * (`program_id`) at create; an edit sends the whole Program it loaded (`expected`) and the
+ * draft that replaces it, and applies from the next window (the one playing keeps its end).
  *
  * INSTANCES. New drafts open at Scene with the shell's `recentScene`; edits are keyed by
  * Program id and open at Review.
  */
 
-import { programProblems, toEpochSeconds, windowProblems } from "./authoring.js";
 import { editedId, flowKeys } from "./flow/instance.js";
 
 /** @typedef {import("./flow/steps.js").Step} Step */
@@ -28,25 +25,18 @@ const REVIEW = Object.freeze({ id: "review", label: "Review" });
 /** @type {ReadonlyArray<Step>} */
 export const SCHEDULE_STEPS = Object.freeze([SCENE, WHEN, REVIEW]);
 
-/**
- * Which step asks each field of the Program problems (flow design §6). The name and
- * its id are asked on Review: the id derives from the name, and whether it (or, for
- * separate windows, each `<id>-<n>`) is free depends on the number of windows When
- * decided.
- */
+/** Which step asks each field (flow design §6). */
 export const SCHEDULE_FIELD_STEP = Object.freeze({
   scene: SCENE.id,
+  days: WHEN.id,
   start: WHEN.id,
   end: WHEN.id,
-  weekdays: WHEN.id,
-  count: WHEN.id,
   priority: REVIEW.id,
   name: REVIEW.id,
-  id: REVIEW.id,
 });
 
 /** The fields that sit under their step's Advanced (they have a stated default). */
-export const SCHEDULE_ADVANCED_FIELDS = Object.freeze(new Set(["weekdays", "count", "priority", "id"]));
+export const SCHEDULE_ADVANCED_FIELDS = Object.freeze(new Set(["priority"]));
 
 /** The Schedule flow's instance and its routes (flow/instance.js `flowKeys`). */
 export const SCHEDULE_KEYS = flowKeys({
@@ -55,36 +45,43 @@ export const SCHEDULE_KEYS = flowKeys({
   describe: { create: "a new Program", edit: (id) => `Program ${id}` },
 });
 
-/** Every weekday ticked, indexed like `Date.getDay()` (0 = Sunday). */
+/** The days of a When, Monday first, as Central names them (central/house_time/model.py). */
+export const DAY_KEYS = Object.freeze(["mon", "tue", "wed", "thu", "fri", "sat", "sun"]);
+
+/** Every day ticked, Monday first. */
 export const EVERY_DAY = Object.freeze([true, true, true, true, true, true, true]);
 
+/** The priorities, weakest first, with their words (#78; "normal" is the default). */
+export const PRIORITIES = Object.freeze([
+  ["normal", "Normal"],
+  ["special-event", "Special event"],
+  ["always-wins", "Always wins"],
+]);
+
 /**
- * A new Program draft: no Scene, no window, one window, every weekday, priority 0
- * (the stated defaults, flow design §7 J6), no name.
+ * A new Program draft: no Scene, every day, no times, Normal priority, no name.
  *
- * @typedef {{sceneId: string, start: string, end: string, count: string|number,
- *            weekdays: ReadonlyArray<boolean>, priority: string|number,
- *            name: string, idOverride: string|null, expected?: object}} ProgramDraft
+ * @typedef {{sceneId: string, days: ReadonlyArray<boolean>, start: string, end: string,
+ *            priority: string, name: string, expected?: object}} ProgramDraft
  */
 export const NEW_PROGRAM_DRAFT = Object.freeze({
   sceneId: "",
+  days: EVERY_DAY,
   start: "",
   end: "",
-  count: 1,
-  weekdays: EVERY_DAY,
-  priority: 0,
+  priority: "normal",
   name: "",
-  idOverride: null,
 });
 
 /**
  * The Schedule flow's seed: a new Program draft, its Scene prefilled with the Scene the
  * operator last saved or picked (the shell's `recentScene`) while it is still stored, as
- * showNowModel.js `seedShowNow` does.
+ * showNowModel.js `seedShowNow` does; an edit key seeds from the stored Program.
  *
  * @param {string|null} recentSceneId
  * @param {Record<string, object>} definitions the stored Scenes
- * @returns {(key: string) => ProgramDraft}
+ * @param {Record<string, object>} [programs] the stored Programs by id
+ * @returns {(key: string) => ProgramDraft|null}
  */
 export function seedSchedule(recentSceneId, definitions, programs = {}) {
   const stored = recentSceneId !== null && definitions[recentSceneId] !== undefined;
@@ -97,100 +94,67 @@ export function seedSchedule(recentSceneId, definitions, programs = {}) {
   };
 }
 
-/** Editable local-time view of a stored Program, retaining its exact optimistic baseline. */
+/**
+ * The editable draft of a stored Program, keeping the whole Program as `expected` (the save's
+ * precondition). Null for a When this editor cannot show (a sunrise or sunset time).
+ */
 export function programEditDraft(program) {
-  const local = (seconds) => {
-    const milliseconds = Math.round(seconds * 1000);
-    if (milliseconds / 1000 !== seconds) return null;
-    const date = new Date(milliseconds);
-    if (!Number.isFinite(date.getTime())) return null;
-    const pad = (part) => String(part).padStart(2, "0");
-    const minute = `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
-    const secondsPart = `${pad(date.getSeconds())}${date.getMilliseconds() === 0 ? "" : `.${String(date.getMilliseconds()).padStart(3, "0")}`}`;
-    const value = date.getSeconds() === 0 && date.getMilliseconds() === 0 ? minute : `${minute}:${secondsPart}`;
-    return value;
-  };
-  const start = local(program.starts_at);
-  const end = local(program.ends_at);
-  if (start === null || end === null) return null;
+  const { when } = program;
+  if (when?.start?.at !== "clock" || when?.end?.at !== "clock") return null;
   return {
-    ...NEW_PROGRAM_DRAFT,
     sceneId: program.scene_id,
-    start,
-    end,
+    days: DAY_KEYS.map((day) => when.days.includes(day)),
+    start: when.start.time,
+    end: when.end.time,
     priority: program.priority,
-    name: program.program_id,
-    idOverride: program.program_id,
-    expected: { ...program },
+    name: program.name,
+    expected: program,
   };
 }
 
-/** Resolve the exact instants an edit will save. Untouched local fields retain their
- * original instant, including the later side of a repeated daylight-saving hour.
- * Changed fields follow the browser's normal local datetime interpretation. */
-export function effectiveProgramTimes(draft) {
-  const expected = draft.expected;
-  const unchangedStart = expected !== undefined && draft.start === programEditDraft(expected)?.start;
-  const unchangedEnd = expected !== undefined && draft.end === programEditDraft(expected)?.end;
-  return {
-    startsAt: unchangedStart ? expected.starts_at : toEpochSeconds(draft.start),
-    endsAt: unchangedEnd ? expected.ends_at : toEpochSeconds(draft.end),
-    retainedStart: unchangedStart && toEpochSeconds(draft.start) !== expected.starts_at,
-    retainedEnd: unchangedEnd && toEpochSeconds(draft.end) !== expected.ends_at,
-  };
-}
+const CLOCK = /^([01][0-9]|2[0-3]):[0-5][0-9]$/;
 
 /**
- * Whether the draft is the separate-windows helper: any "Number of windows" but 1.
+ * A draft's problems before it is sent: each field the operator must fill. Central checks the
+ * rest and answers a code (`REFUSAL_FIELDS` routes it to its field).
  *
  * @param {ProgramDraft} draft
- * @returns {boolean}
+ * @returns {{field: string, message: string}[]}
  */
-export function separateWindows(draft) {
-  return String(draft.count).trim() !== "1";
-}
-
-/**
- * The problems of the write this draft makes: one Program's (authoring.js
- * `programProblems`), or the separate-windows helper's (`windowProblems`). `pendingIds`
- * are the ids of this very draft's earlier attempt that Central did not confirm, or only
- * partly (flow/useFlowWrite.js NOT CONFIRMED): sending it again confirms them, so its own
- * Programs never read as collisions.
- *
- * @param {ProgramDraft} draft
- * @param {Set<string>} programIds the stored Program ids
- * @param {number} now Central's clock (`current.now`)
- * @param {ReadonlyArray<string>} [pendingIds]
- * @returns {import("./authoring.js").Problem[]}
- */
-export function programDraftProblems(draft, programIds, now, pendingIds = [], editing = false) {
-  const pending = new Set(pendingIds);
-  const taken = new Set([...programIds].filter((id) => id !== draft.expected?.program_id && !pending.has(id)));
-  const times = effectiveProgramTimes(draft);
-  const problems = separateWindows(draft) ? windowProblems(draft, taken, now) :
-    programProblems(draft, taken, now, editing ? times : null);
-  if (editing && Number.isFinite(times.startsAt) && times.startsAt <= now) {
-    problems.push({ field: "start", message: "A replacement Program must start in the future." });
-  }
+export function programDraftProblems(draft) {
+  const problems = [];
+  if (draft.sceneId === "") problems.push({ field: "scene", message: "Choose a Scene." });
+  if (!draft.days.some(Boolean)) problems.push({ field: "days", message: "Tick at least one day." });
+  if (!CLOCK.test(draft.start)) problems.push({ field: "start", message: "Enter when it starts." });
+  if (!CLOCK.test(draft.end)) problems.push({ field: "end", message: "Enter when it ends." });
+  if (draft.name.trim() === "") problems.push({ field: "name", message: "Enter a name." });
+  else if (draft.name.trim().length > 80) problems.push({ field: "name", message: "At most 80 characters." });
   return problems;
 }
 
+/** Central's refusal codes (central/runtime.py `ProgramRefused`) by the field they concern. */
+export const REFUSAL_FIELDS = Object.freeze({
+  "no-days": { field: "days", message: "Tick at least one day." },
+  "unknown-scene": { field: "scene", message: "That Scene no longer exists; choose another." },
+  "needs-place": { field: "start", message: "Sunrise and sunset need the house's location." },
+});
+
 /**
- * The body of a single-window Program write: exactly the stored `Program` shape
- * (central/runtime.py:114-125) — a Scene bound to ONE `[starts_at, ends_at)`
- * window with a priority. There is deliberately no recurrence field: central
- * stores single windows only (design Q2), so N-window scheduling is N of THESE,
- * never one recurring rule.
+ * The body Central stores (central/runtime.py `ProgramDraft`): a name, a Scene, a weekly When
+ * of clock times on the house clock, and a priority.
  *
- * @param {{programId: string, sceneId: string, startsAt: number, endsAt: number, priority: number}} draft
- * @returns {{program_id: string, scene_id: string, starts_at: number, ends_at: number, priority: number}}
+ * @param {ProgramDraft} draft
+ * @returns {{name: string, scene_id: string, when: object, priority: string}}
  */
-export function buildProgram({ programId, sceneId, startsAt, endsAt, priority }) {
+export function buildProgram(draft) {
   return {
-    program_id: programId,
-    scene_id: sceneId,
-    starts_at: startsAt,
-    ends_at: endsAt,
-    priority,
+    name: draft.name.trim(),
+    scene_id: draft.sceneId,
+    when: {
+      days: DAY_KEYS.filter((_day, index) => draft.days[index]),
+      start: { at: "clock", time: draft.start },
+      end: { at: "clock", time: draft.end },
+    },
+    priority: draft.priority,
   };
 }

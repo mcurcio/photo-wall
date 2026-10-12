@@ -49,7 +49,8 @@ export function SceneList({ snapshot, editDisabled = false, onEdit, onShowNow, o
     const parents = scenes.filter((candidate) => candidate.scene_id !== id && containsScene(candidate));
     const editingThisDirty = editingId === id && editingDirty;
     const dependentNames = [
-      ...programsForScene.map((item) => `Program ${item.program_id}`),
+      ...programsForScene.map((item) => `Program ${item.name}`),
+      ...(runtime?.default_scene?.scene_id === id ? ["the Default Scene"] : []),
       ...runsForScene.map((item) => `active Run ${item.run_id}`),
       ...parents.map((item) => `stored Scene ${item.scene_id}`),
     ];
@@ -70,7 +71,8 @@ export function SceneList({ snapshot, editDisabled = false, onEdit, onShowNow, o
         if (result.error === "scene_in_use") {
           const ids = result.data ?? {};
           const names = [
-            ...(ids.program_ids ?? []).map((value) => `Program ${value}`),
+            ...(ids.program_ids ?? []).map((value) => `Program ${runtime?.programs?.[value]?.name ?? value}`),
+            ...(ids.default_scene ? ["the Default Scene"] : []),
             ...(ids.run_ids ?? []).map((value) => `Run ${value}`),
             ...(ids.queued_activation_ids ?? []).map((value) => `queued activation ${value}`),
             ...(ids.scene_ids ?? []).map((value) => `stored Scene ${value}`),
@@ -143,7 +145,7 @@ function SceneCard({ scene, snapshot, usedBy, running, editDisabled, onEdit, onS
           label: "Used by",
           value:
             usedBy.length > 0
-              ? `Programs ${usedBy.map((program) => program.program_id).join(", ")}`
+              ? `Programs ${usedBy.map((program) => program.name).join(", ")}`
               : "no Program",
         },
       ]}

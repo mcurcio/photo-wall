@@ -4,7 +4,7 @@ import { isBound, plannedFor, rankedContributions } from "../join.js";
 import { EmptyState } from "../patterns/entity-page";
 import { OwnerLinks } from "../patterns/link-to-owner";
 import { formatRoute, sceneCreationRoute } from "../routes.js";
-import { windowLabel } from "../timeWords.js";
+import { windowWords } from "../timeWords.js";
 import { Section } from "../ui/section";
 import { Stack } from "../ui/stack";
 import { FitBoardFor, type FitQuestion } from "./photo-fit-board";
@@ -13,15 +13,17 @@ import { type FrameDraft, type JudgedAt, type SceneUse, scenesOnFrame } from "./
 interface Served {
   runtime?: {
     current?: { now?: number };
-    programs?: Record<string, { program_id: string; scene_id: string; starts_at: number; ends_at: number }>;
+    programs?: Record<string, { program_id: string; scene_id: string }>;
+    program_windows?: Record<string, { next: { start_at: number; start: string; end: string } | null }>;
   } | null;
   inventory?: { frames?: { id: string; player_id?: string | null; output_id?: string | null }[] };
 }
 
 /**
  * How a Scene relates to now on this Frame, in words: "Playing now", "Waiting underneath what
- * plays now", "Scheduled Tue 2 Mar 17:00–23:00 BST" (its next window), or "Not scheduled". Read
- * from Central's Runtime (its own clock: the windows are compared with `current.now`).
+ * plays now", "Scheduled Mon 12 Oct 17:00–23:00" (the soonest next window of a Program playing it,
+ * on the house clock), or "Not scheduled". Read from Central's Runtime: Central works out every
+ * window; the console compares no times.
  */
 export function relationWords(snapshot: object | null, frameId: string, sceneId: string): string {
   const served = snapshot as Served | null;
@@ -31,11 +33,12 @@ export function relationWords(snapshot: object | null, frameId: string, sceneId:
   if ((rankedContributions(runtime as object, frameId) as { scene_id: string }[]).some((entry) => entry.scene_id === sceneId)) {
     return "Waiting underneath what plays now";
   }
-  const now = runtime?.current?.now ?? null;
   const next = Object.values(runtime?.programs ?? {})
-    .filter((program) => program.scene_id === sceneId && (now === null || program.ends_at > now))
-    .sort((a, b) => a.starts_at - b.starts_at)[0];
-  return next === undefined ? "Not scheduled" : `Scheduled ${windowLabel(next)}`;
+    .filter((program) => program.scene_id === sceneId)
+    .map((program) => runtime?.program_windows?.[program.program_id]?.next ?? null)
+    .filter((window) => window !== null)
+    .sort((a, b) => a!.start_at - b!.start_at)[0];
+  return next === undefined || next === null ? "Not scheduled" : `Scheduled ${windowWords(next)}`;
 }
 
 function SceneRow({ snapshot, frameId, scene }: { snapshot: object | null; frameId: string; scene: SceneUse }) {

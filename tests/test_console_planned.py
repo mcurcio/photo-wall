@@ -120,11 +120,17 @@ out.time = {
   clock: time.clockTime(winter),
   seconds: time.clockTime(winter + 5),
   factsClock: facts.clock(winter),
-  window: time.windowLabel({ starts_at: winter, ends_at: winter + 7200 }),
-  acrossDays: time.windowLabel({ starts_at: winter, ends_at: winter + 8 * 3600 }),
+  // A Program's window on the house clock, as Central serves it: never the browser's zone.
+  window: time.windowWords({ start: "2026-10-12T17:00", end: "2026-10-12T23:00" }),
+  acrossDays: time.windowWords({ start: "2026-10-12T22:00", end: "2026-10-13T02:00" }),
+  weekdays: time.whenWords({ days: ["mon", "tue", "wed", "thu", "fri"],
+                             start: { at: "clock", time: "17:00" }, end: { at: "clock", time: "23:00" } }),
+  crossing: time.whenWords({ days: ["mon", "wed", "fri", "sat", "sun"],
+                             start: { at: "clock", time: "22:00" }, end: { at: "clock", time: "02:00" } }),
+  sunset: time.whenWords({ days: ["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+                           start: { at: "sunset", offset_minutes: -30 }, end: { at: "clock", time: "23:00" } }),
   zone: time.zoneName(),
   note: time.zoneNote(),
-  occurrence: time.occurrenceTime(winter),
 };
 
 console.log(JSON.stringify(out));
@@ -198,11 +204,13 @@ def test_the_planned_fact_origins_and_zoned_times():
     assert time["clock"] == "18:00 PST"
     assert time["seconds"] == "18:00:05 PST"
     assert time["factsClock"] == "18:00 PST"
-    assert time["window"] == "Mon, Jan 11 18:00–20:00 PST"
-    assert time["acrossDays"] == "Mon, Jan 11 18:00 PST – Tue, Jan 12 02:00 PST"
+    assert time["window"] == "Mon 12 Oct 17:00–23:00"
+    assert time["acrossDays"] == "Mon 12 Oct 22:00 – Tue 13 Oct 02:00"
+    assert time["weekdays"] == "Mon–Fri, 17:00–23:00"
+    assert time["crossing"] == "Mon, Wed, Fri–Sun, 22:00–02:00 (ends next day)"
+    assert time["sunset"] == "Every day, sunset −30 min–23:00"
     assert time["zone"] == "America/Los_Angeles"
     assert time["note"] == "Times in America/Los_Angeles (this browser's time zone)"
-    assert time["occurrence"] == "6:00 PM PST (GMT-08:00)"
 
 
 DISPLAY_FORMATTERS = re.compile(r"toLocaleTimeString|toLocaleString|toLocaleDateString|Intl\.DateTimeFormat")

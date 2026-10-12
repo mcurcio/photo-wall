@@ -412,9 +412,11 @@ export function deleteFrameRequest(snapshot, frameId) {
         )}
         {programs.length > 0 && (
           <>
-            <p>Upcoming Programs using those Scenes also need review:</p>
+            <p>Programs playing those Scenes also need review:</p>
             <ul className="confirm__runs">
-              {programs.map((programId) => <li key={programId}>{programId}</li>)}
+              {programs.map((programId) => (
+                <li key={programId}>{snapshot?.runtime?.programs?.[programId]?.name ?? programId}</li>
+              ))}
             </ul>
           </>
         )}

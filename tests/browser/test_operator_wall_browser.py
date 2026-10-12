@@ -24,10 +24,11 @@ from operator_harness import (
     tile_health,
 )
 from playwright.sync_api import expect
+from support.house_time import window_program
 from test_registry import enroll
 
 from central.registry import FrameCreate
-from central.runtime import Child, Contribution, Program, Scene
+from central.runtime import Child, Contribution, Scene
 from central.runtime_store import RuntimeStore
 from contracts.models import FrameProfile
 
@@ -631,7 +632,7 @@ def test_delete_clear_frame_removes_it_from_the_plan(page, registry):
         expect(plan.get_by_role("status")).to_have_text(f"Frame {CLEAR} deleted.")
 
 
-def test_delete_frame_lists_stored_scene_roots_and_upcoming_programs(page, registry):
+def test_delete_frame_lists_stored_scene_roots_and_the_programs_playing_them(page, registry):
     registry.create_frame(FrameCreate(
         id=CLEAR, surface_id="wall", x_mm=100, y_mm=100,
         width_mm=300, height_mm=500, profile=PORTRAIT))
@@ -639,10 +640,7 @@ def test_delete_frame_lists_stored_scene_roots_and_upcoming_programs(page, regis
     store.command("set_scene", Scene(scene_id="nested-gallery", children=(Child(scene=Scene(
         scene_id="inline", contributions=(Contribution(
             target="frame:" + CLEAR, kind="black"),))),)))
-    now = registry.clock.utc()
-    store.command("set_program", Program(
-        program_id="morning-show", scene_id="nested-gallery",
-        starts_at=now + 60, ends_at=now + 120))
+    store.command_current("create_program", window_program("morning-show", "nested-gallery", 1080, 1140))
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall")
         edit_layout(page)
@@ -651,7 +649,7 @@ def test_delete_frame_lists_stored_scene_roots_and_upcoming_programs(page, regis
         dialog = page.get_by_role("dialog")
         expect(dialog).to_contain_text("Saved Scenes targeting this Frame must be edited or removed")
         expect(dialog.get_by_text("nested-gallery", exact=True)).to_be_visible()
-        expect(dialog).to_contain_text("Upcoming Programs using those Scenes")
+        expect(dialog).to_contain_text("Programs playing those Scenes")
         expect(dialog.get_by_text("morning-show", exact=True)).to_be_visible()
         expect(dialog).to_contain_text("Central checks references again when you confirm")
         _confirm_delete(page)

@@ -31,11 +31,12 @@ def clock_time(seconds: float) -> str:
     return f"{minutes // 60:02d}:{minutes % 60:02d}"
 
 
-def window_program(program_id: str, scene_id: str, start: float, end: float, *, priority: str = "normal"):
+def window_program(program_id: str, scene_id: str, start: float, end: float, *, priority: str = "normal",
+                   name: str | None = None):
     """A Program "every day, from `start` to `end`" on the UTC house (both on a minute): its first
-    window is [start, end) for a test clock near the epoch."""
+    window is [start, end) for a test clock near the epoch. Its name is its id unless given."""
     from central.runtime import Program
-    return Program(program_id=program_id, name=program_id, scene_id=scene_id,
+    return Program(program_id=program_id, name=program_id if name is None else name, scene_id=scene_id,
                    when=daily(clock_time(start), clock_time(end)), priority=priority)
 
 
