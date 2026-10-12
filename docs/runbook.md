@@ -1010,13 +1010,13 @@ Roadmap 1b: each Pi reports the display on each HDMI port, Central recognises it
 
 | What | Writer | Reader | Kept in Central |
 |---|---|---|---|
-| Output report (connected, EDID identity and modes, methods that answered, request in force, last result) | the Pi's display controller | the worker's report judge | `node_link_records` (every report), `displays`, `shared_serials`, `output_displays` (the Display last seen per port) |
+| Output report (connected, EDID identity and modes, methods that answered, what is in force, last result) | the Pi's display controller | the worker's report judge | `node_link_records` (every report), `displays`, `shared_serials`, `output_displays` (the Display last seen per port) |
 | Power attempt (`display.record.power`) | the Pi's display controller | recorded only | `node_link_records` |
-| Output document (power request stack, method, switches) | the worker, from Displays, bindings and `power_requests` | the Pi's display controller | `output_documents` (the latest per port) |
+| Output document (the power timetable with the test on top, method, switches) | the worker, from Displays, bindings, Night off, holds and `power_requests` (the test) | the Pi's display controller | `output_documents` (the latest per port) |
 
 **Readiness.** Nothing stores whether a Frame is ready: `frames.position_generation` and `frames.position_display_id` record each Position commit, and readiness is worked out when read (`unbound`, `display-changed`, `position-needed`, `ready`; `central/displays/model.py`). Migration 073 dropped `frames.calibration_valid`, marking every Frame that was ready as committed at its current generation; at the first report each Frame adopts the display on its port. **Rolling Central back past 073 is not supported:** the previous build reads `calibration_valid`, which no longer exists, and no reverse SQL is kept.
 
-**A console test, end to end.** **Test: turn off** posts `POST /v1/operator/frames/{id}/power-tests` (no body); Central keeps one live test per Frame in `power_requests` for 5 minutes on its own clock and sends `pg_notify('photo_wall_output_documents', <device id>)` in the same transaction. The worker's one LISTEN connection (`DisplayWakes.listen`, reconnecting after a second, waking every Node at each connect) wakes that Pi's links, which put the new document; the Pi acts and reports, and `GET /v1/operator/frames/{id}/power` reads "Waiting for the Pi" until the report names the change that carried the test. **Turn on** is `DELETE` on the same path (204): it deletes the live test, so the request underneath (standing on) takes over, and the tab waits until the Pi reports that request in force on the change that dropped the test. Settings are `PUT /v1/operator/displays/{display_id}/power-settings`; the Hardware tab reads `GET /v1/operator/frames/{id}/display`. All are operator routes behind the admin token.
+**A console test, end to end.** **Test: turn off** posts `POST /v1/operator/frames/{id}/power-tests` (no body); Central keeps one live test per Frame in `power_requests` for 5 minutes on its own clock and sends `pg_notify('photo_wall_output_documents', <device id>)` in the same transaction. The worker's one LISTEN connection (`DisplayWakes.listen`, reconnecting after a second, waking every Node at each connect) wakes that Pi's links, which put the new document; the Pi acts and reports, and `GET /v1/operator/frames/{id}/power` reads "Waiting for the Pi" until the report names the change that carried the test. **Turn on** is `DELETE` on the same path (204): it deletes the live test, so the power timetable underneath takes over, and the tab waits until the Pi reports the timetable in force on the change that dropped the test. Settings are `PUT /v1/operator/displays/{display_id}/power-settings`; the Hardware tab reads `GET /v1/operator/frames/{id}/display`. All are operator routes behind the admin token.
 
 | What you see | What it means | What to do |
 |---|---|---|
@@ -1029,4 +1029,29 @@ Roadmap 1b: each Pi reports the display on each HDMI port, Central recognises it
 
 **On the Pi.** The display controller (`photo-wall-display-controller.service`) runs the display session and the power methods. Read it with `sudo journalctl -b --no-pager -u photo-wall-display-controller.service` ([Reaching a Node over SSH](#reaching-a-node-over-ssh)). Its device access: `DevicePolicy=closed` with `DeviceAllow=char-cec rw` and `DeviceAllow=char-i2c rw`, the `video` group for `/dev/cecN` and the `i2c` group for `/dev/i2c-N` (declared by `debian/photo-wall-node.sysusers`; [gap G15](player-architecture.md#observed-gaps)). `id pw-display` does not list them: the groups are the unit's own, so check the running process with `grep Groups /proc/$(systemctl show -p MainPID --value photo-wall-display-controller.service)/status`. The base loads `i2c-dev` at boot (`/etc/modules-load.d/photo-wall-ddc.conf`); `ls /dev/i2c-*` shows `/dev/i2c-13` and `/dev/i2c-14` on a Pi 5 when it did.
 
-**Not built:** setting the HDMI mode, the power schedule, All off, holds and the smart plug ([roadmap 1b](roadmap.md#1b-display-identity-and-power)). The bench check (Test off and on against the test Pi's monitor) waits for a deployed release.
+**Not built:** setting the HDMI mode and the smart plug ([roadmap 1b](roadmap.md#1b-display-identity-and-power)); Night off, All off and holds came with 2a ([below](#night-off-and-the-week)). The bench check (Test off and on against the test Pi's monitor) waits for a deployed release.
+
+## Night off and the week
+
+Roadmap 2a and 2b ([#86](https://github.com/mcurcio/photo-wall/pull/86), [0021](decisions/0021-power-timetable-and-repeating-schedules.md)): Central works out each HDMI port's next 7 days of off and on set times from Night off and holds and writes them in the port's Output document; the Pi switches at those times on its own clock. Schedules repeat by the week, and a Default Scene plays where none does. The console's side is the [operator console design §7](operator-console-design.md#7-power); the Pi's is the [Player architecture](player-architecture.md#display-identity-and-power-1b).
+
+**Set the house first.** Settings › House (`#/house`, `GET|PUT /v1/operator/house`) holds the timezone and the optional location. At Central's start the house is seeded once with Central's own server zone (`central/infra/house_store.py` `seed_house`); correct it there. Every time of day (Schedule windows, Night off, the week page, On this day, a Photo source's "last 3 years") is worked out in that zone; sunrise and sunset need the location and cannot be chosen until it is set. Saving a new zone or location moves the Schedules' windows and Night off's set times.
+
+**Read a Pi's power timetable.** In Central's database, the latest document per port is `output_documents` (`document->'power'`: `now`, `changes` with each `at` and `power`, `until`, `darkness`, `test`), and the Pi's latest report is `output_displays.report` (`in_force`: `test`, `timetable` with its `power` and `since`, or `timetable-ran-out`):
+
+```sql
+SELECT o.player_id, o.output_id, o.change, o.document->'power' AS power, d.report->'in_force' AS in_force
+FROM output_documents o LEFT JOIN output_displays d USING (player_id, output_id);
+```
+
+On the Pi, the controller's journal (above) logs each attempt; each is also a `display.record.power` event in `node_link_records`. Why is this playing on the Frame page reads the same: what Central wants, why, until when, and what the Pi says.
+
+**With Central away** the Pi keeps switching at the set times for up to 7 days (the timetable's `until`), then leaves its displays as they are and reports `timetable-ran-out`. A Pi that boots without Central has no document and no Night off, as before. A Pi whose clock is wrong switches at the wrong time: check its clock first when a display switches at an odd hour.
+
+**Deploying 2a and 2b.**
+
+- Central and every Pi run the display line's schema 3 together. A Pi still on an older release refuses the new document and leaves its display as it is, reported, until it reboots onto the release (Central deploys through an iac pull request the owner merges; a Pi takes a new release at its next reboot).
+- Today's Programs end at deploy (migration 088): they were timed in the browser's zone, which Central never recorded. Until a Default Scene is chosen and the routine remade, Frames keep their last photo. After deploy: choose a Default Scene on the week page, then remake each Schedule.
+- Night off is seeded on: 23:00 to 07:00, every day, every Frame there was at deploy, displays off. Check it on the week page's Power lane right after deploy.
+
+**Bench step (2a).** On the test Pi, with a release carrying #86 on it: set Night off's off time two minutes ahead and its on time two minutes after that; confirm the monitor goes off within a minute of the off time and on within a minute of the on time, and read the report's `in_force` at each. NOT RUN until such a release is on the Pi.

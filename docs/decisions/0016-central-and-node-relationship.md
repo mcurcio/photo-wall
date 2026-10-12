@@ -55,3 +55,5 @@ These come from the same day's channel-model gate ([briefing](https://claude.ai/
 
 - A first-principles redesign of the Node and Central relationship, measured against this declaration and the inventory. It reopens [0015](0015-player-base-layer-and-health-overlay.md) wherever 0015 assumes Central is in charge.
 - M1 of the Player health build ([PR 46](https://github.com/mcurcio/photo-wall/pull/46)) stays paused before B12 until that redesign says what M1 should finish with.
+
+2026-10-12: what crosses the wire to a Node for display power (durations and calendar set times; never a clock reading) is recorded in [0021](0021-power-timetable-and-repeating-schedules.md), under rule 5 above.

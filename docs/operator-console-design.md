@@ -130,11 +130,17 @@ Asked whether power should be its own concept or part of Scenes, the owner answe
 **Who can turn displays on and off:**
 
 1. The **power schedule** in the Schedule page's Power lane: on and off times (clock or sunrise/sunset ± minutes), days, which Frames (the editor pre-selects every current Frame explicitly; a new Frame joins only if the user chose the "All Frames" group), and Night off (default off 23:00 to 07:00, every day, powering displays off where they support it and showing black otherwise).
-2. A **Scene** that asks for its displays on, off, or "leave as scheduled" (the default). Its request lasts while the Scene plays. A "Good night" Scene is optional. **This is a deliberate exception that needs the owner's confirmation:** it stores an operational setting (display power) inside authored content, which the requirements keep apart ([operations](requirements.md#operations-and-scope)). It is offered only because he said "Or both"; without his confirmation, Scenes do not carry it.
+2. A **Scene** that asks for its displays on, off, or "leave as scheduled". **Not now** (owner, 2026-10-12: "Not now", [system gate](https://claude.ai/artifact/HHNRy2Hs1CpEm5VVK58DWm)): it would store an operational setting (display power) inside authored content, which the requirements keep apart ([operations](requirements.md#operations-and-scope)). Night off, holds and a dark Scene cover Good night; the power timetable can take Scene requests later.
 3. The console's **All off/on**, a hold.
 4. **Home Assistant**, through its switches or the request topic.
 
-**Built in 1b: the request stack and Test.** Central writes, per HDMI port, the stack of power requests it wants (the Output document; [Player architecture](player-architecture.md#display-identity-and-power-1b)), and the Pi carries out the first that has not ended, reporting what it did. 1b's stack has two requests: **standing on** at the bottom, and a **test** from the Power tab on top. A test (Test: turn off) lasts 5 minutes, or less if **Turn on** is pressed; when it ends the request underneath takes over. Turn on ends the test and puts nothing on top, so it is offered only while a test is live; with no test the request underneath is already in force, and the Pi leaves a display someone turned off by hand alone. The Pi counts the time itself, so a test ends even when Central is away. Owner, 2026-10-10 (q1 on the [1b gate page](https://claude.ai/artifact/DjZTF9HGKWLVy6kexikeUp)), chose this. The result says what the display or the Pi confirmed and never claims what is on the screen: "Display confirmed off" or "on" (the display read back the state), "Picture stopped; the display may sleep" (signal off), "Display didn't answer", "Left on: the display is showing another input" (#118), and, while Central cannot reach the Pi, when it last heard from it. The power schedule, Scenes' requests, All off/on, Home Assistant and the hold rule below are not built; each adds a request to the same stack (2a, 3).
+**Built in 2a: the power timetable** ([#86](https://github.com/mcurcio/photo-wall/pull/86), [0021](decisions/0021-power-timetable-and-repeating-schedules.md)). Central decides whether each display should be on; the Pi switches at the set times on its own clock and reports what it did. Per HDMI port Central writes the **power timetable** in the Output document ([Player architecture](player-architecture.md#display-identity-and-power-1b)): the power wanted now, the next 7 days of off and on set times, and how a display is dark (displays off, or black). It is worked out from three layers:
+
+- **Night off** underneath (default 23:00 to 07:00, every day, every current Frame chosen one by one, displays off); a Frame that does not follow it is on.
+- **The newest hold on top** (All off, All on), until the next scheduled change (Night off's next on or off time, the same moment for every Frame, a Frame outside Night off included) or until resumed, as #90 says. **Resume schedule** ends it at once.
+- **1b's test on top of both**: Test: turn off lasts 5 minutes, or less if **Turn on** is pressed, counted on the Pi, so a test ends even when Central is away (owner, 2026-10-10, q1 on the [1b gate page](https://claude.ai/artifact/DjZTF9HGKWLVy6kexikeUp)).
+
+With Central away the Pi keeps following the set times for up to 7 days (owner, 2026-10-12: "Yes, send 7 days of set times", [overview gate](https://claude.ai/artifact/8DXMFAosB3HKY7m35fmHno)), then leaves its displays as they are. A daily rewrite that wants the same as the Pi is doing writes nothing, so it never fights a person with the remote. The result says what the display or the Pi confirmed and never claims what is on the screen: "Display confirmed off" or "on" (the display read back the state), "Picture stopped; the display may sleep" (signal off), "Display didn't answer", "Left on: the display is showing another input" (#118), and, while Central cannot reach the Pi, when it last heard from it. With "Show black" (#83), or when no power method can switch the display, the Pi shows an opaque black from Display Host instead. The Frame page's Power tab and Why is this playing read one power line ("Resting: Night off until 07:00", "Held off by the console until 23:00"); a display that did not answer is a power problem, never Resting. Home Assistant (3) adds a hold source to the same timetable.
 
 ### The hold rule
 
@@ -143,8 +149,8 @@ How long each power request lasts. This is the one statement of the rule; other 
 | Request | Lasts until |
 |---|---|
 | The power schedule | Always in force underneath; it is what the others return to |
-| A Scene's request (if confirmed, above) | The Scene stops playing |
-| Console **All off** / **All on** | The next scheduled power change (the default; see the guard below) |
+| A Scene's request | Not now (owner, 2026-10-12, above) |
+| Console **All off** / **All on** | The next scheduled power change (the default; see the guard below); built in 2a |
 | A Home Assistant **power switch** (per Frame, or All on/off) | The same as the console: the next scheduled power change by default |
 | Home Assistant **Keep all off** (away mode) | The switch is turned off. Shown as "Off — by Home Assistant (Away mode)". |
 | A message on the request topic | Its `until` time ("Off — by Home Assistant (film night) until 23:30"); a message with no `until` is a hold like a power switch |
@@ -155,8 +161,8 @@ How long each power request lasts. This is the one statement of the rule; other 
 |---|---|---|
 | Home Assistant may turn displays on during Night off | No | A motion sensor at 2 am shouldn't light up the room. A person can still press All on in the console. |
 | Home Assistant may turn displays off | Yes, any time | Turning off is always safe (away mode, a film starting) |
-| Scenes may turn displays on during Night off | No | Night off means dark unless a person decides otherwise |
-| A hold (console All off/on, or a Home Assistant power switch) lasts until | The next scheduled power change (other choices: a set time, or until resumed) | Like a thermostat hold: nothing stays off forever by accident |
+| Scenes may turn displays on during Night off | Not now (goes with Scene requests, owner 2026-10-12) | Night off means dark unless a person decides otherwise |
+| A hold (console All off/on, or a Home Assistant power switch) lasts until | The next scheduled power change (built in 2a with the other choice, until resumed; "a set time" is not built) | Like a thermostat hold: nothing stays off forever by accident |
 
 One more power setting lives on each display, not here: **Never power off a display showing another input** (default on, Frame page › Power), because someone is watching TV on it.
 
@@ -220,10 +226,10 @@ Every setting a power user expects, with exactly one home: 136 settings (numbere
 | # | Setting | Lives on | Default | P |
 |---|---|---|---|---|
 | 1 | House name | Settings › House | "Home" | N |
-| 2 | Timezone | Settings › House | from browser at setup | M |
-| 3 | Location (for sunrise/sunset) | Settings › House | unset; set at setup | S |
-| 4 | Units (cm/in) | Settings › House | from locale | S |
-| 5 | Clock format 12/24 h | Settings › House | from locale | S |
+| 2 | Timezone (built in 2b) | Settings › House | Central's own zone at deploy; the browser's is offered when it differs | M |
+| 3 | Location (for sunrise/sunset; built in 2b, latitude and longitude, Clear) | Settings › House | unset; sun times cannot be chosen until set | S |
+| 4 | Units (cm/in; built in 2b) | Settings › House | cm | S |
+| 5 | Clock format 12/24 h (built in 2b) | Settings › House | 24 h | S |
 | 6 | Language | Settings › House | from browser | N |
 | 7 | Show setup checklist | Settings › House | auto-hide when done | S |
 
@@ -303,41 +309,41 @@ Every setting a power user expects, with exactly one home: 136 settings (numbere
 | 67 | Child Scenes | Scene editor › Advanced | none | N |
 | 68 | Burn-in protection (pixel shift) | Scene editor › Advanced | off | N |
 | 69 | Show in Home Assistant (as an HA scene) | Scene editor › header | off | S |
-| 70 | Displays during this Scene (on / off / leave as scheduled) | Scene editor › Ending | leave as scheduled | S |
+| 70 | Displays during this Scene (on / off / leave as scheduled; not now, owner 2026-10-12: "Not now") | Scene editor › Ending | leave as scheduled | S |
 | 71 | Never show list | Scenes › Never show list | empty | M |
 
 ### Schedule and Show now
 
 | # | Setting | Lives on | Default | P |
 |---|---|---|---|---|
-| 72 | Scene to play | Schedule › editor | n/a | M |
-| 73 | Days of week | Schedule › editor | every day | M |
-| 74 | Start/end clock time | Schedule › editor | all day | M |
-| 75 | Sunrise/sunset ± offset | Schedule › editor | off | S |
-| 76 | Crosses midnight | Schedule › editor | automatic | M |
+| 72 | Scene to play (built in 2b: a Schedule is one repeating rule) | Schedule › editor | n/a | M |
+| 73 | Days of week (built in 2b; at least one) | Schedule › editor | every day | M |
+| 74 | Start/end clock time (built in 2b, on the house clock) | Schedule › editor | all day | M |
+| 75 | Sunrise/sunset ± offset (built in 2b; needs the house location) | Schedule › editor | off | S |
+| 76 | Crosses midnight (built in 2b: shown, not asked) | Schedule › editor | automatic: an end at or before the start is the next day | M |
 | 77 | Date range / yearly event | Schedule › editor | none | S |
-| 78 | Priority (Normal / Special event / Always wins) | Schedule › editor | Normal | M |
+| 78 | Priority (Normal / Special event / Always wins; built in 2b, the Default Scene below all three) | Schedule › editor | Normal | M |
 | 79 | At end: finish gracefully / stop now | Schedule › editor | finish gracefully | N |
-| 80 | Power schedule: displays on/off times (its own lane, not a Scene) | Schedule › Power lane | on 07:00, off 23:00 | M |
-| 81 | Power schedule days and sunrise/sunset times | Schedule › Power lane | every day; clock times | M |
-| 82 | Which Frames follow the power schedule | Schedule › Power lane | every current Frame, selected explicitly | S |
-| 83 | Night off turns displays off (vs black screen only) | Schedule › Power lane | power off where the display supports it | M |
+| 80 | Power schedule: displays on/off times (its own lane, not a Scene; built in 2a as Night off) | Schedule › Power lane › Night off | on 07:00, off 23:00 | M |
+| 81 | Power schedule days and sunrise/sunset times (built in 2a; sun times need the house location) | Schedule › Power lane › Night off | every day; clock times | M |
+| 82 | Which Frames follow the power schedule (built in 2a: chosen one by one, or the "All Frames" group) | Schedule › Power lane › Night off | every current Frame, selected explicitly | S |
+| 83 | Night off turns displays off (vs black screen only; built in 2a: "Turn displays off" or "Show black") | Schedule › Power lane › Night off | power off where the display supports it, black otherwise | M |
 | 84 | Show now default length | Show now sheet | 1 h | S |
 | 85 | Show now default Frames | Show now sheet | every current Frame, selected explicitly | S |
 | 86 | Pause default length | Show now sheet › Pause | 1 h | S |
 | 87 | Home Assistant may turn displays on during Night off | Schedule › Power lane › Rules | No | S |
 | 88 | Home Assistant may turn displays off | Schedule › Power lane › Rules | Yes, any time | S |
-| 89 | Scenes may turn displays on during Night off | Schedule › Power lane › Rules | No | S |
-| 90 | A hold (console All off/on, Home Assistant power switch) lasts until (next scheduled change / set time / until resumed) | Schedule › Power lane › Rules | next scheduled change | M |
-| 91 | Holds shown with who set them ("Off — by Home Assistant (Away mode)") and Resume schedule | Schedule › Power lane | n/a | M |
+| 89 | Scenes may turn displays on during Night off (not now: goes with Scene power requests, #70; owner, 2026-10-12: "Not now") | n/a | n/a | S |
+| 90 | A hold (console All off/on, Home Assistant power switch) lasts until (next scheduled change / set time / until resumed; built in 2a without "set time") | Schedule › Power lane › Night off | next scheduled change | M |
+| 91 | Holds shown with who set them ("Off — by Home Assistant (Away mode)") and Resume schedule (built in 2a; the console is the one source until 3) | Schedule › Power lane | n/a | M |
 
 ### Wall and Frame
 
 | # | Setting | Lives on | Default | P |
 |---|---|---|---|---|
-| 92 | Wall name + room label | Frames › Wall tab | "Wall 1" | S |
+| 92 | Wall name + room label (built in 2b, the one wall) | Frames › Wall tab | "Wall 1", no room | S |
 | 93 | Wall photo backdrop | Frames › Wall tab | none | N |
-| 94 | Frame name | Frame page › header | "Frame N" | M |
+| 94 | Frame name (built in 2b; unique, a taken name refused) | Frame page › header | "Frame N" | M |
 | 95 | Placement on the wall (where the Frame hangs) | Frames › wall layout | from Display size | M |
 | 96 | Orientation | Frame page › Hardware (the Frame display profile's aspect alone: landscape when at least as wide as tall; the angle never changes it, owner 2026-10-11) | from the profile | M |
 | 97 | Corner positions (the opening) | Frame page › Position | full output | M |
@@ -412,13 +418,13 @@ Recommendations only; none changes a requirement. Rows marked **owner** need his
 |---|---|---|
 | Authored edits default to the next Run ([live media](requirements.md#live-media-compatibility-and-preparation)) | Change seconds-per-photo and see it now | Keep the rule; add **Save and apply now** |
 | "Once an assignment is scheduled and secured by its responsible Players, its content is locked for that execution" ([live media](requirements.md#live-media-compatibility-and-preparation)) | Skip, Previous and Never show act at once | They act at once on assignments still drawn from a live query (not yet secured). On a secured assignment, Never show takes effect from the next Run, and Skip is not offered. |
-| U1: "Authored darkness stays allowed"; a failure never leaves a display dark ([failure visibility](requirements.md#failure-visibility-and-recovery)) | Night off, Pause and All off leave displays dark, and that is not a failure | **Owner:** amend U1 so intentional operational darkness (the power schedule, Pause, All off, a display powered off on purpose) counts as intended darkness and shows as Resting. This is a requirement change. |
+| U1: a failure never leaves a display dark ([failure visibility](requirements.md#failure-visibility-and-recovery)) | Night off, Pause and All off leave displays dark, and that is not a failure | **Resolved:** U1 amended 2026-10-12 (owner: "Amend U1", [system gate](https://claude.ai/artifact/HHNRy2Hs1CpEm5VVK58DWm)): intended darkness, authored or operational, is allowed and reads Resting; a failure during it shows in the console at once and on the display when it is next due on. |
 | "A changed profile requires calibration revalidation before the new equipment is considered ready" ([installation model](requirements.md#installation-model)) | A new display just works, with a prompt to re-check | The requirement wins: the display-changed flow blocks the Frame's readiness until Position is re-checked; it is not just a prompt ([§6](#6-display-identity)) |
 | "Every target intentionally affected by a Scene or its children must participate explicitly" ([composition](requirements.md#composition-and-spatial-authoring)) | "All Frames" as the default for the power schedule, Scenes and Show now | Editors pre-select every current Frame explicitly; a Frame added later joins only if the user chose the explicit "All Frames" group |
-| "Operational state … remains distinct from authored content state" ([operations](requirements.md#operations-and-scope)) | A "Good night" Scene that turns the displays off | **Owner:** a Scene's "Displays during this Scene" setting stores operational power in authored content. It is offered as a deliberate exception under his "Or both" and needs his confirmation ([§7](#7-power)) |
+| "Operational state … remains distinct from authored content state" ([operations](requirements.md#operations-and-scope)) | A "Good night" Scene that turns the displays off | **Not now** (owner, 2026-10-12: "Not now"): Scenes do not carry display power; Night off, holds and a dark Scene cover Good night ([§7](#7-power)) |
 | A photo goes only on a Frame it fills with its key content kept; cropping that would cut a face or the interesting part is no exception ([compatibility](requirements.md#live-media-compatibility-and-preparation)) | A fill option, mats and portrait pairing | Built in 5a as the requirement says: every photo fills its Frame by smart crop, a photo that would lose its key content skips that Frame, one photo per Frame (owner, 2026-10-11: "Correct. One photo per frame."); the Frame page counts what was skipped and why |
 | A 720p video never on a 40-inch Frame ([compatibility](requirements.md#live-media-compatibility-and-preparation)) | An adjustable floor and a skipped count | Keep it strict and always show the skipped count; a lenient floor would be a requirement change |
-| The Installation owns policy and timezone ([installation model](requirements.md#installation-model)) | Location for sun times, units | Add location (optional) as house policy |
+| The Installation owns policy and timezone ([installation model](requirements.md#installation-model)) | Location for sun times, units | Add location (optional) as house policy (built in 2b: Settings › House) |
 | The operator selects the Player release ([provisioning](requirements.md#player-provisioning)) | Automatic updates | Keep the existing release choices ([console DDD Part E](operator-console-ddd.md#part-e-v2-only-console-and-node-release-workflows-feature-layer)) |
 | U2: photos within a couple of hours after a power cut | Minutes | Keep U2 as the bound; show per-Frame progress |
 | No playback guarantee after a cold reboot without Central ([stateless Players](requirements.md#central-authority-and-stateless-players)) | The wall survives a server reboot | Accept; the display says "Can't reach the Photo Wall server" |

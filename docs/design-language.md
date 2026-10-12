@@ -405,13 +405,24 @@ Stories: `Default`, `GroupChosen`, `AllFramesChosen`, `ExcludesThisFrame`.
 | `CropThumb` (+ `FrameTile`) | patterns | A photo at its own ratio with the Frame's window drawn where Central put it: the kept part clear, the cut-away dimmed (Immich's crop tool look), a window the Frame would not show dashed; it opens the photo sheet | Fits, RefusedFace, RefusedShape, Video, Openable, Tiles |
 | `MediaCard` (+ `MediaCardAdd`, `MediaCardList`) | patterns | T2's card for a thing made of photos: a four-photo mosaic, its name, its count, what it holds, its status chip and More; or, in a form, a choice by checkbox or radio; "+ New …" as the list's last card | Default, Empty, Chosen, List |
 
+### Members for Power and the week (2a, 2b)
+
+Built in [#86](https://github.com/mcurcio/photo-wall/pull/86). Every time they show is a house-time string Central worked out ([0021](decisions/0021-power-timetable-and-repeating-schedules.md)); none works out a time or reads the browser's zone.
+
+| Member | Layer | Purpose | States |
+|---|---|---|---|
+| `WeekCalendar` | patterns | Seven house days, Monday first, as lanes of bands on a time axis, a now line, Previous / Next week; every band has an accessible name and is also a text list. It takes lanes of plain bands, so Home Assistant holds (3) and several walls (6) add data, not components. Replaces the planned `TimelineLane` | Default, Empty, AcrossMidnight, Held |
+| `PowerLane` | domain | The week page's Power lane over the content calendar: solid bands while displays should be on, grey Night off, hatched holds labelled with who set them ("Held off · console") each with **Resume schedule** (#91) | NightOff, Held, HeldUntilResumed, NoNightOff |
+| `NightOffEditor` | domain | Night off's Rules: off and on as a clock time or sunrise/sunset ± minutes (#80, #81; sun choices disabled with "Set the house location" linking to Settings › House while no location is set), days, which Frames (#82: every current Frame ticked, or "All Frames"), "Turn displays off" or "Show black" (#83), how long a hold lasts (#90) | Default, NoPlace, AllFrames, Refused, Stale |
+| `FrameWhy` | domain | Why is this playing? on the Frame page's Overview (E6): the winner and what it beat ("Evenings is playing; it beat the Default Scene (lower priority)", "… admitted earlier", "… kept out by a protected Scene") and the power line ("Resting: Night off until 07:00", "Held off by the console until 23:00", "Display didn't answer", never Resting, and "Not heard from the Pi") | Program, DefaultScene, KeptOut, Resting, PowerProblem, NotHeard |
+
 ### Later patterns (props written when their delivery starts)
 
 | Pattern | Purpose | Delivery |
 |---|---|---|
 | `OverrideBanner` | Something overriding the plan, with an explicit `kind`: `"power-hold"` ("Off — by Home Assistant (Away mode) · **Resume schedule**"), `"takeover"` (Show now: countdown and **Back to normal**) or `"pause"` ("Paused until 22:04 · **Carry on**") | 2a (power-hold); 3b-i (takeover, pause) |
-| `TimelineLane` | One lane of blocks on a time axis (power on/off, content, holds, Default Scene); blocks are also a text list | 2a |
-| `SaveBar` (the Schedule's pairs) | Explicit Save / Save and apply now, or Change now / From the next block; the editor's bar of delivery 4 is above | 2b |
+| `TimelineLane` | Built in 2a and 2b as `WeekCalendar` (above) | 2a |
+| `SaveBar` (the Schedule's pairs) | Built in 2b as Save (from the next window) / Save and apply now on the editor's bar of delivery 4 | 2b |
 | `WallMap`, `WallTile` | Frames to scale; a tile shows the status, what the Pi is presenting and its actions; read-only on Home, editable in T6 | 3b-i (status and actions); 3b-ii (what the Pi presents); 6 (T6) |
 | `IncludeExcludePicker` | Photo source filters paired with excludes | 4 |
 | `Checklist` | Steps from real checks: T7's body and a settings area's live checks | 3 (Integrations); 6 (T7) |
@@ -551,12 +562,13 @@ Every journey step in the [roadmap](roadmap.md#the-journey), one row per home (p
 | A2 Sign in | Sign-in page | exception (no template) | Field, Button | Action | lands on Home | wrong password inline, without saying which part was wrong |
 | A2 Owner account | Settings › People and access | T8 | SettingRow | Autosave | "Signed in as …" | none |
 | A3 Connect Immich | Settings › Photo library | T8 | SettingRow, Field (the key a password field, then "Key ending …1234"), Button (Check now), ProblemCard | Save (Save checks at once) | "41,203 photos · 2,110 videos · 212 albums · 96 people" (Immich's totals, archived photos included) and the Immich user; Connected, Checking, Paste the address and key, or Needs a look | EmptyState "Connect your photo library: paste the address of your Immich and an API key below."; a ProblemCard per problem with its one fix, for example "Immich rejected the API key." → Paste a new key, each saying "Photos keep playing." |
-| A4 House basics | Settings › House | T8 | SettingRow, SegmentedControl | Autosave | none | browser-derived defaults shown as defaults |
+| A4 House basics | Settings › House (`#/house`; built in 2b: timezone, location, units, clock format) | T8 | SettingRow, SegmentedControl | Autosave | none | the seeded zone is Central's own; when the browser's differs it is offered ("Use this browser's timezone (…)?"), never applied by itself; an unknown zone refused in plain words |
 | A5 Ready for Pis | Setup checklist › Ready for Pis | T7 | Checklist, ProblemCard | none | "Network boot OK · release 1.4.2 ready" | the problem names the piece (DHCP, files, release) |
 | B1 Pi appears | Pis › New Pis waiting | T2 | EntityList, HealthBadge | none | the display shows its code; "Waiting · seen 21:04" | EmptyState "Plug a Pi into a display and power"; "2 GB, needs 4 GB" |
 | B1 Pi appears | Setup checklist › First Pi | T7 | Checklist | none | done when a Pi is waiting or bound | links to Pis › New Pis waiting |
 | B2 Identify | Frame page › header | T3 | Button, AckBadge | Action | requested → acknowledged | no acknowledgement: ProblemCard inline, Retry |
-| B3 Name and place | Frame page › header (name) | T3 | EntityHeader (inline title) | Autosave | saved inline | duplicate name: inline error |
+| B3 Name and place | Frame page › header (name; built in 2b) | T3 | EntityHeader (inline title) | Autosave | saved inline | duplicate name: inline error "That name is taken" |
+| B3 Name and place | Frames › Wall tab (the wall's name and room label, #92; built in 2b) | T2 | SettingRow, Field | Autosave | saved inline | none |
 | B3 Name and place | Frames › wall layout (placement) | T6 | WallTile, Tabs (walls) | Autosave | overlaps flagged | EmptyState "Add your first Frame" |
 | B4 Fit the picture | Frame page › Position | T3 + LivePreviewEditor | QuadEditor, NudgePad, SegmentedControl (fit: Cover or Corners; rotation 0/90/180/270), NumberInput and Slider (angle, Cover only), AckBadge, LeaveGuard | Live | Previewing → Presented by the Pi | unbound → binding picker; Pi offline → disabled with since; expired session note; a Cover Save whose picture would turn against the Frame's orientation: the refusal in plain words beside the angle |
 | B5 Picture quality | Frame page › Picture | T3 + LivePreviewEditor | SettingRow (equipment, actsOn), Slider, Switch (grey ramp, not built) | Live | each brightness and contrast slider says where it acts; Done once the Pi reports the latest change taken by the display or presented | a write the display refuses: the row says "The display did not take it" and stays on the display (it never switches by itself; the operator may move it to picture adjustment) |
@@ -576,12 +588,12 @@ Every journey step in the [roadmap](roadmap.md#the-journey), one row per home (p
 | D5 Timing and transitions | Scene editor › Timing | T4 | SettingRow, Slider | Save | preview plays the timing | none |
 | D6 Video | Scene editor › Video | T4 | SettingRow, Slider, Switch | Save | share also shown as a count | no videos match: one-line note |
 | D7 Captions | Scene editor › Captions | T4 | SettingRow, SegmentedControl | Save | preview shows a caption | none |
-| E1 Weekly routine | Schedule › content lanes | T5 | TimelineLane, Sheet, SaveBar | Schedule | now line; block labels | only the Default Scene band + "Add a Schedule" |
-| E2 Night off | Schedule › Power lane | T5 | TimelineLane, SettingRow, OverrideBanner | Schedule | grey band "Off 23:00 – 07:00" | a Frame with no power method: "black screen only" |
-| E3 Sunrise and sunset | Schedule › editor | T5 | SettingRow, Field | Schedule | resolved time beside the rule ("sunset −30 min · 18:42") | no House location → link to Settings › House |
+| E1 Weekly routine | Schedule › week page (`#/schedule`), content lanes; the Schedule flow's When step | T5 | WeekCalendar, Sheet, SaveBar | Save (from the next window; **Save and apply now** on a playing Schedule) | now line; block labels; Review lists Central's next windows; "ends next day" shown when the end is at or before the start | only the Default Scene band + "Add a Schedule"; a newer save: reload |
+| E2 Night off | Schedule › week page › Power lane › Rules | T5 | WeekCalendar, PowerLane, NightOffEditor | Save (a stale save reloads) | grey band "Off 23:00 – 07:00" | a Frame with no power method: "black screen only" |
+| E3 Sunrise and sunset | Schedule › editor (When step) and Power lane › Rules | T5 | SettingRow, Field, NightOffEditor | Save, as E1 and E2 | resolved time beside the rule ("sunset −30 min · 18:42") | no House location → choices disabled, "Set the house location" linking to Settings › House |
 | E4 Holidays | Schedule › editor › Date range | T5 | Field, TimelineLane | Schedule | the range overrides blocks visibly | overlaps explained by priority |
-| E5 Default content | Schedule › Default Scene | T5 | SettingRow, Select | Schedule | the band fills the gaps | none chosen → `todo` chip |
-| E6 Why is this playing? | Schedule › block explanation (Home tiles and the Frame Overview open the same sheet) | T5 | Sheet, LinkToOwner | none | one sentence: "Evenings (Normal, Mon–Fri 17:00–23:00) beats the Default Scene" | "No plan received since 21:04" |
+| E5 Default content | Schedule › week page › Default Scene | T5 | SettingRow, Select | Action (applies at once; "Nothing" allowed) | the band fills the gaps | none chosen → `todo` chip |
+| E6 Why is this playing? | Frame page › Overview (built in 2b; the Power tab reads the same power line; Home tiles in 3b-i) | T3 | FrameWhy, LinkToOwner | none | one sentence: "Evenings is playing; it beat the Default Scene (lower priority)", and the power line "Resting: Night off until 07:00" | "Not heard from the Pi"; a display that did not answer is a power problem, never Resting |
 | F1 Glance | Home › map | T1 | WallMap, WallTile, HealthBadge | none | pushed; "What the Pi is presenting" | per-tile Can't tell; house banner if Central unreachable |
 | F2 Skip and previous | Home › tile | T1 | WallTile actions, AckBadge | Action | requested → acknowledged | not offered on secured content ([design §12](operator-console-design.md#12-where-a-power-users-expectation-meets-a-written-requirement)) |
 | F2 Skip and previous | Frame page › header | T3 | Button, AckBadge | Action | requested → acknowledged | as above |
@@ -589,7 +601,7 @@ Every journey step in the [roadmap](roadmap.md#the-journey), one row per home (p
 | F3 Never show | Scenes › Never show list | T2 | MediaGrid, UndoToast | Action + Undo | **Show again** per photo | EmptyState "Nothing hidden from the wall" |
 | F4 Show now | Home › Show now (and the phone tab) | T1 + QuickActionSheet | TargetPicker, OverrideBanner (takeover) | Action | banner with countdown and **Back to normal** | nothing matches: error inside the sheet |
 | F5 All off/on | Home › quick actions | T1 | Button, UndoToast | Action + Undo | per Frame acknowledged; displays that didn't answer listed by name | none |
-| F5 All off/on | Schedule › Power lane (the hold) | T5 | OverrideBanner (power-hold), TimelineLane | Action (Resume schedule) | hatched hold with who and until | none |
+| F5 All off/on | Schedule › week page header (All off, All on) and Power lane (the hold; built in 2a) | T5 | Button, PowerLane, WeekCalendar | Action (Resume schedule) | hatched hold with who and until; a held page shows "Held off until 07:00" | none |
 | F6 Phone layout | AppShell | exception (no template) | AppShell, cards, Sheet | n/a | bottom tabs Home · Show now · Schedule · More | no sideways scrolling anywhere |
 | F7 Home Assistant | Settings › Integrations | T8 | SettingRow, Checklist (live checks), Button (Test), ConfirmDangerous (Remove) | Autosave; Action (Test, Remove) | "Broker connected → Home Assistant online → 12 devices published → last command 21:04" | "Broker rejected the username/password" |
 | F8 Pause | Home › tile (default length in the Show now sheet, #86) | T1 | WallTile actions, OverrideBanner (pause) | Action (its way back: **Carry on**) | the Frame reads Resting; "Paused until 22:04" | Pi didn't acknowledge: ProblemCard inline |
