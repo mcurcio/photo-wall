@@ -4,11 +4,12 @@ profiles the house keeps, each the one source of the LUT baked from it (central/
 - **Add** checks and bakes the profile once (`checked_profile`), so a listed LUT always works; the
   same bytes twice are one row.
 - **In use** (one rule, `_users_in`): a Display that stores the LUT, or whose live picture session's
-  draft chooses it (the session's lease is read on PostgreSQL's clock, as the session's own rules
-  read it). The list shows them; Remove refuses while there are any. The displays column's
-  foreign key (RESTRICT) holds the stored half in the database too.
-- **Known** (`lut_known_in`): the picture session's LUT edit asks it in its own transaction, under a
-  key-share lock that a concurrent Remove waits on.
+  draft chooses it (central/infra/display_store.py `live_drafts_in`: the session's own lease rule
+  and draft, on PostgreSQL's clock as the session reads it). The list shows them; Remove refuses
+  while there are any. The displays column's foreign key (RESTRICT) holds the stored half in the
+  database too.
+- **Known** (central/infra/lut_rows.py `lut_known_in`): the picture session's LUT edit asks it in its
+  own transaction, under a key-share lock that a concurrent Remove waits on.
 """
 from __future__ import annotations
 
@@ -19,17 +20,13 @@ from typing import Any, Final
 from central.db import Database, DatabaseTransactionClock
 from central.displays.lut import LutRefusal, PaperProfile, checked_profile
 from central.displays.views import LutsView, LutView
+from central.infra.display_store import live_drafts_in
 from contracts.time import Clock
 
 _LEASE_CLOCK: Final = DatabaseTransactionClock()
 
-# Every (LUT, Display) use: the Display's stored choice, and its live session's draft.
-_USERS: Final = (
-    "SELECT DISTINCT u.profile_sha256, d.id, d.name, d.maker, d.product FROM displays d "
-    "LEFT JOIN picture_sessions ps ON ps.display_id=d.id AND ps.idle_until > %(now)s "
-    "CROSS JOIN LATERAL (VALUES (d.software_lut_profile), (ps.draft->>'software_lut_profile')) AS u(profile_sha256) "
-    "WHERE u.profile_sha256 IS NOT NULL AND (%(lut)s::text IS NULL OR u.profile_sha256 = %(lut)s::text) "
-    "ORDER BY d.name, d.maker, d.product, d.id")
+_DISPLAYS: Final = ("SELECT id, name, maker, product, software_lut_profile FROM displays "
+                    "ORDER BY name, maker, product, id")
 
 
 class LutRefused(Exception):
@@ -94,25 +91,17 @@ class PgLuts:
         return None if row is None else bytes(row["profile"])
 
 
-def lut_name_in(conn: Any, profile_sha256: str) -> str | None:
-    """The listed LUT's name; None when it is not on the list."""
-    row = conn.execute("SELECT name FROM luts WHERE profile_sha256=%s", (profile_sha256,)).fetchone()
-    return None if row is None else row["name"]
-
-
-def lut_known_in(conn: Any, profile_sha256: str) -> bool:
-    """Whether the LUTs list holds `profile_sha256`, under a key-share lock: a concurrent Remove
-    waits for the caller's transaction, and then sees the choice it made."""
-    return conn.execute("SELECT 1 FROM luts WHERE profile_sha256=%s FOR KEY SHARE",
-                        (profile_sha256,)).fetchone() is not None
-
-
 def _users_in(conn: Any, profile_sha256: str | None) -> Mapping[str, tuple[str, ...]]:
     """Each LUT's users (only `profile_sha256`'s, when given), by Display name: the EDID's name, or
-    its maker and product code when the EDID names none."""
+    its maker and product code when the EDID names none; a Display once per LUT."""
+    drafts = live_drafts_in(conn, _LEASE_CLOCK.now_in(conn))
     users: dict[str, list[str]] = defaultdict(list)
-    for row in conn.execute(_USERS, {"now": _LEASE_CLOCK.now_in(conn), "lut": profile_sha256}).fetchall():
-        users[row["profile_sha256"]].append(row["name"] or f"{row['maker']} {row['product']}")
+    for row in conn.execute(_DISPLAYS).fetchall():
+        draft = drafts.get(row["id"])
+        drafted = None if draft is None or draft.software.lut is None else draft.software.lut.profile_sha256
+        for lut in dict.fromkeys((row["software_lut_profile"], drafted)):
+            if lut is not None and (profile_sha256 is None or lut == profile_sha256):
+                users[lut].append(row["name"] or f"{row['maker']} {row['product']}")
     return {lut: tuple(names) for lut, names in users.items()}
 
 
@@ -121,4 +110,4 @@ def _view(row: Mapping[str, Any], users: Mapping[str, Iterable[str]]) -> LutView
                    used_by=tuple(users.get(row["profile_sha256"], ())))
 
 
-__all__ = ["LutRefused", "PgLuts", "lut_known_in", "lut_name_in"]
+__all__ = ["LutRefused", "PgLuts"]

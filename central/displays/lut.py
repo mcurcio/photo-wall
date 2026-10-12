@@ -12,7 +12,10 @@ One home each for:
   comes back as the paper prints it (LittleCMS's one-step proof transform runs unbounded, and hands
   a matrix-shaper paper's out-of-gamut colours back unchanged). Applied to every point of the
   LUT_GRID**3 grid and laid out by contracts/lut.py `lut_offset`. A new recipe is a new name
-  (contracts/lut.py `LutRef`), so a Player never holds a table under a name it was not baked for.
+  (contracts/lut.py `LutRef`), so a Player never holds a table under a name it was not baked for;
+  the LittleCMS that bakes it is part of the recipe and of its name (`LUT_RECIPE_ID` ends with its
+  version), so a LittleCMS upgrade names a new table, never other bytes under a name a Player
+  already caches.
 - **What a paper profile is** (`checked_profile`): an ICC file LittleCMS opens, of the output
   (printer) device class with RGB or CMYK device values, that the recipe bakes; its name is its
   own description. A profile that passes always bakes, so a listed LUT always works.
@@ -27,11 +30,11 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Final
 
-from PIL import Image, ImageCms
+from PIL import Image, ImageCms, features
 
 from contracts.lut import LUT_BYTES, LUT_GRID
 
-LUT_RECIPE_ID: Final = "lut33-perceptual-relcol-bpc-1"
+LUT_RECIPE_ID: Final = f"lut33-perceptual-relcol-bpc-1-lcms{features.version('littlecms2')}"
 LUT_PROFILE_MAX_BYTES: Final = 8 * 1024 * 1024
 LUT_NAME_MAX: Final = 128
 

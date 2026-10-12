@@ -5819,3 +5819,17 @@ Order: (a) merge the iac PR that switches the factory to `central.app:create_app
   `PictureCommands.edit_lut`), not the design's `lut` setting on the software edit:** one route per
   question, because the LUT choice names a LUT where the software edit sets a number. Closes slice
   C2's `PictureCommands` entry.
+- **The LUT recipe's intents and black point compensation are now held by a test** on a synthetic
+  LUT-based paper (tests/support/icc_paper.py: a raised paper black, a perceptual table that
+  compresses chroma). The review's "paper black bakes to (0, 0, 0)" does not hold for LittleCMS:
+  its black point compensation estimates the paper's black (Adobe's algorithm), so this paper's
+  black bakes to (8, 8, 8), not 0; without compensation back it bakes to 58. The test asserts
+  "near" (at most 12) and pins one colour within 3.
+- **`LUT_RECIPE_ID` ends with the LittleCMS version** (`lut33-perceptual-relcol-bpc-1-lcms2.19`): the
+  library that bakes is part of the recipe, so a Pillow/LittleCMS upgrade names a new table and a
+  Player never holds other bytes under a name it cached. Cost: an upgrade re-fetches every LUT once.
+- **The LUTs list's "in use" reads the open sessions through display_store** (`live_drafts_in`: the
+  session's own lease rule and draft parser), not its own SQL; `lut_known_in` and `lut_name_in`
+  moved to central/infra/lut_rows.py so display_store and lut_store do not import each other.
+- **A capped request body has one home**, central/request_body.py `capped_body`, used by the Node's
+  control routes and the paper profile's upload.

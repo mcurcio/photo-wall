@@ -134,7 +134,7 @@ from central.displays.views import (
 from central.fleet.node_bus_presence import bus_links_in
 from central.house_time.calculator import day_start, house_date
 from central.infra.house_store import house_time_in
-from central.infra.lut_store import lut_known_in, lut_name_in
+from central.infra.lut_rows import lut_known_in, lut_name_in
 from central.infra.node_link_store import PgLinkStores
 from central.infra.output_wakes import OUTPUT_DOCUMENTS_CHANNEL, notify_nodes_in
 from central.infra.power_store import power_policy_in
@@ -468,6 +468,16 @@ def picture_session(row: Mapping[str, Any]) -> PictureSession | None:
                           frozenset(row["touched_hardware"]),
                           frozenset(software_touch(name) for name in row["touched_software"]),
                           Lease(row["session_idle_until"], None))
+
+
+def live_drafts_in(conn: Any, now: float) -> dict[UUID, DisplayPicture]:
+    """The draft of each Display whose picture session is live at `now` (its lease's rule,
+    central/live_session.py `Lease.live`), by Display id: the one read of what an open session has
+    in force, for rules outside the session (the LUTs list's "in use")."""
+    rows = conn.execute(f"SELECT {_SESSION_COLUMNS} FROM picture_sessions ps").fetchall()  # noqa: S608
+    sessions = (picture_session(row) for row in rows)
+    return {session.display_id: session.draft for session in sessions
+            if session is not None and session.lease.live(now)}
 
 
 def record_picture_report(conn: Any, player_id: str, report: PictureReport, now: float) -> None:
@@ -1283,6 +1293,7 @@ def _session_view(session: PictureSession) -> PictureSessionView:
 __all__ = ["DOCUMENT_STREAM", "OUTPUT_DOCUMENTS_CHANNEL", "POSITION_COLUMNS", "POSITION_FACTS", "REPORT_STREAM", "SEEN_DISPLAY_JOIN",
            "DisplayDocuments", "DisplayWakes", "FramePowerFacts", "OutputReportJudge", "PgDisplayCommands", "PgDisplayQueries",
            "PgPictureSessions",
-           "commit_position", "frame_position", "frame_readiness", "frame_readiness_in", "output_documents",
+           "commit_position", "frame_position", "frame_readiness", "frame_readiness_in", "live_drafts_in",
+           "output_documents",
            "picture_fields", "power_facts_in", "record_picture_report", "record_report", "resolve_output",
            "stored_picture", "write_picture"]

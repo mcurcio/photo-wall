@@ -27,6 +27,7 @@ from central.displays.lut import LUT_PROFILE_MAX_BYTES, LUT_RECIPE_ID, baked_lut
 from central.displays.views import LutsView, LutView
 from central.infra.lut_store import LutRefused, PgLuts
 from central.operator_auth import OPERATOR_PREFIX
+from central.request_body import capped_body
 from contracts.lut import LUT_BYTES, LUT_MEDIA_TYPE
 
 LUTS: Final = OPERATOR_PREFIX + "luts"
@@ -69,17 +70,8 @@ def mount_lut_routes(app: FastAPI, *, admin: Any, player: Any, luts: PgLuts) -> 
 
 
 async def _profile(request: Request) -> bytes:
-    """The uploaded profile's bytes; too_large 413 past LUT_PROFILE_MAX_BYTES, by its Content-Length
-    before anything is read, else while it is read."""
-    declared = request.headers.get("content-length")
-    if declared is not None and declared.isdigit() and int(declared) > LUT_PROFILE_MAX_BYTES:
-        raise LutRefused("too_large", 413)
-    data = bytearray()
-    async for chunk in request.stream():
-        data.extend(chunk)
-        if len(data) > LUT_PROFILE_MAX_BYTES:
-            raise LutRefused("too_large", 413)
-    return bytes(data)
+    """The uploaded profile's bytes; too_large 413 past LUT_PROFILE_MAX_BYTES (central/request_body.py)."""
+    return await capped_body(request, LUT_PROFILE_MAX_BYTES, lambda: LutRefused("too_large", 413))
 
 
 __all__ = ["LUTS", "mount_lut_routes"]

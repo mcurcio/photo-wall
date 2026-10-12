@@ -15,6 +15,7 @@ import os
 import struct
 
 from PIL import ImageCms
+from support.icc_paper import lut_paper
 from test_display_identity import (
     AUTH,
     NO_SERIAL,
@@ -128,6 +129,33 @@ def test_the_recipe_brings_a_colour_the_paper_cannot_print_back_as_it_prints_it(
     assert red >= 200 and min(green, blue) >= 60            # still red, far less saturated
     for index in range(LUT_GRID):
         assert all(abs(value - LEVELS[index]) <= 2 for value in _at(lut, index, index, index)), index
+
+
+def test_the_recipe_prints_perceptually_and_compensates_the_papers_black_both_ways():
+    """(2) The recipe's intents and black point compensation, on a paper with a raised black (4 %
+    of its white) and a perceptual table that compresses chroma (tests/support/icc_paper.py): white
+    is white; black lands near the screen's black (LittleCMS estimates the paper's black point by
+    Adobe's algorithm, so near, not exact) where the paper's own black would read ~58; greys stay
+    grey; a colour comes back as the paper prints it perceptually, less saturated, near the bake
+    pinned here. Mutation probes: the back transform perceptual -> the colour keeps its chroma
+    (200, 81, 42); no compensation back -> black 58; the forward transform relative colorimetric ->
+    (199, 79, 37); no compensation forward -> grey 119."""
+    lut = baked_lut(lut_paper())
+    assert _at(lut, LUT_GRID - 1, LUT_GRID - 1, LUT_GRID - 1) == (255, 255, 255)
+    assert max(_at(lut, 0, 0, 0)) <= 12, _at(lut, 0, 0, 0)
+    assert all(abs(value - LEVELS[16]) <= 2 for value in _at(lut, 16, 16, 16)), _at(lut, 16, 16, 16)
+    colour = _at(lut, 25, 10, 5)                                        # sRGB (199, 80, 40)
+    assert max(colour) - min(colour) < .85 * (LEVELS[25] - LEVELS[5]), colour
+    assert all(abs(got - want) <= 3 for got, want in zip(colour, (187, 91, 61), strict=True)), colour
+
+
+def test_the_recipe_names_the_littlecms_that_bakes_it():
+    """A LittleCMS upgrade can change the bake: its version is in the recipe's name, so a new bake
+    is a new name a Player fetches, never other bytes under a name it already caches. Mutation probe:
+    a fixed LUT_RECIPE_ID -> this fails."""
+    from PIL import features
+    assert LUT_RECIPE_ID.endswith("-lcms" + features.version("littlecms2"))
+    LutRef(_sha(_monitor()), LUT_RECIPE_ID)                              # a valid name
 
 
 def test_the_layout_puts_red_fastest():
