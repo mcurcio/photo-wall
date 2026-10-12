@@ -277,12 +277,12 @@ def main() -> None:
         AS_THE_DISPLAY_HAS_IT,
         BEST_DETECTED,
         ActsOn,
+        Darkness,
         OutputDocument,
         OutputPicture,
+        OutputPower,
         PictureSetting,
         Power,
-        PowerRequest,
-        RequestReason,
         decode_output_document,
         encode_output_document,
     )
@@ -373,11 +373,11 @@ def main() -> None:
         controller.start()
         picture = OutputPicture(PictureSetting(ActsOn.PICTURE_ADJUSTMENT, 30),
                                 PictureSetting(ActsOn.PICTURE_ADJUSTMENT, 25), 6500, 22)
-        standing = PowerRequest("standing", Power.ON, RequestReason.STANDING)
+        always_on = OutputPower(Power.ON, (), "2099-01-01T00:00:00Z", Darkness.DISPLAY_OFF, None)
         # The document as it crosses the wire for HDMI-A-1, then retargeted at this compositor's one
         # Output: Weston's headless backend names it "headless", which no Node Output is called.
         document = decode_output_document(encode_output_document(OutputDocument(
-            "HDMI-A-1", 1, (standing,), BEST_DETECTED, False, False, PICTURE_CHANGE, picture)))
+            "HDMI-A-1", 1, always_on, BEST_DETECTED, False, False, PICTURE_CHANGE, picture)))
         object.__setattr__(document, "output_id", OUTPUT)
         controller.document(OUTPUT, document)
         end = time.monotonic() + 15

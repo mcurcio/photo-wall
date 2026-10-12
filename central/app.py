@@ -35,6 +35,7 @@ from central.display_routes import mount_display_routes, mount_picture_routes
 from central.fleet.leaf_bridge import mount_leaf_bridge
 from central.fleet.node_routes import mount_node_routes
 from central.fleet.node_sessions import NodeControlConfig
+from central.house_routes import mount_house_routes
 from central.infra.display_store import (
     PgDisplayCommands,
     PgDisplayQueries,
@@ -43,8 +44,11 @@ from central.infra.display_store import (
 )
 from central.infra.fit_analysis_store import PgFitAnalysisReader
 from central.infra.fit_settings_store import PgFitSettings
+from central.infra.house_store import PgHouse, seed_house
 from central.infra.photo_library_store import PgPhotoLibrary
-from central.installation_models import InstallationInventory
+from central.infra.power_store import PgPower
+from central.infra.why_store import PgWhy
+from central.installation_models import FrameName, InstallationInventory, WallInventory, WallNaming
 from central.library_routes import mount_library_routes
 from central.media_ports import MediaApplication
 from central.media_queue import MediaTaskQueue, ProcrastinateMediaQueue
@@ -57,6 +61,8 @@ from central.photo_library.provisioning import apply_setting, read_setting
 from central.photo_library_routes import mount_photo_library_routes, mount_photo_source_routes
 from central.photo_sources import PhotoSources
 from central.player_control_protocol import project_state, state_digest
+from central.power_routes import mount_power_routes
+from central.program_routes import mount_program_routes
 from central.registry import (
     Enrollment,
     FrameCreate,
@@ -65,12 +71,13 @@ from central.registry import (
     Registry,
     RegistryError,
 )
-from central.runtime import Program, RuntimeConflict, Scene, SceneInUse
+from central.runtime import RuntimeConflict, Scene, SceneInUse
 from central.runtime_store import RuntimeStore
 from central.source_names import SourceInUse, SourceNameService
 from central.wall_plan.fit import FitTarget
 from central.wall_plan.fit_analysis import analyse
 from central.wall_plan.fit_settings import FIT_SETTING_RANGES
+from central.why_routes import mount_why_routes
 from contracts.central_identity import LOCATE_PATH, identity_body
 from contracts.models import (
     Identifier,
@@ -117,15 +124,10 @@ class UnbindRequest(Model):
     expected_generation: int = Field(ge=0)
 
 
-class ProgramReplacementRequest(Model):
-    expected: Program
-    program: Program
-
-
 class ActivationRequest(Model):
     scene_id: Identifier
     activation_id: Identifier
-    priority: int = 0
+    priority: int = Field(default=0, ge=0)   # above the Default Scene (central.runtime DEFAULT_SCENE_RANK)
     repeat: Literal["ignore", "restart", "queue"] = "ignore"
     force: bool = False
     expires_at: float | None = None
@@ -267,6 +269,8 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app):
         db.migrate()
+        if isinstance(db, Database):    # Settings › House starts from Central's own zone (a stand-in has none)
+            seed_house(db, DatabaseTransactionClock())
         if isinstance(media_queue, ProcrastinateMediaQueue) or (
             content is not None and isinstance(db, Database)
         ):
@@ -360,6 +364,7 @@ def create_app(
             "run_ids": exc.run_ids,
             "queued_activation_ids": exc.queued_activation_ids,
             "scene_ids": exc.scene_ids,
+            "default_scene": exc.default_scene,
         }, status_code=409)
 
     @app.exception_handler(RequestValidationError)
@@ -634,6 +639,14 @@ def create_app(
     def reposition(frame_id: Identifier, placement: FramePlacement) -> dict:
         return registry.place_frame(frame_id, placement)
 
+    @app.put("/v1/operator/frames/{frame_id}/name", dependencies=[Depends(admin)])
+    def rename_frame(frame_id: Identifier, request: FrameName) -> dict:
+        return registry.rename_frame(frame_id, request.name)
+
+    @app.put("/v1/operator/walls/{surface_id}", dependencies=[Depends(admin)], response_model=WallInventory)
+    def name_wall(surface_id: Identifier, naming: WallNaming) -> WallInventory:
+        return registry.name_wall(surface_id, naming)
+
     def _refuse_frame_in_use(frame_id: str) -> None:
         # Runs refer to Frame ids by string, so keep destructive/reconfiguring
         # operator actions away from a target while its projected Run is live.
@@ -748,24 +761,6 @@ def create_app(
         coordinator.runtime.command("delete_scene", scene_id, expected_revision)
         return {"status": "deleted"}
 
-    @app.put("/v1/operator/programs/{program_id}", dependencies=[Depends(admin)])
-    def configure_program(program_id: Identifier, program: Program):
-        if program.program_id != program_id:
-            raise ValueError("Program identity mismatch")
-        coordinator.runtime.command("set_program", program)
-        return {"status": "configured"}
-
-    @app.post("/v1/operator/programs/{program_id}/replace", dependencies=[Depends(admin)])
-    def replace_program(program_id: Identifier, request: ProgramReplacementRequest):
-        if request.expected.program_id != program_id or request.program.program_id != program_id:
-            raise ValueError("Program identity mismatch")
-        coordinator.runtime.command_current("replace_program", request.expected, request.program)
-        return {"status": "configured"}
-
-    @app.delete("/v1/operator/programs/{program_id}", dependencies=[Depends(admin)])
-    def remove_program(program_id: Identifier):
-        return coordinator.runtime.command_current("remove_program", program_id)
-
     @app.post("/v1/operator/activations", dependencies=[Depends(admin)])
     def activate(request: ActivationRequest):
         return coordinator.runtime.command_current(
@@ -789,6 +784,12 @@ def create_app(
         analysis=lambda request: analyse(request, fit_analysis_reader, fit_settings.fit_settings()))
     mount_library_routes(app, admin=admin, library=photo_library, content=content)
     mount_display_routes(app, admin=admin, queries=PgDisplayQueries(db), commands=PgDisplayCommands(db))
+    power = PgPower(db, times=media_times)
+    mount_power_routes(app, admin=admin, queries=power, commands=power)
+    mount_program_routes(app, admin=admin, runtime=runtime_store)
+    mount_why_routes(app, admin=admin, queries=PgWhy(db, times=media_times))
+    house = PgHouse(db, times=media_times)
+    mount_house_routes(app, admin=admin, queries=house, commands=house)
     pictures = PgPictureSessions(db)
     mount_picture_routes(app, admin=admin, queries=pictures, commands=pictures)
     if content is not None:

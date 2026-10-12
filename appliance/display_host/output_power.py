@@ -1,23 +1,38 @@
 """The Pi's display power controller: works each Output toward its Output document and reports back
 (roadmap 1b; run ledger .claude/runs/display-1b.md, slice D2; design "Display identity and
-power", rule 2 and the PARKED apply rule).
+power", rule 2 and the PARKED apply rule). Roadmap 2a (Power and the week): the document carries
+the port's power timetable, read at the Pi's own wall clock (appliance/display_host/power_timetable.py),
+with 1b's console test on top.
 
-Pure core, effects at the edges. `in_force` and `decide` are pure functions of the document, the
-Pi's own timer starts and its monotonic clock. `OutputPowerController` applies them through two
-ports: `PowerMethodAdapter` (one per method; appliance/display_host/power_methods.py) and
-`ReportSink` (the display bus session; appliance/display_host/bus.py). The controller never blocks
+Pure core, effects at the edges. `in_force` and `next_deadline` are pure functions of the document,
+the Pi's own test start and its two clocks. `OutputPowerController` applies them through three
+ports: `PowerMethodAdapter` (one per method; appliance/display_host/power_methods.py),
+`BlackPicture` (the shell's black curtain; appliance/display_host/weston.py) and `ReportSink` (the
+display bus session; appliance/display_host/bus.py). The controller never blocks
 the Weston dispatch loop: it runs its adapters on its own worker thread, one Output at a time, and
 every adapter call is bounded by its `timeout`.
 
 The rules it owns (one home each):
-- **In force:** the first request of the document's stack that has not ended. A timed request
-  starts counting on the Pi's monotonic clock when the Pi first applies it (per request id, so a
-  re-put of the same request in a new bus epoch does not restart a running count); it has ended
-  when `for_seconds` have passed since then. No document = nothing in force = leave the display
-  as it is.
-- **When to act:** on a change-number rise, on the display (re)appearing on the Output, when a
-  timed request ends, and once at start. Never between those, so it never fights a person with
-  the remote.
+- **In force:** the console test while its own count runs, else the timetable at the Pi's wall
+  clock. The test starts counting on the Pi's monotonic clock when the Pi first applies it (per
+  request id, so a re-put of the same test in a new bus epoch does not restart a running count);
+  it has ended when `for_seconds` have passed since then. No document = nothing in force = leave
+  the display as it is; past the timetable's `until`, the display is also left as it is
+  (TIMETABLE_RAN_OUT).
+- **When to act:** once at start, on the display (re)appearing on the Output, when the test ends,
+  when the wall clock reaches a set time whose power differs from the one carried out (SET_TIME;
+  every tick re-reads it, so a wall-clock step is seen within a tick), and on a change-number rise
+  only when the new document wants something else at the Pi's clock (`acts_on_new_document`).
+  A rise that wants the same moves the report's `for_change` and keeps its in-force and result.
+  Never between those, so it never fights a person with the remote.
+- **Black picture** (#83; an opaque black from Display Host, never the Player and never a layer):
+  with Darkness.BLACK_PICTURE a timetable off shows the shell's black curtain over the Output and
+  runs no power method (the display stays on); its on takes the curtain down. The result is
+  CONFIRMED when the shell confirmed the curtain, DID_NOT_ANSWER when it did not (a claim about
+  the shell, never about pixels). With Darkness.DISPLAY_OFF, an off no method can carry out
+  (NOT_SUPPORTED) shows black instead and keeps NOT_SUPPORTED, so the Power tab still says the
+  display cannot be switched (console design §7: "showing black otherwise"). Every other look
+  takes a curtain still up down, so black is up exactly while one of those offs is carried out.
 - **How to act:** read first and write only when the display reads other than wanted. A display
   that reads as wanted gives `confirmed` with no write; after a DDC/CI standby blip the display
   reappears, reads standby, and is left alone: no loop.
@@ -35,37 +50,59 @@ from __future__ import annotations
 import logging
 import math
 import threading
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Final, Protocol
 
+from appliance.display_host.power_timetable import acts_on_new_document, next_set_time, wanted
 from contracts.node_output import (
     BEST_DETECTED,
     METHOD_PRECEDENCE,
+    Darkness,
     DisplayIdentity,
     DisplayMode,
     InForce,
+    InForceKind,
     MethodChoice,
     OutputDocument,
     OutputReport,
     Power,
     PowerAttempt,
     PowerMethod,
-    PowerRequest,
     PowerResult,
 )
 
 PROBE_SECONDS: Final = 5.0     # one read-only check of one method on one Output
 READ_SECONDS: Final = 5.0      # one read-back
 WRITE_SECONDS: Final = 10.0    # one power write, its read-back included
-TICK_SECONDS: Final = 1.0      # the worker's longest sleep: a timed request ends within it
+TICK_SECONDS: Final = 1.0      # the worker's longest sleep: a test end or a set time is seen within it
 
 log = logging.getLogger(__name__)
 
 
 class Clock(Protocol):
-    def monotonic(self) -> float: ...                 # seconds; the Pi's own clock, never compared elsewhere
+    def monotonic(self) -> float: ...   # the test's count; the Pi's own clock, never compared elsewhere
+
+    def time(self) -> float: ...        # the Pi's wall clock, UTC seconds; compared only with set times
+
+    def wait(self, condition: threading.Condition, seconds: float) -> None:
+        """The worker's sleep: wait on `condition` (held) for at most `seconds` of this clock."""
+        ...
+
+
+class PiClock:
+    """The Pi's own clocks and a real wait (the production Clock)."""
+
+    def monotonic(self) -> float:
+        return time.monotonic()
+
+    def time(self) -> float:
+        return time.time()
+
+    def wait(self, condition: threading.Condition, seconds: float) -> None:
+        condition.wait(seconds)
 
 
 class PowerMethodAdapter(Protocol):
@@ -100,6 +137,19 @@ class PowerMethodAdapter(Protocol):
         ...
 
 
+class BlackPicture(Protocol):
+    """The shell's opaque black curtain above every view on an Output (WestonBackend in production).
+    Every call returns within its `timeout` and never raises."""
+
+    def show(self, output_id: str, black: bool, *, timeout: float) -> bool:
+        """Put the curtain up (`black`) or take it down; whether the shell confirmed it."""
+        ...
+
+    def shown(self, output_id: str) -> bool | None:
+        """Whether the shell last said the curtain is up; None while it has no such Output."""
+        ...
+
+
 class ReportSink(Protocol):
     """Where the controller's results go: the display bus session in production."""
 
@@ -109,55 +159,62 @@ class ReportSink(Protocol):
 
 
 class Trigger(StrEnum):
-    """Why the controller looked at an Output (the apply rule's four triggers)."""
+    """Why the controller looked at an Output."""
     START = "start"
     CHANGE = "change"
     APPEARED = "appeared"
     ENDED = "ended"
+    SET_TIME = "set-time"
 
 
 @dataclass(frozen=True)
 class Decision:
-    """What one look at an Output decided: the request in force (None = no document: leave it) and
-    the Pi's remaining count for it."""
-    in_force: PowerRequest | None
-    remaining_seconds: int | None
+    """What one look at an Output decided: what is in force (None: no document) and the power to
+    carry out (None: leave the display as it is: no document, or the timetable ran out)."""
+    in_force: InForce | None
+    power: Power | None
 
 
-def in_force(document: OutputDocument | None, started: Mapping[str, float], now: float) -> Decision:
-    """The first request of `document.power` that has not ended at `now`; `started` maps a timed
-    request's id to the monotonic second the Pi first applied it (a timed request absent from it
-    has not started, so it has not ended). Pure."""
+def in_force(document: OutputDocument | None, started: Mapping[str, float], monotonic_now: float,
+             wall_now: float) -> Decision:
+    """The test while its own count runs (a test absent from `started` has not started, so it is
+    running), else `power_timetable.wanted` at the Pi's wall clock. `started` maps the test's id to
+    the monotonic second the Pi first applied it. Pure."""
     if document is None:
         return Decision(None, None)
-    for request in document.power:
-        if request.for_seconds is None:
-            return Decision(request, None)
-        start = started.get(request.request_id)
-        if start is None:
-            return Decision(request, request.for_seconds)
-        left = start + request.for_seconds - now
+    test = document.power.test
+    if test is not None:
+        start = started.get(test.request_id)
+        left = test.for_seconds if start is None else start + test.for_seconds - monotonic_now
         if left > 0:
-            return Decision(request, min(request.for_seconds, math.ceil(left)))
-    return Decision(None, None)     # unreachable for a valid document: its last request is untimed
+            remaining = min(test.for_seconds, math.ceil(left))
+            return Decision(InForce(InForceKind.TEST, test.power, test.request_id, remaining, None), test.power)
+    timetable = wanted(document.power, wall_now)
+    return Decision(InForce(timetable.kind, timetable.power, None, None, timetable.since), timetable.power)
 
 
-def next_deadline(document: OutputDocument | None, started: Mapping[str, float]) -> float | None:
-    """The monotonic second the request now in force ends (None: nothing timed is in force). Pure.
-
-    It takes no clock reading, so it is the earliest end among the started timed requests above
-    the stack's first untimed or not-yet-started request: in a 1b stack (at most one timed request
-    over the standing one) exactly the request in force. The worker never sleeps past
-    TICK_SECONDS, so a deeper stack still ends within a tick."""
+def next_deadline(document: OutputDocument | None, started: Mapping[str, float], monotonic_now: float,
+                  wall_now: float) -> float | None:
+    """Seconds until the running test ends or the timetable's next set time, whichever is first
+    (None: neither). The worker sleeps min(TICK_SECONDS, this). Pure."""
     if document is None:
         return None
-    ends: list[float] = []
-    for request in document.power:
-        start = started.get(request.request_id)
-        if request.for_seconds is None or start is None:
-            break
-        ends.append(start + request.for_seconds)
-    return min(ends, default=None)
+    waits: list[float] = []
+    test = document.power.test
+    if test is not None and (start := started.get(test.request_id)) is not None:
+        left = start + test.for_seconds - monotonic_now
+        if left > 0:
+            waits.append(left)
+    following = next_set_time(document.power, wall_now)
+    if following is not None:
+        waits.append(following - wall_now)
+    return min(waits, default=None)
+
+
+def _carried(in_force: InForce | None) -> tuple[object, ...] | None:
+    """What a look carried out, for comparing with what is wanted now: the kind, the power and the
+    test's id (never the count or `since`)."""
+    return None if in_force is None else (in_force.kind, in_force.power, in_force.request_id)
 
 
 def _resolve(choice: MethodChoice, answers: tuple[PowerMethod, ...]) -> PowerMethod | None:
@@ -175,8 +232,8 @@ class _Port:
     identity: DisplayIdentity | None = None
     modes: tuple[DisplayMode, ...] = ()
     document: OutputDocument | None = None
-    started: dict[str, float] = field(default_factory=dict)   # timed request id -> first apply
-    acted: str | None = None                  # the request id the last attempt carried out
+    started: dict[str, float] = field(default_factory=dict)   # the test's id -> first apply
+    acted: tuple[object, ...] | None = None   # `_carried` of the last look's in-force
     answers: tuple[PowerMethod, ...] = ()
     method: PowerMethod | None = None
     for_change: int | None = None
@@ -187,9 +244,10 @@ class _Port:
 class OutputPowerController:
     """Every Output's power, from its document, through the adapters, to the sink."""
 
-    def __init__(self, adapters: Mapping[PowerMethod, PowerMethodAdapter], sink: ReportSink,
-                 clock: Clock) -> None:
+    def __init__(self, adapters: Mapping[PowerMethod, PowerMethodAdapter], sink: ReportSink, clock: Clock,
+                 black: BlackPicture) -> None:
         self._adapters = dict(adapters)
+        self._black = black
         self._sink = sink
         self._clock = clock
         self._ports: dict[str, _Port] = {}
@@ -216,7 +274,7 @@ class OutputPowerController:
 
     def document(self, output_id: str, document: OutputDocument) -> None:
         """A document for `output_id` arrived (the desired view's callback); acts when its change
-        rose. Thread-safe, never blocks."""
+        rose and it wants something else at the Pi's clock. Thread-safe, never blocks."""
         if document.output_id != output_id:
             raise ValueError("output_document_output")
         with self._wake:
@@ -224,10 +282,18 @@ class OutputPowerController:
             seen = port.document
             port.document = document
             # A count belongs to its request id: a re-put (a new bus epoch) keeps it running.
-            port.started = {request.request_id: port.started[request.request_id]
-                            for request in document.power if request.request_id in port.started}
-            if seen is None or document.change > seen.change:
+            test = document.power.test
+            port.started = {test.request_id: port.started[test.request_id]} if (
+                test is not None and test.request_id in port.started) else {}
+            if seen is not None and document.change <= seen.change:
+                return
+            if seen is None or port.acted is None or acts_on_new_document(
+                    seen.power, document.power, self._clock.time()):
                 self._queue(output_id, Trigger.CHANGE)
+            elif port.for_change is not None:
+                # The same wanted power: answer the new change with what is already carried out.
+                port.for_change = document.change
+                self._put(output_id, port)
 
     def output(self, output_id: str, *, connected: bool, identity: DisplayIdentity | None,
                modes: tuple[DisplayMode, ...]) -> None:
@@ -268,7 +334,7 @@ class OutputPowerController:
         while True:
             with self._wake:
                 while not self._stopping and not self._due:
-                    self._wake.wait(self._sleep())
+                    self._clock.wait(self._wake, self._sleep())
                     self._ended()
                 if self._stopping:
                     return
@@ -280,21 +346,24 @@ class OutputPowerController:
                 log.exception("output power: %s look at %s failed", trigger.value, output_id)
 
     def _sleep(self) -> float:
-        """Under the lock: until the next timed request ends, never past TICK_SECONDS."""
-        now = self._clock.monotonic()
-        waits = [deadline - now for port in self._ports.values()
-                 if (deadline := next_deadline(port.document, port.started)) is not None and deadline > now]
+        """Under the lock: until the next test end or set time, never past TICK_SECONDS."""
+        monotonic_now, wall_now = self._clock.monotonic(), self._clock.time()
+        waits = [wait for port in self._ports.values()
+                 if (wait := next_deadline(port.document, port.started, monotonic_now, wall_now)) is not None
+                 and wait > 0]
         return min([TICK_SECONDS, *waits])
 
     def _ended(self) -> None:
-        """Under the lock: an Output whose request in force is no longer the one it carried out."""
-        now = self._clock.monotonic()
+        """Under the lock: an Output whose in-force is no longer the one it carried out (the test
+        ended, or the wall clock reached a set time with another power)."""
+        monotonic_now, wall_now = self._clock.monotonic(), self._clock.time()
         for output_id, port in self._ports.items():
             if port.acted is None:
                 continue
-            current = in_force(port.document, port.started, now).in_force
-            if current is not None and current.request_id != port.acted:
-                self._queue(output_id, Trigger.ENDED)
+            current = _carried(in_force(port.document, port.started, monotonic_now, wall_now).in_force)
+            if current is not None and current != port.acted:
+                ended = port.acted[0] is InForceKind.TEST
+                self._queue(output_id, Trigger.ENDED if ended else Trigger.SET_TIME)
 
     def _act(self, output_id: str, trigger: Trigger) -> None:
         """One look at one Output: probe every method (reads only), then carry out the request in
@@ -311,30 +380,56 @@ class OutputPowerController:
             # (A pending APPEARED stays: the display came back after this look's probes.)
             if self._due.get(output_id) is Trigger.CHANGE:
                 del self._due[output_id]
-            decision = in_force(document, port.started, now)
-            request = decision.in_force
-            if document is None or request is None:   # no document: leave the display as it is
+            decision = in_force(document, port.started, now, self._clock.time())
+            carried, power = decision.in_force, decision.power
+            if document is None or carried is None or power is None:   # leave the display as it is
                 port.answers = answers
                 if port.method not in answers:
                     port.method = None
+                if document is not None:          # ran out: say so for this change; no attempt
+                    port.for_change, port.in_force, port.acted = document.change, carried, _carried(carried)
                 self._put(output_id, port)
                 return
-            if request.for_seconds is not None:
-                port.started.setdefault(request.request_id, now)
+            if carried.kind is InForceKind.TEST and carried.request_id is not None:
+                port.started.setdefault(carried.request_id, now)
         method = _resolve(document.method, answers)
-        if method is None:
+        black_picture = (carried.kind is InForceKind.TIMETABLE
+                         and document.power.darkness is Darkness.BLACK_PICTURE)
+        if black_picture and power is Power.OFF:
+            # Black picture's off: the curtain is the whole of it; no power method runs.
+            confirmed = self._black.show(output_id, True, timeout=WRITE_SECONDS)
+            result = PowerResult.CONFIRMED if confirmed else PowerResult.DID_NOT_ANSWER
+        elif black_picture and method is None:
+            # Its on with no method to check the display: the curtain comes down, and that is all.
+            confirmed = self._black.show(output_id, False, timeout=WRITE_SECONDS)
+            result = PowerResult.CONFIRMED if confirmed else PowerResult.DID_NOT_ANSWER
+        elif method is None:
             result = PowerResult.DID_NOT_ANSWER if answers else PowerResult.NOT_SUPPORTED
+            black = power is Power.OFF and result is PowerResult.NOT_SUPPORTED   # showing black otherwise
+            if self._curtain(output_id, black) is False and black:
+                result = PowerResult.DID_NOT_ANSWER      # nothing turned it off: the photos stay up
         else:
-            result = _carry_out(self._adapters[method], output_id, request.power, document)
+            # Every on, black picture's too, brings the display itself on (read first, write only
+            # when it reads off): a test, or a night with displays turned off, may have left it off.
+            lowered = (self._black.show(output_id, False, timeout=WRITE_SECONDS) if black_picture
+                       else self._curtain(output_id, False))
+            result = _carry_out(self._adapters[method], output_id, power, document)
+            if lowered is False:
+                result = PowerResult.DID_NOT_ANSWER      # the display is on; the shell kept black up
         elapsed_ms = max(0, round((self._clock.monotonic() - began) * 1000))
         with self._wake:
             port.answers, port.method = answers, method
             port.for_change, port.result = document.change, result
-            port.in_force = InForce(request.request_id, decision.remaining_seconds)
-            port.acted = request.request_id
+            port.in_force, port.acted = carried, _carried(carried)
             self._put(output_id, port)
-        self._sink.emit_attempt(PowerAttempt(output_id, document.change, request.request_id,
-                                             request.power, method, result, elapsed_ms))
+        self._sink.emit_attempt(PowerAttempt(output_id, document.change, carried, method, result, elapsed_ms))
+
+    def _curtain(self, output_id: str, black: bool) -> bool | None:
+        """Up when `black`; else down when the shell may have it up (it said so, or cannot say).
+        Whether the shell confirmed; None when nothing was asked of it."""
+        if black or self._black.shown(output_id) is not False:
+            return self._black.show(output_id, black, timeout=WRITE_SECONDS)
+        return None
 
 
 def _carry_out(adapter: PowerMethodAdapter, output_id: str, power: Power,
@@ -353,5 +448,5 @@ def _carry_out(adapter: PowerMethodAdapter, output_id: str, power: Power,
     return result
 
 
-__all__ = ["PROBE_SECONDS", "READ_SECONDS", "TICK_SECONDS", "WRITE_SECONDS", "Clock", "Decision",
-           "OutputPowerController", "PowerMethodAdapter", "ReportSink", "Trigger", "in_force", "next_deadline"]
+__all__ = ["PROBE_SECONDS", "READ_SECONDS", "TICK_SECONDS", "WRITE_SECONDS", "BlackPicture", "Clock", "Decision",
+           "OutputPowerController", "PiClock", "PowerMethodAdapter", "ReportSink", "Trigger", "in_force", "next_deadline"]

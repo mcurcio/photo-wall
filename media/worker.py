@@ -22,6 +22,7 @@ from central.assets.maintenance import CacheSettings, MediaCacheBudget
 from central.assets.store import CacheStore
 from central.content_wiring import build_job_runtime
 from central.db import Database, DatabaseTransactionClock
+from central.infra.house_store import seed_house
 from central.infra.key_content_store import PgKeyContent
 from central.infra.media_cache_records import PgMediaVariantUse
 from central.infra.photo_library_store import PgPhotoLibrary
@@ -350,6 +351,9 @@ async def _entry():
         media_maker=worker.media_maker(store=media_store,
                                        transactions=PgTransactions(db)))
     await _blocking(repository.db.migrate)
+    # Settings › House starts from this process's zone when Central has not seeded it yet: the
+    # worker reads Runtime (the Planner's Program windows) in house time, as Central does.
+    await _blocking(seed_house, db, DatabaseTransactionClock())
     await _blocking(ProcrastinateMediaQueue.apply_schema, dsn)
     app = create_worker_app(dsn)
     checks = LibraryChecks(

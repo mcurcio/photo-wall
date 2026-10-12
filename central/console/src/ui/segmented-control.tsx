@@ -41,7 +41,7 @@ export function SegmentedControl<V extends string>({ label, value, options, onCh
             key={option.value}
             value={option.value}
             className={cn(
-              "grow cursor-pointer border-0 bg-surface-input px-3 py-1.5 whitespace-nowrap",
+              "grow cursor-pointer border-0 bg-surface-input px-3 py-1.5 whitespace-nowrap max-md:min-h-11",
               "font-sans text-sm text-text",
               "focus-visible:relative focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus",
               "data-checked:bg-accent data-checked:text-on-accent",

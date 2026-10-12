@@ -13,9 +13,11 @@ import pytest
 from support.photo_pools import photo, seed_pool
 
 from central.catalog import Candidate, SourcePool
+from central.house_time.model import HouseTime
 from central.infra.photo_library_store import PgPhotoLibrary
 from central.wall_plan.order import (
     ORDERS,
+    UTC_HOUSE,
     LineQuery,
     PoolLines,
     ShapeBounds,
@@ -104,3 +106,22 @@ def test_the_line_holds_each_photo_once_with_every_pool_that_has_it(line):
     assert len(answer.members) == len(photos)
     shared = [member for member in answer.members if len(member.pool_keys) == 2]
     assert len(shared) == 8
+
+
+@pytest.mark.parametrize("house, extra", [(UTC_HOUSE, set()),
+                                          (HouseTime(zone="Europe/Berlin"), {"before-midnight"})])
+def test_on_this_day_counts_capture_days_on_the_house_calendar_in_both(line, house, extra):
+    """Roadmap 2b: a photo taken at 23:59 UTC on 10 October was taken on 11 October in Berlin, so
+    a Berlin house's On this day holds it; SQL and Python read the same zone."""
+    registry, keys, python, photos = line
+    query = LineQuery(pool_keys=tuple(sorted(keys)), scene_id="scene", pass_number=1,
+                      order="on_this_day", now=NOW, shape=ANY_SHAPE, limit=1000, house=house)
+    with registry.db.transaction() as conn:
+        sql = [m.asset_id for m in PgPhotoLibrary.ranked_line_in(conn, query).members]
+    memory = python.line(query).members
+    assert sql == [m.candidate.asset_id for m in memory]
+    group = {f"today{n}" for n in range(5)} | extra
+    names = {photo(name, taken_at=0).upstream_id: name
+             for name in group | {"before-midnight", "after-midnight"}}
+    name_at = {p.taken_at: names.get(p.upstream_id) for p in photos}
+    assert {name_at[m.candidate.captured_at] for m in memory[:len(group)]} == group

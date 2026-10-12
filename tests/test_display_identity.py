@@ -21,6 +21,7 @@ from fastapi.testclient import TestClient
 
 from central.app import create_app
 from central.content_catalog.catalog import device_id_for_serial
+from central.db import DatabaseTransactionClock
 from central.infra.display_store import (
     DOCUMENT_STREAM,
     REPORT_STREAM,
@@ -36,6 +37,7 @@ from contracts.node_output import (
     BEST_DETECTED,
     DisplayIdentity,
     DisplayMode,
+    Power,
     PowerMethod,
     decode_output_document,
     encode_output_report,
@@ -120,7 +122,7 @@ def _sql(registry, sql: str, params=()) -> list[dict]:
 
 def _documents(registry, serial: str, pipe: Pipe = Pipe.FLEET) -> dict:
     stores = PgLinkStores(registry.db)
-    source = DisplayDocuments(stores, DisplayWakes()).source(serial, pipe)
+    source = DisplayDocuments(stores, DisplayWakes(), times=DatabaseTransactionClock()).source(serial, pipe)
     return asyncio.run(source.documents(DOCUMENT_STREAM))
 
 
@@ -233,8 +235,8 @@ def test_the_output_document_changes_only_when_its_body_does(registry):
     first = _documents(registry, "pi-a")
     assert sorted(first) == [output_document_key("HDMI-A-1"), output_document_key("HDMI-A-2")]
     document = decode_output_document(first[output_document_key("HDMI-A-1")])
-    assert (document.change, document.method, [request.request_id for request in document.power]) == (
-        1, BEST_DETECTED, ["standing"])
+    assert (document.change, document.method, document.power.now, document.power.test) == (
+        1, BEST_DETECTED, Power.ON, None)
     assert _documents(registry, "pi-a") == first                     # unchanged: the same bytes, change 1
 
     _report(registry, "pi-a", "HDMI-A-1", NO_SERIAL)

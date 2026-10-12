@@ -280,7 +280,7 @@ The console is one page: a header (Central's health, the snapshot age with **Ref
 | **Wall** | `#/wall`; Edit layout: `#/wall/layout`; a Frame's page: `#/wall/frames/<id>/<tab>`, tab `overview` (the default; `#/wall/frames/<id>` opens it), `position`, `picture` or `hardware` | The read-only plan, the Unplaced tray, the To finish list and the first-run guidance; one click on a Frame opens [its page](#operator-console-calibration-and-conflict-states); [Edit layout](#operator-console-placing-moving-and-deleting-frames-and-the-unplaced-tray) holds every layout write. |
 | **Now** | `#/now`; Show now: `#/now/show/scene`, `#/now/show/review` | Central's live Runs, [Show now](#now-show-a-scene-now), Run cards, and why a frame shows what it does. |
 | **Scenes** | `#/scenes`; `#/scenes/new/<step>` (optionally `?target=<frame-id>` when started from a Frame); `#/scenes/<id>/edit/<step>` | [Making and editing Scenes](#scenes-make-a-scene-step-by-step). Steps: `kind`, `photos`, `frames`, `media` (hand-picked only), `playback`, `review`. |
-| **Schedule** | `#/schedule`; `#/schedule/new/<step>` | [Programs](#schedule-a-program-step-by-step). Steps: `scene`, `when`, `review`. |
+| **Schedule** | `#/schedule`; `#/schedule/new/<step>` | [Schedules](#schedule-a-repeating-schedule-step-by-step). Steps: `scene`, `when`, `review`. |
 | **Sources** | `#/sources`; a new Source and an edit open the Photo source editor | [Sources](#sources-add-and-manage-a-source): one editor with Include, Exclude and the pool as it fills. |
 | **Hardware** | `#/hardware`; one Pi in focus: `#/hardware?pi=<device-id>`; one Pi: `#/hardware/<device-id>` | The [Hardware list and Hardware pages](#the-hardware-list-and-the-hardware-pages). |
 | *Software and screens* (no sidebar entry) | one Pi: `#/players/<device-id>` | The [Software and screens page](#the-software-and-screens-page), reached from a Pi's Hardware page. There is no list at `#/players`, and the old `#/equipment` and `#/players` addresses open the Wall. |
@@ -592,7 +592,7 @@ On Now, open **Why nothing new?** on the frame's row. It opens its own group bes
 
 | Step | Stops when | What to do at that stop |
 |---|---|---|
-| 1. Intended? | "On top: nothing · no Run puts a layer on this Frame now". (If a Run on the frame ended, this step is only informational and the chain stops at step 2.) | [Show a Scene now](#now-show-a-scene-now), or [schedule a Program](#schedule-a-program-step-by-step), that targets the frame. |
+| 1. Intended? | "On top: nothing · no Run puts a layer on this Frame now". (If a Run on the frame ended, this step is only informational and the chain stops at step 2.) | [Show a Scene now](#now-show-a-scene-now), or [schedule a Scene](#schedule-a-repeating-schedule-step-by-step), that targets the frame. |
 | 2. Run ended? | The last Run on the frame ended ("evening's Run ended at 18:00:30 after one cycle") or was cancelled. If the Scene keeps its last still, it adds "if its last item was a photo, the frame keeps that still (a video is not kept)". | "After one cycle" means Keep playing was off: edit the Scene and turn it on, then start it again. |
 | 3. Authored? | The winning Scene uses fixed, hand-picked media ("new photos never appear by design"), or shows black by design. | Nothing is wrong. To show new photos, use a live-source Scene. |
 | 4. The Source | None of the Scene's Sources has photos in its pool: "None of this Scene's Sources has photos yet.", or "Photo Wall is still reading this Scene's Sources." while a check runs. Each Source is named with its pool's count and its check state. A Source whose last check failed but whose pool has photos passes: its photos keep playing. | Read the [Source states](#the-media-pipeline) below; an empty complete check means the Source matches nothing, so widen it. |
@@ -682,45 +682,25 @@ To edit:
 
 Pressing Replace again with exactly the same Scene after an outcome you did not see is safe: Central accepts an identical save of the stored revision.
 
-### Schedule: a Program step by step
+### Schedule: a repeating Schedule step by step
 
-A Program binds a Scene to **one time window** with a **priority** (`PUT /v1/operator/programs/{id}`; `DELETE` removes it). Schedule lists the Programs as cards, then **Schedule a Program**; **Schedule it** on a Scene's card, or after saving a Scene, opens the flow with that Scene chosen. The flow (`#/schedule/new/<step>`) asks:
+A Schedule (Central's and the API's **Program**) plays one Scene every week on its days, from its start to its end, at a named priority (`POST /v1/operator/programs`, `PUT …/{id}` to save, `POST …/{id}/apply-now`, `DELETE …/{id}?revision=`). Its windows are worked out by Central on the house clock (Settings › House), never by the browser ([module-runtime](module-runtime.md), [0021](decisions/0021-power-timetable-and-repeating-schedules.md)). The Schedule page (`#/schedule`) shows the week, then the Schedules as cards, then the Default Scene and Night off. **New Schedule**, or **Schedule it** on a Scene's card or after saving a Scene, opens the flow (`#/schedule/new/<step>`):
 
 | Step | Asks | Default |
 |---|---|---|
 | 1 Scene | **Scene** | the Scene you last saved or picked |
-| 2 When | **Window start** and **Window end**; under Advanced, **Repeat on** and **Number of windows** | none: required; every day; 1 |
-| 3 Review | Every answer with Change; **Program name**; under Advanced, **Priority** and the **Id** (derived from the name). Then **Schedule Program**. | priority 0 |
+| 2 When | **Days**, **Starts** and **Ends**, each a clock time or sunrise or sunset plus or minus minutes; an end at or before the start is the next day, shown as "(ends next day)" | every day; none: required |
+| 3 Review | Every answer with Change; the **Schedule name**; **Priority** (Normal, Special event, Always wins) | Normal |
 
-**Times are in your browser's time zone.** The page, When and Review name it ("Times in Europe/London"); if the browser and the wall are in different zones, that label is the only warning. The flow refuses a window that ends before it starts, a window that has already ended (Central would record it as missed), and a priority that is not a whole number.
+- **The Default Scene** (the week page) plays wherever no Schedule does, beneath every one; Nothing leaves those Frames with their last photo. It never protects its Frames.
+- **Saving a change applies from the next window**: a window playing now keeps its end, and the card names it until it ends, then the new rule's next window. **Save and apply now** finishes the window playing now and plays the new rule's window at once. A Schedule made during one of its own windows plays at once, for the rest of that window (owner, 2026-10-12: "Start right away, for the rest of tonight's window"); a window of a saved rule that started before the save does not play, and the week draws it dashed and says so in its name.
+- **A handed-over Scene never replaces your changes.** Pressing Schedule it for another Scene while a draft holds changes keeps the draft and offers "Schedule Scene X instead".
+- **Removing** a Schedule whose window is playing asks first: its Scene finishes at the end of its current cycle, after any outro, and no later window plays. The card says whether Central accepted, refused or gave no answer; after a refusal or no answer, check the card before retrying.
+- **Edits are compared** with the Schedule you opened: a change made elsewhere since is refused ("changed since you opened it"), and the flow offers Reload.
 
-**A handed-over Scene never replaces your changes.** If you press Schedule it for another Scene while a Schedule draft holds changes, the Scene step keeps your draft and offers "Schedule Scene X instead".
+### Reading a Schedule's card
 
-**Separate windows.** For a repeating show, open **Advanced** on When:
-- **Number of windows** is 1 by default, which schedules one Program under its id. Any other number, 2 to 60, creates that many **separate Programs** `<id>-1`, `<id>-2`, …, and the final button becomes **Add separate windows**. A number outside that range is a reason on the field, never silently reset.
-- **Repeat on** is a weekday mask; every day is ticked by default. It is used only with more than one window.
-- Window 1 is the window entered on When. Each later window falls on the **next ticked day at the same local clock times**, so a daylight-saving change keeps 18:00 at 18:00. Review lists every planned window.
-- Each window is a **real, separately stored Program**, which you manage and remove individually. There is **no stored recurrence rule**, and no control implies a living recurring schedule (slice 3 Q2).
-- When's Continue refuses windows that would overlap ("Each window must end before the next starts." — for example, a window longer than the day spacing). Review refuses a window id that already exists, or an `<id>-<n>` longer than 128 characters.
-- If some windows fail, the flow stays on Review and the status lists them as **not created** (Central refused them) or **not confirmed** (a request that failed or did not complete may still have been stored). Pressing **Add separate windows** again sends only the windows Central does not yet list.
-
-**Removing a Program.** **Remove** on an upcoming or past card sends the removal immediately. The card reports whether Central accepted it, refused it, or gave an unknown outcome; after a refusal or unknown outcome, review the current Program state before retrying. If Central accepted removal but the refreshed list has not caught up yet, the card says it is waiting for the list to update. Removing a Program that is **running now**, or whose window has started, asks for confirmation: its Run is asked to finish at the end of its current cycle, after any outro, and later windows stay.
-
-**Editing an upcoming Program.** Use **Edit** on its card to correct the Scene, window or priority while its window is still in the future. The editor opens at Review with the saved answers filled in. Its Program id stays the same, and a Program created by the separate-windows helper is edited as one independent window. A saved time in the later occurrence of a repeated daylight-saving hour remains editable: When and Review identify the saved occurrence with its zone and UTC offset. Leaving that time field unchanged preserves the exact saved instant; changing it uses the browser's local-time interpretation. Save compares the exact Program you opened with Central's current Program, so another operator's change or removal is refused rather than overwritten. Reload the current Program and review your edits if it changed. Central also refuses the save if either the old or proposed window has started by the time the write reaches it. An already started Program's Run keeps its admitted snapshot; use the Run controls for live changes.
-
-### Reading Program states
-
-Each Program card, `Program X`, shows its Scene, its window in local time, its priority and one state, read from what Central served; Running, Refused and Missed also carry a chip. Times are the Run's, never the window's.
-
-| State | Reads | Means |
-|---|---|---|
-| Upcoming | "Starts in 2 h · Tue 2 Mar 18:00–20:00" | Its window has not started. |
-| Running | "Running since 18:00" | Central admitted its Run and it is live. |
-| Ran | "Ran 18:00–18:00:30 (one cycle, then ended)", or "Cancelled at 19:10" | Its Run ended. "(one cycle, then ended)" marks a Scene with Keep playing off. |
-| Refused (alarm) | "Did not start: lobby-left was protected by the Run of evening." | Another Run protected one of its frames when the window started. The Run named is the one Central recorded as blocking it; if that Run is no longer listed, the card says "…protected by another Run, no longer listed." A Scene that protects a frame covered by a higher-priority Run reads "Did not start: it protects frames that a higher-priority Run of evening covered." |
-| Missed (to-do) | "Missed: its window had ended before Central first scheduled it." | Only two cases: the Program was saved after its window ended, or its window ended before Central's very first scheduler tick. |
-
-**A warm restart is not a miss.** If Central was down during a window, it catches up logically when it comes back: it admits the Run and ends it as the plan would have. The card reads "Ran" even though the wall showed nothing, and its hint says so. "Ran" describes Central's Runs, never what the panels showed. Past Programs sit under a closed "Past (N)". Central serves Runs and outcomes for one day, so older cards read "details older than a day".
+Each card names the Schedule, its Scene, its days and times, the window playing now or the next one (Central's, on the house clock), its priority and a state. "Playing" (ok), "Refused" (alarm: a protected Scene on one of its Frames kept the window out; the card names it) and "No window" (to-do: none in the coming week, as a sunrise time on days without one) carry a chip. Why is this playing on the Frame page names the Schedule on top and what it beat. If Central was down during a window, it catches up when it is back: the card reads the window as played even though the wall showed nothing, because it describes Central's plan, never what the panels showed.
 
 ### Sources: add and manage a Source
 
@@ -731,7 +711,7 @@ The page opens with: "A Photo source asks Immich for photos: albums, people, a p
 | Part | Asks | Default |
 |---|---|---|
 | Photo library | Which Immich (#14). Hidden when there is only one; choosing another starts the query again. | the only one |
-| **Include** | Albums (#15) and people (#16): "All of these must be in the photo", with "For any of them, add another Source to the Scene" (#17). A place (#18): city, state and country chosen together. Dates (#19, #20): **Any time**, **Between** two dates (in this browser's time zone), or **In the last** N years and months (counted back from each check; the worker counts in UTC until the house has a time zone). **Favourites only** (#22). Tags (#23): every chosen tag, each including its nested tags. Media types (#25): **Photos**, **Live photos**, **Videos** (at least one). **Include partners' photos** (#32). | everything in the library; all three media types; partners off |
+| **Include** | Albums (#15) and people (#16): "All of these must be in the photo", with "For any of them, add another Source to the Scene" (#17). A place (#18): city, state and country chosen together. Dates (#19, #20): **Any time**, **Between** two dates (in this browser's time zone), or **In the last** N years and months (counted back from each check on the house calendar, Settings › House). **Favourites only** (#22). Tags (#23): every chosen tag, each including its nested tags. Media types (#25): **Photos**, **Live photos**, **Videos** (at least one). **Include partners' photos** (#32). | everything in the library; all three media types; partners off |
 | **Exclude** | **Leave out albums** (#26), **Leave out people** (#27), **Leave out tags** (#28), **Leave out screenshots** (#31) | none; screenshots left out |
 | The fixed line | "Archived, hidden and locked photos are never included" (#29, #30): not a switch | — |
 | Name | **Name**: what Scenes and Show now call this Source (like `holiday`) | none: required to save |
@@ -1029,13 +1009,13 @@ Roadmap 1b: each Pi reports the display on each HDMI port, Central recognises it
 
 | What | Writer | Reader | Kept in Central |
 |---|---|---|---|
-| Output report (connected, EDID identity and modes, methods that answered, request in force, last result) | the Pi's display controller | the worker's report judge | `node_link_records` (every report), `displays`, `shared_serials`, `output_displays` (the Display last seen per port) |
+| Output report (connected, EDID identity and modes, methods that answered, what is in force, last result) | the Pi's display controller | the worker's report judge | `node_link_records` (every report), `displays`, `shared_serials`, `output_displays` (the Display last seen per port) |
 | Power attempt (`display.record.power`) | the Pi's display controller | recorded only | `node_link_records` |
-| Output document (power request stack, method, switches) | the worker, from Displays, bindings and `power_requests` | the Pi's display controller | `output_documents` (the latest per port) |
+| Output document (the power timetable with the test on top, method, switches) | the worker, from Displays, bindings, Night off, holds and `power_requests` (the test) | the Pi's display controller | `output_documents` (the latest per port) |
 
 **Readiness.** Nothing stores whether a Frame is ready: `frames.position_generation` and `frames.position_display_id` record each Position commit, and readiness is worked out when read (`unbound`, `display-changed`, `position-needed`, `ready`; `central/displays/model.py`). Migration 073 dropped `frames.calibration_valid`, marking every Frame that was ready as committed at its current generation; at the first report each Frame adopts the display on its port. **Rolling Central back past 073 is not supported:** the previous build reads `calibration_valid`, which no longer exists, and no reverse SQL is kept.
 
-**A console test, end to end.** **Test: turn off** posts `POST /v1/operator/frames/{id}/power-tests` (no body); Central keeps one live test per Frame in `power_requests` for 5 minutes on its own clock and sends `pg_notify('photo_wall_output_documents', <device id>)` in the same transaction. The worker's one LISTEN connection (`DisplayWakes.listen`, reconnecting after a second, waking every Node at each connect) wakes that Pi's links, which put the new document; the Pi acts and reports, and `GET /v1/operator/frames/{id}/power` reads "Waiting for the Pi" until the report names the change that carried the test. **Turn on** is `DELETE` on the same path (204): it deletes the live test, so the request underneath (standing on) takes over, and the tab waits until the Pi reports that request in force on the change that dropped the test. Settings are `PUT /v1/operator/displays/{display_id}/power-settings`; the Hardware tab reads `GET /v1/operator/frames/{id}/display`. All are operator routes behind the admin token.
+**A console test, end to end.** **Test: turn off** posts `POST /v1/operator/frames/{id}/power-tests` (no body); Central keeps one live test per Frame in `power_requests` for 5 minutes on its own clock and sends `pg_notify('photo_wall_output_documents', <device id>)` in the same transaction. The worker's one LISTEN connection (`DisplayWakes.listen`, reconnecting after a second, waking every Node at each connect) wakes that Pi's links, which put the new document; the Pi acts and reports, and `GET /v1/operator/frames/{id}/power` reads "Waiting for the Pi" until the report names the change that carried the test. **Turn on** is `DELETE` on the same path (204): it deletes the live test, so the power timetable underneath takes over, and the tab waits until the Pi reports the timetable in force on the change that dropped the test. Settings are `PUT /v1/operator/displays/{display_id}/power-settings`; the Hardware tab reads `GET /v1/operator/frames/{id}/display`. All are operator routes behind the admin token.
 
 | What you see | What it means | What to do |
 |---|---|---|
@@ -1048,4 +1028,31 @@ Roadmap 1b: each Pi reports the display on each HDMI port, Central recognises it
 
 **On the Pi.** The display controller (`photo-wall-display-controller.service`) runs the display session and the power methods. Read it with `sudo journalctl -b --no-pager -u photo-wall-display-controller.service` ([Reaching a Node over SSH](#reaching-a-node-over-ssh)). Its device access: `DevicePolicy=closed` with `DeviceAllow=char-cec rw` and `DeviceAllow=char-i2c rw`, the `video` group for `/dev/cecN` and the `i2c` group for `/dev/i2c-N` (declared by `debian/photo-wall-node.sysusers`; [gap G15](player-architecture.md#observed-gaps)). `id pw-display` does not list them: the groups are the unit's own, so check the running process with `grep Groups /proc/$(systemctl show -p MainPID --value photo-wall-display-controller.service)/status`. The base loads `i2c-dev` at boot (`/etc/modules-load.d/photo-wall-ddc.conf`); `ls /dev/i2c-*` shows `/dev/i2c-13` and `/dev/i2c-14` on a Pi 5 when it did.
 
-**Not built:** setting the HDMI mode, the power schedule, All off, holds and the smart plug ([roadmap 1b](roadmap.md#1b-display-identity-and-power)). The bench check (Test off and on against the test Pi's monitor) waits for a deployed release.
+**Not built:** setting the HDMI mode and the smart plug ([roadmap 1b](roadmap.md#1b-display-identity-and-power)); Night off, All off and holds came with 2a ([below](#night-off-and-the-week)). The bench check (Test off and on against the test Pi's monitor) waits for a deployed release.
+
+## Night off and the week
+
+Roadmap 2a and 2b ([#86](https://github.com/mcurcio/photo-wall/pull/86), [0021](decisions/0021-power-timetable-and-repeating-schedules.md)): Central works out each HDMI port's next 7 days of off and on set times from Night off and holds and writes them in the port's Output document; the Pi switches at those times on its own clock. Schedules repeat by the week, and a Default Scene plays where none does. The console's side is the [operator console design §7](operator-console-design.md#7-power); the Pi's is the [Player architecture](player-architecture.md#display-identity-and-power-1b).
+
+**Set the house first.** Settings › House (`#/house`, `GET|PUT /v1/operator/house`) holds the timezone and the optional location. At Central's start the house is seeded once with Central's own server zone (`central/infra/house_store.py` `seed_house`; a container's is often UTC), marked not confirmed: **Night off turns no display off until Settings › House is saved once** (the page and the Night off editor say so). Check the zone and save. Every time of day (Schedule windows, Night off, the week page, On this day, a Photo source's "last 3 years") is worked out in that zone; sunrise and sunset need the location and cannot be chosen until it is set. Saving a new zone or location moves the Schedules' windows and Night off's set times.
+
+**Read a Pi's power timetable.** In Central's database, the latest document per port is `output_documents` (`document->'power'`: `now`, `changes` with each `at` and `power`, `until`, `darkness`, `test`), and the Pi's latest report is `output_displays.report` (`in_force`: `test`, `timetable` with its `power` and `since`, or `timetable-ran-out`):
+
+```sql
+SELECT o.player_id, o.output_id, o.change, o.document->'power' AS power, d.report->'in_force' AS in_force
+FROM output_documents o LEFT JOIN output_displays d USING (player_id, output_id);
+```
+
+On the Pi, the controller's journal (above) logs each attempt; each is also a `display.record.power` event in `node_link_records`. Why is this playing on the Frame page reads the same: what Central wants, why, until when, and what the Pi says.
+
+**All off and All on hold every Frame, each until its own next change** (owner, 2026-10-12: "Each Frame's hold ends at its own next change; a Frame with no Night off holds until 07:00 tomorrow"): a Frame in Night off until Night off's next off or on; any other Frame until Night off next turns displays on (07:00 by default; it follows Night off's on time), the next one after the press, so a press at 01:00 holds until 07:00 that morning. **A hold lasts** beside All off and All on (`GET|PUT /v1/operator/power/hold-lasts`) switches to **Until I resume**; it applies to holds pressed from then on. The hold banner shows one row per group of Frames that end together, each with **Resume schedule**; `power_holds` keeps each Frame's `ends_at`. While Night off waits for the house's zone a hold lasts to the timetable's horizon.
+
+**With Central away** the Pi keeps switching at the set times for up to 7 days (the timetable's `until`), then leaves its displays as they are and reports `timetable-ran-out`. A Pi that boots without Central has no document and no Night off, as before. A Pi whose clock is wrong switches at the wrong time: check its clock first when a display switches at an odd hour.
+
+**Deploying 2a and 2b.**
+
+- Central and every Pi run the display line's schema 3 together. A Pi still on an older release refuses the new document and leaves its display as it is, reported, until it reboots onto the release (Central deploys through an iac pull request the owner merges; a Pi takes a new release at its next reboot).
+- Today's Programs end at deploy (migration 089): they were timed in the browser's zone, which Central never recorded. Until a Default Scene is chosen and the routine remade, Frames keep their last photo. After deploy: choose a Default Scene on the week page, then remake each Schedule.
+- Night off is seeded on: 23:00 to 07:00, every day, every Frame there was at deploy, displays off. It waits for the house's zone: save Settings › House after deploy, then check Night off on the week page's Power lane.
+
+**Bench step (2a).** On the test Pi, with a release carrying #86 on it: set Night off's off time two minutes ahead and its on time two minutes after that; confirm the monitor goes off within a minute of the off time and on within a minute of the on time, and read the report's `in_force` at each. NOT RUN until such a release is on the Pi.

@@ -20,9 +20,13 @@ import re
 import subprocess
 from pathlib import Path
 
+from support.console_words import SCHEDULE, schedule
 from test_console_flow import _require_node
 
 SRC = Path(__file__).parents[1] / "central/console/src"
+# The console's words for a Schedule (showWords.json): a stored one by its name, never its id.
+NAMED = schedule("named", name="December evenings")
+REMOVED = SCHEDULE["sinceRemoved"]
 
 SCRIPT = r"""
 const facts = await import(process.argv[1]);
@@ -41,7 +45,7 @@ const run = (run_id, scene_id, extra = {}) => ({
   finish_requested_at: null, ...extra });
 
 const runtime = {
-  programs: { "dec-evenings": { program_id: "dec-evenings" } },
+  programs: { "dec-evenings": { program_id: "dec-evenings", name: "December evenings" } },
   current: {
     now: 1000,
     runs: [
@@ -120,11 +124,29 @@ out.time = {
   clock: time.clockTime(winter),
   seconds: time.clockTime(winter + 5),
   factsClock: facts.clock(winter),
-  window: time.windowLabel({ starts_at: winter, ends_at: winter + 7200 }),
-  acrossDays: time.windowLabel({ starts_at: winter, ends_at: winter + 8 * 3600 }),
+  // A Program's window on the house clock, as Central serves it: never the browser's zone.
+  window: time.windowWords({ start: "2026-10-12T17:00", end: "2026-10-12T23:00" }),
+  acrossDays: time.windowWords({ start: "2026-10-12T22:00", end: "2026-10-13T02:00" }),
+  weekdays: time.whenWords({ days: ["mon", "tue", "wed", "thu", "fri"],
+                             start: { at: "clock", time: "17:00" }, end: { at: "clock", time: "23:00" } }),
+  crossing: time.whenWords({ days: ["mon", "wed", "fri", "sat", "sun"],
+                             start: { at: "clock", time: "22:00" }, end: { at: "clock", time: "02:00" } }),
+  sunset: time.whenWords({ days: ["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+                           start: { at: "sunset", offset_minutes: -30 }, end: { at: "clock", time: "23:00" } }),
   zone: time.zoneName(),
   note: time.zoneNote(),
-  occurrence: time.occurrenceTime(winter),
+};
+// Settings › House read (houseClock.js): every time on the house's zone and its 12-hour clock.
+time.setHouseClock({ zone: "Europe/London", clock: "12h" });
+out.house = {
+  clock: time.clockTime(winter),
+  seconds: time.timeOfDay(winter + 5),
+  since: time.sinceTime(winter),
+  window: time.windowWords({ start: "2026-10-12T17:00", end: "2026-10-13T00:30" }),
+  hour: [time.hourWords(0), time.hourWords(12), time.hourWords(18)],
+  resolved: [time.dayOfWords("2026-10-12T18:12", "2026-10-12T09:00"),
+             time.dayOfWords("2026-10-13T07:00", "2026-10-12T09:00")],
+  note: time.zoneNote(),
 };
 
 console.log(JSON.stringify(out));
@@ -144,16 +166,16 @@ def test_the_planned_fact_origins_and_zoned_times():
     tail = "(Central's Runs; media not checked; the Panel is not observed)"
 
     assert rows["program"] == {
-        "text": f"On top: xmas · Program dec-evenings {tail}",
+        "text": f"On top: xmas · {NAMED} {tail}",
         "kind": "planned", "sceneId": "xmas", "phase": "body"}
     assert rows["direct"]["text"] == f"On top: lobby · started directly, by Show now or the API {tail}"
     assert rows["direct"]["phase"] == "outro"
     # A child's origin is read from its ROOT Run (a child's program_id is null).
-    assert rows["child"]["text"] == f"On top: intro · part of xmas's Run, Program dec-evenings {tail}"
+    assert rows["child"]["text"] == f"On top: intro · part of Scene xmas, {NAMED} {tail}"
     assert rows["unbound"]["text"] == (
-        "On top: xmas · Program dec-evenings (Central's Runs; this Frame is unbound, so Central "
+        f"On top: xmas · {NAMED} (Central's Runs; this Frame is unbound, so Central "
         "sends it no layers; the Panel is not observed)")
-    assert rows["removed"]["text"] == f"On top: old · Program removed-one, since removed {tail}"
+    assert rows["removed"]["text"] == f"On top: old · {REMOVED} {tail}"
     nothing = ("On top: nothing · no Run puts a layer on this Frame now (Central's Runs; the Panel "
                "is not observed)")
     assert rows["nothing"] == {"text": nothing, "kind": "planned", "sceneId": None, "phase": None}
@@ -171,38 +193,50 @@ def test_the_planned_fact_origins_and_zoned_times():
     assert construction["noAge"] is None
 
     assert out["origins"] == {
-        "r-prog": {"kind": "program", "words": "Program dec-evenings", "programListed": True},
-        "r-child": {"kind": "child", "words": "part of xmas's Run", "programListed": False},
+        "r-prog": {"kind": "program", "words": NAMED, "programListed": True},
+        "r-child": {"kind": "child", "words": "part of Scene xmas", "programListed": False},
         "r-direct": {"kind": "direct", "words": "started directly (Show now or the API)",
                      "programListed": False},
-        "r-gone": {"kind": "program", "words": "Program removed-one, since removed", "programListed": False},
+        "r-gone": {"kind": "program", "words": REMOVED, "programListed": False},
     }
-    assert out["orphanChild"] == "part of another Run"
-    assert out["rowOrigins"]["r-prog"] == "Program dec-evenings"
+    assert out["orphanChild"] == "part of another Scene"
+    assert out["rowOrigins"]["r-prog"] == NAMED
     assert out["rowOrigins"]["r-direct"] == "started directly (Show now or the API)"
-    assert out["childRowOrigin"] == "part of xmas's Run"
+    assert out["childRowOrigin"] == "part of Scene xmas"
 
-    assert out["heading"] == "Central's Runs on a: xmas (priority 5, Program dec-evenings) on top."
+    assert out["heading"] == f"Central's Runs on a: xmas (priority 5, {NAMED}) on top."
     assert out["directHeading"] == (
         "Central's Runs on b: lobby (priority 5, started directly, by Show now or the API) on top.")
 
     # A child on top: the heading names its root's Run, as the `planned` fact does (§35).
     assert out["childHeading"] == (
-        "Central's Runs on c: intro (priority 5, part of xmas's Run, Program dec-evenings) on top.")
+        f"Central's Runs on c: intro (priority 5, part of Scene xmas, {NAMED}) on top.")
     # The Intended? step says the top Run as the `planned` fact, never Central's plan as the output.
     assert out["intended"] == {"title": "Intended?", "state": "ok",
-                               "text": f"On top: xmas · Program dec-evenings {tail}; priority 5."}
+                               "text": f"On top: xmas · {NAMED} {tail}; priority 5."}
     assert "this Frame is unbound" in out["intendedUnbound"]["text"]
 
     time = out["time"]
     assert time["clock"] == "18:00 PST"
     assert time["seconds"] == "18:00:05 PST"
     assert time["factsClock"] == "18:00 PST"
-    assert time["window"] == "Mon, Jan 11 18:00–20:00 PST"
-    assert time["acrossDays"] == "Mon, Jan 11 18:00 PST – Tue, Jan 12 02:00 PST"
+    assert time["window"] == "Mon 12 Oct 17:00–23:00"
+    assert time["acrossDays"] == "Mon 12 Oct 22:00 – Tue 13 Oct 02:00"
+    assert time["weekdays"] == "Mon–Fri, 17:00–23:00"
+    assert time["crossing"] == "Mon, Wed, Fri–Sun, 22:00–02:00 (ends next day)"
+    assert time["sunset"] == "Every day, sunset −30 min–23:00"
     assert time["zone"] == "America/Los_Angeles"
     assert time["note"] == "Times in America/Los_Angeles (this browser's time zone)"
-    assert time["occurrence"] == "6:00 PM PST (GMT-08:00)"
+    # The house's clock, once read: its zone (London, 02:00 when Los Angeles reads 18:00), no
+    # abbreviation (every time is the house's), and its 12-hour clock on instants and house times.
+    house = out["house"]
+    assert house["clock"] == "2:00 am"
+    assert house["seconds"] == "2:00:05 am"
+    assert house["since"] == "Tue 2:00 am"
+    assert house["window"] == "Mon 12 Oct 5:00 pm – Tue 13 Oct 12:30 am"
+    assert house["hour"] == ["12 am", "12 pm", "6 pm"]
+    assert house["resolved"] == ["6:12 pm today", "7:00 am tomorrow"]
+    assert house["note"] == "Times on the house clock (Europe/London)"
 
 
 DISPLAY_FORMATTERS = re.compile(r"toLocaleTimeString|toLocaleString|toLocaleDateString|Intl\.DateTimeFormat")

@@ -6,13 +6,14 @@ pools are the photo library store's, fed by nothing here (no worker, no Immich).
 
 import pytest
 from fastapi.testclient import TestClient
+from support.house_time import UTC_HOUSE, set_house, window_program
 from support.photo_pools import fixture_connection, library_of
 
 from central.app import create_app
 from central.db import ProcessTransactionClock
 from central.media_repository import MediaRepository
 from central.photo_library.model import SourceQuery
-from central.runtime import Child, Contribution, Program, RuntimeConflict, Scene
+from central.runtime import Child, Contribution, RuntimeConflict, Scene
 from central.runtime_store import RuntimeStore
 from central.source_names import SourceInUse, SourceNameService
 
@@ -58,8 +59,8 @@ def test_named_edit_revises_future_scenes_but_keeps_admitted_run(names):
                   contributions=(Contribution(target="frame:main",
                                               source_refs=("all-photos:1",)),))
     runtime.command("set_scene", scene)
-    runtime.command("set_program", Program(program_id="next", scene_id="show",
-                                           starts_at=1010, ends_at=1200))
+    set_house(runtime.db, UTC_HOUSE)
+    runtime.command("create_program", window_program("next", "show", 1020, 1200), 1000)
     admission = runtime.command("activate", "show", "manual", 1000)
     assert admission.status == "admitted"
     queued = runtime.command("activate", "show", "later", 1000,
@@ -80,9 +81,9 @@ def test_named_edit_revises_future_scenes_but_keeps_admitted_run(names):
     saved = runtime.read().export_state()
     queued_run = saved["admissions"]["later"]["run_id"]
     assert saved["runs"][queued_run]["scene"]["contributions"][0]["source_refs"] == ["all-photos:1"]
-    runtime.command("advance", 1010)
+    runtime.command("advance", 1020)
     saved = runtime.read().export_state()
-    program_run = saved["admissions"]["program:next:1010"]["run_id"]
+    program_run = saved["admissions"]["program:next:1:1020"]["run_id"]
     assert saved["runs"][program_run]["scene"]["contributions"][0]["source_refs"] == ["all-photos:2"]
     assert [s["name"] for s in names.repository.sources()] == ["all-photos"]
     assert names.repository.sources()[0]["source_ref"] == "all-photos:2"

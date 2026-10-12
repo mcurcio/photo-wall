@@ -20,12 +20,13 @@ import json
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal
 
 from pydantic import Field
 
 from central.catalog import Candidate
+from central.house_time.calculator import house_date
+from central.house_time.model import HouseTime
 from central.runtime import Intent, Runtime, RuntimeBudgetExceeded
 from central.wall_plan.assignment import (
     FixedShowing,
@@ -275,7 +276,9 @@ class _ProjectionBuilder:
         limits: PlannerLimits,
         settings: FitSettings,
         frame_outputs: Mapping[str, tuple[int, int] | None],
+        house: HouseTime,
     ) -> None:
+        self.house = house          # On this day's date (roadmap 2b)
         self.limits, self.sources, self.lines, self.authored, self.locks = (
             limits, sources, lines, authored, locks)
         self.failure_checks: list[tuple[Intent, str, str]] = []
@@ -442,7 +445,7 @@ class _ProjectionBuilder:
         reserved = {ref for item in self.pending for ref in item.slot.authored}
         passes = scene_passes(history)
         shown_at = last_shown_at(history)
-        today = datetime.fromtimestamp(now, UTC).date()
+        today = house_date(self.house, now)
         by_scene: dict[str, list[_Pending]] = {}
         for item in self.pending:
             if item.slot.pool:
@@ -470,7 +473,7 @@ class _ProjectionBuilder:
                 return self.lines.line(LineQuery(
                     pool_keys=pool_keys, scene_id=scene_id, pass_number=pass_number,
                     order=selection.order, after=last, now=now, picked=picked, recent=recent,
-                    shape=shape, limit=limit))
+                    shape=shape, limit=limit, house=self.house))
 
             def serves(member: LineMember, test, *, classes=classes, keys_of=keys_of) -> bool:
                 return member.candidate.asset_id not in reserved and any(
@@ -509,7 +512,7 @@ class _ProjectionBuilder:
             lines[scene_id] = SceneLine(
                 scene_id, selection, tuple(member.candidate for member in known.values()),
                 scene_pass, shown_at, now=now, today=today, pickable=frozenset(pickable),
-                whole=whole, complete=complete, mark=answer.after)
+                whole=whole, complete=complete, mark=answer.after, house=self.house)
         for item in self.pending:
             for ref in item.slot.authored:
                 if ref in self.authored:
@@ -696,7 +699,7 @@ def project(
         bindings_by_player=bindings_by_player,
         sources=lines.sources(runtime.planning_source_refs()), lines=lines,
         authored=authored_candidates, locks=locked_assignments, limits=limits,
-        settings=settings, frame_outputs=frame_outputs,
+        settings=settings, frame_outputs=frame_outputs, house=runtime.house,
     )
     try:
         timeline = runtime.timeline(now, window.plan_end, max_events=limits.max_events)

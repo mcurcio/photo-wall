@@ -42,15 +42,15 @@ from contracts.node_output import (
     AS_THE_DISPLAY_HAS_IT,
     BEST_DETECTED,
     ActsOn,
+    Darkness,
     DisplayIdentity,
     OutputDocument,
     OutputPicture,
+    OutputPower,
     OutputReport,
     PictureReport,
     PictureSetting,
     Power,
-    PowerRequest,
-    RequestReason,
     SettingReport,
     WriteResult,
 )
@@ -200,8 +200,8 @@ def picture(brightness=UNSET, contrast=UNSET, kelvin=6500, gamma=22) -> OutputPi
 
 def document(picture_change: int, part: OutputPicture | None = None, *, change: int = 1,
              output_id: str = OUTPUT) -> OutputDocument:
-    standing = PowerRequest("standing", Power.ON, RequestReason.STANDING)
-    return OutputDocument(output_id, change, (standing,), BEST_DETECTED, False, False,
+    always_on = OutputPower(Power.ON, (), "2099-01-01T00:00:00Z", Darkness.DISPLAY_OFF, None)
+    return OutputDocument(output_id, change, always_on, BEST_DETECTED, False, False,
                           picture_change=picture_change, picture=picture() if part is None else part)
 
 

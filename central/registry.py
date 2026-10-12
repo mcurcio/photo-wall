@@ -27,11 +27,15 @@ from central.infra.display_store import (
     frame_readiness_in,
     resolve_output,
 )
+from central.infra.power_store import forget_frame_in
 from central.installation_models import (
     FrameInventory,
     InstallationInventory,
+    Name,
     OutputInventory,
     PlayerInventory,
+    WallInventory,
+    WallNaming,
 )
 from central.transaction_locks import acquire_runtime_locks, holds_runtime_locks_in
 from contracts.enrollment import Enrollment as Enrollment
@@ -79,6 +83,7 @@ class FrameCreate(Model):
     # Stored Frames and path parameters stay `Identifier`, so an older id is still
     # readable and deletable.
     id: TargetIdentifier
+    name: Name | None = None              # None: "Frame N", N the smallest free
     surface_id: Identifier = "wall"
     x_mm: float = 0
     y_mm: float = 0
@@ -105,6 +110,28 @@ class FramePlacement(Model):
 class FrameProfileReplacement(Model):
     profile: FrameProfile
     expected_generation: int = Field(ge=0)
+
+
+def _smallest_free(conn, table: str, word: str) -> str:
+    """`word` and the smallest N >= 1 no row of `table` (frames or walls) is named, ignoring case."""
+    row = conn.execute(
+        f"SELECT min(n) AS n FROM generate_series(1, (SELECT count(*) + 1 FROM {table})) n "  # noqa: S608
+        f"WHERE NOT EXISTS (SELECT 1 FROM {table} t WHERE lower(t.name) = lower(%s || ' ' || n))",
+        (word,)).fetchone()
+    return f"{word} {row['n']}"
+
+
+def _ensure_wall(conn, surface_id: str) -> None:
+    """A wall row for `surface_id`, named "Wall N" when it is new: every surface a Frame is placed
+    on is a named wall."""
+    if conn.execute("SELECT 1 FROM walls WHERE surface_id=%s", (surface_id,)).fetchone() is None:
+        conn.execute("INSERT INTO walls(surface_id, name) VALUES (%s, %s) ON CONFLICT (surface_id) DO NOTHING",
+                     (surface_id, _smallest_free(conn, "walls", "Wall")))
+
+
+def _name_or(exc: UniqueViolation, code: str) -> str:
+    """name_taken when `exc` is migration 091's case-insensitive Frame name index, else `code`."""
+    return "name_taken" if exc.diag.constraint_name == "frames_name" else code
 
 
 class Registry:
@@ -444,15 +471,41 @@ class Registry:
     def create_frame(self, frame: FrameCreate) -> dict:
         try:
             with self.db.transaction() as conn:
-                conn.execute("INSERT INTO frames(id,surface_id,x_mm,y_mm,width_mm,height_mm,"
-                             "profile,calibration) VALUES(%s,%s,%s,%s,%s,%s,%s,%s)",
-                             (frame.id, frame.surface_id, frame.x_mm, frame.y_mm,
+                name = frame.name if frame.name is not None else _smallest_free(conn, "frames", "Frame")
+                conn.execute("INSERT INTO frames(id,name,surface_id,x_mm,y_mm,width_mm,height_mm,"
+                             "profile,calibration) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                             (frame.id, name, frame.surface_id, frame.x_mm, frame.y_mm,
                               frame.width_mm, frame.height_mm, Jsonb(frame.profile.model_dump()),
                               Jsonb(Calibration(fit=CoverFit()).model_dump(mode="json"))))
+                _ensure_wall(conn, frame.surface_id)
                 self._audit(conn, "frame_created", frame.id)
         except UniqueViolation as exc:
-            raise RegistryError("frame_exists") from exc
-        return frame.model_dump()
+            raise RegistryError(_name_or(exc, "frame_exists")) from exc
+        return {**frame.model_dump(), "name": name}
+
+    def rename_frame(self, frame_id: str, name: str) -> dict:
+        """Name a Frame (#94). RegistryError unknown_frame 404, name_taken 409 (ignoring case)."""
+        try:
+            with self.db.transaction() as conn:
+                row = conn.execute("UPDATE frames SET name=%s WHERE id=%s RETURNING id",
+                                   (name, frame_id)).fetchone()
+                if row is None:
+                    raise RegistryError("unknown_frame", 404)
+                self._audit(conn, "frame_renamed", frame_id, {"name": name})
+        except UniqueViolation as exc:
+            raise RegistryError(_name_or(exc, "frame_exists")) from exc
+        return {"frame_id": frame_id, "name": name}
+
+    def name_wall(self, surface_id: str, naming: WallNaming) -> WallInventory:
+        """Name a wall and label its room (#92). RegistryError unknown_wall 404."""
+        with self.db.transaction() as conn:
+            row = conn.execute("UPDATE walls SET name=%s, room=%s WHERE surface_id=%s "
+                               "RETURNING surface_id, name, room",
+                               (naming.name, naming.room, surface_id)).fetchone()
+            if row is None:
+                raise RegistryError("unknown_wall", 404)
+            self._audit(conn, "wall_named", surface_id, naming.model_dump())
+        return WallInventory.model_validate(row)
 
     def frame_profile(self, frame_id: str) -> FrameProfile:
         """Read the persistent profile for a Frame, whether it is bound yet."""
@@ -543,6 +596,7 @@ class Registry:
                          "height_mm=%s WHERE id=%s",
                          (merged["surface_id"], merged["x_mm"], merged["y_mm"],
                           merged["width_mm"], merged["height_mm"], frame_id))
+            _ensure_wall(conn, merged["surface_id"])
             self._audit(conn, "frame_repositioned", frame_id)
             return {"id": frame_id, **merged}
 
@@ -615,6 +669,7 @@ class Registry:
                 "queued_activation_ids": list(references.get("queued_activation_ids", ())),
             })
         conn.execute("DELETE FROM frames WHERE id=%s", (frame_id,))
+        forget_frame_in(conn, frame_id)
         self._audit(conn, "frame_deleted", frame_id)
         return {"status": "deleted"}
 
@@ -746,7 +801,7 @@ class Registry:
                                "FROM players ORDER BY registered_at,id").fetchall()
         outputs = conn.execute("SELECT player_id,output_id,observation FROM outputs "
                                "ORDER BY player_id,output_id").fetchall()
-        frames = conn.execute("SELECT f.id,f.surface_id,f.x_mm,f.y_mm,f.width_mm,f.height_mm,f.profile,"  # noqa: S608
+        frames = conn.execute("SELECT f.id,f.name,f.surface_id,f.x_mm,f.y_mm,f.width_mm,f.height_mm,f.profile,"  # noqa: S608
                               "f.calibration,f.configuration_revision,"
                               f"b.player_id,b.output_id,{POSITION_COLUMNS} FROM frames f LEFT JOIN bindings b "
                               f"ON b.frame_id=f.id {SEEN_DISPLAY_JOIN} ORDER BY f.id").fetchall()
@@ -758,4 +813,6 @@ class Registry:
             frames=tuple(FrameInventory.model_validate(
                 {**{key: value for key, value in row.items() if key not in POSITION_FACTS},
                  "generation": row["generation"], "readiness": frame_readiness(row)}) for row in frames),
+            walls=tuple(WallInventory.model_validate(row) for row in conn.execute(
+                "SELECT surface_id, name, room FROM walls ORDER BY surface_id").fetchall()),
         )

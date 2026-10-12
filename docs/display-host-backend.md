@@ -222,6 +222,28 @@ CI proves this in `tests/native_display_smoke.py` (node-pid1 `display-harness`):
 operations reach a late app verbatim, a 10-byte non-JSON operations text is not parsed,
 oversize operations and lines are refused, and `tag_picture` presents its change.
 
+## Black picture (2a)
+
+Night off's "Show black" (#83) and an off no power method can carry out need an opaque black
+from Display Host, never from the Player and never a layer of the plan. The rules for when it is
+up belong to the [Player architecture](player-architecture.md#display-identity-and-power-1b).
+
+- **Control op `black`** (base-only control socket): `output_id`, `output` and `on` (a
+  boolean). The shell maps a solid-colour black view (a Weston curtain, never a shm buffer)
+  at the Output's size in its own layer above every other, the health layer included
+  (`WESTON_LAYER_POSITION_LOCK + 2`), and answers a `black` event (`output_id`, `on`) ahead of
+  the response. It does not capture input. The app's grant holds its lease under it, as
+  under signal off, so taking it down shows the app at once.
+- **Kept across a hot-plug.** The wanted state stays on the Output's slot: the curtain is
+  rebuilt when the Output comes back or changes mode, and the `output` event carries `black`,
+  so the controller (`weston.py` `black_shown`) knows whether it is up.
+- Under the curtain a fault's tint is not seen: a failure during intended darkness shows in
+  the console at once and on the display when it is next due on
+  ([U1](requirements.md#failure-visibility-and-recovery)).
+
+CI proves the op in `tests/native_display_smoke.py` and the controller's use of it in
+`tests/node/display/test_display_black_picture.py`.
+
 ## The health layer's buffers
 
 The overlay client (`overlay/client.py`) keeps its health surface mapped over the whole

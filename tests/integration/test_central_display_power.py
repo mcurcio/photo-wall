@@ -20,6 +20,7 @@ from test_display_identity import ADMIN, AUTH, enroll_pi
 from appliance.display_host.bus import DISPLAY_COMPONENT, DISPLAY_SLICE, DISPLAY_VERSION
 from central.app import create_app
 from central.content_catalog.catalog import device_id_for_serial
+from central.db import DatabaseTransactionClock
 from central.displays.model import TEST_SECONDS
 from central.infra.display_store import (
     REPORT_STREAM,
@@ -36,7 +37,6 @@ from contracts.node_output import (
     SCHEMA_MAJOR,
     Power,
     PowerRequest,
-    RequestReason,
     decode_output_document,
     output_document_key,
 )
@@ -46,7 +46,6 @@ from nodeapi.node import NodeSession, Release
 
 SERIAL = "serial-display-power"
 SECONDS = 30
-STANDING = PowerRequest("standing", Power.ON, RequestReason.STANDING)
 
 
 def test_a_console_test_reaches_the_nodes_desired_bucket_by_notification(database, tmp_path, monkeypatch):
@@ -83,7 +82,8 @@ def test_a_console_test_reaches_the_nodes_desired_bucket_by_notification(databas
         before_listening = wakes.count(device)
         listening = asyncio.create_task(wakes.listen(database.dsn))
         stores = PgLinkStores(database, {REPORT_STREAM: OutputReportJudge(wakes)})
-        links = NodeLinks(Pipe.FLEET, hub.client_url, stores, DisplayDocuments(stores, wakes))
+        links = NodeLinks(Pipe.FLEET, hub.client_url, stores, 
+                         DisplayDocuments(stores, wakes, times=DatabaseTransactionClock()))
         stop = asyncio.Event()
         running = asyncio.create_task(links.run(stop))
         try:
@@ -94,7 +94,7 @@ def test_a_console_test_reaches_the_nodes_desired_bucket_by_notification(databas
                 return (found is not None and found.writer == CENTRAL_WRITER
                         and decode_output_document(found.value))
             document = await until(held, SECONDS, "output-HDMI-A-1 on the Node")
-            assert document.power == (STANDING,)
+            assert document.power.test is None and document.power.now is Power.ON
             # Settled: the link's reconcile after it drained the session's birth is done, and the
             # listener listens (its connect wakes every Node), so only the notification is left.
             async def settled():
@@ -106,12 +106,12 @@ def test_a_console_test_reaches_the_nodes_desired_bucket_by_notification(databas
             response = await asyncio.to_thread(client.post, "/v1/operator/frames/kitchen/power-tests",
                                                headers=AUTH)
             assert response.status_code == 202
-            test = PowerRequest(response.json()["request_id"], Power.OFF, RequestReason.CONSOLE_TEST, TEST_SECONDS)
+            test = PowerRequest(response.json()["request_id"], Power.OFF, TEST_SECONDS)
 
             async def tested():
                 found = await held()
-                return found if found and found.power == (test, STANDING) else None
-            carried = await until(tested, 3, "the test on top of standing on, by notification")
+                return found if found and found.power.test == test else None
+            carried = await until(tested, 3, "the test on top of the timetable, by notification")
             assert carried.change == document.change + 1
             assert len(reconciles) == reconciled   # no reconcile carried it
             assert not running.done()

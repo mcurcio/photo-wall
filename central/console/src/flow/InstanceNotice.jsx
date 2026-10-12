@@ -1,4 +1,5 @@
 import React from "react";
+import { scene as sceneWords } from "../showWords.js";
 
 /**
  * What a flow's section says when the route names an instance it cannot show as a
@@ -110,11 +111,11 @@ export function DraftBar({
  * presentational): "Your unsaved draft <drafts> Scene X." and "<action> Scene Y
  * instead" (`onTake`). Nothing renders without an offer.
  *
- * @param {{offered: string|null, current: string, drafts: string, action: string,
+ * @param {{offered: string|null, current: string, drafts: string, take: "showInstead"|"scheduleInstead",
  *          onTake: () => void}} props `drafts` says what the draft does with its Scene
- *   ("schedules", "shows"); `action` is the verb that takes the offer ("Schedule", "Show")
+ *   ("schedules", "shows"); `take` is the words of the button that takes the offer (showWords.json `scene`)
  */
-export function OfferedScene({ offered, current, drafts, action, onTake }) {
+export function OfferedScene({ offered, current, drafts, take, onTake }) {
   if (offered === null) {
     return null;
   }
@@ -126,7 +127,7 @@ export function OfferedScene({ offered, current, drafts, action, onTake }) {
           : `Your unsaved draft ${drafts} Scene ${current}.`}
       </p>
       <button type="button" onClick={onTake}>
-        {`${action} Scene ${offered} instead`}
+        {sceneWords(take, { id: offered })}
       </button>
     </div>
   );

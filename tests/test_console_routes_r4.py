@@ -95,6 +95,12 @@ SHARED_WITH_SHOW = {
     # A Frame's health as a chip (design review round 2): the Frame page header's words and
     # severity, also the Show side's Frame chips and the Scene's Frame picker. Words only.
     "frame-health-chip.ts",
+    # Display power's one copy home (Night off, holds, Resting, the power line): the week page and
+    # the Frame page's Why, Power tab and status chip. Words only.
+    "powerWords.js",
+    "powerWords.json",
+    # (Power and the week's houseApi.js and weekApi.js are the shell's own: its house clock,
+    # houseClock.js, reads Settings › House for every time the console shows.)
 }
 # The console's write modules: the operator write primitive and every module that wraps a
 # write (framesApi writes, the delete confirmation, refresh-after-write, equipment writes).
@@ -617,7 +623,7 @@ def test_every_section_is_in_exactly_one_route_table():
     sections = [section for group in SAMPLES.values() for section in group]
     assert sorted(sections) == sorted(
         ["now", "scenes", "schedule", "sources", "wall", "hardware", "players", "releases",
-         "photo-library", "photo-fit", "attention"])
+         "photo-library", "photo-fit", "house", "attention"])
 
 
 ROUND_TRIP = r"""
@@ -769,9 +775,9 @@ LAYERS = ("pages", "domain", "patterns", "ui", "design")
 MODEL_FREE = {"patterns", "ui", "design"}
 MODELS = {"facts.js", "health.js", "hostHealth.js", "join.js", "players.js", "routes.js"}
 # What a page or a domain component may import from outside the catalog: the models, and the
-# node read (a hook, no markup) and the one time formatter (no markup). Anything else that
+# node read (a hook, no markup), the one time formatter and the copy homes (no markup). Anything else that
 # renders markup is a legacy module.
-PAGE_IMPORTS = MODELS | {"nodeRead.js", "timeWords.js"}
+PAGE_IMPORTS = MODELS | {"nodeRead.js", "timeWords.js", "showWords.js", "powerWords.js"}
 # Legacy modules that render markup the Hardware Pi page still composes: the confirmation
 # dialog (ConfirmAction.jsx, whose typed handle, terminal phases and page-hidden suspension the
 # Dialog primitive does not carry yet) and the Reboot section. Declared in .claude/errata.md
@@ -784,7 +790,7 @@ LEGACY_MARKUP = {"ConfirmAction.jsx", "PlayerCommands.jsx"}
 # Frame id rule; the Frame profile its write and refresh-after-write; the live adjustment's
 # view the hook's type. No other page or domain module may import any of them.
 FRAME_PAGE_IMPORTS = {
-    "frame-page.tsx": {"BindingFacet.jsx", "liveAdjustment.js", "pictureSession.js"},
+    "frame-page.tsx": {"BindingFacet.jsx", "liveAdjustment.js", "pictureSession.js", "framesApi.js", "useMutate.js"},
     # The Picture tab (1c K1): its routes and the session hook's type; Position (1c K2): the
     # quarter turns its draft takes.
     "frame-picture.tsx": {"pictureApi.js", "pictureSession.js"},
@@ -818,7 +824,15 @@ PHOTO_PAGE_IMPORTS = {
     # A failed check as the error template where a Source is chosen or shown (Scene, Show now).
     "source-check-problem.tsx": {"sourceWords.js"},
 }
-DECLARED_IMPORTS = {**FRAME_PAGE_IMPORTS, **PHOTO_PAGE_IMPORTS}
+# Power and the week's pages, each with the legacy modules it alone may import: their routes and
+# the one polled read. The Frame's Why reads its power result (powerApi.js) and the house's zone.
+POWER_WEEK_IMPORTS = {
+    "week-page.tsx": {"houseApi.js", "polledRead.js", "powerScheduleApi.js", "weekApi.js"},
+    # A save tells the shell's house clock to read again (houseClock.js).
+    "house-settings-page.tsx": {"houseApi.js", "houseClock.js"},
+    "frame-why.tsx": {"houseApi.js", "polledRead.js", "whyApi.js"},
+}
+DECLARED_IMPORTS = {**FRAME_PAGE_IMPORTS, **PHOTO_PAGE_IMPORTS, **POWER_WEEK_IMPORTS}
 
 
 def _layer(module, src=SRC):

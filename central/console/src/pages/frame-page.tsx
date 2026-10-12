@@ -8,20 +8,22 @@ import { FrameDraftFit, FramePhotos } from "../domain/frame-photos";
 import { FramePicture } from "../domain/frame-picture";
 import { FramePosition, type PixelSize } from "../domain/frame-position";
 import { FramePower } from "../domain/frame-power";
+import { useFrameWhy } from "../domain/frame-why";
 import { FrameProfile, type Readiness } from "../domain/frame-profile";
 import type { HostsRead } from "../domain/hosts-read";
 import { frameHealth } from "../health.js";
 import { boundOutput, isBound } from "../join.js";
 import { useFrameAdjustment } from "../liveAdjustment.js";
+import { renameFrame } from "../framesApi.js";
 import { EntityHeader } from "../patterns/entity-header";
 import { EmptyState, EntityPage } from "../patterns/entity-page";
-import { Note } from "../patterns/fact-row";
-import { HealthBadge } from "../patterns/health-badge";
 import { LeaveGuard } from "../patterns/leave-guard";
 import { usePictureSession } from "../pictureSession.js";
+import { useMutate } from "../useMutate.js";
 import { playerPageHref } from "../players.js";
 import { formatRoute, routeIdName, type Tab } from "../routes.js";
 import { Tabs } from "../ui/tabs";
+import { FramePageHeader, type RenameAnswer } from "./frame-page-header";
 
 export interface FramePageProps {
   snapshot: object | null;
@@ -37,6 +39,7 @@ export interface FramePageProps {
 
 interface Frame {
   id: string;
+  name?: string;
   surface_id: string;
   generation?: number;
   player_id?: string | null;
@@ -102,6 +105,11 @@ export function FramePage({ snapshot, bootFacts, hosts, frameId, tab, onTab, foc
   const frames = ((snapshot as { inventory?: { frames?: Frame[] } } | null)?.inventory?.frames ?? []);
   const frame = frames.find((candidate) => candidate.id === frameId);
   const adjustment = useFrameAdjustment({ frameId, frame, open: tab === "position" });
+  // The Frame's Why, read once for the page: the header's Resting, Overview's sentence, Power's line.
+  const { read: why, refresh: rereadWhy } = useFrameWhy(frameId);
+  // A tab shown reads Why again: what it says is as of now, not the last poll's.
+  useEffect(() => { void rereadWhy(); }, [tab, rereadWhy]);
+  const mutate = useMutate() as <T>(op: () => Promise<T>) => Promise<T>;
   const picture = usePictureSession({ frameId, open: tab === "picture" && frame !== undefined });
   // The shown tab's live session, if it has one: the one a tab change would leave.
   const guarded = tab === "position" ? adjustment : tab === "picture" ? picture : null;
@@ -139,14 +147,15 @@ export function FramePage({ snapshot, bootFacts, hosts, frameId, tab, onTab, foc
   }
   const walls = new Set(frames.map((candidate) => candidate.surface_id));
   const classified = frameHealth(snapshot, frameId) as FrameHealth | null;
-  const health = classified === null ? null : frameChip(classified);
+  // Resting is Central's one answer (Why's `power.resting`), never worked out here.
+  const resting = why !== null && why.ok && why.why.power?.resting === true;
+  const health = classified === null ? null : frameChip(classified, false, resting);
   const piHref = isBound(frame) ? playerPageHref(snapshot, frame.player_id as string) : null;
   return (
     <EntityPage header={
-      <EntityHeader title={`Frame ${frameId}`} level={1} headingRef={headingRef} back={back}>
-        {health !== null && <HealthBadge verdict={{ severity: health.severity, label: health.label, receipt: null }} />}
-        {walls.size > 1 && <Note>{`On the “${frame.surface_id}” wall`}</Note>}
-      </EntityHeader>
+      <FramePageHeader name={frame.name ?? frameId} chip={health} wall={walls.size > 1 ? frame.surface_id : null}
+        back={back} headingRef={headingRef}
+        onRename={(next) => mutate(() => renameFrame(frameId, next)) as Promise<RenameAnswer>} />
     }>
       <LeaveGuard
         open={leaving !== null}
@@ -159,7 +168,8 @@ export function FramePage({ snapshot, bootFacts, hosts, frameId, tab, onTab, foc
       <Tabs label="Frame settings" tabs={TABS} value={tab} onValueChange={(next) => choose(next as Tab)}>
         {tab === "overview" && (
           <>
-            <FrameOverview snapshot={snapshot} bootFacts={bootFacts} frameId={frameId} hosts={hosts} />
+            <FrameOverview snapshot={snapshot} bootFacts={bootFacts} frameId={frameId} frameName={frame.name ?? frameId}
+              hosts={hosts} why={why} />
             <FramePhotos key={`${frameId}:photos`} snapshot={snapshot} frameId={frameId} />
           </>
         )}
@@ -175,7 +185,10 @@ export function FramePage({ snapshot, bootFacts, hosts, frameId, tab, onTab, foc
           <FramePicture frameId={frameId} piHref={piHref} session={picture}
             otherFrames={frames.filter((other) => other.id !== frameId).map((other) => other.id)} />
         )}
-        {tab === "power" && <FramePower key={`${frameId}:power`} frameId={frameId} />}
+        {tab === "power" && (
+          <FramePower key={`${frameId}:power`} frameId={frameId} why={why}
+            readAt={(snapshot as { readAt?: number } | null)?.readAt ?? null} />
+        )}
         {tab === "hardware" && (
           <>
             <BindingFacet key={frameId} snapshot={snapshot} bootFacts={bootFacts} frameId={frameId}

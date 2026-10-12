@@ -10,6 +10,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 from psycopg.types.json import Jsonb
+from support.house_time import UTC_HOUSE, window_program
 from test_exposed_settings_roundtrip import (
     BLACK,
     _Frame,
@@ -21,7 +22,7 @@ from test_exposed_settings_roundtrip import (
 from test_exposed_settings_roundtrip import _scene as _console_scene
 from test_player_control_protocol import after_end_plan
 
-from central.runtime import Contribution, Program, Runtime, Scene
+from central.runtime import Contribution, Runtime, Scene
 from contracts.models import Layer, Plan
 
 MIGRATION = Path(__file__).parents[1] / "central/migrations/071_layer_after_end.sql"
@@ -47,7 +48,7 @@ def _scene(scene_id, ending):
 def test_stored_scenes_runs_plans_and_locks_move_to_the_after_state(registry):
     """Mutation probes: map the flag's "no" to "keep_nothing" (a plain body photo would drop the
     kept one); skip the endings step (the ending stays "leave_as_is")."""
-    runtime = Runtime()
+    runtime = Runtime(house=UTC_HOUSE)
     black = Contribution(target="frame:left", kind="black")
     fading = Contribution(target="frame:left", source_refs=("library:1",), fade_out_seconds=4)
     runtime.set_scene(_scene("black-end", black))
@@ -55,8 +56,7 @@ def test_stored_scenes_runs_plans_and_locks_move_to_the_after_state(registry):
     runtime.set_scene(Scene(scene_id="plain", contributions=(
         Contribution(target="frame:right", source_refs=("library:1",)),)))
     runtime.activate("black-end", "running", 1000)
-    runtime.set_program(Program(program_id="later", scene_id="fade-end", starts_at=5000,
-                                ends_at=6000))
+    runtime.create_program(window_program("later", "fade-end", 4980, 6000), 1000)
     snapshot = runtime.export_state()
     _, plan = after_end_plan()
     plan = plan.model_copy(update={"layers": plan.layers[:1] + plan.layers[2:]})
@@ -77,7 +77,7 @@ def test_stored_scenes_runs_plans_and_locks_move_to_the_after_state(registry):
         lock = conn.execute("SELECT layer FROM assignment_locks").fetchone()["layer"]
         functions = conn.execute(
             "SELECT count(*) AS n FROM pg_proc WHERE proname='ending_keeps_nothing'").fetchone()
-    state = Runtime.restore(migrated).export_state()
+    state = Runtime.restore(migrated, house=UTC_HOUSE).export_state()
     for scene_id in ("black-end", "fade-end"):
         scene = state["scenes"][scene_id]
         assert [c["after_end"] for c in scene["contributions"]] == ["keep_this_photo"]

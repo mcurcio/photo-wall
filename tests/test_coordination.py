@@ -1,9 +1,11 @@
 """Real PostgreSQL coordination with explicit clocks; no physical rendering claim."""
 
+import math
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from support.frame_media import seed_variant
+from support.house_time import UTC_HOUSE, daily, set_house, window_program
 from support.key_content_builders import face
 from support.measured_photos import measure, measure_all
 from support.photo_pools import photo, seed_pool
@@ -12,7 +14,7 @@ from test_registry import SKEWED, enroll, frame
 
 from central.coordination import CoordinationError, CoordinationLimits, Coordinator
 from central.registry import RegistryError
-from central.runtime import Child, Contribution, Program, Scene
+from central.runtime import Child, Contribution, Program, ProgramDraft, Scene
 from central.runtime_store import RuntimeStore
 from central.wall_plan.selection import SceneSelection
 from contracts.models import Failure, Readiness
@@ -30,12 +32,29 @@ def setup_players(registry, count=2):
     return players
 
 
+def future_program(coordinator, program_id, scene_id, starts, ends):
+    """A Program whose first window starts `starts - now` seconds from now, as a Program created
+    at `starts`' distance before it: windows start on a minute, so the start moves up to the
+    minute and the test clock moves by the same amount first. Returns that shift (seconds)."""
+    aligned = math.ceil(starts / 60) * 60
+    shift = aligned - starts
+    set_house(coordinator.db, UTC_HOUSE)
+    coordinator.clock.advance(shift)
+    coordinator.runtime.command_current(
+        "create_program", window_program(program_id, scene_id, aligned, math.ceil(ends / 60) * 60))
+    return shift
+
+
 def schedule(coordinator, frames, *, starts=1010, media=False):
+    """The Scene "scheduled" on `frames` from `starts`: Show now at `starts` when it is not in the
+    future, else a Program (`future_program`: a start of 1010 becomes 1020, the clock at 1010)."""
     coordinator.runtime.command("set_scene", Scene(scene_id="scheduled", loop=True, cycle_seconds=60,
         contributions=tuple(Contribution(target=f"frame:{f}", kind="media" if media else "black",
                                          source_refs=("library:1",) if media else ()) for f in frames)))
-    coordinator.runtime.command("set_program", Program(program_id="calendar", scene_id="scheduled",
-                                                        starts_at=starts, ends_at=2000))
+    if starts <= coordinator.clock.utc():
+        coordinator.runtime.command("activate", "scheduled", "calendar", starts)
+    else:
+        future_program(coordinator, "calendar", "scheduled", starts, 2000)
     return coordinator.advance()
 
 
@@ -252,8 +271,7 @@ def test_missing_ready_blob_refuses_whole_offer_but_persists_current_runtime(reg
     coordinator = Coordinator(registry.db, registry.clock)
     coordinator.runtime.command("set_scene", Scene(scene_id="scheduled", loop=True, cycle_seconds=60,
         contributions=(Contribution(target="frame:frame-0", kind="media", source_refs=("library:1",)),)))
-    coordinator.runtime.command("set_program", Program(program_id="calendar", scene_id="scheduled",
-                                                        starts_at=1000, ends_at=2000))
+    coordinator.runtime.command("activate", "scheduled", "calendar", 1000)
     original_offer = coordinator._offer
 
     def corrupt_after_planning(conn, plan, groups):
@@ -373,21 +391,23 @@ def skip_codes(registry):
             "SELECT detail FROM execution_events WHERE kind='group_skipped'").fetchall()}
 
 
-def assert_outro_plays_after_finish(registry, coordinator, player):
-    coordinator.advance()  # the edit's own tick: the grown 1060 cue no longer aborts coordination
+def assert_outro_plays_after_finish(registry, coordinator, player, start=1000):
+    """The Run started at `start` (cycle 60) was finished 20 s in: its outro plays at start + 60."""
+    coordinator.advance()  # the edit's own tick: the grown cue no longer aborts coordination
     outro = next(layer for layer in coordinator.delivery(player["player_id"], 1)["plan"].layers
-                 if layer.start == 1060)
-    assert (outro.end, outro.opacity) == (1070, .5)
+                 if layer.start == start + 60)
+    assert (outro.end, outro.opacity) == (start + 70, .5)
     codes = skip_codes(registry)
-    old, new = [g for g in cohorts(registry) if g["starts_at"] == 1060]
+    old, new = [g for g in cohorts(registry) if g["starts_at"] == start + 60]
     assert codes[old["id"]] == "superseded" and new["status"] == "pending"
     assert list(new["members"]) == [outro.assignment_id]
-    registry.clock.advance(1056 - registry.clock.utc())
+    registry.clock.advance(start + 56 - registry.clock.utc())
     coordinator.advance()
     coordinator.readiness(player["player_id"], report(coordinator, player))
     committed = {a for c in coordinator.delivery(player["player_id"], 1)["commits"] for a in c.assignment_ids}
     assert outro.assignment_id in committed
-    assert coordinator.runtime.read().project(1060).runs[0].phase == "outro"
+    roots = [run for run in coordinator.runtime.read().project(start + 60).runs if run.parent_id is None]
+    assert roots[0].phase == "outro"
 
 
 def test_operator_finish_with_outro_supersedes_the_grouped_next_cycle(registry):
@@ -405,12 +425,13 @@ def test_removing_a_running_program_with_outro_supersedes_the_grouped_next_cycle
     player = setup_players(registry, count=1)[0]
     coordinator = Coordinator(registry.db, registry.clock)
     coordinator.runtime.command("set_scene", ending_scene())
-    coordinator.runtime.command("set_program", Program(program_id="p", scene_id="ending",
-                                                        starts_at=1000, ends_at=5000))
-    coordinator.advance()
+    set_house(registry.db, UTC_HOUSE)
+    coordinator.runtime.command_current("create_program", window_program("p", "ending", 1020, 4980))
     registry.clock.advance(20)
-    coordinator.runtime.command_current("remove_program", "p")
-    assert_outro_plays_after_finish(registry, coordinator, player)
+    coordinator.advance()                       # the window starts at 1020
+    registry.clock.advance(20)
+    coordinator.runtime.command_current("remove_program", "p", 1)
+    assert_outro_plays_after_finish(registry, coordinator, player, start=1020)
 
 
 def test_scene_edit_for_an_upcoming_program_supersedes_each_affected_cue_once(registry):
@@ -419,8 +440,7 @@ def test_scene_edit_for_an_upcoming_program_supersedes_each_affected_cue_once(re
     one = Scene(scene_id="s", loop=True, cycle_seconds=60,
                 contributions=(Contribution(target="frame:frame-0", kind="black"),))
     coordinator.runtime.command("set_scene", one)
-    coordinator.runtime.command("set_program", Program(program_id="p", scene_id="s",
-                                                        starts_at=1100, ends_at=1500))
+    future_program(coordinator, "p", "s", 1100, 1500)
     coordinator.advance()
     before = cohorts(registry)
     assert before and all(len(g["members"]) == 1 for g in before)
@@ -499,12 +519,12 @@ def test_an_edit_inside_the_prepare_window_supersedes_a_committed_cue_and_both_f
     players = setup_players(registry, count=2)
     coordinator = Coordinator(registry.db, registry.clock, CoordinationLimits(horizon_seconds=60))
     schedule(coordinator, ["frame-0"])
-    drive(registry, coordinator, players, 1006, step=2)
-    committed = next(g for g in cohorts(registry) if g["starts_at"] == 1010)
+    drive(registry, coordinator, players, 1016, step=2)
+    committed = next(g for g in cohorts(registry) if g["starts_at"] == 1020)
     assert committed["status"] == "committed"
     coordinator.runtime.command("set_scene", two_frame_scene())
-    dark = drive(registry, coordinator, players, 1012, step=2, watch=players, since=1010)
-    dark += drive(registry, coordinator, players, 1068, watch=players)
+    dark = drive(registry, coordinator, players, 1022, step=2, watch=players, since=1020)
+    dark += drive(registry, coordinator, players, 1078, watch=players)
     assert dark == [], "no Frame goes dark in the cycle"
     detail = group_events(registry, committed["id"])
     assert [(d["code"], d["cue_key"], d["root"] is not None) for d in detail] == [
@@ -517,11 +537,11 @@ def test_a_player_that_fetches_the_superseding_plan_after_the_start_still_commit
     players = setup_players(registry, count=2)
     coordinator = Coordinator(registry.db, registry.clock, CoordinationLimits(horizon_seconds=60))
     schedule(coordinator, ["frame-0"])
-    drive(registry, coordinator, players, 1006, step=2)
-    committed = next(g for g in cohorts(registry) if g["starts_at"] == 1010)
-    assert committed["status"] == "committed"  # frame-0 starts 1010 on this commit, offline
+    drive(registry, coordinator, players, 1016, step=2)
+    committed = next(g for g in cohorts(registry) if g["starts_at"] == 1020)
+    assert committed["status"] == "committed"  # frame-0 starts 1020 on this commit, offline
     coordinator.runtime.command("set_scene", two_frame_scene())
-    for _ in range(5):  # 1007..1011: the scheduler ticks; neither Player fetches or reports
+    for _ in range(5):  # 1017..1021: the scheduler ticks; neither Player fetches or reports
         registry.clock.advance(1)
         coordinator.advance()
     for sequence, player in enumerate(players, start=20000):  # past drive()'s sequences
@@ -529,8 +549,8 @@ def test_a_player_that_fetches_the_superseding_plan_after_the_start_still_commit
     assert "not_ready" not in skip_codes(registry).values()
     for player in players:
         delivery = coordinator.delivery(player["player_id"], 1)
-        first = next(layer for layer in delivery["plan"].layers if layer.start == 1010)
-        assert first.media_origin == 1010 and not delivery["revocations"]
+        first = next(layer for layer in delivery["plan"].layers if layer.start == 1020)
+        assert first.media_origin == 1020 and not delivery["revocations"]
         assert first.assignment_id in {a for c in delivery["commits"] for a in c.assignment_ids}
 
 
@@ -538,12 +558,12 @@ def test_a_started_cue_that_grows_is_skipped_while_other_frames_keep_their_offer
     players = setup_players(registry, count=3)
     coordinator = Coordinator(registry.db, registry.clock)
     schedule(coordinator, ["frame-0", "frame-1"])
-    drive(registry, coordinator, players[:2], 1012, step=2)
-    started = next(g for g in cohorts(registry) if g["starts_at"] == 1010)
+    drive(registry, coordinator, players[:2], 1022, step=2)
+    started = next(g for g in cohorts(registry) if g["starts_at"] == 1020)
     assert started["status"] == "committed"
     # No Runtime edit grows a started cue; forge the stored cohort narrower to reach the rule.
     frame_1 = next(layer.assignment_id for layer in coordinator.delivery(
-        players[1]["player_id"], 1)["plan"].layers if layer.start == 1010)
+        players[1]["player_id"], 1)["plan"].layers if layer.start == 1020)
     with registry.db.transaction() as conn:
         conn.execute("UPDATE coordination_groups SET members=members-%s WHERE id=%s",
                      (frame_1, started["id"]))
@@ -567,15 +587,14 @@ def test_a_new_binding_supersedes_the_pending_cohort_it_replaces(registry):
     coordinator.runtime.command("set_scene", Scene(scene_id="s", loop=True, cycle_seconds=60,
         contributions=(Contribution(target="frame:frame-0", kind="black"),
                        Contribution(target="frame:late", kind="black"))))
-    coordinator.runtime.command("set_program", Program(program_id="p", scene_id="s",
-                                                        starts_at=1100, ends_at=1200))
+    shift = future_program(coordinator, "p", "s", 1100, 1200)
     coordinator.advance()
-    before = next(g for g in cohorts(registry) if g["starts_at"] == 1100)
+    before = next(g for g in cohorts(registry) if g["starts_at"] == 1100 + shift)
     frame(registry, "late")
     registry.bind("late", player["player_id"], "HDMI-A-2", expected_generation=0)
     save_position(registry, "late")
     registry.clock.advance(90)
-    drive(registry, coordinator, [player], 1110)
+    drive(registry, coordinator, [player], 1110 + shift)
     assert [d["code"] for d in group_events(registry, before["id"])] == ["superseded"]
     assert "not_ready" not in skip_codes(registry).values()
     assert [g["status"] for g in cohorts(registry) if g["cue_key"] == before["cue_key"]] \
@@ -587,19 +606,22 @@ def test_moving_an_upcoming_program_end_earlier_plans_its_outro(registry, edit_a
     player = setup_players(registry, count=1)[0]
     coordinator = Coordinator(registry.db, registry.clock)
     coordinator.runtime.command("set_scene", ending_scene())
-    old = Program(program_id="p", scene_id="ending", starts_at=1100, ends_at=1500)
-    coordinator.runtime.command("set_program", old)
+    shift = future_program(coordinator, "p", "ending", 1100, 1500)      # 1140 to 1500
+    old = coordinator.runtime.read().export_state()["programs"]["p"]
     coordinator.advance()
-    registry.clock.advance(max(0, edit_at - 4 - registry.clock.utc()))  # nothing starts before 1100
+    edit_at += shift
+    registry.clock.advance(max(0, edit_at - 4 - registry.clock.utc()))  # nothing starts before 1140
     drive(registry, coordinator, [player], edit_at)
-    coordinator.runtime.command_current("replace_program", old, old.model_copy(update={"ends_at": 1130}))
-    if edit_at < 1090:
-        registry.clock.advance(1090 - edit_at)
-    drive(registry, coordinator, [player], 1166)
+    coordinator.runtime.command_current(
+        "save_program", Program.model_validate(old),
+        ProgramDraft(name="p", scene_id="ending", when=daily("00:19", "00:20")))      # ends 1200
+    if edit_at < 1130:
+        registry.clock.advance(1130 - edit_at)
+    drive(registry, coordinator, [player], 1206)
     codes = set(skip_codes(registry).values())
     assert "cue_membership_changed" not in codes and "not_ready" not in codes
     committed = {g["starts_at"] for g in cohorts(registry) if g["status"] == "committed"}
-    assert {1100, 1160} <= committed  # the body cycle, then the outro at the cycle end
+    assert {1140, 1200} <= committed  # the body cycle, then the outro at the window's end
 
 
 def test_finishing_a_parent_with_children_never_freezes_or_misses_a_cue(registry):
@@ -629,10 +651,10 @@ def test_removing_a_program_inside_its_prepare_window_withdraws_its_committed_cu
     player = setup_players(registry, count=1)[0]
     coordinator = Coordinator(registry.db, registry.clock)
     schedule(coordinator, ["frame-0"])
-    drive(registry, coordinator, [player], 1006, step=2)
-    committed = next(g for g in cohorts(registry) if g["starts_at"] == 1010)
+    drive(registry, coordinator, [player], 1016, step=2)
+    committed = next(g for g in cohorts(registry) if g["starts_at"] == 1020)
     assert committed["status"] == "committed"
-    coordinator.runtime.command_current("remove_program", "calendar")
+    coordinator.runtime.command_current("remove_program", "calendar", 1)
     coordinator.advance()
     assert [d["code"] for d in group_events(registry, committed["id"])] == ["superseded"]
     assert coordinator.delivery(player["player_id"], 1)["commits"] == ()
@@ -642,12 +664,11 @@ def test_orphaned_pending_cues_are_superseded_not_skipped_as_not_ready(registry)
     setup_players(registry, count=1)
     coordinator = Coordinator(registry.db, registry.clock)
     coordinator.runtime.command("set_scene", ending_scene())
-    coordinator.runtime.command("set_program", Program(program_id="p", scene_id="ending",
-                                                        starts_at=1100, ends_at=1500))
+    future_program(coordinator, "p", "ending", 1100, 1500)
     coordinator.advance()
     forecast = cohorts(registry)
     assert forecast and all(g["status"] == "pending" for g in forecast)
-    coordinator.runtime.command_current("remove_program", "p")
+    coordinator.runtime.command_current("remove_program", "p", 1)
     coordinator.advance()
     codes = skip_codes(registry)
     assert all(codes[g["id"]] == "superseded" for g in forecast)

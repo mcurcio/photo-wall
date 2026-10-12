@@ -20,6 +20,7 @@ from test_display_identity import enroll_pi
 
 from appliance.display_host.bus import DISPLAY_COMPONENT, DISPLAY_SLICE, DISPLAY_VERSION
 from central.content_catalog.catalog import device_id_for_serial
+from central.db import DatabaseTransactionClock
 from central.infra.display_store import (
     REPORT_STREAM,
     DisplayDocuments,
@@ -38,8 +39,6 @@ from contracts.node_output import (
     DisplayMode,
     OutputReport,
     Power,
-    PowerRequest,
-    RequestReason,
     decode_output_document,
     encode_output_report,
     output_document_key,
@@ -96,20 +95,21 @@ def test_a_nodes_output_documents_and_reports_cross_the_display_line(database, t
         await until(linked, 15, "the Node's leaf links")
         wakes = DisplayWakes()
         stores = PgLinkStores(database, {REPORT_STREAM: OutputReportJudge(wakes)})
-        links = NodeLinks(Pipe.FLEET, hub.client_url, stores, DisplayDocuments(stores, wakes))
+        links = NodeLinks(Pipe.FLEET, hub.client_url, stores, 
+                         DisplayDocuments(stores, wakes, times=DatabaseTransactionClock()))
         stop = asyncio.Event()
         running = asyncio.create_task(links.run(stop))
         try:
             await links.track([SERIAL])
 
-            # (1) The enrolled Output's document, standing on, reaches the Node's desired view.
+            # (1) The enrolled Output's document, its timetable on, reaches the Node's desired view.
             async def held(output_id: str):
                 found = display.desired.get(output_document_key(output_id))
                 return (found is not None and found.writer == CENTRAL_WRITER
                         and decode_output_document(found.value))
             document = await until(lambda: held("HDMI-A-1"), SECONDS, "output-HDMI-A-1 on the Node")
-            assert (document.change, document.power, document.method) == (
-                1, (PowerRequest("standing", Power.ON, RequestReason.STANDING),), BEST_DETECTED)
+            assert (document.change, document.power.now, document.power.test, document.method) == (
+                1, Power.ON, None, BEST_DETECTED)
             assert display.desired.get(output_document_key("HDMI-A-2")) is None
 
             # (2) The Node's report is recorded and judged: the Display on the bound Frame.

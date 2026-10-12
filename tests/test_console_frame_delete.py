@@ -9,7 +9,7 @@ from test_console_flow import _require_node
 SRC = Path(__file__).parents[1] / "central/console/src"
 
 
-def test_frame_stored_references_walk_inline_scenes_and_future_programs():
+def test_frame_stored_references_walk_inline_scenes_and_the_programs_playing_them():
     _require_node()
     script = r"""
 const { frameStoredReferences } = await import(process.argv[1]);
@@ -22,10 +22,9 @@ const snapshot = { runtime: {
     "other": { contributions: [{ target: "frame:other" }] },
   },
   programs: {
-    "z-next": { scene_id: "z-outro", starts_at: 1010 },
-    "a-next": { scene_id: "a-inline", starts_at: 1001 },
-    "past": { scene_id: "a-inline", starts_at: 999 },
-    "other": { scene_id: "other", starts_at: 1010 },
+    "z-next": { scene_id: "z-outro", name: "Z" },
+    "a-next": { scene_id: "a-inline", name: "A" },
+    "other": { scene_id: "other", name: "Other" },
   },
 } };
 console.log(JSON.stringify({

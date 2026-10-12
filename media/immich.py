@@ -52,7 +52,6 @@ from central.photo_library.model import SourceQuery as LibraryQuery
 from central.photo_library.policy import IMMICH_WEB_TYPES, REQUIRED_PERMISSIONS
 from contracts.models import Model, Positive
 from contracts.time import Clock, SystemClock
-from media import pool_check
 from media.library_client import (
     ChosenItemGone,
     ExclusionQuery,
@@ -456,10 +455,10 @@ class ImmichClient:
         rows, position, _ = await self._step(self._keyset(body, TakenWindow(), after))
         return IdsPage(ids=tuple(_ref(row.get("id"), "search") for row in rows), next=position)
 
-    async def still_matches(self, query: LibraryQuery, upstream_id: str) -> bool:
-        """LibraryClient.still_matches: the include body, its window taken now, narrowed to one
-        id (MetadataSearchDto `id`)."""
-        body = {**_filters(query, pool_check.window_of(query, self.clock.utc())),
+    async def still_matches(self, query: LibraryQuery, window: TakenWindow, upstream_id: str) -> bool:
+        """LibraryClient.still_matches: the include body with the check's window, narrowed to
+        one id (MetadataSearchDto `id`)."""
+        body = {**_filters(query, window),
                 "withStacked": True, "id": _safe_ref(upstream_id)}
         rows, _ = await self._step(self._search(body))
         return any(_ref(row.get("id"), "search") == body["id"] for row in rows)

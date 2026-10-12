@@ -19,7 +19,7 @@ import re
 import time
 
 import pytest
-from console_tasks import open_frame, visit
+from console_tasks import frame_heading, frame_name, open_frame, visit
 from operator_harness import operator_server, sign_in
 from playwright.sync_api import expect
 from support.position import save_position
@@ -293,7 +293,7 @@ def test_one_click_on_a_wall_tile_opens_the_frame_page_and_its_position_is_kept_
 
         # One click on the tile opens the Frame's page at Overview, named by its own heading.
         page.get_by_role("button", name=f"Frame {FRAME}", exact=True).click()
-        expect(page.get_by_role("heading", level=1, name=f"Frame {FRAME}", exact=True)).to_be_focused()
+        expect(frame_heading(page, frame_name(registry, FRAME))).to_be_focused()
         expect(page.get_by_role("heading", level=1)).to_have_count(1)
         assert page.evaluate("location.hash") == f"#/wall/frames/{FRAME}/overview"
         tabs = page.get_by_role("tablist", name="Frame settings", exact=True)

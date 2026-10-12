@@ -15,6 +15,7 @@ from typing import Any, Literal, Protocol
 
 from pydantic import Field, SecretStr
 
+from central.house_time.model import IanaZone
 from central.installation_models import FrameOutput
 from central.photo_library.model import (
     AlbumRef,
@@ -224,6 +225,7 @@ class CheckLease(Model):
     connection: ConnectionSecret
     check_number: int = Field(ge=1, strict=True)
     started_at: Instant
+    zone: IanaZone                       # the house zone: relative dates count on its calendar
     progress: JsonObject | None = None   # the worker's own resume state; None: a fresh check
 
 

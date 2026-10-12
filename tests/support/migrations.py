@@ -11,16 +11,18 @@ from central.db import Database
 MIGRATIONS = Path(__file__).parents[2] / "central/migrations"
 
 
-def migrate_before(db: Database, stop: str) -> None:
-    """Apply, in order, every migration not yet applied whose file name sorts before `stop`,
-    recording each as `central.db`'s runner does (so `db.migrate()` later applies the rest)."""
+def migrate_before(db: Database, stop: str, *, also: tuple[str, ...] = ()) -> None:
+    """Apply, in order, every migration not yet applied whose file name sorts before `stop`, and
+    then each later one whose name starts with one of `also` (a later schema the code seeding the
+    test's rows needs, independent of the migrations under test), recording each as
+    `central.db`'s runner does (so `db.migrate()` later applies the rest)."""
     with db.transaction() as conn:
         conn.execute("CREATE TABLE IF NOT EXISTS schema_migrations (name TEXT PRIMARY KEY, "
                      "sha256 TEXT NOT NULL, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())")
         applied = {row["name"] for row in conn.execute("SELECT name FROM schema_migrations")}
         for path in sorted(MIGRATIONS.glob("*.sql")):
-            if path.name >= stop:
-                break
+            if path.name >= stop and not path.name.startswith(also):
+                continue
             if path.name in applied:
                 continue
             text = path.read_text()

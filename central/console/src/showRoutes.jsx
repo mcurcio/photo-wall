@@ -2,6 +2,7 @@ import React from "react";
 
 import { FrameHealthBadges } from "./FrameHealthBadges.jsx";
 import { MediaPipeline } from "./MediaPipeline.jsx";
+import { WeekPage } from "./pages/week-page.tsx";
 import { ProgramsRegion } from "./ProgramsRegion.jsx";
 import SAMPLES from "./routeSamples.json";
 import { RunsRegion } from "./RunsRegion.jsx";
@@ -66,15 +67,21 @@ export const showRoutes = Object.freeze(
     {
       section: "schedule",
       label: "Schedule",
-      render: ({ snapshot, route, navigate, recentScene, markDraft }) => (
-        <ProgramsRegion
-          snapshot={snapshot}
-          route={route}
-          navigate={navigate}
-          recentScene={recentScene}
-          markDraft={markDraft}
-        />
-      ),
+      // The week page (Power and the week): the week calendar with its Power lane, the
+      // Schedules under it, then the rules (the Default Scene, Night off); while the Schedule flow
+      // shows a step, the week is left out (rule 1). The page is flat: no card around its cards.
+      render: ({ snapshot, route, navigate, recentScene, markDraft }) => {
+        const schedules = (
+          <ProgramsRegion
+            snapshot={snapshot}
+            route={route}
+            navigate={navigate}
+            recentScene={recentScene}
+            markDraft={markDraft}
+          />
+        );
+        return <WeekPage snapshot={snapshot} schedules={schedules} hidden={route?.flow !== undefined} />;
+      },
       samplePaths: SAMPLES.show.schedule,
     },
     {

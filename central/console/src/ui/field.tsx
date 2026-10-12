@@ -30,7 +30,7 @@ export function useFieldControl(): FieldWiring {
 
 /** The look every text-like control shares (an input, a select). */
 export const controlClass = cn(
-  "min-w-0 rounded-input border border-line-input bg-surface-input px-3 py-1.5",
+  "min-w-0 rounded-input border border-line-input bg-surface-input px-3 py-1.5 max-md:min-h-11",
   "font-sans text-sm text-text",
   "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus",
   "disabled:cursor-not-allowed disabled:opacity-60 aria-invalid:border-alarm",
@@ -111,7 +111,8 @@ export interface TextInputProps {
   value: string;
   onChange: (value: string) => void;
   /** `password` for a secret pasted once (an API key): the browser never shows it back. */
-  type?: "text" | "password" | "url" | "search" | "date";
+  /** `time` for a time of day ("23:00"): the browser's time picker, a phone's wheel. */
+  type?: "text" | "password" | "url" | "search" | "date" | "time";
   /** How wide the field is: `short` for a name, `long` for an address. */
   width?: "short" | "long";
   placeholder?: string;

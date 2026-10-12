@@ -9,17 +9,22 @@ from __future__ import annotations
 
 import hashlib
 import time
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import pytest
+from support.house_time import UTC_HOUSE
 from support.key_content_builders import face, measured
 from support.photo_pools import photo as library_photo
 from support.photo_pools import seed_pool
 
 from central.catalog import Candidate, SourcePool
 from central.db import ProcessTransactionClock
+from central.house_time.model import HouseTime
 from central.media_repository import MediaRepository
 from central.planner import PlannerLimits, Projection, project
 from central.runtime import Contribution, Runtime, Scene
+from central.wall_plan import assignment
 from central.wall_plan.fit_settings import FitSettings
 from central.wall_plan.order import (
     LineAnswer,
@@ -32,6 +37,7 @@ from central.wall_plan.order import (
 )
 from central.wall_plan.selection import SceneSelection
 from contracts.models import FrameProfile, OutputBinding, Variant
+from contracts.on_screen import Extent
 
 PROFILES = {
     "wide": FrameProfile(width_px=1920, height_px=1080, diagonal_inches=24),
@@ -73,8 +79,8 @@ def photo(asset: str, shape: str, *, captured: float, prepared: bool = True,
 
 
 def wall(frames: dict[str, str], *, order: str, no_repeat_days: int = 0,
-         cycle: float = 30) -> Runtime:
-    instance = Runtime()
+         cycle: float = 30, house: HouseTime = UTC_HOUSE) -> Runtime:
+    instance = Runtime(house=house)
     instance.set_scene(Scene(
         scene_id="scene", cycle_seconds=cycle, loop=True,
         selection=SceneSelection(order=order, no_repeat_days=no_repeat_days),
@@ -117,6 +123,28 @@ HISTORIES = {
     "shown": WallHistory(shown=tuple(
         shown(f"p{n:04d}", pass_number=2, start=-10_000 + n) for n in range(0, 120, 3))),
 }
+
+
+def test_a_partial_read_finds_on_this_day_on_the_house_calendar():
+    """Roadmap 2b: the line's top is read on the house calendar, as the whole line is ranked. At
+    23:40 on 12 Oct in New York (13 Oct in UTC) the 300 photos taken on a 13 Oct are not On this
+    day; a top read on UTC's date would hold only them, ordered by name, and plan otherwise.
+
+    Mutation probe: the Planner's `LineQuery` without `house` -> the plans differ."""
+    house = HouseTime(zone="America/New_York")
+    zone = ZoneInfo(house.zone)
+    now = datetime(2026, 10, 12, 23, 40, tzinfo=zone).timestamp()
+    frames = {"left": "wide"}
+    pool = SourcePool(source_ref=POOL, ready=True, candidates=(
+        photo("late-12th", "wide", captured=datetime(2025, 10, 12, 23, 30, tzinfo=zone).timestamp()),
+        *(photo(f"f{n:03d}", "wide", captured=datetime(2020, 10, 13, 12, tzinfo=zone).timestamp())
+          for n in range(300))))
+    lean = plan(wall(frames, order="on_this_day", house=house), frames,
+                PoolLines({POOL: pool}), now=now)
+    full = plan(wall(frames, order="on_this_day", house=house), frames,
+                PoolLines({POOL: pool}), now=now, limits=PlannerLimits(hydrate_factor=64))
+    assert [entry.asset_id for entry in lean.plan][:1] == ["late-12th"]
+    assert lean == full
 
 
 @pytest.mark.parametrize("order", ["shuffle", "chronological", "newest_first", "on_this_day"])
@@ -198,7 +226,7 @@ def test_a_capture_time_edited_by_another_pools_check_changes_the_next_pass(regi
     frames = {"left": "wide"}
 
     def first_photo() -> str:
-        instance = Runtime()
+        instance = Runtime(house=UTC_HOUSE)
         instance.set_scene(Scene(
             scene_id="scene", cycle_seconds=30, loop=True,
             selection=SceneSelection(order="newest_first"),
@@ -212,3 +240,47 @@ def test_a_capture_time_edited_by_another_pools_check_changes_the_next_pass(regi
     assert first_photo() == newer.asset_id
     seed_pool(registry, "garden:1", (older.model_copy(update={"taken_at": 3.0}),))
     assert first_photo() == older.asset_id
+
+
+def test_rule_1_reads_a_bounded_number_of_extents_per_photo_placed(monkeypatch):
+    """A perpetual Run (the Default Scene) on an 8 s cycle, three Frames and four photos: an
+    hour's plan places each photo about 340 times. Rule 1 (never one photo on two Frames at once)
+    reads only the showings that can overlap (`_Spans`), so the extents a pass computes and
+    compares grow with the photos it places, never with the photos placed before them. The pass
+    holds the coordination lock while it plans, so a slow one stalls every Player's readiness
+    (the wall demo's fallback gaps). Counted, not timed: the count is the same on every machine.
+
+    Mutation probe: rule 1 reading every earlier showing of the photo (`_Wall.add` putting every
+    showing in `of_asset`, the previous `free`) -> about 680 extent reads a placement in the hour,
+    four times the half hour's, where this reads 5 in both."""
+    reads = 0
+    computed, compared = assignment.on_screen_extent, Extent.overlaps
+
+    def count_computed(*args, **kwargs):
+        nonlocal reads
+        reads += 1
+        return computed(*args, **kwargs)
+
+    def count_compared(self, other):
+        nonlocal reads
+        reads += 1
+        return compared(self, other)
+
+    monkeypatch.setattr(assignment, "on_screen_extent", count_computed)
+    monkeypatch.setattr(Extent, "overlaps", count_compared)
+    frames = {"left": "wide", "right": "wide", "far": "wide"}
+    pool = SourcePool(source_ref=POOL, ready=True, candidates=tuple(
+        photo(f"p{n}", "wide", captured=float(n)) for n in range(4)))
+
+    def reads_a_placement(plan_seconds: float) -> float:
+        nonlocal reads
+        reads = 0
+        projection = plan(wall(frames, order="shuffle", cycle=8), frames,
+                          PoolLines({POOL: pool}), plan_seconds=plan_seconds)
+        placed = sum(entry.asset_id is not None for entry in projection.plan)
+        assert placed > 3 * plan_seconds / 8 * 0.9
+        return reads / placed
+
+    half_hour, hour = reads_a_placement(1800), reads_a_placement(3600)
+    assert hour <= 1.1 * half_hour
+    assert hour < 20

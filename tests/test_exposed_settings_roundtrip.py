@@ -27,6 +27,7 @@ import hashlib
 
 import pytest
 from fastapi.testclient import TestClient
+from support.house_time import EVERY_DAY, UTC_HOUSE, clock_time, set_house
 from test_coordination import publish_fixture_catalog, setup_players
 from test_registry import ADMIN
 
@@ -72,6 +73,7 @@ PHOTO = b"photo-wall"
 
 
 def _rig(registry):
+    set_house(registry.db, UTC_HOUSE)     # a Program's windows are on the UTC house clock
     player = setup_players(registry, count=1)[0]
     publish_fixture_catalog(registry, digest=hashlib.sha256(PHOTO).hexdigest())
     app = create_app(registry.db, registry.clock, ADMIN, run_scheduler=False)
@@ -260,18 +262,14 @@ BLACK = (True, [])  # nothing plays, and the Frame keeps nothing
 
 
 def _play(client, frame, body, *, cycles=1, program=True):
-    """`body` started now and run for `cycles` 20 s cycles: as a Program (its end planned ahead)
+    """`body` started now and run for `cycles` 20 s cycles: with its end planned ahead (`_program`)
     or, with `program=False`, an activation that stops on its own or by Finish. Then 10 s on:
     mid-cycle, the photo shows at full strength."""
-    saved = client.put(f"/v1/operator/scenes/{body['scene_id']}", json=body, headers=AUTH)
-    assert saved.status_code == 200, saved.text
     if program:
+        saved = client.put(f"/v1/operator/scenes/{body['scene_id']}", json=body, headers=AUTH)
+        assert saved.status_code == 200, saved.text
         now = frame.registry.clock.utc()
-        program = {"program_id": "p-" + body["scene_id"], "scene_id": body["scene_id"],
-                   "starts_at": now, "ends_at": now + 20 * cycles}
-        scheduled = client.put(f"/v1/operator/programs/{program['program_id']}", json=program,
-                               headers=AUTH)
-        assert scheduled.status_code == 200, scheduled.text
+        _program(client, frame, body["scene_id"], now, now + 20 * cycles)
     else:
         _save_and_start(client, body)
     frame.sync()
@@ -473,12 +471,28 @@ def test_the_shortest_fading_ending_keeps_nothing(registry, tmp_path):
         assert _shown(frame.lose_central(60)) == BLACK
 
 
+_PRIORITIES = {0: "normal", 10: "special-event", 20: "always-wins"}
+
+
 def _program(client, frame, scene_id, starts, ends, *, priority=0):
-    program = {"program_id": "p-" + scene_id, "scene_id": scene_id, "starts_at": starts,
-               "ends_at": ends, "priority": priority}
-    scheduled = client.put(f"/v1/operator/programs/{program['program_id']}", json=program,
-                           headers=AUTH)
-    assert scheduled.status_code == 200, scheduled.text
+    """The saved Scene `scene_id` played over [starts, ends), its end planned ahead: the Scene's
+    duration is `ends - starts` (a revision of it), started now by Show now, or later by a
+    Program whose window starts at `starts` (on a minute: the test clock starts at 1000, so
+    1020 is). `priority` 0, 10, 20 is the Program's normal, special event, always wins."""
+    current = client.get("/v1/operator/runtime", headers=AUTH).json()["definitions"][scene_id]
+    timed = {**current, "revision": current["revision"] + 1, "duration_seconds": ends - starts}
+    saved = client.put(f"/v1/operator/scenes/{scene_id}", json=timed, headers=AUTH)
+    assert saved.status_code == 200, saved.text
+    if starts <= frame.registry.clock.utc():
+        started = client.post("/v1/operator/activations", headers=AUTH, json={
+            "scene_id": scene_id, "activation_id": "act-" + scene_id, "priority": priority})
+        assert started.status_code == 200, started.text
+        return
+    program = {"name": scene_id, "scene_id": scene_id, "priority": _PRIORITIES[priority],
+               "when": {"days": list(EVERY_DAY), "start": {"at": "clock", "time": clock_time(starts)},
+                        "end": {"at": "clock", "time": clock_time(starts + 60)}}}
+    scheduled = client.post("/v1/operator/programs", json=program, headers=AUTH)
+    assert scheduled.status_code == 201, scheduled.text
 
 
 def test_back_to_back_programs_keep_their_fade(registry, tmp_path):
@@ -642,8 +656,8 @@ def test_a_run_starting_on_top_at_the_top_scenes_end_still_leaves_keeping_to_the
             body = _scene(scene_id, keep_last=True)
             saved = client.put(f"/v1/operator/scenes/{scene_id}", json=body, headers=AUTH)
             assert saved.status_code == 200, saved.text
-        _program(client, frame, "top", start + 20, start + 40, priority=10)
-        _program(client, frame, "next", start + 40, start + 60, priority=20)
+        _program(client, frame, "top", start + 20, start + 80, priority=10)     # windows start on a minute
+        _program(client, frame, "next", start + 80, start + 100, priority=20)
         frame.sync()
         frame.advance(25)
         tops = [layer for layer in _layers(coordinator, player)

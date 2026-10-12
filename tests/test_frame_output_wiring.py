@@ -21,7 +21,7 @@ from central.app import create_app
 from central.coordination import Coordinator
 from central.photo_fit_routes import ANALYSIS_PATH
 from central.registry import FrameCreate
-from central.runtime import Contribution, Program, Scene
+from central.runtime import Contribution, Scene
 from contracts.models import Calibration, CoverFit, FrameProfile
 
 WIDE = FrameProfile(width_px=1920, height_px=1080, diagonal_inches=24)
@@ -69,6 +69,5 @@ def test_a_photo_that_fills_a_mat_opening_is_judged_against_the_opening_everywhe
     coordinator.runtime.command("set_scene", Scene(
         scene_id="house", cycle_seconds=30, loop=True,
         contributions=(Contribution(target="frame:hall", source_refs=(POOL,)),)))
-    coordinator.runtime.command("set_program", Program(
-        program_id="calendar", scene_id="house", starts_at=1000, ends_at=1000 + 7200))
+    coordinator.runtime.command("activate", "house", "calendar", 1000)
     assert {entry.asset_id for entry in coordinator.advance().plan} == {opening.asset_id}

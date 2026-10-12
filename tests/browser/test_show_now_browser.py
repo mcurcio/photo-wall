@@ -34,6 +34,7 @@ from operator_harness import (
 )
 from photo_seed import connected, filled, library_of, saved_source
 from playwright.sync_api import expect
+from support.console_words import scene_words
 from test_operator_showrunner_browser import (
     INVALID_FRAME,
     SCENE_ID,
@@ -401,13 +402,13 @@ def test_a_scene_cards_show_now_opens_the_flow_on_that_scene(page, registry):
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         connect(page, origin, "scenes")
         scenes = page.get_by_role("region", name="Scenes", exact=True)
-        scenes.get_by_role("button", name=f"Show Scene {SCENE_ID} now", exact=True).click()
+        scenes.get_by_role("button", name=scene_words("showCard", id=SCENE_ID), exact=True).click()
         expect(page.get_by_role("heading", level=1, name="Now", exact=True)).to_be_visible()
         assert current_hash(page) == "#/now/show/scene"
         expect(show_form(page).get_by_label("Scene", exact=True)).to_have_value(SCENE_ID)
 
         go(page, "scenes")
-        scenes.get_by_role("button", name="Show Scene elsewhere now", exact=True).click()
+        scenes.get_by_role("button", name=scene_words("showCard", id="elsewhere"), exact=True).click()
         expect(show_form(page).get_by_label("Scene", exact=True)).to_have_value(
             "elsewhere")
 
@@ -542,7 +543,7 @@ def _show_scene_card(page, scene_id):
     """A Scene card's "Show now", from the Scenes page."""
     go(page, "scenes")
     page.get_by_role("region", name="Scenes", exact=True).get_by_role(
-        "button", name=f"Show Scene {scene_id} now", exact=True).click()
+        "button", name=scene_words("showCard", id=scene_id), exact=True).click()
     expect(page.get_by_role("heading", level=1, name="Now", exact=True)).to_be_visible()
 
 
@@ -560,9 +561,9 @@ def test_a_card_show_now_offers_its_scene_to_a_changed_draft(page, registry):
         scene = form.get_by_label("Scene", exact=True)
         expect(scene).to_have_value(SCENE_ID)
         expect(form).to_contain_text(f"Your unsaved draft shows Scene {SCENE_ID}.")
-        form.get_by_role("button", name="Show Scene elsewhere instead", exact=True).click()
+        form.get_by_role("button", name=scene_words("showInstead", id="elsewhere"), exact=True).click()
         expect(scene).to_have_value("elsewhere")
-        expect(form.get_by_role("button", name="Show Scene elsewhere instead", exact=True)
+        expect(form.get_by_role("button", name=scene_words("showInstead", id="elsewhere"), exact=True)
                ).to_have_count(0)
 
 
@@ -582,7 +583,7 @@ def test_the_same_scene_handed_over_again_is_offered_again(page, registry):
         scene.select_option(SCENE_ID)  # a changed draft
         _show_scene_card(page, "elsewhere")
         expect(scene).to_have_value(SCENE_ID)
-        form.get_by_role("button", name="Show Scene elsewhere instead", exact=True).click()
+        form.get_by_role("button", name=scene_words("showInstead", id="elsewhere"), exact=True).click()
         expect(scene).to_have_value("elsewhere")
 
 
@@ -615,7 +616,7 @@ def test_a_card_show_now_keeps_a_draft_whose_outcome_is_unknown(page, registry):
         assert current_hash(page) == "#/now/show/scene"
         expect(form.get_by_label("Scene", exact=True)).to_have_value(SCENE_ID)
         expect(form).to_contain_text(f"Your unsaved draft shows Scene {SCENE_ID}.")
-        expect(form.get_by_role("button", name="Show Scene elsewhere instead", exact=True)
+        expect(form.get_by_role("button", name=scene_words("showInstead", id="elsewhere"), exact=True)
                ).to_be_visible()
         form.get_by_role("button", name="Continue", exact=True).click()
         with page.expect_response(lambda r: r.url.endswith("/v1/operator/activations")):
@@ -681,7 +682,7 @@ def test_a_card_show_now_during_an_activation_in_flight_keeps_its_draft_and_key(
         route.fulfill(status=500, content_type="application/json", body='{"error": "internal"}')
         expect(_outcome(page)).to_have_text(UNKNOWN)
         expect(scene).to_have_value(SCENE_ID)
-        expect(form.get_by_role("button", name="Show Scene elsewhere instead", exact=True)
+        expect(form.get_by_role("button", name=scene_words("showInstead", id="elsewhere"), exact=True)
                ).to_be_visible()
 
         # The operator retries the same Scene, as the notice invites: the same key.

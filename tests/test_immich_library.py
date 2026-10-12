@@ -295,6 +295,21 @@ def test_the_search_body_carries_every_filter_of_the_query_in_one_request():
         "withStacked": True, "withExif": True, "size": 500, "page": 1, "order": "desc"}]
 
 
+def test_the_one_item_recheck_asks_with_the_checks_window_and_one_id():
+    """The Re-check (follow-up S4) asks Immich's include query with the check's own window (taken
+    at its start on the house calendar, media/pool_check.py `window_of`), narrowed to one id.
+
+    Mutation probe: work the window out again in the client -> no house zone there (TypeError),
+    or another window."""
+    library = Library([asset(1, taken=T0 + 10)])
+    source = query(taken=TakenBetween(start=T0, end=T0 + 86400))
+    window = TakenWindow(after=T0, before=T0 + 86400)
+    assert run(library.client().still_matches(source, window, ref(1))) is True
+    (body,) = library.searches
+    assert (body["takenAfter"], body["takenBefore"], body["id"]) == (
+        "2026-01-01T00:00:00.000000Z", "2026-01-02T00:00:00.000000Z", ref(1))
+
+
 @pytest.mark.parametrize(("kinds", "sent"), [
     (("video",), "VIDEO"), (("live_photo", "photo"), "IMAGE"), (("live_photo",), "IMAGE"),
     (("photo", "video"), None), (("live_photo", "photo", "video"), None),

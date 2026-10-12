@@ -4,8 +4,8 @@
 Two documents ride the Node bus's `display` store line, one key per Output (HDMI port):
 
 - The **Output document** (Central -> Pi, the display line's desired bucket, key
-  `output_document_key(output_id)`): the stack of power requests for the port, top first, plus the
-  power method and the two input switches of the Display last seen on it. It explains itself, so
+  `output_document_key(output_id)`): the port's power timetable (Central's decision now, the set
+  times it changes at over the next days, and 1b's console test on top), plus the power method and the two input switches of the Display last seen on it. It explains itself, so
   any writer (Central today, a local writer later) can produce it and the Pi needs nothing else.
 - The **Output report** (Pi -> Central, the display line's state bucket, key
   `output_report_key(output_id)`): whether a display is connected, its identity and modes as its
@@ -27,7 +27,8 @@ and Central records no report from a schema-1 writer (no backwards compatibility
 Rules this module owns (one home each):
 - the wire shape and its JSON codec (canonical: sorted keys, no spaces, so a digest of the bytes
   is stable for an unchanged document);
-- the vocabulary: `PowerMethod`, `Power`, `RequestReason`, `PowerResult`, `BEST_DETECTED`;
+- the vocabulary: `PowerMethod`, `Power`, `Darkness`, `InForceKind`, `PowerResult`, `BEST_DETECTED`;
+- the set time's text form (`encode_set_time`, `decode_set_time`);
 - the best-detected order of methods (`METHOD_PRECEDENCE`, setting #116);
 - the picture vocabulary and ranges: `ActsOn`, `AS_THE_DISPLAY_HAS_IT`, `WriteResult`, percent
   0..100, colour temperature KELVIN_MIN..KELVIN_MAX in KELVIN_STEP, gamma in tenths
@@ -35,15 +36,18 @@ Rules this module owns (one home each):
 - the bus keys and their largest sizes (the display line's key tables are built from them in
   appliance/display_host/bus.py; Central's writer learns them from the bucket itself).
 
-Rules it does NOT own: which request is in force and when to act (the Pi's
-appliance/display_host/output_power.py), whether a display is the same Display and whether a Frame
+Rules it does NOT own: what is in force at the Pi's clock and when to act (the Pi's
+appliance/display_host/power_timetable.py and output_power.py), the timetable itself (Central's
+central/power/timetable.py), whether a display is the same Display and whether a Frame
 is ready (Central's central/displays/); how a picture setting becomes a DDC/CI write or a picture
 operation (appliance/display_host/picture.py); where a setting acts on a Display (Central's
 central/displays/picture.py, set at the Display's first probe and kept).
 
-Durations, never timestamps, cross the wire: `for_seconds` counts on the Pi's monotonic clock from
-when the Pi applies the request; `remaining_seconds` is the Pi's own count. No clock is compared
-across machines.
+Durations and calendar set times cross the wire, never a clock reading (the design's rule, from
+the owner's "Yes, send 7 days of set times", 2026-10-12): a set time is a calendar time Central
+worked out from the house's rules; the Pi compares it only with its
+own clock; a test's `for_seconds` counts on the Pi's monotonic clock from when the Pi applies it,
+and `remaining_seconds` is the Pi's own count.
 """
 from __future__ import annotations
 
@@ -51,13 +55,14 @@ import json
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, fields, is_dataclass
+from datetime import UTC, datetime
 from enum import Enum, StrEnum
 from typing import Any, Final, Literal, TypeVar
 
 from contracts.node_protocol import token
 from contracts.strict_json import loads_object
 
-SCHEMA_MAJOR: Final = 2                         # the display line's schema major (birth, envelope); 2 from 1c
+SCHEMA_MAJOR: Final = 3                         # the display line's schema major (birth, envelope); 3 from 2a
 
 # Every Output a Node can have: the Pi 5's two HDMI connectors, and the two virtual connectors the
 # software end-to-end tier runs (player/output_discovery.py's `weston_ini` iterates these).
@@ -66,7 +71,6 @@ OUTPUT_IDS: Final[tuple[str, ...]] = ("HDMI-A-1", "HDMI-A-2", "Virtual-1", "Virt
 OUTPUT_DOCUMENT_BYTES: Final = 4096             # an Output document's largest encoding
 OUTPUT_REPORT_BYTES: Final = 8192               # an Output report's largest encoding
 POWER_ATTEMPT_BYTES: Final = 1024               # a PowerAttempt event's largest encoding
-MAX_POWER_REQUESTS: Final = 8                   # the deepest request stack a document carries
 MAX_DISPLAY_MODES: Final = 64                   # the most EDID modes a report carries
 MAX_REQUEST_SECONDS: Final = 24 * 3600          # the longest `for_seconds`
 
@@ -103,12 +107,6 @@ class Power(StrEnum):
     OFF = "off"
 
 
-class RequestReason(StrEnum):
-    """Who asked, as a type (never display text). 2a adds schedule, all-off and home-assistant."""
-    STANDING = "standing"           # the bottom of every stack in 1b: displays are on
-    CONSOLE_TEST = "console-test"   # Test: turn off / turn on on the Frame's Power tab
-
-
 class PowerResult(StrEnum):
     """What one power attempt established. Never a claim about pixels (design-language P4)."""
     CONFIRMED = "confirmed"             # the display read back the wanted state
@@ -120,19 +118,105 @@ class PowerResult(StrEnum):
 
 @dataclass(frozen=True)
 class PowerRequest:
-    """One layer of an Output's power stack. `request_id` is the writer's id for it (Central: the
-    power_requests row id; the standing request: "standing"); `for_seconds` None = until removed."""
+    """1b's console test, on top of the timetable. `request_id` is the writer's id for it (Central:
+    the power_requests row id); `for_seconds` counts on the Pi from when it applies the test: a test
+    always ends."""
     request_id: str
     power: Power
-    reason: RequestReason
-    for_seconds: int | None = None
+    for_seconds: int
 
     def __post_init__(self) -> None:
-        """ValueError("power_request") unless request_id is a node token, power and reason are
-        members, and for_seconds is None or 1..MAX_REQUEST_SECONDS."""
+        """ValueError("power_request") unless request_id is a node token, power is a member and
+        for_seconds is 1..MAX_REQUEST_SECONDS."""
         _require(_is_token(self.request_id) and isinstance(self.power, Power)
-                 and isinstance(self.reason, RequestReason)
-                 and (self.for_seconds is None or _count(self.for_seconds, 1, MAX_REQUEST_SECONDS)), "power_request")
+                 and _count(self.for_seconds, 1, MAX_REQUEST_SECONDS), "power_request")
+
+
+# Power and the week (roadmap 2a). The design's rule (decision 0021), from the owner's "Yes, send 7
+# days of set times" (2026-10-12): the wire carries durations and calendar set times, never a clock
+# reading. A set time is a calendar time Central worked out from the house's
+# rules ("2026-10-11T22:00:00Z", whole seconds, UTC), never a reading of Central's clock; the Pi
+# compares it with its own clock only.
+
+MAX_POWER_CHANGES: Final = 32                   # the most set times one timetable carries (8 days of 2, with room)
+SET_TIME_PATTERN: Final = r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z"
+
+
+class Darkness(StrEnum):
+    """How a display is dark on purpose (setting #83)."""
+    DISPLAY_OFF = "display-off"         # the display's power method turns it off
+    BLACK_PICTURE = "black-picture"     # the display stays on; Display Host shows black (slice S2)
+
+
+class InForceKind(StrEnum):
+    """What the Pi is carrying out on one Output (never a claim about pixels)."""
+    TEST = "test"                               # 1b's console test, counted on the Pi's monotonic clock
+    TIMETABLE = "timetable"                     # the power timetable at the Pi's own clock
+    TIMETABLE_RAN_OUT = "timetable-ran-out"     # the Pi's clock is past `until`: the display is left as it is
+
+
+@dataclass(frozen=True)
+class PowerChange:
+    """One set time of the power timetable: at `at` (a set time) the display's wanted power becomes
+    `power`."""
+    at: str
+    power: Power
+
+    def __post_init__(self) -> None:
+        """ValueError("power_change") unless `at` decodes (`decode_set_time`) and power is a member."""
+        _require(_is_set_time(self.at) and isinstance(self.power, Power), "power_change")
+
+
+@dataclass(frozen=True)
+class OutputPower:
+    """The Output document's power part. `now`: Central's decision, in force from when the Pi reads
+    the document until the first change its own clock has reached. `changes`: the timetable,
+    strictly increasing `at`, each before `until`. `until`: the end of the timetable's horizon;
+    past it the Pi leaves the display as it is (InForceKind.TIMETABLE_RAN_OUT). `test`: 1b's
+    console test, on top of the timetable while the Pi's own count runs (slice T drops its
+    `reason`)."""
+    now: Power
+    changes: tuple[PowerChange, ...]
+    until: str
+    darkness: Darkness
+    test: PowerRequest | None
+
+    def __post_init__(self) -> None:
+        """ValueError("output_power") unless now and darkness are members, changes holds at most
+        MAX_POWER_CHANGES PowerChanges with strictly increasing `at`, every `at` < `until`, `until`
+        decodes, and test is None or a PowerRequest."""
+        changes = self.changes
+        _require(isinstance(self.now, Power) and isinstance(self.darkness, Darkness)
+                 and isinstance(changes, tuple) and len(changes) <= MAX_POWER_CHANGES
+                 and all(isinstance(change, PowerChange) for change in changes)
+                 and _is_set_time(self.until)
+                 and (self.test is None or isinstance(self.test, PowerRequest)), "output_power")
+        moments = [decode_set_time(change.at) for change in changes] + [decode_set_time(self.until)]
+        _require(all(left < right for left, right in zip(moments, moments[1:], strict=False)), "output_power")
+
+
+_SET_TIME: Final = re.compile(SET_TIME_PATTERN)
+_SET_TIME_FORMAT: Final = "%Y-%m-%dT%H:%M:%SZ"
+
+
+def encode_set_time(seconds: int) -> str:
+    """UTC seconds as a set time: 1791842400 -> "2026-10-12T22:00:00Z". ValueError("set_time") for a
+    negative or non-int value."""
+    _require(_count(seconds, 0), "set_time")
+    try:
+        return datetime.fromtimestamp(seconds, UTC).strftime(_SET_TIME_FORMAT)
+    except (OverflowError, OSError, ValueError) as error:
+        raise ValueError("set_time") from error
+
+
+def decode_set_time(text: str) -> int:
+    """A set time as UTC seconds; ValueError("set_time") for anything not SET_TIME_PATTERN or not a
+    real calendar moment. Stdlib only (the Pi runs it)."""
+    _require(isinstance(text, str) and _SET_TIME.fullmatch(text) is not None, "set_time")
+    try:
+        return int(datetime.strptime(text, _SET_TIME_FORMAT).replace(tzinfo=UTC).timestamp())
+    except ValueError as error:
+        raise ValueError("set_time") from error
 
 
 class ActsOn(StrEnum):
@@ -232,12 +316,12 @@ class PictureReport:
 
 @dataclass(frozen=True)
 class OutputDocument:
-    """What is wanted on one HDMI port. `change` rises on every change of anything else in it; the
-    report echoes the change it acted on. `power` is top first and never empty: its last request has
-    no `for_seconds` (the stack always ends in something that does not end)."""
+    """What is wanted on one HDMI port. `change` rises when the power part (power, method, switches)
+    changes; the report echoes the change it acted on. `power` is the port's power timetable with
+    the console test on top."""
     output_id: str
     change: int
-    power: tuple[PowerRequest, ...]
+    power: OutputPower
     method: MethodChoice
     switch_input_on_power_on: bool      # #117
     never_off_on_other_input: bool      # #118
@@ -245,15 +329,11 @@ class OutputDocument:
     picture: OutputPicture              # the Display's picture settings (#111-#114)
 
     def __post_init__(self) -> None:
-        """ValueError("output_document") unless output_id is in OUTPUT_IDS, change >= 1, power has
-        1..MAX_POWER_REQUESTS requests with unique request_ids and an untimed last one, and method
-        is a PowerMethod or BEST_DETECTED, picture_change >= 1 and picture an OutputPicture."""
-        power = self.power
+        """ValueError("output_document") unless output_id is in OUTPUT_IDS, change >= 1, power is an
+        OutputPower, method is a PowerMethod or BEST_DETECTED, picture_change >= 1 and picture an
+        OutputPicture."""
         _require(self.output_id in OUTPUT_IDS and _count(self.change, 1)
-                 and isinstance(power, tuple) and 1 <= len(power) <= MAX_POWER_REQUESTS
-                 and all(isinstance(request, PowerRequest) for request in power)
-                 and len({request.request_id for request in power}) == len(power)
-                 and power[-1].for_seconds is None
+                 and isinstance(self.power, OutputPower)
                  and (isinstance(self.method, PowerMethod) or _is_best_detected(self.method))
                  and type(self.switch_input_on_power_on) is bool and type(self.never_off_on_other_input) is bool
                  and _count(self.picture_change, 1) and isinstance(self.picture, OutputPicture),
@@ -296,15 +376,27 @@ class DisplayMode:
 
 @dataclass(frozen=True)
 class InForce:
-    """The request the Pi is carrying out, and its own count of what is left (None = untimed)."""
-    request_id: str
+    """What the Pi is carrying out on one Output. TEST: the console test `request_id`, with the Pi's
+    own count of what is left. TIMETABLE: the timetable's `power` at the Pi's clock, `since` the set
+    time of the change in force (None while the document's `now` is). TIMETABLE_RAN_OUT: the Pi's
+    clock is past `until`; nothing is wanted (`power` None)."""
+    kind: InForceKind
+    power: Power | None
+    request_id: str | None
     remaining_seconds: int | None
+    since: str | None
 
     def __post_init__(self) -> None:
-        """ValueError("in_force") unless request_id is a node token and remaining_seconds is None or
-        0..MAX_REQUEST_SECONDS."""
-        _require(_is_token(self.request_id) and (
-            self.remaining_seconds is None or _count(self.remaining_seconds, 0, MAX_REQUEST_SECONDS)), "in_force")
+        """ValueError("in_force") for any combination but the three above."""
+        kind = self.kind
+        test = kind is InForceKind.TEST
+        _require(isinstance(kind, InForceKind)
+                 and (self.power is None if kind is InForceKind.TIMETABLE_RAN_OUT else isinstance(self.power, Power))
+                 and (_is_token(self.request_id) if test else self.request_id is None)
+                 and (_count(self.remaining_seconds, 0, MAX_REQUEST_SECONDS) if test
+                      else self.remaining_seconds is None)
+                 and (self.since is None or (kind is InForceKind.TIMETABLE and _is_set_time(self.since))),
+                 "in_force")
 
 
 @dataclass(frozen=True)
@@ -348,20 +440,22 @@ class OutputReport:
 
 @dataclass(frozen=True)
 class PowerAttempt:
-    """One power attempt, as a `display.record.power` event."""
+    """One power attempt, as a `display.record.power` event. `in_force` is what was carried out: a
+    TEST or the TIMETABLE, never TIMETABLE_RAN_OUT (nothing is carried out then)."""
     output_id: str
     for_change: int
-    request_id: str
-    power: Power
+    in_force: InForce
     method: PowerMethod | None
     result: PowerResult
     elapsed_ms: int
 
     def __post_init__(self) -> None:
-        """ValueError("power_attempt") unless output_id is in OUTPUT_IDS, for_change >= 1, request_id
-        is a node token, power, method (when set) and result are members, and elapsed_ms >= 0."""
-        _require(self.output_id in OUTPUT_IDS and _count(self.for_change, 1) and _is_token(self.request_id)
-                 and isinstance(self.power, Power) and (self.method is None or isinstance(self.method, PowerMethod))
+        """ValueError("power_attempt") unless output_id is in OUTPUT_IDS, for_change >= 1, in_force is
+        an InForce of kind TEST or TIMETABLE, method (when set) and result are members, and
+        elapsed_ms >= 0."""
+        _require(self.output_id in OUTPUT_IDS and _count(self.for_change, 1)
+                 and isinstance(self.in_force, InForce) and self.in_force.kind is not InForceKind.TIMETABLE_RAN_OUT
+                 and (self.method is None or isinstance(self.method, PowerMethod))
                  and isinstance(self.result, PowerResult) and _count(self.elapsed_ms, 0), "power_attempt")
 
 
@@ -393,7 +487,7 @@ def decode_output_document(raw: bytes) -> OutputDocument:
     def build(value: dict[str, Any]) -> OutputDocument:
         method, picture = value["method"], value["picture"]
         return OutputDocument(**{
-            **value, "power": tuple(_power_request(request) for request in _list(value["power"])),
+            **value, "power": _output_power(value["power"]),
             "method": BEST_DETECTED if _is_best_detected(method) else PowerMethod(method),
             "picture": _output_picture(picture)})
     return _decode(raw, OUTPUT_DOCUMENT_BYTES, OutputDocument, build, "output_document")
@@ -416,7 +510,7 @@ def decode_output_report(raw: bytes) -> OutputReport:
             "answers": tuple(PowerMethod(method) for method in _list(value["answers"])),
             "method": _optional(PowerMethod, value["method"]),
             "result": _optional(PowerResult, value["result"]),
-            "in_force": None if in_force is None else InForce(**_fields(InForce, in_force)),
+            "in_force": None if in_force is None else _in_force(in_force),
             "picture": None if picture is None else _picture_report(picture)})
     return _decode(raw, OUTPUT_REPORT_BYTES, OutputReport, build, "output_report")
 
@@ -429,7 +523,7 @@ def encode_power_attempt(attempt: PowerAttempt) -> bytes:
 def decode_power_attempt(raw: bytes) -> PowerAttempt:
     """ValueError("power_attempt") for anything but a valid encoding."""
     def build(value: dict[str, Any]) -> PowerAttempt:
-        return PowerAttempt(**{**value, "power": Power(value["power"]),
+        return PowerAttempt(**{**value, "in_force": _in_force(value["in_force"]),
                                "method": _optional(PowerMethod, value["method"]),
                                "result": PowerResult(value["result"])})
     return _decode(raw, POWER_ATTEMPT_BYTES, PowerAttempt, build, "power_attempt")
@@ -509,9 +603,33 @@ def _optional(kind: type[StrEnum], value: object) -> Any:
     return None if value is None else kind(value)
 
 
+def _is_set_time(value: object) -> bool:
+    try:
+        decode_set_time(value)  # type: ignore[arg-type]
+    except ValueError:
+        return False
+    return True
+
+
 def _power_request(value: object) -> PowerRequest:
     request = _fields(PowerRequest, value)
-    return PowerRequest(**{**request, "power": Power(request["power"]), "reason": RequestReason(request["reason"])})
+    return PowerRequest(**{**request, "power": Power(request["power"])})
+
+
+def _output_power(value: object) -> OutputPower:
+    power = _fields(OutputPower, value)
+    test = power["test"]
+    return OutputPower(**{
+        **power, "now": Power(power["now"]), "darkness": Darkness(power["darkness"]),
+        "changes": tuple(PowerChange(**{**(change := _fields(PowerChange, item)), "power": Power(change["power"])})
+                         for item in _list(power["changes"])),
+        "test": None if test is None else _power_request(test)})
+
+
+def _in_force(value: object) -> InForce:
+    in_force = _fields(InForce, value)
+    return InForce(**{**in_force, "kind": InForceKind(in_force["kind"]),
+                      "power": _optional(Power, in_force["power"])})
 
 
 def _picture_setting(value: object) -> PictureSetting:
@@ -555,11 +673,13 @@ def _decode(raw: bytes, limit: int, cls: type[_Wire], build: Callable[[dict[str,
 __all__ = [
     "AS_THE_DISPLAY_HAS_IT", "BEST_DETECTED", "GAMMA_TENTHS_MAX", "GAMMA_TENTHS_MIN", "GAMMA_TENTHS_NEUTRAL",
     "KELVIN_MAX", "KELVIN_MIN", "KELVIN_NEUTRAL", "KELVIN_STEP",
-    "MAX_DISPLAY_MODES", "MAX_POWER_REQUESTS", "MAX_REQUEST_SECONDS", "METHOD_PRECEDENCE",
+    "MAX_DISPLAY_MODES", "MAX_REQUEST_SECONDS", "METHOD_PRECEDENCE",
     "OUTPUT_DOCUMENT_BYTES", "OUTPUT_IDS", "OUTPUT_REPORT_BYTES", "PERCENT_MAX", "POWER_ATTEMPT_BYTES",
-    "SCHEMA_MAJOR", "ActsOn", "DisplayIdentity", "DisplayMode", "InForce", "MethodChoice", "OutputDocument",
-    "OutputPicture", "OutputReport", "PictureReport", "PictureSetting", "PictureValue", "Power",
-    "PowerAttempt", "PowerMethod", "PowerRequest", "PowerResult", "RequestReason", "SettingReport", "WriteResult",
-    "decode_output_document", "decode_output_report", "decode_power_attempt", "encode_output_document",
-    "encode_output_report", "encode_power_attempt", "output_document_key", "output_report_key",
+    "MAX_POWER_CHANGES", "SCHEMA_MAJOR", "SET_TIME_PATTERN", "ActsOn", "Darkness", "DisplayIdentity", "DisplayMode",
+    "InForce", "InForceKind", "MethodChoice", "OutputDocument", "OutputPicture", "OutputPower", "OutputReport",
+    "PictureReport", "PictureSetting", "PictureValue", "Power", "PowerAttempt", "PowerChange", "PowerMethod",
+    "PowerRequest", "PowerResult", "SettingReport", "WriteResult",
+    "decode_output_document", "decode_output_report", "decode_power_attempt", "decode_set_time",
+    "encode_output_document", "encode_output_report", "encode_power_attempt", "encode_set_time",
+    "output_document_key", "output_report_key",
 ]

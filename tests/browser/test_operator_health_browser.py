@@ -14,7 +14,7 @@ import re
 import time
 
 import pytest
-from console_tasks import connect, go, open_frame, visible_page
+from console_tasks import connect, frame_heading, frame_name, go, open_frame, visible_page
 from operator_harness import (
     SNAPSHOT,
     RequestGate,
@@ -405,14 +405,14 @@ def test_strip_navigation_opens_the_tab_showing_the_cause_and_focuses_the_frame_
             "button", name="silent-a — Player app silent · last reported 4 min ago").click()
         expect(page.get_by_role("tab", name="Hardware", exact=True)).to_have_attribute(
             "aria-selected", "true")
-        expect(page.get_by_role("heading", name="Frame silent-a", exact=True)).to_be_focused()
+        expect(frame_heading(page, frame_name(registry, "silent-a"))).to_be_focused()
 
         # A tile click opens the Frame's page at Overview, and its heading takes focus.
         page.go_back()
         page.get_by_role("button", name="Frame all-good", exact=True).click()
         expect(page.get_by_role("tab", name="Overview", exact=True)).to_have_attribute(
             "aria-selected", "true")
-        expect(page.get_by_role("heading", name="Frame all-good", exact=True)).to_be_focused()
+        expect(frame_heading(page, frame_name(registry, "all-good"))).to_be_focused()
 
 
 def test_a_needs_attention_visit_opens_the_cause_tab(
@@ -425,7 +425,7 @@ def test_a_needs_attention_visit_opens_the_cause_tab(
         listing.get_by_role("link", name="silent-a — Player app silent · last reported 4 min ago").click()
         expect(page.get_by_role("tab", name="Hardware", exact=True)).to_have_attribute(
             "aria-selected", "true")
-        expect(page.get_by_role("heading", name="Frame silent-a", exact=True)).to_be_focused()
+        expect(frame_heading(page, frame_name(registry, "silent-a"))).to_be_focused()
         assert page.evaluate("window.location.hash") == "#/wall/frames/silent-a/hardware"
 
 
@@ -435,7 +435,7 @@ def test_a_strip_focus_request_is_spent_once_and_not_replayed_on_remount(page, r
         connect(page, origin, "wall")
         _open_list(page).get_by_role(
             "button", name="silent-b — Player app silent · last reported 4 min ago").click()
-        heading = page.get_by_role("heading", name="Frame silent-b", exact=True)
+        heading = frame_heading(page, frame_name(registry, "silent-b"))
         expect(heading).to_be_focused()
         # Away to a Show page (the Wall unmounts) and back through the sidebar, which
         # returns to the Wall as it was: the frame is open again, but the spent request
@@ -553,7 +553,7 @@ def test_strip_navigation_leaves_the_frame_page_in_view(page, registry, viewport
         connect(page, origin, "wall")
         _open_list(page).get_by_role(
             "button", name="silent-b — Player app silent · last reported 4 min ago").click()
-        heading = page.get_by_role("heading", name="Frame silent-b", exact=True)
+        heading = frame_heading(page, frame_name(registry, "silent-b"))
         expect(heading).to_be_in_viewport()
         expect(heading).to_be_focused()
 
@@ -564,7 +564,7 @@ def test_a_phone_width_page_never_scrolls_sideways(page, registry):
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall")
         page.get_by_role("button", name="Frame silent-b", exact=True).click()
-        expect(page.get_by_role("heading", name="Frame silent-b", exact=True)).to_be_visible()
+        expect(frame_heading(page, frame_name(registry, "silent-b"))).to_be_visible()
         hide = _strip(page).get_by_role("button", name="Hide list", exact=True)
         for tab in ("Overview", "Position", "Picture", "Hardware"):
             # The open list lies over the top of the page (the tabs on a phone): shut it to

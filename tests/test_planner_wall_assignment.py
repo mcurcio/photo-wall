@@ -16,11 +16,13 @@ from itertools import combinations
 
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
+from support.house_time import UTC_HOUSE
 from support.key_content_builders import face, measured
 
 from central.catalog import Candidate, SourcePool
 from central.planner import PlannerLimits, Projection, project
 from central.runtime import Contribution, Runtime, Scene
+from central.wall_plan.assignment import _Spans
 from central.wall_plan.fit_settings import FitSettings
 from central.wall_plan.key_content import MeasureFailed
 from central.wall_plan.order import KeptStill, PhotoShowing, PoolLines, WallHistory
@@ -62,7 +64,7 @@ class FrameSetup:
 
 def scene(frames: dict[str, FrameSetup], *, cycle: float = 30, order="newest_first",
           no_repeat_days: int = 0) -> Runtime:
-    instance = Runtime()
+    instance = Runtime(house=UTC_HOUSE)
     instance.set_scene(Scene(
         scene_id="scene", cycle_seconds=cycle, loop=True,
         selection=SceneSelection(order=order, no_repeat_days=no_repeat_days),
@@ -469,3 +471,18 @@ def test_a_lock_with_no_recorded_selection_still_holds_its_photo():
     second = plan(scene(two), two, [four_three, photo("y", "wide", captured=1)], now=10,
                   horizon=120, plan_seconds=600, locks=layers(first), history=WallHistory())
     assert_never_on_two_frames(two, second, fixed=offered_history(first))
+
+
+def test_rule_1s_index_reads_past_a_short_extent_inside_a_long_one():
+    """Rule 1's index (`_Spans`) stops reading back only once no earlier extent can reach the
+    query: a long extent on Frame A (0-100) with a later, shorter one on Frame B (10-20) still
+    keeps the photo off Frame C at 50-60.
+
+    Mutation probe (P-reach-early-stop): stop on the extent's own end instead of the running
+    latest end -> C may show it at 50-60."""
+    spans = _Spans()
+    spans.add(Extent(start=0, end=100), "a")
+    spans.add(Extent(start=10, end=20), "b")
+    assert spans.overlaps_another("c", Extent(start=50, end=60))
+    assert not spans.overlaps_another("a", Extent(start=50, end=60))
+    assert not spans.overlaps_another("c", Extent(start=100, end=110))

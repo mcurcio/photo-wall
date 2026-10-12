@@ -48,7 +48,8 @@ import logging
 import threading
 import uuid
 from collections.abc import Mapping
-from dataclasses import replace
+from dataclasses import dataclass, replace
+from datetime import timedelta
 from typing import Any, Final
 from uuid import UUID
 
@@ -56,7 +57,7 @@ import psycopg
 from psycopg.types.json import Jsonb
 
 from central.content_catalog.catalog import device_id_for_serial
-from central.db import Database, DatabaseTransactionClock
+from central.db import Database, DatabaseTransactionClock, TransactionClock
 from central.displays.model import (
     DEFAULT_SETTINGS,
     TEST_SECONDS,
@@ -73,7 +74,6 @@ from central.displays.model import (
     power_status,
     project_output,
     readiness,
-    remaining_seconds,
     serial_usable,
 )
 from central.displays.picture import (
@@ -102,7 +102,6 @@ from central.displays.views import (
     FrameDisplayView,
     FramePictureView,
     FramePowerView,
-    InForceView,
     ModeView,
     PictureCopyRequest,
     PictureCopyResult,
@@ -113,11 +112,17 @@ from central.displays.views import (
     PictureSettingView,
     PowerTestAccepted,
     PowerTestView,
+    in_force_view,
 )
 from central.fleet.node_bus_presence import bus_links_in
+from central.house_time.calculator import day_start, house_date
+from central.infra.house_store import house_time_in
 from central.infra.node_link_store import PgLinkStores
+from central.infra.output_wakes import OUTPUT_DOCUMENTS_CHANNEL, notify_nodes_in
+from central.infra.power_store import power_policy_in
 from central.installation_models import FrameOutput
 from central.live_session import Lease, begin_lease, touched
+from central.power.timetable import frame_timetable, unbound_timetable
 from contracts.models import Calibration, FrameProfile, frame_output
 from contracts.node_link import Pipe
 from contracts.node_output import (
@@ -132,7 +137,6 @@ from contracts.node_output import (
     PictureReport,
     Power,
     PowerMethod,
-    RequestReason,
     SettingReport,
     decode_output_document,
     decode_output_report,
@@ -151,9 +155,9 @@ DOCUMENT_STREAM: Final = "KV_desired_display"   # the display line's desired buc
 _REPORT_SUBJECT: Final = "$KV.state_display."
 _KV_OPERATION: Final = "KV-Operation"            # a delete or purge marker carries no value
 _CLOCK: Final = DatabaseTransactionClock()
-OUTPUT_DOCUMENTS_CHANNEL: Final = "photo_wall_output_documents"   # payload: the Node's device id
 _LISTEN_RETRY_SECONDS: Final = 1.0
 _LISTEN_APPLICATION: Final = "photo-wall-output-documents"
+_CONSOLE_TEST: Final = "console-test"            # power_requests.reason of 1b's console test
 
 
 # --- Readiness facts -----------------------------------------------------------------------------
@@ -561,9 +565,10 @@ class DisplayDocuments:
     document; every other stream, and the show pipe, is `{}`. Reads run behind the link stores'
     gate, in one transaction each."""
 
-    def __init__(self, stores: PgLinkStores, wakes: DisplayWakes) -> None:
+    def __init__(self, stores: PgLinkStores, wakes: DisplayWakes, *, times: TransactionClock) -> None:
         self._stores = stores
         self._wakes = wakes
+        self._times = times
 
     def source(self, serial: str, pipe: Pipe) -> DocumentSource:
         device_id = device_id_for_serial(serial)
@@ -571,7 +576,7 @@ class DisplayDocuments:
             raise ValueError("node_link_serial")
         if Pipe(pipe) is not Pipe.FLEET:
             return _NoDocuments()
-        return _OutputDocuments(self._stores, self._wakes, device_id)
+        return _OutputDocuments(self._stores, self._wakes, device_id, self._times)
 
 
 class _NoDocuments:
@@ -583,34 +588,39 @@ class _NoDocuments:
 
 
 class _OutputDocuments:
-    def __init__(self, stores: PgLinkStores, wakes: DisplayWakes, device_id: str) -> None:
+    def __init__(self, stores: PgLinkStores, wakes: DisplayWakes, device_id: str, times: TransactionClock) -> None:
         self._stores = stores
         self._wakes = wakes
         self._device_id = device_id
+        self._times = times
         self._seen = wakes.count(device_id)
 
     async def documents(self, stream: str) -> Mapping[str, bytes]:
         if stream != DOCUMENT_STREAM:
             return {}
-        return await self._stores.run(lambda conn: output_documents(conn, self._device_id))
+        return await self._stores.run(
+            lambda conn: output_documents(conn, self._device_id, self._times.now_in(conn)))
 
     async def changed(self) -> None:
-        """When this Node's facts are woken, or at the earliest end of its live tests or idle
-        deadline of a picture session on its Outputs' Displays (measured from Central's clock,
-        slept on this process's), so an ended test, and an abandoned session's revert, reach the Pi
-        with no other write and no reaper."""
+        """When this Node's facts are woken, or at its next deadline (`_until_next_deadline`,
+        measured from Central's clock, slept on this process's), so an ended test, an abandoned
+        session's revert and the timetable's roll forward reach the Pi with no other write and no
+        reaper."""
         seen = self._seen
-        remaining = await self._stores.run(lambda conn: _until_next_deadline(conn, self._device_id))
+        remaining = await self._stores.run(
+            lambda conn: _until_next_deadline(conn, self._device_id, self._times.now_in(conn)))
         try:
             self._seen = await asyncio.wait_for(self._wakes.after(self._device_id, seen), remaining)
         except TimeoutError:
             return
 
 
-def _until_next_deadline(conn: Any, device_id: str) -> float | None:
-    """Seconds until the earliest live console test on the Node's Outputs ends, or the earliest idle
-    deadline of a picture session on a Display last seen on them; None without either."""
-    now = _CLOCK.now_in(conn)
+def _until_next_deadline(conn: Any, device_id: str, now: float) -> float:
+    """Seconds from Central's `now` until the earliest of: a live console test on the Node's
+    Outputs ends, a picture session's idle deadline on a Display last seen on them, the Node's
+    timetables' first change after now (a hold's end is one when it changes the power; one that
+    does not changes no document), and the next house midnight (the horizon moves), which always
+    comes."""
     row = conn.execute(
         "SELECT least((SELECT min(r.ends_at) FROM players p JOIN bindings b ON b.player_id=p.id "
         "JOIN power_requests r ON r.frame_id=b.frame_id WHERE p.device_id=%(device)s "
@@ -619,7 +629,21 @@ def _until_next_deadline(conn: Any, device_id: str) -> float | None:
         "JOIN picture_sessions ps ON ps.display_id=o.display_id WHERE p.device_id=%(device)s "
         "AND p.retired_at IS NULL AND ps.idle_until > %(now)s)) AS deadline",
         {"device": device_id, "now": now}).fetchone()
-    return None if row["deadline"] is None else row["deadline"] - now
+    deadlines = [] if row["deadline"] is None else [row["deadline"]]
+    house = house_time_in(conn)
+    policy = power_policy_in(conn, now)
+    deadlines.append(day_start(house, house_date(house, now) + timedelta(days=1)))
+    for frame_id in _bound_frames(conn, device_id):
+        following = frame_timetable(frame_id, policy, house, now).next_change_after(now)
+        if following is not None:
+            deadlines.append(following.at)
+    return max(0.0, min(deadlines) - now)
+
+
+def _bound_frames(conn: Any, device_id: str) -> tuple[str, ...]:
+    return tuple(row["frame_id"] for row in conn.execute(
+        "SELECT b.frame_id FROM players p JOIN bindings b ON b.player_id=p.id "
+        "WHERE p.device_id=%s AND p.retired_at IS NULL ORDER BY b.frame_id", (device_id,)).fetchall())
 
 
 def _power_test(row: Mapping[str, Any]) -> PowerTest | None:
@@ -631,18 +655,21 @@ def _power_test(row: Mapping[str, Any]) -> PowerTest | None:
 
 
 _TEST_COLUMNS: Final = "r.id AS test_id, r.power AS test_power, r.for_seconds, r.ends_at"
-_TEST_JOIN: Final = "LEFT JOIN power_requests r ON r.frame_id=b.frame_id AND r.reason='console-test'"
+_TEST_JOIN: Final = f"LEFT JOIN power_requests r ON r.frame_id=b.frame_id AND r.reason='{_CONSOLE_TEST}'"
 
 
-def output_documents(conn: Any, device_id: str) -> dict[str, bytes]:
-    """key -> encoded Output document for each Output of the Node, raising an Output's `change` only
-    when its body differs from the one recorded."""
+def output_documents(conn: Any, device_id: str, now: float) -> dict[str, bytes]:
+    """key -> encoded Output document for each Output of the Node at Central's `now`, raising an
+    Output's `change` only when its body differs from the one recorded. A bound Output carries its
+    Frame's timetable (`frame_timetable` over `power_policy_in` and `house_time_in`), an unbound
+    one `unbound_timetable`."""
     player_id = _player_of(conn, device_id, "FOR SHARE")
     if player_id is None:
         return {}
-    now = _CLOCK.now_in(conn)
+    house = house_time_in(conn)
+    policy = power_policy_in(conn, now)
     rows = conn.execute(
-        "SELECT o.output_id, d.power_method, d.switch_input_on_power_on, d.never_off_on_other_input, "
+        "SELECT o.output_id, b.frame_id, d.power_method, d.switch_input_on_power_on, d.never_off_on_other_input, "
         f"{_PICTURE_COLUMNS}, {_SESSION_COLUMNS}, w.change, w.digest, w.picture_change, w.picture_digest, "
         f"{_TEST_COLUMNS} FROM (SELECT output_id FROM outputs WHERE player_id=%(player)s "
         "UNION SELECT output_id FROM output_displays WHERE player_id=%(player)s) o "
@@ -655,8 +682,10 @@ def output_documents(conn: Any, device_id: str) -> dict[str, bytes]:
     for row in rows:
         if row["output_id"] not in OUTPUT_IDS:
             continue
-        projected = project_output(row["output_id"], test=_power_test(row), settings=_settings(row),
-                                   picture=_picture_in_force(row, now), now=now)
+        timetable = (unbound_timetable(house, now) if row["frame_id"] is None
+                     else frame_timetable(row["frame_id"], policy, house, now))
+        projected = project_output(row["output_id"], timetable=timetable, test=_power_test(row),
+                                   settings=_settings(row), picture=_picture_in_force(row, now), now=now)
         digest, picture_digest = projected.digest(), projected.picture_digest()
         change = (row["change"] or 0) + (row["digest"] != digest)
         picture_change = (row["picture_change"] or 0) + (row["picture_digest"] != picture_digest)
@@ -692,13 +721,6 @@ def _settings(row: Mapping[str, Any]) -> DisplaySettings | None:
 
 def _document_json(document: OutputDocument) -> dict[str, Any]:
     return json.loads(encode_output_document(document))
-
-
-def _notify(conn: Any, device_ids_sql: str, params: tuple[Any, ...]) -> None:
-    """Wake the worker's document source of each Node `device_ids_sql` selects (column device_id),
-    delivered when the caller's transaction commits."""
-    conn.execute(f"SELECT pg_notify(%s, n.device_id) FROM ({device_ids_sql}) n",  # noqa: S608 (module SQL)
-                 (OUTPUT_DOCUMENTS_CHANNEL, *params))
 
 
 # --- The operator API's reads --------------------------------------------------------------------
@@ -743,18 +765,18 @@ class PgDisplayQueries:
                 f"LEFT JOIN players p ON p.id=b.player_id {SEEN_DISPLAY_JOIN} "
                 f"LEFT JOIN displays d ON d.id=seen.display_id LEFT JOIN output_documents w "
                 f"ON w.player_id=b.player_id AND w.output_id=b.output_id "
-                f"LEFT JOIN power_requests r ON r.frame_id=f.id AND r.reason='console-test' WHERE f.id=%s",
+                f"LEFT JOIN power_requests r ON r.frame_id=f.id AND r.reason='{_CONSOLE_TEST}' WHERE f.id=%s",
                 (frame_id,)).fetchone()
             if frame is None:
                 raise DisplayRefused("unknown_frame", 404)
             now = _CLOCK.now_in(conn)
+            house = house_time_in(conn)
             presence = None if frame["device_id"] is None else (
                 bus_links_in(conn, (frame["device_id"],))[frame["device_id"]])
         test = _power_test(frame)
         live = live_test(test, now)
         linked = None if presence is None else presence["linked"]
-        document = None if frame["document"] is None else decode_output_document(_json_bytes(frame["document"]))
-        report = None if frame["report"] is None else decode_output_report(_json_bytes(frame["report"]))
+        document, report = _stored_document(frame), _stored_report(frame)
         status = power_status(bound=frame["player_id"] is not None, test=test, document=document,
                               report=report, now=now)
         settings = _settings(frame) or DEFAULT_SETTINGS
@@ -768,11 +790,36 @@ class PgDisplayQueries:
             test=None if live is None else PowerTestView(request_id=live.request_id, power=live.power,
                                                          for_seconds=live.for_seconds, ends_at=live.ends_at),
             result=power_result(test=test, document=document, report=report, now=now),
-            in_force=_in_force_view(report, document, live, now), linked=linked,
+            in_force=in_force_view(report, house, live, now), linked=linked,
             # The link's presence row changed to unlinked when Central's hub last saw the Pi's leaf
             # go: the last time Central heard it. A report time would be the last change the Pi
             # put, hours old on a quiet display.
             last_heard_at=presence["changed_at"] if linked is False else None)
+
+
+@dataclass(frozen=True)
+class FramePowerFacts:
+    """What Central holds about a Frame's display power, read in one transaction: whether it is
+    bound to an Output, its 1b console test, its Output's latest document and the Pi's latest
+    report (None when there is none, or under an older schema major)."""
+    bound: bool
+    test: PowerTest | None
+    document: OutputDocument | None
+    report: OutputReport | None
+
+
+def power_facts_in(conn: Any, frame_id: str) -> FramePowerFacts | None:
+    """The Frame's power facts in the caller's transaction; None for an unknown Frame."""
+    frame = conn.execute(
+        f"SELECT b.player_id, seen.report, w.document, {_TEST_COLUMNS} FROM frames f "  # noqa: S608
+        f"LEFT JOIN bindings b ON b.frame_id=f.id {SEEN_DISPLAY_JOIN} "
+        f"LEFT JOIN output_documents w ON w.player_id=b.player_id AND w.output_id=b.output_id "
+        f"LEFT JOIN power_requests r ON r.frame_id=f.id AND r.reason='{_CONSOLE_TEST}' WHERE f.id=%s",
+        (frame_id,)).fetchone()
+    if frame is None:
+        return None
+    return FramePowerFacts(bound=frame["player_id"] is not None, test=_power_test(frame),
+                           document=_stored_document(frame), report=_stored_report(frame))
 
 
 def _json_bytes(value: Mapping[str, Any]) -> bytes:
@@ -780,25 +827,9 @@ def _json_bytes(value: Mapping[str, Any]) -> bytes:
     return json.dumps(value, ensure_ascii=False).encode()
 
 
-def _in_force_view(report: OutputReport | None, document: OutputDocument | None, live: PowerTest | None,
-                   now: float) -> InForceView | None:
-    """The request the Pi says it carries out, named from the latest document's stack (None when the
-    Pi names none, or a request that document no longer holds). Its count is Central's for its live
-    console test (the Pi reports only on a change, so its own count would stand still), else the Pi's."""
-    if report is None or report.in_force is None or document is None:
-        return None
-    for request in document.power:
-        if request.request_id == report.in_force.request_id:
-            remaining = (remaining_seconds(live, now) if live is not None and str(live.request_id) == request.request_id
-                         else report.in_force.remaining_seconds)
-            return InForceView(request_id=request.request_id, reason=request.reason, power=request.power,
-                               remaining_seconds=remaining)
-    return None
-
-
 class PgDisplayCommands:
     """`DisplayCommands` over PostgreSQL. Each command wakes the worker's document source of every
-    Node it changes, in its own transaction (`_notify`)."""
+    Node it changes, in its own transaction (`notify_nodes_in`)."""
 
     def __init__(self, db: Database) -> None:
         self._db = db
@@ -818,9 +849,9 @@ class PgDisplayCommands:
                 "VALUES (%s, %s, %s, %s, %s, %s, %s) ON CONFLICT (frame_id, reason) DO UPDATE SET "
                 "id=EXCLUDED.id, power=EXCLUDED.power, for_seconds=EXCLUDED.for_seconds, "
                 "created_at=EXCLUDED.created_at, ends_at=EXCLUDED.ends_at",
-                (request_id, frame_id, Power.OFF.value, RequestReason.CONSOLE_TEST.value, TEST_SECONDS, now,
+                (request_id, frame_id, Power.OFF.value, _CONSOLE_TEST, TEST_SECONDS, now,
                  now + TEST_SECONDS))
-            _notify(conn, "SELECT device_id FROM players WHERE id=%s", (frame["player_id"],))
+            notify_nodes_in(conn, "SELECT device_id FROM players WHERE id=%s", (frame["player_id"],))
         return PowerTestAccepted(request_id=request_id, for_seconds=TEST_SECONDS)
 
     def end_power_test(self, frame_id: str) -> None:
@@ -830,9 +861,9 @@ class PgDisplayCommands:
             if frame is None:
                 raise DisplayRefused("unknown_frame", 404)
             ended = conn.execute("DELETE FROM power_requests WHERE frame_id=%s AND reason=%s RETURNING id",
-                                 (frame_id, RequestReason.CONSOLE_TEST.value)).fetchone()
+                                 (frame_id, _CONSOLE_TEST)).fetchone()
             if ended is not None and frame["player_id"] is not None:
-                _notify(conn, "SELECT device_id FROM players WHERE id=%s", (frame["player_id"],))
+                notify_nodes_in(conn, "SELECT device_id FROM players WHERE id=%s", (frame["player_id"],))
 
     def set_power_settings(self, display_id: UUID, settings: DisplayPowerSettings) -> DisplayPowerSettings:
         with self._db.transaction() as conn:
@@ -843,7 +874,7 @@ class PgDisplayCommands:
                  settings.switch_input_on_power_on, settings.never_off_on_other_input, display_id)).fetchone()
             if row is None:
                 raise DisplayRefused("unknown_display", 404)
-            _notify(conn, "SELECT DISTINCT p.device_id FROM output_displays o JOIN players p ON p.id=o.player_id "
+            notify_nodes_in(conn, "SELECT DISTINCT p.device_id FROM output_displays o JOIN players p ON p.id=o.player_id "
                           "WHERE o.display_id=%s", (display_id,))
         return DisplayPowerSettings(**row)
 
@@ -871,11 +902,20 @@ _NODES_SEEING: Final = ("SELECT DISTINCT p.device_id FROM output_displays o JOIN
 
 
 def _stored_document(row: Mapping[str, Any]) -> OutputDocument | None:
-    return None if row["document"] is None else decode_output_document(_json_bytes(row["document"]))
+    """The recorded document; None when there is none, or it was written under an older schema
+    major (the source rewrites it at its next read: no backwards compatibility)."""
+    try:
+        return None if row["document"] is None else decode_output_document(_json_bytes(row["document"]))
+    except ValueError:
+        return None
 
 
 def _stored_report(row: Mapping[str, Any]) -> OutputReport | None:
-    return None if row["report"] is None else decode_output_report(_json_bytes(row["report"]))
+    """The recorded report; None when there is none, or it was written under an older schema major."""
+    try:
+        return None if row["report"] is None else decode_output_report(_json_bytes(row["report"]))
+    except ValueError:
+        return None
 
 
 def _presented(picture: DisplayPicture, document: OutputDocument | None, report: OutputReport | None) -> bool:
@@ -899,7 +939,7 @@ def _setting_view(setting: StoredSetting, answered: bool | None, report: Setting
 class PgPictureSessions:
     """`PictureQueries` and `PictureCommands` over PostgreSQL (displays, picture_sessions). The rules
     are central/displays/picture.py's; every write locks the Display row and wakes the document
-    source of every Node that last saw that Display, in its own transaction (`_notify`)."""
+    source of every Node that last saw that Display, in its own transaction (`notify_nodes_in`)."""
 
     def __init__(self, db: Database) -> None:
         self._db = db
@@ -956,7 +996,7 @@ class PgPictureSessions:
                 "before_contrast, touched, idle_until, created_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
                 (session.session_id, display_id, frame_id, session.sequence, Jsonb(picture_fields(stored)),
                  *session.before_read, [], lease.idle_until, now))
-            _notify(conn, _NODES_SEEING, (display_id,))
+            notify_nodes_in(conn, _NODES_SEEING, (display_id,))
         return _session_view(session)
 
     def edit_picture(self, session_id: UUID, edit: PictureEdit) -> PictureSequence:
@@ -1024,7 +1064,7 @@ class PgPictureSessions:
                     outcome = CopyOutcome.SESSION_OPEN
                 else:
                     write_picture(conn, display_id, copied(values, stored))
-                    _notify(conn, _NODES_SEEING, (display_id,))
+                    notify_nodes_in(conn, _NODES_SEEING, (display_id,))
                     outcome = CopyOutcome.COPIED
                 outcomes.append(PictureCopyResult(frame_id=target, outcome=outcome))
         return tuple(outcomes)
@@ -1045,14 +1085,14 @@ class PgPictureSessions:
                      (session.sequence, Jsonb(picture_fields(session.draft)),
                       sorted(setting.value for setting in session.touched), session.lease.idle_until,
                       session.session_id))
-        _notify(conn, _NODES_SEEING, (session.display_id,))
+        notify_nodes_in(conn, _NODES_SEEING, (session.display_id,))
 
     @staticmethod
     def _end_in(conn: Any, session: PictureSession, picture: DisplayPicture) -> None:
         """Store `picture` on the Display and end the session, in one transaction."""
         write_picture(conn, session.display_id, picture)
         conn.execute("DELETE FROM picture_sessions WHERE id=%s", (session.session_id,))
-        _notify(conn, _NODES_SEEING, (session.display_id,))
+        notify_nodes_in(conn, _NODES_SEEING, (session.display_id,))
 
 
 def _fold_in(conn: Any, display_id: UUID, now: float) -> DisplayPicture | None:
@@ -1083,7 +1123,7 @@ def _session_view(session: PictureSession) -> PictureSessionView:
 
 
 __all__ = ["DOCUMENT_STREAM", "OUTPUT_DOCUMENTS_CHANNEL", "POSITION_COLUMNS", "POSITION_FACTS", "REPORT_STREAM", "SEEN_DISPLAY_JOIN",
-           "DisplayDocuments", "DisplayWakes", "OutputReportJudge", "PgDisplayCommands", "PgDisplayQueries",
+           "DisplayDocuments", "DisplayWakes", "FramePowerFacts", "OutputReportJudge", "PgDisplayCommands", "PgDisplayQueries",
            "PgPictureSessions",
            "commit_position", "frame_position", "frame_readiness", "frame_readiness_in", "output_documents",
-           "record_report", "resolve_output"]
+           "power_facts_in", "record_report", "resolve_output"]

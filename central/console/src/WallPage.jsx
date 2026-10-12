@@ -1,4 +1,6 @@
-import React, { useMemo } from "react";
+import React, { useMemo, useState } from "react";
+
+import { nameWall } from "./framesApi.js";
 
 import { Guidance } from "./Guidance.jsx";
 import { LayoutEditor } from "./LayoutEditor.jsx";
@@ -6,6 +8,7 @@ import { FramePage } from "./pages/frame-page.tsx";
 import { Plan } from "./Plan.jsx";
 import { DEFAULT_TAB } from "./routes.js";
 import { UnplacedTray } from "./UnplacedTray.jsx";
+import { useMutate } from "./useMutate.js";
 import { WallUnfinished } from "./WallUnfinished.jsx";
 
 /**
@@ -113,9 +116,64 @@ export function WallPage({ snapshot, bootFacts, hosts = null, route, navigate, m
         />
         <WallUnfinished snapshot={snapshot} />
         {filter}
+        <WallName key={activeSurface ?? ""} wall={(snapshot?.inventory?.walls ?? []).find((wall) => wall.surface_id === activeSurface) ?? null} />
         <Plan snapshot={snapshot} surfaceId={activeSurface} selection={null} onSelect={memory.openFrame} />
         <UnplacedTray snapshot={snapshot} onSelect={memory.openFrame} />
       </div>
+    </div>
+  );
+}
+
+/** Central's refusal of a wall's name (central/registry.py `name_wall`), in words. */
+const WALL_REFUSALS = { unknown_wall: "This wall no longer exists.", unreachable: "Central did not answer. Save again." };
+
+/**
+ * The wall's name and its room label (#92), named in place: Rename opens both, Save sends them
+ * (PUT /v1/operator/walls/{surface_id}); the snapshot carries them back.
+ *
+ * @param {{wall: {surface_id: string, name: string, room: string}|null}} props
+ */
+function WallName({ wall }) {
+  const mutate = useMutate();
+  const [draft, setDraft] = useState(null);
+  const [problem, setProblem] = useState(null);
+  const [busy, setBusy] = useState(false);
+  if (wall === null) return null;
+  if (draft === null) {
+    return (
+      <div className="console__surface-filter" role="group" aria-label="Wall name">
+        <p>{`Wall: ${wall.name}${wall.room === "" ? "" : ` · Room: ${wall.room}`}`}</p>
+        <button type="button" className="console__button" onClick={() => { setDraft({ name: wall.name, room: wall.room }); setProblem(null); }}>
+          Rename wall
+        </button>
+      </div>
+    );
+  }
+  const save = async () => {
+    const name = draft.name.trim();
+    if (name === "" || name.length > 60) {
+      setProblem("A wall's name has 1 to 60 characters.");
+      return;
+    }
+    setBusy(true);
+    const answer = await mutate(() => nameWall(wall.surface_id, { name, room: draft.room.trim() }));
+    setBusy(false);
+    if (answer.ok) setDraft(null);
+    else setProblem(WALL_REFUSALS[answer.error] ?? `Central refused it (${answer.error}).`);
+  };
+  return (
+    <div className="console__surface-filter" role="group" aria-label="Wall name">
+      <label className="console__surface-field">
+        Wall name
+        <input type="text" maxLength={60} value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} />
+      </label>
+      <label className="console__surface-field">
+        Room
+        <input type="text" maxLength={60} value={draft.room} onChange={(event) => setDraft({ ...draft, room: event.target.value })} />
+      </label>
+      <button type="button" className="console__button" disabled={busy} onClick={() => void save()}>Save wall name</button>
+      <button type="button" className="console__button" disabled={busy} onClick={() => setDraft(null)}>Cancel</button>
+      {problem !== null && <p role="status">{problem}</p>}
     </div>
   );
 }

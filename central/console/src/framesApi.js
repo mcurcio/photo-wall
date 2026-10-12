@@ -1,6 +1,7 @@
 import { apiWrite } from "./apiWrite.js";
 import { dragToPlacement, orientationCoherent } from "./projection.js";
 import { FRAME_ID_PATTERN } from "./frameIds.js";
+import { callApi } from "./weekApi.js";
 
 export { FRAME_ID_PATTERN } from "./frameIds.js";
 
@@ -183,4 +184,27 @@ export function dropFromTray(frameId, pxRect, viewport, surfaceId) {
     x_mm: placement.x_mm,
     y_mm: placement.y_mm,
   });
+}
+
+/**
+ * Name a Frame (#94): PUT /v1/operator/frames/{id}/name. Names are unique ignoring case: a taken
+ * one answers 409 `name_taken`.
+ *
+ * @param {string} frameId
+ * @param {string} name
+ * @returns {Promise<{ok: true, renamed: object}|{ok: false, error: string}>}
+ */
+export function renameFrame(frameId, name) {
+  return callApi("renamed", `/v1/operator/frames/${encodeURIComponent(frameId)}/name`, { method: "PUT", body: { name } });
+}
+
+/**
+ * Name a wall and label its room (#92): PUT /v1/operator/walls/{surface_id}.
+ *
+ * @param {string} surfaceId
+ * @param {{name: string, room: string}} naming
+ * @returns {Promise<{ok: true, wall: object}|{ok: false, error: string}>}
+ */
+export function nameWall(surfaceId, naming) {
+  return callApi("wall", `/v1/operator/walls/${encodeURIComponent(surfaceId)}`, { method: "PUT", body: naming });
 }

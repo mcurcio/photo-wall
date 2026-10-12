@@ -20,7 +20,7 @@ from central.db import ProcessTransactionClock
 from central.infra.fit_settings_store import PgFitSettings
 from central.photo_fit_routes import SETTINGS_PATH
 from central.registry import FrameCreate
-from central.runtime import Contribution, Program, Scene
+from central.runtime import Contribution, Scene
 from central.wall_plan.fit_settings import FIT_SETTING_RANGES, FitSettings
 from central.wall_plan.selection import SceneSelection
 from contracts.models import FrameProfile
@@ -95,8 +95,7 @@ def test_the_house_crop_limit_moves_scenes_without_their_own_at_the_next_pass(
     prepare(registry, (four_three,))
     coordinator = Coordinator(registry.db, registry.clock)
     coordinator.runtime.command("set_scene", _scene(scene_crop_limit))
-    coordinator.runtime.command("set_program", Program(
-        program_id="calendar", scene_id="house", starts_at=1000, ends_at=1000 + 7200))
+    coordinator.runtime.command("activate", "house", "calendar", 1000)
     assert {entry.asset_id for entry in coordinator.advance().plan} == {four_three.asset_id}
 
     response = _client(registry).put(SETTINGS_PATH, headers=AUTH, json=FitSettings(

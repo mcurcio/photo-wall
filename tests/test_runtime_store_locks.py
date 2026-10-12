@@ -6,11 +6,12 @@ from threading import Event
 
 import pytest
 from fastapi.testclient import TestClient
+from support.house_time import UTC_HOUSE, daily, set_house, window_program
 from test_registry import ADMIN
 
 from central.app import create_app
 from central.coordination import COORDINATION_LOCK, Coordinator
-from central.runtime import Contribution, Program, RuntimeConflict, Scene
+from central.runtime import Contribution, ProgramDraft, Scene
 from central.runtime_store import RUNTIME_LOCK, RuntimeStore
 from central.transaction_locks import acquire_runtime_locks
 
@@ -138,14 +139,15 @@ def test_operator_activation_uses_post_lock_time(registry, monkeypatch):
     assert [run["started_at"] for run in state["runs"].values()] == [1005]
 
 
-def test_program_replace_checks_window_after_lock_wait(registry, monkeypatch):
+def test_program_save_applies_at_the_clock_after_lock_wait(registry, monkeypatch):
+    """A save waits for the Runtime lock and applies at the clock read after it: the window that
+    started while it waited keeps its end (R10), so the save applies from the next window."""
+    set_house(registry.db, UTC_HOUSE)
     store = RuntimeStore(registry.db, registry.clock)
-    store.command("set_scene", Scene(scene_id="scheduled"))
-    expected = Program(
-        program_id="upcoming", scene_id="scheduled", starts_at=1003, ends_at=1020,
-    )
-    replacement = expected.model_copy(update={"starts_at": 1010})
-    store.command("set_program", expected)
+    store.command("set_scene", Scene(scene_id="scheduled", loop=True))
+    registry.clock.advance(17)                                     # 1017: the window starts at 1020
+    expected = store.command_current("create_program", window_program("upcoming", "scheduled", 1020, 1080))
+    draft = ProgramDraft(name="upcoming", scene_id="scheduled", when=daily("00:17", "00:19"))
     entering = Event()
     original = store.edit
 
@@ -159,14 +161,15 @@ def test_program_replace_checks_window_after_lock_wait(registry, monkeypatch):
     with ThreadPoolExecutor(max_workers=1) as workers:
         with registry.db.transaction() as blocker:
             blocker.execute("SELECT pg_advisory_xact_lock(%s)", (COORDINATION_LOCK,))
-            pending = workers.submit(
-                store.command_current, "replace_program", expected, replacement,
-            )
+            pending = workers.submit(store.command_current, "save_program", expected, draft)
             assert entering.wait(4)
             with pytest.raises(TimeoutError):
                 pending.result(timeout=.1)
             registry.clock.advance(5)
-        with pytest.raises(RuntimeConflict, match="program_started"):
-            pending.result(timeout=4)
+        assert pending.result(timeout=4).revision == 2
 
-    assert store.read().export_state()["programs"][expected.program_id]["starts_at"] == 1003
+    state = store.read().export_state()
+    assert state["now"] == 1022
+    (run,) = state["runs"].values()
+    assert (run["started_at"], run["program_ends_at"]) == (1020, 1080)    # the old rule's window
+    assert state["program_from"]["upcoming"] == 1080
