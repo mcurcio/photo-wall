@@ -5416,3 +5416,39 @@ Order: (a) merge the iac PR that switches the factory to `central.app:create_app
   test there ran about twice as long as on main's run (test_node_fleet_hosts 176 s vs 95 s); locally it reads 1.7 s on
   both trees (A/B with a main worktree), and nothing this branch changed is on its path. Runner speed, not the PR;
   left to CI.
+
+## E-PW-FIX-2 (Power and the week, final fix round, 2026-10-12) · feat/power-and-the-week (PR 86)
+- **T page's `ProgramWindows.next` ("the first window starting after now") ignored R10.** After a save mid-window
+  the card and the week named a window Runtime never admits. `next` is now the current rule's first window
+  starting after now and at or after its `program_from`; `current` is the window a Run of the Program plays
+  (under whichever revision admitted it). The week's windows carry `plays` (`Runtime.program_windows_between`,
+  the week's one source): a window of the saved rule that started before the rule applies is drawn dashed.
+  Consequence the pages never stated: **a Schedule created during one of its own windows starts at the next one**
+  (it already did in Runtime; the card used to say "Now"). Owner question, left as built: should creating one
+  mid-window play it at once, as Save and apply now does for an edit?
+- **Night off was seeded on in Central's server zone** (UTC in the deploy's container: 23:00 UTC is 16:00 in Los
+  Angeles), and nothing asked the operator to confirm it. Resolution taken (option B; owner question): migration
+  089 (never applied outside a test database) adds `house_settings.zone_confirmed`, false until Settings › House is
+  saved; `power.timetable.night_off_in_force` is the rule's one home (no Night off span, and a hold lasts to the
+  horizon, until then); Night off's read carries `waits_for_zone` and the console says so on the Night off editor
+  and Settings › House. Not chosen: the iac deploy supplying the zone (option A, an iac pull request).
+- **The Default Scene kept its Scene's protection**, so a protecting Scene chosen as Default refused every Schedule
+  on its Frames for as long as it played. It is admitted unprotected, at any depth.
+- **The frame's `Hold.source: {kind, by}` lost `by`** (one operator today; migration 090 stores only the kind).
+  Recorded here: the slice pages follow the code.
+- **S4 says the console never reads the browser's zone except to offer it.** Until the shell's first read of
+  Settings › House answers (a moment after sign-in, or while Central does not answer it), `timeWords.js` shows times
+  in the browser's zone with its abbreviation, so a time is never shown in a zone it does not name. Kept and
+  written into design-language §7's clock-time row; not a house time in another zone.
+- **The browser harness's "operator server did not stop" (CI browser (3) on 2c56054) was a uvicorn race, not a
+  flake:** a connection accepted in the same loop turn as the shutdown is registered after uvicorn asks the others
+  to close, so it is never asked; the console's 5 s snapshot poll reuses it inside the 5 s keep-alive, and uvicorn
+  waits on it without end. Diagnosed by dumping the open connections at the join (an idle keep-alive connection,
+  not closing, no task in flight), 2-3 in 240 runs at -n 8 before the fix, 0 in 240 after: the harness sets
+  `timeout_graceful_shutdown`. Production's `uvicorn` has no such bound either (a rollout waits for the pod's grace
+  period); left as remaining work.
+- **The output power worker's sleep goes through its `Clock` port** (`wait`; `PiClock` in production), so the
+  timetable tests step it by its looks and assert the tick cap from the waits it asked for, with no real sleeps.
+- **The Pi now reports did-not-answer when the shell does not confirm the curtain** (an off with no power method;
+  an on whose curtain stays up): E-PW-FIX-1's "Resting after not-supported (the Pi shows black)" assumed the
+  curtain went up.
