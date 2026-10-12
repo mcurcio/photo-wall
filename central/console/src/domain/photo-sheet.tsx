@@ -8,11 +8,14 @@ import { Field } from "../ui/field";
 import { Select } from "../ui/select";
 import { Sheet } from "../ui/sheet";
 import { Stack } from "../ui/stack";
-import { type FitRefusal, type FitSample, type FrameFit, ratioWords, reasonWords } from "./photo-fit";
+import {
+  type CopyName, type FitRefusal, type FitSample, type FrameCopy, type FrameFit, playsFromWords, ratioWords, reasonWords,
+  UNDECIDED_PLAYS_FROM, VIDEO_PLAYS_FROM,
+} from "./photo-fit";
 
 /** One of Immich's copies of a photo (central/photo_library/views.py `CopyView`). */
 export interface CopyView {
-  name: "thumbnail" | "preview" | "fullsize" | "original";
+  name: CopyName;
   in_immich: boolean | null;
   measured: { width: number; height: number; media_type: string } | null;
 }
@@ -32,14 +35,6 @@ export interface PhotoFacts {
   /** Each Frame's need and whether Immich's preview holds it (central/photo_library/views.py
    * `FrameCopy`); none for a video. */
   frames: FrameCopy[];
-}
-
-/** What one Frame asks of the photo's copy (central/photo_library/views.py `FrameCopy`). */
-export interface FrameCopy {
-  frame_id: string;
-  need_px: [number, number];
-  output_known: boolean;
-  preview_holds: boolean | null;
 }
 
 /** Immich's copies in the photo sheet's words. */
@@ -79,30 +74,6 @@ export function copyWords(copy: CopyView, facts: PhotoFacts): string {
   }
   if (copy.measured === null) return copy.in_immich === null ? "size known after first use (Immich may keep none)" : "size known after first use";
   return `${countText(copy.measured.width)} × ${countText(copy.measured.height)} · ${typeWords(copy.measured.media_type)}`;
-}
-
-/** One Frame's need in words: "needs 1,920 × 1,080 px (its Frame output); the preview holds it". */
-export function needWords(frame: FrameCopy): string {
-  const need = `needs ${countText(frame.need_px[0])} × ${countText(frame.need_px[1])} px`;
-  const what = frame.output_known ? "its Frame output" : "its profile's size, until its screen reports";
-  const preview = frame.preview_holds === null ? "the preview's size is known after first use"
-    : frame.preview_holds ? "Immich's preview holds it" : "Immich's preview is smaller";
-  return `${need} (${what}); ${preview}`;
-}
-
-/** The copy the wall plays the photo from, in words (owner, 2026-10-09: "use Immich downsampled
- * copy only if it is at least the visible Frame size, else the original"): the copy it was
- * prepared from, else the one the next preparation takes as far as the preview's size says. */
-export function playsFromWords(facts: PhotoFacts, name: (frameId: string) => string): string {
-  if (facts.kind === "video") return "its original";
-  if (facts.prepared_from !== null) return `${COPY_WORDS[facts.prepared_from].toLowerCase()} (prepared)`;
-  if (facts.frames.length === 0) return "decided when a Frame shows it";
-  if (facts.frames.some((frame) => frame.preview_holds === null)) {
-    return "Immich's preview if it holds every Frame's need, else a larger copy (decided at first use)";
-  }
-  const short = facts.frames.filter((frame) => frame.preview_holds === false).map((frame) => name(frame.frame_id));
-  if (short.length === 0) return "Immich's preview: it holds every Frame's need";
-  return `a larger copy than Immich's preview, which is smaller than ${short.join(", ")} needs`;
 }
 
 /** What one Frame's answer says of this photo: it fits (with its window), it is left off (and
@@ -206,9 +177,10 @@ export function PhotoSheet({ open, onClose, assetId, sample, frames, focus, name
                 ))}
               </FactGroup>
               <FactGroup title="Which copy plays">
-                <FactRow label="Plays from" tone="derived">{playsFromWords(facts.facts, name)}</FactRow>
-                {facts.facts.frames.map((frame) => (
-                  <FactRow key={frame.frame_id} label={name(frame.frame_id)} tone="derived">{needWords(frame)}</FactRow>
+                {facts.facts.kind === "video" || facts.facts.frames.length === 0 ? (
+                  <Note>{facts.facts.kind === "video" ? VIDEO_PLAYS_FROM : UNDECIDED_PLAYS_FROM}</Note>
+                ) : facts.facts.frames.map((frame) => (
+                  <FactRow key={frame.frame_id} label={name(frame.frame_id)} tone="derived">{playsFromWords(frame, facts.facts)}</FactRow>
                 ))}
               </FactGroup>
             </>

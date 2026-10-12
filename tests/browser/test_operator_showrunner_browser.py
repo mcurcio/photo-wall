@@ -1016,22 +1016,24 @@ def test_a_name_without_a_latin_letter_asks_for_an_id(page, registry):
 
 
 def test_the_id_is_derived_from_the_name_under_advanced_and_can_be_changed(page, registry):
-    """Bead 2, slice 3 §5: Review's Advanced says the id the name saves under; "Change"
-    in the name's hint opens it at the Id field, and a typed id is what is saved."""
+    """Bead 2, slice 3 §5: the name's hint says the id it saves under, once (design fix round
+    4: no second "Id:" beside Advanced); "Change" opens Advanced at the Id field, and a typed id
+    is what is saved."""
     _seed(registry)
     queue = _seed_source(registry)
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         connect(page, origin, "scenes")
         form = author_scene(page, "Family Evening", SOURCE, (VALID_FRAME,), submit=False)
         advanced = form.get_by_role("button", name="Advanced", exact=True)
-        expect(advanced).to_have_attribute("aria-expanded", "false")
-        expect(advanced).to_have_accessible_description("Id: family-evening")
+        expect(advanced).to_have_count(0)
+        expect(form.get_by_text("family-evening", exact=True)).to_have_count(1)
         form.get_by_role("button", name="Change", exact=True).click()
         identifier = form.get_by_label("Id", exact=True)
         expect(identifier).to_be_focused()
         expect(identifier).to_have_value("family-evening")
         identifier.fill("evening-2")
-        expect(advanced).to_have_accessible_description("Id: evening-2")
+        expect(advanced).to_have_attribute("aria-expanded", "true")
+        expect(form.get_by_text("Id: evening-2")).to_have_count(0)
         with page.expect_response(
             lambda r: r.url.endswith("/v1/operator/scenes/evening-2") and r.request.method == "PUT"
         ) as info:

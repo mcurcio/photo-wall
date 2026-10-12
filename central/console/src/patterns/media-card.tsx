@@ -3,6 +3,7 @@ import type * as React from "react";
 import { cn } from "../ui/cn";
 import { Link } from "../ui/link";
 import { Menu, type MenuProps } from "../ui/menu";
+import { Split } from "../ui/split";
 import { HealthBadge, type Verdict } from "./health-badge";
 
 /** One photo of a card's mosaic: Central's thumbnail and what it shows, in words. */
@@ -67,7 +68,22 @@ export function MediaCard({ title, href, mosaic, emptyText = "No photos yet", li
             className={cn("size-full min-h-0 object-cover", shown.length === 3 && photo === shown[0] ? "row-span-2" : "")} />
         ))}
       </div>
-      <div className="flex min-w-0 items-start justify-between gap-2">
+      <Split align="start" action={(
+        <>
+          {choice ? (
+            <input
+              type={choice.type}
+              name={choice.name}
+              value={choice.value}
+              checked={choice.checked}
+              aria-label={choice.label}
+              onChange={(event) => choice.onChange(event.target.checked)}
+              className="mt-1 size-5 shrink-0 cursor-pointer accent-accent"
+            />
+          ) : null}
+          {menu ? <Menu label={menu.label} items={menu.items} /> : null}
+        </>
+      )}>
         <div className="flex min-w-0 flex-col gap-1">
           <h3 className="m-0 text-base font-medium wrap-anywhere text-text">
             {href ? <Link href={href}>{title}</Link> : title}
@@ -77,19 +93,7 @@ export function MediaCard({ title, href, mosaic, emptyText = "No photos yet", li
           {verdict !== null && <HealthBadge verdict={verdict} />}
           {note ? <div role="status" className="text-sm text-muted">{note}</div> : null}
         </div>
-        {choice ? (
-          <input
-            type={choice.type}
-            name={choice.name}
-            value={choice.value}
-            checked={choice.checked}
-            aria-label={choice.label}
-            onChange={(event) => choice.onChange(event.target.checked)}
-            className="mt-1 size-5 shrink-0 cursor-pointer accent-accent"
-          />
-        ) : null}
-        {menu ? <Menu label={menu.label} items={menu.items} /> : null}
-      </div>
+      </Split>
     </>
   );
   const frame = cn(

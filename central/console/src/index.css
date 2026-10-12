@@ -707,6 +707,13 @@ label {
   overflow-wrap: anywhere;
 }
 
+/* A record whose label and value read at one size (Show now's Frames and Photos from). */
+.record--even dt,
+.record--even dd {
+  font-size: 14px;
+  line-height: 1.5;
+}
+
 .record__actions {
   display: flex;
   flex-wrap: wrap;
@@ -964,14 +971,39 @@ label {
   gap: 4px;
 }
 
+/* A Frame chip is status only: one line, never wrapped (a long id is cut with an ellipsis);
+   its "Open Frame" link sits on the line of links under the chips. */
 .run-control__frame {
+  max-width: 100%;
+  overflow: hidden;
   padding: 1px 8px;
   font-size: 12px;
-  overflow-wrap: anywhere;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
-.run-control__frame a {
-  margin-inline-start: 0.5em;
+.run-control__frames-block {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.run-control__recovery {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+}
+
+.run-control__recovery a {
+  color: var(--color-accent);
+  font-size: 14px;
+  font-weight: 500;
+  text-decoration: none;
+  overflow-wrap: normal;
+}
+
+.run-control__recovery a:hover {
+  text-decoration: underline;
 }
 
 .run-control__ended {

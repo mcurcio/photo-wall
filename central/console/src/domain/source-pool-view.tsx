@@ -82,8 +82,8 @@ export interface SourcePoolViewProps {
   /** The query's choices, named by an empty pool, each with a Clear. */
   filters?: readonly ActiveFilter[];
   /** A newer read of these photos is running (its count is the one shown, beside this view):
-   * the grid is dimmed and its own count hidden, so the page shows one count (design review
-   * round 2). */
+   * the grid is dimmed and its own count and check chip hidden, so the page shows one count and
+   * one state (design review rounds 2 and 4). */
   reading?: boolean;
 }
 
@@ -105,7 +105,9 @@ export function SourcePoolView({ view, pages, hasMore, onLoadMore, loadingMore =
   const empty = view.in_pool.photos + view.in_pool.videos === 0;
   return (
     <div>
-      <HealthBadge verdict={{ severity: verdict.severity, label: verdict.label, receipt: null }} />
+      {/* While a newer read runs, the board beside says "Still reading Immich": no older
+          "Checked …" chip next to it. */}
+      {!reading && <HealthBadge verdict={{ severity: verdict.severity, label: verdict.label, receipt: null }} />}
       {!reading && <Note live>{poolWords(view)}</Note>}
       {view.waiting > 0 && <Note>{`Immich is still reading ${counted(view.waiting, "photo")}`}</Note>}
       {view.left_out.filter((row) => row.count > 0).map((row) => (

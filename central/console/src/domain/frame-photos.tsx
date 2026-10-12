@@ -4,11 +4,11 @@ import { isBound, plannedFor, rankedContributions } from "../join.js";
 import { EmptyState } from "../patterns/entity-page";
 import { OwnerLinks } from "../patterns/link-to-owner";
 import { formatRoute, sceneCreationRoute } from "../routes.js";
-import { countWords, windowLabel } from "../timeWords.js";
+import { windowLabel } from "../timeWords.js";
 import { Section } from "../ui/section";
 import { Stack } from "../ui/stack";
 import { FitBoardFor, type FitQuestion } from "./photo-fit-board";
-import { type FitAnalysis, type FrameDraft, percentWords, type SceneUse, scenesOnFrame } from "./photo-fit";
+import { type FrameDraft, type JudgedAt, type SceneUse, scenesOnFrame } from "./photo-fit";
 
 interface Served {
   runtime?: {
@@ -43,9 +43,7 @@ function SceneRow({ snapshot, frameId, scene }: { snapshot: object | null; frame
     selection: { sources: scene.sourceRefs }, frames: [frameId], crop_limit: scene.cropLimit,
   }), [scene, frameId]);
   // One line for what the Scene holds and what it is judged at (the board leads with the picture).
-  const judged = (analysis: FitAnalysis) => `From the Scene's ${countWords(analysis.photos, "photo")}${
-    analysis.videos > 0 ? ` and ${countWords(analysis.videos, "video")}` : ""}, at ${
-    scene.cropLimit === null ? "the house crop limit" : "its own crop limit"}, ${percentWords(analysis.crop_limit)}.`;
+  const judged: JudgedAt = { at: "frame-scene", ownCrop: scene.cropLimit !== null };
   return (
     <Stack label={`Scene ${scene.sceneId}`}>
       <OwnerLinks label={`Scene “${scene.sceneId}” · ${relationWords(snapshot, frameId, scene.sceneId)}`} links={[

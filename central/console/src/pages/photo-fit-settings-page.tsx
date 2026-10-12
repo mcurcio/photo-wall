@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 
 import { type FitQuestion, PhotoFitBoard, useFitRead } from "../domain/photo-fit-board";
-import { type FitSettings, type FitSettingsView, percentWords, storedScenes, useFitSettings } from "../domain/photo-fit";
+import { type FitSettings, type FitSettingsView, storedScenes, useFitSettings } from "../domain/photo-fit";
 import { EmptyState } from "../patterns/entity-page";
 import { Note } from "../patterns/fact-row";
 import { ProblemCard } from "../patterns/problem-card";
@@ -194,7 +194,7 @@ export function PhotoFitSettingsPage({ snapshot }: { snapshot: object | null }) 
             ? <Note>Every value must be within its range before its effect can be shown.</Note>
             : (
               <PhotoFitBoard read={fit} size="compact" title="How the photos fit with these values"
-                judged={(analysis) => `Every Source a Scene uses, on every Frame, at the crop limit as set here, ${percentWords(analysis.crop_limit)}.`} />
+                judged={{ at: "settings" }} />
             )}
       </Section>
       <SaveBar label="Photo fit actions" message={said !== null && <Note live>{said}</Note>}>

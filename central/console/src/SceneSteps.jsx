@@ -344,6 +344,10 @@ export function ReviewStep({
     ],
   });
   const derived = idFromName(value.name);
+  // The id is said once: "Saved as <id> · Change" under the name while it is derived; once it
+  // is typed (or must be), the Id field under Advanced, whose summary names it only while closed.
+  const idShown = value.idOverride !== null || idNeeded(value.name);
+  const idOpen = advanced.open || idNeeded(value.name);
   return (
     <>
       {editingId !== null && (
@@ -358,7 +362,7 @@ export function ReviewStep({
           <NameField
             kind="Scene"
             name={value.name}
-            idShown={value.idOverride !== null || idNeeded(value.name)}
+            idShown={idShown}
             onName={(name) => patch({ name })}
             onChangeId={() => {
               patch({ idOverride: derived });
@@ -366,18 +370,20 @@ export function ReviewStep({
             }}
             problems={problems}
           />
-          <Advanced
-            summary={`Id: ${draftId(value) || "none yet"}`}
-            open={advanced.open}
-            lockedOpen={idNeeded(value.name)}
-            onToggle={advanced.onToggle}
-          >
-            <IdField
-              value={value.idOverride ?? derived ?? ""}
-              onIdOverride={(idOverride) => patch({ idOverride })}
-              problems={problems}
-            />
-          </Advanced>
+          {idShown && (
+            <Advanced
+              summary={idOpen ? null : `Id: ${draftId(value) || "none yet"}`}
+              open={advanced.open}
+              lockedOpen={idNeeded(value.name)}
+              onToggle={advanced.onToggle}
+            >
+              <IdField
+                value={value.idOverride ?? derived ?? ""}
+                onIdOverride={(idOverride) => patch({ idOverride })}
+                problems={problems}
+              />
+            </Advanced>
+          )}
         </>
       )}
       <section aria-label="Your answers">

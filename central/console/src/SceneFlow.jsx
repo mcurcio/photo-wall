@@ -33,7 +33,7 @@ import {
 import { SceneList } from "./SceneList.jsx";
 import { FramesStep, KindStep, MediaStep, PhotosStep, PlaybackStep, ReviewStep } from "./SceneSteps.jsx";
 import { useCandidates } from "./useCandidates.js";
-import { percentWords, useHouseCropLimit } from "./domain/photo-fit.ts";
+import { useHouseCropLimit } from "./domain/photo-fit.ts";
 import { raiseAction, useFitRead } from "./domain/photo-fit-board.tsx";
 import { useSourceCheck } from "./useSourceCheck.js";
 
@@ -43,7 +43,7 @@ const EMPTY = {};
 const HEADINGS = {
   kind: "What kind of Scene?",
   photos: "Which photos?",
-  frames: "Which frames?",
+  frames: "Which Frames?",
   media: "Which item on each frame?",
   playback: "How long each item shows",
   review: "Check your Scene",
@@ -286,10 +286,9 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft,
   const fitRead = useFitRead(fitQuestion, { live: liveCrop !== null });
   const fit = {
     read: fitRead,
-    judged: (analysis) => `${targetKey === "" ? "On every Frame, until you choose this Scene's" : "On this Scene's Frames"}, at ${
-      judgedCrop === null ? "the house crop limit" : "this Scene's crop limit"}, ${percentWords(analysis.crop_limit)}.`,
+    judged: { at: "scene", framesChosen: targetKey !== "", ownCrop: judgedCrop !== null },
     // Under the crop limit (Playback), whose value is right above: only which Frames.
-    framesJudged: targetKey === "" ? "On every Frame, until you choose this Scene's." : null,
+    framesJudged: { at: "scene-crop", framesChosen: targetKey !== "" },
     rescue: (frame) => raiseAction(frame, (limit) => patch({ cropLimit: limit })),
   };
 

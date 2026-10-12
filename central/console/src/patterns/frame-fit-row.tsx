@@ -76,7 +76,8 @@ export interface FrameFitView {
   samples: readonly CropView[];
   /** The sampled check of faces and the interesting part, in words, or null. */
   checked: string | null;
-  /** Its Frame output not known yet, in words ("hall's Frame output isn't known yet"), shown;
+  /** Its Frame output not reported yet, in words ("Judged at hall's planned 9:16 shape; hall
+   * hasn't reported its output yet."), shown;
    * null once it is known. */
   unknownOutput: string | null;
   /** The pixels it is judged at, in words ("Frame output 1,512 × 1,008 px, 3:2"), under

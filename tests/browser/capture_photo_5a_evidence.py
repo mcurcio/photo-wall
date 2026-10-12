@@ -60,12 +60,20 @@ def _settled(page) -> None:
     expect(page.locator("[aria-busy=true]")).to_have_count(0, timeout=20_000)
 
 
+def _unhover(page) -> None:
+    """The pointer off every control (the rail's links, a card's button): it rests in the top
+    bar's empty right corner, so no shot captures a hover state."""
+    view = page.viewport_size
+    page.mouse.move(view["width"] - 2, 2)
+
+
 def _shot(page, name: str, scheme: str, *, settle=True) -> None:
     """One full-page PNG, settled. The view first grows to the page's height (as
     capture_photo4_evidence.py `_shot` does), so a sticky bar (the Scene flow's Back and
     Continue below 850 px) lands at the page's end rather than over the content mid-page.
     `settle=False` only for a shot of the reading state itself."""
     OUT.mkdir(parents=True, exist_ok=True)
+    _unhover(page)
     page.wait_for_timeout(400)
     if settle:
         _settled(page)
@@ -190,6 +198,7 @@ def _top_shot(page, name, scheme, *, settle=True):
 def _view_shot(page, name, scheme):
     """The viewport only (a sheet over the page)."""
     OUT.mkdir(parents=True, exist_ok=True)
+    _unhover(page)
     page.wait_for_timeout(300)
     _settled(page)
     page.screenshot(path=str(OUT / f"{name}.{scheme}.png"), animations="disabled", caret="hide")

@@ -62,6 +62,12 @@ export const LineLoading: Story = { args: { size: "line", state: STATES.loading 
 export const LineEmpty: Story = { args: { size: "line", state: STATES.empty } };
 export const LineCantTell: Story = { args: { size: "line", state: STATES.cantTell } };
 export const LineError: Story = { args: { size: "line", state: STATES.error } };
+/** The line at phone width (384 px), under a container that lets text wrap anywhere, with a
+ * long line: "Show ›" stays whole at its end, never "Sho / w ›". */
+export const LinePhone: Story = {
+  args: { size: "line", state: STATES.thin },
+  render: (args) => <div className="w-96 wrap-anywhere"><FitBoard {...args} /></div>,
+};
 
 // --- Each moment's composition (owner, 2026-10-11: "preview is an idea, rather than a specific
 // widget. Because what is being previewed is context dependent").

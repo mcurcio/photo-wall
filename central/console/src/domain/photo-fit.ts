@@ -146,30 +146,51 @@ export function ratioWords(ratio: number): string {
   return ratio >= 1 ? `${ratio.toFixed(2)}:1` : `1:${(1 / ratio).toFixed(2)}`;
 }
 
+/*
+ * Every sentence here starts with a capital letter, also where a Frame's name ("hall") would
+ * lead it: the sentence is turned so the name sits inside it. A Frame is judged at its Frame
+ * output, never its Display (owner, 2026-10-11: "make sure that compatibility is measuring
+ * against the Frame output and not the Display"); until the Frame reports its output, at the
+ * shape its Frame profile plans, and the words say "planned".
+ */
+
+/** The shape a Frame is judged at: its Frame output's, else its planned one (its profile's). */
+function shapeOf(frame: FrameFit): number {
+  return frame.output_px === null ? frame.aspect : frame.output_px[0] / frame.output_px[1];
+}
+
+/** A Frame's shape in a clause: "hall's Frame output is 9:16", or, not reported yet, "hall is
+ * planned at 9:16". */
+function frameShapeClause(frame: FrameFit, name: string): string {
+  const shape = ratioWords(shapeOf(frame));
+  return frame.output_px === null ? `${name} is planned at ${shape}` : `${name}'s Frame output is ${shape}`;
+}
+
 /**
  * A Frame of the answer with nothing that fits, in one plain sentence with what to do: when its
- * photos are left off for their shape (the usual case), "hall is 9:16 and these photos are 3:2:
- * add photos of that shape or raise the crop limit." (`most`: the selection's most common shape);
- * otherwise what leaves most of them off.
+ * photos are left off for their shape (the usual case), "Most of these photos are 3:2 and hall's
+ * Frame output is 9:16: add photos closer to 9:16 or raise the crop limit." (`most`: the
+ * selection's most common shape); otherwise what leaves most of them off.
  */
 export function emptyFrameWords(frame: FrameFit, name: string, most: string | null): string {
   const top = [...frame.refused_by_shape, ...frame.refused_by_content]
     .filter((count) => count.photos > 0)
     .sort((a, b) => b.photos - a.photos)[0];
-  const shape = ratioWords(frame.aspect);
+  const shape = ratioWords(shapeOf(frame));
   switch (top?.reason ?? "beyond_crop_limit") {
     case "below_frame_pixels":
-      return `${name} needs larger photos than most of these: add larger photos.`;
+      return `Most of these photos are smaller than ${name} needs: add larger photos.`;
     case "face_cut":
-      return `${name} would cut a face in most of these photos: add photos closer to ${shape}.`;
+      return `Most of these photos would lose a face on ${name}: add photos closer to ${shape}.`;
     case "interest_cut":
-      return `${name} would cut the interesting part of most of these photos: add photos closer to ${shape}.`;
+      return `Most of these photos would lose their interesting part on ${name}: add photos closer to ${shape}.`;
     case "no_video_here":
-      return `${name} shows no videos, and these are videos: add photos.`;
+      return `These are videos, and ${name} shows no videos: add photos.`;
     default:
       return most === null
-        ? `${name} is ${shape}: add photos of that shape or raise the crop limit.`
-        : `${name} is ${shape} and these photos are ${most}: add photos of that shape or raise the crop limit.`;
+        ? `None of these photos is close to ${shape}, ${frame.output_px === null ? `the shape ${name} is planned at`
+          : `the shape of ${name}'s Frame output`}: add photos closer to ${shape} or raise the crop limit.`
+        : `Most of these photos are ${most} and ${frameShapeClause(frame, name)}: add photos closer to ${shape} or raise the crop limit.`;
   }
 }
 
@@ -221,27 +242,72 @@ export function percentWords(limit: number): string {
   return `${Math.round(limit * 100)} %`;
 }
 
-/** The answer in one line: "Fits 5 of 6 Frames · Hall has no photo that fits". */
+/** The answer in one line, each part starting with a capital: "Fits 5 of 6 Frames · No photo
+ * fits hall · Only 1 photo fits stairs". */
 export function lineWords(analysis: FitAnalysis, name: (frameId: string) => string = (id) => id): string {
   const frames = analysis.frames;
   if (frames.length === 0) return "There is no Frame to show them on yet";
   const empty = frames.filter((frame) => frame.photos > 0 && !hasFit(frame)).map((frame) => name(frame.frame_id));
   if (frames.length === 1) {
     const [frame] = frames;
-    if (empty.length > 0) return `${empty[0]} has no photo that fits`;
+    if (empty.length > 0) return `No photo fits ${empty[0]}`;
     const counted = `${countText(frame.fit_by_shape)} of ${countText(frame.photos)} fit ${name(frame.frame_id)}`;
-    return isThin(frame, 1) ? `${counted} · it will keep that one photo up` : counted;
+    return isThin(frame, 1) ? `${counted} · That one photo stays up` : counted;
   }
   const fits = frames.length - empty.length;
   const lead = `Fits ${fits} of ${frames.length} Frames`;
-  const thin = frames.filter((frame) => isThin(frame, frames.length))
-    .map((frame) => `${name(frame.frame_id)} has only ${countWords(fitCount(frame), "photo")}`);
+  const thin = frames.filter((frame) => isThin(frame, frames.length)).map((frame) => {
+    const count = fitCount(frame);
+    return `Only ${countWords(count, "photo")} ${count === 1 ? "fits" : "fit"} ${name(frame.frame_id)}`;
+  });
   const few = thin.length === 0 ? "" : thin.length <= 2 ? ` · ${thin.join(" · ")}`
     : ` · ${thin.length} Frames have only a few photos`;
   if (empty.length === 0) return `${lead}${few}`;
-  if (empty.length === 1) return `${lead} · ${empty[0]} has no photo that fits${few}`;
-  if (empty.length === 2) return `${lead} · ${empty[0]} and ${empty[1]} have no photo that fits${few}`;
+  if (empty.length === 1) return `${lead} · No photo fits ${empty[0]}${few}`;
+  if (empty.length === 2) return `${lead} · No photo fits ${empty[0]} or ${empty[1]}${few}`;
   return `${lead} · ${empty.length} Frames have no photo that fits${few}`;
+}
+
+// --- Which copy a photo plays from ----------------------------------------------------------------
+
+/** One of Immich's copies of a photo, by name (central/photo_library/views.py `CopyView`). */
+export type CopyName = "thumbnail" | "preview" | "fullsize" | "original";
+
+/** What one Frame asks of the photo's copy (central/photo_library/views.py `FrameCopy`): the
+ * pixels it needs (its Frame output's, or, before it reports one, its planned size). */
+export interface FrameCopy {
+  frame_id: string;
+  need_px: [number, number];
+  output_known: boolean;
+  preview_holds: boolean | null;
+}
+
+const COPY_CLAUSE: Readonly<Record<CopyName, string>> = {
+  thumbnail: "Immich's thumbnail",
+  preview: "Immich's preview",
+  fullsize: "Immich's full-size copy",
+  original: "the original",
+};
+
+/** A video plays from its original on every Frame. */
+export const VIDEO_PLAYS_FROM = "Plays from the original.";
+/** A photo no Frame judges yet. */
+export const UNDECIDED_PLAYS_FROM = "Which copy plays is decided when a Frame shows it.";
+
+/**
+ * Which copy one Frame plays a photo from, in one plain clause (owner, 2026-10-09: "use Immich
+ * downsampled copy only if it is at least the visible Frame size, else the original"): "Plays
+ * from Immich's preview, which holds its Frame output, 1,920 × 1,080 px." or "Plays from a
+ * larger copy: Immich's preview is smaller than its planned 1,080 × 1,920 px."
+ */
+export function playsFromWords(frame: FrameCopy, photo: { kind: MediaKind; prepared_from: CopyName | null }): string {
+  if (photo.kind === "video") return VIDEO_PLAYS_FROM;
+  if (photo.prepared_from !== null) return `Plays from the copy Photo Wall prepared from ${COPY_CLAUSE[photo.prepared_from]}.`;
+  const pixels = `${countText(frame.need_px[0])} × ${countText(frame.need_px[1])} px`;
+  const need = frame.output_known ? `its Frame output, ${pixels}` : `its planned ${pixels}`;
+  if (frame.preview_holds === null) return `Plays from Immich's preview if it holds ${need}, else from a larger copy.`;
+  return frame.preview_holds ? `Plays from Immich's preview, which holds ${need}.`
+    : `Plays from a larger copy: Immich's preview is smaller than ${need}.`;
 }
 
 // --- The board's words and pictures ----------------------------------------------------------
@@ -270,12 +336,21 @@ function size([width, height]: [number, number]): string {
   return pixelSize(width, height);
 }
 
-/** The pixels a Frame is judged at, in words: its Frame output (the picture inside its
- * Position, at its shape), never its Display's mode (owner, 2026-10-11: "make sure that
- * compatibility is measuring against the Frame output and not the Display"). */
+/** What a Frame is judged at, in words: its Frame output (the picture inside its Position, at
+ * its shape) in pixels, a Details fact, never its Display's mode; or, before the Frame reports
+ * its output, "Judged at hall's planned 9:16 shape; hall hasn't reported its output yet." */
 export function outputWords(frame: FrameFit, name = frame.frame_id): string {
-  if (frame.output_px === null) return `${name}'s Frame output isn't known yet`;
-  return `Frame output ${size(frame.output_px)} px, ${ratioWords(frame.output_px[0] / frame.output_px[1])}`;
+  if (frame.output_px === null) {
+    return `Judged at ${name}'s planned ${ratioWords(frame.aspect)} shape; ${name} hasn't reported its output yet.`;
+  }
+  return `Frame output ${size(frame.output_px)} px, ${ratioWords(shapeOf(frame))}`;
+}
+
+/** A one-Frame line under a Position or Frame profile being set: what it is judged at, without
+ * pixels (they are under the board's Details). */
+function draftOutputWords(frame: FrameFit, name: string): string {
+  return frame.output_px === null ? outputWords(frame, name)
+    : `Judged at its Frame output as you set it, ${ratioWords(shapeOf(frame))}`;
 }
 
 /** The line over Frames drawn side by side (a strip): a neutral count only, as each tile says
@@ -296,17 +371,64 @@ function countedWords(analysis: FitAnalysis): string {
   return analysis.reading ? `${counted} so far` : counted;
 }
 
+/** What a board is judged at, as its host knows it: which Frames, and whose crop limit. The
+ * host names its moment; {@link judgedWords} is the one home of the sentence. */
+export type JudgedAt =
+  /** The Photo source editor: every Frame, at the house crop limit or as a Scene using it. */
+  | { at: "source"; scene: string | null }
+  /** A Source's card on the Sources list (the shape tier). */
+  | { at: "source-card" }
+  /** The Scene editor: its Frames once chosen, else every Frame; its own crop limit or the house's. */
+  | { at: "scene"; framesChosen: boolean; ownCrop: boolean }
+  /** The Scene editor's board right under its crop limit, whose value is said above it. */
+  | { at: "scene-crop"; framesChosen: boolean }
+  /** Show now: the chosen Scene on its Frames. */
+  | { at: "show-now"; ownCrop: boolean }
+  /** Settings › Photo fit, with the values as typed. */
+  | { at: "settings" }
+  /** A Frame's own page, one board per Scene. */
+  | { at: "frame-scene"; ownCrop: boolean };
+
+/** What a board is judged at, in one sentence, or null where nothing needs saying. */
+export function judgedWords(judged: JudgedAt, analysis: FitAnalysis): string | null {
+  const limit = percentWords(analysis.crop_limit);
+  const whose = (own: boolean, scene: string) => (own ? `${scene} crop limit` : "the house crop limit");
+  switch (judged.at) {
+    case "source":
+      return judged.scene === null
+        ? `Judged on every Frame at the house crop limit, ${limit}: a Source has no Frames of its own.`
+        : `Judged on every Frame as Scene ${judged.scene} judges it, at its crop limit, ${limit}.`;
+    case "source-card":
+      return `Judged by shape and size on every Frame, at the house crop limit, ${limit}.`;
+    case "scene":
+      return `Judged ${judged.framesChosen ? "on this Scene's Frames" : "on every Frame until you choose this Scene's"}, at ${
+        whose(judged.ownCrop, "this Scene's")}, ${limit}.`;
+    case "scene-crop":
+      return judged.framesChosen ? null : "Judged on every Frame until you choose this Scene's.";
+    case "show-now":
+      return `Judged at ${whose(judged.ownCrop, "the Scene's")}, ${limit}.`;
+    case "settings":
+      return `Judged on every Frame with every Source a Scene uses, at the crop limit as set here, ${limit}.`;
+    case "frame-scene":
+      return `From the Scene's ${countWords(analysis.photos, "photo")}${
+        analysis.videos > 0 ? ` and ${countWords(analysis.videos, "video")}` : ""}, judged at ${
+        whose(judged.ownCrop, "its own")}, ${limit}.`;
+  }
+}
+
 export interface BoardOptions {
   /** A Frame's name (its id by default). */
   name?: (frameId: string) => string;
   /** Where a Frame's name leads, if anywhere. */
   href?: (frameId: string) => string | undefined;
-  /** What the board is judged at, in the host's words (from the answer, which says the crop
-   * limit it used), or null for none. Default: "Judged at a crop limit of 35 %." */
-  judged?: string | null | ((analysis: FitAnalysis) => string | null);
+  /** What the board is judged at, as the host knows it ({@link judgedWords} says it, from the
+   * answer, which names the crop limit it used), or null for none. Default: "Judged at a crop
+   * limit of 35 %." */
+  judged?: JudgedAt | null;
   /** One action for a Frame that has nothing that fits (the Scene editor's raise). */
   rescue?: (frame: FrameFit) => ProblemAction | undefined;
-  /** The line names the Frame output too (a one-Frame line under a Position being dragged). */
+  /** The line says what the Frame is judged at too (a one-Frame line under a Position being
+   * dragged), its pixels left to Details. */
   lineOutput?: boolean;
   /** How many Frames share the selection, when not every Frame of the answer does (a Frame
    * picker judging every Frame while a few are chosen); default: the answer's Frames. */
@@ -329,7 +451,7 @@ function alertOf(frame: FrameFit, name: string, sharing: number, most: string | 
 }
 
 function frameView(frame: FrameFit, name: string, href: string | undefined, alert: FitAlert | null): FrameFitView {
-  const aspect = frame.output_px === null ? frame.aspect : frame.output_px[0] / frame.output_px[1];
+  const aspect = shapeOf(frame);
   const shaped = frame.refused_by_shape.filter((count) => count.photos > 0);
   const segments: FitSegment[] = [
     { key: "fit", label: "fit", count: frame.fit_by_shape, countText: countText(frame.fit_by_shape) },
@@ -407,10 +529,10 @@ export function boardView(analysis: FitAnalysis, options: BoardOptions = {}): Fi
     summary: countedWords(analysis),
     stripLine: stripWords(analysis),
     line: options.lineOutput && analysis.frames.length === 1
-      ? `${lineWords(analysis, name)} · ${outputWords(analysis.frames[0], name(analysis.frames[0].frame_id))}`
+      ? `${lineWords(analysis, name)} · ${draftOutputWords(analysis.frames[0], name(analysis.frames[0].frame_id))}`
       : lineWords(analysis, name),
     judged: options.judged === undefined ? `Judged at a crop limit of ${percentWords(analysis.crop_limit)}.`
-      : typeof options.judged === "function" ? options.judged(analysis) : options.judged,
+      : options.judged === null ? null : judgedWords(options.judged, analysis),
     reading: analysis.reading ? "Still reading Immich: these are the photos found so far." : null,
     frames: analysis.frames.map((frame) => frameView(frame, name(frame.frame_id), options.href?.(frame.frame_id),
       alertOf(frame, name(frame.frame_id), sharing, most, options.rescue))),

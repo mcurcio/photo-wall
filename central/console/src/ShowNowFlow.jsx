@@ -15,7 +15,6 @@ import { useFlowWrite } from "./flow/useFlowWrite.js";
 import { useSceneHandOver } from "./flow/useSceneHandOver.js";
 import { mediaNow, sourceState } from "./mediaHealth.js";
 import { FitBoardFor } from "./domain/photo-fit-board.tsx";
-import { percentWords } from "./domain/photo-fit.ts";
 import { ScenePicker } from "./ScenePicker.jsx";
 import {
   activationAnswer,
@@ -293,7 +292,7 @@ function SceneStep({ value, problems, edit, snapshot, frames, sourceRefs, author
       />
       {value.sceneId !== "" && (
         <>
-          <dl className="record">
+          <dl className="record record--even">
             <dt>Frames</dt>
             <dd>
               <SceneFramesValue snapshot={snapshot} frames={frames} />
@@ -323,7 +322,7 @@ function SceneFit({ sceneId, scene, sourceRefs, frames }) {
   }), [sourceKey, frameKey, cropLimit]);
   return (
     <FitBoardFor question={question} size="strip" lead="wall" title={`How ${sceneId} fills its Frames`}
-      judged={(analysis) => `At ${cropLimit === null ? "the house crop limit" : "the Scene's crop limit"}, ${percentWords(analysis.crop_limit)}.`} />
+      judged={{ at: "show-now", ownCrop: cropLimit !== null }} />
   );
 }
 
@@ -458,7 +457,7 @@ function SceneSources({ snapshot, refs, authoredMedia }) {
     return `${sourceName(source ?? ref)} (${state})`;
   });
   return (
-    <dl className="record" aria-label="Photos from">
+    <dl className="record record--even" aria-label="Photos from">
       <dt>Photos from</dt>
       <dd>
         {refs.length > 0 ? words.join(", ")

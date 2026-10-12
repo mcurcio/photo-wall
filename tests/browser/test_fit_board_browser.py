@@ -73,10 +73,12 @@ HALL, LIVING = "hall", "living-room"
 SHAPES = ((6000, 4000), (4032, 3024), (3840, 2160), (3000, 3000))  # 3:2, 4:3, 16:9, 1:1
 SOURCE = "holiday:1"
 SCENE_ID = "evenings"
-# A Frame with nothing that fits, in plain words (src/domain/photo-fit.ts `emptyFrameWords`): its
-# shape against the selection's most common one, and what to do.
+# A Frame with nothing that fits, in plain words (src/domain/photo-fit.ts `emptyFrameWords`): the
+# selection's most common shape against the Frame's (planned, until it reports its output), and
+# what to do; the sentence starts with a capital, not the Frame's name.
 NOTHING_FITS_HALL = re.compile(
-    rf"{HALL} is 9:16 and these photos are \d+:\d+: add photos of that shape or raise the crop limit\.")
+    rf"Most of these photos are \d+:\d+ and ({HALL} is planned at 9:16|{HALL}'s Frame output is 9:16): "
+    r"add photos closer to 9:16 or raise the crop limit\.")
 
 
 def _library(registry, page, shapes=SHAPES):
@@ -287,11 +289,13 @@ def test_the_frame_page_shows_one_row_per_scene_with_its_relation_to_now(page, r
         # alert is said once, on the row, with no warning card over it.
         expect(_row(scene, HALL).get_by_role("img", name=f"{HALL}, 9:16", exact=True)).to_be_visible()
         _said_once(scene, "Nothing fits", "alarm")
-        expect(scene).to_contain_text("From the Scene's 4 photos, at the house crop limit, 35 %.")
+        expect(scene).to_contain_text("From the Scene's 4 photos, judged at the house crop limit, 35 %.")
         # The page is hall's: the row does not name hall or its shape again, and says what it is
-        # judged at (no Pi reports hall's screen here).
+        # judged at (no Pi reports hall's output here): its planned shape, never "is 9:16".
         expect(_row(scene, HALL).get_by_role("heading", name=HALL, exact=True)).to_have_count(0)
-        expect(_row(scene, HALL)).to_contain_text("hall's Frame output isn't known yet")
+        expect(_row(scene, HALL)).to_contain_text(
+            "Judged at hall's planned 9:16 shape; hall hasn't reported its output yet.")
+        expect(scene).not_to_contain_text("hall is 9:16")
         expect(_row(scene, HALL).get_by_role("button", name="Details", exact=True)).to_have_count(0)
         expect(photos).not_to_contain_text("photos fit this Frame")
         expect(photos).not_to_contain_text("from Source")
@@ -330,16 +334,25 @@ def test_a_position_drafted_as_a_mat_opening_changes_what_fits_before_done(page,
             expect(row).not_to_contain_text("display")
             position = open_frame(page, FRAME, "position").get_by_role("region", name="Position", exact=True)
             expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
+            # The line says what the Frame is judged at; its pixels are under Details (design fix
+            # round 4), in the board the line opens.
             expect(position.get_by_role("button", name=re.compile(
-                rf"^1 of 2 fit {FRAME} · it will keep that one photo up · Frame output 1,920 × 1,080 px, 16:9$"
+                rf"^1 of 2 fit {FRAME} · That one photo stays up · Judged at its Frame output as you set it, 16:9$"
                 ))).to_be_visible()
+            expect(position).not_to_contain_text("1,920 × 1,080 px")
             position.get_by_role("button", name="Exact values", exact=True).click()
             for label, value in (("Top-left x", "480"), ("Bottom-left x", "480"), ("Top-right x", "1440"),
                                  ("Bottom-right x", "1440"), ("Top-left y", "270"), ("Top-right y", "270"),
                                  ("Bottom-right y", "810"), ("Bottom-left y", "810")):
                 position.get_by_label(label, exact=True).fill(value)
-            expect(position.get_by_role("button", name=re.compile(
-                rf"^2 of 2 fit {FRAME} · Frame output 960 × 540 px, 16:9$"))).to_be_visible()
+            line = position.get_by_role("button", name=re.compile(
+                rf"^2 of 2 fit {FRAME} · Judged at its Frame output as you set it, 16:9$"))
+            expect(line).to_be_visible()
+            expect(position).not_to_contain_text("960 × 540 px")
+            line.click()
+            sheet = page.get_by_role("dialog", name=f"Scene {SCENE_ID} on this Frame, as you are setting it")
+            sheet.get_by_role("button", name="Details", exact=True).click()
+            expect(sheet).to_contain_text("Frame output 960 × 540 px, 16:9")
     finally:
         page.unroute_all(behavior="ignoreErrors")
         del sessions
@@ -353,7 +366,7 @@ def test_show_now_and_the_sources_list_say_it_in_one_line_that_opens_the_board(p
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "sources")
         card = page.get_by_role("region", name="Sources", exact=True).get_by_role("article", name="holiday", exact=True)
-        line = card.get_by_role("button", name=re.compile(r"Fits 1 of 2 Frames · hall has no photo that fits"))
+        line = card.get_by_role("button", name=re.compile(r"Fits 1 of 2 Frames · No photo fits hall"))
         expect(line).to_be_visible()
         form = start_show_now(page, SCENE_ID)
         line = form.get_by_role("button", name="Fits 1 of 2 Frames", exact=True)
@@ -450,17 +463,15 @@ def test_a_sample_opens_the_photo_sheet_with_immichs_copies_and_no_immich_id(pag
         ])
         expect(sheet).to_contain_text(f"{LIVING} (16:9): fits")
         # Unedited, the original is the photo Immich shows (its size is Immich's own), and which
-        # copy plays is said per Frame: neither Frame's screen reports, so each needs its
-        # profile's size, which the 1,440 x 960 preview is smaller than.
+        # copy plays is one plain clause per Frame: neither Frame has reported its output, so each
+        # needs its planned size, which the 1,440 x 960 preview is smaller than.
         expect(copies.locator("p").last).to_have_text("Original: 6,000 × 4,000")
         plays = sheet.get_by_role("group", name="Which copy plays", exact=True)
         expect(plays.locator("p")).to_have_text([
-            f"Plays from: a larger copy than Immich's preview, which is smaller than {HALL}, {LIVING} needs",
-            f"{HALL}: needs 1,080 × 1,920 px (its profile's size, until its screen reports); "
-            "Immich's preview is smaller",
-            f"{LIVING}: needs 3,840 × 2,160 px (its profile's size, until its screen reports); "
-            "Immich's preview is smaller",
+            f"{HALL}: Plays from a larger copy: Immich's preview is smaller than its planned 1,080 × 1,920 px.",
+            f"{LIVING}: Plays from a larger copy: Immich's preview is smaller than its planned 3,840 × 2,160 px.",
         ])
+        expect(sheet).not_to_contain_text("screen")
         html = page.content()
         for asset in assets:
             assert asset.upstream_id not in html

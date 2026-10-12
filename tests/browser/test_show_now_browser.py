@@ -201,6 +201,8 @@ def test_unhealthy_scene_frame_opens_its_recovery_tab_and_keeps_show_draft(page,
         expect(form).to_contain_text(f"{INVALID_FRAME}: Getting ready")
         expect(form.get_by_role("link", name=f"Open Frame {INVALID_FRAME}", exact=True)).to_have_attribute(
             "href", f"#/wall/frames/{INVALID_FRAME}/hardware")
+        # A chip is status only (design fix round 4): its link sits on the line under the chips.
+        expect(form.get_by_text(f"{INVALID_FRAME}: Getting ready", exact=True).get_by_role("link")).to_have_count(0)
 
         for player_id in players:
             report_readiness(registry, player_id)

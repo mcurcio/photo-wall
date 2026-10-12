@@ -13,7 +13,7 @@ import {
 } from "../domain/source-query-editor";
 import { type SourcePoolViewData, SourcePoolView, poolWords } from "../domain/source-pool-view";
 import { fitLine, type FitQuestion, fitReading, PhotoFitBoard, useFitRead } from "../domain/photo-fit-board";
-import { type FitAnalysis, percentWords, type SceneUse } from "../domain/photo-fit";
+import type { SceneUse } from "../domain/photo-fit";
 import {
   albumsById,
   peopleById,
@@ -124,13 +124,6 @@ export interface PhotoSourcePageProps {
 }
 
 const HOUSE = "";
-
-/** What the Photo source editor's board is judged at, in words. */
-function judgedWords(scene: SceneUse | null): (analysis: FitAnalysis) => string {
-  return (analysis) => (scene === null
-    ? `Judged on every Frame at the house crop limit, ${percentWords(analysis.crop_limit)}: a Source has no Frames of its own.`
-    : `Judged on every Frame as Scene ${scene.sceneId} judges it: crop limit ${percentWords(analysis.crop_limit)}.`);
-}
 
 /**
  * The Photo source editor (`#/sources/new/query`, `#/sources/<name>/edit/query`; design-language
@@ -289,7 +282,7 @@ export function PhotoSourcePage({ editing, forLabel, onSaved, onDiscard, onChang
       preview={() => (
         <Stack>
           {scenes.length > 0 && (
-            <Field label="Judge as" help="A Source has no Frames or crop limit of its own: judge it as the house does, or as a Scene that uses it.">
+            <Field label="Judge as" help="At the house crop limit, or as a Scene that uses this Source.">
               <Select value={judgeAt} onChange={setJudgeAt} options={[
                 { value: HOUSE, label: "The house crop limit" },
                 ...scenes.map((scene) => ({ value: scene.sceneId, label: `Scene ${scene.sceneId}` })),
@@ -297,7 +290,7 @@ export function PhotoSourcePage({ editing, forLabel, onSaved, onDiscard, onChang
             </Field>
           )}
           <PhotoFitBoard read={fit} size="full" lead="shapes" collapse={false}
-            title="What these photos are, and which Frames can show them" judged={judgedWords(judgingScene)} />
+            title="What these photos are, and which Frames can show them" judged={{ at: "source", scene: judgingScene?.sceneId ?? null }} />
           <SourcePoolView view={view} pages={pool.pages} hasMore={pool.hasMore} onLoadMore={() => void pool.loadMore()}
             loadingMore={pool.loadingMore} error={pool.error} filters={filters} reading={reading} />
         </Stack>

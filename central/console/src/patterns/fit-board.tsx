@@ -5,6 +5,7 @@ import { Button } from "../ui/button";
 import { cn } from "../ui/cn";
 import { Disclosure } from "../ui/disclosure";
 import { Sheet } from "../ui/sheet";
+import { Split } from "../ui/split";
 import type { CropView } from "./crop-thumb";
 import { EmptyState } from "./entity-page";
 import { FrameFitRow, type FrameFitView } from "./frame-fit-row";
@@ -16,13 +17,13 @@ import { WallStrip } from "./wall-strip";
 export interface FitBoardView {
   /** The selection's counts ("1,689 photos · 42 videos"). */
   summary: string;
-  /** The board in one line ("Fits 5 of 6 Frames · Hall has no photo that fits"), where the
+  /** The board in one line ("Fits 5 of 6 Frames · No photo fits hall"), where the
    * line stands alone. */
   line: string;
   /** The line over the Frames drawn side by side (a `strip`): a neutral count only ("Fits 5 of
    * 6 Frames"), as each tile says its own alert. */
   stripLine: string;
-  /** What it is judged at ("Judged at the house crop limit, 35 %"), or null. */
+  /** What it is judged at ("Judged at the house crop limit, 35 %"), from the domain, or null. */
   judged: string | null;
   /** While the selection is still being read ("Still reading Immich: these are the photos
    * found so far."), or null. */
@@ -119,12 +120,11 @@ function Board({ view, size, lead, named, faded, onShuffle, onFrame, action, onO
   return (
     <div className="flex min-w-0 flex-col gap-3">
       {lead !== "frame" && (
-        <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
+        <Split action={onShuffle && (size === "full" || wall) ? (
+          <Button variant="ghost" className="px-2 py-0.5 text-xs" onClick={onShuffle}>Shuffle photos</Button>
+        ) : null}>
           <p className="m-0 text-sm text-text">{view.summary}</p>
-          {onShuffle && (size === "full" || wall) ? (
-            <Button variant="ghost" className="px-2 py-0.5 text-xs" onClick={onShuffle}>Shuffle photos</Button>
-          ) : null}
-        </div>
+        </Split>
       )}
       {view.judged !== null && <p className="m-0 text-xs text-muted">{view.judged}</p>}
       {view.reading !== null && <p className="m-0 text-xs text-muted">{view.reading}</p>}
@@ -227,13 +227,14 @@ function Line({ title, state, strip = false, lead, named, ...rest }: Omit<FitBoa
         type="button"
         onClick={() => setOpen(true)}
         className={cn(
-          "flex min-h-11 w-full min-w-0 cursor-pointer items-center justify-between gap-3 rounded-input border border-line",
+          "flex min-h-11 w-full min-w-0 cursor-pointer items-center rounded-input border border-line",
           "bg-surface-raised px-3 py-2 text-left font-sans text-sm text-text",
           "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus",
         )}
       >
-        <span className="min-w-0 wrap-anywhere">{lineOf(state, strip && view !== null && view.empty === null)}</span>
-        <span className="shrink-0 whitespace-nowrap text-accent" aria-hidden="true">Show ›</span>
+        <Split as="span" action={<span className="text-accent" aria-hidden="true">Show ›</span>}>
+          {lineOf(state, strip && view !== null && view.empty === null)}
+        </Split>
       </button>
       {strip && view !== null && view.empty === null && (
         <WallStrip frames={view.frames} size="small" named={named} faded={state.status !== "ready" || state.updating}

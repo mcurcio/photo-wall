@@ -189,3 +189,44 @@ def test_media_grid_draws_each_photo_at_its_own_ratio(page, catalog_origin):
     for alt, width, height in shapes:
         w, h = (int(n) for n in alt.rsplit(", ", 1)[1].split(":"))
         assert abs(width / height - w / h) / (w / h) < 0.05, (alt, width, height)
+
+
+# The words of each action beside a title or a line, in the stories that draw one at phone width
+# (384 px) under a container that lets text wrap anywhere, as the legacy regions do.
+WHOLE_ACTIONS = {
+    "primitives-split--long-title-phone": ("More", "Show ›"),
+    "primitives-split--narrow": ("Show ›",),
+    "patterns-mediacard--long-title-phone": ("More",),
+    "patterns-fitboard--line-phone": ("Show ›",),
+}
+
+
+@pytest.mark.parametrize("story", sorted(WHOLE_ACTIONS))
+def test_an_action_beside_a_long_title_never_breaks_inside_a_word_at_phone_width(page, catalog_origin, story):
+    # ui/split.tsx (design fix round 4): an action in a strip or a card header never shrinks and
+    # never breaks mid-word ("Sho / w ›", "Mor / e" on the phone shots); when the line is too
+    # narrow it moves to a row of its own. Mutation probes: Split as the old layout (no wrap, no
+    # basis, an unguarded action) -> "Show ›" breaks onto two lines in three stories; no
+    # `flex-wrap` alone -> Narrow's action stays beside its words.
+    page.set_viewport_size(VIEWPORT)
+    page.goto(f"{catalog_origin}/iframe.html?id={story}&viewMode=story")
+    page.wait_for_selector("body.sb-show-main")
+    page.evaluate("document.fonts.ready")
+    lines = page.evaluate(
+        """words => [...document.querySelectorAll('#storybook-root *')]
+            .filter(e => e.children.length === 0 && words.includes(e.textContent.trim()))
+            .map(e => { const r = document.createRange(); r.selectNodeContents(e);
+                        const tops = new Set([...r.getClientRects()].map(b => Math.round(b.top)));
+                        return [e.textContent.trim(), tops.size]; })""",
+        list(WHOLE_ACTIONS[story]))
+    assert sorted({word for word, _ in lines}) == sorted(WHOLE_ACTIONS[story]), lines
+    assert all(count == 1 for _, count in lines), lines
+    if story == "primitives-split--narrow":
+        # Too narrow for both: the action sits on its own row, under the line's words.
+        below = page.evaluate(
+            """() => { const action = [...document.querySelectorAll('#storybook-root span')]
+                         .find(e => e.textContent.trim() === 'Show ›');
+                       const words = [...document.querySelectorAll('#storybook-root span')]
+                         .find(e => e.textContent.startsWith('Fits'));
+                       return action.getBoundingClientRect().top >= words.getBoundingClientRect().bottom - 1; }""")
+        assert below

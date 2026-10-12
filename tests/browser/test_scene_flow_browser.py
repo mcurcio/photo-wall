@@ -519,9 +519,12 @@ def test_a_review_problem_opens_its_step_and_focuses_the_field(page, registry):
         # ...then, nothing left before it, back to Review (Playback is skipped).
         scene_continue(page, "Review")
 
-        # An invalid id under Advanced: Save opens Advanced and focuses the Id.
+        # An invalid id under Advanced: Save opens Advanced and focuses the Id. The id is said
+        # once: the name's hint ("Saved as routed · Change") until Change opens Advanced at it.
+        expect(form.get_by_role("button", name="Advanced", exact=True)).to_have_count(0)
+        form.get_by_role("button", name="Change", exact=True).click()
         advanced = form.get_by_role("button", name="Advanced", exact=True)
-        advanced.click()
+        expect(advanced).to_have_attribute("aria-expanded", "true")
         form.get_by_label("Id", exact=True).fill("-bad")
         advanced.click()
         expect(advanced).to_have_attribute("aria-expanded", "false")
@@ -816,7 +819,7 @@ def test_continue_shows_only_its_own_steps_reasons(page, registry):
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         connect(page, origin, "scenes")
         form = start_scene(page)
-        targets = form.get_by_role("group", name="Target frames", exact=True)
+        targets = form.get_by_role("group", name="Target Frames", exact=True)
         expect(targets).to_be_visible()
         expect(form.get_by_text("Choose at least one frame.")).to_have_count(0)
         expect(targets).to_have_accessible_description("")
@@ -1044,7 +1047,7 @@ def test_a_frame_with_no_compatible_media_is_a_frame_problem(page, registry):
         _steps(page).get_by_role("button", name="Frames", exact=True).click()
         message = (f"No compatible media for {VALID_FRAME} in holiday. "
                    "Choose another frame, or another Source.")
-        targets = form.get_by_role("group", name="Target frames", exact=True)
+        targets = form.get_by_role("group", name="Target Frames", exact=True)
         expect(targets).to_have_accessible_description(message)
         form.get_by_role("button", name="Continue", exact=True).click()
         expect(form.get_by_role("alert")).to_contain_text(message)
@@ -1157,7 +1160,7 @@ def test_a_late_answer_after_log_out_leaves_the_new_sessions_draft_alone(page, r
         expect(page.get_by_role("group", name="Snapshot status", exact=True)
                ).not_to_have_attribute("aria-busy", "true")
         assert current_hash(page) == "#/scenes/new/frames"
-        expect(form.get_by_role("group", name="Target frames", exact=True)).to_be_visible()
+        expect(form.get_by_role("group", name="Target Frames", exact=True)).to_be_visible()
 
 
 def _stored(page, origin, key):

@@ -38,10 +38,10 @@ export function TargetPicker({ id, reason = null, snapshot, targets, onToggle, t
     <fieldset
       id={id}
       className={tileFor === null ? "target-picker" : "target-picker target-picker--tiles"}
-      aria-label="Target frames"
+      aria-label="Target Frames"
       aria-describedby={reason !== null ? `${id}-reason` : undefined}
     >
-      <legend>Target frames</legend>
+      <legend>Target Frames</legend>
       {frames.length === 0 && <p className="target-picker__empty">No Frames to target.</p>}
       {ordered.map(([surface, group]) => {
         const name = surface === null ? "Frames not on any wall" : `Frames on ${surface}`;
@@ -93,29 +93,37 @@ export function TargetPicker({ id, reason = null, snapshot, targets, onToggle, t
 /**
  * Frames as chips, each with the plan tile's health label (health.js
  * `tileLabel`): the one rendering of "which frames, and are they alright" in
- * Run rows (§9) and Scene rows (§13).
+ * Run rows (§9) and Scene rows (§13). A chip is status only and never wraps;
+ * with `recoveryLinks`, a Frame that needs a look gets "Open Frame <id>" on a
+ * line of links under the chips, never inside one.
  *
  * @param {{snapshot: object|null, frameIds: string[], recoveryLinks?: boolean}} props
  */
 export function FrameChips({ snapshot, frameIds, recoveryLinks = false }) {
-  return (
+  const frames = frameIds.map((frameId) => {
+    const health = frameHealth(snapshot, frameId);
+    // The chip's severity and words are the Frame page header's (domain/frame-health-chip.ts).
+    return { frameId, chip: health === null ? null : frameChip(health, true), tab: recoveryLinks ? health?.tab ?? null : null };
+  });
+  const chips = (
     <span className="run-control__frames">
-      {frameIds.map((frameId) => {
-        const health = frameHealth(snapshot, frameId);
-        const recoveryTab = recoveryLinks ? health?.tab : null;
-        // The chip's severity and words are the Frame page header's (domain/frame-health-chip.ts).
-        const chip = health === null ? null : frameChip(health, true);
-        return (
-          <span key={frameId} className={`run-control__frame health--${chip?.severity ?? "todo"}`}>
-            {chip === null ? `${frameId}: not in the inventory` : `${frameId}: ${chip.label}`}
-            {recoveryTab !== null && recoveryTab !== undefined && (
-              <a href={formatRoute({ section: "wall", id: frameId, tab: recoveryTab })}>
-                {`Open Frame ${frameId}`}
-              </a>
-            )}
-          </span>
-        );
-      })}
+      {frames.map(({ frameId, chip }) => (
+        <span key={frameId} className={`run-control__frame health--${chip?.severity ?? "todo"}`}>
+          {chip === null ? `${frameId}: not in the inventory` : `${frameId}: ${chip.label}`}
+        </span>
+      ))}
+    </span>
+  );
+  const recovery = frames.filter(({ tab }) => tab !== null);
+  if (recovery.length === 0) return chips;
+  return (
+    <span className="run-control__frames-block">
+      {chips}
+      <span className="run-control__recovery">
+        {recovery.map(({ frameId, tab }) => (
+          <a key={frameId} href={formatRoute({ section: "wall", id: frameId, tab })}>{`Open Frame ${frameId}`}</a>
+        ))}
+      </span>
     </span>
   );
 }

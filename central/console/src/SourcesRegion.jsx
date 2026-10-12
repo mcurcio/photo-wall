@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 
 import { apiWrite } from "./apiWrite.js";
 import { useHandOffTo } from "./flow/useHandOff.js";
-import { percentWords, scenesUsingSource } from "./domain/photo-fit.ts";
+import { scenesUsingSource } from "./domain/photo-fit.ts";
 import { FitBoardFor } from "./domain/photo-fit-board.tsx";
 import { SourceCard } from "./domain/source-card.tsx";
 import { mediaNow } from "./mediaHealth.js";
@@ -140,7 +140,7 @@ function SourceFitLine({ sourceRef, name }) {
   const question = useMemo(() => ({ selection: { sources: [sourceRef] }, frames: null, crop_limit: null }), [sourceRef]);
   return (
     <FitBoardFor question={question} tier="shape" size="line" title={`How ${name}'s photos fit the Frames`}
-      judged={(analysis) => `Judged by shape and size at the house crop limit, ${percentWords(analysis.crop_limit)}.`} />
+      judged={{ at: "source-card" }} />
   );
 }
 

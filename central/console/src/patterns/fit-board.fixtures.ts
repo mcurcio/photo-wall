@@ -31,7 +31,7 @@ export function crop(key: string, w: number, h: number, aspect: number, offset =
 /** hall (9:16) with nothing that fits, worded as photo-fit.ts words it. */
 export const NOTHING_FITS: FitAlert = {
   severity: "alarm", label: "Nothing fits",
-  what: "hall is 9:16 and these photos are 4:3: add photos of that shape or raise the crop limit.",
+  what: "Most of these photos are 4:3 and hall's Frame output is 9:16: add photos closer to 9:16 or raise the crop limit.",
 };
 
 /** stairs with a single photo, shared with other Frames. */
@@ -106,7 +106,7 @@ export const OFFICE: FrameFitView = {
   ],
   samples: [crop("o1", 4, 3, FOUR_THREE), crop("o2", 3, 2, FOUR_THREE, 0.6), crop("o3", 1, 1, FOUR_THREE, 0.4)],
   checked: null,
-  unknownOutput: "office's Frame output isn't known yet",
+  unknownOutput: "Judged at office's planned 4:3 shape; office hasn't reported its output yet.",
   detail: null,
   alert: null,
   why: { summary: "Why 88 don't fit", reasons: [{ key: "beyond_crop_limit", label: "doesn't fit this Frame's shape", countText: "88", samples: [] }] },
@@ -136,7 +136,7 @@ export const BANDS = [
 
 export const READY: FitBoardView = {
   summary: "1,689 photos · 42 videos",
-  line: "Fits 2 of 3 Frames · hall has no photo that fits",
+  line: "Fits 2 of 3 Frames · No photo fits hall",
   stripLine: "Fits 2 of 3 Frames",
   judged: "Judged on every Frame at the house crop limit, 35 %: a Source has no Frames of its own.",
   reading: null,
@@ -168,8 +168,8 @@ export const STAIRS: FrameFitView = {
 /** A Scene on three Frames: one fills well, one has a single photo, one has none. */
 export const THIN: FitBoardView = {
   ...READY,
-  line: "Fits 2 of 3 Frames · hall has no photo that fits · stairs has only 1 photo",
-  judged: "At the Scene's crop limit, 35 %.",
+  line: "Fits 2 of 3 Frames · No photo fits hall · Only 1 photo fits stairs",
+  judged: "Judged at the Scene's crop limit, 35 %.",
   frames: [LIVING, STAIRS, HALL],
   shape: { ...READY.shape, bands: [...BANDS.filter((band) => band.key !== "office"),
     { key: "stairs", name: "stairs", low: (2 / 3) * 0.65, high: (2 / 3) / 0.65 }] },
@@ -186,7 +186,7 @@ export const READING: FitBoardView = {
 
 export const NONE_FIT: FitBoardView = {
   ...READY,
-  line: "hall has no photo that fits",
+  line: "No photo fits hall",
   stripLine: "1,689 photos · 42 videos",
   frames: [HALL],
   shape: { ...READY.shape, bands: BANDS.filter((band) => band.key === "hall") },
