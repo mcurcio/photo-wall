@@ -1,20 +1,22 @@
-"""Picture settings on the Display (roadmap 1c, slices C1 and C2; design rules 1 and 3; owner q1, q3).
+"""Picture settings on the Display: the display's own and Photo Wall's, each on its own (decision
+0022, the picture split, slice S2; roadmap 1c's Live model; owner, 2026-10-12: "i might set hardware
+brightness to 46% AND the software brightness to 114%").
 
-Every report travels the real path (`test_display_identity._report`: the link store's commit and its
-Output report judge); every console write goes through the operator API the Picture tab calls; the
-document is the one the worker's source projects (`DisplayDocuments`).
+Every report travels the real path (the link store's commit and its report judge: `_report` for the
+Output report, `_picture_report` for the picture report on `picture-<output>`); every console write
+goes through the operator API the Picture tab calls; the documents are the ones the worker's source
+projects (`DisplayDocuments`).
 
-C1: (1) a Display's settings follow it to another Pi's Output; (2) the Display's first probe places
-brightness and contrast, and a later probe never moves them; (3) the picture part has its own change
-number; (4) an unplaced setting goes in the document unset; (5) and (6) migration 075 on Frames as
-1b stored them; (7) the V1 calibration route is gone.
-C2: (8) a stale sequence changes nothing; (9) Done waits for the Pi; (10) Revert; (11) an abandoned
-session reverts with no request; (12) Copy; (13) the picture is never a Position commit; (14) a
-setting is placed on the display only when the display answered.
+(1) Hardware 46 and software 114 in one session, end to end; picture never costs power; (2) a Done
+against the previous document is refused; (3) the refusals; (4) "offered" is known only from a
+report for the recorded identity; (5) Revert; (6) an abandoned session reverts with no request;
+(7) Copy; (8) the picture is never a Position commit; (9) a Display's picture follows it to another
+Pi; (10) migration 075's gain, carried through 092.
 """
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -22,9 +24,10 @@ from psycopg.types.json import Jsonb
 from support.position import save_position
 from test_coordination import schedule, setup_players
 from test_display_identity import (
+    _SEQ,
     ADMIN,
     AUTH,
-    MODE,
+    EPOCH,
     NO_SERIAL,
     SERIAL_DISPLAY,
     _bind,
@@ -34,55 +37,77 @@ from test_display_identity import (
     _sql,
     enroll_pi,
 )
+from test_migration_092 import before_092, migrate_092
 
 from central.app import create_app
 from central.coordination import Coordinator
 from central.db import DatabaseTransactionClock
 from central.displays.model import Readiness
-from central.infra.display_store import DOCUMENT_STREAM, DisplayDocuments, DisplayWakes
+from central.infra.display_store import (
+    DOCUMENT_STREAM,
+    REPORT_STREAM,
+    DisplayDocuments,
+    DisplayWakes,
+    OutputReportJudge,
+)
 from central.infra.node_link_store import PgLinkStores
 from contracts.models import Calibration, CoverFit, Plan
 from contracts.node_link import Pipe
 from contracts.node_output import (
-    AS_THE_DISPLAY_HAS_IT,
-    ActsOn,
     DisplayIdentity,
     OutputDocument,
-    PictureReport,
-    PictureSetting,
-    SettingReport,
-    WriteResult,
     decode_output_document,
-    encode_output_report,
+    decode_output_report,
     output_document_key,
 )
-from contracts.node_output import OutputReport as WireReport
+from contracts.node_picture import (
+    HardwareRange,
+    HardwareResult,
+    HardwareSetting,
+    PictureDocument,
+    PictureReport,
+    RangeKind,
+    WriteResult,
+    decode_picture_document,
+    encode_picture_report,
+    picture_document_key,
+    picture_report_key,
+)
+from nodeapi.epoch import Token
+from nodeapi.pull import Batch, Read
 
-MIGRATION = Path(__file__).parents[1] / "central/migrations/075_display_picture.sql"
+MIGRATION_075 = Path(__file__).parents[1] / "central/migrations/075_display_picture.sql"
 SERIAL = "pi-picture"
-UNSET_ADJUSTMENT = PictureSetting(ActsOn.PICTURE_ADJUSTMENT, AS_THE_DISPLAY_HAS_IT)
 SKEWED_CORNERS = [[0.1, 0.05], [0.95, 0.0], [1.0, 1.0], [0.0, 0.9]]
+# The test monitor as the Pi asked it: brightness and contrast as levels of 100, a colour preset list.
+OFFERED = (HardwareSetting("10", HardwareRange(RangeKind.LEVEL, 100, ()), 60),
+           HardwareSetting("12", HardwareRange(RangeKind.LEVEL, 100, ()), 50))
 
 
-def _projected(registry, serial: str = SERIAL, output_id: str = "HDMI-A-1") -> OutputDocument:
-    """The Output's document as the worker's source projects (and records) it now."""
+def _documents(registry, serial: str = SERIAL, output_id: str = "HDMI-A-1") -> tuple[OutputDocument, PictureDocument]:
+    """The Output's two documents as the worker's source projects (and records) them now."""
     source = DisplayDocuments(PgLinkStores(registry.db), DisplayWakes(),
                               times=DatabaseTransactionClock()).source(serial, Pipe.FLEET)
-    return decode_output_document(asyncio.run(source.documents(DOCUMENT_STREAM))[output_document_key(output_id)])
+    documents = asyncio.run(source.documents(DOCUMENT_STREAM))
+    return (decode_output_document(documents[output_document_key(output_id)]),
+            decode_picture_document(documents[picture_document_key(output_id)]))
 
 
-def _probe(registry, *, brightness: bool, contrast: bool, for_change: int = 1, read: int | None = None,
-           presented: int | None = None, result: WriteResult | None = None, serial: str = SERIAL,
-           output_id: str = "HDMI-A-1", identity: DisplayIdentity = NO_SERIAL) -> None:
-    """The Pi's report with a picture part: which settings the display answered, and for
-    `for_change` brightness on the display (read back `read`) and contrast as picture adjustment."""
-    picture = PictureReport(brightness, contrast, for_change,
-                            SettingReport(ActsOn.DISPLAY, read, result) if brightness
-                            else SettingReport(ActsOn.PICTURE_ADJUSTMENT, None, None),
-                            SettingReport(ActsOn.DISPLAY, read, None) if contrast
-                            else SettingReport(ActsOn.PICTURE_ADJUSTMENT, None, None), presented)
-    report = WireReport(output_id, True, identity, MODE, (), None, None, None, None, picture)
-    _report(registry, serial, output_id, identity, data=encode_output_report(report))
+def _picture(registry, serial: str = SERIAL, output_id: str = "HDMI-A-1") -> PictureDocument:
+    return _documents(registry, serial, output_id)[1]
+
+
+def _picture_report(registry, *, offered: tuple[HardwareSetting, ...] | None = OFFERED, for_change: int | None = None,
+                    results: dict | None = None, presented: int | None = None, serial: str = SERIAL,
+                    output_id: str = "HDMI-A-1", identity: DisplayIdentity | None = NO_SERIAL,
+                    data: bytes | None = None) -> None:
+    """The Pi's picture report, recorded by Central's link store on the display line's state bucket."""
+    report = PictureReport(output_id, identity, offered, for_change, results or {}, presented)
+    token = Token(EPOCH, next(_SEQ))
+    read = Read(token, "$KV.state_display." + picture_report_key(output_id), {},
+                encode_picture_report(report) if data is None else data)
+    stores = PgLinkStores(registry.db, {REPORT_STREAM: OutputReportJudge(DisplayWakes())})
+    asyncio.run(stores.store(serial, Pipe.FLEET).commit(REPORT_STREAM, Batch((read,), token, False)))
 
 
 def _display(registry, player_id: str, output_id: str = "HDMI-A-1") -> dict:
@@ -91,9 +116,14 @@ def _display(registry, player_id: str, output_id: str = "HDMI-A-1") -> dict:
     return row
 
 
-def _bound(registry, frame_id: str = "kitchen", serial: str = SERIAL) -> str:
+def _bound(registry, frame_id: str = "kitchen", serial: str = SERIAL, *, offered: bool = True) -> str:
+    """A Pi with `frame_id` bound to its HDMI-A-1, the display reported there and, when `offered`,
+    its picture list."""
     player = enroll_pi(registry, serial)
     _bind(registry, _frame(registry, frame_id), player, "HDMI-A-1")
+    _report(registry, serial, "HDMI-A-1", NO_SERIAL)
+    if offered:
+        _picture_report(registry, serial=serial)
     return player
 
 
@@ -107,74 +137,281 @@ def _begin(client, frame_id: str = "kitchen") -> dict:
     return response.json()
 
 
-def _edit(client, session: dict, setting: str, value: int, expected: int):
-    return client.post(f"/v1/operator/picture-sessions/{session['session_id']}/edits", headers=AUTH,
+def _hardware(client, session: dict, code: str, value: int | None, expected: int):
+    return client.post(f"/v1/operator/picture-sessions/{session['session_id']}/hardware-edits", headers=AUTH,
+                       json={"code": code, "value": value, "expected_sequence": expected})
+
+
+def _software(client, session: dict, setting: str, value: int, expected: int):
+    return client.post(f"/v1/operator/picture-sessions/{session['session_id']}/software-edits", headers=AUTH,
                        json={"setting": setting, "value": value, "expected_sequence": expected})
 
 
-# --- C1 ------------------------------------------------------------------------------------------
+def _view(client, frame_id: str = "kitchen") -> dict:
+    response = client.get(f"/v1/operator/frames/{frame_id}/picture", headers=AUTH)
+    assert response.status_code == 200, response.text
+    return response.json()
 
-def test_a_displays_settings_follow_it_to_another_pis_output(registry):
-    """(1) Serial-keyed: the settings are the Display's, not the Output's."""
+
+def _done(client, session: dict):
+    return client.post(f"/v1/operator/picture-sessions/{session['session_id']}/done", headers=AUTH)
+
+
+def test_hardware_46_and_software_114_are_set_apart_end_to_end_and_never_cost_power(registry):
+    """(1) Acceptance 1. Mutation probe (primary): include the picture in the Output document's
+    digest, or raise `change` on a picture write -> the power change rises with the edit."""
+    player = _bound(registry)
+    with _client(registry) as client:
+        power_before, picture_before = _documents(registry)
+        assert (picture_before.hardware, picture_before.software.brightness_percent) == ({}, 100)
+        session = _begin(client)
+        assert _hardware(client, session, "10", 46, 1).json() == {"sequence": 2}
+        assert _software(client, session, "brightness", 114, 2).json() == {"sequence": 3}
+        power, picture = _documents(registry)
+        assert dict(picture.hardware) == {"10": 46} and picture.software.brightness_percent == 114
+        assert power.change == power_before.change                     # picture never costs power
+        assert picture.picture_change > picture_before.picture_change
+
+        settings = client.get("/v1/operator/frames/kitchen/power", headers=AUTH).json()
+        assert client.put(f"/v1/operator/displays/{settings['display_id']}/power-settings", headers=AUTH, json={
+            "power_method": "signal-off", "switch_input_on_power_on": True,
+            "never_off_on_other_input": False}).status_code == 200
+        powered, unmoved = _documents(registry)
+        assert (powered.change, unmoved.picture_change) == (power.change + 1, picture.picture_change)
+        assert _documents(registry) == (powered, unmoved)                # unchanged facts: neither number moves
+
+        early = _done(client, session)
+        assert (early.status_code, early.json()) == (409, {"error": "not_presented_yet"})
+        assert _view(client)["status"] == "waiting"
+        _picture_report(registry, for_change=picture.picture_change, presented=picture.picture_change,
+                        results={"10": HardwareResult(WriteResult.TAKEN, 60, 46)})
+        view = _view(client)
+        assert view["status"] == "shown" and view["offered_known"] is True
+        brightness = next(row for row in view["hardware"] if row["code"] == "10")
+        assert brightness == {"code": "10", "name": "Brightness", "value": 46,
+                              "offered": {"range": {"kind": "level", "maximum": 100, "choices": []}, "current": 60},
+                              "result": {"result": "taken", "before": 60, "after": 46}}
+        contrast = next(row for row in view["hardware"] if row["code"] == "12")
+        assert (contrast["value"], contrast["result"]) == (None, None)  # unset: as the display has it
+        assert view["software"] == {"brightness_percent": 114, "contrast_percent": 100,
+                                    "colour_temperature_kelvin": 6500, "gamma_tenths": 22}
+        assert _done(client, session).status_code == 204
+    stored = _display(registry, player)
+    assert (stored["hardware_picture"], stored["software_brightness_percent"]) == ({"10": 46}, 114)
+    assert _sql(registry, "SELECT id FROM picture_sessions") == []
+
+
+def test_done_against_the_previous_document_is_refused(registry):
+    """(2) The report answers the document the source projected before the latest hardware edit.
+    Mutation probe: `presented` ignores hardware equality -> that Done is taken."""
+    _bound(registry)
+    with _client(registry) as client:
+        session = _begin(client)
+        _hardware(client, session, "10", 46, 1)
+        shown = _picture(registry)
+        _picture_report(registry, for_change=shown.picture_change, presented=shown.picture_change,
+                        results={"10": HardwareResult(WriteResult.TAKEN, 60, 46)})
+        assert _hardware(client, session, "10", 50, 2).status_code == 200     # not projected yet
+        stale = _done(client, session)
+        assert (stale.status_code, stale.json()) == (409, {"error": "not_presented_yet"})
+        assert _view(client)["status"] == "waiting"
+
+
+def test_an_edit_is_refused_by_what_the_display_offers_and_photo_walls_ranges(registry):
+    """(3) Acceptance 2. Mutation probe: `edit_refusal` accepts value <= maximum + 1 -> 101 is taken."""
+    _bound(registry)
+    with _client(registry) as client:
+        session = _begin(client)
+        refusals = [
+            (_hardware(client, session, "D6", 1, 1), 409, "not_offered"),       # power: off the picture list
+            (_hardware(client, session, "10", 101, 1), 422, "out_of_range"),    # past the display's 100
+            (_hardware(client, session, "16", 40, 1), 409, "not_offered"),      # on the list, not offered
+            (_software(client, session, "brightness", 151, 1), 422, "out_of_range"),
+            (_software(client, session, "gamma", 27, 1), 422, "out_of_range"),
+        ]
+        for answer, status, code in refusals:
+            assert (answer.status_code, answer.json()) == (status, {"error": code})
+        assert _hardware(client, session, "16", None, 1).json() == {"sequence": 2}   # handing back is fine
+        assert _hardware(client, session, "10", 100, 2).json() == {"sequence": 3}
+        stale = _software(client, session, "contrast", 30, 2)
+        assert (stale.status_code, stale.json()) == (409, {"error": "stale_sequence"})
+        assert _view(client)["session"]["sequence"] == 3
+
+
+def test_what_a_display_offers_is_known_only_from_a_report_for_its_recorded_identity(registry):
+    """(4) Acceptance 3: no picture report, a report naming another display, and a report that does
+    not know the list yet all leave the list unknown, and a hardware value cannot be set."""
+    _bound(registry, offered=False)
+    with _client(registry) as client:
+        assert (_view(client)["offered_known"], _view(client)["hardware"]) == (False, [])
+        _picture_report(registry, identity=SERIAL_DISPLAY)
+        assert _view(client)["offered_known"] is False
+        _picture_report(registry, offered=None)
+        assert _view(client)["offered_known"] is False
+        session = _begin(client)
+        refused = _hardware(client, session, "10", 46, 1)
+        assert (refused.status_code, refused.json()) == (409, {"error": "not_offered"})
+        _picture_report(registry)
+        view = _view(client)
+        assert view["offered_known"] is True
+        assert [(row["code"], row["name"]) for row in view["hardware"]] == [("10", "Brightness"), ("12", "Contrast")]
+        assert _hardware(client, session, "10", 46, 1).status_code == 200
+
+
+def test_revert_puts_back_the_stored_values(registry):
+    """(5) Both groups go back to what is stored; a code set only in the session goes from the
+    document."""
+    player = _bound(registry)
+    _sql(registry, "UPDATE displays SET hardware_picture='{\"12\": 30}', software_brightness_percent=120")
+    with _client(registry) as client:
+        session = _begin(client)
+        _hardware(client, session, "10", 46, 1)
+        _hardware(client, session, "12", 70, 2)
+        _software(client, session, "brightness", 80, 3)
+        _software(client, session, "colour-temperature", 3200, 4)
+        assert dict(_picture(registry).hardware) == {"10": 46, "12": 70}
+        assert client.delete(f"/v1/operator/picture-sessions/{session['session_id']}",
+                             headers=AUTH).status_code == 204
+        gone = _software(client, session, "brightness", 20, 5)
+        assert (gone.status_code, gone.json()) == (404, {"error": "unknown_session"})
+    stored = _display(registry, player)
+    assert (stored["hardware_picture"], stored["software_brightness_percent"],
+            stored["colour_temperature_kelvin"]) == ({"12": 30}, 120, 6500)
+    reverted = _picture(registry)
+    assert (dict(reverted.hardware), reverted.software.brightness_percent) == ({"12": 30}, 120)
+
+
+def test_an_abandoned_session_reverts_with_no_request(registry):
+    """(6) Past its idle deadline the document shows the stored values with no request made; the
+    next session folds it first. Mutation probe: a projection that ignores `idle_until` -> the draft
+    stays in the document."""
+    player = _bound(registry)
+    with _client(registry) as client:
+        session = _begin(client)
+        _software(client, session, "brightness", 90, 1)
+        assert _picture(registry).software.brightness_percent == 90
+        _sql(registry, "UPDATE picture_sessions SET idle_until = EXTRACT(EPOCH FROM clock_timestamp()) - 1")
+        assert _picture(registry).software.brightness_percent == 100
+        ended = client.post(f"/v1/operator/picture-sessions/{session['session_id']}/keepalive", headers=AUTH)
+        assert (ended.status_code, ended.json()) == (410, {"error": "session_ended"})
+        _begin(client)
+    assert _display(registry, player)["software_brightness_percent"] == 100
+
+
+def test_the_sources_wait_ends_at_a_sessions_idle_deadline(registry):
+    """(6, the wake) The source's changed() returns at the session's idle deadline, with no wake."""
+    _bound(registry)
+    with _client(registry) as client:
+        _begin(client)
+    _sql(registry, "UPDATE picture_sessions SET idle_until = EXTRACT(EPOCH FROM clock_timestamp()) + 1")
+    source = DisplayDocuments(PgLinkStores(registry.db), DisplayWakes(),
+                              times=DatabaseTransactionClock()).source(SERIAL, Pipe.FLEET)
+
+    async def ended() -> None:
+        await asyncio.wait_for(source.changed(), 5)
+    asyncio.run(ended())
+
+
+def test_copy_carries_the_software_values_names_the_hardware_skipped_and_never_position(registry):
+    """(7) Slice S2 copies all four software values; each hardware value set on the source is named
+    as skipped and the target's own stay (S4 copies the ones the target offers)."""
     pi_a, pi_b = enroll_pi(registry, "pi-a"), enroll_pi(registry, "pi-b")
-    _probe(registry, brightness=True, contrast=False, serial="pi-a", identity=SERIAL_DISPLAY)
-    display_id = _seen(registry, pi_a, "HDMI-A-1")["display_id"]
-    _sql(registry, "UPDATE displays SET brightness=60, gamma_tenths=24 WHERE id=%s", (display_id,))
+    _bind(registry, _frame(registry, "a"), pi_a, "HDMI-A-1")
+    _bind(registry, _frame(registry, "b"), pi_b, "HDMI-A-1")
+    _bind(registry, _frame(registry, "c"), pi_b, "HDMI-A-2")
+    _frame(registry, "d")                                                  # never bound: no Display
+    _report(registry, "pi-a", "HDMI-A-1", SERIAL_DISPLAY)
+    _report(registry, "pi-b", "HDMI-A-1", NO_SERIAL)
+    save_position(registry, "b")
+    _sql(registry, "UPDATE displays SET hardware_picture='{\"12\": 35, \"10\": 65}', software_brightness_percent=130, "
+                   "software_contrast_percent=70, colour_temperature_kelvin=5000, gamma_tenths=20 "
+                   "WHERE serial IS NOT NULL")
+    _sql(registry, "UPDATE displays SET hardware_picture='{\"10\": 20}' WHERE serial IS NULL")
+    # A's display moves to C's port: C is fed by A's own Display.
     _report(registry, "pi-a", "HDMI-A-1", None, connected=False)
-    _probe(registry, brightness=False, contrast=False, serial="pi-b", output_id="HDMI-A-2",
-           identity=SERIAL_DISPLAY)
+    _report(registry, "pi-b", "HDMI-A-2", SERIAL_DISPLAY)
+    before = _sql(registry, "SELECT calibration, profile, position_generation FROM frames WHERE id='b'")
+    with _client(registry) as client:
+        copied = client.post("/v1/operator/frames/a/picture-copies", headers=AUTH, json={"to_frames": ["b", "c", "d"]})
+        assert copied.status_code == 200, copied.text
+        assert copied.json() == [{"frame_id": "b", "outcome": "copied", "hardware_skipped": ["10", "12"]},
+                                 {"frame_id": "c", "outcome": "same-display", "hardware_skipped": []},
+                                 {"frame_id": "d", "outcome": "no-display", "hardware_skipped": []}]
+        unknown = client.post("/v1/operator/frames/a/picture-copies", headers=AUTH, json={"to_frames": ["zz"]})
+        assert (unknown.status_code, unknown.json()) == (404, {"error": "unknown_frame"})
+    target = _display(registry, pi_b, "HDMI-A-1")
+    assert (target["software_brightness_percent"], target["software_contrast_percent"],
+            target["colour_temperature_kelvin"], target["gamma_tenths"]) == (130, 70, 5000, 20)
+    assert target["hardware_picture"] == {"10": 20}
+    assert _sql(registry, "SELECT calibration, profile, position_generation FROM frames WHERE id='b'") == before
+
+
+def test_a_picture_edit_and_done_are_never_a_position_commit(registry):
+    """(8) Mutation probe: an edit raising the position revision -> the revisions move."""
+    player = _bound(registry)
+    save_position(registry, "kitchen")
+    columns = "SELECT calibration, configuration_revision, generation, position_generation FROM frames"
+    before = _sql(registry, columns)
+    with _client(registry) as client:
+        session = _begin(client)
+        _software(client, session, "contrast", 130, 1)
+        latest = _picture(registry)
+        _picture_report(registry, for_change=latest.picture_change, presented=latest.picture_change)
+        assert _done(client, session).status_code == 204
+    assert _sql(registry, columns) == before
+    assert next(frame for frame in registry.inventory().frames if frame.id == "kitchen").readiness is Readiness.READY
+    assert _display(registry, player)["software_contrast_percent"] == 130
+
+
+def test_a_displays_picture_follows_it_to_another_pis_output(registry):
+    """(9) Serial-keyed: the picture is the Display's, not the Output's; an Output with no Display
+    seen gets a new Display's picture."""
+    pi_a, pi_b = enroll_pi(registry, "pi-a"), enroll_pi(registry, "pi-b")
+    _report(registry, "pi-a", "HDMI-A-1", SERIAL_DISPLAY)
+    display_id = _seen(registry, pi_a, "HDMI-A-1")["display_id"]
+    _sql(registry, "UPDATE displays SET hardware_picture='{\"10\": 46}', software_brightness_percent=114, "
+                   "gamma_tenths=24 WHERE id=%s", (display_id,))
+    _report(registry, "pi-a", "HDMI-A-1", None, connected=False)
+    assert _picture(registry, "pi-b", "HDMI-A-2").software.gamma_tenths == 22     # nothing seen there yet
+    _report(registry, "pi-b", "HDMI-A-2", SERIAL_DISPLAY)
 
     assert _seen(registry, pi_b, "HDMI-A-2")["display_id"] == display_id
-    moved = _projected(registry, "pi-b", "HDMI-A-2").picture
-    assert moved.brightness == PictureSetting(ActsOn.DISPLAY, 60)   # placed by its first probe, kept
-    assert (moved.contrast, moved.gamma_tenths) == (UNSET_ADJUSTMENT, 24)
+    moved = _picture(registry, "pi-b", "HDMI-A-2")
+    assert (dict(moved.hardware), moved.software.brightness_percent, moved.software.gamma_tenths) == ({"10": 46}, 114, 24)
 
 
-def test_the_first_probe_places_each_setting_and_a_later_probe_never_moves_it(registry):
-    """(2) Mutation probe: re-place on every report -> the later probe moves contrast onto the display."""
-    player = _bound(registry)
-    _probe(registry, brightness=True, contrast=False)
-    placed = _display(registry, player)
-    assert (placed["brightness_acts_on"], placed["contrast_acts_on"]) == ("display", "picture-adjustment")
-    assert (placed["brightness"], placed["contrast"]) == (None, None)    # nothing set: nothing written
-
-    _probe(registry, brightness=True, contrast=True)
-    kept = _display(registry, player)
-    assert (kept["brightness_acts_on"], kept["contrast_acts_on"]) == ("display", "picture-adjustment")
+def test_a_picture_report_that_does_not_decode_or_names_another_output_is_skipped(registry):
+    _bound(registry, offered=False)
+    _picture_report(registry, data=b'{"output_id":"HDMI-A-1"}')
+    _picture_report(registry, output_id="HDMI-A-2", data=encode_picture_report(
+        PictureReport("HDMI-A-1", NO_SERIAL, OFFERED, None, {}, None)))
+    assert _sql(registry, "SELECT output_id FROM picture_reports") == []
+    _picture_report(registry)
+    assert [row["output_id"] for row in _sql(registry, "SELECT output_id FROM picture_reports")] == ["HDMI-A-1"]
 
 
-def test_the_picture_part_has_its_own_change_number(registry):
-    """(3) Mutation probe: raise `change` with the picture -> the edit raises it."""
-    _bound(registry)
-    _probe(registry, brightness=True, contrast=False)
+def test_a_session_needs_a_bound_frame_with_a_display(registry):
+    enroll_pi(registry, SERIAL)
+    _frame(registry, "loose")
+    player = enroll_pi(registry, "pi-other")
+    _bind(registry, _frame(registry, "kitchen"), player, "HDMI-A-1")
     with _client(registry) as client:
-        before = _projected(registry)
-        session = _begin(client)
-        assert _edit(client, session, "brightness", 70, 1).status_code == 200
-        edited = _projected(registry)
-        assert (edited.change, edited.picture_change) == (before.change, before.picture_change + 1)
-        assert edited.picture.brightness == PictureSetting(ActsOn.DISPLAY, 70)
-
-        assert client.post("/v1/operator/frames/kitchen/power-tests", headers=AUTH).status_code == 202
-        tested = _projected(registry)
-        assert (tested.change, tested.picture_change) == (edited.change + 1, edited.picture_change)
-        assert _projected(registry) == tested   # unchanged facts: neither number moves
+        assert client.post("/v1/operator/frames/nowhere/picture-sessions", headers=AUTH).json() == {
+            "error": "unknown_frame"}
+        assert client.post("/v1/operator/frames/loose/picture-sessions", headers=AUTH).json() == {
+            "error": "frame_unbound"}
+        assert client.post("/v1/operator/frames/kitchen/picture-sessions", headers=AUTH).json() == {
+            "error": "no_display"}
+        picture = _view(client, "loose")
+        assert (picture["status"], picture["display_id"], picture["session"]) == ("no-display", None, None)
+        assert client.post("/v1/operator/frames/kitchen/picture-sessions").status_code == 401
 
 
-def test_an_unplaced_setting_goes_in_the_document_unset(registry):
-    """(4) A Display seen with no picture part yet, and an Output with no Display at all."""
-    player = _bound(registry)
-    assert _projected(registry).picture.brightness == UNSET_ADJUSTMENT      # no Display yet
-    _report(registry, SERIAL, "HDMI-A-1", NO_SERIAL)
-    assert _display(registry, player)["brightness_acts_on"] is None
-    _sql(registry, "UPDATE displays SET brightness=55")                       # set, but not placed
-    document = _projected(registry)
-    assert (document.picture.brightness, document.picture.contrast) == (UNSET_ADJUSTMENT, UNSET_ADJUSTMENT)
-    assert (document.picture.colour_temperature_kelvin, document.picture.gamma_tenths) == (6500, 22)
-
+# --- Migration 075, carried through 092 --------------------------------------------------------------
 
 def _before_075(registry) -> None:
-    """The database as 1b's build left it: no picture columns, the preview columns back."""
+    """The database as 1b's build left it: 092 undone, then no picture columns, the preview columns back."""
+    before_092(registry)
     _sql(registry, "DROP TABLE picture_sessions")
     _sql(registry, "ALTER TABLE displays DROP COLUMN brightness_acts_on, DROP COLUMN brightness, "
                    "DROP COLUMN contrast_acts_on, DROP COLUMN contrast, DROP COLUMN colour_temperature_kelvin, "
@@ -184,8 +421,10 @@ def _before_075(registry) -> None:
 
 
 def _migrate(registry) -> None:
+    """075, then 092, on the database `_before_075` left."""
     with registry.db.transaction() as conn:
-        conn.execute(MIGRATION.read_text())
+        conn.execute(MIGRATION_075.read_text())
+    migrate_092(registry)
 
 
 def _stored_1b(registry, frame_id: str, *, gain: float, rotation: int = 0, corners=None) -> None:
@@ -199,30 +438,30 @@ def _frame_row(registry, frame_id: str):
     return next(frame for frame in registry.inventory().frames if frame.id == frame_id)
 
 
-def test_075_moves_a_frames_gain_to_its_displays_brightness(registry):
-    """(5) Mutation probe: write gain 1.0 as 50 % -> the second Display is set."""
+def test_075_then_092_move_a_frames_gain_to_its_displays_software_brightness(registry):
+    """(10) 1b's gain 0.8 became 1c's picture adjustment 40 %, and 092 makes it 80 %; gain 1.0 stays
+    unset, so 100 %. Mutation probe: drop 092's doubling -> 40 %."""
     player = enroll_pi(registry, SERIAL)
     for frame_id, output_id in (("bright", "HDMI-A-1"), ("plain", "HDMI-A-2")):
         _bind(registry, _frame(registry, frame_id), player, output_id)
         _report(registry, SERIAL, output_id, NO_SERIAL)
     _before_075(registry)
-    _stored_1b(registry, "bright", gain=1.5)
+    _stored_1b(registry, "bright", gain=0.8)
     _stored_1b(registry, "plain", gain=1.0)
     _migrate(registry)
 
     bright, plain = _display(registry, player, "HDMI-A-1"), _display(registry, player, "HDMI-A-2")
-    assert (bright["brightness_acts_on"], bright["brightness"]) == ("picture-adjustment", 75)
-    assert (plain["brightness_acts_on"], plain["brightness"]) == (None, None)
-    assert (bright["contrast_acts_on"], bright["colour_temperature_kelvin"], bright["gamma_tenths"]) == (
-        None, 6500, 22)
+    assert (bright["software_brightness_percent"], bright["hardware_picture"]) == (80, {})
+    assert (plain["software_brightness_percent"], plain["software_contrast_percent"]) == (100, 100)
+    assert (bright["colour_temperature_kelvin"], bright["gamma_tenths"]) == (6500, 22)
 
 
 def test_075_moves_every_frame_to_cover_at_angle_0_and_not_ready(registry):
-    """(6) Owner q1 and his rotation answer (2026-10-10, "Every frame should reset to 0 rotation"):
-    a Frame stored with corners C and rotation 90 reads Cover with C as its opening at angle 0; its
+    """Owner q1 and his rotation answer (2026-10-10, "Every frame should reset to 0 rotation"): a
+    Frame stored with corners C and rotation 90 reads Cover with C as its opening at angle 0; its
     revision and configuration revision rise; trim and gain are gone; it is not ready until its
     Position is saved again. Mutation probe: drop the readiness statement -> the Frame stays ready."""
-    player = _bound(registry)
+    player = _bound(registry, offered=False)
     _before_075(registry)
     _stored_1b(registry, "kitchen", gain=0.8, rotation=90, corners=SKEWED_CORNERS)
     _sql(registry, "UPDATE frames SET preview=calibration, preview_expires=2000")
@@ -257,9 +496,9 @@ def _bindings_as_1b(registry, table: str, column: str) -> int:
 
 
 def test_075_rewrites_the_stored_configurations_and_offers_so_central_still_plans(registry):
-    """(6b) A Player's last configuration and its plan offers hold copies of the Frame's Position;
-    after 075 the strict 1c models still read them, so Central hands the Player a configuration and
-    plans. Mutation probe: drop the two binding rewrites -> `configuration` raises."""
+    """A Player's last configuration and its plan offers hold copies of the Frame's Position; after
+    075 the strict 1c models still read them, so Central hands the Player a configuration and plans.
+    Mutation probe: drop the two binding rewrites -> `configuration` raises."""
     [player] = setup_players(registry, 1)
     coordinator = Coordinator(registry.db, registry.clock)
     epoch = player["authority_epoch"]
@@ -279,209 +518,19 @@ def test_075_rewrites_the_stored_configurations_and_offers_so_central_still_plan
         Plan.model_validate(row["manifest"])
 
 
-def test_075_gives_a_stored_1b_report_and_document_a_picture_part(registry):
-    """(6c) A Pi's report and Central's document as 1b stored them (no picture part) still decode
-    after 075, so the Power and Picture tabs answer before the Pi reports again. Mutation probe:
-    drop the report statement -> the Power tab answers 422."""
-    _bound(registry)
-    _probe(registry, brightness=True, contrast=False)
-    _projected(registry)
+def test_a_1b_report_and_document_still_answer_after_075_and_092(registry):
+    """A Pi's report and Central's document as 1b stored them answer the Power and Picture tabs after
+    075 and 092, before the Pi reports again; the picture numbering carries (075's 1, then the
+    Display's own). Mutation probe: drop 092's report statement -> the stored report no longer decodes."""
+    _bound(registry, offered=False)
+    _documents(registry)
     _before_075(registry)
-    _sql(registry, "UPDATE output_displays SET report = report - 'picture'")
     _sql(registry, "UPDATE output_documents SET document = document - 'picture' - 'picture_change'")
     _migrate(registry)
 
     with _client(registry) as client:
         assert client.get("/v1/operator/frames/kitchen/power", headers=AUTH).status_code == 200
         assert client.get("/v1/operator/frames/kitchen/picture", headers=AUTH).status_code == 200
-    projected = _projected(registry)
-    assert projected.picture_change == 2     # the neutral part's change 1, then the Display's own
-
-
-def test_the_v1_calibration_route_is_gone(registry):
-    """(7) Position is committed only by its trial's Save."""
-    _bound(registry)
-    with _client(registry) as client:
-        answer = client.post("/v1/operator/frames/kitchen/calibration", headers=AUTH, json={
-            "operation": "commit", "expected_revision": 1, "expected_generation": 1, "calibration": {}})
-    assert answer.status_code in (404, 405)
-
-
-# --- C2 ------------------------------------------------------------------------------------------
-
-def test_an_edit_against_a_stale_sequence_changes_nothing(registry):
-    """(8) Mutation probe: overwrite the whole record on edit -> the stale edit lands."""
-    _bound(registry)
-    _probe(registry, brightness=True, contrast=False)
-    with _client(registry) as client:
-        session = _begin(client)
-        assert _edit(client, session, "brightness", 70, 1).json() == {"sequence": 2}
-        stale = _edit(client, session, "contrast", 30, 1)
-        assert (stale.status_code, stale.json()) == (409, {"error": "stale_sequence"})
-        picture = client.get("/v1/operator/frames/kitchen/picture", headers=AUTH).json()
-        assert (picture["brightness"]["value"], picture["contrast"]["value"]) == (70, None)
-        assert picture["session"]["sequence"] == 2
-        refused = _edit(client, session, "gamma", 27, 2)
-        assert (refused.status_code, refused.json()) == (422, {"error": "out_of_range"})
-
-
-def test_done_waits_until_the_pi_answers_the_latest_picture_change(registry):
-    """(9) Mutation probe: Done without the report check -> the first Done is taken."""
-    player = _bound(registry)
-    _probe(registry, brightness=True, contrast=False, read=40)
-    with _client(registry) as client:
-        session = _begin(client)
-        _edit(client, session, "brightness", 70, 1)
-        latest = _projected(registry)
-        done = f"/v1/operator/picture-sessions/{session['session_id']}/done"
-        early = client.post(done, headers=AUTH)
-        assert (early.status_code, early.json()) == (409, {"error": "not_presented_yet"})
-        assert client.get("/v1/operator/frames/kitchen/picture", headers=AUTH).json()["status"] == "waiting"
-
-        _probe(registry, brightness=True, contrast=False, for_change=latest.picture_change, read=70,
-               result=WriteResult.TAKEN, presented=latest.picture_change)
-        picture = client.get("/v1/operator/frames/kitchen/picture", headers=AUTH).json()
-        assert picture["status"] == "shown"
-        assert (picture["brightness"]["read"], picture["brightness"]["result"]) == (70, "taken")
-        assert client.post(done, headers=AUTH).status_code == 204
-    stored = _display(registry, player)
-    assert (stored["brightness_acts_on"], stored["brightness"]) == ("display", 70)
-    assert _sql(registry, "SELECT id FROM picture_sessions") == []
-
-
-def test_revert_puts_back_the_stored_values_and_an_unset_one_as_the_display_read_it(registry):
-    """(10) Brightness was unset (as the display has it) and edited: Revert sets it to the 40 % the
-    display read before the session, so the display shows what it did. Contrast was set: back to it."""
-    player = _bound(registry)
-    _probe(registry, brightness=True, contrast=True, read=40)
-    _sql(registry, "UPDATE displays SET contrast=55")
-    with _client(registry) as client:
-        session = _begin(client)
-        _edit(client, session, "brightness", 90, 1)
-        _edit(client, session, "contrast", 10, 2)
-        _edit(client, session, "colour-temperature", 3200, 3)
-        assert client.delete(f"/v1/operator/picture-sessions/{session['session_id']}",
-                             headers=AUTH).status_code == 204
-        gone = _edit(client, session, "brightness", 20, 4)
-        assert (gone.status_code, gone.json()) == (404, {"error": "unknown_session"})
-    stored = _display(registry, player)
-    assert (stored["brightness"], stored["contrast"], stored["colour_temperature_kelvin"]) == (40, 55, 6500)
-    assert _projected(registry).picture.brightness == PictureSetting(ActsOn.DISPLAY, 40)
-
-
-def test_an_abandoned_session_reverts_with_no_request(registry):
-    """(11) Past its idle deadline the document shows the reverted values with no request made; the
-    next session stores them first. Mutation probe: a projection that ignores `idle_until` -> the
-    draft stays in the document."""
-    player = _bound(registry)
-    _probe(registry, brightness=True, contrast=False, read=40)
-    with _client(registry) as client:
-        session = _begin(client)
-        _edit(client, session, "brightness", 90, 1)
-        assert _projected(registry).picture.brightness == PictureSetting(ActsOn.DISPLAY, 90)
-        _sql(registry, "UPDATE picture_sessions SET idle_until = EXTRACT(EPOCH FROM clock_timestamp()) - 1")
-        assert _projected(registry).picture.brightness == PictureSetting(ActsOn.DISPLAY, 40)
-        ended = client.post(f"/v1/operator/picture-sessions/{session['session_id']}/keepalive", headers=AUTH)
-        assert (ended.status_code, ended.json()) == (410, {"error": "session_ended"})
-        assert _display(registry, player)["brightness"] is None    # no request has stored anything yet
-        _begin(client)
-    assert _display(registry, player)["brightness"] == 40
-
-
-def test_the_sources_wait_ends_at_a_sessions_idle_deadline(registry):
-    """(11, the wake) The source's changed() returns at the session's idle deadline, with no wake."""
-    _bound(registry)
-    _probe(registry, brightness=True, contrast=False)
-    with _client(registry) as client:
-        _begin(client)
-    _sql(registry, "UPDATE picture_sessions SET idle_until = EXTRACT(EPOCH FROM clock_timestamp()) + 1")
-    source = DisplayDocuments(PgLinkStores(registry.db), DisplayWakes(),
-                              times=DatabaseTransactionClock()).source(SERIAL, Pipe.FLEET)
-
-    async def ended() -> None:
-        await asyncio.wait_for(source.changed(), 5)
-    asyncio.run(ended())
-
-
-def test_copy_carries_the_four_values_never_where_they_act_nor_position(registry):
-    """(12) Mutation probe: Copy carrying `acts_on` -> B's contrast moves onto the display."""
-    pi_a, pi_b = enroll_pi(registry, "pi-a"), enroll_pi(registry, "pi-b")
-    _bind(registry, _frame(registry, "a"), pi_a, "HDMI-A-1")
-    _bind(registry, _frame(registry, "b"), pi_b, "HDMI-A-1")
-    _bind(registry, _frame(registry, "c"), pi_b, "HDMI-A-2")
-    _frame(registry, "d")                                                  # never bound: no Display
-    _probe(registry, brightness=True, contrast=True, serial="pi-a", identity=SERIAL_DISPLAY)
-    _probe(registry, brightness=False, contrast=False, serial="pi-b")
-    save_position(registry, "b")
-    _sql(registry, "UPDATE displays SET brightness=65, contrast=35, colour_temperature_kelvin=5000, gamma_tenths=20 "
-                   "WHERE serial IS NOT NULL")
-    # A's display moves to C's port: C is fed by A's own Display.
-    _report(registry, "pi-a", "HDMI-A-1", None, connected=False)
-    _report(registry, "pi-b", "HDMI-A-2", SERIAL_DISPLAY)
-    before = _sql(registry, "SELECT calibration, profile, position_generation FROM frames WHERE id='b'")
-    with _client(registry) as client:
-        copied = client.post("/v1/operator/frames/a/picture-copies", headers=AUTH, json={"to_frames": ["b", "c", "d"]})
-        assert copied.status_code == 200, copied.text
-        assert copied.json() == [{"frame_id": "b", "outcome": "copied"}, {"frame_id": "c", "outcome": "same-display"},
-                                 {"frame_id": "d", "outcome": "no-display"}]
-        unknown = client.post("/v1/operator/frames/a/picture-copies", headers=AUTH, json={"to_frames": ["zz"]})
-        assert (unknown.status_code, unknown.json()) == (404, {"error": "unknown_frame"})
-    target = _display(registry, pi_b, "HDMI-A-1")
-    assert (target["brightness"], target["contrast"], target["colour_temperature_kelvin"], target["gamma_tenths"]) == (
-        65, 35, 5000, 20)
-    assert (target["brightness_acts_on"], target["contrast_acts_on"]) == ("picture-adjustment", "picture-adjustment")
-    assert _sql(registry, "SELECT calibration, profile, position_generation FROM frames WHERE id='b'") == before
-
-
-def test_a_picture_edit_and_done_are_never_a_position_commit(registry):
-    """(13) Mutation probe: an edit raising the position revision -> the revisions move."""
-    player = _bound(registry)
-    _probe(registry, brightness=True, contrast=False)
-    save_position(registry, "kitchen")
-    columns = "SELECT calibration, configuration_revision, generation, position_generation FROM frames"
-    before = _sql(registry, columns)
-    with _client(registry) as client:
-        session = _begin(client)
-        _edit(client, session, "brightness", 30, 1)
-        latest = _projected(registry)
-        _probe(registry, brightness=True, contrast=False, for_change=latest.picture_change, read=30,
-               presented=latest.picture_change, result=WriteResult.TAKEN)
-        assert client.post(f"/v1/operator/picture-sessions/{session['session_id']}/done",
-                           headers=AUTH).status_code == 204
-    assert _sql(registry, columns) == before
-    assert _frame_row(registry, "kitchen").readiness is Readiness.READY
-    assert _display(registry, player)["brightness"] == 30
-
-
-def test_a_setting_goes_onto_the_display_only_when_the_display_answered(registry):
-    """(14) Rule 1: a setting acts on the display only where the display took a DDC/CI read."""
-    _bound(registry)
-    _probe(registry, brightness=True, contrast=False)
-    with _client(registry) as client:
-        session = _begin(client)
-        place = f"/v1/operator/picture-sessions/{session['session_id']}/places"
-        refused = client.post(place, headers=AUTH,
-                              json={"setting": "contrast", "acts_on": "display", "expected_sequence": 1})
-        assert (refused.status_code, refused.json()) == (409, {"error": "display_did_not_answer"})
-        moved = client.post(place, headers=AUTH,
-                            json={"setting": "brightness", "acts_on": "picture-adjustment", "expected_sequence": 1})
-        assert moved.json() == {"sequence": 2}
-        assert _projected(registry).picture.brightness == UNSET_ADJUSTMENT
-        assert client.post("/v1/operator/frames/kitchen/picture-sessions", headers=AUTH).json() == {
-            "error": "session_open"}
-
-
-def test_a_session_needs_a_bound_frame_with_a_display(registry):
-    enroll_pi(registry, SERIAL)
-    _frame(registry, "loose")
-    _bound(registry, "kitchen", "pi-other")
-    with _client(registry) as client:
-        assert client.post("/v1/operator/frames/nowhere/picture-sessions", headers=AUTH).json() == {
-            "error": "unknown_frame"}
-        assert client.post("/v1/operator/frames/loose/picture-sessions", headers=AUTH).json() == {
-            "error": "frame_unbound"}
-        assert client.post("/v1/operator/frames/kitchen/picture-sessions", headers=AUTH).json() == {
-            "error": "no_display"}
-        picture = client.get("/v1/operator/frames/loose/picture", headers=AUTH).json()
-        assert (picture["status"], picture["display_id"], picture["session"]) == ("no-display", None, None)
-        assert client.post("/v1/operator/frames/kitchen/picture-sessions").status_code == 401
+    [seen] = _sql(registry, "SELECT report FROM output_displays")
+    assert decode_output_report(json.dumps(seen["report"]).encode()).identity == NO_SERIAL
+    assert _picture(registry).picture_change == 2

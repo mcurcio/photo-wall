@@ -5476,3 +5476,22 @@ Order: (a) merge the iac PR that switches the factory to `central.app:create_app
   names its Output (1c's picture part did not).
 - **Words left for S3/S6:** AGENTS.md's code map still lists `output_report.py` (deleted here); the overlay tests and
   `tests/native_display_smoke.py` still carry 1c's static line "Brightness: on the display · 60 %".
+
+## E-PS-S2 (Picture split, slice S2, 2026-10-12) · feat/picture-hardware-and-software
+- **"Changed on the display's buttons" leaves the console with S2, as the frozen page says; the owner's addition
+  (main loop, 2026-10-12) brings it back in S4 and S5.** S2 keeps the shape that makes it possible: the view's
+  hardware rows carry both `value` (set in Photo Wall) and `offered.current` (the Pi's latest read). The rule
+  "current differs from the stored value" should get its one home in central/displays/hardware.py (S4) and a view
+  field, not be worked out in the console.
+- **Revert of a hardware code set only in the session leaves the display at the new value until S4** fills
+  `hardware_before` from the Pi's first `before` (S2 records `began_at_change` but no befores).
+- **`PictureCopyResult.hardware_skipped` is `[]` for every outcome but `copied`** (the page is silent on the
+  others); the console does not show it yet (S5's Copy words).
+- **The console's minimum words are design choices S5 may change:** a level row says "Set in Photo Wall · 46 of
+  100" (the display's own count, never a percent), its hand-back button "As the display has it: brightness";
+  Photo Wall's percents say "114 % · 100 % changes nothing"; with the list unknown the group says "Checking what
+  this display offers…" (S5 owns those words; S2 shows them so the group is never silently empty).
+- **Files beyond the owned list:** tests/test_display_identity.py (the source now also writes `picture-…` keys:
+  one assertion), tests/test_node_picture_contract.py and tests/node/display/test_display_picture_controls.py
+  (WriteResult now imported from contracts.node_picture, its one home). Migration 075's tests in
+  tests/test_display_picture_settings.py now undo 092 first and run 075 then 092.

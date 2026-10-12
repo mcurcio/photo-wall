@@ -27,12 +27,11 @@ Rules this module owns (one home each):
 - the wire shapes, their size caps (which the bounds below make every valid value fit, so no
   valid report is ever refused for size) and the two keys.
 
+- `WriteResult`: one DDC/CI write judged by its read-back.
+
 Rules it does NOT own: how the Pi asks and writes (appliance/display_host/picture_list.py,
 picture.py, ddc.py); what is stored on a Display, the session, Done, Revert and Copy (Central's
 central/displays/picture.py and hardware.py).
-
-Slice S2, which deletes the Output document's and report's picture part, moves WriteResult and
-the kelvin and gamma constants here from contracts/node_output.py.
 """
 from __future__ import annotations
 
@@ -42,18 +41,7 @@ from enum import StrEnum
 from types import MappingProxyType
 from typing import Any, Final
 
-from contracts.node_output import (  # S2 moves these definitions here and deletes them there
-    GAMMA_TENTHS_MAX,
-    GAMMA_TENTHS_MIN,
-    GAMMA_TENTHS_NEUTRAL,
-    KELVIN_MAX,
-    KELVIN_MIN,
-    KELVIN_NEUTRAL,
-    KELVIN_STEP,
-    OUTPUT_IDS,
-    DisplayIdentity,
-    WriteResult,
-)
+from contracts.node_output import OUTPUT_IDS, DisplayIdentity
 from contracts.wire_codec import decode, encode, fields_of, list_of, object_of, require, whole
 
 VcpCode = str                                   # VCP_CODE_PATTERN, and on PICTURE_LIST wherever it is used
@@ -67,6 +55,13 @@ CHOICE_NAME_MAX: Final = 24                     # printable ASCII; a longer name
 SOFTWARE_PERCENT_MIN: Final = 0                 # owner, 2026-10-12: "0–150%"
 SOFTWARE_PERCENT_MAX: Final = 150
 SOFTWARE_PERCENT_NEUTRAL: Final = 100           # changes nothing
+KELVIN_MIN: Final = 3000                        # colour temperature (#113), whole kelvin in KELVIN_STEP
+KELVIN_MAX: Final = 9300
+KELVIN_STEP: Final = 100
+KELVIN_NEUTRAL: Final = 6500                    # changes nothing
+GAMMA_TENTHS_MIN: Final = 18                    # gamma (#114) in tenths: 18..26 is 1.8..2.6
+GAMMA_TENTHS_MAX: Final = 26
+GAMMA_TENTHS_NEUTRAL: Final = 22                # 2.2: changes nothing
 
 PICTURE_DOCUMENT_BYTES: Final = 1024            # a picture document's largest encoding
 PICTURE_REPORT_BYTES: Final = 32768             # a picture report's largest encoding (30 settings, 16 choices each)
@@ -107,6 +102,13 @@ PICTURE_LIST: Final[Mapping[VcpCode, str]] = MappingProxyType({
     "A0": "6 axis hue control: Magenta",
     "DC": "Display mode",
 })
+
+
+class WriteResult(StrEnum):
+    """One DDC/CI write's result, judged by its read-back (never by the tool's exit status)."""
+    TAKEN = "taken"                 # the read-back equals the value written
+    NOT_TAKEN = "not-taken"         # the display answered the read-back with another value
+    NO_ANSWER = "no-answer"         # no read-back in time
 
 
 class RangeKind(StrEnum):

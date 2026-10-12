@@ -41,18 +41,14 @@ from appliance.display_host.runner import document_feed
 from appliance.host.bus import HOST_SLICE, host_session
 from contracts.node_link import CENTRAL_WRITER, NODE_MAX_STREAMS, Pipe, account_id
 from contracts.node_output import (
-    AS_THE_DISPLAY_HAS_IT,
     BEST_DETECTED,
     SCHEMA_MAJOR,
-    ActsOn,
     Darkness,
     DisplayIdentity,
     DisplayMode,
     OutputDocument,
-    OutputPicture,
     OutputPower,
     OutputReport,
-    PictureSetting,
     Power,
     PowerMethod,
     PowerRequest,
@@ -87,11 +83,9 @@ STATE = "KV_state_display"
 KEY = output_document_key("HDMI-A-1")
 UNLISTED = "output-HDMI-A-3"
 ALWAYS_ON = OutputPower(Power.ON, (), "2099-01-01T00:00:00Z", Darkness.DISPLAY_OFF, None)
-PICTURE = OutputPicture(PictureSetting(ActsOn.DISPLAY, AS_THE_DISPLAY_HAS_IT),
-                        PictureSetting(ActsOn.DISPLAY, AS_THE_DISPLAY_HAS_IT), 6500, 22)
-FIRST = OutputDocument("HDMI-A-1", 1, ALWAYS_ON, BEST_DETECTED, True, True, 1, PICTURE)
+FIRST = OutputDocument("HDMI-A-1", 1, ALWAYS_ON, BEST_DETECTED, True, True)
 TEST_OFF = OutputDocument("HDMI-A-1", 2, replace(ALWAYS_ON, test=PowerRequest("req-1", Power.OFF, 300)),
-                          BEST_DETECTED, True, True, 1, PICTURE)
+                          BEST_DETECTED, True, True)
 PICTURE_KEY = picture_document_key("HDMI-A-1")
 PICTURE_DOCUMENT = PictureDocument("HDMI-A-1", 8, {"10": 46}, SoftwarePicture(114, 100, 6500, 22))
 PICTURE_REPORT = PictureReport("HDMI-A-1", DisplayIdentity("XYM", 5475, "MNN", None),

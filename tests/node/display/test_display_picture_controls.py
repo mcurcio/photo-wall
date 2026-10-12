@@ -35,7 +35,7 @@ from appliance.display_host.picture import (
 )
 from appliance.display_host.picture_list import ASK_AGAIN_SECONDS, PictureListAsker
 from contracts.node_frame import PictureOperations, decode_picture_operations, neutral_operations
-from contracts.node_output import DisplayIdentity, WriteResult
+from contracts.node_output import DisplayIdentity
 from contracts.node_picture import (
     NEUTRAL_SOFTWARE,
     HardwareRange,
@@ -45,6 +45,7 @@ from contracts.node_picture import (
     PictureReport,
     RangeKind,
     SoftwarePicture,
+    WriteResult,
 )
 from player.geometry import final_pixel
 

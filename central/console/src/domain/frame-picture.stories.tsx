@@ -3,26 +3,37 @@ import type { Meta, StoryObj } from "@storybook/react-vite";
 import { FramePicture, type PictureSession } from "./frame-picture";
 
 type View = NonNullable<PictureSession["view"]>;
+type Row = View["hardware"][number];
+
+const LEVEL_100 = { kind: "level" as const, maximum: 100, choices: [] };
+const BRIGHTNESS: Row = {
+  code: "10", name: "Brightness", value: 46,
+  offered: { range: LEVEL_100, current: 46 }, result: { result: "taken", before: 60, after: 46 },
+};
+const CONTRAST: Row = { code: "12", name: "Contrast", value: null, offered: { range: LEVEL_100, current: 50 }, result: null };
+const PRESET: Row = {
+  code: "14", name: "Select color preset", value: null, result: null,
+  offered: { range: { kind: "read-only-choice", maximum: null, choices: [] }, current: 5 },
+};
 
 const VIEW: View = {
   frame_id: "lobby",
   status: "shown",
   display_id: "8b9e4f2d-1c3a-4b5e-8f7d-2a6c9e0b1d34",
-  brightness: { acts_on: "display", value: 60, answered: true, read: 60, result: "taken" },
-  contrast: { acts_on: "picture-adjustment", value: 40, answered: false, read: null, result: null },
-  colour_temperature_kelvin: 6500,
-  gamma_tenths: 22,
   connected: true,
+  offered_known: true,
+  hardware: [BRIGHTNESS, CONTRAST, PRESET],
+  software: { brightness_percent: 114, contrast_percent: 100, colour_temperature_kelvin: 6500, gamma_tenths: 22 },
   session: { session_id: "5b7f0c1e-2d4a-4f6b-9c8e-1a2b3c4d5e6f", sequence: 1, idle_until: 1_791_000_005 },
 };
 
 const SESSION: PictureSession = {
   view: VIEW,
   phase: "shown",
-  draft: { values: {}, places: {} },
+  draft: { hardware: {}, software: {} },
   dirty: false,
-  change: () => {},
-  place: () => {},
+  changeHardware: () => {},
+  changeSoftware: () => {},
   done: async () => true,
   revert: async () => {},
   busy: false,
@@ -43,41 +54,37 @@ const meta = {
 export default meta;
 type Story = StoryObj<typeof meta>;
 
-/** Brightness on the display, contrast as picture adjustment: nothing changed yet. */
+/** Display brightness 46 of 100 and Photo Wall brightness 114 %: nothing changed yet. */
 export const Shown: Story = {};
-/** A brightness change the Pi has not shown yet: Done waits. */
+/** A display brightness change the Pi has not shown yet: Done waits. */
 export const Waiting: Story = {
-  args: { session: { ...SESSION, phase: "waiting", dirty: true, latest: 1, draft: { values: { brightness: 75 }, places: {} } } },
+  args: { session: { ...SESSION, phase: "waiting", dirty: true, latest: 1, draft: { hardware: { "10": 75 }, software: {} } } },
 };
 /** The Pi showed the latest change: Done is offered. */
 export const ChangeShown: Story = {
   args: {
     session: {
-      ...SESSION, dirty: true, latest: 1, draft: { values: { brightness: 75 }, places: {} },
-      view: { ...VIEW, brightness: { ...VIEW.brightness, value: 75, read: 75 } },
+      ...SESSION, dirty: true, latest: 1, draft: { hardware: {}, software: { brightness: 130 } },
+      view: { ...VIEW, software: { ...VIEW.software, brightness_percent: 130 } },
     },
   },
 };
 /** The display read back another value than the one written. */
 export const NotTaken: Story = {
-  args: { session: { ...SESSION, view: { ...VIEW, brightness: { ...VIEW.brightness, read: 20, result: "not-taken" } } } },
-};
-/** Someone used the display's own buttons since. */
-export const ChangedOnTheButtons: Story = {
-  args: { session: { ...SESSION, view: { ...VIEW, brightness: { ...VIEW.brightness, read: 35 } } } },
-};
-/** Nobody set brightness or contrast: nothing is written to the display. */
-export const AsTheDisplayHasIt: Story = {
   args: {
     session: {
       ...SESSION,
-      view: {
-        ...VIEW,
-        brightness: { ...VIEW.brightness, value: null, read: 52, result: null },
-        contrast: { ...VIEW.contrast, value: null },
-      },
+      view: { ...VIEW, hardware: [{ ...BRIGHTNESS, result: { result: "not-taken", before: 60, after: 20 } }, CONTRAST, PRESET] },
     },
   },
+};
+/** Nobody set the display's own settings: nothing is written to the display. */
+export const AsTheDisplayHasIt: Story = {
+  args: { session: { ...SESSION, view: { ...VIEW, hardware: [{ ...BRIGHTNESS, value: null, result: null }, CONTRAST, PRESET] } } },
+};
+/** The Pi has not finished asking the display what it offers. */
+export const Checking: Story = {
+  args: { session: { ...SESSION, view: { ...VIEW, offered_known: false, hardware: [] } } },
 };
 /** The display is not connected: the values apply when it is. */
 export const NotConnected: Story = { args: { session: { ...SESSION, view: { ...VIEW, connected: false } } } };
@@ -105,8 +112,7 @@ export const Refused: Story = {
   args: {
     session: {
       ...SESSION,
-      error: { words: "The display did not answer the Pi's check, so this setting stays a Photo Wall picture adjustment.",
-        code: "display_did_not_answer" },
+      error: { words: "This display does not offer that setting, so Photo Wall cannot set it.", code: "not_offered" },
     },
   },
 };

@@ -11,7 +11,7 @@ import json
 
 import pytest
 
-from contracts.node_output import DisplayIdentity, WriteResult
+from contracts.node_output import DisplayIdentity
 from contracts.node_picture import (
     CHOICE_NAME_MAX,
     LEVEL_MAX,
@@ -28,6 +28,7 @@ from contracts.node_picture import (
     PictureReport,
     RangeKind,
     SoftwarePicture,
+    WriteResult,
     decode_picture_document,
     decode_picture_report,
     encode_picture_document,

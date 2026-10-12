@@ -18,8 +18,8 @@ module holds every rule that reads one against the other, one home each:
 - **The tab's rows** (`hardware_rows`): every offered setting and every set code, in picture-list
   order.
 
-Interface only (the picture split's milestone commit): bodies land in slices S2 (offered_for,
-edit_refusal, offered_setting, hardware_rows) and S4 (copied_hardware, level_share, kept_offered).
+Slice S2 holds offered_for, edit_refusal, offered_setting and hardware_rows; S4 brings
+copied_hardware, level_share and kept_offered.
 """
 from __future__ import annotations
 
@@ -28,7 +28,14 @@ from dataclasses import dataclass
 from typing import Literal
 
 from contracts.node_output import DisplayIdentity
-from contracts.node_picture import HardwareResult, HardwareSetting, PictureReport, VcpCode
+from contracts.node_picture import (
+    PICTURE_LIST,
+    HardwareResult,
+    HardwareSetting,
+    PictureReport,
+    RangeKind,
+    VcpCode,
+)
 
 EditRefusal = Literal["not_offered", "out_of_range"]
 
@@ -37,7 +44,9 @@ def offered_for(identity: DisplayIdentity | None, report: PictureReport | None) 
     """What the display on an Output offers, from the Output's recorded picture report: its `offered`
     when the report describes `identity` (the identity recorded on the Output from its power report;
     both not None and equal), else None (unknown). Pure."""
-    raise NotImplementedError("picture split S2")
+    if identity is None or report is None or report.identity != identity:
+        return None
+    return report.offered
 
 
 def edit_refusal(code: VcpCode, value: int | None,
@@ -45,12 +54,24 @@ def edit_refusal(code: VcpCode, value: int | None,
     """None when `value` may be set on `code`. "not_offered": `code` is off PICTURE_LIST; or `value`
     is not None and `offered` is None, lacks `code`, or offers it READ_ONLY_CHOICE. "out_of_range":
     a LEVEL value outside 0..maximum, or a CHOICE value its choices do not list. Pure."""
-    raise NotImplementedError("picture split S2")
+    if code not in PICTURE_LIST:
+        return "not_offered"
+    if value is None:
+        return None
+    setting = offered_setting(offered, code)
+    if setting is None or setting.range.kind is RangeKind.READ_ONLY_CHOICE:
+        return "not_offered"
+    if setting.range.kind is RangeKind.LEVEL:
+        maximum = setting.range.maximum or 0
+        return None if type(value) is int and 0 <= value <= maximum else "out_of_range"
+    return None if any(choice.value == value for choice in setting.range.choices) else "out_of_range"
 
 
 def offered_setting(offered: tuple[HardwareSetting, ...] | None, code: VcpCode) -> HardwareSetting | None:
     """The setting `offered` holds for `code`; None when the list is unknown or lacks it. Pure."""
-    raise NotImplementedError("picture split S2")
+    if offered is None:
+        return None
+    return next((setting for setting in offered if setting.code == code), None)
 
 
 def level_share(value: int, source_maximum: int, target_maximum: int) -> int:
@@ -94,7 +115,10 @@ def hardware_rows(values: Mapping[VcpCode, int], offered: tuple[HardwareSetting,
                   results: Mapping[VcpCode, HardwareResult] | None) -> tuple[HardwareRow, ...]:
     """One row per code that is offered or set (the union), in PICTURE_LIST order. `results` None:
     the report does not answer the latest picture change. Pure."""
-    raise NotImplementedError("picture split S2")
+    codes = set(values) | {setting.code for setting in offered or ()}
+    return tuple(HardwareRow(code, offered_setting(offered, code), values.get(code),
+                             None if results is None else results.get(code))
+                 for code in PICTURE_LIST if code in codes)
 
 
 __all__ = ["EditRefusal", "HardwareRow", "copied_hardware", "edit_refusal", "hardware_rows", "kept_offered",

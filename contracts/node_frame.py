@@ -31,7 +31,7 @@ from contracts.node_protocol import counter, digest, token
 from contracts.strict_json import loads_object
 
 PICTURE_OPERATIONS_BYTES: Final = 512     # one `picture` event's operations, encoded
-LIGHT_FACTOR_MAX: Final = 2.0             # light_factor in 0..2 (brightness 0..100 % as picture adjustment)
+LIGHT_FACTOR_MAX: Final = 2.0             # light_factor in 0..2 (Photo Wall's brightness 0..150 % is 0..1.5)
 CONTRAST_SLOPE_MAX: Final = 2.0           # contrast_slope in 0..2
 GAMMA_EXPONENT_MIN: Final = 0.5           # gamma_exponent in 0.5..2
 GAMMA_EXPONENT_MAX: Final = 2.0

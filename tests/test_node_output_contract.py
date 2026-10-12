@@ -1,10 +1,12 @@
-"""The Output document and report on the wire (roadmap 1b, slice T1; roadmap 2a, schema 3;
-contracts/node_output.py).
+"""The Output document and report on the wire (roadmap 1b, slice T1; roadmap 2a, schema 3; the
+picture split, schema 4; contracts/node_output.py).
 
 Every type round-trips through its codec; a document's bytes are canonical (one encoding however its
 input was ordered, so a digest of them is stable); and each refusal the contract names is refused
 with the type's own code. Schema 3 (Power and the week): the document's power part is a timetable of
 calendar set times with the console test on top, and the largest one still fits the bus's 4096 bytes.
+Schema 4 (decision 0022): picture has left both for its own keys (contracts/node_picture.py), so a
+document or report that still carries a picture part is refused.
 """
 from __future__ import annotations
 
@@ -14,34 +16,25 @@ import json
 import pytest
 
 from contracts.node_output import (
-    AS_THE_DISPLAY_HAS_IT,
     BEST_DETECTED,
-    GAMMA_TENTHS_MAX,
-    KELVIN_MAX,
     MAX_POWER_CHANGES,
     MAX_REQUEST_SECONDS,
     OUTPUT_DOCUMENT_BYTES,
     SCHEMA_MAJOR,
-    ActsOn,
     Darkness,
     DisplayIdentity,
     DisplayMode,
     InForce,
     InForceKind,
     OutputDocument,
-    OutputPicture,
     OutputPower,
     OutputReport,
-    PictureReport,
-    PictureSetting,
     Power,
     PowerAttempt,
     PowerChange,
     PowerMethod,
     PowerRequest,
     PowerResult,
-    SettingReport,
-    WriteResult,
     decode_output_document,
     decode_output_report,
     decode_power_attempt,
@@ -59,9 +52,7 @@ TIMETABLE = OutputPower(Power.ON, (PowerChange("2026-10-12T22:00:00Z", Power.OFF
                                    PowerChange("2026-10-13T06:00:00Z", Power.ON)),
                         "2026-10-20T23:00:00Z", Darkness.DISPLAY_OFF, None)
 WITH_TEST = OutputPower(Power.ON, TIMETABLE.changes, TIMETABLE.until, Darkness.DISPLAY_OFF, TEST_OFF)
-PICTURE = OutputPicture(PictureSetting(ActsOn.DISPLAY, 60), PictureSetting(ActsOn.PICTURE_ADJUSTMENT, AS_THE_DISPLAY_HAS_IT),
-                        3000, 24)
-DOCUMENT = OutputDocument("HDMI-A-1", 3, WITH_TEST, PowerMethod.DDC_CI, True, True, 2, PICTURE)
+DOCUMENT = OutputDocument("HDMI-A-1", 3, WITH_TEST, PowerMethod.DDC_CI, True, True)
 IDENTITY = DisplayIdentity("XYM", 5475, "MNN", None)
 TESTING = InForce(InForceKind.TEST, Power.OFF, "req-7", 120, None)
 REPORT = OutputReport(
@@ -70,21 +61,19 @@ REPORT = OutputReport(
     (PowerMethod.DDC_CI, PowerMethod.SIGNAL_OFF), PowerMethod.DDC_CI, 3, PowerResult.CONFIRMED, TESTING)
 ATTEMPT = PowerAttempt("HDMI-A-1", 3, TESTING, PowerMethod.DDC_CI, PowerResult.CONFIRMED, 840)
 CANONICAL = (b'{"change":3,"method":"ddc-ci","never_off_on_other_input":true,"output_id":"HDMI-A-1",'
-             b'"picture":{"brightness":{"acts_on":"display","value":60},"colour_temperature_kelvin":3000,'
-             b'"contrast":{"acts_on":"picture-adjustment","value":"as-the-display-has-it"},"gamma_tenths":24},'
-             b'"picture_change":2,"power":{"changes":[{"at":"2026-10-12T22:00:00Z","power":"off"},'
+             b'"power":{"changes":[{"at":"2026-10-12T22:00:00Z","power":"off"},'
              b'{"at":"2026-10-13T06:00:00Z","power":"on"}],"darkness":"display-off","now":"on",'
              b'"test":{"for_seconds":300,"power":"off","request_id":"req-7"},"until":"2026-10-20T23:00:00Z"},'
              b'"switch_input_on_power_on":true}')
 
 
-def test_the_display_line_is_schema_3():
-    assert SCHEMA_MAJOR == 3
+def test_the_display_line_is_schema_4():
+    assert SCHEMA_MAJOR == 4
 
 
 @pytest.mark.parametrize("value, encode, decode", [
     (DOCUMENT, encode_output_document, decode_output_document),
-    (OutputDocument("Virtual-2", 1, TIMETABLE, BEST_DETECTED, False, False, 1, PICTURE),
+    (OutputDocument("Virtual-2", 1, TIMETABLE, BEST_DETECTED, False, False),
      encode_output_document, decode_output_document),
     (REPORT, encode_output_report, decode_output_report),
     (OutputReport("HDMI-A-2", False, None, (), (), None, None, None, None),
@@ -130,15 +119,13 @@ def test_set_times_are_whole_utc_seconds_both_ways():
 
 
 def test_the_largest_document_fits_the_bus():
-    """MAX_POWER_CHANGES changes, a test and the largest picture part fit OUTPUT_DOCUMENT_BYTES."""
+    """MAX_POWER_CHANGES changes and a test fit OUTPUT_DOCUMENT_BYTES."""
     start = 1791842400
     changes = tuple(PowerChange(encode_set_time(start + 3600 * index), Power.OFF if index % 2 == 0 else Power.ON)
                     for index in range(MAX_POWER_CHANGES))
     power = OutputPower(Power.ON, changes, encode_set_time(start + 3600 * MAX_POWER_CHANGES), Darkness.BLACK_PICTURE,
                         PowerRequest("0" * 64, Power.OFF, MAX_REQUEST_SECONDS))
-    picture = OutputPicture(PictureSetting(ActsOn.PICTURE_ADJUSTMENT, AS_THE_DISPLAY_HAS_IT),
-                            PictureSetting(ActsOn.PICTURE_ADJUSTMENT, AS_THE_DISPLAY_HAS_IT), KELVIN_MAX, GAMMA_TENTHS_MAX)
-    document = OutputDocument("Virtual-1", 2**31, power, BEST_DETECTED, True, True, 2**31, picture)
+    document = OutputDocument("Virtual-1", 2**31, power, BEST_DETECTED, True, True)
     raw = encode_output_document(document)
     assert len(raw) <= OUTPUT_DOCUMENT_BYTES
     assert decode_output_document(raw) == document
@@ -161,11 +148,12 @@ def _power(**changes) -> dict:
 
 
 @pytest.mark.parametrize("build", [
-    lambda: OutputDocument("HDMI-A-3", 1, TIMETABLE, BEST_DETECTED, True, True, 1, PICTURE),
-    lambda: OutputDocument("HDMI-A-1", 0, TIMETABLE, BEST_DETECTED, True, True, 1, PICTURE),
-    lambda: OutputDocument("HDMI-A-1", 1, (TEST_OFF,), BEST_DETECTED, True, True, 1, PICTURE),
-    lambda: OutputDocument("HDMI-A-1", 1, TIMETABLE, "smart-plug", True, True, 1, PICTURE),
-], ids=["unknown-output", "change-0", "a-request-stack", "unknown-method"])
+    lambda: OutputDocument("HDMI-A-3", 1, TIMETABLE, BEST_DETECTED, True, True),
+    lambda: OutputDocument("HDMI-A-1", 0, TIMETABLE, BEST_DETECTED, True, True),
+    lambda: OutputDocument("HDMI-A-1", 1, (TEST_OFF,), BEST_DETECTED, True, True),
+    lambda: OutputDocument("HDMI-A-1", 1, TIMETABLE, "smart-plug", True, True),
+    lambda: OutputDocument("HDMI-A-1", 1, TIMETABLE, BEST_DETECTED, 1, True),
+], ids=["unknown-output", "change-0", "a-request-stack", "unknown-method", "int-switch"])
 def test_a_document_refuses(build):
     with pytest.raises(ValueError, match="^output_document$"):
         build()
@@ -287,12 +275,12 @@ _AT_UNTIL = _power(until=_power()["changes"][-1]["at"])
     CANONICAL + b" " * (OUTPUT_DOCUMENT_BYTES + 1 - len(CANONICAL)),            # past the size
     b"[]",
     b"\xff",
-    json.dumps({key: value for key, value in _document().items()
-                if key not in ("picture", "picture_change")}).encode(),             # a 1b document
-    json.dumps(_document(picture=None, picture_change=None)).encode(),           # F0's null picture
+    json.dumps(_document(picture_change=2, picture={"colour_temperature_kelvin": 6500, "gamma_tenths": 22,
+                                                    "brightness": {"acts_on": "display", "value": 60},
+                                                    "contrast": {"acts_on": "display", "value": 50}})).encode(),
 ], ids=["unknown-output", "request-stack", "unsorted", "change-at-until", "bad-set-time", "untimed-test",
         "schema-2-reason", "unknown-field", "missing-field", "string-change", "bool-change", "int-switch",
-        "duplicate-key", "nan", "too-large", "not-object", "not-utf8", "no-picture-part", "null-picture-part"])
+        "duplicate-key", "nan", "too-large", "not-object", "not-utf8", "schema-3-picture-part"])
 def test_decoding_a_document_refuses(raw):
     with pytest.raises(ValueError, match="^output_document$"):
         decode_output_document(raw)
@@ -309,7 +297,7 @@ def test_decoding_a_report_or_attempt_refuses():
                    {**report, "modes": [{"width": 1, "height": 1, "refresh_millihertz": 60000}]},
                    {**report, "in_force": {"request_id": "x", "remaining_seconds": -1}},   # schema 2's in-force
                    {**report, "in_force": {**report["in_force"], "kind": "standing"}},
-                   {key: value for key, value in report.items() if key != "picture"}):   # a 1b (schema 1) report
+                   {**report, "picture": None}):                     # schema 3's picture part, even empty
         with pytest.raises(ValueError, match="^output_report$"):
             decode_output_report(json.dumps(broken).encode())
     attempt = json.loads(encode_power_attempt(ATTEMPT))
@@ -317,88 +305,3 @@ def test_decoding_a_report_or_attempt_refuses():
                    {**attempt, "request_id": "req-7", "power": "off"}):
         with pytest.raises(ValueError, match="^power_attempt$"):
             decode_power_attempt(json.dumps(broken).encode())
-
-
-# 1c (slice T0): the picture parts of the document and the report.
-
-PICTURE_DOCUMENT = OutputDocument("HDMI-A-1", 3, TIMETABLE, BEST_DETECTED, True, False, picture_change=17,
-                                  picture=PICTURE)
-PICTURE_REPORT = PictureReport(True, False, 17, SettingReport(ActsOn.DISPLAY, 60, WriteResult.TAKEN),
-                               SettingReport(ActsOn.PICTURE_ADJUSTMENT, None, None), 16)
-
-
-def test_a_document_and_a_report_with_picture_parts_round_trip():
-    raw = encode_output_document(PICTURE_DOCUMENT)
-    assert decode_output_document(raw) == PICTURE_DOCUMENT
-    assert b'"value":"as-the-display-has-it"' in raw and b'"value":60' in raw
-    report = _report(picture=PICTURE_REPORT)
-    assert decode_output_report(encode_output_report(report)) == report
-    for result in WriteResult:
-        report = _report(picture=PictureReport(False, True, 1, SettingReport(ActsOn.DISPLAY, None, result),
-                                               SettingReport(ActsOn.DISPLAY, 0, None), None))
-        assert decode_output_report(encode_output_report(report)) == report
-
-
-def test_a_picture_documents_bytes_are_canonical_whatever_the_field_order():
-    canonical = encode_output_document(PICTURE_DOCUMENT)
-    parsed = json.loads(canonical)
-    picture = parsed["picture"]
-    shuffled = {key: parsed[key] for key in reversed(list(parsed))}
-    shuffled["picture"] = {key: (dict(reversed(value.items())) if isinstance(value, dict) else value)
-                           for key, value in reversed(list(picture.items()))}
-    raw = json.dumps(shuffled).encode()
-    assert raw != canonical
-    assert encode_output_document(decode_output_document(raw)) == canonical
-
-
-@pytest.mark.parametrize("build, code", [
-    (lambda: OutputDocument("HDMI-A-1", 3, TIMETABLE, BEST_DETECTED, True, False, 17, None),
-     "output_document"),                                                           # change without picture
-    (lambda: OutputDocument("HDMI-A-1", 3, TIMETABLE, BEST_DETECTED, True, False, None, PICTURE),
-     "output_document"),                                                           # picture without change
-    (lambda: OutputDocument("HDMI-A-1", 3, TIMETABLE, BEST_DETECTED, True, False, picture_change=0,
-                            picture=PICTURE), "output_document"),
-    (lambda: PictureSetting(ActsOn.DISPLAY, 101), "picture_setting"),
-    (lambda: PictureSetting(ActsOn.DISPLAY, -1), "picture_setting"),
-    (lambda: PictureSetting(ActsOn.DISPLAY, "50"), "picture_setting"),
-    (lambda: PictureSetting(ActsOn.DISPLAY, True), "picture_setting"),
-    (lambda: PictureSetting("display", 50), "picture_setting"),
-    (lambda: OutputPicture(PICTURE.brightness, PICTURE.contrast, 6550, 22), "output_picture"),
-    (lambda: OutputPicture(PICTURE.brightness, PICTURE.contrast, 9400, 22), "output_picture"),
-    (lambda: OutputPicture(PICTURE.brightness, PICTURE.contrast, 6500, 27), "output_picture"),
-    (lambda: OutputPicture(PICTURE.brightness, PICTURE.contrast, 6500, 2.2), "output_picture"),
-    (lambda: SettingReport(ActsOn.PICTURE_ADJUSTMENT, 40, None), "setting_report"),  # a software value as read
-    (lambda: SettingReport(ActsOn.PICTURE_ADJUSTMENT, None, WriteResult.TAKEN), "setting_report"),
-    (lambda: SettingReport(ActsOn.DISPLAY, 101, None), "setting_report"),
-    (lambda: PictureReport(True, False, 17, PICTURE_REPORT.brightness, PICTURE_REPORT.contrast, 0),
-     "picture_report"),                                                            # presented_change 0
-    (lambda: PictureReport(True, False, 0, PICTURE_REPORT.brightness, PICTURE_REPORT.contrast, None),
-     "picture_report"),
-    (lambda: PictureReport(1, False, 17, PICTURE_REPORT.brightness, PICTURE_REPORT.contrast, None),
-     "picture_report"),
-    (lambda: _report(picture={"for_change": 1}), "output_report"),
-], ids=["change-without-picture", "picture-without-change", "picture-change-0", "value-101", "value-negative",
-        "value-string", "value-bool", "acts-on-string", "kelvin-off-step", "kelvin-past-max", "gamma-27",
-        "gamma-float", "read-while-picture-adjustment", "result-while-picture-adjustment", "read-101",
-        "presented-0", "for-change-0", "answered-int", "report-picture-not-a-report"])
-def test_picture_parts_refuse(build, code):
-    with pytest.raises(ValueError, match=f"^{code}$"):
-        build()
-
-
-def test_decoding_picture_parts_refuses():
-    document = json.loads(encode_output_document(PICTURE_DOCUMENT))
-    for picture in ({**document["picture"], "brightness": {"acts_on": "display", "value": "50"}},
-                    {**document["picture"], "contrast": {"acts_on": "panel", "value": 50}},
-                    {**document["picture"], "colour_temperature_kelvin": 6550},
-                    {**document["picture"], "extra": 1}):
-        with pytest.raises(ValueError, match="^output_document$"):
-            decode_output_document(json.dumps({**document, "picture": picture}).encode())
-    with pytest.raises(ValueError, match="^output_document$"):
-        decode_output_document(json.dumps({**document, "picture": None}).encode())   # change without picture
-    report = json.loads(encode_output_report(_report(picture=PICTURE_REPORT)))
-    for picture in ({**report["picture"], "presented_change": 0},
-                    {**report["picture"], "brightness": {"acts_on": "display", "read": 60, "result": "lit"}},
-                    {**report["picture"], "contrast": {"acts_on": "picture-adjustment", "read": 3, "result": None}}):
-        with pytest.raises(ValueError, match="^output_report$"):
-            decode_output_report(json.dumps({**report, "picture": picture}).encode())

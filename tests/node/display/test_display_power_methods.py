@@ -34,16 +34,12 @@ from appliance.display_host.power_methods import (
     run_tool,
 )
 from contracts.node_output import (
-    AS_THE_DISPLAY_HAS_IT,
     BEST_DETECTED,
-    ActsOn,
     Darkness,
     DisplayIdentity,
     InForceKind,
     OutputDocument,
-    OutputPicture,
     OutputPower,
-    PictureSetting,
     Power,
     PowerChange,
     PowerMethod,
@@ -238,16 +234,11 @@ def document(change: int, test: PowerRequest | None = None, *, power: OutputPowe
              method=BEST_DETECTED, never_off_on_other_input=False, switch_input_on_power_on=False) -> OutputDocument:
     """A document whose timetable is on with no set times (or `power`), `test` on top."""
     part = timetable(test=test) if power is None else power
-    return OutputDocument(OUTPUT, change, part, method, switch_input_on_power_on, never_off_on_other_input, 1, PICTURE)
-
-
-PICTURE = OutputPicture(PictureSetting(ActsOn.DISPLAY, AS_THE_DISPLAY_HAS_IT),
-                        PictureSetting(ActsOn.DISPLAY, AS_THE_DISPLAY_HAS_IT), 6500, 22)
+    return OutputDocument(OUTPUT, change, part, method, switch_input_on_power_on, never_off_on_other_input)
 
 
 def console_off(seconds: int = 300, request_id: str = "17") -> PowerRequest:
     return PowerRequest(request_id, Power.OFF, seconds)
-
 
 
 class Curtain:

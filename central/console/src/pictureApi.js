@@ -1,30 +1,37 @@
 import { apiWrite } from "./apiWrite.js";
 
 /**
- * The Picture tab's read and writes (roadmap 1c, slice K1): the eight routes of
- * central/display_routes.py `mount_picture_routes`, answered with the shapes of
- * central/displays/views.py (their one home). Each returns `{ok: true, …}` or `{ok: false, error}`:
- * a refusal answers its code (`unknown_frame`, `frame_unbound`, `no_display`, `session_open`,
- * `unknown_session`, `session_ended`, `stale_sequence`, `not_placed_yet`, `out_of_range`,
- * `display_did_not_answer`, `not_presented_yet`); a lost request answers `unreachable`.
+ * The Picture tab's read and writes (roadmap 1c's Live model; decision 0022, the picture split,
+ * slice S2): the eight routes of central/display_routes.py `mount_picture_routes`, answered with the
+ * shapes of central/displays/views.py (their one home). Each returns `{ok: true, …}` or
+ * `{ok: false, error}`: a refusal answers its code (`unknown_frame`, `frame_unbound`, `no_display`,
+ * `session_open`, `unknown_session`, `session_ended`, `stale_sequence`, `not_offered`,
+ * `out_of_range`, `not_presented_yet`); a lost request answers `unreachable`.
  *
- * @typedef {"brightness"|"contrast"|"colour-temperature"|"gamma"} Setting
- *   Brightness and contrast are percents, colour temperature whole kelvin (3000..9300 in 100),
- *   gamma in tenths (18..26).
- * @typedef {"display"|"picture-adjustment"} ActsOn
+ * @typedef {string} VcpCode   An MCCS code, two upper-case hex digits ("10" brightness).
+ * @typedef {"brightness"|"contrast"|"colour-temperature"|"gamma"} SoftwareSetting
+ *   Brightness and contrast are percents 0..150 (100 changes nothing), colour temperature whole
+ *   kelvin (3000..9300 in 100), gamma in tenths (18..26).
  * @typedef {"taken"|"not-taken"|"no-answer"} WriteResult
- * @typedef {{acts_on: ActsOn|null, value: number|null, answered: boolean|null, read: number|null,
- *            result: WriteResult|null}} PictureSettingView
- *   `acts_on` null: not placed yet (the display has not been seen); `value` null: as the display
- *   has it; `answered`, `read` null: no report; `result` only for the latest picture change.
+ * @typedef {"level"|"choice"|"read-only-choice"} RangeKind
+ * @typedef {{value: number, name: string}} ChoiceView
+ * @typedef {{kind: RangeKind, maximum: number|null, choices: ChoiceView[]}} HardwareRangeView
+ * @typedef {{range: HardwareRangeView, current: number|null}} OfferedView
+ * @typedef {{result: WriteResult, before: number|null, after: number|null}} HardwareResultView
+ * @typedef {{code: VcpCode, name: string, offered: OfferedView|null, value: number|null,
+ *            result: HardwareResultView|null}} HardwareSettingView
+ *   One row of Display (hardware): every offered setting and every set code. `offered` null: set
+ *   here, not offered at the last check; `value` null: as the display has it; `result` only for the
+ *   latest picture change.
+ * @typedef {{brightness_percent: number, contrast_percent: number, colour_temperature_kelvin: number,
+ *            gamma_tenths: number}} SoftwarePictureView
  * @typedef {{session_id: string, sequence: number, idle_until: number}} PictureSessionView
  * @typedef {{frame_id: string, status: "no-display"|"waiting"|"shown", display_id: string|null,
- *            brightness: PictureSettingView, contrast: PictureSettingView,
- *            colour_temperature_kelvin: number, gamma_tenths: number, connected: boolean|null,
- *            session: PictureSessionView|null}} FramePictureView
+ *            connected: boolean|null, offered_known: boolean, hardware: HardwareSettingView[],
+ *            software: SoftwarePictureView, session: PictureSessionView|null}} FramePictureView
  * @typedef {{sequence: number}} PictureSequence
  * @typedef {"copied"|"no-display"|"same-display"|"session-open"} CopyOutcome
- * @typedef {{frame_id: string, outcome: CopyOutcome}} PictureCopyResult
+ * @typedef {{frame_id: string, outcome: CopyOutcome, hardware_skipped: VcpCode[]}} PictureCopyResult
  */
 
 /**
@@ -67,25 +74,25 @@ export function beginPicture(frameId) {
 }
 
 /**
- * One setting at one value (POST …/edits).
+ * One display setting at one value, or null to hand it back (POST …/hardware-edits).
  *
  * @param {string} sessionId
- * @param {{setting: Setting, value: number, expected_sequence: number}} edit
+ * @param {{code: VcpCode, value: number|null, expected_sequence: number}} edit
  * @returns {Promise<{ok: true, sequence: PictureSequence}|{ok: false, error: string}>}
  */
-export function editPicture(sessionId, edit) {
-  return call("sequence", `${session(sessionId)}/edits`, { method: "POST", body: edit });
+export function editHardware(sessionId, edit) {
+  return call("sequence", `${session(sessionId)}/hardware-edits`, { method: "POST", body: edit });
 }
 
 /**
- * Move brightness or contrast to where it acts (POST …/places).
+ * One of Photo Wall's four at one value (POST …/software-edits).
  *
  * @param {string} sessionId
- * @param {{setting: "brightness"|"contrast", acts_on: ActsOn, expected_sequence: number}} place
+ * @param {{setting: SoftwareSetting, value: number, expected_sequence: number}} edit
  * @returns {Promise<{ok: true, sequence: PictureSequence}|{ok: false, error: string}>}
  */
-export function placePicture(sessionId, place) {
-  return call("sequence", `${session(sessionId)}/places`, { method: "POST", body: place });
+export function editSoftware(sessionId, edit) {
+  return call("sequence", `${session(sessionId)}/software-edits`, { method: "POST", body: edit });
 }
 
 /**
@@ -119,8 +126,8 @@ export function revertPicture(sessionId) {
 }
 
 /**
- * Copy this Frame's Display values to other Frames' Displays (POST …/picture-copies, #119): the
- * four values only, never where they act, never position.
+ * Copy this Frame's Display values to other Frames' Displays (POST …/picture-copies, #119): Photo
+ * Wall's four, and the display settings set here where each target offers them; never position.
  *
  * @param {string} frameId
  * @param {string[]} toFrames

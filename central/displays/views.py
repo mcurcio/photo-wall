@@ -5,40 +5,38 @@ slices C1-C3, read by the console slices K1 and K2). Plain models, one per answe
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Annotated, Literal
+from typing import Annotated
 from uuid import UUID
 
 from pydantic import Field
 
 from central.displays.model import PowerStatus, PowerTest, Readiness, remaining_seconds
-from central.displays.picture import PictureStatus, Setting
+from central.displays.picture import PictureStatus, SoftwareSetting
 from central.house_time.calculator import local_date_time
 from central.house_time.model import HouseTime, LocalDateTime
 from contracts.models import Identifier, Instant, Model
 from contracts.node_output import (
-    GAMMA_TENTHS_MAX,
-    GAMMA_TENTHS_MIN,
-    KELVIN_MAX,
-    KELVIN_MIN,
-    PERCENT_MAX,
-    ActsOn,
     InForceKind,
     OutputReport,
     Power,
     PowerMethod,
     PowerResult,
-    WriteResult,
     decode_set_time,
 )
 from contracts.node_picture import (
     CHOICE_NAME_MAX,
     CHOICE_VALUE_MAX,
+    GAMMA_TENTHS_MAX,
+    GAMMA_TENTHS_MIN,
+    KELVIN_MAX,
+    KELVIN_MIN,
     LEVEL_MAX,
     MAX_CHOICES,
     SOFTWARE_PERCENT_MAX,
     SOFTWARE_PERCENT_MIN,
     VCP_CODE_PATTERN,
     RangeKind,
+    WriteResult,
 )
 
 
@@ -140,18 +138,9 @@ class DisplayPowerSettings(Model):
     never_off_on_other_input: bool
 
 
-# Roadmap 1c (run ledger .claude/runs/display-1c.md, slice C2; read by the console slice K1): the
-# Picture tab's shapes. A value None is "as the display has it" (nothing set).
-
-class PictureSettingView(Model):
-    """Brightness or contrast on the Picture tab: where it acts (None: not placed yet, the display
-    has not been seen), the value in force, and what the Pi reported for it."""
-    acts_on: ActsOn | None
-    value: Annotated[int, Field(ge=0, le=PERCENT_MAX)] | None
-    answered: bool | None                         # the display answered its DDC/CI read; None: no report
-    read: Annotated[int, Field(ge=0, le=PERCENT_MAX)] | None   # what the display last read back
-    result: WriteResult | None                    # the Pi's write result for the latest picture change
-
+# The Picture tab's shapes (roadmap 1c's Live model; decision 0022, the picture split, slice S2):
+# two sections, Display (hardware) and Photo Wall (software). A hardware value None is "as the
+# display has it" (nothing set).
 
 class PictureSessionView(Model):
     """An open picture session: the sequence the next edit names, and its idle deadline."""
@@ -160,35 +149,8 @@ class PictureSessionView(Model):
     idle_until: Instant
 
 
-class FramePictureView(Model):
-    """GET /v1/operator/frames/{frame_id}/picture: the Picture tab."""
-    frame_id: Identifier
-    status: PictureStatus
-    display_id: UUID | None                       # the Display last seen on the bound Output
-    brightness: PictureSettingView
-    contrast: PictureSettingView
-    colour_temperature_kelvin: Annotated[int, Field(ge=KELVIN_MIN, le=KELVIN_MAX)]
-    gamma_tenths: Annotated[int, Field(ge=GAMMA_TENTHS_MIN, le=GAMMA_TENTHS_MAX)]
-    connected: bool | None                        # the latest Output report's; None: no report
-    session: PictureSessionView | None            # the Display's open session, if any
-
-
-class PictureEdit(Model):
-    """POST /v1/operator/picture-sessions/{session_id}/edits: one setting, one value."""
-    setting: Setting
-    value: int                                    # percent, kelvin or gamma tenths, by setting
-    expected_sequence: Annotated[int, Field(ge=1)]
-
-
-class PicturePlace(Model):
-    """POST /v1/operator/picture-sessions/{session_id}/places: move brightness or contrast."""
-    setting: Literal[Setting.BRIGHTNESS, Setting.CONTRAST]
-    acts_on: ActsOn
-    expected_sequence: Annotated[int, Field(ge=1)]
-
-
 class PictureSequence(Model):
-    """An accepted edit or place: the sequence the next one names."""
+    """An accepted edit: the sequence the next one names."""
     sequence: Annotated[int, Field(ge=1)]
 
 
@@ -203,15 +165,6 @@ class CopyOutcome(StrEnum):
     SAME_DISPLAY = "same-display"                 # the target is fed by the source's own Display
     SESSION_OPEN = "session-open"                 # someone is adjusting the target's Display now
 
-
-class PictureCopyResult(Model):
-    frame_id: Identifier
-    outcome: CopyOutcome
-
-
-# The picture split (decision 0022; slice S2 mounts these and deletes PictureSettingView,
-# PictureEdit and PicturePlace; FramePictureView and PictureCopyResult change in S2 as the slice's
-# frozen page says). A hardware value None is "as the display has it" (nothing set).
 
 VcpCodeField = Annotated[str, Field(pattern=f"^{VCP_CODE_PATTERN}$")]
 SoftwarePercent = Annotated[int, Field(ge=SOFTWARE_PERCENT_MIN, le=SOFTWARE_PERCENT_MAX)]
@@ -268,8 +221,27 @@ class HardwareEdit(Model):
 
 
 class SoftwareEdit(Model):
-    """POST /v1/operator/picture-sessions/{session_id}/software-edits: one of Photo Wall's four.
-    S2 renames central.displays.picture.Setting to SoftwareSetting."""
-    setting: Setting
+    """POST /v1/operator/picture-sessions/{session_id}/software-edits: one of Photo Wall's four."""
+    setting: SoftwareSetting
     value: int                                      # percent, kelvin or gamma tenths, by setting
     expected_sequence: Annotated[int, Field(ge=1)]
+
+
+class FramePictureView(Model):
+    """GET /v1/operator/frames/{frame_id}/picture: the Picture tab."""
+    frame_id: Identifier
+    status: PictureStatus
+    display_id: UUID | None                         # the Display last seen on the bound Output
+    connected: bool | None                          # the latest Output report's; None: no report
+    offered_known: bool                             # False: "Checking what this display offers"
+    hardware: tuple[HardwareSettingView, ...]       # hardware.hardware_rows, names from PICTURE_LIST
+    software: SoftwarePictureView
+    session: PictureSessionView | None              # the Display's open session, if any
+
+
+class PictureCopyResult(Model):
+    """One target's outcome; `hardware_skipped`: the source's display settings left as they are on
+    the target (in picture-list order)."""
+    frame_id: Identifier
+    outcome: CopyOutcome
+    hardware_skipped: tuple[VcpCodeField, ...]
