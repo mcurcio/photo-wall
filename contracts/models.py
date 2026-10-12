@@ -127,7 +127,7 @@ class OutputBinding(Model):
     configuration_revision: int = Field(default=1, ge=1)
     profile: FrameProfile
     calibration: Calibration = Field(default_factory=Calibration)
-    mat: Mat = Field(default_factory=Mat)
+    mat: Mat
 
 
 def frame_output(profile: FrameProfile, calibration: Calibration,

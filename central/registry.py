@@ -744,14 +744,13 @@ class Registry:
     def commit_calibration_trial_in(self, conn, *, frame_id: str, player_id: str,
             authority_epoch: int, output_id: str, binding_generation: int,
             config_revision: int, calibration_revision: int,
-            calibration: Calibration, mat: Mat | None = None) -> Calibration:
+            calibration: Calibration, mat: Mat) -> Calibration:
         """Registry-owned Save CAS inside the Trial owner's existing transaction.
 
         Caller holds Coordination→Runtime then Fleet/session locks. This method
         owns the persistent Frame calibration and mat (print look: the mat rides the binding
-        beside the calibration and is saved with it; it never changes the Frame output); `mat`
-        None keeps the saved one (a Position commit with no mat draft). It never interprets
-        trial evidence.
+        beside the calibration and is saved with it; it never changes the Frame output). It never
+        interprets trial evidence.
         """
         if not holds_runtime_locks_in(conn):
             raise RegistryError("calibration_runtime_locks_required")
@@ -769,10 +768,10 @@ class Registry:
             raise RegistryError("calibration_revision_conflict")
         committed = Calibration.model_validate(calibration.model_dump()).model_copy(
             update={"revision": current.revision + 1})
-        conn.execute("UPDATE frames SET calibration=%s,mat=COALESCE(%s,mat),"
+        conn.execute("UPDATE frames SET calibration=%s,mat=%s,"
                      "configuration_revision=configuration_revision+1 WHERE id=%s",
-                     (Jsonb(committed.model_dump(mode="json")),
-                      None if mat is None else Jsonb(mat.model_dump(mode="json")), frame_id))
+                     (Jsonb(committed.model_dump(mode="json")), Jsonb(mat.model_dump(mode="json")),
+                      frame_id))
         commit_position(conn, frame_id)
         self._audit(conn, "calibration_trial_commit", frame_id)
         return committed

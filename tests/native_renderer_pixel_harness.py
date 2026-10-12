@@ -108,7 +108,7 @@ WIDTH, HEIGHT = 64, 48                      # the picture
 TOLERANCE = 0.015
 QUADRANTS = ((255, 0, 0, 255), (0, 255, 0, 255), (0, 0, 255, 255), (255, 255, 255, 255))
 PROFILE = FrameProfile(width_px=1600, height_px=900, diagonal_inches=10)   # 16:9 trims the photo
-BINDING = OutputBinding(output_id="headless", frame_id="frame", generation=1, profile=PROFILE)
+BINDING = OutputBinding(output_id="headless", frame_id="frame", generation=1, profile=PROFILE, mat=Mat())
 OPENING = ((.1, .12), (.85, .08), (.9, .9), (.12, .82))
 SMALL_OPENING = ((.2, .2), (.8, .25), (.75, .8), (.25, .75))
 SKEWED = ((.1, .1), (.9, .2), (.8, .9), (.2, .8))
@@ -422,7 +422,7 @@ def the_diagnostic_shows_only_while_the_output_is_unbound(native, frames, varian
 
 
 TALL = FrameProfile(width_px=900, height_px=1600, diagonal_inches=10)     # 9:16 cuts the sides
-TALL_BINDING = OutputBinding(output_id="headless", frame_id="frame", generation=1, profile=TALL)
+TALL_BINDING = OutputBinding(output_id="headless", frame_id="frame", generation=1, profile=TALL, mat=Mat())
 
 
 def crop_offset_keeps_the_left_edge(native, frames, variant) -> None:

@@ -59,7 +59,8 @@ def _save(registry, calibration, mat, expected_revision):
 
 class MatSessions(FakeSessions):
     """FakeSessions with Central's mat rules (see the module docstring); `mats` lists every mat the
-    page sent with an edit or renew, in order."""
+    page sent, in order: with an edit or renew, and with a begin for a changed draft (a change
+    made while no session runs, e.g. right after Done, rides the next session's begin)."""
 
     def __init__(self, page, registry):
         self.mats = []
@@ -80,8 +81,8 @@ class MatSessions(FakeSessions):
                 self.bodies.append(body)
                 route.fulfill(status=422, json={"error": "trial_mat_required"})
                 return
-            self.mats.append(body["mat"])
         if "mat" in body:
+            self.mats.append(body["mat"])
             try:
                 Mat.model_validate(body["mat"])
             except ValidationError:

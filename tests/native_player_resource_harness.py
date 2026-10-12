@@ -46,14 +46,14 @@ import gi  # noqa: E402
 gi.require_version("Gst", "1.0")
 from gi.repository import GLib, Gst  # noqa: E402
 
-from contracts.models import FrameProfile, Layer, OutputBinding, Variant  # noqa: E402
+from contracts.models import FrameProfile, Layer, Mat, OutputBinding, Variant  # noqa: E402
 from contracts.photo_crop import CENTRED  # noqa: E402
 from player.native import NativeOutput, NativeRenderer  # noqa: E402
 from player.rendering import LocalLayer, OutputComposition  # noqa: E402
 
 WIDTH, HEIGHT = 64, 48
 BINDING = OutputBinding(output_id="headless", frame_id="frame", generation=1,
-                        profile=FrameProfile(width_px=640, height_px=480, diagonal_inches=10))
+                        profile=FrameProfile(width_px=640, height_px=480, diagonal_inches=10), mat=Mat())
 
 
 def jpeg_fixture() -> Variant:

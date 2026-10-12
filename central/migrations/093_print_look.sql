@@ -46,3 +46,25 @@ ALTER TABLE node_calibration_trials
     ADD COLUMN mat JSONB NOT NULL DEFAULT '{"depth_mm": 0.0, "lights": []}'::jsonb
         CHECK (jsonb_typeof(mat) = 'object'),
     ADD COLUMN saved_mat JSONB NULL;
+
+-- A binding carries its Frame's mat (contracts/models.py OutputBinding, `mat` required on the wire):
+-- a Player's last configuration (player_configurations) and each offered plan's bindings
+-- (plan_offers.manifest) stored before this release gain the no-shadow mat every Frame has here,
+-- so they read as the current contract (the outage 087 repaired). Nothing else in a binding changes.
+UPDATE player_configurations SET configuration = jsonb_set(configuration, '{bindings}', (
+    SELECT jsonb_agg(CASE WHEN jsonb_typeof(e.binding) = 'object' AND e.binding->'mat' IS NULL
+                          THEN e.binding || '{"mat": {"depth_mm": 0.0, "lights": []}}'::jsonb
+                          ELSE e.binding END
+                     ORDER BY e.ordinal)
+    FROM jsonb_array_elements(configuration->'bindings') WITH ORDINALITY AS e(binding, ordinal)))
+WHERE jsonb_typeof(configuration->'bindings') = 'array'
+  AND jsonb_path_exists(configuration, '$.bindings[*] ? (!(exists(@.mat)))');
+
+UPDATE plan_offers SET manifest = jsonb_set(manifest, '{bindings}', (
+    SELECT jsonb_agg(CASE WHEN jsonb_typeof(e.binding) = 'object' AND e.binding->'mat' IS NULL
+                          THEN e.binding || '{"mat": {"depth_mm": 0.0, "lights": []}}'::jsonb
+                          ELSE e.binding END
+                     ORDER BY e.ordinal)
+    FROM jsonb_array_elements(manifest->'bindings') WITH ORDINALITY AS e(binding, ordinal)))
+WHERE jsonb_typeof(manifest->'bindings') = 'array'
+  AND jsonb_path_exists(manifest, '$.bindings[*] ? (!(exists(@.mat)))');

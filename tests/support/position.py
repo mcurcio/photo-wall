@@ -8,15 +8,16 @@ crosses the same CAS: the same writes, the same readiness, the same refusals.
 from __future__ import annotations
 
 from central.transaction_locks import acquire_runtime_locks
-from contracts.models import Calibration, CornersFit
+from contracts.models import Calibration, CornersFit, Mat
 
 # Corners on the whole output: a Save that needs no reported output size (Cover's profile does).
 FULL_SCREEN_CORNERS = Calibration(fit=CornersFit())
 
 
 def save_position(registry, frame_id: str, calibration: Calibration | None = None, *,
-                  expected_revision: int | None = None) -> Calibration:
-    """Commit `calibration` (default: Corners on the whole output) as the bound Frame's Position,
+                  expected_revision: int | None = None, mat: Mat = Mat()) -> Calibration:
+    """Commit `calibration` (default: Corners on the whole output) and `mat` (default: no shadow)
+    as the bound Frame's Position,
     against its current binding, generation and configuration, and the calibration revision the
     draft was made from (`expected_revision`; default the saved one). RegistryError as Save's."""
     with registry.db.transaction() as conn:
@@ -32,4 +33,4 @@ def save_position(registry, frame_id: str, calibration: Calibration | None = Non
             config_revision=row["configuration_revision"],
             calibration_revision=(Calibration.model_validate(row["calibration"]).revision
                                   if expected_revision is None else expected_revision),
-            calibration=FULL_SCREEN_CORNERS if calibration is None else calibration)
+            calibration=FULL_SCREEN_CORNERS if calibration is None else calibration, mat=mat)

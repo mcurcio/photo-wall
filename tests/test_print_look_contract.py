@@ -13,7 +13,14 @@ from pydantic import ValidationError
 from contracts.kelvin import KELVIN_TABLE_MAX, KELVIN_TABLE_MIN, KELVIN_WHITE, kelvin_white
 from contracts.lut import LUT_BYTES, LUT_GRID, LutRef, lut_offset
 from contracts.models import MAT_LIGHTS_MAX, FrameProfile, Light, Mat, OutputBinding
-from contracts.node_calibration import NO_MAT_JSON, candidate_hash, canonical
+from contracts.node_calibration import (
+    NO_MAT_JSON,
+    TrialCandidate,
+    candidate_hash,
+    canonical,
+    encode_trial,
+    parse_trial,
+)
 from contracts.node_display import Surface
 from contracts.node_picture import KELVIN_MAX, KELVIN_MIN
 from contracts.node_protocol import NodeProcessIdentity, OutputKey
@@ -56,7 +63,7 @@ def test_a_lut_is_named_by_its_inputs_and_laid_out_red_fastest():
 
 def test_the_mat_rides_the_binding_and_shades_only_with_depth_and_a_light():
     binding = OutputBinding(output_id="HDMI-A-1", frame_id="f", generation=1,
-                            profile=FrameProfile(width_px=1920, height_px=1080, diagonal_inches=27))
+                            profile=FrameProfile(width_px=1920, height_px=1080, diagonal_inches=27), mat=Mat())
     assert binding.mat == Mat() and not binding.mat.shades
     assert canonical(Mat().model_dump(mode="json")) == NO_MAT_JSON
     assert Mat(depth_mm=1.5, lights=(WARM_TOP, COOL_SIDE)).shades
@@ -91,10 +98,32 @@ def test_the_trial_candidate_hash_covers_the_mat():
     mat = canonical(Mat(depth_mm=1.5, lights=(WARM_TOP,)).model_dump(mode="json"))
     assert json.loads(mat)["lights"][0]["colour_kelvin"] == 2700
     baseline = _surface()
-    assert candidate_hash(trial_id, 1, 1, baseline, calibration) == candidate_hash(
-        trial_id, 1, 1, baseline, calibration, NO_MAT_JSON)
     assert candidate_hash(trial_id, 1, 1, baseline, calibration, mat) != candidate_hash(
         trial_id, 1, 1, baseline, calibration, NO_MAT_JSON)
+
+
+def test_the_frames_wires_refuse_a_message_without_its_mat():
+    """No backwards compatibility: a binding or a trial envelope from a release before the mat is
+    refused, never read as "no shadow" (the Display's wires are strict the same way).
+
+    Mutation probes: give OutputBinding.mat a default_factory -> the binding is read; let
+    parse_trial take a missing mat_json (a default on TrialCandidate) -> the envelope is read."""
+    binding = OutputBinding(output_id="HDMI-A-1", frame_id="f", generation=1,
+                            profile=FrameProfile(width_px=1920, height_px=1080, diagonal_inches=27), mat=Mat())
+    old_binding = binding.model_dump(mode="json")
+    del old_binding["mat"]
+    with pytest.raises(ValidationError):
+        OutputBinding.model_validate(old_binding)
+
+    trial_id, baseline = uuid4(), _surface()
+    calibration = '{"fit":{"corners":[[0,0],[1,0],[1,1],[0,1]],"mode":"cover","rotation":0},"revision":1}'
+    envelope = json.loads(encode_trial(TrialCandidate(
+        trial_id, 1, 1, baseline, calibration, candidate_hash(trial_id, 1, 1, baseline, calibration, NO_MAT_JSON),
+        5000, 9000, NO_MAT_JSON)))
+    assert parse_trial(canonical(envelope)).mat_json == NO_MAT_JSON
+    del envelope["mat_json"]
+    with pytest.raises(ValueError, match="trial_envelope_invalid"):
+        parse_trial(canonical(envelope))
 
 
 def _surface() -> Surface:

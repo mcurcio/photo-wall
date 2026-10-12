@@ -425,7 +425,9 @@ def test_cancellation_reaps_active_native_process_and_cleans_destination(tmp_pat
     asset = save_jpeg(source)
     wrapper = tool_wrapper(tmp_path / "slow-ffmpeg", native_tools[0],
                            "if '-i' in arguments:\n"
-                           f"    Path({str(marker)!r}).write_text(str(os.getpid()))\n"
+                           # Written whole, then renamed: the test polls for the marker and reads it.
+                           f"    Path({str(marker) + '.partial'!r}).write_text(str(os.getpid()))\n"
+                           f"    os.replace({str(marker) + '.partial'!r}, {str(marker)!r})\n"
                            "    time.sleep(30)")
 
     async def perform():

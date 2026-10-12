@@ -15,10 +15,14 @@ from pathlib import Path
 
 import psycopg
 import pytest
+from pydantic import ValidationError
+from test_coordination import schedule, setup_players
 from test_display_identity import NO_SERIAL, _bind, _frame, _report, _sql, enroll_pi
 from test_node_calibration import setup_trial
 
+from central.coordination import Coordinator
 from central.infra.display_store import stored_picture
+from contracts.models import Mat, Plan, PlayerConfiguration
 from contracts.node_picture import NEUTRAL_SOFTWARE
 
 MIGRATION = Path(__file__).parents[1] / "central/migrations/093_print_look.sql"
@@ -102,3 +106,38 @@ def test_093_luts_refuse_a_malformed_profile_and_a_lut_in_use_cannot_be_removed(
     _sql(registry, "UPDATE displays SET software_lut_profile=NULL")
     _sql(registry, "DELETE FROM luts WHERE profile_sha256=%s", (DIGEST,))
     assert _sql(registry, "SELECT profile_sha256 FROM luts") == []
+
+
+WITHOUT_MAT = """jsonb_set({column}, '{{bindings}}', (
+    SELECT jsonb_agg(b - 'mat' ORDER BY n)
+    FROM jsonb_array_elements({column}->'bindings') WITH ORDINALITY AS e(b, n)))"""
+
+
+def test_093_gives_every_stored_binding_the_no_shadow_mat_and_the_scheduler_advances(registry):
+    """A binding's mat is required on the wire: a Player's last configuration and an offered plan
+    stored before 093 (no `mat`) read back as the current contracts after it.
+
+    Mutation probe: drop 093's plan_offers statement -> the offered plan fails to validate."""
+    player = setup_players(registry, count=1)[0]
+    coordinator = Coordinator(registry.db, registry.clock)
+    schedule(coordinator, ["frame-0"])
+    with registry.db.transaction() as conn:
+        conn.execute("UPDATE player_configurations SET configuration=" + WITHOUT_MAT.format(column="configuration"))
+        conn.execute("UPDATE plan_offers SET manifest=" + WITHOUT_MAT.format(column="manifest"))
+        manifest = conn.execute("SELECT manifest FROM plan_offers LIMIT 1").fetchone()["manifest"]
+    with pytest.raises(ValidationError):   # no default: a binding without its mat is refused
+        Plan.model_validate(manifest)
+    before_093(registry)
+    migrate_093(registry)
+
+    with registry.db.transaction() as conn:
+        configuration = conn.execute("SELECT configuration FROM player_configurations "
+                                     "WHERE player_id=%s", (player["player_id"],)).fetchone()
+        manifests = conn.execute("SELECT manifest FROM plan_offers").fetchall()
+    assert [binding.mat for binding in PlayerConfiguration.model_validate(
+        configuration["configuration"]).bindings] == [Mat()]
+    assert manifests and all(binding.mat == Mat() for row in manifests
+                             for binding in Plan.model_validate(row["manifest"]).bindings)
+    registry.clock.advance(1)
+    coordinator.advance()
+    assert coordinator.delivery(player["player_id"], 1)["plan"].layers

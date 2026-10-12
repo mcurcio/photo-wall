@@ -21,7 +21,7 @@ from player.calibration_trial import TrialState
 from player.rendering import OutputComposition
 
 BINDING = OutputBinding(output_id="HDMI-A-1", frame_id="frame", generation=3, configuration_revision=2,
-                        profile=FrameProfile(width_px=1920, height_px=1080, diagonal_inches=27))
+                        profile=FrameProfile(width_px=1920, height_px=1080, diagonal_inches=27), mat=Mat())
 COMPOSITION = OutputComposition(BINDING, BINDING.calibration)
 BASELINE = Surface(OutputKey(uuid4(), uuid4(), "HDMI-A-1", 1, 1), NodeProcessIdentity(100, 5, uuid4()),
                    1, BINDING.generation, BINDING.configuration_revision, "frame")

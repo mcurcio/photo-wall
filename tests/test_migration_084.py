@@ -40,7 +40,8 @@ def test_stored_media_layers_without_a_crop_read_back_centred(registry):
             "authority_epoch": 1, "issued_at": 0, "valid_from": 0, "valid_until": 20,
             "bindings": [{"output_id": "HDMI-A-1", "frame_id": "frame-0", "generation": 1,
                           "profile": {"width_px": 1920, "height_px": 1080,
-                                      "diagonal_inches": 24}}],
+                                      "diagonal_inches": 24},
+                          "mat": {"depth_mm": 0.0, "lights": []}}],
             "layers": layers}
     with registry.db.transaction() as conn:
         for table in ("plan_offers", "assignment_locks"):

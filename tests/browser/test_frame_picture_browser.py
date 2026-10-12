@@ -369,7 +369,17 @@ def test_black_floor_is_sent_in_tenths_and_reads_as_a_percent_once_kept(page, re
         bar.get_by_role("button", name="Done", exact=True).click()
         expect(_picture_tab(page).get_by_role("status").filter(has_text="Saved at")).to_be_visible()
         assert _display(registry)["software_black_floor_tenths"] == 20
+        # Leaving the tab ends this page's session; a reload alone leaves it open until Central's
+        # idle lease lapses, and the reloaded page would wait that long behind it.
+        open_frame(page, FRAME, "overview")
+        for _ in range(50):
+            if not _sql(registry, "SELECT 1 FROM picture_sessions"):
+                break
+            page.wait_for_timeout(100)
+        else:
+            raise AssertionError("the Picture tab's session did not end when the tab was left")
         page.reload()
+        open_frame(page, FRAME, "picture")
         expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
         expect(_row(page, PHOTO_WALL, "Black floor")).to_contain_text("2.0 % of white")
 

@@ -375,7 +375,7 @@ def test_code_shaped_unknown_exception_cannot_escape_as_public_failure():
 
 def test_player_runner_recorder_logs_only_successful_presentations():
     """Exercise the exact Recorder class shipped inside the Player image."""
-    from contracts.models import Calibration, FrameProfile, Layer, OutputBinding, Variant
+    from contracts.models import Calibration, FrameProfile, Layer, Mat, OutputBinding, Variant
     from contracts.photo_crop import CENTRED
     from player.rendering import LocalLayer, OutputComposition
 
@@ -389,7 +389,7 @@ def test_player_runner_recorder_logs_only_successful_presentations():
 
     renderer = namespace["Recorder"]()
     binding = OutputBinding(output_id="HDMI-A-1", frame_id="frame-1", generation=1,
-                            profile=FrameProfile(width_px=64, height_px=48, diagonal_inches=20))
+                            profile=FrameProfile(width_px=64, height_px=48, diagonal_inches=20), mat=Mat())
     variant = Variant(asset_id="asset-a", recipe_id="e" * 64, sha256="a" * 64, size=1, media_type="image/png", width=1, height=1)
     layer = Layer(assignment_id="assignment-1", run_id="run-1", output_id="HDMI-A-1",
                   frame_id="frame-1", binding_generation=1, start=100, end=110,

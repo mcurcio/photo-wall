@@ -23,7 +23,7 @@ from central.wall_plan.fit_settings import FitSettings
 from central.wall_plan.key_content import Measured
 from central.wall_plan.order import PoolLines, WallHistory
 from central.wall_plan.selection import SceneSelection
-from contracts.models import FrameProfile, OutputBinding
+from contracts.models import FrameProfile, Mat, OutputBinding
 
 RAW = "image/x-sony-arw"
 SHA = "a" * 40
@@ -81,7 +81,7 @@ def _plan(photo: Candidate, profile: FrameProfile):
     runtime.activate("scene", "run", 0)
     return project(
         runtime, 0, bindings_by_player={"player": (OutputBinding(
-            output_id="out", frame_id="f", generation=1, profile=profile),)},
+            output_id="out", frame_id="f", generation=1, profile=profile, mat=Mat()),)},
         lines=PoolLines({"pool": SourcePool(source_ref="pool", ready=True, candidates=(photo,))}),
         authored_candidates={}, locked_assignments={}, history=WallHistory(),
         horizon_seconds=300, plan_seconds=600, settings=HOUSE,

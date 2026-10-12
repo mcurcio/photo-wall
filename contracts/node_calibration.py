@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from uuid import UUID
 
 from contracts.node_display import Surface, document, surface_from
@@ -39,7 +39,7 @@ class TrialCandidate:
     candidate_sha256: str
     expires_boottime_ms: int
     hard_expires_boottime_ms: int
-    mat_json: str = NO_MAT_JSON
+    mat_json: str
 
     def __post_init__(self) -> None:
         identifier(self.trial_id)
@@ -73,7 +73,7 @@ class TrialCandidate:
 
 def candidate_hash(
     trial_id: UUID, generation: int, sequence: int, baseline: Surface, calibration_json: str,
-    mat_json: str = NO_MAT_JSON,
+    mat_json: str,
 ) -> str:
     """The candidate's SHA-256 over its identity, baseline, calibration and mat (the trial's frame
     tag is "trial-" + it): Central computes it at each begin and edit, the Player checks it."""
@@ -100,8 +100,8 @@ def encode_trial(candidate: TrialCandidate) -> str:
 
 def parse_trial(raw: str) -> TrialCandidate:
     value = loads_object(raw.encode(), max_bytes=MAX_TRIAL_BYTES)
-    if value is None:
-        raise ValueError("trial_envelope_invalid")
+    if value is None or set(value) != _TRIAL_FIELDS:
+        raise ValueError("trial_envelope_invalid")      # exactly the envelope's fields, none defaulted
     try:
         return TrialCandidate(
             **{
@@ -112,3 +112,6 @@ def parse_trial(raw: str) -> TrialCandidate:
         )
     except (KeyError, TypeError, AttributeError) as exc:
         raise ValueError("trial_envelope_invalid") from exc
+
+
+_TRIAL_FIELDS = frozenset(field.name for field in fields(TrialCandidate))
