@@ -41,6 +41,8 @@ export interface LibraryConnectionView {
   health: LibraryHealth;
   counts: LibraryCounts | null;
   required_permissions: string[];
+  /** Set by the deployment (Central's environment): shown read-only, never changed here. */
+  managed: boolean;
 }
 
 /** The one thing to do about a problem: paste a new key, or ask Photo Wall to check again. */
@@ -77,8 +79,22 @@ interface ProblemWords {
   details?: string;
 }
 
-/** Each problem's sentence and its one fix (run ledger K1). */
+/**
+ * Each problem's sentence and its one fix (run ledger K1). A connection the deployment sets takes
+ * no key here: its key fixes say where the key is changed, and its one button is Check again.
+ */
 export function problemWords(connection: LibraryConnectionView, problem: LibraryProblem): ProblemWords {
+  const words = pastedProblemWords(connection, problem);
+  if (!connection.managed || words.fix !== "paste_key") return words;
+  const key = problem.kind === "other_user" ? `a key for ${problem.expected}` : "a new API key";
+  return {
+    what: `${words.what} Set ${key} in your deployment; Photo Wall uses it from its next start.`,
+    fix: "check_again",
+    label: "Check again",
+  };
+}
+
+function pastedProblemWords(connection: LibraryConnectionView, problem: LibraryProblem): ProblemWords {
   switch (problem.kind) {
     case "key_rejected":
       return { what: "Immich rejected the API key.", fix: "paste_key", label: "Paste a new key" };
@@ -159,9 +175,10 @@ export interface LibraryHealthCardProps {
   href?: string;
 }
 
-/** How a connection is named where it is not on its own page: "Archive (Immich)". */
+/** How a connection is named where it is not on its own page: "Archive (Immich)"; a name that
+ * already says Immich (the deployment's "Immich") is not repeated: "Immich", never "Immich (Immich)". */
 export function connectionSubject(connection: LibraryConnectionView): string {
-  return `${connection.name} (Immich)`;
+  return /immich/i.test(connection.name) ? connection.name : `${connection.name} (Immich)`;
 }
 
 /**

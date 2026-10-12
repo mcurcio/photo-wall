@@ -5,7 +5,8 @@ library_list_items, photo_pools, photo_pool_rows, photo_check_marks, photo_draft
 asset_copies, and asset_revisions' columns) and the only
 code that reads `library_connections.api_key` (for the media worker: `begin_contact`,
 `connection_secret`, `begin_check`). It implements central.photo_library.ports'
-PhotoLibraryQueries and PhotoLibraryCommands (slice C1), PhotoSourceQueries and the store half of
+PhotoLibraryQueries and PhotoLibraryCommands (slice C1), ManagedConnectionCommands (the connection
+the deployment sets), PhotoSourceQueries and the store half of
 PhotoSourceCommands (slice C2), and LibraryWorkerStore (C1 contacts and lists, C2 checks).
 
 Every time written or compared here is `times`' (the database's, G11). Fences are numbers the
@@ -28,7 +29,7 @@ from __future__ import annotations
 import unicodedata
 import uuid
 from collections.abc import Iterable, Sequence
-from typing import Any, NamedTuple
+from typing import Any, Literal, NamedTuple
 
 from psycopg.types.json import Jsonb
 from pydantic import SecretStr, TypeAdapter, ValidationError
@@ -88,6 +89,7 @@ from central.photo_library.ports import (
     KnownRevision,
     LeanMember,
     LibraryRefused,
+    Provision,
     RankedLine,
 )
 from central.photo_library.rendition import covers, frame_need
@@ -314,12 +316,13 @@ class PgPhotoLibrary:
             # The key's last four characters only (policy.key_hint): never the key itself.
             rows = conn.execute(
                 "SELECT connection_ref,name,url,right(api_key,4) AS key_tail,immich_user,health,"
-                "counts FROM library_connections ORDER BY name, connection_ref").fetchall()
+                "counts,managed FROM library_connections ORDER BY name, connection_ref").fetchall()
         return tuple(LibraryConnectionView(
             connection_ref=row["connection_ref"], name=row["name"], url=row["url"],
             key_hint=None if row["key_tail"] is None else policy.key_hint(row["key_tail"]),
             immich_user=row["immich_user"], health=row["health"], counts=row["counts"],
-            required_permissions=policy.REQUIRED_PERMISSIONS) for row in rows)
+            required_permissions=policy.REQUIRED_PERMISSIONS, managed=row["managed"])
+            for row in rows)
 
     @staticmethod
     def _url(text: str) -> str:
@@ -358,10 +361,13 @@ class PgPhotoLibrary:
         url, key = self._url(write.url), self._key(write)
         queue = self._queue()
         with self.db.transaction() as conn:
-            row = conn.execute("SELECT api_key IS NOT NULL AS keyed FROM library_connections "
-                               "WHERE connection_ref=%s FOR UPDATE", (connection_ref,)).fetchone()
+            row = conn.execute("SELECT api_key IS NOT NULL AS keyed,managed FROM "
+                               "library_connections WHERE connection_ref=%s FOR UPDATE",
+                               (connection_ref,)).fetchone()
             if row is None:
                 raise LibraryRefused("connection_unknown", 404)
+            if row["managed"]:
+                raise LibraryRefused("connection_managed", 409)
             if key is None and not row["keyed"]:
                 raise LibraryRefused("key_required", 422)   # a cut-over row's first paste (C12)
             self._name_taken(conn, write.name, connection_ref)
@@ -375,9 +381,12 @@ class PgPhotoLibrary:
         needs) or a draft uses it. Older revisions nothing needs keep their query, lose their
         pool, and the connection's pools and lists go with it."""
         with self.db.transaction() as conn:
-            if conn.execute("SELECT 1 FROM library_connections WHERE connection_ref=%s FOR UPDATE",
-                            (connection_ref,)).fetchone() is None:
+            row = conn.execute("SELECT managed FROM library_connections WHERE connection_ref=%s "
+                               "FOR UPDATE", (connection_ref,)).fetchone()
+            if row is None:
                 raise LibraryRefused("connection_unknown", 404)
+            if row["managed"]:
+                raise LibraryRefused("connection_managed", 409)
             used = conn.execute(
                 "SELECT 1 FROM media_sources s WHERE s.query->>'connection_ref'=%s AND "
                 "(s.refresh_active OR EXISTS (SELECT 1 FROM media_source_names n WHERE "
@@ -392,6 +401,56 @@ class PgPhotoLibrary:
             conn.execute("DELETE FROM photo_pools WHERE connection_ref=%s", (connection_ref,))
             conn.execute("DELETE FROM library_connections WHERE connection_ref=%s",
                          (connection_ref,))
+
+    # --- The deployment's connection (provisioning.py; ManagedConnectionCommands) ---------------
+
+    def provision_connection(self, url: str, key: SecretStr) -> Provision:
+        url, secret = self._url(url), key.get_secret_value().strip()
+        if not secret:
+            raise LibraryRefused("key_required", 422)
+        queue = self._queue()
+        with self.db.transaction() as conn:
+            # Two Centrals starting together take turns; the unique index keeps one managed row.
+            conn.execute("LOCK TABLE library_connections IN SHARE ROW EXCLUSIVE MODE")
+            managed = conn.execute("SELECT connection_ref,url,api_key FROM library_connections "
+                                   "WHERE managed").fetchone()
+            outcome: Literal["created", "adopted", "updated"]
+            if managed is not None:
+                ref = managed["connection_ref"]
+                if (managed["url"], managed["api_key"]) == (url, secret):
+                    return Provision(connection_ref=ref, outcome="unchanged")
+                outcome = "updated"
+            else:
+                adopted = conn.execute(
+                    "SELECT connection_ref FROM library_connections WHERE api_key=%(key)s OR "
+                    "url=%(url)s OR url IS NULL ORDER BY api_key IS NOT DISTINCT FROM %(key)s DESC,"
+                    " url IS NOT DISTINCT FROM %(url)s DESC, created_at, connection_ref LIMIT 1",
+                    {"key": secret, "url": url}).fetchone()
+                if adopted is not None:
+                    ref, outcome = adopted["connection_ref"], "adopted"
+                else:
+                    ref, outcome = "library-" + uuid.uuid4().hex[:12], "created"
+                    conn.execute("INSERT INTO library_connections(connection_ref,name,created_at) "
+                                 "VALUES(%s,%s,%s)",
+                                 (ref, self._free_name(conn), self.times.now_in(conn)))
+            conn.execute("UPDATE library_connections SET url=%s,api_key=%s,managed=TRUE "
+                         "WHERE connection_ref=%s", (url, secret, ref))
+            queue.enqueue_connection_check_in(conn, ref)
+        return Provision(connection_ref=ref, outcome=outcome)
+
+    @staticmethod
+    def _free_name(conn: Any) -> str:
+        """"Immich", or "Immich 2", "Immich 3"… when an ordinary connection has the name."""
+        taken = {row["name"] for row in conn.execute(
+            "SELECT name FROM library_connections WHERE name ~ '^Immich( [0-9]+)?$'").fetchall()}
+        return next(name for name in ("Immich", *(f"Immich {n}" for n in range(2, len(taken) + 3)))
+                    if name not in taken)
+
+    def release_managed_connection(self) -> ConnectionRef | None:
+        with self.db.transaction() as conn:
+            row = conn.execute("UPDATE library_connections SET managed=FALSE WHERE managed "
+                               "RETURNING connection_ref").fetchone()
+        return None if row is None else row["connection_ref"]
 
     def check_connection(self, connection_ref: ConnectionRef) -> None:
         queue = self._queue()

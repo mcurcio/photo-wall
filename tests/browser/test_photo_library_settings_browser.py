@@ -32,6 +32,7 @@ from central.photo_library.model import (
     UnexpectedAnswer,
     Unreachable,
 )
+from central.photo_library.provisioning import KEY_VARIABLE, URL_VARIABLE
 from central.photo_library.views import ConnectionWrite
 
 pytestmark = pytest.mark.skipif(
@@ -246,3 +247,40 @@ def test_a_name_already_used_is_refused_in_plain_words(page, registry, library):
         add.get_by_label("API key", exact=True).fill(KEY)
         add.get_by_role("button", name="Save connection", exact=True).click()
         expect(add.get_by_text("A connection with this name exists.")).to_be_visible()
+
+
+def test_the_connection_the_deployment_sets_is_read_only_with_its_health_and_check_now(
+        page, registry, library, monkeypatch):
+    """Owner, 2026-10-12: "The immich url and api key should be injected by iac", read-only in
+    Settings. Central starts with both variables, as a deployment starts it. Mutation probes:
+    render Remove for a managed connection -> the controls assertion fails; drop the managed
+    branch of problemWords -> the fix assertion fails."""
+    monkeypatch.setenv(URL_VARIABLE, "http://immich.invalid:2283")
+    monkeypatch.setenv(KEY_VARIABLE, KEY)
+    with operator_server(registry.db, registry.clock) as origin:
+        [connection] = library.connections()
+        _contact(library, connection.connection_ref, _answer())
+        connect(page, origin, "photo-library")
+        row = _region(page, "Immich")
+        expect(row.get_by_text("Connected")).to_be_visible()
+        expect(row.get_by_text("Set by your deployment. Change its address or key there.")).to_be_visible()
+        expect(row.get_by_text("Key ending …1234")).to_be_visible()
+        expect(row.get_by_text("41,203 photos · 2,110 videos · 212 albums · 96 people")).to_be_visible()
+        # Health and Check now; no control that would change or remove it.
+        actions = row.get_by_role("group", name="Immich actions")
+        expect(actions.get_by_role("button")).to_have_text(["Check now"])
+        expect(row.locator("input")).to_have_count(0)
+        with page.expect_response(lambda r: r.url.endswith("/checks") and r.request.method == "POST") as asked:
+            actions.get_by_role("button", name="Check now", exact=True).click()
+        assert asked.value.status == 202
+        assert KEY not in page.content()
+        # A key problem's fix is made in the deployment; the one button here is Check again.
+        _contact(library, connection.connection_ref, ContactRefused(problem=KeyRejected()))
+        go(page, "attention")
+        go(page, "photo-library")
+        expect(row.get_by_text("Immich rejected the API key. Set a new API key in your deployment; "
+                               "Photo Wall uses it from its next start.")).to_be_visible()
+        expect(row.get_by_text(re.compile(r"^Immich: Needs a look since"))).to_be_visible()
+        expect(row.get_by_role("button", name="Paste a new key")).to_have_count(0)
+        expect(row.get_by_role("group", name="Needs a look").get_by_role("button", name="Check again",
+                                                                          exact=True)).to_be_visible()

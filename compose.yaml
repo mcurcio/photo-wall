@@ -25,6 +25,9 @@ services:
       PHOTO_WALL_DATABASE_URL: postgresql://photo_wall:${PHOTO_WALL_DB_PASSWORD}@photo-wall-database:5432/photo_wall
       PHOTO_WALL_ADMIN_TOKEN: ${PHOTO_WALL_ADMIN_TOKEN:?Run python3 scripts/configure.py first}
       PHOTO_WALL_HORIZON_SECONDS: ${PHOTO_WALL_HORIZON_SECONDS:-300}
+      # Optional: the Immich connection the deployment sets (read-only in Settings; empty: none).
+      PHOTO_WALL_IMMICH_URL: ${PHOTO_WALL_IMMICH_URL:-}
+      PHOTO_WALL_IMMICH_API_KEY: ${PHOTO_WALL_IMMICH_API_KEY:-}
       # A Node's leaf arrives at Central's origin (/photo-wall/bus/leafnode) and is relayed to the hub.
       PHOTO_WALL_HUB_LEAF_URL: ws://photo-wall-hub:8080/leafnode
     ports:

@@ -40,6 +40,10 @@ Prior art: Grafana's data-source secure fields (written through the API, stored 
 - **The cut-over.** After deploy, no new photos play until the owner pastes each Immich's address and key once; Frames keep their last photo.
 - **Plain `http` is accepted** (UX over security): the key crosses the network in clear text when the owner pastes an `http` address. A private certificate authority must be in the worker's system trust store.
 
+## Update, 2026-10-12: the deployment's connection
+
+Owner, 2026-10-12, verbatim: "The immich url and api key should be injected by iac"; he chose "Read-only in Settings". This revisits the "secret store" alternative above for the deployment only: Central reads `PHOTO_WALL_IMMICH_URL` and `PHOTO_WALL_IMMICH_API_KEY` (or `PHOTO_WALL_IMMICH_API_KEY_FILE`) at every start and keeps one connection, marked managed (migration 089), in step with them; the operator API refuses to change or remove it (409 `connection_managed`) and Settings shows it read-only. The key is still stored in the row the worker reads, so the one-reader rule and the worker's no-restart pickup are unchanged; a new deployment key needs a Central restart, which is how the deployment changes anything. Pasting a connection in Settings stays for local and development use. How it behaves: [runbook](../runbook.md#the-deployments-immich).
+
 ## Evidence
 
 The named tests of delivery 4: `tests/test_photo_library_routes.py` (the key in no route answer, no queued job's arguments, no captured log record; a change without a key keeps it), `tests/test_immich_connection.py` (against real Immich with a worker started before the connection exists: counts with no restart; the key in no answer, job row, worker log or console build file; the key problems in plain words), and `tests/browser/test_photo_library_settings_browser.py` (the key in neither the page nor any response the page received). How it works is the [media module](../module-media.md#connections-and-health) and the runbook's [connecting Immich](../runbook.md#connecting-immich).

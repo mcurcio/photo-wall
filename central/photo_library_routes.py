@@ -6,8 +6,8 @@ question:
 |---|---|---|---|---|---|
 | GET | /v1/operator/library/connections | | tuple[LibraryConnectionView, ...] | | C1 |
 | POST | /v1/operator/library/connections | ConnectionWrite | 201 ConnectionSaved | 422 invalid_url, key_required; 409 connection_name_exists | C1 |
-| PUT | /v1/operator/library/connections/{connection_ref} | ConnectionWrite | ConnectionSaved | 404 connection_unknown; 422 invalid_url, key_required (a cut-over row without its first key); 409 connection_name_exists | C1 |
-| DELETE | /v1/operator/library/connections/{connection_ref} | | 204 | 404 connection_unknown, 409 sources_use_connection | C1 |
+| PUT | /v1/operator/library/connections/{connection_ref} | ConnectionWrite | ConnectionSaved | 404 connection_unknown; 422 invalid_url, key_required (a cut-over row without its first key); 409 connection_name_exists, connection_managed | C1 |
+| DELETE | /v1/operator/library/connections/{connection_ref} | | 204 | 404 connection_unknown, 409 sources_use_connection, connection_managed | C1 |
 | POST | /v1/operator/library/connections/{connection_ref}/checks | | 202 | 404 connection_unknown | C1 |
 | GET | /v1/operator/library/albums?connection=&q=&limit= or &ids= | | ListAnswer[LibraryAlbum] | 404 connection_unknown, 422 ids_with_query | C1 |
 | GET | /v1/operator/library/people?connection=&q=&limit= or &ids= | | ListAnswer[LibraryPerson] | as albums | C1 |
@@ -24,7 +24,9 @@ question:
 Every route takes the operator `admin` dependency. A refusal answers {"error": code} with its
 status (central.photo_library.ports.LibraryRefused), the shape apiWrite.js reads. Query strings
 under /v1/operator/library/ stay out of the access log (library_routes.LibraryQueryStrings). The
-key is accepted by POST and PUT and never answered by any route.
+key is accepted by POST and PUT and never answered by any route. The connection the deployment
+sets (`managed`, central/photo_library/provisioning.py) is refused by PUT and DELETE with 409
+connection_managed: its one source is Central's environment.
 """
 
 from __future__ import annotations

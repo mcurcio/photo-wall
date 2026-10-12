@@ -1,7 +1,7 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
 
 import { LibraryConnection } from "./library-connection";
-import { CONNECTED, connectedWith, connectionWith } from "./library.fixtures";
+import { CONNECTED, MANAGED, connectedWith, connectionWith } from "./library.fixtures";
 
 const meta = {
   title: "Domain/LibraryConnection",
@@ -41,6 +41,14 @@ export const Checking: Story = {
 
 /** Needs a look: the problem card with its fix. */
 export const NeedsALook: Story = { args: { connection: connectionWith({ kind: "unreachable" }) } };
+
+/** Set by the deployment: its facts, health and Check now; no Change, Paste a new key or Remove. */
+export const SetByDeployment: Story = { args: { connection: MANAGED } };
+
+/** Set by the deployment, and Immich rejects its key: the fix is made in the deployment. */
+export const SetByDeploymentKeyRejected: Story = {
+  args: { connection: { ...connectionWith({ kind: "key_rejected" }), name: "Immich", managed: true } },
+};
 
 /** Waiting since the cut-over: its address and key are pasted once. */
 export const WaitingForKey: Story = {

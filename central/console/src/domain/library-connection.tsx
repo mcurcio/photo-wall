@@ -23,6 +23,8 @@ import {
  * design #8-#12): its address, the key's last four characters, the Immich user, Immich's own
  * counts, its notes, its health with the one fix, Check now, Change, Paste a new key and Remove.
  * The key is typed once into a password field and sent; nothing here ever holds it after that.
+ * A connection the deployment sets (`managed`) is read-only, like a provisioned data source:
+ * its facts, health and Check now, and where it is changed instead of Change, Paste and Remove.
  */
 
 /** What a connection write asks for; `key` only when one is pasted. */
@@ -39,6 +41,7 @@ export function connectionRefusalWords(code: string): string {
     case "key_required": return "Paste the API key as well.";
     case "sources_use_connection": return "Photo sources use this connection. Change or delete them first.";
     case "connection_unknown": return "This connection was removed meanwhile.";
+    case "connection_managed": return "Your deployment sets this connection. Change it there.";
     case "unreachable": return "Photo Wall did not answer. Try again.";
     default: return `Photo Wall did not take this (${code}).`;
   }
@@ -118,6 +121,8 @@ export function LibraryConnection({ connection, onSave, onCheck, checkNote, onRe
   const [removeBusy, setRemoveBusy] = useState(false);
   const [removeRefused, setRemoveRefused] = useState<string | null>(null);
   const waiting = waitingForKey(connection);
+  // Set by the deployment: nothing here changes it (the API refuses, connection_managed).
+  const editable = !connection.managed;
   const save = async (write: ConnectionWrite) => {
     const outcome = await onSave(write);
     if (outcome === null) setEditing("none");
@@ -143,6 +148,9 @@ export function LibraryConnection({ connection, onSave, onCheck, checkNote, onRe
     <Section title={connection.name} heading="name">
       <Stack>
         {problemFix === null && <HealthBadge verdict={libraryVerdict(connection)} />}
+        {connection.managed && (
+          <Note>Set by your deployment. Change its address or key there.</Note>
+        )}
         {waiting ? (
           <>
             <Note>Paste the address and key of this Immich to start new photos again.</Note>
@@ -192,11 +200,15 @@ export function LibraryConnection({ connection, onSave, onCheck, checkNote, onRe
         )}
         <Inline label={`${connection.name} actions`}>
           {!waiting && problemFix !== "check_again" && <Button onClick={onCheck}>Check now</Button>}
-          {!waiting && editing === "none" && <Button variant="ghost" onClick={() => setEditing("change")}>Change name or address</Button>}
-          {!waiting && editing === "none" && problemFix !== "paste_key" && (
+          {editable && !waiting && editing === "none" && (
+            <Button variant="ghost" onClick={() => setEditing("change")}>Change name or address</Button>
+          )}
+          {editable && !waiting && editing === "none" && problemFix !== "paste_key" && (
             <Button variant="ghost" onClick={() => setEditing("key")}>Paste a new key</Button>
           )}
-          <Button variant="ghost" onClick={() => { setRemoveRefused(null); setRemoving(true); }}>Remove</Button>
+          {editable && (
+            <Button variant="ghost" onClick={() => { setRemoveRefused(null); setRemoving(true); }}>Remove</Button>
+          )}
         </Inline>
       </Stack>
       <Dialog

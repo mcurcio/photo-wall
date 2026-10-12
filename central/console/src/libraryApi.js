@@ -23,7 +23,7 @@ import { usePolledRead } from "./polledRead.js";
  *   | {state: "needs_a_look", problem: LibraryProblem, since: number, checked_at: number}} LibraryHealth
  * @typedef {{connection_ref: string, name: string, url: string|null, key_hint: string|null,
  *            immich_user: ImmichUser|null, health: LibraryHealth, counts: LibraryCounts|null,
- *            required_permissions: string[]}} LibraryConnectionView
+ *            required_permissions: string[], managed: boolean}} LibraryConnectionView
  * @typedef {{name: string, url: string, key?: string}} ConnectionWrite
  * @typedef {{album_ref: string, name: string, photos: number}} LibraryAlbum
  * @typedef {{person_ref: string, name: string}} LibraryPerson

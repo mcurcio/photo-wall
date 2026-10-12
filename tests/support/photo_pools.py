@@ -18,7 +18,6 @@ from central.media_queue import QueueReceipt
 from central.media_repository import MediaRepository
 from central.photo_library.model import InPool, LibraryAsset, OriginalFile, SourceQuery
 from central.photo_library.ports import CheckComplete, CheckStep
-from central.photo_library.views import ConnectionWrite
 from central.runtime_store import RuntimeStore
 from central.source_names import SourceNameService
 
@@ -42,17 +41,16 @@ def library_of(registry) -> PgPhotoLibrary:
 
 def fixture_connection(registry) -> str:
     """The test database's one keyed connection `fixture`, added on first use. Its ref is fixed
-    (as a cut-over row's, C12) so a photo can be built before the database is touched; the
-    operator side then pastes its address and key."""
+    (as a cut-over row's, C12) so a photo can be built before the database is touched. Its address
+    and key are written as rows, in migration 080's columns only, so an upgrade test may seed it
+    on a database migrated part-way (tests/test_upgrade_087.py), before the store's newer columns."""
     with registry.db.transaction() as conn:
-        conn.execute("INSERT INTO library_connections(connection_ref,name,created_at) "
-                     "VALUES(%s,%s,0) ON CONFLICT DO NOTHING",
-                     (FIXTURE_CONNECTION, FIXTURE_CONNECTION))
-        keyed = conn.execute("SELECT api_key IS NOT NULL AS keyed FROM library_connections "
-                             "WHERE connection_ref=%s", (FIXTURE_CONNECTION,)).fetchone()["keyed"]
-    if not keyed:
-        library_of(registry).change_connection(FIXTURE_CONNECTION, ConnectionWrite(
-            name=FIXTURE_CONNECTION, url="http://immich.invalid", key="PUBLIC-FIXTURE-KEY-1234"))
+        conn.execute("INSERT INTO library_connections(connection_ref,name,url,api_key,created_at) "
+                     "VALUES(%s,%s,%s,%s,0) ON CONFLICT (connection_ref) DO UPDATE SET "
+                     "url=EXCLUDED.url,api_key=EXCLUDED.api_key "
+                     "WHERE library_connections.api_key IS NULL",
+                     (FIXTURE_CONNECTION, FIXTURE_CONNECTION, "http://immich.invalid/api",
+                      "PUBLIC-FIXTURE-KEY-1234"))
     return FIXTURE_CONNECTION
 
 
