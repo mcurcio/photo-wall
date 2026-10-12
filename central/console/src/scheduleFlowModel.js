@@ -6,7 +6,8 @@
  *
  * A Program is a Scene, a weekly When on the house clock and a priority (central/runtime.py
  * `ProgramDraft`): Central works out every window from the When in the house's time zone, so
- * the console sends clock times ("17:00") and works out no instant. Central names the Program
+ * the console sends clock times ("17:00") or sunrise and sunset with minutes, and works out no
+ * instant. Central names the Program
  * (`program_id`) at create; an edit sends the whole Program it loaded (`expected`) and the
  * draft that replaces it, and applies from the next window (the one playing keeps its end).
  *
@@ -58,17 +59,31 @@ export const PRIORITIES = Object.freeze([
   ["always-wins", "Always wins"],
 ]);
 
+/** Where a start or end sits (#74, #75): a clock time, or sunrise or sunset plus or minus minutes. */
+export const TIME_ATS = Object.freeze([
+  ["clock", "Clock time"],
+  ["sunrise", "Sunrise"],
+  ["sunset", "Sunset"],
+]);
+
 /**
- * A new Program draft: no Scene, every day, no times, Normal priority, no name.
+ * A new Program draft: no Scene, every day, no times (clock times), Normal priority, no name.
+ * A start or end is three fields: where it sits (`startAt`: "clock", "sunrise", "sunset"), its
+ * clock time (`start`, "17:00") and its minutes from the sun (`startOffset`, −180…180).
  *
- * @typedef {{sceneId: string, days: ReadonlyArray<boolean>, start: string, end: string,
+ * @typedef {{sceneId: string, days: ReadonlyArray<boolean>, start: string, startAt: string,
+ *            startOffset: number, end: string, endAt: string, endOffset: number,
  *            priority: string, name: string, expected?: object}} ProgramDraft
  */
 export const NEW_PROGRAM_DRAFT = Object.freeze({
   sceneId: "",
   days: EVERY_DAY,
   start: "",
+  startAt: "clock",
+  startOffset: 0,
   end: "",
+  endAt: "clock",
+  endOffset: 0,
   priority: "normal",
   name: "",
 });
@@ -94,18 +109,27 @@ export function seedSchedule(recentSceneId, definitions, programs = {}) {
   };
 }
 
+/** A When's start or end as the draft's three fields, under `key` ("start" or "end"). */
+function timeFields(key, time) {
+  return {
+    [key]: time.at === "clock" ? time.time : "",
+    [`${key}At`]: time.at,
+    [`${key}Offset`]: time.at === "clock" ? 0 : time.offset_minutes ?? 0,
+  };
+}
+
 /**
  * The editable draft of a stored Program, keeping the whole Program as `expected` (the save's
- * precondition). Null for a When this editor cannot show (a sunrise or sunset time).
+ * precondition). Null for a Program with no When.
  */
 export function programEditDraft(program) {
   const { when } = program;
-  if (when?.start?.at !== "clock" || when?.end?.at !== "clock") return null;
+  if (when?.start === undefined || when?.end === undefined) return null;
   return {
     sceneId: program.scene_id,
     days: DAY_KEYS.map((day) => when.days.includes(day)),
-    start: when.start.time,
-    end: when.end.time,
+    ...timeFields("start", when.start),
+    ...timeFields("end", when.end),
     priority: program.priority,
     name: program.name,
     expected: program,
@@ -125,8 +149,8 @@ export function programDraftProblems(draft) {
   const problems = [];
   if (draft.sceneId === "") problems.push({ field: "scene", message: "Choose a Scene." });
   if (!draft.days.some(Boolean)) problems.push({ field: "days", message: "Tick at least one day." });
-  if (!CLOCK.test(draft.start)) problems.push({ field: "start", message: "Enter when it starts." });
-  if (!CLOCK.test(draft.end)) problems.push({ field: "end", message: "Enter when it ends." });
+  if (draft.startAt === "clock" && !CLOCK.test(draft.start)) problems.push({ field: "start", message: "Enter when it starts." });
+  if (draft.endAt === "clock" && !CLOCK.test(draft.end)) problems.push({ field: "end", message: "Enter when it ends." });
   if (draft.name.trim() === "") problems.push({ field: "name", message: "Enter a name." });
   else if (draft.name.trim().length > 80) problems.push({ field: "name", message: "At most 80 characters." });
   return problems;
@@ -139,9 +163,15 @@ export const REFUSAL_FIELDS = Object.freeze({
   "needs-place": { field: "start", message: "Sunrise and sunset need the house's location." },
 });
 
+/** The draft's start or end (`key`) as a When's TimeOfDay (central/house_time/model.py). */
+function timeOf(draft, key) {
+  const at = draft[`${key}At`];
+  return at === "clock" ? { at, time: draft[key] } : { at, offset_minutes: draft[`${key}Offset`] };
+}
+
 /**
  * The body Central stores (central/runtime.py `ProgramDraft`): a name, a Scene, a weekly When
- * of clock times on the house clock, and a priority.
+ * on the house clock (clock times, or sunrise or sunset plus or minus minutes), and a priority.
  *
  * @param {ProgramDraft} draft
  * @returns {{name: string, scene_id: string, when: object, priority: string}}
@@ -152,8 +182,8 @@ export function buildProgram(draft) {
     scene_id: draft.sceneId,
     when: {
       days: DAY_KEYS.filter((_day, index) => draft.days[index]),
-      start: { at: "clock", time: draft.start },
-      end: { at: "clock", time: draft.end },
+      start: timeOf(draft, "start"),
+      end: timeOf(draft, "end"),
     },
     priority: draft.priority,
   };

@@ -4,9 +4,9 @@ import { Field } from "./Field.jsx";
 import { Advanced } from "./flow/Advanced.jsx";
 import { CheckAnswers, NotChosen } from "./flow/CheckAnswers.jsx";
 import { OfferedScene } from "./flow/InstanceNotice.jsx";
-import { buildProgram, DAY_KEYS, PRIORITIES } from "./scheduleFlowModel.js";
+import { buildProgram, DAY_KEYS, PRIORITIES, TIME_ATS } from "./scheduleFlowModel.js";
 import { ScenePicker } from "./ScenePicker.jsx";
-import { whenWords } from "./timeWords.js";
+import { whenWords, windowWords } from "./timeWords.js";
 
 /**
  * The Schedule flow's step views (flow design §7 J6; Power and the week): views over the draft
@@ -33,7 +33,8 @@ export function TimeZoneNote() {
 
 /** The draft's When in words, once its days and times are filled: "Mon–Fri, 17:00–23:00". */
 function draftWhenWords(value) {
-  if (value.start === "" || value.end === "" || !value.days.some(Boolean)) return null;
+  const unset = (key) => value[`${key}At`] === "clock" && value[key] === "";
+  if (unset("start") || unset("end") || !value.days.some(Boolean)) return null;
   return whenWords(buildProgram(value).when);
 }
 
@@ -71,8 +72,10 @@ export function SceneStep({ value, patch, problems, definitions, offered, onUseO
 }
 
 /**
- * Step 2, When: "Days" (every day ticked by default), "Starts" and "Ends" (clock times on the
- * house clock). An end at or before the start reads "(ends next day)".
+ * Step 2, When: "Days" (every day ticked by default), "Starts" and "Ends": each a clock time on
+ * the house clock, or sunrise or sunset plus or minus minutes (#75; Central refuses a sun time
+ * while the house has no location, and the refusal returns here). An end at or before the start
+ * reads "(ends next day)" (#76).
  *
  * @param {StepProps} props
  */
@@ -80,21 +83,62 @@ export function WhenStep({ value, patch, problems }) {
   const daysReason = problems.reasonFor("days");
   const daysReasonId = `${problems.idFor("days")}-reason`;
   const words = draftWhenWords(value);
-  const time = (key, label) => (
-    <Field id={problems.idFor(key)} label={label} reason={problems.reasonFor(key)}>
-      {(props) => (
-        <input
-          {...props}
-          type="time"
-          value={value[key]}
-          onChange={(event) => {
-            patch({ [key]: event.target.value });
-            problems.touch(key);
-          }}
-        />
-      )}
-    </Field>
-  );
+  // A start or end: where it sits (a clock time, or sunrise or sunset, #75), then its clock time
+  // or its minutes from the sun.
+  const time = (key, label) => {
+    const at = value[`${key}At`];
+    return (
+      <div className="program-scheduling__time">
+        <Field id={`${problems.idFor(key)}-at`} label={`${label} at`}>
+          {(props) => (
+            <select
+              {...props}
+              value={at}
+              onChange={(event) => {
+                patch({ [`${key}At`]: event.target.value });
+                problems.touch(key);
+              }}
+            >
+              {TIME_ATS.map(([choice, words]) => <option key={choice} value={choice}>{words}</option>)}
+            </select>
+          )}
+        </Field>
+        {at === "clock" ? (
+          <Field id={problems.idFor(key)} label={label} reason={problems.reasonFor(key)}>
+            {(props) => (
+              <input
+                {...props}
+                type="time"
+                value={value[key]}
+                onChange={(event) => {
+                  patch({ [key]: event.target.value });
+                  problems.touch(key);
+                }}
+              />
+            )}
+          </Field>
+        ) : (
+          <Field id={problems.idFor(key)} label={`${label}: minutes after ${at}`} reason={problems.reasonFor(key)}
+            hint={`A minus means before ${at}, as −30.`}>
+            {(props) => (
+              <input
+                {...props}
+                type="number"
+                min={-180}
+                max={180}
+                step={5}
+                value={value[`${key}Offset`]}
+                onChange={(event) => {
+                  patch({ [`${key}Offset`]: Math.round(Number(event.target.value) || 0) });
+                  problems.touch(key);
+                }}
+              />
+            )}
+          </Field>
+        )}
+      </div>
+    );
+  };
   return (
     <>
       <TimeZoneNote />
@@ -139,14 +183,16 @@ export function priorityWords(priority) {
 }
 
 /**
- * Step 3, Review: a check-answers list of every value, each with "Change"; then "Program name"
- * and, under Advanced, "Priority" (Normal by default).
+ * Step 3, Review: a check-answers list of every value, each with "Change"; for an edit, the saved
+ * Program's window now or next as Central worked it out (`windows`, the snapshot's
+ * `program_windows`); then "Program name" and, under Advanced, "Priority" (Normal by default).
  *
  * @param {StepProps & {advanced: {open: boolean, onToggle: () => void},
  *          onChange: (field: string) => void}} props
  */
-export function ReviewStep({ value, patch, problems, advanced, onChange }) {
+export function ReviewStep({ value, patch, problems, advanced, onChange, windows = null }) {
   const words = draftWhenWords(value);
+  const stored = windows === null ? null : windows.current ?? windows.next ?? null;
   const rows = [
     { label: "Scene", field: "scene", value: value.sceneId === "" ? <NotChosen /> : `Scene ${value.sceneId}` },
     { label: "When", field: "start", value: words === null ? <NotChosen /> : words },
@@ -156,6 +202,12 @@ export function ReviewStep({ value, patch, problems, advanced, onChange }) {
     <>
       <TimeZoneNote />
       <CheckAnswers rows={rows} onChange={onChange} />
+      {windows !== null && (
+        <p className="field__hint" aria-label="Saved windows">
+          {stored === null ? "The saved Program has no window in the coming week."
+            : `${windows.current ? "Playing now" : "Next window"} (as saved, worked out by Central): ${windowWords(stored)}`}
+        </p>
+      )}
       <Field id={problems.idFor("name")} label="Program name" reason={problems.reasonFor("name")}>
         {(props) => (
           <input

@@ -29,6 +29,7 @@ import { priorityWords, ReviewStep, SceneStep, TimeZoneNote, WhenStep } from "./
 import { programState } from "./showState.js";
 import { whenWords, windowWords } from "./timeWords.js";
 import { useCardMutation } from "./useCardMutation.js";
+import { SaveBar } from "./patterns/save-bar.tsx";
 
 const EMPTY = {};
 
@@ -57,7 +58,9 @@ const HEADINGS = {
  * Review and says so. Save: `PUT /v1/operator/programs/{id}` with the Program the editor
  * loaded (`expected`) and the draft (`next`); it applies from the next window (the window
  * playing now keeps its end). A 409 "changed" carries the stored Program: Reload reseeds the
- * draft from it. Remove: `DELETE …?revision=N`; a playing window finishes gracefully. A
+ * draft from it. Save and apply now (`POST …/apply-now`, the same body, through the SaveBar on
+ * an edit's Review): the window playing now finishes gracefully and the new rule plays at once.
+ * Remove: `DELETE …?revision=N`; a playing window finishes gracefully. A
  * refusal code that names a field (no-days, unknown-scene, needs-place) returns to its step.
  *
  * @param {{snapshot: object|null, route: import("./routes.js").Route|null,
@@ -192,22 +195,30 @@ export function ProgramsRegion({ snapshot, route, navigate, recentScene, markDra
     setReloaded(`Reloaded Program ${value.name} from Central.`);
   };
 
+  // An edit saves from the next window (PUT), or saves and applies now (POST …/apply-now): the
+  // window playing now finishes gracefully and the new rule's window covering now plays at once.
+  const saveEdit = (applyNow) => {
+    if (stale || !flow.checkAll()) return;
+    write.send(flow, async (sent) => {
+      const path = `/v1/operator/programs/${encodeURIComponent(editingId)}${applyNow ? "/apply-now" : ""}`;
+      const result = await sent.request(() => apiWrite(path, {
+        method: applyNow ? "POST" : "PUT", body: { expected: value.expected, next: buildProgram(value) },
+      }));
+      if (result?.ok) {
+        sent.say(applyNow
+          ? `Saved Program ${result.data.name} and applied it now: the window playing now finishes and the new rule plays.`
+          : `Saved Program ${result.data.name}. It applies from its next window; a window playing now keeps its end.`);
+        sent.finish();
+      } else if (result === null || result.status >= 500) {
+        sent.attempted([editingId]);
+        sent.say(`Program ${value.name} ${NOT_CONFIRMED} Save again to confirm.`);
+      } else refused(sent, result);
+    });
+  };
+
   const onSave = () => {
     if (editingId !== null) {
-      if (stale || !flow.checkAll()) return;
-      write.send(flow, async (sent) => {
-        const result = await sent.request(() => apiWrite(
-          `/v1/operator/programs/${encodeURIComponent(editingId)}`,
-          { method: "PUT", body: { expected: value.expected, next: buildProgram(value) } },
-        ));
-        if (result?.ok) {
-          sent.say(`Saved Program ${result.data.name}. It applies from its next window; a window playing now keeps its end.`);
-          sent.finish();
-        } else if (result === null || result.status >= 500) {
-          sent.attempted([editingId]);
-          sent.say(`Program ${value.name} ${NOT_CONFIRMED} Save again to confirm.`);
-        } else refused(sent, result);
-      });
+      saveEdit(false);
       return;
     }
     write.send(flow, async (sent) => {
@@ -284,7 +295,13 @@ export function ProgramsRegion({ snapshot, route, navigate, recentScene, markDra
         {storedProgram !== undefined && <button type="button" onClick={reload}>Reload</button>}
       </div>}
       {reloaded !== null && <p role="status">{reloaded}</p>}
-      <ReviewStep {...stepProps} advanced={advanced("review")} onChange={flow.openField} />
+      <ReviewStep {...stepProps} advanced={advanced("review")} onChange={flow.openField}
+        windows={editingId === null ? null : snapshot?.runtime?.program_windows?.[editingId] ?? {}} />
+      {editingId !== null && (
+        <SaveBar label="Apply now" message="Save Program applies from the next window; the window playing now keeps its end.">
+          <button type="button" disabled={write.busy || stale} onClick={() => saveEdit(true)}>Save and apply now</button>
+        </SaveBar>
+      )}
     </>,
   };
 
@@ -323,7 +340,7 @@ export function ProgramsRegion({ snapshot, route, navigate, recentScene, markDra
             )}
           </>
         }
-        unavailableReason="only Programs with clock times can be edited here"
+        unavailableReason="this Program has no When to edit"
         title={editingId === null ? "New Program" : `Edit Program ${storedProgram?.name ?? editingId}`}
         steps={SCHEDULE_STEPS}
         formLabel={editingId === null ? "Schedule a Program" : `Edit Program ${storedProgram?.name ?? editingId}`}
@@ -396,7 +413,7 @@ function ProgramCards({ programs, snapshot, onRemove, onEdit, removing = new Set
                     <button type="button" aria-label={`Edit program ${program.name}`} onClick={(event) => onEdit(id, event)}>Edit</button>
                   ) : (
                     <p className="field__hint program-list__edit-hint">
-                      Editing unavailable: this Program uses sunrise or sunset.
+                      Editing unavailable: this Program has no When.
                     </p>
                   )}
                   <button

@@ -10,6 +10,7 @@ import { formatRoute, sceneCreationRoute } from "../routes.js";
 import { Disclosure } from "../ui/disclosure";
 import { Section } from "../ui/section";
 import { FactLine } from "./fact-line";
+import { FrameWhy, useFrameWhy } from "./frame-why";
 import { frameHost, HostHealthLink } from "./host-health-link";
 import type { HostsRead } from "./hosts-read";
 
@@ -47,7 +48,8 @@ function sendingWords(sceneId: string | null, phase: string | null, bound: boole
  * wait underneath, how its Pi is (a link to the Pi's Hardware page), whether the Pi reported a
  * problem getting content ready, and how to put content on the Frame. Central's own account
  * (its Runs, their priorities, the Pi's classifier words, the readiness report) is under
- * **Details**.
+ * **Details**. Above it, "Why is this playing?" (E6): Central's Why, the winner, what it beat and the
+ * display's power line.
  */
 export function FrameOverview({ snapshot, bootFacts, frameId, hosts }: FrameOverviewProps) {
   const served = snapshot as Runtime | null;
@@ -58,8 +60,11 @@ export function FrameOverview({ snapshot, bootFacts, frameId, hosts }: FrameOver
     .slice(1).map((intent) => `“${intent.scene_id}”`);
   const host = frameHost({ snapshot, bootFacts, frameId, hosts });
   const readiness = readinessReportForFrame(snapshot, frameId);
+  const why = useFrameWhy(frameId);
+  const readAt = (snapshot as { readAt?: number } | null)?.readAt ?? null;
   return (
     <>
+      <FrameWhy read={why} readAt={readAt} />
       <Section title="Now">
         <Note>{sendingWords(planned.sceneId, planned.phase, bound)}</Note>
         {underneath.length > 0 && <Note>{`Waiting underneath it: ${[...new Set(underneath)].join(", ")}.`}</Note>}

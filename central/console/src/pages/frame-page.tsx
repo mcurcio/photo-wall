@@ -13,14 +13,19 @@ import type { HostsRead } from "../domain/hosts-read";
 import { frameHealth } from "../health.js";
 import { boundOutput, isBound } from "../join.js";
 import { useFrameAdjustment } from "../liveAdjustment.js";
+import { renameFrame } from "../framesApi.js";
 import { EntityHeader } from "../patterns/entity-header";
 import { EmptyState, EntityPage } from "../patterns/entity-page";
 import { Note } from "../patterns/fact-row";
 import { HealthBadge } from "../patterns/health-badge";
 import { LeaveGuard } from "../patterns/leave-guard";
 import { usePictureSession } from "../pictureSession.js";
+import { useMutate } from "../useMutate.js";
 import { playerPageHref } from "../players.js";
 import { formatRoute, routeIdName, type Tab } from "../routes.js";
+import { Button } from "../ui/button";
+import { Field, TextInput } from "../ui/field";
+import { Inline } from "../ui/stack";
 import { Tabs } from "../ui/tabs";
 
 export interface FramePageProps {
@@ -37,6 +42,7 @@ export interface FramePageProps {
 
 interface Frame {
   id: string;
+  name?: string;
   surface_id: string;
   generation?: number;
   player_id?: string | null;
@@ -64,6 +70,54 @@ const TABS = [
   { value: "power", label: "Power" },
   { value: "hardware", label: "Hardware" },
 ] as const;
+
+/** Central's refusal of a Frame name (central/registry.py `rename_frame`), in words. */
+const NAME_REFUSALS: Record<string, string> = {
+  name_taken: "That name is taken",
+  unknown_frame: "This Frame no longer exists",
+  unreachable: "Central did not answer. Save again.",
+};
+
+/**
+ * The Frame's name in its header (#94), renamed in place: Rename opens the name, Save sends it, and
+ * a name another Frame has (ignoring case) is refused with "That name is taken". The snapshot
+ * carries the saved name everywhere a Frame is listed.
+ */
+function FrameName({ frameId, name }: { frameId: string; name: string }) {
+  const [draft, setDraft] = useState<string | null>(null);
+  const [problem, setProblem] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const mutate = useMutate() as <T>(op: () => Promise<T>) => Promise<T>;
+  if (draft === null) {
+    return (
+      <Inline label="Frame name">
+        <Note>{`Name: ${name}`}</Note>
+        <Button variant="ghost" onClick={() => { setDraft(name); setProblem(null); }}>Rename</Button>
+      </Inline>
+    );
+  }
+  const save = async () => {
+    const next = draft.trim();
+    if (next === "" || next.length > 60) {
+      setProblem("A name has 1 to 60 characters");
+      return;
+    }
+    setBusy(true);
+    const answer = await mutate(() => renameFrame(frameId, next)) as { ok: true } | { ok: false; error: string };
+    setBusy(false);
+    if (answer.ok) setDraft(null);
+    else setProblem(NAME_REFUSALS[answer.error] ?? `Central refused it (${answer.error})`);
+  };
+  return (
+    <Inline label="Frame name">
+      <Field label="Frame name" error={problem ?? undefined}>
+        <TextInput value={draft} onChange={(text) => { setDraft(text); setProblem(null); }} />
+      </Field>
+      <Button variant="primary" disabled={busy} onClick={() => void save()}>Save name</Button>
+      <Button variant="ghost" disabled={busy} onClick={() => setDraft(null)}>Cancel</Button>
+    </Inline>
+  );
+}
 
 /**
  * The output's size in pixels, as the Pi reported it; null when it reported none. Position's
@@ -145,6 +199,7 @@ export function FramePage({ snapshot, bootFacts, hosts, frameId, tab, onTab, foc
     <EntityPage header={
       <EntityHeader title={`Frame ${frameId}`} level={1} headingRef={headingRef} back={back}>
         {health !== null && <HealthBadge verdict={{ severity: health.severity, label: health.label, receipt: null }} />}
+        <FrameName key={frame.name ?? frameId} frameId={frameId} name={frame.name ?? frameId} />
         {walls.size > 1 && <Note>{`On the “${frame.surface_id}” wall`}</Note>}
       </EntityHeader>
     }>
@@ -175,7 +230,10 @@ export function FramePage({ snapshot, bootFacts, hosts, frameId, tab, onTab, foc
           <FramePicture frameId={frameId} piHref={piHref} session={picture}
             otherFrames={frames.filter((other) => other.id !== frameId).map((other) => other.id)} />
         )}
-        {tab === "power" && <FramePower key={`${frameId}:power`} frameId={frameId} />}
+        {tab === "power" && (
+          <FramePower key={`${frameId}:power`} frameId={frameId}
+            readAt={(snapshot as { readAt?: number } | null)?.readAt ?? null} />
+        )}
         {tab === "hardware" && (
           <>
             <BindingFacet key={frameId} snapshot={snapshot} bootFacts={bootFacts} frameId={frameId}

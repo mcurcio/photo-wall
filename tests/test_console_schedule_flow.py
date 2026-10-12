@@ -36,7 +36,8 @@ const program = { program_id: "p-1", revision: 3, name: "Evenings", scene_id: "e
                   when: { days: ["mon", "tue", "wed", "thu", "fri"], start: { at: "clock", time: "17:00" },
                           end: { at: "clock", time: "23:00" } } };
 out.editSeed = model.seedSchedule(null, stored, { "p-1": program })("edit/p-1");
-out.sunEdit = model.programEditDraft({ ...program, when: { ...program.when, start: { at: "sunset", offset_minutes: 0 } } });
+out.sunEdit = model.programEditDraft({ ...program, when: { ...program.when, start: { at: "sunset", offset_minutes: -30 } } });
+out.sunBody = model.buildProgram(out.sunEdit);
 out.seedNone = model.seedSchedule(null, stored)("new");
 out.seedRecent = model.seedSchedule("evening", stored)("new");
 out.seedGone = model.seedSchedule("ghost", stored)("new");
@@ -66,15 +67,20 @@ def test_schedule_flow_shape():
     assert out["editRoute"] == {"section": "schedule", "id": "x", "flow": "edit", "step": "review"}
     assert out["route"] == {"section": "schedule", "flow": "new", "step": "scene"}
     # The stated defaults: every day, Normal; no count, no id (Central names the Program).
-    assert out["seedNone"] == {"sceneId": "", "days": [True] * 7, "start": "", "end": "",
-                               "priority": "normal", "name": ""}
+    assert out["seedNone"] == {"sceneId": "", "days": [True] * 7, "start": "", "startAt": "clock", "startOffset": 0,
+                               "end": "", "endAt": "clock", "endOffset": 0, "priority": "normal", "name": ""}
     assert out["seedRecent"] == {**out["seedNone"], "sceneId": "evening"}
     assert out["seedGone"] == out["seedNone"]
     assert out["editSeed"] == {"sceneId": "evening", "days": [True] * 5 + [False] * 2, "start": "17:00",
-                               "end": "23:00", "priority": "special-event", "name": "Evenings",
+                               "startAt": "clock", "startOffset": 0, "end": "23:00", "endAt": "clock",
+                               "endOffset": 0, "priority": "special-event", "name": "Evenings",
                                "expected": out["editSeed"]["expected"]}
     assert out["editSeed"]["expected"]["revision"] == 3          # the whole Program, the save's precondition
-    assert out["sunEdit"] is None                                 # this editor shows clock times only
+    # Sunrise and sunset with minutes (#75): edited and sent as Central's TimeOfDay.
+    assert {key: out["sunEdit"][key] for key in ("start", "startAt", "startOffset")} == {
+        "start": "", "startAt": "sunset", "startOffset": -30}
+    assert out["sunBody"]["when"]["start"] == {"at": "sunset", "offset_minutes": -30}
+    assert out["sunBody"]["when"]["end"] == {"at": "clock", "time": "23:00"}
     # The body Central stores: the When as clock times on the house clock, never an instant.
     assert out["body"] == {"name": "Evenings", "scene_id": "evening", "priority": "special-event", "when": {
         "days": ["mon", "tue", "wed", "thu", "fri"], "start": {"at": "clock", "time": "17:00"},

@@ -170,7 +170,7 @@ function dayWords(days) {
 }
 
 /** A start or end of a When: "17:00", "sunset", "sunrise +15 min", "sunset −30 min". */
-function timeOfDayWords(time) {
+export function timeOfDayWords(time) {
   if (time.at === "clock") return time.time;
   const offset = time.offset_minutes ?? 0;
   if (offset === 0) return time.at;
@@ -191,7 +191,7 @@ export function whenWords(when) {
 }
 
 /** "2026-10-12T17:00" (house clock) as its day, "Mon 12 Oct", and its time, "17:00". */
-function houseParts(local) {
+export function houseParts(local) {
   const [date, time] = local.split("T");
   const [year, month, day] = date.split("-").map(Number);
   const weekday = DAY_KEYS[(new Date(Date.UTC(year, month - 1, day)).getUTCDay() + 6) % 7];
@@ -240,4 +240,57 @@ export function countText(count) {
  */
 export function pixelSize(width, height) {
   return `${countText(width)} × ${countText(height)}`;
+}
+
+// --- The house calendar (Power and the week, the week page): dates and times on the house clock
+// are Central's strings ("2026-10-12", "2026-10-12T23:00"). Calendar arithmetic on a date is
+// zone-free (UTC dates); the one instant this module turns into house time is a served read time
+// (`houseLocal`), in the house's zone Central named, never the browser's.
+
+/** The house time of Central's instant `epochSeconds` in Central's zone `zone`: "2026-10-12T17:05". */
+export function houseLocal(epochSeconds, zone) {
+  const parts = Object.fromEntries(new Intl.DateTimeFormat("en-GB", {
+    timeZone: zone, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(toDate(epochSeconds)).map((part) => [part.type, part.value]));
+  return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}`;
+}
+
+const dateOf = (text) => {
+  const [year, month, day] = text.split("-").map(Number);
+  return new Date(Date.UTC(year, month - 1, day));
+};
+const dateText = (date) => date.toISOString().slice(0, 10);
+
+/** House date `date` ("2026-10-12") moved by `days` calendar days. */
+export function addDays(date, days) {
+  const moved = dateOf(date);
+  moved.setUTCDate(moved.getUTCDate() + days);
+  return dateText(moved);
+}
+
+/** The Monday on or before house date `date`: a week page's first day. */
+export function mondayOf(date) {
+  return addDays(date, -((dateOf(date).getUTCDay() + 6) % 7));
+}
+
+/** A house date as its day words: "Mon 12 Oct". */
+export function houseDayWords(date) {
+  return houseParts(`${date}T00:00`).day;
+}
+
+/**
+ * When a house time is due, from the house time `now` (both Central's strings): its time alone,
+ * "07:00", within the next day; else with its day, "Tue 13 Oct 07:00".
+ *
+ * @param {string} local
+ * @param {string|null} now
+ * @returns {string}
+ */
+export function untilWords(local, now) {
+  const { day, time } = houseParts(local);
+  if (now !== null && local.slice(0, 10) <= addDays(now.slice(0, 10), 1) && local > now) {
+    return local.slice(0, 10) === now.slice(0, 10) || local.slice(11) <= now.slice(11) ? time : `${day} ${time}`;
+  }
+  return `${day} ${time}`;
 }

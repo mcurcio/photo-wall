@@ -2,6 +2,7 @@ import React from "react";
 
 import { FrameHealthBadges } from "./FrameHealthBadges.jsx";
 import { MediaPipeline } from "./MediaPipeline.jsx";
+import { WeekPage } from "./pages/week-page.tsx";
 import { ProgramsRegion } from "./ProgramsRegion.jsx";
 import SAMPLES from "./routeSamples.json";
 import { RunsRegion } from "./RunsRegion.jsx";
@@ -66,14 +67,23 @@ export const showRoutes = Object.freeze(
     {
       section: "schedule",
       label: "Schedule",
+      // The week page (Power and the week): the week calendar with its Power lane, then the
+      // Schedules; while the Schedule flow shows a step, the week is left out (rule 1).
       render: ({ snapshot, route, navigate, recentScene, markDraft }) => (
-        <ProgramsRegion
-          snapshot={snapshot}
-          route={route}
-          navigate={navigate}
-          recentScene={recentScene}
-          markDraft={markDraft}
-        />
+        <>
+          {route?.flow === undefined && (
+            <section className="showrunner__region" role="region" aria-label="Week">
+              <WeekPage snapshot={snapshot} />
+            </section>
+          )}
+          <ProgramsRegion
+            snapshot={snapshot}
+            route={route}
+            navigate={navigate}
+            recentScene={recentScene}
+            markDraft={markDraft}
+          />
+        </>
       ),
       samplePaths: SAMPLES.show.schedule,
     },

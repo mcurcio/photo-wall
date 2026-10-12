@@ -43,7 +43,8 @@
   },
   "settings": {
     "photo-library": ["#/photo-library"],
-    "photo-fit": ["#/photo-fit"]
+    "photo-fit": ["#/photo-fit"],
+    "house": ["#/house"]
   },
   "neutral": {
     "attention": ["#/attention"]

@@ -353,3 +353,87 @@ def test_a_program_central_did_not_answer_says_it_may_have_been_saved(page, regi
         assert current_hash(page) == "#/schedule/new/review"
         visit(page, "#/schedule")
         expect(_programs(page).get_by_label("Program Morning", exact=True)).to_be_visible()
+
+
+# --- The week page (Power and the week, roadmap 2b; slice S4 K3). The house is London, the clock
+# Wednesday 14 Oct 2026 18:00 house time, and the browser runs in Auckland.
+
+WEEK_DAYS = ("Mon 12 Oct", "Tue 13 Oct", "Wed 14 Oct", "Thu 15 Oct", "Fri 16 Oct", "Sat 17 Oct", "Sun 18 Oct")
+
+
+def _week(page):
+    return page.get_by_role("region", name="Week", exact=True)
+
+
+def _windows(page, day, name):
+    """`name`'s windows drawn in `day`'s row of the week calendar."""
+    return _week(page).get_by_role("group", name=day, exact=True).get_by_role(
+        "img", name=re.compile(f"^{re.escape(name)}, "))
+
+
+def _london_evening(registry):
+    from support.house_time import LONDON, at, set_house
+    _seed(registry)
+    set_house(registry.db, LONDON)
+    registry.clock.wall = at(LONDON, "2026-10-14T18:00")
+    _runtime(registry).command("set_scene", _console_scene("evening"))
+    _runtime(registry).command("set_scene", _console_scene("calm"))
+
+
+@pytest.mark.browser_context_args(timezone_id="Pacific/Auckland")
+def test_a_weekday_schedule_shows_on_the_week_monday_to_friday_only(page, registry):
+    """K3: "Evenings, Mon–Fri 17:00–23:00" is one repeating Schedule, drawn on Mon–Fri of the
+    week and nowhere else; a 22:00–02:00 Schedule reads "ends next day"; Priority offers the three
+    named levels, Normal first. Mutation probe (P-days-off-by-one): send Sunday-first days from
+    `buildProgram` -> the calendar draws Tue–Sat."""
+    _london_evening(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin)
+        schedule_program(page, "Evenings", "evening", "17:00", "23:00", days=WEEKDAYS)
+        for day in WEEK_DAYS:
+            expect(_windows(page, day, "Evenings")).to_have_count(1 if day[:3] in ("Mon", "Tue", "Wed", "Thu", "Fri") else 0)
+        expect(_windows(page, "Mon 12 Oct", "Evenings")).to_have_accessible_name("Evenings, Mon 12 Oct 17:00–23:00")
+
+        form = schedule_program(page, "Late", "calm", "22:00", "02:00", submit=False)
+        expect(form.get_by_label("Your answers", exact=True)).to_contain_text("Every day, 22:00–02:00 (ends next day)")
+        form.get_by_text("Priority: Normal").click()
+        expect(form.get_by_label("Priority", exact=True).locator("option")).to_have_text(
+            ["Normal", "Special event", "Always wins"])
+
+
+@pytest.mark.browser_context_args(timezone_id="Pacific/Auckland")
+def test_save_and_apply_now_plays_the_new_rule_at_once_and_the_default_scene_is_picked(page, registry):
+    """K3: editing the Schedule playing now, Save and apply now (POST …/apply-now) ends the window
+    playing now and plays the new rule's window at once (the card's Now is the new window); the
+    week page's Default Scene picker sets the Default Scene ("Nothing" allowed)."""
+    _london_evening(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin)
+        stored = schedule_program(page, "Evenings", "evening", "17:00", "23:00").json()
+        card = _programs(page).get_by_label("Program Evenings", exact=True)
+        expect(card).to_contain_text("Wed 14 Oct 17:00–23:00")
+
+        card.get_by_role("button", name="Edit program Evenings", exact=True).click()
+        edit = _programs(page).get_by_role("form", name="Edit Program Evenings", exact=True)
+        expect(edit.get_by_label("Saved windows", exact=True)).to_contain_text(
+            "Playing now (as saved, worked out by Central): Wed 14 Oct 17:00–23:00")
+        edit.get_by_role("button", name="Change When", exact=True).click()
+        edit.get_by_label("Ends", exact=True).fill("21:00")
+        schedule_continue_edit(page, edit)
+        with page.expect_response(lambda r: r.request.method == "POST"
+                                  and r.url.endswith(f"/v1/operator/programs/{stored['program_id']}/apply-now")) as sent:
+            _programs(page).get_by_role("button", name="Save and apply now", exact=True).click()
+        assert sent.value.status == 200
+        expect(card).to_contain_text("Now")
+        expect(card).to_contain_text("Wed 14 Oct 17:00–21:00")      # the new rule's window, at once
+
+        picker = _week(page).get_by_role("region", name="Default Scene", exact=True).get_by_label(
+            "Default Scene", exact=True)
+        expect(picker).to_have_value("nothing")
+        with page.expect_response(lambda r: r.url.endswith("/v1/operator/default-scene")) as chosen:
+            picker.select_option("calm")
+        assert chosen.value.request.post_data_json == {"scene_id": "calm"}
+        expect(picker).to_have_value("calm")
+        with page.expect_response(lambda r: r.url.endswith("/v1/operator/default-scene")) as cleared:
+            picker.select_option("nothing")
+        assert cleared.value.request.post_data_json == {"scene_id": None}

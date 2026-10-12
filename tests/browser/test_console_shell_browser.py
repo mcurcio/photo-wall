@@ -190,7 +190,7 @@ def test_the_sidebar_groups_wall_show_fleet_settings_and_needs_attention_in_a_fi
         for group, labels in (("Wall", ["Wall"]),
                               ("Show", [LABELS[s] for s in ("now", "scenes", "schedule", "sources")]),
                               ("Fleet", ["Hardware", "Releases"]),
-                              ("Settings", ["Photo library", "Photo fit"]),
+                              ("Settings", ["Photo library", "Photo fit", "House"]),
                               ("Needs attention", ["Needs attention"])):
             expect(nav.get_by_role("list", name=group, exact=True).get_by_role("link")
                    ).to_have_text(labels)

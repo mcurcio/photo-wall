@@ -14,6 +14,7 @@ import { Select } from "../ui/select";
 import { Section } from "../ui/section";
 import { Inline } from "../ui/stack";
 import { Switch } from "../ui/switch";
+import { FrameWhy, useFrameWhy } from "./frame-why";
 
 /** How the Pi turns a display off and on (contracts/node_output.py `PowerMethod`). */
 export type PowerMethod = "hdmi-cec" | "ddc-ci" | "signal-off";
@@ -255,9 +256,11 @@ const sameSettings = (a: PowerSettings, b: PowerSettings) => a.power_method === 
 /**
  * The Frame page's Power tab (roadmap 1b, slice K2): read from GET …/power while it is shown (more
  * often while a test waits for the Pi), the display's power settings saved on change, and the two
- * test buttons. A changed setting shows at once and stays shown until a read carries it.
+ * test buttons. A changed setting shows at once and stays shown until a read carries it. Its first
+ * line is the Frame's power line from Why (the Overview's; this tab only reads it).
  */
-export function FramePower({ frameId }: { frameId: string }) {
+export function FramePower({ frameId, readAt = null }: { frameId: string; readAt?: number | null }) {
+  const why = useFrameWhy(frameId);
   const [sent, setSent] = useState<string | null>(null);
   const [turnedOn, setTurnedOn] = useState(false);
   const [sending, setSending] = useState(false);
@@ -342,6 +345,7 @@ export function FramePower({ frameId }: { frameId: string }) {
   }
   return (
     <Section title="Power">
+      <FrameWhy read={why} readAt={readAt} powerOnly />
       {body}
       {problem !== null && (
         <ProblemCard
