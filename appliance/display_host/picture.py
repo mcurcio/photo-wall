@@ -53,13 +53,22 @@ Rules this module owns (one home each):
 - **Operations from the software group** (`operations_for`): white balance from colour
   temperature (contracts/kelvin.py `kelvin_white`, in linear light, normalised so KELVIN_NEUTRAL is
   exactly (1, 1, 1) and the largest is 1); light factor = brightness / SOFTWARE_PERCENT_NEUTRAL; contrast
-  slope = contrast / SOFTWARE_PERCENT_NEUTRAL; gamma exponent = gamma_tenths / GAMMA_TENTHS_NEUTRAL. Sent to the shell
-  at once on each new change, by the shell worker.
+  slope = contrast / SOFTWARE_PERCENT_NEUTRAL; gamma exponent = gamma_tenths / GAMMA_TENTHS_NEUTRAL;
+  saturation = saturation_percent / SATURATION_PERCENT_NEUTRAL; highlight knee = 1 - r * (1 -
+  HIGHLIGHT_KNEE_MIN) with r = highlight_rolloff_percent / ROLLOFF_PERCENT_MAX, worked as (1 - r) +
+  r * HIGHLIGHT_KNEE_MIN so 0 % is exactly 1 (skipped) and 100 % exactly HIGHLIGHT_KNEE_MIN (the
+  form 1 - r * (1 - HIGHLIGHT_KNEE_MIN) rounds to just below it, which the contract refuses);
+  black floor = (black_floor_tenths / 1000) ** (1 / DISPLAY_GAMMA), the floor's share of white
+  light as an output value through the display's response, never Photo Wall's gamma (a look;
+  errata "the display's response"); the LUT mix is none when there is no LUT or lut_amount_percent is 0, else the LUT at lut_amount_percent / 100.
+  Each at its neutral value is exactly the neutral operation. Sent to the shell at once on each new
+  change, by the shell worker.
 - **Re-sent at start:** the controller restarts with Weston, and sends every Output's operations
   to the shell when it starts and whenever the shell reports an Output (re)created.
 - **Presented:** `presented_change` is the newest picture change the shell's `presented` events
   echoed for the Output (frame protocol v4 `tag_picture`), or the new change when its operations
-  equal the ones last presented.
+  equal the ones last presented, every operation compared (`_values`), the print look's too: a
+  change that moves only a print-look field waits for the shell's echo.
 - **The base page's line** (`brightness_line`): the display's own brightness and Photo Wall's,
   each named; it rides the shell's `picture` op beside the operations, and the shell forwards it to
   the overlay client (frame protocol v4 `brightness`).
@@ -79,11 +88,13 @@ from pathlib import Path
 from typing import Final, Protocol
 
 from contracts.kelvin import kelvin_white
-from contracts.node_frame import PictureOperations
+from contracts.node_frame import DISPLAY_GAMMA, HIGHLIGHT_KNEE_MIN, LutMix, PictureOperations
 from contracts.node_output import DisplayIdentity
 from contracts.node_picture import (
     GAMMA_TENTHS_NEUTRAL,
     PICTURE_LIST,
+    ROLLOFF_PERCENT_MAX,
+    SATURATION_PERCENT_NEUTRAL,
     SOFTWARE_PERCENT_NEUTRAL,
     HardwareResult,
     HardwareSetting,
@@ -111,11 +122,17 @@ log = logging.getLogger(__name__)
 
 def operations_for(output_id: str, picture_change: int, software: SoftwarePicture) -> PictureOperations:
     """The Player's operations for one Output's software group (the module's rule). Pure."""
+    rolloff = software.highlight_rolloff_percent / ROLLOFF_PERCENT_MAX
     return PictureOperations(output_id=output_id, picture_change=picture_change,
                              rgb_multipliers=kelvin_white(software.colour_temperature_kelvin),
                              light_factor=software.brightness_percent / SOFTWARE_PERCENT_NEUTRAL,
                              contrast_slope=software.contrast_percent / SOFTWARE_PERCENT_NEUTRAL,
-                             gamma_exponent=software.gamma_tenths / GAMMA_TENTHS_NEUTRAL)
+                             gamma_exponent=software.gamma_tenths / GAMMA_TENTHS_NEUTRAL,
+                             saturation=software.saturation_percent / SATURATION_PERCENT_NEUTRAL,
+                             highlight_knee=(1 - rolloff) + rolloff * HIGHLIGHT_KNEE_MIN,
+                             black_floor=(software.black_floor_tenths / 1000) ** (1 / DISPLAY_GAMMA),
+                             lut=None if software.lut is None or software.lut_amount_percent == 0
+                             else LutMix(software.lut, software.lut_amount_percent / 100))
 
 
 def judged(written: int, after: VcpAnswer | None) -> WriteResult:
