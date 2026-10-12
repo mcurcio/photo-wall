@@ -156,6 +156,42 @@ def test_link_failure_does_not_stall_control_or_mark_player_offline(tmp_path):
     asyncio.run(run())
 
 
+@pytest.mark.parametrize(("outcome", "level", "message"), [
+    ("rejected", "WARNING", "player: the broker refused the app link; retrying in 5 s"),
+    ("stale", "INFO", "player: app link stale (a newer control delivery or enrollment); "
+                      "retrying in 5 s"),
+])
+def test_a_missed_link_is_logged(tmp_path, caplog, outcome, level, message):
+    """A link that did not take is in the journal, not only at DEBUG. Mutation probe: drop
+    either log line."""
+    class MissingLink:
+        def __init__(self):
+            self.done = threading.Event()
+
+        def exchange_applied(self, **_kwargs):
+            self.done.set()
+            return outcome
+
+    async def run():
+        service, _ = await rig(tmp_path, server=ReceiptServer(ManualClock(100)), negotiate=True)
+        link = MissingLink()
+        service.node_link_client, service.boot_id, service._proof_active = link, BOOT_ID, True
+        task = asyncio.create_task(service._app_link_loop())
+        try:
+            for _ in range(100):
+                if link.done.is_set() and message in caplog.messages:
+                    break
+                await asyncio.sleep(.01)
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            await close(service)
+
+    with caplog.at_level("INFO", logger="photo_wall.player"):
+        asyncio.run(run())
+    assert (level, message) in [(r.levelname, r.getMessage()) for r in caplog.records]
+
+
 def test_service_exit_invalidates_in_flight_socket_worker(tmp_path):
     class WaitingLink:
         def __init__(self):

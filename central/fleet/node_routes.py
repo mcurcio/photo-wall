@@ -83,6 +83,7 @@ def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
     trials = NodeCalibration(sessions, display=display, registry=Registry(db, clock))
     display.trials = trials
     app.state.node_lifecycle = lifecycle
+    app.state.node_app_links = links
     app.state.node_sessions = sessions
 
     @app.middleware("http")

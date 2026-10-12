@@ -8,7 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 from starlette.websockets import WebSocketDisconnect
-from test_registry import ADMIN, enroll
+from test_registry import ADMIN, enroll, frame
 
 from central.app import create_app
 from central.player_control_protocol import project_state, state_digest
@@ -176,6 +176,13 @@ def test_v2_applied_ack_replays_exact_receipt_until_superseded_and_epoch_fenced(
                 (player["player_id"],),
             ).fetchone()
         assert repeated == first
+        # Unchanged state is the same delivery again, so its receipt stays current.
+        assert client.get("/v1/player/state", headers=headers).json() == state
+        assert client.post("/v1/player/control-acks", json=report,
+                           headers=headers).json() == accepted
+        # A real change is a new delivery, and the old receipt is no longer current.
+        frame(registry, "changed")
+        registry.bind("changed", player["player_id"], "HDMI-A-1", expected_generation=0)
         assert client.get("/v1/player/state", headers=headers).json()["delivery_id"] != state[
             "delivery_id"]
         assert client.post("/v1/player/control-acks", json=report, headers=headers).json() == {

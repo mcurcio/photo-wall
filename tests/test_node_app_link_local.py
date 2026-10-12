@@ -151,6 +151,25 @@ def test_a_newer_proof_replaces_the_slot(monkeypatch, node):
     assert second != first and '\\"delivery\\":2' in second
 
 
+def test_a_local_refusal_is_logged_with_its_code(monkeypatch, node, caplog):
+    """The peer gets a bare `refused`; the journal names why. Mutation probe: drop the log."""
+    running, connection = running_app(), Connection()
+    connection.setsockopt = connection.settimeout = connection.close = lambda *args: None
+    links = BrokerLinkService.__new__(BrokerLinkService)
+    links.driver, links.probes = SimpleNamespace(current=lambda: running), None
+    links.session, links.feed = Session(node.store, node.grant), None
+    links.listener = SimpleNamespace(accept=lambda: (connection, None))
+    begin = encode_node_app_link_begin(player_id=PLAYER, authority_epoch=1,
+                                       control_receipt='{"authority_epoch":1}')
+    monkeypatch.setattr(app_link, "receive_credential_packet",
+                        lambda *args, **kwargs: ((running.process.pid + 1, 10004, 10004), begin))
+    monkeypatch.setattr(app_link.socket, "SO_PASSCRED", 16, raising=False)  # Linux's; macOS lacks it
+    with caplog.at_level("WARNING", logger=app_link.__name__):
+        links.serve_one()
+    assert connection.sent[-1][1] == b'{"schema":2,"kind":"result","status":"refused"}'
+    assert "broker: app link refused locally (node_link_peer)" in caplog.messages
+
+
 # -- delivered until Central acknowledges ---------------------------------------------------
 
 

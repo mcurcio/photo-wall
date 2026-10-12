@@ -329,6 +329,11 @@ class Registry:
                 and row["pending_expires"] > now):
             return ControlDelivery(delivery_id=row["pending_id"],
                                    delivery_sequence=row["issued_sequence"]).model_dump()
+        if self._applied_is_latest(row) and row["applied_digest"] == digest:
+            # Unchanged since the Player applied it: the same delivery again, so its receipt
+            # (and an app link proved with it) stays current until the state really changes.
+            return ControlDelivery(delivery_id=row["applied_delivery_id"],
+                                   delivery_sequence=row["applied_sequence"]).model_dump()
         delivery_id = secrets.token_hex(16)
         issued = conn.execute(
             "UPDATE player_control_sessions SET issued_sequence=issued_sequence+1,"
@@ -341,19 +346,24 @@ class Registry:
                                delivery_sequence=issued["issued_sequence"]).model_dump()
 
     @staticmethod
-    def _current_applied_receipt(row: dict, report: ControlAck) -> ControlAppliedReceipt | None:
+    def _applied_is_latest(row: dict) -> bool:
+        """The applied delivery is still the latest: nothing issued, pending or rejected since."""
+        return (row["status"] == "negotiated"
+                and row["pending_id"] is None and row["pending_digest"] is None
+                and row["pending_expires"] is None
+                and row["issued_sequence"] == row["applied_sequence"]
+                and row["last_result_sequence"] == row["applied_sequence"]
+                and row["last_result"] == "applied"
+                and row["applied_at"] is not None and row["last_result_at"] is not None
+                and row["last_delivery_id"] == row["applied_delivery_id"]
+                and row["last_result_digest"] == row["applied_digest"]
+                and row["applied_ack_nonce"] is not None)
+
+    @classmethod
+    def _current_applied_receipt(cls, row: dict, report: ControlAck) -> ControlAppliedReceipt | None:
         """Replay only a receipt for the exact still-current applied delivery."""
-        if (report.result != "applied" or row["status"] != "negotiated"
-                or row["pending_id"] is not None or row["pending_digest"] is not None
-                or row["pending_expires"] is not None
-                or row["issued_sequence"] != row["applied_sequence"]
-                or row["last_result_sequence"] != row["applied_sequence"]
-                or row["last_result"] != "applied"
-                or row["applied_at"] is None or row["last_result_at"] is None
-                or row["applied_delivery_id"] != report.delivery_id
-                or row["last_delivery_id"] != report.delivery_id
-                or row["last_result_digest"] != row["applied_digest"]
-                or row["applied_ack_nonce"] is None):
+        if (report.result != "applied" or not cls._applied_is_latest(row)
+                or row["applied_delivery_id"] != report.delivery_id):
             return None
         return ControlAppliedReceipt(
             authority_epoch=row["authority_epoch"],

@@ -206,21 +206,25 @@ def _central_fixture(
         hub_leaf_url=HUB_LEAF_URL if hub is not None else None,
     )
     sessions, lifecycle = app.state.node_sessions, app.state.node_lifecycle
-    protocol_refusals = {}
+    # Effect refusals must stay empty; app-link refusals are counted apart, because a relink
+    # recovers them, and named when a scenario's link never arrives.
+    protocol_refusals, app_link_refusals = {}, {}
     refusal_lock = threading.Lock()
     # Observe sanitized refusal codes without changing any production predicate.
-    def observe_refusals(name, method):
+    def observe_refusals(name, method, refusals):
         def observed(*args, **kwargs):
             try:
                 return method(*args, **kwargs)
             except NodeControlError as error:
                 with refusal_lock:
                     key = name + ":" + error.code
-                    if len(protocol_refusals) < 32 or key in protocol_refusals:
-                        protocol_refusals[key] = protocol_refusals.get(key, 0) + 1
+                    if len(refusals) < 32 or key in refusals:
+                        refusals[key] = refusals.get(key, 0) + 1
                 raise
         return observed
-    lifecycle.effect = observe_refusals("effect", lifecycle.effect)
+    lifecycle.effect = observe_refusals("effect", lifecycle.effect, protocol_refusals)
+    links = app.state.node_app_links
+    links.admit = observe_refusals("app_link", links.admit, app_link_refusals)
     boots = NodeBootService(sessions)
     base = NodeBaseRefV2(
         "v99.0.0",
@@ -564,6 +568,7 @@ def _central_fixture(
                     if outage["last_drop"] is not None else 0,
                 },
                 "protocol_refusals": dict(protocol_refusals),
+                "app_link_refusals": dict(app_link_refusals),
                 "fixture_qualification": True,
             }
 
