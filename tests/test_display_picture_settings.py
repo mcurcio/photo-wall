@@ -11,7 +11,9 @@ projects (`DisplayDocuments`).
 against the previous document is refused; (3) the refusals; (4) "offered" is known only from a
 report for the recorded identity; (5) Revert; (6) an abandoned session reverts with no request;
 (7) Copy; (8) the picture is never a Position commit; (9) a Display's picture follows it to another
-Pi; (10) migration 075's gain, carried through 092.
+Pi; (10) migration 075's gain, carried through 092. Slice S4: (11) Copy by what each display
+offers; (12) a known list is kept; (13) Revert to the Pi's first `before`; (14) "Changed on the
+display's buttons".
 """
 from __future__ import annotations
 
@@ -61,6 +63,7 @@ from contracts.node_output import (
     output_document_key,
 )
 from contracts.node_picture import (
+    Choice,
     HardwareRange,
     HardwareResult,
     HardwareSetting,
@@ -82,6 +85,12 @@ SKEWED_CORNERS = [[0.1, 0.05], [0.95, 0.0], [1.0, 1.0], [0.0, 0.9]]
 # The test monitor as the Pi asked it: brightness and contrast as levels of 100, a colour preset list.
 OFFERED = (HardwareSetting("10", HardwareRange(RangeKind.LEVEL, 100, ()), 60),
            HardwareSetting("12", HardwareRange(RangeKind.LEVEL, 100, ()), 50))
+
+
+def _read(brightness: int, contrast: int = 50) -> tuple[HardwareSetting, ...]:
+    """OFFERED with the display's latest reads of brightness (10) and contrast (12)."""
+    return (HardwareSetting("10", HardwareRange(RangeKind.LEVEL, 100, ()), brightness),
+            HardwareSetting("12", HardwareRange(RangeKind.LEVEL, 100, ()), contrast))
 
 
 def _documents(registry, serial: str = SERIAL, output_id: str = "HDMI-A-1") -> tuple[OutputDocument, PictureDocument]:
@@ -184,13 +193,14 @@ def test_hardware_46_and_software_114_are_set_apart_end_to_end_and_never_cost_po
         assert (early.status_code, early.json()) == (409, {"error": "not_presented_yet"})
         assert _view(client)["status"] == "waiting"
         _picture_report(registry, for_change=picture.picture_change, presented=picture.picture_change,
-                        results={"10": HardwareResult(WriteResult.TAKEN, 60, 46)})
+                        offered=_read(46), results={"10": HardwareResult(WriteResult.TAKEN, 60, 46)})
         view = _view(client)
         assert view["status"] == "shown" and view["offered_known"] is True
         brightness = next(row for row in view["hardware"] if row["code"] == "10")
         assert brightness == {"code": "10", "name": "Brightness", "value": 46,
-                              "offered": {"range": {"kind": "level", "maximum": 100, "choices": []}, "current": 60},
-                              "result": {"result": "taken", "before": 60, "after": 46}}
+                              "offered": {"range": {"kind": "level", "maximum": 100, "choices": []}, "current": 46},
+                              "result": {"result": "taken", "before": 60, "after": 46},
+                              "changed_on_buttons": False}
         contrast = next(row for row in view["hardware"] if row["code"] == "12")
         assert (contrast["value"], contrast["result"]) == (None, None)  # unset: as the display has it
         assert view["software"] == {"brightness_percent": 114, "contrast_percent": 100,
@@ -313,8 +323,8 @@ def test_the_sources_wait_ends_at_a_sessions_idle_deadline(registry):
 
 
 def test_copy_carries_the_software_values_names_the_hardware_skipped_and_never_position(registry):
-    """(7) Slice S2 copies all four software values; each hardware value set on the source is named
-    as skipped and the target's own stay (S4 copies the ones the target offers)."""
+    """(7) Copy carries all four software values; with neither display's list known, each hardware
+    value set on the source is named as skipped and the target's own stay."""
     pi_a, pi_b = enroll_pi(registry, "pi-a"), enroll_pi(registry, "pi-b")
     _bind(registry, _frame(registry, "a"), pi_a, "HDMI-A-1")
     _bind(registry, _frame(registry, "b"), pi_b, "HDMI-A-1")
@@ -405,6 +415,99 @@ def test_a_session_needs_a_bound_frame_with_a_display(registry):
         picture = _view(client, "loose")
         assert (picture["status"], picture["display_id"], picture["session"]) == ("no-display", None, None)
         assert client.post("/v1/operator/frames/kitchen/picture-sessions").status_code == 401
+
+
+def _revert(client, session: dict) -> None:
+    assert client.delete(f"/v1/operator/picture-sessions/{session['session_id']}", headers=AUTH).status_code == 204
+
+
+def test_copy_carries_each_hardware_value_the_target_offers_the_same_way(registry):
+    """(11) 10 = 46 of 100 goes to a display counting 10 of 255 as 117; 14 = 5 "6500 K" is skipped
+    where 5 is "sRGB"; the target's own 12 stays."""
+    pi_a, pi_b = enroll_pi(registry, "pi-a"), enroll_pi(registry, "pi-b")
+    _bind(registry, _frame(registry, "a"), pi_a, "HDMI-A-1")
+    _bind(registry, _frame(registry, "b"), pi_b, "HDMI-A-1")
+    _report(registry, "pi-a", "HDMI-A-1", SERIAL_DISPLAY)
+    _report(registry, "pi-b", "HDMI-A-1", NO_SERIAL)
+    preset = HardwareRange(RangeKind.CHOICE, None, (Choice(4, "5000 K"), Choice(5, "6500 K")))
+    _picture_report(registry, serial="pi-a", identity=SERIAL_DISPLAY, offered=(
+        HardwareSetting("10", HardwareRange(RangeKind.LEVEL, 100, ()), 46), HardwareSetting("14", preset, 5)))
+    _picture_report(registry, serial="pi-b", offered=(
+        HardwareSetting("10", HardwareRange(RangeKind.LEVEL, 255, ()), 0),
+        HardwareSetting("12", HardwareRange(RangeKind.LEVEL, 100, ()), 30),
+        HardwareSetting("14", HardwareRange(RangeKind.CHOICE, None, (Choice(5, "sRGB"),)), 5)))
+    _sql(registry, "UPDATE displays SET hardware_picture='{\"10\": 46, \"14\": 5}', software_brightness_percent=114 "
+                   "WHERE serial IS NOT NULL")
+    _sql(registry, "UPDATE displays SET hardware_picture='{\"12\": 30}' WHERE serial IS NULL")
+    with _client(registry) as client:
+        copied = client.post("/v1/operator/frames/a/picture-copies", headers=AUTH, json={"to_frames": ["b"]})
+        assert copied.json() == [{"frame_id": "b", "outcome": "copied", "hardware_skipped": ["14"]}]
+    target = _display(registry, pi_b)
+    assert (target["hardware_picture"], target["software_brightness_percent"]) == ({"10": 117, "12": 30}, 114)
+    assert dict(_picture(registry, "pi-b").hardware) == {"10": 117, "12": 30}
+
+
+def test_a_report_that_does_not_know_the_list_yet_keeps_the_known_list_of_the_same_display(registry):
+    """(12) The Pi restarted and has not asked yet: the tab keeps the list. Mutation probe:
+    `kept_offered` lets None through -> offered_known turns False."""
+    _bound(registry)
+    with _client(registry) as client:
+        _picture_report(registry, offered=None)
+        view = _view(client)
+        assert view["offered_known"] is True and [row["code"] for row in view["hardware"]] == ["10", "12"]
+        _picture_report(registry, offered=None, identity=SERIAL_DISPLAY)    # another display there now
+        _report(registry, SERIAL, "HDMI-A-1", SERIAL_DISPLAY)
+        assert _view(client)["offered_known"] is False
+        _report(registry, SERIAL, "HDMI-A-1", NO_SERIAL)
+        _picture_report(registry, offered=None)                              # the first display is back
+        assert _view(client)["offered_known"] is False                       # its list was not kept
+
+
+def test_revert_puts_a_code_set_only_in_the_session_back_to_the_pis_first_before(registry):
+    """(13) The Pi read 60 before the session's first write of 10: Revert sets 10 = 60; the second
+    write's `before` (46) does not replace it; a report for the change the session began at does
+    not count. Mutation probe: `with_befores` overwrites -> 10 = 46."""
+    player = _bound(registry)
+    began = _picture(registry).picture_change
+    with _client(registry) as client:
+        session = _begin(client)
+        _picture_report(registry, for_change=began, results={"12": HardwareResult(WriteResult.TAKEN, 20, 50)})
+        _hardware(client, session, "10", 46, 1)
+        first = _picture(registry).picture_change
+        _picture_report(registry, for_change=first, results={"10": HardwareResult(WriteResult.TAKEN, 60, 46)})
+        _hardware(client, session, "10", 50, 2)
+        _hardware(client, session, "12", 70, 3)
+        second = _picture(registry).picture_change
+        _picture_report(registry, for_change=second, results={"10": HardwareResult(WriteResult.TAKEN, 46, 50)})
+        _revert(client, session)
+    assert _display(registry, player)["hardware_picture"] == {"10": 60}     # 12: no before after the session began
+    assert dict(_picture(registry).hardware) == {"10": 60}
+
+
+def test_a_value_changed_on_the_displays_buttons_is_shown_and_not_written_back(registry):
+    """(14) The owner's addition (main loop, 2026-10-12): the Pi's re-read says 40 where Photo Wall
+    set 46 -> the row says so, with no new picture change; not while the Pi has not carried out the
+    value in force, nor when the display did not take the write."""
+    _bound(registry)
+    _sql(registry, "UPDATE displays SET hardware_picture='{\"10\": 46}'")
+    shown = _picture(registry)
+
+    def brightness(client) -> dict:
+        return next(row for row in _view(client)["hardware"] if row["code"] == "10")
+    with _client(registry) as client:
+        _picture_report(registry, for_change=shown.picture_change, presented=shown.picture_change,
+                        offered=_read(46), results={"10": HardwareResult(WriteResult.TAKEN, 60, 46)})
+        assert brightness(client)["changed_on_buttons"] is False
+        _picture_report(registry, for_change=shown.picture_change, presented=shown.picture_change,
+                        offered=_read(40), results={"10": HardwareResult(WriteResult.TAKEN, 60, 46)})
+        assert brightness(client)["changed_on_buttons"] is True and brightness(client)["offered"]["current"] == 40
+        assert _picture(registry).picture_change == shown.picture_change     # not written back
+        _picture_report(registry, for_change=shown.picture_change, presented=shown.picture_change,
+                        offered=_read(60), results={"10": HardwareResult(WriteResult.NOT_TAKEN, 60, 60)})
+        assert brightness(client)["changed_on_buttons"] is False             # "the display did not take it"
+        session = _begin(client)
+        _hardware(client, session, "10", 50, 1)
+        assert brightness(client)["changed_on_buttons"] is False             # 50 is not carried out yet
 
 
 # --- Migration 075, carried through 092 --------------------------------------------------------------

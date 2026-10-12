@@ -5495,3 +5495,21 @@ Order: (a) merge the iac PR that switches the factory to `central.app:create_app
   one assertion), tests/test_node_picture_contract.py and tests/node/display/test_display_picture_controls.py
   (WriteResult now imported from contracts.node_picture, its one home). Migration 075's tests in
   tests/test_display_picture_settings.py now undo 092 first and run 075 then 092.
+
+## E-PS-S4 (Picture split, slice S4, 2026-10-12) · feat/picture-hardware-and-software
+- **"Changed on the display's buttons" (owner addition, main loop, 2026-10-12) has its Central home in
+  `central/displays/hardware.py` `changed_on_buttons`, carried on each row as `HardwareRow.changed_on_buttons` and
+  `HardwareSettingView.changed_on_buttons` (bool).** `central/displays/views.py` is beyond S4's owned list (one added
+  field; no sibling owns it). The rule: a value set in Photo Wall, the report answers the picture change whose
+  document carries the in-force hardware, that change's write of the code was taken or not needed, and
+  `offered[].current` answered and differs. S5 should read the field, not recompute it in the console.
+- **The rule needs `offered[].current` to be the display's last read, a write's read-back included** (design.md's
+  `current: last read`). S1's controller keeps the ask's read in `port.lists` after a write, so until S3 puts each
+  write's `after` (and every periodic re-read) into the list it reports, a taken write would show "Changed on the
+  display's buttons" falsely. S3 must do so; the DB test models a report after a write with `current` = `after`.
+- **The tab's per-row `result` now also waits for the answered document to carry the in-force hardware** (S2 showed
+  the previous document's results while a session's edit was not projected yet): the same gate as `presented`.
+- **`with_befores` records a `before` for every result of a later change, touched or not** (as the page says);
+  `reverted` reads only touched codes, so the extra ones are inert.
+- **Copy skips (and names) a stored level past the source display's maximum now** (its maximum changed since it was
+  set), rather than raising from `level_share`.

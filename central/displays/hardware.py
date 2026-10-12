@@ -17,14 +17,19 @@ module holds every rule that reads one against the other, one home each:
   known list for the same display.
 - **The tab's rows** (`hardware_rows`): every offered setting and every set code, in picture-list
   order.
+- **Changed on the display's buttons** (`changed_on_buttons`; 1c's re-read, kept by the owner's
+  addition, main loop, 2026-10-12): a value set in Photo Wall that the display's latest read
+  (`HardwareSetting.current`) says is otherwise, once the Pi carried out the picture change in force
+  and took the write (or needed none). Photo Wall does not write it back until the next change.
 
 Slice S2 holds offered_for, edit_refusal, offered_setting and hardware_rows; S4 brings
-copied_hardware, level_share and kept_offered.
+copied_hardware, level_share, kept_offered and changed_on_buttons.
 """
 from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from fractions import Fraction
 from typing import Literal
 
 from contracts.node_output import DisplayIdentity
@@ -35,6 +40,7 @@ from contracts.node_picture import (
     PictureReport,
     RangeKind,
     VcpCode,
+    WriteResult,
 )
 
 EditRefusal = Literal["not_offered", "out_of_range"]
@@ -78,7 +84,10 @@ def level_share(value: int, source_maximum: int, target_maximum: int) -> int:
     """`value` of `source_maximum` at the same share of `target_maximum`, rounded half to even
     (Python's round): 46 of 100 -> 117 of 255. Pure; ValueError("level_share") unless both maxima
     are >= 1 and 0 <= value <= source_maximum."""
-    raise NotImplementedError("picture split S4")
+    if not (_whole(source_maximum) and _whole(target_maximum) and source_maximum >= 1 and target_maximum >= 1
+            and _whole(value) and 0 <= value <= source_maximum):
+        raise ValueError("level_share")
+    return round(Fraction(value * target_maximum, source_maximum))
 
 
 def copied_hardware(source: Mapping[VcpCode, int], *,
@@ -89,14 +98,52 @@ def copied_hardware(source: Mapping[VcpCode, int], *,
     code is copied when both lists offer it and: both are LEVEL (`level_share` of the two maxima),
     or both are CHOICE and the target lists a Choice equal to the source's (same value and name).
     Anything else is skipped, including every code when either list is unknown. Pure."""
-    raise NotImplementedError("picture split S4")
+    copied: dict[VcpCode, int] = {}
+    skipped: list[VcpCode] = []
+    for code in PICTURE_LIST:
+        if code not in source:
+            continue
+        value = _copied_value(source[code], offered_setting(source_offered, code),
+                              offered_setting(target_offered, code))
+        if value is None:
+            skipped.append(code)
+        else:
+            copied[code] = value
+    return copied, tuple(skipped)
+
+
+def _copied_value(value: int, source: HardwareSetting | None, target: HardwareSetting | None) -> int | None:
+    """`value` as the target counts it, or None when it does not carry over (copied_hardware's rule)."""
+    if source is None or target is None or source.range.kind is not target.range.kind:
+        return None
+    if source.range.kind is RangeKind.LEVEL:
+        source_maximum, target_maximum = source.range.maximum or 0, target.range.maximum or 0
+        return level_share(value, source_maximum, target_maximum) if 0 <= value <= source_maximum else None
+    if source.range.kind is RangeKind.CHOICE:
+        choice = next((item for item in source.range.choices if item.value == value), None)
+        return value if choice is not None and choice in target.range.choices else None
+    return None
 
 
 def kept_offered(previous: PictureReport | None, report: PictureReport) -> tuple[HardwareSetting, ...] | None:
     """What to record as the Output's offered list: `report.offered`, unless it is None while
     `previous` describes the same identity (not None, equal) with a known list; then that list.
     Pure."""
-    raise NotImplementedError("picture split S4")
+    if (report.offered is None and previous is not None and previous.identity is not None
+            and previous.identity == report.identity):
+        return previous.offered
+    return report.offered
+
+
+def changed_on_buttons(value: int | None, offered: HardwareSetting | None, result: HardwareResult | None, *,
+                       answered: bool) -> bool:
+    """Whether the display now holds a value set in Photo Wall otherwise (someone used its own
+    buttons): `value` is set, the display's latest read (`offered.current`, the Pi's last read of the
+    code, a write's read-back and the periodic re-read included) answered and differs from it, the
+    report `answered` the picture change that carries `value`, and that change's write of the code
+    was taken or none was needed (a write not taken is "the display did not take it"). Pure."""
+    return (answered and value is not None and offered is not None and offered.current is not None
+            and offered.current != value and (result is None or result.result is WriteResult.TAKEN))
 
 
 @dataclass(frozen=True)
@@ -104,22 +151,34 @@ class HardwareRow:
     """One row of the Picture tab's Display (hardware) section. `offered`: what the display offers
     for `code` at its last check (None: set here, not offered then, or the list is unknown);
     `value`: in force (None: as the display has it); `result`: the Pi's write for the latest
-    picture change (None: none, or the report answers an older change)."""
+    picture change (None: none, or the report answers an older change); `changed_on_buttons`:
+    `changed_on_buttons`'s rule."""
     code: VcpCode
     offered: HardwareSetting | None
     value: int | None
     result: HardwareResult | None
+    changed_on_buttons: bool
 
 
 def hardware_rows(values: Mapping[VcpCode, int], offered: tuple[HardwareSetting, ...] | None,
                   results: Mapping[VcpCode, HardwareResult] | None) -> tuple[HardwareRow, ...]:
     """One row per code that is offered or set (the union), in PICTURE_LIST order. `results` None:
-    the report does not answer the latest picture change. Pure."""
+    the report does not answer the picture change that carries `values`. Pure."""
     codes = set(values) | {setting.code for setting in offered or ()}
-    return tuple(HardwareRow(code, offered_setting(offered, code), values.get(code),
-                             None if results is None else results.get(code))
-                 for code in PICTURE_LIST if code in codes)
+    rows = []
+    for code in PICTURE_LIST:
+        if code not in codes:
+            continue
+        setting, value = offered_setting(offered, code), values.get(code)
+        result = None if results is None else results.get(code)
+        rows.append(HardwareRow(code, setting, value, result,
+                                changed_on_buttons(value, setting, result, answered=results is not None)))
+    return tuple(rows)
 
 
-__all__ = ["EditRefusal", "HardwareRow", "copied_hardware", "edit_refusal", "hardware_rows", "kept_offered",
-           "level_share", "offered_for", "offered_setting"]
+def _whole(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+__all__ = ["EditRefusal", "HardwareRow", "changed_on_buttons", "copied_hardware", "edit_refusal", "hardware_rows",
+           "kept_offered", "level_share", "offered_for", "offered_setting"]

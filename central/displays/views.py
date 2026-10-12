@@ -202,6 +202,7 @@ class HardwareSettingView(Model):
     offered: OfferedView | None                     # None: set here, not offered at the last check
     value: Annotated[int, Field(ge=0, le=LEVEL_MAX)] | None   # in force; None: as the display has it
     result: HardwareResultView | None
+    changed_on_buttons: bool                        # hardware.changed_on_buttons: set here, read otherwise
 
 
 class SoftwarePictureView(Model):

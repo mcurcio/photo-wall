@@ -61,7 +61,7 @@ from psycopg.types.json import Jsonb
 
 from central.content_catalog.catalog import device_id_for_serial
 from central.db import Database, DatabaseTransactionClock, TransactionClock
-from central.displays.hardware import HardwareRow, hardware_rows, offered_for
+from central.displays.hardware import HardwareRow, hardware_rows, kept_offered, offered_for
 from central.displays.model import (
     DEFAULT_SETTINGS,
     TEST_SECONDS,
@@ -97,6 +97,7 @@ from central.displays.picture import (
     picture_status,
     presented,
     reverted,
+    with_befores,
 )
 from central.displays.ports import DisplayRefused
 from central.displays.views import (
@@ -447,11 +448,31 @@ def picture_session(row: Mapping[str, Any]) -> PictureSession | None:
 
 
 def record_picture_report(conn: Any, player_id: str, report: PictureReport, now: float) -> None:
-    """Record `report` as its Output's latest picture report (`picture_reports`)."""
+    """Record `report` as its Output's latest picture report (`picture_reports`), its offered list
+    `hardware.kept_offered` of the one recorded before (a "not known yet" never replaces a known list
+    for the same display); then the open session on the Display recorded on that Output, if any,
+    keeps the befores the report brings (`picture.with_befores`). Locks after the player row (the
+    judge's): the Output's picture report row, then the session row."""
+    previous = conn.execute("SELECT report AS picture_report FROM picture_reports WHERE player_id=%s "
+                            "AND output_id=%s FOR UPDATE", (player_id, report.output_id)).fetchone()
+    offered = kept_offered(None if previous is None else _stored_picture_report(previous), report)
+    if offered is not report.offered:
+        report = replace(report, offered=offered)
     conn.execute(
         "INSERT INTO picture_reports(player_id, output_id, report, reported_at) VALUES (%s, %s, %s, %s) "
         "ON CONFLICT (player_id, output_id) DO UPDATE SET report=EXCLUDED.report, reported_at=EXCLUDED.reported_at",
         (player_id, report.output_id, Jsonb(json.loads(encode_picture_report(report))), now))
+    row = conn.execute(f"SELECT {_SESSION_COLUMNS} FROM output_displays o "  # noqa: S608
+                       "JOIN picture_sessions ps ON ps.display_id=o.display_id "
+                       "WHERE o.player_id=%s AND o.output_id=%s FOR UPDATE OF ps",
+                       (player_id, report.output_id)).fetchone()
+    session = None if row is None else picture_session(row)
+    if session is None:
+        return
+    kept = with_befores(session, report)
+    if kept.hardware_before != session.hardware_before:
+        conn.execute("UPDATE picture_sessions SET hardware_before=%s WHERE id=%s",
+                     (Jsonb(dict(kept.hardware_before)), session.session_id))
 
 
 # --- The Output report judge ---------------------------------------------------------------------
@@ -994,7 +1015,8 @@ def _hardware_view(row: HardwareRow) -> HardwareSettingView:
                                                   for choice in offered.range.choices)),
             current=offered.current),
         result=None if result is None else HardwareResultView(result=result.result, before=result.before,
-                                                              after=result.after))
+                                                              after=result.after),
+        changed_on_buttons=row.changed_on_buttons)
 
 
 class PgPictureSessions:
@@ -1017,7 +1039,8 @@ class PgPictureSessions:
                    else effective_picture(stored_picture(row), session, now))
         document, report = _stored_picture_document(row), _stored_picture_report(row)
         offered = _offered(row)
-        current = report is not None and document is not None and report.for_change == document.picture_change
+        current = (report is not None and document is not None and report.for_change == document.picture_change
+                   and dict(document.hardware) == dict(picture.hardware))
         live = session is not None and session.lease.live(now)
         status = picture_status(bound=row["player_id"] is not None and row["display_id"] is not None,
                                 document=document, report=report)

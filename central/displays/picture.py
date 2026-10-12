@@ -13,7 +13,8 @@ One home each for:
   in force while the session is live (`effective_picture`); Done stores the draft; Revert, or the
   session's lease running out, puts back what was in force before (`reverted`: the stored values,
   and a touched hardware code that was "as the display has it" goes to the value the Pi read just
-  before its first write in the session, when one is known). The projection is a pure function of
+  before its first write in the session, when one is known: `with_befores`, from each picture
+  report for a change after the session began). The projection is a pure function of
   the stored picture, the session and Central's `now`, so an abandoned console needs no reaper.
 - **The picture document** (`picture_document`, `picture_digest`): the Output's own key, with its
   own `picture_change`, which rises only when the digest differs (never with the Output
@@ -35,7 +36,7 @@ from enum import StrEnum
 from typing import Final
 from uuid import UUID
 
-from central.displays.hardware import edit_refusal
+from central.displays.hardware import copied_hardware, edit_refusal
 from central.live_session import Lease, StaleSequence, next_sequence, touched
 from contracts.node_picture import (
     NEUTRAL_SOFTWARE,
@@ -201,11 +202,26 @@ def copied(source: DisplayPicture, target: DisplayPicture, *,
            source_offered: tuple[HardwareSetting, ...] | None,
            target_offered: tuple[HardwareSetting, ...] | None) -> tuple[DisplayPicture, tuple[VcpCode, ...]]:
     """(`target` with `source`'s software and the copied hardware merged over the target's, the
-    source codes skipped in picture-list order). Slice S2 copies no hardware value (every source
-    code is skipped and left as it is on the target); S4 copies by `hardware.copied_hardware`."""
-    del source_offered, target_offered   # S4's rule reads them
-    skipped = tuple(code for code in PICTURE_LIST if code in source.hardware)
-    return DisplayPicture(dict(target.hardware), source.software), skipped
+    source codes skipped in picture-list order): `hardware.copied_hardware` decides which hardware
+    values carry over; a skipped code, and every target code the source does not set, stays as it
+    is on the target."""
+    hardware, skipped = copied_hardware(source.hardware, source_offered=source_offered,
+                                        target_offered=target_offered)
+    return DisplayPicture(_in_list_order({**target.hardware, **hardware}), source.software), skipped
+
+
+def with_befores(session: PictureSession, report: PictureReport) -> PictureSession:
+    """`session` with the befores `report` brings: when the report answers a picture change after
+    the session began (`for_change > began_at_change`), each result's `before` (when the display
+    answered it) for a code with none yet. The first one per code is kept, so a second write in the
+    session never replaces what the display showed before it began."""
+    if report.for_change is None or report.for_change <= session.began_at_change:
+        return session
+    befores = {code: result.before for code, result in report.results.items()
+               if result.before is not None and code not in session.hardware_before}
+    if not befores:
+        return session
+    return replace(session, hardware_before=_in_list_order({**session.hardware_before, **befores}))
 
 
 def _next(session: PictureSession, expected_sequence: int, now: float) -> int:
@@ -225,4 +241,4 @@ def _in_list_order(hardware: Mapping[VcpCode, int]) -> dict[VcpCode, int]:
 __all__ = ["PICTURE_IDLE_SECONDS", "DisplayPicture", "PictureRefused", "PictureSession", "PictureStatus",
            "SoftwareSetting", "copied", "default_picture", "edited_hardware", "edited_software",
            "effective_picture", "picture_digest", "picture_document", "picture_status", "presented",
-           "reverted"]
+           "reverted", "with_befores"]
