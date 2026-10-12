@@ -1,5 +1,7 @@
 # Media storage and delivery leases
 
+> **Removed.** The media store (`central/media_store.py`, `media_jobs`, `media_blobs`) was replaced by media variants on the one asset read path in the follow-up to roadmap 5a (migrations 087 and 088). This page is the record of the design it implemented. Today's behaviour is in the [media module](module-media.md#the-asset-tables) and the [media worker](module-media-worker.md#the-media-cache-budget).
+
 Status: implementation contract, 2026-09-05; fault evidence is recorded after execution. This module implements [decision 0004](decisions/0004-media-publication-and-worker-recovery.md) under the source/job repository and [media preparation](module-media-preparation.md) boundaries. It owns local bytes, publication recovery, collection, and authorized read descriptors; it never selects, downloads, converts, or grants execution.
 
 ## API and state ownership

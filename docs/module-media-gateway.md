@@ -1,5 +1,7 @@
 # Authenticated media HTTP gateway
 
+> **Removed.** The gateway (`central/media_gateway.py`, `GET /v1/media/{sha256}`) was replaced by `GET /v1/media/{asset_id}/{recipe_id}` through `FrameMedia` and the AssetReader in the follow-up to roadmap 5a. This page is the record of the design it implemented. Today's behaviour is in the [media module](module-media.md#immutable-photo-wall-delivery).
+
 The HTTP gateway adapts [MediaStore read leases](module-media-store.md) to the source-neutral Player protocol. It owns no files, query configuration, credentials, or publication policy. `GET /v1/media/{sha256}` accepts a Player bearer token and delegates exact current-offer/secured authorization to `MediaStore.open_read` before starting the response.
 
 The response has exact Content-Length, prepared media Content-Type, a quoted digest ETag, and private no-store caching. It rejects Range requests explicitly and never redirects or performs upstream requests. Digest paths are strictly validated. No admin token substitutes for Player authority. Each new request obtains a fresh authorization decision; a bounded active descriptor has its existing transfer lease.
