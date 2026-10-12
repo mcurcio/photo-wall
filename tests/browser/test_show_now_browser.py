@@ -32,7 +32,7 @@ from operator_harness import (
     report_readiness,
     submit_sign_in,
 )
-from photo_seed import connected, library_of, saved_source
+from photo_seed import connected, filled, library_of, saved_source
 from playwright.sync_api import expect
 from test_operator_showrunner_browser import (
     INVALID_FRAME,
@@ -46,6 +46,7 @@ from test_operator_showrunner_browser import (
 )
 
 from central.photo_library.model import SourceQuery
+from central.photo_library.ports import CheckFailed
 from central.runtime import Contribution, Scene
 
 pytestmark = pytest.mark.skipif(
@@ -123,6 +124,27 @@ def test_show_now_names_the_scenes_sources_in_one_line_with_no_check_now(page, r
         form.get_by_role("button", name="Continue", exact=True).click()
         expect(form.get_by_role("definition").filter(has_text="garden")).to_have_text("garden (Not checked yet)")
         expect(form.get_by_role("button", name="Activate now", exact=True)).to_be_enabled()
+
+
+def test_show_now_shows_a_failed_check_as_its_problem_naming_immich(page, registry):
+    """A Source whose check failed reads as the error template under the one line, naming who
+    failed (Immich) with its one fix; the line says only "Check failed" (owner, 2026-10-09).
+    Mutation probe: drop SourceCheckProblem from ShowNowFlow.jsx's SceneSources."""
+    _seed(registry)
+    library, garden = _garden(registry)
+    with registry.db.transaction() as conn:
+        key = conn.execute("SELECT pool_key FROM media_sources WHERE source_ref=%s",
+                           (garden,)).fetchone()["pool_key"]
+    filled(library, key, [], CheckFailed(problem="connection"))
+    _runtime(registry).command("set_scene", _on(SCENE_ID, garden))
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "now")
+        form = start_show_now(page, SCENE_ID)
+        expect(form.get_by_role("definition").filter(has_text="garden")).to_have_text("garden (Check failed)")
+        problem = form.get_by_role("group", name="Check failed")
+        expect(problem).to_contain_text("garden: Check failed.")
+        expect(problem).to_contain_text("Immich could not be read: see Photo library. Photos keep playing.")
+        expect(problem.get_by_role("link", name="Open Photo library")).to_be_visible()
 
 
 def test_show_now_handles_historical_and_authored_scenes(page, registry):

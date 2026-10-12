@@ -1248,6 +1248,15 @@ label {
   margin-left: auto;
 }
 
+/* A failed Source's error template (SourceCheckProblem), under the line, full width. */
+.chosen-sources__problems {
+  display: flex;
+  flex: 1 0 100%;
+  flex-direction: column;
+  gap: 8px;
+  padding: 4px 0 6px;
+}
+
 /* The flow kit (flow design §6): step form, stepper, Advanced, summary card. */
 :where(.button--primary) {
   color: var(--color-on-accent);

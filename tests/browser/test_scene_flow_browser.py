@@ -119,13 +119,27 @@ def test_scene_photos_and_review_say_each_sources_state_and_readiness(page, regi
         expect(card).to_contain_text(expected)
         readiness = form.get_by_role("region", name="Source media status")
         expect(readiness.get_by_role("listitem", name="garden")).to_be_visible()
-        expect(readiness).not_to_contain_text(expected)
+        # The line itself never repeats the card's state; a failed check's problem below it does,
+        # as the error template with its fix.
+        expect(readiness.get_by_role("listitem", name="garden")).not_to_contain_text(expected)
         if readiness_line is not None:
             expect(readiness).to_contain_text(readiness_line)
         # The Frames lead: the board sits right under the cards, the line of actions under it.
         board = form.get_by_role("region", name="How this Scene fills its Frames", exact=True)
         cards = form.get_by_role("group", name="Photo sources", exact=True)
         assert cards.bounding_box()["y"] < board.bounding_box()["y"] < readiness.bounding_box()["y"]
+        line = readiness.get_by_role("listitem", name="garden")
+        if state == "failed":
+            # A failure is the error template, not a line of body text (owner, 2026-10-09), with
+            # its one fix, right under the line of actions. Mutation probe: drop ChosenSources'
+            # SourceCheckProblem.
+            problem = readiness.get_by_role("group", name="Check failed")
+            expect(problem).to_contain_text("garden: Check failed.")
+            expect(problem.get_by_role("link", name="Open Photo library")).to_have_attribute(
+                "href", "#/photo-library")
+            assert line.bounding_box()["y"] < problem.bounding_box()["y"]
+        else:
+            expect(readiness.get_by_role("group", name="Check failed")).to_have_count(0)
         scene_continue(page, "Playback")
         scene_continue(page, "Review")
         expect(form.get_by_label("Your answers", exact=True)).to_contain_text("garden")

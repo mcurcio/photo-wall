@@ -815,6 +815,8 @@ PHOTO_PAGE_IMPORTS = {
     "photo-fit.ts": {"photoFitApi.js", "sourceNames.js"},
     # The photo sheet (follow-ups C2): one photo's facts and Immich's copies.
     "photo-sheet.tsx": {"libraryApi.js"},
+    # A failed check as the error template where a Source is chosen or shown (Scene, Show now).
+    "source-check-problem.tsx": {"sourceWords.js"},
 }
 DECLARED_IMPORTS = {**FRAME_PAGE_IMPORTS, **PHOTO_PAGE_IMPORTS}
 

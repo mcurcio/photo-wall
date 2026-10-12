@@ -3,6 +3,7 @@ import React, { useId } from "react";
 import { draftId, idFromName, PLAYBACK_LABELS } from "./authoring.js";
 import { CycleField, LoopField } from "./CycleInput.jsx";
 import { Field, IdField, idNeeded, NameField } from "./Field.jsx";
+import { SourceCheckProblem } from "./domain/source-check-problem.tsx";
 import { Advanced } from "./flow/Advanced.jsx";
 import { CheckAnswers, NotChosen } from "./flow/CheckAnswers.jsx";
 import { candidateLabels } from "./mediaHealth.js";
@@ -412,10 +413,13 @@ const FRAMES_LABEL = "Frames";
  * The chosen Photo sources' actions on one line (design fix round 3): each Source's name, a note
  * only when its photos are not ready (pool, read here), Check now's receipt, Check now and
  * Remove; then Manage in Sources (the Scene draft stays open in this tab meanwhile). Each card
- * above already says its check's state, so the line does not repeat it.
+ * above already says its check's state, so the line does not repeat it; a Source whose check
+ * failed also gets the error template, with its one fix, right under the line
+ * (SourceCheckProblem: a failure is a block, never a line of body text).
  */
 function ChosenSources({ chosen, check, onManage, onRemove }) {
   if (chosen.length === 0) return null;
+  const failed = chosen.filter(({ source }) => source?.check?.state === "failed");
   return (
     <section className="chosen-sources" aria-label="Source media status">
       <ul className="chosen-sources__list">
@@ -424,6 +428,13 @@ function ChosenSources({ chosen, check, onManage, onRemove }) {
         ))}
       </ul>
       <button type="button" className="chosen-sources__manage" onClick={onManage}>Manage in Sources</button>
+      {failed.length > 0 && (
+        <div className="chosen-sources__problems">
+          {failed.map(({ ref, source }) => (
+            <SourceCheckProblem key={ref} name={sourceName(source)} check={source.check} />
+          ))}
+        </div>
+      )}
     </section>
   );
 }

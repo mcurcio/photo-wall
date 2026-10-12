@@ -103,6 +103,50 @@ def test_a_sources_state_is_its_checks_and_a_failure_keeps_photos_playing():
     assert out["preFour"] == "Made before Photo Wall read Immich directly"
 
 
+ORIGIN_SCRIPT = r"""
+const words = await import(process.argv[1]);
+console.log(JSON.stringify({
+  origins: words.ORIGINS,
+  failed: Object.fromEntries(Object.keys(words.FAILED_WORDS).map((code) =>
+    [code, words.failedWords({ state: "failed", problem: code })])),
+  leftOut: Object.fromEntries(Object.entries(words.LEFT_OUT_WORDS).map(([code, said]) => [code, [said(1), said(3)]])),
+}));
+"""
+
+
+def _literal_codes(name):
+    """The codes of one `Literal` alias in central/photo_library/model.py."""
+    text = (SRC.parents[2] / "central/photo_library/model.py").read_text()
+    body = re.search(rf"^{name} = Literal\[(.*?)\]", text, re.MULTILINE | re.DOTALL).group(1)
+    return set(re.findall(r'"([a-z_]+)"', body))
+
+
+def test_each_failure_names_who_refused_it_from_one_table():
+    """Who refused (owner, 2026-10-09: "If Immich rejects the grants on the API key, then its an
+    'immich' error. But if photo wall is rejecting sources that produce more than 1000 photos, then
+    its a 'photo wall' error"): every failed-check problem and left-out reason the model serves has
+    one origin in sourceWords.js `ORIGINS`, and its words name that origin. Mutation probe: give
+    `over_item_limits` the origin "Immich"."""
+    out = _run(ORIGIN_SCRIPT, "sourceWords.js")
+    problems, reasons = _literal_codes("SourceProblem"), _literal_codes("LeftOutReason")
+    assert problems == {"connection", "chosen_item_gone"}
+    assert reasons == {"unreadable_answer", "over_item_limits"}
+    assert set(out["origins"]) == problems | reasons
+    assert set(out["failed"]) == problems and set(out["leftOut"]) == reasons
+    assert out["origins"]["over_item_limits"] == "Photo Wall"
+    assert {out["origins"][code] for code in problems | {"unreadable_answer"}} == {"Immich"}
+    for code, said in out["failed"].items():
+        assert out["origins"][code] in said, (code, said)
+    for code, said in out["leftOut"].items():
+        assert all(out["origins"][code] in line for line in said), (code, said)
+    assert out["failed"]["connection"] == "Immich could not be read: see Photo library."
+    assert out["leftOut"] == {
+        "unreadable_answer": ["1 could not be read: Immich sent an answer Photo Wall can't read",
+                              "3 could not be read: Immich sent an answer Photo Wall can't read"],
+        "over_item_limits": ["1 is over Photo Wall's size limits", "3 are over Photo Wall's size limits"],
+    }
+
+
 def test_check_nows_receipt_lasts_until_the_served_check_differs():
     out = _run(CHECK_SCRIPT, "useSourceCheck.js")
     assert out["kinds"] == ["requested", "unknown", "unknown", "Check request failed: source unknown.",

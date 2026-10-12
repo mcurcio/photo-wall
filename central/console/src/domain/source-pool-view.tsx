@@ -4,7 +4,7 @@ import { HealthBadge } from "../patterns/health-badge";
 import { MediaGrid } from "../patterns/media-grid";
 import { Button } from "../ui/button";
 import { Inline } from "../ui/stack";
-import { checkWords, counted, FAILED_WORDS, INCOMPLETE_WORDS, PHOTOS_KEEP_PLAYING } from "../sourceWords.js";
+import { checkWords, counted, FAILED_WORDS, INCOMPLETE_WORDS, LEFT_OUT_WORDS, PHOTOS_KEEP_PLAYING } from "../sourceWords.js";
 import { captureDay, countText } from "../timeWords.js";
 
 /** A served check (central/photo_library/model.py `CheckState`). */
@@ -37,10 +37,6 @@ export interface SourcePoolViewData {
   read_at: number;
 }
 
-const LEFT_OUT_WORDS = {
-  unreadable_answer: (count: number) => `${countText(count)} could not be read`,
-  over_item_limits: (count: number) => `${countText(count)} ${count === 1 ? "is" : "are"} too large`,
-};
 
 /**
  * The pool's line: what is in it, against its check (run ledger K2). The check's time is the
