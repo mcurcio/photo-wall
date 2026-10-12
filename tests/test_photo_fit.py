@@ -177,6 +177,19 @@ def test_the_interest_density_limit_is_a_setting() -> None:
     assert isinstance(_judge(photo, settings=_settings(max_lost_interest_density=3)), Fits)
 
 
+def test_the_house_defaults_admit_ordinary_photos_the_old_ones_refused() -> None:
+    """Owner, 2026-10-12: "the default values are very conservative and exclude many photos".
+    A 4:3 photo on a 16:9 Frame whose cut quarters hold 1.5 times their share of the interest
+    (texture at the edges), and a close-up face from 8 % to 70 % of its height, fit at the house
+    defaults; at the old ones (density 1.25, face room 20 %) each was refused."""
+    textured = measured("p", 4000, 3000, grid=banded_grid(rows=12, top=.25, bottom=.25, weight=.5))
+    close_up = measured("q", 4000, 3000, faces=(face(.35, .08, .65, .70),))
+    old = _settings(max_lost_interest_density=1.25, face_padding=.2)
+    assert isinstance(_judge(textured), Fits) and isinstance(_judge(close_up), Fits)
+    assert _refused(_judge(textured, settings=old)) == "interest_cut"
+    assert _refused(_judge(close_up, settings=old)) == "face_cut"
+
+
 def test_the_window_steps_are_a_setting() -> None:
     """A face whole only in a window off the coarse steps' grid: found at 256 steps."""
     # The 16:9 window over a 4:3 photo slides over 25 % of its height; the face needs the window
