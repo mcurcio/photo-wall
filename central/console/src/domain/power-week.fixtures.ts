@@ -40,14 +40,17 @@ export const HOLD: HoldView = {
   started_at: 1_792_000_000, until_at: 1_792_039_600, until: "2026-10-14T23:00",
 };
 
-export const NAMES = { bedroom: "Bedroom" };
+/** The same All off on a second Frame outside Night off: held to Night off's next on time. */
+export const HOLD_HALL: HoldView = { ...HOLD, frame_ids: ["hall"], until_at: 1_792_068_400, until: "2026-10-15T07:00" };
+
+export const NAMES = { bedroom: "Bedroom", hall: "Hall" };
 export const NOW = "2026-10-14T12:00";
 
 export const NIGHT_OFF: NightOffView = {
   night_off: {
     off: { at: "clock", time: "23:00" }, on: { at: "clock", time: "07:00" },
     days: ["mon", "tue", "wed", "thu", "fri", "sat", "sun"], frames: { kind: "all-frames" },
-    darkness: "display-off", hold_lasts: "next-scheduled-change", revision: 3,
+    darkness: "display-off", revision: 3,
   },
   next_off: "2026-10-14T23:00",
   next_on: "2026-10-15T07:00",

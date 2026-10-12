@@ -7,11 +7,14 @@ Mutation probes: `is_resting` ignoring `result` -> the did-not-answer and anothe
 read Resting; `power_why` passing no result -> the same through the report."""
 from __future__ import annotations
 
+import uuid
 from types import SimpleNamespace
 
 import pytest
 from support.house_time import UTC_HOUSE
 
+from central.house_time.calculator import local_date_time
+from central.power.model import Hold, HoldSource
 from central.power.timetable import TimedChange, Timetable
 from central.why.explain import power_why
 from contracts.node_output import (
@@ -37,7 +40,7 @@ def report(result: PowerResult | None, *, power: Power = Power.OFF, change: int 
 
 
 def why(answer: OutputReport | None):
-    return power_why(timetable=NIGHT, test=None, document=DOCUMENT, report=answer,
+    return power_why(timetable=NIGHT, hold=None, test=None, document=DOCUMENT, report=answer,
                      house=UTC_HOUSE, now=NOW)
 
 
@@ -60,3 +63,20 @@ def test_a_report_for_an_older_change_or_an_on_is_not_resting():
     assert (stale.pi_says, stale.result, stale.resting) == ("not-heard", None, False)
     assert why(report(PowerResult.CONFIRMED, power=Power.ON)).resting is False
     assert why(None).resting is False
+
+
+@pytest.mark.parametrize("ends_at", [NOW + 5 * 3600, None])
+def test_a_hold_reads_until_its_own_end_even_when_the_power_does_not_change_then(ends_at):
+    """Owner, 2026-10-12: "Each Frame's hold ends at its own next change". All on, on a Frame that
+    Night off does not cover, holds until Night off's on time; the timetable has no change there
+    (on before and after), so Why's "until" is the hold's end (None: until resumed).
+
+    Mutation probe (P-why-next-change): drop the hold's end -> Why reads no "until"."""
+    held_on = Timetable(now=Power.ON, because="hold", changes=(), until=NOW + 7 * 86400,
+                        darkness=Darkness.DISPLAY_OFF)
+    hold = Hold(hold_id=uuid.uuid4(), power=Power.ON, frame_ids=("hall",), source=HoldSource(),
+                started_at=NOW - 60, ends_at=ends_at)
+    answer = power_why(timetable=held_on, hold=hold, test=None, document=DOCUMENT, report=None,
+                       house=UTC_HOUSE, now=NOW)
+    assert (answer.wanted, answer.because) == (Power.ON, "hold")
+    assert answer.until == (None if ends_at is None else local_date_time(UTC_HOUSE, ends_at))

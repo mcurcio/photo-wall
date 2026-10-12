@@ -84,7 +84,7 @@ export function powerWhyWords(power: NonNullable<FrameWhyView["power"]>, now: st
   if (power.pi_says === "not-heard") return "Not heard from the Pi";
   if (power.pi_says.kind === "timetable-ran-out") return "Left as it is: no power times from Central for a week";
   if (power.because === "hold") {
-    return `Held ${power.wanted} by the console${until === null ? " until you resume" : ` until ${until}`}`;
+    return powerWords("heldBy", { power: power.wanted, until: until ?? POWER.youResume });
   }
   if (power.wanted === "off") {
     if (!power.resting) return "Turning off: the Pi has not carried out the off yet";

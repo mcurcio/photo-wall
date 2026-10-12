@@ -589,13 +589,17 @@ def test_programs_refuse_without_storing_and_compare_the_expected_program():
     assert (raised.value.code, raised.value.current) == ("changed", saved)
 
 
-def test_a_window_already_started_at_create_is_not_admitted():
+def test_a_window_already_started_at_create_plays_at_once_for_the_rest_of_it():
+    """Owner, 2026-10-12: "Start right away, for the rest of tonight's window". An earlier window
+    is never admitted backdated; the next day's window follows."""
     runtime = Runtime(house=UTC_HOUSE)
     runtime.set_scene(Scene(scene_id="scene", cycle_seconds=600, loop=True, contributions=(media(),)))
     runtime.advance(6000)
-    schedule(runtime, "historical", "scene", 0, 120)     # 00:00 to 02:00; now is 01:40
-    assert runtime.advance(6600).runs == ()
-    assert runtime.export_state()["admissions"] == {}
+    created = schedule(runtime, "tonight", "scene", 0, 120)     # 00:00 to 02:00; now is 01:40
+    (root,) = runtime.advance(6600).runs
+    assert (root.started_at, root.activation_id) == (6000, created.window_id(0))
+    assert runtime.export_state()["runs"][root.run_id]["program_ends_at"] == 7200
+    assert get_run(runtime.advance(7300), root.run_id).ended_at == 7200
     tomorrow = runtime.advance(86400 + 60)                # the next window starts it
     assert tomorrow.for_target("frame:left").logical_origin == 86400
 

@@ -2,8 +2,8 @@ import { callApi } from "./weekApi.js";
 
 /**
  * The Power lane's reads and writes (roadmap 2a; central/power_routes.py, central/power/views.py,
- * the one home of their shapes): Night off, the live holds, All off and All on, and Resume
- * schedule. Each returns `{ok: true, …}` or `{ok: false, error, current?}`: a refusal answers its
+ * the one home of their shapes): Night off, the live holds, how long a hold lasts, All off and
+ * All on, and Resume schedule. Each returns `{ok: true, …}` or `{ok: false, error, current?}`: a refusal answers its
  * code (`changed`, `no-days`, `needs-place`, `unknown-frame`); a lost request answers
  * `unreachable`. 1b's per-Frame Test stays in powerApi.js.
  */
@@ -34,16 +34,33 @@ export function readHolds() {
   return callApi("holds", `${POWER}holds`, { method: "GET" });
 }
 
+/** @returns {Promise<{ok: true, view: object}|{ok: false, error: string}>} the HoldLastsView */
+export function readHoldLasts() {
+  return callApi("view", `${POWER}hold-lasts`, { method: "GET" });
+}
+
 /**
- * All off or All on (F5) on every current Frame. `requestId` is fresh per press and reused on a
- * retry of that press, so a retried or doubled press makes one hold.
+ * How long a hold pressed from now on lasts (#90); a hold in force keeps its end.
+ *
+ * @param {"next-scheduled-change"|"until-resumed"} holdLasts
+ * @returns {Promise<{ok: true, view: object}|{ok: false, error: string}>}
+ */
+export function saveHoldLasts(holdLasts) {
+  return callApi("view", `${POWER}hold-lasts`, { method: "PUT", body: { hold_lasts: holdLasts } });
+}
+
+/**
+ * All off or All on (F5) on every current Frame, each Frame until its own end. `requestId` is
+ * fresh per press and reused on a retry of that press, so a retried or doubled press makes one
+ * hold.
  *
  * @param {"off"|"on"} power
  * @param {string} requestId
- * @returns {Promise<{ok: true, hold: object}|{ok: false, error: string}>}
+ * @returns {Promise<{ok: true, holds: object[]}|{ok: false, error: string}>} the hold's HoldViews,
+ *   one per end (none with no Frames)
  */
 export function hold(power, requestId) {
-  return callApi("hold", `${POWER}all-${power}`, { method: "POST", body: { request_id: requestId } });
+  return callApi("holds", `${POWER}all-${power}`, { method: "POST", body: { request_id: requestId } });
 }
 
 /**

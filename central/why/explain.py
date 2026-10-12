@@ -9,7 +9,9 @@ Rules this module owns (one home each):
   Frame, for a request whose window covers now, is beaten "kept-out-by-protected-frames".
 - **Kinds**: an activation id starting "program:" is a Program's window, "default:" the Default
   Scene, anything else Show now.
-- **Power**: a live 1b test wins ("test"); else the timetable's reason at now. `pi_says` is the
+- **Power**: a live 1b test wins ("test", until its end); else the timetable's reason at now,
+  until the hold's own end while a hold is in force (None: until resumed; the Frame's next change,
+  whether or not the power changes then), else until the timetable's next change. `pi_says` is the
   report's in-force for the latest document change, else "not-heard"; `result` that report's last
   attempt's result (None: not heard, or no attempt was needed).
 - **Resting** (the amended U1): wanted off, the Pi carries out an off from the test or the
@@ -26,6 +28,7 @@ from central.displays.model import PowerTest, live_test
 from central.displays.views import InForceView, in_force_view
 from central.house_time.calculator import local_date_time
 from central.house_time.model import HouseTime
+from central.power.model import Hold
 from central.power.timetable import Timetable
 from central.runtime import (
     DEFAULT_PREFIX,
@@ -113,14 +116,18 @@ def _request(root: RunView, programs: Mapping[str, Program]) -> ContentRequest:
                           name=program.name if program is not None else root.scene_id, rank=root.priority)
 
 
-def power_why(*, timetable: Timetable | None, test: PowerTest | None, document: OutputDocument | None,
-              report: OutputReport | None, house: HouseTime, now: float) -> PowerWhy | None:
-    """The Frame's power answer at Central's `now`; None when `timetable` is None (no Output)."""
+def power_why(*, timetable: Timetable | None, hold: Hold | None, test: PowerTest | None,
+              document: OutputDocument | None, report: OutputReport | None, house: HouseTime,
+              now: float) -> PowerWhy | None:
+    """The Frame's power answer at Central's `now`; None when `timetable` is None (no Output).
+    `hold` is the hold in force on the Frame at `now` (power.timetable `hold_in_force`)."""
     if timetable is None:
         return None
     live = live_test(test, now)
     if live is not None:
         wanted, because, until = live.power, "test", live.ends_at
+    elif timetable.because == "hold" and hold is not None:
+        wanted, because, until = timetable.now, timetable.because, hold.ends_at
     else:
         wanted, because = timetable.now, timetable.because
         following = timetable.next_change_after(now)

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from support.house_time import EVERY_DAY, LONDON, at, daily, set_house
 
+from central.house_time.model import Window
 from central.runtime import Contribution, Program, ProgramDraft, Scene
 from central.runtime_store import RuntimeStore
 
@@ -96,6 +97,34 @@ def test_a_save_mid_window_keeps_its_end_and_the_next_window_follows_the_new_rul
     (tuesday,) = _roots(store.command("advance", at(LONDON, "2026-10-13T18:35")))
     assert tuesday.started_at == at(LONDON, "2026-10-13T18:30")
     assert store.read().export_state()["runs"][tuesday.run_id]["program_ends_at"] == at(LONDON, "2026-10-13T22:00")
+
+
+def test_a_schedule_created_during_its_window_plays_at_once_for_the_rest_of_it(registry):
+    """Owner, 2026-10-12: "Start right away, for the rest of tonight's window". Made at 19:00 for
+    17:00-23:00, it plays now under that window's identity and ends at 23:00; the card names the
+    window playing now and the week marks it as playing; tomorrow's window follows.
+
+    Mutation probe (P-create-next): drop the creation's admission of the covering window -> nothing
+    plays at 19:00 and the card's current window is None."""
+    store = _store(registry)
+    now = at(LONDON, "2026-10-12T19:00")
+    created = _create(store, daily("17:00", "23:00", EVERY_DAY), now)
+    view = store.command("advance", now)
+    (playing,) = _roots(view)
+    assert (playing.started_at, playing.program_id) == (now, "evenings")
+    assert playing.activation_id == created.window_id(at(LONDON, "2026-10-12T17:00"))
+    assert view.for_target("frame:hall").scene_id == "evening"
+    runtime = store.read()
+    assert runtime.export_state()["runs"][playing.run_id]["program_ends_at"] == at(LONDON, "2026-10-12T23:00")
+    card = runtime.operator_projection(now).program_windows["evenings"]
+    assert (card.current.start, card.current.end) == ("2026-10-12T17:00", "2026-10-12T23:00")
+    assert card.current.admission.run_id == playing.run_id
+    assert runtime.program_windows_between(created, now - 3600, now + 3600) == (
+        (Window(start=at(LONDON, "2026-10-12T17:00"), end=at(LONDON, "2026-10-12T23:00")), True),)
+    ended = store.command("advance", at(LONDON, "2026-10-12T23:05"))
+    assert next(run for run in ended.runs if run.run_id == playing.run_id).ended_at == at(LONDON, "2026-10-12T23:00")
+    (tuesday,) = _roots(store.command("advance", at(LONDON, "2026-10-13T17:05")))
+    assert tuesday.started_at == at(LONDON, "2026-10-13T17:00")
 
 
 def test_save_and_apply_now_finishes_the_playing_window_and_the_new_rule_plays_at_once(registry):

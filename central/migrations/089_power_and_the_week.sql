@@ -15,9 +15,9 @@ CREATE TABLE house_settings (
   zone_confirmed BOOLEAN NOT NULL DEFAULT FALSE,
   CHECK ((latitude IS NULL) = (longitude IS NULL)));
 
--- Night off (#80-#83, #90): one row, validated by central.power.model.NightOff in app code. Seeded on:
--- 23:00 to 07:00, every day, every Frame there is now (chosen one by one), displays off, holds until
--- the next scheduled change; in force once the house's zone is confirmed (house_settings above).
+-- Night off (#80-#83): one row, validated by central.power.model.NightOff in app code. Seeded on:
+-- 23:00 to 07:00, every day, every Frame there is now (chosen one by one), displays off; in force once
+-- the house's zone is confirmed (house_settings above).
 CREATE TABLE night_off (
   singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
   settings JSONB NOT NULL,
@@ -30,8 +30,7 @@ SELECT TRUE, jsonb_build_object(
     'days', '["mon","tue","wed","thu","fri","sat","sun"]'::jsonb,
     'frames', jsonb_build_object('kind', 'frames',
                                  'frame_ids', COALESCE((SELECT jsonb_agg(id ORDER BY id COLLATE "C") FROM frames), '[]'::jsonb)),
-    'darkness', 'display-off',
-    'hold_lasts', 'next-scheduled-change'),
+    'darkness', 'display-off'),
   1, EXTRACT(EPOCH FROM clock_timestamp());
 
 -- Today's Programs end at deploy (frame "At deploy"; no backwards compatibility): they were single windows

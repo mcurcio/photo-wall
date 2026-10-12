@@ -1,5 +1,5 @@
 """Display power policy over PostgreSQL (Power and the week: slice T for Night off, slice S2 for
-holds; migrations 089 `night_off` and 090 `power_holds`).
+holds; migrations 089 `night_off` and 090 `power_holds` and `hold_settings`).
 
 `power_policy_in` is the one read of the policy: the Output document source
 (central/infra/display_store.py), Why and the shown-history filter all call it in their own
@@ -22,10 +22,18 @@ from central.house_time.calculator import local_date_time, next_window, when_pro
 from central.house_time.model import HouseTime
 from central.infra.house_store import house_settings_in, house_time_in
 from central.infra.output_wakes import wake_every_node_in
-from central.power.model import AllFrames, ChosenFrames, Hold, HoldSource, NightOff, PowerPolicy
+from central.power.model import (
+    AllFrames,
+    ChosenFrames,
+    Hold,
+    HoldLasts,
+    HoldSource,
+    NightOff,
+    PowerPolicy,
+)
 from central.power.ports import PowerRefused
 from central.power.timetable import hold_end, spans
-from central.power.views import HoldView, NightOffSave, NightOffView
+from central.power.views import HoldLastsView, HoldView, NightOffSave, NightOffView
 from contracts.node_output import Power
 
 _HOLD_COLUMNS = "hold_id, power, source, started_at, ends_at"
@@ -52,15 +60,21 @@ def forget_frame_in(conn: Any, frame_id: str) -> None:
     wake_every_node_in(conn)
 
 
+def hold_lasts_in(conn: Any) -> HoldLasts:
+    """The stored "a hold lasts" setting (migration 090 writes the row; it always exists)."""
+    return conn.execute("SELECT hold_lasts FROM hold_settings").fetchone()["hold_lasts"]
+
+
 def power_policy_in(conn: Any, now: float) -> PowerPolicy:
     """Night off, the holds live at Central's `now` (ends_at after it, or until resumed: one Hold
-    per hold, its Frames sorted) and whether the house's zone is confirmed. An expired row is
-    ignored here and deleted by the next command (never by a reaper or a trigger)."""
+    per hold and end, its Frames sorted), whether the house's zone is confirmed and how long a
+    hold lasts. An expired row is ignored here and deleted by the next command (never by a reaper
+    or a trigger)."""
     rows = conn.execute(
         f"SELECT frame_id, {_HOLD_COLUMNS} FROM power_holds WHERE ends_at IS NULL OR ends_at > %s",  # noqa: S608
         (now,)).fetchall()
     return PowerPolicy(night_off_in(conn), holds=_holds(rows),
-                       zone_confirmed=house_settings_in(conn).zone_confirmed)
+                       zone_confirmed=house_settings_in(conn).zone_confirmed, hold_lasts=hold_lasts_in(conn))
 
 
 def wanted_off_in(conn: Any, frame_id: str, start: float, end: float) -> bool:
@@ -73,9 +87,11 @@ def wanted_off_in(conn: Any, frame_id: str, start: float, end: float) -> bool:
 
 
 def _holds(rows: Iterable[Mapping[str, Any]]) -> tuple[Hold, ...]:
-    """Rows to Holds, newest first. Rows are grouped by the whole hold (id, power, start, end): a
-    double tap that straddles a Frame's creation gives that Frame its own start, so it reads as a
-    Hold of its own with the same id rather than moving the others' start."""
+    """Rows to Holds, newest first, then the earliest end first (until resumed last). Rows are
+    grouped by the whole hold (id, power, start, end): each Frame's hold ends at its own next
+    change, so the Frames that end together read as one Hold, and a double tap that straddles a
+    Frame's creation gives that Frame its own start, so it reads as a Hold of its own with the
+    same id rather than moving the others' start."""
     grouped: dict[tuple[Any, ...], list[str]] = {}
     for row in rows:
         grouped.setdefault((row["hold_id"], row["power"], row["source"], row["started_at"], row["ends_at"]),
@@ -83,7 +99,8 @@ def _holds(rows: Iterable[Mapping[str, Any]]) -> tuple[Hold, ...]:
     holds = [Hold(hold_id=hold_id, power=Power(power), frame_ids=tuple(sorted(frame_ids)),
                   source=HoldSource(kind=source), started_at=started_at, ends_at=ends_at)
              for (hold_id, power, source, started_at, ends_at), frame_ids in grouped.items()]
-    return tuple(sorted(holds, key=lambda hold: (-hold.started_at, str(hold.hold_id))))
+    return tuple(sorted(holds, key=lambda hold: (-hold.started_at, str(hold.hold_id), hold.ends_at is None,
+                                                 hold.ends_at or 0.0)))
 
 
 def _hold_view(hold: Hold, house: HouseTime) -> HoldView:
@@ -125,6 +142,17 @@ class PgPower:
             house, now = house_time_in(conn), self._times.now_in(conn)
             return tuple(_hold_view(hold, house) for hold in power_policy_in(conn, now).holds)
 
+    def hold_lasts(self) -> HoldLastsView:
+        with self._db.transaction() as conn:
+            return HoldLastsView(hold_lasts=hold_lasts_in(conn))
+
+    def set_hold_lasts(self, hold_lasts: HoldLasts) -> HoldLastsView:
+        # A hold in force keeps its end: no timetable changes, so no Node is woken.
+        with self._db.transaction() as conn:
+            conn.execute("UPDATE hold_settings SET hold_lasts=%s, updated_at=%s",
+                         (hold_lasts, self._times.now_in(conn)))
+        return self.hold_lasts()
+
     def save_night_off(self, save: NightOffSave) -> NightOffView:
         draft = save.night_off
         with self._db.transaction() as conn:
@@ -144,10 +172,10 @@ class PgPower:
             wake_every_node_in(conn)
         return self.night_off()
 
-    def all_off(self, request_id: UUID) -> HoldView:
+    def all_off(self, request_id: UUID) -> tuple[HoldView, ...]:
         return self._hold(request_id, Power.OFF)
 
-    def all_on(self, request_id: UUID) -> HoldView:
+    def all_on(self, request_id: UUID) -> tuple[HoldView, ...]:
         return self._hold(request_id, Power.ON)
 
     def resume_schedule(self, frame_ids: tuple[str, ...]) -> None:
@@ -156,30 +184,29 @@ class PgPower:
             conn.execute("DELETE FROM power_holds WHERE frame_id = ANY(%s)", (list(frame_ids),))
             wake_every_node_in(conn)
 
-    def _hold(self, request_id: UUID, power: Power) -> HoldView:
-        """Hold every current Frame at `power` until `hold_end`. The newest hold on a Frame replaces
-        an older one; a Frame already held by this request keeps its row (start included)."""
+    def _hold(self, request_id: UUID, power: Power) -> tuple[HoldView, ...]:
+        """Hold every current Frame at `power`, each until its own `hold_end`. The newest hold on a
+        Frame replaces an older one; a Frame already held by this request keeps its row (start and
+        end included)."""
         with self._db.transaction() as conn:
             now, house = self._times.now_in(conn), house_time_in(conn)
             _forget_expired(conn, now)
-            ends_at = hold_end(power_policy_in(conn, now), house, now)
+            policy = power_policy_in(conn, now)
+            frame_ids = [row["id"] for row in conn.execute("SELECT id FROM frames ORDER BY id").fetchall()]
+            ends = [hold_end(frame_id, policy, house, now) for frame_id in frame_ids]
             conn.execute(
                 "INSERT INTO power_holds (frame_id, hold_id, power, source, started_at, ends_at) "
-                "SELECT id, %s, %s, 'console', %s, %s FROM frames ON CONFLICT (frame_id) DO UPDATE SET "
+                "SELECT frame_id, %s, %s, 'console', %s, ends_at "
+                "FROM unnest(%s::text[], %s::double precision[]) AS held(frame_id, ends_at) "
+                "ON CONFLICT (frame_id) DO UPDATE SET "
                 "hold_id=EXCLUDED.hold_id, power=EXCLUDED.power, source=EXCLUDED.source, "
                 "started_at=EXCLUDED.started_at, ends_at=EXCLUDED.ends_at "
                 "WHERE power_holds.hold_id <> EXCLUDED.hold_id",
-                (request_id, power.value, now, ends_at))
+                (request_id, power.value, now, frame_ids, ends))
             rows = conn.execute(f"SELECT frame_id, {_HOLD_COLUMNS} FROM power_holds WHERE hold_id=%s",  # noqa: S608
                                 (request_id,)).fetchall()
             wake_every_node_in(conn)
-        held = _holds(rows)
-        if not held:      # no Frames: an empty hold, stored nowhere
-            return HoldView(hold_id=request_id, power=power, frame_ids=(), source=HoldSource(),
-                            started_at=now, until_at=ends_at,
-                            until=None if ends_at is None else local_date_time(house, ends_at))
-        view = _hold_view(held[-1], house)          # the oldest part: the request's own start
-        return view.model_copy(update={"frame_ids": tuple(sorted(f for hold in held for f in hold.frame_ids))})
+        return tuple(_hold_view(hold, house) for hold in _holds(rows))
 
 
-__all__ = ["PgPower", "night_off_in", "power_policy_in", "wanted_off_in"]
+__all__ = ["PgPower", "hold_lasts_in", "night_off_in", "power_policy_in", "wanted_off_in"]

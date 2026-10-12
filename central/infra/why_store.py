@@ -11,7 +11,7 @@ from datetime import date
 from central.db import Database, TransactionClock
 from central.infra.display_store import power_facts_in
 from central.infra.power_store import power_policy_in
-from central.power.timetable import frame_timetable
+from central.power.timetable import frame_timetable, hold_in_force
 from central.runtime import Program, Scene
 from central.runtime_store import RuntimeStore
 from central.why.explain import content_why, kept_out, power_why
@@ -42,8 +42,8 @@ class PgWhy:
         content = content_why(projection.current, frame_id, programs=programs,
                               refused=kept_out(projection, programs, scenes, frame_id))
         timetable = frame_timetable(frame_id, policy, house, now) if facts.bound else None
-        power = power_why(timetable=timetable, test=facts.test, document=facts.document, report=facts.report,
-                          house=house, now=now)
+        power = power_why(timetable=timetable, hold=hold_in_force(frame_id, policy, now), test=facts.test,
+                          document=facts.document, report=facts.report, house=house, now=now)
         return FrameWhy(frame_id=frame_id, content=content, power=power)
 
     def week(self, first_day: date) -> Week:

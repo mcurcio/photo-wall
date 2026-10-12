@@ -137,7 +137,7 @@ Asked whether power should be its own concept or part of Scenes, the owner answe
 **Built in 2a: the power timetable** ([#86](https://github.com/mcurcio/photo-wall/pull/86), [0021](decisions/0021-power-timetable-and-repeating-schedules.md)). Central decides whether each display should be on; the Pi switches at the set times on its own clock and reports what it did. Per HDMI port Central writes the **power timetable** in the Output document ([Player architecture](player-architecture.md#display-identity-and-power-1b)): the power wanted now, the next 7 days of off and on set times, and how a display is dark (displays off, or black). It is worked out from three layers:
 
 - **Night off** underneath (default 23:00 to 07:00, every day, every current Frame chosen one by one, displays off); a Frame that does not follow it is on.
-- **The newest hold on top** (All off, All on), until the next scheduled change (Night off's next on or off time, the same moment for every Frame, a Frame outside Night off included) or until resumed, as #90 says. **Resume schedule** ends it at once.
+- **The newest hold on top** (All off, All on), until each Frame's own next change (owner, 2026-10-12: "Each Frame's hold ends at its own next change; a Frame with no Night off holds until 07:00 tomorrow", [remaining-work page](https://claude.ai/artifact/C7wGab1zo8UuCMYfaQh6u2)): a Frame that follows Night off until Night off's next on or off time; a Frame that does not until Night off next turns displays on (its on time, 07:00 by default, the next one after the press); or until resumed, as #90 says. **Resume schedule** ends it at once.
 - **1b's test on top of both**: Test: turn off lasts 5 minutes, or less if **Turn on** is pressed, counted on the Pi, so a test ends even when Central is away (owner, 2026-10-10, q1 on the [1b gate page](https://claude.ai/artifact/DjZTF9HGKWLVy6kexikeUp)).
 
 With Central away the Pi keeps following the set times for up to 7 days (owner, 2026-10-12: "Yes, send 7 days of set times", [overview gate](https://claude.ai/artifact/8DXMFAosB3HKY7m35fmHno)), then leaves its displays as they are. A daily rewrite that wants the same as the Pi is doing writes nothing, so it never fights a person with the remote. The result says what the display or the Pi confirmed and never claims what is on the screen: "Display confirmed off" or "on" (the display read back the state), "Picture stopped; the display may sleep" (signal off), "Display didn't answer", "Left on: the display is showing another input" (#118), and, while Central cannot reach the Pi, when it last heard from it. With "Show black" (#83), or when no power method can switch the display, the Pi shows an opaque black from Display Host instead. The Frame page's Power tab and Why is this playing read one power line ("Resting: Night off until 07:00", "Held off by the console until 23:00"); a display that did not answer is a power problem, never Resting. Home Assistant (3) adds a hold source to the same timetable.
@@ -150,7 +150,7 @@ How long each power request lasts. This is the one statement of the rule; other 
 |---|---|
 | The power schedule | Always in force underneath; it is what the others return to |
 | A Scene's request | Not now (owner, 2026-10-12, above) |
-| Console **All off** / **All on** | The next scheduled power change (the default; see the guard below); built in 2a |
+| Console **All off** / **All on** | Each Frame's own next scheduled power change, a Frame outside Night off until Night off's next on time (the default; see the guard below); built in 2a |
 | A Home Assistant **power switch** (per Frame, or All on/off) | The same as the console: the next scheduled power change by default |
 | Home Assistant **Keep all off** (away mode) | The switch is turned off. Shown as "Off — by Home Assistant (Away mode)". |
 | A message on the request topic | Its `until` time ("Off — by Home Assistant (film night) until 23:30"); a message with no `until` is a hold like a power switch |
@@ -162,7 +162,7 @@ How long each power request lasts. This is the one statement of the rule; other 
 | Home Assistant may turn displays on during Night off | No | A motion sensor at 2 am shouldn't light up the room. A person can still press All on in the console. |
 | Home Assistant may turn displays off | Yes, any time | Turning off is always safe (away mode, a film starting) |
 | Scenes may turn displays on during Night off | Not now (goes with Scene requests, owner 2026-10-12) | Night off means dark unless a person decides otherwise |
-| A hold (console All off/on, or a Home Assistant power switch) lasts until | The next scheduled power change (built in 2a with the other choice, until resumed; "a set time" is not built) | Like a thermostat hold: nothing stays off forever by accident |
+| A hold (console All off/on, or a Home Assistant power switch) lasts until (beside All off and All on on the week page, owner 2026-10-12: "the setting moves beside All off/All on") | Each Frame's next scheduled power change (built in 2a with the other choice, until resumed; "a set time" is not built) | Like a thermostat hold: nothing stays off forever by accident |
 
 One more power setting lives on each display, not here: **Never power off a display showing another input** (default on, Frame page › Power), because someone is watching TV on it.
 
@@ -334,7 +334,7 @@ Every setting a power user expects, with exactly one home: 136 settings (numbere
 | 87 | Home Assistant may turn displays on during Night off | Schedule › Power lane › Rules | No | S |
 | 88 | Home Assistant may turn displays off | Schedule › Power lane › Rules | Yes, any time | S |
 | 89 | Scenes may turn displays on during Night off (not now: goes with Scene power requests, #70; owner, 2026-10-12: "Not now") | n/a | n/a | S |
-| 90 | A hold (console All off/on, Home Assistant power switch) lasts until (next scheduled change / set time / until resumed; built in 2a without "set time") | Schedule › Power lane › Night off | next scheduled change | M |
+| 90 | A hold (console All off/on, Home Assistant power switch) lasts until (next scheduled change / set time / until resumed; built in 2a without "set time") | Schedule › week page, beside All off / All on | next scheduled change | M |
 | 91 | Holds shown with who set them ("Off — by Home Assistant (Away mode)") and Resume schedule (built in 2a; the console is the one source until 3) | Schedule › Power lane | n/a | M |
 
 ### Wall and Frame

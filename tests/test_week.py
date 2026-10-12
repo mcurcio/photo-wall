@@ -29,8 +29,7 @@ WEEK_START, WEEK_END = at(LONDON, "2026-10-19T00:00"), at(LONDON, "2026-10-26T00
 
 def _night_off(frame_ids: tuple[str, ...]) -> NightOff:
     return NightOff(off=daily("23:00", "07:00").start, on=daily("23:00", "07:00").end, days=EVERY_DAY,
-                    frames=ChosenFrames(frame_ids=frame_ids), darkness=Darkness.DISPLAY_OFF,
-                    hold_lasts="next-scheduled-change", revision=1)
+                    frames=ChosenFrames(frame_ids=frame_ids), darkness=Darkness.DISPLAY_OFF, revision=1)
 
 
 def _agrees(item: dict) -> None:
@@ -70,7 +69,8 @@ def test_the_week_builder_cuts_house_days_across_the_autumn_change():
     evenings = Program(program_id="evenings", name="Evenings", scene_id="evening", when=daily("17:00", "23:00"))
     built = week(programs={"evenings": evenings}, plays=Runtime(house=LONDON).program_windows_between,
                  default_scene_id="calm",
-                 policy=PowerPolicy(_night_off(("hall",)), holds=(), zone_confirmed=True), frame_ids=("study", "hall"), house=LONDON,
+                 policy=PowerPolicy(_night_off(("hall",)), holds=(), zone_confirmed=True,
+                                    hold_lasts="next-scheduled-change"), frame_ids=("study", "hall"), house=LONDON,
                  first_day=MONDAY)
     assert built.default_scene_id == "calm"
     _check(built.model_dump(mode="json"))

@@ -4,7 +4,8 @@ Every command goes through the routes the Power lane calls (`create_app` with Ce
 where the test puts it); every answer is read back through the Output document the worker's source
 projects (`DisplayDocuments` on the same clock). The house is Europe/London; one Pi has two HDMI
 ports: "living" on HDMI-A-1 follows Night off (23:00 to 07:00, every day), "hall" on HDMI-A-2 does
-not.
+not. Each Frame's hold ends at its own next change (owner, 2026-10-12): "living" at Night off's
+next off or on, "hall" at Night off's next on time (07:00).
 """
 from __future__ import annotations
 
@@ -35,6 +36,7 @@ LIVING, HALL = "living", "hall"
 PORTS = {LIVING: "HDMI-A-1", HALL: "HDMI-A-2"}
 NIGHT_OFF = "/v1/operator/power/night-off"
 HOLDS = "/v1/operator/power/holds"
+HOLD_LASTS = "/v1/operator/power/hold-lasts"
 
 
 def local(text: str) -> float:
@@ -56,10 +58,9 @@ class FixedClock:
 
 def draft(*, off: str = "23:00", on: str = "07:00", days: tuple[str, ...] = ("mon", "tue", "wed", "thu", "fri",
                                                                              "sat", "sun"),
-          frames: tuple[str, ...] = (LIVING,), hold_lasts: str = "next-scheduled-change") -> dict:
+          frames: tuple[str, ...] = (LIVING,)) -> dict:
     return {"off": {"at": "clock", "time": off}, "on": {"at": "clock", "time": on}, "days": list(days),
-            "frames": {"kind": "frames", "frame_ids": sorted(frames)}, "darkness": "display-off",
-            "hold_lasts": hold_lasts}
+            "frames": {"kind": "frames", "frame_ids": sorted(frames)}, "darkness": "display-off"}
 
 
 class House:
@@ -72,11 +73,16 @@ class House:
         return self.client.put(NIGHT_OFF, headers=AUTH, json={"expected_revision": revision,
                                                               "night_off": draft(**values)})
 
-    def hold(self, power: str, request_id: uuid.UUID) -> dict:
+    def hold(self, power: str, request_id: uuid.UUID) -> list[dict]:
+        """The hold as Central answers it: one view per end, the earliest first."""
         response = self.client.post(f"/v1/operator/power/all-{power}", headers=AUTH,
                                     json={"request_id": str(request_id)})
         assert response.status_code == 201, response.text
         return response.json()
+
+    def hold_lasts(self, setting: str) -> None:
+        response = self.client.put(HOLD_LASTS, headers=AUTH, json={"hold_lasts": setting})
+        assert (response.status_code, response.json()) == (200, {"hold_lasts": setting}), response.text
 
     def resume(self, *frame_ids: str) -> None:
         response = self.client.post("/v1/operator/power/resume", headers=AUTH, json={"frame_ids": list(frame_ids)})
@@ -110,29 +116,37 @@ def house(registry):
         yield subject
 
 
-def test_all_off_holds_every_frame_until_night_offs_next_change_and_the_newest_hold_wins(house):
-    """Mutation probe (P-hold-per-frame-end): end a hold at that Frame's own next change -> "hall",
-    outside Night off, stays held past 23:00."""
-    held = house.hold("off", uuid.uuid4())
-    assert (held["power"], held["frame_ids"], held["until"]) == ("off", [HALL, LIVING], "2026-10-12T23:00")
-    assert held["until_at"] == local("2026-10-12T23:00") and held["started_at"] == THREE_PM
+def test_all_off_holds_each_frame_until_its_own_next_change_and_the_newest_hold_wins(house):
+    """Owner, 2026-10-12: "Each Frame's hold ends at its own next change; a Frame with no Night off
+    holds until 07:00 tomorrow".
+
+    Mutation probe (P-house-wide-end): end every Frame's hold at Night off's next on or off time ->
+    "hall" is back on at 23:00."""
+    by_end = house.hold("off", uuid.uuid4())
+    assert [(held["power"], held["frame_ids"], held["until"]) for held in by_end] == [
+        ("off", [LIVING], "2026-10-12T23:00"), ("off", [HALL], "2026-10-13T07:00")]
+    assert len({held["hold_id"] for held in by_end}) == 1
+    assert by_end[0]["until_at"] == local("2026-10-12T23:00") and by_end[0]["started_at"] == THREE_PM
+    assert house.holds() == by_end
     # "living": held off, then Night off from 23:00 (no change), on at 07:00.
     assert house.wanted(LIVING) == (Power.OFF, ((local("2026-10-13T07:00"), Power.ON),
                                                 (local("2026-10-13T23:00"), Power.OFF)))
-    # "hall" is held to the same moment, then back to on.
-    assert house.wanted(HALL) == (Power.OFF, ((local("2026-10-12T23:00"), Power.ON),))
+    # "hall", outside Night off, is held to Night off's next on time, then back to on.
+    assert house.wanted(HALL) == (Power.OFF, ((local("2026-10-13T07:00"), Power.ON),))
 
     house.clock.now = local("2026-10-12T15:05")
     newest = house.hold("on", uuid.uuid4())
-    assert [hold["hold_id"] for hold in house.holds()] == [newest["hold_id"]]
+    assert {hold["hold_id"] for hold in house.holds()} == {newest[0]["hold_id"]}
     assert house.wanted(LIVING) == (Power.ON, ((local("2026-10-12T23:00"), Power.OFF),
                                                (local("2026-10-13T07:00"), Power.ON)))
-    assert house.wanted(HALL)[0] is Power.ON
+    assert house.wanted(HALL) == (Power.ON, ())
 
-    house.clock.now = local("2026-10-12T23:00") + 1        # the hold ended: the schedule resumes
-    assert house.holds() == []
+    house.clock.now = local("2026-10-12T23:00") + 1        # living's hold ended: Night off resumes
+    assert [hold["frame_ids"] for hold in house.holds()] == [[HALL]]
     assert house.wanted(LIVING) == (Power.OFF, ((local("2026-10-13T07:00"), Power.ON),
                                                 (local("2026-10-13T23:00"), Power.OFF)))
+    house.clock.now = local("2026-10-13T07:00") + 1
+    assert house.holds() == []
     assert house.wanted(HALL) == (Power.ON, ())
 
 
@@ -170,25 +184,33 @@ def test_the_same_request_twice_makes_one_hold_that_keeps_its_start(house):
     house.clock.now = THREE_PM + 2
     again = house.hold("off", request)
     assert again == first
-    (hold,) = house.holds()
-    assert (hold["hold_id"], hold["started_at"], hold["frame_ids"]) == (str(request), THREE_PM, [HALL, LIVING])
+    assert [(hold["hold_id"], hold["started_at"], hold["frame_ids"]) for hold in house.holds()] == [
+        (str(request), THREE_PM, [LIVING]), (str(request), THREE_PM, [HALL])]
 
 
 def test_a_hold_until_resumed_survives_every_scheduled_change(house):
-    assert house.save(2, hold_lasts="until-resumed").status_code == 200
-    held = house.hold("on", uuid.uuid4())
-    assert (held["until_at"], held["until"]) == (None, None)
+    """The setting is its own (#90, beside All off and All on): changing it leaves Night off's
+    revision alone, and a hold already in force keeps its end."""
+    assert house.client.get(HOLD_LASTS, headers=AUTH).json() == {"hold_lasts": "next-scheduled-change"}
+    before = house.hold("off", uuid.uuid4())
+    house.hold_lasts("until-resumed")
+    assert house.client.get(NIGHT_OFF, headers=AUTH).json()["night_off"]["revision"] == 2
+    assert house.holds() == before
+    (held,) = house.hold("on", uuid.uuid4())
+    assert (held["frame_ids"], held["until_at"], held["until"]) == ([HALL, LIVING], None, None)
     for moment in ("2026-10-12T23:30", "2026-10-13T07:30", "2026-10-15T23:30"):
         house.clock.now = local(moment)
         assert house.wanted(LIVING) == (Power.ON, ()), moment
         assert [hold["hold_id"] for hold in house.holds()] == [held["hold_id"]]
     house.resume(LIVING)
     assert house.wanted(LIVING)[0] is Power.OFF       # 23:30: Night off again
+    assert house.client.put(HOLD_LASTS, headers=AUTH, json={"hold_lasts": "forever"}).status_code == 422
+    assert house.client.get(HOLD_LASTS).status_code == 401
 
 
 def test_an_expired_hold_reads_as_gone_with_no_reaper(house):
     house.hold("off", uuid.uuid4())
-    house.clock.now = local("2026-10-12T23:00")
+    house.clock.now = local("2026-10-13T07:00")
     assert house.holds() == []
     with house.registry.db.transaction() as conn:   # still stored: the next command deletes it
         assert conn.execute("SELECT count(*) AS n FROM power_holds").fetchone()["n"] == 2
@@ -200,7 +222,6 @@ def test_an_expired_hold_reads_as_gone_with_no_reaper(house):
 def test_night_off_saves_refuse_a_stale_revision_no_days_and_an_unknown_frame(house):
     """Mutation probe (P-revision): skip the revision check -> the stale save is stored."""
     stored = house.client.get(NIGHT_OFF, headers=AUTH).json()
-    assert stored["night_off"]["hold_lasts"] == "next-scheduled-change"     # the #90 default
     assert stored["night_off"]["revision"] == 2
     for response, status, code in (
             (house.save(1, off="21:00"), 409, "changed"),

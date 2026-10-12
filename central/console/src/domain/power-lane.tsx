@@ -4,6 +4,8 @@ import { type CalendarBand, type CalendarKeyEntry, type CalendarLane, WeekCalend
 import { POWER, power as powerWords } from "../powerWords.js";
 import { addDays, houseDayWords, hourWords, localClockWords, untilWords, windowWords } from "../timeWords.js";
 import { Button } from "../ui/button";
+import { Field } from "../ui/field";
+import { SegmentedControl } from "../ui/segmented-control";
 import { Inline } from "../ui/stack";
 
 type Power = "on" | "off";
@@ -45,7 +47,8 @@ export interface Week {
   power: readonly PowerBand[];
 }
 
-/** One live hold (central/power/views.py `HoldView`). */
+/** One live hold's Frames that end together (central/power/views.py `HoldView`): a hold whose
+ * Frames end at different times (each at its own next change) is one view per end. */
 export interface HoldView {
   hold_id: string;
   power: Power;
@@ -61,7 +64,7 @@ const SOURCE_WORDS: Record<"console", string> = { console: "console" };
 
 /** A hold's label: "Held off · console". */
 export function holdWords(power: Power, source: { kind: "console" } | null): string {
-  return `Held ${power} · ${SOURCE_WORDS[source?.kind ?? "console"]}`;
+  return powerWords("heldWho", { power, who: SOURCE_WORDS[source?.kind ?? "console"] });
 }
 
 /** A band's words: its short label and what it is. */
@@ -146,14 +149,34 @@ export function weekDays(week: Week) {
 
 /** How long a hold lasts, in words: "07:00", "Thu 07:00" or "you resume" (one home). */
 export function holdUntilWords(hold: Pick<HoldView, "until">, now: string | null): string {
-  return hold.until === null ? "you resume" : untilWords(hold.until, now);
+  return hold.until === null ? POWER.youResume : untilWords(hold.until, now);
+}
+
+/** The newest hold's views (one per end; Central serves them newest first). */
+function newestHold(holds: readonly HoldView[]): HoldView[] {
+  const newest = holds[0];
+  return newest === undefined ? [] : holds.filter((hold) => hold.hold_id === newest.hold_id);
+}
+
+/** A hold's views as one line: "Held off until 07:00", or, when its Frames end at different
+ * times, "Held off, each Frame until its own next change"; null with none. */
+function heldLine(views: readonly HoldView[], now: string | null, key: "held" | "holding"): string | null {
+  const first = views[0];
+  if (first === undefined) return null;
+  if (views.some((view) => view.until !== first.until)) {
+    return powerWords(key === "held" ? "heldEach" : "holdingEach", { power: first.power });
+  }
+  return powerWords(key, { power: first.power, until: holdUntilWords(first, now) });
 }
 
 /** The newest live hold, the page's header line ("Held off until 07:00"); null with none. */
 export function heldWords(holds: readonly HoldView[], now: string | null): string | null {
-  const newest = [...holds].sort((a, b) => b.started_at - a.started_at)[0];
-  if (newest === undefined) return null;
-  return `Held ${newest.power} until ${holdUntilWords(newest, now)}`;
+  return heldLine(newestHold(holds), now, "held");
+}
+
+/** Central's answer to All off or All on in words: "Holding every display off until 07:00." */
+export function holdingWords(views: readonly HoldView[], now: string | null): string | null {
+  return heldLine(views, now, "holding");
 }
 
 export interface PowerButtonsProps {
@@ -168,6 +191,36 @@ export function PowerButtons({ busy, onHold }: PowerButtonsProps) {
       <Button disabled={busy} onClick={() => onHold("off")}>{POWER.allOff}</Button>
       <Button disabled={busy} onClick={() => onHold("on")}>{POWER.allOn}</Button>
     </Inline>
+  );
+}
+
+/** How long a hold lasts (#90; central/power/model.py `HoldLasts`). */
+export type HoldLasts = "next-scheduled-change" | "until-resumed";
+
+/** The setting's choices in words (one home). */
+export const HOLD_LASTS_WORDS: Record<HoldLasts, string> = {
+  "next-scheduled-change": POWER.holdLastsNext,
+  "until-resumed": POWER.holdLastsResumed,
+};
+
+export interface HoldLastsControlProps {
+  value: HoldLasts;
+  busy: boolean;
+  onChange: (next: HoldLasts) => void;
+}
+
+/**
+ * "A hold lasts" (#90), beside All off and All on: the house's one stored setting
+ * (GET and PUT /v1/operator/power/hold-lasts), saved when chosen. It governs holds pressed from
+ * then on; a hold in force keeps its end.
+ */
+export function HoldLastsControl({ value, busy, onChange }: HoldLastsControlProps) {
+  return (
+    <Field label={POWER.holdLasts} help={POWER.holdLastsHelp}>
+      <SegmentedControl label={POWER.holdLasts} value={value} disabled={busy} onChange={onChange}
+        options={(Object.keys(HOLD_LASTS_WORDS) as HoldLasts[]).map((choice) => ({
+          value: choice, label: HOLD_LASTS_WORDS[choice] }))} />
+    </Field>
   );
 }
 
@@ -197,23 +250,25 @@ export interface HoldBannerProps {
 
 /**
  * The week page's hold banner (F5): while All off or All on is in force, what is held and until
- * when ("Held off until 23:00"), each hold with who set it, its Frames and Resume schedule. No
- * hold: nothing is drawn.
+ * when ("Held off until 23:00", or "each Frame until its own next change" when its Frames end at
+ * different times), each group of Frames that end together with who set it, until when, its
+ * Frames and Resume schedule. No hold: nothing is drawn.
  */
 export function HoldBanner({ holds, names, now, busy, onResume }: HoldBannerProps) {
   const title = heldWords(holds, now);
   if (title === null) return null;
   return (
     <OverrideBanner label="Holds" title={title}>
-      {holds.map((hold) => (
-        <Inline key={hold.hold_id} label={holdWords(hold.power, hold.source)}>
-          <Note>
-            {`${holdWords(hold.power, hold.source)} · until ${holdUntilWords(hold, now)}`
-              + ` · ${hold.frame_ids.map((frameId) => names[frameId] ?? frameId).join(", ")}`}
-          </Note>
-          <Button disabled={busy} onClick={() => onResume(hold)}>{POWER.resume}</Button>
-        </Inline>
-      ))}
+      {holds.map((hold) => {
+        const row = powerWords("holdRow", { who: holdWords(hold.power, hold.source), until: holdUntilWords(hold, now),
+          frames: hold.frame_ids.map((frameId) => names[frameId] ?? frameId).join(", ") });
+        return (
+          <Inline key={`${hold.hold_id}:${hold.until_at ?? "resume"}`} label={row}>
+            <Note>{row}</Note>
+            <Button disabled={busy} onClick={() => onResume(hold)}>{POWER.resume}</Button>
+          </Inline>
+        );
+      })}
     </OverrideBanner>
   );
 }

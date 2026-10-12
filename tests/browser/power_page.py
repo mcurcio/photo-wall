@@ -20,6 +20,21 @@ def button(scope, key):
     return scope.get_by_role("button", name=POWER[key], exact=True)
 
 
+def hold_banner(page):
+    """The hold banner above the week, while a hold is in force."""
+    return week(page).get_by_role("region", name="Holds", exact=True)
+
+
+def hold_lasts(page):
+    """The "A hold lasts" setting beside All off and All on."""
+    return week(page).get_by_role("radiogroup", name=POWER["holdLasts"], exact=True)
+
+
+def hold_lasts_choice(page, key):
+    """The setting's choice whose words are POWER[`key`] ("holdLastsNext", "holdLastsResumed")."""
+    return hold_lasts(page).get_by_role("radio", name=POWER[key], exact=True)
+
+
 def night_off_editor(page):
     """The Night off editor on the week page."""
     return week(page).get_by_role("region", name=POWER["nightOff"], exact=True)

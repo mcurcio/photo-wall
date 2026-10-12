@@ -10,7 +10,7 @@ from uuid import UUID
 from pydantic import Field
 
 from central.house_time.model import LocalDateTime
-from central.power.model import HoldSource, NightOff, NightOffDraft
+from central.power.model import HoldLasts, HoldSource, NightOff, NightOffDraft
 from contracts.models import Identifier, Instant, Model
 from contracts.node_output import Power
 
@@ -30,6 +30,12 @@ class NightOffView(Model):
     next_on: LocalDateTime | None
 
 
+class HoldLastsView(Model):
+    """GET and PUT /v1/operator/power/hold-lasts: how long a hold pressed from now on lasts (#90):
+    until each Frame's own next change, or until resumed. A hold already in force keeps its end."""
+    hold_lasts: HoldLasts
+
+
 class HoldRequest(Model):
     """POST /v1/operator/power/all-off and /all-on: the console's request id (a double tap makes
     one hold). The hold covers every current Frame."""
@@ -37,7 +43,9 @@ class HoldRequest(Model):
 
 
 class HoldView(Model):
-    """One live hold, as the Power lane draws it (#91)."""
+    """One live hold's Frames that end together, as the Power lane draws it (#91): a hold whose
+    Frames end at different times (each at its own next change) reads as one view per end, each
+    with the hold's id."""
     hold_id: UUID
     power: Power
     frame_ids: tuple[Identifier, ...]
@@ -52,4 +60,4 @@ class ResumeRequest(Model):
     frame_ids: Annotated[tuple[Identifier, ...], Field(min_length=1, max_length=256)]
 
 
-__all__ = ["HoldRequest", "HoldView", "NightOffSave", "NightOffView", "ResumeRequest"]
+__all__ = ["HoldLastsView", "HoldRequest", "HoldView", "NightOffSave", "NightOffView", "ResumeRequest"]

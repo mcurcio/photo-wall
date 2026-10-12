@@ -9,7 +9,8 @@ from __future__ import annotations
 from typing import Literal, Protocol
 from uuid import UUID
 
-from central.power.views import HoldView, NightOffSave, NightOffView
+from central.power.model import HoldLasts
+from central.power.views import HoldLastsView, HoldView, NightOffSave, NightOffView
 
 PowerRefusal = Literal["changed", "no-days", "needs-place", "unknown-frame"]
 
@@ -30,7 +31,12 @@ class PowerQueries(Protocol):
         ...
 
     def holds(self) -> tuple[HoldView, ...]:
-        """The live holds (ends_at after Central's now, or until resumed), newest first."""
+        """The live holds (ends_at after Central's now, or until resumed), newest first; a hold's
+        Frames that end at different times as one view per end, the earliest end first."""
+        ...
+
+    def hold_lasts(self) -> HoldLastsView:
+        """How long a hold pressed now lasts (#90; migration 090 seeds it)."""
         ...
 
 
@@ -40,12 +46,17 @@ class PowerCommands(Protocol):
         revision differs; "no-days" / "needs-place" from `when_problems`; "unknown-frame"."""
         ...
 
-    def all_off(self, request_id: UUID) -> HoldView:
-        """Hold every current Frame off until `hold_end` (#90). The newest hold on a Frame replaces
-        an older one; the same request id again answers the same hold."""
+    def set_hold_lasts(self, hold_lasts: HoldLasts) -> HoldLastsView:
+        """Store how long a hold pressed from now on lasts (#90); a hold in force keeps its end."""
         ...
 
-    def all_on(self, request_id: UUID) -> HoldView:
+    def all_off(self, request_id: UUID) -> tuple[HoldView, ...]:
+        """Hold every current Frame off, each until its own `hold_end` (#90), and answer the hold
+        as `holds` reads it (one view per end; none with no Frames). The newest hold on a Frame
+        replaces an older one; the same request id again answers the same hold."""
+        ...
+
+    def all_on(self, request_id: UUID) -> tuple[HoldView, ...]:
         """As `all_off`, on."""
         ...
 

@@ -651,9 +651,10 @@ class Runtime:
         return tuple(program.when for program in self._state.programs.values())
 
     def create_program(self, program: Program, now: float) -> Program:
-        """Store a new Program at revision 1. Its windows are admitted from `now` on: a window
-        already started is not (a new Schedule starts with its next window). The same Program
-        again is an idempotent retry; another under a taken id is refused "changed"."""
+        """Store a new Program at revision 1. A window of it covering `now` is admitted at once,
+        from `now` to its end (owner, 2026-10-12: "Start right away, for the rest of tonight's
+        window"); later windows follow from `now`. The same Program again is an idempotent
+        retry; another under a taken id is refused "changed"."""
         if program.revision != 1:
             raise ValueError("a new Program has revision 1")
         self.advance(now)
@@ -664,6 +665,7 @@ class Runtime:
             raise ProgramRefused("changed", stored)
         self._check_program(program)
         self._state.programs[program.program_id] = program
+        self._admit_covering(program, set())
         self._state.program_from[program.program_id] = self._state.now
         self.advance(now)
         return program
@@ -689,19 +691,27 @@ class Runtime:
             return saved
         for run in playing:
             run.scheduled_finish_at = min(run.scheduled_finish_at or now, now)
-        window = calculator.window_at(saved.when, self._house, self._state.now)
-        if window is not None:
-            identity = saved.window_id(window.start)
-            scene = self._state.scenes[saved.scene_id]
-            rank = PRIORITY_RANK[saved.priority]
-            denial = self._protected_conflict(scene, rank, False, {run.run_id for run in playing})
-            self._state.admissions[identity] = (
-                _refusal(identity, denial) if denial else self._admit(
-                    scene, identity, self._state.now, rank,
-                    program_id=saved.program_id, program_end=window.end))
+        self._admit_covering(saved, {run.run_id for run in playing})
         self._state.program_from[saved.program_id] = self._state.now
         self.advance(now)
         return saved
+
+    def _admit_covering(self, program: Program, finishing: set[str]) -> None:
+        """Admit `program`'s window covering the processed instant, if any, at once: from that
+        instant to the window's end, under the window's own identity, or record its refusal. The
+        Runs in `finishing` are left out of the protection check (as `activate`'s restart leaves
+        out the Runs it replaces). Creation and Save and apply now share it."""
+        now = self._state.now
+        window = calculator.window_at(program.when, self._house, now)
+        if window is None:
+            return
+        identity = program.window_id(window.start)
+        scene = self._state.scenes[program.scene_id]
+        rank = PRIORITY_RANK[program.priority]
+        denial = self._protected_conflict(scene, rank, False, finishing)
+        self._state.admissions[identity] = (
+            _refusal(identity, denial) if denial else self._admit(
+                scene, identity, now, rank, program_id=program.program_id, program_end=window.end))
 
     def _replace_program(self, expected: Program, draft: ProgramDraft,
                          now: float) -> tuple[Program, list[_Run] | None]:
@@ -844,8 +854,9 @@ class Runtime:
     def program_windows_between(self, program: Program, start: float, end: float) -> tuple[tuple[Window, bool], ...]:
         """`program`'s windows over [start, end), each with whether it plays by the rule Runtime
         admits by (R10): its current rule's windows (those starting before its `program_from`, as
-        one a save or a creation made mid-window, do not play), and the window a Run of an earlier
-        revision is still playing (a save keeps that window's end). The week page's one source."""
+        one a save made mid-window, do not play), and the window a Run of it is playing (a save
+        keeps that window's end; a creation or Save and apply now plays the window covering its
+        moment at once). The week page's one source."""
         since = self._program_from(program)
         try:
             found = [(window, window.start >= since)

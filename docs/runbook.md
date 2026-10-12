@@ -693,7 +693,7 @@ A Schedule (Central's and the API's **Program**) plays one Scene every week on i
 | 3 Review | Every answer with Change; the **Schedule name**; **Priority** (Normal, Special event, Always wins) | Normal |
 
 - **The Default Scene** (the week page) plays wherever no Schedule does, beneath every one; Nothing leaves those Frames with their last photo. It never protects its Frames.
-- **Saving a change applies from the next window**: a window playing now keeps its end, and the card names it until it ends, then the new rule's next window. **Save and apply now** finishes the window playing now and plays the new rule's window at once. A Schedule made during one of its own windows starts at the next one; the week draws a window that does not play dashed, and says so in its name.
+- **Saving a change applies from the next window**: a window playing now keeps its end, and the card names it until it ends, then the new rule's next window. **Save and apply now** finishes the window playing now and plays the new rule's window at once. A Schedule made during one of its own windows plays at once, for the rest of that window (owner, 2026-10-12: "Start right away, for the rest of tonight's window"); a window of a saved rule that started before the save does not play, and the week draws it dashed and says so in its name.
 - **A handed-over Scene never replaces your changes.** Pressing Schedule it for another Scene while a draft holds changes keeps the draft and offers "Schedule Scene X instead".
 - **Removing** a Schedule whose window is playing asks first: its Scene finishes at the end of its current cycle, after any outro, and no later window plays. The card says whether Central accepted, refused or gave no answer; after a refusal or no answer, check the card before retrying.
 - **Edits are compared** with the Schedule you opened: a change made elsewhere since is refused ("changed since you opened it"), and the flow offers Reload.
@@ -1044,6 +1044,8 @@ FROM output_documents o LEFT JOIN output_displays d USING (player_id, output_id)
 ```
 
 On the Pi, the controller's journal (above) logs each attempt; each is also a `display.record.power` event in `node_link_records`. Why is this playing on the Frame page reads the same: what Central wants, why, until when, and what the Pi says.
+
+**All off and All on hold every Frame, each until its own next change** (owner, 2026-10-12: "Each Frame's hold ends at its own next change; a Frame with no Night off holds until 07:00 tomorrow"): a Frame in Night off until Night off's next off or on; any other Frame until Night off next turns displays on (07:00 by default; it follows Night off's on time), the next one after the press, so a press at 01:00 holds until 07:00 that morning. **A hold lasts** beside All off and All on (`GET|PUT /v1/operator/power/hold-lasts`) switches to **Until I resume**; it applies to holds pressed from then on. The hold banner shows one row per group of Frames that end together, each with **Resume schedule**; `power_holds` keeps each Frame's `ends_at`. While Night off waits for the house's zone a hold lasts to the timetable's horizon.
 
 **With Central away** the Pi keeps switching at the set times for up to 7 days (the timetable's `until`), then leaves its displays as they are and reports `timetable-ran-out`. A Pi that boots without Central has no document and no Night off, as before. A Pi whose clock is wrong switches at the wrong time: check its clock first when a display switches at an odd hour.
 

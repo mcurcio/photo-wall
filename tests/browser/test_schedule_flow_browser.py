@@ -460,7 +460,9 @@ def test_a_weekday_schedule_shows_on_the_week_monday_to_friday_only(page, regist
     week and nowhere else; a 22:00–02:00 Schedule reads "ends next day"; Priority offers the three
     named levels, Normal first. Mutation probes: (P-days-off-by-one) send Sunday-first days from
     `buildProgram` -> the calendar draws Tue–Sat; (P-week-plays-all) the week marks every window
-    as playing -> Wednesday's 17:00 window, made at 18:00, reads as playing."""
+    as playing -> Monday's 17:00 window, made after it, reads as playing; (P-create-next) creation
+    leaves the window playing now to the next one -> the card has no Now and Wednesday's window
+    reads "does not play"."""
     _london_evening(registry)
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin)
@@ -468,9 +470,12 @@ def test_a_weekday_schedule_shows_on_the_week_monday_to_friday_only(page, regist
         for day in WEEK_DAYS:
             expect(_windows(page, day, "Evenings")).to_have_count(1 if day[:3] in ("Mon", "Tue", "Wed", "Thu", "Fri") else 0)
         expect(_windows(page, "Thu 15 Oct", "Evenings")).to_have_accessible_name("Evenings, Thu 15 Oct 17:00–23:00")
-        # Made on Wednesday at 18:00: this week's windows until then do not play (R10), and say so.
-        for day in ("Mon 12 Oct", "Wed 14 Oct"):
-            expect(_windows(page, day, "Evenings")).to_have_accessible_name(re.compile(r", so it does not play$"))
+        # Made on Wednesday at 18:00: Wednesday's window plays at once, for the rest of it (owner,
+        # 2026-10-12: "Start right away, for the rest of tonight's window"); earlier ones do not
+        # play, and say so.
+        expect(_windows(page, "Wed 14 Oct", "Evenings")).to_have_accessible_name("Evenings, Wed 14 Oct 17:00–23:00")
+        expect(card(page, "Evenings")).to_contain_text("Now")
+        expect(_windows(page, "Mon 12 Oct", "Evenings")).to_have_accessible_name(re.compile(r", so it does not play$"))
 
         form = schedule_program(page, "Late", "calm", "22:00", "02:00", submit=False)
         expect(form.get_by_label("Your answers", exact=True)).to_contain_text("Every day, 22:00–02:00 (ends next day)")
@@ -484,7 +489,7 @@ def test_save_and_apply_now_plays_the_new_rule_at_once_and_the_default_scene_is_
     """K3: editing the Schedule playing now, Save and apply now (POST …/apply-now) ends the window
     playing now and plays the new rule's window at once (the card's Now is the new window); the
     week page's Default Scene picker sets the Default Scene ("Nothing" allowed). The Schedule is
-    made before its window (one made during it starts at its next window, R10)."""
+    made before its window, so the window it plays is admitted by the advance at 17:00."""
     from support.house_time import LONDON, at
     _london_evening(registry)
     registry.clock.wall = at(LONDON, "2026-10-14T16:00")

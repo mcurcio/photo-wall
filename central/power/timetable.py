@@ -14,8 +14,12 @@ Rules this module owns (one home each):
   always covers at least HORIZON_DAYS days.
 - **The timetable:** `now` is the wanted power at Central's now; `changes` are the span starts in
   (now, until) where the power changes (a reason change with the same power is no change).
-- **A hold's end:** Night off's next on or off time after `now` while it is in force (house-wide: the
-  same moment for a Frame that does not follow Night off), or None when holds last until resumed.
+- **A hold's end, per Frame** (owner, 2026-10-12: "Each Frame's hold ends at its own next change; a
+  Frame with no Night off holds until 07:00 tomorrow"): for a Frame that follows Night off, Night
+  off's next on or off time after `now`; for one that does not, the next time of day Night off turns
+  displays on (07:00 by default) after `now` on the house clock; the horizon's end while Night off
+  is not in force or has no such time in the look-ahead; None when holds last until resumed.
+- **The hold in force:** the newest live hold on the Frame (`hold_in_force`).
 The 1b console test is not here: it sits on top of the timetable in the Output document
 (central/displays/model.py), counted on the Pi.
 """
@@ -28,6 +32,7 @@ from typing import Final
 from uuid import UUID
 
 from central.house_time.calculator import LOOKAHEAD_DAYS, day_start, house_date, windows
+from central.house_time.calculator import moment as house_moment
 from central.house_time.model import HouseTime, Window
 from central.power.model import (
     AllFrames,
@@ -115,7 +120,7 @@ def spans(frame_id: str, policy: PowerPolicy, house: HouseTime, start: float, en
     cuts = sorted(edges)
     found: list[PowerSpan] = []
     for left, right in zip(cuts, cuts[1:], strict=False):
-        piece = _span_at(left, right, holds, nights)
+        piece = _span_at(frame_id, policy, left, right, nights)
         previous = found[-1] if found else None
         if previous is not None and (previous.power, previous.because, previous.hold_id, previous.source) == (
                 piece.power, piece.because, piece.hold_id, piece.source):
@@ -151,18 +156,41 @@ def unbound_timetable(house: HouseTime, now: float) -> Timetable:
                      darkness=Darkness.DISPLAY_OFF)
 
 
-def hold_end(policy: PowerPolicy, house: HouseTime, now: float) -> float | None:
-    """When a hold pressed at Central's `now` ends: None when Night off's `hold_lasts` is
-    "until-resumed"; else Night off's next on or off time after `now` while it is in force, or
-    `horizon_end(house, now)` when it has none within the calculator's look-ahead (nothing stays
-    held forever by accident)."""
-    if policy.night_off.hold_lasts == "until-resumed":
+def hold_end(frame_id: str, policy: PowerPolicy, house: HouseTime, now: float) -> float | None:
+    """When a hold pressed at Central's `now` ends on `frame_id` (the rule above): None when
+    `policy.hold_lasts` is "until-resumed"; `horizon_end(house, now)` when there is no such time
+    within the calculator's look-ahead (nothing stays held forever by accident)."""
+    if policy.hold_lasts == "until-resumed":
         return None
     night_off = night_off_in_force(policy)
+    if night_off is None:
+        return horizon_end(house, now)
     reach = day_start(house, house_date(house, now) + timedelta(days=LOOKAHEAD_DAYS + 1))
-    moments = [] if night_off is None else [moment for night in _night_windows(night_off, house, now, reach)
-                                             for moment in (night.start, night.end) if moment > now]
+    if follows_night_off(frame_id, night_off):
+        moments = [edge for night in _night_windows(night_off, house, now, reach)
+                   for edge in (night.start, night.end) if edge > now]
+    else:
+        moments = _times_of_day(night_off, house, now)
     return min(moments) if moments else horizon_end(house, now)
+
+
+def hold_in_force(frame_id: str, policy: PowerPolicy, at: float) -> Hold | None:
+    """The newest hold on `frame_id` live at `at` (started at or before it, not yet ended), or None."""
+    live = [hold for hold in policy.holds if frame_id in hold.frame_ids and hold.started_at <= at
+            and (hold.ends_at is None or at < hold.ends_at)]
+    return max(live, key=lambda hold: hold.started_at, default=None)
+
+
+def _times_of_day(night_off: NightOff, house: HouseTime, now: float) -> list[float]:
+    """Night off's on time on each house day from now's to the look-ahead's end, after `now`
+    (every day, whatever nights Night off starts on); none while it cannot be worked out (a sun
+    time with no Place)."""
+    first = house_date(house, now)
+    try:
+        found = (house_moment(night_off.on, house, first + timedelta(days=offset)) for offset in range(LOOKAHEAD_DAYS + 1))
+        return [at for at in found if at is not None and at > now]
+    except ValueError:
+        return []
 
 
 def _night_windows(night_off: NightOff, house: HouseTime, start: float, end: float) -> tuple[Window, ...]:
@@ -174,16 +202,16 @@ def _night_windows(night_off: NightOff, house: HouseTime, start: float, end: flo
         return ()
 
 
-def _span_at(left: float, right: float, holds: tuple[Hold, ...], nights: tuple[Window, ...]) -> PowerSpan:
+def _span_at(frame_id: str, policy: PowerPolicy, left: float, right: float,
+             nights: tuple[Window, ...]) -> PowerSpan:
     """The span [left, right), which no hold or night edge crosses, by its state at `left`."""
-    live = [hold for hold in holds if hold.started_at <= left and (hold.ends_at is None or left < hold.ends_at)]
-    if live:
-        newest = max(live, key=lambda hold: hold.started_at)
-        return PowerSpan(left, right, newest.power, "hold", newest.hold_id, newest.source)
+    held = hold_in_force(frame_id, policy, left)
+    if held is not None:
+        return PowerSpan(left, right, held.power, "hold", held.hold_id, held.source)
     if any(night.start <= left < night.end for night in nights):
         return PowerSpan(left, right, Power.OFF, "night-off")
     return PowerSpan(left, right, Power.ON, "on-underneath")
 
 
 __all__ = ["HORIZON_DAYS", "PowerSpan", "TimedChange", "Timetable", "follows_night_off", "frame_timetable",
-           "hold_end", "horizon_end", "night_off_in_force", "spans", "unbound_timetable"]
+           "hold_end", "hold_in_force", "horizon_end", "night_off_in_force", "spans", "unbound_timetable"]

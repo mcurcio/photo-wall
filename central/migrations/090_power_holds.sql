@@ -10,3 +10,12 @@ CREATE TABLE power_holds (
   ends_at DOUBLE PRECISION,
   CHECK (ends_at IS NULL OR ends_at > started_at));
 CREATE INDEX power_holds_hold ON power_holds (hold_id);
+
+-- How long a hold lasts (#90): one row, one rule for every hold, set beside All off and All on. Seeded
+-- 'next-scheduled-change': each Frame's own next change (central/power/timetable.py hold_end).
+CREATE TABLE hold_settings (
+  singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
+  hold_lasts TEXT NOT NULL CHECK (hold_lasts IN ('next-scheduled-change', 'until-resumed')),
+  updated_at DOUBLE PRECISION NOT NULL);
+INSERT INTO hold_settings (singleton, hold_lasts, updated_at)
+VALUES (TRUE, 'next-scheduled-change', EXTRACT(EPOCH FROM clock_timestamp()));

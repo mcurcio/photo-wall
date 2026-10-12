@@ -27,7 +27,7 @@ export const SunAndChosenFrames: Story = {
     placeSet: true,
     view: { ...NIGHT_OFF, next_off: "2026-10-14T18:42", night_off: { ...NIGHT_OFF.night_off,
       off: { at: "sunset", offset_minutes: 30 }, frames: { kind: "frames", frame_ids: ["bedroom"] },
-      darkness: "black-picture", hold_lasts: "until-resumed" } },
+      darkness: "black-picture" } },
   },
 };
 /** Settings › House never saved: the zone is Central's own, so Night off switches nothing yet. */

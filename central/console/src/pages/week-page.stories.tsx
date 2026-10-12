@@ -4,14 +4,17 @@ import { HELD_WEEK, HOLD, NIGHT_OFF, NOW, WEEK } from "../domain/power-week.fixt
 import { setHouseClock } from "../timeWords.js";
 import { WeekView } from "./week-page";
 
-const READ = { ok: true as const, week: WEEK, holds: [], nightOff: NIGHT_OFF, zone: "Europe/London", placeSet: true };
+const READ = {
+  ok: true as const, week: WEEK, holds: [], holdLasts: "next-scheduled-change" as const, nightOff: NIGHT_OFF,
+  zone: "Europe/London", placeSet: true,
+};
 
 const meta = {
   title: "Pages/Week",
   component: WeekView,
   args: {
     read: READ, now: NOW, frames: [{ id: "bedroom", name: "Bedroom" }], sceneIds: ["calm", "evening"], busy: false,
-    said: null, sceneSaid: null, thisWeek: true, onWeek: () => {}, onHold: () => {}, onResume: () => {},
+    said: null, sceneSaid: null, thisWeek: true, onWeek: () => {}, onHold: () => {}, onHoldLasts: () => {}, onResume: () => {},
     onDefaultScene: () => {}, onSaveNightOff: async () => ({ ok: true as const }),
   },
 } satisfies Meta<typeof WeekView>;

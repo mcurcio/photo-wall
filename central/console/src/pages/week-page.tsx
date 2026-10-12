@@ -1,14 +1,18 @@
 import { type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 
 import { NightOffEditor, type NightOffDraft, type NightOffView } from "../domain/night-off-editor";
-import { HoldBanner, holdUntilWords, type HoldView, PowerButtons, PowerLane, scheduleLane, type Week } from "../domain/power-lane";
+import {
+  HOLD_LASTS_WORDS, HoldBanner, type HoldLasts, HoldLastsControl, holdingWords, type HoldView, PowerButtons, PowerLane,
+  scheduleLane, type Week,
+} from "../domain/power-lane";
 import { readHouse } from "../houseApi.js";
 import { EntityHeader } from "../patterns/entity-header";
 import { Note } from "../patterns/fact-row";
 import { ProblemCard } from "../patterns/problem-card";
 import { SettingRow } from "../patterns/setting-row";
 import { usePolledRead } from "../polledRead.js";
-import { hold, readHolds, readNightOff, resumeSchedule, saveNightOff } from "../powerScheduleApi.js";
+import { POWER, power as powerWords } from "../powerWords.js";
+import { hold, readHoldLasts, readHolds, readNightOff, resumeSchedule, saveHoldLasts, saveNightOff } from "../powerScheduleApi.js";
 import { formatRoute } from "../routes.js";
 import { SCHEDULE } from "../showWords.js";
 import { addDays, houseDayWords, houseLocal, mondayOf, zoneNote } from "../timeWords.js";
@@ -27,21 +31,21 @@ interface Snapshot {
 type Read = WeekRead | { ok: false; error: string } | null;
 
 /** One read of the week page. */
-export type WeekRead =
-  { ok: true; week: Week; holds: HoldView[]; nightOff: NightOffView; zone: string; placeSet: boolean };
+export type WeekRead = {
+  ok: true; week: Week; holds: HoldView[]; holdLasts: HoldLasts; nightOff: NightOffView; zone: string; placeSet: boolean;
+};
 
 const NOTHING = "nothing";
 
-type Answer = { ok: true; hold?: HoldView } | { ok: false; error: string };
+type Answer = { ok: true; holds?: HoldView[] } | { ok: false; error: string };
 
 /** Central's answer to All off, All on or Resume, in words: a hold says until when Central
- * holds it (its `until`), never a guess from the setting. */
+ * holds each Frame (its views' `until`), never a guess from the setting. */
 function pressWords(power: "on" | "off" | "resume", answer: Answer, now: string | null): string {
   if (answer.ok) {
     if (power === "resume") return "Resumed the schedule: the displays follow Night off again.";
-    if (answer.hold === undefined) return `Holding every display ${power}.`;
-    if (answer.hold.frame_ids.length === 0) return "No Frame to hold yet.";
-    return `Holding every display ${power} until ${holdUntilWords(answer.hold, now)}.`;
+    if (answer.holds === undefined) return `Holding every display ${power}.`;
+    return holdingWords(answer.holds, now) ?? "No Frame to hold yet.";
   }
   return answer.error === "unreachable" ? "Central did not answer. Press it again."
     : `Not done: Central refused it (${answer.error}).`;
@@ -50,7 +54,7 @@ function pressWords(power: "on" | "off" | "resume", answer: Answer, now: string 
 /**
  * The week page (`#/schedule`; Power and the week, roadmap 2a + 2b): seven house days from Monday,
  * the Power lane over the Schedules' windows, the now line, Previous and Next week; All off and All
- * on in the header (a held page says until when); every hold with Resume schedule; the Default
+ * on in the header with how long a hold lasts beside them (a held page says until when); every hold with Resume schedule; the Default
  * Scene; and Night off's rules. Every band and window is Central's (GET /v1/operator/week): the
  * page works out no time, and reads the house's "today" from Central's read time in the house's
  * zone, never the browser's.
@@ -78,15 +82,18 @@ export function WeekPage({ snapshot, schedules = null, hidden = false }: {
     const zone = house.settings.time.zone;
     const day = firstDay ?? (readAt.current === null ? null : mondayOf(houseLocal(readAt.current, zone).slice(0, 10)));
     if (day === null) return null;
-    const [week, holds, nightOff] = await Promise.all([readWeek(day), readHolds(), readNightOff()]) as [
+    const [week, holds, holdLasts, nightOff] = await Promise.all([readWeek(day), readHolds(), readHoldLasts(), readNightOff()]) as [
       { ok: true; week: Week } | { ok: false; error: string },
       { ok: true; holds: HoldView[] } | { ok: false; error: string },
+      { ok: true; view: { hold_lasts: HoldLasts } } | { ok: false; error: string },
       { ok: true; view: NightOffView } | { ok: false; error: string },
     ];
     if (!week.ok) return week;
     if (!holds.ok) return holds;
+    if (!holdLasts.ok) return holdLasts;
     if (!nightOff.ok) return nightOff;
-    return { ok: true, week: week.week, holds: holds.holds, nightOff: nightOff.view, zone, placeSet: house.settings.time.place !== null };
+    return { ok: true, week: week.week, holds: holds.holds, holdLasts: holdLasts.view.hold_lasts, nightOff: nightOff.view,
+      zone, placeSet: house.settings.time.place !== null };
   }, [firstDay]);
   // The house's today comes from Central's read time: nothing is read before the first snapshot.
   const { value: read, refresh } = usePolledRead(load, {
@@ -118,6 +125,14 @@ export function WeekPage({ snapshot, schedules = null, hidden = false }: {
     const answer = await resumeSchedule([...held.frame_ids]) as Answer;
     setBusy(false);
     setSaid(pressWords("resume", answer, nowWords()));
+    void refresh();
+  };
+  const onHoldLasts = async (next: HoldLasts) => {
+    setBusy(true);
+    const answer = await saveHoldLasts(next) as { ok: true } | { ok: false; error: string };
+    setBusy(false);
+    setSaid(answer.ok ? powerWords("holdLastsSaved", { setting: HOLD_LASTS_WORDS[next] })
+      : answer.error === "unreachable" ? POWER.holdLastsUnreachable : powerWords("holdLastsRefused", { error: answer.error }));
     void refresh();
   };
   const onSaveNightOff = async (revision: number, draft: NightOffDraft) => {
@@ -154,7 +169,7 @@ export function WeekPage({ snapshot, schedules = null, hidden = false }: {
   const props: WeekViewProps = {
     read, now: readAt.current === null ? null : houseLocal(readAt.current, read.zone), frames,
     sceneIds: Object.keys(definitions), busy, said, sceneSaid, thisWeek: firstDay === null, onWeek: setFirstDay,
-    onHold: (power) => void onHold(power), onResume: (held) => void onResume(held),
+    onHold: (power) => void onHold(power), onHoldLasts: (next) => void onHoldLasts(next), onResume: (held) => void onResume(held),
     onDefaultScene: (next, label) => void onDefaultScene(next, label), onSaveNightOff,
   };
   return page(<WeekTop view={props} />, <WeekRules view={props} />);
@@ -178,13 +193,16 @@ export interface WeekViewProps {
   /** Show the week from this Monday; null: the house's current week. */
   onWeek: (firstDay: string | null) => void;
   onHold: (power: "on" | "off") => void;
+  /** "A hold lasts" chosen (saved at once). */
+  onHoldLasts: (next: HoldLasts) => void;
   onResume: (hold: HoldView) => void;
   onDefaultScene: (sceneId: string, label: string) => void;
   onSaveNightOff: (revision: number, draft: NightOffDraft) => Promise<{ ok: true } | { ok: false; error: string }>;
 }
 
 /**
- * The week page for one read: what a story draws. The header (All off, All on, the weeks), the hold
+ * The week page for one read: what a story draws. The header (All off, All on, how long a hold
+ * lasts, the weeks), the hold
  * banner while one is in force, the calendar with its colour key (a day at a time on a phone), a
  * line on how to add a Schedule when none plays this week, the Default Scene and Night off.
  */
@@ -194,7 +212,7 @@ export function WeekView(props: WeekViewProps) {
 
 /** The week's top: its header (All off, All on, the weeks), the hold banner, the calendar. */
 function WeekTop({ view }: { view: WeekViewProps }) {
-  const { read, now, frames, busy, said, thisWeek, onWeek, onHold, onResume } = view;
+  const { read, now, frames, busy, said, thisWeek, onWeek, onHold, onHoldLasts, onResume } = view;
   const { week, holds } = read;
   const title = `Week of ${houseDayWords(week.first_day)}`;
   const names = Object.fromEntries(frames.map((frame) => [frame.id, frame.name]));
@@ -202,7 +220,10 @@ function WeekTop({ view }: { view: WeekViewProps }) {
     <Stack>
       <EntityHeader title={title}>
         <Note>{`${zoneNote(read.zone)}.`}</Note>
-        <PowerButtons busy={busy} onHold={onHold} />
+        <Inline>
+          <PowerButtons busy={busy} onHold={onHold} />
+          <HoldLastsControl value={read.holdLasts} busy={busy} onChange={onHoldLasts} />
+        </Inline>
         <Inline label="Weeks">
           <Button variant="ghost" onClick={() => onWeek(addDays(week.first_day, -7))}>Previous week</Button>
           <Button variant="ghost" disabled={thisWeek} onClick={() => onWeek(null)}>This week</Button>

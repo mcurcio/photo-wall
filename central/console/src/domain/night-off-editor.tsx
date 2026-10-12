@@ -26,7 +26,6 @@ export interface NightOffDraft {
   days: Weekday[];
   frames: { kind: "frames"; frame_ids: string[] } | { kind: "all-frames" };
   darkness: "display-off" | "black-picture";
-  hold_lasts: "next-scheduled-change" | "until-resumed";
 }
 
 /** GET /v1/operator/power/night-off (central/power/views.py `NightOffView`). */
@@ -155,8 +154,8 @@ function resolvedOf(shown: TimeOfDay, saved: TimeOfDay, next: string | null, now
 }
 
 const draftOf = (view: NightOffView): NightOffDraft => {
-  const { off, on, days, frames, darkness, hold_lasts: holdLasts } = view.night_off;
-  return { off, on, days: [...days], frames, darkness, hold_lasts: holdLasts };
+  const { off, on, days, frames, darkness } = view.night_off;
+  return { off, on, days: [...days], frames, darkness };
 };
 
 export interface NightOffEditorProps {
@@ -172,10 +171,11 @@ export interface NightOffEditorProps {
 }
 
 /**
- * The Power lane's Night off rules (roadmap 2a, #80-#83, #90; the editor save model): when
+ * The Power lane's Night off rules (roadmap 2a, #80-#83; the editor save model): when
  * displays turn off and on (a clock time, or sunrise or sunset plus or minus minutes), on which
  * nights, on which Frames (each current Frame, or the "All Frames" group, which later Frames
- * join), whether "off" turns displays off or shows black, and how long All off and All on hold.
+ * join), and whether "off" turns displays off or shows black. How long All off and All on hold
+ * sits beside them on the week page (power-lane.tsx `HoldLastsControl`).
  * Save sends the revision the editor opened at: a save from another tab since answers "changed",
  * and the editor offers Reload rather than overwrite it.
  */
@@ -263,12 +263,6 @@ export function NightOffEditor({ view, frames, placeSet, houseHref, now = null, 
         control={<SegmentedControl label="Off means" value={shown.darkness}
           options={[{ value: "display-off", label: "Turn displays off" }, { value: "black-picture", label: "Show black" }]}
           onChange={(darkness) => edit({ darkness })} />} />
-      <SettingRow kind="house" label="A hold lasts" defaultLabel="Default: until the next scheduled change" state="idle"
-        help="How long All off and All on keep the displays as they are."
-        control={<SegmentedControl label="A hold lasts" value={shown.hold_lasts}
-          options={[{ value: "next-scheduled-change", label: "Until the next scheduled change" },
-            { value: "until-resumed", label: "Until I resume" }]}
-          onChange={(holdLasts) => edit({ hold_lasts: holdLasts })} />} />
       <SaveBar label="Night off actions" message={said !== null && <Note live>{said}</Note>}>
         <Button variant="primary" disabled={!changed || saving || stale} onClick={() => void save()}>
           {saving ? "Saving…" : POWER.saveNightOff}

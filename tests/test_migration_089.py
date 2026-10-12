@@ -57,9 +57,8 @@ def test_089_seeds_night_off_with_every_frame_and_ends_todays_programs(registry)
 
     seeded = NightOff.model_validate({**night_off["settings"], "revision": night_off["revision"]})
     assert seeded.frames == ChosenFrames(frame_ids=("Attic", "b-c", "ba", "hall", "study"))   # sorted as Python sorts
-    assert (seeded.off.time, seeded.on.time, seeded.days, seeded.darkness, seeded.hold_lasts) == (
-        "23:00", "07:00", ("mon", "tue", "wed", "thu", "fri", "sat", "sun"), Darkness.DISPLAY_OFF,
-        "next-scheduled-change")
+    assert (seeded.off.time, seeded.on.time, seeded.days, seeded.darkness) == (
+        "23:00", "07:00", ("mon", "tue", "wed", "thu", "fri", "sat", "sun"), Darkness.DISPLAY_OFF)
     assert houses == 0                          # Central seeds the house row at start, never the migration
     assert state["revision"] == 8 and state["snapshot"]["programs"] == {}
     (kept,) = state["snapshot"]["runs"].values()

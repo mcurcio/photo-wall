@@ -17,8 +17,17 @@ import pytest
 from console_tasks import connect
 from operator_harness import operator_server
 from playwright.sync_api import expect
-from power_page import band, button, night_off_band, night_off_editor, week
-from support.console_words import POWER
+from power_page import (
+    band,
+    button,
+    hold_banner,
+    hold_lasts,
+    hold_lasts_choice,
+    night_off_band,
+    night_off_editor,
+    week,
+)
+from support.console_words import POWER, power
 from support.house_time import LONDON, at, set_house
 
 from central.house_time.model import HouseTime, Place
@@ -56,27 +65,69 @@ def test_the_lane_draws_night_off_and_holds_with_resume_schedule(page, registry)
             expect(night_off_band(page, day, f"{day} 23:00 – {ends}")).to_have_count(1)
         expect(band(page, "Wed 14 Oct", "^On, Wed 14 Oct 07:00–23:00$")).to_have_count(1)
 
-        # All off: a hatched hold labelled with who set it, until the next change (23:00).
+        # All off: a hatched hold labelled with who set it, until the Frame's next change (23:00).
+        held_off = power("heldWho", power="off", who="console")
         button(week(page), "allOff").click()
-        expect(band(page, "Wed 14 Oct", r"^Held off · console, Wed 14 Oct 12:00–23:00$")).to_have_count(1)
-        holds = week(page).get_by_role("region", name="Holds", exact=True)     # the hold banner
-        expect(holds.get_by_role("heading", name="Held off until 23:00", exact=True)).to_be_visible()
-        expect(week(page)).to_contain_text("Holding every display off until 23:00.")     # Central's until
-        expect(holds).to_contain_text("Held off · console · until 23:00 · Frame 1")
+        expect(band(page, "Wed 14 Oct", f"^{held_off}, Wed 14 Oct 12:00–23:00$")).to_have_count(1)
+        holds = hold_banner(page)
+        expect(holds.get_by_role("heading", name=power("held", power="off", until="23:00"), exact=True)).to_be_visible()
+        expect(week(page)).to_contain_text(power("holding", power="off", until="23:00"))     # Central's until
+        expect(holds).to_contain_text(power("holdRow", who=held_off, until="23:00", frames="Frame 1"))
 
         # Resume schedule removes it at once, and the hold banner with it.
         button(holds, "resume").click()
         expect(band(page, "Wed 14 Oct", "^Held")).to_have_count(0)
         expect(holds).to_have_count(0)
-        expect(week(page)).not_to_contain_text("Held off until")
+        expect(week(page)).not_to_contain_text(power("held", power="off", until="23:00"))
 
         # All on, then All off: only the newest hold shows.
         button(week(page), "allOn").click()
-        expect(band(page, "Wed 14 Oct", "^Held on · console")).to_have_count(1)
+        expect(band(page, "Wed 14 Oct", "^" + power("heldWho", power="on", who="console"))).to_have_count(1)
         button(week(page), "allOff").click()
-        expect(band(page, "Wed 14 Oct", "^Held off · console")).to_have_count(1)
+        expect(band(page, "Wed 14 Oct", f"^{held_off}")).to_have_count(1)
         expect(band(page, "Wed 14 Oct", "^Held on")).to_have_count(0)
-        expect(week(page)).to_contain_text("Held off until 23:00")
+        expect(week(page)).to_contain_text(power("held", power="off", until="23:00"))
+
+
+@pytest.mark.browser_context_args(timezone_id="Pacific/Auckland")
+def test_each_frames_hold_ends_at_its_own_next_change_and_the_setting_sits_beside_all_off(page, registry):
+    """Owner, 2026-10-12: "Each Frame's hold ends at its own next change; a Frame with no Night off
+    holds until 07:00 tomorrow; the setting moves beside All off/All on". The bedroom follows Night
+    off and the study does not: All off at Wednesday noon holds the bedroom to 23:00 and the study
+    to 07:00, one banner row each; "A hold lasts" is chosen beside All off (no Save), and the next
+    All on lasts until resumed.
+
+    Mutation probes: (P-house-wide-end) end every Frame's hold at Night off's next on or off time
+    -> the study's row reads 23:00; (P-banner-newest-end) title the banner by the newest view's end
+    alone -> it reads "Held off until 23:00"."""
+    seed_house(registry)
+    registry.create_frame(FrameCreate(id="study", width_mm=300, height_mm=500,
+                                      profile=FrameProfile(width_px=1080, height_px=1920, diagonal_inches=24)))
+    with registry.db.transaction() as conn:   # Night off on the bedroom only
+        conn.execute("""UPDATE night_off SET settings = jsonb_set(settings, '{frames}',
+                        '{"kind": "frames", "frame_ids": ["bedroom"]}')""")
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "schedule")
+        expect(hold_lasts_choice(page, "holdLastsNext")).to_be_checked()
+        expect(night_off_editor(page).get_by_role("radiogroup", name=POWER["holdLasts"])).to_have_count(0)
+
+        held_off = power("heldWho", power="off", who="console")
+        button(week(page), "allOff").click()
+        holds = hold_banner(page)
+        expect(holds.get_by_role("heading", name=power("heldEach", power="off"), exact=True)).to_be_visible()
+        expect(week(page)).to_contain_text(power("holdingEach", power="off"))
+        expect(holds).to_contain_text(power("holdRow", who=held_off, until="23:00", frames="Frame 1"))
+        expect(holds).to_contain_text(power("holdRow", who=held_off, until="07:00", frames="Frame 2"))
+        expect(band(page, "Wed 14 Oct", f"^{held_off}, Wed 14 Oct 12:00 – Thu 15 Oct 07:00$")).to_have_count(1)
+
+        with page.expect_response(lambda r: r.url.endswith("/power/hold-lasts") and r.request.method == "PUT") as sent:
+            hold_lasts_choice(page, "holdLastsResumed").click()
+        assert sent.value.request.post_data_json == {"hold_lasts": "until-resumed"}
+        expect(week(page)).to_contain_text(power("holdLastsSaved", setting=POWER["holdLastsResumed"]))
+        expect(holds).to_contain_text(power("holdRow", who=held_off, until="07:00", frames="Frame 2"))  # kept
+        button(week(page), "allOn").click()
+        expect(week(page)).to_contain_text(power("holding", power="on", until=POWER["youResume"]))
+        expect(hold_lasts(page)).to_be_visible()
 
 
 @pytest.mark.browser_context_args(timezone_id="Pacific/Auckland")
