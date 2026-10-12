@@ -426,7 +426,7 @@ Every setting a power user expects, with exactly one home: 136 settings (numbere
 | 142 | Home Assistant can control Photo Wall | Settings › Integrations | on | S |
 | 143 | Include Pi diagnostics in Home Assistant | Settings › Integrations | off | N |
 | 144 | Remove from Home Assistant | Settings › Integrations | n/a | S |
-| 153 | LUTs: the paper profiles Central keeps, each a LUT the Picture tab offers; add one (an ICC file from the paper's maker), remove one no Display uses (not built: added through the operator route, [runbook](runbook.md#luts-paper-profiles)) | Settings › LUTs | none | S |
+| 153 | LUTs: the paper profiles Central keeps, each a LUT the Picture tab offers; add one (an ICC file from the paper's maker), remove one no Display uses | Settings › LUTs (`#/luts`) | none | S |
 
 ## 12. Where a power user's expectation meets a written requirement
 

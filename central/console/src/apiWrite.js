@@ -17,18 +17,23 @@ const TIMEOUT_MS = 15000;
  *
  * When `body` is supplied it is JSON-encoded and a `Content-Type` header is set;
  * when it is omitted (e.g. DELETE frame) neither is sent, matching the requests
- * the endpoints issued before this extraction. The response body is parsed as
- * JSON best-effort on BOTH paths — an empty/non-JSON body yields `data: null`
+ * the endpoints issued before this extraction. A body that is not JSON (a file the
+ * operator chose, as Settings › LUTs' paper profile) names its `contentType`: the
+ * body (a Blob, File or bytes) is then sent as it is, under that type. The
+ * response body is parsed as JSON best-effort on BOTH paths — an empty/non-JSON body yields `data: null`
  * and, on failure, `error: null` — so a caller reads one shape regardless.
  *
  * @param {string} path
- * @param {{method: string, body?: any}} options
+ * @param {{method: string, body?: any, contentType?: string}} options
  * @returns {Promise<{ok: boolean, status: number, error: string|null, data: any}>}
  */
-export async function apiWrite(path, { method, body } = {}) {
+export async function apiWrite(path, { method, body, contentType } = {}) {
   const headers = { ...CONSOLE_HEADER };
   const init = { method, headers, signal: AbortSignal.timeout(TIMEOUT_MS) };
-  if (body !== undefined) {
+  if (body !== undefined && contentType !== undefined) {
+    headers["Content-Type"] = contentType;
+    init.body = body;
+  } else if (body !== undefined) {
     headers["Content-Type"] = "application/json";
     init.body = JSON.stringify(body);
   }

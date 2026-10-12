@@ -67,5 +67,5 @@ Prior art: ICC soft proofing and black point compensation (LittleCMS through Pil
 - The paper's measured black is not shown by itself: set the black floor to it. The LUT is 8-bit in and out and between its two transforms; banding on a grey ramp is a bench check.
 - Lights are directional: a lamp close to a large Frame is not modelled. They shade only and never relight the photo (no lamp-warmed print). With a flush 45° bevel real shadows are millimetres; the 20 mm depth allows exaggeration.
 - Contrast above 100 % still clips, as before.
-- The console has no Settings › LUTs page yet: a paper profile is added through the operator route ([runbook](../runbook.md#luts-paper-profiles)), and the Picture tab's LUT picker lists what is there.
-- Deferred: the Settings › LUTs page; copying a mat and its lights to other Frames; room lights; `.cube` import; a per-Scene switch; matching room light and white (R8). Not planned: paper texture and matte simulation (R7), the display's own processing, relighting.
+- A paper profile is added on Settings › LUTs ([runbook](../runbook.md#luts-paper-profiles)); the Picture tab's LUT picker reads the list when the tab opens, so a LUT added while the tab is open shows the next time it opens.
+- Deferred: copying a mat and its lights to other Frames; room lights; `.cube` import; a per-Scene switch; matching room light and white (R8). Not planned: paper texture and matte simulation (R7), the display's own processing, relighting.

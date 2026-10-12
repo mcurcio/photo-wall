@@ -5748,3 +5748,26 @@ Order: (a) merge the iac PR that switches the factory to `central.app:create_app
   run); a broken one fails (exit 1, run). Only review catches a removed link.
 - **design-decisions.md's index lists only 0001-0005**; later records are named in the D rows, so
   0023 joined D12 beside 0022.
+
+## print-look console lane, slice U3 Settings › LUTs (implementer, 2026-10-12)
+
+- **The re-cut paths still miss five files the section needs, all edited here:** the Settings route
+  table is `central/console/src/settingsRoutes.jsx` and its sample `src/routeSamples.json`
+  (`test_each_route_table_takes_its_sections_and_samples_from_its_own_group`); `lutsApi.js` is now
+  reached from Settings and from the Wall's Picture tab, so it joins `SHARED_WITH_SHOW` in
+  `tests/test_console_routes_r4.py`; the sidebar's Settings list is asserted by
+  `tests/browser/test_console_shell_browser.py` (one word, "LUTs"); and `go(page, "luts")` needs the
+  section in `tests/browser/console_tasks.py` (`SETTINGS_SECTIONS`, `LABELS`). The file chooser is
+  `src/ui/file-chooser.tsx` with its stories (console lane's finding).
+- **Docs that said "not built" are corrected in the same commit** (console-ux skill step 1: a §8
+  row changes with what was built): design-language §4 (`LutsSettings`, `FileChooser` join the
+  print look's members; the Later row is gone) and §8 row B5 (FileChooser and Dialog, not
+  "Button" and "ConfirmDangerous", which is not a member), operator-console-design #153,
+  runbook › LUTs, roadmap's print-look line, 0023's costs and deferred list.
+- **Remove is offered on a LUT a Display uses and Central refuses it** (409, the Displays named):
+  the DL §8 row's "the refusal in plain words"; the list's Used by column says who uses it before
+  Remove is pressed. Not disabled, so the rule keeps one home (Central's, which also counts an open
+  Picture session's draft).
+- **The list is read when the page opens and after each Add or Remove, not pushed:** a LUT chosen
+  on another tab shows in Used by the next time the page opens. The Picture tab's picker reads the
+  list when the tab opens (pictureSession.js), so a LUT added while it is open shows next time.

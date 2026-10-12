@@ -44,7 +44,8 @@
   "settings": {
     "photo-library": ["#/photo-library"],
     "photo-fit": ["#/photo-fit"],
-    "house": ["#/house"]
+    "house": ["#/house"],
+    "luts": ["#/luts"]
   },
   "neutral": {
     "attention": ["#/attention"]

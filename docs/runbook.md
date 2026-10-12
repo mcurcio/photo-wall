@@ -1038,7 +1038,7 @@ Roadmap 1b: each Pi reports the display on each HDMI port, Central recognises it
 
 The print look's LUT ([0023](decisions/0023-print-look.md)) is made from a **paper profile**: the free ICC file a paper maker publishes for each paper and printer (search the maker's site for "ICC profiles", for example Hahnemühle, Canson or Ilford, and take the profile for your paper on any printer; the printer matters little here). Central keeps the profile (`luts`, migration 093) and bakes the LUT from it whenever a Player asks, so there is nothing else to keep or back up.
 
-**Add one.** The console has no Settings › LUTs page yet; add a profile through the operator route, then choose it on a Frame's Picture tab (Photo Wall (software) › LUT):
+**Add one.** In the console, Settings › LUTs › **Add a paper profile**, then choose it on a Frame's Picture tab (Photo Wall (software) › LUT); the page lists each LUT with the Displays that use it and removes one none uses. The same through the operator route:
 
 ```sh
 curl --fail-with-body -X POST -H 'Authorization: Bearer <admin-token>' \
