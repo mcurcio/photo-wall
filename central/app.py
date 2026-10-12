@@ -57,6 +57,7 @@ from central.node_runtime_reconciliation import NodeRuntimeReconciler
 from central.operator_auth import OperatorAuth
 from central.operator_snapshot import OperatorSnapshot, OperatorSnapshotReader, runtime_document
 from central.photo_fit_routes import mount_photo_fit_routes
+from central.photo_library.provisioning import apply_setting, read_setting
 from central.photo_library_routes import mount_photo_library_routes, mount_photo_source_routes
 from central.photo_sources import PhotoSources
 from central.player_control_protocol import project_state, state_digest
@@ -275,6 +276,10 @@ def create_app(
         ):
             # The content publisher defers into procrastinate's tables too.
             ProcrastinateMediaQueue.apply_schema(db.dsn)
+        if isinstance(db, Database):
+            # The Immich connection the deployment sets, kept in step at every start.
+            apply_setting(photo_library, read_setting(
+                os.environ, lambda path: Path(path).read_text(encoding="utf-8")))
         if feed is not None:
             await feed.start()
         task = asyncio.create_task(scheduler()) if run_scheduler else None

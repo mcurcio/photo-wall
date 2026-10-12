@@ -14,6 +14,7 @@ export function connectionWith(problem: LibraryProblem): LibraryConnectionView {
     health: { state: "needs_a_look", problem, since: AT - 3600, checked_at: AT },
     counts: { photos: 41203, videos: 2110, albums: 212, people: 96 },
     required_permissions: ["asset.read", "asset.view", "album.read", "person.read"],
+    managed: false,
   };
 }
 
@@ -24,3 +25,6 @@ export function connectedWith(...notes: LibraryNote[]): LibraryConnectionView {
 
 /** The same connection, connected. */
 export const CONNECTED: LibraryConnectionView = connectedWith();
+
+/** The Immich the deployment sets (Central's environment), connected: shown read-only. */
+export const MANAGED: LibraryConnectionView = { ...CONNECTED, name: "Immich", managed: true };
