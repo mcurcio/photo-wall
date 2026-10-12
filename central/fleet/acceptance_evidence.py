@@ -7,7 +7,8 @@ this module is that join's one home.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import asdict, dataclass
 
 from contracts.player_control import ControlAppliedReceipt
 
@@ -38,21 +39,32 @@ class AppControl:
     applied_ack_nonce: str | None = None
 
 
+def applied_is_latest(row: Mapping[str, object]) -> bool:
+    """The applied delivery is still the latest: nothing issued, pending or rejected since.
+
+    One home for the rule Registry uses to re-send (and replay the receipt of) an applied
+    delivery and that app-link admission and qualification use to call a receipt current;
+    `row` is a `player_control_sessions` row or an `AppControl`'s fields.
+    """
+    return (row["status"] == "negotiated"
+            and row["pending_id"] is None and row["pending_digest"] is None
+            and row["pending_expires"] is None
+            and row["issued_sequence"] == row["applied_sequence"]
+            and row["last_result_sequence"] == row["applied_sequence"]
+            and row["last_result"] == "applied"
+            and row["applied_at"] is not None and row["last_result_at"] is not None
+            and row["last_delivery_id"] == row["applied_delivery_id"]
+            and row["last_result_digest"] == row["applied_digest"]
+            and row["applied_ack_nonce"] is not None)
+
+
 def current_control_receipt_matches(receipt: ControlAppliedReceipt,
                                     control: AppControl | None) -> bool:
     """One canonical current-Registry ACK correlation rule for every proof carrier."""
     if control is None:
         return False
     return (
-        control.status == "negotiated"
-        and control.applied_at is not None and control.last_result_at is not None
-        and control.last_result == "applied"
-        and control.issued_sequence == control.applied_sequence
-        and control.pending_id is None and control.pending_digest is None
-        and control.pending_expires is None
-        and control.last_result_sequence == control.applied_sequence
-        and control.last_delivery_id == control.applied_delivery_id
-        and control.last_result_digest == control.applied_digest
+        applied_is_latest(asdict(control))
         and receipt.authority_epoch == control.authority_epoch
         and receipt.delivery_id == control.applied_delivery_id
         and receipt.delivery_sequence == control.applied_sequence
