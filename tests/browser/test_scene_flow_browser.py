@@ -114,6 +114,15 @@ def test_scene_photos_and_review_say_each_sources_state_and_readiness(page, regi
         expect(readiness.get_by_role("listitem", name="garden")).to_contain_text(expected)
         if readiness_line is not None:
             expect(readiness).to_contain_text(readiness_line)
+        if state == "failed":
+            # A failure is the error template, not a line of body text (owner, 2026-10-09), with
+            # its one fix. Mutation probe: render ChosenSource's plain line for a failed check.
+            problem = readiness.get_by_role("group", name="Check failed")
+            expect(problem).to_contain_text("garden: Check failed.")
+            expect(problem.get_by_role("link", name="Open Photo library")).to_have_attribute(
+                "href", "#/photo-library")
+        else:
+            expect(readiness.get_by_role("group", name="Check failed")).to_have_count(0)
         scene_continue(page, "Frames")
         form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
         scene_continue(page, "Playback")

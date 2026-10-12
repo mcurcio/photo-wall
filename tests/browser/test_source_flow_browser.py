@@ -189,8 +189,9 @@ def test_each_check_state_says_its_sentence(page, registry, library, state):
         finish(store, lease, finish_with)
         expect(_pool(page)).to_contain_text(sentence)
         expect(_pool(page)).to_contain_text("Immich is still reading 1 photo")
-        expect(_pool(page)).to_contain_text("1 could not be read")
-        expect(_pool(page)).to_contain_text("1 is too large")
+        # Each left-out reason names who refused the photo (sourceWords.js ORIGINS).
+        expect(_pool(page)).to_contain_text("1 could not be read: Immich sent an answer Photo Wall can't read")
+        expect(_pool(page)).to_contain_text("1 is over Photo Wall's size limits")
 
 
 def test_the_fixed_line_shows_and_no_archived_or_hidden_switch_exists(page, registry, library):

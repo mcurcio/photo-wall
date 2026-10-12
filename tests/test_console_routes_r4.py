@@ -796,6 +796,8 @@ PHOTO_PAGE_IMPORTS = {
     "source-query-editor.tsx": {"sourceWords.js"},
     # A saved Source as a card (follow-ups D1): its counts and first photos (its pool route).
     "source-card.tsx": {"photoSourcesApi.js", "sourceWords.js"},
+    # A failed check as the error template where a Source is chosen or shown (Scene, Show now).
+    "source-check-problem.tsx": {"sourceWords.js"},
 }
 DECLARED_IMPORTS = {**FRAME_PAGE_IMPORTS, **PHOTO_PAGE_IMPORTS}
 
