@@ -5406,3 +5406,13 @@ Order: (a) merge the iac PR that switches the factory to `central.app:create_app
 - **The merge left main's one-item Re-check (`ImmichClient.still_matches`) calling `window_of` without the house
   zone** (a TypeError on every Re-check, red in CI's photo-sources and upstream-faults legs). `LibraryClient.
   still_matches(query, window, upstream_id)` takes the check's own window, as `search_page` does.
+- **Wall e2e (upstream-faults) regression, found in CI: the Default Scene made every pass plan a whole hour of 8 s
+  cycles** (main's demo used a 600 s Program window), and rule 1 (never on two Frames at once) rechecked every
+  earlier showing of a photo at each slot, recomputing extents: 1.5 s a pass locally, holding the coordination lock,
+  so Players' readiness calls waited, their clock mapping aged out (`readiness_lost: clock`) and every other layer
+  fell back. `_Spans` (central/wall_plan/assignment.py) indexes the fixed extents: 0.23 s a pass; the same plans
+  (every planner test unchanged). Not a spec contradiction; a latent 5a cost that a perpetual Run exposes.
+- **`tests/test_fit_analysis_budget.py` (main's, 5 s) read 5.4-6.0 s on this branch's CI runners** while every DB
+  test there ran about twice as long as on main's run (test_node_fleet_hosts 176 s vs 95 s); locally it reads 1.7 s on
+  both trees (A/B with a main worktree), and nothing this branch changed is on its path. Runner speed, not the PR;
+  left to CI.

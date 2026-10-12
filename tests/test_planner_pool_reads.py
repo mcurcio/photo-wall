@@ -238,3 +238,24 @@ def test_a_capture_time_edited_by_another_pools_check_changes_the_next_pass(regi
     assert first_photo() == newer.asset_id
     seed_pool(registry, "garden:1", (older.model_copy(update={"taken_at": 3.0}),))
     assert first_photo() == older.asset_id
+
+
+def test_an_hour_of_short_cycles_on_a_small_pool_plans_in_a_fraction_of_a_second():
+    """A perpetual Run (the Default Scene) on an 8 s cycle, three Frames and four photos: the
+    hour's plan places each photo about 340 times, and rule 1 (never one photo on two Frames at
+    once) reads only the showings that can overlap (`_Spans`). The pass holds the coordination
+    lock while it plans, so a slow one stalls every Player's readiness (the wall demo's fallback
+    gaps).
+
+    Mutation probe: rule 1 reading every earlier showing of the photo (the previous `free`) ->
+    about 0.55 s on a laptop where this reads 0.06 s."""
+    frames = {"left": "wide", "right": "wide", "far": "wide"}
+    pool = SourcePool(source_ref=POOL, ready=True, candidates=tuple(
+        photo(f"p{n}", "wide", captured=float(n)) for n in range(4)))
+    instance = wall(frames, order="shuffle", cycle=8)
+    started = time.perf_counter()
+    projection = plan(instance, frames, PoolLines({POOL: pool}), plan_seconds=3600)
+    elapsed = time.perf_counter() - started
+    print(f"an hour of 8 s cycles on three Frames: {elapsed:.3f} s")
+    assert sum(entry.asset_id is not None for entry in projection.plan) > 3 * 400
+    assert elapsed < 0.3
