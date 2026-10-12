@@ -84,7 +84,7 @@ class FakeClient:
         self.calls.append("contact")
         if self.fail_on == "contact":
             return ContactRefused(problem=Unreachable())
-        return ContactAnswer(version=ImmichVersion(major=2, minor=5, patch=6), user=USER,
+        return ContactAnswer(version=ImmichVersion(major=3, minor=1, patch=0), user=USER,
                              counts=LibraryCounts(photos=3, videos=0, albums=1, people=0))
 
     async def albums(self):
@@ -124,6 +124,10 @@ class FakeClient:
         self._call("include")
         items, position = self._slice(self.photos, after)
         return SearchPage(items=tuple(items), next=position)
+
+    async def still_matches(self, query, upstream_id):
+        self._call("recheck")
+        return any(item.upstream_id == upstream_id for item in self.photos)
 
     async def edits_fingerprint(self, upstream_id):
         self._call("edits")
@@ -185,7 +189,7 @@ def test_a_chosen_album_immich_lost_fails_the_check_as_such():
     assert store.pools[key].outcome == CheckFailed(problem="chosen_item_gone")
 
 
-def test_a_photo_a_complete_check_missed_leaves_only_when_that_check_finishes():
+def test_a_photo_a_complete_check_missed_leaves_only_after_its_re_check():
     client = FakeClient([photo(n) for n in range(1, 6)])
     store, key, checks, _ = setup(client)
     asyncio.run(check_to_end(checks, store, key))
@@ -195,6 +199,7 @@ def test_a_photo_a_complete_check_missed_leaves_only_when_that_check_finishes():
         assert ref(1) in in_pool(store, key)
     asyncio.run(check_to_end(checks, store, key))
     assert ref(1) not in in_pool(store, key) and len(in_pool(store, key)) == 4
+    assert client.calls.count("recheck") == 1          # asked about alone before it left
 
 
 def test_stacked_copies_the_timeline_hides_are_marked_not_pooled():
@@ -231,7 +236,7 @@ def _pools_queued_by_tick(checks):
     return [key for kind, key in checks.queue.queued if kind == "pool"]
 
 
-def test_a_check_whose_step_was_lost_resumes_after_the_stale_window_and_removes_only_at_the_end():
+def test_a_check_whose_step_was_lost_resumes_after_the_stale_window_and_removes_only_on_re_check():
     """S1: the staleness rule (policy.STALE_CHECK_SECONDS) over the fake store."""
     client = FakeClient([photo(n) for n in range(1, 6)])
     store, key, checks, _ = setup(client)
@@ -252,9 +257,12 @@ def test_a_check_whose_step_was_lost_resumes_after_the_stale_window_and_removes_
     assert store.pools[key].check_number == number and "up_to" not in client.calls
     assert _pools_queued_by_tick(checks) == []         # its step began again just now
     assert ref(1) in in_pool(store, key)
-    while store.pools[key].checking:
-        assert ref(1) in in_pool(store, key)           # nothing removed before the finish
+    removed = False
+    while store.pools[key].checking:                   # nothing removed before its re-check
         asyncio.run(checks.check_pool(key))
+        if not removed and ref(1) not in in_pool(store, key):
+            assert client.calls[-1] == "recheck"
+            removed = True
     assert isinstance(store.pools[key].outcome, CheckComplete)
     assert in_pool(store, key) == [ref(n) for n in range(2, 6)]
 

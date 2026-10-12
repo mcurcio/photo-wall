@@ -278,8 +278,22 @@ class LibraryWorkerStore(Protocol):
         and queue the next step."""
         ...
 
+    def unseen_rows(self, lease: CheckLease, limit: int) -> tuple[LibraryRef, ...]:
+        """Up to `limit` of the pool's rows this check has neither seen nor marked, by Immich id
+        (follow-up S4): the rows its Re-check phase must ask Immich about, one at a time. A row
+        marked by this check (excluded, a stacked copy) is not among them: it counts as gone.
+        Empty for a superseded lease."""
+        ...
+
+    def record_recheck(self, lease: CheckLease, ref: LibraryRef, matches: bool) -> bool:
+        """One re-checked row, fenced as `record_step` (False: superseded, nothing written):
+        `matches` keeps the row as seen by this check; otherwise the row is removed, the only
+        removal of a row the check did not see. Queues the next step."""
+        ...
+
     def finish_check(self, lease: CheckLease, finish: CheckFinish) -> bool:
-        """Complete: remove rows this check did not see (the sweep), record the time.
+        """Complete: remove the rows this check marked (the subtraction) and record the time; a
+        row it did not see stays, since only `record_recheck` removes one (follow-up S4).
         Incomplete or failed: remove nothing (design rule 2). Fenced as `record_step`."""
         ...
 

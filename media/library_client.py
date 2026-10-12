@@ -232,6 +232,14 @@ class LibraryClient(Protocol):
         timeline only (archived, hidden, locked never: C5), newest first."""
         ...
 
+    async def still_matches(self, query: SourceQuery, upstream_id: LibraryRef) -> bool:
+        """The one-item re-check (follow-up S4): whether Immich's include query, as
+        `search_page` asks it with its window taken now, still answers this one photo
+        (`search/metadata` with `id`). An empty answer is False (deleted, untagged, moved out of
+        the window); a chosen album, person or tag Immich lost raises ChosenItemGone, any other
+        failure LibraryUnavailable, so a failure never reads as gone."""
+        ...
+
     async def edits_fingerprint(self, upstream_id: str) -> str:
         """16 hex of the sha256 of the asset's canonical edit list (assets/{id}/edits)."""
         ...

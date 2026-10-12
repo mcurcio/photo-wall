@@ -101,5 +101,10 @@ def seed_pool(registry, source_ref: str, photos: Iterable[LibraryAsset], *,
     assert library.record_step(lease, CheckStep(progress={"page": 1}, marks=(), entries=entries,
                                                 seen_so_far=len(entries), immich_up_to=None))
     if complete:
+        # `photos` is all the library holds: the Re-check phase (follow-up S4) finds every
+        # earlier row this check did not see gone.
+        while unseen := library.unseen_rows(lease, 100):
+            for ref in unseen:
+                assert library.record_recheck(lease, ref, False)
         assert library.finish_check(lease, CheckComplete())
     return key

@@ -59,7 +59,7 @@ def store_of(db, queue=None):
                           queue=queue if queue is not None else RecordingLibraryQueue())
 
 
-def answer(user=ANNA, *, missing=(), counts=COUNTS, version=(2, 5, 6)):
+def answer(user=ANNA, *, missing=(), counts=COUNTS, version=(3, 1, 0)):
     return ContactAnswer(version=ImmichVersion(major=version[0], minor=version[1], patch=version[2]),
                          user=user, missing_permissions=missing, counts=counts,
                          full_size_copies=True)

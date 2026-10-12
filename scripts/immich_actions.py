@@ -241,7 +241,6 @@ class UpstreamFixture:
     def upload_bytes(self, name: str, data: bytes, mime: str, taken: str, *,
                      favourite: bool = False) -> str:
         result = self.request("POST", "/assets", (201,), data={
-            "deviceAssetId": name, "deviceId": "photo-wall-synthetic-fixture",
             "fileCreatedAt": taken, "fileModifiedAt": taken,
             "isFavorite": str(favourite).lower(),
         }, files={"assetData": (name, data, mime)})
@@ -336,7 +335,8 @@ class UpstreamFixture:
                 if time.monotonic() >= deadline:
                     raise ActionError("upstream_startup_timeout") from None
                 time.sleep(1)
-        require(version == {"major": 2, "minor": 5, "patch": 6},
+        require({part: version.get(part) for part in ("major", "minor", "patch")}
+                == {"major": 3, "minor": 1, "patch": 0} and not version.get("prerelease"),
                 "upstream_version_mismatch")
         credentials = {"email": "fixture@example.invalid", "password": password}
         owner = self.request("POST", "/auth/admin-sign-up", (201,),

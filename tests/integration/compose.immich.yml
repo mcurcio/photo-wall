@@ -1,7 +1,7 @@
 # Dedicated synthetic fixture only; see docs/module-immich-fixture.md.
 services:
   immich:
-    image: ghcr.io/immich-app/immich-server:v2.5.6@sha256:aa163d2e1cc2b16a9515dd1fef901e6f5231befad7024f093d7be1f2da14341a
+    image: ghcr.io/immich-app/immich-server:v3.1.0@sha256:b434cb9287eea1471c9974845914d4dd328c9c2d652e446ed4930f99944f0ceb
     environment:
       DB_HOSTNAME: database
       DB_USERNAME: postgres
@@ -31,7 +31,7 @@ services:
     healthcheck: {disable: false}
     restart: "no"
   redis:
-    image: docker.io/valkey/valkey:9@sha256:546304417feac0874c3dd576e0952c6bb8f06bb4093ea0c9ca303c73cf458f63
+    image: docker.io/valkey/valkey:9@sha256:8e8d64b405ce18f41b8e5ee20aa4687a8ed0022d1298f2ce31cdcf3a76e09411
     networks: [upstream_net]
     healthcheck:
       test: [CMD, redis-cli, ping]

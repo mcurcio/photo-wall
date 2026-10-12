@@ -36,9 +36,11 @@ REQUIRED_PERMISSIONS: Final[tuple[str, ...]] = (
     "album.read", "album.statistics", "asset.download", "asset.edit.get", "asset.read",
     "asset.statistics", "asset.view", "face.read", "person.read", "tag.read", "user.read",
 )
-# C2: 2.5.x is tested; newer works with a note; older than 2.5 is Needs a look ("Update Immich").
-OLDEST_VERSION: Final = ImmichVersion(major=2, minor=5, patch=0)
-TESTED_RELEASE: Final[tuple[int, int]] = (2, 5)
+# C2: 3.1.x is tested (follow-up S4: production runs 3.1, and the adapter reads 3.x answers:
+# durations in milliseconds, an album's owner among its `albumUsers`); newer works with a note;
+# older than 3.1 is Needs a look ("Update Immich").
+OLDEST_VERSION: Final = ImmichVersion(major=3, minor=1, patch=0)
+TESTED_RELEASE: Final[tuple[int, int]] = (3, 1)
 # #12 "Look for new photos every": each connection check and each Source's check (C2).
 CHECK_EVERY_SECONDS: Final = 900
 # A running check whose latest step began this long ago (database time) is due again, so a step

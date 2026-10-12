@@ -168,7 +168,9 @@ def test_a_passing_contact_lists_albums_people_places_and_tags(system, immich_li
     people = {item["name"] for item in listed("people")["items"]}
     assert people >= set(immich_library.people)
     assert immich_library.hidden_people and not people & set(immich_library.hidden_people)
-    assert "Paris" in {item["city"] for item in listed("places")["items"]}
+    # Immich 3.1.0 names the fixture's Paris coordinates by their arrondissement
+    # ("Paris 04 Hôtel-de-Ville"): the place is the one in France.
+    assert "France" in {item["country"] for item in listed("places")["items"]}
     assert {item["path"] for item in listed("tags")["items"]} >= set(immich_library.tags)
 
 

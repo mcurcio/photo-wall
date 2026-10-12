@@ -780,8 +780,7 @@ def upstream_action(action: str):
         data = filename.read_bytes()
         with filename.open("rb") as stream:
             uploaded = fixture.request("POST", "/assets", (201,), data=dict(
-                deviceAssetId=name, deviceId=project, fileCreatedAt=stamp(30),
-                fileModifiedAt=stamp(30), isFavorite="true"),
+                fileCreatedAt=stamp(30), fileModifiedAt=stamp(30), isFavorite="true"),
                 files={"assetData": (name + ".mp4", stream, "video/mp4")})
         state["assets"][name] = dict(label="video", upstream_id=uploaded["id"],
             sha1=hashlib.sha1(data).hexdigest(), sha256=hashlib.sha256(data).hexdigest(),

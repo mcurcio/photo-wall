@@ -117,6 +117,10 @@ _ITEM_TYPES: dict[str, type] = {"albums": LibraryAlbum, "people": LibraryPerson,
 # A pool is wanted (module docstring); `p` names the photo_pools row.
 _WANTED = ("(EXISTS (SELECT 1 FROM photo_drafts d WHERE d.pool_key=p.pool_key) OR EXISTS "
            "(SELECT 1 FROM media_sources s WHERE s.pool_key=p.pool_key AND s.refresh_active))")
+# A pool row `r` carries a mark of check `%(n)s` (an excluded id or a stacked copy): the
+# subtraction's one condition, for the finish and for the Re-check phase's unseen rows.
+_MARKED_BY_CHECK = ("EXISTS (SELECT 1 FROM photo_check_marks m WHERE m.pool_key=r.pool_key AND "
+                    "m.check_number=%(n)s AND m.upstream_id=r.upstream_id)")
 # An in-pool row `r` joined to its revision `a` and the revision's Immich asset `l` (owner item 6:
 # the facts live once, on the revision and its parent), and the columns of a PoolMember.
 _REVISION_JOIN = ("JOIN asset_revisions a USING (asset_id) JOIN library_assets l "
@@ -901,19 +905,43 @@ class PgPhotoLibrary:
             return (entry.upstream_id, "waiting", None, None)
         return (entry.upstream_id, "left_out", entry.reason, None)
 
+    def unseen_rows(self, lease: CheckLease, limit: int) -> tuple[LibraryRef, ...]:
+        with self.db.transaction() as conn:
+            if not self._fenced(conn, lease):
+                return ()
+            rows = conn.execute(
+                "SELECT r.upstream_id::text AS upstream_id FROM photo_pool_rows r WHERE "
+                f"r.pool_key=%(key)s AND r.seen_check<%(n)s AND NOT {_MARKED_BY_CHECK} "
+                "ORDER BY r.upstream_id LIMIT %(limit)s",
+                {"key": lease.pool_key, "n": lease.check_number, "limit": limit}).fetchall()
+        return tuple(row["upstream_id"] for row in rows)
+
+    def record_recheck(self, lease: CheckLease, ref: LibraryRef, matches: bool) -> bool:
+        queue = self._queue()
+        with self.db.transaction() as conn:
+            if not self._fenced(conn, lease):
+                return False
+            if matches:
+                conn.execute("UPDATE photo_pool_rows SET seen_check=%s WHERE pool_key=%s AND "
+                             "upstream_id=%s", (lease.check_number, lease.pool_key, ref))
+            else:
+                conn.execute("DELETE FROM photo_pool_rows WHERE pool_key=%s AND upstream_id=%s",
+                             (lease.pool_key, ref))
+            queue.enqueue_pool_check_in(conn, lease.pool_key)
+            return True
+
     def finish_check(self, lease: CheckLease, finish: CheckFinish) -> bool:
         with self.db.transaction() as conn:
             if not self._fenced(conn, lease):
                 return False
             now = self.times.now_in(conn)
             if isinstance(finish, CheckComplete):
-                # The sweep (design rule 2): only a complete check removes what it did not see,
-                # and what it subtracted (an id marked after an earlier step of it added a row).
+                # The subtraction (design rule 2): a complete check removes what it marked (an id
+                # marked after an earlier step of it added a row). A row it did not see stays:
+                # only `record_recheck` removes one, after asking Immich (follow-up S4).
                 conn.execute(
                     "DELETE FROM photo_pool_rows r WHERE r.pool_key=%(key)s AND "
-                    "(r.seen_check<%(n)s OR EXISTS (SELECT 1 FROM photo_check_marks m WHERE "
-                    "m.pool_key=r.pool_key AND m.check_number=%(n)s AND "
-                    "m.upstream_id=r.upstream_id))", {"key": lease.pool_key, "n": lease.check_number})
+                    f"{_MARKED_BY_CHECK}", {"key": lease.pool_key, "n": lease.check_number})
                 conn.execute("DELETE FROM photo_check_marks WHERE pool_key=%s AND check_number<%s",
                              (lease.pool_key, lease.check_number))
                 conn.execute("UPDATE photo_pools SET check_state='complete',check_finished_at=%s,"
