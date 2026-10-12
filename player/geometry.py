@@ -15,16 +15,23 @@ pass, each stated once here and mirrored by player/native.py's shaders:
   from the Frame profile's aspect (contracts/photo_crop.py, the one home of the window; no trim,
   owner q3). It is the one crop in either fit: in Cover the drawn rectangle has that same aspect,
   so the photo is never cropped twice or squeezed.
+
+The print look (design /print-look, 2026-10-12) adds saturation, the highlight rolloff (which
+replaces the clamp after white balance x brightness), the black floor and the Frame's mat shadow to
+the final pass, in one order (`final_pixel`), each skipped at its neutral value.
 """
 
 from __future__ import annotations
 
 import math
 from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
+from typing import Final
 
 from contracts.frame_fit import Corners, OutputSize, cover_rectangle
-from contracts.models import CornersFit, CoverFit, PhotoCrop
-from contracts.node_frame import PictureOperations, srgb_to_linear
+from contracts.kelvin import kelvin_white
+from contracts.models import CornersFit, CoverFit, FrameProfile, Mat, PhotoCrop
+from contracts.node_frame import DISPLAY_GAMMA, PictureOperations, srgb_to_linear
 from contracts.photo_crop import CENTRED, crop_window
 
 Matrix = tuple[float, float, float, float, float, float, float, float, float]
@@ -181,33 +188,201 @@ def picture_source_uv(x: float, y: float, fit: CornersFit | CoverFit, output: Ou
     return left + u*(right-left), top + v*(bottom-top)
 
 
-def final_pixel(linear: Linear, operations: PictureOperations, *, inside: bool) -> tuple[float, float, float, float]:
-    """One output pixel's final pass: white balance, light factor (linear light), clamp, sRGB
-    encode, contrast about 0.5, gamma exponent, clamp, then the per-Output mask (opaque black when
-    not `inside` any Frame's opening). Pure. A contrast result below 0 meets the exponent as 0
-    (a power of a negative number is undefined, in GLSL too); with the clamp after, this equals
-    clamping before the exponent."""
+# -- The print look (design /print-look, 2026-10-12, "The order"): steps 2, 4, 6 and 7 -------------
+# Each step is stated once here and mirrored by player/native.py's final pass; a step at its
+# neutral value is skipped, never computed, so neutral operations draw exactly the v4 pixels.
+
+LUMA: Final[Linear] = (0.2126, 0.7152, 0.0722)    # Rec. 709 linear luminance, saturation's axis (Haeberli / CSS saturate())
+ROLLOFF_FADE_POWER: Final = 2.0                     # fade toward white = g ** 2
+LIGHT_ELEVATION_MIN_DEGREES: Final = 1.0            # a soft light's lower edge never reaches the wall plane
+
+
+def saturated(linear: Linear, saturation: float) -> Linear:
+    """Step 2, linear light: each channel L + saturation * (c - L), L = sum(LUMA_i * c_i). No clamp. Pure."""
+    luminance = sum(weight * value for weight, value in zip(LUMA, linear, strict=True))
+    return tuple(luminance + saturation * (value - luminance) for value in linear)
+
+
+def peak(operations: PictureOperations) -> float:
+    """M, the brightest a channel reaches after steps 2-3 for inputs in [0, 1]:
+    light_factor * max_c(m_c * (1 + max(0, saturation - 1) * (1 - LUMA_c))). Pure.
+
+    Saturation above 1 pushes a pure primary furthest: the channel at 1 with the others at 0
+    reaches s - (s - 1) * LUMA_c."""
+    boost = max(0.0, operations.saturation - 1)
+    return operations.light_factor * max(
+        multiplier * (1 + boost * (1 - weight))
+        for multiplier, weight in zip(operations.rgb_multipliers, LUMA, strict=True))
+
+
+def rolloff_skipped(operations: PictureOperations) -> bool:
+    """highlight_knee >= 1 or peak(operations) <= 1: step 4 is then v4's clamp to 0..1."""
+    return operations.highlight_knee >= 1 or peak(operations) <= 1
+
+
+def rolled_off(linear: Linear, knee: float, peak: float) -> Linear:
+    """Step 4 when not skipped, channels already max(0, c). x = max channel; x <= knee: unchanged.
+    Else t = (x-k)/(1-k), w = (peak-k)/(1-k), g = t*(1 + t/w**2)/(1 + t), y = k + (1-k)*g,
+    fade = g ** ROLLOFF_FADE_POWER, each channel c*y/x*(1-fade) + y*fade. peak -> exactly 1, slope 1 at the knee.
+
+    Extended Reinhard on the brightest channel with `peak` as its white, every channel scaled
+    alike (hue kept) and faded toward white as it nears the top (the path to white of darktable's
+    filmic and AgX). Pure.
+
+    Worked through the shortfall 1 - g = (w - t)(w + t) / (w**2 (1 + t)) (the same g, rearranged),
+    so at x == peak, where t == w, it is exactly 0 and the pixel exactly white."""
+    x = max(linear)
+    if x <= knee:
+        return linear
+    t = (x - knee) / (1 - knee)
+    w = (peak - knee) / (1 - knee)
+    short = (w - t) * (w + t) / (w * w * (1 + t))
+    g = 1 - short
+    y = 1 - (1 - knee) * short
+    fade = g ** ROLLOFF_FADE_POWER
+    return tuple(value * y / x * (1 - fade) + y * fade for value in linear)
+
+
+def floor_lifted(value: float, floor: float) -> float:
+    """Step 6, output value: floor + (1 - floor) * value."""
+    return floor + (1 - floor) * value
+
+
+@dataclass(frozen=True)
+class MatLight:
+    """One light of a Frame's mat, as the final pass uses it."""
+    toward: tuple[float, float]   # unit vector from the opening toward the light (output axes, x right, y down)
+    dark_until_mm: float          # s0 = depth * cot(min(90, steep + softness/2)): nearer the edge than this, fully shadowed
+    lit_from_mm: float            # s1 = depth * cot(max(LIGHT_ELEVATION_MIN_DEGREES, steep - softness/2)): fully lit from here
+    weight: Linear                # strength_tenths/10 * kelvin_white(colour_kelvin)
+
+
+@dataclass(frozen=True)
+class MatShadow:
+    """A Frame's mat shadow (step 7): its opening in mat space and the lights that shade it."""
+    to_opening: Matrix            # output fractions -> the opening's unit square: inverse(homography(fit.corners))
+    size_mm: tuple[float, float]  # the square's physical extent along u, v
+    lights: tuple[MatLight, ...]  # only lights with strength_tenths > 0; 1..MAT_LIGHTS_MAX
+
+
+def _cot(degrees: float) -> float:
+    """cot of an angle in degrees; cot(90) is exactly 0."""
+    return 0.0 if degrees == 90 else 1 / math.tan(math.radians(degrees))
+
+
+def mat_shadow(fit: CornersFit | CoverFit, profile: FrameProfile, mat: Mat) -> MatShadow | None:
+    """None when not mat.shades (step 7 skipped). size: diag_mm = diagonal_inches*25.4, a = width_px/height_px,
+    W = diag_mm*a/hypot(a,1), H = diag_mm/hypot(a,1); size_mm = (W, H) when the nearest quarter turn of
+    fit.rotation is 0 or 180, else (H, W). toward: alpha = radians(from_degrees + fit.rotation),
+    (sin alpha, -cos alpha) (wall-up is the picture's up). cot(90) is exactly 0.
+
+    The distance to the edge is measured in mat space (the opening's own rectangle at its
+    physical size), so a skewed Corners opening still gets an even band. Pure."""
+    if not mat.shades:
+        return None
+    diagonal = profile.diagonal_inches * 25.4
+    aspect = profile.width_px / profile.height_px
+    width, height = diagonal * aspect / math.hypot(aspect, 1), diagonal / math.hypot(aspect, 1)
+    size = (width, height) if round(fit.rotation / 90) % 2 == 0 else (height, width)
+    lights = []
+    for light in mat.lights:
+        if light.strength_tenths <= 0:
+            continue
+        turn = math.radians(light.from_degrees + fit.rotation)
+        half = light.softness_degrees / 2
+        strength = light.strength_tenths / 10
+        lights.append(MatLight(
+            toward=(math.sin(turn), -math.cos(turn)),
+            dark_until_mm=mat.depth_mm * _cot(min(90, light.steep_degrees + half)),
+            lit_from_mm=mat.depth_mm * _cot(max(LIGHT_ELEVATION_MIN_DEGREES, light.steep_degrees - half)),
+            weight=tuple(strength * channel for channel in kelvin_white(light.colour_kelvin))))
+    return MatShadow(inverse(homography(fit.corners)), size, tuple(lights))
+
+
+def _edge_distance(point: tuple[float, float], toward: tuple[float, float],
+                   size: tuple[float, float]) -> float:
+    """How far `point` (mat space, mm) is from the opening's edge along `toward`: the nearer of the
+    two edges the direction heads to; never below 0."""
+    reach = math.inf
+    for position, direction, extent in zip(point, toward, size, strict=True):
+        if direction > 0:
+            reach = min(reach, (extent - position) / direction)
+        elif direction < 0:
+            reach = min(reach, position / -direction)
+    return max(reach, 0.0)
+
+
+def mat_shade(shadow: MatShadow, x: float, y: float) -> Linear:
+    """At output point (x, y): m = transform(to_opening) * size_mm; per light s = the distance along `toward`
+    from m to the square's boundary (min over the two axes it heads to; >= 0); v = 1 if s >= s1, 0 if s < s0,
+    else smoothstep (t*t*(3-2t)), with s0 == s1 a hard step (s >= s0 -> 1);
+    shade_c = (1 + sum_j weight_jc * v_j) / (1 + sum_j weight_jc). Fully lit is exactly (1, 1, 1)."""
+    u, v = transform(shadow.to_opening, x, y)
+    point = (u * shadow.size_mm[0], v * shadow.size_mm[1])
+    lit, total = [1.0, 1.0, 1.0], [1.0, 1.0, 1.0]
+    for light in shadow.lights:
+        s = _edge_distance(point, light.toward, shadow.size_mm)
+        if s >= light.lit_from_mm:
+            reached = 1.0
+        elif s < light.dark_until_mm:
+            reached = 0.0
+        else:
+            t = (s - light.dark_until_mm) / (light.lit_from_mm - light.dark_until_mm)
+            reached = t * t * (3 - 2 * t)
+        for channel in range(3):
+            lit[channel] += light.weight[channel] * reached
+            total[channel] += light.weight[channel]
+    return tuple(lit[channel] / total[channel] for channel in range(3))
+
+
+def final_pixel(linear: Linear, operations: PictureOperations, *, inside: bool,
+                shade: Linear | None = None) -> tuple[float, float, float, float]:
+    """One output pixel's final pass, in the print look's order (design "The order"):
+    [step 1, the LUT, comes first: P2] -> step 2 (`saturated`) unless saturation == 1 -> white
+    balance x light_factor (linear light) -> step 4: max(0, .) then `rolled_off` unless
+    `rolloff_skipped`, else clamp 0..1 (v4) -> sRGB encode, contrast about 0.5, gamma exponent,
+    clamp (v4) -> step 6 (`floor_lifted`) unless black_floor == 0 -> step 7 unless `shade` is
+    None: value * shade_c ** (1/DISPLAY_GAMMA) (a shade is light; the display's response turns it
+    into an output factor) -> the per-Output mask LAST: (0, 0, 0, 1) when not `inside` any Frame's
+    opening, whatever the floor and the shadow. Pure.
+
+    A contrast result below 0 meets the exponent as 0 (a power of a negative number is undefined,
+    in GLSL too); with the clamp after, this equals clamping before the exponent."""
+    if operations.saturation != 1.0:
+        linear = saturated(linear, operations.saturation)
+    gained = tuple(max(0.0, value*multiplier*operations.light_factor)
+                   for value, multiplier in zip(linear, operations.rgb_multipliers, strict=True))
+    if rolloff_skipped(operations):
+        gained = tuple(min(1.0, value) for value in gained)
+    else:
+        gained = rolled_off(gained, operations.highlight_knee, peak(operations))
     pixel = []
-    for value, multiplier in zip(linear, operations.rgb_multipliers, strict=True):
-        value = min(1.0, max(0.0, value*multiplier*operations.light_factor))
+    for value in gained:
         value = (encode_srgb(value) - .5)*operations.contrast_slope + .5
         pixel.append(min(1.0, max(0.0, value) ** operations.gamma_exponent))
+    if operations.black_floor != 0:
+        pixel = [floor_lifted(value, operations.black_floor) for value in pixel]
+    if shade is not None:
+        pixel = [value * light ** (1 / DISPLAY_GAMMA) for value, light in zip(pixel, shade, strict=True)]
     if not inside:
         return (0.0, 0.0, 0.0, 1.0)
     return (*pixel, 1.0)
 
 
-def output_pixel(x: float, y: float, frames: Sequence[tuple[CornersFit | CoverFit, float, Linear]],
+def output_pixel(x: float, y: float,
+                 frames: Sequence[tuple[CornersFit | CoverFit, float, Linear, MatShadow | None]],
                  operations: PictureOperations, output: OutputSize) -> tuple[float, float, float, float]:
-    """The reference for one Output carrying several Frames, each a fit, its profile's aspect and
-    one flat linear colour:
-    the colour of the last Frame whose opening holds (x, y), black where none does, through
-    `final_pixel` with `inside` = some opening holds it. Pure; the two-Frames test's oracle. Each
-    Frame's coverage is where it samples its picture (`picture_source_uv`), so the per-Frame mask
-    decides what a Frame paints; the per-Output mask is the union of the openings."""
+    """The reference for one Output carrying several Frames, each a fit, its profile's aspect, one
+    flat linear colour and its mat shadow (None: no shadow): the colour of the last Frame whose
+    opening holds (x, y), black where none does, through `final_pixel` with `inside` = some
+    opening holds it and the shade of that covering Frame's shadow. Pure; the two-Frames test's
+    oracle. Each Frame's coverage is where it samples its picture (`picture_source_uv`), so the
+    per-Frame mask decides what a Frame paints; the per-Output mask is the union of the openings."""
     colour: Linear = (0.0, 0.0, 0.0)
-    for fit, aspect, flat in frames:
+    shadow: MatShadow | None = None
+    for fit, aspect, flat, frame_shadow in frames:
         if picture_source_uv(x, y, fit, output, aspect, 1, 1, CENTRED) is not None:
-            colour = flat
-    inside = any(inside_opening(fit.corners, x, y) for fit, _, _ in frames)
-    return final_pixel(colour, operations, inside=inside)
+            colour, shadow = flat, frame_shadow
+    inside = any(inside_opening(fit.corners, x, y) for fit, _, _, _ in frames)
+    shade = None if shadow is None else mat_shade(shadow, x, y)
+    return final_pixel(colour, operations, inside=inside, shade=shade)

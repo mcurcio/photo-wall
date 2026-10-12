@@ -31,7 +31,21 @@ a 64x48 PNG of four flat quadrants (red, green, blue, white) written here with t
    reference (`picture_source_uv` with that crop) and show only the left quadrants' colours
    (red, blue); with offset 1 only the right ones (green, white). A renderer that ignored the
    crop, or swapped its axes, draws the centre's four colours.
+10. print_sliders_match_the_reference (print look, 2026-10-12, P1): saturation 120 %, brightness
+   110 % with the highlight rolloff's knee at 0.4, a cool white balance, contrast 1.1 and a black floor 0.1 equal
+   `final_pixel` (steps 2, 4, 6): the saturated red rolls off toward white, so its green and blue
+   rise above the floor only through the rolloff's fade.
+11. one_light_from_the_top_matches: the binding's Mat (8 mm deep, one soft light from the wall's
+   up) shades a band under the top edge, equal to `final_pixel` with `mat_shade`'s shade.
+12. cover_at_90_shades_the_wall_up_edge: the same light on a Frame turned 90 degrees shades the
+   output's right edge (the picture's up), not its top.
+13. neutral_program_takes_no_new_step: neutral v5 operations and Mat() leave every new step's
+   switch (saturation_on, rolloff_on, floor_on, mat_on) at 0 in the linked program, and the
+   pixels are the v4 reference's.
+14. trial_mat_drawn: while Position's trial is drawn its mat shades the picture, though the
+   binding's Mat() casts none; when the trial ends the binding's (no shadow) is drawn again.
 """
+import ctypes
 import hashlib
 import os
 import pathlib
@@ -41,6 +55,7 @@ import sys
 import time
 import uuid
 import zlib
+from types import SimpleNamespace
 
 sys.path[:0] = ["/repo", "/smoke"]
 RUNTIME = pathlib.Path("/tmp/pw-pixels")
@@ -60,6 +75,8 @@ from contracts.models import (  # noqa: E402
     CoverFit,
     FrameProfile,
     Layer,
+    Light,
+    Mat,
     OutputBinding,
     PhotoCrop,
     Variant,
@@ -71,6 +88,8 @@ from player.geometry import (  # noqa: E402
     decode_channel,
     final_pixel,
     inside_opening,
+    mat_shade,
+    mat_shadow,
     picture_source_uv,
 )
 from player.native import NativeOutput, NativeRenderer  # noqa: E402
@@ -240,9 +259,11 @@ def close(actual, expected) -> bool:
 
 
 def check_fit(native: CapturingRenderer, fit, operations: PictureOperations | None, *,
-              profile: FrameProfile = PROFILE, crop: PhotoCrop = CENTRED) -> tuple[int, int]:
-    """Every sample equals the reference: inside, the picture through `final_pixel`; outside,
-    opaque black. The (inside, outside) sample counts."""
+              profile: FrameProfile = PROFILE, crop: PhotoCrop = CENTRED,
+              mat: Mat = Mat()) -> tuple[int, int]:
+    """Every sample equals the reference: inside, the picture through `final_pixel` (shaded by
+    `mat`'s shadow on this fit); outside, opaque black. The (inside, outside) sample counts."""
+    shadow = mat_shadow(fit, profile, mat)
     width, height, _ = native.captured
     applied = operations or PictureOperations("headless", 1, (1.0, 1.0, 1.0), 1.0, 1.0, 1.0)
     counts = [0, 0]
@@ -256,7 +277,8 @@ def check_fit(native: CapturingRenderer, fit, operations: PictureOperations | No
             linear = texel_colour(*uv)
             if linear is None:
                 continue
-            expected = final_pixel(linear, applied, inside=True)
+            shade = None if shadow is None else mat_shade(shadow, x, y)
+            expected = final_pixel(linear, applied, inside=True, shade=shade)
             counts[0] += 1
         actual = pixel(native, i, j)
         assert close(actual, expected), ("pixel", fit.mode, fit.rotation, i, j, actual, expected)
@@ -424,12 +446,119 @@ def crop_offset_keeps_the_left_edge(native, frames, variant) -> None:
         native.release(f"crop{offset}")
 
 
+# -- The print look (design /print-look, 2026-10-12, slice P1) ------------------------------------
+
+PRINT = PictureOperations("headless", 5, (.9, .95, 1.0), 1.1, 1.1, 1.0, saturation=1.2,
+                          highlight_knee=.4, black_floor=.1)
+TOP_LIGHT = Light(from_degrees=0, steep_degrees=30, softness_degrees=20, strength_tenths=15,
+                  colour_kelvin=3000)
+DEEP_MAT = Mat(depth_mm=8, lights=(TOP_LIGHT,))      # a band of ~10..22 mm: tens of pixels here
+TRIAL_SHA = "a" * 64
+
+
+def print_sliders_match_the_reference(native, frames, variant) -> None:
+    frames.operations = PRINT
+    fit = CoverFit(corners=OPENING)
+    show(native, composition(variant, Calibration(fit=fit)))
+    until(lambda: frames.tags and frames.tags[-1][1] == 5)
+    inside, outside = check_fit(native, fit, PRINT)
+    red = final_pixel(tuple(decode_channel(v / 255) for v in QUADRANTS[0][:3]), PRINT, inside=True)
+    print(f"PRINT inside={inside} outside={outside} red={red}", flush=True)
+    assert red[1] > PRINT.black_floor + .05, red          # the fade toward white lifts green
+    assert inside > 500 and outside > 100, (inside, outside)
+
+
+def shaded_binding(mat: Mat) -> OutputBinding:
+    return BINDING.model_copy(update={"mat": mat})
+
+
+def one_light_from_the_top_matches(native, frames, variant) -> None:
+    frames.operations = None
+    fit = CoverFit(corners=OPENING)
+    show(native, composition(variant, Calibration(fit=fit), binding=shaded_binding(DEEP_MAT)))
+    inside, _ = check_fit(native, fit, None, mat=DEEP_MAT)
+    shadow = mat_shadow(fit, PROFILE, DEEP_MAT)
+    top, middle = mat_shade(shadow, .5, .12), mat_shade(shadow, .5, .5)
+    print(f"ONE_LIGHT inside={inside} top={top} middle={middle}", flush=True)
+    assert top[0] < .8 and middle == (1.0, 1.0, 1.0), (top, middle)
+    assert inside > 500, inside
+
+
+def cover_at_90_shades_the_wall_up_edge(native, frames, variant) -> None:
+    frames.operations = None
+    fit = CoverFit(corners=OPENING, rotation=90)
+    show(native, composition(variant, Calibration(fit=fit), binding=shaded_binding(DEEP_MAT)))
+    inside, _ = check_fit(native, fit, None, mat=DEEP_MAT)
+    shadow = mat_shadow(fit, PROFILE, DEEP_MAT)
+    right, top = mat_shade(shadow, .86, .5), mat_shade(shadow, .5, .12)
+    print(f"TURNED inside={inside} right={right} top={top}", flush=True)
+    assert right[0] < .8 and top == (1.0, 1.0, 1.0), (right, top)
+    assert inside > 500, inside
+
+
+def neutral_program_takes_no_new_step(native, frames, variant) -> None:
+    neutral = PictureOperations("headless", 6, (1.0, 1.0, 1.0), 1.0, 1.0, 1.0)
+    frames.operations = neutral
+    fit = CoverFit(corners=OPENING)
+    show(native, composition(variant, Calibration(fit=fit)))
+    until(lambda: frames.tags and frames.tags[-1][1] == 6)
+    check_fit(native, fit, neutral)
+    surface = native._surfaces["headless"]
+    surface.area.make_current()
+    gl = native.GL
+    final = surface.programs[1]
+    switches = {}
+    for name in ("saturation_on", "rolloff_on", "floor_on", "mat_on"):
+        value = (ctypes.c_int * 1)()
+        gl.glGetUniformiv(final, gl.glGetUniformLocation(final, name), value)
+        switches[name] = value[0]
+    print(f"NEUTRAL switches={switches}", flush=True)
+    assert switches == dict.fromkeys(switches, 0), switches
+    for name in ("saturation", "highlight_knee", "peak", "black_floor", "to_opening", "mat_size",
+                 "light_count", "light_toward", "light_band", "light_weight"):
+        assert gl.glGetUniformLocation(final, name) != -1, ("missing_uniform", name)
+
+
+class TrialFrames(Frames):
+    """The display host with Position's trial drawn: its calibration and its draft mat."""
+
+    def __init__(self, fit, mat: Mat):
+        super().__init__()
+        self.active = SimpleNamespace(
+            candidate=SimpleNamespace(trial_id=uuid.uuid4(), generation=1, sequence=1,
+                                      candidate_sha256=TRIAL_SHA),
+            calibration=Calibration(fit=fit), primitives=fit.corners, mat=mat)
+
+    def trial(self, _composition, _grant):
+        return self.active
+
+
+def trial_mat_drawn(native, frames, variant) -> None:
+    fit = CoverFit(corners=OPENING)
+    trial = TrialFrames(fit, DEEP_MAT)
+    native._frames = trial
+    shown = composition(variant, Calibration(fit=fit))       # the binding's mat is Mat()
+    show(native, shown)
+    assert until(lambda: trial.tags and trial.tags[-1][0] == "trial-" + TRIAL_SHA), trial.tags[-3:]
+    spin(0.3)
+    during, _ = check_fit(native, fit, None, mat=DEEP_MAT)
+    trial.active = None
+    native.present(shown)
+    assert until(lambda: trial.tags and not trial.tags[-1][0].startswith("trial-")), trial.tags[-3:]
+    spin(0.3)
+    after, _ = check_fit(native, fit, None)
+    print(f"TRIAL_MAT during={during} after={after}", flush=True)
+    assert during > 500 and after > 500, (during, after)
+
+
 CASES = (cover_matches_the_reference(0), cover_matches_the_reference(7),
          cover_matches_the_reference(90), outside_the_opening_stays_black_at_low_contrast,
          corners_fit_matches_the_reference, operations_change_the_picture_and_the_tag,
          no_trim_and_no_gain_uniforms, alpha_and_black_layers_compose_as_the_reference,
          a_corrupt_picture_fails_and_the_frame_still_presents,
-         the_diagnostic_shows_only_while_the_output_is_unbound, crop_offset_keeps_the_left_edge)
+         the_diagnostic_shows_only_while_the_output_is_unbound, crop_offset_keeps_the_left_edge,
+         print_sliders_match_the_reference, one_light_from_the_top_matches,
+         cover_at_90_shades_the_wall_up_edge, neutral_program_takes_no_new_step, trial_mat_drawn)
 
 
 def main() -> None:
