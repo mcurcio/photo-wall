@@ -145,11 +145,16 @@ preset before the gains it moves), reads before each write, writes only when the
 otherwise, and reads back; a choice the display does not list, or a level past its maximum, is
 not written (`not-taken`). It reads the set and offered codes again from time to time and
 reports their current values; a value changed on the display's buttons shows as "Changed on the
-display's buttons", left alone until the next change.
+display's buttons", left alone until that setting is set again in Photo Wall. A change that moves
+only Photo Wall's group runs no DDC/CI command.
 
 **Power first.** Picture and power share the port's one DDC/CI channel. A waiting power command
-always goes before a waiting picture command, and a picture command holds the port at most
-`PICTURE_HOLD_SECONDS` (`ddc.py`), so a power Test waits at most one picture command.
+always goes before a waiting picture command, a picture command holds the port at most
+`PICTURE_HOLD_SECONDS` (a picture `setvcp` and `capabilities` are cut there too), and after a power
+command the port waits `POWER_GRACE_SECONDS` for that operation's next command (`ddc.py`), so a
+whole power operation waits at most one picture command. A batch, re-read or `capabilities` run
+cut at the hold is logged by `picture_list.py` (`journalctl` on the display host unit: "did not
+finish"); time a real batch, `setvcp` and `capabilities` on the bench before trusting 1.5 s.
 
 From Central, `GET /v1/operator/frames/{id}/picture` (admin token) gives whether the display's
 list is known, one row per hardware setting (offered with its range and current value, the value

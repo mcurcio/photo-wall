@@ -8,8 +8,14 @@ Rules this module owns (one home each):
   `PortLock`, so a power write and a picture write never meet on one i2c bus; a waiting POWER
   command always takes the port before a waiting PICTURE command; two ports never wait on each
   other. Every call names its `urgency` (a required keyword).
+- **Power first for a whole power operation:** a power operation is several commands (a read, the
+  write, its read-back), each its own hold; after a POWER command releases the port, no PICTURE
+  command takes it for POWER_GRACE_SECONDS, so the operation's next command never queues behind a
+  picture hold.
 - **A picture command's hold is bounded:** its tool run is cut at PICTURE_HOLD_SECONDS (here, in
-  `_command`, the one home of the cap), so power waits at most one picture command.
+  `_command`, the one home of the cap; a `setvcp` and `capabilities` at picture's turn are cut too),
+  so a power operation waits at most one picture command, however many commands it has.
+- **An answer's value** (`answer_value`): a level's current, a list setting's byte.
 - **The terse format** (`parse_terse`).
 - **The bus of an Output:** the i2c number of `/sys/class/drm/<card>-<output>/ddc` (HDMI-A-1 -> 13,
   HDMI-A-2 -> 14 on a Pi 5). No bus: every call answers None/False at once.
@@ -40,6 +46,7 @@ _TERSE_CONTINUOUS: Final = re.compile(r"VCP ([0-9A-Fa-f]{2}) C (\d+) (\d+)", re.
 _TERSE_SIMPLE: Final = re.compile(r"VCP ([0-9A-Fa-f]{2}) SNC x([0-9A-Fa-f]{2})", re.IGNORECASE)
 
 PICTURE_HOLD_SECONDS: Final = 1.5   # a picture command's longest hold of a port: power waits at most this
+POWER_GRACE_SECONDS: Final = 0.2    # after a POWER command, the port waits this long for the operation's next one
 
 
 class Urgency(IntEnum):
@@ -53,11 +60,15 @@ class Urgency(IntEnum):
 class PortLock:
     """One port's lock with two queues: when it is released, a waiting POWER command takes it before
     any waiting PICTURE command; PICTURE waiters take it in arrival order only while no POWER
-    command waits. Thread-safe; every acquire returns within its timeout."""
+    command waits and POWER_GRACE_SECONDS have passed since a POWER holder released it (so a power
+    operation's commands follow each other). Thread-safe; every acquire returns within its
+    timeout."""
 
-    def __init__(self) -> None:
+    def __init__(self, grace: float = POWER_GRACE_SECONDS) -> None:
         self._turn = threading.Condition()
-        self._held = False
+        self._held: Urgency | None = None
+        self._grace = grace
+        self._power_until = 0.0                          # time.monotonic() until which PICTURE waits
         self._waiting: dict[Urgency, list[object]] = {urgency: [] for urgency in Urgency}
 
     def acquire(self, urgency: Urgency, timeout: float) -> bool:
@@ -68,12 +79,14 @@ class PortLock:
             queue = self._waiting[urgency]
             queue.append(ticket)
             try:
-                while self._held or self._next() is not ticket:
-                    left = deadline - time.monotonic()
+                while self._held is not None or self._next() is not ticket:
+                    now = time.monotonic()
+                    left = deadline - now
                     if left <= 0:
                         return False
-                    self._turn.wait(left)
-                self._held = True
+                    grace = self._power_until - now
+                    self._turn.wait(min(left, grace) if grace > 0 else left)
+                self._held = urgency
                 return True
             finally:
                 queue.remove(ticket)
@@ -82,16 +95,20 @@ class PortLock:
     def release(self) -> None:
         """Hand the port to the next waiter by the rule above; RuntimeError when not held."""
         with self._turn:
-            if not self._held:
+            if self._held is None:
                 raise RuntimeError("port_not_held")
-            self._held = False
+            if self._held is Urgency.POWER:
+                self._power_until = time.monotonic() + self._grace
+            self._held = None
             self._turn.notify_all()
 
     def _next(self) -> object | None:
-        """The waiter whose turn it is: the first of the most urgent non-empty queue."""
-        for urgency in sorted(Urgency):
-            if self._waiting[urgency]:
-                return self._waiting[urgency][0]
+        """The waiter whose turn it is: the first POWER waiter; else the first PICTURE waiter once
+        the grace after a POWER release has passed."""
+        if self._waiting[Urgency.POWER]:
+            return self._waiting[Urgency.POWER][0]
+        if self._waiting[Urgency.PICTURE] and time.monotonic() >= self._power_until:
+            return self._waiting[Urgency.PICTURE][0]
         return None
 
 
@@ -121,6 +138,13 @@ class VcpByte:
 
 
 VcpAnswer = VcpReading | VcpByte
+
+
+def answer_value(answer: VcpAnswer | None) -> int | None:
+    """An answer's value: a level's current, a list setting's byte; None for no answer. Pure."""
+    if answer is None:
+        return None
+    return answer.current if isinstance(answer, VcpReading) else answer.value
 
 
 def parse_terse(stdout: str) -> dict[str, VcpAnswer]:
@@ -224,5 +248,5 @@ class DdcChannel:
             port.release()
 
 
-__all__ = ["PICTURE_HOLD_SECONDS", "DdcChannel", "PortLock", "Urgency", "VcpAnswer", "VcpByte", "VcpReading",
-           "parse_terse"]
+__all__ = ["PICTURE_HOLD_SECONDS", "POWER_GRACE_SECONDS", "DdcChannel", "PortLock", "Urgency", "VcpAnswer", "VcpByte",
+           "VcpReading", "answer_value", "parse_terse"]

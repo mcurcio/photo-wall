@@ -11,7 +11,7 @@ import hashlib
 import pytest
 from node.display.fake_ddcutil import OUTPUT, RECORDED_CAPABILITIES, Display
 
-from appliance.display_host.ddc import Urgency, VcpByte, VcpReading
+from appliance.display_host.ddc import DdcChannel, Urgency, VcpByte, VcpReading
 from appliance.display_host.picture_list import (
     FileOfferedCache,
     PictureListAsker,
@@ -166,3 +166,13 @@ def test_a_file_naming_another_identity_is_none_kept(tmp_path, serial):
     target = cache._path(two)
     path.rename(target)
     assert cache.get(two) is None
+
+
+def test_an_output_with_no_ddc_bus_offers_nothing_known_and_is_never_unknown(tmp_path):
+    """An Output with no DDC/CI bus is known to offer nothing ((), never None), so the console
+    never says "Checking" for ever. Mutation probe: return None for no bus -> the ask is unknown."""
+    ran: list[object] = []
+    asker = PictureListAsker(DdcChannel(lambda argv, timeout: ran.append(argv), drm_root=tmp_path,
+                                        cache_dir=tmp_path / "cache"))
+    assert asker.ask("HDMI-A-1") == ()
+    assert ran == []

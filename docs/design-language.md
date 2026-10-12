@@ -205,7 +205,7 @@ interface SelectProps<V extends string> { value: V | null; options: readonly { v
 // label and error; arrow keys step by `step`, and the value commits on blur or Enter.
 interface NumberInputProps { value: number | null; unit: string; min?: number; max?: number; step?: number; onCommit(v: number): void; disabled?: boolean }
 
-// Tag — a neutral small label ("On the display", "Photo Wall picture adjustment"); never a severity colour.
+// Tag — a neutral small label ("On the display", "Photo Wall (software)"); never a severity colour.
 interface TagProps { children: string }
 ```
 
@@ -218,7 +218,7 @@ Later primitives: `Link` (accent text; 1a, with the accent rule), `Menu` (overfl
 The one anatomy for a setting; one discriminated union so an equipment setting cannot omit where it acts (P2). Prior art: Polaris SettingToggle; iOS Settings rows.
 
 ```ts
-type ActsOn = "display-hardware" | "picture-adjustment" | "pi";   // "On the display" · "Photo Wall picture adjustment" · "On the Pi"
+type ActsOn = "display-hardware" | "pi";   // "On the display" · "On the Pi"; picture settings are grouped by section instead (0022)
 type SettingRowProps = SettingRowBase & (
   | { kind: "equipment"; belongsTo: "frame" | "display"; actsOn: ActsOn }
   | { kind: "content"; inherited?: { from: OwnerLink; onOverride(): void } }   // Scene / Photo source / Frame override
@@ -229,7 +229,7 @@ interface SettingRowBase {
   help?: string;                  // one plain sentence
   control: React.ReactElement;    // an unlabelled ui control: the row's Field labels it, and help, actsOn and
                                   // defaultLabel are the Field's help and notes
-  defaultLabel?: string;          // "Default: 50 %"
+  defaultLabel?: string;          // "Default: 1.5 s"
   onReset?(): void;               // shown only when the value differs from the default
   state: "idle" | "saving" | "saved" | "error";
   error?: string;

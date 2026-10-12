@@ -260,24 +260,31 @@ def test_a_list_setting_is_offered_read_only_with_its_byte(display, running):
 
 # Unknown is never reported known --------------------------------------------------------------------
 
-def test_a_batch_that_does_not_finish_leaves_the_list_unknown_until_the_next_ask(display, running):
+def test_a_batch_that_does_not_finish_leaves_the_list_unknown_until_the_next_ask(display, running, caplog):
     """Acceptance 5: one batch's `read_many` is None (its getvcp hangs past the hold) -> offered
-    None and nothing written; the next ask, ASK_AGAIN_SECONDS later, completes it and the waiting
-    change is carried out. Mutation probe: `PictureListAsker.ask` returns the finished batches
-    when one is None -> offered is reported known."""
+    None and nothing written, while the change is answered with no result, so Photo Wall's group
+    is not held by the display's (the fix pass: "a change is answered while its hardware waits");
+    the next ask, ASK_AGAIN_SECONDS later, completes it and the waiting change is carried out.
+    Mutation probes: `PictureListAsker.ask` returns the finished batches when one is None ->
+    offered is reported known; `_carry_out` returns without `_answer` -> for_change stays None;
+    no log for the cut batch -> fails."""
     display.script(hang=["16"], hang_seconds=4)          # the list's second batch
     run = running()
     run.controller.document(OUTPUT, document(1, {"10": 46}))
     until(lambda: sum(1 for args in display.started() if "16" in args) == 1)
     time.sleep(2.0)                                       # the cut batch, and a tick to report it
     assert all(report.offered is None for report in run.reports.puts)
-    assert display.writes() == [] and run.reports.latest().for_change is None
+    assert display.writes() == []
+    assert run.reports.latest().for_change == 1 and run.reports.latest().results == {}
+    assert any("HDMI-A-1's getvcp 16 18 1A 59 did not finish" in record.getMessage()
+               for record in caplog.records)             # logged with its Output, codes and time
     asks = len(display.started())
     time.sleep(1.2)
     assert len(display.started()) == asks                 # not asked again before ASK_AGAIN_SECONDS
     display.script(hang=[])
     run.clock.now += ASK_AGAIN_SECONDS
-    report = run.reported(1)
+    until(lambda: run.reports.latest().results == {"10": HardwareResult(WriteResult.TAKEN, 60, 46)})
+    report = run.reports.latest()
     assert report.offered is not None and {setting.code for setting in report.offered} == {"10", "12"}
     assert display.writes() == [["10", "46"]]
 
@@ -461,20 +468,19 @@ def test_another_display_is_asked_and_written_and_a_blip_is_not_asked_again(disp
     run.controller.output(OUTPUT, connected=False, identity=None)
     run.controller.document(OUTPUT, document(1, {"10": 46}))
     time.sleep(0.5)
-    assert display.calls() == [] and run.reports.latest().for_change is None   # waits for a display
+    assert display.calls() == []                                            # the hardware waits for a display
+    assert run.reports.latest().for_change == 1 and run.reports.latest().results == {}   # the change is answered
     run.connect()
-    report = run.reported(1)
-    assert report.results == {"10": HardwareResult(WriteResult.TAKEN, 60, 46)}
-    asks = sum(1 for args in display.started() if len(args) > 2 and args[0] == "getvcp")
+    until(lambda: run.reports.latest().results == {"10": HardwareResult(WriteResult.TAKEN, 60, 46)})
     run.controller.output(OUTPUT, connected=False, identity=None)           # a blip
     run.connect()
     time.sleep(0.5)
-    assert sum(1 for args in display.started() if len(args) > 2 and args[0] == "getvcp") == asks
+    assert asks(display) == 1
     assert display.writes() == [["10", "46"]]                               # the same display: no write
     display.vcp("10", 30, 100)
     run.connect(identity=DisplayIdentity("ABC", 1, "Other", None))         # another display
     until(lambda: display.writes() == [["10", "46"], ["10", "46"]])
-    assert sum(1 for args in display.started() if len(args) > 2 and args[0] == "getvcp") == 2 * asks
+    assert asks(display) == 2
 
 
 # The backend's picture op over the shell's socket -------------------------------------------------
@@ -596,3 +602,64 @@ def test_the_display_is_read_again_and_a_change_on_its_buttons_is_reported_not_u
     assert len(display.started()) == reads              # once per REREAD_SECONDS, not every tick
     restarted = Running(display)                        # the kept list carries the latest read
     assert restarted.controller._offered.get(IDENTITY) == run.reports.latest().offered
+
+
+# The two groups are not coupled in time; the fix pass after review --------------------------------
+
+def test_photo_walls_change_reaches_the_shell_while_a_display_write_is_running(display, running):
+    """A software change that arrives while the hardware worker waits on a slow write reaches the
+    shell at once, not after the write. Mutation probe: send the operations from the hardware worker
+    (no shell worker) -> change 2 reaches the shell only after the 1 s write."""
+    display.script(write_seconds=1.0)
+    run = running()
+    run.offered()
+    run.controller.document(OUTPUT, document(1, {"10": 46}))
+    until(lambda: display.writes() == [["10", "46"]], timeout=5)
+    run.controller.document(OUTPUT, document(2, {"10": 46}, software(brightness=50)))
+    until(lambda: any(operations.picture_change == 2 for operations, _ in run.shell.sent), timeout=0.5)
+    assert [call["at"] for call in display.calls() if call["args"][0] == "setvcp"] == ["start"]   # still writing
+    run.reported(2)
+
+
+def test_a_change_to_photo_walls_group_only_touches_no_ddc(display, running):
+    """A change that moves only the software group writes and reads nothing on the display, and the
+    report keeps each untouched code's result; a later change of one code writes only that code.
+    Mutation probe: carry out every set code on each change -> getvcp 10 and 12 run again."""
+    run = running()
+    run.offered()
+    run.controller.document(OUTPUT, document(1, {"10": 46, "12": 40}))
+    first = run.reported(1).results
+    commands = len(display.started())
+    run.controller.document(OUTPUT, document(2, {"10": 46, "12": 40}, software(brightness=120)))
+    assert run.reported(2).results == first
+    assert len(display.started()) == commands
+    run.controller.document(OUTPUT, document(3, {"10": 46, "12": 45}))
+    report = run.reported(3)
+    assert display.started()[commands:] == [["getvcp", "12"], ["setvcp", "12", "45"], ["getvcp", "12"]]
+    assert report.results == {"10": first["10"], "12": HardwareResult(WriteResult.TAKEN, 40, 45)}
+
+
+def test_a_display_that_comes_back_is_read_again_at_once(display, running):
+    """1c read a set value again at each appearance: a blip with the same identity reads the held
+    list at once, so a value changed while away shows without waiting REREAD_SECONDS. Mutation
+    probe: leave read_after as it was on an appearance -> 10 stays 60 until the clock moves."""
+    run = running()
+    run.offered()
+    run.controller.output(OUTPUT, connected=False, identity=None)
+    display.vcp("10", 30, 100)                          # changed while it was away
+    run.connect()
+    until(lambda: {setting.code: setting.current for setting in run.reports.latest().offered}["10"] == 30, timeout=5)
+    assert display.writes() == []
+
+
+def test_a_restart_before_any_re_read_reports_the_written_value(display, running):
+    """E-PS-S3: the kept list is put after every write, so a controller restarted before a re-read
+    reports the value it wrote, not the ask's. Mutation probe: drop the put after the writes -> the
+    restarted controller reports 10 at 60."""
+    first = running()
+    first.offered()
+    first.controller.document(OUTPUT, document(1, {"10": 46}))
+    first.reported(1)
+    first.controller.stop()
+    again = running()
+    assert {setting.code: setting.current for setting in again.offered()}["10"] == 46

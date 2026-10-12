@@ -22,6 +22,9 @@ Rules this module owns (one home each):
   sends, each with ddcutil's English name (the console shows that name; it never crosses the wire);
 - the MCCS code's text form (`VCP_CODE_PATTERN`: two upper-case hex digits) and the value bounds
   (a level 0..LEVEL_MAX, a choice's value one byte);
+- **which value a setting takes** (`HardwareRange.holds`): a level 0..its maximum, a choice the
+  display lists, nothing on a read-only list; Central's edit check and Copy and the Pi's write all
+  ask it;
 - the software ranges (brightness and contrast SOFTWARE_PERCENT_MIN..SOFTWARE_PERCENT_MAX, 100
   changes nothing; colour temperature and gamma as before);
 - the wire shapes, their size caps (which the bounds below make every valid value fit, so no
@@ -152,12 +155,22 @@ class HardwareRange:
         else:
             require(maximum is None and not choices, "hardware_range")
 
+    def holds(self, value: object) -> bool:
+        """Whether `value` may be set on a setting with this range: a whole number 0..maximum for a
+        LEVEL, a value its choices list for a CHOICE, never for a READ_ONLY_CHOICE. Pure."""
+        if not (isinstance(value, int) and not isinstance(value, bool)):
+            return False
+        if self.kind is RangeKind.LEVEL:
+            return 0 <= value <= (self.maximum or 0)
+        return any(choice.value == value for choice in self.choices)
+
 
 @dataclass(frozen=True)
 class HardwareSetting:
     """One setting on the picture list a display answered: observed, never desired. `current` is the
-    value read when the Pi asked (None: no answer at that read); a level's is 0..maximum, a list's
-    any byte (a display may sit at a value it does not list)."""
+    display's latest read of it (the ask, the read before a write, a write's read-back or the
+    periodic re-read; None: no answer at that read); a level's is 0..maximum, a list's any byte (a
+    display may sit at a value it does not list)."""
     code: VcpCode
     range: HardwareRange
     current: int | None

@@ -16,7 +16,8 @@ Rules this module owns (one home each):
 - **Known or not:** the ask is known only when every batch's command finished; a batch that did
   not finish leaves the whole list unknown (None), asked again later, never reported partial. A
   finished command answers the codes it read; the rest are not offered. An Output with no DDC/CI
-  bus offers nothing: known, ().
+  bus offers nothing: known, (). A batch or a capabilities run that did not finish is logged with
+  its Output, its codes and the time it took (the hold is not measured on the bench yet).
 - **One answer to one setting** (`offered_setting`).
 - **Choices from the capabilities string** (`parse_capability_choices`): read once per ask, after
   the batches and only when a list setting answered, as one more hold at Urgency.PICTURE; names cut
@@ -34,6 +35,7 @@ import hashlib
 import logging
 import os
 import re
+import time
 from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
@@ -54,7 +56,7 @@ from contracts.node_picture import (
     encode_picture_report,
 )
 
-from .ddc import PICTURE_HOLD_SECONDS, DdcChannel, Urgency, VcpAnswer, VcpReading
+from .ddc import PICTURE_HOLD_SECONDS, DdcChannel, Urgency, VcpAnswer, VcpReading, answer_value
 
 ASK_BATCH: Final = 4                # codes per getvcp (one port hold); the bench step measures it
 ASK_AGAIN_SECONDS: Final = 60.0     # an unknown list is asked again this long after the last try
@@ -114,9 +116,8 @@ def with_current(setting: HardwareSetting, answer: VcpAnswer | None) -> Hardware
     """`setting` with what it answers now as its current: the answer's value when the setting's
     range holds it, else None (no answer, or a value the range cannot hold). The range is kept.
     Pure."""
-    value = None if answer is None else answer.current if isinstance(answer, VcpReading) else answer.value
     try:
-        return replace(setting, current=value)
+        return replace(setting, current=answer_value(answer))
     except ValueError:
         return replace(setting, current=None)
 
@@ -151,8 +152,12 @@ class PictureListAsker:
             return None                                 # never a partial ask reported as known
         choices: dict[VcpCode, tuple[Choice, ...]] = {}
         if any(not isinstance(answer, VcpReading) for answer in answers.values()):
+            began = time.monotonic()
             capabilities = self._channel.capabilities(output_id, urgency=Urgency.PICTURE,
                                                       timeout=PICTURE_HOLD_SECONDS)
+            if capabilities is None:
+                log.warning("picture: %s's capabilities did not answer (%.2f s, hold %.1f s): its list settings "
+                            "are offered read-only", output_id, time.monotonic() - began, PICTURE_HOLD_SECONDS)
             choices = {} if capabilities is None else parse_capability_choices(capabilities)
         return answers_by_code(answers, choices)
 
@@ -168,8 +173,11 @@ class PictureListAsker:
         answers: dict[VcpCode, VcpAnswer] = {}
         for start in range(0, len(codes), ASK_BATCH):
             batch = codes[start:start + ASK_BATCH]
+            began = time.monotonic()
             read = self._channel.read_many(output_id, batch, urgency=Urgency.PICTURE, timeout=PICTURE_HOLD_SECONDS)
             if read is None:
+                log.warning("picture: %s's getvcp %s did not finish (%.2f s, hold %.1f s): the read is not known",
+                            output_id, " ".join(batch), time.monotonic() - began, PICTURE_HOLD_SECONDS)
                 return None
             answers.update({code: answer for code, answer in read.items() if code in batch})
         return answers

@@ -22,30 +22,39 @@ Rules this module owns (one home each):
 - **Ask once per display:** at an appearance with an identity whose list it does not hold, the
   worker takes the list kept for it (`OfferedCache`) or else asks it (`PictureAsk.ask`), again
   every ASK_AGAIN_SECONDS while it is unknown; the list is held per identity for the controller's
-  life (a blip with the same identity does not re-ask), and kept whenever it changes.
+  life (a blip with the same identity does not re-ask, but its values are read again at once), and
+  kept whenever it changes.
 - **Read again:** every REREAD_SECONDS the worker reads the held list's values again
   (`PictureAsk.read_again`, picture's turn, batched) and reports them as each setting's current,
   so a value changed on the display's own buttons shows (Central says so). Every read the worker
   makes (before a write, its read-back) is a current too. Reading never writes: the Pi never puts
   a value back on its own.
-- **Write only on a new picture change or another display:** the hardware codes are written, in
-  `write_order` (list settings first, so a preset is chosen before the gains it moves), when the
-  document's picture_change rose or the display appeared with another identity, once it is
-  connected and its list is known. Each code is read first (a display that already has the value
-  is not written), a level past the display's maximum or a choice the display does not list is not
-  written (`not-taken`), a list setting's value is its byte (`setvcp 14 5`), and the read-back
-  judges a write (`judged`). A picture change already carried out
-  on the same display is never written again, even by a restarted controller (a Weston restart
-  restarts it): `AppliedPictures` remembers it.
+- **Write only what changed:** when the document's picture_change rose, only the hardware codes
+  whose value differs from the change last carried out on the same display are written; on another
+  display (or with no record of the last), every code. A change that moves only Photo Wall's group
+  touches no DDC/CI at all. Codes are written in `write_order` (list settings first, so a preset is
+  chosen before the gains it moves), once the display is connected and its list is known. Each
+  code is read first (a display that already has the value is not written), a value its range does
+  not hold (`HardwareRange.holds`) is not written (`not-taken`), a list setting's value is its byte
+  (`setvcp 14 5`), and the read-back judges a write (`judged`). The report's results keep the
+  latest result of each code the change did not touch. A picture change already carried out on
+  the same display is never written again, even by a restarted controller (a Weston restart
+  restarts it): `AppliedPictures` remembers it and its hardware.
+- **A change is answered while its hardware waits:** a change whose codes cannot be written yet
+  (the display is not connected, or its list is not known) is still answered (`for_change`, with
+  the kept results of the codes it did not touch), so Photo Wall's group is never held by the
+  display's; the codes are written once the display and its list are there.
 - **At most two writes a second per display** (WRITE_GAP_SECONDS): some displays save each write
   to memory that wears, so the worker waits out the gap before a write.
-- **Newest wins:** each Output has one picture worker; a document that arrives while it writes
+- **Newest wins:** each Output has one hardware worker; a document that arrives while it writes
   replaces the one waiting, so a dragged slider's writes never queue.
+- **The shell never waits on the display:** each Output's operations and line go to the shell from
+  their own worker, at once on each new change, never queued behind an ask, a re-read or a write.
 - **Operations from the software group** (`operations_for`): white balance from colour
   temperature (`kelvin_multipliers`, in linear light, normalised so KELVIN_NEUTRAL is exactly
   (1, 1, 1) and the largest is 1); light factor = brightness / SOFTWARE_PERCENT_NEUTRAL; contrast
-  slope = contrast / 100; gamma exponent = gamma_tenths / GAMMA_TENTHS_NEUTRAL. Sent to the shell
-  at once on each new change, before any hardware write.
+  slope = contrast / SOFTWARE_PERCENT_NEUTRAL; gamma exponent = gamma_tenths / GAMMA_TENTHS_NEUTRAL. Sent to the shell
+  at once on each new change, by the shell worker.
 - **Re-sent at start:** the controller restarts with Weston, and sends every Output's operations
   to the shell when it starts and whenever the shell reports an Output (re)created.
 - **Presented:** `presented_change` is the newest picture change the shell's `presented` events
@@ -87,17 +96,16 @@ from contracts.node_picture import (
     WriteResult,
 )
 
-from .ddc import DdcChannel, Urgency, VcpAnswer, VcpReading, parse_terse
+from .ddc import DdcChannel, Urgency, VcpAnswer, answer_value, parse_terse
 from .picture_list import ASK_AGAIN_SECONDS, OfferedCache, PictureAsk, with_current
 
 BRIGHTNESS_CODE: Final = "10"       # VESA MCCS luminance
-READ_SECONDS: Final = 5.0           # one VCP read (the port's wait included)
-WRITE_SECONDS: Final = 10.0         # one VCP write with its read-back
+READ_SECONDS: Final = 5.0           # one VCP read's wait for the port and its run (the run itself is cut at the hold)
+WRITE_SECONDS: Final = 10.0         # one VCP write with its read-back, the port waits included (each run is cut at the hold)
 WRITE_GAP_SECONDS: Final = 0.5      # the least time between two writes to one display
 SHELL_SECONDS: Final = 2.0          # one `picture` control op
 TICK_SECONDS: Final = 1.0           # a worker's longest sleep: an ask or a read again falls due within it
 REREAD_SECONDS: Final = 60.0        # the held list's values are read again this often (1c's re-read)
-CONTRAST_NEUTRAL_PERCENT: Final = 100   # contrast slope = contrast / 100
 _HISTORY: Final = 16                # picture changes remembered per Output for `presented`
 
 log = logging.getLogger(__name__)
@@ -150,21 +158,14 @@ def operations_for(output_id: str, picture_change: int, software: SoftwarePictur
     return PictureOperations(output_id=output_id, picture_change=picture_change,
                              rgb_multipliers=kelvin_multipliers(software.colour_temperature_kelvin),
                              light_factor=software.brightness_percent / SOFTWARE_PERCENT_NEUTRAL,
-                             contrast_slope=software.contrast_percent / CONTRAST_NEUTRAL_PERCENT,
+                             contrast_slope=software.contrast_percent / SOFTWARE_PERCENT_NEUTRAL,
                              gamma_exponent=software.gamma_tenths / GAMMA_TENTHS_NEUTRAL)
-
-
-def _value(answer: VcpAnswer | None) -> int | None:
-    """An answer's value: a level's current or a list setting's byte; None for no answer."""
-    if answer is None:
-        return None
-    return answer.current if isinstance(answer, VcpReading) else answer.value
 
 
 def judged(written: int, after: VcpAnswer | None) -> WriteResult:
     """A write's result by its read-back: TAKEN when the value read equals the value written,
     NOT_TAKEN for another, NO_ANSWER for none. Pure."""
-    value = _value(after)
+    value = answer_value(after)
     if value is None:
         return WriteResult.NO_ANSWER
     return WriteResult.TAKEN if value == written else WriteResult.NOT_TAKEN
@@ -224,13 +225,22 @@ class PictureReports(Protocol):
     def put_picture(self, report: PictureReport) -> None: ...   # never blocks
 
 
+@dataclass(frozen=True)
+class Applied:
+    """The picture change last carried out on an Output, the display it was carried out on, and
+    its hardware values."""
+    picture_change: int
+    identity: DisplayIdentity | None
+    hardware: Mapping[VcpCode, int]
+
+
 class AppliedPictures(Protocol):
-    """Which picture change each Output's display last had written, and on which display, kept
-    across controller restarts."""
+    """Which picture change each Output's display last had carried out, on which display and with
+    which hardware values, kept across controller restarts."""
 
-    def last(self, output_id: str) -> tuple[int, DisplayIdentity | None] | None: ...   # None: none known
+    def last(self, output_id: str) -> Applied | None: ...   # None: none known
 
-    def record(self, output_id: str, picture_change: int, identity: DisplayIdentity | None) -> None: ...
+    def record(self, output_id: str, applied: Applied) -> None: ...
 
 
 class FileAppliedPictures:
@@ -244,22 +254,24 @@ class FileAppliedPictures:
     def _path(self, output_id: str) -> Path:
         return self._directory / f"picture-{output_id}.json"
 
-    def last(self, output_id: str) -> tuple[int, DisplayIdentity | None] | None:
+    def last(self, output_id: str) -> Applied | None:
         try:
             value = json.loads(self._path(output_id).read_text())
-            change, identity = value["picture_change"], value["identity"]
-            if type(change) is not int:
+            change, identity, hardware = value["picture_change"], value["identity"], value["hardware"]
+            if type(change) is not int or not all(type(item) is int for item in hardware.values()):
                 return None
-            return change, None if identity is None else DisplayIdentity(**identity)
-        except (OSError, ValueError, TypeError, KeyError):
+            return Applied(change, None if identity is None else DisplayIdentity(**identity), dict(hardware))
+        except (OSError, ValueError, TypeError, KeyError, AttributeError):
             return None
 
-    def record(self, output_id: str, picture_change: int, identity: DisplayIdentity | None) -> None:
+    def record(self, output_id: str, applied: Applied) -> None:
         path = self._path(output_id)
         partial = path.with_suffix(".partial")
+        identity = applied.identity
         try:
-            partial.write_text(json.dumps({"picture_change": picture_change,
-                                           "identity": None if identity is None else asdict(identity)}))
+            partial.write_text(json.dumps({"picture_change": applied.picture_change,
+                                           "identity": None if identity is None else asdict(identity),
+                                           "hardware": dict(applied.hardware)}))
             os.replace(partial, path)
         except OSError:
             log.warning("picture: could not record %s's applied change", output_id, exc_info=True)
@@ -280,14 +292,6 @@ class DdcPictureAdapter:
         # The read-back judges the write, never the tool's exit status.
         self._channel.set(output_id, code, value, urgency=Urgency.PICTURE, timeout=timeout)
         return self.read(output_id, code, timeout=deadline - time.monotonic())
-
-
-def _settable(setting: HardwareSetting, value: int) -> bool:
-    """Whether `value` is one the display offers for `setting`: a level within its maximum, a choice
-    it lists (a READ_ONLY_CHOICE lists none). Pure."""
-    if setting.range.kind is RangeKind.LEVEL:
-        return value <= (setting.range.maximum or 0)
-    return value in {choice.value for choice in setting.range.choices}
 
 
 _NEVER: Final = object()            # no display carried out yet (an identity may itself be None)
@@ -319,9 +323,11 @@ class _Port:
     presented_change: int | None = None
     put: PictureReport | None = None                # the report last put
     want_apply: bool = False
-    want_send: bool = False
+    want_send: bool = False                         # re-send the operations and line, even unchanged
+    want_line: bool = False                         # send them if either changed
     last_write: float | None = None                 # time.monotonic() at the end of the last write
-    worker: threading.Thread | None = None
+    worker: threading.Thread | None = None          # the hardware worker: asks, re-reads, writes
+    shell_worker: threading.Thread | None = None    # the shell worker: operations and the line
 
     def offered(self) -> tuple[HardwareSetting, ...] | None:
         """The connected display's list; None while it is not known (or nothing is connected)."""
@@ -346,7 +352,7 @@ class PictureController:
         self._stopping = False
 
     def start(self) -> None:
-        """Start one worker per known Output and send every known Output's operations to the shell
+        """Start the workers of every known Output and send every known Output's operations to the shell
         (the re-send at start); returns at once."""
         with self._wake:
             self._started = True
@@ -358,7 +364,8 @@ class PictureController:
     def stop(self, timeout: float = 5.0) -> None:
         with self._wake:
             self._stopping = True
-            workers = [port.worker for port in self._ports.values() if port.worker is not None]
+            workers = [worker for port in self._ports.values() for worker in (port.worker, port.shell_worker)
+                       if worker is not None]
             self._wake.notify_all()
         for worker in workers:
             worker.join(timeout)
@@ -374,7 +381,7 @@ class PictureController:
             if seen is not None and document.picture_change <= seen.picture_change:
                 return
             port.document = document         # replaces the one waiting: newest wins
-            port.pending = port.want_apply = True
+            port.pending = port.want_apply = port.want_line = True
             self._worker(output_id, port)
             self._wake.notify_all()
 
@@ -384,7 +391,10 @@ class PictureController:
         blocks."""
         with self._wake:
             port = self._ports.setdefault(output_id, _Port())
+            appeared = connected and (not port.connected or identity != port.identity)
             port.connected, port.identity = connected, identity
+            if appeared and identity is not None and port.lists.get(identity):
+                port.read_after[identity] = self._clock()   # it may have changed while away: read it again now
             if connected and port.document is not None and (port.pending or identity != port.carried_out_on):
                 port.pending = port.want_apply = True
             self._report(output_id, port)
@@ -420,11 +430,17 @@ class PictureController:
     # -- the workers: one per Output, never under the lock while they talk to a device --------
 
     def _worker(self, output_id: str, port: _Port) -> None:
-        """Under the lock: the Output's worker, once the controller started."""
-        if self._started and not self._stopping and port.worker is None:
+        """Under the lock: the Output's two workers, once the controller started."""
+        if not self._started or self._stopping:
+            return
+        if port.worker is None:
             port.worker = threading.Thread(target=self._run, args=(output_id, port),
                                            name=f"picture-{output_id}", daemon=True)
             port.worker.start()
+        if port.shell_worker is None:
+            port.shell_worker = threading.Thread(target=self._run_shell, args=(output_id, port),
+                                                 name=f"picture-shell-{output_id}", daemon=True)
+            port.shell_worker.start()
 
     def _read_due(self, port: _Port) -> DisplayIdentity | None:
         """Under the lock: the connected display whose held list is due a read again; None when none is."""
@@ -442,26 +458,45 @@ class PictureController:
         after = port.ask_after.get(identity)
         return identity if after is None or self._clock() >= after else None
 
-    def _run(self, output_id: str, port: _Port) -> None:
+    def _run_shell(self, output_id: str, port: _Port) -> None:
+        """The shell worker: the operations and the line, never behind the display's port."""
         while True:
             with self._wake:
-                while not self._stopping and not (port.want_apply or port.want_send or self._ask_due(port)
-                                                  or self._read_due(port)):
+                while not self._stopping and not (port.want_send or port.want_line):
                     self._wake.wait(TICK_SECONDS)
                 if self._stopping:
                     return
-                apply, send, asking = port.want_apply, port.want_send, self._ask_due(port)
-                reading = self._read_due(port)
-                port.want_apply = port.want_send = False
+                force = port.want_send
+                port.want_send = port.want_line = False
             try:
-                if apply or send:                    # the operations first, before any port wait
-                    self._send(output_id, port, force=send)
+                self._send(output_id, port, force=force)
+            except Exception:
+                log.exception("picture: %s's operations failed", output_id)
+
+    def _refresh(self, port: _Port) -> None:
+        """Ask the shell worker to send the operations and line if either changed."""
+        with self._wake:
+            port.want_line = True
+            self._wake.notify_all()
+
+    def _run(self, output_id: str, port: _Port) -> None:
+        """The hardware worker: asks, writes and re-reads, one at a time on the Output's port."""
+        while True:
+            with self._wake:
+                while not self._stopping and not (port.want_apply or self._ask_due(port) or self._read_due(port)):
+                    self._wake.wait(TICK_SECONDS)
+                if self._stopping:
+                    return
+                apply, asking = port.want_apply, self._ask_due(port)
+                reading = self._read_due(port)
+                port.want_apply = False
+            try:
                 if asking is not None and self._asked(output_id, port, asking):
                     apply = True
                 if apply:
                     self._carry_out(output_id, port)
                 elif asking is not None:
-                    self._send(output_id, port, force=False)   # the line follows the list's read of 10
+                    self._refresh(port)              # the line follows the list's read of 10
                 if reading is not None:
                     self._read_again(output_id, port, reading)
             except Exception:
@@ -499,7 +534,7 @@ class PictureController:
             port.lists[identity] = fresh
             self._report(output_id, port)
         self._offered.put(identity, fresh)
-        self._send(output_id, port, force=False)     # the line follows the display's brightness
+        self._refresh(port)                          # the line follows the display's brightness
 
     def _current(self, output_id: str, port: _Port, identity: DisplayIdentity | None, code: VcpCode,
                  answer: VcpAnswer | None) -> None:
@@ -513,35 +548,53 @@ class PictureController:
             self._report(output_id, port)
 
     def _carry_out(self, output_id: str, port: _Port) -> None:
-        """The latest document's hardware on the connected display: each offered code in
-        `write_order`, read first, written and judged by its read-back. Waits (stays pending) while
-        hardware is set and the display is not connected or its list is not known."""
+        """The latest document's hardware on the connected display: each offered code whose value
+        changed since the change last carried out on this display (every code on another display),
+        in `write_order`, read first, written and judged by its read-back. While such codes wait for
+        the display or its list, the change is answered (`_answer`) and stays pending."""
         with self._wake:
             document, identity, connected, offered = port.document, port.identity, port.connected, port.offered()
             if document is None or not port.pending:
                 return
-        if not document.hardware:
-            self._finish(output_id, port, document, identity, {})
-            return
-        if not connected:
-            return
-        if self._applied.last(output_id) == (document.picture_change, identity):
+            earlier = dict(port.results) if port.carried_out_on == identity else {}
+        last = self._applied.last(output_id)
+        same = last is not None and last.identity == identity
+        if same and last.picture_change == document.picture_change:
             self._finish(output_id, port, document, identity, {})   # this display already had it
             return
-        if offered is None:
+        carried = last.hardware if same else {}
+        to_write = {code: value for code, value in document.hardware.items() if carried.get(code, _NEVER) != value}
+        kept = {code: result for code, result in earlier.items()
+                if code in document.hardware and code not in to_write}
+        if document.hardware and (not connected or (to_write and offered is None)):
+            self._answer(output_id, port, document, kept)           # Photo Wall's group does not wait
             return
-        settings = {setting.code: setting for setting in offered}
-        results: dict[VcpCode, HardwareResult] = {}
-        for code in write_order(document.hardware, offered):
-            result = self._write(output_id, port, identity, settings[code], document.hardware[code])
+        settings = {setting.code: setting for setting in offered or ()}
+        results = dict(kept)
+        for code in write_order(to_write, offered or ()):
+            result = self._write(output_id, port, identity, settings[code], to_write[code])
             if result is not None:
                 results[code] = result
-        self._applied.record(output_id, document.picture_change, identity)
+            else:
+                results.pop(code, None)
+        self._applied.record(output_id, Applied(document.picture_change, identity, dict(document.hardware)))
         self._finish(output_id, port, document, identity, results)
+        if not to_write:
+            return
         with self._wake:
             held = None if identity is None else port.lists.get(identity)
         if identity is not None and held is not None:
             self._offered.put(identity, held)        # the currents the writes read
+
+    def _answer(self, output_id: str, port: _Port, document: PictureDocument,
+                results: dict[VcpCode, HardwareResult]) -> None:
+        """`document`'s change is answered while its hardware waits for the display or its list: the
+        report names it with `results` (the codes it did not touch); it stays pending."""
+        with self._wake:
+            if port.document is not document:
+                return
+            port.for_change, port.results = document.picture_change, results
+            self._report(output_id, port)
 
     def _write(self, output_id: str, port: _Port, identity: DisplayIdentity | None, setting: HardwareSetting,
                value: int) -> HardwareResult | None:
@@ -550,10 +603,10 @@ class PictureController:
         code = setting.code
         read = self._ddc.read(output_id, code, timeout=READ_SECONDS)
         self._current(output_id, port, identity, code, read)
-        before = _value(read)
+        before = answer_value(read)
         if before == value:
             return None
-        if not _settable(setting, value):           # past the display's range, or a choice it does not list
+        if not setting.range.holds(value):          # past the display's range, or a choice it does not list
             if before is None:
                 return HardwareResult(WriteResult.NO_ANSWER, None, None)
             return HardwareResult(WriteResult.NOT_TAKEN, before, before)
@@ -564,7 +617,7 @@ class PictureController:
         finally:
             port.last_write = time.monotonic()
         self._current(output_id, port, identity, code, after)
-        return HardwareResult(judged(value, after), before, _value(after))
+        return HardwareResult(judged(value, after), before, answer_value(after))
 
     def _finish(self, output_id: str, port: _Port, document: PictureDocument, identity: DisplayIdentity | None,
                 results: dict[VcpCode, HardwareResult]) -> None:
@@ -580,7 +633,7 @@ class PictureController:
             if port.document is document:
                 port.pending = False
             self._report(output_id, port)
-        self._send(output_id, port, force=False)     # the line after the result
+        self._refresh(port)                          # the line after the result
 
     def _line(self, port: _Port, document: PictureDocument) -> str:
         """Under the lock: the base page's brightness line for `document` on this display."""
@@ -629,7 +682,7 @@ class PictureController:
             self._reports.put_picture(report)
 
 
-__all__ = ["BRIGHTNESS_CODE", "CONTRAST_NEUTRAL_PERCENT", "READ_SECONDS", "REREAD_SECONDS", "SHELL_SECONDS",
-           "TICK_SECONDS", "WRITE_GAP_SECONDS", "WRITE_SECONDS", "AppliedPictures", "DdcPictureAdapter", "DisplayBrightness",
+__all__ = ["BRIGHTNESS_CODE", "READ_SECONDS", "REREAD_SECONDS", "SHELL_SECONDS",
+           "TICK_SECONDS", "WRITE_GAP_SECONDS", "WRITE_SECONDS", "Applied", "AppliedPictures", "DdcPictureAdapter", "DisplayBrightness",
            "FileAppliedPictures", "PictureController", "PictureDdc", "PictureReports", "PictureShell",
            "brightness_line", "judged", "kelvin_multipliers", "operations_for", "write_order"]

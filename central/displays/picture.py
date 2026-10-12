@@ -10,18 +10,27 @@ set on it, is central/displays/hardware.py's.
 
 One home each for:
 - **The picture session** (the Live model; central/live_session.py): edits go to a draft that is
-  in force while the session is live (`effective_picture`); Done stores the draft; Revert, or the
-  session's lease running out, puts back what was in force before (`reverted`: the stored values,
-  and a touched hardware code that was "as the display has it" goes to the value the Pi read just
-  before its first write in the session, when one is known: `with_befores`, from each picture
-  report for a change after the session began). The projection is a pure function of
-  the stored picture, the session and Central's `now`, so an abandoned console needs no reaper.
+  in force while the session is live (`effective_picture`, `kept_picture`); Done stores the draft;
+  Revert ends the lease, and Revert or the lease running out puts back what was in force before.
+  The stored values never change: Photo Wall keeps what it kept (`kept_picture`), and a touched
+  hardware code that was "as the display has it" stays so. Putting the display back is a one-time
+  instruction, never a stored value: an ended session's `restore_of` (each such code at the value
+  the Pi read just before its first write in the session, when one is known: `with_befores`, from
+  each picture report for a change after the session began) rides the document beside the values
+  in force (`with_restore`) until the Pi answers a document that carries it (`restore_answered`);
+  then the document carries the values in force alone. The projection is a pure function of the
+  stored picture, the session, the pending instruction and Central's `now`, so an abandoned
+  console needs no reaper.
 - **The picture document** (`picture_document`, `picture_digest`): the Output's own key, with its
   own `picture_change`, which rises only when the digest differs (never with the Output
   document's `change`: picture never costs power).
-- **Done waits for the Pi** (`picture_status`, `presented`): SHOWN once the report answers the
-  document's picture change (every hardware write done) and the Player presented it, and the
-  document carries the values Done would keep.
+- **Which report answers which picture** (`answers`, `carries`, `hardware_answered`): a report
+  answers a document when its for_change is the document's picture_change; the tab's per-row
+  results and "changed on the display's buttons" read a report only when it answers the document
+  that carries the hardware in force (`hardware_answered`), so a result of an older change is never
+  shown as the latest.
+- **Done waits for the Pi** (`presented`, `picture_status`): SHOWN once the report answers the
+  document that carries exactly the picture Done would keep and the Player presented it.
 - **Copy** (#119; owner, 2026-10-12: "Both (Recommended)"; "Only ones set in Photo Wall
   (Recommended)"): all four software values; the hardware values set on the source where the
   target offers them (hardware.py's rule, slice S4); never position.
@@ -114,17 +123,24 @@ def default_picture() -> DisplayPicture:
 
 
 def effective_picture(stored: DisplayPicture, session: PictureSession | None, now: float) -> DisplayPicture:
-    """What is in force at Central's `now`: the draft while the session is live; `reverted` once
-    its lease ran out without Done; `stored` with no session."""
+    """What the picture document carries at Central's `now`: the draft while the session is live;
+    `reverted` once it ended without Done (Revert, or its lease ran out) until the ended session
+    goes; `stored` with no session."""
     if session is None:
         return stored
     return session.draft if session.lease.live(now) else reverted(stored, session)
 
 
+def kept_picture(stored: DisplayPicture, session: PictureSession | None, now: float) -> DisplayPicture:
+    """What Photo Wall keeps for the Display at `now`, as the tab shows it: the draft while the
+    session is live, else `stored` (a reverted session sets nothing)."""
+    return session.draft if session is not None and session.lease.live(now) else stored
+
+
 def reverted(stored: DisplayPicture, session: PictureSession) -> DisplayPicture:
-    """`stored`, with each touched hardware code absent from `stored.hardware` set to
-    `session.hardware_before[code]` when the Pi reported one, so the display goes back to what it
-    showed before the session."""
+    """The one-time instruction that puts the display back: `stored`, with each touched hardware
+    code absent from `stored.hardware` at `session.hardware_before[code]` when the Pi reported one,
+    so the display goes back to what it showed before the session. Never stored."""
     back = {code: session.hardware_before[code] for code in session.touched_hardware
             if code not in stored.hardware and code in session.hardware_before}
     if not back:
@@ -178,24 +194,63 @@ def picture_digest(picture: DisplayPicture) -> str:
     return hashlib.sha256(json.dumps(body, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
-def picture_status(*, bound: bool, document: PictureDocument | None,
-                   report: PictureReport | None) -> PictureStatus:
-    """NO_DISPLAY unless bound with a document; SHOWN when the report's for_change is the document's
-    picture_change and its presented_change >= it; else WAITING."""
-    if not bound or document is None:
-        return PictureStatus.NO_DISPLAY
-    shown = (report is not None and report.for_change == document.picture_change
-             and report.presented_change is not None and report.presented_change >= document.picture_change)
-    return PictureStatus.SHOWN if shown else PictureStatus.WAITING
+def answers(document: PictureDocument | None, report: PictureReport | None) -> bool:
+    """`report` answers `document`: its for_change is the document's picture_change."""
+    return document is not None and report is not None and report.for_change == document.picture_change
+
+
+def carries(document: PictureDocument | None, picture: DisplayPicture) -> bool:
+    """`document` carries exactly `picture`, both groups (the document is projected from the
+    session asynchronously, so the recorded one may still be the previous)."""
+    return (document is not None and dict(document.hardware) == dict(picture.hardware)
+            and document.software == picture.software)
+
+
+def hardware_answered(hardware: Mapping[VcpCode, int], document: PictureDocument | None,
+                      report: PictureReport | None) -> bool:
+    """`report` answers the document that carries exactly `hardware` (the software group is not
+    read: the two groups are never coupled)."""
+    return answers(document, report) and document is not None and dict(document.hardware) == dict(hardware)
 
 
 def presented(picture: DisplayPicture, document: PictureDocument | None, report: PictureReport | None) -> bool:
-    """The Pi carried out the document that carries exactly `picture`, not an older one: the
-    document is projected from the session asynchronously, so a report answering the previous
-    document must neither show the Picture tab `shown` nor let Done keep the draft."""
-    return (document is not None and dict(document.hardware) == dict(picture.hardware)
-            and document.software == picture.software
-            and picture_status(bound=True, document=document, report=report) is PictureStatus.SHOWN)
+    """The Pi answered the document that carries exactly `picture`, not an older one, and the
+    Player presented it: a report answering the previous document must neither show the Picture
+    tab `shown` nor let Done keep the draft."""
+    return (carries(document, picture) and answers(document, report) and report is not None
+            and document is not None and report.presented_change is not None
+            and report.presented_change >= document.picture_change)
+
+
+def picture_status(*, bound: bool, picture: DisplayPicture, document: PictureDocument | None,
+                   report: PictureReport | None) -> PictureStatus:
+    """NO_DISPLAY unless bound with a document; SHOWN when `presented(picture, …)`; else WAITING."""
+    if not bound or document is None:
+        return PictureStatus.NO_DISPLAY
+    return PictureStatus.SHOWN if presented(picture, document, report) else PictureStatus.WAITING
+
+
+def restore_of(stored: DisplayPicture, session: PictureSession) -> dict[VcpCode, int]:
+    """The one-time instruction an ended session leaves: the codes `reverted` puts back that
+    `stored` does not set, each at the Pi's first `before`."""
+    return {code: value for code, value in reverted(stored, session).hardware.items() if code not in stored.hardware}
+
+
+def with_restore(picture: DisplayPicture, restore: Mapping[VcpCode, int]) -> DisplayPicture:
+    """What the picture document carries: `picture`, with each code of the pending instruction
+    `restore` that `picture` does not set (a value in force always wins)."""
+    back = {code: value for code, value in restore.items() if code not in picture.hardware}
+    if not back:
+        return picture
+    return replace(picture, hardware=_in_list_order({**picture.hardware, **back}))
+
+
+def restore_answered(restore: Mapping[VcpCode, int], in_force: DisplayPicture, document: PictureDocument | None,
+                     report: PictureReport | None) -> bool:
+    """The pending instruction is done: `report` answers a document that carries it (each code at
+    its restore value, or at the value in force that overrides it), never an older one."""
+    return answers(document, report) and document is not None and all(
+        document.hardware.get(code) == in_force.hardware.get(code, value) for code, value in restore.items())
 
 
 def copied(source: DisplayPicture, target: DisplayPicture, *,
@@ -239,6 +294,6 @@ def _in_list_order(hardware: Mapping[VcpCode, int]) -> dict[VcpCode, int]:
 
 
 __all__ = ["PICTURE_IDLE_SECONDS", "DisplayPicture", "PictureRefused", "PictureSession", "PictureStatus",
-           "SoftwareSetting", "copied", "default_picture", "edited_hardware", "edited_software",
-           "effective_picture", "picture_digest", "picture_document", "picture_status", "presented",
-           "reverted", "with_befores"]
+           "SoftwareSetting", "answers", "carries", "copied", "default_picture", "edited_hardware", "edited_software",
+           "effective_picture", "hardware_answered", "kept_picture", "picture_digest", "picture_document",
+           "picture_status", "presented", "restore_answered", "restore_of", "reverted", "with_befores", "with_restore"]

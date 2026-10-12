@@ -11,8 +11,25 @@ from uuid import uuid4
 
 import pytest
 
-from central.displays.hardware import changed_on_buttons, copied_hardware, kept_offered, level_share
-from central.displays.picture import DisplayPicture, PictureSession, copied, with_befores
+from central.displays.hardware import (
+    changed_on_buttons,
+    copied_hardware,
+    edit_refusal,
+    hardware_rows,
+    kept_report,
+    level_share,
+)
+from central.displays.picture import (
+    DisplayPicture,
+    PictureSession,
+    copied,
+    hardware_answered,
+    kept_picture,
+    restore_answered,
+    restore_of,
+    with_befores,
+    with_restore,
+)
 from central.live_session import Lease
 from contracts.node_output import DisplayIdentity
 from contracts.node_picture import (
@@ -21,6 +38,7 @@ from contracts.node_picture import (
     HardwareRange,
     HardwareResult,
     HardwareSetting,
+    PictureDocument,
     PictureReport,
     RangeKind,
     SoftwarePicture,
@@ -84,15 +102,18 @@ def test_copy_carries_all_software_and_leaves_the_targets_other_hardware_values(
 
 
 def test_a_report_that_does_not_know_the_list_yet_keeps_the_known_list_of_the_same_display():
-    """Mutation probe: `kept_offered` lets None through -> the known list is lost."""
+    """Mutation probes: `kept_report` lets None through -> the known list is lost; it keeps the
+    list only for an equal identity -> a disconnected display (identity None) loses it."""
     known = (_level("10", 100, 60),)
-    assert kept_offered(_report(HERE, known), _report(HERE, None)) == known
-    assert kept_offered(_report(THERE, known), _report(HERE, None)) is None      # another display
-    assert kept_offered(_report(None, known), _report(None, None)) is None       # no identity: nothing to match
-    assert kept_offered(None, _report(HERE, None)) is None
+    assert kept_report(_report(HERE, known), _report(HERE, None)).offered == known
+    assert kept_report(_report(THERE, known), _report(HERE, None)).offered is None   # another display
+    assert kept_report(_report(None, known), _report(None, None)).offered is None    # no identity: nothing to match
+    assert kept_report(None, _report(HERE, None)).offered is None
     fresh = (_level("10", 100, 70),)
-    assert kept_offered(_report(HERE, known), _report(HERE, fresh)) == fresh     # a new list replaces
-    assert kept_offered(_report(HERE, known), _report(HERE, ())) == ()           # asked: offers none
+    assert kept_report(_report(HERE, known), _report(HERE, fresh)).offered == fresh  # a new list replaces
+    assert kept_report(_report(HERE, known), _report(HERE, ())).offered == ()        # asked: offers none
+    away = kept_report(_report(HERE, known), _report(None, None, for_change=7))      # not connected now
+    assert (away.identity, away.offered, away.for_change) == (HERE, known, 7)
 
 
 def _session(began_at_change: int, befores: dict | None = None) -> PictureSession:
@@ -125,3 +146,70 @@ def test_changed_on_the_buttons_only_once_the_pi_carried_out_the_value_and_took_
     assert not changed_on_buttons(None, read_40, None, answered=True)         # as the display has it
     assert not changed_on_buttons(46, _level("10", 100), None, answered=True)  # no answer at the read
     assert not changed_on_buttons(46, None, None, answered=True)              # not offered at the last check
+
+
+def test_a_list_kept_while_the_display_is_away_never_says_changed_on_its_buttons():
+    """Mutation probe: `hardware_rows` ignores `connected` -> the kept 60 reads as changed."""
+    kept = (_level("10", 100, 60),)
+    away, = hardware_rows({"10": 46}, kept, {}, connected=False)
+    here, = hardware_rows({"10": 46}, kept, {}, connected=True)
+    assert (away.offered, away.changed_on_buttons, here.changed_on_buttons) == (kept[0], False, True)
+
+
+def test_an_edit_is_refused_by_what_the_display_offers():
+    """Central's own check, beside the Pi's: a choice it does not list is out of range; any value on
+    a read-only list is not offered. Mutation probes: CHOICE accepts any value, or READ_ONLY_CHOICE
+    is editable -> fails."""
+    offered = (_level("10", 100), _choices("14", (4, "5000 K"), (5, "6500 K")),
+               HardwareSetting("DC", HardwareRange(RangeKind.READ_ONLY_CHOICE, None, ()), 2))
+    assert edit_refusal("14", 6, offered) == "out_of_range"
+    assert edit_refusal("14", 5, offered) is None
+    assert edit_refusal("DC", 2, offered) == "not_offered"
+    assert edit_refusal("10", 101, offered) == "out_of_range"
+    assert edit_refusal("10", -1, offered) == "out_of_range"
+    assert edit_refusal("12", 40, offered) == "not_offered"
+    assert edit_refusal("10", None, None) is None                              # handing back needs no list
+
+
+def test_the_range_rule_has_one_home_the_contract():
+    level = HardwareRange(RangeKind.LEVEL, 100, ())
+    assert [level.holds(value) for value in (0, 100, 101, -1, True, 4.0)] == [True, True, False, False, False, False]
+    listed = HardwareRange(RangeKind.CHOICE, None, (Choice(4, "5000 K"),))
+    assert (listed.holds(4), listed.holds(5)) == (True, False)
+    assert not HardwareRange(RangeKind.READ_ONLY_CHOICE, None, ()).holds(0)
+
+
+def _document(change: int, hardware: dict, software=NEUTRAL_SOFTWARE) -> PictureDocument:
+    return PictureDocument("HDMI-A-1", change, hardware, software)
+
+
+def test_a_rows_result_waits_for_the_report_on_the_document_that_carries_the_hardware():
+    """E-PS-S4's gate, its one home: a report that answers change 8 counts for the hardware only
+    when document 8 carries it; the software group is not read. Mutation probe: drop the hardware
+    comparison -> a draft not projected yet reads change 8's result."""
+    report = _report(HERE, None, for_change=8)
+    assert hardware_answered({"10": 46}, _document(8, {"10": 46}), report)
+    assert hardware_answered({"10": 46}, _document(8, {"10": 46}, SoftwarePicture(50, 100, 6500, 22)), report)
+    assert not hardware_answered({"10": 50}, _document(8, {"10": 46}), report)   # the edit is not projected yet
+    assert not hardware_answered({"10": 46}, _document(9, {"10": 46}), report)
+
+
+def test_revert_is_a_one_time_instruction_never_a_stored_value():
+    """0022: Revert puts back the stored values; a touched code that was "as the display has it"
+    stays so. The ended session leaves an instruction (`restore_of`, the Pi's first `before`) that
+    rides the document beside the values in force (`with_restore`, in force wins) until the Pi
+    answers a document that carries it. Mutation probes: `restore_answered` ignores the document's
+    hardware -> an older document clears it; `with_restore` lets the instruction win -> 46 is lost."""
+    stored = DisplayPicture({}, NEUTRAL_SOFTWARE)
+    ended = _session(3, {"10": 60})                                           # lease ended at 10.0
+    assert restore_of(stored, ended) == {"10": 60}
+    assert restore_of(DisplayPicture({"10": 46}, NEUTRAL_SOFTWARE), ended) == {}   # stored: nothing to put back
+    assert dict(kept_picture(stored, ended, 11.0).hardware) == {}             # the tab: as the display has it
+    assert dict(with_restore(stored, {"10": 60}).hardware) == {"10": 60}
+    set_here = DisplayPicture({"10": 46}, NEUTRAL_SOFTWARE)
+    assert dict(with_restore(set_here, {"10": 60}).hardware) == {"10": 46}
+    answered = _report(HERE, None, for_change=9)
+    assert restore_answered({"10": 60}, stored, _document(9, {"10": 60}), answered)
+    assert not restore_answered({"10": 60}, stored, _document(9, {"10": 46}), answered)   # the draft's document
+    assert not restore_answered({"10": 60}, stored, _document(10, {"10": 60}), answered)  # not answered yet
+    assert restore_answered({"10": 60}, set_here, _document(9, {"10": 46}), answered)     # set again since

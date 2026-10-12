@@ -464,9 +464,12 @@ def test_a_report_that_does_not_know_the_list_yet_keeps_the_known_list_of_the_sa
 
 
 def test_revert_puts_a_code_set_only_in_the_session_back_to_the_pis_first_before(registry):
-    """(13) The Pi read 60 before the session's first write of 10: Revert sets 10 = 60; the second
-    write's `before` (46) does not replace it; a report for the change the session began at does
-    not count. Mutation probe: `with_befores` overwrites -> 10 = 46."""
+    """(13) The Pi read 60 before the session's first write of 10: Revert puts the display back to
+    60 once, and 10 stays "as the display has it" (0022: Revert puts back the stored values; the fix
+    pass: a one-time instruction, never a stored value); the second write's `before` (46) does not
+    replace it; a report for the change the session began at does not count. Once the Pi answers
+    the document that puts it back, the document carries the stored values alone. Mutation probes:
+    `with_befores` overwrites -> 60 becomes 46; Revert stores `reverted` -> 10 = 60 is kept set."""
     player = _bound(registry)
     began = _picture(registry).picture_change
     with _client(registry) as client:
@@ -480,14 +483,23 @@ def test_revert_puts_a_code_set_only_in_the_session_back_to_the_pis_first_before
         second = _picture(registry).picture_change
         _picture_report(registry, for_change=second, results={"10": HardwareResult(WriteResult.TAKEN, 46, 50)})
         _revert(client, session)
-    assert _display(registry, player)["hardware_picture"] == {"10": 60}     # 12: no before after the session began
-    assert dict(_picture(registry).hardware) == {"10": 60}
+        assert _display(registry, player)["hardware_picture"] == {}        # nothing is set by a Revert
+        back = _picture(registry)
+        assert dict(back.hardware) == {"10": 60}                          # 12: no before after the session began
+        assert next(row for row in _view(client)["hardware"] if row["code"] == "10")["value"] is None
+        _picture_report(registry, for_change=second)                     # an older change: still waits
+        assert dict(_picture(registry).hardware) == {"10": 60}
+        _picture_report(registry, for_change=back.picture_change, results={"10": HardwareResult(WriteResult.TAKEN, 50, 60)})
+        assert dict(_picture(registry).hardware) == {}                    # done once: the stored values alone
+    assert _display(registry, player)["hardware_picture"] == {}
 
 
 def test_a_value_changed_on_the_displays_buttons_is_shown_and_not_written_back(registry):
-    """(14) The owner's addition (main loop, 2026-10-12): the Pi's re-read says 40 where Photo Wall
-    set 46 -> the row says so, with no new picture change; not while the Pi has not carried out the
-    value in force, nor when the display did not take the write."""
+    """(14) The main loop's addition (2026-10-12): the Pi's re-read says 40 where Photo Wall set 46 ->
+    the row says so, with no new picture change; not while the Pi has not carried out the value in
+    force (E-PS-S4's gate: a report answering the document of 46 says nothing of a draft of 50),
+    nor when the display did not take the write. Mutation probe: `hardware_answered` ignores the
+    document's hardware -> the draft's 50 shows change 46's result and "changed"."""
     _bound(registry)
     _sql(registry, "UPDATE displays SET hardware_picture='{\"10\": 46}'")
     shown = _picture(registry)
@@ -505,9 +517,11 @@ def test_a_value_changed_on_the_displays_buttons_is_shown_and_not_written_back(r
         _picture_report(registry, for_change=shown.picture_change, presented=shown.picture_change,
                         offered=_read(60), results={"10": HardwareResult(WriteResult.NOT_TAKEN, 60, 60)})
         assert brightness(client)["changed_on_buttons"] is False             # "the display did not take it"
+        _picture_report(registry, for_change=shown.picture_change, presented=shown.picture_change,
+                        offered=_read(46), results={"10": HardwareResult(WriteResult.TAKEN, 60, 46)})
         session = _begin(client)
-        _hardware(client, session, "10", 50, 1)
-        assert brightness(client)["changed_on_buttons"] is False             # 50 is not carried out yet
+        _hardware(client, session, "10", 50, 1)                              # not projected yet
+        assert (brightness(client)["changed_on_buttons"], brightness(client)["result"]) == (False, None)
 
 
 # --- Migration 075, carried through 092 --------------------------------------------------------------
@@ -637,3 +651,31 @@ def test_a_1b_report_and_document_still_answer_after_075_and_092(registry):
     [seen] = _sql(registry, "SELECT report FROM output_displays")
     assert decode_output_report(json.dumps(seen["report"]).encode()).identity == NO_SERIAL
     assert _picture(registry).picture_change == 2
+
+
+def test_a_display_that_is_away_keeps_its_list_and_takes_edits_until_it_is_back(registry):
+    """(15) The fix pass: the cable pulled (or a standby that drops hot-plug), the Pi reports no
+    identity and no list; what the display offered at its last check is kept, the rows keep their
+    ranges, nothing says "changed on the display's buttons", and an edit is taken (it applies when
+    the display is connected). Mutation probe: `kept_report` keeps a list only for an equal identity
+    -> offered_known turns False and the edit is refused not_offered."""
+    _bound(registry)
+    _sql(registry, "UPDATE displays SET hardware_picture='{\"10\": 46}'")
+    with _client(registry) as client:
+        _report(registry, SERIAL, "HDMI-A-1", None, connected=False)
+        _picture_report(registry, offered=None, identity=None)
+        view = _view(client)
+        assert (view["connected"], view["offered_known"]) == (False, True)
+        brightness = next(row for row in view["hardware"] if row["code"] == "10")
+        assert brightness["offered"]["range"]["maximum"] == 100 and brightness["changed_on_buttons"] is False
+        session = _begin(client)
+        assert _hardware(client, session, "10", 30, 1).json() == {"sequence": 2}
+
+
+def test_a_display_that_offers_nothing_is_known_not_checking(registry):
+    """(16) An empty known list ((): asked, offers none) is known, with no rows, never "Checking".
+    Mutation probe: offered_known = bool(offered) -> False."""
+    _bound(registry, offered=False)
+    with _client(registry) as client:
+        _picture_report(registry, offered=())
+        assert (_view(client)["offered_known"], _view(client)["hardware"]) == (True, [])

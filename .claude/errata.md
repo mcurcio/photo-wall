@@ -5562,3 +5562,47 @@ Order: (a) merge the iac PR that switches the factory to `central.app:create_app
 - **Files beyond the owned list:** `tests/node/display/fake_ddcutil.py` (the fake answers `capabilities` from a
   scripted string; `RECORDED_CAPABILITIES`, a recorded Cintiq Pro 32 string from the linuxwacom wiki, is the
   fixture) and `tests/native_picture_e2e_harness.py` (the controller's new `offered` argument).
+
+## E-PS-FIX (Picture split, the fix pass after review, 2026-10-12) · feat/picture-hardware-and-software
+- **S1 acceptance 2 ("power waits at most one picture command") held per command, not per power
+  operation.** `PortLock` gave the port to a queued PICTURE waiter in the gap between a power
+  operation's commands (read, setvcp D6, read-back), so each command waited a hold. Now the port
+  stays POWER's for `POWER_GRACE_SECONDS` (0.2) after a POWER release (ddc.py); the acceptance reads
+  "a whole power operation waits at most one picture command". Tests: a full `DdcCiAdapter.set`
+  during back-to-back picture reads; a recording channel asserts each caller's urgency.
+- **The frozen page's `HardwareSettingView.offered: null` had three meanings** (not connected, not
+  checked yet, not offered at the last check). Now: a report that does not know the list keeps the
+  known one also when it names no display (`hardware.kept_report`, which replaces `kept_offered`
+  and keeps the identity too), so a display that is away keeps its rows, ranges and edits;
+  "changed on the display's buttons" needs a connected display; the console words `offered: null`
+  by `offered_known` ("Not offered by this display at its last check" only when known; a value
+  alone while never checked; "Photo Wall checks what this display offers when it is connected"
+  for a never-checked display that is away).
+- **Revert stored the Pi's first `before` as a set value**, against 0022's "Unset hardware is
+  untouched" and "Revert puts back the stored values". Now it is a one-time instruction:
+  `displays.hardware_restore` (added to migration 092, unapplied outside this branch) rides the
+  picture document beside the values in force (`picture.with_restore`) until a report answers a
+  document that carries it (`picture.restore_answered`); the stored values never change. The S4
+  test's `hardware_picture == {"10": 60}` became `{}` with the document carrying 60 once.
+- **The two groups were coupled in time on the Pi.** One worker sent the operations, asked,
+  re-read and wrote, and every change re-read every set code. Now: a shell worker per Output sends
+  the operations and line; a change writes only codes whose value changed since the change last
+  carried out on the same display (`AppliedPictures` now records the hardware map too; the
+  report's results keep untouched codes' latest result); a change whose codes wait for the
+  display or its list is answered (`for_change`, no result for them) and stays pending, so Done
+  for Photo Wall's group never waits on the display's. Cost: a value changed on the buttons is not
+  re-asserted by a change to other settings.
+- **1c's re-read at each appearance is back:** a display whose list is held is read again at once
+  when it comes back.
+- **The re-read and "Changed on the display's buttons" are credited "owner addition" in E-PS-S1
+  to S4 and were in the Player architecture, with no owner words recorded** (owner-notes.md has
+  none). They are now credited to the main loop (2026-10-12) in 0022, the Player architecture and
+  hardware.py; 0022 gains a decision bullet and its port-time cost.
+- **The owner answered R3's input question** (owner-notes.md, 2026-10-12: "Let's put it on both")
+  after 0022 called it open: 0022 records it as R10. Not built on this branch: the Picture tab has
+  no input control.
+- **E-PS-S1 and E-PS-S3 "Words left for S3/S6" are closed:** the overlay tests take their lines
+  from `brightness_line`, the native smoke test sends "Brightness: display 46 % · Photo Wall 114 %",
+  and the 1c evidence script is deleted.
+- **One home for the range rule:** `contracts.node_picture.HardwareRange.holds`, asked by Central's
+  edit check, Copy and the Pi's write; an answer's value is `ddc.answer_value`.

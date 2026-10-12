@@ -13,22 +13,24 @@ module holds every rule that reads one against the other, one home each:
   Wall (Recommended)"): each value set on the source, where the target offers that code the same
   way: a choice only when the target lists the same value and name, a level at the same share of
   its range. Everything else is skipped and named, and left as it is on the target.
-- **A known list is kept** (`kept_offered`): a report saying "not known yet" never replaces a
-  known list for the same display.
+- **A known list is kept** (`kept_report`): a report saying "not known yet" never replaces a
+  known list for the same display, nor while no display is connected (what a display offered at
+  its last check is a fact about that display; a pulled cable or a standby that drops hot-plug
+  does not erase it).
 - **The tab's rows** (`hardware_rows`): every offered setting and every set code, in picture-list
   order.
-- **Changed on the display's buttons** (`changed_on_buttons`; 1c's re-read, kept by the owner's
-  addition, main loop, 2026-10-12): a value set in Photo Wall that the display's latest read
-  (`HardwareSetting.current`) says is otherwise, once the Pi carried out the picture change in force
-  and took the write (or needed none). Photo Wall does not write it back until the next change.
+- **Changed on the display's buttons** (`changed_on_buttons`; 1c's re-read, kept by the main
+  loop's addition, 2026-10-12): a value set in Photo Wall that the display's latest read
+  (`HardwareSetting.current`) says is otherwise, while the display is connected, once the Pi
+  carried out the picture change in force and took the write (or needed none). Photo Wall does not
+  write it back until that setting is set again, or the display is carried out anew.
 
-Slice S2 holds offered_for, edit_refusal, offered_setting and hardware_rows; S4 brings
-copied_hardware, level_share, kept_offered and changed_on_buttons.
+Which value a setting takes is the contract's (`HardwareRange.holds`); this module asks it.
 """
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from fractions import Fraction
 from typing import Literal
 
@@ -67,10 +69,7 @@ def edit_refusal(code: VcpCode, value: int | None,
     setting = offered_setting(offered, code)
     if setting is None or setting.range.kind is RangeKind.READ_ONLY_CHOICE:
         return "not_offered"
-    if setting.range.kind is RangeKind.LEVEL:
-        maximum = setting.range.maximum or 0
-        return None if type(value) is int and 0 <= value <= maximum else "out_of_range"
-    return None if any(choice.value == value for choice in setting.range.choices) else "out_of_range"
+    return None if setting.range.holds(value) else "out_of_range"   # one home: the contract
 
 
 def offered_setting(offered: tuple[HardwareSetting, ...] | None, code: VcpCode) -> HardwareSetting | None:
@@ -118,21 +117,21 @@ def _copied_value(value: int, source: HardwareSetting | None, target: HardwareSe
         return None
     if source.range.kind is RangeKind.LEVEL:
         source_maximum, target_maximum = source.range.maximum or 0, target.range.maximum or 0
-        return level_share(value, source_maximum, target_maximum) if 0 <= value <= source_maximum else None
+        return level_share(value, source_maximum, target_maximum) if source.range.holds(value) else None
     if source.range.kind is RangeKind.CHOICE:
         choice = next((item for item in source.range.choices if item.value == value), None)
         return value if choice is not None and choice in target.range.choices else None
     return None
 
 
-def kept_offered(previous: PictureReport | None, report: PictureReport) -> tuple[HardwareSetting, ...] | None:
-    """What to record as the Output's offered list: `report.offered`, unless it is None while
-    `previous` describes the same identity (not None, equal) with a known list; then that list.
-    Pure."""
+def kept_report(previous: PictureReport | None, report: PictureReport) -> PictureReport:
+    """What to record as the Output's picture report: `report`, except that one whose `offered` is
+    None keeps `previous`'s identity and known list when `previous` describes a display (identity
+    not None, list known) and `report` describes the same one or none (no display connected). Pure."""
     if (report.offered is None and previous is not None and previous.identity is not None
-            and previous.identity == report.identity):
-        return previous.offered
-    return report.offered
+            and previous.offered is not None and report.identity in (None, previous.identity)):
+        return replace(report, identity=previous.identity, offered=previous.offered)
+    return report
 
 
 def changed_on_buttons(value: int | None, offered: HardwareSetting | None, result: HardwareResult | None, *,
@@ -161,9 +160,11 @@ class HardwareRow:
 
 
 def hardware_rows(values: Mapping[VcpCode, int], offered: tuple[HardwareSetting, ...] | None,
-                  results: Mapping[VcpCode, HardwareResult] | None) -> tuple[HardwareRow, ...]:
+                  results: Mapping[VcpCode, HardwareResult] | None, *, connected: bool) -> tuple[HardwareRow, ...]:
     """One row per code that is offered or set (the union), in PICTURE_LIST order. `results` None:
-    the report does not answer the picture change that carries `values`. Pure."""
+    the report does not answer the picture change that carries `values` (picture.hardware_answered).
+    `connected`: a display is connected now; a list kept from its last check never says "changed
+    on the display's buttons" while it is away. Pure."""
     codes = set(values) | {setting.code for setting in offered or ()}
     rows = []
     for code in PICTURE_LIST:
@@ -172,7 +173,7 @@ def hardware_rows(values: Mapping[VcpCode, int], offered: tuple[HardwareSetting,
         setting, value = offered_setting(offered, code), values.get(code)
         result = None if results is None else results.get(code)
         rows.append(HardwareRow(code, setting, value, result,
-                                changed_on_buttons(value, setting, result, answered=results is not None)))
+                                changed_on_buttons(value, setting, result, answered=results is not None and connected)))
     return tuple(rows)
 
 
@@ -181,4 +182,4 @@ def _whole(value: object) -> bool:
 
 
 __all__ = ["EditRefusal", "HardwareRow", "changed_on_buttons", "copied_hardware", "edit_refusal", "hardware_rows",
-           "kept_offered", "level_share", "offered_for", "offered_setting"]
+           "kept_report", "level_share", "offered_for", "offered_setting"]

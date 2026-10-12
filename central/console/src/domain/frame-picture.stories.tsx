@@ -94,11 +94,16 @@ export const NotTaken: Story = {
 export const AsTheDisplayHasIt: Story = {
   args: { session: { ...SESSION, view: { ...VIEW, hardware: [{ ...BRIGHTNESS, value: null, result: null }, CONTRAST, { ...PRESET, value: null, result: null }, MODE] } } },
 };
-/** The Pi has not finished asking the display what it offers. */
+/** The Pi has not finished asking the display what it offers: a value set here shows alone. */
 export const Checking: Story = {
-  args: { session: { ...SESSION, view: { ...VIEW, offered_known: false, hardware: [] } } },
+  args: {
+    session: {
+      ...SESSION,
+      view: { ...VIEW, offered_known: false, hardware: [{ ...BRIGHTNESS, offered: null, result: null }] },
+    },
+  },
 };
-/** The display is not connected: the values apply when it is. */
+/** The display is not connected: what it offered at its last check is kept, and the values apply when it is. */
 export const NotConnected: Story = { args: { session: { ...SESSION, view: { ...VIEW, connected: false } } } };
 /** The Pi has not reported a display on this port: no session. */
 export const NoDisplay: Story = {

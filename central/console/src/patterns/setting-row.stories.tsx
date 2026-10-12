@@ -60,9 +60,6 @@ export const EquipmentOnDisplay: Story = {
     control: <Switch checked onChange={() => {}} />,
   },
 };
-export const EquipmentPictureAdjustment: Story = {
-  args: { kind: "equipment", belongsTo: "frame", actsOn: "picture-adjustment" },
-};
 /** The control cannot be used now; the help says why. */
 export const Disabled: Story = {
   args: { control: fade(1.5, true), help: "Seconds per cycle is too short for a fade." },

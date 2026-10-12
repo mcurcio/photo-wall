@@ -38,6 +38,8 @@ const AS_IT_HAS_IT = "As the display has it";
 const NOT_CONNECTED = "Applies when the display is connected";
 const NO_CHANGE = "100 % changes nothing";
 const CHECKING = "Checking what this display offers…";
+const CHECKED_WHEN_CONNECTED = "Photo Wall checks what this display offers when it is connected";
+const NOT_OFFERED = "Not offered by this display at its last check";
 // The Select's value for "As the display has it" (a choice's own value is its byte, in decimal).
 const AS_IT_HAS_IT_OPTION = "as-the-display-has-it";
 
@@ -58,16 +60,19 @@ function displayValue(row: HardwareSettingView, value: number): string {
 
 /**
  * One display setting's words (design "What the tab says"), `draft` the operator's change in this
- * visit (undefined: none; null: handed back): as the display has it when nobody set it here; set
- * here but not offered at the display's last check; whether the display took the latest write or
- * was changed on its own buttons since (Central's judgement, central/displays/hardware.py
- * `changed_on_buttons`; never while the operator's own change is in flight); else the value set in Photo Wall on the display's own count
- * ("46 of 100") or by its choice's name ("6500 K").
+ * visit (undefined: none; null: handed back), `offeredKnown` the view's: as the display has it when
+ * nobody set it here; while what the display offers is not known (never checked yet), the value set
+ * here alone; set here but not offered at the display's last check; whether the display took the
+ * latest write or was changed on its own buttons since (Central's judgement,
+ * central/displays/hardware.py `changed_on_buttons`; never while the operator's own change is in
+ * flight); else the value set in Photo Wall on the display's own count ("46 of 100") or by its
+ * choice's name ("6500 K"). Three states never share one null: not connected (the tab's own
+ * line), not checked yet (`offeredKnown` false) and not offered at the last check.
  */
-export function hardwareWords(row: HardwareSettingView, draft: number | null | undefined): string {
+export function hardwareWords(row: HardwareSettingView, draft: number | null | undefined, offeredKnown = true): string {
   const value = draft === undefined ? row.value : draft;
   if (value === null) return AS_IT_HAS_IT;
-  if (row.offered === null) return "Not offered by this display at its last check";
+  if (row.offered === null) return offeredKnown ? NOT_OFFERED : displayValue(row, value);
   if (draft === undefined && (row.result?.result === "not-taken" || row.result?.result === "no-answer")) {
     return "The display did not take it";
   }
@@ -97,11 +102,13 @@ function unavailableWords(session: PictureSession, piHref: string | null) {
 /** One display setting: a slider per level, a picker per list of choices (its choices and "As the
  * display has it"), a line with no control for a setting the display answers but lists nothing for,
  * or one it no longer offers; a hand-back ("As the display has it: …") wherever a value is set. */
-function HardwareSettingRow({ row, session, ready }: { row: HardwareSettingView; session: PictureSession; ready: boolean }) {
+function HardwareSettingRow({ row, session, ready, offeredKnown }: {
+  row: HardwareSettingView; session: PictureSession; ready: boolean; offeredKnown: boolean;
+}) {
   const { draft } = session;
   const drafted = row.code in draft.hardware ? draft.hardware[row.code] : undefined;
   const value = drafted === undefined ? row.value : drafted;
-  const words = hardwareWords(row, drafted);
+  const words = hardwareWords(row, drafted, offeredKnown);
   const set = (next: number | null) => session.changeHardware(row.code, next);
   const range = row.offered?.range;
   const handBack = value !== null && range?.kind !== "choice" && (
@@ -147,14 +154,17 @@ function HardwareSettingRow({ row, session, ready }: { row: HardwareSettingView;
 }
 
 /** Display (hardware): every setting the display offers, and every one set here, in picture-list
- * order; "Checking what this display offers" until the Pi has asked it. */
+ * order; "Checking what this display offers" while a connected display's list is not known yet,
+ * and that it is checked once connected while one never checked is away. */
 function DisplaySettings({ view, session, ready }: { view: View; session: PictureSession; ready: boolean }) {
   return (
     <FactGroup title={DISPLAY_GROUP}>
       <Stack>
-        {!view.offered_known && <Note>{CHECKING}</Note>}
+        {!view.offered_known && <Note>{view.connected === false ? CHECKED_WHEN_CONNECTED : CHECKING}</Note>}
         {view.connected === false && <Note>{NOT_CONNECTED}</Note>}
-        {view.hardware.map((row) => <HardwareSettingRow key={row.code} row={row} session={session} ready={ready} />)}
+        {view.hardware.map((row) => (
+          <HardwareSettingRow key={row.code} row={row} session={session} ready={ready} offeredKnown={view.offered_known} />
+        ))}
       </Stack>
     </FactGroup>
   );

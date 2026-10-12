@@ -4,9 +4,12 @@
 
 -- The two groups on the Display. Hardware: only the display settings set in Photo Wall, by MCCS
 -- code ({"10": 46}). Software: Photo Wall's brightness and contrast 0-150 % (100 changes nothing);
--- colour temperature and gamma keep their columns.
+-- colour temperature and gamma keep their columns. hardware_restore: a Revert's one-time
+-- instruction to put a display setting back ({"10": 60}), never a stored value; it rides the
+-- picture document until the Pi answers it.
 ALTER TABLE displays
     ADD COLUMN hardware_picture JSONB NOT NULL DEFAULT '{}'::jsonb CHECK (jsonb_typeof(hardware_picture) = 'object'),
+    ADD COLUMN hardware_restore JSONB NOT NULL DEFAULT '{}'::jsonb CHECK (jsonb_typeof(hardware_restore) = 'object'),
     ADD COLUMN software_brightness_percent INTEGER NOT NULL DEFAULT 100 CHECK (software_brightness_percent BETWEEN 0 AND 150),
     ADD COLUMN software_contrast_percent INTEGER NOT NULL DEFAULT 100 CHECK (software_contrast_percent BETWEEN 0 AND 150);
 

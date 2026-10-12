@@ -6,8 +6,8 @@ import { LivePreviewEditor } from "./live-preview-editor";
 import { ProblemCard } from "./problem-card";
 
 const controls = (
-  <Field label="Brightness — Photo Wall picture adjustment">
-    <Slider value={145} min={0} max={200} step={5} unit="%" onCommit={() => {}} />
+  <Field label="Brightness — Photo Wall (software)">
+    <Slider value={114} min={0} max={150} step={1} unit="%" onCommit={() => {}} />
   </Field>
 );
 

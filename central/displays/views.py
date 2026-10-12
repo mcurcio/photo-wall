@@ -185,7 +185,7 @@ class HardwareRangeView(Model):
 class OfferedView(Model):
     """What the display offers for one code at its last check."""
     range: HardwareRangeView
-    current: Annotated[int, Field(ge=0, le=LEVEL_MAX)] | None            # read when the Pi asked
+    current: Annotated[int, Field(ge=0, le=LEVEL_MAX)] | None            # the display's latest read (ask, before a write, read-back, re-read)
 
 
 class HardwareResultView(Model):
@@ -199,7 +199,8 @@ class HardwareSettingView(Model):
     """One row of the Display (hardware) section: every offered setting and every set code."""
     code: VcpCodeField
     name: str                                       # contracts.node_picture.PICTURE_LIST's
-    offered: OfferedView | None                     # None: set here, not offered at the last check
+    offered: OfferedView | None                     # None: set here and not offered at the last check, or
+                                                    # never checked (offered_known False on the view)
     value: Annotated[int, Field(ge=0, le=LEVEL_MAX)] | None   # in force; None: as the display has it
     result: HardwareResultView | None
     changed_on_buttons: bool                        # hardware.changed_on_buttons: set here, read otherwise
@@ -234,7 +235,8 @@ class FramePictureView(Model):
     status: PictureStatus
     display_id: UUID | None                         # the Display last seen on the bound Output
     connected: bool | None                          # the latest Output report's; None: no report
-    offered_known: bool                             # False: "Checking what this display offers"
+    offered_known: bool                             # False: never checked ("Checking what this display offers"
+                                                    # while connected); a list kept while the display is away stays known
     hardware: tuple[HardwareSettingView, ...]       # hardware.hardware_rows, names from PICTURE_LIST
     software: SoftwarePictureView
     session: PictureSessionView | None              # the Display's open session, if any

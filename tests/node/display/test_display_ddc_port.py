@@ -25,7 +25,7 @@ from appliance.display_host.output_power import PROBE_SECONDS
 from appliance.display_host.picture import DdcPictureAdapter
 from appliance.display_host.picture_list import ASK_BATCH, PictureListAsker
 from appliance.display_host.power_methods import DdcCiAdapter
-from contracts.node_output import Power
+from contracts.node_output import Power, PowerResult
 
 
 @pytest.fixture
@@ -190,3 +190,76 @@ def test_a_call_that_waits_past_its_timeout_for_the_port_runs_nothing(display):
     assert time.monotonic() - began < 1.0
     writing.join(5)
     assert len(display.intervals("13")) == 1
+
+
+# Each caller's turn on the port; a whole power operation first (the fix pass after review) -------
+
+class RecordingChannel:
+    """A DdcChannel stand-in that records the urgency of every call and answers as the test monitor."""
+
+    def __init__(self) -> None:
+        self.urgencies: list[tuple[str, Urgency]] = []
+
+    def bus(self, output_id):
+        return 13
+
+    def get(self, output_id, code, *, urgency, timeout):
+        self.urgencies.append(("get", urgency))
+        return "VCP D6 SNC x01" if code == "D6" else f"VCP {code} C 60 100"
+
+    def set(self, output_id, code, value, *, urgency, timeout):
+        self.urgencies.append(("set", urgency))
+        return True
+
+    def read_many(self, output_id, codes, *, urgency, timeout):
+        self.urgencies.append(("read_many", urgency))
+        return {code: VcpReading(60, 100) for code in codes if code in ("10", "12")}
+
+    def capabilities(self, output_id, *, urgency, timeout):
+        self.urgencies.append(("capabilities", urgency))
+        return ""
+
+
+def test_power_calls_at_powers_turn_and_picture_calls_at_pictures():
+    """Every caller names its own turn: DdcCiAdapter POWER; PictureListAsker and DdcPictureAdapter
+    PICTURE. Mutation probes: DdcCiAdapter at PICTURE, or either picture caller at POWER -> fails."""
+    channel = RecordingChannel()
+    power = DdcCiAdapter(channel)
+    power.read(OUTPUT, timeout=1)
+    power.set(OUTPUT, Power.ON, timeout=1)
+    assert {urgency for _, urgency in channel.urgencies} == {Urgency.POWER}
+    channel.urgencies.clear()
+    asker = PictureListAsker(channel)
+    offered = asker.ask(OUTPUT)
+    asker.read_again(OUTPUT, offered)
+    picture_ddc = DdcPictureAdapter(channel)
+    picture_ddc.read(OUTPUT, "10", timeout=1)
+    picture_ddc.write(OUTPUT, "10", 46, timeout=1)
+    assert channel.urgencies and {urgency for _, urgency in channel.urgencies} == {Urgency.PICTURE}
+
+
+def test_a_whole_power_operation_waits_at_most_one_picture_hold(display):
+    """A power set is two commands (setvcp D6, then its read-back), each its own hold; with picture
+    reads queued back to back, the read-back must not queue behind another picture hold. Mutation
+    probe: POWER_GRACE_SECONDS 0 -> each power command waits a hold (about 2 s for the set)."""
+    display.script(read_seconds=1.2)
+    channel = display.channel
+    stop = threading.Event()
+
+    def read_forever() -> None:
+        while not stop.is_set():
+            channel.read_many(OUTPUT, ("10",), urgency=Urgency.PICTURE, timeout=10)
+
+    reading = [threading.Thread(target=read_forever) for _ in range(3)]   # picture waiters always queued
+    for thread in reading:
+        thread.start()
+    try:
+        until(lambda: sum(call["at"] == "end" for call in display.calls()) >= 2)
+        began = time.monotonic()
+        assert DdcCiAdapter(channel).set(OUTPUT, Power.OFF, timeout=10) is PowerResult.CONFIRMED
+        took = time.monotonic() - began
+        assert took < PICTURE_HOLD_SECONDS + 0.6, took
+    finally:
+        stop.set()
+        for thread in reading:
+            thread.join(15)

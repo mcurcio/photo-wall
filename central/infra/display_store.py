@@ -61,7 +61,7 @@ from psycopg.types.json import Jsonb
 
 from central.content_catalog.catalog import device_id_for_serial
 from central.db import Database, DatabaseTransactionClock, TransactionClock
-from central.displays.hardware import HardwareRow, hardware_rows, kept_offered, offered_for
+from central.displays.hardware import HardwareRow, hardware_rows, kept_report, offered_for
 from central.displays.model import (
     DEFAULT_SETTINGS,
     TEST_SECONDS,
@@ -85,19 +85,22 @@ from central.displays.picture import (
     DisplayPicture,
     PictureRefused,
     PictureSession,
-    PictureStatus,
     SoftwareSetting,
     copied,
     default_picture,
     edited_hardware,
     edited_software,
     effective_picture,
+    hardware_answered,
+    kept_picture,
     picture_digest,
     picture_document,
     picture_status,
     presented,
-    reverted,
+    restore_answered,
+    restore_of,
     with_befores,
+    with_restore,
 )
 from central.displays.ports import DisplayRefused
 from central.displays.views import (
@@ -448,31 +451,48 @@ def picture_session(row: Mapping[str, Any]) -> PictureSession | None:
 
 
 def record_picture_report(conn: Any, player_id: str, report: PictureReport, now: float) -> None:
-    """Record `report` as its Output's latest picture report (`picture_reports`), its offered list
-    `hardware.kept_offered` of the one recorded before (a "not known yet" never replaces a known list
-    for the same display); then the open session on the Display recorded on that Output, if any,
-    keeps the befores the report brings (`picture.with_befores`). Locks after the player row (the
-    judge's): the Output's picture report row, then the session row."""
+    """Record `report` as its Output's latest picture report (`picture_reports`), as
+    `hardware.kept_report` of the one recorded before (a "not known yet" never replaces a known list
+    for the same display, nor while none is connected); then the session on the Display recorded on
+    that Output, if any, keeps the befores the report brings (`picture.with_befores`), and an ended
+    one goes once the report answers the document that puts the display back
+    (`picture.restore_answered`). Locks after the player row (the judge's): the Output's picture
+    report row, then the session row and its Display."""
     previous = conn.execute("SELECT report AS picture_report FROM picture_reports WHERE player_id=%s "
                             "AND output_id=%s FOR UPDATE", (player_id, report.output_id)).fetchone()
-    offered = kept_offered(None if previous is None else _stored_picture_report(previous), report)
-    if offered is not report.offered:
-        report = replace(report, offered=offered)
+    report = kept_report(None if previous is None else _stored_picture_report(previous), report)
     conn.execute(
         "INSERT INTO picture_reports(player_id, output_id, report, reported_at) VALUES (%s, %s, %s, %s) "
         "ON CONFLICT (player_id, output_id) DO UPDATE SET report=EXCLUDED.report, reported_at=EXCLUDED.reported_at",
         (player_id, report.output_id, Jsonb(json.loads(encode_picture_report(report))), now))
-    row = conn.execute(f"SELECT {_SESSION_COLUMNS} FROM output_displays o "  # noqa: S608
-                       "JOIN picture_sessions ps ON ps.display_id=o.display_id "
-                       "WHERE o.player_id=%s AND o.output_id=%s FOR UPDATE OF ps",
+    row = conn.execute(f"SELECT {_SESSION_COLUMNS}, {_PICTURE_COLUMNS}, pd.document AS picture_document "  # noqa: S608
+                       "FROM output_displays o JOIN picture_sessions ps ON ps.display_id=o.display_id "
+                       "JOIN displays d ON d.id=ps.display_id LEFT JOIN picture_documents pd "
+                       "ON pd.player_id=o.player_id AND pd.output_id=o.output_id "
+                       "WHERE o.player_id=%s AND o.output_id=%s FOR UPDATE OF ps, d",
                        (player_id, report.output_id)).fetchone()
     session = None if row is None else picture_session(row)
-    if session is None:
+    if session is not None:
+        kept = with_befores(session, report)
+        if kept.hardware_before != session.hardware_before:
+            conn.execute("UPDATE picture_sessions SET hardware_before=%s WHERE id=%s",
+                         (Jsonb(dict(kept.hardware_before)), session.session_id))
+        session = kept
+    display = conn.execute(f"SELECT d.id AS d_id, {_PICTURE_COLUMNS}, d.hardware_restore, "  # noqa: S608
+                           "pd.document AS picture_document FROM output_displays o JOIN displays d ON d.id=o.display_id "
+                           "LEFT JOIN picture_documents pd ON pd.player_id=o.player_id AND pd.output_id=o.output_id "
+                           "WHERE o.player_id=%s AND o.output_id=%s FOR UPDATE OF d",
+                           (player_id, report.output_id)).fetchone()
+    if display is None:
         return
-    kept = with_befores(session, report)
-    if kept.hardware_before != session.hardware_before:
-        conn.execute("UPDATE picture_sessions SET hardware_before=%s WHERE id=%s",
-                     (Jsonb(dict(kept.hardware_before)), session.session_id))
+    stored, restore = stored_picture(display), dict(display["hardware_restore"])
+    if session is not None and not session.lease.live(now):
+        restore = {**restore, **_fold_session_in(conn, stored, session)}   # ended unseen: fold it now
+        session = None
+    in_force = stored if session is None else session.draft
+    if restore and restore_answered(restore, in_force, _stored_picture_document(display), report):
+        conn.execute("UPDATE displays SET hardware_restore='{}'::jsonb WHERE id=%s", (display["d_id"],))
+        notify_nodes_in(conn, _NODES_SEEING, (display["d_id"],))
 
 
 # --- The Output report judge ---------------------------------------------------------------------
@@ -714,7 +734,7 @@ def output_documents(conn: Any, device_id: str, now: float) -> dict[str, bytes]:
     policy = power_policy_in(conn, now)
     rows = conn.execute(
         "SELECT o.output_id, b.frame_id, d.power_method, d.switch_input_on_power_on, d.never_off_on_other_input, "
-        f"{_PICTURE_COLUMNS}, {_SESSION_COLUMNS}, w.change, w.digest, pd.picture_change, "
+        f"{_PICTURE_COLUMNS}, d.hardware_restore, {_SESSION_COLUMNS}, w.change, w.digest, pd.picture_change, "
         f"pd.digest AS picture_digest, {_TEST_COLUMNS} FROM (SELECT output_id FROM outputs WHERE player_id=%(player)s "
         "UNION SELECT output_id FROM output_displays WHERE player_id=%(player)s) o "
         "LEFT JOIN output_displays s ON s.player_id=%(player)s AND s.output_id=o.output_id "
@@ -759,12 +779,14 @@ def output_documents(conn: Any, device_id: str, now: float) -> dict[str, bytes]:
 
 
 def _picture_in_force(row: Mapping[str, Any], now: float) -> DisplayPicture:
-    """The picture in force on the Display last seen on the Output (its open session's draft while
-    live, `reverted` once the lease ran out with no Done; `picture.effective_picture`), or a new
-    Display's (`default_picture`) when none was seen."""
+    """What the picture document carries for the Display last seen on the Output: the picture in
+    force (its open session's draft while live, `reverted` once the lease ran out with no Done;
+    `picture.effective_picture`) with a Revert's pending instruction beside it
+    (`picture.with_restore`), or a new Display's (`default_picture`) when none was seen."""
     if row["colour_temperature_kelvin"] is None:
         return default_picture()
-    return effective_picture(stored_picture(row), picture_session(row), now)
+    return with_restore(effective_picture(stored_picture(row), picture_session(row), now),
+                        {code: int(value) for code, value in row["hardware_restore"].items()})
 
 
 def _settings(row: Mapping[str, Any]) -> DisplaySettings | None:
@@ -1035,22 +1057,19 @@ class PgPictureSessions:
                 raise DisplayRefused("unknown_frame", 404)
             now = _CLOCK.now_in(conn)
         session = picture_session(row)
-        picture = (default_picture() if row["d_id"] is None
-                   else effective_picture(stored_picture(row), session, now))
+        picture = default_picture() if row["d_id"] is None else kept_picture(stored_picture(row), session, now)
         document, report = _stored_picture_document(row), _stored_picture_report(row)
         offered = _offered(row)
-        current = (report is not None and document is not None and report.for_change == document.picture_change
-                   and dict(document.hardware) == dict(picture.hardware))
+        answered = report is not None and hardware_answered(picture.hardware, document, report)
         live = session is not None and session.lease.live(now)
         status = picture_status(bound=row["player_id"] is not None and row["display_id"] is not None,
-                                document=document, report=report)
-        if status is PictureStatus.SHOWN and not presented(picture, document, report):
-            status = PictureStatus.WAITING
+                                picture=picture, document=document, report=report)
         return FramePictureView(
             frame_id=frame_id, display_id=row["display_id"], status=status, connected=row["connected"],
             offered_known=offered is not None,
             hardware=tuple(_hardware_view(hardware) for hardware in hardware_rows(
-                picture.hardware, offered, report.results if current and report is not None else None)),
+                picture.hardware, offered, report.results if answered and report is not None else None,
+                connected=row["connected"] is True)),
             software=SoftwarePictureView(**asdict(picture.software)),
             session=_session_view(session) if live and session is not None else None)
 
@@ -1113,10 +1132,13 @@ class PgPictureSessions:
             self._end_in(conn, session, session.draft)
 
     def revert_picture(self, session_id: UUID) -> None:
+        """End the session: the stored values stay, and the display is put back once
+        (`picture.restore_of`), until the Pi answers it (`record_picture_report`)."""
         with self._db.transaction() as conn:
             row, session, now = self._session_in(conn, session_id)
             _require_live(session, now)
-            self._end_in(conn, session, reverted(stored_picture(row), session))
+            _fold_session_in(conn, stored_picture(row), session)
+            notify_nodes_in(conn, _NODES_SEEING, (session.display_id,))
 
     def copy_picture(self, frame_id: str, request: PictureCopyRequest) -> tuple[PictureCopyResult, ...]:
         with self._db.transaction() as conn:
@@ -1175,9 +1197,20 @@ class PgPictureSessions:
         notify_nodes_in(conn, _NODES_SEEING, (session.display_id,))
 
 
+def _fold_session_in(conn: Any, stored: DisplayPicture, session: PictureSession) -> dict[str, int]:
+    """End `session` without Done: its one-time instruction (`picture.restore_of`) joins the
+    Display's pending one, the stored values unchanged, and the session row goes. The instruction."""
+    restore = restore_of(stored, session)
+    if restore:
+        conn.execute("UPDATE displays SET hardware_restore = hardware_restore || %s WHERE id=%s",
+                     (Jsonb(restore), session.display_id))
+    conn.execute("DELETE FROM picture_sessions WHERE id=%s", (session.session_id,))
+    return restore
+
+
 def _fold_in(conn: Any, display_id: UUID, now: float) -> DisplayPicture | None:
     """The Display's stored picture with its row locked, after folding a session whose lease ran out
-    (its `reverted` result stored, the session removed); None while a live session holds it."""
+    (`_fold_session_in`: the stored values unchanged); None while a live session holds it."""
     row = conn.execute(f"SELECT {_PICTURE_COLUMNS}, {_SESSION_COLUMNS} FROM displays d "  # noqa: S608
                        "LEFT JOIN picture_sessions ps ON ps.display_id=d.id WHERE d.id=%s FOR NO KEY UPDATE OF d",
                        (display_id,)).fetchone()
@@ -1186,10 +1219,8 @@ def _fold_in(conn: Any, display_id: UUID, now: float) -> DisplayPicture | None:
         return stored
     if session.lease.live(now):
         return None
-    folded = reverted(stored, session)
-    write_picture(conn, display_id, folded)
-    conn.execute("DELETE FROM picture_sessions WHERE id=%s", (session.session_id,))
-    return folded
+    _fold_session_in(conn, stored, session)
+    return stored
 
 
 def _require_live(session: PictureSession, now: float) -> None:
