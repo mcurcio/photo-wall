@@ -8,7 +8,7 @@ import {
 /*
  * The Picture tab's live session (roadmap 1c's Live model, design language §8 row B5; decision
  * 0022, the picture split, slice S2): the operator's draft of the Display's two groups, the
- * display's own settings (hardware) and Photo Wall's four (software), shown on the display while
+ * display's own settings (hardware) and Photo Wall's (software), shown on the display while
  * the tab is open, then kept (Done) or put back (Revert). Central's rules are
  * central/displays/picture.py's and hardware.py's; this module only drives the routes
  * (pictureApi.js).
@@ -40,8 +40,10 @@ import {
 export const EDIT_GAP_MS = 500;
 const RETRY_MS = 2000;
 
-/** Photo Wall's four, as Central names them (central/displays/picture.py `SoftwareSetting`). */
-export const SOFTWARE_SETTINGS = /** @type {const} */ (["brightness", "contrast", "colour-temperature", "gamma"]);
+/** Photo Wall's settings, as Central names them (central/displays/picture.py `SoftwareSetting`). */
+export const SOFTWARE_SETTINGS = /** @type {const} */ ([
+  "brightness", "contrast", "colour-temperature", "gamma", "saturation", "highlight-rolloff", "black-floor", "lut-amount",
+]);
 
 /** Central's refusals, in the operator's words; `stops`: the session waits for the operator. */
 const REFUSALS = {
@@ -74,6 +76,10 @@ const SOFTWARE_FIELDS = {
   contrast: "contrast_percent",
   "colour-temperature": "colour_temperature_kelvin",
   gamma: "gamma_tenths",
+  saturation: "saturation_percent",
+  "highlight-rolloff": "highlight_rolloff_percent",
+  "black-floor": "black_floor_tenths",
+  "lut-amount": "lut_amount_percent",
 };
 
 /** A Photo Wall setting's value as a read shows it: a percent, kelvin or tenths. */

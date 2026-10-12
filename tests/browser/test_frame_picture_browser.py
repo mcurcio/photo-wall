@@ -11,7 +11,8 @@ Central's real status, never from the console alone.
 Mutation probes: enable Done before the phase is `shown` -> the Done case fails; send every drag
 event -> the rate case fails; one edit route for both groups -> the two-groups case fails; render a
 READ_ONLY_CHOICE row with a select -> the list-settings case's "no control" assertion fails; drop
-FrameInput from the Picture tab (pages/frame-page.tsx) -> the input case fails.
+FrameInput from the Picture tab (pages/frame-page.tsx) -> the input case fails. The print look's
+rows (design R2, R4) carry their own probes below.
 """
 
 import os
@@ -340,6 +341,88 @@ def test_a_value_changed_on_the_displays_buttons_is_shown_not_fought(page, regis
         page.wait_for_timeout(600)
         assert edits == []
         assert _display(registry)["hardware_picture"] == {"10": 40}
+
+
+ACTS_ABOVE = "acts above 100 % brightness"
+
+
+def test_black_floor_is_sent_in_tenths_and_reads_as_a_percent_once_kept(page, registry):
+    """Print look R2 tracer: Black floor 2.0 % of white is sent as 20 tenths, presented, kept by Done,
+    and the row reads 2.0 % from Central's stored value.
+
+    Mutation: send the percent (2) instead of tenths -> the body assertion fails."""
+    _seen(registry)
+    with FakePi(registry), operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "wall")
+        open_frame(page, FRAME, "picture")
+        bar = _bar(page)
+        expect(bar.get_by_role("status")).to_have_text(PRESENTED)
+        expect(_row(page, PHOTO_WALL, "Black floor")).to_contain_text("0.0 % of white · 0.0 % changes nothing")
+        software = _edits(page, "software-edits")
+        _slider(page, PHOTO_WALL, "Black floor").fill("2")
+        expect(_row(page, PHOTO_WALL, "Black floor")).to_contain_text("2.0 % of white")
+        expect(bar.get_by_role("status")).to_have_text(PRESENTED)
+        page.wait_for_timeout(600)
+        assert [(body["setting"], body["value"]) for _at, body in software] == [("black-floor", 20)], software
+        bar.get_by_role("button", name="Done", exact=True).click()
+        expect(_picture_tab(page).get_by_role("status").filter(has_text="Saved at")).to_be_visible()
+        assert _display(registry)["software_black_floor_tenths"] == 20
+        page.reload()
+        expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
+        expect(_row(page, PHOTO_WALL, "Black floor")).to_contain_text("2.0 % of white")
+
+
+def test_saturation_drags_at_most_two_edits_a_second_and_revert_puts_back_the_stored_values(page, registry):
+    """Live model on the print look: twenty steps of Saturation over about two seconds send at most
+    two edits a second, the last where it stopped; Revert puts back the stored saturation and
+    soft highlights.
+
+    Mutation: drop the send on release (onCommit) -> the last value (80) never arrives."""
+    _seen(registry)
+    _store(registry, software_saturation_percent=100, software_highlight_rolloff_percent=30)
+    with FakePi(registry), operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "wall")
+        open_frame(page, FRAME, "picture")
+        bar = _bar(page)
+        expect(bar.get_by_role("status")).to_have_text(PRESENTED)
+        edits = _edits(page, "software-edits")
+        started = time.monotonic()
+        saturation = _press(page, PHOTO_WALL, "Saturation", "ArrowLeft", 20, pause_ms=100)
+        took = time.monotonic() - started
+        expect(saturation).to_have_value("80")
+        rolloff = _press(page, PHOTO_WALL, "Soft highlights", "ArrowRight", 5)
+        expect(rolloff).to_have_value("35")
+        expect(bar.get_by_role("status")).to_have_text(PRESENTED)
+        page.wait_for_timeout(600)
+        sent = [body for _at, body in edits if body["setting"] == "saturation"]
+        times = [at for at, _body in edits]
+        assert sent and sent[-1]["value"] == 80, edits
+        assert len(edits) <= 2 * took + 4, (len(edits), took)
+        assert all(later - earlier >= 0.45 for earlier, later in zip(times, times[1:])), times
+        assert _off_thread(_picture, registry).software.saturation_percent == 80
+
+        bar.get_by_role("button", name="Revert", exact=True).click()
+        expect(saturation).to_have_value("100")
+        expect(rolloff).to_have_value("30")
+        expect(bar.get_by_role("button", name="Revert", exact=True)).to_be_disabled()
+        stored = _display(registry)
+        assert (stored["software_saturation_percent"], stored["software_highlight_rolloff_percent"]) == (100, 30)
+
+
+def test_soft_highlights_says_where_it_acts_only_while_nothing_passes_white(page, registry):
+    """Soft highlights acts only above 100 % brightness (or saturation): at 100 % both, its row says
+    so; with Photo Wall brightness at 120 % it does not.
+
+    Mutation: show the words always -> the second assertion fails."""
+    _seen(registry)
+    with FakePi(registry), operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "wall")
+        open_frame(page, FRAME, "picture")
+        expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
+        expect(_row(page, PHOTO_WALL, "Soft highlights")).to_contain_text(ACTS_ABOVE)
+        _slider(page, PHOTO_WALL, "Brightness").fill("120")
+        expect(_row(page, PHOTO_WALL, "Soft highlights")).not_to_contain_text(ACTS_ABOVE)
+        expect(_row(page, PHOTO_WALL, "Saturation")).to_contain_text("100 % · 100 % changes nothing")
 
 
 def _positions(registry):

@@ -1,6 +1,6 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
 
-import { FramePicture, type PictureSession } from "./frame-picture";
+import { FramePicture, PhotoWallSettings, type PictureSession } from "./frame-picture";
 
 type View = NonNullable<PictureSession["view"]>;
 type Row = View["hardware"][number];
@@ -37,7 +37,10 @@ const VIEW: View = {
   connected: true,
   offered_known: true,
   hardware: [BRIGHTNESS, CONTRAST, PRESET, MODE],
-  software: { brightness_percent: 114, contrast_percent: 100, colour_temperature_kelvin: 6500, gamma_tenths: 22 },
+  software: {
+    brightness_percent: 114, contrast_percent: 100, colour_temperature_kelvin: 6500, gamma_tenths: 22,
+    saturation_percent: 100, highlight_rolloff_percent: 0, black_floor_tenths: 0, lut_amount_percent: 100, lut: null,
+  },
   session: { session_id: "5b7f0c1e-2d4a-4f6b-9c8e-1a2b3c4d5e6f", sequence: 1, idle_until: 1_791_000_005 },
 };
 
@@ -158,4 +161,30 @@ export const ChangedOnTheButtons: Story = {
       view: { ...VIEW, hardware: [{ ...BRIGHTNESS, offered: { range: LEVEL_100, current: 35 }, changed_on_buttons: true }, CONTRAST, PRESET, MODE] },
     },
   },
+};
+/** The Photo Wall (software) section alone (below the fold of the whole tab): every slider at no change. */
+export const PhotoWallSection: Story = {
+  render: () => <PhotoWallSettings view={{ ...VIEW, software: { ...VIEW.software, brightness_percent: 100 } }} session={SESSION} ready />,
+};
+/** The print look changed in this visit: saturation 85 %, soft highlights 40 % (brightness 114 %, so it
+ * acts), black floor 2.0 %. */
+export const PhotoWallPrintLook: Story = {
+  render: () => (
+    <PhotoWallSettings view={VIEW} ready
+      session={{ ...SESSION, dirty: true, draft: { hardware: {}, software: { saturation: 85, "highlight-rolloff": 40, "black-floor": 20 } } }} />
+  ),
+};
+/** Brightness and saturation at 100 % or below: nothing passes white, so soft highlights says where it acts. */
+export const PhotoWallSoftHighlightsIdle: Story = {
+  render: () => (
+    <PhotoWallSettings view={{ ...VIEW, software: { ...VIEW.software, brightness_percent: 90, highlight_rolloff_percent: 30 } }}
+      session={SESSION} ready />
+  ),
+};
+/** No session (the Pi is not connected, or someone else is adjusting): the values in force, nothing can change. */
+export const PhotoWallNoSession: Story = {
+  render: () => (
+    <PhotoWallSettings view={{ ...VIEW, software: { ...VIEW.software, black_floor_tenths: 25 } }}
+      session={{ ...SESSION, phase: "idle", latest: null }} ready={false} />
+  ),
 };

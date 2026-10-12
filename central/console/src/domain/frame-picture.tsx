@@ -2,7 +2,7 @@ import { useState } from "react";
 
 import { levelWords } from "../levelWords.js";
 import { copyPicture } from "../pictureApi.js";
-import type { HardwareSettingView, PictureCopyResult } from "../pictureApi.js";
+import type { HardwareSettingView, PictureCopyResult, SoftwareSetting } from "../pictureApi.js";
 import type { usePictureSession } from "../pictureSession.js";
 import { FactGroup, FactRow, Note } from "../patterns/fact-row";
 import { LivePreviewEditor } from "../patterns/live-preview-editor";
@@ -38,6 +38,8 @@ export const PHOTO_WALL_GROUP = "Photo Wall (software)";
 const AS_IT_HAS_IT = "As the display has it";
 const NOT_CONNECTED = "Applies when the display is connected";
 const NO_CHANGE = "100 % changes nothing";
+const ZERO_NO_CHANGE = "0 % changes nothing";
+const ACTS_ABOVE_100 = "acts above 100 % brightness";
 const CHECKING = "Checking what this display offers…";
 const CHECKED_WHEN_CONNECTED = "Photo Wall checks what this display offers when it is connected";
 const NOT_OFFERED = "Not offered by this display at its last check";
@@ -173,43 +175,65 @@ function DisplaySettings({ view, session, ready }: { view: View; session: Pictur
   );
 }
 
+/** Whether Soft highlights acts: only where Photo Wall can push a value past white, its brightness
+ * or saturation above 100 % (design "Highlight rolloff, defined for SDR"; the Pi skips it otherwise). */
+export function softHighlightsAct(brightnessPercent: number, saturationPercent: number): boolean {
+  return brightnessPercent > 100 || saturationPercent > 100;
+}
+
+/** Black floor's words: tenths of a percent of white light as a percent with one decimal ("2.0 %"). */
+export function blackFloorWords(tenths: number): string {
+  return `${(tenths / 10).toFixed(1)} %`;
+}
+
 /** Photo Wall (software): brightness and contrast 0–150 % (100 % changes nothing), colour
- * temperature and gamma; the picture Photo Wall sends, never the display's own brightness. */
-function PhotoWallSettings({ view, session, ready }: { view: View; session: PictureSession; ready: boolean }) {
+ * temperature and gamma, then the print look (design R2, R4): saturation 0–150 % (100 % changes
+ * nothing), soft highlights 0–100 % (acts above 100 % brightness) and the black floor, 0.0–10.0 % of
+ * white in 0.1 steps, sent as tenths. The picture Photo Wall sends, never the display's own brightness. */
+export function PhotoWallSettings({ view, session, ready }: { view: View; session: PictureSession; ready: boolean }) {
   const { software } = session.draft;
-  const percent = (setting: "brightness" | "contrast", label: string, inForce: number) => {
-    const value = software[setting] ?? inForce;
-    return (
-      <Field label={label} notes={[`${value} % · ${NO_CHANGE}`]}>
-        <Slider min={0} max={150} step={1} unit="%" value={value} disabled={!ready}
-          onPreview={(next) => session.changeSoftware(setting, next)}
-          onCommit={(next) => session.changeSoftware(setting, next)} />
-      </Field>
-    );
-  };
+  const send = (setting: SoftwareSetting) => (next: number) => session.changeSoftware(setting, next);
+  const percent = (setting: SoftwareSetting, label: string, value: number, max: number, notes: string[]) => (
+    <Field label={label} notes={[[`${value} %`, ...notes].join(" · ")]}>
+      <Slider min={0} max={max} step={1} unit="%" value={value} disabled={!ready}
+        onPreview={send(setting)} onCommit={send(setting)} />
+    </Field>
+  );
+  const brightness = software.brightness ?? view.software.brightness_percent;
+  const contrast = software.contrast ?? view.software.contrast_percent;
   const kelvin = software["colour-temperature"] ?? view.software.colour_temperature_kelvin;
   const gamma = software.gamma ?? view.software.gamma_tenths;
+  const saturation = software.saturation ?? view.software.saturation_percent;
+  const rolloff = software["highlight-rolloff"] ?? view.software.highlight_rolloff_percent;
+  const floor = software["black-floor"] ?? view.software.black_floor_tenths;
+  const tenths = (next: number) => session.changeSoftware("black-floor", Math.round(next * 10));
   return (
     <FactGroup title={PHOTO_WALL_GROUP}>
       <Stack>
-        {percent("brightness", "Brightness", view.software.brightness_percent)}
-        {percent("contrast", "Contrast", view.software.contrast_percent)}
+        {percent("brightness", "Brightness", brightness, 150, [NO_CHANGE])}
+        {percent("contrast", "Contrast", contrast, 150, [NO_CHANGE])}
         <Field label="Colour temperature" notes={[`${kelvin} K`]}>
           <Slider min={3000} max={9300} step={100} unit="K" disabled={!ready} value={kelvin}
-            onPreview={(next) => session.changeSoftware("colour-temperature", next)}
-            onCommit={(next) => session.changeSoftware("colour-temperature", next)} />
+            onPreview={send("colour-temperature")} onCommit={send("colour-temperature")} />
         </Field>
         <Field label="Gamma" notes={[(gamma / 10).toFixed(1)]}>
           <Slider min={1.8} max={2.6} step={0.1} unit="" disabled={!ready} value={gamma / 10}
             onPreview={(next) => session.changeSoftware("gamma", Math.round(next * 10))}
             onCommit={(next) => session.changeSoftware("gamma", Math.round(next * 10))} />
         </Field>
+        {percent("saturation", "Saturation", saturation, 150, [NO_CHANGE])}
+        {percent("highlight-rolloff", "Soft highlights", rolloff, 100,
+          [ZERO_NO_CHANGE, ...(softHighlightsAct(brightness, saturation) ? [] : [ACTS_ABOVE_100])])}
+        <Field label="Black floor" notes={[`${blackFloorWords(floor)} of white · 0.0 % changes nothing`]}>
+          <Slider min={0} max={10} step={0.1} unit="" disabled={!ready} value={floor / 10}
+            format={(shown) => blackFloorWords(Math.round(shown * 10))} onPreview={tenths} onCommit={tenths} />
+        </Field>
       </Stack>
     </FactGroup>
   );
 }
 
-/** Copy to other Frames (#119): Photo Wall's four and the display settings set here, never position. */
+/** Copy to other Frames (#119): all of Photo Wall's values and the display settings set here, never position. */
 function CopyToFrames({ frameId, otherFrames, blocked, names }: {
   frameId: string; otherFrames: readonly string[]; blocked: string | null; names: Readonly<Record<string, string>>;
 }) {
@@ -236,7 +260,7 @@ function CopyToFrames({ frameId, otherFrames, blocked, names }: {
     <Disclosure summary="Copy to other Frames">
       <Stack>
         <Note>
-          Copies this display&apos;s kept Photo Wall settings, and the display settings set here where the
+          Copies all of this display&apos;s kept Photo Wall settings, and the display settings set here where the
           other display offers them, to the displays of the Frames you choose. Each Frame&apos;s position
           stays as it is.
         </Note>

@@ -9,9 +9,12 @@ import { apiWrite } from "./apiWrite.js";
  * `out_of_range`, `not_presented_yet`); a lost request answers `unreachable`.
  *
  * @typedef {string} VcpCode   An MCCS code, two upper-case hex digits ("10" brightness).
- * @typedef {"brightness"|"contrast"|"colour-temperature"|"gamma"} SoftwareSetting
+ * @typedef {"brightness"|"contrast"|"colour-temperature"|"gamma"|"saturation"|"highlight-rolloff"
+ *            |"black-floor"|"lut-amount"} SoftwareSetting
  *   Brightness and contrast are percents 0..150 (100 changes nothing), colour temperature whole
- *   kelvin (3000..9300 in 100), gamma in tenths (18..26).
+ *   kelvin (3000..9300 in 100), gamma in tenths (18..26); the print look's: saturation a percent
+ *   0..150 (100 changes nothing), highlight rolloff a percent 0..100 (0 changes nothing), black
+ *   floor in tenths of a percent of white 0..100 (0 changes nothing), LUT amount a percent 0..100.
  * @typedef {"taken"|"not-taken"|"no-answer"} WriteResult
  * @typedef {"level"|"choice"|"read-only-choice"} RangeKind
  * @typedef {{value: number, name: string}} ChoiceView
@@ -24,8 +27,11 @@ import { apiWrite } from "./apiWrite.js";
  *   here, not offered at the last check; `value` null: as the display has it; `result` only for the
  *   latest picture change; `changed_on_buttons`: the display's latest read differs from the value
  *   set here (someone used its own buttons).
+ * @typedef {{profile_sha256: string, name: string}} LutChoiceView   The LUT in force: its paper
+ *   profile's digest and name.
  * @typedef {{brightness_percent: number, contrast_percent: number, colour_temperature_kelvin: number,
- *            gamma_tenths: number}} SoftwarePictureView
+ *            gamma_tenths: number, saturation_percent: number, highlight_rolloff_percent: number,
+ *            black_floor_tenths: number, lut_amount_percent: number, lut: LutChoiceView|null}} SoftwarePictureView
  * @typedef {{session_id: string, sequence: number, idle_until: number}} PictureSessionView
  * @typedef {{frame_id: string, status: "no-display"|"waiting"|"shown", display_id: string|null,
  *            connected: boolean|null, offered_known: boolean, hardware: HardwareSettingView[],
@@ -86,7 +92,7 @@ export function editHardware(sessionId, edit) {
 }
 
 /**
- * One of Photo Wall's four at one value (POST …/software-edits).
+ * One Photo Wall setting at one value (POST …/software-edits).
  *
  * @param {string} sessionId
  * @param {{setting: SoftwareSetting, value: number, expected_sequence: number}} edit
@@ -128,7 +134,7 @@ export function revertPicture(sessionId) {
 
 /**
  * Copy this Frame's Display values to other Frames' Displays (POST …/picture-copies, #119): Photo
- * Wall's four, and the display settings set here where each target offers them; never position.
+ * Wall's settings, and the display settings set here where each target offers them; never position.
  *
  * @param {string} frameId
  * @param {string[]} toFrames
