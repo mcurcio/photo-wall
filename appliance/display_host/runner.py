@@ -209,12 +209,27 @@ def document_feed(power: OutputPowerController, picture: PictureController) -> C
     return on_document
 
 
+class ShellBlackPicture:
+    """output_power.BlackPicture over the shell's `black` op (WestonBackend)."""
+
+    def __init__(self, backend: WestonBackend) -> None:
+        self._backend = backend
+
+    def show(self, output_id: str, black: bool, *, timeout: float) -> bool:
+        return self._backend.black(output_id, black, timeout=timeout)
+
+    def shown(self, output_id: str) -> bool | None:
+        return self._backend.black_shown(output_id)
+
+
 def power_controller(backend: WestonBackend, sink: ReportSink,
                      ddc: DdcChannel) -> tuple[OutputPowerController, HdmiCecAdapter]:
-    """The three methods on this Pi's tools and compositor, and the controller over them."""
+    """The three methods on this Pi's tools and compositor, the shell's black picture, and the
+    controller over them."""
     cec = HdmiCecAdapter(run_tool)
     adapters = (cec, DdcCiAdapter(ddc), SignalOffAdapter(backend))
-    return OutputPowerController({adapter.method: adapter for adapter in adapters}, sink, time), cec
+    return OutputPowerController({adapter.method: adapter for adapter in adapters}, sink, time,
+                                 ShellBlackPicture(backend)), cec
 
 
 def picture_controller(backend: WestonBackend, reports: OutputReports, ddc: DdcChannel,

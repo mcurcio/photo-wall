@@ -22,7 +22,7 @@ from typing import Any
 
 from fastapi.testclient import TestClient
 from integration.bus_servers import hub_server, leaf_connections, node_server, until
-from node.display.test_display_power_methods import Clock, Display, ddc
+from node.display.test_display_power_methods import Clock, Curtain, Display, ddc
 from support.house_time import LONDON, at, set_house
 from test_display_identity import ADMIN, AUTH, enroll_pi
 
@@ -101,7 +101,7 @@ def test_the_pi_keeps_night_off_while_central_is_away(database, tmp_path):
     node = node_server(tmp_path, SERIAL, hub)
     session = display_session("sha256:night-off-test", url=node.client_url)
     power = OutputPowerController({adapter.method: adapter for adapter in (ddc(display),)},
-                                  BusReportSink(session), pi_clock)
+                                  BusReportSink(session), pi_clock, Curtain())
     central_clock = CentralClock(FOUR_PM)
     hub.start()
     node.start()

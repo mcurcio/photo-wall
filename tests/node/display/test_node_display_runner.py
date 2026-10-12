@@ -360,7 +360,8 @@ def test_power_reports_carry_what_the_output_reporter_saw():
     from appliance.display_host.runner import PowerObservations
 
     sink = Reports()
-    power = OutputPowerController({}, sink, SimpleNamespace(monotonic=lambda: 0.0, time=lambda: 0.0))
+    power = OutputPowerController({}, sink, SimpleNamespace(monotonic=lambda: 0.0, time=lambda: 0.0),
+                                  SimpleNamespace(show=lambda *args, **kwargs: True, shown=lambda output_id: False))
     seen = []
     picture = SimpleNamespace(output=lambda output_id, **observed: seen.append((output_id, observed)))
     backend = FakeBackend()

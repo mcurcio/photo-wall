@@ -5,9 +5,10 @@ the port's power timetable, read at the Pi's own wall clock (appliance/display_h
 with 1b's console test on top.
 
 Pure core, effects at the edges. `in_force` and `next_deadline` are pure functions of the document,
-the Pi's own test start and its two clocks. `OutputPowerController` applies them through two
-ports: `PowerMethodAdapter` (one per method; appliance/display_host/power_methods.py) and
-`ReportSink` (the display bus session; appliance/display_host/bus.py). The controller never blocks
+the Pi's own test start and its two clocks. `OutputPowerController` applies them through three
+ports: `PowerMethodAdapter` (one per method; appliance/display_host/power_methods.py),
+`BlackPicture` (the shell's black curtain; appliance/display_host/weston.py) and `ReportSink` (the
+display bus session; appliance/display_host/bus.py). The controller never blocks
 the Weston dispatch loop: it runs its adapters on its own worker thread, one Output at a time, and
 every adapter call is bounded by its `timeout`.
 
@@ -24,8 +25,14 @@ The rules it owns (one home each):
   only when the new document wants something else at the Pi's clock (`acts_on_new_document`).
   A rise that wants the same moves the report's `for_change` and keeps its in-force and result.
   Never between those, so it never fights a person with the remote.
-- **Black picture** (Darkness.BLACK_PICTURE) is slice S2's: a timetable off with it is refused
-  with NOT_SUPPORTED and nothing written.
+- **Black picture** (#83; an opaque black from Display Host, never the Player and never a layer):
+  with Darkness.BLACK_PICTURE a timetable off shows the shell's black curtain over the Output and
+  runs no power method (the display stays on); its on takes the curtain down. The result is
+  CONFIRMED when the shell confirmed the curtain, DID_NOT_ANSWER when it did not (a claim about
+  the shell, never about pixels). With Darkness.DISPLAY_OFF, an off no method can carry out
+  (NOT_SUPPORTED) shows black instead and keeps NOT_SUPPORTED, so the Power tab still says the
+  display cannot be switched (console design §7: "showing black otherwise"). Every other look
+  takes a curtain still up down, so black is up exactly while one of those offs is carried out.
 - **How to act:** read first and write only when the display reads other than wanted. A display
   that reads as wanted gives `confirmed` with no write; after a DDC/CI standby blip the display
   reappears, reads standby, and is left alone: no loop.
@@ -109,6 +116,19 @@ class PowerMethodAdapter(Protocol):
 
     def claim_input(self, output_id: str, *, timeout: float) -> bool:
         """Ask the display to show this Pi's input (#117); whether it acknowledged."""
+        ...
+
+
+class BlackPicture(Protocol):
+    """The shell's opaque black curtain above every view on an Output (WestonBackend in production).
+    Every call returns within its `timeout` and never raises."""
+
+    def show(self, output_id: str, black: bool, *, timeout: float) -> bool:
+        """Put the curtain up (`black`) or take it down; whether the shell confirmed it."""
+        ...
+
+    def shown(self, output_id: str) -> bool | None:
+        """Whether the shell last said the curtain is up; None while it has no such Output."""
         ...
 
 
@@ -206,9 +226,10 @@ class _Port:
 class OutputPowerController:
     """Every Output's power, from its document, through the adapters, to the sink."""
 
-    def __init__(self, adapters: Mapping[PowerMethod, PowerMethodAdapter], sink: ReportSink,
-                 clock: Clock) -> None:
+    def __init__(self, adapters: Mapping[PowerMethod, PowerMethodAdapter], sink: ReportSink, clock: Clock,
+                 black: BlackPicture) -> None:
         self._adapters = dict(adapters)
+        self._black = black
         self._sink = sink
         self._clock = clock
         self._ports: dict[str, _Port] = {}
@@ -354,12 +375,16 @@ class OutputPowerController:
             if carried.kind is InForceKind.TEST and carried.request_id is not None:
                 port.started.setdefault(carried.request_id, now)
         method = _resolve(document.method, answers)
-        if (power is Power.OFF and carried.kind is InForceKind.TIMETABLE
-                and document.power.darkness is Darkness.BLACK_PICTURE):
-            result = PowerResult.NOT_SUPPORTED     # slice S2 shows black instead; nothing is written
+        if carried.kind is InForceKind.TIMETABLE and document.power.darkness is Darkness.BLACK_PICTURE:
+            # Black picture: the curtain is the whole of it; no power method runs.
+            confirmed = self._black.show(output_id, power is Power.OFF, timeout=WRITE_SECONDS)
+            result = PowerResult.CONFIRMED if confirmed else PowerResult.DID_NOT_ANSWER
         elif method is None:
             result = PowerResult.DID_NOT_ANSWER if answers else PowerResult.NOT_SUPPORTED
+            black = power is Power.OFF and result is PowerResult.NOT_SUPPORTED   # showing black otherwise
+            self._curtain(output_id, black)
         else:
+            self._curtain(output_id, False)
             result = _carry_out(self._adapters[method], output_id, power, document)
         elapsed_ms = max(0, round((self._clock.monotonic() - began) * 1000))
         with self._wake:
@@ -368,6 +393,11 @@ class OutputPowerController:
             port.in_force, port.acted = carried, _carried(carried)
             self._put(output_id, port)
         self._sink.emit_attempt(PowerAttempt(output_id, document.change, carried, method, result, elapsed_ms))
+
+    def _curtain(self, output_id: str, black: bool) -> None:
+        """Up when `black`; else down when the shell may have it up (it said so, or cannot say)."""
+        if black or self._black.shown(output_id) is not False:
+            self._black.show(output_id, black, timeout=WRITE_SECONDS)
 
 
 def _carry_out(adapter: PowerMethodAdapter, output_id: str, power: Power,
@@ -386,5 +416,5 @@ def _carry_out(adapter: PowerMethodAdapter, output_id: str, power: Power,
     return result
 
 
-__all__ = ["PROBE_SECONDS", "READ_SECONDS", "TICK_SECONDS", "WRITE_SECONDS", "Clock", "Decision",
+__all__ = ["PROBE_SECONDS", "READ_SECONDS", "TICK_SECONDS", "WRITE_SECONDS", "BlackPicture", "Clock", "Decision",
            "OutputPowerController", "PowerMethodAdapter", "ReportSink", "Trigger", "in_force", "next_deadline"]

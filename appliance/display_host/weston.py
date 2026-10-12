@@ -166,6 +166,7 @@ class WestonBackend:
         self.incarnation_id: UUID | None = None
         self._channel_lock = threading.RLock()
         self._powered: dict[str, Power] = {}   # the compositor's own output power, per Output
+        self._black: dict[str, bool] = {}      # whether the shell's black curtain is up, per Output
         self.picture_events: PictureEvents | None = None   # set by the runner (roadmap 1c)
 
     def _receive(self) -> dict:
@@ -178,7 +179,13 @@ class WestonBackend:
         return value
 
     def _note_power(self, value: dict) -> bool:
-        """Keep the compositor's output power from an `output_power` event; whether it was one."""
+        """Keep the compositor's output power from an `output_power` event, or the black curtain's
+        state from a `black` event; whether it was one of them."""
+        if value.get("event") == "black":
+            if type(value.get("on")) is not bool:
+                raise ValueError("display_message_invalid")
+            self._black[value["output_id"]] = value["on"]
+            return True
         if value.get("event") != "output_power":
             return False
         self._powered[value["output_id"]] = Power(value["power"])
@@ -244,6 +251,26 @@ class WestonBackend:
         """The compositor's own output power for `output_id`; None while it has no such Output."""
         with self._channel_lock:
             return self._powered.get(output_id)
+
+    def black(self, output_id: str, on: bool, *, timeout: float) -> bool:
+        """Ask the shell to put its opaque black curtain over every view on `output_id` (`on`) or
+        take it down (control op `black`); whether the shell's `black` event confirms it. Called
+        from the power controller's worker thread (output_power.BlackPicture)."""
+        try:
+            with self._channel_lock:
+                if self.host is None or output_id not in self._black:
+                    return False
+                key = self.host.state(output_id).key
+                self._request("black", key, timeout=timeout, on=on)
+                return self._black.get(output_id) is on
+        except (OSError, ValueError, KeyError, TimeoutError):
+            return False
+
+    def black_shown(self, output_id: str) -> bool | None:
+        """Whether the shell last said `output_id`'s black curtain is up; None while it has no such
+        Output (a new Output has none)."""
+        with self._channel_lock:
+            return self._black.get(output_id)
 
     def picture(self, operations: PictureOperations, *, timeout: float, brightness: str) -> bool:
         """Hand one Output's picture operations and base page brightness line to the shell (control
@@ -414,8 +441,10 @@ class WestonBackend:
             self.host.observe_output(key, connected=value["connected"])
             if value["connected"]:
                 self._powered[key.output_id] = Power(value.get("power", Power.ON.value))
+                self._black[key.output_id] = value.get("black") is True   # the shell says
             else:
                 self._powered.pop(key.output_id, None)
+                self._black.pop(key.output_id, None)
             self.grants.pop(key.output_id, None)
             self.revisions.pop(key.output_id, None)
             self.withdrawals.pop(key.output_id, None)

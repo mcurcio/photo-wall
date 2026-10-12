@@ -236,14 +236,34 @@ def console_off(seconds: int = 300, request_id: str = "17") -> PowerRequest:
 
 
 
-class Running:
-    """A started controller over the given adapters, stopped at the end."""
+class Curtain:
+    """output_power.BlackPicture: the shell's black curtain as a fake shell keeps it (`answers`
+    False: the shell does not confirm)."""
 
-    def __init__(self, adapters, clock: Clock | None = None) -> None:
+    def __init__(self, answers: bool = True) -> None:
+        self.answers = answers
+        self.up: dict[str, bool] = {}
+        self.asked: list[tuple[str, bool]] = []
+
+    def show(self, output_id, black, *, timeout):
+        self.asked.append((output_id, black))
+        if self.answers:
+            self.up[output_id] = black
+        return self.answers
+
+    def shown(self, output_id):
+        return self.up.get(output_id, False)
+
+
+class Running:
+    """A started controller over the given adapters and curtain, stopped at the end."""
+
+    def __init__(self, adapters, clock: Clock | None = None, black: Curtain | None = None) -> None:
         self.sink = Sink()
         self.clock = clock or Clock()
+        self.black = black or Curtain()
         self.controller = OutputPowerController({adapter.method: adapter for adapter in adapters},
-                                                self.sink, self.clock)
+                                                self.sink, self.clock, self.black)
         self.controller.start()
 
     def connect(self, connected: bool = True) -> None:
@@ -271,8 +291,8 @@ def until(condition: Callable[[], bool], timeout: float) -> None:
 def running():
     started: list[Running] = []
 
-    def start(adapters, clock=None) -> Running:
-        subject = Running(adapters, clock)
+    def start(adapters, clock=None, black=None) -> Running:
+        subject = Running(adapters, clock, black)
         started.append(subject)
         return subject
 
