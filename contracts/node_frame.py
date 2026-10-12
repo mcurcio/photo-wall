@@ -51,6 +51,10 @@ SATURATION_MAX: Final = 1.5               # saturation in 0..1.5 (Photo Wall's 0
 HIGHLIGHT_KNEE_MIN: Final = 0.18          # highlight_knee in 0.18..1, linear light (0.18: mid-grey); 1 is skipped.
                                           # The rolloff slider's 100 % (a placeholder, tuned on the bench)
 BLACK_FLOOR_MAX: Final = 0.5              # black_floor in 0..0.5, an output value; 0 is skipped
+DISPLAY_GAMMA: Final = 2.2                # the display's response the Player encodes for (light = value ** 2.2):
+                                          # how a share of white light becomes an output value, for the black
+                                          # floor (Display Host) and the mat shadow (the Player). Not Photo
+                                          # Wall's gamma setting, which is a look (2.2 changes nothing)
 
 
 def srgb_to_linear(value: float) -> float:

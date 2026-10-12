@@ -5651,3 +5651,11 @@ Order: (a) merge the iac PR that switches the factory to `central.app:create_app
   `TrialCandidate.mat_json`, `OutputBinding.mat`): the wire never defaults (strict decoders), so a
   mixed release is refused; the cost is that a constructor that forgets a field still runs. Each
   lane's page names its constructors, with a mutation probe per field.
+- **The black floor's light share becomes an output value through the display's response, not
+  Photo Wall's gamma setting.** The design says "the Pi turns it into the output value using the
+  display gamma setting"; Photo Wall's gamma (1.8-2.6, 2.2 changes nothing) is a look applied
+  before the floor, not the panel's response, so using it would make "2 % of white" mean another
+  light level at every gamma. Both the floor (Display Host: `black_floor = share ** (1 /
+  DISPLAY_GAMMA)`) and the mat shadow (the Player: an output value times `shade ** (1 /
+  DISPLAY_GAMMA)`) use `contracts/node_frame.py` `DISPLAY_GAMMA` (2.2), so the floor's 2 % and a
+  shadow's darkness are light on the panel whatever the gamma look. The bench may tune it.
