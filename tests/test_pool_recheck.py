@@ -25,6 +25,7 @@ from central.photo_library.model import ConnectionSecret, Exclusions, SourceQuer
 from central.photo_library.ports import CheckComplete, CheckFailed
 from contracts.time import ManualClock
 from media.immich import ImmichClient
+from media.library_client import TakenWindow
 
 # --- The worker, over the fake client and store ----------------------------------------------
 
@@ -139,16 +140,16 @@ def test_immich_answers_one_photo_while_it_matches_and_not_once_untagged_or_dele
         immich_library, tagged, client):
     tag_id, (first, second, third), deleted = tagged
     query = _query(tag_id)
-    assert run(client.still_matches(query, first)) is True
+    assert run(client.still_matches(query, TakenWindow(), first)) is True
     other = next(asset.upstream_id for asset in immich_library.assets.values()
                  if asset.kind == "image")
-    assert run(client.still_matches(query, other)) is False      # never under this tag
+    assert run(client.still_matches(query, TakenWindow(), other)) is False      # never under this tag
     _untag(immich_library, tag_id, second)
     immich_library.delete(third)
     deleted.add(third)
-    assert run(client.still_matches(query, second)) is False
-    assert run(client.still_matches(query, third)) is False
-    assert run(client.still_matches(query, first)) is True
+    assert run(client.still_matches(query, TakenWindow(), second)) is False
+    assert run(client.still_matches(query, TakenWindow(), third)) is False
+    assert run(client.still_matches(query, TakenWindow(), first)) is True
 
 
 def test_a_real_check_keeps_a_moved_photo_and_removes_an_untagged_one(immich_library, tagged):

@@ -98,7 +98,7 @@ class LibraryChecks:
         try:
             client = await self._client(lease.connection)
             if progress.phase == "recheck":
-                await self._recheck(lease, client)
+                await self._recheck(lease, progress, client)
                 return
             step = await self._step(lease, progress, client)
         except LibraryUnavailable:
@@ -110,7 +110,7 @@ class LibraryChecks:
             return
         await _blocking(self.store.record_step, lease, step)
 
-    async def _recheck(self, lease: CheckLease, client: LibraryClient) -> None:
+    async def _recheck(self, lease: CheckLease, progress: CheckProgress, client: LibraryClient) -> None:
         """One step of the Re-check phase (follow-up S4): ask Immich about one row the walk did
         not see, or, with none left, complete the check. A failure raises before anything is
         recorded, so it removes nothing."""
@@ -118,7 +118,7 @@ class LibraryChecks:
         if not unseen:
             await _blocking(self.store.finish_check, lease, CheckComplete())
             return
-        matches = await client.still_matches(lease.query, unseen[0])
+        matches = await client.still_matches(lease.query, progress.window, unseen[0])
         await _blocking(self.store.record_recheck, lease, unseen[0], matches)
 
     async def _step(self, lease: CheckLease, progress: CheckProgress,

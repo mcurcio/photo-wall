@@ -129,7 +129,7 @@ class FakeClient:
         items, position = self._slice(self.photos, after)
         return SearchPage(items=tuple(items), next=position)
 
-    async def still_matches(self, query, upstream_id):
+    async def still_matches(self, query, window, upstream_id):
         self._call("recheck")
         return any(item.upstream_id == upstream_id for item in self.photos)
 
