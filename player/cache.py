@@ -1,10 +1,12 @@
-"""A bounded disposable cache for Player media variants, kept by (key, digest).
+"""A bounded disposable cache for what the Player fetches from Central, kept by (name, digest).
 
-A variant is named by its inputs (`Variant.key`, `<asset_id>.<recipe_id>`), and Central may
-re-make it and serve other bytes of the same content. So the cache keeps a variant's bytes under
-its name and the digest Central served them with (`Repr-Digest`), checked against that digest
-and size (`Content-Length`) as they arrive, never against the plan's. Any whole file held under
-a variant's name is that variant.
+Each blob is named by its inputs: a media variant by `Variant.key` (`<asset_id>.<recipe_id>`), a
+LUT by `LutRef.key` (`<profile_sha256>.<recipe_id>`, print look 2026-10-12), and Central may
+re-make it and serve other bytes of the same content. So the cache keeps a blob's bytes under its
+name and the digest Central served them with (`Repr-Digest`), checked against that digest and
+size (`Content-Length`) as they arrive, never against anything in the name. Any whole file held
+under a name is that blob. One verified-write path serves every kind (`secure_named`,
+`path_named`); the variant calls name the variant by its key.
 
 The filesystem is never an authority source. Every process builds a fresh in-memory index, and
 every candidate is checked against the digest in its file name before it is returned. Pins and
@@ -27,17 +29,17 @@ from threading import RLock
 from contracts.models import Variant
 
 _DIGEST = re.compile(r"^[a-f0-9]{64}$")
-# `<SHA-256 of the variant's key>.<SHA-256 of the bytes>.blob`: a key can be longer than a file
+# `<SHA-256 of the blob's name>.<SHA-256 of the bytes>.blob`: a name can be longer than a file
 # name may be, so the file name carries its hash.
 _BLOB = re.compile(r"^([a-f0-9]{64})\.([a-f0-9]{64})\.blob$")
 _MAX_CHUNK = 1024 * 1024
 
-# One cached file: (the hash of its variant's key, the digest of its bytes).
+# One cached file: (the hash of its blob's name, the digest of its bytes).
 _Name = tuple[str, str]
 
 
 class CacheError(ValueError):
-    """The cache could not accept or validate a requested variant."""
+    """The cache could not accept or validate a requested blob."""
 
 
 class CacheCapacityError(CacheError):
@@ -50,10 +52,17 @@ class _Entry:
     accessed: float
 
 
-def _key_of(variant: Variant) -> str:
+def _variant_key(variant: Variant) -> str:
     if not isinstance(variant, Variant):
         raise TypeError("variant must be a contracts.models.Variant")
-    return hashlib.sha256(variant.key.encode()).hexdigest()
+    return variant.key
+
+
+def _hashed(key: str) -> str:
+    """A blob's name as its file name carries it: the SHA-256 of the name."""
+    if not isinstance(key, str) or not key or len(key) > 1024:
+        raise CacheError("blob name must be a nonempty string of at most 1024 characters")
+    return hashlib.sha256(key.encode()).hexdigest()
 
 
 class Cache:
@@ -79,8 +88,8 @@ class Cache:
         self._lock = RLock()
         self._closed = False
         self._entries: dict[_Name, _Entry] = {}
-        # Each owner's pinned variants, by the hash of their key: a pin keeps every whole file
-        # held under that variant's name.
+        # Each owner's pinned blobs, by the hash of their name: a pin keeps every whole file
+        # held under that name.
         self._pins: dict[str, set[str]] = {}
         self._temporary_bytes = 0
         self._acquisition_active = False
@@ -211,10 +220,9 @@ class Cache:
                 raise CacheCapacityError("cache capacity is protected by pins")
             self._unlink(name)
 
-    def _lookup_valid(self, variant: Variant) -> Path | None:
-        """A whole file held under ``variant``'s name (whichever digest it was served with),
-        most recently used first; a damaged one is removed as a miss."""
-        key = _key_of(variant)
+    def _lookup_valid(self, key: str) -> Path | None:
+        """A whole file held under the hashed name ``key`` (whichever digest it was served
+        with), most recently used first; a damaged one is removed as a miss."""
         # A file can appear after startup. It is still eligible only after verification.
         for blob in self.directory.glob(f"{key}.*.blob"):
             match = _BLOB.fullmatch(blob.name)
@@ -234,19 +242,24 @@ class Cache:
 
     def secure(self, variant: Variant, chunks: Iterable[bytes], pin: str, *, sha256: str,
                size: int) -> Path:
-        """Store the bytes Central served for ``variant`` and pin them for ``pin``: exactly
-        ``size`` bytes whose SHA-256 is ``sha256`` (the response's `Content-Length` and
-        `Repr-Digest`). A whole file of the variant already held is used instead."""
+        """`secure_named` under ``variant``'s name (`Variant.key`)."""
+        return self.secure_named(_variant_key(variant), chunks, pin, sha256=sha256, size=size)
+
+    def secure_named(self, key: str, chunks: Iterable[bytes], pin: str, *, sha256: str,
+                     size: int) -> Path:
+        """Store the bytes Central served under the name ``key`` and pin them for ``pin``:
+        exactly ``size`` bytes whose SHA-256 is ``sha256`` (the response's `Content-Length` and
+        `Repr-Digest`). A whole file already held under the name is used instead."""
         owner = self._validate_owner(pin)
-        key = _key_of(variant)
+        key = _hashed(key)
         sha256 = self._validate_digest(sha256)
         if isinstance(size, bool) or not isinstance(size, int) or size <= 0:
             raise CacheError("served size must be a positive integer")
         if size > self.max_bytes:
-            raise CacheCapacityError("variant is larger than cache capacity")
+            raise CacheCapacityError("blob is larger than cache capacity")
         with self._lock:
             self._ensure_open()
-            existing = self._lookup_valid(variant)
+            existing = self._lookup_valid(key)
             if existing is not None:
                 self._pins.setdefault(owner, set()).add(key)
                 return existing
@@ -291,10 +304,15 @@ class Cache:
                     pass
 
     def path_for(self, variant: Variant) -> Path | None:
-        """Return a freshly verified ready path, or repair corruption as a miss."""
+        """`path_named` for ``variant``'s name (`Variant.key`)."""
+        return self.path_named(_variant_key(variant))
+
+    def path_named(self, key: str) -> Path | None:
+        """A freshly verified whole file held under the name ``key``, or None (a damaged one is
+        removed as a miss)."""
         with self._lock:
             self._ensure_open()
-            return self._lookup_valid(variant)
+            return self._lookup_valid(_hashed(key))
 
     def pin(self, variant: Variant, owner: str) -> None:
         """Pin a verified whole file of ``variant`` for this process; pins never survive
@@ -302,9 +320,10 @@ class Cache:
         owner = self._validate_owner(owner)
         with self._lock:
             self._ensure_open()
-            if self._lookup_valid(variant) is None:
+            key = _hashed(_variant_key(variant))
+            if self._lookup_valid(key) is None:
                 raise CacheError("cannot pin a missing or corrupt variant")
-            self._pins.setdefault(owner, set()).add(_key_of(variant))
+            self._pins.setdefault(owner, set()).add(key)
 
     def release(self, owner: str) -> None:
         owner = self._validate_owner(owner)

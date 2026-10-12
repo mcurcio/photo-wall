@@ -40,10 +40,16 @@ a 64x48 PNG of four flat quadrants (red, green, blue, white) written here with t
 12. cover_at_90_shades_the_wall_up_edge: the same light on a Frame turned 90 degrees shades the
    output's right edge (the picture's up), not its top.
 13. neutral_program_takes_no_new_step: neutral v5 operations and Mat() leave every new step's
-   switch (saturation_on, rolloff_on, floor_on, mat_on) at 0 in the linked program, and the
-   pixels are the v4 reference's.
+   switch (lut_on, saturation_on, rolloff_on, floor_on, mat_on) at 0 in the linked program, and
+   the pixels are the v4 reference's.
 14. trial_mat_drawn: while Position's trial is drawn its mat shades the picture, though the
    binding's Mat() casts none; when the trial ends the binding's (no shadow) is drawn again.
+15. lut_matches_the_reference (slice P2, rule 3): a picture of four mid-tone quadrants whose
+   operations name a LUT the Player does not hold yet is drawn at once with the sliders alone
+   (lut_on 0, pixels = `final_pixel` without the LUT) and its tag never names the change; once the
+   LUT is held (`PlayerLuts.hold`, as the service does after its digest-checked fetch) the surface
+   draws again, the pixels equal `final_pixel` with the table (a steep, channel-turning one,
+   mixed in at 0.8, so a half-texel sampling slip fails) and the tag names the change.
 """
 import ctypes
 import hashlib
@@ -69,6 +75,7 @@ os.environ.update(XDG_RUNTIME_DIR=str(RUNTIME), WAYLAND_DISPLAY=SOCKET,
 
 from gi.repository import GLib  # noqa: E402
 
+from contracts.lut import LUT_BYTES, LUT_GRID, LutRef, lut_offset  # noqa: E402
 from contracts.models import (  # noqa: E402
     Calibration,
     CornersFit,
@@ -81,7 +88,7 @@ from contracts.models import (  # noqa: E402
     PhotoCrop,
     Variant,
 )
-from contracts.node_frame import PictureOperations  # noqa: E402
+from contracts.node_frame import LutMix, PictureOperations  # noqa: E402
 from contracts.photo_crop import CENTRED  # noqa: E402
 from player.geometry import (  # noqa: E402
     compose_pixel,
@@ -92,6 +99,7 @@ from player.geometry import (  # noqa: E402
     mat_shadow,
     picture_source_uv,
 )
+from player.luts import PlayerLuts  # noqa: E402
 from player.native import NativeOutput, NativeRenderer  # noqa: E402
 from player.rendering import LocalLayer, OutputComposition  # noqa: E402
 from player.wayland_frames import FrameGrant  # noqa: E402
@@ -107,8 +115,8 @@ SKEWED = ((.1, .1), (.9, .2), (.8, .9), (.2, .8))
 OPERATIONS = PictureOperations("headless", 3, (.9, .95, 1.0), 1.2, .8, 24 / 22)
 
 
-def quadrant(x: int, y: int) -> tuple[int, int, int, int]:
-    return QUADRANTS[(x >= WIDTH // 2) + 2 * (y >= HEIGHT // 2)]
+def quadrant(x: int, y: int, palette=QUADRANTS) -> tuple[int, int, int, int]:
+    return palette[(x >= WIDTH // 2) + 2 * (y >= HEIGHT // 2)]
 
 
 def png_fixture(path: pathlib.Path = PHOTO, colour=quadrant) -> Variant:
@@ -244,13 +252,13 @@ def samples(native: CapturingRenderer, corners, step: int = 7):
                 yield i, j, x, y
 
 
-def texel_colour(u: float, v: float) -> tuple[float, float, float] | None:
+def texel_colour(u: float, v: float, palette=QUADRANTS) -> tuple[float, float, float] | None:
     """The picture's linear colour at source UV (u, v); None within 2 texels of a quadrant seam
     (where linear filtering blends two quadrants)."""
     tx, ty = u * WIDTH, v * HEIGHT
     if abs(tx - WIDTH / 2) < 2 or abs(ty - HEIGHT / 2) < 2:
         return None
-    rgba = quadrant(min(WIDTH - 1, int(tx)), min(HEIGHT - 1, int(ty)))
+    rgba = quadrant(min(WIDTH - 1, int(tx)), min(HEIGHT - 1, int(ty)), palette)
     return tuple(decode_channel(value / 255) for value in rgba[:3])
 
 
@@ -260,7 +268,7 @@ def close(actual, expected) -> bool:
 
 def check_fit(native: CapturingRenderer, fit, operations: PictureOperations | None, *,
               profile: FrameProfile = PROFILE, crop: PhotoCrop = CENTRED,
-              mat: Mat = Mat()) -> tuple[int, int]:
+              mat: Mat = Mat(), palette=QUADRANTS, lut: bytes | None = None) -> tuple[int, int]:
     """Every sample equals the reference: inside, the picture through `final_pixel` (shaded by
     `mat`'s shadow on this fit); outside, opaque black. The (inside, outside) sample counts."""
     shadow = mat_shadow(fit, profile, mat)
@@ -274,11 +282,11 @@ def check_fit(native: CapturingRenderer, fit, operations: PictureOperations | No
             expected = final_pixel((0.0, 0.0, 0.0), applied, inside=False)
             counts[1] += 1
         else:
-            linear = texel_colour(*uv)
+            linear = texel_colour(*uv, palette)
             if linear is None:
                 continue
             shade = None if shadow is None else mat_shade(shadow, x, y)
-            expected = final_pixel(linear, applied, inside=True, shade=shade)
+            expected = final_pixel(linear, applied, inside=True, shade=shade, lut=lut)
             counts[0] += 1
         actual = pixel(native, i, j)
         assert close(actual, expected), ("pixel", fit.mode, fit.rotation, i, j, actual, expected)
@@ -507,14 +515,11 @@ def neutral_program_takes_no_new_step(native, frames, variant) -> None:
     surface.area.make_current()
     gl = native.GL
     final = surface.programs[1]
-    switches = {}
-    for name in ("saturation_on", "rolloff_on", "floor_on", "mat_on"):
-        value = (ctypes.c_int * 1)()
-        gl.glGetUniformiv(final, gl.glGetUniformLocation(final, name), value)
-        switches[name] = value[0]
+    switches = {name: switch(native, name)
+                for name in ("lut_on", "saturation_on", "rolloff_on", "floor_on", "mat_on")}
     print(f"NEUTRAL switches={switches}", flush=True)
     assert switches == dict.fromkeys(switches, 0), switches
-    for name in ("saturation", "highlight_knee", "peak", "black_floor", "to_opening", "mat_size",
+    for name in ("lut", "lut_amount", "saturation", "highlight_knee", "peak", "black_floor", "to_opening", "mat_size",
                  "light_count", "light_toward", "light_band", "light_weight"):
         assert gl.glGetUniformLocation(final, name) != -1, ("missing_uniform", name)
 
@@ -551,6 +556,63 @@ def trial_mat_drawn(native, frames, variant) -> None:
     assert during > 500 and after > 500, (during, after)
 
 
+MIDTONES = ((40, 90, 200, 255), (230, 140, 20, 255), (120, 200, 60, 255), (180, 60, 150, 255))
+LUT_REF = LutRef("cd" * 32, "lut33-perceptual-relcol-bpc-1")
+
+
+def steep(index: int) -> int:
+    """Black up to encoded 0.75, then four times the identity's slope to white: a sampling slip
+    of half a texel (where the grid's points sit) moves the bright quadrants' colour by ~0.04,
+    past the tolerance. (On an identity table the slip is at most 1/64, under it.)"""
+    return round(255 * min(1.0, max(0.0, 4 * index / (LUT_GRID - 1) - 3)))
+
+
+def turning_table() -> bytes:
+    """contracts/lut.py's layout: grid point (r, g, b) holds (steep(g), steep(b), steep(r))."""
+    body = bytearray(LUT_BYTES)
+    for r in range(LUT_GRID):
+        for g in range(LUT_GRID):
+            for b in range(LUT_GRID):
+                offset = lut_offset(r, g, b)
+                body[offset:offset + 3] = bytes((steep(g), steep(b), steep(r)))
+    return bytes(body)
+
+
+def switch(native: CapturingRenderer, name: str) -> int:
+    surface = native._surfaces["headless"]
+    surface.area.make_current()
+    gl = native.GL
+    value = (ctypes.c_int * 1)()
+    gl.glGetUniformiv(surface.programs[1], gl.glGetUniformLocation(surface.programs[1], name), value)
+    return value[0]
+
+
+def lut_matches_the_reference(native, frames, variant) -> None:
+    luts = PlayerLuts()
+    native._luts = luts
+    picture = png_fixture(RUNTIME / "midtones.png", lambda x, y: quadrant(x, y, MIDTONES))
+    looked = PictureOperations("headless", 8, (1.0, 1.0, 1.0), 1.0, 1.0, 1.0, saturation=1.1,
+                               black_floor=.02, lut=LutMix(LUT_REF, .8))
+    frames.operations = looked
+    fit = CoverFit(corners=OPENING)
+    shown = composition(picture, Calibration(fit=fit), layer("midtones", RUNTIME / "midtones.png", picture))
+    show(native, shown)
+    spin(0.3)
+    before, _ = check_fit(native, fit, looked, palette=MIDTONES)
+    assert luts.wanted() == (LUT_REF,), luts.wanted()
+    assert switch(native, "lut_on") == 0
+    assert frames.tags and all(change is None for _, change in frames.tags), ("claimed_early", frames.tags[-3:])
+    table = turning_table()
+    luts.hold(LUT_REF, table)
+    native.present(shown)
+    assert until(lambda: frames.tags and frames.tags[-1][1] == 8), ("tag_after_hold", frames.tags[-3:])
+    spin(0.2)
+    after, _ = check_fit(native, fit, looked, palette=MIDTONES, lut=table)
+    assert switch(native, "lut_on") == 1
+    print(f"LUT before={before} after={after}", flush=True)
+    assert before > 500 and after > 500, (before, after)
+
+
 CASES = (cover_matches_the_reference(0), cover_matches_the_reference(7),
          cover_matches_the_reference(90), outside_the_opening_stays_black_at_low_contrast,
          corners_fit_matches_the_reference, operations_change_the_picture_and_the_tag,
@@ -558,7 +620,8 @@ CASES = (cover_matches_the_reference(0), cover_matches_the_reference(7),
          a_corrupt_picture_fails_and_the_frame_still_presents,
          the_diagnostic_shows_only_while_the_output_is_unbound, crop_offset_keeps_the_left_edge,
          print_sliders_match_the_reference, one_light_from_the_top_matches,
-         cover_at_90_shades_the_wall_up_edge, neutral_program_takes_no_new_step, trial_mat_drawn)
+         cover_at_90_shades_the_wall_up_edge, neutral_program_takes_no_new_step, trial_mat_drawn,
+         lut_matches_the_reference)
 
 
 def main() -> None:

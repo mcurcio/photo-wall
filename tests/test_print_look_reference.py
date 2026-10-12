@@ -6,17 +6,22 @@ from __future__ import annotations
 
 import itertools
 import math
+from dataclasses import replace
 
 import pytest
 
 from contracts.kelvin import kelvin_white
+from contracts.lut import LUT_BYTES, LUT_GRID, LutRef, lut_offset
 from contracts.models import CornersFit, CoverFit, FrameProfile, Light, Mat
-from contracts.node_frame import DISPLAY_GAMMA, PictureOperations
+from contracts.node_frame import DISPLAY_GAMMA, LutMix, PictureOperations
 from player.geometry import (
+    LUMA,
     decode_channel,
     encode_srgb,
     final_pixel,
     homography,
+    lut_applied,
+    lut_sampled,
     mat_shade,
     mat_shadow,
     output_pixel,
@@ -256,3 +261,64 @@ def test_each_frame_on_an_output_carries_its_own_shadow():
     assert plain == final_pixel((.5, .5, .5), operations(), inside=True)
     assert shaded[0] < plain[0]
     assert shaded == final_pixel((.5, .5, .5), operations(), inside=True, shade=mat_shade(shadow, .25, .12))
+
+
+# -- Step 1, the LUT (slice P2) ----------------------------------------------------------------------
+
+def lut_table(colour) -> bytes:
+    """A LUT body (contracts/lut.py layout) whose grid point (r, g, b), each 0..LUT_GRID-1, holds
+    `colour(r, g, b)` as three bytes."""
+    body = bytearray(LUT_BYTES)
+    for r, g, b in itertools.product(range(LUT_GRID), repeat=3):
+        offset = lut_offset(r, g, b)
+        body[offset:offset + 3] = bytes(colour(r, g, b))
+    return bytes(body)
+
+
+IDENTITY = lut_table(lambda *point: (round(index * 255 / (LUT_GRID - 1)) for index in point))
+INVERTING = lut_table(lambda *point: (255 - round(index * 255 / (LUT_GRID - 1)) for index in point))
+WARM_SEPIA = lut_table(lambda r, g, b: (min(255, round((r + g + b) / 3 * 255 / 32 * 1.1)),
+                                        round((r + g + b) / 3 * 255 / 32 * .8), round(b * 255 / 32 * .3)))
+REF = LutRef("ab" * 32, "lut33-perceptual-relcol-bpc-1")
+
+
+def with_lut(amount: float = 1.0, **fields) -> PictureOperations:
+    return replace(operations(**fields), lut=LutMix(REF, amount))
+
+
+def test_an_identity_lut_samples_back_its_input_and_an_inverting_one_mixes_to_mid_grey():
+    """Trilinear at texel centres: the identity table returns its input within one byte step; an
+    inverting table mixed in at 0.5 returns mid-grey (encoded 0.5)."""
+    for encoded in itertools.product((0.0, .03, .2, .5, .51, .77, .999, 1.0), repeat=3):
+        assert lut_sampled(IDENTITY, encoded) == pytest.approx(encoded, abs=1 / 255)
+    for linear in ((0.0, 0.0, 0.0), (.2, .5, .9), (1.0, 1.0, 1.0)):
+        mixed = lut_applied(linear, INVERTING, .5)
+        assert [encode_srgb(value) for value in mixed] == pytest.approx([.5] * 3, abs=1 / 255)
+    # Between grid points the blend is linear along each axis.
+    halfway = (.5 / (LUT_GRID - 1), 0.0, 0.0)
+    assert lut_sampled(INVERTING, halfway)[0] == pytest.approx((255 + INVERTING[3]) / 2 / 255)
+
+
+def test_the_lut_comes_first_so_saturation_greys_the_tables_colour():
+    """Order: the LUT acts on the photo as authored, then saturation. With saturation 0 the result
+    is the grey of the table's output luminance. Mutation probe: apply the LUT after saturation ->
+    the grey input comes out sepia, not grey."""
+    linear = (.6, .3, .1)
+    sampled = lut_applied(linear, WARM_SEPIA, 1.0)
+    grey = sum(weight * value for weight, value in zip(LUMA, sampled, strict=True))
+    pixel = final_pixel(linear, with_lut(saturation=0.0), inside=True, lut=WARM_SEPIA)
+    assert pixel == pytest.approx((encode_srgb(grey),) * 3 + (1.0,), abs=1e-12)
+    assert len(set(pixel[:3])) == 1
+
+
+def test_a_lut_not_named_or_not_held_draws_exactly_the_sliders():
+    """Rule 3's other half: no LUT, or one not yet held (the renderer draws on with the sliders),
+    is exactly P1's pixel; a held one changes it."""
+    for linear in ((.2, .5, .9), (1.0, .0, .3), (0.0, 0.0, 0.0)):
+        sliders = final_pixel(linear, operations(light=1.2, saturation=1.3, knee=.5, floor=.05), inside=True)
+        named = final_pixel(linear, with_lut(.8, light=1.2, saturation=1.3, knee=.5, floor=.05), inside=True)
+        assert named == sliders
+        assert final_pixel(linear, operations(), inside=True, lut=WARM_SEPIA) == final_pixel(
+            linear, operations(), inside=True)                  # a table with no LutMix is never applied
+    assert final_pixel((.2, .5, .9), with_lut(.8), inside=True, lut=WARM_SEPIA) != final_pixel(
+        (.2, .5, .9), operations(), inside=True)

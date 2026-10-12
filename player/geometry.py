@@ -16,13 +16,14 @@ pass, each stated once here and mirrored by player/native.py's shaders:
   owner q3). It is the one crop in either fit: in Cover the drawn rectangle has that same aspect,
   so the photo is never cropped twice or squeezed.
 
-The print look (design /print-look, 2026-10-12) adds saturation, the highlight rolloff (which
-replaces the clamp after white balance x brightness), the black floor and the Frame's mat shadow to
-the final pass, in one order (`final_pixel`), each skipped at its neutral value.
+The print look (design /print-look, 2026-10-12) adds a LUT, saturation, the highlight rolloff
+(which replaces the clamp after white balance x brightness), the black floor and the Frame's mat
+shadow to the final pass, in one order (`final_pixel`), each skipped at its neutral value.
 """
 
 from __future__ import annotations
 
+import itertools
 import math
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
@@ -30,6 +31,7 @@ from typing import Final
 
 from contracts.frame_fit import Corners, OutputSize, cover_rectangle
 from contracts.kelvin import kelvin_white
+from contracts.lut import LUT_GRID, lut_offset
 from contracts.models import CornersFit, CoverFit, FrameProfile, Mat, PhotoCrop
 from contracts.node_frame import DISPLAY_GAMMA, PictureOperations, srgb_to_linear
 from contracts.photo_crop import CENTRED, crop_window
@@ -335,10 +337,41 @@ def mat_shade(shadow: MatShadow, x: float, y: float) -> Linear:
     return tuple(lit[channel] / total[channel] for channel in range(3))
 
 
+def lut_sampled(table: bytes, encoded: Linear) -> Linear:
+    """Trilinear at texel centres, as GL samples a GL_LINEAR 3D texture: position p = e*(LUT_GRID-1) per axis,
+    blend the 8 grid points around it (contracts/lut.py lut_offset), each byte / 255. Pure.
+
+    `encoded` is screen-encoded (sRGB), each channel clamped to 0..1, as is the result."""
+    lower, fraction = [], []
+    for value in encoded:
+        position = min(1.0, max(0.0, value)) * (LUT_GRID - 1)
+        index = min(int(position), LUT_GRID - 2)
+        lower.append(index)
+        fraction.append(position - index)
+    result = [0.0, 0.0, 0.0]
+    for dr, dg, db in itertools.product((0, 1), repeat=3):
+        weight = ((fraction[0] if dr else 1 - fraction[0]) * (fraction[1] if dg else 1 - fraction[1])
+                  * (fraction[2] if db else 1 - fraction[2]))
+        offset = lut_offset(lower[0] + dr, lower[1] + dg, lower[2] + db)
+        for channel in range(3):
+            result[channel] += weight * table[offset + channel] / 255
+    return tuple(result)
+
+
+def lut_applied(linear: Linear, table: bytes, amount: float) -> Linear:
+    """Step 1: encode for the screen, look the colour up (`lut_sampled`), mix the table's colour in
+    by `amount` (e (1 - amount) + s amount, as GLSL's mix), decode back to linear light. Pure."""
+    encoded = tuple(encode_srgb(value) for value in linear)
+    sampled = lut_sampled(table, encoded)
+    return tuple(decode_channel(e * (1 - amount) + s * amount)
+                 for e, s in zip(encoded, sampled, strict=True))
+
+
 def final_pixel(linear: Linear, operations: PictureOperations, *, inside: bool,
-                shade: Linear | None = None) -> tuple[float, float, float, float]:
+                shade: Linear | None = None, lut: bytes | None = None) -> tuple[float, float, float, float]:
     """One output pixel's final pass, in the print look's order (design "The order"):
-    [step 1, the LUT, comes first: P2] -> step 2 (`saturated`) unless saturation == 1 -> white
+    step 1 (`lut_applied`, the LUT `operations.lut` names mixed in by its amount) unless
+    operations.lut is None or its bytes (`lut`) are not held -> step 2 (`saturated`) unless saturation == 1 -> white
     balance x light_factor (linear light) -> step 4: max(0, .) then `rolled_off` unless
     `rolloff_skipped`, else clamp 0..1 (v4) -> sRGB encode, contrast about 0.5, gamma exponent,
     clamp (v4) -> step 6 (`floor_lifted`) unless black_floor == 0 -> step 7 unless `shade` is
@@ -348,6 +381,8 @@ def final_pixel(linear: Linear, operations: PictureOperations, *, inside: bool,
 
     A contrast result below 0 meets the exponent as 0 (a power of a negative number is undefined,
     in GLSL too); with the clamp after, this equals clamping before the exponent."""
+    if operations.lut is not None and lut is not None:
+        linear = lut_applied(linear, lut, operations.lut.amount)
     if operations.saturation != 1.0:
         linear = saturated(linear, operations.saturation)
     gained = tuple(max(0.0, value*multiplier*operations.light_factor)
