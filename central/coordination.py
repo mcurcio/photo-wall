@@ -8,12 +8,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 from contextlib import contextmanager
 from dataclasses import dataclass
 
 from psycopg.types.json import Jsonb
-from pydantic import Field
+from pydantic import Field, ValidationError
 
 from central.db import Database, DatabaseTransactionClock
 from central.execution_outcomes import ExecutionOutcome, ExecutionOutcomeRouter
@@ -59,6 +60,8 @@ from contracts.models import (
 )
 from contracts.time import Clock
 
+LOG = logging.getLogger(__name__)
+
 
 class CoordinationLimits(Model):
     horizon_seconds: float = Field(default=300, gt=0, le=3600)
@@ -86,6 +89,20 @@ class CoordinationError(RegistryError):
 def identity(prefix: str, parts) -> str:
     encoded = json.dumps(parts, sort_keys=True, separators=(",", ":"), allow_nan=False)
     return prefix + hashlib.sha256(encoded.encode()).hexdigest()[:40]
+
+
+def _stored_configuration(player_id: str, stored) -> PlayerConfiguration | None:
+    """A Player's last configuration as player_configurations holds it, or None when it no longer
+    reads as the current contract (a shape an earlier release wrote): it is then regenerated under
+    the next revision, so one stale document never stops the wall. The warning names the table,
+    the Player and the failing fields, never the stored content."""
+    try:
+        return PlayerConfiguration.model_validate(stored)
+    except ValidationError as exc:
+        fields = sorted({".".join(map(str, error["loc"])) for error in exc.errors()})
+        LOG.warning("player_configurations: stored configuration for player %s no longer validates "
+                    "(%s); regenerating it", player_id, ", ".join(fields) or "document")
+        return None
 
 
 def offer_owner(plan: Plan) -> str:
@@ -228,9 +245,10 @@ class Coordinator:
         ).fetchone()
         revision = 1
         if old and old["authority_epoch"] == epoch:
-            previous = PlayerConfiguration.model_validate(old["configuration"])
+            previous = _stored_configuration(player_id, old["configuration"])
             revision = old["revision"] + int(
-                content != previous.model_dump(mode="json", include={"bindings", "enabled_outputs"})
+                previous is None
+                or content != previous.model_dump(mode="json", include={"bindings", "enabled_outputs"})
             )
         configuration = PlayerConfiguration(
             player_id=player_id, authority_epoch=epoch, configuration_revision=revision, **content
