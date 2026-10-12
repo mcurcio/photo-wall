@@ -25,12 +25,17 @@ cut on Central's clock. Central assigns `program_id` at create (`new_program_id`
 from __future__ import annotations
 
 from typing import Any
+from uuid import uuid4
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI, Query, Request
+from fastapi.responses import JSONResponse, Response
 
-from central.runtime import Program, ProgramDraft
+from central.runtime import Program, ProgramDraft, ProgramRefused
 from central.runtime_store import RuntimeStore
 from contracts.models import Identifier, Model
+
+PROGRAMS = "/v1/operator/programs"
+_STATUS = {"changed": 409, "missing": 404}
 
 
 class ProgramSave(Model):
@@ -47,12 +52,39 @@ class DefaultSceneRequest(Model):
 
 def new_program_id() -> str:
     """A fresh Program id: "p-" and 24 lowercase hex characters (an Identifier)."""
-    raise NotImplementedError
+    return "p-" + uuid4().hex[:24]
 
 
 def mount_program_routes(app: FastAPI, *, admin: Any, runtime: RuntimeStore) -> None:
     """Declare the routes above on `app`; ProgramRefused becomes {"error": code} at its status."""
-    raise NotImplementedError
+
+    @app.exception_handler(ProgramRefused)
+    async def refused(request: Request, exc: ProgramRefused) -> JSONResponse:
+        body: dict[str, Any] = {"error": exc.code}
+        if exc.code == "changed" and exc.current is not None:
+            body["current"] = exc.current.model_dump(mode="json")
+        return JSONResponse(body, status_code=_STATUS.get(exc.code, 422))
+
+    @app.post(PROGRAMS, dependencies=[Depends(admin)], status_code=201, response_model=Program)
+    def create_program(draft: ProgramDraft) -> Program:
+        program = Program(**draft.model_dump(), program_id=new_program_id())
+        return runtime.command_current("create_program", program)
+
+    @app.put(PROGRAMS + "/{program_id}", dependencies=[Depends(admin)], response_model=Program)
+    def save_program(program_id: Identifier, request: ProgramSave) -> Program:
+        if request.expected.program_id != program_id:
+            raise ValueError("Program identity mismatch")
+        return runtime.command_current("save_program", request.expected, request.next)
+
+    @app.delete(PROGRAMS + "/{program_id}", dependencies=[Depends(admin)], status_code=204)
+    def remove_program(program_id: Identifier, revision: int = Query(ge=1)) -> Response:
+        runtime.command_current("remove_program", program_id, revision)
+        return Response(status_code=204)
+
+    @app.put("/v1/operator/default-scene", dependencies=[Depends(admin)], status_code=204)
+    def set_default_scene(request: DefaultSceneRequest) -> Response:
+        runtime.command_current("set_default_scene", request.scene_id)
+        return Response(status_code=204)
 
 
 __all__ = ["DefaultSceneRequest", "ProgramSave", "mount_program_routes", "new_program_id"]

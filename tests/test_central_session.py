@@ -5,6 +5,7 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
+from support.house_time import UTC_HOUSE, set_house
 from test_coordination import setup_players
 from test_registry import ADMIN, enroll, hello
 
@@ -31,8 +32,11 @@ def test_operator_source_scene_program_workflow_and_player_originated_session(re
                  "contributions": [{"target": "frame:frame-0", "kind": "black"}]}
         assert client.put("/v1/operator/scenes/night", json=scene, headers=appliance).status_code == 401
         assert client.put("/v1/operator/scenes/night", json=scene, headers=operator).status_code == 200
-        program = {"program_id": "evening", "scene_id": "night", "starts_at": 1010, "ends_at": 1200}
-        assert client.put("/v1/operator/programs/evening", json=program, headers=operator).status_code == 200
+        set_house(registry.db, UTC_HOUSE)
+        registry.clock.advance(10)          # 1010: the window starts at 00:17 (1020)
+        program = {"name": "Evening", "scene_id": "night", "when": WHEN_0017_0020}
+        created = client.post("/v1/operator/programs", json=program, headers=operator)
+        assert created.status_code == 201
         app.state.coordinator.advance()
         registry.clock.advance(6)
         with client.websocket_connect("/v1/player/session", headers=appliance) as connection:
@@ -41,18 +45,26 @@ def test_operator_source_scene_program_workflow_and_player_originated_session(re
             configuration = PlayerConfiguration.model_validate(state["configuration"])
             assert configuration.player_id == player["player_id"]
             assert "source_ref" not in json.dumps(state) and "library" not in json.dumps(state)
-            due = tuple(layer["assignment_id"] for layer in state["plan"]["layers"] if layer["start"] == 1010)
+            due = tuple(layer["assignment_id"] for layer in state["plan"]["layers"] if layer["start"] == 1020)
             readiness = Readiness(plan_id=state["plan"]["plan_id"], revision=state["plan"]["revision"],
                 authority_epoch=1, sequence=1, secured=due, prepared=due, capacity_ok=True,
-                observed_at=1006, clock_uncertainty=.01)
+                observed_at=1016, clock_uncertainty=.01)
             connection.send_json({"type": "readiness", "payload": readiness.model_dump(mode="json")})
             granted = connection.receive_json()
             assert granted["commits"][0]["readiness_sequence"] == 1
             assert set(granted["commits"][0]["assignment_ids"]) == set(due)
-        assert client.delete("/v1/operator/programs/evening", headers=operator).status_code == 200
+        program_id = created.json()["program_id"]
+        assert client.delete(f"/v1/operator/programs/{program_id}?revision=1", headers=operator).status_code == 204
 
 
-def test_program_replace_endpoint_is_optimistic_and_retryable(registry):
+WHEN_0017_0020 = {"days": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+                  "start": {"at": "clock", "time": "00:17"}, "end": {"at": "clock", "time": "00:20"}}
+
+
+def test_program_routes_are_optimistic_and_retryable(registry):
+    """The Schedule routes (roadmap 2b): POST creates at revision 1 with Central's id; PUT saves
+    against the Program the editor loaded (409 "changed" with the stored one, an identical retry
+    answers again); DELETE names the revision; refusals are {"error": code}."""
     app = create_app(registry.db, registry.clock, ADMIN)
     operator = {"Authorization": "Bearer " + ADMIN}
     with TestClient(app) as client:
@@ -61,44 +73,54 @@ def test_program_replace_endpoint_is_optimistic_and_retryable(registry):
                      "contributions": [{"target": "frame:frame-0", "kind": "black"}]}
             assert client.put(f"/v1/operator/scenes/{scene_id}", json=scene,
                               headers=operator).status_code == 200
-        original = {"program_id": "schedule", "scene_id": "first",
-                    "starts_at": 1010, "ends_at": 1200}
-        assert client.put("/v1/operator/programs/schedule", json=original,
-                          headers=operator).status_code == 200
+        draft = {"name": "Evenings", "scene_id": "first", "when": WHEN_0017_0020}
+        created = client.post("/v1/operator/programs", json=draft, headers=operator)
+        assert created.status_code == 201
+        original = created.json()
+        assert original["program_id"].startswith("p-") and original["revision"] == 1
+        assert (original["priority"], original["name"]) == ("normal", "Evenings")
+        path = f"/v1/operator/programs/{original['program_id']}"
 
-        externally_changed = {**original, "priority": 1}
-        assert client.put("/v1/operator/programs/schedule", json=externally_changed,
-                          headers=operator).status_code == 200
-        stale = {"expected": original,
-                 "program": {**original, "scene_id": "second"}}
-        response = client.post("/v1/operator/programs/schedule/replace", json=stale,
-                               headers=operator)
-        assert response.status_code == 409 and response.json() == {"error": "program_changed"}
+        first = {"expected": original, "next": {**draft, "priority": "special-event"}}
+        saved = client.put(path, json=first, headers=operator)
+        assert saved.status_code == 200 and saved.json()["revision"] == 2
+        assert client.put(path, json=first, headers=operator).json() == saved.json()   # a retry
+        stale = client.put(path, json={"expected": original, "next": {**draft, "scene_id": "second"}},
+                           headers=operator)
+        assert stale.status_code == 409 and stale.json() == {"error": "changed", "current": saved.json()}
 
-        replacement = {**externally_changed, "scene_id": "second", "starts_at": 1020}
-        request = {"expected": externally_changed, "program": replacement}
-        response = client.post("/v1/operator/programs/schedule/replace", json=request,
-                               headers=operator)
-        assert response.status_code == 200
-        registry.clock.advance(25)
-        retry = client.post("/v1/operator/programs/schedule/replace", json=request,
-                            headers=operator)
-        assert retry.status_code == 200
+        assert client.delete(f"{path}?revision=1", headers=operator).json() == {
+            "error": "changed", "current": saved.json()}
+        assert client.delete(f"{path}?revision=2", headers=operator).status_code == 204
+        missing = client.delete(f"{path}?revision=2", headers=operator)
+        assert (missing.status_code, missing.json()) == (404, {"error": "missing"})
 
-        due = {"program_id": "due", "scene_id": "first", "starts_at": 1025, "ends_at": 1100}
-        assert client.put("/v1/operator/programs/due", json=due, headers=operator).status_code == 200
-        changed_due = {**due, "priority": 2}
-        refused = client.post("/v1/operator/programs/due/replace",
-                             json={"expected": due, "program": changed_due}, headers=operator)
-        assert refused.status_code == 409 and refused.json() == {"error": "program_started"}
+        unknown = client.post("/v1/operator/programs", json={**draft, "scene_id": "nowhere"}, headers=operator)
+        assert (unknown.status_code, unknown.json()) == (422, {"error": "unknown-scene"})
+        no_days = client.post("/v1/operator/programs", json={**draft, "when": {**WHEN_0017_0020, "days": []}},
+                              headers=operator)
+        assert (no_days.status_code, no_days.json()) == (422, {"error": "no-days"})
+        sunset = {**WHEN_0017_0020, "start": {"at": "sunset", "offset_minutes": -30}}
+        needs_place = client.post("/v1/operator/programs", json={**draft, "when": sunset}, headers=operator)
+        assert (needs_place.status_code, needs_place.json()) == (422, {"error": "needs-place"})
+
+        refused = client.put("/v1/operator/default-scene", json={"scene_id": "nowhere"}, headers=operator)
+        assert (refused.status_code, refused.json()) == (422, {"error": "unknown-scene"})
+        assert client.put("/v1/operator/default-scene", json={"scene_id": "second"},
+                          headers=operator).status_code == 204
+        runtime = client.get("/v1/operator/runtime", headers=operator).json()
+        assert runtime["default_scene"] == {"scene_id": "second", "revision": 1}
+        assert [run["scene_id"] for run in runtime["current"]["runs"]] == ["second"]
+        assert client.put("/v1/operator/default-scene", json={"scene_id": None},
+                          headers=operator).status_code == 204
 
 
-def test_program_replace_endpoint_checks_both_path_identities(registry):
+def test_program_save_checks_the_path_identity(registry):
     app = create_app(registry.db, registry.clock, ADMIN)
-    response = TestClient(app).post(
-        "/v1/operator/programs/path-id/replace",
-        json={"expected": {"program_id": "other", "scene_id": "s", "starts_at": 10, "ends_at": 20},
-              "program": {"program_id": "path-id", "scene_id": "s", "starts_at": 11, "ends_at": 21}},
+    expected = {"program_id": "other", "name": "x", "scene_id": "s", "when": WHEN_0017_0020}
+    response = TestClient(app).put(
+        "/v1/operator/programs/path-id",
+        json={"expected": expected, "next": {"name": "x", "scene_id": "s", "when": WHEN_0017_0020}},
         headers={"Authorization": "Bearer " + ADMIN},
     )
     assert response.status_code == 422

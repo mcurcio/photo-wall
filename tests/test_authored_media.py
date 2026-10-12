@@ -7,6 +7,7 @@ from typing import NamedTuple
 from fastapi.testclient import TestClient
 from media_queue import RecordingMediaQueue
 from psycopg.types.json import Jsonb
+from support.house_time import UTC_HOUSE
 from support.photo_pools import FIXTURE_CONNECTION, seed_pool
 
 from central.app import create_app
@@ -156,7 +157,7 @@ def test_worker_publication_eviction_and_failure_cooldown_hydrate_authored_refs(
 
 
 def test_scene_asset_refs_are_per_frame_and_admitted_runs_are_immutable():
-    runtime = Runtime()
+    runtime = Runtime(house=UTC_HOUSE)
     first = Scene(scene_id="scene", revision=1, contributions=(Contribution(
         target="frame:left", asset_refs=("asset-a",)),))
     second = first.model_copy(update={"revision": 2, "contributions": (Contribution(

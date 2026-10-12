@@ -21,6 +21,7 @@ from central import cache_layout
 from central.assets.layout import TEMP_PREFIX, CacheLayout
 from central.content_wiring import build_job_runtime
 from central.db import Database, DatabaseTransactionClock
+from central.infra.house_store import seed_house
 from central.infra.key_content_store import PgKeyContent
 from central.infra.photo_library_store import PgPhotoLibrary
 from central.infra.runtime import (
@@ -442,6 +443,9 @@ async def _entry():
     runtime = build_job_runtime(db, clock, cache_root=cache_root, env=os.environ,
                                 thumbnails=thumbnails)
     await _blocking(repository.db.migrate)
+    # Settings › House starts from this process's zone when Central has not seeded it yet: the
+    # worker reads Runtime (the Planner's Program windows) in house time, as Central does.
+    await _blocking(seed_house, db, DatabaseTransactionClock())
     await _blocking(ProcrastinateMediaQueue.apply_schema, dsn)
     app = create_worker_app(dsn)
     checks = LibraryChecks(

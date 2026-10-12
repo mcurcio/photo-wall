@@ -9,7 +9,14 @@ from __future__ import annotations
 from datetime import date
 
 from central.db import Database, TransactionClock
+from central.infra.display_store import power_facts_in
+from central.infra.power_store import power_policy_in
+from central.power.timetable import frame_timetable
+from central.runtime import Program
+from central.runtime_store import RuntimeStore
+from central.why.explain import content_why, power_why
 from central.why.model import FrameWhy, Week
+from central.why.ports import WhyRefused
 
 
 class PgWhy:
@@ -19,7 +26,21 @@ class PgWhy:
         self._db, self._times = db, times
 
     def frame_why(self, frame_id: str) -> FrameWhy:
-        raise NotImplementedError
+        with self._db.transaction() as conn:
+            facts = power_facts_in(conn, frame_id)
+            if facts is None:
+                raise WhyRefused("unknown_frame", 404)
+            runtime = RuntimeStore.read_in(conn)
+            state = runtime.export_state()
+            now = max(self._times.now_in(conn), state["now"] if state["now"] is not None else float("-inf"))
+            policy = power_policy_in(conn, now)
+        house = runtime.house
+        programs = {program_id: Program.model_validate(program) for program_id, program in state["programs"].items()}
+        content = content_why(runtime.project(now), frame_id, programs=programs, refused={})
+        timetable = frame_timetable(frame_id, policy, house, now) if facts.bound else None
+        power = power_why(timetable=timetable, test=facts.test, document=facts.document, report=facts.report,
+                          house=house, now=now)
+        return FrameWhy(frame_id=frame_id, content=content, power=power)
 
     def week(self, first_day: date) -> Week:
         raise NotImplementedError

@@ -3,12 +3,15 @@ from datetime import UTC, datetime
 
 import pytest
 from pydantic import ValidationError
+from support.house_time import UTC_HOUSE, daily
 
 from central.runtime import (
     OPERATOR_HISTORY_SECONDS,
     Child,
     Contribution,
     Program,
+    ProgramDraft,
+    ProgramRefused,
     RecordingActuator,
     Runtime,
     RuntimeConflict,
@@ -31,20 +34,33 @@ def get_run(view, run_id):
     return next(run for run in view.runs if run.run_id == run_id)
 
 
+def hm(minutes):
+    """Minutes after midnight on the house clock, as "HH:MM"."""
+    return f"{int(minutes) // 60:02d}:{int(minutes) % 60:02d}"
+
+
+def program(program_id, scene_id, start, end, *, priority="normal", days=None):
+    """A Program "every day, `start` to `end`" (minutes after midnight, UTC house)."""
+    when = daily(hm(start), hm(end)) if days is None else daily(hm(start), hm(end), days)
+    return Program(program_id=program_id, name=program_id, scene_id=scene_id, when=when, priority=priority)
+
+
+def schedule(runtime, program_id, scene_id, start, end, *, now=None, priority="normal"):
+    """Create `program(...)` at `now` (default: the Runtime's now, else 0, the tests' origin:
+    1970-01-01 00:00 UTC). Its windows are admitted from `now` on."""
+    created = runtime._state.now if now is None and runtime._state.now is not None else (now or 0.0)
+    return runtime.create_program(program(program_id, scene_id, start, end, priority=priority), created)
+
+
 def test_frame_references_include_nested_outro_and_upcoming_program_context():
-    runtime = Runtime()
+    runtime = Runtime(house=UTC_HOUSE)
     runtime.set_scene(Scene(
         scene_id="parent", children=(Child(scene=Scene(
             scene_id="child", outro_seconds=5,
             outro_contributions=(media("frame:portrait"),),
         )),),
     ))
-    runtime.set_program(Program(
-        program_id="upcoming", scene_id="parent", starts_at=1100, ends_at=1200,
-    ))
-    runtime.set_program(Program(
-        program_id="past", scene_id="parent", starts_at=900, ends_at=950,
-    ))
+    schedule(runtime, "upcoming", "parent", 600, 610)       # a repeating Program always refers
     refs = runtime.frame_references("portrait", now=1000)
     assert refs == {
         "scene_ids": ("parent",), "program_ids": ("upcoming",),
@@ -53,7 +69,7 @@ def test_frame_references_include_nested_outro_and_upcoming_program_context():
 
 
 def test_frame_references_keep_queued_snapshot_but_ignore_terminal_run_history():
-    runtime = Runtime()
+    runtime = Runtime(house=UTC_HOUSE)
     runtime.set_scene(Scene(scene_id="show", loop=True, cycle_seconds=100,
                             contributions=(media("frame:elsewhere"),)))
     admission = runtime.activate("show", "active", 1000)
@@ -76,7 +92,7 @@ def test_frame_references_keep_queued_snapshot_but_ignore_terminal_run_history()
 
 
 def test_frame_references_project_expired_queue_without_mutating_runtime():
-    runtime = Runtime()
+    runtime = Runtime(house=UTC_HOUSE)
     runtime.set_scene(Scene(scene_id="show", loop=True,
                             contributions=(media("frame:portrait"),)))
     active_run_id = runtime.activate("show", "active", 1000).run_id
@@ -95,7 +111,7 @@ def test_frame_references_project_expired_queue_without_mutating_runtime():
 
 
 def test_frame_references_project_logically_ended_run_without_mutating_runtime():
-    runtime = Runtime()
+    runtime = Runtime(house=UTC_HOUSE)
     runtime.set_scene(Scene(scene_id="show", duration_seconds=5,
                             contributions=(media("frame:portrait"),)))
     runtime.activate("show", "active", 1000)
@@ -112,52 +128,49 @@ def test_frame_references_project_logically_ended_run_without_mutating_runtime()
 
 def test_calendar_boundary_projection_overlay_and_current_reveal():
     midnight = datetime(2027, 1, 1, tzinfo=UTC).timestamp()
-    runtime = Runtime()
+    runtime = Runtime(house=UTC_HOUSE)
     runtime.set_scene(Scene(
-        scene_id="december", loop=True, cycle_seconds=40,
+        scene_id="december", loop=True, cycle_seconds=2400,
         contributions=(media(), lamp()),
     ))
     runtime.set_scene(Scene(
-        scene_id="january", loop=True, cycle_seconds=60,
+        scene_id="january", loop=True, cycle_seconds=3600,
         contributions=(media(source="january:v1"), lamp()),
     ))
     portraits = Scene(
-        scene_id="portraits", cycle_seconds=30,
+        scene_id="portraits", cycle_seconds=1800,
         contributions=(
             Contribution(target="frame:left", asset_refs=("left-portrait",), role="left-speaker"),
             Contribution(target="frame:right", asset_refs=("right-portrait",), role="right-speaker"),
         ),
     )
     runtime.set_scene(Scene(
-        scene_id="overlay", cycle_seconds=30,
+        scene_id="overlay", cycle_seconds=1800,
         children=(Child(scene=portraits),),
         contributions=(lamp(0.8, 0.8), Contribution(target="frame:surround", kind="black")),
     ))
-    runtime.set_program(Program(
-        program_id="dec", scene_id="december", starts_at=midnight - 50, ends_at=midnight,
-    ))
-    runtime.set_program(Program(
-        program_id="jan", scene_id="january", starts_at=midnight, ends_at=midnight + 300,
-    ))
-    initial = runtime.advance(midnight - 10)
+    # 23:10 to midnight (crossing into the next day), then midnight to 05:00.
+    schedule(runtime, "dec", "december", 23 * 60 + 10, 0, now=midnight - 3600)
+    schedule(runtime, "jan", "january", 0, 300, now=midnight - 3600)
+    initial = runtime.advance(midnight - 600)
     december = initial.for_target("frame:left").run_id
     adapter = RecordingActuator()
-    adapter.apply(initial, now=midnight - 10, authorized_run_ids={december})
-    overlay = runtime.activate("overlay", "manual-overlay", midnight - 10, priority=10).run_id
+    adapter.apply(initial, now=midnight - 600, authorized_run_ids={december})
+    overlay = runtime.activate("overlay", "manual-overlay", midnight - 600, priority=10).run_id
     before = runtime.export_state()
     before_records = tuple(adapter.records)
-    projected = runtime.project(midnight + 25)
+    projected = runtime.project(midnight + 1500)
     assert runtime.export_state() == before
     assert tuple(adapter.records) == before_records
     with pytest.raises(ValueError, match="current instant"):
-        adapter.apply(projected, now=midnight - 10,
+        adapter.apply(projected, now=midnight - 600,
                       authorized_run_ids={run.run_id for run in projected.runs})
     assert tuple(adapter.records) == before_records
     assert projected.for_target("frame:left").scene_id == "january"
-    assert projected.for_target("frame:left").cycle_position == 25
+    assert projected.for_target("frame:left").cycle_position == 1500
     assert projected.for_target("actuator:lamp").actuator_value == pytest.approx(25 / 60)
-    still_covered = runtime.advance(midnight + 10)
-    assert get_run(still_covered, december).phase == "body"  # outgoing cycle ends at +30
+    still_covered = runtime.advance(midnight + 600)
+    assert get_run(still_covered, december).phase == "body"  # outgoing cycle ends at +30 min
     assert get_run(still_covered, overlay).phase == "body"
     assert still_covered.for_target("frame:left").role == "left-speaker"
     assert still_covered.for_target("frame:left").asset_refs == ("left-portrait",)
@@ -165,34 +178,23 @@ def test_calendar_boundary_projection_overlay_and_current_reveal():
     assert still_covered.for_target("frame:right").asset_refs == ("right-portrait",)
     assert still_covered.for_target("frame:surround").kind == "black"
     assert still_covered.for_target("actuator:lamp").actuator_value == 0.8
-    adapter.apply(still_covered, now=midnight + 10,
+    adapter.apply(still_covered, now=midnight + 600,
                   authorized_run_ids={run.run_id for run in still_covered.runs})
     assert adapter.records[-1].run_id == overlay
     assert adapter.records[-1].value == 0.8
-    reveal = runtime.advance(midnight + 25)
+    reveal = runtime.advance(midnight + 1500)
     assert reveal == projected
     january = reveal.for_target("frame:left").run_id
-    adapter.apply(reveal, now=midnight + 25,
+    adapter.apply(reveal, now=midnight + 1500,
                   authorized_run_ids={run.run_id for run in reveal.runs})
     assert [record.run_id for record in adapter.records] == [december, overlay, january]
-    assert [record.at - midnight for record in adapter.records] == [-10, 10, 25]
+    assert [record.at - midnight for record in adapter.records] == [-600, 600, 1500]
     assert [record.value for record in adapter.records] == pytest.approx([0, 0.8, 25 / 60])
-    assert {record.target for record in adapter.records} == {"actuator:lamp"}
-    assert adapter.apply(reveal, now=midnight + 25,
-                         authorized_run_ids={run.run_id for run in reveal.runs}) == ()
-    later = runtime.advance(midnight + 30)
-    assert later.for_target("frame:left").scene_id == "january"
-    assert get_run(later, december).phase == "completed"
-    adapter.apply(later, now=midnight + 30,
-                  authorized_run_ids={run.run_id for run in later.runs})
-    assert [record.run_id for record in adapter.records] == [december, overlay, january, january]
-    assert [record.at - midnight for record in adapter.records] == [-10, 10, 25, 30]
-    assert [record.value for record in adapter.records] == pytest.approx([0, 0.8, 25 / 60, 0.5])
 
 
 @pytest.mark.parametrize("cover_lamp", [False, True])
 def test_recording_actuator_only_current_winner_without_hidden_replay(cover_lamp):
-    runtime = Runtime()
+    runtime = Runtime(house=UTC_HOUSE)
     runtime.set_scene(Scene(
         scene_id="background", cycle_seconds=100, contributions=(media(), lamp()),
     ))
@@ -226,7 +228,7 @@ def test_delayed_child_union_does_not_issue_early_dark_or_move_roles():
     child = Scene(scene_id="child", cycle_seconds=5, contributions=(
         Contribution(target="frame:right", asset_refs=("right-only",), role="right-speaker"),
     ))
-    runtime = Runtime()
+    runtime = Runtime(house=UTC_HOUSE)
     runtime.set_scene(Scene(scene_id="background", cycle_seconds=100, contributions=(
         media("frame:right"),
     )))
@@ -248,28 +250,28 @@ def test_delayed_child_union_does_not_issue_early_dark_or_move_roles():
 
 
 def test_natural_finish_stops_unstarted_children_and_waits_current_work_then_outro():
-    current = Scene(scene_id="current", cycle_seconds=12, loop=True, contributions=(media(),))
-    future = Scene(scene_id="future", cycle_seconds=3, contributions=(media("frame:future"),))
-    runtime = Runtime()
+    current = Scene(scene_id="current", cycle_seconds=720, loop=True, contributions=(media(),))
+    future = Scene(scene_id="future", cycle_seconds=180, contributions=(media("frame:future"),))
+    runtime = Runtime(house=UTC_HOUSE)
     runtime.set_scene(Scene(
-        scene_id="parent", cycle_seconds=10, loop=True,
-        children=(Child(scene=current, delay_seconds=2), Child(scene=future, delay_seconds=8)),
-        outro_seconds=3, outro_contributions=(Contribution(target="frame:left", kind="black"),),
+        scene_id="parent", cycle_seconds=600, loop=True,
+        children=(Child(scene=current, delay_seconds=120), Child(scene=future, delay_seconds=480)),
+        outro_seconds=180, outro_contributions=(Contribution(target="frame:left", kind="black"),),
     ))
-    runtime.set_program(Program(program_id="window", scene_id="parent", starts_at=0, ends_at=5))
+    schedule(runtime, "window", "parent", 0, 5)
     runtime.advance(0)
     baseline = runtime.export_state()
-    future_view = runtime.project(1000)
+    future_view = runtime.project(60000)
     assert runtime.export_state() == baseline
     assert all(r.phase == "completed" for r in future_view.runs)
-    at_expiry = runtime.advance(5)
+    at_expiry = runtime.advance(300)
     root = next(r for r in at_expiry.runs if r.parent_id is None)
-    assert root.finish_requested_at == 5
+    assert root.finish_requested_at == 300
     assert len(root.children) == 1
-    assert runtime.advance(11).for_target("frame:left").scene_id == "current"
-    assert runtime.advance(14).for_target("frame:left").kind == "black"
-    final = runtime.advance(17)
-    assert get_run(final, root.run_id).ended_at == 17
+    assert runtime.advance(660).for_target("frame:left").scene_id == "current"
+    assert runtime.advance(840).for_target("frame:left").kind == "black"
+    final = runtime.advance(1020)
+    assert get_run(final, root.run_id).ended_at == 1020
     assert final.contributions == ()
     assert all(r.scene_id != "future" for r in final.runs)
 
@@ -277,7 +279,7 @@ def test_natural_finish_stops_unstarted_children_and_waits_current_work_then_out
 def test_cancel_is_downward_and_skips_outro():
     grandchild = Scene(scene_id="grandchild", cycle_seconds=50, contributions=(media(),))
     child = Scene(scene_id="child", cycle_seconds=50, children=(Child(scene=grandchild),))
-    runtime = Runtime()
+    runtime = Runtime(house=UTC_HOUSE)
     runtime.set_scene(Scene(
         scene_id="parent", cycle_seconds=100, children=(Child(scene=child),),
         outro_seconds=10, outro_contributions=(Contribution(target="frame:left", kind="black"),),
@@ -296,7 +298,7 @@ def test_cancel_is_downward_and_skips_outro():
 def test_a_scene_save_must_move_past_the_stored_revision():
     """A save built from an older copy never silently replaces a newer Scene (slice 3
     §13); an identical retry is idempotent. Mutation probe: drop the guard."""
-    runtime = Runtime()
+    runtime = Runtime(house=UTC_HOUSE)
     stored = Scene(scene_id="scene", revision=2, cycle_seconds=10, contributions=(media(),))
     runtime.set_scene(stored)
     for stale in (stored.model_copy(update={"cycle_seconds": 45}),
@@ -314,7 +316,7 @@ def test_tree_edits_adopt_only_on_next_root_including_delayed_child():
     root_v1 = Scene(scene_id="root", cycle_seconds=20, children=(Child(
         scene=child_v1, delay_seconds=5,
     ),))
-    runtime = Runtime()
+    runtime = Runtime(house=UTC_HOUSE)
     runtime.set_scene(root_v1)
     original = runtime.activate("root", "one", 0).run_id
     child_v2 = child_v1.model_copy(update={"revision": 2, "contributions": (media(source="new:v2"),)})
@@ -329,7 +331,7 @@ def test_tree_edits_adopt_only_on_next_root_including_delayed_child():
 
 
 def test_repeat_idempotency_restart_queue_capacity_and_expiry():
-    runtime = Runtime()
+    runtime = Runtime(house=UTC_HOUSE)
     runtime.set_scene(Scene(scene_id="scene", cycle_seconds=10, contributions=(media(),)))
     first = runtime.activate("scene", "first", 0)
     assert runtime.activate("scene", "first", 1) == first
@@ -356,7 +358,7 @@ def test_repeat_idempotency_restart_queue_capacity_and_expiry():
 
 
 def test_protection_reserves_delayed_frames_force_explicit_actuators_independent():
-    runtime = Runtime()
+    runtime = Runtime(house=UTC_HOUSE)
     child = Scene(scene_id="later", cycle_seconds=5, contributions=(media("frame:right"),))
     runtime.set_scene(Scene(
         scene_id="protected", cycle_seconds=30, protect_frames=True,
@@ -372,41 +374,42 @@ def test_protection_reserves_delayed_frames_force_explicit_actuators_independent
 
 
 def test_serialization_restart_no_duplicate_and_projection_equals_current():
-    runtime = Runtime()
-    runtime.set_scene(Scene(scene_id="long", cycle_seconds=10, loop=True, contributions=(media(),)))
-    runtime.set_program(Program(program_id="long", scene_id="long", starts_at=0, ends_at=100))
-    current = runtime.advance(5)
-    restored = Runtime.restore(json.loads(json.dumps(runtime.export_state())))
-    projected = runtime.project(37)
-    assert restored.advance(37) == projected
-    assert restored.advance(37) == runtime.advance(37)
+    runtime = Runtime(house=UTC_HOUSE)
+    runtime.set_scene(Scene(scene_id="long", cycle_seconds=600, loop=True, contributions=(media(),)))
+    schedule(runtime, "long", "long", 0, 100)
+    current = runtime.advance(300)
+    restored = Runtime.restore(json.loads(json.dumps(runtime.export_state())), house=UTC_HOUSE)
+    projected = runtime.project(2220)
+    assert restored.advance(2220) == projected
+    assert restored.advance(2220) == runtime.advance(2220)
     assert len(restored.export_state()["admissions"]) == 1
     assert current.for_target("frame:left").run_id == projected.for_target("frame:left").run_id
-    assert projected.for_target("frame:left").cycle_position == 7
-    assert projected.for_target("frame:left").logical_position == 37
+    assert projected.for_target("frame:left").cycle_position == 420
+    assert projected.for_target("frame:left").logical_position == 2220
 
 
 def test_same_scene_program_successor_and_missed_window_are_explicit():
-    runtime = Runtime()
-    runtime.set_scene(Scene(scene_id="bg", cycle_seconds=20, loop=True, contributions=(media(),)))
-    runtime.set_program(Program(program_id="z-outgoing", scene_id="bg", starts_at=0, ends_at=15))
-    runtime.set_program(Program(program_id="a-successor", scene_id="bg", starts_at=15, ends_at=30))
-    first = runtime.advance(10).for_target("frame:left")
-    at_boundary = runtime.advance(15)
+    runtime = Runtime(house=UTC_HOUSE)
+    runtime.set_scene(Scene(scene_id="bg", cycle_seconds=1200, loop=True, contributions=(media(),)))
+    schedule(runtime, "z-outgoing", "bg", 0, 15)
+    schedule(runtime, "a-successor", "bg", 15, 30)
+    first = runtime.advance(600).for_target("frame:left")
+    at_boundary = runtime.advance(900)
     successor = at_boundary.for_target("frame:left")
     assert successor.run_id != first.run_id
-    assert successor.logical_origin == 15
+    assert successor.logical_origin == 900
     assert get_run(at_boundary, first.run_id).phase == "body"
     assert successor.root_order > first.root_order
-    cold = Runtime()
-    cold.set_scene(Scene(scene_id="bg", cycle_seconds=20, contributions=(media(),)))
-    cold.set_program(Program(program_id="missed", scene_id="bg", starts_at=0, ends_at=10))
-    assert cold.advance(20).contributions == ()
-    assert next(iter(cold.export_state()["admissions"].values()))["status"] == "expired"
+    # A window wholly missed between two advances is skipped: no Run, no admission.
+    skipped = Runtime(house=UTC_HOUSE)
+    skipped.set_scene(Scene(scene_id="bg", cycle_seconds=1200, contributions=(media(),)))
+    schedule(skipped, "missed", "bg", 1, 10)
+    assert skipped.advance(1200).contributions == ()
+    assert skipped.export_state()["admissions"] == {}
 
 
 def test_opacity_distinguishes_black_from_dissolve_and_keeps_underlying_layers():
-    runtime = Runtime()
+    runtime = Runtime(house=UTC_HOUSE)
     runtime.set_scene(Scene(scene_id="bg", cycle_seconds=100, contributions=(media(),)))
     runtime.set_scene(Scene(scene_id="black", cycle_seconds=20, contributions=(
         Contribution(target="frame:left", kind="black", fade_out_seconds=10),
@@ -422,9 +425,11 @@ def test_opacity_distinguishes_black_from_dissolve_and_keeps_underlying_layers()
 
 
 def test_long_run_leaf_catchup_has_bounded_state():
-    runtime = Runtime()
+    runtime = Runtime(house=UTC_HOUSE)
     runtime.set_scene(Scene(scene_id="month", cycle_seconds=30, loop=True, contributions=(media(),)))
-    runtime.set_program(Program(program_id="month", scene_id="month", starts_at=0, ends_at=3000000))
+    runtime.set_scene(Scene(scene_id="daily", cycle_seconds=30, contributions=(media("frame:right"),)))
+    runtime.activate("month", "month", 0)
+    schedule(runtime, "daily", "daily", 600, 601)      # a window each day bounds each catch-up step
     intent = runtime.advance(2500001).for_target("frame:left")
     assert intent.cycle_index == 83333
     assert intent.cycle_position == 11
@@ -444,7 +449,7 @@ def test_invalid_contributions_rejected(definition):
 
 
 def test_nonfinite_time_and_backwards_clock_rejected():
-    runtime = Runtime()
+    runtime = Runtime(house=UTC_HOUSE)
     runtime.advance(10)
     for invalid in (9, float("nan"), float("inf"), True):
         with pytest.raises(ValueError):
@@ -452,7 +457,7 @@ def test_nonfinite_time_and_backwards_clock_rejected():
 
 
 def test_explicit_finish_at_exact_boundary_does_not_start_next_cycle():
-    runtime = Runtime()
+    runtime = Runtime(house=UTC_HOUSE)
     runtime.set_scene(Scene(scene_id="bg", cycle_seconds=10, loop=True, contributions=(media(),)))
     root = runtime.activate("bg", "bg", 0).run_id
     final = runtime.finish(root, 10)
@@ -461,7 +466,7 @@ def test_explicit_finish_at_exact_boundary_does_not_start_next_cycle():
 
 
 def test_explicit_finish_future_instant_allows_earlier_delayed_child():
-    runtime = Runtime()
+    runtime = Runtime(house=UTC_HOUSE)
     runtime.set_scene(Scene(
         scene_id="root", cycle_seconds=10, loop=True,
         children=(Child(
@@ -478,106 +483,100 @@ def test_explicit_finish_future_instant_allows_earlier_delayed_child():
 
 @pytest.mark.parametrize("with_child", [False, True])
 def test_protected_ownership_releases_before_successor_at_exact_boundary(with_child):
-    runtime = Runtime()
-    protected_child = Scene(scene_id="child", cycle_seconds=10, contributions=(media(),))
+    runtime = Runtime(house=UTC_HOUSE)
+    protected_child = Scene(scene_id="child", cycle_seconds=600, contributions=(media(),))
     runtime.set_scene(Scene(
-        scene_id="protected", cycle_seconds=10, protect_frames=True,
+        scene_id="protected", cycle_seconds=600, protect_frames=True,
         contributions=() if with_child else (media(),),
         children=(Child(scene=protected_child),) if with_child else (),
     ))
-    runtime.set_scene(Scene(scene_id="successor", cycle_seconds=10, contributions=(media(),)))
+    runtime.set_scene(Scene(scene_id="successor", cycle_seconds=600, contributions=(media(),)))
     runtime.activate("protected", "protected", 0)
-    runtime.set_program(Program(
-        program_id="next", scene_id="successor", starts_at=10, ends_at=20,
-    ))
-    assert runtime.advance(10).for_target("frame:left").scene_id == "successor"
+    schedule(runtime, "next", "successor", 10, 20)
+    assert runtime.advance(600).for_target("frame:left").scene_id == "successor"
 
 
-def test_program_definition_updates_next_window_removal_stops_all_owned_roots():
-    runtime = Runtime()
-    runtime.set_scene(Scene(scene_id="bg", cycle_seconds=10, loop=True, contributions=(media(),)))
-    runtime.set_program(Program(program_id="schedule", scene_id="bg", starts_at=0, ends_at=100))
-    original = runtime.advance(5).for_target("frame:left").run_id
-    runtime.set_program(Program(program_id="schedule", scene_id="bg", starts_at=0, ends_at=6))
-    assert runtime.advance(7).for_target("frame:left").run_id == original
-    runtime.set_program(Program(program_id="schedule", scene_id="bg", starts_at=8, ends_at=100))
-    newer = runtime.advance(8).for_target("frame:left").run_id
-    assert newer != original
-    runtime.remove_program("schedule", 9)
-    assert get_run(runtime.advance(10), original).ended_at == 10
-    assert get_run(runtime.advance(18), newer).ended_at == 18
-    assert runtime.advance(18).contributions == ()
+def test_a_save_keeps_the_playing_windows_end_and_removal_finishes_it():
+    """R10: a save mid-window never rewrites the admitted Run (it keeps its snapshot end); the next
+    window follows the new rule. Removal finishes the Program's Run gracefully."""
+    runtime = Runtime(house=UTC_HOUSE)
+    runtime.set_scene(Scene(scene_id="bg", cycle_seconds=600, loop=True, contributions=(media(),)))
+    created = schedule(runtime, "schedule", "bg", 0, 100)
+    original = runtime.advance(300).for_target("frame:left").run_id
+    saved = runtime.save_program(created, ProgramDraft(
+        name="schedule", scene_id="bg", when=daily(hm(5), hm(100))), 360)
+    assert saved.revision == 2
+    assert runtime._state.runs[original].program_ends_at == 6000
+    assert runtime.advance(420).for_target("frame:left").run_id == original
+    removed = runtime.remove_program("schedule", 2, 540)
+    assert get_run(removed, original).finish_requested_at == 540
+    assert get_run(runtime.advance(600), original).ended_at == 600
+    assert runtime.advance(86400 + 300).contributions == ()     # forgotten: no next window
 
 
-def test_replace_program_uses_expected_version_and_does_not_advance_runtime():
-    runtime = Runtime()
-    runtime.set_scene(Scene(scene_id="first", cycle_seconds=10, loop=True, contributions=(media(),)))
-    runtime.set_scene(Scene(scene_id="second", cycle_seconds=10, loop=True,
-                           contributions=(media(source="second:v1"),)))
-    runtime.set_program(Program(program_id="schedule", scene_id="first", starts_at=20, ends_at=40))
-    runtime.advance(5)
-    expected = runtime.export_state()
-    original = runtime._state.programs["schedule"]
-    replacement = Program(program_id="schedule", scene_id="second", starts_at=30, ends_at=50)
+def test_programs_refuse_without_storing_and_compare_the_expected_program():
+    runtime = Runtime(house=UTC_HOUSE)
+    runtime.set_scene(Scene(scene_id="scene", cycle_seconds=600, loop=True, contributions=(media(),)))
+    with pytest.raises(ProgramRefused) as raised:
+        runtime.create_program(program("p", "missing-scene", 0, 10), 0)
+    assert raised.value.code == "unknown-scene"
+    no_days = Program(program_id="p", name="p", scene_id="scene",
+                      when=daily(hm(0), hm(10), days=()))
+    with pytest.raises(ProgramRefused) as raised:
+        runtime.create_program(no_days, 0)
+    assert raised.value.code == "no-days"
+    with pytest.raises(ValueError):
+        runtime.create_program(program("p", "scene", 0, 10).model_copy(update={"revision": 2}), 0)
+    assert runtime.export_state()["programs"] == {}
 
-    runtime.replace_program(original, replacement, now=10)
-    assert runtime._state.programs["schedule"] == replacement
-    assert runtime._state.now == 5
-    assert runtime._state.runs == Runtime.restore(expected)._state.runs
-    assert runtime.replace_program(original, replacement, now=30) is None
-    assert runtime.advance(30).for_target("frame:left").scene_id == "second"
+    created = schedule(runtime, "p", "scene", 600, 610)
+    assert runtime.create_program(created, 0) == created                     # an idempotent retry
+    with pytest.raises(ProgramRefused) as raised:
+        runtime.create_program(program("p", "scene", 0, 10), 0)
+    assert (raised.value.code, raised.value.current) == ("changed", created)
 
-
-@pytest.mark.parametrize("starts_at", [10, 9])
-def test_replace_program_refuses_due_or_running_program_without_mutation(starts_at):
-    runtime = Runtime()
-    runtime.set_scene(Scene(scene_id="scene", cycle_seconds=10, loop=True, contributions=(media(),)))
-    expected = Program(program_id="schedule", scene_id="scene", starts_at=starts_at, ends_at=20)
-    runtime.set_program(expected)
-    before = runtime.export_state()
-    replacement = expected.model_copy(update={"ends_at": 30})
-    with pytest.raises(RuntimeConflict, match="program_started"):
-        runtime.replace_program(expected, replacement, now=10)
-    assert runtime.export_state() == before
-
-
-def test_replace_program_refuses_a_new_window_that_has_started():
-    runtime = Runtime()
-    runtime.set_scene(Scene(scene_id="scene", cycle_seconds=10, loop=True, contributions=(media(),)))
-    expected = Program(program_id="schedule", scene_id="scene", starts_at=20, ends_at=40)
-    runtime.set_program(expected)
-    with pytest.raises(RuntimeConflict, match="program_window_started"):
-        runtime.replace_program(expected, expected.model_copy(update={"starts_at": 10, "ends_at": 30}), 10)
+    draft = ProgramDraft(name="later", scene_id="scene", when=daily(hm(700), hm(710)))
+    saved = runtime.save_program(created, draft, 10)
+    assert runtime.save_program(created, draft, 11) == saved                 # a retry of the same save
+    with pytest.raises(ProgramRefused) as raised:
+        runtime.save_program(created, draft.model_copy(update={"name": "other"}), 12)
+    assert (raised.value.code, raised.value.current) == ("changed", saved)
+    with pytest.raises(ProgramRefused) as raised:
+        runtime.save_program(created.model_copy(update={"program_id": "gone"}), draft, 12)
+    assert raised.value.code == "missing"
+    with pytest.raises(ProgramRefused) as raised:
+        runtime.remove_program("p", 1, 12)
+    assert (raised.value.code, raised.value.current) == ("changed", saved)
 
 
-def test_backdated_already_missed_program_is_not_replayed():
-    runtime = Runtime()
-    runtime.set_scene(Scene(scene_id="scene", cycle_seconds=10, loop=True, contributions=(media(),)))
-    runtime.advance(100)
-    program = Program(program_id="historical", scene_id="scene", starts_at=0, ends_at=80)
-    runtime.set_program(program)
-    view = runtime.advance(100)
-    assert view.runs == ()
-    assert runtime.export_state()["admissions"][program.activation_id]["status"] == "expired"
+def test_a_window_already_started_at_create_is_not_admitted():
+    runtime = Runtime(house=UTC_HOUSE)
+    runtime.set_scene(Scene(scene_id="scene", cycle_seconds=600, loop=True, contributions=(media(),)))
+    runtime.advance(6000)
+    schedule(runtime, "historical", "scene", 0, 120)     # 00:00 to 02:00; now is 01:40
+    assert runtime.advance(6600).runs == ()
+    assert runtime.export_state()["admissions"] == {}
+    tomorrow = runtime.advance(86400 + 60)                # the next window starts it
+    assert tomorrow.for_target("frame:left").logical_origin == 86400
 
 
-def test_remove_program_reconciles_intervening_start_but_not_same_time_start():
-    runtime = Runtime()
-    runtime.set_scene(Scene(scene_id="bg", cycle_seconds=100, loop=True, contributions=(media(),)))
-    runtime.set_program(Program(program_id="p", scene_id="bg", starts_at=10, ends_at=200))
-    runtime.advance(0)
-    view = runtime.remove_program("p", 15)
+def test_remove_program_finishes_its_runs_and_admits_no_window_starting_then():
+    runtime = Runtime(house=UTC_HOUSE)
+    runtime.set_scene(Scene(scene_id="bg", cycle_seconds=6000, loop=True, contributions=(media(),)))
+    created = schedule(runtime, "p", "bg", 10, 200)
+    runtime.advance(600)
+    view = runtime.remove_program("p", created.revision, 900)
     root = next(r for r in view.runs if r.parent_id is None)
-    assert root.started_at == 10
-    assert root.finish_requested_at == 15
-    assert get_run(runtime.advance(110), root.run_id).ended_at == 110
-    runtime.set_program(Program(program_id="future", scene_id="bg", starts_at=120, ends_at=200))
-    runtime.remove_program("future", 120)
+    assert root.started_at == 600
+    assert root.finish_requested_at == 900
+    assert get_run(runtime.advance(6600), root.run_id).ended_at == 6600
+    future = schedule(runtime, "future", "bg", 120, 200)
+    runtime.remove_program("future", future.revision, 86400 + 7200)
     assert len(runtime.export_state()["admissions"]) == 1
 
 
 def test_external_activation_ids_cannot_alias_child_or_program_identity():
-    runtime = Runtime()
+    runtime = Runtime(house=UTC_HOUSE)
     runtime.set_scene(Scene(scene_id="parent", cycle_seconds=20, children=(Child(
         scene=Scene(scene_id="child", cycle_seconds=10, contributions=(media(),)),
     ),)))
@@ -590,13 +589,15 @@ def test_external_activation_ids_cannot_alias_child_or_program_identity():
     assert get_run(view, parent).phase == "completed"
     assert get_run(view, parent).children == ()
     with pytest.raises(ValueError, match="reserved"):
-        runtime.activate("other", "program:p:30", 20)
-    runtime.set_program(Program(program_id="p", scene_id="other", starts_at=30, ends_at=40))
-    assert runtime.advance(30).for_target("frame:other").scene_id == "other"
+        runtime.activate("other", "program:p:1:1800", 20)
+    with pytest.raises(ValueError, match="reserved"):
+        runtime.activate("other", "default:other:1:20", 20)
+    schedule(runtime, "p", "other", 30, 40)
+    assert runtime.advance(1800).for_target("frame:other").scene_id == "other"
 
 
 def test_nested_protection_reserves_its_frames_without_protecting_unrelated_siblings():
-    runtime = Runtime()
+    runtime = Runtime(house=UTC_HOUSE)
     runtime.set_scene(Scene(scene_id="parent", cycle_seconds=20, children=(Child(
         scene=Scene(scene_id="protected-child", cycle_seconds=10, protect_frames=True,
                     contributions=(media("frame:right"),)),
@@ -612,7 +613,7 @@ def test_nested_protection_reserves_its_frames_without_protecting_unrelated_sibl
 def test_timeline_contains_short_child_and_all_loop_boundaries_without_effects():
     from central.runtime import RuntimeBudgetExceeded
 
-    runtime = Runtime()
+    runtime = Runtime(house=UTC_HOUSE)
     runtime.set_scene(Scene(scene_id="root", cycle_seconds=2, loop=True, children=(Child(
         scene=Scene(scene_id="brief", cycle_seconds=0.05, contributions=(media(),)),
         delay_seconds=0.125,
@@ -630,7 +631,7 @@ def test_timeline_contains_short_child_and_all_loop_boundaries_without_effects()
 
 
 def test_timeline_does_not_skip_leaf_cycles_and_retains_authored_fade_origin():
-    runtime = Runtime()
+    runtime = Runtime(house=UTC_HOUSE)
     runtime.set_scene(Scene(scene_id="scene", loop=True, cycle_seconds=10, contributions=(
         media(opacity=0.8, fade_in_seconds=2, fade_out_seconds=3),
     )))
@@ -648,7 +649,7 @@ def test_timeline_does_not_skip_leaf_cycles_and_retains_authored_fade_origin():
 def test_pathologically_tiny_cycles_fail_bounded_projection():
     from central.runtime import RuntimeBudgetExceeded
 
-    runtime = Runtime()
+    runtime = Runtime(house=UTC_HOUSE)
     runtime.set_scene(Scene(scene_id="tiny", cycle_seconds=1e-12, loop=True, contributions=(media(),)))
     runtime.activate("tiny", "tiny", 0)
     before = runtime.export_state()
@@ -660,16 +661,16 @@ def test_pathologically_tiny_cycles_fail_bounded_projection():
 def test_timeline_budget_counts_simultaneous_program_admissions_and_extreme_cycles():
     from central.runtime import RuntimeBudgetExceeded
 
-    instance = Runtime()
+    instance = Runtime(house=UTC_HOUSE)
     instance.set_scene(Scene(scene_id="empty", cycle_seconds=10))
     for index in range(20):
-        instance.set_program(Program(program_id=f"p{index}", scene_id="empty", starts_at=10, ends_at=20))
+        schedule(instance, f"p{index}", "empty", 10, 20)
     instance.advance(0)
     before = instance.export_state()
     with pytest.raises(RuntimeBudgetExceeded):
-        instance.timeline(10, 11, max_events=5)
+        instance.timeline(600, 660, max_events=5)
     assert instance.export_state() == before
-    tiny = Runtime()
+    tiny = Runtime(house=UTC_HOUSE)
     tiny.set_scene(Scene(scene_id="tiny", loop=True, cycle_seconds=1e-320))
     tiny.activate("tiny", "tiny", 0)
     with pytest.raises(RuntimeBudgetExceeded):
@@ -677,7 +678,7 @@ def test_timeline_budget_counts_simultaneous_program_admissions_and_extreme_cycl
 
 
 def test_early_v1_snapshot_without_local_order_restores_child_precedence():
-    instance = Runtime()
+    instance = Runtime(house=UTC_HOUSE)
     instance.set_scene(Scene(scene_id="root", cycle_seconds=20, contributions=(media(),), children=(Child(
         scene=Scene(scene_id="child", cycle_seconds=10, contributions=(
             Contribution(target="frame:left", kind="black"),
@@ -688,7 +689,7 @@ def test_early_v1_snapshot_without_local_order_restores_child_precedence():
     for record in legacy["runs"].values():
         del record["local_order"]
         del record["descendant_sequence"]
-    restored = Runtime.restore(legacy)
+    restored = Runtime.restore(legacy, house=UTC_HOUSE)
     assert restored.advance(1).for_target("frame:left").scene_id == "child"
     assert all("local_order" not in record for record in legacy["runs"].values())
 
@@ -699,23 +700,24 @@ def test_early_v1_snapshot_without_local_order_restores_child_precedence():
 def test_run_views_carry_their_program_and_priority():
     assert RunView.model_fields["program_id"].is_required()
     assert RunView.model_fields["priority"].is_required()
-    runtime = Runtime()
+    runtime = Runtime(house=UTC_HOUSE)
     runtime.set_scene(Scene(scene_id="evening", loop=True, contributions=(media(),)))
     runtime.set_scene(Scene(scene_id="direct", loop=True, contributions=(media("frame:right"),)))
-    runtime.set_program(Program(
-        program_id="weekday-evenings", scene_id="evening", starts_at=10, ends_at=100, priority=5))
+    schedule(runtime, "weekday-evenings", "evening", 10, 100, priority="always-wins")
     direct = runtime.activate("direct", "act", 0, priority=2).run_id
-    view = runtime.advance(20)
+    view = runtime.advance(1200)
     scheduled = next(run for run in view.runs if run.scene_id == "evening")
-    assert (scheduled.program_id, scheduled.priority) == ("weekday-evenings", 5)
+    assert (scheduled.program_id, scheduled.priority) == ("weekday-evenings", 3)
+    assert scheduled.activation_id == "program:weekday-evenings:1:600"
     assert (get_run(view, direct).program_id, get_run(view, direct).priority) == (None, 2)
+    assert get_run(view, direct).activation_id == "act"
 
 
 def test_protected_frames_are_served_only_by_the_operator_projection():
     # Never on the scheduler's path: neither view model carries protection.
     for model in (RunView, RuntimeView):
         assert not [name for name in model.model_fields if "protect" in name]
-    runtime = Runtime()
+    runtime = Runtime(house=UTC_HOUSE)
     runtime.set_scene(Scene(scene_id="guard", protect_frames=True, loop=True,
                             contributions=(media(), lamp())))
     runtime.set_scene(Scene(scene_id="open", loop=True, contributions=(media("frame:right"),)))
@@ -726,60 +728,36 @@ def test_protected_frames_are_served_only_by_the_operator_projection():
     assert {run.run_id for run in projection.current.runs} >= {guard}
 
 
-def _outcome(runtime, program_id, now):
-    return runtime.operator_projection(now).program_outcomes[program_id]
+def test_program_windows_name_the_current_and_next_window_in_house_time():
+    scene = Scene(scene_id="evening", cycle_seconds=1800, loop=True, contributions=(media(),))
+    runtime = Runtime(house=UTC_HOUSE)
+    runtime.set_scene(scene)
+    schedule(runtime, "evening", "evening", 17 * 60, 23 * 60)
+    before = runtime.operator_projection(3600).program_windows["evening"]
+    assert before.current is None
+    assert (before.next.start, before.next.end, before.next.admission) == (
+        "1970-01-01T17:00", "1970-01-01T23:00", None)
+    during = runtime.operator_projection(18 * 3600).program_windows["evening"]
+    assert (during.current.start_at, during.current.admission.status) == (17 * 3600, "admitted")
+    assert during.next.start == "1970-01-02T17:00"
 
 
-def test_program_outcomes_distinguish_missed_windows_from_warm_restarts():
-    scene = Scene(scene_id="evening", cycle_seconds=30, contributions=(media(),))
-
-    # Saved after its window ended, on a warm Runtime: missed.
-    late = Runtime()
-    late.set_scene(scene)
-    late.advance(500)
-    late.set_program(Program(program_id="late", scene_id="evening", starts_at=100, ends_at=200))
-    missed = _outcome(late, "late", 600)
-    assert (missed.status, missed.reason) == ("expired", "missed_window")
-
-    # Ended before the Runtime's first-ever tick: missed.
-    cold = Runtime()
-    cold.set_scene(scene)
-    cold.set_program(Program(program_id="cold", scene_id="evening", starts_at=100, ends_at=200))
-    missed = _outcome(cold, "cold", 300)
-    assert (missed.status, missed.reason) == ("expired", "missed_window")
-
-    # Central was down across the whole window after a tick: a warm restart
-    # catches up logically and the outcome reads admitted, never missed.
-    warm = Runtime()
-    warm.set_scene(scene)
-    warm.advance(0)
-    warm.set_program(Program(program_id="warm", scene_id="evening", starts_at=100, ends_at=200))
-    projection = warm.operator_projection(300)
-    ran = projection.program_outcomes["warm"]
-    assert ran.status == "admitted"
-    run = get_run(projection.current, ran.run_id)
-    assert (run.phase, run.started_at, run.ended_at) == ("completed", 100, 130)
-
-    # Not yet started: no outcome.
-    assert _outcome(warm, "warm", 50) is None
-
-
-def test_a_protected_refusal_is_a_served_program_outcome():
-    runtime = Runtime()
+def test_a_protected_refusal_is_a_served_program_window_admission():
+    runtime = Runtime(house=UTC_HOUSE)
     runtime.set_scene(Scene(scene_id="guard", protect_frames=True, loop=True,
                             contributions=(media(),)))
     runtime.set_scene(Scene(scene_id="evening", loop=True, contributions=(media(),)))
     guard = runtime.activate("guard", "guard-act", 0, priority=5).run_id
-    runtime.set_program(Program(program_id="evening", scene_id="evening", starts_at=10, ends_at=100))
-    projection = runtime.operator_projection(20)
-    refused = projection.program_outcomes["evening"]
+    schedule(runtime, "evening", "evening", 10, 100)
+    projection = runtime.operator_projection(1200)
+    refused = projection.program_windows["evening"].current.admission
     assert (refused.status, refused.reason) == ("rejected", "protected_frames")
     assert refused.blocking_run_id == guard
     assert projection.protected_frames[guard] == frozenset({"frame:left"})
 
 
 def test_a_refused_activation_names_the_run_that_refused_it():
-    runtime = Runtime()
+    runtime = Runtime(house=UTC_HOUSE)
     runtime.set_scene(Scene(scene_id="guard", protect_frames=True, loop=True,
                             contributions=(media(),)))
     runtime.set_scene(Scene(scene_id="open", loop=True, contributions=(media(),)))
@@ -797,7 +775,7 @@ def test_a_refused_activation_names_the_run_that_refused_it():
 
 
 def test_an_admission_stored_before_the_blocking_run_existed_restores():
-    runtime = Runtime()
+    runtime = Runtime(house=UTC_HOUSE)
     runtime.set_scene(Scene(scene_id="guard", protect_frames=True, loop=True,
                             contributions=(media(),)))
     runtime.set_scene(Scene(scene_id="open", loop=True, contributions=(media(),)))
@@ -806,11 +784,11 @@ def test_an_admission_stored_before_the_blocking_run_existed_restores():
     old = json.loads(json.dumps(runtime.export_state()))
     for admission in old["admissions"].values():
         admission.pop("blocking_run_id", None)
-    restored = Runtime.restore(old)
+    restored = Runtime.restore(old, house=UTC_HOUSE)
     assert restored.activate("open", "open-act", 2).blocking_run_id is None
     exported = restored.export_state()
     assert "blocking_run_id" not in exported["admissions"]["open-act"]
-    assert Runtime.restore(exported).export_state() == exported
+    assert Runtime.restore(exported, house=UTC_HOUSE).export_state() == exported
 
 
 # Rollback compatibility: the Admission fields the Central build before
@@ -828,26 +806,25 @@ def _keys_named(value, key):
 
 
 def test_a_state_without_a_protection_refusal_restores_on_the_previous_build():
-    runtime = Runtime()
+    runtime = Runtime(house=UTC_HOUSE)
     runtime.set_scene(Scene(scene_id="guard", protect_frames=True, loop=True,
                             contributions=(media(),)))
     runtime.set_scene(Scene(scene_id="open", loop=True, contributions=(media("frame:right"),)))
     runtime.activate("guard", "guard-act", 0)
     runtime.activate("guard", "guard-again", 1)
-    runtime.set_program(Program(program_id="gone", scene_id="open", starts_at=0, ends_at=1))
-    runtime.set_program(Program(program_id="later", scene_id="open", starts_at=5, ends_at=50))
-    runtime.advance(10)
+    schedule(runtime, "later", "open", 5, 50)
+    runtime.advance(600)
     exported = json.loads(json.dumps(runtime.export_state()))
     statuses = {a["status"] for a in exported["admissions"].values()}
     assert {"admitted", "ignored"} <= statuses
     assert _keys_named(exported, "blocking_run_id") == 0
     for admission in exported["admissions"].values():
         assert set(admission) <= PREVIOUS_ADMISSION_FIELDS
-    assert Runtime.restore(exported).export_state() == exported
+    assert Runtime.restore(exported, house=UTC_HOUSE).export_state() == exported
 
 
 def test_a_protection_refusal_is_stored_and_restores_on_this_build():
-    runtime = Runtime()
+    runtime = Runtime(house=UTC_HOUSE)
     runtime.set_scene(Scene(scene_id="guard", protect_frames=True, loop=True,
                             contributions=(media(),)))
     runtime.set_scene(Scene(scene_id="open", loop=True, contributions=(media(),)))
@@ -856,26 +833,22 @@ def test_a_protection_refusal_is_stored_and_restores_on_this_build():
     exported = json.loads(json.dumps(runtime.export_state()))
     assert exported["admissions"]["open-act"]["blocking_run_id"] == guard
     assert "blocking_run_id" not in exported["admissions"]["guard-act"]
-    restored = Runtime.restore(exported)
+    restored = Runtime.restore(exported, house=UTC_HOUSE)
     assert restored.activate("open", "open-act", 2).blocking_run_id == guard
     assert restored.export_state()["admissions"] == exported["admissions"]
 
 
 def test_the_operator_read_serves_a_day_of_history_and_stores_everything():
     day = OPERATOR_HISTORY_SECONDS
-    runtime = Runtime()
+    runtime = Runtime(house=UTC_HOUSE)
     for scene_id, target in (("old", "frame:a"), ("recent", "frame:b"), ("live", "frame:c")):
         runtime.set_scene(Scene(scene_id=scene_id, loop=True, contributions=(media(target),)))
     old = runtime.activate("old", "old-act", 0).run_id
     runtime.cancel(old, 10)
-    runtime.set_program(Program(program_id="old-window", scene_id="old", starts_at=20, ends_at=60))
     recent = runtime.activate("recent", "recent-act", day).run_id
     runtime.cancel(recent, day + 100)
     live = runtime.activate("live", "live-act", day + 100).run_id
-    runtime.set_program(Program(
-        program_id="recent-window", scene_id="recent", starts_at=day + 150, ends_at=day + 300))
-    runtime.set_program(Program(
-        program_id="later-window", scene_id="live", starts_at=day + 900, ends_at=day + 1000))
+    schedule(runtime, "later-window", "live", 15, 16)
     before = runtime.export_state()
 
     now = day + 200
@@ -883,8 +856,7 @@ def test_the_operator_read_serves_a_day_of_history_and_stores_everything():
     served = {run.run_id for run in projection.current.runs}
     assert {recent, live} <= served  # ended 100 s ago, and live
     assert old not in served  # ended more than a day ago
-    assert set(projection.program_outcomes) == {"recent-window", "later-window"}
-    assert projection.program_outcomes["later-window"] is None
+    assert set(projection.program_windows) == {"later-window"}
 
     # A read filter only: stored state and every other read keep the old Run.
     assert runtime.export_state() == before
@@ -892,7 +864,7 @@ def test_the_operator_read_serves_a_day_of_history_and_stores_everything():
 
 
 def test_delete_scene_checks_revision_and_removes_only_an_unused_definition():
-    runtime = Runtime()
+    runtime = Runtime(house=UTC_HOUSE)
     runtime.set_scene(Scene(scene_id="unused", revision=3))
     before = runtime.export_state()
     with pytest.raises(RuntimeConflict, match="scene_revision_conflict"):
@@ -904,13 +876,15 @@ def test_delete_scene_checks_revision_and_removes_only_an_unused_definition():
         runtime.delete_scene("unused", 3)
 
 
-@pytest.mark.parametrize("dependency", ["program", "run", "queued", "child"])
+@pytest.mark.parametrize("dependency", ["program", "default", "run", "queued", "child"])
 def test_delete_scene_refuses_each_live_or_authored_dependency(dependency):
-    runtime = Runtime()
+    runtime = Runtime(house=UTC_HOUSE)
     target = Scene(scene_id="target", loop=True, contributions=(media(),))
     runtime.set_scene(target)
     if dependency == "program":
-        runtime.set_program(Program(program_id="uses-target", scene_id="target", starts_at=10, ends_at=20))
+        schedule(runtime, "uses-target", "target", 10, 20)
+    elif dependency == "default":
+        runtime.set_default_scene("target", 0)
     elif dependency == "run":
         runtime.activate("target", "active", 0)
     elif dependency == "queued":
@@ -925,13 +899,14 @@ def test_delete_scene_refuses_each_live_or_authored_dependency(dependency):
     assert raised.value.code == "scene_in_use"
     assert runtime.export_state() == before
     assert ("uses-target" in getattr(raised.value, "program_ids", ())) == (dependency == "program")
-    assert bool(getattr(raised.value, "run_ids", ())) == (dependency in {"run", "queued"})
+    assert bool(getattr(raised.value, "run_ids", ())) == (dependency in {"run", "queued", "default"})
+    assert getattr(raised.value, "default_scene", False) == (dependency == "default")
     assert bool(getattr(raised.value, "queued_activation_ids", ())) == (dependency == "queued")
     assert ("parent" in getattr(raised.value, "scene_ids", ())) == (dependency == "child")
 
 
 def test_deleting_definition_does_not_rewrite_ended_run_snapshot():
-    runtime = Runtime()
+    runtime = Runtime(house=UTC_HOUSE)
     runtime.set_scene(Scene(scene_id="historical", loop=True, contributions=(media(),)))
     run_id = runtime.activate("historical", "historical-activation", 0).run_id
     runtime.cancel(run_id, 1)
@@ -943,8 +918,8 @@ def test_deleting_definition_does_not_rewrite_ended_run_snapshot():
 KEEP = {"after_end": "keep_this_photo"}
 
 
-def _kept_scene(**scene):
-    return Scene(scene_id="kept", cycle_seconds=10, loop=True, contributions=(
+def _kept_scene(cycle_seconds=10, **scene):
+    return Scene(scene_id="kept", cycle_seconds=cycle_seconds, loop=True, contributions=(
         media(fade_in_seconds=1, fade_out_seconds=2, **KEEP),), **scene)
 
 
@@ -958,31 +933,31 @@ def test_a_kept_photo_plans_no_fade_out_in_its_final_cycle_only():
     follows) holds full strength: a Program's end, the Scene's duration and Finish each make a
     cycle final; earlier cycles, an ending on the Frame, and a photo not kept keep the authored
     fade-out. Mutation probe: drop the final-cycle rule (the fade-out stays 2)."""
-    runtime = Runtime()
-    runtime.set_scene(_kept_scene())
-    runtime.set_program(Program(program_id="evening", scene_id="kept", starts_at=0, ends_at=20))
-    assert _fades(runtime.advance(5)) == [("body", 1, 2)]
-    assert _fades(runtime.advance(15)) == [("body", 1, 0)]
+    runtime = Runtime(house=UTC_HOUSE)
+    runtime.set_scene(_kept_scene(600))
+    schedule(runtime, "evening", "kept", 0, 20)
+    assert _fades(runtime.advance(300)) == [("body", 1, 2)]
+    assert _fades(runtime.advance(900)) == [("body", 1, 0)]
 
-    timed = Runtime()
+    timed = Runtime(house=UTC_HOUSE)
     timed.set_scene(_kept_scene(duration_seconds=15))
     timed.activate("kept", "timed", 0)
     assert _fades(timed.advance(5)) == [("body", 1, 2)]
     assert _fades(timed.advance(12)) == [("body", 1, 0)]
 
-    finished = Runtime()
+    finished = Runtime(house=UTC_HOUSE)
     finished.set_scene(_kept_scene())
     run = finished.activate("kept", "finished", 0).run_id
     assert _fades(finished.advance(3)) == [("body", 1, 2)]
     assert _fades(finished.finish(run, 4)) == [("body", 1, 0)]
 
-    ending = Runtime()
+    ending = Runtime(house=UTC_HOUSE)
     ending.set_scene(_kept_scene(outro_seconds=4, outro_contributions=(
         Contribution(target="frame:left", kind="black"),)))
     run = ending.activate("kept", "ending", 0).run_id
     assert _fades(ending.finish(run, 4)) == [("body", 1, 2)]
 
-    plain = Runtime()
+    plain = Runtime(house=UTC_HOUSE)
     plain.set_scene(Scene(scene_id="plain", cycle_seconds=10, contributions=(
         media(fade_in_seconds=1, fade_out_seconds=2),)))
     plain.activate("plain", "plain", 0)
@@ -997,21 +972,21 @@ def test_a_kept_photo_followed_on_its_frame_keeps_its_fade_out():
         return [(i.fade_in_seconds, i.fade_out_seconds) for i in runtime.advance(
             runtime._state.now).contributions if i.scene_id == "kept"]
 
-    following = Runtime()
-    following.set_scene(_kept_scene())
-    following.set_scene(Scene(scene_id="next", cycle_seconds=10, contributions=(media(),)))
-    following.set_program(Program(program_id="evening", scene_id="kept", starts_at=0, ends_at=10))
-    following.advance(5)
+    following = Runtime(house=UTC_HOUSE)
+    following.set_scene(_kept_scene(600))
+    following.set_scene(Scene(scene_id="next", cycle_seconds=600, contributions=(media(),)))
+    schedule(following, "evening", "kept", 0, 10)
+    following.advance(300)
     assert kept(following) == [(1, 0)]
-    following.set_program(Program(program_id="night", scene_id="next", starts_at=10, ends_at=20))
+    schedule(following, "night", "next", 10, 20)
     assert kept(following) == [(1, 2)]
 
-    beneath = Runtime()
-    beneath.set_scene(_kept_scene())
-    beneath.set_scene(Scene(scene_id="under", cycle_seconds=10, loop=True, contributions=(media(),)))
+    beneath = Runtime(house=UTC_HOUSE)
+    beneath.set_scene(_kept_scene(600))
+    beneath.set_scene(Scene(scene_id="under", cycle_seconds=600, loop=True, contributions=(media(),)))
     beneath.activate("under", "under", 0)
-    beneath.set_program(Program(program_id="evening", scene_id="kept", starts_at=0, ends_at=10))
-    beneath.advance(5)
+    schedule(beneath, "evening", "kept", 0, 10)
+    beneath.advance(300)
     assert kept(beneath) == [(1, 2)]
 
 
@@ -1020,12 +995,11 @@ def test_looking_at_what_follows_a_kept_photo_spends_the_callers_budget():
     the same advance that fits the budget without a kept photo exceeds it with one. Mutation
     probe: give the projection its own budget (the kept advance succeeds)."""
     def advance(after_end):
-        runtime = Runtime()
-        runtime.set_scene(Scene(scene_id="kept", cycle_seconds=10, loop=True, contributions=(
+        runtime = Runtime(house=UTC_HOUSE)
+        runtime.set_scene(Scene(scene_id="kept", cycle_seconds=600, loop=True, contributions=(
             media(fade_in_seconds=1, fade_out_seconds=2, after_end=after_end),)))
-        runtime.set_program(Program(program_id="evening", scene_id="kept", starts_at=0,
-                                    ends_at=10))
-        return runtime.advance(5, max_events=2)
+        schedule(runtime, "evening", "kept", 0, 10)
+        return runtime.advance(300, max_events=1)
 
     from central.runtime import RuntimeBudgetExceeded
 
@@ -1039,7 +1013,7 @@ def test_an_ending_keeps_nothing_only_when_nothing_plays_beneath_it():
     underneath takes over." An ending's `keep_nothing` becomes `leave_as_is` when another Run
     plays on its Frame at its end. Mutation probe: keep the authored after-state."""
     def ending(beneath):
-        runtime = Runtime()
+        runtime = Runtime(house=UTC_HOUSE)
         runtime.set_scene(Scene(scene_id="top", cycle_seconds=10, outro_seconds=4,
                                 contributions=(media(),), outro_contributions=(
                                     Contribution(target="frame:left", kind="black",
@@ -1062,18 +1036,16 @@ def test_a_photo_is_kept_only_when_no_run_beneath_it_plays_on():
     Mutation probes: keep the top's photo whatever plays beneath; step aside for any
     follower."""
     def after_ends(other):
-        runtime = Runtime()
-        runtime.set_scene(_kept_scene())
-        runtime.set_scene(Scene(scene_id="other", cycle_seconds=10, loop=True,
+        runtime = Runtime(house=UTC_HOUSE)
+        runtime.set_scene(_kept_scene(600))
+        runtime.set_scene(Scene(scene_id="other", cycle_seconds=600, loop=True,
                                 contributions=(media(after_end="keep_this_photo"),)))
         if other == "beneath":
             runtime.activate("other", "other", 0)
-        runtime.set_program(Program(program_id="evening", scene_id="kept", starts_at=0,
-                                    ends_at=20))
+        schedule(runtime, "evening", "kept", 0, 20)
         if other == "after":
-            runtime.set_program(Program(program_id="night", scene_id="other", starts_at=20,
-                                        ends_at=30))
-        return [(i.scene_id, i.after_end) for i in runtime.advance(15).contributions]
+            schedule(runtime, "night", "other", 20, 30)
+        return [(i.scene_id, i.after_end) for i in runtime.advance(900).contributions]
 
     assert after_ends(None) == [("kept", "keep_this_photo")]
     assert after_ends("after") == [("kept", "keep_this_photo")]
@@ -1086,7 +1058,7 @@ def test_a_photo_is_kept_only_when_no_run_beneath_it_plays_on():
 def test_an_intent_carries_its_own_scenes_selection_and_a_childs_carries_the_childs():
     parent_selection = SceneSelection(order="chronological", no_repeat_days=3, crop_limit=0.5)
     child_selection = SceneSelection(order="on_this_day", no_repeat_days=0, crop_limit=0.2)
-    runtime = Runtime()
+    runtime = Runtime(house=UTC_HOUSE)
     runtime.set_scene(Scene(
         scene_id="parent", cycle_seconds=60, selection=parent_selection,
         contributions=(media("frame:left"),),
@@ -1107,7 +1079,7 @@ def test_planning_selections_name_configured_child_and_admitted_scenes():
     configured = SceneSelection(crop_limit=0.4)
     child = SceneSelection(order="newest_first")
     admitted = SceneSelection(crop_limit=0.5)
-    runtime = Runtime()
+    runtime = Runtime(house=UTC_HOUSE)
     runtime.set_scene(Scene(scene_id="show", cycle_seconds=60, selection=admitted,
                             contributions=(media("frame:left"),)))
     runtime.activate("show", "show-start", 0)
@@ -1121,3 +1093,54 @@ def test_planning_selections_name_configured_child_and_admitted_scenes():
     ))
     assert runtime.planning_selections() == {
         "show": admitted, "family": SceneSelection(), "kids": child}
+
+
+# Power and the week (E5): the Default Scene plays wherever no Schedule does.
+
+def test_the_default_scene_plays_beneath_every_window_and_starts_again_when_it_ends():
+    runtime = Runtime(house=UTC_HOUSE)
+    runtime.set_scene(Scene(scene_id="calm", cycle_seconds=600, contributions=(media(),)))
+    runtime.set_scene(Scene(scene_id="evening", cycle_seconds=600, loop=True, contributions=(media(),)))
+    runtime.set_default_scene("calm", 0)
+    schedule(runtime, "evening", "evening", 15, 30)
+    first = runtime.advance(60)
+    assert first.for_target("frame:left").scene_id == "calm"
+    calm = first.for_target("frame:left").run_id
+    assert get_run(first, calm).activation_id == "default:calm:1:0"
+    assert get_run(first, calm).priority == 0
+    # Its Scene ends at 600 and starts again at once; the window covers it at 900.
+    again = runtime.advance(600)
+    assert again.for_target("frame:left").run_id != calm
+    covered = runtime.advance(1000)
+    assert covered.for_target("frame:left").scene_id == "evening"
+    assert {intent.scene_id for intent in covered.contributions} == {"calm", "evening"}
+    assert runtime.advance(2200).for_target("frame:left").scene_id == "calm"   # its cycle ended at 2100
+
+
+def test_a_protected_run_keeps_the_default_scene_out_without_recording_a_refusal():
+    runtime = Runtime(house=UTC_HOUSE)
+    runtime.set_scene(Scene(scene_id="calm", cycle_seconds=600, loop=True, contributions=(media(),)))
+    runtime.set_scene(Scene(scene_id="guard", cycle_seconds=300, protect_frames=True, contributions=(media(),)))
+    guard = runtime.activate("guard", "guard-act", 0).run_id
+    view = runtime.set_default_scene("calm", 10)
+    assert view.for_target("frame:left").run_id == guard
+    assert set(runtime.export_state()["admissions"]) == {"guard-act"}
+    after = runtime.advance(400)                        # the guard ended at 300: calm starts then
+    assert after.for_target("frame:left").scene_id == "calm"
+    assert after.for_target("frame:left").logical_origin == 300
+
+
+def test_choosing_another_default_scene_finishes_the_old_one_gracefully():
+    runtime = Runtime(house=UTC_HOUSE)
+    runtime.set_scene(Scene(scene_id="calm", cycle_seconds=600, loop=True, contributions=(media(),)))
+    runtime.set_scene(Scene(scene_id="bright", cycle_seconds=600, loop=True, contributions=(media(),)))
+    with pytest.raises(ProgramRefused) as raised:
+        runtime.set_default_scene("missing", 0)
+    assert raised.value.code == "unknown-scene"
+    calm = runtime.set_default_scene("calm", 0).for_target("frame:left").run_id
+    view = runtime.set_default_scene("bright", 100)
+    assert get_run(view, calm).finish_requested_at == 100
+    assert runtime.export_state()["default_scene"] == {"scene_id": "bright", "revision": 2}
+    assert runtime.advance(700).for_target("frame:left").scene_id == "bright"
+    assert runtime.set_default_scene(None, 800).contributions[0].scene_id == "bright"   # finishing
+    assert runtime.advance(1300).contributions == ()

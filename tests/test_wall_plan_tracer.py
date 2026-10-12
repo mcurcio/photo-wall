@@ -20,6 +20,7 @@ from collections import defaultdict
 
 import pytest
 from psycopg.types.json import Jsonb
+from support.house_time import UTC_HOUSE
 from support.key_content_builders import face, measured
 from support.measured_photos import measure
 from support.photo_pools import photo, seed_pool
@@ -36,7 +37,7 @@ from central.media_queue import QueueReceipt
 from central.media_repository import MediaRepository
 from central.planner import Projection, project
 from central.registry import FrameCreate
-from central.runtime import Contribution, Program, Runtime, Scene
+from central.runtime import Contribution, Runtime, Scene
 from central.wall_plan.fit import Fits, FitTarget, judge
 from central.wall_plan.fit_settings import FitSettings
 from central.wall_plan.order import WallHistory
@@ -77,7 +78,7 @@ def pool():
 
 def wall(crop_limit: float | None = None) -> Runtime:
     selection = SceneSelection() if crop_limit is None else SceneSelection(crop_limit=crop_limit)
-    instance = Runtime()
+    instance = Runtime(house=UTC_HOUSE)
     instance.set_scene(Scene(
         scene_id="tracer", cycle_seconds=30, loop=True, selection=selection,
         contributions=tuple(Contribution(target=f"frame:{frame}", source_refs=(POOL,),
@@ -161,7 +162,7 @@ def test_a_mat_opening_frame_plans_a_photo_smaller_than_its_display():
     small = {"small": measured("small", 1600, 900, variant=Variant(
         sha256=hashlib.sha256(b"small").hexdigest(), size=10, media_type="image/jpeg",
         width=1600, height=900))}
-    instance = Runtime()
+    instance = Runtime(house=UTC_HOUSE)
     instance.set_scene(Scene(
         scene_id="tracer", cycle_seconds=30, loop=True, selection=SceneSelection(),
         contributions=(Contribution(target="frame:wide", source_refs=(POOL,),
@@ -273,8 +274,7 @@ def test_the_wall_through_the_real_advance_measures_crops_and_remembers_what_was
         contributions=tuple(Contribution(target=f"frame:{frame}", source_refs=(POOL,),
                                          after_end="keep_this_photo")
                             for frame in ("frame-wide", "frame-tall"))))
-    coordinator.runtime.command("set_program", Program(
-        program_id="calendar", scene_id="tracer", starts_at=1000, ends_at=1000 + 7200))
+    coordinator.runtime.command("activate", "tracer", "calendar", 1000)
     first = coordinator.advance()
     assert [request.asset_id for request in first.measurements] == [four_three]
     assert four_three not in {entry.asset_id for entry in first.plan}

@@ -40,6 +40,7 @@ from central.infra.fit_settings_store import PgFitSettings
 from central.infra.house_store import seed_house
 from central.infra.photo_library_store import PgPhotoLibrary
 from central.infra.power_store import PgPower
+from central.infra.why_store import PgWhy
 from central.installation_models import InstallationInventory
 from central.library_routes import mount_library_routes
 from central.media_gateway import MediaGateway
@@ -55,6 +56,7 @@ from central.photo_library_routes import mount_photo_library_routes, mount_photo
 from central.photo_sources import PhotoSources
 from central.player_control_protocol import project_state, state_digest
 from central.power_routes import mount_power_routes
+from central.program_routes import mount_program_routes
 from central.registry import (
     Enrollment,
     FrameCreate,
@@ -63,12 +65,13 @@ from central.registry import (
     Registry,
     RegistryError,
 )
-from central.runtime import Program, RuntimeConflict, Scene, SceneInUse
+from central.runtime import RuntimeConflict, Scene, SceneInUse
 from central.runtime_store import RuntimeStore
 from central.source_names import SourceInUse, SourceNameService
 from central.wall_plan.fit import FitTarget
 from central.wall_plan.fit_analysis import analyse
 from central.wall_plan.fit_settings import FIT_SETTING_RANGES
+from central.why_routes import mount_why_routes
 from contracts.central_identity import LOCATE_PATH, identity_body
 from contracts.models import (
     Identifier,
@@ -113,11 +116,6 @@ class BindingRequest(Model):
 
 class UnbindRequest(Model):
     expected_generation: int = Field(ge=0)
-
-
-class ProgramReplacementRequest(Model):
-    expected: Program
-    program: Program
 
 
 class ActivationRequest(Model):
@@ -375,6 +373,7 @@ def create_app(
             "run_ids": exc.run_ids,
             "queued_activation_ids": exc.queued_activation_ids,
             "scene_ids": exc.scene_ids,
+            "default_scene": exc.default_scene,
         }, status_code=409)
 
     @app.exception_handler(RequestValidationError)
@@ -743,24 +742,6 @@ def create_app(
         coordinator.runtime.command("delete_scene", scene_id, expected_revision)
         return {"status": "deleted"}
 
-    @app.put("/v1/operator/programs/{program_id}", dependencies=[Depends(admin)])
-    def configure_program(program_id: Identifier, program: Program):
-        if program.program_id != program_id:
-            raise ValueError("Program identity mismatch")
-        coordinator.runtime.command("set_program", program)
-        return {"status": "configured"}
-
-    @app.post("/v1/operator/programs/{program_id}/replace", dependencies=[Depends(admin)])
-    def replace_program(program_id: Identifier, request: ProgramReplacementRequest):
-        if request.expected.program_id != program_id or request.program.program_id != program_id:
-            raise ValueError("Program identity mismatch")
-        coordinator.runtime.command_current("replace_program", request.expected, request.program)
-        return {"status": "configured"}
-
-    @app.delete("/v1/operator/programs/{program_id}", dependencies=[Depends(admin)])
-    def remove_program(program_id: Identifier):
-        return coordinator.runtime.command_current("remove_program", program_id)
-
     @app.post("/v1/operator/activations", dependencies=[Depends(admin)])
     def activate(request: ActivationRequest):
         return coordinator.runtime.command_current(
@@ -786,6 +767,8 @@ def create_app(
     mount_display_routes(app, admin=admin, queries=PgDisplayQueries(db), commands=PgDisplayCommands(db))
     power = PgPower(db, times=media_times)
     mount_power_routes(app, admin=admin, queries=power, commands=power)
+    mount_program_routes(app, admin=admin, runtime=runtime_store)
+    mount_why_routes(app, admin=admin, queries=PgWhy(db, times=media_times))
     pictures = PgPictureSessions(db)
     mount_picture_routes(app, admin=admin, queries=pictures, commands=pictures)
     if content is not None:

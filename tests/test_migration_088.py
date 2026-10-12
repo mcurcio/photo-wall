@@ -10,6 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from psycopg.types.json import Jsonb
+from support.house_time import UTC_HOUSE
 from test_display_identity import _frame
 
 from central.power.model import ChosenFrames, NightOff
@@ -23,10 +24,15 @@ OLD_PROGRAM = {"program_id": "evening", "scene_id": "show", "starts_at": 1000.0,
 
 
 def _snapshot_with_an_admitted_window() -> dict:
-    runtime = Runtime()
+    """A Runtime snapshot as the previous build stored it: two single-window Programs, the first
+    one's window admitted at 1000 and ending at 9000 (its Run's snapshot end)."""
+    runtime = Runtime(house=UTC_HOUSE)
     runtime.set_scene(Scene(scene_id="show", cycle_seconds=30, loop=True, contributions=(
         Contribution(target="frame:hall", source_refs=("library:1",)),)))
+    runtime.activate("show", "evening-window", 1000.0)
     state = runtime.export_state()
+    (run,) = state["runs"].values()
+    run.update(program_id="evening", program_ends_at=9000.0, activation_id=None)
     state["programs"] = {"evening": OLD_PROGRAM, "tomorrow": {**OLD_PROGRAM, "program_id": "tomorrow",
                                                               "starts_at": 90000.0, "ends_at": 99000.0}}
     return state
@@ -34,14 +40,10 @@ def _snapshot_with_an_admitted_window() -> dict:
 
 def test_088_seeds_night_off_with_every_frame_and_ends_todays_programs(registry):
     """Mutation probe (P-no-empty): drop the runtime_state UPDATE -> the old Programs stay in the
-    snapshot (and, once Programs repeat, the snapshot no longer restores)."""
+    snapshot, which no longer restores (a Program is now a repeating rule)."""
     for frame in ("study", "hall", "ba", "b-c", "Attic"):
         _frame(registry, frame)
-    restored = Runtime.restore(_snapshot_with_an_admitted_window())
-    restored.advance(1000.0)                    # the evening window is admitted, ending at 9000
-    snapshot = restored.export_state()
-    (run,) = snapshot["runs"].values()
-    assert run["program_ends_at"] == 9000.0
+    snapshot = _snapshot_with_an_admitted_window()
     with registry.db.transaction() as conn:
         conn.execute("INSERT INTO runtime_state(singleton, revision, snapshot, updated_at) VALUES (TRUE, 7, %s, 0) "
                      "ON CONFLICT (singleton) DO UPDATE SET revision=7, snapshot=EXCLUDED.snapshot",
@@ -63,3 +65,7 @@ def test_088_seeds_night_off_with_every_frame_and_ends_todays_programs(registry)
     (kept,) = state["snapshot"]["runs"].values()
     assert kept["program_ends_at"] == 9000.0    # the admitted window keeps its end
     assert runtime.export_state()["programs"] == {}
+    restored = runtime.advance(2000.0)          # it plays on to its snapshot end, then finishes
+    assert restored.for_target("frame:hall").scene_id == "show"
+    (ended,) = runtime.advance(9030.0).runs
+    assert ended.ended_at == 9010.0             # the cycle in flight at its end (30 s cycles from 1000)

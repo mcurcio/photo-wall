@@ -120,7 +120,7 @@ def test_a_rejected_report_leaves_last_report_at_unchanged(registry):
     newer = first.model_copy(update={"sequence": 2, "observed_at": registry.clock.utc()})
     with pytest.raises(CoordinationError, match="stale_binding"):
         coordinator.readiness(players[0]["player_id"], newer)
-    assert players_by_id(inventory(registry))[players[0]["player_id"]].last_report_at == 1006
+    assert players_by_id(inventory(registry))[players[0]["player_id"]].last_report_at == 1016   # schedule() moved the clock to 1010
 
 
 def test_ages_are_never_negative_after_the_wall_clock_steps_backward(registry):

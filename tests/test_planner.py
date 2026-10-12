@@ -1,6 +1,7 @@
 import hashlib
 
 import pytest
+from support.house_time import UTC_HOUSE, window_program
 from support.key_content_builders import measured
 
 from central.catalog import Candidate, SourcePool
@@ -41,7 +42,7 @@ def binding(frame="left", output="hdmi-1", *, width=1080, height=1920, diagonal=
 
 def runtime(*, cycle=10, contributions=None, children=(), order="newest_first"):
     """One looping Scene; newest first unless named (its order is roadmap 5a's Scene setting)."""
-    instance = Runtime()
+    instance = Runtime(house=UTC_HOUSE)
     instance.set_scene(Scene(
         scene_id="scene", cycle_seconds=cycle, loop=True, children=children,
         selection=SceneSelection(order=order),
@@ -356,20 +357,18 @@ def test_secured_delayed_child_keeps_exact_layer_across_unrelated_activation():
 
 
 def test_secured_future_program_preserves_bytes_while_fresh_plan_revises_root_order():
-    from central.runtime import Program
-
     instance = runtime()
     instance.set_scene(Scene(scene_id="next", cycle_seconds=10, contributions=(
         Contribution(target="frame:left", source_refs=("holiday:1",)),
     )))
-    instance.set_program(Program(program_id="p", scene_id="next", starts_at=10, ends_at=20))
-    first = propose(instance, horizon=15)
+    instance.create_program(window_program("p", "next", 60, 120), 0)
+    first = propose(instance, now=50, horizon=15)
     lock = next(layer for layer in layers(first) if layer.run_id != layers(first)[0].run_id)
     instance.set_scene(Scene(scene_id="overlay", cycle_seconds=30, contributions=(
         Contribution(target="frame:left", kind="black"),
     )))
-    instance.activate("overlay", "overlay", 5)
-    actual = propose(instance, now=11, horizon=4, assets=[candidate("different")],
+    instance.activate("overlay", "overlay", 55)
+    actual = propose(instance, now=61, horizon=4, assets=[candidate("different")],
                      locks={lock.assignment_id: lock})
     replacement = next(layer for layer in layers(actual) if layer.assignment_id == lock.assignment_id)
     assert replacement.variant == lock.variant

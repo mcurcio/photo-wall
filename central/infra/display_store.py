@@ -48,7 +48,7 @@ import logging
 import threading
 import uuid
 from collections.abc import Mapping
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import timedelta
 from typing import Any, Final
 from uuid import UUID
@@ -74,7 +74,6 @@ from central.displays.model import (
     power_status,
     project_output,
     readiness,
-    remaining_seconds,
     serial_usable,
 )
 from central.displays.picture import (
@@ -103,7 +102,6 @@ from central.displays.views import (
     FrameDisplayView,
     FramePictureView,
     FramePowerView,
-    InForceView,
     ModeView,
     PictureCopyRequest,
     PictureCopyResult,
@@ -114,10 +112,10 @@ from central.displays.views import (
     PictureSettingView,
     PowerTestAccepted,
     PowerTestView,
+    in_force_view,
 )
 from central.fleet.node_bus_presence import bus_links_in
-from central.house_time.calculator import day_start, house_date, local_date_time
-from central.house_time.model import HouseTime
+from central.house_time.calculator import day_start, house_date
 from central.infra.house_store import house_time_in
 from central.infra.node_link_store import PgLinkStores
 from central.infra.power_store import power_policy_in
@@ -141,7 +139,6 @@ from contracts.node_output import (
     SettingReport,
     decode_output_document,
     decode_output_report,
-    decode_set_time,
     encode_output_document,
     encode_output_report,
     output_document_key,
@@ -800,32 +797,41 @@ class PgDisplayQueries:
             test=None if live is None else PowerTestView(request_id=live.request_id, power=live.power,
                                                          for_seconds=live.for_seconds, ends_at=live.ends_at),
             result=power_result(test=test, document=document, report=report, now=now),
-            in_force=_in_force_view(report, house, live, now), linked=linked,
+            in_force=in_force_view(report, house, live, now), linked=linked,
             # The link's presence row changed to unlinked when Central's hub last saw the Pi's leaf
             # go: the last time Central heard it. A report time would be the last change the Pi
             # put, hours old on a quiet display.
             last_heard_at=presence["changed_at"] if linked is False else None)
 
 
+@dataclass(frozen=True)
+class FramePowerFacts:
+    """What Central holds about a Frame's display power, read in one transaction: whether it is
+    bound to an Output, its 1b console test, its Output's latest document and the Pi's latest
+    report (None when there is none, or under an older schema major)."""
+    bound: bool
+    test: PowerTest | None
+    document: OutputDocument | None
+    report: OutputReport | None
+
+
+def power_facts_in(conn: Any, frame_id: str) -> FramePowerFacts | None:
+    """The Frame's power facts in the caller's transaction; None for an unknown Frame."""
+    frame = conn.execute(
+        f"SELECT b.player_id, seen.report, w.document, {_TEST_COLUMNS} FROM frames f "  # noqa: S608
+        f"LEFT JOIN bindings b ON b.frame_id=f.id {SEEN_DISPLAY_JOIN} "
+        f"LEFT JOIN output_documents w ON w.player_id=b.player_id AND w.output_id=b.output_id "
+        f"LEFT JOIN power_requests r ON r.frame_id=f.id AND r.reason='{_CONSOLE_TEST}' WHERE f.id=%s",
+        (frame_id,)).fetchone()
+    if frame is None:
+        return None
+    return FramePowerFacts(bound=frame["player_id"] is not None, test=_power_test(frame),
+                           document=_stored_document(frame), report=_stored_report(frame))
+
+
 def _json_bytes(value: Mapping[str, Any]) -> bytes:
     """A wire record stored as JSONB, back to bytes its strict decoder reads."""
     return json.dumps(value, ensure_ascii=False).encode()
-
-
-def _in_force_view(report: OutputReport | None, house: HouseTime, live: PowerTest | None,
-                   now: float) -> InForceView | None:
-    """What the Pi says it carries out (None when it names nothing). A test's count is Central's for
-    its live console test (the Pi reports only on a change, so its own count would stand still),
-    else the Pi's; the set time in force is shown on the house clock."""
-    if report is None or report.in_force is None:
-        return None
-    in_force = report.in_force
-    remaining = in_force.remaining_seconds
-    if live is not None and in_force.request_id == str(live.request_id):
-        remaining = remaining_seconds(live, now)
-    since = None if in_force.since is None else local_date_time(house, decode_set_time(in_force.since))
-    return InForceView(kind=in_force.kind, power=in_force.power, request_id=in_force.request_id,
-                       remaining_seconds=remaining, since=since)
 
 
 class PgDisplayCommands:
@@ -1124,7 +1130,7 @@ def _session_view(session: PictureSession) -> PictureSessionView:
 
 
 __all__ = ["DOCUMENT_STREAM", "OUTPUT_DOCUMENTS_CHANNEL", "POSITION_COLUMNS", "POSITION_FACTS", "REPORT_STREAM", "SEEN_DISPLAY_JOIN",
-           "DisplayDocuments", "DisplayWakes", "OutputReportJudge", "PgDisplayCommands", "PgDisplayQueries",
+           "DisplayDocuments", "DisplayWakes", "FramePowerFacts", "OutputReportJudge", "PgDisplayCommands", "PgDisplayQueries",
            "PgPictureSessions",
            "commit_position", "frame_position", "frame_readiness", "frame_readiness_in", "output_documents",
-           "record_report", "resolve_output"]
+           "power_facts_in", "record_report", "resolve_output"]

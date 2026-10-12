@@ -16,6 +16,7 @@ from itertools import combinations
 
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
+from support.house_time import UTC_HOUSE
 from support.key_content_builders import face, measured
 
 from central.catalog import Candidate, SourcePool
@@ -62,7 +63,7 @@ class FrameSetup:
 
 def scene(frames: dict[str, FrameSetup], *, cycle: float = 30, order="newest_first",
           no_repeat_days: int = 0) -> Runtime:
-    instance = Runtime()
+    instance = Runtime(house=UTC_HOUSE)
     instance.set_scene(Scene(
         scene_id="scene", cycle_seconds=cycle, loop=True,
         selection=SceneSelection(order=order, no_repeat_days=no_repeat_days),
