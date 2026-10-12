@@ -5659,3 +5659,22 @@ Order: (a) merge the iac PR that switches the factory to `central.app:create_app
   DISPLAY_GAMMA)`) and the mat shadow (the Player: an output value times `shade ** (1 /
   DISPLAY_GAMMA)`) use `contracts/node_frame.py` `DISPLAY_GAMMA` (2.2), so the floor's 2 % and a
   shadow's darkness are light on the panel whatever the gamma look. The bench may tune it.
+
+## print-look central lane, slice C3 (implementer, 2026-10-12)
+
+- **`Registry.commit_calibration_trial_in(..., mat)` takes `mat: Mat | None = None`, not a required
+  `mat: Mat`:** five callers outside the slice's files cross the same Save CAS directly
+  (tests/support/position.py `save_position`, tests/test_node_display.py,
+  tests/test_display_changed_readiness.py, tests/test_node_runtime_reconciliation.py and the tests
+  built on `save_position`). `None` keeps the Frame's saved mat (`mat=COALESCE(%s, mat)`), never
+  resets it; Position's trial Save always passes the trial's mat.
+- **"No plan revision is issued for the Frame" is not observable per Frame:** the Coordinator offers
+  a new plan revision every cycle (central/coordination.py, `_presented_from_an_earlier_offer`), so
+  no revision is tied to a Save. The Planner's input from a Frame's Position is `frame_outputs_in`;
+  tests/test_print_look_mat.py proves it equal before and after a mat-only Save, and the saved fit
+  unchanged.
+- **`edit` and `renew` now refuse a body without `mat` (`trial_mat_required`), so every caller must
+  send it:** the console (central/console/src/liveAdjustment.js `payload()`; browser tests that
+  drive it against the real app) and the Linux-only native probe tests/native_display_service_probe.py
+  (run by tests/test_node_display_native.py) send only `calibration`, so they are refused until
+  their owners add `mat`. Not in C3's files; left to the console lane and the probe's owner.

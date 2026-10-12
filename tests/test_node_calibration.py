@@ -9,7 +9,7 @@ from test_node_runtime_reconciliation import rig
 from central.fleet.node_calibration import NodeCalibration
 from central.fleet.node_display import NodeDisplay
 from central.fleet.node_sessions import NodeControlError
-from contracts.models import Calibration, CornersFit, CoverFit
+from contracts.models import Calibration, CornersFit, CoverFit, Mat
 from contracts.node_calibration import candidate_hash, canonical, parse_trial
 from contracts.node_display import (
     DisplayExchange,
@@ -23,6 +23,7 @@ from player.rendering import OutputComposition
 
 SKEWED = CornersFit(corners=((0.1, 0), (1, 0), (1, 1), (0, 1)))   # Corners, top-left moved in
 TURNED = CoverFit(rotation=7)                                      # Cover at a fine angle
+NO_MAT = Mat().model_dump(mode="json")                             # an edit carries the whole draft mat
 
 
 def setup_trial(registry):
@@ -61,6 +62,7 @@ def test_latest_exact_ack_and_atomic_save_retry(registry, monkeypatch):
         operation="edit",
         expected_sequence=1,
         calibration=edited.model_dump(mode="json"),
+        mat=NO_MAT,
     )
     request = replace(request, request_id=uuid4(), sampled_boottime_ms=1500)
     candidate = parse_trial(exchange(request).trial)
@@ -262,12 +264,12 @@ def test_renew_hands_the_draft_to_the_next_trial_in_one_step(registry):
     first_id = __import__("uuid").UUID(first["trial_id"])
     draft = Calibration.model_validate(first["calibration"]).model_copy(update={"fit": TURNED})
     trials.operate("node-f0", first_id, operation="edit", expected_sequence=1,
-                   calibration=draft.model_dump(mode="json"))
+                   calibration=draft.model_dump(mode="json"), mat=NO_MAT)
     with pytest.raises(NodeControlError, match="trial_sequence_conflict"):
         trials.operate("node-f0", first_id, operation="renew", expected_sequence=1,
-                       calibration=draft.model_dump(mode="json"))
+                       calibration=draft.model_dump(mode="json"), mat=NO_MAT)
     second = trials.operate("node-f0", first_id, operation="renew", expected_sequence=2,
-                            calibration=draft.model_dump(mode="json"))
+                            calibration=draft.model_dump(mode="json"), mat=NO_MAT)
     assert second["state"] == "active" and second["trial_id"] != first["trial_id"]
     assert second["generation"] == first["generation"] + 1 and second["sequence"] == 1
     assert Calibration.model_validate(second["calibration"]).fit == TURNED
@@ -282,7 +284,7 @@ def test_renew_hands_the_draft_to_the_next_trial_in_one_step(registry):
     stale = draft.model_copy(update={"revision": draft.revision + 1})
     with pytest.raises(NodeControlError, match="trial_baseline_revision_changed"):
         trials.operate("node-f0", second_id, operation="renew", expected_sequence=1,
-                       calibration=stale.model_dump(mode="json"))
+                       calibration=stale.model_dump(mode="json"), mat=NO_MAT)
     assert trials.operate("node-f0", second_id, operation="status", expected_sequence=1)["state"] == "active"
     trials.operate("node-f0", second_id, operation="end", expected_sequence=1)
     with pytest.raises(NodeControlError, match="trial_baseline_revision_changed"):
@@ -317,7 +319,8 @@ def test_the_operator_routes_begin_at_a_draft_and_renew(registry):
         assert begun.status_code == 200, begun.text
         assert Calibration.model_validate(begun.json()["calibration"]).fit == TURNED
         renewed = client.post(f"{path}/{begun.json()['trial_id']}", headers=headers,
-                              json={"operation": "renew", "expected_sequence": 1, "calibration": draft})
+                              json={"operation": "renew", "expected_sequence": 1, "calibration": draft,
+                                    "mat": NO_MAT})
         assert renewed.status_code == 200, renewed.text
         assert renewed.json()["trial_id"] != begun.json()["trial_id"]
         assert renewed.json()["generation"] == begun.json()["generation"] + 1

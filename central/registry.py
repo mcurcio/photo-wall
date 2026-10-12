@@ -47,6 +47,7 @@ from contracts.models import (
     CoverFit,
     FrameProfile,
     Identifier,
+    Mat,
     Model,
     OutputBinding,
     TargetIdentifier,
@@ -743,11 +744,14 @@ class Registry:
     def commit_calibration_trial_in(self, conn, *, frame_id: str, player_id: str,
             authority_epoch: int, output_id: str, binding_generation: int,
             config_revision: int, calibration_revision: int,
-            calibration: Calibration) -> Calibration:
+            calibration: Calibration, mat: Mat | None = None) -> Calibration:
         """Registry-owned Save CAS inside the Trial owner's existing transaction.
 
         Caller holds Coordination→Runtime then Fleet/session locks. This method
-        owns persistent Frame calibration only; it never interprets trial evidence.
+        owns the persistent Frame calibration and mat (print look: the mat rides the binding
+        beside the calibration and is saved with it; it never changes the Frame output); `mat`
+        None keeps the saved one (a Position commit with no mat draft). It never interprets
+        trial evidence.
         """
         if not holds_runtime_locks_in(conn):
             raise RegistryError("calibration_runtime_locks_required")
@@ -765,9 +769,10 @@ class Registry:
             raise RegistryError("calibration_revision_conflict")
         committed = Calibration.model_validate(calibration.model_dump()).model_copy(
             update={"revision": current.revision + 1})
-        conn.execute("UPDATE frames SET calibration=%s,"
+        conn.execute("UPDATE frames SET calibration=%s,mat=COALESCE(%s,mat),"
                      "configuration_revision=configuration_revision+1 WHERE id=%s",
-                     (Jsonb(committed.model_dump(mode="json")), frame_id))
+                     (Jsonb(committed.model_dump(mode="json")),
+                      None if mat is None else Jsonb(mat.model_dump(mode="json")), frame_id))
         commit_position(conn, frame_id)
         self._audit(conn, "calibration_trial_commit", frame_id)
         return committed
@@ -793,7 +798,8 @@ class Registry:
         bindings = [OutputBinding(output_id=r["output_id"], frame_id=r["id"], generation=r["generation"],
                               configuration_revision=r["configuration_revision"],
                               profile=FrameProfile.model_validate(r["profile"]),
-                              calibration=Calibration.model_validate(r["calibration"]))
+                              calibration=Calibration.model_validate(r["calibration"]),
+                              mat=Mat.model_validate(r["mat"]))
                 for r in rows]
         return {"bindings": bindings, "execution_bindings": [binding for binding, row in
                 zip(bindings, rows, strict=True) if frame_readiness(row) is Readiness.READY]}
@@ -809,7 +815,7 @@ class Registry:
         outputs = conn.execute("SELECT player_id,output_id,observation FROM outputs "
                                "ORDER BY player_id,output_id").fetchall()
         frames = conn.execute("SELECT f.id,f.name,f.surface_id,f.x_mm,f.y_mm,f.width_mm,f.height_mm,f.profile,"  # noqa: S608
-                              "f.calibration,f.configuration_revision,"
+                              "f.calibration,f.mat,f.configuration_revision,"
                               f"b.player_id,b.output_id,{POSITION_COLUMNS} FROM frames f LEFT JOIN bindings b "
                               f"ON b.frame_id=f.id {SEEN_DISPLAY_JOIN} ORDER BY f.id").fetchall()
         bound_player_ids = {frame["player_id"] for frame in frames if frame["player_id"] is not None}

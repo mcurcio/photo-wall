@@ -16,6 +16,13 @@ trial at once, so the Node is handed the draft on its next exchange, with no gap
 the saved calibration and no gap another console could begin in. Both refuse a draft whose
 base is not the saved revision (`trial_baseline_revision_changed`), as `edit` does, so a
 save made elsewhere is never overwritten across trials.
+
+The print look adds the Frame's mat (contracts.models.Mat: its depth and lights) to the trial
+beside the calibration: a trial begins at the saved mat (frames.mat) unless given a draft one,
+`edit` and `renew` carry the whole draft mat (`trial_mat_required` without it,
+`trial_mat_invalid` for one the contract refuses), the candidate hash covers it, so the
+Player's presented tag proves the mat too, and Save writes it to the binding with the
+calibration. The mat never changes the Frame output.
 The only persistence write crosses Registry's in-transaction CAS port. Failed Save
 rolls back its row lock and all writes; it cannot strand a durable frozen trial.
 
@@ -28,12 +35,19 @@ from __future__ import annotations
 from uuid import UUID, uuid4
 
 from psycopg.types.json import Jsonb
+from pydantic import ValidationError
 
 from central.fleet.node_sessions import NodeControlError
 from central.live_session import Lease, StaleSequence, next_sequence, touched
 from central.transaction_locks import acquire_runtime_locks
-from contracts.models import Calibration
-from contracts.node_calibration import TrialCandidate, candidate_hash, canonical, encode_trial
+from contracts.models import Calibration, Mat
+from contracts.node_calibration import (
+    MAX_MAT_BYTES,
+    TrialCandidate,
+    candidate_hash,
+    canonical,
+    encode_trial,
+)
 from contracts.node_display import document, surface_from
 
 
@@ -60,10 +74,12 @@ class NodeCalibration:
             if key not in ("producer_id",)
         }
 
-    def begin(self, frame_id: str, calibration: dict | None = None) -> dict:
+    def begin(self, frame_id: str, calibration: dict | None = None, mat: dict | None = None) -> dict:
         """A new trial for the Frame, at the saved calibration or at `calibration`, the
-        operator's draft whose `revision` is the saved revision it was made from."""
+        operator's draft whose `revision` is the saved revision it was made from; and at the
+        saved mat (frames.mat) or at `mat`, the operator's draft mat."""
         draft = None if calibration is None else Calibration.model_validate(calibration)
+        draft_mat = None if mat is None else _mat(mat)
         with self.sessions.db.transaction() as conn:
             acquire_runtime_locks(conn)
             context = self.display.current_frame_in(conn, frame_id)
@@ -78,15 +94,18 @@ class NodeCalibration:
                 (frame_id,),
             ).fetchone():
                 raise NodeControlError("trial_already_active", 409)
-            return self._open(conn, frame_id, context, draft, now)
+            return self._open(conn, frame_id, context, draft, draft_mat, now)
 
-    def _open(self, conn, frame_id: str, context, draft: Calibration | None, now: float) -> dict:
+    def _open(self, conn, frame_id: str, context, draft: Calibration | None, draft_mat: Mat | None,
+              now: float) -> dict:
         """Insert the Frame's next-generation active trial (the caller holds the locks and has
-        ended any active one): at the saved calibration, or at `draft` if its base is it."""
+        ended any active one): at the saved calibration, or at `draft` if its base is it; at the
+        saved mat, or at `draft_mat`."""
         saved = context.binding.calibration
         if draft is not None and draft.revision != saved.revision:
             raise NodeControlError("trial_baseline_revision_changed", 409)
         calibration = saved if draft is None else draft
+        mat = context.binding.mat if draft_mat is None else draft_mat
         generation = conn.execute(
             "SELECT COALESCE(max(generation),0)+1 AS n "
             "FROM node_calibration_trials WHERE frame_id=%s",
@@ -95,11 +114,11 @@ class NodeCalibration:
         trial_id = uuid4()
         baseline = context.request.admitted
         payload = canonical(calibration.model_dump(mode="json"))
-        sha = candidate_hash(trial_id, generation, 1, baseline, payload)
+        sha = candidate_hash(trial_id, generation, 1, baseline, payload, _mat_json(mat))
         row = conn.execute(
             "INSERT INTO node_calibration_trials(trial_id,frame_id,generation,player_id,"
-            "authority_epoch,producer_id,baseline,calibration_revision,sequence,calibration,candidate_sha256,"
-            "state,created_at,touched_at,expires_at,hard_expires_at) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,1,%s,%s,"
+            "authority_epoch,producer_id,baseline,calibration_revision,sequence,calibration,mat,candidate_sha256,"
+            "state,created_at,touched_at,expires_at,hard_expires_at) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,1,%s,%s,%s,"
             "'active',%s,%s,%s,%s) RETURNING *",
             (
                 trial_id,
@@ -111,6 +130,7 @@ class NodeCalibration:
                 Jsonb(document(baseline)),
                 calibration.revision,
                 Jsonb(calibration.model_dump(mode="json")),
+                Jsonb(mat.model_dump(mode="json")),
                 sha,
                 now,
                 now,
@@ -128,7 +148,10 @@ class NodeCalibration:
         operation: str,
         expected_sequence: int,
         calibration: dict | None = None,
+        mat: dict | None = None,
     ) -> dict:
+        """One operation on the trial; `edit` and `renew` carry the whole draft: `calibration`
+        and `mat`."""
         if operation not in ("edit", "save", "end", "status", "keepalive", "renew"):
             raise NodeControlError("trial_operation_invalid", 422)
         if type(expected_sequence) is not int or expected_sequence < 1:
@@ -136,6 +159,11 @@ class NodeCalibration:
         proposed = (
             Calibration.model_validate(calibration) if operation in ("edit", "renew") else None
         )
+        proposed_mat = None
+        if operation in ("edit", "renew"):
+            if mat is None:
+                raise NodeControlError("trial_mat_required", 422)
+            proposed_mat = _mat(mat)
         with self.sessions.db.transaction() as conn:
             acquire_runtime_locks(conn)
             terminal = conn.execute(
@@ -196,7 +224,7 @@ class NodeCalibration:
                 conn.execute(
                     "UPDATE node_calibration_trials SET state='ended' WHERE trial_id=%s", (trial_id,)
                 )
-                return self._open(conn, frame_id, context, proposed, now)
+                return self._open(conn, frame_id, context, proposed, proposed_mat, now)
             if operation == "end":
                 row = conn.execute(
                     "UPDATE node_calibration_trials SET state='ended' WHERE trial_id=%s RETURNING *",
@@ -211,14 +239,16 @@ class NodeCalibration:
                     sequence,
                     surface_from(row["baseline"]),
                     canonical(proposed.model_dump(mode="json")),
+                    _mat_json(proposed_mat),
                 )
                 row = conn.execute(
-                    "UPDATE node_calibration_trials SET sequence=%s,calibration=%s,candidate_sha256=%s,"
+                    "UPDATE node_calibration_trials SET sequence=%s,calibration=%s,mat=%s,candidate_sha256=%s,"
                     "touched_at=%s,expires_at=%s,presented_sequence=NULL,presented_sha256=NULL,"
                     "presentation_request_id=NULL,presented_at=NULL WHERE trial_id=%s RETURNING *",
                     (
                         sequence,
                         Jsonb(proposed.model_dump(mode="json")),
+                        Jsonb(proposed_mat.model_dump(mode="json")),
                         sha,
                         now,
                         self._touched(row, now),
@@ -245,11 +275,12 @@ class NodeCalibration:
                     config_revision=baseline.config_revision,
                     calibration_revision=row["calibration_revision"],
                     calibration=Calibration.model_validate(row["calibration"]),
+                    mat=Mat.model_validate(row["mat"]),
                 )
                 row = conn.execute(
-                    "UPDATE node_calibration_trials SET state='saved',saved_calibration=%s "
+                    "UPDATE node_calibration_trials SET state='saved',saved_calibration=%s,saved_mat=%s "
                     "WHERE trial_id=%s RETURNING *",
-                    (Jsonb(committed.model_dump(mode="json")), trial_id),
+                    (Jsonb(committed.model_dump(mode="json")), Jsonb(row["mat"]), trial_id),
                 ).fetchone()
             return self._view(row)
 
@@ -310,8 +341,26 @@ class NodeCalibration:
             row["candidate_sha256"],
             request.sampled_boottime_ms + max(1, int((row["expires_at"] - now) * 1000)),
             request.sampled_boottime_ms + max(1, int((row["hard_expires_at"] - now) * 1000)),
+            mat_json=canonical(row["mat"]),
         )
         return encode_trial(candidate)
+
+
+def _mat(value: object) -> Mat:
+    """The operator's draft mat; NodeControlError("trial_mat_invalid", 422) for one the contract
+    refuses (contracts.models.Mat's ranges, or past the trial's MAX_MAT_BYTES)."""
+    try:
+        mat = Mat.model_validate(value)
+    except ValidationError:
+        raise NodeControlError("trial_mat_invalid", 422) from None
+    if len(_mat_json(mat).encode()) > MAX_MAT_BYTES:
+        raise NodeControlError("trial_mat_invalid", 422)
+    return mat
+
+
+def _mat_json(mat: Mat) -> str:
+    """The mat as the trial carries and hashes it (contracts.node_calibration `mat_json`)."""
+    return canonical(mat.model_dump(mode="json"))
 
 
 def _lease(row) -> Lease:
