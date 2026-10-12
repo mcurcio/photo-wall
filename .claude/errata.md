@@ -5301,3 +5301,13 @@ Order: (a) merge the iac PR that switches the factory to `central.app:create_app
 - **The photo sheet says which copy plays:** `PhotoFacts.frames` (each Frame's need and whether the measured preview holds it); an unedited photo's original shows Immich's own size.
 - **Catalog baselines** for the new and changed FitBoard, FrameFitRow and WallStrip stories are arm64 renders (`PHOTO_WALL_CATALOG_PLATFORM=linux/arm64`; this Mac cannot run the amd64 image); a full `--check` of all 456 there passed. CI's amd64 leg confirms them.
 - **NOT RUN by this agent: the designer agents' adversarial review of the new screenshots** (owner item 5). This fix agent has no tool to start other agents; the orchestrator should send them over `docs/evidence/photo5a/followup-*` against `pre-review-*`.
+
+## E-PW-T-1 (Power and the week, slice T, 2026-10-12) · feat/power-and-the-week
+- **Import-linter contract "Sun times and the zone database are Central's" cannot list `media`.** The slice page T.md
+  ("Dependencies") forbids `astral` from `media`, but the media worker imports `central.media_repository` ->
+  `central.planner` -> `central.runtime`, and Runtime works out Program windows with the house-time calculator
+  (which imports astral) — the same page says the worker "builds Runtime". Resolution taken (not a stop): the
+  contract's sources are `contracts, appliance, player, uplink, nodeapi` (the Pi and the wire), and its comment says
+  why the media worker (a Central process) is not listed.
+- **Migration 088 sorts the seeded Frame ids with `COLLATE "C"`.** `ChosenFrames.frame_ids` must be sorted as Python
+  sorts; the page's `ORDER BY id` follows the database's collation, which may order `-` and digits differently.
