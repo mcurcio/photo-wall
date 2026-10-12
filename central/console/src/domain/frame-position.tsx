@@ -4,7 +4,7 @@ import type * as React from "react";
 import { Note } from "../patterns/fact-row";
 import { NudgePad } from "../patterns/nudge-pad";
 import { ProblemCard } from "../patterns/problem-card";
-import { type Point, QuadEditor } from "../patterns/quad-editor";
+import { moveCorners, type Point, QuadEditor, type QuadPart } from "../patterns/quad-editor";
 import { pixelSize } from "../timeWords.js";
 import { QUARTER_TURNS } from "../useDraft.js";
 import { Button } from "../ui/button";
@@ -39,6 +39,7 @@ export interface FramePositionProps {
 type Mode = "cover" | "corners";
 
 const CORNERS = ["Top-left", "Top-right", "Bottom-right", "Bottom-left"] as const;
+const EDGES = ["Top", "Right", "Bottom", "Left"] as const;
 const STEPS = ["1", "10", "50"] as const;
 const FULL_SCREEN: Point[] = [[0, 0], [1, 0], [1, 1], [0, 1]];
 const EDGE = "The picture cannot go past the edge of the screen: move a corner inward first.";
@@ -59,12 +60,25 @@ const CHECK_AGAIN = "If the picture sits right on the Display, press Done to kee
 
 const round = (value: number) => Math.round(value * 10) / 10;
 const inside = (value: number) => value >= 0 && value <= 1;
+// What to move, as the Move list's value: "all", or a part's kind and index ("edge-0").
+const partValue = (part: QuadPart | null) => (part === null ? "all" : `${part.kind}-${part.index}`);
+const valuePart = (value: string): QuadPart | null => {
+  const [kind, index] = value.split("-");
+  return kind === "corner" || kind === "edge" ? { kind, index: Number(index) } : null;
+};
+const partName = (part: QuadPart) =>
+  part.kind === "corner" ? `${CORNERS[part.index]} corner` : `${EDGES[part.index]} edge`;
+const PARTS: QuadPart[] = [
+  ...CORNERS.map((_, index) => ({ kind: "corner", index }) as const),
+  ...EDGES.map((_, index) => ({ kind: "edge", index }) as const),
+];
 
 /**
  * The Frame page's Position tab: where the picture sits on the Display. **Fit**: Cover (the
  * default, owner 2026-10-10 q1) keeps the picture's shape, turned to any angle, and covers the
- * four corners; Corners, an explicit choice, stretches it exactly onto them. Drag a corner on the
- * drawing, or choose what to move (the whole picture or one corner) and press the arrows (or the
+ * four corners; Corners, an explicit choice, stretches it exactly onto them. Drag a corner or an
+ * edge (both its corners together) on the drawing, or choose what to move (the whole picture, one
+ * corner or one edge) and press the arrows (or the
  * arrow keys on the drawing) in steps of 1, 10 or 50 pixels; turn it a quarter at a time, or in
  * Cover to any angle; reset. Each corner's pixels are under **Exact values**. Every change is sent
  * to the Pi as it is made (liveAdjustment.js), and Done keeps it. A Frame whose Position must be
@@ -74,7 +88,7 @@ const inside = (value: number) => value >= 0 && value <= 1;
 export function FramePosition({ adjustment, size: reported, piHref, readiness, whatFits }: FramePositionProps) {
   const size = reported ?? FALLBACK_SIZE;
   const checkAgain = readiness === "position-needed" || readiness === "display-changed";
-  const [selected, setSelected] = useState<number | null>(null);
+  const [selected, setSelected] = useState<QuadPart | null>(null);
   const [step, setStep] = useState<(typeof STEPS)[number]>("10");
   const [problem, setProblem] = useState<string | null>(null);
   const { fit } = adjustment.draft;
@@ -92,8 +106,7 @@ export function FramePosition({ adjustment, size: reported, piHref, readiness, w
   const nudge = (dx: number, dy: number) => {
     const moveX = (dx * Number(step)) / size.width;
     const moveY = (dy * Number(step)) / size.height;
-    setCorners(corners.map(([x, y], index) =>
-      selected === null || selected === index ? [x + moveX, y + moveY] as Point : [x, y] as Point));
+    setCorners(moveCorners(corners, selected, moveX, moveY));
   };
   const setPixel = (index: number, axis: 0 | 1, raw: string) => {
     const pixels = Number(raw);
@@ -109,7 +122,7 @@ export function FramePosition({ adjustment, size: reported, piHref, readiness, w
     }
     apply(adjustment.change({ rotation: round(degrees) }));
   };
-  const subject = selected === null ? "the whole picture" : `the ${CORNERS[selected].toLowerCase()} corner`;
+  const subject = selected === null ? "the whole picture" : `the ${partName(selected).toLowerCase()}`;
 
   return (
     <Section title="Position">
@@ -121,7 +134,7 @@ export function FramePosition({ adjustment, size: reported, piHref, readiness, w
             onChange={(mode) => apply(adjustment.change({ mode }))} />
         </Field>
         <Note>
-          Drag a corner, or choose what to move and use the arrows. Each change is sent to the Pi
+          Drag a corner or an edge, or choose what to move and use the arrows. Each change is sent to the Pi
           as you make it; press Done to keep it.
         </Note>
         <QuadEditor
@@ -130,7 +143,7 @@ export function FramePosition({ adjustment, size: reported, piHref, readiness, w
           aspect={size.width / size.height}
           selected={selected}
           onSelect={setSelected}
-          onCorner={(index, point) => setCorners(corners.map((corner, at) => (at === index ? point : corner)))}
+          onCorners={setCorners}
           onArrow={nudge}
         />
         {problem !== null && (
@@ -146,10 +159,10 @@ export function FramePosition({ adjustment, size: reported, piHref, readiness, w
         <Inline label="Nudge">
           <Field label="Move">
             <Select
-              value={selected === null ? "all" : String(selected)}
+              value={partValue(selected)}
               options={[{ value: "all", label: "Whole picture" },
-                ...CORNERS.map((name, index) => ({ value: String(index), label: `${name} corner` }))]}
-              onChange={(value) => setSelected(value === "all" ? null : Number(value))}
+                ...PARTS.map((part) => ({ value: partValue(part), label: partName(part) }))]}
+              onChange={(value) => setSelected(valuePart(value))}
             />
           </Field>
           <SegmentedControl
