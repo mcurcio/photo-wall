@@ -584,18 +584,20 @@ def test_a_key_the_nodes_table_lacks_is_never_sent_and_written_once_a_release_li
             assert (await bed.documents(("show", "layout"))).keys() == {"show"}
 
             # A release that lists `layout` re-attaches (a new birth); Central's next reconcile writes it.
+            # That reconcile may be one an earlier birth started, once the new table is applied, so the
+            # write and the new birth's record are each awaited, in no order between them.
             session.stop()
             session = bed.session(listing, DISPLAY_NEXT)
 
             async def written():
                 held = await bed.documents(("show", "layout"))
-                return held if held.keys() == {"show", "layout"} else None
-            held = await until(written, 20, "Central writes the newly listed key")
+                births = [json.loads(row["data"]) for row in bed.store.records(DISPLAY_STATE)
+                          if row["subject"].endswith(".birth")]
+                born = bool(births) and births[-1]["version"] == DISPLAY_NEXT.version
+                return held if born and held.keys() == {"show", "layout"} else None
+            held = await until(written, 20, "Central writes the newly listed key and records the new birth")
             assert {key: value[:2] for key, value in held.items()} == {
                 "show": (b"show-1", CENTRAL_WRITER), "layout": (b"layout-1", CENTRAL_WRITER)}
-            births = [json.loads(row["data"]) for row in bed.store.records(DISPLAY_STATE)
-                      if row["subject"].endswith(".birth")]
-            assert births[-1]["version"] == DISPLAY_NEXT.version
 
     asyncio.run(run())
 
