@@ -986,11 +986,10 @@ def operator_action(action: str):
             "cycle_seconds": SCENE_CYCLE_SECONDS, "selection": {"crop_limit": DEMO_CROP_LIMIT},
             "contributions": [{"target": "frame:" + frame, "kind": "media", "source_refs": ["demo:1"]}
                               for frame in frames]})
-        now = time.time()
-        program = dict(program_id="demo", scene_id="demo", starts_at=now + 12,
-                       ends_at=now + (100 if expected == 1 else 600))
-        request("PUT", "/v1/operator/programs/demo", program)
-        result = dict(program=program, frames=frames, player_count=len(inventory["players"]))
+        # The Default Scene plays wherever no Schedule does (Power and the week): the wall plays
+        # it from now on, until it is changed; nothing ends it during the demo.
+        request("PUT", "/v1/operator/default-scene", {"scene_id": "demo"})
+        result = dict(default_scene="demo", frames=frames, player_count=len(inventory["players"]))
         write_json(Path("/control/run.json"), result)
         return result
     if action != "snapshot":
@@ -1090,12 +1089,15 @@ def rejoined_player_ready(old, report, rejoined_at):
 
 
 def operator_status(method: str, path: str) -> int:
-    """The status each operator request of the demo expects (central/photo_library_routes.py)."""
+    """The status each operator request of the demo expects (central/photo_library_routes.py,
+    central/program_routes.py)."""
     if method == "POST" and path in ("/v1/operator/frames", "/v1/operator/library/connections",
                                      "/v1/operator/photo-drafts"):
         return 201
     if method == "POST" and path.endswith("/checks"):
         return 202
+    if method == "PUT" and path == "/v1/operator/default-scene":
+        return 204
     return 200
 
 
@@ -1470,7 +1472,6 @@ def fault_sequence(host, evidence, save, segments):
     run = FaultRun(host, evidence, save)
     for segment in segments:
         snapshot, reports = FAULT_SEGMENTS[segment](run)
-    require(time.time() < evidence["run"]["program"]["ends_at"], "run_ended_before_faults_completed")
     run.phases["network_final"] = host.probe()
     run.phases["final_checks"] = baseline_checks(snapshot, reports)
     save()
