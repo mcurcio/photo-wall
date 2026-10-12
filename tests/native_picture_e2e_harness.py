@@ -20,6 +20,24 @@ that tints only the Output's bottom-right quarter, which no sample reads.
    inside the opening equal `final_pixel` of the operations the controller computed for that
    document; outside every opening they stay exactly black although contrast below 100 lifts black
    (the mask is last).
+2. neutral_is_v4 (print look, 2026-10-12, P3): a v5 document whose software group is neutral,
+   print look included, on a binding whose Mat is Mat(): presented, and the pixels equal picture
+   operations v4's formula (written out here, not player/geometry.py's).
+3. tracer_black_floor_and_one_light (the design's tracer): a document with software black floor
+   2 % (black_floor_tenths 20) and all else neutral, on a binding whose Mat is 2 mm deep with one
+   light from the wall's up (steep 45, no softness, strength 1.0, 6500 K): presented, and the
+   pixels equal `final_pixel` with the floor 0.02 ** (1 / 2.2) (worked here from the share, so a
+   controller that compiled the floor another way fails) and `mat_shade`'s shade, including the
+   point 1 mm below the picture's top edge, in the light's shadow.
+4. lut_leg_waits_for_the_lut (the tracer's second leg): a document naming a LUT (a fixture table)
+   at amount 80. The Player has no Central here: its PlayerLuts is fed by this harness (the
+   Player holds the fixture bytes once a release file appears, as the service does after its
+   digest-checked fetch). Before the release the report's presented change stays below the
+   document's and the pixels are the sliders-only reference; after it the presented change
+   reaches the document's and the pixels are the reference with the LUT.
+
+The Player child reads the binding's Mat from MAT_FILE (absent: Mat()) on every present, so the
+harness moves the Frame's mat as Central would move the binding.
 """
 import mmap
 import os
@@ -48,6 +66,11 @@ OPENING = ((.2, .2), (.8, .25), (.75, .8), (.25, .75))
 ROTATION = 7.0
 TOLERANCE = 0.02            # the GL reference's 0.015 plus the framebuffer's 8-bit rounding
 PICTURE_CHANGE = 3
+PROFILE = dict(width_px=1600, height_px=900, diagonal_inches=10)
+MAT_FILE = pathlib.Path("/tmp/pw-picture-e2e-mat.json")             # the binding's Mat, for the Player
+LUT_FILE = pathlib.Path("/tmp/pw-picture-e2e-lut.bin")              # the fixture LUT's bytes
+LUT_RELEASE = pathlib.Path("/tmp/pw-picture-e2e-lut-release")       # present: the Player holds them
+LUT_PROFILE_SHA256, LUT_RECIPE = "ef" * 32, "lut33-perceptual-relcol-bpc-1"
 PLAYER_ENV = {"XDG_RUNTIME_DIR": str(ROOT), "WAYLAND_DISPLAY": SOCKET, "GDK_BACKEND": "wayland",
               "LIBGL_ALWAYS_SOFTWARE": "1", "PYOPENGL_PLATFORM": "egl", "GSETTINGS_BACKEND": "memory",
               "PHOTO_WALL_DISPLAY_HOST": "1", "HOME": "/tmp/pw-picture-e2e-home"}
@@ -74,27 +97,42 @@ def player() -> None:
 
     from gi.repository import GLib
 
-    from contracts.models import Calibration, CoverFit, FrameProfile, Layer, OutputBinding, Variant
+    from contracts.lut import LutRef
+    from contracts.models import (
+        Calibration,
+        CoverFit,
+        FrameProfile,
+        Layer,
+        Mat,
+        OutputBinding,
+        Variant,
+    )
     from contracts.photo_crop import CENTRED
+    from player.luts import PlayerLuts
     from player.native import NativeOutput, NativeRenderer
     from player.rendering import LocalLayer, OutputComposition
 
     payload = PHOTO.read_bytes()
     variant = Variant(asset_id="asset-" + hashlib.sha256(payload).hexdigest()[:16], recipe_id="e" * 64, sha256=hashlib.sha256(payload).hexdigest(), size=len(payload),
                       media_type="image/png", width=64, height=48)
-    binding = OutputBinding(output_id=OUTPUT, frame_id="frame", generation=1,
-                            profile=FrameProfile(width_px=1600, height_px=900, diagonal_inches=10))
+    binding = OutputBinding(output_id=OUTPUT, frame_id="frame", generation=1, profile=FrameProfile(**PROFILE))
     layer = LocalLayer(Layer(assignment_id="grey", run_id="run", output_id=OUTPUT, frame_id="frame",
                              binding_generation=1, start=0, end=10**9, media_origin=0, variant=variant,
                              crop=CENTRED),
                        PHOTO, 0.0, 1.0)
-    shown = OutputComposition(binding, Calibration(fit=CoverFit(corners=OPENING, rotation=ROTATION)), (layer,))
-    native = NativeRenderer((NativeOutput(OUTPUT, "photo-wall-headless", WIDTH_PX, HEIGHT_PX),))
+    calibration = Calibration(fit=CoverFit(corners=OPENING, rotation=ROTATION))
+    luts = PlayerLuts()
+    native = NativeRenderer((NativeOutput(OUTPUT, "photo-wall-headless", WIDTH_PX, HEIGHT_PX),), luts=luts)
     native.set_unbound_outputs((), None)
     native.set_identify_output(None)        # as player/service.py does: no identify banner
     context = GLib.MainContext.default()
     last = None
     while True:
+        mat = Mat.model_validate_json(MAT_FILE.read_text()) if MAT_FILE.exists() else Mat()
+        shown = OutputComposition(binding.model_copy(update={"mat": mat}), calibration, (layer,))
+        if LUT_RELEASE.exists() and luts.wanted():
+            luts.hold(LutRef(LUT_PROFILE_SHA256, LUT_RECIPE), LUT_FILE.read_bytes())
+            print("PLAYER lut held", flush=True)
         native.prepare(layer)
         status = native.present(shown).status
         if status != last:
@@ -174,15 +212,20 @@ def capture() -> tuple[int, int, bytes]:
         display.disconnect()
 
 
-def compare(operations) -> tuple[int, int]:
+def grey_linear() -> tuple[float, float, float]:
+    from player.geometry import decode_channel
+
+    return (decode_channel(GREY / 255),) * 3
+
+
+def compare(operations, *, reference=None) -> tuple[int, int]:
     """Every sampled pixel clear of the opening's edges equals the reference: inside, the grey
-    through `final_pixel` with `operations`; outside, exactly black. The (inside, outside) counts;
-    AssertionError at the first that differs."""
-    from player.geometry import decode_channel, final_pixel, inside_opening
+    through `final_pixel` with `operations` (or `reference(x, y)`, an RGB, when given); outside,
+    exactly black. The (inside, outside) counts; AssertionError at the first that differs."""
+    from player.geometry import final_pixel, inside_opening
 
     width, height, data = capture()
-    linear = (decode_channel(GREY / 255),) * 3
-    expected_inside = final_pixel(linear, operations, inside=True)[:3]
+    flat = final_pixel(grey_linear(), operations, inside=True)[:3] if reference is None else None
     counts = [0, 0]
     for j in range(4, height, 9):
         for i in range(4, width, 9):
@@ -196,6 +239,7 @@ def compare(operations) -> tuple[int, int]:
             offset = (j * width + i) * 4
             blue, green, red = data[offset:offset + 3]
             if near.pop():
+                expected_inside = flat if reference is None else reference(x, y)
                 actual = (red / 255, green / 255, blue / 255)
                 assert max(abs(a - e) for a, e in zip(actual, expected_inside, strict=True)) <= TOLERANCE, (
                     "inside", i, j, actual, expected_inside)
@@ -206,13 +250,13 @@ def compare(operations) -> tuple[int, int]:
     return counts[0], counts[1]
 
 
-def await_compare(operations, drain, seconds: float = 8.0) -> tuple[int, int]:
+def await_compare(operations, drain, seconds: float = 8.0, *, reference=None) -> tuple[int, int]:
     """`compare` until it holds or `seconds` pass, draining the shell's events between tries."""
     end = time.monotonic() + seconds
     while True:
         drain()
         try:
-            return compare(operations)
+            return compare(operations, reference=reference)
         except AssertionError:
             if time.monotonic() >= end:
                 print(f"CAPTURED {histogram()}", flush=True)
@@ -394,6 +438,23 @@ def main() -> None:
         print(f"ADJUSTED inside={inside} outside={outside}", flush=True)
         assert inside > 300 and outside > 1000, (inside, outside)
         print("PASS a_picture_document_changes_the_pixels_and_comes_back_presented", flush=True)
+
+        def send(change: int, software) -> None:
+            """The document as it crosses the wire for HDMI-A-1, retargeted at the headless Output."""
+            controller.document(OUTPUT, replace(decode_picture_document(encode_picture_document(
+                PictureDocument("HDMI-A-1", change, {}, software))), output_id=OUTPUT))
+
+        def presented(change: int, seconds: float = 15.0):
+            end = time.monotonic() + seconds
+            while True:
+                report = reports.latest.get(OUTPUT)
+                if report is not None and report.presented_change == change:
+                    return report
+                assert time.monotonic() < end, ("presented_change", change, report)
+                drain()
+                time.sleep(0.01)
+
+        print_look_cases(send, presented, drain, reports, SoftwarePicture)
     except BaseException:
         player_log.flush()
         print("PLAYER LOG:\n" + pathlib.Path("/tmp/pw-picture-e2e-player.log").read_text()[-4000:], flush=True)
@@ -409,6 +470,123 @@ def main() -> None:
             weston.wait(timeout=3)
         except subprocess.TimeoutExpired:
             weston.kill()
+
+
+# --- the print look (P3): the design's tracer, end to end ------------------------------------------
+
+def v4_pixel(linear, operations) -> tuple[float, float, float]:
+    """Picture operations v4's final pass as it shipped (1c), written out: the oracle for "neutral
+    is today"."""
+    def encode(value: float) -> float:
+        value = min(1.0, max(0.0, value))
+        return 12.92 * value if value <= .0031308 else 1.055 * value ** (1 / 2.4) - .055
+    pixel = []
+    for value, multiplier in zip(linear, operations.rgb_multipliers, strict=True):
+        value = min(1.0, max(0.0, value * multiplier * operations.light_factor))
+        value = (encode(value) - .5) * operations.contrast_slope + .5
+        pixel.append(min(1.0, max(0.0, value) ** operations.gamma_exponent))
+    return tuple(pixel)
+
+
+def lut_fixture() -> bytes:
+    """A warm table (contracts/lut.py layout): red kept, green 85 %, blue 60 %."""
+    from contracts.lut import LUT_BYTES, LUT_GRID, lut_offset
+
+    body = bytearray(LUT_BYTES)
+    for r in range(LUT_GRID):
+        for g in range(LUT_GRID):
+            for b in range(LUT_GRID):
+                offset = lut_offset(r, g, b)
+                body[offset:offset + 3] = bytes((round(r * 255 / (LUT_GRID - 1)),
+                                                 round(g * 255 / (LUT_GRID - 1) * .85),
+                                                 round(b * 255 / (LUT_GRID - 1) * .6)))
+    return bytes(body)
+
+
+def print_look_cases(send, presented, drain, reports, SoftwarePicture) -> None:
+    from contracts.lut import LutRef
+    from contracts.models import CoverFit, FrameProfile, Light, Mat
+    from contracts.node_frame import LutMix, PictureOperations
+    from player.geometry import final_pixel, homography, mat_shade, mat_shadow, transform
+
+    fit = CoverFit(corners=OPENING, rotation=ROTATION)
+    profile = FrameProfile(**PROFILE)
+    neutral = SoftwarePicture(100, 100, 6500, 22)
+
+    # 2. neutral_is_v4
+    MAT_FILE.unlink(missing_ok=True)
+    send(4, neutral)
+    presented(4)
+    operations = PictureOperations(OUTPUT, 4, (1.0, 1.0, 1.0), 1.0, 1.0, 1.0)
+    v4 = v4_pixel(grey_linear(), operations)
+    inside, outside = await_compare(operations, drain, reference=lambda _x, _y: v4)
+    print(f"NEUTRAL_V4 inside={inside} outside={outside}", flush=True)
+    assert inside > 300 and outside > 1000, (inside, outside)
+    print("PASS neutral_is_v4", flush=True)
+
+    # 3. tracer_black_floor_and_one_light
+    mat = Mat(depth_mm=2, lights=(Light(from_degrees=0, steep_degrees=45, softness_degrees=0,
+                                        strength_tenths=10, colour_kelvin=6500),))
+    MAT_FILE.write_text(mat.model_dump_json())
+    MAT_FILE.chmod(0o644)
+    floored = SoftwarePicture(100, 100, 6500, 22, black_floor_tenths=20)
+    send(5, floored)
+    report = presented(5)
+    expected = PictureOperations(OUTPUT, 5, (1.0, 1.0, 1.0), 1.0, 1.0, 1.0,
+                                 black_floor=(20 / 1000) ** (1 / 2.2))
+    shadow = mat_shadow(fit, profile, mat)
+
+    def shaded(x: float, y: float) -> tuple[float, float, float]:
+        return final_pixel(grey_linear(), expected, inside=True, shade=mat_shade(shadow, x, y))[:3]
+
+    inside, outside = await_compare(expected, drain, reference=shaded)
+    # The point 1 mm below the opening's top edge (mat space), mid-width: in the light's shadow.
+    to_output = homography(fit.corners)
+    u, v = .5, 1 / shadow.size_mm[1]
+    x, y = transform(to_output, u, v)
+    assert mat_shade(shadow, x, y) == (.5, .5, .5), mat_shade(shadow, x, y)
+    width, height, data = capture()
+    i, j = int(x * width), int(y * height)
+    centre_x, centre_y = (i + .5) / width, (j + .5) / height
+    offset = (j * width + i) * 4
+    blue, green, red = data[offset:offset + 3]
+    want = shaded(centre_x, centre_y)
+    actual = (red / 255, green / 255, blue / 255)
+    print(f"TRACER inside={inside} outside={outside} report={report} one_mm={actual} want={want}", flush=True)
+    assert max(abs(a - e) for a, e in zip(actual, want, strict=True)) <= TOLERANCE, ("one_mm", actual, want)
+    assert want[0] < final_pixel(grey_linear(), expected, inside=True)[0] - .1, want      # shaded
+    assert inside > 300 and outside > 1000, (inside, outside)
+    print("PASS tracer_black_floor_and_one_light", flush=True)
+
+    # 4. lut_leg_waits_for_the_lut
+    MAT_FILE.unlink(missing_ok=True)
+    table = lut_fixture()
+    LUT_FILE.write_bytes(table)
+    LUT_FILE.chmod(0o644)
+    LUT_RELEASE.unlink(missing_ok=True)
+    ref = LutRef(LUT_PROFILE_SHA256, LUT_RECIPE)
+    looked = SoftwarePicture(100, 100, 6500, 22, black_floor_tenths=20, lut=ref, lut_amount_percent=80)
+    send(6, looked)
+    sliders = PictureOperations(OUTPUT, 6, (1.0, 1.0, 1.0), 1.0, 1.0, 1.0,
+                                black_floor=(20 / 1000) ** (1 / 2.2))
+    inside, _ = await_compare(sliders, drain)
+    end = time.monotonic() + 2.0
+    while time.monotonic() < end:           # the Player draws on with the sliders; Done waits
+        drain()
+        report = reports.latest.get(OUTPUT)
+        assert report is None or report.presented_change is None or report.presented_change < 6, (
+            "presented_before_the_lut", report)
+        time.sleep(0.05)
+    compare(sliders)
+    LUT_RELEASE.touch()
+    LUT_RELEASE.chmod(0o644)
+    report = presented(6)
+    with_lut = replace(sliders, lut=LutMix(ref, .8))
+    lut_pixel = final_pixel(grey_linear(), with_lut, inside=True, lut=table)[:3]
+    inside_after, _ = await_compare(with_lut, drain, reference=lambda _x, _y: lut_pixel)
+    print(f"LUT before={inside} after={inside_after} report={report} pixel={lut_pixel}", flush=True)
+    assert lut_pixel[2] < lut_pixel[0] - .1, lut_pixel          # the warm table is drawn
+    print("PASS lut_leg_waits_for_the_lut", flush=True)
 
 
 if __name__ == "__main__":
