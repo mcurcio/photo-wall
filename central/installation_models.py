@@ -37,8 +37,32 @@ class OutputInventory(Model):
     observation: OutputReport
 
 
+# A Frame's or a wall's name (#92, #94): Frame names are unique ignoring case (migration 090's
+# `frames_name` index, the one home of that rule).
+Name = Annotated[str, Field(min_length=1, max_length=60)]
+
+
+class FrameName(Model):
+    """PUT /v1/operator/frames/{frame_id}/name."""
+    name: Name
+
+
+class WallNaming(Model):
+    """PUT /v1/operator/walls/{surface_id}: the wall's name and its room label (#92)."""
+    name: Name
+    room: Annotated[str, Field(max_length=60)] = ""
+
+
+class WallInventory(Model):
+    """A wall (one per surface the Frames are placed on; one today, roadmap 6 adds more)."""
+    surface_id: Identifier
+    name: str
+    room: str
+
+
 class FrameInventory(Model):
     id: Identifier
+    name: str
     surface_id: Identifier
     x_mm: float
     y_mm: float
@@ -104,6 +128,7 @@ class InstallationInventory(Model):
     players: tuple[PlayerInventory, ...]
     outputs: tuple[OutputInventory, ...]
     frames: tuple[FrameInventory, ...]
+    walls: tuple[WallInventory, ...]
     # Liveness facts, set by with_liveness: Central's clock at read time (no Player timestamp
     # in the payload is later), the silence threshold the console classifies against, and the
     # Player's report interval (the console's grace before a fresh enrollment counts as a to-do).

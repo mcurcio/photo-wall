@@ -172,7 +172,12 @@ class Program(ProgramDraft):
     revision: Annotated[int, Field(ge=1)] = 1
 
     def window_id(self, start: float) -> str:
-        return f"program:{self.program_id}:{self.revision}:{start:.17g}"
+        return f"{self.window_prefix}{start:.17g}"
+
+    @property
+    def window_prefix(self) -> str:
+        """What every window identity of this revision starts with."""
+        return f"{PROGRAM_PREFIX}{self.program_id}:{self.revision}:"
 
 
 DEFAULT_PREFIX: Final = "default:"
@@ -651,6 +656,43 @@ class Runtime:
     def save_program(self, expected: Program, draft: ProgramDraft, now: float) -> Program:
         """Replace `expected` with `draft` at the next revision. The window playing now keeps its
         end (R10): the new rule's windows are admitted from the later of now and that end."""
+        saved, playing = self._replace_program(expected, draft, now)
+        if playing is not None:
+            ends = [run.program_ends_at for run in playing if run.program_ends_at is not None]
+            self._state.program_from[saved.program_id] = max([self._state.now, *ends])
+            self.advance(now)
+        return saved
+
+    def save_program_and_apply_now(self, expected: Program, draft: ProgramDraft, now: float) -> Program:
+        """As `save_program`, but applied at once: the Program's playing Runs finish gracefully at
+        `now`, and the new rule's window covering `now`, if any, is admitted at once (from `now`
+        to its end, under its own identity), the finishing Runs left out of the protection check
+        (as `activate`'s restart leaves out the Runs it replaces). Later windows follow the new
+        rule from `now`."""
+        saved, playing = self._replace_program(expected, draft, now)
+        if playing is None:
+            return saved
+        for run in playing:
+            run.scheduled_finish_at = min(run.scheduled_finish_at or now, now)
+        window = calculator.window_at(saved.when, self._house, self._state.now)
+        if window is not None:
+            identity = saved.window_id(window.start)
+            scene = self._state.scenes[saved.scene_id]
+            rank = PRIORITY_RANK[saved.priority]
+            denial = self._protected_conflict(scene, rank, False, {run.run_id for run in playing})
+            self._state.admissions[identity] = (
+                _refusal(identity, denial) if denial else self._admit(
+                    scene, identity, self._state.now, rank,
+                    program_id=saved.program_id, program_end=window.end))
+        self._state.program_from[saved.program_id] = self._state.now
+        self.advance(now)
+        return saved
+
+    def _replace_program(self, expected: Program, draft: ProgramDraft,
+                         now: float) -> tuple[Program, list[_Run] | None]:
+        """Store `draft` as `expected`'s next revision after advancing to `now`, and answer it with
+        the Program's playing root Runs; None for them when the same save was already stored (an
+        idempotent retry, nothing changed). ProgramRefused "missing", "changed" or a draft refusal."""
         self.advance(now)
         stored = self._state.programs.get(expected.program_id)
         if stored is None:
@@ -658,17 +700,14 @@ class Runtime:
         saved = Program(**draft.model_dump(), program_id=expected.program_id,
                         revision=expected.revision + 1)
         if stored == saved:
-            return stored
+            return stored, None
         if stored != expected:
             raise ProgramRefused("changed", stored)
         self._check_program(draft)
-        playing = [run.program_ends_at for run in self._state.runs.values()
-                   if run.parent_id is None and run.active and run.program_id == saved.program_id
-                   and run.program_ends_at is not None]
+        playing = [run for run in self._state.runs.values()
+                   if run.parent_id is None and run.active and run.program_id == saved.program_id]
         self._state.programs[saved.program_id] = saved
-        self._state.program_from[saved.program_id] = max([self._state.now, *playing])
-        self.advance(now)
-        return saved
+        return saved, playing
 
     def remove_program(self, program_id: str, revision: int, now: float) -> RuntimeView:
         """Forget a Program; its active Runs finish gracefully at `now`. It is forgotten before

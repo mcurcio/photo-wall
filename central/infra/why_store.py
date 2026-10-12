@@ -12,9 +12,9 @@ from central.db import Database, TransactionClock
 from central.infra.display_store import power_facts_in
 from central.infra.power_store import power_policy_in
 from central.power.timetable import frame_timetable
-from central.runtime import Program
+from central.runtime import Program, Scene
 from central.runtime_store import RuntimeStore
-from central.why.explain import content_why, power_why
+from central.why.explain import content_why, kept_out, power_why
 from central.why.model import FrameWhy, Week
 from central.why.ports import WhyRefused
 
@@ -36,7 +36,10 @@ class PgWhy:
             policy = power_policy_in(conn, now)
         house = runtime.house
         programs = {program_id: Program.model_validate(program) for program_id, program in state["programs"].items()}
-        content = content_why(runtime.project(now), frame_id, programs=programs, refused={})
+        scenes = {scene_id: Scene.model_validate(scene) for scene_id, scene in state["scenes"].items()}
+        projection = runtime.operator_projection(now)
+        content = content_why(projection.current, frame_id, programs=programs,
+                              refused=kept_out(projection, programs, scenes, frame_id))
         timetable = frame_timetable(frame_id, policy, house, now) if facts.bound else None
         power = power_why(timetable=timetable, test=facts.test, document=facts.document, report=facts.report,
                           house=house, now=now)

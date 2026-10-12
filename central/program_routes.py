@@ -76,6 +76,12 @@ def mount_program_routes(app: FastAPI, *, admin: Any, runtime: RuntimeStore) -> 
             raise ValueError("Program identity mismatch")
         return runtime.command_current("save_program", request.expected, request.next)
 
+    @app.post(PROGRAMS + "/{program_id}/apply-now", dependencies=[Depends(admin)], response_model=Program)
+    def save_program_and_apply_now(program_id: Identifier, request: ProgramSave) -> Program:
+        if request.expected.program_id != program_id:
+            raise ValueError("Program identity mismatch")
+        return runtime.command_current("save_program_and_apply_now", request.expected, request.next)
+
     @app.delete(PROGRAMS + "/{program_id}", dependencies=[Depends(admin)], status_code=204)
     def remove_program(program_id: Identifier, revision: int = Query(ge=1)) -> Response:
         runtime.command_current("remove_program", program_id, revision)

@@ -26,12 +26,15 @@ from central.house_time.model import HouseTime
 from central.power.timetable import Timetable
 from central.runtime import (
     DEFAULT_PREFIX,
+    PRIORITY_RANK,
     PROGRAM_PREFIX,
     Admission,
     Intent,
+    OperatorProjection,
     Program,
     RuntimeView,
     RunView,
+    Scene,
 )
 from central.why.model import Beaten, ContentKind, ContentRequest, ContentWhy, PowerWhy
 from contracts.node_output import InForceKind, OutputDocument, OutputReport, Power
@@ -41,7 +44,8 @@ def content_why(view: RuntimeView, frame_id: str, *, programs: Mapping[str, Prog
                 refused: Mapping[str, Admission]) -> ContentWhy:
     """The Frame's content answer at `view.now`. `programs`: the stored Programs by id (for names);
     `refused`: admissions refused by protected Frames whose window covers now, by activation id
-    (empty in slice T)."""
+    (`kept_out`). Each is beaten "kept-out-by-protected-frames" after the Runs the winner beat,
+    the highest rank first."""
     target = f"frame:{frame_id}"
     runs = {run.run_id: run for run in view.runs}
     # Each root Run on the Frame, at its strongest contribution there (a child speaks for its root).
@@ -53,14 +57,46 @@ def content_why(view: RuntimeView, frame_id: str, *, programs: Mapping[str, Prog
         if held is None or intent.precedence > held.precedence:
             strongest[intent.root_id] = intent
     ordered = sorted(strongest.values(), key=lambda intent: intent.precedence, reverse=True)
+    kept_out = sorted((Beaten(request=request, because="kept-out-by-protected-frames")
+                       for admission in refused.values()
+                       if (request := _refused_request(admission, programs)) is not None),
+                      key=lambda beaten: (-beaten.request.rank, beaten.request.activation_id))
     if not ordered:
-        return ContentWhy(winner=None, beat=())
+        return ContentWhy(winner=None, beat=tuple(kept_out))
     winner, *losers = ordered
     winning = _request(runs[winner.root_id], programs)
     beat = tuple(Beaten(request=_request(runs[loser.root_id], programs),
                         because="lower-priority" if loser.priority < winner.priority else "admitted-earlier")
                  for loser in losers)
-    return ContentWhy(winner=winning, beat=beat)
+    return ContentWhy(winner=winning, beat=(*beat, *kept_out))
+
+
+def kept_out(projection: OperatorProjection, programs: Mapping[str, Program], scenes: Mapping[str, Scene],
+             frame_id: str) -> dict[str, Admission]:
+    """The `refused` `content_why` takes (the kept-out rule above): each Program whose Scene has
+    the Frame and whose window covering `projection`'s now was refused by protected Frames, its
+    admission by activation id."""
+    target = f"frame:{frame_id}"
+    refused: dict[str, Admission] = {}
+    for program_id, windows in projection.program_windows.items():
+        program = programs.get(program_id)
+        scene = None if program is None else scenes.get(program.scene_id)
+        admission = None if windows.current is None else windows.current.admission
+        if (scene is not None and target in scene.participants and admission is not None
+                and admission.status == "rejected" and admission.reason == "protected_frames"):
+            refused[admission.activation_id] = admission
+    return refused
+
+
+def _refused_request(admission: Admission, programs: Mapping[str, Program]) -> ContentRequest | None:
+    """A refused Program window as its request (no Run); None when no stored Program owns it."""
+    program = next((program for program in programs.values()
+                    if admission.activation_id.startswith(program.window_prefix)), None)
+    if program is None:
+        return None
+    return ContentRequest(kind="program", activation_id=admission.activation_id, run_id=None,
+                          scene_id=program.scene_id, program_id=program.program_id, name=program.name,
+                          rank=PRIORITY_RANK[program.priority])
 
 
 def _request(root: RunView, programs: Mapping[str, Program]) -> ContentRequest:
@@ -101,4 +137,4 @@ def is_resting(wanted: Power, pi_says: InForceView | Literal["not-heard"]) -> bo
             and pi_says.kind in (InForceKind.TEST, InForceKind.TIMETABLE) and pi_says.power is Power.OFF)
 
 
-__all__ = ["content_why", "is_resting", "power_why"]
+__all__ = ["content_why", "is_resting", "kept_out", "power_why"]

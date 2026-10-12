@@ -29,6 +29,7 @@ from central.execution_repository import PostgresExecutionRepository
 from central.fleet.leaf_bridge import mount_leaf_bridge
 from central.fleet.node_routes import mount_node_routes
 from central.fleet.node_sessions import NodeControlConfig
+from central.house_routes import mount_house_routes
 from central.infra.display_store import (
     PgDisplayCommands,
     PgDisplayQueries,
@@ -37,11 +38,11 @@ from central.infra.display_store import (
 )
 from central.infra.fit_analysis_store import PgFitAnalysisReader
 from central.infra.fit_settings_store import PgFitSettings
-from central.infra.house_store import seed_house
+from central.infra.house_store import PgHouse, seed_house
 from central.infra.photo_library_store import PgPhotoLibrary
 from central.infra.power_store import PgPower
 from central.infra.why_store import PgWhy
-from central.installation_models import InstallationInventory
+from central.installation_models import FrameName, InstallationInventory, WallInventory, WallNaming
 from central.library_routes import mount_library_routes
 from central.media_gateway import MediaGateway
 from central.media_ports import MediaApplication
@@ -628,6 +629,14 @@ def create_app(
     def reposition(frame_id: Identifier, placement: FramePlacement) -> dict:
         return registry.place_frame(frame_id, placement)
 
+    @app.put("/v1/operator/frames/{frame_id}/name", dependencies=[Depends(admin)])
+    def rename_frame(frame_id: Identifier, request: FrameName) -> dict:
+        return registry.rename_frame(frame_id, request.name)
+
+    @app.put("/v1/operator/walls/{surface_id}", dependencies=[Depends(admin)], response_model=WallInventory)
+    def name_wall(surface_id: Identifier, naming: WallNaming) -> WallInventory:
+        return registry.name_wall(surface_id, naming)
+
     def _refuse_frame_in_use(frame_id: str) -> None:
         # Runs refer to Frame ids by string, so keep destructive/reconfiguring
         # operator actions away from a target while its projected Run is live.
@@ -769,6 +778,8 @@ def create_app(
     mount_power_routes(app, admin=admin, queries=power, commands=power)
     mount_program_routes(app, admin=admin, runtime=runtime_store)
     mount_why_routes(app, admin=admin, queries=PgWhy(db, times=media_times))
+    house = PgHouse(db, times=media_times)
+    mount_house_routes(app, admin=admin, queries=house, commands=house)
     pictures = PgPictureSessions(db)
     mount_picture_routes(app, admin=admin, queries=pictures, commands=pictures)
     if content is not None:

@@ -20,6 +20,7 @@ from pydantic import ValidationError
 from central.db import Database, TransactionClock
 from central.house_time.calculator import known_zone
 from central.house_time.model import HouseSettings, HouseSettingsDraft, HouseTime
+from central.house_time.ports import HouseRefused
 
 _LOG = logging.getLogger(__name__)
 _LOCALTIME = Path("/etc/localtime")
@@ -88,7 +89,24 @@ class PgHouse:
             return house_settings_in(conn)
 
     def save_house_settings(self, draft: HouseSettingsDraft) -> HouseSettings:
-        raise NotImplementedError
+        # The document source imports this module (house_time_in): its channel is read at call time.
+        from central.infra.display_store import OUTPUT_DOCUMENTS_CHANNEL
+        if not known_zone(draft.time.zone):
+            raise HouseRefused("unknown-zone", 422)
+        place = draft.time.place
+        with self._db.transaction() as conn:
+            saved = HouseSettings(**draft.model_dump(), updated_at=self._times.now_in(conn))
+            conn.execute(
+                "INSERT INTO house_settings (singleton, zone, latitude, longitude, units, clock_format, updated_at)"
+                " VALUES (TRUE, %s, %s, %s, %s, %s, %s) ON CONFLICT (singleton) DO UPDATE SET zone=EXCLUDED.zone,"
+                " latitude=EXCLUDED.latitude, longitude=EXCLUDED.longitude, units=EXCLUDED.units,"
+                " clock_format=EXCLUDED.clock_format, updated_at=EXCLUDED.updated_at",
+                (saved.time.zone, None if place is None else place.latitude,
+                 None if place is None else place.longitude, saved.units, saved.clock, saved.updated_at))
+            # Every Node's set times follow the zone and the place.
+            conn.execute("SELECT pg_notify(%s, device_id) FROM players WHERE retired_at IS NULL",
+                         (OUTPUT_DOCUMENTS_CHANNEL,))
+        return saved
 
 
 __all__ = ["PgHouse", "house_settings_in", "house_time_in", "seed_house", "seed_settings", "server_zone"]

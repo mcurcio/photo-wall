@@ -12,12 +12,12 @@ from central.transaction_locks import acquire_runtime_locks
 from contracts.time import Clock
 
 _RUNTIME_COMMANDS = frozenset({
-    "set_scene", "delete_scene", "create_program", "save_program", "remove_program",
-    "set_default_scene", "activate", "finish", "cancel", "advance",
+    "set_scene", "delete_scene", "create_program", "save_program", "save_program_and_apply_now",
+    "remove_program", "set_default_scene", "activate", "finish", "cancel", "advance",
 })
 _TIMED_COMMANDS = frozenset({
-    "create_program", "save_program", "remove_program", "set_default_scene",
-    "activate", "finish", "cancel", "advance",
+    "create_program", "save_program", "save_program_and_apply_now", "remove_program",
+    "set_default_scene", "activate", "finish", "cancel", "advance",
 })
 
 

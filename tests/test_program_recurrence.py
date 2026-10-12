@@ -96,3 +96,66 @@ def test_a_save_mid_window_keeps_its_end_and_the_next_window_follows_the_new_rul
     (tuesday,) = _roots(store.command("advance", at(LONDON, "2026-10-13T18:35")))
     assert tuesday.started_at == at(LONDON, "2026-10-13T18:30")
     assert store.read().export_state()["runs"][tuesday.run_id]["program_ends_at"] == at(LONDON, "2026-10-13T22:00")
+
+
+def test_save_and_apply_now_finishes_the_playing_window_and_the_new_rule_plays_at_once(registry):
+    """Roadmap 2b, Save and apply now: mid-window, the playing Run finishes gracefully now and the new
+    rule's window covering now plays at once, to that window's end, under the new rule's identity;
+    the next day follows the new rule. (A plain save keeps the playing window: the test above.)
+
+    Mutation probe (P-apply-later): leave the covering window to the next admission
+    (`program_from = window.end`, no admission now) -> nothing new plays now."""
+    store = _store(registry)
+    created = _create(store, daily("17:00", "23:00", EVERY_DAY), at(LONDON, "2026-10-12T12:00"))
+    (playing,) = _roots(store.command("advance", at(LONDON, "2026-10-12T18:00")))
+    now = at(LONDON, "2026-10-12T18:10")
+    saved = store.command("save_program_and_apply_now", created, ProgramDraft(
+        name="Evenings", scene_id="calm", when=daily("18:00", "22:00")), now)
+    assert saved.revision == 2
+    view = store.command("advance", now)
+    finishing = next(run for run in view.runs if run.run_id == playing.run_id)
+    assert finishing.finish_requested_at == now                 # gracefully: its cycle plays out
+    (applied,) = _roots(view, "calm")
+    assert (applied.started_at, applied.program_id) == (now, "evenings")
+    assert applied.activation_id == saved.window_id(at(LONDON, "2026-10-12T18:00"))
+    assert view.for_target("frame:hall").scene_id == "calm"
+    state = store.read().export_state()
+    assert state["runs"][applied.run_id]["program_ends_at"] == at(LONDON, "2026-10-12T22:00")
+    ended = store.command("advance", at(LONDON, "2026-10-12T22:05"))
+    assert next(run for run in ended.runs if run.run_id == applied.run_id).ended_at == at(LONDON, "2026-10-12T22:00")
+    (tuesday,) = _roots(store.command("advance", at(LONDON, "2026-10-13T18:05")), "calm")
+    assert tuesday.started_at == at(LONDON, "2026-10-13T18:00")
+    # The same save again is an idempotent retry: nothing changes.
+    assert store.command("save_program_and_apply_now", created, ProgramDraft(
+        name="Evenings", scene_id="calm", when=daily("18:00", "22:00")), at(LONDON, "2026-10-13T18:06")) == saved
+    (still,) = _roots(store.command("advance", at(LONDON, "2026-10-13T18:07")), "calm")
+    assert still.run_id == tuesday.run_id
+
+
+def test_save_and_apply_now_through_the_route_answers_as_put(registry):
+    from fastapi.testclient import TestClient
+    from test_operator_frames import ADMIN, AUTH
+
+    from central.app import create_app
+    set_house(registry.db, LONDON)
+    registry.clock.advance(at(LONDON, "2026-10-12T18:00") - registry.clock.utc())
+    app = create_app(registry.db, registry.clock, ADMIN, run_scheduler=False)
+    store = app.state.coordinator.runtime
+    for scene_id in ("evening", "calm"):
+        store.command("set_scene", Scene(scene_id=scene_id, cycle_seconds=600, loop=True, contributions=(
+            Contribution(target="frame:hall", source_refs=("library:1",)),)))
+    with TestClient(app) as client:
+        when = {"days": list(EVERY_DAY), "start": {"at": "clock", "time": "17:00"}, "end": {"at": "clock", "time": "23:00"}}
+        created = client.post("/v1/operator/programs", headers=AUTH,
+                              json={"name": "Evenings", "scene_id": "evening", "when": when}).json()
+        draft = {"name": "Evenings", "scene_id": "calm", "when": when}
+        applied = client.post(f"/v1/operator/programs/{created['program_id']}/apply-now", headers=AUTH,
+                              json={"expected": created, "next": draft})
+        assert (applied.status_code, applied.json()["revision"]) == (200, 2), applied.text
+        assert store.read().advance(registry.clock.utc()).for_target("frame:hall").scene_id == "calm"
+        stale = client.post(f"/v1/operator/programs/{created['program_id']}/apply-now", headers=AUTH,
+                            json={"expected": created, "next": {**draft, "name": "Late"}})
+        assert (stale.status_code, stale.json()["error"]) == (409, "changed")
+        assert stale.json()["current"] == applied.json()
+        assert client.post(f"/v1/operator/programs/{created['program_id']}/apply-now",
+                           json={"expected": created, "next": draft}).status_code == 401
