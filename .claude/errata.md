@@ -5403,3 +5403,6 @@ Order: (a) merge the iac PR that switches the factory to `central.app:create_app
 - **S4 item 4 asked for "an IANA picker"; the page had a text box.** It is a native Select over the browser's
   zones, labelled by city. **S4 item 2 puts "A hold lasts" in the Night off editor**, though it governs All off and
   All on (left there; a UX finding to take to the owner).
+- **The merge left main's one-item Re-check (`ImmichClient.still_matches`) calling `window_of` without the house
+  zone** (a TypeError on every Re-check, red in CI's photo-sources and upstream-faults legs). `LibraryClient.
+  still_matches(query, window, upstream_id)` takes the check's own window, as `search_page` does.

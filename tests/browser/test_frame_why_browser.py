@@ -76,7 +76,7 @@ def test_the_overview_names_the_winner_and_resting_and_a_display_that_did_not_an
         connect(page, origin, "wall")
         overview = open_frame(page, frame, "overview")
         why = _why(overview)
-        expect(why).to_contain_text("Evenings is playing; it beat the Default Scene (calm) (lower priority).")
+        expect(why).to_contain_text("Evenings is playing; it beat calm, the Default Scene, which has lower priority.")
         expect(why).to_contain_text("Display power: Resting: Night off until 07:00")
 
         power = open_frame(page, frame, "power").get_by_role("region", name="Power", exact=True)

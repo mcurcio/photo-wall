@@ -40,16 +40,22 @@ export interface FrameWhyView {
   } | null;
 }
 
-/** One request in words: a Schedule by its name, the Default Scene, or Show now's Scene. */
-function requestWords(request: ContentRequest, start = false): string {
+/** One request in words: a Schedule by its name, the Default Scene's Scene, or Show now's. */
+function requestWords(request: ContentRequest): string {
   if (request.kind === "program") return request.name;
-  if (request.kind === "default-scene") return `${start ? "The" : "the"} Default Scene (${request.scene_id})`;
-  return `Show now of Scene ${request.scene_id}`;
+  if (request.kind === "default-scene") return `${request.scene_id}, the Default Scene`;
+  return `Show now: ${request.scene_id}`;
 }
 
+const BECAUSE: Record<"lower-priority" | "admitted-earlier", string> = {
+  "lower-priority": "which has lower priority",
+  "admitted-earlier": "which started earlier",
+};
+
 /**
- * What plays on the Frame and what it beat (E6, moment 7): "Evenings is playing; it beat the
- * Default Scene (lower priority)." A request a protected Scene kept out is named after it.
+ * What plays on the Frame and what it beat (E6, moment 7): "Evenings is playing; it beat calm,
+ * the Default Scene, which has lower priority." A request a protected Scene kept out is named
+ * after it.
  */
 export function contentWhyWords(content: FrameWhyView["content"]): string {
   if (content.winner === null) {
@@ -59,8 +65,8 @@ export function contentWhyWords(content: FrameWhyView["content"]): string {
   }
   const beat = content.beat.map((beaten) => beaten.because === "kept-out-by-protected-frames"
     ? `${requestWords(beaten.request)} kept out by a protected Scene`
-    : `it beat ${requestWords(beaten.request)} (${beaten.because === "lower-priority" ? "lower priority" : "admitted earlier"})`);
-  return `${requestWords(content.winner, true)} is playing${beat.length === 0 ? "" : `; ${beat.join("; ")}`}.`;
+    : `it beat ${requestWords(beaten.request)}, ${BECAUSE[beaten.because]}`);
+  return `${requestWords(content.winner)} is playing${beat.length === 0 ? "" : `; ${beat.join("; ")}`}.`;
 }
 
 const REASON: Record<"night-off" | "test", string> = { "night-off": "Night off", test: "a power test" };
@@ -115,8 +121,8 @@ export function FrameWhy({ read, readAt, powerOnly = false }: FrameWhyProps) {
   if (!read.ok) {
     return (
       <ProblemCard scope="central" variant="inline" verdict={{ severity: "unknown", label: "Can't tell", receipt: null }}
-        what="Photo Wall's server did not answer with why this Frame plays what it does." doing="The page tries again by itself."
-        details={<Note>{`Photo Wall's answer: ${read.error}`}</Note>} />
+        what="Central did not answer with why this Frame plays what it does." doing="The page tries again by itself."
+        details={<Note>{`Central's answer: ${read.error}`}</Note>} />
     );
   }
   const now = readAt === null || read.zone === null ? null : houseLocal(readAt, read.zone);

@@ -131,10 +131,17 @@ export function WeekCalendar({ label, days, lanes, now = null }: WeekCalendarPro
                         fill={held ? `url(#${hatch})` : undefined}
                         className={TONE_CLASS[band.tone]} strokeWidth={1} />
                       {band.short !== undefined && width > band.short.length * 7 + 8 && (
-                        <text x={x(from) + 4} y={y + LANE / 2 + 4} fontSize={FONT} aria-hidden="true"
-                          className={band.tone === "window" || held ? "fill-text" : "fill-on-accent"}>
-                          {band.short}
-                        </text>
+                        <>
+                          {/* A held band's label sits on a plain ground: the hatching never runs through it. */}
+                          {held && (
+                            <rect x={x(from) + 2} y={y + 3} width={band.short.length * 7 + 4} height={LANE - 6} rx={2}
+                              className="fill-surface-raised" aria-hidden="true" />
+                          )}
+                          <text x={x(from) + 4} y={y + LANE / 2 + 4} fontSize={FONT} aria-hidden="true"
+                            className={band.tone === "window" || held ? "fill-text" : "fill-on-accent"}>
+                            {band.short}
+                          </text>
+                        </>
                       )}
                     </g>
                   );
