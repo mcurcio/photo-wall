@@ -55,6 +55,7 @@ class PgWhy:
         chosen = state["default_scene"]
         return week(programs={program_id: Program.model_validate(program)
                               for program_id, program in state["programs"].items()},
+                    plays=runtime.program_windows_between,
                     default_scene_id=None if chosen is None else chosen["scene_id"], policy=policy,
                     frame_ids=frame_ids, house=runtime.house, first_day=first_day)
 

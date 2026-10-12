@@ -50,6 +50,7 @@ from __future__ import annotations
 import logging
 import math
 import threading
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -85,6 +86,23 @@ class Clock(Protocol):
     def monotonic(self) -> float: ...   # the test's count; the Pi's own clock, never compared elsewhere
 
     def time(self) -> float: ...        # the Pi's wall clock, UTC seconds; compared only with set times
+
+    def wait(self, condition: threading.Condition, seconds: float) -> None:
+        """The worker's sleep: wait on `condition` (held) for at most `seconds` of this clock."""
+        ...
+
+
+class PiClock:
+    """The Pi's own clocks and a real wait (the production Clock)."""
+
+    def monotonic(self) -> float:
+        return time.monotonic()
+
+    def time(self) -> float:
+        return time.time()
+
+    def wait(self, condition: threading.Condition, seconds: float) -> None:
+        condition.wait(seconds)
 
 
 class PowerMethodAdapter(Protocol):
@@ -316,7 +334,7 @@ class OutputPowerController:
         while True:
             with self._wake:
                 while not self._stopping and not self._due:
-                    self._wake.wait(self._sleep())
+                    self._clock.wait(self._wake, self._sleep())
                     self._ended()
                 if self._stopping:
                     return
@@ -388,7 +406,8 @@ class OutputPowerController:
         elif method is None:
             result = PowerResult.DID_NOT_ANSWER if answers else PowerResult.NOT_SUPPORTED
             black = power is Power.OFF and result is PowerResult.NOT_SUPPORTED   # showing black otherwise
-            self._curtain(output_id, black)
+            if self._curtain(output_id, black) is False and black:
+                result = PowerResult.DID_NOT_ANSWER      # nothing turned it off: the photos stay up
         else:
             # Every on, black picture's too, brings the display itself on (read first, write only
             # when it reads off): a test, or a night with displays turned off, may have left it off.
@@ -430,4 +449,4 @@ def _carry_out(adapter: PowerMethodAdapter, output_id: str, power: Power,
 
 
 __all__ = ["PROBE_SECONDS", "READ_SECONDS", "TICK_SECONDS", "WRITE_SECONDS", "BlackPicture", "Clock", "Decision",
-           "OutputPowerController", "PowerMethodAdapter", "ReportSink", "Trigger", "in_force", "next_deadline"]
+           "OutputPowerController", "PiClock", "PowerMethodAdapter", "ReportSink", "Trigger", "in_force", "next_deadline"]

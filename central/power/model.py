@@ -123,10 +123,12 @@ def _unique_sorted(values: tuple[str, ...], code: str) -> tuple[str, ...]:
 
 @dataclass(frozen=True, slots=True)
 class PowerPolicy:
-    """Everything the timetable is worked out from, read in one transaction: Night off and the
-    holds live at the read (each Hold's `ends_at` after it)."""
+    """Everything the timetable is worked out from, read in one transaction: Night off, the holds
+    live at the read (each Hold's `ends_at` after it), and whether the operator has confirmed the
+    house's zone (Settings › House `zone_confirmed`)."""
     night_off: NightOff
     holds: tuple[Hold, ...]
+    zone_confirmed: bool
 
 
 __all__ = ["EVERY_DAY", "NIGHT_OFF_OFF", "NIGHT_OFF_ON", "AllFrames", "ChosenFrames", "Hold", "HoldLasts",

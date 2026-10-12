@@ -782,6 +782,27 @@ def test_program_windows_name_the_current_and_next_window_in_house_time():
     assert during.next.start == "1970-01-02T17:00"
 
 
+def test_after_a_save_mid_window_the_card_and_the_week_name_the_windows_runtime_plays():
+    """R10: a save at 18:00 of "17:00-23:00" as "19:00-22:00" keeps the playing window to 23:00, so
+    the card's current window is that one and its next is tomorrow's 19:00, never today's 19:00
+    (which Runtime never admits); the week draws the same.
+
+    Mutation probes: the card's next ignores program_from -> today's 19:00; the week draws the
+    rule's every window -> today's 19:00-22:00 and no 17:00-23:00."""
+    runtime = Runtime(house=UTC_HOUSE)
+    runtime.set_scene(Scene(scene_id="evening", cycle_seconds=1800, loop=True, contributions=(media(),)))
+    created = schedule(runtime, "p1", "evening", 17 * 60, 23 * 60)
+    runtime.advance(18 * 3600)
+    runtime.save_program(created, ProgramDraft(name="p1", scene_id="evening", when=daily("19:00", "22:00")),
+                         18 * 3600)
+    windows = runtime.operator_projection(18 * 3600).program_windows["p1"]
+    assert (windows.current.start, windows.current.end) == ("1970-01-01T17:00", "1970-01-01T23:00")
+    assert windows.current.admission.status == "admitted"
+    assert (windows.next.start, windows.next.end) == ("1970-01-02T19:00", "1970-01-02T22:00")
+    plays = runtime.program_windows_between(runtime._state.programs["p1"], 0, 2 * 86400)
+    assert [(window.start / 3600, window.end / 3600) for window in plays] == [(17, 23), (24 + 19, 24 + 22)]
+
+
 def test_a_protected_refusal_is_a_served_program_window_admission():
     runtime = Runtime(house=UTC_HOUSE)
     runtime.set_scene(Scene(scene_id="guard", protect_frames=True, loop=True,
@@ -1261,6 +1282,28 @@ def test_a_protected_run_keeps_the_default_scene_out_without_recording_a_refusal
     after = runtime.advance(400)                        # the guard ended at 300: calm starts then
     assert after.for_target("frame:left").scene_id == "calm"
     assert after.for_target("frame:left").logical_origin == 300
+
+
+def test_a_default_scene_whose_scene_protects_its_frames_never_refuses_a_schedule():
+    """Frame design rule 3: the Default Scene is beneath every Schedule, so its Scene's protection
+    (its own or a child's) does not come with it.
+
+    Mutation probe: admit the chosen Scene with its protection -> Evenings is refused
+    "protected_frames" at 15 and the Default Scene plays on."""
+    for protects_itself in (True, False):
+        guard = Scene(scene_id="guard", cycle_seconds=600, loop=True, protect_frames=protects_itself,
+                      contributions=(media(),),
+                      children=() if protects_itself else (Child(scene=Scene(
+                          scene_id="inner", protect_frames=True, contributions=(media(),))),))
+        runtime = Runtime(house=UTC_HOUSE)
+        runtime.set_scene(guard)
+        runtime.set_scene(Scene(scene_id="evening", cycle_seconds=600, loop=True, contributions=(media(),)))
+        runtime.set_default_scene("guard", 0)
+        schedule(runtime, "evening", "evening", 15, 30)
+        covered = runtime.advance(1000)
+        assert covered.for_target("frame:left").scene_id == "evening"
+        assert not any(admission["status"] == "rejected"
+                       for admission in runtime.export_state()["admissions"].values())
 
 
 def test_choosing_another_default_scene_finishes_the_old_one_gracefully():

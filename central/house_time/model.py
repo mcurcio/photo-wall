@@ -102,8 +102,11 @@ class HouseSettingsDraft(HouseModel):
 
 
 class HouseSettings(HouseSettingsDraft):
-    """Settings › House as stored, with the moment it was last saved (Central's clock)."""
+    """Settings › House as stored, with the moment it was last saved (Central's clock).
+    `zone_confirmed` is false until the operator first saves it: until then the zone is Central's
+    own, which need not be the house's, and Night off switches no display (power.timetable)."""
     updated_at: Annotated[float, Field(allow_inf_nan=False)]
+    zone_confirmed: bool
 
 
 @dataclass(frozen=True, slots=True)

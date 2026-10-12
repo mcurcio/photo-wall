@@ -22,8 +22,10 @@ class NightOffSave(Model):
 
 
 class NightOffView(Model):
-    """GET /v1/operator/power/night-off: Night off and its next on and off times (house time)."""
+    """GET /v1/operator/power/night-off: Night off and its next on and off times (house time).
+    `waits_for_zone`: Night off switches no display until Settings › House is saved once."""
     night_off: NightOff
+    waits_for_zone: bool
     next_off: LocalDateTime | None
     next_on: LocalDateTime | None
 

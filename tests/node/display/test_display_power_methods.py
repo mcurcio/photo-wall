@@ -180,17 +180,31 @@ WALL_START: Final = 1_791_820_800          # 2026-10-12T16:00:00Z, the Pi's wall
 
 
 class Clock:
-    """The Pi's two clocks: `now` the monotonic count, `wall` the wall clock (UTC seconds)."""
+    """The Pi's two clocks: `now` the monotonic count, `wall` the wall clock (UTC seconds), both
+    moved only by the test. The worker's sleeps are recorded (`waits`, the seconds it asked for)
+    and each lasts a moment of real time, so a test steps the worker by its looks (`ticks`), never
+    by sleeping."""
 
     def __init__(self) -> None:
         self.now = 1_000.0
         self.wall = float(WALL_START)
+        self.waits: list[float] = []
 
     def monotonic(self) -> float:
         return self.now
 
     def time(self) -> float:
         return self.wall
+
+    def wait(self, condition, seconds: float) -> None:
+        self.waits.append(seconds)
+        condition.wait(0.005)
+
+    def ticks(self, count: int = 2, timeout: float = 15.0) -> None:
+        """Wait until the worker has slept `count` more times: each sleep follows a look at both
+        clocks, so whatever they say now has been seen."""
+        start = len(self.waits)
+        until(lambda: len(self.waits) >= start + count, timeout)
 
 
 class Sink:

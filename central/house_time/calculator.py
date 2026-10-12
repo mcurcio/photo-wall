@@ -15,6 +15,11 @@ Rules this module owns (one home each):
 - **Look-ahead**: no search goes more than LOOKAHEAD_DAYS house days past its starting point.
 
 Every function takes UTC seconds and returns UTC seconds or house-time strings; none reads a clock.
+
+The one calculator of windows on the house clock (Schedules, Night off, the power timetable, the
+week). Two other rules read the house calendar and keep their own homes: a Source's relative
+dates ("last 3 months", media/pool_check.py `window_of`) and On this day (the ranked line's SQL
+`AT TIME ZONE` the house zone, central/infra/photo_library_store.py).
 """
 from __future__ import annotations
 

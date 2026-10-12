@@ -21,6 +21,7 @@ from central.db import Database, TransactionClock
 from central.house_time.calculator import known_zone, when_problems
 from central.house_time.model import HouseSettings, HouseSettingsDraft, HouseTime
 from central.house_time.ports import HouseRefused
+from central.infra.output_wakes import wake_every_node_in
 
 _LOG = logging.getLogger(__name__)
 _LOCALTIME = Path("/etc/localtime")
@@ -42,20 +43,23 @@ def server_zone() -> str:
 
 
 def seed_settings(zone: str, updated_at: float) -> HouseSettings:
-    """The value a house with no row has: `zone`, no place, "cm", "24h"."""
-    return HouseSettings(time=HouseTime(zone=zone), units="cm", clock="24h", updated_at=updated_at)
+    """The value a house with no row has: `zone`, no place, "cm", "24h", the zone not confirmed."""
+    return HouseSettings(time=HouseTime(zone=zone), units="cm", clock="24h", updated_at=updated_at,
+                         zone_confirmed=False)
 
 
 def house_settings_in(conn: Any) -> HouseSettings:
     """The stored Settings › House, or `seed_settings(server_zone(), 0.0)` with no row."""
     row = conn.execute(
-        "SELECT zone, latitude, longitude, units, clock_format, updated_at FROM house_settings").fetchone()
+        "SELECT zone, latitude, longitude, units, clock_format, updated_at, zone_confirmed FROM house_settings"
+    ).fetchone()
     if row is None:
         return seed_settings(server_zone(), 0.0)
     place = None if row["latitude"] is None else {"latitude": row["latitude"], "longitude": row["longitude"]}
     try:
         return HouseSettings(time=HouseTime(zone=row["zone"], place=place), units=row["units"],
-                             clock=row["clock_format"], updated_at=row["updated_at"])
+                             clock=row["clock_format"], updated_at=row["updated_at"],
+                             zone_confirmed=row["zone_confirmed"])
     except ValidationError:
         _LOG.warning("house_settings row does not validate; reading the seed value instead")
         return seed_settings(server_zone(), 0.0)
@@ -89,30 +93,27 @@ class PgHouse:
             return house_settings_in(conn)
 
     def save_house_settings(self, draft: HouseSettingsDraft) -> HouseSettings:
-        # The document source, the power store and the Runtime store import this module
+        # (An unknown zone never reaches here: HouseTime refuses it when the request is parsed.)
+        # The power store and the Runtime store import this module
         # (house_time_in): they are read at call time.
-        from central.infra.display_store import OUTPUT_DOCUMENTS_CHANNEL
         from central.infra.power_store import night_off_in
         from central.runtime_store import RuntimeStore
-        if not known_zone(draft.time.zone):
-            raise HouseRefused("unknown-zone", 422)
         place = draft.time.place
         with self._db.transaction() as conn:
             if place is None:
                 whens = (night_off_in(conn).when, *RuntimeStore.read_in(conn).program_whens())
                 if any("needs-place" in when_problems(when, draft.time) for when in whens):
                     raise HouseRefused("place-in-use", 409)
-            saved = HouseSettings(**draft.model_dump(), updated_at=self._times.now_in(conn))
+            saved = HouseSettings(**draft.model_dump(), updated_at=self._times.now_in(conn), zone_confirmed=True)
             conn.execute(
-                "INSERT INTO house_settings (singleton, zone, latitude, longitude, units, clock_format, updated_at)"
-                " VALUES (TRUE, %s, %s, %s, %s, %s, %s) ON CONFLICT (singleton) DO UPDATE SET zone=EXCLUDED.zone,"
-                " latitude=EXCLUDED.latitude, longitude=EXCLUDED.longitude, units=EXCLUDED.units,"
-                " clock_format=EXCLUDED.clock_format, updated_at=EXCLUDED.updated_at",
+                "INSERT INTO house_settings (singleton, zone, latitude, longitude, units, clock_format, updated_at,"
+                " zone_confirmed) VALUES (TRUE, %s, %s, %s, %s, %s, %s, TRUE) ON CONFLICT (singleton) DO UPDATE SET"
+                " zone=EXCLUDED.zone, latitude=EXCLUDED.latitude, longitude=EXCLUDED.longitude, units=EXCLUDED.units,"
+                " clock_format=EXCLUDED.clock_format, updated_at=EXCLUDED.updated_at, zone_confirmed=TRUE",
                 (saved.time.zone, None if place is None else place.latitude,
                  None if place is None else place.longitude, saved.units, saved.clock, saved.updated_at))
             # Every Node's set times follow the zone and the place.
-            conn.execute("SELECT pg_notify(%s, device_id) FROM players WHERE retired_at IS NULL",
-                         (OUTPUT_DOCUMENTS_CHANNEL,))
+            wake_every_node_in(conn)
         return saved
 
 

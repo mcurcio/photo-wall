@@ -99,6 +99,34 @@ def test_display_off_with_no_answering_method_shows_black_and_reports_not_suppor
     assert on.in_force.power is Power.ON and subject.black.up == {OUTPUT: False}
 
 
+def test_display_off_with_no_method_and_no_curtain_did_not_answer(display, running):
+    """Nothing turned the display off and the shell kept the photos up: never "not supported",
+    which Why reads as Resting (the amended U1: a failure during intended darkness shows at once).
+
+    Mutation probe: ignore the curtain's answer -> NOT_SUPPORTED."""
+    display.script(ddc=False)
+    subject = running([ddc(display)], black=Curtain(answers=False))
+    subject.connect()
+    subject.controller.document(OUTPUT, document(1, power=timetable(Power.OFF)))
+    (off,) = subject.attempts(1)
+    assert (off.result, off.method) == (PowerResult.DID_NOT_ANSWER, None)
+
+
+def test_an_on_whose_curtain_stays_up_did_not_answer(display, running):
+    """The display is on through DDC/CI, but the shell does not confirm taking the black curtain
+    down: the photos are not on screen, so the on did not happen.
+
+    Mutation probe: drop the `lowered is False` check -> CONFIRMED."""
+    curtain = Curtain(answers=False)
+    curtain.up[OUTPUT] = True                       # a night with no method left it up
+    subject = running([ddc(display)], black=curtain)
+    subject.connect()
+    subject.controller.document(OUTPUT, document(1, power=timetable(Power.ON)))
+    (on,) = subject.attempts(1)
+    assert (on.method, on.result) == (PowerMethod.DDC_CI, PowerResult.DID_NOT_ANSWER)
+    assert (OUTPUT, False) in curtain.asked and display.power == "on"
+
+
 def test_black_pictures_on_after_a_test_off_brings_the_display_itself_back_on(display, running):
     """The 1b test turns the display off through its method; when it ends, black picture's "on"
     must bring the display on too, not only lower the curtain, and the result describes the

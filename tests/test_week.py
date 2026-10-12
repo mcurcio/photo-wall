@@ -19,7 +19,7 @@ from test_operator_frames import ADMIN, AUTH
 
 from central.app import create_app
 from central.power.model import ChosenFrames, NightOff, PowerPolicy
-from central.runtime import Contribution, Program, Scene
+from central.runtime import Contribution, Program, Runtime, Scene
 from central.why.week import week
 from contracts.node_output import Darkness
 
@@ -68,8 +68,9 @@ def _check(body: dict) -> None:
 
 def test_the_week_builder_cuts_house_days_across_the_autumn_change():
     evenings = Program(program_id="evenings", name="Evenings", scene_id="evening", when=daily("17:00", "23:00"))
-    built = week(programs={"evenings": evenings}, default_scene_id="calm",
-                 policy=PowerPolicy(_night_off(("hall",)), holds=()), frame_ids=("study", "hall"), house=LONDON,
+    built = week(programs={"evenings": evenings}, plays=Runtime(house=LONDON).program_windows_between,
+                 default_scene_id="calm",
+                 policy=PowerPolicy(_night_off(("hall",)), holds=(), zone_confirmed=True), frame_ids=("study", "hall"), house=LONDON,
                  first_day=MONDAY)
     assert built.default_scene_id == "calm"
     _check(built.model_dump(mode="json"))

@@ -22,6 +22,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from fastapi.testclient import TestClient
+from support.house_time import LONDON, set_house
 from test_display_identity import ADMIN, AUTH, NO_SERIAL, _bind, _frame, _report, enroll_pi
 
 from central.app import create_app
@@ -317,8 +318,7 @@ def test_the_document_carries_the_frames_timetable_and_its_change_moves_only_at_
     now is off) and at house midnight (the horizon moves); the Power tab names the set time the
     Pi says is in force on the house clock."""
     frame, _ = _bound_frame(registry)
-    _rows(registry, "INSERT INTO house_settings(singleton, zone, units, clock_format, updated_at) "
-                    "VALUES (TRUE, 'Europe/London', 'cm', '24h', 0) ON CONFLICT (singleton) DO UPDATE SET zone=EXCLUDED.zone")
+    set_house(registry.db, LONDON)
     _rows(registry, "UPDATE night_off SET settings = jsonb_set(settings, '{frames}', "
                     "jsonb_build_object('kind', 'frames', 'frame_ids', jsonb_build_array(%s::text)))", (frame,))
     clock = FixedClock(_london("2026-10-12T16:00"))
@@ -359,8 +359,7 @@ def test_the_document_source_wakes_at_the_next_set_time_and_at_a_hold_end_that_c
 
     Mutation probe: drop the timetable's next change from the deadlines -> 7200 s (midnight)."""
     frame, _ = _bound_frame(registry)
-    _rows(registry, "INSERT INTO house_settings(singleton, zone, units, clock_format, updated_at) "
-                    "VALUES (TRUE, 'Europe/London', 'cm', '24h', 0) ON CONFLICT (singleton) DO UPDATE SET zone=EXCLUDED.zone")
+    set_house(registry.db, LONDON)
     now = _london("2026-10-12T22:00")
     _rows(registry, "UPDATE night_off SET settings = jsonb_set(settings, '{frames}', "
                     "jsonb_build_object('kind', 'frames', 'frame_ids', jsonb_build_array(%s::text)))", (frame,))

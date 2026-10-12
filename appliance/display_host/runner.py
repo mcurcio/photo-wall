@@ -41,7 +41,7 @@ from .bus import DISPLAY_SLICE, BusReportSink, display_session
 from .ddc import DdcChannel
 from .domain import OutputState
 from .edid import parse_edid, read_edid
-from .output_power import OutputPowerController, ReportSink
+from .output_power import OutputPowerController, PiClock, ReportSink
 from .output_report import OutputReports
 from .picture import DdcPictureAdapter, FileAppliedPictures, PictureController
 from .power_methods import DdcCiAdapter, HdmiCecAdapter, SignalOffAdapter, run_tool
@@ -228,7 +228,7 @@ def power_controller(backend: WestonBackend, sink: ReportSink,
     controller over them."""
     cec = HdmiCecAdapter(run_tool)
     adapters = (cec, DdcCiAdapter(ddc), SignalOffAdapter(backend))
-    return OutputPowerController({adapter.method: adapter for adapter in adapters}, sink, time,
+    return OutputPowerController({adapter.method: adapter for adapter in adapters}, sink, PiClock(),
                                  ShellBlackPicture(backend)), cec
 
 

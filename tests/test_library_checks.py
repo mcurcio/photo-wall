@@ -69,6 +69,7 @@ class FakeClient:
         self.stacked: tuple[TimeBucket, ...] = ()
         self.shown: frozenset[str] = frozenset()
         self.windows: list = []                  # each up_to's capture-time window
+        self.recheck_windows: list = []          # each still_matches's
         self.closed = False
 
     def _call(self, name):
@@ -131,6 +132,7 @@ class FakeClient:
 
     async def still_matches(self, query, window, upstream_id):
         self._call("recheck")
+        self.recheck_windows.append(window)
         return any(item.upstream_id == upstream_id for item in self.photos)
 
     async def edits_fingerprint(self, upstream_id):
@@ -217,6 +219,20 @@ def test_a_photo_a_complete_check_missed_leaves_only_after_its_re_check():
     asyncio.run(check_to_end(checks, store, key))
     assert ref(1) not in in_pool(store, key) and len(in_pool(store, key)) == 4
     assert client.calls.count("recheck") == 1          # asked about alone before it left
+
+
+def test_a_re_check_asks_with_the_checks_own_window():
+    """A one-photo Re-check reads Immich over the same capture-time window as the walk it follows
+    ("last 1 month" on the house calendar), never another.
+
+    Mutation probe (P-recheck-other-window): pass an empty window -> the windows differ."""
+    client = FakeClient([photo(n) for n in range(1, 4)])
+    store, key, checks, _ = setup(client, zone="America/New_York", taken=TakenLast(months=1))
+    asyncio.run(check_to_end(checks, store, key))
+    del client.photos[0]
+    asyncio.run(check_to_end(checks, store, key))
+    assert client.recheck_windows == [client.windows[-1]]
+    assert client.windows[-1].after is not None
 
 
 def test_stacked_copies_the_timeline_hides_are_marked_not_pooled():

@@ -4,11 +4,10 @@ The same fake `ddcutil` harness as test_display_power_methods.py. The controller
 document and receives no other: its fake wall clock crosses 23:00 and 07:00 (Europe/London, BST:
 22:00Z and 06:00Z), and it switches the display by itself, each switch a PowerAttempt whose
 in-force is the timetable. Past `until` nothing is written; a rewrite wanting what is carried out
-writes nothing; a step of the wall clock past a set time is acted on within a tick.
+writes nothing; a step of the wall clock past a set time is acted on within a tick. The fake clock
+steps the worker by its looks (`Clock.ticks`), so no test sleeps or reads a real duration.
 """
 from __future__ import annotations
-
-import time
 
 import pytest
 from node.display.test_display_power_methods import (
@@ -23,6 +22,7 @@ from node.display.test_display_power_methods import (
     until,
 )
 
+from appliance.display_host.output_power import TICK_SECONDS
 from appliance.display_host.power_timetable import acts_on_new_document, next_set_time, wanted
 from contracts.node_output import InForceKind, Power, PowerResult
 
@@ -60,7 +60,7 @@ def test_the_pi_turns_the_display_off_and_on_at_the_set_times_by_itself(display,
         InForceKind.TIMETABLE, Power.ON, PowerResult.CONFIRMED)
     assert display.writes() == []                    # already on: read, never written
     clock.wall = OFF_AT - 1
-    time.sleep(1.5)                                  # a tick: nothing before the set time
+    clock.ticks()                                    # it has looked: nothing before the set time
     assert len(subject.sink.attempts) == 1
     clock.wall = OFF_AT                              # no new document: Central is away
     off = subject.attempts(2)[1]
@@ -81,10 +81,12 @@ def test_a_wall_clock_step_past_a_set_time_acts_within_a_tick(display, running):
     subject.controller.document(OUTPUT, document(1, power=NIGHT))
     subject.attempts(1)
     clock.wall = OFF_AT + 2 * 3600                   # NTP stepped the clock past 23:00
-    began = time.monotonic()
     assert subject.attempts(2)[1].in_force.power is Power.OFF
-    assert time.monotonic() - began < 3.0
     assert display.power == "standby"
+    # Within a tick: the worker never sleeps past TICK_SECONDS, though the next set time was hours
+    # away, so a step of the wall clock is seen within one (mutation probe: no tick cap -> a wait
+    # of about 6 h).
+    assert clock.waits and max(clock.waits) <= TICK_SECONDS
 
 
 def test_past_until_nothing_is_written_and_the_report_says_ran_out(display, running):
@@ -97,7 +99,7 @@ def test_past_until_nothing_is_written_and_the_report_says_ran_out(display, runn
     until(lambda: (report := subject.controller.report(OUTPUT)) is not None and report.for_change == 1, 15)
     report = subject.controller.report(OUTPUT)
     assert report.in_force.kind is InForceKind.TIMETABLE_RAN_OUT and report.in_force.power is None
-    time.sleep(1.5)
+    clock.ticks()
     assert subject.sink.attempts == [] and display.writes() == [] and display.power == "standby"
 
 
@@ -114,7 +116,7 @@ def test_a_rewrite_that_wants_the_same_writes_nothing(display, running):
     rewrite = timetable(Power.OFF, (ON_AT, Power.ON), until=UNTIL + 86400)
     subject.controller.document(OUTPUT, document(2, power=rewrite))
     until(lambda: subject.controller.report(OUTPUT).for_change == 2, 15)
-    time.sleep(1.5)
+    clock.ticks()
     assert len(subject.sink.attempts) == 2 and display.power == "on"    # the person's choice stands
     assert len(display.writes()) == 1
     report = subject.controller.report(OUTPUT)

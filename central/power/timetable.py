@@ -3,15 +3,19 @@
 Rules this module owns (one home each):
 - **Spans:** a Frame's wanted power over any range, as consecutive spans, each with its reason:
   the newest live hold on the Frame (until its `ends_at`, or for good when until resumed), else
-  Night off's windows when the Frame follows it ("night-off", off), else on ("on-underneath").
+  Night off's windows when Night off is in force and the Frame follows it ("night-off", off), else
+  on ("on-underneath").
+- **Night off in force:** only once the operator has confirmed the house's zone (`night_off_in_force`):
+  before that the zone is Central's own, which need not be the house's, and its 23:00 could fall
+  in the house's afternoon.
   Adjacent spans with the same power and reason merge.
 - **The horizon:** a timetable runs from Central's `now` to `horizon_end`: the start of the house
   day HORIZON_DAYS + 1 days after now's house day, so it moves once a house day, at midnight, and
   always covers at least HORIZON_DAYS days.
 - **The timetable:** `now` is the wanted power at Central's now; `changes` are the span starts in
   (now, until) where the power changes (a reason change with the same power is no change).
-- **A hold's end:** Night off's next on or off time after `now` (house-wide: the same moment for a
-  Frame that does not follow Night off), or None when holds last until resumed.
+- **A hold's end:** Night off's next on or off time after `now` while it is in force (house-wide: the
+  same moment for a Frame that does not follow Night off), or None when holds last until resumed.
 The 1b console test is not here: it sits on top of the timetable in the Output document
 (central/displays/model.py), counted on the Pi.
 """
@@ -28,7 +32,6 @@ from central.house_time.model import HouseTime, Window
 from central.power.model import (
     AllFrames,
     Hold,
-    HoldLasts,
     HoldSource,
     NightOff,
     PowerBecause,
@@ -86,6 +89,11 @@ def horizon_end(house: HouseTime, now: float) -> float:
     return day_start(house, house_date(house, now) + timedelta(days=HORIZON_DAYS + 1))
 
 
+def night_off_in_force(policy: PowerPolicy) -> NightOff | None:
+    """Night off when it switches displays (the house's zone is confirmed), else None."""
+    return policy.night_off if policy.zone_confirmed else None
+
+
 def follows_night_off(frame_id: str, night_off: NightOff) -> bool:
     """Whether `frame_id` follows Night off: every Frame under AllFrames, else the chosen ones."""
     return isinstance(night_off.frames, AllFrames) or frame_id in night_off.frames.frame_ids
@@ -97,8 +105,9 @@ def spans(frame_id: str, policy: PowerPolicy, house: HouseTime, start: float, en
     if not start < end:
         raise ValueError("range")
     holds = tuple(hold for hold in policy.holds if frame_id in hold.frame_ids)
-    nights = _night_windows(policy.night_off, house, start, end) if follows_night_off(
-        frame_id, policy.night_off) else ()
+    night_off = night_off_in_force(policy)
+    nights = _night_windows(night_off, house, start, end) if night_off is not None and follows_night_off(
+        frame_id, night_off) else ()
     edges = {start, end}
     edges.update(moment for hold in holds for moment in (hold.started_at, hold.ends_at)
                  if moment is not None and start < moment < end)
@@ -142,15 +151,17 @@ def unbound_timetable(house: HouseTime, now: float) -> Timetable:
                      darkness=Darkness.DISPLAY_OFF)
 
 
-def hold_end(night_off: NightOff, house: HouseTime, now: float, lasts: HoldLasts) -> float | None:
-    """When a hold pressed at Central's `now` ends: None when `lasts` is "until-resumed"; else
-    Night off's next on or off time after `now`, or `horizon_end(house, now)` when Night off has
-    none within the calculator's look-ahead (nothing stays held forever by accident)."""
-    if lasts == "until-resumed":
+def hold_end(policy: PowerPolicy, house: HouseTime, now: float) -> float | None:
+    """When a hold pressed at Central's `now` ends: None when Night off's `hold_lasts` is
+    "until-resumed"; else Night off's next on or off time after `now` while it is in force, or
+    `horizon_end(house, now)` when it has none within the calculator's look-ahead (nothing stays
+    held forever by accident)."""
+    if policy.night_off.hold_lasts == "until-resumed":
         return None
+    night_off = night_off_in_force(policy)
     reach = day_start(house, house_date(house, now) + timedelta(days=LOOKAHEAD_DAYS + 1))
-    moments = [moment for night in _night_windows(night_off, house, now, reach)
-               for moment in (night.start, night.end) if moment > now]
+    moments = [] if night_off is None else [moment for night in _night_windows(night_off, house, now, reach)
+                                             for moment in (night.start, night.end) if moment > now]
     return min(moments) if moments else horizon_end(house, now)
 
 
@@ -175,4 +186,4 @@ def _span_at(left: float, right: float, holds: tuple[Hold, ...], nights: tuple[W
 
 
 __all__ = ["HORIZON_DAYS", "PowerSpan", "TimedChange", "Timetable", "follows_night_off", "frame_timetable",
-           "hold_end", "horizon_end", "spans", "unbound_timetable"]
+           "hold_end", "horizon_end", "night_off_in_force", "spans", "unbound_timetable"]

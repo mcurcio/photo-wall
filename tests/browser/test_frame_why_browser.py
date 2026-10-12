@@ -38,7 +38,7 @@ LATE = at(LONDON, "2026-10-14T23:30")
 OFF = InForce(InForceKind.TIMETABLE, Power.OFF, None, None, None)
 
 
-class TestClock:
+class WhyClock:
     """The document source's clock: the test clock, read as Central's transaction clock is."""
 
     def __init__(self, clock):
@@ -76,7 +76,7 @@ def test_the_overview_names_the_winner_and_resting_and_a_display_that_did_not_an
                                                       when=daily("17:00", "23:45"), priority="normal"))
     runtime.command_current("set_default_scene", "calm")
     registry.clock.wall = LATE
-    change = _off_thread(_projected, registry, TestClock(registry.clock)).change
+    change = _off_thread(_projected, registry, WhyClock(registry.clock)).change
     _off_thread(_answer, registry, change, PowerResult.CONFIRMED, OFF)
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall")

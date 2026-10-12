@@ -4,12 +4,12 @@ a second evaluator in the browser's timezone, is deleted in slice T).
 """
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import date, timedelta
 from typing import Final
 
 from central.house_time import calculator
-from central.house_time.model import HouseTime
+from central.house_time.model import HouseTime, Window
 from central.power.model import PowerPolicy
 from central.power.timetable import spans
 from central.runtime import Program
@@ -18,12 +18,13 @@ from central.why.model import PowerBand, Week, WeekWindow
 DAYS: Final = 7
 
 
-def week(*, programs: Mapping[str, Program], default_scene_id: str | None, policy: PowerPolicy,
-         frame_ids: tuple[str, ...], house: HouseTime, first_day: date) -> Week:
+def week(*, programs: Mapping[str, Program], plays: Callable[[Program, float, float], tuple[Window, ...]],
+         default_scene_id: str | None, policy: PowerPolicy, frame_ids: tuple[str, ...], house: HouseTime,
+         first_day: date) -> Week:
     """Seven house days from `first_day`'s start (calculator `day_start`) to the start of the day
-    seven days later: each Program's windows overlapping them (calculator `windows`), in start
-    order; each Frame's power spans (power.timetable `spans`), by Frame then start. A Program
-    whose When the house can no longer place (its Place removed) has no windows."""
+    seven days later: each Program's windows overlapping them as Runtime plays them (`plays`:
+    Runtime.program_windows_between, so a saved rule shows from the window it applies from, R10),
+    in start order; each Frame's power spans (power.timetable `spans`), by Frame then start."""
     start = calculator.day_start(house, first_day)
     end = calculator.day_start(house, first_day + timedelta(days=DAYS))
 
@@ -32,10 +33,7 @@ def week(*, programs: Mapping[str, Program], default_scene_id: str | None, polic
 
     windows = []
     for program in programs.values():
-        try:
-            found = calculator.windows(program.when, house, start, end)
-        except ValueError:
-            found = ()
+        found = plays(program, start, end)
         windows.extend(WeekWindow(program_id=program.program_id, name=program.name, scene_id=program.scene_id,
                                   priority=program.priority, start_at=window.start, end_at=window.end,
                                   start=local(window.start), end=local(window.end)) for window in found)

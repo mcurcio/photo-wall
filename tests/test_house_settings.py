@@ -4,8 +4,9 @@ unknown zone is refused; a saved zone and Place move Night off's set times in th
 the worker's source projects and every Program's windows, and wake every Node's document source; a
 sunset When is "needs-place" until the house has a Place.
 
-Mutation probe (P-zone-ignored): keep reading the seed zone after save (the save does not store
-the zone) -> the moved-set-time assertion fails.
+Mutation probes: (P-zone-ignored) keep reading the seed zone after save (the save does not store
+the zone) -> the moved-set-time assertion fails; (P-unconfirmed-drives) Night off in force before
+the zone is confirmed -> a 23:00 change before the first save.
 """
 from __future__ import annotations
 
@@ -39,7 +40,7 @@ def test_with_no_row_the_house_is_centrals_own_zone(registry):
     response = client.get("/v1/operator/house", headers=AUTH)
     assert response.status_code == 200, response.text
     assert response.json() == {"time": {"zone": server_zone(), "place": None}, "units": "cm", "clock": "24h",
-                               "updated_at": 0.0}
+                               "updated_at": 0.0, "zone_confirmed": False}
     assert client.get("/v1/operator/house").status_code == 401
     assert client.put("/v1/operator/house", json=_house("Europe/London")).status_code == 401
 
@@ -67,8 +68,13 @@ def test_a_saved_zone_and_place_move_night_off_and_the_programs_windows(registry
                                                                                          source_refs=("library:1",)),)))
     device = device_id_for_serial(SERIAL)
     wakes = DisplayWakes()
+    clock = FixedClock(at(LONDON, "2026-10-12T16:00"))
     with TestClient(app) as client:
+        # Until the operator confirms the zone (Central's own here), Night off switches nothing.
+        assert client.get("/v1/operator/power/night-off", headers=AUTH).json()["waits_for_zone"] is True
+        assert _projected(registry, clock).power.changes == ()
         assert client.put("/v1/operator/house", headers=AUTH, json=_house("Europe/London")).status_code == 200
+        assert client.get("/v1/operator/power/night-off", headers=AUTH).json()["waits_for_zone"] is False
         refused = client.post("/v1/operator/programs", headers=AUTH, json={
             "name": "Sunset", "scene_id": "evening", "when": SUNSET})
         assert (refused.status_code, refused.json()) == (422, {"error": "needs-place"})
@@ -83,7 +89,6 @@ def test_a_saved_zone_and_place_move_night_off_and_the_programs_windows(registry
             body = client.get("/v1/operator/runtime", headers=AUTH).json()
             return body["program_windows"][program_id]["next"]
 
-        clock = FixedClock(at(LONDON, "2026-10-12T16:00"))
         assert _projected(registry, clock).power.changes[0].at == "2026-10-12T22:00:00Z"   # 23:00 BST
         assert next_window()["start_at"] == at(LONDON, "2026-10-12T17:00")
 
@@ -100,7 +105,7 @@ def test_a_saved_zone_and_place_move_night_off_and_the_programs_windows(registry
         saved = asyncio.run(woken_by(lambda: client.put("/v1/operator/house", headers=AUTH,
                                                         json=_house("America/New_York", PLACE))))
         assert saved.status_code == 200, saved.text
-        assert saved.json() == {**_house("America/New_York", PLACE), "updated_at": noon}
+        assert saved.json() == {**_house("America/New_York", PLACE), "updated_at": noon, "zone_confirmed": True}
         assert client.get("/v1/operator/house", headers=AUTH).json() == saved.json()
         assert _projected(registry, clock).power.changes[0].at == "2026-10-13T03:00:00Z"   # 23:00 EDT
         assert next_window()["start_at"] == at(NEW_YORK, "2026-10-12T17:00")

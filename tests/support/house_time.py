@@ -41,12 +41,13 @@ def window_program(program_id: str, scene_id: str, start: float, end: float, *, 
 
 
 def set_house(db, house: HouseTime) -> None:
-    """Store Settings › House as `house` (a DB test's house; with no row Central would read its own
-    server zone, which differs between a laptop and CI)."""
+    """Store Settings › House as `house`, its zone confirmed as an operator's save confirms it (a DB
+    test's house; with no row Central would read its own server zone, which differs between a laptop
+    and CI, and Night off would switch nothing)."""
     place = house.place
     with db.transaction() as conn:
         conn.execute(
-            "INSERT INTO house_settings (singleton, zone, latitude, longitude, units, clock_format, updated_at) "
-            "VALUES (TRUE, %s, %s, %s, 'cm', '24h', 0) ON CONFLICT (singleton) DO UPDATE SET zone=EXCLUDED.zone, "
-            "latitude=EXCLUDED.latitude, longitude=EXCLUDED.longitude",
+            "INSERT INTO house_settings (singleton, zone, latitude, longitude, units, clock_format, updated_at, "
+            "zone_confirmed) VALUES (TRUE, %s, %s, %s, 'cm', '24h', 0, TRUE) ON CONFLICT (singleton) DO UPDATE SET "
+            "zone=EXCLUDED.zone, latitude=EXCLUDED.latitude, longitude=EXCLUDED.longitude, zone_confirmed=TRUE",
             (house.zone, None if place is None else place.latitude, None if place is None else place.longitude))

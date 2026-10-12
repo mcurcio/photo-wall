@@ -124,6 +124,12 @@ class Scene(FrozenModel):
 Child.model_rebuild()
 
 
+def _unprotected(scene: Scene) -> Scene:
+    """`scene` with no protection at any depth (its own `protect_frames` and every child's)."""
+    children = tuple(child.model_copy(update={"scene": _unprotected(child.scene)}) for child in scene.children)
+    return scene.model_copy(update={"protect_frames": False, "children": children})
+
+
 # Power and the week (roadmap 2b; frozen page /Volumes/Dock/tmp/power-week/slices/T.md). Slice T
 # reshapes `Program` below into a repeating rule: {program_id, name, scene_id, when, priority,
 # revision}, its windows derived from `when` in house time, never stored. Content's arbiter
@@ -277,7 +283,8 @@ class ProgramWindowView(FrozenModel):
 
 class ProgramWindows(FrozenModel):
     current: ProgramWindowView | None                # start_at <= now < end_at
-    next: ProgramWindowView | None                   # the first window starting after now
+    next: ProgramWindowView | None                   # the first window starting after now that its
+                                                     # current rule plays (at or after program_from)
 
 
 class OperatorProjection(FrozenModel):
@@ -806,22 +813,64 @@ class Runtime:
         )
 
     def _program_windows(self, program: Program, now: float) -> ProgramWindows:
+        """The card's windows by the rule Runtime admits by (R10): `current` is the window the
+        Program is playing (under whichever revision admitted it), else its current rule's window
+        covering `now` once that rule applies (a refused one shows its refusal); `next` is the
+        current rule's first window starting after `now` and at or after its `program_from`."""
+        since = self._program_from(program)
+        playing = self._playing_window(program)
         try:
-            current = calculator.window_at(program.when, self._house, now)
-            following = calculator.next_window(program.when, self._house, now)
+            covering = calculator.window_at(program.when, self._house, now)
+            following = next((window for window in _windows_after(program.when, self._house, now)
+                              if window.start > now and window.start >= since), None)
         except ValueError:          # a When the house can no longer place
-            current = following = None
+            covering = following = None
+        if playing is None and covering is not None and covering.start >= since:
+            playing = (covering, program.window_id(covering.start))
 
-        def view(window: Window | None) -> ProgramWindowView | None:
-            if window is None:
+        def view(window: Window | None, identity: str | None) -> ProgramWindowView | None:
+            if window is None or identity is None:
                 return None
             return ProgramWindowView(
                 start_at=window.start, end_at=window.end,
                 start=calculator.local_date_time(self._house, window.start),
                 end=calculator.local_date_time(self._house, window.end),
-                admission=self._state.admissions.get(program.window_id(window.start)))
+                admission=self._state.admissions.get(identity))
 
-        return ProgramWindows(current=view(current), next=view(following))
+        return ProgramWindows(
+            current=view(*playing) if playing else None,
+            next=view(following, None if following is None else program.window_id(following.start)))
+
+    def program_windows_between(self, program: Program, start: float, end: float) -> tuple[Window, ...]:
+        """The windows `program` plays over [start, end), by the rule Runtime admits by (R10): its
+        current rule's windows from its `program_from` on, and the window a Run of an earlier
+        revision is still playing (a save keeps that window's end). The week page's one source."""
+        since = self._program_from(program)
+        try:
+            found = [window for window in calculator.windows(program.when, self._house, start, end)
+                     if window.start >= since]
+        except ValueError:          # a When the house can no longer place
+            found = []
+        playing = self._playing_window(program)
+        if playing is not None and playing[0] not in found and playing[0].start < end and playing[0].end > start:
+            found.append(playing[0])
+        return tuple(sorted(found, key=lambda window: window.start))
+
+    def _program_from(self, program: Program) -> float:
+        """From when `program`'s current rule is admitted (unbounded for a state stored before it)."""
+        return self._state.program_from.get(program.program_id, float("-inf"))
+
+    def _playing_window(self, program: Program) -> tuple[Window, str] | None:
+        """The window an active root Run of `program` plays (the current revision's first) and its
+        identity, or None."""
+        runs = sorted((run for run in self._state.runs.values()
+                       if run.parent_id is None and run.active and run.program_id == program.program_id
+                       and run.program_ends_at is not None and run.activation_id is not None),
+                      key=lambda run: (not run.activation_id.startswith(program.window_prefix), -run.started_at))
+        if not runs:
+            return None
+        run = runs[0]
+        return Window(start=run.started_at, end=run.program_ends_at), run.activation_id
 
     def timeline(
         self, start: float, end: float, *, max_events: int = 10000
@@ -1025,7 +1074,9 @@ class Runtime:
         if any(run.activation_id.startswith(prefix) for run in self._default_runs()):
             return None
         chosen = self._state.scenes[self._state.default_scene.scene_id]
-        scene = chosen.model_copy(update={"loop": True, "duration_seconds": None})
+        # It never protects either (frame design rule 3: it is beneath every Schedule): a
+        # protecting copy would refuse every Schedule on its Frames for as long as it plays.
+        scene = _unprotected(chosen).model_copy(update={"loop": True, "duration_seconds": None})
         if self._protected_conflict(scene, DEFAULT_SCENE_RANK, False):
             return None
         return scene

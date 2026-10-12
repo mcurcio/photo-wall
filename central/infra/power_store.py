@@ -20,7 +20,8 @@ from psycopg.types.json import Jsonb
 from central.db import Database, TransactionClock
 from central.house_time.calculator import local_date_time, next_window, when_problems, window_at
 from central.house_time.model import HouseTime
-from central.infra.house_store import house_time_in
+from central.infra.house_store import house_settings_in, house_time_in
+from central.infra.output_wakes import wake_every_node_in
 from central.power.model import AllFrames, ChosenFrames, Hold, HoldSource, NightOff, PowerPolicy
 from central.power.ports import PowerRefused
 from central.power.timetable import hold_end, spans
@@ -48,17 +49,18 @@ def forget_frame_in(conn: Any, frame_id: str) -> None:
     kept = ChosenFrames(frame_ids=tuple(chosen for chosen in frames.frame_ids if chosen != frame_id))
     draft = night_off.model_copy(update={"frames": kept}).model_dump(mode="json", exclude={"revision"})
     conn.execute("UPDATE night_off SET settings=%s, revision=revision + 1", (Jsonb(draft),))
-    _wake_every_node(conn)
+    wake_every_node_in(conn)
 
 
 def power_policy_in(conn: Any, now: float) -> PowerPolicy:
-    """Night off and the holds live at Central's `now` (ends_at after it, or until resumed): one
-    Hold per hold, its Frames sorted. An expired row is ignored here and deleted by the next
-    command (never by a reaper or a trigger)."""
+    """Night off, the holds live at Central's `now` (ends_at after it, or until resumed: one Hold
+    per hold, its Frames sorted) and whether the house's zone is confirmed. An expired row is
+    ignored here and deleted by the next command (never by a reaper or a trigger)."""
     rows = conn.execute(
         f"SELECT frame_id, {_HOLD_COLUMNS} FROM power_holds WHERE ends_at IS NULL OR ends_at > %s",  # noqa: S608
         (now,)).fetchall()
-    return PowerPolicy(night_off_in(conn), holds=_holds(rows))
+    return PowerPolicy(night_off_in(conn), holds=_holds(rows),
+                       zone_confirmed=house_settings_in(conn).zone_confirmed)
 
 
 def wanted_off_in(conn: Any, frame_id: str, start: float, end: float) -> bool:
@@ -90,14 +92,6 @@ def _hold_view(hold: Hold, house: HouseTime) -> HoldView:
                     until=None if hold.ends_at is None else local_date_time(house, hold.ends_at))
 
 
-def _wake_every_node(conn: Any) -> None:
-    """Wake every unretired Node's Output document source when the caller's transaction commits
-    (display_store's `_notify` shape; its channel, imported here because display_store imports
-    this module)."""
-    from central.infra.display_store import OUTPUT_DOCUMENTS_CHANNEL
-    conn.execute("SELECT pg_notify(%s, device_id) FROM players WHERE retired_at IS NULL",
-                 (OUTPUT_DOCUMENTS_CHANNEL,))
-
 
 def _forget_expired(conn: Any, now: float) -> None:
     """A command's lazy delete of the holds that ended by Central's `now`."""
@@ -113,7 +107,8 @@ class PgPower:
 
     def night_off(self) -> NightOffView:
         with self._db.transaction() as conn:
-            night_off, house, now = night_off_in(conn), house_time_in(conn), self._times.now_in(conn)
+            night_off, settings, now = night_off_in(conn), house_settings_in(conn), self._times.now_in(conn)
+        house = settings.time
         try:
             following, current = next_window(night_off.when, house, now), window_at(night_off.when, house, now)
         except ValueError:          # no days, or a sun time with no Place: no times to show
@@ -121,7 +116,7 @@ class PgPower:
         # The next off is the next window's start; the next on ends the window in force, else the next.
         on_window = current if current is not None else following
         return NightOffView(
-            night_off=night_off,
+            night_off=night_off, waits_for_zone=not settings.zone_confirmed,
             next_off=None if following is None else local_date_time(house, following.start),
             next_on=None if on_window is None else local_date_time(house, on_window.end))
 
@@ -146,7 +141,7 @@ class PgPower:
                     raise PowerRefused("unknown-frame", 422)
             conn.execute("UPDATE night_off SET settings=%s, revision=revision + 1, updated_at=%s",
                          (Jsonb(draft.model_dump(mode="json")), self._times.now_in(conn)))
-            _wake_every_node(conn)
+            wake_every_node_in(conn)
         return self.night_off()
 
     def all_off(self, request_id: UUID) -> HoldView:
@@ -159,15 +154,15 @@ class PgPower:
         with self._db.transaction() as conn:
             _forget_expired(conn, self._times.now_in(conn))
             conn.execute("DELETE FROM power_holds WHERE frame_id = ANY(%s)", (list(frame_ids),))
-            _wake_every_node(conn)
+            wake_every_node_in(conn)
 
     def _hold(self, request_id: UUID, power: Power) -> HoldView:
         """Hold every current Frame at `power` until `hold_end`. The newest hold on a Frame replaces
         an older one; a Frame already held by this request keeps its row (start included)."""
         with self._db.transaction() as conn:
-            now, house, night_off = self._times.now_in(conn), house_time_in(conn), night_off_in(conn)
+            now, house = self._times.now_in(conn), house_time_in(conn)
             _forget_expired(conn, now)
-            ends_at = hold_end(night_off, house, now, night_off.hold_lasts)
+            ends_at = hold_end(power_policy_in(conn, now), house, now)
             conn.execute(
                 "INSERT INTO power_holds (frame_id, hold_id, power, source, started_at, ends_at) "
                 "SELECT id, %s, %s, 'console', %s, %s FROM frames ON CONFLICT (frame_id) DO UPDATE SET "
@@ -177,7 +172,7 @@ class PgPower:
                 (request_id, power.value, now, ends_at))
             rows = conn.execute(f"SELECT frame_id, {_HOLD_COLUMNS} FROM power_holds WHERE hold_id=%s",  # noqa: S608
                                 (request_id,)).fetchall()
-            _wake_every_node(conn)
+            wake_every_node_in(conn)
         held = _holds(rows)
         if not held:      # no Frames: an empty hold, stored nowhere
             return HoldView(hold_id=request_id, power=power, frame_ids=(), source=HoldSource(),

@@ -118,6 +118,7 @@ from central.fleet.node_bus_presence import bus_links_in
 from central.house_time.calculator import day_start, house_date
 from central.infra.house_store import house_time_in
 from central.infra.node_link_store import PgLinkStores
+from central.infra.output_wakes import OUTPUT_DOCUMENTS_CHANNEL, notify_nodes_in
 from central.infra.power_store import power_policy_in
 from central.installation_models import FrameOutput
 from central.live_session import Lease, begin_lease, touched
@@ -154,7 +155,6 @@ DOCUMENT_STREAM: Final = "KV_desired_display"   # the display line's desired buc
 _REPORT_SUBJECT: Final = "$KV.state_display."
 _KV_OPERATION: Final = "KV-Operation"            # a delete or purge marker carries no value
 _CLOCK: Final = DatabaseTransactionClock()
-OUTPUT_DOCUMENTS_CHANNEL: Final = "photo_wall_output_documents"   # payload: the Node's device id
 _LISTEN_RETRY_SECONDS: Final = 1.0
 _LISTEN_APPLICATION: Final = "photo-wall-output-documents"
 _CONSOLE_TEST: Final = "console-test"            # power_requests.reason of 1b's console test
@@ -723,13 +723,6 @@ def _document_json(document: OutputDocument) -> dict[str, Any]:
     return json.loads(encode_output_document(document))
 
 
-def _notify(conn: Any, device_ids_sql: str, params: tuple[Any, ...]) -> None:
-    """Wake the worker's document source of each Node `device_ids_sql` selects (column device_id),
-    delivered when the caller's transaction commits."""
-    conn.execute(f"SELECT pg_notify(%s, n.device_id) FROM ({device_ids_sql}) n",  # noqa: S608 (module SQL)
-                 (OUTPUT_DOCUMENTS_CHANNEL, *params))
-
-
 # --- The operator API's reads --------------------------------------------------------------------
 
 def _display_view(row: Mapping[str, Any]) -> DisplayView:
@@ -836,7 +829,7 @@ def _json_bytes(value: Mapping[str, Any]) -> bytes:
 
 class PgDisplayCommands:
     """`DisplayCommands` over PostgreSQL. Each command wakes the worker's document source of every
-    Node it changes, in its own transaction (`_notify`)."""
+    Node it changes, in its own transaction (`notify_nodes_in`)."""
 
     def __init__(self, db: Database) -> None:
         self._db = db
@@ -858,7 +851,7 @@ class PgDisplayCommands:
                 "created_at=EXCLUDED.created_at, ends_at=EXCLUDED.ends_at",
                 (request_id, frame_id, Power.OFF.value, _CONSOLE_TEST, TEST_SECONDS, now,
                  now + TEST_SECONDS))
-            _notify(conn, "SELECT device_id FROM players WHERE id=%s", (frame["player_id"],))
+            notify_nodes_in(conn, "SELECT device_id FROM players WHERE id=%s", (frame["player_id"],))
         return PowerTestAccepted(request_id=request_id, for_seconds=TEST_SECONDS)
 
     def end_power_test(self, frame_id: str) -> None:
@@ -870,7 +863,7 @@ class PgDisplayCommands:
             ended = conn.execute("DELETE FROM power_requests WHERE frame_id=%s AND reason=%s RETURNING id",
                                  (frame_id, _CONSOLE_TEST)).fetchone()
             if ended is not None and frame["player_id"] is not None:
-                _notify(conn, "SELECT device_id FROM players WHERE id=%s", (frame["player_id"],))
+                notify_nodes_in(conn, "SELECT device_id FROM players WHERE id=%s", (frame["player_id"],))
 
     def set_power_settings(self, display_id: UUID, settings: DisplayPowerSettings) -> DisplayPowerSettings:
         with self._db.transaction() as conn:
@@ -881,7 +874,7 @@ class PgDisplayCommands:
                  settings.switch_input_on_power_on, settings.never_off_on_other_input, display_id)).fetchone()
             if row is None:
                 raise DisplayRefused("unknown_display", 404)
-            _notify(conn, "SELECT DISTINCT p.device_id FROM output_displays o JOIN players p ON p.id=o.player_id "
+            notify_nodes_in(conn, "SELECT DISTINCT p.device_id FROM output_displays o JOIN players p ON p.id=o.player_id "
                           "WHERE o.display_id=%s", (display_id,))
         return DisplayPowerSettings(**row)
 
@@ -946,7 +939,7 @@ def _setting_view(setting: StoredSetting, answered: bool | None, report: Setting
 class PgPictureSessions:
     """`PictureQueries` and `PictureCommands` over PostgreSQL (displays, picture_sessions). The rules
     are central/displays/picture.py's; every write locks the Display row and wakes the document
-    source of every Node that last saw that Display, in its own transaction (`_notify`)."""
+    source of every Node that last saw that Display, in its own transaction (`notify_nodes_in`)."""
 
     def __init__(self, db: Database) -> None:
         self._db = db
@@ -1003,7 +996,7 @@ class PgPictureSessions:
                 "before_contrast, touched, idle_until, created_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
                 (session.session_id, display_id, frame_id, session.sequence, Jsonb(picture_fields(stored)),
                  *session.before_read, [], lease.idle_until, now))
-            _notify(conn, _NODES_SEEING, (display_id,))
+            notify_nodes_in(conn, _NODES_SEEING, (display_id,))
         return _session_view(session)
 
     def edit_picture(self, session_id: UUID, edit: PictureEdit) -> PictureSequence:
@@ -1071,7 +1064,7 @@ class PgPictureSessions:
                     outcome = CopyOutcome.SESSION_OPEN
                 else:
                     write_picture(conn, display_id, copied(values, stored))
-                    _notify(conn, _NODES_SEEING, (display_id,))
+                    notify_nodes_in(conn, _NODES_SEEING, (display_id,))
                     outcome = CopyOutcome.COPIED
                 outcomes.append(PictureCopyResult(frame_id=target, outcome=outcome))
         return tuple(outcomes)
@@ -1092,14 +1085,14 @@ class PgPictureSessions:
                      (session.sequence, Jsonb(picture_fields(session.draft)),
                       sorted(setting.value for setting in session.touched), session.lease.idle_until,
                       session.session_id))
-        _notify(conn, _NODES_SEEING, (session.display_id,))
+        notify_nodes_in(conn, _NODES_SEEING, (session.display_id,))
 
     @staticmethod
     def _end_in(conn: Any, session: PictureSession, picture: DisplayPicture) -> None:
         """Store `picture` on the Display and end the session, in one transaction."""
         write_picture(conn, session.display_id, picture)
         conn.execute("DELETE FROM picture_sessions WHERE id=%s", (session.session_id,))
-        _notify(conn, _NODES_SEEING, (session.display_id,))
+        notify_nodes_in(conn, _NODES_SEEING, (session.display_id,))
 
 
 def _fold_in(conn: Any, display_id: UUID, now: float) -> DisplayPicture | None:
