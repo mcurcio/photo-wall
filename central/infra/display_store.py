@@ -62,6 +62,7 @@ from psycopg.types.json import Jsonb
 from central.content_catalog.catalog import device_id_for_serial
 from central.db import Database, DatabaseTransactionClock, TransactionClock
 from central.displays.hardware import HardwareRow, hardware_rows, kept_report, offered_for
+from central.displays.lut import LUT_RECIPE_ID
 from central.displays.model import (
     DEFAULT_SETTINGS,
     TEST_SECONDS,
@@ -136,6 +137,7 @@ from central.infra.power_store import power_policy_in
 from central.installation_models import FrameOutput
 from central.live_session import Lease, begin_lease, touched
 from central.power.timetable import frame_timetable, unbound_timetable
+from contracts.lut import LutRef
 from contracts.models import Calibration, FrameProfile, frame_output
 from contracts.node_link import Pipe
 from contracts.node_output import (
@@ -402,25 +404,39 @@ def _player_of(conn: Any, device_id: str, lock: str) -> str | None:
 # A displays row `d` gives these; `stored_picture` reads them, `write_picture` writes them. A
 # session's draft is stored under the same names.
 _PICTURE_FIELDS: Final = ("hardware_picture", "software_brightness_percent", "software_contrast_percent",
-                          "colour_temperature_kelvin", "gamma_tenths")
+                          "colour_temperature_kelvin", "gamma_tenths", "software_saturation_percent",
+                          "software_highlight_rolloff_percent", "software_black_floor_tenths", "software_lut_profile",
+                          "software_lut_amount_percent")
 _PICTURE_COLUMNS: Final = ", ".join("d." + field for field in _PICTURE_FIELDS)
 
 
 def stored_picture(row: Mapping[str, Any]) -> DisplayPicture:
-    """The DisplayPicture of a mapping with `_PICTURE_FIELDS` (a displays row, or a session's draft)."""
+    """The DisplayPicture of a mapping with `_PICTURE_FIELDS` (a displays row, or a session's draft).
+    The LUT is stored as its paper profile's digest alone; its recipe is never stored, so it is
+    always the current `LUT_RECIPE_ID`."""
     hardware = {code: int(value) for code, value in row["hardware_picture"].items()}
+    lut = row["software_lut_profile"]
     return DisplayPicture({code: hardware[code] for code in PICTURE_LIST if code in hardware},
                           SoftwarePicture(row["software_brightness_percent"], row["software_contrast_percent"],
-                                          row["colour_temperature_kelvin"], row["gamma_tenths"]))
+                                          row["colour_temperature_kelvin"], row["gamma_tenths"],
+                                          row["software_saturation_percent"], row["software_highlight_rolloff_percent"],
+                                          row["software_black_floor_tenths"],
+                                          None if lut is None else LutRef(lut, LUT_RECIPE_ID),
+                                          row["software_lut_amount_percent"]))
 
 
 def picture_fields(picture: DisplayPicture) -> dict[str, Any]:
-    """`picture` under the stored columns' names (`_PICTURE_FIELDS`)."""
+    """`picture` under the stored columns' names (`_PICTURE_FIELDS`); the LUT as its profile's digest."""
     software = picture.software
     return {"hardware_picture": dict(picture.hardware),
             "software_brightness_percent": software.brightness_percent,
             "software_contrast_percent": software.contrast_percent,
-            "colour_temperature_kelvin": software.colour_temperature_kelvin, "gamma_tenths": software.gamma_tenths}
+            "colour_temperature_kelvin": software.colour_temperature_kelvin, "gamma_tenths": software.gamma_tenths,
+            "software_saturation_percent": software.saturation_percent,
+            "software_highlight_rolloff_percent": software.highlight_rolloff_percent,
+            "software_black_floor_tenths": software.black_floor_tenths,
+            "software_lut_profile": None if software.lut is None else software.lut.profile_sha256,
+            "software_lut_amount_percent": software.lut_amount_percent}
 
 
 def write_picture(conn: Any, display_id: UUID, picture: DisplayPicture) -> None:
@@ -1070,8 +1086,7 @@ class PgPictureSessions:
             hardware=tuple(_hardware_view(hardware) for hardware in hardware_rows(
                 picture.hardware, offered, report.results if answered and report is not None else None,
                 connected=row["connected"] is True)),
-            software=SoftwarePictureView(**{name: getattr(picture.software, name)
-                                            for name in SoftwarePictureView.model_fields}),
+            software=_software_view(picture.software),
             session=_session_view(session) if live and session is not None else None)
 
     def begin_picture(self, frame_id: str) -> PictureSessionView:
@@ -1227,6 +1242,15 @@ def _fold_in(conn: Any, display_id: UUID, now: float) -> DisplayPicture | None:
 def _require_live(session: PictureSession, now: float) -> None:
     if not session.lease.live(now):
         raise PictureRefused("session_ended", 410)
+
+
+def _software_view(software: SoftwarePicture) -> SoftwarePictureView:
+    """The Photo Wall section's values; the LUT choice is not shown yet (lut None)."""
+    return SoftwarePictureView(
+        brightness_percent=software.brightness_percent, contrast_percent=software.contrast_percent,
+        colour_temperature_kelvin=software.colour_temperature_kelvin, gamma_tenths=software.gamma_tenths,
+        saturation_percent=software.saturation_percent, highlight_rolloff_percent=software.highlight_rolloff_percent,
+        black_floor_tenths=software.black_floor_tenths, lut=None, lut_amount_percent=software.lut_amount_percent)
 
 
 def _session_view(session: PictureSession) -> PictureSessionView:

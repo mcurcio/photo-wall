@@ -4,7 +4,8 @@
 A Display keeps two groups of picture settings, never coupled (owner, 2026-10-12: "i want to
 independently control the hardware from the software"): **hardware values**, only the display
 settings someone set in Photo Wall, by MCCS code (an absent code is "as the display has it": the
-Pi never writes it), and **software values**, Photo Wall's four, always complete. No rule here
+Pi never writes it), and **software values**, Photo Wall's group (the picture split's four and the
+print look's: saturation, highlight rolloff, black floor, the LUT and its amount), always complete. No rule here
 reads one group to decide the other. What a display offers, and whether a hardware value may be
 set on it, is central/displays/hardware.py's.
 
@@ -32,7 +33,7 @@ One home each for:
 - **Done waits for the Pi** (`presented`, `picture_status`): SHOWN once the report answers the
   document that carries exactly the picture Done would keep and the Player presented it.
 - **Copy** (#119; owner, 2026-10-12: "Both (Recommended)"; "Only ones set in Photo Wall
-  (Recommended)"): all four software values; the hardware values set on the source where the
+  (Recommended)"): every software value, the print look's included; the hardware values set on the source where the
   target offers them (hardware.py's rule, slice S4); never position.
 """
 from __future__ import annotations
@@ -61,11 +62,16 @@ PICTURE_IDLE_SECONDS: Final = 5.0     # a picture session ends this long after i
 
 
 class SoftwareSetting(StrEnum):
-    """Photo Wall's four picture settings, as the routes name them."""
+    """Photo Wall's picture settings, as the routes name them (the ranges are
+    contracts.node_picture's `SoftwarePicture`)."""
     BRIGHTNESS = "brightness"                   # #111, percent 0..150 (100 changes nothing)
     CONTRAST = "contrast"                       # #112, percent 0..150
     COLOUR_TEMPERATURE = "colour-temperature"   # #113, kelvin
     GAMMA = "gamma"                             # #114, tenths
+    SATURATION = "saturation"                   # print look: percent 0..150, 100 changes nothing
+    HIGHLIGHT_ROLLOFF = "highlight-rolloff"     # print look: percent 0..100, 0 = the clip at white
+    BLACK_FLOOR = "black-floor"                 # print look: tenths of a percent of white light 0..100
+    LUT_AMOUNT = "lut-amount"                   # print look: percent 0..100 of the LUT mixed in
 
 
 _SOFTWARE_FIELDS: Final[Mapping[SoftwareSetting, str]] = {
@@ -73,6 +79,10 @@ _SOFTWARE_FIELDS: Final[Mapping[SoftwareSetting, str]] = {
     SoftwareSetting.CONTRAST: "contrast_percent",
     SoftwareSetting.COLOUR_TEMPERATURE: "colour_temperature_kelvin",
     SoftwareSetting.GAMMA: "gamma_tenths",
+    SoftwareSetting.SATURATION: "saturation_percent",
+    SoftwareSetting.HIGHLIGHT_ROLLOFF: "highlight_rolloff_percent",
+    SoftwareSetting.BLACK_FLOOR: "black_floor_tenths",
+    SoftwareSetting.LUT_AMOUNT: "lut_amount_percent",
 }
 
 
@@ -168,10 +178,10 @@ def edited_hardware(session: PictureSession, code: VcpCode, value: int | None, *
 
 def edited_software(session: PictureSession, setting: SoftwareSetting, value: int, *,
                     expected_sequence: int, now: float) -> PictureSession:
-    """The session after one of Photo Wall's four edits. PictureRefused: session_ended,
+    """The session after one of Photo Wall's numeric edits. PictureRefused: session_ended,
     stale_sequence, out_of_range 422 (contracts.node_picture's ranges: `SoftwarePicture`)."""
     sequence = _next(session, expected_sequence, now)
-    if not isinstance(setting, SoftwareSetting) or type(value) is not int:
+    if not isinstance(setting, SoftwareSetting) or setting not in _SOFTWARE_FIELDS or type(value) is not int:
         raise PictureRefused("out_of_range", 422)
     try:
         software = replace(session.draft.software, **{_SOFTWARE_FIELDS[setting]: value})

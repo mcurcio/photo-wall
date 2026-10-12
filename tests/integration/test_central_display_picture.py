@@ -9,7 +9,9 @@ knows what the display offers. (3) A hardware edit made through the operator API
 process, reaches the Node's `picture-HDMI-A-1` with a new picture change within 3 s while
 `output-HDMI-A-1` keeps its change: carried by the notification (no reconcile runs between the edit
 and its arrival). Mutation probe: drop the session write's NOTIFY -> the edit arrives only at the
-session's idle deadline, past 3 s.
+session's idle deadline, past 3 s. (Print look) the display line is schema major 5 and the
+document Central writes decodes with the print look's fields (the Display's neutral ones); the v4
+software shape would not decode (contracts.node_picture's strict decoder).
 """
 from __future__ import annotations
 
@@ -43,6 +45,7 @@ from contracts.node_output import (
     output_report_key,
 )
 from contracts.node_picture import (
+    NEUTRAL_SOFTWARE,
     HardwareRange,
     HardwareSetting,
     PictureReport,
@@ -129,6 +132,7 @@ def test_picture_documents_and_reports_cross_the_display_line_on_their_own_keys(
             power = await until(held, SECONDS, "output-HDMI-A-1 on the Node")
             first = await until(held_picture, SECONDS, "(1) picture-HDMI-A-1 on the Node")
             assert (dict(first.hardware), first.software.brightness_percent) == ({}, 100)
+            assert SCHEMA_MAJOR == 5 and first.software == NEUTRAL_SOFTWARE   # the print look's fields, neutral
 
             # (2) The Output report records the display; the picture report, what it offers.
             display.state.put(output_report_key("HDMI-A-1"), _report())

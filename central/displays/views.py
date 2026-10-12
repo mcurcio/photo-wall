@@ -14,7 +14,7 @@ from central.displays.model import PowerStatus, PowerTest, Readiness, remaining_
 from central.displays.picture import PictureStatus, SoftwareSetting
 from central.house_time.calculator import local_date_time
 from central.house_time.model import HouseTime, LocalDateTime
-from contracts.models import Identifier, Instant, Model
+from contracts.models import Digest, Identifier, Instant, Model
 from contracts.node_output import (
     InForceKind,
     OutputReport,
@@ -24,6 +24,7 @@ from contracts.node_output import (
     decode_set_time,
 )
 from contracts.node_picture import (
+    BLACK_FLOOR_TENTHS_MAX,
     CHOICE_NAME_MAX,
     CHOICE_VALUE_MAX,
     GAMMA_TENTHS_MAX,
@@ -31,7 +32,11 @@ from contracts.node_picture import (
     KELVIN_MAX,
     KELVIN_MIN,
     LEVEL_MAX,
+    LUT_AMOUNT_PERCENT_MAX,
     MAX_CHOICES,
+    ROLLOFF_PERCENT_MAX,
+    SATURATION_PERCENT_MAX,
+    SATURATION_PERCENT_MIN,
     SOFTWARE_PERCENT_MAX,
     SOFTWARE_PERCENT_MIN,
     VCP_CODE_PATTERN,
@@ -206,12 +211,24 @@ class HardwareSettingView(Model):
     changed_on_buttons: bool                        # hardware.changed_on_buttons: set here, read otherwise
 
 
+class LutChoiceView(Model):
+    """The LUT a Display uses: its paper profile's digest and the name the LUTs list shows."""
+    profile_sha256: Digest
+    name: str
+
+
 class SoftwarePictureView(Model):
-    """The Photo Wall (software) section's four values in force."""
+    """The Photo Wall (software) section's values in force: the picture split's four and the print
+    look's (contracts.node_picture.SoftwarePicture's ranges)."""
     brightness_percent: SoftwarePercent
     contrast_percent: SoftwarePercent
     colour_temperature_kelvin: Annotated[int, Field(ge=KELVIN_MIN, le=KELVIN_MAX)]
     gamma_tenths: Annotated[int, Field(ge=GAMMA_TENTHS_MIN, le=GAMMA_TENTHS_MAX)]
+    saturation_percent: Annotated[int, Field(ge=SATURATION_PERCENT_MIN, le=SATURATION_PERCENT_MAX)]
+    highlight_rolloff_percent: Annotated[int, Field(ge=0, le=ROLLOFF_PERCENT_MAX)]
+    black_floor_tenths: Annotated[int, Field(ge=0, le=BLACK_FLOOR_TENTHS_MAX)]
+    lut: LutChoiceView | None                       # None: no LUT
+    lut_amount_percent: Annotated[int, Field(ge=0, le=LUT_AMOUNT_PERCENT_MAX)]
 
 
 class HardwareEdit(Model):
@@ -223,9 +240,9 @@ class HardwareEdit(Model):
 
 
 class SoftwareEdit(Model):
-    """POST /v1/operator/picture-sessions/{session_id}/software-edits: one of Photo Wall's four."""
+    """POST /v1/operator/picture-sessions/{session_id}/software-edits: one of Photo Wall's numeric settings."""
     setting: SoftwareSetting
-    value: int                                      # percent, kelvin or gamma tenths, by setting
+    value: int                                      # percent, kelvin or tenths, by setting
     expected_sequence: Annotated[int, Field(ge=1)]
 
 
