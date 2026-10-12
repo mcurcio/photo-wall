@@ -383,7 +383,8 @@ def test_newest_wins_a_slow_display_gets_the_first_and_the_last_change_only(disp
     until(lambda: display.writes() == [["10", "20"]], timeout=5)
     for picture_change in range(3, 7):                  # four more within the first write's 2 s
         run.controller.document(OUTPUT, document(picture_change, picture(on_display(picture_change * 10))))
-        time.sleep(0.2)
+        time.sleep(0.05)
+    assert [call["at"] for call in display.calls() if call["args"][0] == "setvcp"] == ["start"]   # still writing
     report = run.reported(6)
     assert display.writes() == [["10", "20"], ["10", "60"]]
     assert report.brightness == SettingReport(ActsOn.DISPLAY, 60, WriteResult.TAKEN)
@@ -557,13 +558,16 @@ def test_writes_to_one_display_are_at_least_the_gap_apart(display, running):
 
 
 def test_another_display_on_the_port_re_applies_and_a_disconnected_port_is_not_written(display, running):
+    display.script(write_seconds=0.3)                   # a slow write: the wait below must outlast it
     run = running(connect=False)
     run.controller.output(OUTPUT, connected=False, identity=None)
     run.controller.document(OUTPUT, document(1, picture(on_display(60))))
     run.reported(1)
     assert display.writes() == []                       # applies when the display is connected
     run.controller.output(OUTPUT, connected=True, identity=IDENTITY)
-    until(lambda: display.writes() == [["10", "60"]])
+    until(lambda: (latest := run.reports.latest()) is not None
+          and latest.brightness.result is WriteResult.TAKEN)   # the write and its read-back are over
+    assert display.writes() == [["10", "60"]]
     display.vcp("10", 30, 100)
     run.controller.output(OUTPUT, connected=True, identity=DisplayIdentity("ABC", 1, "Other", None))
     until(lambda: display.writes() == [["10", "60"], ["10", "60"]])
