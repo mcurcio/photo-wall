@@ -246,6 +246,31 @@ class SoftwareEdit(Model):
     expected_sequence: Annotated[int, Field(ge=1)]
 
 
+class LutEdit(Model):
+    """POST /v1/operator/picture-sessions/{session_id}/lut-edits: the LUT choice, a listed paper
+    profile's digest, or None for no LUT."""
+    profile_sha256: Digest | None
+    expected_sequence: Annotated[int, Field(ge=1)]
+
+
+# The LUTs list (print look, design "The LUT"): the paper profiles the house keeps, each the one
+# source of the LUT baked from it.
+
+class LutView(Model):
+    """One LUT on the list: its paper profile's digest, the profile's own name, when it was added
+    (Central's clock), and the Displays that use it (stored, or chosen in an open picture session),
+    by name."""
+    profile_sha256: Digest
+    name: str
+    added_at: Instant
+    used_by: tuple[str, ...]
+
+
+class LutsView(Model):
+    """GET /v1/operator/luts."""
+    luts: tuple[LutView, ...]
+
+
 class FramePictureView(Model):
     """GET /v1/operator/frames/{frame_id}/picture: the Picture tab."""
     frame_id: Identifier

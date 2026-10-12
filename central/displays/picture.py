@@ -48,6 +48,7 @@ from uuid import UUID
 
 from central.displays.hardware import copied_hardware, edit_refusal
 from central.live_session import Lease, StaleSequence, next_sequence, touched
+from contracts.lut import LutRef
 from contracts.node_picture import (
     NEUTRAL_SOFTWARE,
     PICTURE_LIST,
@@ -72,6 +73,8 @@ class SoftwareSetting(StrEnum):
     HIGHLIGHT_ROLLOFF = "highlight-rolloff"     # print look: percent 0..100, 0 = the clip at white
     BLACK_FLOOR = "black-floor"                 # print look: tenths of a percent of white light 0..100
     LUT_AMOUNT = "lut-amount"                   # print look: percent 0..100 of the LUT mixed in
+    LUT = "lut"                                 # print look: the LUT choice (`edited_lut`; touched tracking only,
+                                                # `edited_software` refuses it)
 
 
 _SOFTWARE_FIELDS: Final[Mapping[SoftwareSetting, str]] = {
@@ -95,7 +98,7 @@ class PictureStatus(StrEnum):
 
 class PictureRefused(Exception):
     """A refusal the routes answer as {"error": code}: stale_sequence 409, not_offered 409,
-    out_of_range 422, session_ended 410, not_presented_yet 409."""
+    out_of_range 422, unknown_lut 422, session_ended 410, not_presented_yet 409."""
 
     def __init__(self, code: str, status: int) -> None:
         super().__init__(code)
@@ -179,7 +182,8 @@ def edited_hardware(session: PictureSession, code: VcpCode, value: int | None, *
 def edited_software(session: PictureSession, setting: SoftwareSetting, value: int, *,
                     expected_sequence: int, now: float) -> PictureSession:
     """The session after one of Photo Wall's numeric edits. PictureRefused: session_ended,
-    stale_sequence, out_of_range 422 (contracts.node_picture's ranges: `SoftwarePicture`)."""
+    stale_sequence, out_of_range 422 (contracts.node_picture's ranges: `SoftwarePicture`; and
+    SoftwareSetting.LUT, which only `edited_lut` sets)."""
     sequence = _next(session, expected_sequence, now)
     if not isinstance(setting, SoftwareSetting) or setting not in _SOFTWARE_FIELDS or type(value) is not int:
         raise PictureRefused("out_of_range", 422)
@@ -189,6 +193,20 @@ def edited_software(session: PictureSession, setting: SoftwareSetting, value: in
         raise PictureRefused("out_of_range", 422) from None
     return replace(session, sequence=sequence, draft=replace(session.draft, software=software),
                    touched_software=session.touched_software | {setting},
+                   lease=touched(session.lease, now, idle_seconds=PICTURE_IDLE_SECONDS))
+
+
+def edited_lut(session: PictureSession, lut: LutRef | None, *, known: bool, expected_sequence: int,
+               now: float) -> PictureSession:
+    """The session after the LUT choice: `lut` None is no LUT; `known` says the LUTs list holds
+    `lut`'s paper profile (the caller's read, in the edit's transaction). PictureRefused:
+    session_ended, stale_sequence, then unknown_lut 422 for a LUT not on the list."""
+    sequence = _next(session, expected_sequence, now)
+    if lut is not None and not known:
+        raise PictureRefused("unknown_lut", 422)
+    software = replace(session.draft.software, lut=lut)
+    return replace(session, sequence=sequence, draft=replace(session.draft, software=software),
+                   touched_software=session.touched_software | {SoftwareSetting.LUT},
                    lease=touched(session.lease, now, idle_seconds=PICTURE_IDLE_SECONDS))
 
 
@@ -304,6 +322,7 @@ def _in_list_order(hardware: Mapping[VcpCode, int]) -> dict[VcpCode, int]:
 
 
 __all__ = ["PICTURE_IDLE_SECONDS", "DisplayPicture", "PictureRefused", "PictureSession", "PictureStatus",
-           "SoftwareSetting", "answers", "carries", "copied", "default_picture", "edited_hardware", "edited_software",
+           "SoftwareSetting", "answers", "carries", "copied", "default_picture", "edited_hardware", "edited_lut",
+           "edited_software",
            "effective_picture", "hardware_answered", "kept_picture", "picture_digest", "picture_document",
            "picture_status", "presented", "restore_answered", "restore_of", "reverted", "with_befores", "with_restore"]

@@ -79,6 +79,12 @@ def stream_opened(opened: Opened, media_type: str) -> StreamingResponse:
     )
 
 
+def repr_digest(sha256_hex: str) -> str:
+    """The `Repr-Digest` field (RFC 9530) of a body whose SHA-256 is `sha256_hex`:
+    "sha-256=:<base64>:". The one home of the header's form: media variants and LUTs."""
+    return "sha-256=:" + base64.b64encode(bytes.fromhex(sha256_hex)).decode() + ":"
+
+
 def stream_frame_media(opened: Opened, *, release: Callable[[], None]) -> StreamingResponse:
     """A media variant's body with its `Repr-Digest` (RFC 9530) and `Content-Length`; `release`
     (blocking) runs once the body ends or the client goes, after the fd is closed."""
@@ -90,11 +96,10 @@ def stream_frame_media(opened: Opened, *, release: Callable[[], None]) -> Stream
         finally:
             release()
 
-    digest = base64.b64encode(bytes.fromhex(opened.sha256)).decode()
     return StreamingResponse(
         _chunks(source),
         media_type=opened.media_type or "application/octet-stream",
-        headers={"Content-Length": str(opened.size), "Repr-Digest": f"sha-256=:{digest}:",
+        headers={"Content-Length": str(opened.size), "Repr-Digest": repr_digest(opened.sha256),
                  "ETag": f'"{opened.sha256}"', "Cache-Control": "private, no-store",
                  "Accept-Ranges": "none", "X-Content-Type-Options": "nosniff"},
         background=BackgroundTask(finish),

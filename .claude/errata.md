@@ -5678,3 +5678,25 @@ Order: (a) merge the iac PR that switches the factory to `central.app:create_app
   drive it against the real app) and the Linux-only native probe tests/native_display_service_probe.py
   (run by tests/test_node_display_native.py) send only `calibration`, so they are refused until
   their owners add `mat`. Not in C3's files; left to the console lane and the probe's owner.
+
+## print-look central lane, slice C2 (implementer, 2026-10-12)
+
+- **The recipe is two LittleCMS transforms through the paper's device values, not one
+  `buildProofTransform`:** the one-step proof transform runs as one unbounded floating-point
+  pipeline, so a matrix-shaper paper hands an out-of-gamut colour back unchanged: the brief's own
+  reduced-gamut fixture (sRGB with rXYZ moved halfway to wtpt) baked pure red to (255, 0, 0) with
+  and without NOOPTIMIZE. `central/displays/lut.py` now goes into the paper perceptually (8-bit
+  device values, held to their range as ink is) and back relative colorimetric, black point
+  compensation both ways: the design's "Intent, settled" words. Red comes back (255, 188, 188),
+  greys and the printer-sRGB identity exact, ~0.02 s. `LUT_RECIPE_ID` is unchanged (nothing was
+  baked under it before). Cost: the device values are 8-bit between the steps (at most 1/255 of
+  rounding on top of the 33-point grid's own).
+- **A paper profile's device values may be RGB or CMYK** (bytes 16..20): the two steps need the
+  intermediate image mode; any other colour space is `not_a_printer_profile`. CMYK has no fixture
+  (Pillow cannot create one); it is exercised only by real profiles.
+- **`PictureCommands` (central/displays/ports.py, not in C2's files) does not declare `edit_lut`:**
+  the route calls `PgPictureSessions.edit_lut` through the protocol-typed `commands` (no type
+  checker runs, so it works); ports.py should gain the method in its next edit.
+- **A LUT's `used_by` names a Display by its EDID name, else "<maker> <product>"**, and counts a
+  Display whose live picture session's draft chooses it (the lease on PostgreSQL's clock, as the
+  session reads it), the same rule Remove refuses by.

@@ -12,6 +12,7 @@ slices C1-C3; a composition-root module like library_routes.py). One route per q
 | POST | /v1/operator/frames/{frame_id}/picture-sessions | | 201 PictureSessionView | 404 unknown_frame, 409 frame_unbound, no_display, session_open |
 | POST | /v1/operator/picture-sessions/{session_id}/hardware-edits | HardwareEdit | PictureSequence | 404 unknown_session, 410 session_ended, 409 stale_sequence, not_offered, 422 out_of_range |
 | POST | /v1/operator/picture-sessions/{session_id}/software-edits | SoftwareEdit | PictureSequence | 404, 410, 409 stale_sequence, 422 out_of_range |
+| POST | /v1/operator/picture-sessions/{session_id}/lut-edits | LutEdit | PictureSequence | 404, 410, 409 stale_sequence, 422 unknown_lut |
 | POST | /v1/operator/picture-sessions/{session_id}/keepalive | | PictureSessionView | 404, 410 |
 | POST | /v1/operator/picture-sessions/{session_id}/done | | 204 | 404, 410, 409 not_presented_yet |
 | DELETE | /v1/operator/picture-sessions/{session_id} | | 204 (Revert) | 404, 410 |
@@ -21,8 +22,9 @@ Every route takes the operator `admin` dependency, as every /v1/operator route d
 answers {"error": code} with its status, the shape apiWrite.js reads. create_app mounts them through
 `mount_display_routes`: GET display (slice C1) and the Power tab's four, `_mount_power_routes`
 (slice C3). POST is Test: turn off; DELETE is Turn on, which ends the test so the request underneath
-takes over (owner q1, 2026-10-10). The Picture tab's eight (roadmap 1c's Live model; decision 0022,
-the picture split, slice S2: one edit route per group) are `mount_picture_routes`, which create_app
+takes over (owner q1, 2026-10-10). The Picture tab's nine (roadmap 1c's Live model; decision 0022,
+the picture split, slice S2: one edit route per group; the print look's LUT choice its own, since
+it names a LUT where the software edit sets a number) are `mount_picture_routes`, which create_app
 mounts too; picture refusals (central/displays/picture.py PictureRefused) answer the same way.
 """
 from __future__ import annotations
@@ -47,6 +49,7 @@ from central.displays.views import (
     FramePictureView,
     FramePowerView,
     HardwareEdit,
+    LutEdit,
     PictureCopyRequest,
     PictureCopyResult,
     PictureSequence,
@@ -101,7 +104,7 @@ def _mount_power_routes(app: FastAPI, *, admin: Any, queries: DisplayQueries, co
 
 
 def mount_picture_routes(app: FastAPI, *, admin: Any, queries: PictureQueries, commands: PictureCommands) -> None:
-    """The Picture tab's eight routes, mounted by create_app beside
+    """The Picture tab's nine routes, mounted by create_app beside
     `mount_display_routes` (whose handler answers DisplayRefused); PictureRefused answers the same way."""
 
     @app.exception_handler(PictureRefused)
@@ -126,6 +129,11 @@ def mount_picture_routes(app: FastAPI, *, admin: Any, queries: PictureQueries, c
               response_model=PictureSequence)
     def edit_software(session_id: UUID, request: SoftwareEdit) -> PictureSequence:
         return commands.edit_software(session_id, request)
+
+    @app.post(PICTURE_SESSIONS + "{session_id}/lut-edits", dependencies=[Depends(admin)],
+              response_model=PictureSequence)
+    def edit_lut(session_id: UUID, request: LutEdit) -> PictureSequence:
+        return commands.edit_lut(session_id, request)  # not on PictureCommands yet (errata, print-look C2)
 
     @app.post(PICTURE_SESSIONS + "{session_id}/keepalive", dependencies=[Depends(admin)],
               response_model=PictureSessionView)
