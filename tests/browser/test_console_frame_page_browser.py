@@ -364,7 +364,7 @@ def test_a_pi_that_did_not_start_from_photo_wall_says_so_and_offers_no_controls(
             "This Frame's Pi did not start from Photo Wall")
         expect(frame.get_by_role("link", name="Open the Pi's page", exact=True)).to_have_attribute(
             "href", re.compile(r"^#/players/device-"))
-        expect(frame.get_by_role("img", name="Picture position")).to_have_count(0)
+        expect(frame.get_by_role("group", name="Picture position")).to_have_count(0)
         expect(frame.get_by_role("button", name="Done")).to_have_count(0)
 
 
@@ -459,10 +459,7 @@ def test_dragging_a_corner_inward_moves_the_picture(page, registry, sessions):
         frame = open_frame(page, FRAME, "position")
         bar = _bar(page)
         expect(bar.get_by_role("status")).to_have_text(PRESENTED)
-        editor = frame.get_by_role("img", name="Picture position", exact=True)
-        editor.scroll_into_view_if_needed()
-        box = editor.bounding_box()
-        scale = box["width"] / 512  # the drawing is 480 wide inside a 16 px margin
+        box, scale = _editor_box(frame)
         start = 16 + SAVED_X / 1920 * 480  # the saved top-left corner's handle
         page.mouse.move(box["x"] + start * scale, box["y"] + 16 * scale)
         page.mouse.down()
@@ -474,6 +471,103 @@ def test_dragging_a_corner_inward_moves_the_picture(page, registry, sessions):
         expect(bar.get_by_role("button", name="Done", exact=True)).to_be_enabled()
         assert fake.count("edit") >= 1
         expect(frame.get_by_role("alert")).to_have_count(0)
+
+
+def _editor_box(frame):
+    """The Position drawing's box on the page and its scale: the drawing is 480 wide (270 high
+    for a 16:9 output) inside a 16 px margin."""
+    editor = frame.get_by_role("group", name="Picture position", exact=True)
+    editor.scroll_into_view_if_needed()
+    box = editor.bounding_box()
+    return box, box["width"] / 512
+
+
+def _drag_top_edge(page, frame, to_y, steps):
+    """Drag the top edge's midpoint (the saved quad's) straight down to `to_y` of the screen."""
+    box, scale = _editor_box(frame)
+    middle = 16 + (SAVED_X / 1920 + 1) / 2 * 480
+    page.mouse.move(box["x"] + middle * scale, box["y"] + 16 * scale)
+    page.mouse.down()
+    page.mouse.move(box["x"] + middle * scale, box["y"] + (16 + to_y * 270) * scale, steps=steps)
+    page.mouse.up()
+
+
+def _corner_values(frame):
+    """Every corner's pixels under Exact values, clockwise from the top left."""
+    return [(frame.get_by_label(f"{name} x", exact=True).input_value(),
+             frame.get_by_label(f"{name} y", exact=True).input_value())
+            for name in ("Top-left", "Top-right", "Bottom-right", "Bottom-left")]
+
+
+def test_dragging_an_edge_moves_both_its_corners_and_leaves_the_others(page, registry, sessions):
+    """Owner, 2026-10-12: "i want to be able to drag "edges" of a frame position and not just
+    the corners". Mutation: have the edge drag move only its first corner -> Top-right y stays
+    0, RED."""
+    _seed(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        sign_in(page, origin)
+        frame = open_frame(page, FRAME, "position")
+        bar = _bar(page)
+        expect(bar.get_by_role("status")).to_have_text(PRESENTED)
+        _drag_top_edge(page, frame, 0.2, steps=6)
+        frame.get_by_role("button", name="Exact values", exact=True).click()
+        expect(frame.get_by_label("Top-left y", exact=True)).not_to_have_value("0")
+        (tl_x, tl_y), (tr_x, tr_y), bottom_right, bottom_left = _corner_values(frame)
+        # Straight down: both top corners went down by the same step, sideways not at all.
+        assert (tl_x, tr_x) == (str(SAVED_X), "1920")
+        assert tl_y == tr_y and 150 < float(tl_y) < 280, (tl_y, tr_y)
+        assert (bottom_right, bottom_left) == (("1920", "1080"), ("0", "1080"))
+        expect(bar.get_by_role("status")).to_have_text(PRESENTED)
+        page.wait_for_timeout(500)
+        shown = _fake_corners(sessions)
+        assert shown[0][1] == shown[1][1] > 0.1 and shown[2:] == [[1, 1], [0, 1]], shown
+        expect(frame.get_by_role("alert")).to_have_count(0)
+
+
+def test_an_edge_dragged_onto_the_opposite_edge_is_refused_like_a_corner(page, registry, sessions):
+    """The top edge dragged onto the bottom one leaves no picture: refused by the same check as a
+    folded corner (convex.js), and it never reaches the Display."""
+    _seed(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        sign_in(page, origin)
+        frame = open_frame(page, FRAME, "position")
+        expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
+        _drag_top_edge(page, frame, 1.2, steps=1)  # past the bottom: held at the screen's edge
+        expect(frame.get_by_role("alert")).to_contain_text("corners must form a convex aperture")
+        frame.get_by_role("button", name="Exact values", exact=True).click()
+        assert _corner_values(frame) == [
+            (str(SAVED_X), "0"), ("1920", "0"), ("1920", "1080"), ("0", "1080")]
+        page.wait_for_timeout(500)
+        assert all(point[1] < 1 for point in _fake_corners(sessions)[:2]), sessions.row
+
+
+def test_an_edge_is_nudged_from_the_move_list_and_from_its_focused_handle(page, registry, sessions):
+    """The arrows move an edge's two corners as they move a corner: chosen in the Move list, or
+    its handle focused on the drawing (keyboard reach)."""
+    _seed(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        sign_in(page, origin)
+        frame = open_frame(page, FRAME, "position")
+        expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
+        frame.get_by_label("Move", exact=True).select_option(label="Top edge")
+        frame.get_by_role("button", name="Move down: the top edge", exact=True).click()
+        frame.get_by_role("button", name="Exact values", exact=True).click()
+        expect(frame.get_by_label("Top-right y", exact=True)).to_have_value("10")
+        assert _corner_values(frame) == [
+            (str(SAVED_X), "10"), ("1920", "10"), ("1920", "1080"), ("0", "1080")]
+        editor = frame.get_by_role("group", name="Picture position", exact=True)
+        editor.get_by_role("button", name="Left edge", exact=True).focus()
+        expect(frame.get_by_label("Move", exact=True)).to_have_value("edge-3")
+        page.keyboard.press("ArrowRight")
+        expect(frame.get_by_label("Bottom-left x", exact=True)).to_have_value("10")
+        assert _corner_values(frame) == [
+            ("110", "10"), ("1920", "10"), ("1920", "1080"), ("10", "1080")]
+
+
+def _fake_corners(sessions):
+    """The corners the fake Central last took (what the Pi was sent to show)."""
+    calibration = sessions.row["calibration"]
+    return (calibration.get("fit") or calibration)["corners"]
 
 
 @pytest.mark.parametrize(("corner", "values"), [

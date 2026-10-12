@@ -11,7 +11,7 @@ const meta = {
     aspect: 16 / 9,
     selected: null,
     onSelect: () => {},
-    onCorner: () => {},
+    onCorners: () => {},
     onArrow: () => {},
   },
 } satisfies Meta<typeof QuadEditor>;
@@ -20,5 +20,6 @@ export default meta;
 type Story = StoryObj<typeof meta>;
 
 export const Default: Story = {};
-export const CornerSelected: Story = { args: { selected: 0 } };
+export const CornerSelected: Story = { args: { selected: { kind: "corner", index: 0 } } };
+export const EdgeSelected: Story = { args: { selected: { kind: "edge", index: 1 } } };
 export const Disabled: Story = { args: { disabled: true } };
