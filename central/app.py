@@ -126,7 +126,7 @@ class UnbindRequest(Model):
 class ActivationRequest(Model):
     scene_id: Identifier
     activation_id: Identifier
-    priority: int = 0
+    priority: int = Field(default=0, ge=0)   # above the Default Scene (central.runtime DEFAULT_SCENE_RANK)
     repeat: Literal["ignore", "restart", "queue"] = "ignore"
     force: bool = False
     expires_at: float | None = None

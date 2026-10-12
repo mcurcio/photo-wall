@@ -25,6 +25,7 @@ from node.display.test_display_power_methods import (
     Display,
     Running,
     cec,
+    console_off,
     ddc,
     document,
     timetable,
@@ -96,6 +97,65 @@ def test_display_off_with_no_answering_method_shows_black_and_reports_not_suppor
     subject.clock.wall = WALL_START + 61
     _, on = subject.attempts(2)
     assert on.in_force.power is Power.ON and subject.black.up == {OUTPUT: False}
+
+
+def test_black_pictures_on_after_a_test_off_brings_the_display_itself_back_on(display, running):
+    """The 1b test turns the display off through its method; when it ends, black picture's "on"
+    must bring the display on too, not only lower the curtain, and the result describes the
+    display.
+
+    Mutation probe: black picture's on lowers the curtain only -> the display stays in standby."""
+    subject = running([ddc(display)])
+    subject.connect()
+    subject.controller.document(OUTPUT, document(1, power=timetable(
+        Power.ON, test=console_off(300), darkness=Darkness.BLACK_PICTURE)))
+    subject.attempts(1)
+    assert display.power == "standby"
+    subject.clock.now += 301                                     # the test ends on the Pi's count
+    _, on = subject.attempts(2)
+    assert (on.in_force.kind, on.in_force.power, on.method, on.result) == (
+        InForceKind.TIMETABLE, Power.ON, PowerMethod.DDC_CI, PowerResult.CONFIRMED)
+    assert display.power == "on" and subject.black.up.get(OUTPUT) is not True
+
+
+def test_switching_to_black_picture_during_night_off_is_acted_on_and_the_morning_turns_it_on(
+        display, running):
+    """A darkness change is a change the Pi acts on (`acts_on_new_document`), and the morning's on
+    brings back a display the night had turned off.
+
+    Mutation probe: `acts_on_new_document` comparing kind and power only -> no second attempt."""
+    subject = running([ddc(display)])
+    subject.connect()
+    subject.controller.document(OUTPUT, document(1, power=timetable(Power.OFF, *OFF_THEN_ON)))
+    subject.attempts(1)
+    assert display.power == "standby"
+    subject.controller.document(OUTPUT, document(2, power=timetable(
+        Power.OFF, *OFF_THEN_ON, darkness=Darkness.BLACK_PICTURE)))
+    _, black = subject.attempts(2)
+    assert (black.for_change, black.result) == (2, PowerResult.CONFIRMED)
+    assert subject.black.up == {OUTPUT: True}
+    subject.clock.wall = WALL_START + 61                          # the set time: on
+    _, _, on = subject.attempts(3)
+    assert (on.in_force.power, on.result) == (Power.ON, PowerResult.CONFIRMED)
+    assert display.power == "on" and subject.black.up == {OUTPUT: False}
+
+
+def test_an_on_through_a_method_takes_the_black_curtain_down_first(display, running):
+    """A display-off night on a display no method answered shows black; when a method answers at
+    the morning's on, the display powers on AND the curtain comes down.
+
+    Mutation probe: no curtain-down in the method branch -> the picture stays black."""
+    display.script(ddc=False)
+    subject = running([ddc(display)])
+    subject.connect()
+    subject.controller.document(OUTPUT, document(1, power=timetable(Power.OFF, *OFF_THEN_ON)))
+    (off,) = subject.attempts(1)
+    assert off.result is PowerResult.NOT_SUPPORTED and subject.black.up == {OUTPUT: True}
+    display.script(ddc=True)
+    subject.clock.wall = WALL_START + 61
+    _, on = subject.attempts(2)
+    assert (on.method, on.result) == (PowerMethod.DDC_CI, PowerResult.CONFIRMED)
+    assert subject.black.up == {OUTPUT: False}
 
 
 def test_display_off_with_ddc_runs_ddc_and_shows_no_black(display, running):

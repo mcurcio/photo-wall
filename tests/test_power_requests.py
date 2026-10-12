@@ -216,3 +216,19 @@ def test_night_off_saves_refuse_a_stale_revision_no_days_and_an_unknown_frame(ho
     assert saved.json()["night_off"]["revision"] == 3 and saved.json()["next_off"] == "2026-10-12T22:00"
     assert house.wanted(LIVING) == (Power.ON, ((local("2026-10-12T22:00"), Power.OFF),
                                                (local("2026-10-13T07:00"), Power.ON)))
+
+
+def test_deleting_a_chosen_frame_drops_it_from_night_off_so_the_next_save_is_accepted(house):
+    """Night off's chosen Frames never name a deleted Frame (`forget_frame_in`, in the delete's
+    transaction): the editor sends the list it read, and a stale id would refuse every save.
+
+    Mutation probe: skip `forget_frame_in` in the Registry's delete -> the save is refused
+    "unknown-frame"."""
+    _frame(house.registry, "den")
+    assert house.save(2, frames=(LIVING, "den")).status_code == 200
+    deleted = house.client.delete("/v1/operator/frames/den", headers=AUTH)
+    assert deleted.status_code == 200, deleted.text
+    stored = house.client.get(NIGHT_OFF, headers=AUTH).json()["night_off"]
+    assert (stored["frames"], stored["revision"]) == ({"kind": "frames", "frame_ids": [LIVING]}, 4)
+    shown = stored["frames"]["frame_ids"]
+    assert house.save(4, off="22:00", frames=tuple(shown)).status_code == 200

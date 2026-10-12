@@ -27,6 +27,7 @@ from central.infra.display_store import (
     frame_readiness_in,
     resolve_output,
 )
+from central.infra.power_store import forget_frame_in
 from central.installation_models import (
     FrameInventory,
     InstallationInventory,
@@ -668,6 +669,7 @@ class Registry:
                 "queued_activation_ids": list(references.get("queued_activation_ids", ())),
             })
         conn.execute("DELETE FROM frames WHERE id=%s", (frame_id,))
+        forget_frame_in(conn, frame_id)
         self._audit(conn, "frame_deleted", frame_id)
         return {"status": "deleted"}
 

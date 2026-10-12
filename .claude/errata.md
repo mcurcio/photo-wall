@@ -5364,3 +5364,42 @@ Order: (a) merge the iac PR that switches the factory to `central.app:create_app
   `run_ended_before_faults_completed`, which the demo no longer raises (the Default Scene never ends).
 - **Deleted, unreachable:** the browser test "a refused Program whose protector is no longer served": a refused
   window lasts at most about a day, the operator read keeps a Run for a day.
+
+## E-PW-FIX-1 (Power and the week, end-review fix round, 2026-10-12) · feat/power-and-the-week (PR 86)
+- **Main's PR 84 took migration numbers 087 and 088.** This branch's `088_power_and_the_week`, `089_power_holds`
+  and `090_names_and_rooms` are renumbered 089, 090 and 091 (none was applied outside a test database); every
+  "migration 088/089/090" in this branch's code and docs now says 089/090/091. The entries above that say 088 for
+  Night off's seed mean 089. `tests/test_upgrade_087.py` (main's) seeds through today's code, so it applies the
+  power migrations first (`migrate_before(..., also=...)`).
+- **Main's ranked line read (PR 84) moved On this day into SQL in UTC.** The merge keeps 2b's house calendar in both
+  interpreters: `LineQuery.house`, and the SQL reads `AT TIME ZONE` the house zone.
+- **T page, "its Scene may end; it starts again" (the Default Scene) was wrong.** A non-repeating Default Scene
+  added a root Run and an admission per cycle, never pruned (2,880 a day at a 30 s cycle). The Default Scene is now
+  what 0021 says, one perpetual Run: its Scene repeats until replaced (loop on, no duration). Its identity is
+  `default:<scene_id>:<choice revision>:<Scene revision>:<start>`, so an edit of its Scene is the next Run (the
+  old one finishes gracefully). Its rank is -1, below every operator request (`activate` and the route accept
+  priority 0 and up), so a new Default Scene never wins the tie against a Show now at 0.
+- **The pages left Runtime's state unbounded** ("stored Runs, Programs and admissions are not pruned"). One
+  retention rule, `Runtime._forget`: a root Run that ended, and whose window ended, more than 24 h ago is forgotten
+  with its admission; a refused window's admission likewise. An operator retry of an id whose Run ended over a day
+  ago is a new request (stated in 0021's costs).
+- **A Program window is never admitted before the processed instant** (a house zone or place change applies from
+  the next window), which the pages did not say.
+- **The frozen `is_resting(wanted, pi_says)` had no result, but the frame says "did not answer" is not Resting.**
+  `is_resting(wanted, pi_says, result)` and `PowerWhy.result` (the report's result for the latest change): not
+  Resting after "did-not-answer" or "another-input"; Resting after "not-supported" (the Pi shows black). The console
+  renders Why's answer and no longer reads the Power tab for it.
+- **T page's contracts docstring credited the wire rule to the owner** ("durations and calendar set times; never a
+  clock reading", owner 2026-10-12); D's D2 forbids that. It is the design's rule, from his "Yes, send 7 days of set
+  times".
+- **Display store: `_until_next_deadline` never returns None** (house midnight always comes); the hold-end deadline
+  is dropped: a hold end that changes the power is already the timetable's next change, and one that does not
+  changes no document.
+- **Settings › House refuses clearing the location while Night off or a Schedule uses a sun time**
+  (`place-in-use`, 409); a deleted Frame leaves Night off's chosen Frames in the delete's transaction.
+- **S3's C3 probe P-apply-later is an equivalent mutant** (apply-now admits the covering window itself); the
+  real probes are "no exclusion" and "never refuse", now in tests/test_runtime.py. **S4's K2 P-no-reload** is
+  better named "retry a 409 at the re-read revision".
+- **S4 item 4 asked for "an IANA picker"; the page had a text box.** It is a native Select over the browser's
+  zones, labelled by city. **S4 item 2 puts "A hold lasts" in the Night off editor**, though it governs All off and
+  All on (left there; a UX finding to take to the owner).

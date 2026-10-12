@@ -28,7 +28,12 @@ from central.app import create_app
 from central.content_catalog.catalog import device_id_for_serial
 from central.db import DatabaseTransactionClock
 from central.displays.model import TEST_SECONDS
-from central.infra.display_store import DOCUMENT_STREAM, DisplayDocuments, DisplayWakes
+from central.infra.display_store import (
+    DOCUMENT_STREAM,
+    DisplayDocuments,
+    DisplayWakes,
+    _until_next_deadline,
+)
 from central.infra.node_link_store import PgLinkStores
 from contracts.node_link import Pipe
 from contracts.node_output import (
@@ -344,3 +349,24 @@ def test_the_document_carries_the_frames_timetable_and_its_change_moves_only_at_
         night_off = client.get("/v1/operator/power/night-off", headers=AUTH)
         assert night_off.status_code == 200
         assert night_off.json()["night_off"]["frames"] == {"kind": "frames", "frame_ids": [frame]}
+
+
+def test_the_document_source_wakes_at_the_next_set_time_and_at_a_hold_end_that_changes_power(registry):
+    """The worker's document source sleeps until the Node's next deadline, so a set time or the
+    end of a hold reaches the Pi with no command (central/infra/display_store.py
+    `_until_next_deadline`). At 22:00 in London the Frame's Night off starts at 23:00, before
+    house midnight; an "off" hold until 22:30 brings the wake forward to its end (on again).
+
+    Mutation probe: drop the timetable's next change from the deadlines -> 7200 s (midnight)."""
+    frame, _ = _bound_frame(registry)
+    _rows(registry, "INSERT INTO house_settings(singleton, zone, units, clock_format, updated_at) "
+                    "VALUES (TRUE, 'Europe/London', 'cm', '24h', 0) ON CONFLICT (singleton) DO UPDATE SET zone=EXCLUDED.zone")
+    now = _london("2026-10-12T22:00")
+    _rows(registry, "UPDATE night_off SET settings = jsonb_set(settings, '{frames}', "
+                    "jsonb_build_object('kind', 'frames', 'frame_ids', jsonb_build_array(%s::text)))", (frame,))
+    device = device_id_for_serial(SERIAL)
+    with registry.db.transaction() as conn:
+        assert _until_next_deadline(conn, device, now) == 3600          # Night off at 23:00
+        conn.execute("INSERT INTO power_holds (frame_id, hold_id, power, source, started_at, ends_at) "
+                     "VALUES (%s, %s, 'off', 'console', %s, %s)", (frame, str(uuid.uuid4()), now, now + 1800))
+        assert _until_next_deadline(conn, device, now) == 1800          # the hold's end: on again

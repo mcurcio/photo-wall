@@ -87,6 +87,9 @@ export function WhenStep({ value, patch, problems }) {
   // or its minutes from the sun.
   const time = (key, label) => {
     const at = value[`${key}At`];
+    const offset = value[`${key}Offset`];
+    // Before the sun: a negative offset, or −0 (Before chosen at 0 minutes).
+    const before = offset < 0 || Object.is(offset, -0);
     return (
       <div className="program-scheduling__time">
         <Field id={`${problems.idFor(key)}-at`} label={`${label} at`}>
@@ -118,23 +121,42 @@ export function WhenStep({ value, patch, problems }) {
             )}
           </Field>
         ) : (
-          <Field id={problems.idFor(key)} label={`${label}: minutes after ${at}`} reason={problems.reasonFor(key)}
-            hint={`A minus means before ${at}, as −30.`}>
-            {(props) => (
-              <input
-                {...props}
-                type="number"
-                min={-180}
-                max={180}
-                step={5}
-                value={value[`${key}Offset`]}
-                onChange={(event) => {
-                  patch({ [`${key}Offset`]: Math.round(Number(event.target.value) || 0) });
-                  problems.touch(key);
-                }}
-              />
-            )}
-          </Field>
+          // The side is chosen, not typed as a sign: a typed "−" was lost on the way.
+          <>
+            <Field id={`${problems.idFor(key)}-side`} label={`${label}: before or after ${at}`}>
+              {(props) => (
+                <select
+                  {...props}
+                  value={before ? "before" : "after"}
+                  onChange={(event) => {
+                    patch({ [`${key}Offset`]: (event.target.value === "before" ? -1 : 1) * Math.abs(offset) });
+                    problems.touch(key);
+                  }}
+                >
+                  <option value="before">Before</option>
+                  <option value="after">After</option>
+                </select>
+              )}
+            </Field>
+            <Field id={problems.idFor(key)} label={`${label}: minutes ${before ? "before" : "after"} ${at}`}
+              reason={problems.reasonFor(key)} hint="0 to 180.">
+              {(props) => (
+                <input
+                  {...props}
+                  type="number"
+                  min={0}
+                  max={180}
+                  step={5}
+                  value={Math.abs(offset)}
+                  onChange={(event) => {
+                    const minutes = Math.min(180, Math.abs(Math.round(Number(event.target.value) || 0)));
+                    patch({ [`${key}Offset`]: before ? -minutes : minutes });
+                    problems.touch(key);
+                  }}
+                />
+              )}
+            </Field>
+          </>
         )}
       </div>
     );

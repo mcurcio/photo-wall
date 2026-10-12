@@ -44,9 +44,13 @@ const AT = [
   { value: "clock", label: "Clock time" }, { value: "sunrise", label: "Sunrise" }, { value: "sunset", label: "Sunset" },
 ] as const;
 const CLOCK = /^([01][0-9]|2[0-3]):[0-5][0-9]$/;
+// On a power screen "on" and "off" would read as display power: a chosen night or Frame is ticked.
+const CHOSEN = ["✓", ""] as const;
 
 export interface TimeOfDayControlProps {
   label: string;
+  /** A clock time the help shows as its example, as "07:00". */
+  example: string;
   value: TimeOfDay;
   onChange: (next: TimeOfDay) => void;
   /** The house has a location: sunrise and sunset can be chosen. */
@@ -54,8 +58,15 @@ export interface TimeOfDayControlProps {
   houseHref: string;
 }
 
-/** A clock time, or sunrise or sunset plus or minus minutes (#80, #81); sun times wait for a Place. */
-export function TimeOfDayControl({ label, value, onChange, placeSet, houseHref }: TimeOfDayControlProps) {
+const SIDES = [{ value: "before", label: "Before" }, { value: "after", label: "After" }] as const;
+/** Before the sun: a negative offset, or −0 (Before chosen at 0 minutes, until a number is typed). */
+export const isBefore = (minutes: number) => minutes < 0 || Object.is(minutes, -0);
+
+/**
+ * A clock time, or sunrise or sunset so many minutes before or after (#80, #81); sun times wait
+ * for a Place. The side is chosen, not typed as a sign: a typed "−" was lost on the way.
+ */
+export function TimeOfDayControl({ label, example, value, onChange, placeSet, houseHref }: TimeOfDayControlProps) {
   const clock = value.at === "clock";
   return (
     <Stack>
@@ -68,14 +79,23 @@ export function TimeOfDayControl({ label, value, onChange, placeSet, houseHref }
         </>
       )}
       {value.at === "clock" ? (
-        <Field label={label} help="On the house clock, as 23:00." error={CLOCK.test(value.time) ? undefined : "Enter a time as 23:00."}>
+        <Field label={label} help={`On the house clock, as ${example}.`}
+          error={CLOCK.test(value.time) ? undefined : `Enter a time as ${example}.`}>
           <TextInput value={value.time} onChange={(time) => onChange({ at: "clock", time })} />
         </Field>
       ) : (
-        <Field label={`${label}: minutes after ${value.at}`} help="A minus means before it, as −30.">
-          <NumberInput min={-180} max={180} step={5} value={value.offset_minutes}
-            onChange={(text) => onChange({ ...value, offset_minutes: Math.round(Number(text) || 0) })} />
-        </Field>
+        <>
+          <SegmentedControl label={`${label}: before or after ${value.at}`} options={SIDES}
+            value={isBefore(value.offset_minutes) ? "before" : "after"}
+            onChange={(side) => onChange({ ...value, offset_minutes: (side === "before" ? -1 : 1) * Math.abs(value.offset_minutes) })} />
+          <Field label={`${label}: minutes ${isBefore(value.offset_minutes) ? "before" : "after"} ${value.at}`} help="0 to 180.">
+            <NumberInput min={0} max={180} step={5} value={Math.abs(value.offset_minutes)}
+              onChange={(text) => {
+                const minutes = Math.min(180, Math.abs(Math.round(Number(text) || 0)));
+                onChange({ ...value, offset_minutes: isBefore(value.offset_minutes) ? -minutes : minutes });
+              }} />
+          </Field>
+        </>
       )}
     </Stack>
   );
@@ -177,11 +197,11 @@ export function NightOffEditor({ view, frames, placeSet, houseHref, onSave }: Ni
           <Button onClick={reload}>Reload Night off</Button>
         </Stack>
       )}
-      <TimeOfDayControl label="Turn off" value={shown.off} onChange={(off) => edit({ off })} placeSet={placeSet} houseHref={houseHref} />
-      <TimeOfDayControl label="Turn on" value={shown.on} onChange={(on) => edit({ on })} placeSet={placeSet} houseHref={houseHref} />
-      <Note>An on at or before the off is the next morning.</Note>
+      <TimeOfDayControl label="Turn off" example="23:00" value={shown.off} onChange={(off) => edit({ off })} placeSet={placeSet} houseHref={houseHref} />
+      <TimeOfDayControl label="Turn on" example="07:00" value={shown.on} onChange={(on) => edit({ on })} placeSet={placeSet} houseHref={houseHref} />
+      <Note>An on time at or before the off time is the next morning: off 23:00, on 07:00 the next day.</Note>
       <SettingRow kind="house" label="Nights" help="The nights Night off starts on." defaultLabel="Default: every night"
-        state="idle" control={<MultiToggle label="Nights" value={shown.days} options={DAYS} required
+        state="idle" control={<MultiToggle label="Nights" value={shown.days} options={DAYS} required stateWords={CHOSEN}
           onChange={(days) => edit({ days: DAYS.map((day) => day.value).filter((day) => days.includes(day)) })} />} />
       <SettingRow kind="house" label="Which Frames" defaultLabel="Default: every Frame" state="idle"
         help="All Frames: a Frame added later follows Night off too."
@@ -191,7 +211,8 @@ export function NightOffEditor({ view, frames, placeSet, houseHref, onSave }: Ni
             : { kind, frame_ids: frames.map((frame) => frame.id).sort() } })} />} />
       {shown.frames.kind === "frames" && (
         <Field label="Frames">
-          <MultiToggle label="Frames" value={chosen} options={frames.map((frame) => ({ value: frame.id, label: frame.name }))}
+          <MultiToggle label="Frames" value={chosen} stateWords={CHOSEN}
+            options={frames.map((frame) => ({ value: frame.id, label: frame.name }))}
             onChange={(frameIds) => edit({ frames: { kind: "frames", frame_ids: [...frameIds].sort() } })} />
         </Field>
       )}

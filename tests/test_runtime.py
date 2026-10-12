@@ -5,6 +5,7 @@ import pytest
 from pydantic import ValidationError
 from support.house_time import UTC_HOUSE, daily
 
+from central.house_time.model import HouseTime
 from central.runtime import (
     OPERATOR_HISTORY_SECONDS,
     Child,
@@ -514,6 +515,45 @@ def test_a_save_keeps_the_playing_windows_end_and_removal_finishes_it():
     assert runtime.advance(86400 + 300).contributions == ()     # forgotten: no next window
 
 
+def test_save_and_apply_now_replaces_its_own_protecting_run():
+    """Save and apply now leaves the Program's own playing Runs out of the protection check: a
+    Schedule whose Scene protects its Frames is still replaced at once.
+
+    Mutation probe: no exclusion in `save_program_and_apply_now` -> the new window is refused."""
+    runtime = Runtime(house=UTC_HOUSE)
+    runtime.set_scene(Scene(scene_id="guarded", cycle_seconds=600, loop=True, protect_frames=True,
+                            contributions=(media(),)))
+    created = schedule(runtime, "schedule", "guarded", 0, 100)
+    original = runtime.advance(300).for_target("frame:left").run_id
+    saved = runtime.save_program_and_apply_now(created, ProgramDraft(
+        name="schedule", scene_id="guarded", when=daily(hm(1), hm(90))), 360)
+    identity = saved.window_id(60)
+    assert runtime._state.admissions[identity].status == "admitted"
+    view = runtime.advance(400)
+    assert view.for_target("frame:left").run_id == runtime._state.admissions[identity].run_id
+    assert get_run(view, original).finish_requested_at == 360
+
+
+def test_save_and_apply_now_is_refused_by_another_protecting_run():
+    """Another live Run that protects the Frames refuses the covering window (recorded, with
+    the Run that refused it); the Program's own Run still finishes.
+
+    Mutation probe: never refuse in `save_program_and_apply_now` -> the window is admitted."""
+    runtime = Runtime(house=UTC_HOUSE)
+    runtime.set_scene(Scene(scene_id="bg", cycle_seconds=600, loop=True, contributions=(media(),)))
+    runtime.set_scene(Scene(scene_id="guard", cycle_seconds=600, loop=True, protect_frames=True,
+                            contributions=(media(),)))
+    created = schedule(runtime, "schedule", "bg", 0, 100)
+    runtime.advance(300)
+    guard = runtime.activate("guard", "guard-act", 330, priority=5).run_id
+    saved = runtime.save_program_and_apply_now(created, ProgramDraft(
+        name="schedule", scene_id="bg", when=daily(hm(1), hm(90))), 360)
+    refused = runtime._state.admissions[saved.window_id(60)]
+    assert (refused.status, refused.reason, refused.blocking_run_id) == (
+        "rejected", "protected_frames", guard)
+    assert runtime.advance(400).for_target("frame:left").run_id == guard
+
+
 def test_programs_refuse_without_storing_and_compare_the_expected_program():
     runtime = Runtime(house=UTC_HOUSE)
     runtime.set_scene(Scene(scene_id="scene", cycle_seconds=600, loop=True, contributions=(media(),)))
@@ -838,7 +878,7 @@ def test_a_protection_refusal_is_stored_and_restores_on_this_build():
     assert restored.export_state()["admissions"] == exported["admissions"]
 
 
-def test_the_operator_read_serves_a_day_of_history_and_stores_everything():
+def test_the_operator_read_serves_a_day_of_history_and_runtime_forgets_what_ended_before_it():
     day = OPERATOR_HISTORY_SECONDS
     runtime = Runtime(house=UTC_HOUSE)
     for scene_id, target in (("old", "frame:a"), ("recent", "frame:b"), ("live", "frame:c")):
@@ -858,9 +898,12 @@ def test_the_operator_read_serves_a_day_of_history_and_stores_everything():
     assert old not in served  # ended more than a day ago
     assert set(projection.program_windows) == {"later-window"}
 
-    # A read filter only: stored state and every other read keep the old Run.
+    # The read leaves stored state alone; advancing forgets the Run that ended over a day ago,
+    # with its admission (the one retention rule, `_forget`), and keeps the rest.
     assert runtime.export_state() == before
-    assert old in {run.run_id for run in runtime.project(now).runs}
+    assert old not in {run.run_id for run in runtime.project(now).runs}
+    runtime.advance(now)
+    assert set(runtime.export_state()["admissions"]) == {"recent-act", "live-act"}
 
 
 def test_delete_scene_checks_revision_and_removes_only_an_unused_definition():
@@ -1097,24 +1140,114 @@ def test_planning_selections_name_configured_child_and_admitted_scenes():
 
 # Power and the week (E5): the Default Scene plays wherever no Schedule does.
 
-def test_the_default_scene_plays_beneath_every_window_and_starts_again_when_it_ends():
+def test_the_default_scene_plays_beneath_every_window_as_one_run_that_repeats_until_replaced():
+    """0021: the Default Scene is one perpetual Run at the lowest rank. A Scene that does not
+    repeat by itself still repeats as the Default Scene (no new Run per cycle).
+
+    Mutation probe: admit the chosen Scene as stored (no loop) -> a new Run at 600."""
     runtime = Runtime(house=UTC_HOUSE)
-    runtime.set_scene(Scene(scene_id="calm", cycle_seconds=600, contributions=(media(),)))
+    runtime.set_scene(Scene(scene_id="calm", cycle_seconds=600, duration_seconds=900,
+                            contributions=(media(),)))
     runtime.set_scene(Scene(scene_id="evening", cycle_seconds=600, loop=True, contributions=(media(),)))
     runtime.set_default_scene("calm", 0)
     schedule(runtime, "evening", "evening", 15, 30)
     first = runtime.advance(60)
     assert first.for_target("frame:left").scene_id == "calm"
     calm = first.for_target("frame:left").run_id
-    assert get_run(first, calm).activation_id == "default:calm:1:0"
-    assert get_run(first, calm).priority == 0
-    # Its Scene ends at 600 and starts again at once; the window covers it at 900.
-    again = runtime.advance(600)
-    assert again.for_target("frame:left").run_id != calm
+    assert get_run(first, calm).activation_id == "default:calm:1:1:0"
+    assert get_run(first, calm).priority == -1
+    assert runtime.advance(600).for_target("frame:left").run_id == calm
     covered = runtime.advance(1000)
     assert covered.for_target("frame:left").scene_id == "evening"
     assert {intent.scene_id for intent in covered.contributions} == {"calm", "evening"}
-    assert runtime.advance(2200).for_target("frame:left").scene_id == "calm"   # its cycle ended at 2100
+    after = runtime.advance(2200)                       # the window ended at 1800
+    assert after.for_target("frame:left").run_id == calm
+    assert [run.run_id for run in after.runs if run.scene_id == "calm"] == [calm]
+
+
+def test_an_edit_of_the_default_scenes_scene_is_its_next_run():
+    """Requirements: "Authored configuration edits default to the next Run"; the Default Scene's
+    Run never ends by itself, so an edit of its Scene finishes it gracefully and the next Run
+    carries the edit.
+
+    Mutation probe: leave the Scene revision out of the identity prefix -> revision 1 plays on."""
+    runtime = Runtime(house=UTC_HOUSE)
+    runtime.set_scene(Scene(scene_id="fam", cycle_seconds=60, loop=True, contributions=(media(),)))
+    first = runtime.set_default_scene("fam", 0).for_target("frame:left").run_id
+    runtime.set_scene(Scene(scene_id="fam", revision=2, cycle_seconds=600, loop=True,
+                            contributions=(media(),)))
+    view = runtime.advance(30 * 86400)
+    playing = view.for_target("frame:left")
+    assert playing.run_id != first and playing.scene_revision == 2
+    assert get_run(view, playing.run_id).activation_id.startswith("default:fam:1:2:")
+    assert get_run(view, first).finish_requested_at == 30 * 86400      # gracefully, at its cycle end
+    later = runtime.advance(30 * 86400 + 60)
+    assert [run.run_id for run in later.runs if run.ended_at is None] == [playing.run_id]
+
+
+def test_show_now_at_priority_0_stays_on_top_of_a_new_default_scene():
+    """Design rule 3: the Default Scene is below everything, so a Default Scene admitted after a
+    Show now never wins the tie the request admitted last would.
+
+    Mutation probe: DEFAULT_SCENE_RANK = 0 -> the new Default Scene takes the Frame."""
+    runtime = Runtime(house=UTC_HOUSE)
+    for scene_id in ("fam", "other", "show"):
+        runtime.set_scene(Scene(scene_id=scene_id, loop=True, contributions=(media(),)))
+    runtime.set_default_scene("fam", 0)
+    runtime.activate("show", "show-act", 10, priority=0)
+    view = runtime.set_default_scene("other", 20)
+    assert view.for_target("frame:left").scene_id == "show"
+    with pytest.raises(ValueError):
+        runtime.activate("show", "below-default", 30, priority=-1)
+
+
+def test_runtime_state_stays_bounded_over_weeks_of_schedules_and_a_default_scene():
+    """The one retention rule (`_forget`): a non-repeating Default Scene and three daily
+    Programs (one refused every day by a protected Run) leave a bounded state, however long
+    the wall runs.
+
+    Mutation probes: skip `_forget` -> Runs and admissions grow with the days."""
+    runtime = Runtime(house=UTC_HOUSE)
+    runtime.set_scene(Scene(scene_id="calm", cycle_seconds=30, contributions=(media(),)))
+    for scene_id in ("morning", "evening", "night"):
+        runtime.set_scene(Scene(scene_id=scene_id, loop=True, contributions=(media(),)))
+    runtime.set_scene(Scene(scene_id="guard", loop=True, protect_frames=True,
+                            contributions=(media("frame:right"),)))
+    runtime.set_scene(Scene(scene_id="blocked", loop=True, contributions=(media("frame:right"),)))
+    runtime.set_default_scene("calm", 0)
+    runtime.activate("guard", "guard-act", 0)
+    schedule(runtime, "morning", "morning", 7 * 60, 9 * 60)
+    schedule(runtime, "evening", "evening", 18 * 60, 21 * 60)
+    schedule(runtime, "night", "night", 23 * 60, 6 * 60)
+    schedule(runtime, "blocked", "blocked", 12 * 60, 13 * 60)
+    sizes = []
+    for hour in range(1, 24 * 21):
+        runtime.advance(hour * 3600)
+        if hour % 24 == 0:
+            state = runtime.export_state()
+            sizes.append((len(state["runs"]), len(state["admissions"])))
+    assert sizes[-1] == sizes[6]                         # a week in, it no longer grows
+    assert max(runs for runs, _ in sizes) <= 10
+    assert any(a.startswith("program:blocked:") for a in runtime.export_state()["admissions"])
+
+
+def test_a_house_zone_change_never_admits_todays_window_again_backdated():
+    """A window's identity is its UTC start, so a new zone gives today's window a new identity:
+    it is not admitted before the processed instant (the change applies from the next window).
+
+    Mutation probe: drop the processed-instant floor in `_pending_windows` -> a second Run of
+    the Program, started before Runtime's present."""
+    london, berlin = HouseTime(zone="Europe/London"), HouseTime(zone="Europe/Berlin")
+    noon = datetime(2026, 7, 1, 11, tzinfo=UTC).timestamp()        # 12:00 in London (BST)
+    runtime = Runtime(house=london)
+    runtime.set_scene(Scene(scene_id="day", loop=True, contributions=(media(),)))
+    runtime.create_program(Program(program_id="p", name="p", scene_id="day",
+                                   when=daily("12:00", "20:00")), noon - 86400)
+    runtime.advance(noon + 3600)
+    moved = Runtime.restore(runtime.export_state(), house=berlin)
+    view = moved.advance(noon + 3900)
+    roots = [run for run in view.runs if run.parent_id is None and run.ended_at is None]
+    assert len(roots) == 1 and roots[0].started_at == noon
 
 
 def test_a_protected_run_keeps_the_default_scene_out_without_recording_a_refusal():

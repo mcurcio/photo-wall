@@ -43,8 +43,9 @@ is ready (Central's central/displays/); how a picture setting becomes a DDC/CI w
 operation (appliance/display_host/picture.py); where a setting acts on a Display (Central's
 central/displays/picture.py, set at the Display's first probe and kept).
 
-Durations and calendar set times cross the wire, never a clock reading (owner, 2026-10-12): a set
-time is a calendar time Central worked out from the house's rules; the Pi compares it only with its
+Durations and calendar set times cross the wire, never a clock reading (the design's rule, from
+the owner's "Yes, send 7 days of set times", 2026-10-12): a set time is a calendar time Central
+worked out from the house's rules; the Pi compares it only with its
 own clock; a test's `for_seconds` counts on the Pi's monotonic clock from when the Pi applies it,
 and `remaining_seconds` is the Pi's own count.
 """
@@ -131,8 +132,9 @@ class PowerRequest:
                  and _count(self.for_seconds, 1, MAX_REQUEST_SECONDS), "power_request")
 
 
-# Power and the week (roadmap 2a). Owner, 2026-10-12: the wire carries "durations and calendar set
-# times; never a clock reading". A set time is a calendar time Central worked out from the house's
+# Power and the week (roadmap 2a). The design's rule (decision 0021), from the owner's "Yes, send 7
+# days of set times" (2026-10-12): the wire carries durations and calendar set times, never a clock
+# reading. A set time is a calendar time Central worked out from the house's
 # rules ("2026-10-11T22:00:00Z", whole seconds, UTC), never a reading of Central's clock; the Pi
 # compares it with its own clock only.
 

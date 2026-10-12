@@ -4,7 +4,6 @@ import { readHouse } from "../houseApi.js";
 import { Note } from "../patterns/fact-row";
 import { ProblemCard } from "../patterns/problem-card";
 import { usePolledRead } from "../polledRead.js";
-import { readFramePower } from "../powerApi.js";
 import { houseLocal, untilWords } from "../timeWords.js";
 import { readFrameWhy } from "../whyApi.js";
 import { Section } from "../ui/section";
@@ -34,6 +33,9 @@ export interface FrameWhyView {
     because: "night-off" | "hold" | "test" | "on-underneath";
     until: string | null;
     pi_says: { kind: "test" | "timetable" | "timetable-ran-out"; power: Power | null } | "not-heard";
+    /** The Pi's last power result for the change in force; null: not heard, or none needed. */
+    result: "confirmed" | "signal-stopped" | "did-not-answer" | "not-supported" | "another-input" | null;
+    /** Central's Resting (central/why/explain.py `is_resting`, its one home). */
     resting: boolean;
   } | null;
 }
@@ -64,14 +66,14 @@ export function contentWhyWords(content: FrameWhyView["content"]): string {
 const REASON: Record<"night-off" | "test", string> = { "night-off": "Night off", test: "a power test" };
 
 /**
- * The Frame's display power in one line (the amended U1): Resting while it is dark on purpose and
- * the Pi says it carries out the off; a display that did not answer is a power problem, never
- * Resting; "Not heard from the Pi" while no report answers Central's latest document.
- * `result` is the Pi's last power result for the change in force (the Power tab's read).
+ * The Frame's display power in one line (the amended U1), from Central's answer only: Resting is
+ * Central's `resting`; a display that did not answer, or that another input keeps on, is a power
+ * problem; "Not heard from the Pi" while no report answers Central's latest document.
  */
-export function powerWhyWords(power: NonNullable<FrameWhyView["power"]>, result: string | null, now: string | null): string {
+export function powerWhyWords(power: NonNullable<FrameWhyView["power"]>, now: string | null): string {
   const until = power.until === null ? null : untilWords(power.until, now);
-  if (result === "did-not-answer") return "Display didn't answer";
+  if (power.result === "did-not-answer") return "Display didn't answer";
+  if (power.wanted === "off" && power.result === "another-input") return "Kept on: the display is showing another input";
   if (power.pi_says === "not-heard") return "Not heard from the Pi";
   if (power.pi_says.kind === "timetable-ran-out") return "Left as it is: no power times from Central for a week";
   if (power.because === "hold") {
@@ -84,22 +86,17 @@ export function powerWhyWords(power: NonNullable<FrameWhyView["power"]>, result:
   return until === null ? "On" : `On: Night off starts at ${until}`;
 }
 
-type Read = { ok: true; why: FrameWhyView; result: string | null; zone: string | null } | { ok: false; error: string } | null;
+type Read = { ok: true; why: FrameWhyView; zone: string | null } | { ok: false; error: string } | null;
 
-/** The Frame's Why, its power result and the house zone, re-read while shown. */
+/** The Frame's Why and the house zone, re-read while shown. */
 export function useFrameWhy(frameId: string) {
   const load = useCallback(async (): Promise<Read> => {
-    const [why, power, house] = await Promise.all([readFrameWhy(frameId), readFramePower(frameId), readHouse()]) as [
+    const [why, house] = await Promise.all([readFrameWhy(frameId), readHouse()]) as [
       { ok: true; why: FrameWhyView } | { ok: false; error: string },
-      { ok: true; view: { result: string | null } } | { ok: false },
       { ok: true; settings: { time: { zone: string } } } | { ok: false },
     ];
     if (!why.ok) return why;
-    return {
-      ok: true, why: why.why,
-      result: power.ok ? power.view.result : null,
-      zone: house.ok ? house.settings.time.zone : null,
-    };
+    return { ok: true, why: why.why, zone: house.ok ? house.settings.time.zone : null };
   }, [frameId]);
   return usePolledRead(load, { cadenceMs: 10000, initial: null as Read }).value;
 }
@@ -124,7 +121,7 @@ export function FrameWhy({ read, readAt, powerOnly = false }: FrameWhyProps) {
   }
   const now = readAt === null || read.zone === null ? null : houseLocal(readAt, read.zone);
   const power = read.why.power === null ? "Display power: no Pi feeds this Frame yet."
-    : `Display power: ${powerWhyWords(read.why.power, read.result, now)}`;
+    : `Display power: ${powerWhyWords(read.why.power, now)}`;
   if (powerOnly) return <Note>{power}</Note>;
   return (
     <Section title="Why is this playing?">

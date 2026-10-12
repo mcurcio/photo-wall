@@ -615,11 +615,12 @@ class _OutputDocuments:
             return
 
 
-def _until_next_deadline(conn: Any, device_id: str, now: float) -> float | None:
+def _until_next_deadline(conn: Any, device_id: str, now: float) -> float:
     """Seconds from Central's `now` until the earliest of: a live console test on the Node's
     Outputs ends, a picture session's idle deadline on a Display last seen on them, the Node's
-    timetables' first change after now, the next house midnight (the horizon moves), the earliest
-    live hold end. None without any."""
+    timetables' first change after now (a hold's end is one when it changes the power; one that
+    does not changes no document), and the next house midnight (the horizon moves), which always
+    comes."""
     row = conn.execute(
         "SELECT least((SELECT min(r.ends_at) FROM players p JOIN bindings b ON b.player_id=p.id "
         "JOIN power_requests r ON r.frame_id=b.frame_id WHERE p.device_id=%(device)s "
@@ -632,7 +633,6 @@ def _until_next_deadline(conn: Any, device_id: str, now: float) -> float | None:
     house = house_time_in(conn)
     policy = power_policy_in(conn, now)
     deadlines.append(day_start(house, house_date(house, now) + timedelta(days=1)))
-    deadlines.extend(hold.ends_at for hold in policy.holds if hold.ends_at is not None and hold.ends_at > now)
     for frame_id in _bound_frames(conn, device_id):
         following = frame_timetable(frame_id, policy, house, now).next_change_after(now)
         if following is not None:

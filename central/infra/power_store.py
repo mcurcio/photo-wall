@@ -5,8 +5,9 @@ holds; migrations 089 `night_off` and 090 `power_holds`).
 (central/infra/display_store.py), Why and the shown-history filter all call it in their own
 transaction. Each command wakes every Node's Output document source in its own transaction
 (`NOTIFY OUTPUT_DOCUMENTS_CHANNEL`, from app code; no trigger), and the source also wakes at the
-timetable's next set time, its next horizon move and the next hold end, so a timetable rolls
-forward with no other write.
+timetable's next set time (a hold's end among them) and its next horizon move, so a timetable
+rolls forward with no other write. Night off's chosen Frames never name a deleted Frame
+(`forget_frame_in`, in the delete's transaction).
 """
 from __future__ import annotations
 
@@ -20,7 +21,7 @@ from central.db import Database, TransactionClock
 from central.house_time.calculator import local_date_time, next_window, when_problems, window_at
 from central.house_time.model import HouseTime
 from central.infra.house_store import house_time_in
-from central.power.model import AllFrames, Hold, HoldSource, NightOff, PowerPolicy
+from central.power.model import AllFrames, ChosenFrames, Hold, HoldSource, NightOff, PowerPolicy
 from central.power.ports import PowerRefused
 from central.power.timetable import hold_end, spans
 from central.power.views import HoldView, NightOffSave, NightOffView
@@ -33,6 +34,21 @@ def night_off_in(conn: Any) -> NightOff:
     """The stored Night off (migration 089 writes the row; it always exists)."""
     row = conn.execute("SELECT settings, revision FROM night_off").fetchone()
     return NightOff.model_validate({**row["settings"], "revision": row["revision"]})
+
+
+def forget_frame_in(conn: Any, frame_id: str) -> None:
+    """Drop `frame_id` from Night off's chosen Frames, in the caller's transaction (the Registry's
+    Frame delete): the one owner of which Frames follow Night off keeps naming only Frames that
+    exist, so a later save is not refused "unknown-frame". The revision rises, so an editor open on
+    the old list is told to reload."""
+    night_off = night_off_in(conn)
+    frames = night_off.frames
+    if not isinstance(frames, ChosenFrames) or frame_id not in frames.frame_ids:
+        return
+    kept = ChosenFrames(frame_ids=tuple(chosen for chosen in frames.frame_ids if chosen != frame_id))
+    draft = night_off.model_copy(update={"frames": kept}).model_dump(mode="json", exclude={"revision"})
+    conn.execute("UPDATE night_off SET settings=%s, revision=revision + 1", (Jsonb(draft),))
+    _wake_every_node(conn)
 
 
 def power_policy_in(conn: Any, now: float) -> PowerPolicy:

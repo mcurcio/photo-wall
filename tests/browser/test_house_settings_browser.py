@@ -32,7 +32,7 @@ def save(page):
 
 
 @pytest.mark.browser_context_args(timezone_id="America/New_York")
-def test_house_offers_the_browsers_zone_saves_zone_and_place_and_refuses_an_unknown_zone(page, registry):
+def test_house_offers_the_browsers_zone_lists_zones_by_city_and_saves_zone_and_place(page, registry):
     seed_house(registry)
     assert registry.clock.wall == NOON and LONDON.zone == "Europe/London"
     with operator_server(registry.db, registry.clock) as origin:
@@ -45,10 +45,9 @@ def test_house_offers_the_browsers_zone_saves_zone_and_place_and_refuses_an_unkn
         expect(offer).to_be_visible()
         expect(zone).to_have_value("Europe/London")          # offered, not applied
 
-        zone.fill("Mars/Olympus")
-        assert save(page).status == 422
-        expect(page.get_by_role("group", name="House actions", exact=True)).to_contain_text(
-            "Not saved: Central doesn't know the timezone “Mars/Olympus”. Enter one like Europe/London.")
+        # A zone is chosen from the browser's list (Central still refuses one it does not know:
+        # tests/test_house_settings.py).
+        expect(zone.locator("option[value='Europe/London']")).to_have_text("London (Europe/London)")
 
         offer.click()
         expect(zone).to_have_value("America/New_York")

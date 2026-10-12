@@ -7,9 +7,10 @@ import { SaveBar } from "../patterns/save-bar";
 import { SettingRow } from "../patterns/setting-row";
 import { zoneName } from "../timeWords.js";
 import { Button } from "../ui/button";
-import { Field, NumberInput, TextInput } from "../ui/field";
+import { Field, NumberInput } from "../ui/field";
 import { Section } from "../ui/section";
 import { SegmentedControl } from "../ui/segmented-control";
+import { Select } from "../ui/select";
 import { Inline, Stack } from "../ui/stack";
 
 /** Settings › House as Central stores it (central/house_time/model.py `HouseSettings`). */
@@ -53,6 +54,18 @@ function problemOf(draft: Draft): string | null {
     return "Longitude is a number from −180 to 180.";
   }
   return null;
+}
+
+/** Every timezone this browser knows, labelled by its city ("London (Europe/London)"), with the
+ * house's own zone kept when the browser's list lacks it. */
+function zoneOptions(current: string): { value: string; label: string }[] {
+  const intl = Intl as unknown as { supportedValuesOf?: (key: string) => string[] };
+  const known = intl.supportedValuesOf?.("timeZone") ?? [];
+  const zones = known.includes(current) || current === "" ? known : [current, ...known];
+  return zones.map((zone) => {
+    const city = zone.split("/").pop()?.replaceAll("_", " ") ?? zone;
+    return { value: zone, label: city === zone ? zone : `${city} (${zone})` };
+  });
 }
 
 const bodyOf = (draft: Draft) => ({
@@ -113,7 +126,10 @@ export function HouseSettingsPage() {
       setDraft(null);
       setSaid("Saved. Schedules and Night off follow the house's time from now on.");
     } else if (answer.error === "unknown-zone") {
-      setSaid(`Not saved: Central doesn't know the timezone “${current.zone.trim()}”. Enter one like Europe/London.`);
+      setSaid(`Not saved: Central doesn't know the timezone “${current.zone.trim()}”. Choose one like Europe/London.`);
+    } else if (answer.error === "place-in-use") {
+      setSaid("Not saved: Night off or a Schedule uses sunrise or sunset, which need the location. "
+        + "Change them to clock times first, or keep the location.");
     } else {
       setSaid(`Not saved: ${answer.error === "unreachable" ? "Central did not answer." : `Central refused it (${answer.error}).`}`);
     }
@@ -122,8 +138,9 @@ export function HouseSettingsPage() {
     <Stack>
       <Note>The house&apos;s time and place: every Schedule and Night off time is on the house clock.</Note>
       <Section title="House">
-        <SettingRow kind="house" label="Timezone" help="An IANA timezone, as Europe/London or America/New_York."
-          state="idle" control={<TextInput value={current.zone} onChange={(zone) => change({ zone })} />} />
+        <SettingRow kind="house" label="Timezone" help="The city whose clock the house keeps, as London."
+          state="idle" control={<Select value={current.zone === "" ? null : current.zone}
+            options={zoneOptions(current.zone)} onChange={(zone) => change({ zone })} />} />
         {browser !== current.zone.trim() && (
           <Inline label="This browser's timezone">
             <Note>{`This browser is in ${browser}.`}</Note>
@@ -144,10 +161,12 @@ export function HouseSettingsPage() {
           </Inline>
         </Stack>
         <SettingRow kind="house" label="Units" defaultLabel="Default: cm" state="idle"
+          help="Kept for the house; the console does not use it yet."
           control={<SegmentedControl label="Units" value={current.units}
             options={[{ value: "cm", label: "Centimetres" }, { value: "in", label: "Inches" }]}
             onChange={(units) => change({ units })} />} />
         <SettingRow kind="house" label="Clock" defaultLabel="Default: 24-hour" state="idle"
+          help="Kept for the house; the console shows 24-hour times until it uses it."
           control={<SegmentedControl label="Clock" value={current.clock}
             options={[{ value: "24h", label: "24-hour" }, { value: "12h", label: "12-hour" }]}
             onChange={(clock) => change({ clock })} />} />

@@ -237,7 +237,7 @@ export function coveringRuns(snapshot, frameIds) {
 /**
  * The priority a new activation on `frameIds` needs to show on top (flow design §6
  * frozen surface, §7 J7): the highest priority among the live root Runs covering any
- * of the frames; 0 when none does.
+ * of the frames; 0 when none does, or only the Default Scene does.
  *
  * Max, not max + 1: precedence is `(priority, root_order, admission_order)`
  * (central/runtime.py `Intent.precedence`), the visible winner needs a strictly
@@ -251,7 +251,9 @@ export function coveringRuns(snapshot, frameIds) {
  */
 export function coveringPriority(snapshot, frameIds) {
   const [top] = coveringRuns(snapshot, frameIds);
-  return top === undefined ? 0 : top.run.priority;
+  // The Default Scene ranks below 0 and Central accepts 0 and up (central/runtime.py
+  // DEFAULT_SCENE_RANK): any request beats it.
+  return top === undefined ? 0 : Math.max(0, top.run.priority);
 }
 
 /**

@@ -14,7 +14,7 @@ from central.house_time.model import LocalDateTime
 from central.power.model import HoldSource, PowerBecause
 from central.runtime import Priority
 from contracts.models import Identifier, Instant, Model
-from contracts.node_output import Power
+from contracts.node_output import Power, PowerResult
 
 ContentKind = Literal["program", "show-now", "default-scene"]
 BeatenBecause = Literal["lower-priority", "admitted-earlier", "kept-out-by-protected-frames"]
@@ -48,13 +48,14 @@ class ContentWhy(Model):
 class PowerWhy(Model):
     """`wanted`: Central's decision now and `because` its reason; `until`: its next set time on the
     house clock (None: none within the horizon). `pi_says`: what the Pi reports carrying out for the
-    latest document change, or "not-heard" (no report answers it). `resting`: dark on purpose
-    (wanted off, and the Pi says it carries out an off from the test or the timetable): the
-    amended U1's Resting."""
+    latest document change, or "not-heard" (no report answers it); `result`: that report's last
+    attempt's result (None: not heard, or no attempt was needed). `resting`: dark on purpose
+    (central/why/explain.py `is_resting`, its one home): the amended U1's Resting."""
     wanted: Power
     because: PowerBecause
     until: LocalDateTime | None
     pi_says: InForceView | Literal["not-heard"]
+    result: PowerResult | None
     resting: bool
 
 

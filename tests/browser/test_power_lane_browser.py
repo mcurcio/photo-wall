@@ -20,6 +20,7 @@ from operator_harness import operator_server
 from playwright.sync_api import expect
 from support.house_time import LONDON, at, set_house
 
+from central.house_time.model import HouseTime, Place
 from central.registry import FrameCreate
 from contracts.models import FrameProfile
 
@@ -67,6 +68,7 @@ def test_the_lane_draws_night_off_and_holds_with_resume_schedule(page, registry)
         week(page).get_by_role("button", name="All off", exact=True).click()
         expect(band(page, "Wed 14 Oct", r"^Held off · console, Wed 14 Oct 12:00–23:00$")).to_have_count(1)
         expect(week(page)).to_contain_text("Held off until 23:00")
+        expect(week(page)).to_contain_text("Holding every display off until 23:00.")     # Central's until
         holds = week(page).get_by_role("region", name="Holds", exact=True)
         expect(holds).to_contain_text("Held off · console · until 23:00 · Frame 1")
 
@@ -117,3 +119,18 @@ def test_night_off_saves_moves_the_lane_and_a_stale_tab_reloads(page, registry):
         expect(stale.get_by_label("Turn off", exact=True)).to_have_value("22:30")
         assert page.request.get(origin + "/v1/operator/power/night-off").json()["night_off"]["off"] == {
             "at": "clock", "time": "22:30"}
+
+        # With a location, "30 minutes before sunset" is chosen as a side and a number of minutes:
+        # a typed minus sign was lost on the way (it saved 30 after).
+        set_house(registry.db, HouseTime(zone=LONDON.zone, place=Place(latitude=51.5, longitude=-0.13)))
+        page.reload()
+        editor = week(page).get_by_role("region", name="Night off", exact=True)
+        editor.get_by_role("radiogroup", name="Turn off at", exact=True).get_by_role(
+            "radio", name="Sunset", exact=True).click()
+        editor.get_by_role("radiogroup", name="Turn off: before or after sunset", exact=True).get_by_role(
+            "radio", name="Before", exact=True).click()
+        editor.get_by_label("Turn off: minutes before sunset", exact=True).fill("30")
+        editor.get_by_role("button", name="Save Night off", exact=True).click()
+        expect(editor.get_by_role("status")).to_have_text("Saved. The displays follow it from its next off or on.")
+        assert page.request.get(origin + "/v1/operator/power/night-off").json()["night_off"]["off"] == {
+            "at": "sunset", "offset_minutes": -30}

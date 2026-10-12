@@ -109,3 +109,23 @@ def test_a_saved_zone_and_place_move_night_off_and_the_programs_windows(registry
         sunset = client.post("/v1/operator/programs", headers=AUTH, json={
             "name": "Sunset", "scene_id": "evening", "when": SUNSET})
         assert sunset.status_code == 201, sunset.text
+
+        # A Schedule uses sunset now: the location cannot be cleared (it would silently stop),
+        # and the house is left as it was.
+        in_use = client.put("/v1/operator/house", headers=AUTH, json=_house("America/New_York"))
+        assert (in_use.status_code, in_use.json()) == (409, {"error": "place-in-use"})
+        assert client.get("/v1/operator/house", headers=AUTH).json() == saved.json()
+
+
+def test_the_location_cannot_go_while_night_off_uses_sunset(registry):
+    """Mutation probe: skip the place-in-use check -> the location is cleared and Night off
+    stops turning displays off without a word."""
+    _rows(registry, "UPDATE night_off SET settings = jsonb_set(settings, '{off}', "
+                    "'{\"at\": \"sunset\", \"offset_minutes\": 0}'::jsonb)")
+    with TestClient(create_app(registry.db, registry.clock, ADMIN, run_scheduler=False)) as client:
+        assert client.put("/v1/operator/house", headers=AUTH,
+                          json=_house("America/New_York", PLACE)).status_code == 200
+        refused = client.put("/v1/operator/house", headers=AUTH, json=_house("America/New_York"))
+        assert (refused.status_code, refused.json()) == (409, {"error": "place-in-use"})
+        moved = client.put("/v1/operator/house", headers=AUTH, json=_house("Europe/London", PLACE))
+        assert moved.status_code == 200, moved.text

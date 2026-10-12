@@ -7,8 +7,11 @@ the report names that result. The Power tab reads the same line. Every document 
 through the worker's document source and the link store's judge
 (`test_display_power_requests._projected`, `_answer`).
 
-Mutation probe (P-resting-wide): `powerWhyWords` reads Resting whenever the display is wanted off
-(drop the did-not-answer line) -> the did-not-answer case reads Resting.
+Resting is Central's answer (`power.resting`, central/why/explain.py `is_resting`; the pure cases
+are tests/test_why_power.py); the console renders it and the result Why carries, from one read.
+
+Mutation probe (P-resting-wide): `powerWhyWords` drops the did-not-answer line -> the
+did-not-answer case no longer says "Display didn't answer".
 """
 
 import os

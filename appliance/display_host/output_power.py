@@ -375,17 +375,28 @@ class OutputPowerController:
             if carried.kind is InForceKind.TEST and carried.request_id is not None:
                 port.started.setdefault(carried.request_id, now)
         method = _resolve(document.method, answers)
-        if carried.kind is InForceKind.TIMETABLE and document.power.darkness is Darkness.BLACK_PICTURE:
-            # Black picture: the curtain is the whole of it; no power method runs.
-            confirmed = self._black.show(output_id, power is Power.OFF, timeout=WRITE_SECONDS)
+        black_picture = (carried.kind is InForceKind.TIMETABLE
+                         and document.power.darkness is Darkness.BLACK_PICTURE)
+        if black_picture and power is Power.OFF:
+            # Black picture's off: the curtain is the whole of it; no power method runs.
+            confirmed = self._black.show(output_id, True, timeout=WRITE_SECONDS)
+            result = PowerResult.CONFIRMED if confirmed else PowerResult.DID_NOT_ANSWER
+        elif black_picture and method is None:
+            # Its on with no method to check the display: the curtain comes down, and that is all.
+            confirmed = self._black.show(output_id, False, timeout=WRITE_SECONDS)
             result = PowerResult.CONFIRMED if confirmed else PowerResult.DID_NOT_ANSWER
         elif method is None:
             result = PowerResult.DID_NOT_ANSWER if answers else PowerResult.NOT_SUPPORTED
             black = power is Power.OFF and result is PowerResult.NOT_SUPPORTED   # showing black otherwise
             self._curtain(output_id, black)
         else:
-            self._curtain(output_id, False)
+            # Every on, black picture's too, brings the display itself on (read first, write only
+            # when it reads off): a test, or a night with displays turned off, may have left it off.
+            lowered = (self._black.show(output_id, False, timeout=WRITE_SECONDS) if black_picture
+                       else self._curtain(output_id, False))
             result = _carry_out(self._adapters[method], output_id, power, document)
+            if lowered is False:
+                result = PowerResult.DID_NOT_ANSWER      # the display is on; the shell kept black up
         elapsed_ms = max(0, round((self._clock.monotonic() - began) * 1000))
         with self._wake:
             port.answers, port.method = answers, method
@@ -394,10 +405,12 @@ class OutputPowerController:
             self._put(output_id, port)
         self._sink.emit_attempt(PowerAttempt(output_id, document.change, carried, method, result, elapsed_ms))
 
-    def _curtain(self, output_id: str, black: bool) -> None:
-        """Up when `black`; else down when the shell may have it up (it said so, or cannot say)."""
+    def _curtain(self, output_id: str, black: bool) -> bool | None:
+        """Up when `black`; else down when the shell may have it up (it said so, or cannot say).
+        Whether the shell confirmed; None when nothing was asked of it."""
         if black or self._black.shown(output_id) is not False:
-            self._black.show(output_id, black, timeout=WRITE_SECONDS)
+            return self._black.show(output_id, black, timeout=WRITE_SECONDS)
+        return None
 
 
 def _carry_out(adapter: PowerMethodAdapter, output_id: str, power: Power,

@@ -391,7 +391,7 @@ Stories: `Default`, `GroupChosen`, `AllFramesChosen`, `ExcludesThisFrame`.
 
 | Member | Layer | Purpose | Stories |
 |---|---|---|---|
-| `MultiToggle` | ui | Two to five choices any of which can be on together (Base UI ToggleGroup); each says "on" or "off" in words, not by the accent alone; `required` keeps one on | Default, AllOn, InField, Disabled |
+| `MultiToggle` | ui | Two to seven choices (a week's days) any of which can be on together (Base UI ToggleGroup); each shows its state, not by the accent alone: "on" or "off" in words, or `stateWords` where on and off would read as display power (Night off: "✓" and nothing); `required` keeps one on | Default, AllOn, InField, Disabled |
 | `Sheet` | ui | The sheet of §2: from the bottom on a phone, from the side above `md`, above the page's sticky bars | Default |
 | `Menu` | ui | Overflow actions behind a "More" button named for what it acts on ("More actions for garden") | Default |
 | `EditorPage` | patterns | T4: form and preview side by side from `lg` (the preview sticky), stacked from `md`, a count line opening the preview in a `Sheet` on a phone; the `SaveBar` last | Default |

@@ -140,11 +140,16 @@ export function weekDays(week: Week) {
   });
 }
 
+/** How long a hold lasts, in words: "07:00", "Thu 07:00" or "you resume" (one home). */
+export function holdUntilWords(hold: Pick<HoldView, "until">, now: string | null): string {
+  return hold.until === null ? "you resume" : untilWords(hold.until, now);
+}
+
 /** The newest live hold, the page's header line ("Held off until 07:00"); null with none. */
 export function heldWords(holds: readonly HoldView[], now: string | null): string | null {
   const newest = [...holds].sort((a, b) => b.started_at - a.started_at)[0];
   if (newest === undefined) return null;
-  return `Held ${newest.power} until ${newest.until === null ? "you resume" : untilWords(newest.until, now)}`;
+  return `Held ${newest.power} until ${holdUntilWords(newest, now)}`;
 }
 
 export interface PowerButtonsProps {

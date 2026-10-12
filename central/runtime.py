@@ -131,7 +131,9 @@ Child.model_rebuild()
 Priority = Literal["normal", "special-event", "always-wins"]          # #78; "normal" is the default
 PRIORITY_RANK: Final[Mapping[str, int]] = MappingProxyType(
     {"normal": 1, "special-event": 2, "always-wins": 3})
-DEFAULT_SCENE_RANK: Final = 0      # the Default Scene plays under every Schedule (E5)
+# The Default Scene plays under every Schedule and every operator request (E5): its rank is below
+# any priority `activate` accepts (0 and up), so it never wins a tie.
+DEFAULT_SCENE_RANK: Final = -1
 
 
 class ProgramDraft(FrozenModel):
@@ -146,7 +148,8 @@ class ProgramDraft(FrozenModel):
 
 class DefaultScene(FrozenModel):
     """The Scene that plays wherever no Schedule does (E5). `revision` rises at every change, so
-    each choice's Runs have their own identity `default:<scene_id>:<revision>:<start>`."""
+    each choice's Runs have their own identity `default:<scene_id>:<revision>:<scene revision>:
+    <start>` (`Runtime._default_prefix`): an edit of its Scene is a new identity too."""
     scene_id: Identifier
     revision: Annotated[int, Field(ge=1)]
 
@@ -258,7 +261,8 @@ class RuntimeView(FrozenModel):
         return next((intent for intent in self.visible if intent.target == target), None)
 
 
-# The operator's read keeps ended Runs for this long.
+# The operator's read keeps ended Runs for this long, and Runtime forgets a root Run (with its
+# admission) once it and its Program window, if any, ended this long ago (`Runtime._forget`).
 OPERATOR_HISTORY_SECONDS = 86400.0
 
 
@@ -284,8 +288,8 @@ class OperatorProjection(FrozenModel):
     each served Run that protects frames to those targets; it is computed only
     here, never on the scheduler's path. `program_windows` maps each Program to
     its current and next window (house time worked out here, never in the
-    console); `default_scene` is the Default Scene. The bound is a read filter:
-    stored Runs and admissions are untouched.
+    console); `default_scene` is the Default Scene. Runtime itself forgets what
+    ended longer ago than the bound (`Runtime._forget`).
     """
 
     current: RuntimeView
@@ -635,6 +639,10 @@ class Runtime:
         if problems:
             raise ProgramRefused(problems[0])
 
+    def program_whens(self) -> tuple[When, ...]:
+        """Every stored Program's When (Settings › House checks them before the location goes)."""
+        return tuple(program.when for program in self._state.programs.values())
+
     def create_program(self, program: Program, now: float) -> Program:
         """Store a new Program at revision 1. Its windows are admitted from `now` on: a window
         already started is not (a new Schedule starts with its next window). The same Program
@@ -729,15 +737,14 @@ class Runtime:
 
     def set_default_scene(self, scene_id: str | None, now: float) -> RuntimeView:
         """Choose the Scene that plays wherever no Schedule does (E5), or none. The previous
-        choice's Run finishes gracefully at `now`; the new one is admitted at `now`."""
+        choice's Run finishes gracefully at `now` and the new one is admitted then
+        (`_process`)."""
         self.advance(now)
         current = self._state.default_scene
         if scene_id is not None and scene_id not in self._state.scenes:
             raise ProgramRefused("unknown-scene")
         if (current.scene_id if current else None) == scene_id:
             return self.advance(now)
-        for run in self._default_runs():
-            run.scheduled_finish_at = min(run.scheduled_finish_at or now, now)
         self._state.default_scene = None if scene_id is None else DefaultScene(
             scene_id=scene_id, revision=current.revision + 1 if current else 1)
         return self.advance(now)
@@ -849,6 +856,8 @@ class Runtime:
             raise ValueError("activation_id must be a nonempty string")
         if activation_id.startswith((PROGRAM_PREFIX, DEFAULT_PREFIX)):
             raise ValueError("program and Default Scene identities are reserved for scheduled ingress")
+        if priority <= DEFAULT_SCENE_RANK:
+            raise ValueError("an operator request ranks above the Default Scene (priority 0 and up)")
         self.advance(now)
         if activation_id in self._state.admissions:
             return self._state.admissions[activation_id]
@@ -928,7 +937,32 @@ class Runtime:
         finally:
             self._target = None
         self._state.now = now
+        self._forget(now)
         return self._view(now, budget=budget if holds else None)
+
+    def _forget(self, now: float) -> None:
+        """The one retention rule (Runtime's state stays bounded however long it runs): a root
+        Run that ended, and whose Program window (if any) ended, more than
+        OPERATOR_HISTORY_SECONDS before `now` is forgotten with its admission; so is a refused
+        Program window's admission once no window of its Program's current revision ending
+        after that instant has its identity. A forgotten identity is never consulted again:
+        only windows ending after the floor are admitted. An operator retry of a forgotten
+        activation id is a new request."""
+        cutoff = now - OPERATOR_HISTORY_SECONDS
+        for run in list(self._state.runs.values()):
+            if (run.parent_id is None and not run.active and run.ended_at is not None
+                    and run.ended_at < cutoff
+                    and (run.program_ends_at is None or run.program_ends_at < cutoff)):
+                del self._state.runs[run.run_id]
+                if run.activation_id is not None:
+                    self._state.admissions.pop(run.activation_id, None)
+        recent = {program.window_id(window.start)
+                  for program in self._state.programs.values()
+                  for window in _windows_after(program.when, self._house, cutoff)}
+        for identity, admission in list(self._state.admissions.items()):
+            if (identity.startswith(PROGRAM_PREFIX) and admission.run_id is None
+                    and identity not in recent):
+                del self._state.admissions[identity]
 
     def _floor(self) -> float | None:
         """The instant before which no Program window or Default Scene is admitted: the advance's
@@ -938,14 +972,19 @@ class Runtime:
 
     def _pending_windows(self) -> list[tuple[float, str, Program, Window]]:
         """Every Program window still to be admitted, (start, program_id, Program, Window), in
-        start order: it ends after the floor, starts at or after its Program's `program_from`,
-        and its identity has no admission yet."""
+        start order: it ends after the floor, starts at or after its Program's `program_from`
+        and at or after the processed instant (a window is never admitted backdated, e.g. one a
+        house zone or place change moved into the past: the change applies from the next
+        window, as a save does, R10), and its identity has no admission yet."""
         floor = self._floor()
         if floor is None:
             return []
+        processed = self._state.now
         pending = []
         for program in self._state.programs.values():
             since = self._state.program_from.get(program.program_id, floor)
+            if processed is not None:
+                since = max(since, processed)
             for window in _windows_after(program.when, self._house, floor):
                 if window.start >= since and program.window_id(window.start) not in self._state.admissions:
                     pending.append((window.start, program.program_id, program, window))
@@ -957,17 +996,36 @@ class Runtime:
                 if run.parent_id is None and run.active and run.activation_id is not None
                 and run.activation_id.startswith(DEFAULT_PREFIX)]
 
-    def _default_due(self) -> Scene | None:
-        """The Default Scene's Scene when it is set, none of its Runs under its current identity
-        prefix is active, and no protection refuses it (a refusal is never recorded: it is
-        retried at the next event)."""
+    def _default_prefix(self) -> str | None:
+        """What the identity of a Run of the Default Scene as chosen and stored now starts with:
+        the choice's revision and its Scene's revision, so a new choice or an edit of its Scene
+        is the next Run (requirements: "Authored configuration edits default to the next
+        Run"). None when none is chosen or its Scene is gone."""
         chosen = self._state.default_scene
         if chosen is None or chosen.scene_id not in self._state.scenes:
             return None
-        prefix = f"{DEFAULT_PREFIX}{chosen.scene_id}:{chosen.revision}:"
+        scene = self._state.scenes[chosen.scene_id]
+        return f"{DEFAULT_PREFIX}{chosen.scene_id}:{chosen.revision}:{scene.revision}:"
+
+    def _stale_defaults(self) -> list[_Run]:
+        """The active Default Scene Runs not under the current prefix, not yet asked to finish."""
+        prefix = self._default_prefix()
+        return [run for run in self._default_runs()
+                if (prefix is None or not run.activation_id.startswith(prefix))
+                and run.scheduled_finish_at is None and run.finish_requested_at is None]
+
+    def _default_due(self) -> Scene | None:
+        """The Default Scene's Scene, repeating until replaced (it never ends by itself: one
+        perpetual Run), when it is set, none of its Runs under the current prefix is active, and
+        no protection refuses it (a refusal is never recorded: it is retried at the next
+        event)."""
+        prefix = self._default_prefix()
+        if prefix is None:
+            return None
         if any(run.activation_id.startswith(prefix) for run in self._default_runs()):
             return None
-        scene = self._state.scenes[chosen.scene_id]
+        chosen = self._state.scenes[self._state.default_scene.scene_id]
+        scene = chosen.model_copy(update={"loop": True, "duration_seconds": None})
         if self._protected_conflict(scene, DEFAULT_SCENE_RANK, False):
             return None
         return scene
@@ -1065,7 +1123,7 @@ class Runtime:
 
     def _next_event(self) -> float | None:
         events = [start for start, *_ in self._pending_windows()[:1]]
-        if self._default_due() is not None:
+        if self._default_due() is not None or self._stale_defaults():
             events.append(self._floor())
         events.extend(item.expires_at for item in self._state.queue)
         for run in self._state.runs.values():
@@ -1149,10 +1207,14 @@ class Runtime:
                 )
             )
             self._state.admissions[identity] = result
+        # A Default Scene Run of an earlier choice or Scene revision finishes gracefully; the
+        # current one is admitted once no protection refuses it.
+        for run in self._stale_defaults():
+            budget.consume()
+            run.scheduled_finish_at = at
         if (default := self._default_due()) is not None:
             budget.consume()
-            chosen = self._state.default_scene
-            identity = f"{DEFAULT_PREFIX}{chosen.scene_id}:{chosen.revision}:{at:.17g}"
+            identity = f"{self._default_prefix()}{at:.17g}"
             self._state.admissions[identity] = self._admit(default, identity, at, DEFAULT_SCENE_RANK)
         for run in list(self._state.runs.values()):
             if run.phase != "body" or run.finish_requested_at is not None:

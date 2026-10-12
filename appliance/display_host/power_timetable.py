@@ -52,12 +52,18 @@ def next_set_time(power: OutputPower, wall_now: float) -> float | None:
 def acts_on_new_document(previous: OutputPower | None, current: OutputPower, wall_now: float) -> bool:
     """Whether a document whose `change` rose is carried out at once: no previous document, or
     `wanted(previous, wall_now) != wanted(current, wall_now)`, or the test part differs. "Wanted"
-    compares what is carried out (kind and power), never `since`: a rewrite that moves `now` past a
-    set time already reached wants the same."""
+    compares what is carried out (kind, power, and how an off is dark: `darkness`), never `since`:
+    a rewrite that moves `now` past a set time already reached wants the same."""
     if previous is None or previous.test != current.test:
         return True
-    before, after = wanted(previous, wall_now), wanted(current, wall_now)
-    return (before.kind, before.power) != (after.kind, after.power)
+    return _carried(previous, wall_now) != _carried(current, wall_now)
+
+
+def _carried(power: OutputPower, wall_now: float) -> tuple:
+    """What carrying out `power` at `wall_now` does: its kind and power, and for an off how it is
+    dark (display off, or black picture with the display on)."""
+    now = wanted(power, wall_now)
+    return now.kind, now.power, power.darkness if now.power is Power.OFF else None
 
 
 __all__ = ["Wanted", "acts_on_new_document", "next_set_time", "wanted"]

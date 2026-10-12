@@ -18,7 +18,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from central.db import Database, TransactionClock
-from central.house_time.calculator import known_zone
+from central.house_time.calculator import known_zone, when_problems
 from central.house_time.model import HouseSettings, HouseSettingsDraft, HouseTime
 from central.house_time.ports import HouseRefused
 
@@ -89,12 +89,19 @@ class PgHouse:
             return house_settings_in(conn)
 
     def save_house_settings(self, draft: HouseSettingsDraft) -> HouseSettings:
-        # The document source imports this module (house_time_in): its channel is read at call time.
+        # The document source, the power store and the Runtime store import this module
+        # (house_time_in): they are read at call time.
         from central.infra.display_store import OUTPUT_DOCUMENTS_CHANNEL
+        from central.infra.power_store import night_off_in
+        from central.runtime_store import RuntimeStore
         if not known_zone(draft.time.zone):
             raise HouseRefused("unknown-zone", 422)
         place = draft.time.place
         with self._db.transaction() as conn:
+            if place is None:
+                whens = (night_off_in(conn).when, *RuntimeStore.read_in(conn).program_whens())
+                if any("needs-place" in when_problems(when, draft.time) for when in whens):
+                    raise HouseRefused("place-in-use", 409)
             saved = HouseSettings(**draft.model_dump(), updated_at=self._times.now_in(conn))
             conn.execute(
                 "INSERT INTO house_settings (singleton, zone, latitude, longitude, units, clock_format, updated_at)"

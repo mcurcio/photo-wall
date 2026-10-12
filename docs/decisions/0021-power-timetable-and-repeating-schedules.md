@@ -59,5 +59,7 @@ Prior art: iCalendar (RFC 5545) weekly recurrence and its daylight-saving rule f
 - **Central and the Pis upgrade together.** The display line's schema 3 is not read by an older Pi, which refuses the document and leaves its display as it is until it reboots onto the release.
 - **A wrong Pi clock switches at the wrong time.** The Pi's wall clock is trusted as it is.
 - **Today's Programs end at deploy.** The owner picks a Default Scene and remakes his routine; until then Frames keep their last photo.
+- **Runtime forgets after a day.** Every repeating window and Default Scene Run adds a Run and an admission; Runtime forgets each once it and its window ended more than 24 hours ago, so its stored state stays bounded. An operator retry of a request whose Run ended over a day ago is a new request.
+- **A house zone change waits for the next window.** A window it moves into the past is not played backdated.
 - **Weekly only.** No one-off dates, holidays or "every other week" (E4, deferred).
 - **Larger than planned.** L in one pull request, not M + M.

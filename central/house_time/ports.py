@@ -8,11 +8,13 @@ from typing import Literal, Protocol
 
 from central.house_time.model import HouseSettings, HouseSettingsDraft
 
-HouseRefusal = Literal["unknown-zone"]
+HouseRefusal = Literal["unknown-zone", "place-in-use"]
 
 
 class HouseRefused(Exception):
-    """A refusal the routes answer as {"error": code} with `status`: unknown-zone 422."""
+    """A refusal the routes answer as {"error": code} with `status`: unknown-zone 422,
+    place-in-use 409 (the location is cleared while Night off or a Schedule uses sunrise or
+    sunset)."""
 
     def __init__(self, code: HouseRefusal, status: int) -> None:
         super().__init__(code)
@@ -31,5 +33,7 @@ class HouseCommands(Protocol):
     def save_house_settings(self, draft: HouseSettingsDraft) -> HouseSettings:
         """Store Settings › House and wake every Node's Output document source (the timetable's set
         times follow the zone and place). HouseRefused("unknown-zone", 422) for a zone the IANA
-        database does not know. Last write wins (one operator)."""
+        database does not know; HouseRefused("place-in-use", 409) for no location while Night off
+        or a Schedule uses sunrise or sunset (`when_problems` "needs-place", its one home), which
+        would otherwise silently stop. Last write wins (one operator)."""
         ...

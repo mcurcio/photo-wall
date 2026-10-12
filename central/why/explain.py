@@ -10,14 +10,17 @@ Rules this module owns (one home each):
 - **Kinds**: an activation id starting "program:" is a Program's window, "default:" the Default
   Scene, anything else Show now.
 - **Power**: a live 1b test wins ("test"); else the timetable's reason at now. `pi_says` is the
-  report's in-force for the latest document change, else "not-heard".
-- **Resting** (the amended U1): wanted off and the Pi carries out an off from the test or the
-  timetable. A display that did not answer is a power problem, not Resting.
+  report's in-force for the latest document change, else "not-heard"; `result` that report's last
+  attempt's result (None: not heard, or no attempt was needed).
+- **Resting** (the amended U1): wanted off, the Pi carries out an off from the test or the
+  timetable, and its last attempt did not fail: a display that did not answer, or that another
+  input keeps on (#118), is a power problem, not Resting. An off no method can carry out
+  ("not-supported") shows black on the Frame (the Pi's black curtain), so it is Resting.
 """
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Literal
+from typing import Final, Literal
 
 from central.displays.model import PowerTest, live_test
 from central.displays.views import InForceView, in_force_view
@@ -37,7 +40,7 @@ from central.runtime import (
     Scene,
 )
 from central.why.model import Beaten, ContentKind, ContentRequest, ContentWhy, PowerWhy
-from contracts.node_output import InForceKind, OutputDocument, OutputReport, Power
+from contracts.node_output import InForceKind, OutputDocument, OutputReport, Power, PowerResult
 
 
 def content_why(view: RuntimeView, frame_id: str, *, programs: Mapping[str, Program],
@@ -126,15 +129,22 @@ def power_why(*, timetable: Timetable | None, test: PowerTest | None, document: 
                 and report.for_change == document.change)
     pi_says = in_force_view(report, house, live, now) if answered else None
     said: InForceView | Literal["not-heard"] = "not-heard" if pi_says is None else pi_says
+    result = report.result if answered else None
     return PowerWhy(wanted=wanted, because=because,
                     until=None if until is None else local_date_time(house, until),
-                    pi_says=said, resting=is_resting(wanted, said))
+                    pi_says=said, result=result, resting=is_resting(wanted, said, result))
 
 
-def is_resting(wanted: Power, pi_says: InForceView | Literal["not-heard"]) -> bool:
+# The results after which the display is not dark on purpose (the Resting rule above).
+_NOT_RESTING: Final = frozenset({PowerResult.DID_NOT_ANSWER, PowerResult.ANOTHER_INPUT})
+
+
+def is_resting(wanted: Power, pi_says: InForceView | Literal["not-heard"],
+               result: PowerResult | None) -> bool:
     """The Resting rule above."""
     return (wanted is Power.OFF and pi_says != "not-heard"
-            and pi_says.kind in (InForceKind.TEST, InForceKind.TIMETABLE) and pi_says.power is Power.OFF)
+            and pi_says.kind in (InForceKind.TEST, InForceKind.TIMETABLE) and pi_says.power is Power.OFF
+            and result not in _NOT_RESTING)
 
 
 __all__ = ["content_why", "is_resting", "kept_out", "power_why"]

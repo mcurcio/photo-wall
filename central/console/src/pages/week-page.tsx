@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { NightOffEditor, type NightOffDraft, type NightOffView } from "../domain/night-off-editor";
-import { heldWords, type HoldView, PowerButtons, PowerLane, scheduleLane, type Week } from "../domain/power-lane";
+import { heldWords, holdUntilWords, type HoldView, PowerButtons, PowerLane, scheduleLane, type Week } from "../domain/power-lane";
 import { readHouse } from "../houseApi.js";
 import { EntityHeader } from "../patterns/entity-header";
 import { Note } from "../patterns/fact-row";
@@ -30,11 +30,16 @@ type Read =
 
 const NOTHING = "nothing";
 
-/** Central's answer to All off, All on or Resume, in words. */
-function pressWords(power: "on" | "off" | "resume", answer: { ok: boolean; error?: string }): string {
+type Answer = { ok: true; hold?: HoldView } | { ok: false; error: string };
+
+/** Central's answer to All off, All on or Resume, in words: a hold says until when Central
+ * holds it (its `until`), never a guess from the setting. */
+function pressWords(power: "on" | "off" | "resume", answer: Answer, now: string | null): string {
   if (answer.ok) {
-    return power === "resume" ? "Resumed the schedule: the displays follow Night off again."
-      : `Holding every display ${power} until the next scheduled change.`;
+    if (power === "resume") return "Resumed the schedule: the displays follow Night off again.";
+    if (answer.hold === undefined) return `Holding every display ${power}.`;
+    if (answer.hold.frame_ids.length === 0) return "No Frame to hold yet.";
+    return `Holding every display ${power} until ${holdUntilWords(answer.hold, now)}.`;
   }
   return answer.error === "unreachable" ? "Central did not answer. Press it again."
     : `Not done: Central refused it (${answer.error}).`;
@@ -83,6 +88,9 @@ export function WeekPage({ snapshot }: { snapshot: object | null }) {
     if (served?.readAt !== undefined) void refresh();
   }, [served, refresh]);
 
+  /** Central's read time on the house clock, for "until 23:00" (null before a read). */
+  const nowWords = () => (readAt.current === null || read === null || !read.ok ? null : houseLocal(readAt.current, read.zone));
+  const [sceneSaid, setSceneSaid] = useState<string | null>(null);
   const frames = (served?.inventory?.frames ?? []).map((frame) => ({ id: frame.id, name: frame.name ?? frame.id }));
   const names = Object.fromEntries(frames.map((frame) => [frame.id, frame.name]));
 
@@ -90,17 +98,17 @@ export function WeekPage({ snapshot }: { snapshot: object | null }) {
     // A fresh request id per press; a press retried after Central did not answer reuses it.
     if (press.current === null || press.current.power !== power) press.current = { power, id: crypto.randomUUID() };
     setBusy(true);
-    const answer = await hold(power, press.current.id) as { ok: boolean; error?: string };
+    const answer = await hold(power, press.current.id) as Answer;
     setBusy(false);
     if (answer.ok || answer.error !== "unreachable") press.current = null;
-    setSaid(pressWords(power, answer));
+    setSaid(pressWords(power, answer, nowWords()));
     void refresh();
   };
   const onResume = async (held: HoldView) => {
     setBusy(true);
-    const answer = await resumeSchedule([...held.frame_ids]) as { ok: boolean; error?: string };
+    const answer = await resumeSchedule([...held.frame_ids]) as Answer;
     setBusy(false);
-    setSaid(pressWords("resume", answer));
+    setSaid(pressWords("resume", answer, nowWords()));
     void refresh();
   };
   const onSaveNightOff = async (revision: number, draft: NightOffDraft) => {
@@ -143,9 +151,14 @@ export function WeekPage({ snapshot }: { snapshot: object | null }) {
         <SettingRow kind="house" label="Default Scene" state="idle" defaultLabel="Default: Nothing"
           help="Plays wherever no Schedule does. Nothing leaves those Frames with their last photo."
           control={<Select value={week.default_scene_id ?? NOTHING} options={scenes} onChange={async (next) => {
-            await setDefaultScene(next === NOTHING ? null : next);
+            const answer = await setDefaultScene(next === NOTHING ? null : next) as { ok: true } | { ok: false; error: string };
+            const label = scenes.find((scene) => scene.value === next)?.label ?? next;
+            setSceneSaid(answer.ok ? `The Default Scene is now ${label}.`
+              : answer.error === "unreachable" ? "Not changed: Central did not answer. Choose it again."
+                : `Not changed: Central refused it (${answer.error}).`);
             void refresh();
           }} />} />
+        {sceneSaid !== null && <Note live>{sceneSaid}</Note>}
       </Section>
       <NightOffEditor view={nightOff} frames={frames} placeSet={placeSet} houseHref={houseHref} onSave={onSaveNightOff} />
     </Stack>

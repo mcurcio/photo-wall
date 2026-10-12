@@ -827,7 +827,7 @@ PHOTO_PAGE_IMPORTS = {
 POWER_WEEK_IMPORTS = {
     "week-page.tsx": {"houseApi.js", "polledRead.js", "powerScheduleApi.js", "weekApi.js"},
     "house-settings-page.tsx": {"houseApi.js"},
-    "frame-why.tsx": {"houseApi.js", "polledRead.js", "powerApi.js", "whyApi.js"},
+    "frame-why.tsx": {"houseApi.js", "polledRead.js", "whyApi.js"},
 }
 DECLARED_IMPORTS = {**FRAME_PAGE_IMPORTS, **PHOTO_PAGE_IMPORTS, **POWER_WEEK_IMPORTS}
 
