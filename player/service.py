@@ -98,6 +98,8 @@ def served_sha256(header: str | None) -> str:
 BACKOFF = SESSION_BACKOFF
 # A failed media download retries on its own schedule; it is not a liveness contract.
 MEDIA_RETRY_BACKOFF = (1, 5, 15, 60)
+# The app link is tried the moment an applied receipt (or a relink) arrives; this is only
+# the backoff after a refusal or a socket failure, and the idle safety net.
 APP_LINK_RETRY = 5.0
 # How long a thread-to-main handoff may wait for the GLib loop before the Player raises the
 # main_loop_late fault instead of waiting on a starved loop in silence (G8). Readiness
@@ -365,6 +367,8 @@ class PlayerService:
         self._proof_active = False
         self._proof_generation = 0
         self._relink = threading.Event()
+        # The running app-link loop's wake-up, set from any thread through its loop.
+        self._link_wake: tuple[asyncio.AbstractEventLoop, asyncio.Event] | None = None
         self._thread = None
         self._loop = None
         self._task = None
@@ -754,8 +758,10 @@ class PlayerService:
             if (self._control_proof_revision == revision and self._session is session
                     and session.registration is registration
                     and self._highest_control_sequence == receipt.delivery_sequence
-                    and self._highest_control_delivery_id == receipt.delivery_id):
+                    and self._highest_control_delivery_id == receipt.delivery_id
+                    and self._applied_proof_receipt != (session, receipt)):
                 self._applied_proof_receipt = (session, receipt)
+                self._wake_link_loop()
 
     def _apply_identify_output(self, cue: IdentifyOutput | None,
                                unbound: tuple[str, ...], authority_epoch: int,
@@ -1049,7 +1055,12 @@ class PlayerService:
         sends a response.
         """
         recorded: tuple[Session, ControlAppliedReceipt] | None = None
+        wake = asyncio.Event()
+        self._link_wake = (asyncio.get_running_loop(), wake)
         while self._proof_active and not self._stop.is_set():
+            # Cleared before reading the receipt, so one that lands during a turn wakes the next.
+            wake.clear()
+            backoff = False
             if self._relink.is_set():
                 # The broker could not deliver the recorded link: prove it again.
                 self._relink.clear()
@@ -1087,16 +1098,24 @@ class PlayerService:
                     if outcome == "recorded" and applied_current():
                         recorded = applied
                     elif outcome == "rejected":
+                        backoff = True
                         LOG.warning("player: the broker refused the app link; retrying in %.0f s",
                                     APP_LINK_RETRY)
                     else:
                         LOG.info("player: app link stale (a newer control delivery or "
-                                 "enrollment); retrying in %.0f s", APP_LINK_RETRY)
+                                 "enrollment); retrying on the next applied delivery")
                 except (ValueError, OSError, TimeoutError) as error:
+                    backoff = True
                     LOG.debug("player: node process linkage unavailable: %s", type(error).__name__)
                 except Exception as error:
+                    backoff = True
                     LOG.warning("player: node process linkage failed: %s", type(error).__name__)
-            await asyncio.sleep(APP_LINK_RETRY)
+            if backoff:
+                await asyncio.sleep(APP_LINK_RETRY)
+            else:
+                # The next applied receipt or relink wakes this at once; the timeout is a net.
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(wake.wait(), APP_LINK_RETRY)
 
     async def run(self):
         self._loop = asyncio.get_running_loop()
@@ -1200,8 +1219,16 @@ class PlayerService:
         self._thread.start()
 
     def request_relink(self):
-        """Thread-safe: the proof loop forgets its recorded app link on its next turn."""
+        """Thread-safe: the proof loop forgets its recorded app link and proves it again now."""
         self._relink.set()
+        self._wake_link_loop()
+
+    def _wake_link_loop(self) -> None:
+        """Thread-safe: the app-link loop takes its next turn now, not at its safety net."""
+        if (link_wake := self._link_wake) is not None:
+            loop, wake = link_wake
+            with contextlib.suppress(RuntimeError):  # the loop has closed: nothing to wake
+                loop.call_soon_threadsafe(wake.set)
 
     def stop(self):
         self._stop.set()
