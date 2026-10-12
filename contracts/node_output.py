@@ -135,6 +135,72 @@ class PowerRequest:
                  and (self.for_seconds is None or _count(self.for_seconds, 1, MAX_REQUEST_SECONDS)), "power_request")
 
 
+# Power and the week (roadmap 2a; slice T replaces the request stack with these, raising
+# SCHEMA_MAJOR to 3; frozen page /Volumes/Dock/tmp/power-week/slices/T.md). Owner, 2026-10-12: the
+# wire carries "durations and calendar set times; never a clock reading". A set time is a calendar
+# time Central worked out from the house's rules ("2026-10-11T22:00:00Z", whole seconds, UTC),
+# never a reading of Central's clock; the Pi compares it with its own clock only.
+
+MAX_POWER_CHANGES: Final = 32                   # the most set times one timetable carries (8 days of 2, with room)
+SET_TIME_PATTERN: Final = r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z"
+
+
+class Darkness(StrEnum):
+    """How a display is dark on purpose (setting #83)."""
+    DISPLAY_OFF = "display-off"         # the display's power method turns it off
+    BLACK_PICTURE = "black-picture"     # the display stays on; Display Host shows black (slice S2)
+
+
+class InForceKind(StrEnum):
+    """What the Pi is carrying out on one Output (never a claim about pixels)."""
+    TEST = "test"                               # 1b's console test, counted on the Pi's monotonic clock
+    TIMETABLE = "timetable"                     # the power timetable at the Pi's own clock
+    TIMETABLE_RAN_OUT = "timetable-ran-out"     # the Pi's clock is past `until`: the display is left as it is
+
+
+@dataclass(frozen=True)
+class PowerChange:
+    """One set time of the power timetable: at `at` (a set time) the display's wanted power becomes
+    `power`."""
+    at: str
+    power: Power
+
+    def __post_init__(self) -> None:
+        """ValueError("power_change") unless `at` decodes (`decode_set_time`) and power is a member."""
+
+
+@dataclass(frozen=True)
+class OutputPower:
+    """The Output document's power part. `now`: Central's decision, in force from when the Pi reads
+    the document until the first change its own clock has reached. `changes`: the timetable,
+    strictly increasing `at`, each before `until`. `until`: the end of the timetable's horizon;
+    past it the Pi leaves the display as it is (InForceKind.TIMETABLE_RAN_OUT). `test`: 1b's
+    console test, on top of the timetable while the Pi's own count runs (slice T drops its
+    `reason`)."""
+    now: Power
+    changes: tuple[PowerChange, ...]
+    until: str
+    darkness: Darkness
+    test: PowerRequest | None
+
+    def __post_init__(self) -> None:
+        """ValueError("output_power") unless now and darkness are members, changes holds at most
+        MAX_POWER_CHANGES PowerChanges with strictly increasing `at`, every `at` < `until`, `until`
+        decodes, and test is None or a PowerRequest with `for_seconds` set."""
+
+
+def encode_set_time(seconds: int) -> str:
+    """UTC seconds as a set time: 1791842400 -> "2026-10-12T22:00:00Z". ValueError("set_time") for a
+    negative or non-int value."""
+    raise NotImplementedError
+
+
+def decode_set_time(text: str) -> int:
+    """A set time as UTC seconds; ValueError("set_time") for anything not SET_TIME_PATTERN or not a
+    real calendar moment. Stdlib only (the Pi runs it)."""
+    raise NotImplementedError
+
+
 class ActsOn(StrEnum):
     """Where one picture setting acts (1c design rule 1: exactly one place, recorded on the Display)."""
     DISPLAY = "display"                         # the display's own setting, over DDC/CI (VCP 0x10, 0x12)
@@ -557,9 +623,11 @@ __all__ = [
     "KELVIN_MAX", "KELVIN_MIN", "KELVIN_NEUTRAL", "KELVIN_STEP",
     "MAX_DISPLAY_MODES", "MAX_POWER_REQUESTS", "MAX_REQUEST_SECONDS", "METHOD_PRECEDENCE",
     "OUTPUT_DOCUMENT_BYTES", "OUTPUT_IDS", "OUTPUT_REPORT_BYTES", "PERCENT_MAX", "POWER_ATTEMPT_BYTES",
-    "SCHEMA_MAJOR", "ActsOn", "DisplayIdentity", "DisplayMode", "InForce", "MethodChoice", "OutputDocument",
-    "OutputPicture", "OutputReport", "PictureReport", "PictureSetting", "PictureValue", "Power",
-    "PowerAttempt", "PowerMethod", "PowerRequest", "PowerResult", "RequestReason", "SettingReport", "WriteResult",
-    "decode_output_document", "decode_output_report", "decode_power_attempt", "encode_output_document",
-    "encode_output_report", "encode_power_attempt", "output_document_key", "output_report_key",
+    "MAX_POWER_CHANGES", "SCHEMA_MAJOR", "SET_TIME_PATTERN", "ActsOn", "Darkness", "DisplayIdentity", "DisplayMode",
+    "InForce", "InForceKind", "MethodChoice", "OutputDocument", "OutputPicture", "OutputPower", "OutputReport",
+    "PictureReport", "PictureSetting", "PictureValue", "Power", "PowerAttempt", "PowerChange", "PowerMethod",
+    "PowerRequest", "PowerResult", "RequestReason", "SettingReport", "WriteResult",
+    "decode_output_document", "decode_output_report", "decode_power_attempt", "decode_set_time",
+    "encode_output_document", "encode_output_report", "encode_power_attempt", "encode_set_time",
+    "output_document_key", "output_report_key",
 ]

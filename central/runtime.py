@@ -9,10 +9,12 @@ from __future__ import annotations
 import hashlib
 import math
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Annotated, Literal, Self
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Annotated, Final, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, FiniteFloat, model_validator
 
+from central.house_time.model import When
 from central.wall_plan.selection import SceneSelection
 from contracts.models import TARGET_ID_PATTERN, AfterEnd
 
@@ -117,6 +119,46 @@ class Scene(FrozenModel):
 
 
 Child.model_rebuild()
+
+
+# Power and the week (roadmap 2b; frozen page /Volumes/Dock/tmp/power-week/slices/T.md). Slice T
+# reshapes `Program` below into a repeating rule: {program_id, name, scene_id, when, priority,
+# revision}, its windows derived from `when` in house time, never stored. Content's arbiter
+# (frame design rule 3): the highest rank wins, a tie to the request admitted last.
+Priority = Literal["normal", "special-event", "always-wins"]          # #78; "normal" is the default
+PRIORITY_RANK: Final[Mapping[str, int]] = MappingProxyType(
+    {"normal": 1, "special-event": 2, "always-wins": 3})
+DEFAULT_SCENE_RANK: Final = 0      # the Default Scene plays under every Schedule (E5)
+
+
+class ProgramDraft(FrozenModel):
+    """What the Schedule flow saves (#72-#76, #78): a Scene, its weekly When and a priority. Slice T
+    makes `Program` this plus `program_id` (Central's, assigned at create) and `revision` (1 at
+    create, +1 per save)."""
+    name: Annotated[str, Field(min_length=1, max_length=80)]
+    scene_id: Identifier
+    when: When
+    priority: Priority = "normal"
+
+
+class DefaultScene(FrozenModel):
+    """The Scene that plays wherever no Schedule does (E5). `revision` rises at every change, so
+    each choice's Runs have their own identity `default:<scene_id>:<revision>:<start>`."""
+    scene_id: Identifier
+    revision: Annotated[int, Field(ge=1)]
+
+
+class ProgramRefused(Exception):
+    """A Program or Default Scene command refused; nothing changed. `code`: "changed" (the stored
+    Program is not the expected one; `current` is it), "missing", "unknown-scene", "no-days",
+    "needs-place". The routes answer {"error": code} (409 changed, 404 missing, 422 the rest),
+    with "current" for "changed"."""
+
+    def __init__(self, code: Literal["changed", "missing", "unknown-scene", "no-days", "needs-place"],
+                 current: Program | None = None) -> None:
+        super().__init__(code)
+        self.code = code
+        self.current = current
 
 
 class Program(FrozenModel):
