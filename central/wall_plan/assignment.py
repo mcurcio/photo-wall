@@ -51,13 +51,14 @@ from central.wall_plan.fit import (
     FitTarget,
     FitVerdict,
     MediaKind,
+    band,
     crop_share,
     judge,
     shape_fit,
 )
 from central.wall_plan.fit_settings import FitSettings
 from central.wall_plan.key_content import KeyContent, Measured, MeasureFailed
-from central.wall_plan.order import KeptStill, SceneLine
+from central.wall_plan.order import KeptStill, SceneLine, ShapeBounds, ShapeClass
 from contracts.models import (
     AfterEnd,
     Fraction,
@@ -240,6 +241,36 @@ def fits_slot(candidate: Candidate, slot: Slot, settings: FitSettings) -> bool:
     screen: measured, it fits, it has not failed, and a prepared copy (if any) is usable. A
     Scene's line counts these as pickable (a pass ends once each is picked)."""
     return _standing(candidate, slot.target, slot.crop_limit, settings, inside=False)[0] == "take"
+
+
+def useful_for(candidate: Candidate, slot: Slot, settings: FitSettings) -> bool:
+    """Whether the fit rule leaves the candidate in play for `slot`: it fits (prepared or not), or
+    it waits for a measurement. False: refused, failed, or a prepared copy the Frame cannot
+    draw. The Planner reads more of a Scene's line while none of what it read is useful."""
+    return _standing(candidate, slot.target, slot.crop_limit, settings,
+                     inside=False)[0] in ("take", "measure")
+
+
+# How far a readable copy's ratio may stray from its revision's (rounding a preview's sides).
+SHAPE_RATIO_SLACK = 0.02
+
+
+def shape_bounds(slots: Sequence[Slot]) -> ShapeBounds:
+    """What the store may pre-filter a Scene's line by (follow-up S3): per slot class, the
+    fit rule's ratio band (`band`, widened by `SHAPE_RATIO_SLACK`), whether the Frame shows
+    videos, and for an image the Frame output as a floor on the revision's sides (the window the
+    rule needs is never larger than the photo, and the readable size never larger than the
+    revision). A superset of `shape_fit`'s acceptances, so the exact judgement drops what the
+    store keeps, never the other way. Pure."""
+    classes: dict[ShapeClass, None] = {}
+    for slot in slots:
+        profile = slot.target.profile
+        low, high = band(profile.width_px / profile.height_px, slot.crop_limit)
+        width, height = slot.target.output_px or (0, 0)
+        classes[ShapeClass(video=profile.video, min_ratio=low * (1 - SHAPE_RATIO_SLACK),
+                           max_ratio=high * (1 + SHAPE_RATIO_SLACK), min_width=width,
+                           min_height=height)] = None
+    return ShapeBounds(classes=tuple(classes))
 
 
 @lru_cache(maxsize=65536)

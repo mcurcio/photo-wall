@@ -39,7 +39,7 @@ from central.registry import FrameCreate
 from central.runtime import Contribution, Program, Runtime, Scene
 from central.wall_plan.fit import Fits, FitTarget, judge
 from central.wall_plan.fit_settings import FitSettings
-from central.wall_plan.order import WallHistory
+from central.wall_plan.order import PoolLines, WallHistory
 from central.wall_plan.selection import SceneSelection
 from contracts.models import (
     Calibration,
@@ -99,8 +99,8 @@ def an_hour(instance: Runtime, photos, *, frames=FRAMES, outputs=None) -> Projec
         bindings_by_player={"player": tuple(
             OutputBinding(output_id=f"out-{frame}", frame_id=frame, generation=1,
                           profile=PROFILES[frame]) for frame in frames)},
-        source_pools={POOL: SourcePool(source_ref=POOL, ready=True,
-                                       candidates=tuple(photos.values()))},
+        lines=PoolLines({POOL: SourcePool(source_ref=POOL, ready=True,
+                                          candidates=tuple(photos.values()))}),
         authored_candidates={}, locked_assignments={}, history=WallHistory(),
         horizon_seconds=300, plan_seconds=3600,
         max_clock_uncertainty=UNCERTAINTY, settings=FitSettings(),

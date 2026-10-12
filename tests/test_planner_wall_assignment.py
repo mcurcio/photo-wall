@@ -23,7 +23,7 @@ from central.planner import PlannerLimits, Projection, project
 from central.runtime import Contribution, Runtime, Scene
 from central.wall_plan.fit_settings import FitSettings
 from central.wall_plan.key_content import MeasureFailed
-from central.wall_plan.order import KeptStill, PhotoShowing, WallHistory
+from central.wall_plan.order import KeptStill, PhotoShowing, PoolLines, WallHistory
 from central.wall_plan.selection import SceneSelection
 from contracts.models import AfterEnd, FrameProfile, Layer, OutputBinding, Variant
 from contracts.on_screen import Extent, on_screen_extent, replaces_kept_at
@@ -44,7 +44,7 @@ POOL = "pool:1"
 def photo(asset: str, shape: str, *, captured: float = 0, prepared: bool = True,
           is_measured: bool = True, faces=()) -> Candidate:
     width, height = SIZES[shape]
-    variant = Variant(asset_id="asset-" + hashlib.sha256(asset.encode()).hexdigest()[:16], recipe_id="e" * 64, sha256=hashlib.sha256(asset.encode()).hexdigest(), size=10,
+    variant = Variant(asset_id=asset, recipe_id="e" * 64, sha256=hashlib.sha256(asset.encode()).hexdigest(), size=10,
                       media_type="image/jpeg", width=width, height=height) if prepared else None
     if is_measured:
         return measured(asset, width, height, faces=faces, captured_at=captured, variant=variant)
@@ -84,7 +84,8 @@ def plan(instance: Runtime, frames: dict[str, FrameSetup], photos, *, now: float
         bindings_by_player={"player": tuple(OutputBinding(
             output_id=f"out-{frame}", frame_id=frame, generation=1,
             profile=PROFILES[setup.shape]) for frame, setup in frames.items())},
-        source_pools={POOL: SourcePool(source_ref=POOL, ready=True, candidates=tuple(photos))},
+        lines=PoolLines({POOL: SourcePool(source_ref=POOL, ready=True,
+                                          candidates=tuple(photos))}),
         authored_candidates={candidate.asset_id: candidate for candidate in authored},
         locked_assignments={layer.assignment_id: layer for layer in locks},
         history=history, horizon_seconds=horizon, plan_seconds=plan_seconds,

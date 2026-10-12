@@ -50,6 +50,8 @@ from central.registry import RegistryError
 from central.wall_plan.assignment import fit_of
 from central.wall_plan.fit import DoesNotFit, FitRefusal, FitTarget, fitting_outputs
 from central.wall_plan.fit_settings import FitSettings
+from central.wall_plan.key_content import Analysis
+from central.wall_plan.order import LineAnswer, LineMember, LineQuery, SourceLine
 from contracts.models import Model, Variant
 from contracts.time import Clock
 from media.prepare import PreparationRecipe, recipe_id
@@ -130,6 +132,44 @@ def _candidate_of(member: PoolMember) -> Candidate:
     """A pool photo as the Planner reads it (Immich-free; its variant is hydrated apart)."""
     return Candidate(asset_id=member.asset_id, kind=member.kind, original_width=member.width,
                      original_height=member.height, captured_at=member.taken_at)
+
+
+@dataclass(frozen=True, slots=True)
+class Hydration:
+    """A photo's worker state at read time (`MediaRepository.hydrate_in`)."""
+
+    variant: Variant | None
+    preparation_failure: str | None
+    analysis: Analysis | None
+    readable_size: tuple[int, int] | None
+
+    def fields(self) -> dict:
+        return {"variant": self.variant, "preparation_failure": self.preparation_failure,
+                "analysis": self.analysis, "readable_size": self.readable_size}
+
+
+class PgSceneLines:
+    """central.wall_plan.order.SceneLines over PostgreSQL in one transaction (follow-up S3): the
+    store ranks the top of a line (`PgPhotoLibrary.ranked_line_in`) and only those members are
+    hydrated. Hydration compares worker-written `retry_at`, so its now is the database's (G11)."""
+
+    def __init__(self, repository: MediaRepository, conn) -> None:
+        self._repository, self._conn = repository, conn
+        self._now = repository.times.now_in(conn)
+
+    def sources(self, source_refs: set[str]) -> dict[str, SourceLine]:
+        return PgPhotoLibrary.source_lines_in(self._conn, source_refs)
+
+    def line(self, query: LineQuery) -> LineAnswer:
+        ranked = PgPhotoLibrary.ranked_line_in(self._conn, query)
+        hydrations = self._repository.hydrate_in(
+            self._conn, [member.asset_id for member in ranked.members], now=self._now)
+        return LineAnswer(
+            members=tuple(LineMember(
+                candidate=_candidate_of(member).model_copy(
+                    update=hydrations[member.asset_id].fields()),
+                pools=frozenset(member.pool_keys)) for member in ranked.members),
+            after=None if ranked.after is None else _candidate_of(ranked.after))
 
 
 class MediaRepository:
@@ -224,17 +264,23 @@ class MediaRepository:
         return None if name is None else name.key
 
     def _hydrate_candidates(self, conn, candidates, now):
-        """Apply the current variant, preparation failure and key content to every pool and
-        authored candidate.
+        """`hydrate_in` applied to every pool and authored candidate."""
+        candidates = tuple(candidates)
+        hydrations = self.hydrate_in(conn, [candidate.asset_id for candidate in candidates],
+                                     now=now)
+        return tuple(candidate.model_copy(update=hydrations[candidate.asset_id].fields())
+                     for candidate in candidates)
+
+    def hydrate_in(self, conn, asset_ids, *, now: float) -> dict[str, Hydration]:
+        """Each photo's current variant, preparation failure, key content and readable size.
 
         Variants, failures and key content are worker state, so they are deliberately hydrated
         at read time: a variant is the current recipe's record with produced facts, and a
         failure is its `PrepareMedia` outcome (terminal, or transient inside its retry window).
         """
-        candidates = tuple(candidates)
-        if not candidates:
-            return candidates
-        asset_ids = [candidate.asset_id for candidate in candidates]
+        asset_ids = list(dict.fromkeys(asset_ids))
+        if not asset_ids:
+            return {}
         analyses = self.key_content.analyses_in(conn, asset_ids, now=now)
         sized = readable_sizes_in(conn, asset_ids)
         keys = {asset_id: name.key for asset_id, name in self.variant_names_in(
@@ -247,16 +293,19 @@ class MediaRepository:
                 "AND (status='terminal' OR (status='transient' AND retry_not_before>%s))",
                 (list(locks), now)).fetchall():
             failed[locks[row["lock_key"]]] = row["reason"] or "preparation_failed"
-        hydrated = []
-        for candidate in candidates:
-            variant = variants.get(keys.get(candidate.asset_id, ""))
-            hydrated.append(candidate.model_copy(update={
-                "variant": variant,
-                "preparation_failure": failed.get(candidate.asset_id) if variant is None else None,
-                "analysis": analyses.get(candidate.asset_id),
-                "readable_size": sized.get(candidate.asset_id, (None, None))[1],
-            }))
-        return tuple(hydrated)
+        hydrations = {}
+        for asset_id in asset_ids:
+            variant = variants.get(keys.get(asset_id, ""))
+            hydrations[asset_id] = Hydration(
+                variant=variant,
+                preparation_failure=failed.get(asset_id) if variant is None else None,
+                analysis=analyses.get(asset_id),
+                readable_size=sized.get(asset_id, (None, None))[1])
+        return hydrations
+
+    def scene_lines_in(self, conn) -> PgSceneLines:
+        """The Planner's `SceneLines` in the caller's (coordination's) transaction."""
+        return PgSceneLines(self, conn)
 
     @staticmethod
     def variants_in(conn, keys) -> dict[str, Variant]:
@@ -469,7 +518,8 @@ class MediaRepository:
                             (AssetKind.MEDIA_VARIANT.value,)).fetchone()["total"]
 
     def source_pools_in(self, conn, source_refs: set[str]) -> dict[str, SourcePool]:
-        """ScenePoolReader: each Source revision's whole pool (in-pool rows, newest first, no
+        """The operator candidates route's read (`source_candidates`; the Planner reads
+        `scene_lines_in`): each Source revision's whole pool (in-pool rows, newest first, no
         window and no limit, C11), hydrated with variants and preparation failures, in the
         caller's transaction. A ref naming no Source revision is left out (the Planner's
         `source_missing`); a revision whose pool has no complete check answers `ready=False`

@@ -86,7 +86,9 @@ from central.photo_library.ports import (
     CheckLease,
     CheckStep,
     KnownRevision,
+    LeanMember,
     LibraryRefused,
+    RankedLine,
 )
 from central.photo_library.rendition import covers, frame_need
 from central.photo_library.views import (
@@ -101,6 +103,18 @@ from central.photo_library.views import (
     PoolItem,
     SourcePoolView,
 )
+from central.wall_plan.order import (
+    ORDERS,
+    SHUFFLE_FIELDS,
+    SHUFFLE_SEPARATOR,
+    TIER_FRESH,
+    TIER_PICKED,
+    TIER_RECENT,
+    LineQuery,
+    ShapeBounds,
+    SourceLine,
+)
+from central.wall_plan.selection import Order
 
 THUMBNAIL_PATH = "/v1/operator/library/thumbnails/"
 # Searchable fields of one list item are joined by this separator (never visible text: the
@@ -126,6 +140,57 @@ _MARKED_BY_CHECK = ("EXISTS (SELECT 1 FROM photo_check_marks m WHERE m.pool_key=
 _REVISION_JOIN = ("JOIN asset_revisions a USING (asset_id) JOIN library_assets l "
                   "ON l.connection_ref=a.connection_ref AND l.upstream_id=a.upstream_id")
 _MEMBER_COLUMNS = "r.asset_id,a.revision,l.kind,l.taken_at,a.width,a.height"
+
+# A Scene line's rows (follow-up S3): one per asset id of the query's pools, as `m`.
+_LINE_ROWS = ("SELECT a.asset_id,a.revision,l.kind,l.taken_at,a.width,a.height FROM "
+              "(SELECT DISTINCT asset_id FROM photo_pool_rows WHERE pool_key=ANY(%(pools)s) "
+              "AND outcome='in_pool') AS r JOIN asset_revisions a USING (asset_id) "
+              "JOIN library_assets l ON l.connection_ref=a.connection_ref "
+              "AND l.upstream_id=a.upstream_id")
+_ON_THIS_DAY = "to_char(to_timestamp(m.taken_at) AT TIME ZONE 'UTC','MM-DD')=%(today)s"
+_SHUFFLE_TEXT = {"scene_id": "%(scene)s::text", "pass_number": "%(pass)s::text",
+                 "asset_id": "m.asset_id"}
+_ORDER_FIELDS = {
+    "shuffle": "sha256(" + " || %(sep)s::bytea || ".join(
+        f"convert_to({_SHUFFLE_TEXT[name]},'UTF8')" for name in SHUFFLE_FIELDS) + ")",
+    "wrapped": ("CASE WHEN %(mark_id)s::text IS NOT NULL AND (m.taken_at,m.asset_id COLLATE \"C\")"
+                " <= (%(mark_at)s::float8,%(mark_id)s::text COLLATE \"C\") THEN 1 ELSE 0 END"),
+    "captured_at": "m.taken_at",
+    "asset_id": "m.asset_id COLLATE \"C\"",
+    "off_this_day": f"CASE WHEN {_ON_THIS_DAY} THEN 0 ELSE 1 END",
+}
+
+
+def _line_order_sql(order: Order) -> str:
+    """The SQL interpreter of central/wall_plan/order.py's tiers and `ORDERS[order]` (the Python
+    one is `order_key`); tests/test_order_sql_conformance.py holds the two equal."""
+    terms = ["CASE WHEN m.asset_id=ANY(%(picked)s::text[]) THEN %(tier_picked)s "
+             "WHEN m.asset_id=ANY(%(recent)s::text[]) THEN %(tier_recent)s ELSE %(fresh)s END"]
+    for term in ORDERS[order]:
+        expression = _ORDER_FIELDS[term.field]
+        if term.on_this_day_only:
+            expression = f"CASE WHEN {_ON_THIS_DAY} THEN {expression} END"
+        terms.append(expression + (" DESC" if term.descending else ""))
+    return ",".join(terms)
+
+
+def _shape_sql(shape: ShapeBounds, params: dict[str, Any]) -> str:
+    """`ShapeBounds.admits` in SQL over the line's revision sizes; adds its values to `params`."""
+    clauses = []
+    for index, bounds in enumerate(shape.classes):
+        params.update({f"low{index}": bounds.min_ratio, f"high{index}": bounds.max_ratio,
+                       f"width{index}": bounds.min_width, f"height{index}": bounds.min_height})
+        video = "m.kind='video'" if bounds.video else "FALSE"
+        clauses.append(
+            f"(m.width::float8/m.height BETWEEN %(low{index})s AND %(high{index})s AND ({video} "
+            f"OR (m.kind='image' AND m.width>=%(width{index})s AND m.height>=%(height{index})s)))")
+    return "(" + (" OR ".join(clauses) or "FALSE") + ")"
+
+
+def _lean(row: dict, pool_keys: dict[str, list[str]]) -> LeanMember:
+    return LeanMember(asset_id=row["asset_id"], revision=row["revision"], kind=row["kind"],
+                      taken_at=row["taken_at"], width=row["width"], height=row["height"],
+                      pool_keys=tuple(pool_keys.get(row["asset_id"], ())))
 
 
 def _fold(text: str) -> str:
@@ -583,6 +648,60 @@ class PgPhotoLibrary:
             if key in ready:
                 answer[ref] = (tuple(members[key]), ready[key])
         return answer
+
+    @classmethod
+    def source_lines_in(cls, conn: Any, source_refs: set[str]) -> dict[str, SourceLine]:
+        """ScenePoolReader (follow-up S3): each named Source revision's pool key (None: no
+        readable query, or no pool yet), whether its pool has a complete check (C7: an unchecked
+        pool still plays what it has) and whether it holds no photo. A ref naming no revision is
+        left out. Read-only, in the caller's transaction."""
+        keys = {row["source_ref"]: cls._query_key(row["query"], row["pool_key"]) for row in
+                conn.execute("SELECT source_ref,query,pool_key FROM media_sources WHERE "
+                             "source_ref=ANY(%s)", (list(source_refs),)).fetchall()}
+        pools = {row["pool_key"]: row for row in conn.execute(
+            "SELECT p.pool_key,p.last_complete_at IS NOT NULL AS ready,EXISTS(SELECT 1 FROM "
+            "photo_pool_rows r WHERE r.pool_key=p.pool_key AND r.outcome='in_pool') AS held "
+            "FROM photo_pools p WHERE p.pool_key=ANY(%s)",
+            (list({key for key in keys.values() if key is not None}),)).fetchall()}
+        answer = {}
+        for ref, key in keys.items():
+            pool = pools.get(key) if key is not None else None
+            answer[ref] = SourceLine(
+                source_ref=ref, pool_key=key if pool is not None else None,
+                ready=pool is not None and pool["ready"],
+                empty=pool is None or not pool["held"])
+        return answer
+
+    @staticmethod
+    def ranked_line_in(conn: Any, q: LineQuery) -> RankedLine:
+        """ScenePoolReader (follow-up S3, design rule 3): the top `q.limit` of a Scene's line in
+        SQL, the in-pool rows of `q.pool_keys` (one per asset id) that `q.shape` admits by
+        revision size, ranked by tier then the pass order: central/wall_plan/order.py's `ORDERS`
+        and tiers, rendered here (`_line_order_sql`). Capture time and size are the rows' now.
+        Also the wrap mark's row (`q.after`, admitted or not). Read-only, in the caller's
+        transaction."""
+        params: dict[str, Any] = {
+            "pools": list(q.pool_keys), "after": q.after, "scene": q.scene_id,
+            "pass": q.pass_number, "sep": SHUFFLE_SEPARATOR, "today": q.today.strftime("%m-%d"),
+            "picked": sorted(q.picked), "recent": sorted(q.recent), "limit": q.limit,
+            "fresh": TIER_FRESH, "tier_recent": TIER_RECENT, "tier_picked": TIER_PICKED}
+        mark = None
+        if q.after is not None:
+            mark = conn.execute(f"SELECT * FROM ({_LINE_ROWS}) AS m WHERE m.asset_id=%(after)s",
+                                params).fetchone()
+        params["mark_at"] = None if mark is None else mark["taken_at"]
+        params["mark_id"] = None if mark is None else mark["asset_id"]
+        shape = _shape_sql(q.shape, params)
+        rows = conn.execute(
+            f"SELECT * FROM ({_LINE_ROWS}) AS m WHERE {shape} "
+            f"ORDER BY {_line_order_sql(q.order)} LIMIT %(limit)s", params).fetchall()
+        ids = [row["asset_id"] for row in rows] + ([] if mark is None else [mark["asset_id"]])
+        pool_keys = {row["asset_id"]: row["keys"] for row in conn.execute(
+            "SELECT asset_id,array_agg(pool_key ORDER BY pool_key) AS keys FROM photo_pool_rows "
+            "WHERE asset_id=ANY(%s) AND pool_key=ANY(%s) AND outcome='in_pool' GROUP BY asset_id",
+            (ids, list(q.pool_keys))).fetchall()}
+        return RankedLine(members=tuple(_lean(row, pool_keys) for row in rows),
+                          after=None if mark is None else _lean(mark, pool_keys))
 
     def _ensure_pool_in(self, conn: Any, query: SourceQuery) -> PoolKey:
         """The query's pool, created (check requested) when no pool has its key yet."""

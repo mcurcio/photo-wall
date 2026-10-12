@@ -2,7 +2,9 @@
 
 Each contribution's photos are the union of its Sources' whole pools (roadmap 4, C11): no
 window and no candidate cap. A pool that has never completed a check still plays what it has
-(C7: the last pool keeps playing while Immich is down).
+(C7: the last pool keeps playing while Immich is down). Follow-up S3: the Planner reads only the
+top of each Scene's line from those pools, fresh every pass (`SceneLines`, `_read_lines`); every
+photo stays reachable, as the line ranks it.
 
 Roadmap 5a (run ledger .claude/runs/photo-5a.md, slice W1): every Frame is planned together over
 the plan horizon (an hour from coordination) by the wall assignment
@@ -23,7 +25,7 @@ from typing import TYPE_CHECKING, Literal
 
 from pydantic import Field
 
-from central.catalog import Candidate, SourcePool
+from central.catalog import Candidate
 from central.runtime import Intent, Runtime, RuntimeBudgetExceeded
 from central.wall_plan.assignment import (
     FixedShowing,
@@ -35,15 +37,23 @@ from central.wall_plan.assignment import (
     fits_slot,
     layer_after_end,
     plan_wall,
+    shape_bounds,
+    useful_for,
     variant_usable,
 )
 from central.wall_plan.fit import FitTarget
 from central.wall_plan.fit_settings import FitSettings
 from central.wall_plan.order import (
+    LineAnswer,
+    LineMember,
+    LineQuery,
     SceneLine,
+    SceneLines,
     ScenePass,
+    SourceLine,
     WallHistory,
     last_shown_at,
+    recent_assets,
     scene_passes,
 )
 from central.wall_plan.selection import crop_limit_of
@@ -99,6 +109,8 @@ class PlannerLimits(Model):
     max_bindings: int = Field(default=256, ge=1)
     # Roadmap 5a: measurement requests per projection (central/wall_plan/assignment.py).
     max_measurements: int = Field(default=64, ge=0)
+    # Follow-up S3: a Scene's line is read `hydrate_factor` members per slot at a time.
+    hydrate_factor: int = Field(default=4, ge=1, le=64)
 
 
 class AcquisitionRequest(Model):
@@ -256,15 +268,18 @@ class _ProjectionBuilder:
         self,
         *,
         bindings_by_player: Mapping[str, Sequence[OutputBinding]],
-        source_pools: Mapping[str, SourcePool],
+        sources: Mapping[str, SourceLine],
+        lines: SceneLines,
         authored: Mapping[str, Candidate],
         locks: Mapping[str, Layer],
         limits: PlannerLimits,
         settings: FitSettings,
         frame_outputs: Mapping[str, tuple[int, int] | None],
     ) -> None:
-        self.limits, self.source_pools, self.authored, self.locks = (
-            limits, source_pools, authored, locks)
+        self.limits, self.sources, self.lines, self.authored, self.locks = (
+            limits, sources, lines, authored, locks)
+        self.failure_checks: list[tuple[Intent, str, str]] = []
+        self.read_by_key: dict[str, dict[str, Candidate]] = {}
         self.settings, self.frame_outputs = settings, frame_outputs
         self.frames: dict[str, tuple[str, OutputBinding]] = {}
         self.layers: dict[str, list[Layer]] = {player: [] for player in bindings_by_player}
@@ -281,10 +296,10 @@ class _ProjectionBuilder:
     def _validate_inputs(self, bindings: Mapping[str, Sequence[OutputBinding]]) -> None:
         _bound(len(bindings), self.limits.max_players, "Player count")
         _bound(sum(len(items) for items in bindings.values()), self.limits.max_bindings, "binding count")
-        _bound(len(self.source_pools), self.limits.max_sources, "source count")
+        _bound(len(self.sources), self.limits.max_sources, "source count")
         _bound(len(self.locks), self.limits.max_assignments, "locked assignment count")
-        for source, pool in self.source_pools.items():
-            if pool.source_ref != source:
+        for source, line in self.sources.items():
+            if line.source_ref != source:
                 raise PlanningError("source pool key does not match its immutable source reference")
         for key, layer in self.locks.items():
             if key != layer.assignment_id:
@@ -314,14 +329,14 @@ class _ProjectionBuilder:
 
     def _source_diagnostics(self, intent: Intent, identity: str) -> None:
         for source in intent.source_refs if not intent.asset_refs else ():
-            pool = self.source_pools.get(source)
-            if pool is None:
+            line = self.sources.get(source)
+            if line is None:
                 self.diagnose("source_missing", intent=intent, assignment=identity, source=source)
-            elif not pool.candidates:
-                self.diagnose("source_empty" if pool.ready else "source_not_ready",
+            elif line.empty:
+                self.diagnose("source_empty" if line.ready else "source_not_ready",
                               intent=intent, assignment=identity, source=source)
-            elif any(c.preparation_failure for c in pool.candidates):
-                self.diagnose("asset_preparation_failed", intent=intent, assignment=identity, source=source)
+            else:   # judged over the photos this pass reads (`_failure_diagnostics`)
+                self.failure_checks.append((intent, identity, source))
 
     @staticmethod
     def _layer_fields(intent: Intent, binding: OutputBinding, identity: str) -> dict:
@@ -407,30 +422,23 @@ class _ProjectionBuilder:
             crop_limit=crop_limit_of(intent.selection, self.settings),
             pool=pool, authored=intent.asset_refs)))
 
-    def _candidates(self) -> tuple[dict[str, Candidate], dict[str, frozenset[str]]]:
-        """Every candidate a slot may take (each pool's, in its Sources' order, then the
-        authored ones), and each pool key's asset ids (its Sources' whole pools, C11)."""
-        candidates: dict[str, Candidate] = {}
-        pools: dict[str, frozenset[str]] = {}
-        for key, refs in self.pool_refs.items():
-            members: set[str] = set()
-            for ref in refs:
-                source = self.source_pools.get(ref)
-                for candidate in source.candidates if source is not None else ():
-                    candidates.setdefault(candidate.asset_id, candidate)
-                    members.add(candidate.asset_id)
-            pools[key] = frozenset(members)
-        for item in self.pending:
-            for ref in item.slot.authored:
-                if ref in self.authored:
-                    candidates.setdefault(ref, self.authored[ref])
-        return candidates, pools
+    def _pool_keys(self, pool: str) -> frozenset[str]:
+        """The photo library pool keys a slot pool's Sources name (a Source with none adds none)."""
+        return frozenset(line.pool_key for ref in self.pool_refs.get(pool, ())
+                         if (line := self.sources.get(ref)) is not None
+                         and line.pool_key is not None)
 
-    def _lines(self, candidates: Mapping[str, Candidate], pools: Mapping[str, frozenset[str]],
-               history: WallHistory, now: float) -> dict[str, SceneLine]:
-        """One line per Scene with Scene-line slots: the union of its contributions' pools;
-        pickable, its photos that could fill one of its slots (the hand-placed ones excepted,
-        which no line takes)."""
+    def _read_lines(self, history: WallHistory, now: float) -> tuple[
+            dict[str, Candidate], dict[str, frozenset[str]], dict[str, SceneLine]]:
+        """Follow-up S3 (design rule 3: the Planner reads only what the plan needs, fresh, every
+        pass). Each Scene with Scene-line slots reads the top of its line (`SceneLines.line`):
+        its slots x `limits.hydrate_factor` members, the batch doubled while none of it is
+        useful (`useful_for`: every one refused), up to the whole line; and, when this pass could
+        end in this plan (every member it has not picked is read, and no more of them are
+        pickable than it has slots), the top of the next pass too. Returns every candidate a slot
+        may take (the members read, then the authored ones), each slot pool's members read, and
+        one line per Scene. Pickable: the members read that could fill one of its slots (the
+        hand-placed ones excepted, which no line takes)."""
         reserved = {ref for item in self.pending for ref in item.slot.authored}
         passes = scene_passes(history)
         shown_at = last_shown_at(history)
@@ -439,24 +447,80 @@ class _ProjectionBuilder:
         for item in self.pending:
             if item.slot.pool:
                 by_scene.setdefault(item.slot.scene_id, []).append(item)
+        candidates: dict[str, Candidate] = {}
+        members: dict[str, set[str]] = {pool: set() for pool in self.pool_refs}
         lines: dict[str, SceneLine] = {}
-        for scene_id, items in by_scene.items():
+        for scene_id, items in sorted(by_scene.items()):
+            selection = items[0].intent.selection
             classes: dict[tuple, Slot] = {}
             for item in items:
                 classes.setdefault((item.slot.pool, item.slot.target, item.slot.crop_limit),
                                    item.slot)
-            members = {asset_id: candidates[asset_id] for asset_id in sorted(
-                set().union(*(pools[slot.pool] for slot in classes.values())))}
-            pickable = frozenset(
-                asset_id for asset_id, candidate in members.items()
-                if asset_id not in reserved and any(
-                    asset_id in pools[slot.pool] and fits_slot(candidate, slot, self.settings)
-                    for slot in classes.values()))
+            keys_of = {slot.pool: self._pool_keys(slot.pool) for slot in classes.values()}
+            pool_keys = tuple(sorted(set().union(*keys_of.values())))
+            scene_pass = passes.get(scene_id, ScenePass(scene_id=scene_id))
+            recent = recent_assets(shown_at, selection.no_repeat_days, now=now)
+            shape = shape_bounds(tuple(classes.values()))
+
+            def read(pass_number: int, picked: frozenset[str], limit: int, *, scene_id=scene_id,
+                     selection=selection, pool_keys=pool_keys, recent=recent, shape=shape,
+                     last=scene_pass.last_shown) -> LineAnswer:
+                if not pool_keys:
+                    return LineAnswer()
+                return self.lines.line(LineQuery(
+                    pool_keys=pool_keys, scene_id=scene_id, pass_number=pass_number,
+                    order=selection.order, after=last, now=now, picked=picked, recent=recent,
+                    shape=shape, limit=limit))
+
+            def serves(member: LineMember, test, *, classes=classes, keys_of=keys_of) -> bool:
+                return member.candidate.asset_id not in reserved and any(
+                    member.pools & keys_of[slot.pool] and test(member.candidate, slot,
+                                                               self.settings)
+                    for slot in classes.values())
+
+            limit = len(items) * self.limits.hydrate_factor
+            answer = read(scene_pass.pass_number, scene_pass.picked, limit)
+            while (len(answer.members) == limit
+                   and not any(serves(member, useful_for) for member in answer.members)):
+                limit *= 2
+                answer = read(scene_pass.pass_number, scene_pass.picked, limit)
+            whole = len(answer.members) < limit
+            complete = whole or answer.members[-1].candidate.asset_id in scene_pass.picked
+            known = {member.candidate.asset_id: member for member in answer.members}
+            pickable = {asset_id for asset_id, member in known.items()
+                        if serves(member, fits_slot)}
+            if not whole and complete and len(pickable - scene_pass.picked) <= len(items):
+                for member in read(scene_pass.pass_number + 1, frozenset(), limit).members:
+                    if member.candidate.asset_id not in known:
+                        known[member.candidate.asset_id] = member
+                        if serves(member, fits_slot):
+                            pickable.add(member.candidate.asset_id)
+            for asset_id, member in known.items():
+                candidates.setdefault(asset_id, member.candidate)
+                for pool, keys in keys_of.items():
+                    if member.pools & keys:
+                        members[pool].add(asset_id)
+                for key in member.pools:
+                    self.read_by_key.setdefault(key, {})[asset_id] = member.candidate
             lines[scene_id] = SceneLine(
-                scene_id, items[0].intent.selection, tuple(members.values()),
-                passes.get(scene_id, ScenePass(scene_id=scene_id)), shown_at, now=now,
-                today=today, pickable=pickable)
-        return lines
+                scene_id, selection, tuple(member.candidate for member in known.values()),
+                scene_pass, shown_at, now=now, today=today, pickable=frozenset(pickable),
+                whole=whole, complete=complete, mark=answer.after)
+        for item in self.pending:
+            for ref in item.slot.authored:
+                if ref in self.authored:
+                    candidates.setdefault(ref, self.authored[ref])
+        return candidates, {pool: frozenset(ids) for pool, ids in members.items()}, lines
+
+    def _failure_diagnostics(self) -> None:
+        """`asset_preparation_failed` for a Source whose photos read this pass include one
+        whose preparation failed."""
+        for intent, identity, source in self.failure_checks:
+            line = self.sources[source]
+            read = self.read_by_key.get(line.pool_key or "", {})
+            if any(candidate.preparation_failure for candidate in read.values()):
+                self.diagnose("asset_preparation_failed", intent=intent, assignment=identity,
+                              source=source)
 
     def _fit_slot_budget(self, window: PlanWindow, budget: int) -> None:
         """Content first (owner, 2026-10-11: "always ensuring that frames have content"): a
@@ -474,22 +538,16 @@ class _ProjectionBuilder:
         self.pending = [item for item in self.pending if item.slot.start < cutoff]
         self.diagnose("plan_shortened")
 
-    def _lock_photos(self, history: WallHistory,
-                     candidates: Mapping[str, Candidate]) -> dict[str, str]:
+    def _lock_photos(self, history: WallHistory) -> dict[str, str]:
         """Which photo each lock shows: its selection in the history, else (a lock offered
-        before 5a, whose selection was never recorded) the candidate whose prepared copy the lock
-        draws. A lock whose photo is no candidate cannot collide with any placement here."""
-        by_variant: dict[str, str] = {}
-        for candidate in candidates.values():
-            if candidate.variant is not None:
-                by_variant.setdefault(candidate.variant.sha256, candidate.asset_id)
+        before 5a, whose selection was never recorded) the photo revision its prepared copy is
+        named by (`Variant.asset_id`, follow-up T), so a lock's photo is known whether or not
+        this pass read it (follow-up S3)."""
         selected = {showing.assignment_id: showing.asset_id for showing in history.selected}
         for identity, lock in self.locks.items():
             layer = self.used_locks.get(identity, lock)
             if identity not in selected and layer.variant is not None:
-                found = by_variant.get(layer.variant.sha256)
-                if found is not None:
-                    selected[identity] = found
+                selected[identity] = layer.variant.asset_id
         return selected
 
     def plan(self, window: PlanWindow, history: WallHistory, max_clock_uncertainty: float,
@@ -499,8 +557,9 @@ class _ProjectionBuilder:
         wall_limits = WallLimits(max_measurements=self.limits.max_measurements,
                                  max_preparations=self.limits.max_acquisitions)
         self._fit_slot_budget(window, wall_limits.max_slots)
-        candidates, pools = self._candidates()
-        selected = self._lock_photos(history, candidates)
+        candidates, pools, lines = self._read_lines(history, window.now)
+        self._failure_diagnostics()
+        selected = self._lock_photos(history)
         for identity, lock in self.locks.items():
             layer = self.used_locks.get(identity, lock)
             self.fixed.append(FixedShowing(
@@ -508,7 +567,6 @@ class _ProjectionBuilder:
                 asset_id=selected.get(identity) if layer.presentation == "media" else None,
                 start=layer.start, end=layer.end, fade_in=layer.fade_in,
                 after_end=layer.after_end))
-        lines = self._lines(candidates, pools, history, window.now)
         current_pass = {scene_id: line.pass_number for scene_id, line in lines.items()}
         wall = plan_wall(tuple(item.slot for item in self.pending), tuple(self.fixed),
                          history.kept, candidates, lines, pools, window=window,
@@ -592,7 +650,7 @@ def project(
     now: float,
     *,
     bindings_by_player: Mapping[str, Sequence[OutputBinding]],
-    source_pools: Mapping[str, SourcePool],
+    lines: SceneLines,
     authored_candidates: Mapping[str, Candidate],
     locked_assignments: Mapping[str, Layer],
     history: WallHistory,
@@ -613,7 +671,9 @@ def project(
     guard (contracts/on_screen.py). Follow-ups B1: every slot is judged with `settings` (the
     photo fit settings) against its Frame's `FitTarget`, whose Frame output is
     `frame_outputs[frame_id]` (None, or a Frame absent from it: judged by shape only); a Scene
-    without its own crop limit follows `settings.crop_limit`."""
+    without its own crop limit follows `settings.crop_limit`. Follow-up S3: `lines` answers the
+    runtime's Source revisions and the top of each Scene's line (`_ProjectionBuilder._read_lines`);
+    nothing reads a whole pool."""
     now = _finite(now, "now")
     horizon_seconds = _finite(horizon_seconds, "horizon_seconds")
     if horizon_seconds <= 0:
@@ -629,7 +689,8 @@ def project(
     window = PlanWindow(now=now, preparation_end=_finite(now + horizon_seconds, "horizon end"),
                         plan_end=_finite(now + plan_span, "plan end"))
     builder = _ProjectionBuilder(
-        bindings_by_player=bindings_by_player, source_pools=source_pools,
+        bindings_by_player=bindings_by_player,
+        sources=lines.sources(runtime.planning_source_refs()), lines=lines,
         authored=authored_candidates, locks=locked_assignments, limits=limits,
         settings=settings, frame_outputs=frame_outputs,
     )

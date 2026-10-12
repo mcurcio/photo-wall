@@ -20,7 +20,7 @@ from central.wall_plan.assignment import fit_of
 from central.wall_plan.fit import DoesNotFit, Fits, FitTarget
 from central.wall_plan.fit_settings import FitSettings
 from central.wall_plan.key_content import Measured
-from central.wall_plan.order import WallHistory
+from central.wall_plan.order import PoolLines, WallHistory
 from central.wall_plan.selection import SceneSelection
 from contracts.models import FrameProfile, OutputBinding
 
@@ -81,7 +81,7 @@ def _plan(photo: Candidate, profile: FrameProfile):
     return project(
         runtime, 0, bindings_by_player={"player": (OutputBinding(
             output_id="out", frame_id="f", generation=1, profile=profile),)},
-        source_pools={"pool": SourcePool(source_ref="pool", ready=True, candidates=(photo,))},
+        lines=PoolLines({"pool": SourcePool(source_ref="pool", ready=True, candidates=(photo,))}),
         authored_candidates={}, locked_assignments={}, history=WallHistory(),
         horizon_seconds=300, plan_seconds=600, settings=HOUSE,
         frame_outputs={"f": (profile.width_px, profile.height_px)})

@@ -10,10 +10,11 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from central.catalog import Candidate, SourcePool
+from central.catalog import Candidate
 from central.planner import AcquisitionRequest, MeasureRequest
 from central.wall_plan.fit import FitTarget
 from central.wall_plan.fit_settings import FitSettings
+from central.wall_plan.order import SceneLines
 from contracts.models import Variant
 
 
@@ -29,8 +30,10 @@ class CoordinationMedia(Protocol):
 
     def reconcile_source_activity_in(self, conn: Any, runtime_refs: set[str]) -> None: ...
 
-    def source_pools_in(self, conn: Any, source_refs: set[str]) -> dict[str, SourcePool]:
-        """central.photo_library.ports.ScenePoolReader.source_pools_in (roadmap 4, C11)."""
+    def scene_lines_in(self, conn: Any) -> SceneLines:
+        """What the Planner reads of the photo library this pass, in coordination's transaction
+        (follow-up S3: the top of each Scene's line, central.photo_library.ports
+        .ScenePoolReader, hydrated; never a whole pool)."""
         ...
 
     def authored_in(self, conn: Any) -> dict[str, Candidate]:
