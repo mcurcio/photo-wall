@@ -23,6 +23,7 @@ import threading
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
+from enum import IntEnum
 from pathlib import Path
 from subprocess import CompletedProcess
 from typing import Final
@@ -30,6 +31,35 @@ from typing import Final
 from .power_methods import DDC_CACHE, DDCUTIL, Runner, _ask, _connectors
 
 _I2C_BUS: Final = re.compile(r"i2c-(\d+)")
+
+# The picture split (decision 0022; slice S1 implements, S1 also gives `get`, `get_continuous` and
+# `set` a required keyword `urgency: Urgency`, so every caller states whose turn it is).
+PICTURE_HOLD_SECONDS: Final = 1.5   # a picture command's longest hold of a port: power waits at most this
+
+
+class Urgency(IntEnum):
+    """Whose turn on a port: a POWER command always goes before a waiting PICTURE command, so a
+    picture ask or write never costs a power look its time (decision 0022, "Picture never costs
+    power")."""
+    POWER = 0
+    PICTURE = 1
+
+
+class PortLock:
+    """One port's lock with two queues: when it is released, a waiting POWER command takes it before
+    any waiting PICTURE command; PICTURE waiters take it in arrival order only while no POWER
+    command waits. Thread-safe; every acquire returns within its timeout (S1)."""
+
+    def __init__(self) -> None:
+        raise NotImplementedError("picture split S1")
+
+    def acquire(self, urgency: Urgency, timeout: float) -> bool:
+        """Whether the port was taken within `timeout` seconds (False: not taken; nothing to release)."""
+        raise NotImplementedError("picture split S1")
+
+    def release(self) -> None:
+        """Hand the port to the next waiter by the rule above; RuntimeError when not held."""
+        raise NotImplementedError("picture split S1")
 
 
 @dataclass(frozen=True)
@@ -43,6 +73,27 @@ class VcpReading:
         if not (type(self.current) is int and type(self.maximum) is int and 0 <= self.current <= self.maximum
                 and self.maximum >= 1):
             raise ValueError("vcp_reading")
+
+
+@dataclass(frozen=True)
+class VcpByte:
+    """One `getvcp <code> --terse` answer for a simple non-continuous code ("VCP 14 SNC x05"): its
+    value byte (S1)."""
+    value: int
+
+    def __post_init__(self) -> None:
+        """ValueError("vcp_byte") unless 0 <= value <= 255."""
+        raise NotImplementedError("picture split S1")
+
+
+VcpAnswer = VcpReading | VcpByte
+
+
+def parse_terse(stdout: str) -> dict[str, VcpAnswer]:
+    """Each code's answer in `getvcp <codes> --terse` output: "VCP 10 C 60 100" a VcpReading,
+    "VCP 14 SNC x05" a VcpByte; codes upper-case; any other line (ERR, CNC, T, noise) is no answer.
+    Pure; the one home of the terse format (S1)."""
+    raise NotImplementedError("picture split S1")
 
 
 class DdcChannel:
@@ -92,6 +143,17 @@ class DdcChannel:
         done = self._command(output_id, ["setvcp", code, str(value)], timeout)
         return done is not None and done.returncode == 0
 
+    def read_many(self, output_id: str, codes: Sequence[str], *, urgency: Urgency,
+                  timeout: float) -> dict[str, VcpAnswer] | None:
+        """One `getvcp <codes...> --terse` as one hold of the port at `urgency` (a PICTURE hold runs
+        at most PICTURE_HOLD_SECONDS): the codes it read (`parse_terse`), whatever the tool's exit
+        status once it finished; None when it did not finish in time or the Output has no bus (S1)."""
+        raise NotImplementedError("picture split S1")
+
+    def capabilities(self, output_id: str, *, urgency: Urgency, timeout: float) -> str | None:
+        """`capabilities`'s stdout as one hold of the port; None when it did not answer (S3)."""
+        raise NotImplementedError("picture split S3")
+
     def _port(self, output_id: str) -> threading.Lock:
         with self._guard:
             return self._ports.setdefault(output_id, threading.Lock())
@@ -117,4 +179,5 @@ class DdcChannel:
             port.release()
 
 
-__all__ = ["DdcChannel", "VcpReading"]
+__all__ = ["PICTURE_HOLD_SECONDS", "DdcChannel", "PortLock", "Urgency", "VcpAnswer", "VcpByte", "VcpReading",
+           "parse_terse"]

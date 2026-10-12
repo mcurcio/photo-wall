@@ -30,6 +30,16 @@ from contracts.node_output import (
     WriteResult,
     decode_set_time,
 )
+from contracts.node_picture import (
+    CHOICE_NAME_MAX,
+    CHOICE_VALUE_MAX,
+    LEVEL_MAX,
+    MAX_CHOICES,
+    SOFTWARE_PERCENT_MAX,
+    SOFTWARE_PERCENT_MIN,
+    VCP_CODE_PATTERN,
+    RangeKind,
+)
 
 
 class ModeView(Model):
@@ -197,3 +207,69 @@ class CopyOutcome(StrEnum):
 class PictureCopyResult(Model):
     frame_id: Identifier
     outcome: CopyOutcome
+
+
+# The picture split (decision 0022; slice S2 mounts these and deletes PictureSettingView,
+# PictureEdit and PicturePlace; FramePictureView and PictureCopyResult change in S2 as the slice's
+# frozen page says). A hardware value None is "as the display has it" (nothing set).
+
+VcpCodeField = Annotated[str, Field(pattern=f"^{VCP_CODE_PATTERN}$")]
+SoftwarePercent = Annotated[int, Field(ge=SOFTWARE_PERCENT_MIN, le=SOFTWARE_PERCENT_MAX)]
+
+
+class ChoiceView(Model):
+    value: Annotated[int, Field(ge=0, le=CHOICE_VALUE_MAX)]
+    name: Annotated[str, Field(min_length=1, max_length=CHOICE_NAME_MAX)]
+
+
+class HardwareRangeView(Model):
+    """How the display counts the setting (contracts.node_picture.HardwareRange)."""
+    kind: RangeKind
+    maximum: Annotated[int, Field(ge=1, le=LEVEL_MAX)] | None            # LEVEL only
+    choices: Annotated[tuple[ChoiceView, ...], Field(max_length=MAX_CHOICES)]   # CHOICE only
+
+
+class OfferedView(Model):
+    """What the display offers for one code at its last check."""
+    range: HardwareRangeView
+    current: Annotated[int, Field(ge=0, le=LEVEL_MAX)] | None            # read when the Pi asked
+
+
+class HardwareResultView(Model):
+    """The Pi's write for the latest picture change, judged by its read-back."""
+    result: WriteResult
+    before: Annotated[int, Field(ge=0, le=LEVEL_MAX)] | None
+    after: Annotated[int, Field(ge=0, le=LEVEL_MAX)] | None
+
+
+class HardwareSettingView(Model):
+    """One row of the Display (hardware) section: every offered setting and every set code."""
+    code: VcpCodeField
+    name: str                                       # contracts.node_picture.PICTURE_LIST's
+    offered: OfferedView | None                     # None: set here, not offered at the last check
+    value: Annotated[int, Field(ge=0, le=LEVEL_MAX)] | None   # in force; None: as the display has it
+    result: HardwareResultView | None
+
+
+class SoftwarePictureView(Model):
+    """The Photo Wall (software) section's four values in force."""
+    brightness_percent: SoftwarePercent
+    contrast_percent: SoftwarePercent
+    colour_temperature_kelvin: Annotated[int, Field(ge=KELVIN_MIN, le=KELVIN_MAX)]
+    gamma_tenths: Annotated[int, Field(ge=GAMMA_TENTHS_MIN, le=GAMMA_TENTHS_MAX)]
+
+
+class HardwareEdit(Model):
+    """POST /v1/operator/picture-sessions/{session_id}/hardware-edits: one display setting, or
+    None to hand it back (as the display has it)."""
+    code: VcpCodeField
+    value: Annotated[int, Field(ge=0, le=LEVEL_MAX)] | None
+    expected_sequence: Annotated[int, Field(ge=1)]
+
+
+class SoftwareEdit(Model):
+    """POST /v1/operator/picture-sessions/{session_id}/software-edits: one of Photo Wall's four.
+    S2 renames central.displays.picture.Setting to SoftwareSetting."""
+    setting: Setting
+    value: int                                      # percent, kelvin or gamma tenths, by setting
+    expected_sequence: Annotated[int, Field(ge=1)]
