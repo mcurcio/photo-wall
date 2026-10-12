@@ -218,9 +218,13 @@ def test_unhealthy_scene_frame_opens_its_recovery_tab_and_keeps_show_draft(page,
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "now", paused_at=registry.clock.utc())
         form = show_now(page, SCENE_ID, submit=False)
-        expect(form).to_contain_text(f"{INVALID_FRAME}: No report yet")
+        # Enrolled, no report yet: "Getting ready", the Frame page header's words
+        # (domain/frame-health-chip.ts).
+        expect(form).to_contain_text(f"{INVALID_FRAME}: Getting ready")
         expect(form.get_by_role("link", name=f"Open Frame {INVALID_FRAME}", exact=True)).to_have_attribute(
             "href", f"#/wall/frames/{INVALID_FRAME}/hardware")
+        # A chip is status only (design fix round 4): its link sits on the line under the chips.
+        expect(form.get_by_text(f"{INVALID_FRAME}: Getting ready", exact=True).get_by_role("link")).to_have_count(0)
 
         for player_id in players:
             report_readiness(registry, player_id)

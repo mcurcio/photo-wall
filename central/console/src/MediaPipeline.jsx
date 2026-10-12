@@ -136,7 +136,8 @@ export function WhyNothingNew({ snapshot, frameId }) {
     setChecking(true);
     try {
       const reads = await Promise.all(
-        (winner?.source_refs ?? []).map((ref) => readCandidates(ref, frameId)),
+        // At the winning Scene's crop limit (roadmap 5a), as the Planner judges its photos.
+        (winner?.source_refs ?? []).map((ref) => readCandidates(ref, frameId, winner?.selection?.crop_limit)),
       );
       setCheck({ counts: checkCounts(reads) });
     } catch (error) {

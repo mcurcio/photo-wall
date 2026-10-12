@@ -7,8 +7,9 @@ import pytest
 
 from central.installation_models import FrameOutput
 from central.photo_library.model import CopySize, LibraryAsset, OriginalFile
+from central.photo_library.rendition import FrameNeed, covers, rendition_needs
 from contracts.models import FrameProfile
-from media.library_client import FrameNeed, covers, fetch_plan, rendition_needs
+from media.library_client import fetch_plan
 
 READABLE = frozenset({"image/jpeg", "image/png", "image/webp"})
 LANDSCAPE = FrameProfile(width_px=3840, height_px=2160, diagonal_inches=55)

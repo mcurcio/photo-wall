@@ -1,6 +1,7 @@
 import { useLayoutEffect, useRef, useState } from "react";
 
 import { Button } from "../ui/button";
+import { cn } from "../ui/cn";
 
 export interface MediaGridItem {
   key: string;
@@ -22,6 +23,8 @@ export interface MediaGridProps {
   /** "Show more", when more can be read. */
   onMore?: () => void;
   moreBusy?: boolean;
+  /** Its thumbnails dimmed: an older read, while a newer one runs. */
+  faded?: boolean;
 }
 
 /** The space between thumbnails, in pixels: the `gap-2` the list draws (2 x the 4 px spacing). */
@@ -78,7 +81,7 @@ const ratioOf = (item: MediaGridItem) => (item.width > 0 && item.height > 0 ? it
  * shape is what a Frame judges it by, so a thumbnail is never cropped to a square. The thumbnails
  * are Central's; nothing here reaches the library.
  */
-export function MediaGrid({ label, items, onMore, moreBusy = false }: MediaGridProps) {
+export function MediaGrid({ label, items, onMore, moreBusy = false, faded = false }: MediaGridProps) {
   const [ref, width] = useWidth();
   const target = width > 0 && width < 600 ? 110 : 160;
   const ratios = items.map(ratioOf);
@@ -91,7 +94,8 @@ export function MediaGrid({ label, items, onMore, moreBusy = false }: MediaGridP
   }
   return (
     <div className="flex min-w-0 flex-col gap-3">
-      <ul ref={ref} aria-label={label} className="m-0 flex min-w-0 list-none flex-wrap gap-2 p-0">
+      <ul ref={ref} aria-label={label} aria-busy={faded || undefined}
+        className={cn("m-0 flex min-w-0 list-none flex-wrap gap-2 p-0", faded ? "opacity-60" : "")}>
         {items.map((item, index) => {
           const height = Math.max(1, Math.floor(heights[index]));
           const shown = Math.max(1, Math.min(Math.floor(heights[index] * ratios[index]), width > 0 ? width : Infinity));

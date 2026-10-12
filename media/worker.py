@@ -21,6 +21,7 @@ from central import cache_layout
 from central.assets.layout import TEMP_PREFIX, CacheLayout
 from central.content_wiring import build_job_runtime
 from central.db import Database, DatabaseTransactionClock
+from central.infra.key_content_store import PgKeyContent
 from central.infra.photo_library_store import PgPhotoLibrary
 from central.infra.runtime import (
     COMPLETION_NOT_RECORDED,
@@ -35,12 +36,21 @@ from central.media_store import MediaStore, MediaStoreError
 from central.node_bus_wiring import NodeBus, build_node_bus
 from central.photo_library.model import ConnectionSecret, LibraryAsset
 from central.photo_library.ports import LibraryWorkerStore
+from central.photo_library.rendition import rendition_needs
 from central.registry import RegistryError
+from central.wall_plan.ports import KeyContentWriter
 from contracts.models import Model, Positive
 from contracts.time import Clock, SystemClock
 from media.immich import ImmichClient, LibraryLimits
+from media.key_content import MeasureError
+from media.key_content import measure as measure_key_content
 from media.library_checks import LibraryChecks
-from media.library_client import FetchedRendition, LibraryClient, fetch_plan, rendition_needs
+from media.library_client import (
+    FetchedRendition,
+    LibraryClient,
+    LibraryUnavailable,
+    fetch_plan,
+)
 from media.library_clients import LibraryClients
 from media.library_thumbnails import LibraryThumbnailOrigin
 from media.models import MediaError
@@ -73,6 +83,8 @@ _PERMANENT = frozenset({
 class WorkerLimits(Model):
     job_seconds: Positive = Field(default=330, le=330)
     close_seconds: Positive = Field(default=5, le=10)
+    # Roadmap 5a: one key content measurement, Immich's two answers and the saliency included.
+    measure_seconds: Positive = Field(default=30, le=120)
 
 
 class PreparationClient(Protocol):
@@ -108,7 +120,8 @@ class MediaWorker:
                  library: LibraryWorkerStore, *,
                  preparer: PreparationClient | None = None,
                  client_factory: Callable[[ConnectionSecret], LibraryClient] | None = None,
-                 limits: WorkerLimits = WorkerLimits(), previews: Path | None = None):
+                 limits: WorkerLimits = WorkerLimits(), previews: Path | None = None,
+                 key_content: KeyContentWriter | None = None):
         self.repository, self.store, self.clock, self.limits = repository, store, repository.clock, limits
         if store.repository is not repository or limits.job_seconds + 30 > repository.limits.lease_seconds:
             raise MediaError("worker_config", "incompatible")
@@ -127,6 +140,9 @@ class MediaWorker:
         self._clients = LibraryClients(self.client_factory, self._close)
         # The thumbnail directory, swept of files whose record maintenance retired.
         self.previews = previews
+        # Roadmap 5a (slice M1): where measurements are read and recorded; `_entry` passes the
+        # PostgreSQL store, and `measure` refuses with media_config without one.
+        self.key_content = key_content
         self._error: str | None = None
         self._recipe: str | None = None
 
@@ -230,6 +246,54 @@ class MediaWorker:
             raise MediaTaskFailed(self._error) from None
         finally:
             await _blocking(self.repository.worker_status, self._error)
+
+    async def measure(self, asset_id: str, *, final_attempt: bool = False) -> None:
+        """Measure one photo's key content (roadmap 5a, slice M1; MEASURE_KEY_CONTENT_TASK): read
+        its asset row (gone: nothing to do), ask its connection's client for `faces` and the
+        `thumbnail` at its revision, `media.key_content.measure` them off the event loop, and
+        record the result. A decode failure, or the whole step running past
+        `WorkerLimits.measure_seconds`, is recorded as failed (its retry is the store's); a
+        library or asset-changed failure raises RetryableMediaTask (Procrastinate retries).
+
+        Any other bounded thumbnail failure: one whose status is `unavailable` (Immich busy or
+        not ready) is retried the same way; one that is not (an oversize or unsupported
+        thumbnail) cannot be measured at this revision and is recorded as `decode`.
+
+        On the `final_attempt` (the queue retries no more) a failure that would be retried is
+        recorded as `timeout` instead, so the photo leaves the Planner's measurement requests
+        until its retry and the photos ranked after it are measured (a photo Immich never
+        answers for must not hold the top of the list)."""
+        if self.key_content is None:
+            raise MediaError("media_config", "incompatible")
+        asset = await _blocking(self.key_content.asset_to_measure, asset_id)
+        if asset is None:
+            return
+        try:
+            async with asyncio.timeout(self.limits.measure_seconds):
+                client = await self._client(asset.connection_ref)
+                boxes = await client.faces(asset.upstream_id)
+                thumbnail = await client.thumbnail(asset.upstream_id, asset.revision)
+                key = await _blocking(measure_key_content, boxes, thumbnail)
+        except MeasureError as error:
+            await _blocking(self.key_content.record_failed, asset_id, error.reason)
+            return
+        except TimeoutError:
+            await _blocking(self.key_content.record_failed, asset_id, "timeout")
+            return
+        except LibraryUnavailable as error:
+            retryable = error.problem.kind
+        except MediaError as error:
+            if error.code != "asset_changed" and error.status != "unavailable":
+                await _blocking(self.key_content.record_failed, asset_id, "decode")
+                return
+            retryable = error.code
+        else:
+            await _blocking(self.key_content.record_measured, asset_id, key)
+            return
+        if final_attempt:
+            await _blocking(self.key_content.record_failed, asset_id, "timeout")
+            return
+        raise RetryableMediaTask(retryable) from None
 
     async def maintain(self) -> None:
         await _blocking(self.store.recover)
@@ -366,7 +430,8 @@ async def _entry():
     cache_root = cache_layout.cache_root()
     previews = ensure_previews_directory(cache_root)
     worker = MediaWorker(repository, MediaStore(repository, Path(root)), library,
-                         previews=previews)
+                         previews=previews,
+                         key_content=PgKeyContent(db, times=DatabaseTransactionClock()))
     # The library half of the thumbnail fetch (R22): only this package holds the key.
     thumbnails = LibraryThumbnailOrigin(
         library.pool_thumbnail, library.connection_secret,

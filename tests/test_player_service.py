@@ -1857,6 +1857,7 @@ def test_real_central_http_media_commit_outage_rejoin_and_renewal(registry, tmp_
 
     import uvicorn
     from fastapi.responses import JSONResponse
+    from support.measured_photos import measure
     from test_coordination import schedule
     from test_media_store import RECIPE, VARIANT, staged
     from test_registry import ADMIN, frame
@@ -1874,6 +1875,7 @@ def test_real_central_http_media_commit_outage_rejoin_and_renewal(registry, tmp_
     with storage.worker_lock():
         lease, _, prepared = staged(storage)   # a photo of Source library:1's pool
         storage.publish(lease, prepared)
+    measure(registry, lease.asset)   # roadmap 5a: the Planner places only measured photos
     app = create_app(
         registry.db,
         registry.clock,

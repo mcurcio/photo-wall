@@ -10,13 +10,24 @@ but FAILS where the checks are meant to run in full (`CI` or `PHOTO_WALL_BROWSER
 set), so a missing Node never reads as a pass there.
 """
 
+import functools
 import json
 import os
 import shutil
 import subprocess
 from pathlib import Path
+from typing import get_args
 
 import pytest
+
+from central.wall_plan.fit_settings import FIT_SETTING_RANGES
+from central.wall_plan.selection import (
+    MAX_NO_REPEAT_DAYS,
+    Order,
+    SceneSelection,
+)
+
+MIN_CROP_LIMIT, MAX_CROP_LIMIT = FIT_SETTING_RANGES["crop_limit"]
 
 SRC = Path(__file__).parents[1] / "central/console/src"
 
@@ -225,11 +236,39 @@ out.outOfRange = [stretched(3, 12), stretched(1.3, 4.5), stretched(6, 4.5), stre
 // "Fades out" brings the last photo back over half the fade, inside the ending.
 out.endingProblem = authoring.sceneProblems({ ...hand, mode: "live", cycleSeconds: 20,
   fadeSeconds: 3, ending: "fade", endingSeconds: 1 }, new Set()).map((p) => [p.field, p.message]);
+
+// --- Roadmap 5a: the Scene's selection, written, read back and bounded.
+const chosen = { order: "chronological", noRepeatDays: "3", cropLimit: 0.3 };
+const selected = authoring.buildSave("live", { sceneId: "evening", sourceRefs: ["holiday:1"],
+  targetIds: ["lobby"], cycleSeconds: 20, loop: true, ...chosen }).body;
+out.selectionBody = selected.selection;
+const pickSelection = ({ order, noRepeatDays, cropLimit }) => ({ order, noRepeatDays, cropLimit });
+out.selectionBack = pickSelection(authoring.editableDraft(selected));
+out.selectionAuthoredBack = pickSelection(authoring.editableDraft(authoring.buildSave("authored", {
+  sceneId: "evening", sourceRefs: ["holiday:1"], targetIds: ["lobby"], cycleSeconds: 20,
+  loop: true, selections: { lobby: "a1" }, ...chosen }).body.scene));
+// A stored Scene with no selection reads as the model's default.
+const { selection: _stored, ...bare } = selected;
+out.selectionMissing = pickSelection(authoring.decodeScene(bare));
+// Values the controls cannot show exactly (a 33.3 % crop limit, half a day, out of range).
+const withSelection = (selection) => ({ ...selected, selection: { ...selected.selection, ...selection } });
+out.selectionEditable = [{ crop_limit: 0.333 }, { no_repeat_days: 2.5 }, { no_repeat_days: 400 },
+  { crop_limit: 0.04 }, { order: "random" }, { crop_limit: 0.6, no_repeat_days: 365 },
+  { crop_limit: 0.05, no_repeat_days: 0, order: "on_this_day" }]
+  .map((selection) => authoring.editableDraft(withSelection(selection)) !== null);
+out.noRepeatProblems = ["", "-1", "2.5", "366", "0", "365"].map((noRepeatDays) => authoring
+  .sceneProblems({ ...hand, mode: "live", noRepeatDays }, new Set())
+  .filter((p) => p.field === "noRepeatDays").map((p) => p.message));
+out.ranges = authoring.SETTING_RANGES;
+out.orders = authoring.ORDERS;
+out.cropPercents = [0.05, 0.07, 0.35, 0.6].map(authoring.cropPercent);
 console.log(JSON.stringify(out));
 """
 
 
-def test_flow_kit_and_scene_flow_shape():
+@functools.cache
+def _flow_out():
+    """SCRIPT's answers, run once per process."""
     _require_node()
     result = subprocess.run(
         ["node", "--input-type=module", "-e", SCRIPT, "--",
@@ -237,7 +276,11 @@ def test_flow_kit_and_scene_flow_shape():
          (SRC / "sceneFlowModel.js").as_uri(), (SRC / "flow/instance.js").as_uri(),
          (SRC / "authoring.js").as_uri()],
         capture_output=True, text=True, timeout=30, check=True)
-    out = json.loads(result.stdout)
+    return json.loads(result.stdout)
+
+
+def test_flow_kit_and_scene_flow_shape():
+    out = _flow_out()
 
     # One draft per flow: a dirty draft refuses another key and the open key is returned.
     assert out["openNew"] == {"opened": "new", "dirty": False, "base": None, "id": 1}
@@ -270,8 +313,9 @@ def test_flow_kit_and_scene_flow_shape():
     assert out["next"] == ["b", "c", "review", "review"]
     assert out["previous"] == [None, "b"]
 
-    assert out["liveSteps"] == ["kind", "photos", "frames", "playback", "review"]
-    assert out["handPickedSteps"] == ["kind", "photos", "frames", "media", "playback", "review"]
+    # Frames before Photos (follow-ups C1): photos are chosen against known Frames.
+    assert out["liveSteps"] == ["kind", "frames", "photos", "playback", "review"]
+    assert out["handPickedSteps"] == ["kind", "frames", "photos", "media", "playback", "review"]
     # A Scene whose id is "new" is an edit key of its own, never the new Scene.
     assert out["keys"] == ["new", "edit/new", None, None, None]
     assert out["routes"] == [
@@ -298,7 +342,7 @@ def test_flow_kit_and_scene_flow_shape():
         "mode": "live", "name": "", "idOverride": None, "sourceRefs": [], "targets": [],
         "selections": {}, "cycleSeconds": 30, "loop": True, "fadeSeconds": 1.5,
         "ending": "none", "endingSeconds": 3, "keepLastPhoto": True, "keepTogether": False,
-        "revision": None}
+        "order": "shuffle", "noRepeatDays": 7, "cropLimit": None, "revision": None}
     assert out["seedNewTarget"]["targets"] == ["frame_one"]
     assert out["seedNewBadTarget"]["targets"] == []
     assert out["seedEditWithTarget"] == out["seedEdit"]
@@ -306,9 +350,10 @@ def test_flow_kit_and_scene_flow_shape():
         "mode": "live", "name": "", "idOverride": None, "sourceRefs": ["holiday:1"],
         "targets": ["lobby"], "selections": {}, "cycleSeconds": 20, "loop": True,
         "fadeSeconds": 0, "ending": "none", "endingSeconds": 3, "keepLastPhoto": True,
-        "keepTogether": False, "revision": 3}
+        "keepTogether": False, "order": "shuffle", "noRepeatDays": 7, "cropLimit": None,
+        "revision": 3}
     assert out["seedMissing"] is None
-    assert out["changed"] == ["Keep playing until the Program ends"]
+    assert out["changed"] == ["Keep repeating"]
 
     # Focus views: away while another section shows; a step; between views (normalising,
     # opening) none; any other place by its name.
@@ -327,15 +372,16 @@ def test_flow_kit_and_scene_flow_shape():
         ["media:hall", "Choose media for hall."]]
     assert out["loadingMedia"] == ["media:lobby", "media:hall"]
     # One wording per label: the problem, Review's answers and Reload share it.
-    assert out["cycleProblem"] == ["Seconds per cycle must be more than 0."]
+    assert out["cycleProblem"] == ["Each photo shows for: choose more than 0 seconds."]
     assert out["answerLabels"] == {
         "mode": "Kind", "source": "Photos from", "targets": "Frames", "media": "Media per frame",
-        "cycle": "Seconds per cycle", "loop": "Keep playing until the Program ends",
+        "cycle": "Each photo shows for", "loop": "Keep repeating",
         "fade": "Fade between photos", "ending": "How it ends",
-        "keepLastPhoto": "Keep the last photo up", "keepTogether": "Keep these Frames together"}
+        "keepLastPhoto": "Keep the last photo up", "keepTogether": "Keep these Frames together",
+        "order": "Order", "noRepeatDays": "Don't repeat within", "cropLimit": "Crop limit"}
     # A fade longer than the cycle is the fade's problem (the planner refuses it).
     assert out["fadeProblem"] == [
-        ["fade", "Fade between photos must be no longer than Seconds per cycle."]]
+        ["fade", "Fade between photos must be no longer than each photo shows for."]]
 
     # Delivery 1x: each setting is written to the Scene model's own field...
     body = out["liveBody"]
@@ -359,6 +405,29 @@ def test_flow_kit_and_scene_flow_shape():
     assert out["outOfRange"] == [False, False, False, True]
     assert out["endingProblem"] == [
         ["endingSeconds", "Ending length must be at least half of Fade between photos."]]
+
+    # Roadmap 5a: the selection is written as the model's fields (the crop limit a fraction,
+    # the days a number), read back by Edit, and missing reads as the model's default.
+    assert out["selectionBody"] == {"order": "chronological", "no_repeat_days": 3, "crop_limit": 0.3}
+    assert SceneSelection.model_validate(out["selectionBody"])
+    back = {"order": "chronological", "noRepeatDays": 3, "cropLimit": 0.3}
+    assert out["selectionBack"] == back
+    assert out["selectionAuthoredBack"] == back
+    # Follow-ups B1: no crop limit of its own, the Scene follows the house value.
+    assert out["selectionMissing"] == {"order": "shuffle", "noRepeatDays": 7, "cropLimit": None}
+    assert out["selectionEditable"] == [False, False, False, False, False, True, True]
+    rule = "Don't repeat within must be a whole number of days from 0 to 365."
+    assert out["noRepeatProblems"] == [[rule], [rule], [rule], [rule], [], []]
+
+
+def test_the_console_selection_bounds_are_the_models():
+    """The console's selection controls offer exactly central/wall_plan/selection.py's range and
+    choices (run ledger K1: the console mirrors the bounds)."""
+    out = _flow_out()
+    assert out["ranges"]["noRepeatDays"] == {"min": 0, "max": MAX_NO_REPEAT_DAYS, "step": 1}
+    assert out["ranges"]["cropLimit"] == {"min": MIN_CROP_LIMIT, "max": MAX_CROP_LIMIT, "step": 0.01}
+    assert out["orders"] == list(get_args(Order))
+    assert out["cropPercents"] == [5, 7, 35, 60]
 
 
 HAND_OFF_SCRIPT = r"""

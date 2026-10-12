@@ -16,7 +16,6 @@ from typing import Literal, Protocol
 
 from pydantic import Field
 
-from central.installation_models import FrameOutput
 from central.photo_library.model import (
     AssetRevision,
     ContactResult,
@@ -38,44 +37,13 @@ from central.photo_library.model import (
     SourceQuery,
 )
 from central.photo_library.policy import IMMICH_WEB_TYPES
-from contracts.frame_fit import window_holds
+from central.photo_library.rendition import FrameNeed, covers
 from contracts.models import Digest, Instant, Model, Positive
 
 # --- The rendition choice (follow-ups 2026-10-11, slice A4; owner, 2026-10-09: "use Immich
 # downsampled copy only if it is at least the visible Frame size, else the original") --------
 
 FetchStep = Literal["preview", "fullsize", "original"]
-
-
-class FrameNeed(Model):
-    """What one Frame asks of a photo's copy: a window of `aspect` (its profile's width_px /
-    height_px, the shape the Player cuts) holding `width` x `height` pixels: its Frame output,
-    or, until its Pi reports its Output's size, its profile's width_px x height_px (never too
-    small; `rendition_needs`)."""
-
-    aspect: Positive
-    width: int = Field(gt=0, strict=True)
-    height: int = Field(gt=0, strict=True)
-
-
-def rendition_needs(frames: Sequence[FrameOutput]) -> tuple[FrameNeed, ...]:
-    """One FrameNeed per distinct (aspect, width, height) over every Frame of the wall
-    (`central.registry.Registry.frame_outputs`), sorted. A photo is prepared once for the whole
-    wall, so its copy must hold every Frame's output. Pure."""
-    distinct = set()
-    for frame in frames:
-        profile = frame.profile
-        width, height = frame.output_px or (profile.width_px, profile.height_px)
-        distinct.add((profile.width_px / profile.height_px, width, height))
-    return tuple(FrameNeed(aspect=aspect, width=width, height=height)
-                 for aspect, width, height in sorted(distinct))
-
-
-def covers(width: int, height: int, needs: Sequence[FrameNeed]) -> bool:
-    """Whether a `width` x `height` copy holds every need (`contracts.frame_fit.window_holds` at
-    each need's aspect). No need: False (the full-resolution copy is taken). Pure."""
-    return bool(needs) and all(window_holds(width, height, need.aspect, (need.width, need.height))
-                               for need in needs)
 
 
 def fetch_plan(asset: LibraryAsset, needs: Sequence[FrameNeed],
@@ -219,6 +187,20 @@ class FetchedRendition(Model):
     measured: tuple[MeasuredCopy, ...]
 
 
+class FaceBox(Model):
+    """One face Immich found (`GET /faces?id=<asset id>`, v2.5.6 `AssetFaceResponseDto`): its
+    pixel box on the `image_width` x `image_height` image Immich measured it on (its preview,
+    upright and edited; not the original's pixels). media/key_content.py `faces_of` turns it into
+    fractions (roadmap 5a, slice M1)."""
+
+    x1: int = Field(ge=0)
+    y1: int = Field(ge=0)
+    x2: int = Field(ge=0)
+    y2: int = Field(ge=0)
+    image_width: int = Field(gt=0)
+    image_height: int = Field(gt=0)
+
+
 class LibraryClient(Protocol):
     """One connection's client; async, every call bounded by its own budget (no retry loops: the
     worker's tasks own retries)."""
@@ -273,6 +255,14 @@ class LibraryClient(Protocol):
     async def thumbnail(self, upstream_id: str, revision: AssetRevision) -> bytes:
         """The edited thumbnail, re-encoded by Photo Wall (no metadata survives); raises
         MediaError("asset_changed") when the asset's revision moved."""
+        ...
+
+    async def faces(self, upstream_id: str) -> tuple[FaceBox, ...]:
+        """Every face Immich holds for the asset (`GET /faces?id=`, permission `face.read`), in
+        Immich's order. Owner, 2026-10-11: "If immich face detection is unavailable, then smart
+        crop doesn't take into account faces": a 403 (the key lacks face.read) answers () like an
+        asset with no faces (the connection's health already names the missing permission); a
+        malformed box is left out. Other failures raise LibraryUnavailable."""
         ...
 
     async def fetch_rendition(self, asset: LibraryAsset, *, plan: Sequence[FetchStep],

@@ -188,7 +188,7 @@ def test_with_no_reported_output_size_a_step_is_a_pixel_of_a_common_screen_not_t
         sign_in(page, origin)
         position = _position(open_frame(page, FRAME, "position"))
         expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
-        expect(position).to_contain_text("The Pi has not reported this output's size")
+        expect(position).to_contain_text("The Pi has not reported its display's size")
         after = len(sessions.sent)
         _move(page)
         draft = _wait_for_draft(page, sessions, after, lambda draft: _top_left_x(draft) != SAVED_X)

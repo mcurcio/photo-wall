@@ -1,23 +1,31 @@
 import hashlib
 
 import pytest
+from support.key_content_builders import measured
 
 from central.catalog import Candidate, SourcePool
 from central.planner import PlannerLimits, PlanningBudgetExceeded, PlanningError, eligible, project
 from central.runtime import Child, Contribution, RecordingActuator, Runtime, Scene
+from central.wall_plan.fit import FitTarget
+from central.wall_plan.fit_settings import FitSettings
+from central.wall_plan.order import WallHistory
+from central.wall_plan.selection import SceneSelection
 from contracts.models import FrameProfile, OutputBinding, Plan, Variant
 
+# Roadmap 5a: a photo is placed only once its key content is measured and it fills its Frame
+# (central/wall_plan/assignment.py), so these candidates are measured, with an even interest
+# grid, and default to the default Frame's 9:16 shape and pixels.
 
-def candidate(asset="a", *, width=1200, height=1800, kind="image", prepared=True, captured=0,
-              variant_width=None, variant_height=None):
+
+def candidate(asset="a", *, width=1080, height=1920, kind="image", prepared=True, captured=0,
+              variant_width=None, variant_height=None) -> Candidate:
     variant = Variant(
         sha256=hashlib.sha256(asset.encode()).hexdigest(), size=10,
         media_type="video/mp4" if kind == "video" else "image/jpeg",
         width=variant_width or width, height=variant_height or height,
         duration=10 if kind == "video" else None,
     ) if prepared else None
-    return Candidate(asset_id=asset, kind=kind, original_width=width, original_height=height,
-                     captured_at=captured, variant=variant)
+    return measured(asset, width, height, kind=kind, captured_at=captured, variant=variant)
 
 
 def pool(source="holiday:1", *candidates, ready=True):
@@ -31,10 +39,12 @@ def binding(frame="left", output="hdmi-1", *, width=1080, height=1920, diagonal=
                                               diagonal_inches=diagonal, video=video))
 
 
-def runtime(*, cycle=10, contributions=None, children=()):
+def runtime(*, cycle=10, contributions=None, children=(), order="newest_first"):
+    """One looping Scene; newest first unless named (its order is roadmap 5a's Scene setting)."""
     instance = Runtime()
     instance.set_scene(Scene(
         scene_id="scene", cycle_seconds=cycle, loop=True, children=children,
+        selection=SceneSelection(order=order),
         contributions=contributions if contributions is not None else (
             Contribution(target="frame:left", source_refs=("holiday:1",)),
         ),
@@ -43,15 +53,22 @@ def runtime(*, cycle=10, contributions=None, children=()):
     return instance
 
 
+def full_screen(bindings) -> dict:
+    """Each bound Frame full screen on a Display of its profile's size (its Frame output)."""
+    return {item.frame_id: (item.profile.width_px, item.profile.height_px)
+            for items in bindings.values() for item in items}
+
+
 def propose(instance, *, now=0, horizon=25, assets=None, pools=None, bindings=None,
             authored=None, locks=None, limits=None):
+    bindings = bindings or {"player-one": (binding(),)}
     options = dict(
-        bindings_by_player=bindings or {"player-one": (binding(),)},
+        bindings_by_player=bindings, settings=FitSettings(), frame_outputs=full_screen(bindings),
         source_pools=pools if pools is not None else {
             "holiday:1": pool("holiday:1", *(assets or [candidate()])),
         },
         authored_candidates=authored or {}, locked_assignments=locks or {},
-        horizon_seconds=horizon,
+        history=WallHistory(), horizon_seconds=horizon, plan_seconds=horizon,
     )
     if limits:
         options["limits"] = limits
@@ -81,20 +98,27 @@ def test_live_results_change_unsecured_cycles_same_run_and_locks_preserve_delete
 
 
 @pytest.mark.parametrize("kind,width,height,diagonal,video,expected", [
-    ("image", 2000, 1000, 20, True, False),
-    ("image", 1000, 2000, 50, True, True),
-    ("image", 1000, 1000, 50, True, True),
-    ("video", 1280, 720, 40, True, False),
-    ("video", 1280, 720, 39, True, True),
-    ("video", 1920, 1080, 40, True, True),
-    ("video", 1920, 1080, 20, False, False),
+    ("image", 2000, 1000, 20, True, False),     # 2:1 on 9:16 crops beyond the limit
+    ("image", 2160, 3840, 50, True, True),
+    ("image", 2400, 3600, 50, True, True),      # 2:3 on 9:16 crops 16 %
+    ("image", 1000, 2000, 50, True, False),     # the kept window has fewer than the Frame's pixels
+    ("image", 2000, 2000, 50, True, False),     # 1:1 on 9:16 crops 44 %
+    ("video", 720, 1280, 40, True, False),
+    ("video", 720, 1280, 39, True, True),
+    ("video", 1080, 1920, 40, True, True),
+    ("video", 1080, 1920, 20, False, False),
 ])
 def test_original_eligibility_precedes_derivative_dimensions(kind, width, height, diagonal,
                                                            video, expected):
+    """Roadmap 5a: eligibility is the photo fit rule's size-only part on the original (ratio,
+    not orientation labels; the Frame's pixels; requirements :186's video floor)."""
     asset = candidate(kind=kind, width=width, height=height,
                       variant_width=3840, variant_height=2160)
     profile = binding(diagonal=diagonal, video=video).profile
-    assert eligible(asset, profile) is expected
+    target, house = FitTarget(profile=profile, output_px=(profile.width_px, profile.height_px)), \
+        FitSettings()
+    assert eligible(asset, target, house.crop_limit, house) is expected
+    assert eligible(asset, target, 0.5, house) is (expected or (width, height) == (2000, 2000))
 
 
 def test_upscaled_720p_is_never_sent_to_large_frame_and_authored_alternative_stays_on_role():
@@ -104,12 +128,13 @@ def test_upscaled_720p_is_never_sent_to_large_frame_and_authored_alternative_sta
     instance = runtime(contributions=(Contribution(
         target="frame:left", asset_refs=("low", "proper"), role="left-speaker",
     ),))
-    result = propose(instance, authored={"low": low, "proper": proper},
-                     bindings={"player-one": (binding(), binding("right", "hdmi-2"))})
+    landscape = {"player-one": (binding(width=1920, height=1080),
+                                binding("right", "hdmi-2", width=1920, height=1080))}
+    result = propose(instance, authored={"low": low, "proper": proper}, bindings=landscape)
     assert {layer.frame_id for layer in layers(result)} == {"left"}
     assert all(layer.variant == proper.variant for layer in layers(result))
     assert all(selection.asset_id == "proper" for selection in result.selections)
-    missing = propose(instance, authored={"low": low})
+    missing = propose(instance, authored={"low": low}, bindings=landscape)
     assert layers(missing) == ()
     assert "authored_no_eligible_alternative" in {d.code for d in missing.diagnostics}
 
@@ -159,13 +184,29 @@ def test_a_photo_only_in_a_source_the_contribution_does_not_name_is_never_assign
     assert {s.asset_id for s in result.selections} == {"mine"}
 
 
-def test_a_pool_of_fifty_thousand_photos_projects_with_no_budget_error():
-    """C11: no window and no candidate cap. Mutation probe: keep a candidate-count bound."""
-    instance = runtime()
-    photos = [candidate(f"photo-{n}", captured=n, prepared=False) for n in range(50_000)]
-    result = propose(instance, assets=photos)
-    assert [s.asset_id for s in result.selections] == ["photo-49999", "photo-49998", "photo-49997"]
-    assert {r.asset_id for r in result.acquisitions} == {"photo-49999", "photo-49998", "photo-49997"}
+def test_a_pool_of_fifty_thousand_photos_on_four_frames_plans_an_hour_with_no_budget_error():
+    """C11: no window and no candidate cap; roadmap 5a: the whole wall an hour ahead. Inside the
+    preparation horizon no photo is prepared, so the newest are requested; beyond it the plan
+    is tentative. Mutation probe: keep a candidate-count bound."""
+    frames = ("left", "right", "top", "bottom")
+    instance = runtime(cycle=30, contributions=tuple(
+        Contribution(target=f"frame:{frame}", source_refs=("holiday:1",)) for frame in frames))
+    shared = candidate("photo-0").analysis
+    photos = [Candidate(asset_id=f"photo-{n}", kind="image", original_width=1080,
+                        original_height=1920, captured_at=n, analysis=shared)
+              for n in range(50_000)]
+    bindings = {"player-one": tuple(binding(frame, f"hdmi-{n}") for n, frame in enumerate(frames))}
+    result = project(
+        instance, 0, bindings_by_player=bindings, settings=FitSettings(),
+        frame_outputs=full_screen(bindings),
+        source_pools={"holiday:1": pool("holiday:1", *photos)}, authored_candidates={},
+        locked_assignments={}, history=WallHistory(), horizon_seconds=300, plan_seconds=3600)
+    assert layers(result) == ()
+    assert {r.asset_id for r in result.acquisitions} >= {f"photo-{49_999 - n}" for n in range(4)}
+    assert len(result.plan) == 4 * 120
+    tentative = [photo for photo in result.plan if photo.state == "tentative"]
+    assert len(tentative) == 4 * 110
+    assert len({photo.asset_id for photo in tentative}) == len(tentative)
 
 
 def test_missing_source_diagnosed_and_missing_variant_requests_deduplicated_acquisition():
@@ -179,7 +220,7 @@ def test_missing_source_diagnosed_and_missing_variant_requests_deduplicated_acqu
     assert len(result.acquisitions) == 1
     assert len(result.acquisitions[0].assignment_ids) == 6
     assert result.acquisitions[0].earliest_start == 0
-    assert {d.code for d in result.diagnostics} == {"preparation_pending"}
+    assert {d.code for d in result.diagnostics} == {"no_photo_free"}
     missing = propose(instance, pools={})
     assert "source_missing" in {d.code for d in missing.diagnostics}
 
@@ -270,8 +311,6 @@ def test_stable_recent_cycle_variety_and_snapshot_order_independence():
         "holiday:1": pool("holiday:1"), "other:1": pool("other:1"),
     }}),
     (PlannerLimits(max_assignments=1), {}),
-    (PlannerLimits(max_acquisitions=1), {"assets": [candidate("a", prepared=False),
-                                                candidate("b", prepared=False)]}),
     (PlannerLimits(max_horizon_seconds=5), {}),
     (PlannerLimits(max_cycle_seconds=5), {}),
     (PlannerLimits(max_events=1), {}),
@@ -297,7 +336,7 @@ def test_invalid_input_and_prepared_variant_fail_safely():
     bad = candidate().model_copy(update={"variant": candidate(kind="video").variant})
     result = propose(instance, assets=[bad])
     assert layers(result) == ()
-    assert "variant_incompatible" in {d.code for d in result.diagnostics}
+    assert "no_photo_free" in {d.code for d in result.diagnostics}
 
 
 def test_secured_delayed_child_keeps_exact_layer_across_unrelated_activation():

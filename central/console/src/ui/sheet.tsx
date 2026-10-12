@@ -3,6 +3,7 @@ import type * as React from "react";
 
 import { Button } from "./button";
 import { cn } from "./cn";
+import { Split } from "./split";
 
 export interface SheetProps {
   open: boolean;
@@ -30,10 +31,9 @@ export function Sheet({ open, onOpenChange, title, children }: SheetProps) {
             "focus-visible:outline-2 focus-visible:outline-focus",
           )}
         >
-          <div className="flex items-center justify-between gap-3">
-            <BaseDialog.Title className="m-0 text-lg font-semibold">{title}</BaseDialog.Title>
-            <BaseDialog.Close render={<Button variant="ghost" />}>Close</BaseDialog.Close>
-          </div>
+          <Split action={<BaseDialog.Close render={<Button variant="ghost" />}>Close</BaseDialog.Close>}>
+            <BaseDialog.Title className="m-0 text-lg font-semibold wrap-anywhere">{title}</BaseDialog.Title>
+          </Split>
           <div className="min-w-0 text-sm">{children}</div>
         </BaseDialog.Popup>
       </BaseDialog.Portal>

@@ -4,8 +4,10 @@
 Every part is the real one except the queue, which these tests drive step by step: the
 PostgreSQL store (`PgPhotoLibrary`), the worker's `LibraryChecks` over the real `ImmichClient` at
 page size 3 (the fixture's eight photos at one instant span pages), the Source save path, Runtime
-and `Coordinator.advance`, and the media worker's `process_job` with the real `Preparer`
-(ffmpeg). What the draft shows is what the Planner plans from, and every planned photo prepares.
+and `Coordinator.advance`, the media worker's `measure` over the real `ImmichClient` and
+`PgKeyContent` (roadmap 5a: a photo is placed, or asked to be prepared, only once its key content
+is measured, F-10), and its `process_job` with the real `Preparer` (ffmpeg). What the draft shows
+is what the Planner plans from, and every planned photo prepares.
 """
 
 from __future__ import annotations
@@ -25,6 +27,7 @@ from test_registry import enroll
 
 from central.coordination import Coordinator
 from central.db import DatabaseTransactionClock
+from central.infra.key_content_store import PgKeyContent
 from central.infra.photo_library_store import PgPhotoLibrary
 from central.media_queue import QueueReceipt
 from central.media_repository import MediaRepository
@@ -43,7 +46,7 @@ from central.registry import FrameCreate
 from central.runtime import Contribution, Scene
 from central.runtime_store import RuntimeStore
 from central.source_names import SourceNameService
-from contracts.models import FrameProfile
+from contracts.models import Calibration, CornersFit, FrameProfile
 from contracts.time import ManualClock
 from media.immich import ImmichClient, LibraryLimits
 from media.library_checks import LibraryChecks
@@ -59,7 +62,10 @@ PAGE_SIZE = 3
 # "Anna and Ben, last 3 years, no screenshots" (design tracer): the fixture's labels it holds.
 ANNA_AND_BEN = {"anna-ben-1", "anna-ben-2", "anna-ben-3"}
 GARDEN = {"garden-1", "garden-2"}
-LANDSCAPE = FrameProfile(width_px=1920, height_px=1080, diagonal_inches=24)
+# Frames sized to the fixture's photos (96 x 64, the edited one 64 x 96), so each clears the fit
+# rule's pixel floor (roadmap 5a rule 2) and a 3:2 photo fills 16:9 within the 35 % crop limit.
+LANDSCAPE = FrameProfile(width_px=64, height_px=36, diagonal_inches=24)
+PORTRAIT = FrameProfile(width_px=36, height_px=64, diagonal_inches=24)
 
 
 def _tool(name: str) -> str:
@@ -103,7 +109,9 @@ class Wall:
         self.preparer = Preparer(ffmpeg=_tool("ffmpeg"), ffprobe=_tool("ffprobe"),
                                  clock=wall_clock)
         self.worker = MediaWorker(self.repository, self.store, self.library,
-                                  preparer=self.preparer)
+                                  preparer=self.preparer,
+                                  key_content=PgKeyContent(registry.db,
+                                                           times=DatabaseTransactionClock()))
         self.coordinator = Coordinator(registry.db, registry.clock, media=self.repository)
         self.run(self.checks.contact(self.ref))   # binds the owner: partners' photos told apart
 
@@ -147,14 +155,21 @@ class Wall:
         return {row["asset_id"]: self.labels.get(row["upstream_id"], row["upstream_id"])
                 for row in rows}
 
-    def frames(self, *frame_ids: str) -> None:
+    def frames(self, *frame_ids: str, profile: FrameProfile = LANDSCAPE) -> None:
         player, _, _ = enroll(self.registry, count=len(frame_ids))
         for index, frame_id in enumerate(frame_ids):
-            self.registry.create_frame(FrameCreate(id=frame_id, width_mm=500, height_mm=300,
-                                                   profile=LANDSCAPE))
+            wide = profile.width_px > profile.height_px
+            self.registry.create_frame(FrameCreate(id=frame_id, width_mm=500 if wide else 300,
+                                                   height_mm=300 if wide else 500,
+                                                   profile=profile))
             self.registry.bind(frame_id, player["player_id"], f"HDMI-A-{index + 1}",
                                expected_generation=0)
-            save_position(self.registry, frame_id)
+            # Follow-ups B1: the fit rule needs the Frame output (its picture on the enrolled
+            # 1920 x 1080 Output), so each Frame's Position is a corner of the profile's own
+            # pixels and the fixture's 96 x 64 photos hold it.
+            right, bottom = profile.width_px / 1920, profile.height_px / 1080
+            save_position(self.registry, frame_id, Calibration(fit=CornersFit(
+                corners=((0.0, 0.0), (right, 0.0), (right, bottom), (0.0, bottom)))))
 
     def show(self, frame_ids, source_refs):
         runtime = self.coordinator.runtime
@@ -163,7 +178,19 @@ class Wall:
                                              source_refs=tuple(source_refs))
                                 for frame_id in frame_ids)))
         runtime.command("activate", "tracer", "tracer-start", self.registry.clock.utc())
-        return self.coordinator.advance()
+        return self.measured(self.coordinator.advance())
+
+    def measured(self, projection):
+        """The scheduler's measurement requests, each run by the worker's `measure` against
+        Immich (faces and the thumbnail), then the next advance, until nothing is left to measure.
+        Before measuring, the Planner places nothing and asks for nothing (F-10)."""
+        for _ in range(8):
+            if not projection.measurements:
+                return projection
+            for request in projection.measurements:
+                self.run(self.worker.measure(request.asset_id))
+            projection = self.coordinator.advance()
+        raise AssertionError("measurement never settled")
 
     def prepare_all(self, acquisitions) -> list[dict]:
         """The scheduler's request for each asked-for photo, then the worker's job for each."""
@@ -236,13 +263,14 @@ def test_what_the_draft_shows_is_what_the_planner_plans_and_every_planned_photo_
     garden = wall.names.save_draft(garden_draft, "garden")["source_ref"]
     union = set(shown) | set(garden_shown)
 
-    # 3. The Planner assigns only pool photos, and every photo eligible for a Frame (all are,
-    # on landscape Frames) is a candidate it asks to have prepared.
+    # 3. Once measured, the Planner asks to have every pool photo prepared (all fit the
+    # Frames), and none outside the pool.
     wall.frames("tracer-a", "tracer-b")
     projection = wall.show(("tracer-a", "tracer-b"), (anna, garden))
-    chosen = {selection.asset_id for selection in projection.selections}
-    assert chosen and chosen <= union
-    assert len({selection.assignment_id for selection in projection.selections}) >= 2
+    with wall.registry.db.transaction() as conn:
+        measured = {row["asset_id"] for row in conn.execute(
+            "SELECT asset_id FROM photo_key_content WHERE status='measured'")}
+    assert measured == union
     assert {request.asset_id for request in projection.acquisitions} == union
     assert not {"source_missing", "source_not_ready"} & {d.code for d in projection.diagnostics}
 
@@ -255,6 +283,15 @@ def test_what_the_draft_shows_is_what_the_planner_plans_and_every_planned_photo_
         variant = job["variant"]
         assert variant["width"] / variant["height"] == pytest.approx(
             asset.width / asset.height, rel=0.05)
+
+    # 5. Prepared, the Planner places pool photos only, on both Frames, and every pool photo
+    # is on the wall within the hour's plan.
+    projection = wall.coordinator.advance()
+    chosen = {selection.asset_id for selection in projection.selections}
+    assert chosen and chosen <= union
+    assert len({selection.assignment_id for selection in projection.selections}) >= 2
+    planned = {photo.asset_id for photo in projection.plan if photo.asset_id is not None}
+    assert planned == union
 
 
 def test_an_edited_photo_plays_as_immich_shows_it(wall, immich_library):
@@ -269,7 +306,7 @@ def test_an_edited_photo_plays_as_immich_shows_it(wall, immich_library):
     shown = wall.shown(draft)
     assert set(shown.values()) == {"edited"}
     source = wall.names.save_draft(draft, "edited")["source_ref"]
-    wall.frames("edited-frame")
+    wall.frames("edited-frame", profile=PORTRAIT)
     projection = wall.show(("edited-frame",), (source,))
     assert {request.asset_id for request in projection.acquisitions} == set(shown)
     [job] = wall.prepare_all(projection.acquisitions)
@@ -277,3 +314,5 @@ def test_an_edited_photo_plays_as_immich_shows_it(wall, immich_library):
     assert (edited.width, edited.height) == (64, 96)
     assert job["variant"]["height"] > job["variant"]["width"]
     assert job["variant"]["width"] / job["variant"]["height"] == pytest.approx(64 / 96, rel=0.05)
+    projection = wall.coordinator.advance()
+    assert {selection.asset_id for selection in projection.selections} == set(shown)

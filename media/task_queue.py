@@ -14,6 +14,7 @@ from central.media_queue import (
     CHECK_POOL_TASK,
     LIBRARY_CONNECTION_LOCK_PREFIX,
     LIBRARY_POOL_LOCK_PREFIX,
+    MEASURE_KEY_CONTENT_TASK,
     MEDIA_QUEUE,
     MEDIA_STORAGE_LOCK,
     PREPARE_MEDIA_TASK,
@@ -142,6 +143,14 @@ def create_worker_app(dsn: str) -> procrastinate.App:
     async def prepare_media(context, job_id: str):
         worker = context.additional_context["media_worker"]
         await worker.process_job(job_id, attempt=max(1, context.job.attempts))
+
+    # Roadmap 5a: one photo's key content. No lock: measurements run beside preparation and the
+    # library checks; the queueing lock (central/media_queue.py) keeps one queued per photo.
+    @app.task(name=MEASURE_KEY_CONTENT_TASK, queue=MEDIA_QUEUE, pass_context=True,
+              retry=MediaRetryStrategy())
+    async def measure_key_content(context, asset_id: str):
+        final = max(1, context.job.attempts) > len(MediaRetryStrategy.delays)
+        await context.additional_context["media_worker"].measure(asset_id, final_attempt=final)
 
     # croniter places seconds last in a six-field expression.  Keeping that
     # explicit matters here: a conventional seconds-first expression silently

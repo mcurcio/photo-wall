@@ -4,8 +4,8 @@ import { PLAYBACK_LABELS } from "./authoring.js";
 import { Field } from "./Field.jsx";
 
 /**
- * The one cycle input (pass 2 slice 3 §4): "Seconds per cycle" (`cycle_seconds`,
- * field `cycle`). The Scene flow asks it on its Playback step.
+ * The one cycle input (pass 2 slice 3 §4): "Each photo shows for", in seconds
+ * (`cycle_seconds`, field `cycle`). The Scene flow asks it on its Playback step.
  *
  * @param {{problems: ReturnType<typeof import("./Field.jsx").useProblems>,
  *          seconds: string|number, onSeconds: (value: string) => void}} props
@@ -14,25 +14,28 @@ export function CycleField({ problems, seconds, onSeconds }) {
   return (
     <Field id={problems.idFor("cycle")} label={PLAYBACK_LABELS.cycle} reason={problems.reasonFor("cycle")}>
       {(props) => (
-        <input
-          {...props}
-          type="number"
-          min="1"
-          value={seconds}
-          onChange={(event) => {
-            onSeconds(event.target.value);
-            problems.touch("cycle");
-          }}
-        />
+        <span className="field__with-unit">
+          <input
+            {...props}
+            type="number"
+            min="1"
+            value={seconds}
+            onChange={(event) => {
+              onSeconds(event.target.value);
+              problems.touch("cycle");
+            }}
+          />
+          <span aria-hidden="true">s</span>
+        </span>
       )}
     </Field>
   );
 }
 
 /**
- * The one loop input (pass 2 slice 3 §4): "Keep playing until the Program ends"
- * (`loop`, field `loop`). Without `loop`, a Run asks to finish at the end of its
- * first cycle (central/runtime.py `_process`), so a Program Scene would play once.
+ * The one loop input (pass 2 slice 3 §4): "Keep repeating" (`loop`, field `loop`).
+ * Without `loop`, a Run asks to finish at the end of its first cycle
+ * (central/runtime.py `_process`), so a scheduled Scene would play once.
  * The Scene flow keeps it under Playback's Advanced, on by default.
  *
  * @param {{problems: ReturnType<typeof import("./Field.jsx").useProblems>,
@@ -53,8 +56,9 @@ export function LoopField({ problems, loop, onLoop }) {
         {PLAYBACK_LABELS.loop}
       </label>
       <p id={`${loopId}-hint`} className="field__hint">
-        Without a Program, it plays until you Finish or Cancel it. It stops at the end of the
-        cycle running when the Program ends, so it can overrun by up to one cycle.
+        Its photos play again from the start until its scheduled time ends; when it is not
+        scheduled, until you finish it. It stops at the end of the round running when its time
+        ends, so it can run over by up to one round.
       </p>
     </div>
   );

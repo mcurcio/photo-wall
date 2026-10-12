@@ -13,7 +13,7 @@ import {
   type LibraryFix,
   libraryCountsWords,
   libraryVerdict,
-  noteWords,
+  LibraryNoteLine,
   problemWords,
   waitingForKey,
 } from "./library-health-card";
@@ -163,7 +163,7 @@ export function LibraryConnection({ connection, onSave, onCheck, checkNote, onRe
             )}
             {connection.counts !== null && <FactRow label="In Immich" tone="reported">{libraryCountsWords(connection.counts)}</FactRow>}
             {connection.health.state === "ok" && connection.health.notes.map((note) => (
-              <Note key={note.kind}>{noteWords(note)}</Note>
+              <LibraryNoteLine key={note.kind} connection={connection} note={note} />
             ))}
           </div>
         )}

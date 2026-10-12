@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Annotated, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, FiniteFloat, model_validator
 
+from central.wall_plan.selection import SceneSelection
 from contracts.models import TARGET_ID_PATTERN, AfterEnd
 
 if TYPE_CHECKING:
@@ -87,6 +88,8 @@ class Scene(FrozenModel):
     outro_seconds: Seconds = 0
     outro_contributions: tuple[Contribution, ...] = ()
     protect_frames: bool = False
+    # Roadmap 5a: how this Scene's Frames pick from its photos (order, no-repeat days, crop limit).
+    selection: SceneSelection = SceneSelection()
 
     @model_validator(mode="after")
     def coherent_cycle(self) -> Self:
@@ -170,6 +173,9 @@ class Intent(FrozenModel):
     after_end: AfterEnd = "leave_as_is"
     actuator_value: Unit | None = None
     phase: Literal["body", "outro"]
+    # Roadmap 5a: the Intent's own Scene's selection (a child Scene's is its own), copied by
+    # `timeline` (slice O1); the Planner reads it.
+    selection: SceneSelection = SceneSelection()
 
     @property
     def precedence(self) -> tuple[int, int, int]:
@@ -468,6 +474,27 @@ class Runtime:
         for queued in self._state.queue:
             refs.update(self._scene_source_refs(queued.scene))
         return refs
+
+    def planning_selections(self) -> dict[str, SceneSelection]:
+        """Roadmap 5a (slice O1): the selection of every Scene that can contribute to a current
+        or future Run projection (configured Scenes, active Runs' and queued Scenes, each with
+        its children), by scene id; a Run's admitted snapshot wins over the configured Scene of
+        the same id. Coordination reads the shown history for these Scenes."""
+        selections: dict[str, SceneSelection] = {}
+
+        def walk(scene: Scene) -> None:
+            selections[scene.scene_id] = scene.selection
+            for child in scene.children:
+                walk(child.scene)
+
+        for scene in self._state.scenes.values():
+            walk(scene)
+        for queued in self._state.queue:
+            walk(queued.scene)
+        for run in self._state.runs.values():
+            if run.active:
+                walk(run.scene)
+        return selections
 
     def revise_source_refs(self, old_refs: set[str], new_ref: str) -> tuple[str, ...]:
         """Revise future Scene definitions; admitted and queued snapshots stay intact."""
@@ -997,6 +1024,7 @@ class Runtime:
                     fade_out_seconds=fade_out,
                     after_end=after_end,
                     actuator_value=value, phase=run.phase,
+                    selection=run.scene.selection,
                 ))
         winners: dict[str, Intent] = {}
         for intent in intents:

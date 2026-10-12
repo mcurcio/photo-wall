@@ -16,6 +16,7 @@ import { useFlowInstance, useFlowRefs } from "./flow/useFlowInstance.js";
 import { useFlowWrite } from "./flow/useFlowWrite.js";
 import { useSceneHandOver } from "./flow/useSceneHandOver.js";
 import { mediaNow, sourceState } from "./mediaHealth.js";
+import { FitBoardFor } from "./domain/photo-fit-board.tsx";
 import { ScenePicker } from "./ScenePicker.jsx";
 import {
   activationAnswer,
@@ -293,16 +294,37 @@ function SceneStep({ value, problems, edit, snapshot, frames, sourceRefs, author
       />
       {value.sceneId !== "" && (
         <>
-          <dl className="record">
+          <dl className="record record--even">
             <dt>Frames</dt>
             <dd>
               <SceneFramesValue snapshot={snapshot} frames={frames} />
             </dd>
           </dl>
           <SceneSources snapshot={snapshot} refs={sourceRefs} authoredMedia={authoredMedia} />
+          {sourceRefs.length > 0 && frames.length > 0 && (
+            <SceneFit sceneId={value.sceneId} scene={definitions[value.sceneId]} sourceRefs={sourceRefs} frames={frames} />
+          )}
         </>
       )}
     </>
+  );
+}
+
+/**
+ * How the chosen Scene's photos fit its Frames, in one line that opens its Fit board
+ * (follow-ups C1): "Fits 3 of 4 Frames · Hall has no photo that fits". At the Scene's crop
+ * limit, or the house's when it has none.
+ */
+function SceneFit({ sceneId, scene, sourceRefs, frames }) {
+  const cropLimit = typeof scene?.selection?.crop_limit === "number" ? scene.selection.crop_limit : null;
+  const sourceKey = sourceRefs.join("\n");
+  const frameKey = frames.join("\n");
+  const question = useMemo(() => ({
+    selection: { sources: sourceKey.split("\n") }, frames: frameKey.split("\n"), crop_limit: cropLimit,
+  }), [sourceKey, frameKey, cropLimit]);
+  return (
+    <FitBoardFor question={question} size="strip" lead="wall" title={`How ${sceneId} fills its Frames`}
+      judged={{ at: "show-now", ownCrop: cropLimit !== null }} />
   );
 }
 
@@ -441,7 +463,7 @@ function SceneSources({ snapshot, refs, authoredMedia }) {
   });
   return (
     <>
-      <dl className="record" aria-label="Photos from">
+      <dl className="record record--even" aria-label="Photos from">
         <dt>Photos from</dt>
         <dd>
           {refs.length > 0 ? words.join(", ")

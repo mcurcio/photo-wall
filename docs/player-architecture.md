@@ -270,6 +270,10 @@ flowchart LR
 - **The base page** shows brightness with where it acts ("Brightness: on the display · 60 %", "Brightness: Photo Wall picture adjustment · 40 %", "Brightness: as the display has it", "Brightness: on the display · the display did not take it"), in place of 1b's "Panel brightness unavailable". Picture adjustment is never called measured panel brightness ([failure visibility](requirements.md#failure-visibility-and-recovery)).
 - **No backwards compatibility.** Central and the Pis must run the 1c release together; how to operate VCP 10 and 12 by hand, and the bench steps, are the repo skill [display-control](../.claude/skills/display-control/SKILL.md).
 
+## Each photo's crop (5a)
+
+The Player draws the part of a photo its layer names and decides nothing about it. A media layer carries `Layer.crop` ([execution contract](execution-contract.md#what-a-frame-shows-its-crop-and-when-a-photo-is-on-screen)); `player/geometry.py` `photo_rect` turns it into the source window with `contracts/photo_crop.py` `crop_window`, the same function Central's fit rule uses, and `player/native.py` samples only that window, in Cover and Corners alike. The window's aspect is the Player's own Frame display profile. A kept still takes effect at the instant `contracts/on_screen.py` `kept_from` gives (its start plus its fade-in), the same instant Central's wall plan counts it from (`player/executor.py` `_apply_after_end`). Proven on the scalar reference (`tests/test_native_math.py`) and on the real renderer by the pixel harness's crop case (`tests/native_renderer_pixel_harness.py`, CI `node-pid1.yml` `display-harness`): with offset 0 a 9:16 Frame shows only the photo's left part, with offset 1 only its right. A Player released before 5a refuses a plan that carries a crop.
+
 ## Telemetry and fault channels
 
 Each node owner holds its own boot-scoped session (`NodeSession`, owners `host_core`, `app_effect_broker`, `app_manager`, `display_host`); the Player has its own enrollment on `/v1/player/*`.

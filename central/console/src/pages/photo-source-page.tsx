@@ -12,6 +12,8 @@ import {
   defaultQuery,
 } from "../domain/source-query-editor";
 import { type SourcePoolViewData, SourcePoolView, poolWords } from "../domain/source-pool-view";
+import { fitLine, type FitQuestion, fitReading, PhotoFitBoard, useFitRead } from "../domain/photo-fit-board";
+import type { SceneUse } from "../domain/photo-fit";
 import {
   albumsById,
   peopleById,
@@ -33,6 +35,7 @@ import { useDraftPool } from "../useDraftPool.js";
 import { sourceCheckMessage, useSourceCheck } from "../useSourceCheck.js";
 import { Button } from "../ui/button";
 import { Field, TextInput } from "../ui/field";
+import { Select } from "../ui/select";
 import { Link } from "../ui/link";
 import { Inline, Stack } from "../ui/stack";
 
@@ -116,7 +119,11 @@ export interface PhotoSourcePageProps {
   onDiscard: () => void;
   /** Called with true once anything is changed (the sidebar marks the section). */
   onChanged: (changed: boolean) => void;
+  /** The stored Scenes that use this Source: its Fit board can judge as one of them does. */
+  scenes?: readonly SceneUse[];
 }
+
+const HOUSE = "";
 
 /**
  * The Photo source editor (`#/sources/new/query`, `#/sources/<name>/edit/query`; design-language
@@ -124,7 +131,7 @@ export interface PhotoSourcePageProps {
  * real: its photos join the pool as Immich is read. Every change sends the query and the pool
  * view starts again; the name and Save work at any time (C8), and Save carries the pool over.
  */
-export function PhotoSourcePage({ editing, forLabel, onSaved, onDiscard, onChanged }: PhotoSourcePageProps) {
+export function PhotoSourcePage({ editing, forLabel, onSaved, onDiscard, onChanged, scenes = [] }: PhotoSourcePageProps) {
   const library = useLibraryConnections({ cadenceMs: CONNECTIONS_CADENCE_MS });
   const connections = useMemo(
     () => (library.connections ?? []).map((c: { connection_ref: string; name: string }) => ({ connection_ref: c.connection_ref, name: c.name })),
@@ -189,8 +196,23 @@ export function PhotoSourcePage({ editing, forLabel, onSaved, onDiscard, onChang
     onChanged(true);
   };
 
+  // How the photos fit the Frames (follow-ups C1): the unsaved Source's photos (or, before it
+  // exists, the saved one's) on every Frame, at the house crop limit or as a Scene using it.
+  const [judgeAt, setJudgeAt] = useState(HOUSE);
+  const judgingScene = scenes.find((scene) => scene.sceneId === judgeAt) ?? null;
+  const fitQuestion = useMemo((): FitQuestion | null => {
+    const selection = draftRef !== null ? { drafts: [draftRef] }
+      : editing !== null ? { sources: [editing.sourceRef] } : null;
+    return selection === null ? null : { selection, frames: null, crop_limit: judgingScene?.cropLimit ?? null };
+  }, [draftRef, editing, judgingScene]);
   const check = useSourceCheck(editing?.sourceRef ?? null);
   const view = pool.view as SourcePoolViewData | null;
+  // The same question is asked again whenever the pool read under it moves on (Immich read
+  // further, or the query changed and a new pool started).
+  const fit = useFitRead(fitQuestion, { refreshKey: JSON.stringify([view?.in_pool ?? null, view?.check ?? null]) });
+  // While Immich is still being read the board's count ("11 photos so far") is the page's one
+  // count; the grid under it is an older read, dimmed, its own count hidden.
+  const reading = fitReading(fit.state);
   const checkNote = editing === null ? null
     : sourceCheckMessage(check.feedback[editing.sourceRef], view?.check ?? null);
 
@@ -255,10 +277,23 @@ export function PhotoSourcePage({ editing, forLabel, onSaved, onDiscard, onChang
         </>
       )}
       previewTitle="Photos in this Source"
-      previewLine={view === null ? "Reading the pool…" : poolWords(view)}
+      previewLine={[view === null ? "Reading the pool…" : reading ? null : poolWords(view), fitLine(fit.state)]
+        .filter((part) => part !== null).join(" · ")}
       preview={() => (
-        <SourcePoolView view={view} pages={pool.pages} hasMore={pool.hasMore} onLoadMore={() => void pool.loadMore()}
-          loadingMore={pool.loadingMore} error={pool.error} filters={filters} />
+        <Stack>
+          {scenes.length > 0 && (
+            <Field label="Judge as" help="At the house crop limit, or as a Scene that uses this Source.">
+              <Select value={judgeAt} onChange={setJudgeAt} options={[
+                { value: HOUSE, label: "The house crop limit" },
+                ...scenes.map((scene) => ({ value: scene.sceneId, label: `Scene ${scene.sceneId}` })),
+              ]} />
+            </Field>
+          )}
+          <PhotoFitBoard read={fit} size="full" lead="shapes" collapse={false}
+            title="What these photos are, and which Frames can show them" judged={{ at: "source", scene: judgingScene?.sceneId ?? null }} />
+          <SourcePoolView view={view} pages={pool.pages} hasMore={pool.hasMore} onLoadMore={() => void pool.loadMore()}
+            loadingMore={pool.loadingMore} error={pool.error} filters={filters} reading={reading} />
+        </Stack>
       )}
       saveBar={(
         <SaveBar

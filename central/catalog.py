@@ -4,6 +4,7 @@ from typing import Literal
 
 from pydantic import Field
 
+from central.wall_plan.key_content import Analysis
 from contracts.models import Identifier, Instant, Model, Variant
 
 
@@ -15,6 +16,10 @@ class Candidate(Model):
     captured_at: Instant
     variant: Variant | None = None
     preparation_failure: str | None = Field(default=None, pattern=r"^[a-z_]{1,64}$")
+    # Roadmap 5a: its key content (central/wall_plan/key_content.py), hydrated at read time like
+    # the variant; None: not measured yet (the Planner requests a measurement). Never stored in
+    # an authored candidate's row.
+    analysis: Analysis | None = None
 
 
 class SourcePool(Model):

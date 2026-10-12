@@ -103,6 +103,9 @@ class Library:
         self.searches: list[dict] = []
         self.routes: dict[str, object] = {}
         self.permissions = ["all"]
+        # v2.5.6 `ServerFeaturesDto` (a subset): facial recognition on, as Immich ships.
+        self.features = {"facialRecognition": True, "smartSearch": True, "map": True,
+                         "trash": True, "search": True}
 
     def json(self, value, status=200):
         return httpx.Response(status, json=value)
@@ -120,6 +123,8 @@ class Library:
         if path == "/api/api-keys/me":
             return self.json({"id": ref(9), "name": "wall", "createdAt": iso(T0),
                               "updatedAt": iso(T0), "permissions": self.permissions})
+        if path == "/api/server/features":
+            return self.json(self.features)
         if path == "/api/search/metadata":
             body = json.loads(request.content)
             self.searches.append(body)
@@ -798,3 +803,56 @@ def test_listed_tags_are_stripped_of_control_and_bidi_characters_and_sorted():
     assert [(t.path, t.name) for t in tags] == [("", ""), ("Ab", "b"), ("Family", "Family"),
                                                 ("Zoo", "Zoo")]
     assert tags[0].tag_ref == ref(3)
+
+
+# 11. faces and face detection (roadmap 5a, slice M1) -------------------------------------------
+
+
+def face(x1, y1, x2, y2, width=1440, height=1080, **changes) -> dict:
+    """One v2.5.6 `AssetFaceResponseDto`."""
+    row = {"id": ref(70), "boundingBoxX1": x1, "boundingBoxY1": y1, "boundingBoxX2": x2,
+           "boundingBoxY2": y2, "imageWidth": width, "imageHeight": height,
+           "person": None, "sourceType": "machine-learning"}
+    row.update(changes)
+    return row
+
+
+def test_faces_are_read_on_the_size_immich_measured_them_and_malformed_ones_left_out():
+    library = Library()
+    library.routes["/api/faces"] = library.json([
+        face(0, 0, 100, 100), face(-4, 900, 300, 1084, width=1440, height=1080),
+        face(10, 10, 10, 50),                       # degenerate
+        face(10, 10, 50, 50, imageWidth=None),     # a field missing
+        face(10, 10, 50, 50, boundingBoxY2="50"),   # not a number
+    ])
+    boxes = run(library.client().faces(ref(8)))
+    assert [box.model_dump() for box in boxes] == [
+        {"x1": 0, "y1": 0, "x2": 100, "y2": 100, "image_width": 1440, "image_height": 1080},
+        {"x1": 0, "y1": 900, "x2": 300, "y2": 1084, "image_width": 1440, "image_height": 1080}]
+    request = next(r for r in library.requests if r.url.path == "/api/faces")
+    assert request.url.params["id"] == ref(8)
+
+
+def test_faces_the_key_may_not_read_are_no_faces():
+    library = Library()
+    library.routes["/api/faces"] = httpx.Response(403, json={"message": "Missing permission"})
+    assert run(library.client().faces(ref(8))) == ()
+
+
+def test_faces_while_immich_fails_are_unavailable():
+    library = Library()
+    library.routes["/api/faces"] = httpx.Response(500, json={"message": "boom"})
+    with pytest.raises(LibraryUnavailable):
+        run(library.client().faces(ref(8)))
+
+
+@pytest.mark.parametrize(("features", "on"), [
+    ({"facialRecognition": False, "smartSearch": True}, False),
+    ({"facialRecognition": True}, True),
+    ({"smartSearch": True}, None),
+])
+def test_contact_reads_whether_immich_detects_faces(features, on):
+    library = Library()
+    statistics(library)
+    library.features = features
+    assert run(library.client().contact()).face_detection is on

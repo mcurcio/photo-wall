@@ -16,6 +16,7 @@ from central.runtime import (
     RunView,
     Scene,
 )
+from central.wall_plan.selection import SceneSelection
 
 
 def media(target="frame:left", source="holiday:v1", **kwargs):
@@ -1077,3 +1078,46 @@ def test_a_photo_is_kept_only_when_no_run_beneath_it_plays_on():
     assert after_ends(None) == [("kept", "keep_this_photo")]
     assert after_ends("after") == [("kept", "keep_this_photo")]
     assert after_ends("beneath") == [("other", "keep_this_photo"), ("kept", "leave_as_is")]
+
+
+# Roadmap 5a (slice O1): each Intent carries its own Scene's selection, and coordination reads the
+# shown history of every Scene Runtime can plan.
+
+def test_an_intent_carries_its_own_scenes_selection_and_a_childs_carries_the_childs():
+    parent_selection = SceneSelection(order="chronological", no_repeat_days=3, crop_limit=0.5)
+    child_selection = SceneSelection(order="on_this_day", no_repeat_days=0, crop_limit=0.2)
+    runtime = Runtime()
+    runtime.set_scene(Scene(
+        scene_id="parent", cycle_seconds=60, selection=parent_selection,
+        contributions=(media("frame:left"),),
+        children=(Child(scene=Scene(scene_id="child", cycle_seconds=60, selection=child_selection,
+                                    contributions=(media("frame:right"),))),),
+    ))
+    runtime.activate("parent", "parent-start", 0)
+    view = runtime.project(10)
+    assert view.for_target("frame:left").selection == parent_selection
+    assert view.for_target("frame:right").scene_id == "child"
+    assert view.for_target("frame:right").selection == child_selection
+    timeline = runtime.timeline(0, 30)
+    assert {intent.scene_id: intent.selection for v in timeline for intent in v.contributions} == {
+        "parent": parent_selection, "child": child_selection}
+
+
+def test_planning_selections_name_configured_child_and_admitted_scenes():
+    configured = SceneSelection(crop_limit=0.4)
+    child = SceneSelection(order="newest_first")
+    admitted = SceneSelection(crop_limit=0.5)
+    runtime = Runtime()
+    runtime.set_scene(Scene(scene_id="show", cycle_seconds=60, selection=admitted,
+                            contributions=(media("frame:left"),)))
+    runtime.activate("show", "show-start", 0)
+    # A later edit changes the configured Scene; the running Run keeps its admitted snapshot.
+    runtime.set_scene(Scene(scene_id="show", revision=2, cycle_seconds=60, selection=configured,
+                            contributions=(media("frame:left"),)))
+    runtime.set_scene(Scene(
+        scene_id="family", cycle_seconds=60,
+        children=(Child(scene=Scene(scene_id="kids", cycle_seconds=60, selection=child,
+                                    contributions=(media("frame:right"),))),),
+    ))
+    assert runtime.planning_selections() == {
+        "show": admitted, "family": SceneSelection(), "kids": child}

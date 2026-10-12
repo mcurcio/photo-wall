@@ -25,6 +25,7 @@ from central.photo_library.model import (
     LibraryNote,
     MissingPermissions,
     NeedsALook,
+    NoFaceDetection,
     NoFullSizeCopies,
     OtherUser,
     UntestedVersion,
@@ -104,7 +105,8 @@ def contact_health(result: ContactResult, *, bound_user: ImmichUser | None,
 
     Precedence: a ContactRefused's problem; then OtherUser when `bound_user` is set and the
     answer's user differs; then ImmichTooOld; then MissingPermissions. With none of these, ok
-    with notes: UntestedVersion, and NoFullSizeCopies when `full_size_copies` is False.
+    with notes: UntestedVersion, NoFullSizeCopies when `full_size_copies` is False, and
+    NoFaceDetection when `face_detection` is False (roadmap 5a: crops then ignore faces).
     `since` stays `previous.since` while the problem's kind is unchanged, else `checked_at`.
     An OtherUser names each user by name, or by email when the name is empty.
     """
@@ -124,6 +126,8 @@ def contact_health(result: ContactResult, *, bound_user: ImmichUser | None,
                 notes.append(verdict)
             if result.full_size_copies is False:
                 notes.append(NoFullSizeCopies())
+            if result.face_detection is False:
+                notes.append(NoFaceDetection())
             return HealthOk(checked_at=checked_at, notes=tuple(notes))
     since = checked_at
     if isinstance(previous, NeedsALook) and previous.problem.kind == problem.kind:

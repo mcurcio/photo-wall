@@ -47,12 +47,12 @@ from playwright.sync_api import expect
 SHOW_SECTIONS = frozenset({"now", "scenes", "schedule", "sources"})
 WALL_SECTIONS = frozenset({"wall"})
 FLEET_SECTIONS = frozenset({"hardware", "releases"})
-SETTINGS_SECTIONS = frozenset({"photo-library"})
+SETTINGS_SECTIONS = frozenset({"photo-library", "photo-fit"})
 SECTIONS = SHOW_SECTIONS | WALL_SECTIONS | FLEET_SECTIONS | SETTINGS_SECTIONS | {"attention"}
 LABELS = {
     "now": "Now", "scenes": "Scenes", "schedule": "Schedule", "sources": "Sources",
     "wall": "Wall", "hardware": "Hardware", "releases": "Releases", "attention": "Needs attention",
-    "photo-library": "Photo library",
+    "photo-library": "Photo library", "photo-fit": "Photo fit",
     # No sidebar link: one Pi's Software and screens page, reached from its Pi header.
     "players": "Software and screens",
 }
@@ -194,14 +194,24 @@ def scene_continue(page, step=None):
 
 def start_scene(page, *, hand_picked=False):
     """Go to Scenes, press "New Scene", answer Kind (live, or hand-picked per frame) and
-    Continue; returns the flow's form, now on the Photos step."""
+    Continue; returns the flow's form, now on the Frames step (Frames come before Photos since
+    follow-ups C1)."""
     go(page, "scenes")
     page.get_by_role("region", name="Scenes", exact=True).get_by_role(
         "button", name="New Scene", exact=True).click()
     form = scene_form(page)
     form.get_by_label(HAND_PICKED if hand_picked else LIVE, exact=True).check()
-    scene_continue(page, "Photos")
+    scene_continue(page, "Frames")
     return form
+
+
+def scene_frames_then_photos(page, form, frames, source=None):
+    """From the Frames step: choose `frames`, Continue to Photos and, with `source`, choose it."""
+    for frame_id in frames:
+        form.get_by_label(f"Target frame {frame_id}", exact=True).check()
+    scene_continue(page, "Photos")
+    if source is not None:
+        choose_source(form, source)
 
 
 def author_scene(page, scene_id, source, frames, *, seconds=None, loop=None, submit=True):
@@ -210,9 +220,9 @@ def author_scene(page, scene_id, source, frames, *, seconds=None, loop=None, sub
 
     `frames` is the target frame ids for a Scene live from the source, or a
     {frame_id: asset_id} mapping for one hand-picked per frame with that item chosen on
-    each frame. The flow runs Kind → Photos → Frames → [Media per frame] → Playback →
-    Review. `seconds` fills "Seconds per cycle" and `loop` sets "Keep playing until the
-    Program ends" (under Playback's Advanced); None keeps each default. `scene_id` is typed
+    each frame. The flow runs Kind → Frames → Photos → [Media per frame] → Playback →
+    Review. `seconds` fills "Each photo shows for" and `loop` sets "Keep repeating" (under
+    Playback's Advanced); None keeps each default. `scene_id` is typed
     as the Scene name on Review, so it must be an id the name rule keeps as is (lowercase
     words joined by hyphens), unless the test is about the name rule.
 
@@ -221,20 +231,17 @@ def author_scene(page, scene_id, source, frames, *, seconds=None, loop=None, sub
     """
     picks = frames if isinstance(frames, Mapping) else None
     form = start_scene(page, hand_picked=picks is not None)
-    choose_source(form, source)
-    scene_continue(page, "Frames")
-    for frame_id in frames:
-        form.get_by_label(f"Target frame {frame_id}", exact=True).check()
+    scene_frames_then_photos(page, form, frames, source)
     if picks is not None:
         scene_continue(page, "Media per frame")
         for frame_id, asset_id in picks.items():
             form.get_by_label(f"Media for frame {frame_id}", exact=True).select_option(asset_id)
     scene_continue(page, "Playback")
     if seconds is not None:
-        form.get_by_label("Seconds per cycle", exact=True).fill(str(seconds))
+        form.get_by_label("Each photo shows for", exact=True).fill(str(seconds))
     if loop is not None:
         form.get_by_role("button", name="Advanced", exact=True).click()
-        form.get_by_label("Keep playing until the Program ends", exact=True).set_checked(loop)
+        form.get_by_label("Keep repeating", exact=True).set_checked(loop)
     scene_continue(page, "Review")
     form.get_by_label("Scene name", exact=True).fill(scene_id)
     if not submit:

@@ -21,7 +21,10 @@ export type LibraryProblem =
   | { kind: "unexpected_answer"; detail: string }
   | { kind: "other_user"; expected: string; found: string };
 
-export type LibraryNote = { kind: "untested_version"; found: string } | { kind: "no_full_size_copies" };
+export type LibraryNote =
+  | { kind: "untested_version"; found: string }
+  | { kind: "no_full_size_copies" }
+  | { kind: "no_face_detection" };
 
 export type LibraryHealth =
   | { state: "not_checked" }
@@ -113,11 +116,39 @@ export function problemWords(connection: LibraryConnectionView, problem: Library
   }
 }
 
-/** The notes of a passing check: shown, nothing stops. */
+/** The notes of a passing check: shown, nothing stops. One arm per kind, so a new kind is a
+ * compile error here rather than worded as another. */
 export function noteWords(note: LibraryNote): string {
-  return note.kind === "untested_version"
-    ? `Immich ${note.found} is newer than Photo Wall has been tested with; it keeps working.`
-    : "RAW photos without a full-size copy in Immich play at Immich's preview size. Turn on full-size copies in Immich to show them in full.";
+  switch (note.kind) {
+    case "untested_version":
+      return `Immich ${note.found} is newer than Photo Wall has been tested with; it keeps working.`;
+    case "no_full_size_copies":
+      return "RAW photos without a full-size copy in Immich play at Immich's preview size. Turn on full-size copies in Immich to show them in full.";
+    case "no_face_detection":
+      return "Immich's face detection is off, so crops ignore faces.";
+  }
+}
+
+/** Where Immich's face detection is turned on, in Immich's own words (no link: an Immich
+ * address with an id stays out of the page, R22). */
+export const FACE_SETTINGS_WORDS =
+  "Open Immich face settings: Administration › Settings › Machine Learning Settings › Facial Recognition.";
+
+/**
+ * A passing check's note on a connection's own page (follow-ups C2): face detection off is a
+ * notice with its consequence in numbers and where to turn it on; the others are a line.
+ */
+export function LibraryNoteLine({ connection, note }: { connection: LibraryConnectionView; note: LibraryNote }) {
+  if (note.kind !== "no_face_detection") return <Note>{noteWords(note)}</Note>;
+  const photos = connection.counts?.photos ?? null;
+  const consequence = photos === null ? "crops cannot protect faces"
+    : `crops cannot protect faces in ${countWords(photos, "photo")}`;
+  return (
+    <ProblemCard scope="setup" subject={connectionSubject(connection)} variant="inline"
+      verdict={{ severity: "notice", label: "Face detection off", receipt: null }}
+      what={`Immich's face detection is off, so ${consequence}. Crops still keep the interesting part. ${FACE_SETTINGS_WORDS}`}
+      doing="Photos keep playing." />
+  );
 }
 
 export interface LibraryHealthCardProps {

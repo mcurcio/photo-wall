@@ -2,6 +2,7 @@ import { useState } from "react";
 import type * as React from "react";
 
 import { Sheet } from "../ui/sheet";
+import { Split } from "../ui/split";
 
 export interface EditorPageProps {
   /** The page's EntityHeader: its one title. */
@@ -33,13 +34,12 @@ export function EditorPage({ header, form, previewTitle, preview, previewLine, s
         type="button"
         onClick={() => setOpen(true)}
         className={
-          "flex min-h-11 w-full cursor-pointer items-center justify-between gap-3 rounded-card border border-line "
+          "flex min-h-11 w-full cursor-pointer items-center rounded-card border border-line "
           + "bg-surface-raised px-4 py-2 text-left font-sans text-sm text-text md:hidden "
           + "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
         }
       >
-        <span>{previewLine}</span>
-        <span className="text-accent" aria-hidden="true">Show ›</span>
+        <Split as="span" action={<span className="text-accent" aria-hidden="true">Show ›</span>}>{previewLine}</Split>
       </button>
       <div className="grid min-w-0 gap-6 lg:grid-cols-2 lg:items-start">
         <div className="flex min-w-0 flex-col gap-3">{form}</div>

@@ -17,7 +17,8 @@ import { usePolledRead } from "./polledRead.js";
  *   | {kind: "immich_too_old", found: string, oldest: string} | {kind: "unreachable"}
  *   | {kind: "unexpected_answer", detail: string}
  *   | {kind: "other_user", expected: string, found: string}} LibraryProblem
- * @typedef {{kind: "untested_version", found: string} | {kind: "no_full_size_copies"}} LibraryNote
+ * @typedef {{kind: "untested_version", found: string} | {kind: "no_full_size_copies"}
+ *           | {kind: "no_face_detection"}} LibraryNote
  * @typedef {{state: "not_checked"} | {state: "ok", checked_at: number, notes: LibraryNote[]}
  *   | {state: "needs_a_look", problem: LibraryProblem, since: number, checked_at: number}} LibraryHealth
  * @typedef {{connection_ref: string, name: string, url: string|null, key_hint: string|null,
@@ -110,6 +111,18 @@ export const searchPlaces = (ref, q) => list("places", ref, { q });
 /** @returns {Promise<{ok: true, answer: ListAnswer<LibraryTag>}|{ok: false, error: string}>} */
 export const searchTags = (ref, q) => list("tags", ref, { q });
 export const tagsById = (ref, ids) => list("tags", ref, { ids });
+
+/**
+ * One pool photo's facts and Immich's copies of it (follow-ups A3, `PhotoFacts`): the original's
+ * type, size and bytes, each copy with whether Immich keeps it and its size when Photo Wall last
+ * measured it, and the copy the wall's prepared one was made from. No Immich id (R22).
+ *
+ * @param {string} assetId
+ * @returns {Promise<{ok: true, facts: object}|{ok: false, error: string}>}
+ */
+export function photoFacts(assetId) {
+  return call("facts", `${LIBRARY}/photos/${encodeURIComponent(assetId)}`, { method: "GET" });
+}
 
 const NOT_READ = Object.freeze({ connections: null, failed: false });
 

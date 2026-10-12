@@ -59,3 +59,15 @@ export const List: Story = {
     </MediaCardList>
   ),
 };
+
+/** At phone width (384 px) under a container that lets text wrap anywhere (the Sources page's
+ * region does), with a long title: "More" stays whole beside it, never "Mor / e". */
+export const LongTitlePhone: Story = {
+  args: {
+    title: "favourite-landscapes-from-the-summer-holidays",
+    detail: "favourites only · last 3 years · no screenshots",
+    menu: { label: "More actions for favourite-landscapes-from-the-summer-holidays",
+      items: [{ label: "Check now", onAction: () => {} }, { label: "Delete", onAction: () => {} }] },
+  },
+  render: (args) => <div className="w-96 wrap-anywhere"><MediaCard {...args} /></div>,
+};

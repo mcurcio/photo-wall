@@ -396,7 +396,7 @@ def test_hardware_keeps_the_frame_profile_apart_from_the_panel_record(page, regi
         expect(port).to_contain_text("Fed by: Pi")
         expect(port).to_contain_text(f"Pi {player_id[-6:]} · HDMI 1")  # the port, not "HDMI-A-1"
         expect(port).not_to_contain_text(OUTPUT)
-        expect(port).to_contain_text("Display, when the Pi last started: Connected, 1920 × 1080")
+        expect(port).to_contain_text("Display, when the Pi last started: Connected, 1,920 × 1,080")
         expect(port).not_to_contain_text("24")
         # Central's own words are under Details.
         port.get_by_role("button", name="Details", exact=True).click()
@@ -418,7 +418,7 @@ def test_the_frame_profile_notes_a_reported_resolution_it_does_not_match(page, r
         problem = _mismatch(frame)
         expect(problem).to_contain_text("Frame profile: Check the Display.")
         expect(problem).to_contain_text(
-            "The Pi reported its Display at 1920 × 1080, but this Frame's profile is 1080 × 1920.")
+            "The Pi reported its Display at 1,920 × 1,080, but this Frame's profile is 1,080 × 1,920.")
         expect(problem).to_contain_text("The saved rotation 0° was considered")
         # One action: edit the profile; the how-to is under Details.
         problem.get_by_role("button", name="Edit Frame profile", exact=True).click()

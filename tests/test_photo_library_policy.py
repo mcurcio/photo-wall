@@ -13,6 +13,7 @@ from central.photo_library.model import (
     KeyRejected,
     MissingPermissions,
     NeedsALook,
+    NoFaceDetection,
     NoFullSizeCopies,
     NotChecked,
     OtherUser,
@@ -78,9 +79,10 @@ NEWER = ImmichVersion(major=2, minor=6, patch=0)
 
 
 def answer(*, user: ImmichUser = OWNER, version: ImmichVersion = TESTED,
-           missing: tuple[str, ...] = (), full_size: bool | None = True) -> ContactAnswer:
+           missing: tuple[str, ...] = (), full_size: bool | None = True,
+           faces: bool | None = True) -> ContactAnswer:
     return ContactAnswer(version=version, user=user, missing_permissions=missing,
-                         full_size_copies=full_size)
+                         full_size_copies=full_size, face_detection=faces)
 
 
 def health(result: ContactAnswer | ContactRefused, *, bound: ImmichUser | None = OWNER,
@@ -116,6 +118,18 @@ def test_a_passing_contact_is_ok_with_its_notes_in_order() -> None:
     assert health(answer(full_size=None)) == HealthOk(checked_at=100.0, notes=())
     assert health(answer(version=NEWER, full_size=False)) == HealthOk(
         checked_at=100.0, notes=(UntestedVersion(found="2.6.0"), NoFullSizeCopies()))
+
+
+@pytest.mark.parametrize(("faces", "notes"), [
+    (False, (UntestedVersion(found="2.6.0"), NoFullSizeCopies(), NoFaceDetection())),
+    (True, (UntestedVersion(found="2.6.0"), NoFullSizeCopies())),
+    (None, (UntestedVersion(found="2.6.0"), NoFullSizeCopies())),
+])
+def test_face_detection_off_is_a_note_after_the_others(faces: bool | None,
+                                                       notes: tuple[object, ...]) -> None:
+    """Roadmap 5a: with Immich's face detection off, crops ignore faces (owner, 2026-10-11)."""
+    assert health(answer(version=NEWER, full_size=False, faces=faces)) == HealthOk(
+        checked_at=100.0, notes=notes)
 
 
 def test_since_carries_while_the_problem_kind_stays_the_same() -> None:

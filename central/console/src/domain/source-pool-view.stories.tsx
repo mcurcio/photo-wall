@@ -65,3 +65,7 @@ export const NotCheckedYet: Story = {
 };
 
 export const Reading: Story = { args: { view: null, pages: [] } };
+
+/** A newer read of the same photos is running beside it (the Fit board's "so far"): the grid is
+ * dimmed and its own count hidden, so the page shows one count. */
+export const OlderWhileReading: Story = { args: { view: COMPLETE, pages: [COMPLETE.items], hasMore: false, reading: true } };

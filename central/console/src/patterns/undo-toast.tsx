@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import { Button } from "../ui/button";
+import { Split } from "../ui/split";
 
 export interface UndoToastProps {
   message: string;
@@ -33,12 +34,11 @@ export function UndoToast({ message, onUndo, onExpire, seconds = 10 }: UndoToast
       onFocus={() => setPaused(true)}
       onBlur={() => setPaused(false)}
       className={
-        "fixed inset-x-4 bottom-4 z-20 mx-auto flex max-w-120 items-center justify-between gap-3 "
+        "fixed inset-x-4 bottom-4 z-20 mx-auto flex max-w-120 items-center "
         + "rounded-card border border-line bg-surface-raised px-4 py-2 font-sans text-sm text-text shadow-lg shadow-shadow"
       }
     >
-      <span className="min-w-0">{message}</span>
-      <Button variant="ghost" onClick={onUndo}>Undo</Button>
+      <Split action={<Button variant="ghost" onClick={onUndo}>Undo</Button>}>{message}</Split>
     </div>
   );
 }

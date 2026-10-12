@@ -11,8 +11,10 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from central.catalog import Candidate, SourcePool
-from central.planner import AcquisitionRequest
-from contracts.models import FrameProfile, Variant
+from central.planner import AcquisitionRequest, MeasureRequest
+from central.wall_plan.fit import FitTarget
+from central.wall_plan.fit_settings import FitSettings
+from contracts.models import Variant
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,12 +57,15 @@ class MediaApplication(Protocol):
 
     def request_acquisitions(self, requests: tuple[AcquisitionRequest, ...]) -> int: ...
 
+    def request_measurements(self, requests: tuple[MeasureRequest, ...]) -> int: ...
+
     def sources(self) -> list[dict]: ...
 
     def media_read(self) -> dict: ...
 
     def source_candidates(
-        self, source_ref: str, *, profile: FrameProfile | None = None,
+        self, source_ref: str, *, target: FitTarget | None = None,
+        crop_limit: float | None = None, settings: FitSettings,
     ) -> dict: ...
 
     def author_authored_candidates(

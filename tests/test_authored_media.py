@@ -26,8 +26,10 @@ class SavedSource(NamedTuple):
     source_ref: str
 
 
-def asset(number=1, *, width=30, height=50, original_bytes=None, kind="image"):
-    """A pool photo; with `original_bytes`, the unedited photo whose checksum is theirs."""
+def asset(number=1, *, width=1080, height=1920, original_bytes=None, kind="image"):
+    """A pool photo; with `original_bytes`, the unedited photo whose checksum is theirs. Its
+    default size fills a 1080 x 1920 Frame (roadmap 5a: a photo goes only on a Frame it fills,
+    with at least the Frame's pixels)."""
     revision = (hashlib.sha1(original_bytes).hexdigest() if original_bytes is not None
                 else f"{number:040x}")
     return LibraryAsset(connection_ref=FIXTURE_CONNECTION, upstream_id=str(uuid.UUID(int=number)),
@@ -63,7 +65,7 @@ def test_authored_api_is_neutral_idempotent_and_membership_bound(registry):
         assert source.status_code == 200
         candidate = source.json()["candidates"][0]
         assert set(candidate) == {"asset_id", "kind", "original_width", "original_height",
-                                  "captured_at", "variant", "preparation_failure"}
+                                  "captured_at", "variant", "preparation_failure", "analysis"}
         assert all(secret not in source.text for secret in ("fixture-1", "connection_ref", "upstream"))
         assert client.post("/v1/operator/authored-candidates", headers=headers,
                            json={"source_ref": spec.source_ref, "asset_ids": [originals[0].asset_id] * 2}).status_code == 422

@@ -13,6 +13,7 @@ from test_registry import ADMIN, enroll
 from central.app import create_app
 from central.player_control_protocol import project_state, state_digest
 from contracts.models import FrameProfile, Layer, OutputBinding, Plan, PlayerConfiguration, Variant
+from contracts.photo_crop import CENTRED
 from contracts.player_control import (
     ControlAck,
     ControlHello,
@@ -272,11 +273,11 @@ def after_end_plan() -> tuple[PlayerConfiguration, Plan]:
     photo = Variant(sha256="b" * 64, size=10, media_type="image/jpeg", width=10, height=10)
     layers = (
         Layer(assignment_id="kept", start=0, end=10, media_origin=0, variant=photo,
-              after_end="keep_this_photo", **common),
+              crop=CENTRED, after_end="keep_this_photo", **common),
         Layer(assignment_id="ending", start=10, end=14, media_origin=10, presentation="black",
               after_end="keep_nothing", **common),
         Layer(assignment_id="overlay", start=14, end=20, media_origin=14, variant=photo,
-              priority=5, **common),
+              crop=CENTRED, priority=5, **common),
     )
     return configuration, Plan(plan_id="plan-1", revision=1, player_id=configuration.player_id,
                                authority_epoch=1, issued_at=0, valid_from=0, valid_until=20,

@@ -88,9 +88,11 @@ from central.photo_library.ports import (
     KnownRevision,
     LibraryRefused,
 )
+from central.photo_library.rendition import covers, frame_need
 from central.photo_library.views import (
     ConnectionWrite,
     CopyView,
+    FrameCopy,
     KindCounts,
     LeftOutCount,
     LibraryConnectionView,
@@ -195,6 +197,14 @@ def _copy_sizes_in(conn: Any, asset_id: str) -> dict[MeasurableCopy, CopySize]:
     return {row["copy"]: CopySize(name=row["copy"], media_type=row["media_type"],
                                   width=row["width"], height=row["height"],
                                   measured_at=row["measured_at"]) for row in rows}
+
+
+def _frame_copy(frame: FrameOutput, preview: CopySize | None) -> FrameCopy:
+    need = frame_need(frame)
+    return FrameCopy(frame_id=frame.frame_id, need_px=(need.width, need.height),
+                     output_known=frame.output_px is not None,
+                     preview_holds=None if preview is None
+                     else covers(preview.width, preview.height, (need,)))
 
 
 # The `original_*` columns, in `_original_values`'s order.
@@ -960,6 +970,7 @@ class PgPhotoLibrary:
                 raise LibraryRefused("photo_not_found", 404)
             asset = library_assets_in(conn, (asset_id,))[asset_id]
             measured = _copy_sizes_in(conn, asset_id)
+            outputs = frame_outputs_in(conn) if asset.kind == "image" else ()
         original = asset.original
         kept = policy.copies_in_immich(asset.kind, asset.edited,
                                        None if original is None else original.media_type,
@@ -969,7 +980,8 @@ class PgPhotoLibrary:
             height=asset.height, edited=asset.edited, original=original,
             copies=tuple(CopyView(name=name, in_immich=in_immich, measured=measured.get(name))
                          for name, in_immich in kept.items()),
-            prepared_from=row["made_from"])
+            prepared_from=row["made_from"],
+            frames=tuple(_frame_copy(frame, measured.get("preview")) for frame in outputs))
 
     def pool_thumbnail(self, asset_id: str) -> PoolThumbnail | None:
         with self.db.transaction() as conn:

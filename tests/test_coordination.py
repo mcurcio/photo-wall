@@ -4,6 +4,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from psycopg.types.json import Jsonb
+from support.key_content_builders import face
+from support.measured_photos import measure, measure_all
 from support.photo_pools import photo, seed_pool
 from support.position import save_position
 from test_registry import SKEWED, enroll, frame
@@ -12,6 +14,7 @@ from central.coordination import CoordinationError, CoordinationLimits, Coordina
 from central.registry import RegistryError
 from central.runtime import Child, Contribution, Program, Scene
 from central.runtime_store import RuntimeStore
+from central.wall_plan.selection import SceneSelection
 from contracts.models import Failure, Readiness, Variant
 
 
@@ -133,13 +136,21 @@ def test_late_join_has_bounded_preparation_grace_and_keeps_logical_origin(regist
     assert first.start == first.media_origin == 990 and first.position(1002) == 12
 
 
-def publish_fixture_catalog(registry, digest="a" * 64, asset="original-a"):
+def publish_fixture_catalog(registry, digest="a" * 64, asset="original-a", *, also=()):
     """Source `library:1`'s pool becomes exactly one photo (`asset`), prepared as `digest`: a
-    complete check of the pool through the store's worker side, then the ready recipe state a
-    completed worker publication exposes (coordination hydrates variants through jobs)."""
+    complete check of the pool through the store's worker side, its key content measured
+    (roadmap 5a: the Planner places only measured photos), then the ready recipe state a
+    completed worker publication exposes (coordination hydrates variants through jobs).
+    `also` names more (asset, digest) photos of the same pool, prepared the same way: one photo
+    is never on two Frames at once (roadmap 5a), so a Scene on N Frames needs N photos."""
     variant = Variant(sha256=digest, size=10, media_type="image/jpeg", width=1080, height=1920)
-    pool_photo = photo(asset, taken_at=registry.clock.utc())
-    seed_pool(registry, "library:1", (pool_photo,))
+    # 4K portrait: a 9:16 Frame full screen (Cover) on the enrolled 1920 x 1080 Output draws
+    # its picture at 1920 x 3414 (its Frame output, follow-ups B1), which this photo holds.
+    pool_photo = photo(asset, taken_at=registry.clock.utc(), width=2160, height=3840)
+    others = [(photo(label, taken_at=registry.clock.utc(), width=2160, height=3840), other)
+              for label, other in also]
+    seed_pool(registry, "library:1", (pool_photo, *(item for item, _ in others)))
+    measure_all(registry, (pool_photo, *(item for item, _ in others)))
     recipe = "f" * 64
     with registry.db.transaction() as conn:
         conn.execute("INSERT INTO media_settings(singleton,max_bytes,recipe_id) VALUES(TRUE,%s,%s) "
@@ -151,6 +162,14 @@ def publish_fixture_catalog(registry, digest="a" * 64, asset="original-a"):
                      "VALUES(%s,%s,%s,'ready',%s,%s,%s)",
                      ("fixture-job-" + pool_photo.asset_id, pool_photo.asset_id, recipe,
                       registry.clock.utc(), digest, registry.clock.utc()))
+        for item, other in others:
+            conn.execute("INSERT INTO media_blobs VALUES(%s,%s,10,'ready',%s)",
+                         (other, Jsonb(variant.model_copy(update={"sha256": other}).model_dump(
+                             mode="json")), registry.clock.utc()))
+            conn.execute("INSERT INTO media_jobs(id,asset_id,recipe_id,state,earliest_start,"
+                         "variant_sha,updated_at) VALUES(%s,%s,%s,'ready',%s,%s,%s)",
+                         ("fixture-job-" + item.asset_id, item.asset_id, recipe,
+                          registry.clock.utc(), other, registry.clock.utc()))
     return variant
 
 
@@ -158,11 +177,14 @@ def test_a_scene_naming_two_sources_plays_only_their_pools_and_asks_for_their_ph
     """F-1: a contribution's photos are the union of the pools of the Sources it names, whether or
     not each pool's check completed (C7); a pool it does not name never plays."""
     setup_players(registry, count=1)
-    family = (photo("family", taken_at=900), photo("shared", taken_at=950))
-    garden = (family[1], photo("garden", taken_at=990))
+    # 4K portrait: what the 9:16 Frame on the 1920 x 1080 Output needs (its Frame output).
+    family = (photo("family", taken_at=900, width=2160, height=3840),
+              photo("shared", taken_at=950, width=2160, height=3840))
+    garden = (family[1], photo("garden", taken_at=990, width=2160, height=3840))
     seed_pool(registry, "family:1", family)
     seed_pool(registry, "garden:1", garden, complete=False)
     seed_pool(registry, "other:1", (photo("other", taken_at=999),))
+    measure_all(registry, (*family, garden[1], photo("other", taken_at=999)))
     coordinator = Coordinator(registry.db, registry.clock)
     coordinator.runtime.command("set_scene", Scene(scene_id="two", loop=True, cycle_seconds=60,
         contributions=(Contribution(target="frame:frame-0", kind="media",
@@ -170,8 +192,10 @@ def test_a_scene_naming_two_sources_plays_only_their_pools_and_asks_for_their_ph
     coordinator.runtime.command("activate", "two", "two-start", 1000)
     projection = coordinator.advance()
     union = {asset.asset_id for asset in family + garden}
-    chosen = [selection.asset_id for selection in projection.selections]
-    assert set(chosen) == union and len(chosen) > len(union)
+    # Nothing is prepared yet, so the preparation horizon requests them all and the hour's
+    # plan beyond it places them tentatively; the pool it does not name never plays.
+    planned = [entry.asset_id for entry in projection.plan if entry.asset_id is not None]
+    assert set(planned) == union and len(planned) > len(union)
     assert {request.asset_id for request in projection.acquisitions} == union
     assert "source_missing" not in {d.code for d in projection.diagnostics}
 
@@ -647,3 +671,83 @@ def test_orphaned_pending_cues_are_superseded_not_skipped_as_not_ready(registry)
     registry.clock.advance(150)
     coordinator.advance()
     assert "not_ready" not in skip_codes(registry).values()
+
+
+# Roadmap 5a (slice O1): a hand-placed photo is checked at its Scene's own crop limit. A square
+# photo on a 9:16 Frame crops 43.75 % of its area: it passes at 50 % and is refused at 35 %.
+
+def square_photo_scene(registry, crop_limit=None):
+    frame(registry, "portrait")
+    square = photo("square", taken_at=900, width=2000, height=2000)
+    seed_pool(registry, "square:1", (square,))
+    selection = {} if crop_limit is None else {"selection": SceneSelection(crop_limit=crop_limit)}
+    scene = Scene(scene_id="hand-placed", contributions=(
+        Contribution(target="frame:portrait", asset_refs=(square.asset_id,)),), **selection)
+    return scene, square
+
+
+def test_a_hand_placed_photo_is_authored_at_its_scenes_crop_limit(registry):
+    scene, square = square_photo_scene(registry, crop_limit=0.5)
+    coordinator = Coordinator(registry.db, registry.clock)
+    result = coordinator.configure_authored_scene(scene, "square:1", (square.asset_id,))
+    assert result["status"] == "configured" and result["created"] == 1
+
+
+def test_a_hand_placed_photo_beyond_the_default_crop_limit_is_refused(registry):
+    scene, square = square_photo_scene(registry)
+    coordinator = Coordinator(registry.db, registry.clock)
+    with pytest.raises(RegistryError, match="authored_incompatible"):
+        coordinator.configure_authored_scene(scene, "square:1", (square.asset_id,))
+
+
+def prepare(registry, photos):
+    """Each photo's prepared copy ready under the current recipe, as a worker leaves it."""
+    recipe = "f" * 64
+    with registry.db.transaction() as conn:
+        conn.execute("INSERT INTO media_settings(singleton,max_bytes,recipe_id) VALUES(TRUE,%s,%s) "
+                     "ON CONFLICT(singleton) DO UPDATE SET recipe_id=EXCLUDED.recipe_id",
+                     (4 * 1024**3, recipe))
+        for number, item in enumerate(photos):
+            digest = f"{number + 1:064x}"
+            variant = Variant(sha256=digest, size=10, media_type="image/jpeg",
+                              width=item.width, height=item.height)
+            conn.execute("INSERT INTO media_blobs VALUES(%s,%s,10,'ready',%s)",
+                         (digest, Jsonb(variant.model_dump(mode="json")), registry.clock.utc()))
+            conn.execute("INSERT INTO media_jobs(id,asset_id,recipe_id,state,earliest_start,"
+                         "variant_sha,updated_at) VALUES(%s,%s,%s,'ready',%s,%s,%s)",
+                         ("job-" + item.asset_id[-12:], item.asset_id, recipe,
+                          registry.clock.utc(), digest, registry.clock.utc()))
+
+
+def test_two_frames_of_one_shape_show_different_photos_with_their_crops(registry):
+    """Roadmap 5a (slice W1), through the real advance: the wall plan puts a photo on one Frame
+    at a time, offers each layer with its crop, and records each offered photo's Scene and pass.
+    A 2:3 photo with a face at its left edge is cropped to keep the left (offset 0) on these
+    9:16 Frames. Owner, 2026-10-11: "Never show the same photo on two frames at the same
+    time"."""
+    players = setup_players(registry, count=2)
+    portraits = tuple(photo(f"portrait-{n}", taken_at=900 + n, width=2400, height=3600)
+                      for n in range(3))
+    seed_pool(registry, "library:1", portraits)
+    measure(registry, portraits[0], faces=(face(0.0, 0.3, 0.15, 0.5),))
+    measure_all(registry, portraits[1:])
+    prepare(registry, portraits)
+    coordinator = Coordinator(registry.db, registry.clock)
+    schedule(coordinator, ["frame-0", "frame-1"], starts=1000, media=True)
+    plans = [coordinator.delivery(player["player_id"], 1)["plan"] for player in players]
+    first = [next(layer for layer in plan.layers if layer.start == 1000) for plan in plans]
+    assert first[0].variant != first[1].variant
+    by_digest = {f"{n + 1:064x}": item.asset_id for n, item in enumerate(portraits)}
+    offsets = {by_digest[layer.variant.sha256]: layer.crop.offset
+               for plan in plans for layer in plan.layers}
+    assert offsets.get(portraits[0].asset_id, 0.0) == 0.0
+    assert all(layer.crop is not None for plan in plans for layer in plan.layers)
+    with registry.db.transaction() as conn:
+        selected = conn.execute("SELECT assignment_id,asset_id,scene_id,pass_number "
+                                "FROM photo_selections ORDER BY starts_at,pass_number").fetchall()
+    offered = {layer.assignment_id: by_digest[layer.variant.sha256]
+               for plan in plans for layer in plan.layers}
+    assert {row["assignment_id"]: row["asset_id"] for row in selected} == offered
+    assert {row["scene_id"] for row in selected} == {"scheduled"}
+    passes = [row["pass_number"] for row in selected]
+    assert passes[0] == 1 and passes == sorted(passes)

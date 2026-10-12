@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import type * as React from "react";
 
 import { type CardChoice, MediaCard } from "../patterns/media-card";
 import type { MenuItem } from "../ui/menu";
@@ -71,6 +72,8 @@ export interface SourceCardProps {
   actions?: readonly MenuItem[];
   /** It is a choice in a form (the Scene editor's Photos step). */
   choice?: CardChoice;
+  /** How its photos fit the Frames, in one line (follow-ups C1). */
+  fit?: React.ReactNode;
 }
 
 /**
@@ -78,7 +81,7 @@ export interface SourceCardProps {
  * counts, its check's state (sourceWords.js, the one home of those words) and its actions, or
  * its choice in a form.
  */
-export function SourceCard({ source, name, now, href, note = null, actions, choice }: SourceCardProps) {
+export function SourceCard({ source, name, now, href, note = null, actions, choice, fit }: SourceCardProps) {
   const view = useSourceSummary(source.source_ref, JSON.stringify(source.check ?? null));
   const state = checkWords(source.check ?? null, now);
   return (
@@ -92,6 +95,7 @@ export function SourceCard({ source, name, now, href, note = null, actions, choi
       note={note}
       menu={actions ? { label: `More actions for ${name}`, items: actions } : undefined}
       choice={choice}
+      footer={fit}
     />
   );
 }

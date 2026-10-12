@@ -4,10 +4,12 @@ import { apiWrite } from "./apiWrite.js";
 import {
   buildSave,
   draftId,
+  inRange,
   NEW_SCENE_DRAFT,
   normalizeScene,
   sceneEditDraft,
   sceneProblems,
+  SETTING_RANGES,
   UNAUTHORABLE_REASON,
 } from "./authoring.js";
 import { useConfirm } from "./ConfirmAction.jsx";
@@ -31,7 +33,8 @@ import {
 import { SceneList } from "./SceneList.jsx";
 import { FramesStep, KindStep, MediaStep, PhotosStep, PlaybackStep, ReviewStep } from "./SceneSteps.jsx";
 import { useCandidates } from "./useCandidates.js";
-import { mediaNow } from "./mediaHealth.js";
+import { useHouseCropLimit } from "./domain/photo-fit.ts";
+import { raiseAction, useFitRead } from "./domain/photo-fit-board.tsx";
 import { useSourceCheck } from "./useSourceCheck.js";
 
 const EMPTY = {};
@@ -39,8 +42,8 @@ const EMPTY = {};
 // Each step's heading: the one question it asks.
 const HEADINGS = {
   kind: "What kind of Scene?",
-  photos: "Which Source?",
-  frames: "Which frames?",
+  photos: "Which photos?",
+  frames: "Which Frames?",
   media: "Which item on each frame?",
   playback: "How long each item shows",
   review: "Check your Scene",
@@ -48,8 +51,18 @@ const HEADINGS = {
 
 /**
  * The Scenes section (flow design §7 J4, "Make a Scene"): the Scene cards and the
- * Scene flow, Kind → Photos → Frames → Media per frame (hand-picked only) → Playback
- * → Review.
+ * Scene flow, Kind → Frames → Photos → Media per frame (hand-picked only) → Playback
+ * → Review. Frames come before Photos (follow-ups C1), so the Photos and Playback steps show
+ * the Fit board of the chosen Sources on the chosen Frames, and Review its compact form.
+ *
+ * THE FIT BOARD reads one question for the draft (domain/photo-fit-board.tsx): its Sources,
+ * its Frames (every Frame on the Frames step, whose tiles each say what that Frame would get, and
+ * until some are chosen) and its crop limit (the house's while it has none). Each step previews
+ * its own question from that read: Frames, what each Frame would get; Photos, how the photos fill
+ * the chosen Frames together; Playback, what the crop limit lets each Frame take; Review, the
+ * line and strip. While Playback's Crop limit is dragged, each value is asked by shape
+ * (`liveCrop`); letting go keeps it. A Frame with nothing that fits is offered "Raise the crop
+ * limit to N %".
  *
  * THE CONTAINER. This component owns the flow's one draft (`useFlowDraft`) and EVERY
  * draft effect: the vanished-frame prune, the candidates read (`useCandidates`) and
@@ -100,7 +113,6 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft,
   const definitions = snapshot?.runtime?.definitions ?? EMPTY;
   const existingIds = useMemo(() => new Set(Object.keys(definitions)), [definitions]);
   const sources = snapshot?.media?.sources ?? [];
-  const now = mediaNow(snapshot);
   const loaded = snapshot != null;
 
   // The selected Frame is a seed for a newly opened Scene only. A route from the
@@ -144,12 +156,16 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft,
   }, [loaded, frameKey, value.targets, draft.key, patch]);
 
   // A hand-picked Scene picks from its first Source; its candidates are read again when that
-  // Source's check moves on (a new check, or one completed).
+  // Source's check moves on (a new check, or one completed). Central judges each photo's fit at
+  // the draft's crop limit (roadmap 5a, run ledger K2), so a Frame offers exactly what the Scene
+  // will show there; a limit outside its range is Playback's problem, and Central's default
+  // judges meanwhile.
   const firstSource = sources.find((source) => source.source_ref === value.sourceRefs[0]) ?? null;
   const candidates = useCandidates(
     draft.key !== null && value.mode === "authored" ? value.sourceRefs[0] ?? "" : "",
     value.targets,
     checkStamp(firstSource?.check),
+    inRange(value.cropLimit, SETTING_RANGES.cropLimit) ? Number(value.cropLimit) : undefined,
   );
 
   // A per-frame choice belongs to one Source's catalog: once a frame's candidates are
@@ -191,7 +207,6 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft,
     chosen: value.sourceRefs.map((ref) => ({
       ref, source: sources.find((source) => source.source_ref === ref) ?? null,
     })),
-    now,
     check: sourceCheck,
     onManage: () => navigate({ section: "sources" }),
   };
@@ -250,6 +265,32 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft,
     },
   });
   const { place, step, focus } = flow;
+
+  // --- How the draft's photos fit its Frames (THE FIT BOARD above), read while a step shows it.
+  const houseCropLimit = useHouseCropLimit();
+  const [liveCrop, setLiveCrop] = useState(/** @type {number|null} */ (null));
+  const ownCrop = value.cropLimit !== null && value.cropLimit !== undefined
+    && inRange(value.cropLimit, SETTING_RANGES.cropLimit) ? Number(value.cropLimit) : null;
+  const judgedCrop = liveCrop ?? ownCrop;
+  const boardShown = place === "open" && ["frames", "photos", "playback", "review"].includes(step ?? "");
+  // The Frames step judges every Frame (each tile says what it would get, chosen or not); the
+  // later steps judge the chosen ones.
+  const everyFrame = step === "frames";
+  const sourceKey = value.sourceRefs.join("\n");
+  const targetKey = value.targets.join("\n");
+  const fitQuestion = useMemo(() => (!boardShown || sourceKey === "" ? null : {
+    selection: { sources: sourceKey.split("\n") },
+    frames: everyFrame || targetKey === "" ? null : targetKey.split("\n"),
+    crop_limit: judgedCrop,
+  }), [boardShown, everyFrame, sourceKey, targetKey, judgedCrop]);
+  const fitRead = useFitRead(fitQuestion, { live: liveCrop !== null });
+  const fit = {
+    read: fitRead,
+    judged: { at: "scene", framesChosen: targetKey !== "", ownCrop: judgedCrop !== null },
+    // Under the crop limit (Playback), whose value is right above: only which Frames.
+    framesJudged: { at: "scene-crop", framesChosen: targetKey !== "" },
+    rescue: (frame) => raiseAction(frame, (limit) => patch({ cropLimit: limit })),
+  };
 
   const showNow = (sceneId) => {
     rememberScene(sceneId);
@@ -363,6 +404,9 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft,
       endingSeconds: value.endingSeconds,
       keepLastPhoto: value.keepLastPhoto,
       keepTogether: value.keepTogether,
+      order: value.order,
+      noRepeatDays: value.noRepeatDays,
+      cropLimit: value.cropLimit,
       revision: editingId === null ? 1 : draft.baseRevision + 1,
     });
 
@@ -410,11 +454,16 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft,
   const views = {
     kind: () => <KindStep {...stepProps} />,
     photos: () => (
-      <PhotosStep {...stepProps} sources={sources} onNewSource={newSource} sourceReadiness={sourceReadiness} />
+      <PhotosStep {...stepProps} sources={sources} onNewSource={newSource} sourceReadiness={sourceReadiness} fit={fit} />
     ),
-    frames: () => <FramesStep {...stepProps} snapshot={snapshot} onToggle={toggleTarget} />,
+    frames: () => (
+      <FramesStep {...stepProps} snapshot={snapshot} onToggle={toggleTarget} fit={sourceKey === "" ? null : fit} />
+    ),
     media: () => <MediaStep {...stepProps} candidates={candidates} onSelect={selectMedia} />,
-    playback: () => <PlaybackStep {...stepProps} advanced={advanced("playback")} />,
+    playback: () => (
+      <PlaybackStep {...stepProps} advanced={advanced("playback")} fit={fit} houseCropLimit={houseCropLimit}
+        onCropPreview={setLiveCrop} />
+    ),
     review: () => (
       <>
         {stale && (
@@ -436,9 +485,9 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft,
           snapshot={snapshot}
           editingId={editingId}
           candidates={candidates}
-          sourceReadiness={sourceReadiness}
           advanced={advanced("review")}
           onChange={flow.openField}
+          fit={fit}
         />
       </>
     ),

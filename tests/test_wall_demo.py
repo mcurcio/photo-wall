@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from contracts.models import Calibration, CornersFit
 from scripts.container_build import daemon_image_build
 from scripts.demo_wall import (
     CORE_IMAGES,
@@ -33,6 +34,7 @@ from scripts.demo_wall import (
     connect_demo_library,
     core_image_mapping,
     delete_secured_original,
+    demo_position,
     demo_query,
     expected_pool,
     fault_holds,
@@ -373,6 +375,7 @@ def test_code_shaped_unknown_exception_cannot_escape_as_public_failure():
 def test_player_runner_recorder_logs_only_successful_presentations():
     """Exercise the exact Recorder class shipped inside the Player image."""
     from contracts.models import Calibration, FrameProfile, Layer, OutputBinding, Variant
+    from contracts.photo_crop import CENTRED
     from player.rendering import LocalLayer, OutputComposition
 
     tree = ast.parse(PLAYER_RUNNER)
@@ -389,7 +392,7 @@ def test_player_runner_recorder_logs_only_successful_presentations():
     variant = Variant(sha256="a" * 64, size=1, media_type="image/png", width=1, height=1)
     layer = Layer(assignment_id="assignment-1", run_id="run-1", output_id="HDMI-A-1",
                   frame_id="frame-1", binding_generation=1, start=100, end=110,
-                  media_origin=100, variant=variant)
+                  media_origin=100, variant=variant, crop=CENTRED)
     composition = OutputComposition(binding, Calibration(), (LocalLayer(layer, None, 0, 1),))
 
     renderer.pending.add("assignment-1")
@@ -1369,3 +1372,58 @@ def test_the_demo_operator_drives_centrals_photo_routes_end_to_end(registry, tmp
         assert library.finish_check(lease, CheckComplete())
         after = operator_action("check")
         assert demo.check_finished({"pool": after}, before, "ok")
+
+
+@pytest.mark.parametrize("project", ["pw-wall-demo-000000000000", "pw-wall-demo-5a5a5a5a5a5a",
+                                     "pw-wall-demo-f00dfeedbeef"])
+def test_every_demo_upload_fills_every_demo_frame(project):
+    """Roadmap 5a's fit rule refuses a photo whose Frame-shaped window, inside the Scene's crop
+    limit, has fewer pixels than the Frame, or cuts its key content. Every demo image, measured
+    as the worker measures it (no faces: the fixture's machine learning is off), and the video
+    fill every demo Frame at the demo Scene's crop limit, so the wall's baseline shows both."""
+    from central.wall_plan.fit import Fits, FitTarget, judge, shape_fit
+    from central.wall_plan.fit_settings import FitSettings
+    from contracts.models import FrameProfile
+    from media.key_content import measure
+    from scripts.demo_wall import (
+        DEMO_CROP_LIMIT,
+        DEMO_FRAME_PROFILE,
+        DEMO_IMAGES,
+        DEMO_VIDEO_SIZE,
+    )
+    from scripts.immich_actions import synthetic_image
+
+    profile = FrameProfile.model_validate(DEMO_FRAME_PROFILE)
+    # Full screen on a Display of the profile's size: the largest Frame output it can have.
+    target, house = FitTarget(profile=profile,
+                              output_px=(profile.width_px, profile.height_px)), FitSettings()
+    for label, (size, _) in DEMO_IMAGES.items():
+        key = measure((), synthetic_image(f"{project}-{label}", size, "2026-01-01T00:00:00Z"))
+        verdict = judge("image", *size, key, target, DEMO_CROP_LIMIT, house)
+        assert isinstance(verdict, Fits), (label, verdict)
+    assert shape_fit("video", *DEMO_VIDEO_SIZE, target, DEMO_CROP_LIMIT, house) is None
+
+
+def test_every_demo_upload_fills_the_demo_frame_output_and_none_fills_the_whole_display():
+    """The e2e baseline needs photos on the wall: the fit rule judges them against the Frame
+    output (owner, 2026-10-11), so the demo's Position is a mat opening its small uploads fill,
+    on the 1920 x 1080 Output its simulated Pis report. Full screen, none of them would."""
+    from central.wall_plan.fit import FitTarget, shape_fit
+    from central.wall_plan.fit_settings import FitSettings
+    from contracts.models import FrameProfile, frame_output
+    from scripts.demo_wall import DEMO_CROP_LIMIT, DEMO_FRAME_PROFILE, DEMO_IMAGES, DEMO_VIDEO_SIZE
+
+    assert "width_px=1920" in PLAYER_RUNNER and "height_px=1080" in PLAYER_RUNNER
+    profile = FrameProfile.model_validate(DEMO_FRAME_PROFILE)
+    display = (1920, 1080)
+    opening = frame_output(profile, demo_position({"width_px": 1920, "height_px": 1080}), display)
+    whole = frame_output(profile, Calibration(fit=CornersFit()), display)
+    assert opening == (90, 90) and whole == display
+    uploads = [("image", size) for size, _ in DEMO_IMAGES.values()] + [("video", DEMO_VIDEO_SIZE)]
+    for kind, (width, height) in uploads:
+        assert shape_fit(kind, width, height, FitTarget(profile=profile, output_px=opening),
+                         DEMO_CROP_LIMIT, FitSettings()) is None, (kind, width, height)
+    for size, _ in DEMO_IMAGES.values():
+        refused = shape_fit("image", *size, FitTarget(profile=profile, output_px=whole),
+                            DEMO_CROP_LIMIT, FitSettings())
+        assert refused is not None and refused.reason == "below_frame_pixels"

@@ -169,6 +169,17 @@ class PlayerTime(Model):
     server_time: Instant
 
 
+class PhotoCrop(Model):
+    """Which part of a photo a Frame shows (roadmap 5a, run ledger .claude/runs/photo-5a.md): the
+    largest window with the Frame profile's aspect, slid along the photo's one free axis. 0 keeps
+    the left (or top) edge, 1 the right (or bottom), 0.5 is centred; a photo with exactly the
+    profile's aspect has no free axis and the offset changes nothing. The window's aspect comes
+    from the profile alone (contracts/photo_crop.py `crop_window`); Central chooses the offset
+    (central/wall_plan/fit.py), the Player only draws it."""
+
+    offset: Fraction
+
+
 # What a Frame keeps once a layer has been shown, for when nothing plays on it (the Player's
 # fallback, an outage included). The layer takes effect once its fade-in is over:
 # "keep_this_photo" keeps this opaque still up; "keep_nothing" keeps nothing (black);
@@ -196,14 +207,17 @@ class Layer(Model):
     fade_out: float = Field(default=0, ge=0)
     required: bool = True
     after_end: AfterEnd = "leave_as_is"
+    # Roadmap 5a: the window this media layer draws (contracts/photo_crop.py); required on a media
+    # layer, absent on a black one (run ledger .claude/runs/photo-5a.md).
+    crop: PhotoCrop | None = None
 
     @model_validator(mode="after")
     def interval(self) -> Self:
         if self.end <= self.start:
             raise ValueError("layer end must follow start")
-        if self.presentation == "media" and self.variant is None:
-            raise ValueError("media layer requires an exact variant")
-        if self.presentation == "black" and self.variant is not None:
+        if self.presentation == "media" and (self.variant is None or self.crop is None):
+            raise ValueError("media layer requires an exact variant and its crop")
+        if self.presentation == "black" and (self.variant is not None or self.crop is not None):
             raise ValueError("black layer cannot carry media")
         if self.fade_in + self.fade_out > self.end - self.start:
             raise ValueError("fades exceed layer interval")
