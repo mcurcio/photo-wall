@@ -97,7 +97,8 @@ class ImmichLibrary:
     def upload(self, label: str, *, taken: str, size: tuple[int, int] = (96, 64),
                png: bool = False, filename: str | None = None,
                tags: Sequence[str] = (), orientation: int = 1) -> FixtureAsset:
-        """Upload one synthetic image as the owner and wait until Immich has read its size.
+        """Upload one synthetic image as the owner and wait until Immich has processed it (read
+        its size and capture time, finished its upload jobs), then tag it with `tags`.
 
         `label` should be unique to the test (it makes the bytes unique); `tags` are tag paths,
         made when missing. `size` is the file's stored pixels; a JPEG's EXIF `orientation`
@@ -109,10 +110,11 @@ class ImmichLibrary:
         try:
             upstream_id = admin.upload_bytes(name, data, "image/png" if png else "image/jpeg",
                                              taken)
+            deadline = time.monotonic() + METADATA_TIMEOUT
+            admin.wait_until_read(upstream_id, taken, deadline=deadline)
+            admin.wait_until_processed(upstream_id, deadline=deadline)
             if tags:
                 admin.tag(list(tags), [upstream_id])
-            admin.wait_until_read(upstream_id, taken,
-                                  deadline=time.monotonic() + METADATA_TIMEOUT)
         finally:
             admin.close()
         return FixtureAsset(label=label, upstream_id=upstream_id, kind="image", taken=taken,
