@@ -555,7 +555,7 @@ def picture_v4():
     read_until(lambda e: e["event"] == "diagnostic_presented", limit=6)
     time.sleep(0.5)
     before = capture_box(*BRIGHTNESS_BOX)
-    assert request("picture", operations=OPERATIONS, brightness="Brightness: on the display \u00b7 60 %")["accepted"]
+    assert request("picture", operations=OPERATIONS, brightness="Brightness: display 46 % \u00b7 Photo Wall 114 %")["accepted"]
     assert not request("picture", operations="x" * 513, brightness="")["accepted"]
     assert not request("picture", operations=OPERATIONS, brightness="b" * 129)["accepted"]
     end = time.monotonic() + 5

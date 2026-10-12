@@ -45,6 +45,7 @@ from contracts.node_output import (
     output_report_key,
 )
 from contracts.node_output import OutputReport as WireReport
+from contracts.node_picture import picture_document_key
 from nodeapi.epoch import Token
 from nodeapi.pull import Batch, Read
 
@@ -233,7 +234,8 @@ def test_the_output_document_changes_only_when_its_body_does(registry):
     pi = enroll_pi(registry, "pi-a")
     _bind(registry, _frame(registry, "kitchen"), pi, "HDMI-A-1")
     first = _documents(registry, "pi-a")
-    assert sorted(first) == [output_document_key("HDMI-A-1"), output_document_key("HDMI-A-2")]
+    assert sorted(first) == [output_document_key("HDMI-A-1"), output_document_key("HDMI-A-2"),
+                             picture_document_key("HDMI-A-1"), picture_document_key("HDMI-A-2")]
     document = decode_output_document(first[output_document_key("HDMI-A-1")])
     assert (document.change, document.method, document.power.now, document.power.test) == (
         1, BEST_DETECTED, Power.ON, None)

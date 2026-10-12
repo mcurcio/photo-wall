@@ -1,13 +1,15 @@
-"""A picture setting crosses the display line both ways (roadmap 1c, slice C1).
+"""Picture crosses the display line both ways on its own keys (decision 0022, the picture split,
+slice S2; roadmap 1c's Live model).
 
 A real hub on Fleet's generated configuration, a real Node bus, and the display line's session on
-the shipped `DISPLAY_SLICE`, as tests/integration/test_central_display_power.py runs them. (1) The
-Node's Output report with a picture part is recorded and judged: the Display's first probe places
-brightness on the display (it answered) and contrast as picture adjustment (it did not). (2) A
-brightness edit made through the operator API, in its own process, reaches the Node's
-`output-HDMI-A-1` with a new picture change and the same power change within 3 s: carried by the
-notification (no reconcile runs between the edit and its arrival). Mutation probe: drop the
-session write's NOTIFY -> the edit arrives only at the session's idle deadline, past 3 s.
+the shipped `DISPLAY_SLICE`, as tests/integration/test_central_display_power.py runs them. (1)
+Central writes `picture-HDMI-A-1` on the Node's desired bucket beside `output-HDMI-A-1`. (2) The
+Node's picture report on `picture-HDMI-A-1` is recorded (`picture_reports`), so the Picture tab
+knows what the display offers. (3) A hardware edit made through the operator API, in its own
+process, reaches the Node's `picture-HDMI-A-1` with a new picture change within 3 s while
+`output-HDMI-A-1` keeps its change: carried by the notification (no reconcile runs between the edit
+and its arrival). Mutation probe: drop the session write's NOTIFY -> the edit arrives only at the
+session's idle deadline, past 3 s.
 """
 from __future__ import annotations
 
@@ -34,15 +36,21 @@ from contracts.models import FrameProfile
 from contracts.node_link import CENTRAL_WRITER, Pipe, account_id
 from contracts.node_output import (
     SCHEMA_MAJOR,
-    ActsOn,
     OutputReport,
-    PictureReport,
-    PictureSetting,
-    SettingReport,
     decode_output_document,
     encode_output_report,
     output_document_key,
     output_report_key,
+)
+from contracts.node_picture import (
+    HardwareRange,
+    HardwareSetting,
+    PictureReport,
+    RangeKind,
+    decode_picture_document,
+    encode_picture_report,
+    picture_document_key,
+    picture_report_key,
 )
 from contracts.time import ManualClock
 from nodeapi.hub import NodeLink
@@ -52,14 +60,18 @@ SERIAL = "serial-display-picture"
 SECONDS = 30
 
 
-def _report(for_change: int) -> bytes:
-    """The Pi's report on HDMI-A-1: DDC/CI answered brightness (read 40) but not contrast."""
-    picture = PictureReport(True, False, for_change, SettingReport(ActsOn.DISPLAY, 40, None),
-                            SettingReport(ActsOn.PICTURE_ADJUSTMENT, None, None), None)
-    return encode_output_report(OutputReport("HDMI-A-1", True, NO_SERIAL, MODE, (), None, None, None, None, picture))
+def _report() -> bytes:
+    """The Pi's Output report on HDMI-A-1: the test monitor connected."""
+    return encode_output_report(OutputReport("HDMI-A-1", True, NO_SERIAL, MODE, (), None, None, None, None))
 
 
-def test_a_picture_edit_and_a_probe_cross_the_display_line(database, tmp_path, monkeypatch):
+def _picture_report() -> bytes:
+    """The Pi's picture report on HDMI-A-1: the monitor offers brightness as a level of 100, read at 40."""
+    return encode_picture_report(PictureReport(
+        "HDMI-A-1", NO_SERIAL, (HardwareSetting("10", HardwareRange(RangeKind.LEVEL, 100, ()), 40),), None, {}, None))
+
+
+def test_picture_documents_and_reports_cross_the_display_line_on_their_own_keys(database, tmp_path, monkeypatch):
     reconciles: list[float] = []
     reconcile = NodeLink.reconcile
 
@@ -81,11 +93,11 @@ def test_a_picture_edit_and_a_probe_cross_the_display_line(database, tmp_path, m
     hub.start()
     node.start()
 
-    def placed() -> tuple:
+    def offered() -> bool:
         with database.transaction() as conn:
-            row = conn.execute("SELECT d.brightness_acts_on, d.contrast_acts_on FROM output_displays o "
-                               "JOIN displays d ON d.id=o.display_id WHERE o.player_id=%s", (player,)).fetchone()
-        return None if row is None else (row["brightness_acts_on"], row["contrast_acts_on"])
+            return conn.execute("SELECT 1 FROM picture_reports WHERE player_id=%s AND output_id='HDMI-A-1' "
+                                "AND report->'offered' IS NOT NULL AND report->'offered' <> 'null'::jsonb",
+                                (player,)).fetchone() is not None
 
     async def run(client: TestClient) -> None:
         display.start()
@@ -109,19 +121,24 @@ def test_a_picture_edit_and_a_probe_cross_the_display_line(database, tmp_path, m
                 found = display.desired.get(output_document_key("HDMI-A-1"))
                 return (found is not None and found.writer == CENTRAL_WRITER
                         and decode_output_document(found.value))
-            first = await until(held, SECONDS, "output-HDMI-A-1 on the Node")
 
-            # (1) The probe is recorded and places the settings; the document follows the placement.
-            display.state.put(output_report_key("HDMI-A-1"), _report(first.picture_change))
+            async def held_picture():
+                found = display.desired.get(picture_document_key("HDMI-A-1"))
+                return (found is not None and found.writer == CENTRAL_WRITER
+                        and decode_picture_document(found.value))
+            power = await until(held, SECONDS, "output-HDMI-A-1 on the Node")
+            first = await until(held_picture, SECONDS, "(1) picture-HDMI-A-1 on the Node")
+            assert (dict(first.hardware), first.software.brightness_percent) == ({}, 100)
 
-            async def judged():
-                return placed() == ("display", "picture-adjustment")
-            await until(judged, SECONDS, "the first probe placing the Display's settings")
+            # (2) The Output report records the display; the picture report, what it offers.
+            display.state.put(output_report_key("HDMI-A-1"), _report())
+            display.state.put(picture_report_key("HDMI-A-1"), _picture_report())
 
-            async def placed_document():
-                found = await held()
-                return found if found and found.picture.brightness.acts_on is ActsOn.DISPLAY else None
-            document = await until(placed_document, SECONDS, "the placement in the Node's document")
+            async def recorded():
+                return offered()
+            await until(recorded, SECONDS, "(2) the picture report recorded on its Output")
+            picture = await asyncio.to_thread(client.get, "/v1/operator/frames/kitchen/picture", headers=AUTH)
+            assert picture.json()["offered_known"] is True, picture.text
 
             async def settled():
                 return len(reconciles) >= 2
@@ -129,7 +146,7 @@ def test_a_picture_edit_and_a_probe_cross_the_display_line(database, tmp_path, m
             await asyncio.wait_for(wakes.after(device, before_listening), SECONDS)
             await asyncio.sleep(1.5)   # the judge's wake and any reconcile it started have run
 
-            # (2) An edit in the operator API's process reaches the Node by notification. The session
+            # (3) An edit in the operator API's process reaches the Node by notification. The session
             # begins first and its own wake settles, so only the edit's notification is left (the
             # session's idle deadline, 5 s after its begin, is past the 3 s this allows).
             begun = await asyncio.to_thread(client.post, "/v1/operator/frames/kitchen/picture-sessions",
@@ -137,16 +154,18 @@ def test_a_picture_edit_and_a_probe_cross_the_display_line(database, tmp_path, m
             assert begun.status_code == 201, begun.text
             await asyncio.sleep(1.0)
             reconciled = len(reconciles)
+            settled_picture = await held_picture()
             edit = await asyncio.to_thread(
-                client.post, f"/v1/operator/picture-sessions/{begun.json()['session_id']}/edits", headers=AUTH,
-                json={"setting": "brightness", "value": 60, "expected_sequence": 1})
+                client.post, f"/v1/operator/picture-sessions/{begun.json()['session_id']}/hardware-edits",
+                headers=AUTH, json={"code": "10", "value": 46, "expected_sequence": 1})
             assert edit.status_code == 200, edit.text
 
             async def edited():
-                found = await held()
-                return found if found and found.picture.brightness == PictureSetting(ActsOn.DISPLAY, 60) else None
-            carried = await until(edited, 3, "the brightness edit on the Node, by notification")
-            assert (carried.change, carried.picture_change) == (document.change, document.picture_change + 1)
+                found = await held_picture()
+                return found if found and dict(found.hardware) == {"10": 46} else None
+            carried = await until(edited, 3, "(3) the hardware edit on the Node, by notification")
+            assert carried.picture_change == settled_picture.picture_change + 1
+            assert (await held()).change == power.change   # picture never costs power
             assert len(reconciles) == reconciled   # no reconcile carried it
             assert not running.done()
         finally:

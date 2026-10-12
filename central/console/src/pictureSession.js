@@ -2,19 +2,22 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { TICK_MS, useVisible } from "./liveAdjustment.js";
 import {
-  beginPicture, editPicture, keepPictureAlive, pictureDone, placePicture, readFramePicture, revertPicture,
+  beginPicture, editHardware, editSoftware, keepPictureAlive, pictureDone, readFramePicture, revertPicture,
 } from "./pictureApi.js";
 
 /*
- * The Picture tab's live session (roadmap 1c, slice K1; design language §8 row B5, the Live
- * model): the operator's draft of the Display's four picture settings, shown on the display while
+ * The Picture tab's live session (roadmap 1c's Live model, design language §8 row B5; decision
+ * 0022, the picture split, slice S2): the operator's draft of the Display's two groups, the
+ * display's own settings (hardware) and Photo Wall's four (software), shown on the display while
  * the tab is open, then kept (Done) or put back (Revert). Central's rules are
- * central/displays/picture.py's; this module only drives the routes (pictureApi.js).
+ * central/displays/picture.py's and hardware.py's; this module only drives the routes
+ * (pictureApi.js).
  *
  * THE DRAFT IS THE OPERATOR'S. A draft holds only what the operator changed in this visit: a value
- * per setting and, for brightness and contrast, where it acts. Every session begun while the tab is
- * open is sent the whole draft, so the draft outlives a session that ended by itself (the browser
- * tab hidden, the Pi restarted, Central's idle window). Done and Revert clear it.
+ * per display setting (null hands it back: as the display has it) and per Photo Wall setting. Every
+ * session begun while the tab is open is sent the whole draft, so the draft outlives a session that
+ * ended by itself (the browser tab hidden, the Pi restarted, Central's idle window). Done and Revert
+ * clear it.
  *
  * THE SESSION RUNS WHILE THE TAB IS OPEN AND SHOWN. `open` and the browser tab visible begin a
  * session (after this page's own Revert of an earlier one is answered, so it is never read as
@@ -25,8 +28,8 @@ import {
  * AT MOST TWO EDITS A SECOND. A change is sent at once when the last edit went EDIT_GAP_MS ago,
  * else when the gap is over, with the newest value: while a slider is dragged the display is
  * written at most twice a second (some displays save each write to memory that wears), and the
- * value where it was let go is always the last one sent. One request is in flight at a time, so
- * each edit names the sequence the previous one answered.
+ * value where it was let go is always the last one sent. Both groups share the gap. One request is
+ * in flight at a time, so each edit names the sequence the previous one answered.
  *
  * SHOWN. The latest change counts as shown only when nothing is waiting to be sent, a read begun
  * after the last accepted change says `shown`, and that read carries the draft's values. Done is
@@ -37,8 +40,8 @@ import {
 export const EDIT_GAP_MS = 500;
 const RETRY_MS = 2000;
 
-/** The four settings, as Central names them (central/displays/picture.py `Setting`). */
-export const SETTINGS = /** @type {const} */ (["brightness", "contrast", "colour-temperature", "gamma"]);
+/** Photo Wall's four, as Central names them (central/displays/picture.py `SoftwareSetting`). */
+export const SOFTWARE_SETTINGS = /** @type {const} */ (["brightness", "contrast", "colour-temperature", "gamma"]);
 
 /** Central's refusals, in the operator's words; `stops`: the session waits for the operator. */
 const REFUSALS = {
@@ -46,9 +49,8 @@ const REFUSALS = {
   no_display: "The Pi has not reported a display on this HDMI port yet, so its picture waits until it does.",
   session_open: "Someone else is adjusting this display's picture. Photo Wall connects as soon as they finish.",
   stale_sequence: "Another window changed this display's picture at the same moment.",
-  not_placed_yet: "This display has not been connected yet, so its brightness and contrast wait until it is.",
+  not_offered: "This display does not offer that setting, so Photo Wall cannot set it.",
   out_of_range: "Photo Wall refused this value.",
-  display_did_not_answer: "The display did not answer the Pi's check, so this setting stays a Photo Wall picture adjustment.",
   not_presented_yet: "The Pi has not shown the latest change yet. Wait a moment, then press Done again.",
   unreachable: "Photo Wall's server did not answer.",
 };
@@ -57,7 +59,7 @@ const UNAVAILABLE = new Set(["frame_unbound", "no_display", "unknown_frame"]);
 // The session is gone: begin again (with the draft).
 const GONE = new Set(["session_ended", "unknown_session"]);
 // Refused values the draft drops (the slider goes back to what Central has).
-const DROPPED = new Set(["out_of_range", "not_placed_yet", "display_did_not_answer"]);
+const DROPPED = new Set(["out_of_range", "not_offered"]);
 
 // The pages left with changes not kept, by Frame, and when (this browser's clock, epoch seconds,
 // only ever shown): the next visit says the display went back then.
@@ -66,48 +68,62 @@ const leftUnsaved = new Map();
 // the same Frame waits for it.
 const ending = new Map();
 
-/** A setting's value as a read shows it: a percent (null: as the display has it), kelvin or tenths. */
-export function viewValue(view, setting) {
-  if (setting === "brightness" || setting === "contrast") return view[setting].value;
-  return setting === "colour-temperature" ? view.colour_temperature_kelvin : view.gamma_tenths;
+/** The field of SoftwarePictureView each Photo Wall setting is read from. */
+const SOFTWARE_FIELDS = {
+  brightness: "brightness_percent",
+  contrast: "contrast_percent",
+  "colour-temperature": "colour_temperature_kelvin",
+  gamma: "gamma_tenths",
+};
+
+/** A Photo Wall setting's value as a read shows it: a percent, kelvin or tenths. */
+export function softwareValue(view, setting) {
+  return view.software[SOFTWARE_FIELDS[setting]];
+}
+
+/** A display setting's value as a read shows it; null: as the display has it. */
+export function hardwareValue(view, code) {
+  return view.hardware.find((row) => row.code === code)?.value ?? null;
 }
 
 /**
  * @typedef {import("./pictureApi.js").FramePictureView} FramePictureView
- * @typedef {import("./pictureApi.js").Setting} Setting
- * @typedef {import("./pictureApi.js").ActsOn} ActsOn
- * @typedef {{values: Partial<Record<Setting, number>>, places: Partial<Record<"brightness"|"contrast", ActsOn>>}} Draft
+ * @typedef {import("./pictureApi.js").SoftwareSetting} SoftwareSetting
+ * @typedef {import("./pictureApi.js").VcpCode} VcpCode
+ * @typedef {{hardware: Record<VcpCode, number|null>, software: Partial<Record<SoftwareSetting, number>>}} Draft
  * @typedef {"idle"|"live"|"waiting"|"shown"} Phase
  *   `idle`: no session (not open, no display, or someone else's session); `live`: a session and
  *   no change to judge; `waiting`: the Pi has not shown the latest change; `shown`: it has.
  * @typedef {{words: string, code: string}} Problem   `code` is Central's, for Details only.
  */
 
-const EMPTY = /** @type {Draft} */ ({ values: {}, places: {} });
-const isEmpty = (draft) => Object.keys(draft.values).length === 0 && Object.keys(draft.places).length === 0;
+const EMPTY = /** @type {Draft} */ ({ hardware: {}, software: {} });
+const isEmpty = (draft) => Object.keys(draft.hardware).length === 0 && Object.keys(draft.software).length === 0;
 
-/** The draft's next request against what this session already took; null when it has taken it all. */
+/**
+ * The draft's next request against what this session already took; null when it has taken it all.
+ * @returns {{kind: "hardware"|"software", key: string, value: number|null}|null}
+ */
 function nextWrite(draft, taken) {
-  for (const [setting, actsOn] of Object.entries(draft.places)) {
-    if (taken.places[setting] !== actsOn) return { kind: "place", setting, value: actsOn };
-  }
-  for (const [setting, value] of Object.entries(draft.values)) {
-    if (taken.values[setting] !== value) return { kind: "edit", setting, value };
+  for (const kind of /** @type {const} */ (["hardware", "software"])) {
+    for (const [key, value] of Object.entries(draft[kind])) {
+      if (!(key in taken[kind]) || taken[kind][key] !== value) return { kind, key, value };
+    }
   }
   return null;
 }
 
 /** Whether a read carries every part of the draft. */
 function carries(view, draft) {
-  return Object.entries(draft.values).every(([setting, value]) => viewValue(view, setting) === value)
-    && Object.entries(draft.places).every(([setting, actsOn]) => view[setting].acts_on === actsOn);
+  return Object.entries(draft.hardware).every(([code, value]) => hardwareValue(view, code) === value)
+    && Object.entries(draft.software).every(([setting, value]) => softwareValue(view, setting) === value);
 }
 
 /**
  * @param {{frameId: string, open: boolean}} props
  * @returns {{view: FramePictureView|null, phase: Phase, draft: Draft, dirty: boolean,
- *            change: (setting: Setting, value: number) => void,
- *            place: (setting: "brightness"|"contrast", actsOn: ActsOn) => void,
+ *            changeHardware: (code: VcpCode, value: number|null) => void,
+ *            changeSoftware: (setting: SoftwareSetting, value: number) => void,
  *            done: () => Promise<boolean>, revert: () => Promise<void>, busy: boolean,
  *            error: Problem|null, unavailable: Problem|null, waitingFor: string|null,
  *            latest: number|null, savedAt: number|null, leftAt: number|null}}
@@ -179,19 +195,19 @@ export function usePictureSession({ frameId, open }) {
     }
   }, [frameId, fail]);
 
-  /** One write of the draft (a place or an edit); false when the loop should stop for now. */
+  /** One write of the draft (a display setting or a Photo Wall one). */
   const write = useCallback(async (next) => {
     const current = state.current;
     const open_ = current.session;
-    const body = { setting: next.setting, expected_sequence: open_.sequence };
-    const result = next.kind === "place"
-      ? await placePicture(open_.session_id, { ...body, acts_on: next.value })
-      : await editPicture(open_.session_id, { ...body, value: next.value });
+    const expected = { expected_sequence: open_.sequence, value: next.value };
+    const result = next.kind === "hardware"
+      ? await editHardware(open_.session_id, { ...expected, code: next.key })
+      : await editSoftware(open_.session_id, { ...expected, setting: next.key });
     current.editAt = performance.now() + EDIT_GAP_MS;
     if (!current.mounted || current.session !== open_) return;
+    const part = next.kind;
     if (result.ok) {
-      const part = next.kind === "place" ? "places" : "values";
-      setTaken({ ...current.taken, [part]: { ...current.taken[part], [next.setting]: next.value } });
+      setTaken({ ...current.taken, [part]: { ...current.taken[part], [next.key]: next.value } });
       current.wrote += 1;
       setShownRead(false);
       setSession({ ...open_, sequence: result.sequence.sequence });
@@ -206,8 +222,7 @@ export function usePictureSession({ frameId, open }) {
       const kept = await keepPictureAlive(open_.session_id);
       if (kept.ok && current.session === open_) setSession({ ...open_, sequence: kept.session.sequence });
     } else if (DROPPED.has(result.error)) {
-      const part = next.kind === "place" ? "places" : "values";
-      const { [next.setting]: _dropped, ...rest } = current.draft[part];
+      const { [next.key]: _dropped, ...rest } = current.draft[part];
       setDraft({ ...current.draft, [part]: rest });
     }
     fail(result.error);
@@ -331,23 +346,18 @@ export function usePictureSession({ frameId, open }) {
     }
   }, [fly]);
 
-  const change = useCallback((setting, value) => {
+  /** One change to the draft's `part`; the loop sends it when the edit gap allows. */
+  const change = useCallback((part, key, value) => {
     const current = state.current;
-    if (current.draft.values[setting] === value) return;
-    setDraft({ ...current.draft, values: { ...current.draft.values, [setting]: value } });
+    if (key in current.draft[part] && current.draft[part][key] === value) return;
+    setDraft({ ...current.draft, [part]: { ...current.draft[part], [key]: value } });
     setShownRead(false);
     setChanges((count) => count + 1);
     clearTimeout(current.timer);
     current.timer = setTimeout(step, Math.max(0, current.editAt - performance.now()) + 5);
   }, [setDraft, step]);
-  const place = useCallback((setting, actsOn) => {
-    const current = state.current;
-    setDraft({ ...current.draft, places: { ...current.draft.places, [setting]: actsOn } });
-    setShownRead(false);
-    setChanges((count) => count + 1);
-    clearTimeout(current.timer);
-    current.timer = setTimeout(step, Math.max(0, current.editAt - performance.now()) + 5);
-  }, [setDraft, step]);
+  const changeHardware = useCallback((code, value) => change("hardware", code, value), [change]);
+  const changeSoftware = useCallback((setting, value) => change("software", setting, value), [change]);
 
   const done = useCallback(() => act(async () => {
     const open_ = state.current.session;
@@ -381,7 +391,7 @@ export function usePictureSession({ frameId, open }) {
   /** @type {Phase} */
   const phase = session === null ? "idle" : shown ? "shown" : dirty ? "waiting" : "live";
   return {
-    view, phase, draft, dirty, change, place, done, revert, busy, error, unavailable, waitingFor,
+    view, phase, draft, dirty, changeHardware, changeSoftware, done, revert, busy, error, unavailable, waitingFor,
     latest: session === null ? null : changes, savedAt, leftAt,
   };
 }

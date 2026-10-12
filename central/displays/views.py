@@ -5,30 +5,38 @@ slices C1-C3, read by the console slices K1 and K2). Plain models, one per answe
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Annotated, Literal
+from typing import Annotated
 from uuid import UUID
 
 from pydantic import Field
 
 from central.displays.model import PowerStatus, PowerTest, Readiness, remaining_seconds
-from central.displays.picture import PictureStatus, Setting
+from central.displays.picture import PictureStatus, SoftwareSetting
 from central.house_time.calculator import local_date_time
 from central.house_time.model import HouseTime, LocalDateTime
 from contracts.models import Identifier, Instant, Model
 from contracts.node_output import (
-    GAMMA_TENTHS_MAX,
-    GAMMA_TENTHS_MIN,
-    KELVIN_MAX,
-    KELVIN_MIN,
-    PERCENT_MAX,
-    ActsOn,
     InForceKind,
     OutputReport,
     Power,
     PowerMethod,
     PowerResult,
-    WriteResult,
     decode_set_time,
+)
+from contracts.node_picture import (
+    CHOICE_NAME_MAX,
+    CHOICE_VALUE_MAX,
+    GAMMA_TENTHS_MAX,
+    GAMMA_TENTHS_MIN,
+    KELVIN_MAX,
+    KELVIN_MIN,
+    LEVEL_MAX,
+    MAX_CHOICES,
+    SOFTWARE_PERCENT_MAX,
+    SOFTWARE_PERCENT_MIN,
+    VCP_CODE_PATTERN,
+    RangeKind,
+    WriteResult,
 )
 
 
@@ -130,18 +138,9 @@ class DisplayPowerSettings(Model):
     never_off_on_other_input: bool
 
 
-# Roadmap 1c (run ledger .claude/runs/display-1c.md, slice C2; read by the console slice K1): the
-# Picture tab's shapes. A value None is "as the display has it" (nothing set).
-
-class PictureSettingView(Model):
-    """Brightness or contrast on the Picture tab: where it acts (None: not placed yet, the display
-    has not been seen), the value in force, and what the Pi reported for it."""
-    acts_on: ActsOn | None
-    value: Annotated[int, Field(ge=0, le=PERCENT_MAX)] | None
-    answered: bool | None                         # the display answered its DDC/CI read; None: no report
-    read: Annotated[int, Field(ge=0, le=PERCENT_MAX)] | None   # what the display last read back
-    result: WriteResult | None                    # the Pi's write result for the latest picture change
-
+# The Picture tab's shapes (roadmap 1c's Live model; decision 0022, the picture split, slice S2):
+# two sections, Display (hardware) and Photo Wall (software). A hardware value None is "as the
+# display has it" (nothing set).
 
 class PictureSessionView(Model):
     """An open picture session: the sequence the next edit names, and its idle deadline."""
@@ -150,35 +149,8 @@ class PictureSessionView(Model):
     idle_until: Instant
 
 
-class FramePictureView(Model):
-    """GET /v1/operator/frames/{frame_id}/picture: the Picture tab."""
-    frame_id: Identifier
-    status: PictureStatus
-    display_id: UUID | None                       # the Display last seen on the bound Output
-    brightness: PictureSettingView
-    contrast: PictureSettingView
-    colour_temperature_kelvin: Annotated[int, Field(ge=KELVIN_MIN, le=KELVIN_MAX)]
-    gamma_tenths: Annotated[int, Field(ge=GAMMA_TENTHS_MIN, le=GAMMA_TENTHS_MAX)]
-    connected: bool | None                        # the latest Output report's; None: no report
-    session: PictureSessionView | None            # the Display's open session, if any
-
-
-class PictureEdit(Model):
-    """POST /v1/operator/picture-sessions/{session_id}/edits: one setting, one value."""
-    setting: Setting
-    value: int                                    # percent, kelvin or gamma tenths, by setting
-    expected_sequence: Annotated[int, Field(ge=1)]
-
-
-class PicturePlace(Model):
-    """POST /v1/operator/picture-sessions/{session_id}/places: move brightness or contrast."""
-    setting: Literal[Setting.BRIGHTNESS, Setting.CONTRAST]
-    acts_on: ActsOn
-    expected_sequence: Annotated[int, Field(ge=1)]
-
-
 class PictureSequence(Model):
-    """An accepted edit or place: the sequence the next one names."""
+    """An accepted edit: the sequence the next one names."""
     sequence: Annotated[int, Field(ge=1)]
 
 
@@ -194,6 +166,85 @@ class CopyOutcome(StrEnum):
     SESSION_OPEN = "session-open"                 # someone is adjusting the target's Display now
 
 
+VcpCodeField = Annotated[str, Field(pattern=f"^{VCP_CODE_PATTERN}$")]
+SoftwarePercent = Annotated[int, Field(ge=SOFTWARE_PERCENT_MIN, le=SOFTWARE_PERCENT_MAX)]
+
+
+class ChoiceView(Model):
+    value: Annotated[int, Field(ge=0, le=CHOICE_VALUE_MAX)]
+    name: Annotated[str, Field(min_length=1, max_length=CHOICE_NAME_MAX)]
+
+
+class HardwareRangeView(Model):
+    """How the display counts the setting (contracts.node_picture.HardwareRange)."""
+    kind: RangeKind
+    maximum: Annotated[int, Field(ge=1, le=LEVEL_MAX)] | None            # LEVEL only
+    choices: Annotated[tuple[ChoiceView, ...], Field(max_length=MAX_CHOICES)]   # CHOICE only
+
+
+class OfferedView(Model):
+    """What the display offers for one code at its last check."""
+    range: HardwareRangeView
+    current: Annotated[int, Field(ge=0, le=LEVEL_MAX)] | None            # the display's latest read (ask, before a write, read-back, re-read)
+
+
+class HardwareResultView(Model):
+    """The Pi's write for the latest picture change, judged by its read-back."""
+    result: WriteResult
+    before: Annotated[int, Field(ge=0, le=LEVEL_MAX)] | None
+    after: Annotated[int, Field(ge=0, le=LEVEL_MAX)] | None
+
+
+class HardwareSettingView(Model):
+    """One row of the Display (hardware) section: every offered setting and every set code."""
+    code: VcpCodeField
+    name: str                                       # contracts.node_picture.PICTURE_LIST's
+    offered: OfferedView | None                     # None: set here and not offered at the last check, or
+                                                    # never checked (offered_known False on the view)
+    value: Annotated[int, Field(ge=0, le=LEVEL_MAX)] | None   # in force; None: as the display has it
+    result: HardwareResultView | None
+    changed_on_buttons: bool                        # hardware.changed_on_buttons: set here, read otherwise
+
+
+class SoftwarePictureView(Model):
+    """The Photo Wall (software) section's four values in force."""
+    brightness_percent: SoftwarePercent
+    contrast_percent: SoftwarePercent
+    colour_temperature_kelvin: Annotated[int, Field(ge=KELVIN_MIN, le=KELVIN_MAX)]
+    gamma_tenths: Annotated[int, Field(ge=GAMMA_TENTHS_MIN, le=GAMMA_TENTHS_MAX)]
+
+
+class HardwareEdit(Model):
+    """POST /v1/operator/picture-sessions/{session_id}/hardware-edits: one display setting, or
+    None to hand it back (as the display has it)."""
+    code: VcpCodeField
+    value: Annotated[int, Field(ge=0, le=LEVEL_MAX)] | None
+    expected_sequence: Annotated[int, Field(ge=1)]
+
+
+class SoftwareEdit(Model):
+    """POST /v1/operator/picture-sessions/{session_id}/software-edits: one of Photo Wall's four."""
+    setting: SoftwareSetting
+    value: int                                      # percent, kelvin or gamma tenths, by setting
+    expected_sequence: Annotated[int, Field(ge=1)]
+
+
+class FramePictureView(Model):
+    """GET /v1/operator/frames/{frame_id}/picture: the Picture tab."""
+    frame_id: Identifier
+    status: PictureStatus
+    display_id: UUID | None                         # the Display last seen on the bound Output
+    connected: bool | None                          # the latest Output report's; None: no report
+    offered_known: bool                             # False: never checked ("Checking what this display offers"
+                                                    # while connected); a list kept while the display is away stays known
+    hardware: tuple[HardwareSettingView, ...]       # hardware.hardware_rows, names from PICTURE_LIST
+    software: SoftwarePictureView
+    session: PictureSessionView | None              # the Display's open session, if any
+
+
 class PictureCopyResult(Model):
+    """One target's outcome; `hardware_skipped`: the source's display settings left as they are on
+    the target (in picture-list order)."""
     frame_id: Identifier
     outcome: CopyOutcome
+    hardware_skipped: tuple[VcpCodeField, ...]

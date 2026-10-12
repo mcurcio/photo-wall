@@ -1,5 +1,5 @@
-"""1c I1 end-to-end picture harness: an Output document's picture part changes the pixels Weston
-shows, through the picture controller, the shell and the Player.
+"""1c I1 end-to-end picture harness: a picture document's software group (decision 0022) changes the
+pixels Weston shows, through the picture controller, the shell and the Player.
 
 Run only inside the display harness container (scripts/run_display_harness.py), after
 native_renderer_pixel_harness.py, with `player` and `contracts` mounted read-only at /repo and
@@ -15,10 +15,11 @@ that tints only the Output's bottom-right quarter, which no sample reads.
 
 1. a_picture_document_changes_the_pixels_and_comes_back_presented: before any picture document,
    pixels inside the opening are the neutral reference and outside are black. A document with
-   brightness 30 % and contrast 25 % as picture adjustment (picture change 3) makes the
-   controller's report say `presented_change` 3, and the captured pixels inside the opening equal
-   `final_pixel` of the operations the controller computed for that document; outside every
-   opening they stay exactly black although contrast below 50 lifts black (the mask is last).
+   software brightness 30 % and contrast 25 % (100 % changes nothing; picture change 3) and no
+   hardware value makes the controller's report say `presented_change` 3, and the captured pixels
+   inside the opening equal `final_pixel` of the operations the controller computed for that
+   document; outside every opening they stay exactly black although contrast below 100 lifts black
+   (the mask is last).
 """
 import mmap
 import os
@@ -31,6 +32,7 @@ import sys
 import time
 import uuid
 import zlib
+from dataclasses import replace
 
 sys.path[:0] = ["/repo", "/smoke"]
 DISPLAY = "/usr/lib/photo-wall/node-display"
@@ -232,13 +234,13 @@ def histogram() -> list:
 
 
 class Reports:
-    """PictureReports: the latest picture part of each Output's report."""
+    """PictureReports: the latest picture report of each Output."""
 
     def __init__(self) -> None:
         self.latest = {}
 
-    def put_picture(self, output_id, picture) -> None:
-        self.latest[output_id] = picture
+    def put_picture(self, report) -> None:
+        self.latest[report.output_id] = report
 
 
 def fake_drm() -> pathlib.Path:
@@ -258,6 +260,7 @@ def never_answers(argv, _timeout):
 
 def main() -> None:
     protocols()
+    import contracts.node_picture as node_picture
     from appliance.display_host.ddc import DdcChannel
     from appliance.display_host.picture import (
         DdcPictureAdapter,
@@ -265,6 +268,7 @@ def main() -> None:
         PictureController,
         operations_for,
     )
+    from appliance.display_host.picture_list import FileOfferedCache, PictureListAsker
     from appliance.display_host.weston import (
         CompositorPresentation,
         DiagnosticRelease,
@@ -273,18 +277,11 @@ def main() -> None:
     )
     from contracts.node_display import Surface
     from contracts.node_frame import neutral_operations
-    from contracts.node_output import (
-        AS_THE_DISPLAY_HAS_IT,
-        BEST_DETECTED,
-        ActsOn,
-        Darkness,
-        OutputDocument,
-        OutputPicture,
-        OutputPower,
-        PictureSetting,
-        Power,
-        decode_output_document,
-        encode_output_document,
+    from contracts.node_picture import (
+        PictureDocument,
+        SoftwarePicture,
+        decode_picture_document,
+        encode_picture_document,
     )
     from contracts.node_protocol import NodeProcessIdentity, OutputKey
 
@@ -366,19 +363,20 @@ def main() -> None:
         reports = Reports()
         applied = pathlib.Path("/tmp/pw-picture-e2e-applied")
         applied.mkdir(exist_ok=True)
-        controller = PictureController(DdcPictureAdapter(DdcChannel(never_answers, drm_root=fake_drm())),
+        # Weston's headless backend names its one Output "headless", which no Node Output is called:
+        # the picture wire's Output ids are widened by that one name for this harness only, so the
+        # controller's documents and reports name the compositor's Output.
+        node_picture.OUTPUT_IDS = (*node_picture.OUTPUT_IDS, OUTPUT)
+        channel = DdcChannel(never_answers, drm_root=fake_drm())
+        controller = PictureController(DdcPictureAdapter(channel), PictureListAsker(channel), FileOfferedCache(applied),
                                        backend, reports, FileAppliedPictures(applied), time.monotonic)
         backend.picture_events = controller
         controller.output(OUTPUT, connected=True, identity=None)
         controller.start()
-        picture = OutputPicture(PictureSetting(ActsOn.PICTURE_ADJUSTMENT, 30),
-                                PictureSetting(ActsOn.PICTURE_ADJUSTMENT, 25), 6500, 22)
-        always_on = OutputPower(Power.ON, (), "2099-01-01T00:00:00Z", Darkness.DISPLAY_OFF, None)
-        # The document as it crosses the wire for HDMI-A-1, then retargeted at this compositor's one
-        # Output: Weston's headless backend names it "headless", which no Node Output is called.
-        document = decode_output_document(encode_output_document(OutputDocument(
-            "HDMI-A-1", 1, always_on, BEST_DETECTED, False, False, PICTURE_CHANGE, picture)))
-        object.__setattr__(document, "output_id", OUTPUT)
+        wanted = SoftwarePicture(30, 25, 6500, 22)
+        # The document as it crosses the wire for HDMI-A-1, then retargeted at the headless Output.
+        document = replace(decode_picture_document(encode_picture_document(
+            PictureDocument("HDMI-A-1", PICTURE_CHANGE, {}, wanted))), output_id=OUTPUT)
         controller.document(OUTPUT, document)
         end = time.monotonic() + 15
         while True:
@@ -389,9 +387,8 @@ def main() -> None:
             drain()
             time.sleep(0.01)
         print(f"REPORT {report}", flush=True)
-        assert report.for_change == PICTURE_CHANGE and not report.brightness_answered, report
-        assert picture.brightness.value != AS_THE_DISPLAY_HAS_IT
-        operations = operations_for(OUTPUT, PICTURE_CHANGE, picture)
+        assert report.for_change == PICTURE_CHANGE and report.results == {}, report   # no hardware value
+        operations = operations_for(OUTPUT, PICTURE_CHANGE, wanted)
         assert operations.contrast_slope < 1 and operations.light_factor < 1, operations
         inside, outside = await_compare(operations, drain)
         print(f"ADJUSTED inside={inside} outside={outside}", flush=True)

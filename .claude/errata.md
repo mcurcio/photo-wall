@@ -5452,3 +5452,179 @@ Order: (a) merge the iac PR that switches the factory to `central.app:create_app
 - **The Pi now reports did-not-answer when the shell does not confirm the curtain** (an off with no power method;
   an on whose curtain stays up): E-PW-FIX-1's "Resting after not-supported (the Pi shows black)" assumed the
   curtain went up.
+
+## E-PS-S1 (Picture split, slice S1, 2026-10-12) · feat/picture-hardware-and-software
+- **A valid report could outgrow PICTURE_REPORT_BYTES.** The frozen page lets a choice's name be any printable ASCII;
+  `"` and `\` each encode as two bytes, so 30 CHOICE settings of 16 such 24-character names encode to 37,900 bytes,
+  past the 32,768 cap the module says no valid report reaches. Resolution taken (not a stop): `Choice` also refuses
+  `"` and `\` (the cap stays; ordinary worst case 26,500 bytes). S3's `parse_capability_choices` must drop those two
+  characters from a display's names, as it cuts them to CHOICE_NAME_MAX.
+- **The periodic re-read stays (owner addition, main loop, 2026-10-12), against the page's "Dropped from 1c".** S1
+  does not re-add it: the controller's docstring names it as S3's, on the same worker (S3 owns the Pi side; the
+  report's `offered[].current` is where re-read values go).
+- **The PICTURE hold also cuts a write.** `_command` caps every PICTURE run at PICTURE_HOLD_SECONDS, so a `setvcp`
+  slower than 1.5 s is killed (and the read-back judges it not taken); WRITE_SECONDS (10) bounds only the port wait.
+  The bench step should time a real write beside the batch.
+- **A level past the display's maximum with no answer to the read before it** is reported `no-answer` (before = after =
+  None): the page's `not-taken` with before = after = the read cannot be built when there is no read (`HardwareResult`
+  requires `after` for `not-taken`).
+- **A display with no readable EDID identity is never asked** (the page asks "on an appearance with an identity"), so
+  its hardware values wait for ever (`offered` None); software applies. Left as the page says; S3/S4 may name it.
+- **Files beyond the owned list:** `tests/node/display/fake_ddcutil.py` (new: the scripted display shared by
+  `test_display_ddc_port.py` and `test_display_picture_controls.py`). `tests/native_picture_e2e_harness.py` widens
+  `contracts.node_picture.OUTPUT_IDS` by Weston's "headless" for the harness only, because the picture report now
+  names its Output (1c's picture part did not).
+- **Words left for S3/S6:** AGENTS.md's code map still lists `output_report.py` (deleted here); the overlay tests and
+  `tests/native_display_smoke.py` still carry 1c's static line "Brightness: on the display · 60 %".
+
+## E-PS-S2 (Picture split, slice S2, 2026-10-12) · feat/picture-hardware-and-software
+- **"Changed on the display's buttons" leaves the console with S2, as the frozen page says; the owner's addition
+  (main loop, 2026-10-12) brings it back in S4 and S5.** S2 keeps the shape that makes it possible: the view's
+  hardware rows carry both `value` (set in Photo Wall) and `offered.current` (the Pi's latest read). The rule
+  "current differs from the stored value" should get its one home in central/displays/hardware.py (S4) and a view
+  field, not be worked out in the console.
+- **Revert of a hardware code set only in the session leaves the display at the new value until S4** fills
+  `hardware_before` from the Pi's first `before` (S2 records `began_at_change` but no befores).
+- **`PictureCopyResult.hardware_skipped` is `[]` for every outcome but `copied`** (the page is silent on the
+  others); the console does not show it yet (S5's Copy words).
+- **The console's minimum words are design choices S5 may change:** a level row says "Set in Photo Wall · 46 of
+  100" (the display's own count, never a percent), its hand-back button "As the display has it: brightness";
+  Photo Wall's percents say "114 % · 100 % changes nothing"; with the list unknown the group says "Checking what
+  this display offers…" (S5 owns those words; S2 shows them so the group is never silently empty).
+- **Files beyond the owned list:** tests/test_display_identity.py (the source now also writes `picture-…` keys:
+  one assertion), tests/test_node_picture_contract.py and tests/node/display/test_display_picture_controls.py
+  (WriteResult now imported from contracts.node_picture, its one home). Migration 075's tests in
+  tests/test_display_picture_settings.py now undo 092 first and run 075 then 092.
+
+## E-PS-S4 (Picture split, slice S4, 2026-10-12) · feat/picture-hardware-and-software
+- **"Changed on the display's buttons" (owner addition, main loop, 2026-10-12) has its Central home in
+  `central/displays/hardware.py` `changed_on_buttons`, carried on each row as `HardwareRow.changed_on_buttons` and
+  `HardwareSettingView.changed_on_buttons` (bool).** `central/displays/views.py` is beyond S4's owned list (one added
+  field; no sibling owns it). The rule: a value set in Photo Wall, the report answers the picture change whose
+  document carries the in-force hardware, that change's write of the code was taken or not needed, and
+  `offered[].current` answered and differs. S5 should read the field, not recompute it in the console.
+- **The rule needs `offered[].current` to be the display's last read, a write's read-back included** (design.md's
+  `current: last read`). S1's controller keeps the ask's read in `port.lists` after a write, so until S3 puts each
+  write's `after` (and every periodic re-read) into the list it reports, a taken write would show "Changed on the
+  display's buttons" falsely. S3 must do so; the DB test models a report after a write with `current` = `after`.
+- **The tab's per-row `result` now also waits for the answered document to carry the in-force hardware** (S2 showed
+  the previous document's results while a session's edit was not projected yet): the same gate as `presented`.
+- **`with_befores` records a `before` for every result of a later change, touched or not** (as the page says);
+  `reverted` reads only touched codes, so the extra ones are inert.
+- **Copy skips (and names) a stored level past the source display's maximum now** (its maximum changed since it was
+  set), rather than raising from `level_share`.
+
+## E-PS-S5 (Picture split, slice S5, 2026-10-12) · feat/picture-hardware-and-software
+- **`copyWords` takes the source's names as an optional second argument** (`copyWords(result, names = {})`): the
+  frozen page's `copyWords(result)` has only codes to hand (`hardware_skipped`), and its "Select color preset,
+  Video gain: Red" needs names; the only name home the console has is the view's rows (`name`), so the tab
+  passes code -> name from them. A code with no row falls back to the code itself.
+- **"Changed on the display's buttons" is Central's judgement** (S4's `HardwareSettingView.changed_on_buttons`,
+  `hardware.changed_on_buttons`); the console only words it ("Changed on the display's buttons: 35 of 100") and
+  never while the operator's own change of that code is in the draft. The browser FakePi now re-reads the list
+  with the written values current (as S3's periodic re-read does), plus `buttons` for a press it finds.
+- **Words follow the frozen page, not S2's minimum:** a level says "46 of 100" (S2's "Set in Photo Wall · "
+  prefix dropped); "Applies when the display is connected" moves from each row to one line under Display
+  (hardware), as `hardwareWords(row, draft)` has no view. A setting set here and no longer offered is a line
+  with no control and keeps its hand-back ("As the display has it: sharpness"); a CHOICE row's hand-back is the
+  select's own "As the display has it" option.
+
+## E-PS-S3 (Picture split, slice S3, 2026-10-12) · feat/picture-hardware-and-software
+- **The periodic re-read is back (owner addition, main loop, 2026-10-12), against S1's "Dropped from 1c".** No wire
+  change: every REREAD_SECONDS (60, 1c's value; `picture.py`) the worker reads the held list's codes again through
+  `PictureListAsker.read_again` (a method added to the `PictureAsk` protocol: same ASK_BATCH batches, Urgency.PICTURE,
+  PICTURE_HOLD_SECONDS each; a batch that does not finish leaves the read unknown) and reports them as
+  `offered[].current` (a code that no longer answers: current None). Every read the worker makes before a write and
+  every read-back also become that setting's current at once, so Central's "current differs from the stored value"
+  rule (S4) never fires on the Pi's own write. The Pi never writes a value back after a re-read.
+- **The kept list is put whenever its currents change** (after an ask, a write and a re-read that changed something),
+  not only "when known": a restarted controller reports the kept list without asking (the page's rule), so a list
+  kept only at the ask would carry pre-write currents and S4 would read them as "changed on the display's buttons"
+  until the first re-read. The files sit on /run (tmpfs): no wear. The re-read falls due REREAD_SECONDS after the
+  list arrives (from the cache or an ask), not at once, so the acceptance "reports the cached list without asking"
+  holds literally.
+- **The capabilities string is read only when a list setting answered** (the page: "after the batches, one
+  `capabilities` hold"): a display offering only levels (the test monitor) costs no extra hold. Its hold is
+  PICTURE_HOLD_SECONDS (1.5 s) because `_command` caps every PICTURE run; a real `ddcutil capabilities` without its
+  cache may take longer, in which case list settings stay READ_ONLY_CHOICE on that display (and, since the list is
+  kept, until the cache file goes with a reboot). The bench step should time `ddcutil capabilities` on the test
+  monitor beside the batch.
+- **A choice the display does not list is not written, READ_ONLY_CHOICE included** (it lists none): `not-taken` with
+  before = after = the read, as the page's rule for a CHOICE; values the string lists without names ("Values: 00 01
+  (interpretation unavailable)") name nothing; a name ddcutil gives as "Unrecognized value" is kept as named.
+- **Cache file names:** a serial's characters outside [A-Za-z0-9._] are written "_" (an EDID serial may hold "/");
+  the file stores the list in the picture report's own encoding with the identity, which `get` checks, so names that
+  meet after that never share a list.
+- **Base page words** stay as S1 wrote them, now final: "Brightness: display 46 % · Photo Wall 114 %", "Brightness:
+  the display did not take it · Photo Wall 114 %", "Brightness: as the display has it · Photo Wall 114 %"; the
+  display's percent now follows the latest read (re-read included). docs/player-architecture.md:272 and the overlay
+  tests still carry 1c's words (S6).
+- **Files beyond the owned list:** `tests/node/display/fake_ddcutil.py` (the fake answers `capabilities` from a
+  scripted string; `RECORDED_CAPABILITIES`, a recorded Cintiq Pro 32 string from the linuxwacom wiki, is the
+  fixture) and `tests/native_picture_e2e_harness.py` (the controller's new `offered` argument).
+
+## E-PS-FIX (Picture split, the fix pass after review, 2026-10-12) · feat/picture-hardware-and-software
+- **S1 acceptance 2 ("power waits at most one picture command") held per command, not per power
+  operation.** `PortLock` gave the port to a queued PICTURE waiter in the gap between a power
+  operation's commands (read, setvcp D6, read-back), so each command waited a hold. Now the port
+  stays POWER's for `POWER_GRACE_SECONDS` (0.2) after a POWER release (ddc.py); the acceptance reads
+  "a whole power operation waits at most one picture command". Tests: a full `DdcCiAdapter.set`
+  during back-to-back picture reads; a recording channel asserts each caller's urgency.
+- **The frozen page's `HardwareSettingView.offered: null` had three meanings** (not connected, not
+  checked yet, not offered at the last check). Now: a report that does not know the list keeps the
+  known one also when it names no display (`hardware.kept_report`, which replaces `kept_offered`
+  and keeps the identity too), so a display that is away keeps its rows, ranges and edits;
+  "changed on the display's buttons" needs a connected display; the console words `offered: null`
+  by `offered_known` ("Not offered by this display at its last check" only when known; a value
+  alone while never checked; "Photo Wall checks what this display offers when it is connected"
+  for a never-checked display that is away).
+- **Revert stored the Pi's first `before` as a set value**, against 0022's "Unset hardware is
+  untouched" and "Revert puts back the stored values". Now it is a one-time instruction:
+  `displays.hardware_restore` (added to migration 092, unapplied outside this branch) rides the
+  picture document beside the values in force (`picture.with_restore`) until a report answers a
+  document that carries it (`picture.restore_answered`); the stored values never change. The S4
+  test's `hardware_picture == {"10": 60}` became `{}` with the document carrying 60 once.
+- **The two groups were coupled in time on the Pi.** One worker sent the operations, asked,
+  re-read and wrote, and every change re-read every set code. Now: a shell worker per Output sends
+  the operations and line; a change writes only codes whose value changed since the change last
+  carried out on the same display (`AppliedPictures` now records the hardware map too; the
+  report's results keep untouched codes' latest result); a change whose codes wait for the
+  display or its list is answered (`for_change`, no result for them) and stays pending, so Done
+  for Photo Wall's group never waits on the display's. Cost: a value changed on the buttons is not
+  re-asserted by a change to other settings.
+- **1c's re-read at each appearance is back:** a display whose list is held is read again at once
+  when it comes back.
+- **The re-read and "Changed on the display's buttons" are credited "owner addition" in E-PS-S1
+  to S4 and were in the Player architecture, with no owner words recorded** (owner-notes.md has
+  none). They are now credited to the main loop (2026-10-12) in 0022, the Player architecture and
+  hardware.py; 0022 gains a decision bullet and its port-time cost.
+- **The owner answered R3's input question** (owner-notes.md, 2026-10-12: "Let's put it on both")
+  after 0022 called it open: 0022 records it as R10. Not built on this branch: the Picture tab has
+  no input control.
+- **E-PS-S1 and E-PS-S3 "Words left for S3/S6" are closed:** the overlay tests take their lines
+  from `brightness_line`, the native smoke test sends "Brightness: display 46 % · Photo Wall 114 %",
+  and the 1c evidence script is deleted.
+- **One home for the range rule:** `contracts.node_picture.HardwareRange.holds`, asked by Central's
+  edit check, Copy and the Pi's write; an answer's value is `ddc.answer_value`.
+
+## E-PS-R10 (Picture split, input on both tabs and level units, 2026-10-12) · feat/picture-hardware-and-software
+
+- **E-PS-FIX's "Not built on this branch: the Picture tab has no input control" is closed.** R10 is
+  built: #117 is one row (`frame-power.tsx` `InputSettingRow`, saved by `usePowerSettingsSave`
+  through `PUT …/power-settings`) on the Power tab and in an Input section below the Picture tab's
+  live editor (`FrameInput`), saved on change outside Done and Revert. 0022 wrote "(#117, #118)";
+  #118 stays on Power only, since it decides a power-off and R3 says "power doesnt make sense" on
+  Picture (a design choice the owner may reopen).
+- **A level's percent had a float rounding with no named home** (`round(current * 100 / maximum)`
+  in the Pi's `_line`, half to even). It is now `HardwareRange.percent`, whole percent rounded half
+  up in integers, which the console's `levelWords.js` mirrors under a Node test; the base page can
+  read one percent higher than before at an exact half (1 of 8: 13 %, was 12 %).
+- **CI run 38291987976's red `test_the_session_is_handed_over_with_the_draft_while_the_tab_stays_open`
+  is a race in `liveAdjustment.js`, unchanged by this branch and present on main:** Done pressed
+  while the page's `renew` is in flight waits for it (`act`), then saves against the new session,
+  which no Pi has presented yet, and Central refuses it (`trial_latest_not_presented`). A held
+  `renew` fails the same way on origin/main and on this branch. Not fixed here.
+- **`test_a_passing_refusal_keeps_the_session_and_clears_itself` failed once locally (1 of 24 under
+  load) and fails the same way on origin/main (1 of 96):** the alert it waits for lives one
+  keepalive tick (about 500 ms) and Playwright's `expect` polls at widening intervals (up to 1 s),
+  so a poll can miss it. Test-side, not this branch; not fixed here.

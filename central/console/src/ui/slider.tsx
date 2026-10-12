@@ -9,6 +9,9 @@ export interface SliderProps {
   step: number;
   /** Read after the value, as text beside the slider and to a screen reader ("150 %"). */
   unit: string;
+  /** How a value reads instead, beside the slider and to a screen reader ("46 % (117 of 255)");
+   * `unit` is then not shown. */
+  format?: (value: number) => string;
   /** Every value while a pointer drags the slider (a live adjustment shows each one). */
   onPreview?: (value: number) => void;
   /** The value where the slider was let go, a key press's value, or a value set any other way. */
@@ -26,12 +29,12 @@ export interface SliderProps {
  * moves whatever its owner does with a preview: `value` is what was committed, and a caller that
  * keeps only committed values (Settings › Photo fit did) cannot pin the thumb in place.
  */
-export function Slider({ value, min, max, step, unit, onPreview, onCommit, disabled }: SliderProps) {
+export function Slider({ value, min, max, step, unit, format, onPreview, onCommit, disabled }: SliderProps) {
   const { id, describedBy } = useFieldControl();
   const dragging = useRef(false);
   const [held, setHeld] = useState<number | null>(null);
   const shown = held ?? value;
-  const text = `${shown} ${unit}`;
+  const text = format ? format(shown) : `${shown} ${unit}`;
   const letGo = (next: number) => {
     dragging.current = false;
     setHeld(null);

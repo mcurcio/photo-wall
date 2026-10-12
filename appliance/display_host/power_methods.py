@@ -6,7 +6,8 @@ Each class implements `output_power.PowerMethodAdapter`. They are the only code 
 `timeout` through the injected `Runner` (tests pass a fake that plays recorded tool output).
 
 - DDC/CI: through the port's one DDC/CI channel (ddc.DdcChannel, shared with the picture
-  controller since 1c, so a power write and a brightness write never meet on one bus); read
+  controller since 1c, so a power write and a picture write never meet on one bus), every call at
+  Urgency.POWER, so power goes before any waiting picture command (decision 0022); read
   `getvcp D6 --terse`, write `setvcp D6 4` (standby) / `setvcp D6 1` (on), always read back;
   never D6 = 5. Input (#117, #118): VCP 60, which many monitors
   ignore (the test monitor does), so `showing_other_input` is None when the read is unstable.
@@ -93,13 +94,15 @@ class DdcCiAdapter:
     method: Final = PowerMethod.DDC_CI
 
     def __init__(self, channel: DdcChannel) -> None:
+        from .ddc import Urgency  # at call time: ddc.py imports Runner and DDC_CACHE from here
         self._channel = channel
+        self._urgency: Final = Urgency.POWER   # power always goes first on the port (decision 0022)
 
     def probe(self, output_id: str, *, timeout: float) -> bool:
         return self.read(output_id, timeout=timeout) is not None
 
     def read(self, output_id: str, *, timeout: float) -> Power | None:
-        output = self._channel.get(output_id, DDC_POWER_CODE, timeout=timeout)
+        output = self._channel.get(output_id, DDC_POWER_CODE, urgency=self._urgency, timeout=timeout)
         value = _DDC_POWER.search(output) if output is not None else None
         if value is None:
             return None
@@ -108,7 +111,7 @@ class DdcCiAdapter:
     def set(self, output_id: str, power: Power, *, timeout: float) -> PowerResult:
         deadline = time.monotonic() + timeout
         value = DDC_ON if power is Power.ON else DDC_STANDBY
-        self._channel.set(output_id, DDC_POWER_CODE, value, timeout=timeout)
+        self._channel.set(output_id, DDC_POWER_CODE, value, urgency=self._urgency, timeout=timeout)
         # The read-back decides, never the write's exit status: a write that bounced hot-plug may
         # still have taken.
         if self.read(output_id, timeout=_left(deadline)) is power:

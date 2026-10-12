@@ -15,7 +15,7 @@ Each principle has a test; a design or a page that fails the test is wrong, what
 | # | Principle | Test | Prior art |
 |---|---|---|---|
 | P1 | **One home per setting.** Every setting and every fact is changed in exactly one place; anywhere else it appears as a read-only line that links to its home. | The [settings catalogue](operator-console-design.md#11-settings-catalogue) names one "Lives on" per setting; no page renders a control for a setting whose home is elsewhere (it renders `LinkToOwner`). | 0018's H1; Home Assistant device pages link to an entity's one settings dialog |
-| P2 | **Show where a setting acts.** A control that changes equipment says what it belongs to (this Frame, this display) and where it takes effect (on the display, Photo Wall picture adjustment). | `SettingRow`'s equipment variant requires `belongsTo` and `actsOn` ([§4](#settingrow)). | macOS Displays and TV menus name the device; Polaris "explain the consequence" |
+| P2 | **Show where a setting acts.** A control that changes equipment says what it belongs to (this Frame, this display) and where it takes effect (on the display, on the Pi, or in the picture Photo Wall sends). Where a page holds both groups of picture settings, the section says it: **Display (hardware)** and **Photo Wall (software)** ([0022](decisions/0022-picture-hardware-and-software-apart.md)). | `SettingRow`'s equipment variant requires `belongsTo` and `actsOn` ([§4](#settingrow)); the Picture tab's two sections each hold one group. | macOS Displays and TV menus name the device; Polaris "explain the consequence" |
 | P3 | **Live on the device, then Done or Revert.** A change to a display shows on the real display while you make it; **Done** keeps it and is offered only once the Pi acknowledges it presents the latest change. | `LivePreviewEditor` derives Done from the acknowledgement of the latest revision ([§4](#liveprevieweditor)). | Apple HIG Display settings; [U9](requirements.md#failure-visibility-and-recovery) |
 | P4 | **Say what is true; never claim pixels.** Every status names its source and time; what nobody reported is **Can't tell since …**, never a guess. The console says what the Pi reports it presents, never what the display lights up. A request is never shown as done before its device acknowledges it. | Every status carries a time; "on screen" is a [forbidden word](#forbidden-words); device actions use `AckBadge`. | [U6](requirements.md#failure-visibility-and-recovery); Home Assistant's "Unavailable" state |
 | P5 | **Plain words.** Labels come from the glossary; internal words appear only under **Details**. | The [forbidden words](#forbidden-words) check. | GOV.UK content design: "use plain English" |
@@ -182,8 +182,8 @@ interface SplitProps { children: React.ReactNode; action: React.ReactNode; as?: 
 // control its id, its describedby and the label's id (`labelId`), so a control that is a group is named by the label.
 interface FieldProps { label: string; help?: string; error?: string; notes?: readonly string[]; children: React.ReactElement }
 
-// Slider — shows its value and unit as text; commits on release, previews on drag; follows the pointer while held whatever the caller does with a preview.
-interface SliderProps { value: number; min: number; max: number; step: number; unit: string; onPreview?(v: number): void; onCommit(v: number): void; disabled?: boolean }
+// Slider — shows its value and unit as text (or `format`'s words, e.g. a display's level "46 % (117 of 255)"); commits on release, previews on drag; follows the pointer while held whatever the caller does with a preview.
+interface SliderProps { value: number; min: number; max: number; step: number; unit: string; format?(v: number): string; onPreview?(v: number): void; onCommit(v: number): void; disabled?: boolean }
 
 // SegmentedControl — 2 to 5 exclusive choices (rotation, nudge step, fit). Alone it shows and carries its `label`;
 // inside a Field the Field's label names the group (aria-labelledby) and its help describes it, and `label` is unused.
@@ -205,7 +205,7 @@ interface SelectProps<V extends string> { value: V | null; options: readonly { v
 // label and error; arrow keys step by `step`, and the value commits on blur or Enter.
 interface NumberInputProps { value: number | null; unit: string; min?: number; max?: number; step?: number; onCommit(v: number): void; disabled?: boolean }
 
-// Tag — a neutral small label ("On the display", "Photo Wall picture adjustment"); never a severity colour.
+// Tag — a neutral small label ("On the display", "Photo Wall (software)"); never a severity colour.
 interface TagProps { children: string }
 ```
 
@@ -218,7 +218,7 @@ Later primitives: `Link` (accent text; 1a, with the accent rule), `Menu` (overfl
 The one anatomy for a setting; one discriminated union so an equipment setting cannot omit where it acts (P2). Prior art: Polaris SettingToggle; iOS Settings rows.
 
 ```ts
-type ActsOn = "display-hardware" | "picture-adjustment" | "pi";   // "On the display" · "Photo Wall picture adjustment" · "On the Pi"
+type ActsOn = "display-hardware" | "pi";   // "On the display" · "On the Pi"; picture settings are grouped by section instead (0022)
 type SettingRowProps = SettingRowBase & (
   | { kind: "equipment"; belongsTo: "frame" | "display"; actsOn: ActsOn }
   | { kind: "content"; inherited?: { from: OwnerLink; onOverride(): void } }   // Scene / Photo source / Frame override
@@ -229,7 +229,7 @@ interface SettingRowBase {
   help?: string;                  // one plain sentence
   control: React.ReactElement;    // an unlabelled ui control: the row's Field labels it, and help, actsOn and
                                   // defaultLabel are the Field's help and notes
-  defaultLabel?: string;          // "Default: 50 %"
+  defaultLabel?: string;          // "Default: 1.5 s"
   onReset?(): void;               // shown only when the value differs from the default
   state: "idle" | "saving" | "saved" | "error";
   error?: string;
@@ -577,7 +577,7 @@ Every journey step in the [roadmap](roadmap.md#the-journey), one row per home (p
 | B3 Name and place | Frames › Wall tab (the wall's name and room label, #92; built in 2b) | T2 | SettingRow, Field | Autosave | saved inline | none |
 | B3 Name and place | Frames › wall layout (placement) | T6 | WallTile, Tabs (walls) | Autosave | overlaps flagged | EmptyState "Add your first Frame" |
 | B4 Fit the picture | Frame page › Position | T3 + LivePreviewEditor | QuadEditor, NudgePad, SegmentedControl (fit: Cover or Corners; rotation 0/90/180/270), NumberInput and Slider (angle, Cover only), AckBadge, LeaveGuard | Live | Previewing → Presented by the Pi | unbound → binding picker; Pi offline → disabled with since; expired session note; a Cover Save whose picture would turn against the Frame's orientation: the refusal in plain words beside the angle |
-| B5 Picture quality | Frame page › Picture | T3 + LivePreviewEditor | SettingRow (equipment, actsOn), Slider, Switch (grey ramp, not built) | Live | each brightness and contrast slider says where it acts; Done once the Pi reports the latest change taken by the display or presented | a write the display refuses: the row says "The display did not take it" and stays on the display (it never switches by itself; the operator may move it to picture adjustment) |
+| B5 Picture quality | Frame page › Picture | T3 + LivePreviewEditor | two sections: Display (hardware), a Slider per level the display offers, read as a percent of its range with the display's own count second ("46 % (117 of 255)"; owner, 2026-10-12, picked "Percent, raw count second"), a Select of exactly its named choices per list setting, a read-only line otherwise, each with "As the display has it"; Photo Wall (software), four Sliders (brightness and contrast 0–150 %); Switch (grey ramp, not built); below the live editor, the Power tab's own input SettingRow (B6), saved on change outside Done and Revert ([0022](decisions/0022-picture-hardware-and-software-apart.md) R10) | Live (the input row: Autosave) | the section says where a setting acts; "Checking what this display offers" until the Pi has asked; Done once the Pi reports the latest hardware values written and the latest software values presented | a write the display refuses: the row says "The display did not take it"; a set value changed on the display's buttons: "Changed on the display's buttons" with the display's value, left alone until the next change |
 | B6 Power | Frame page › Power | T3 | SettingRow, Button (Test), Note (live status, in place of `AckBadge`, whose words are the live editor's), LinkToOwner | Autosave (options), no Undo until `UndoToast` exists; Action (Test) | "Waiting for the Pi" until the Pi answers the change that carried the test, then "Display confirmed off" / "Display confirmed on" / "Picture stopped; the display may sleep" / "Display didn't answer" / "Left on: the display is showing another input"; Pi not linked: "Last heard from the Pi at …" | no method answered (`not-supported`): EmptyState naming the smart-plug option; unbound: "Choose which Pi and HDMI port feeds this Frame", linking to Hardware |
 | B7 First photos | Setup checklist › First photos | T7 | Checklist, MediaGrid | none | done when a Frame is Showing | Immich not connected → that step first |
 | C1 Wall layout | Frames › wall layout | T6 | WallTile, Field (size in house units) | Autosave | overlaps flagged | EmptyState "Add your first Frame" |

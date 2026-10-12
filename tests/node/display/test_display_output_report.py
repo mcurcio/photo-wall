@@ -227,3 +227,29 @@ def test_each_output_reports_alone_and_an_unknown_output_is_not_reported():
 def test_the_display_session_declares_the_display_line_with_its_desired_view():
     session = display_session(DISPLAY_SLICE.digest)
     assert session.desired is not None
+
+
+def test_a_picture_report_is_its_own_state_key_beside_the_output_report():
+    """Decision 0022: picture leaves the Output report; each Output's picture report is the
+    `picture-<output>` state key, and its document the `picture-<output>` desired key, each with
+    its own size cap."""
+    from appliance.display_host.bus import DISPLAY_DESIRED, DISPLAY_STATE, BusPictureSink
+    from contracts.node_output import OUTPUT_IDS
+    from contracts.node_picture import (
+        PICTURE_DOCUMENT_BYTES,
+        PICTURE_REPORT_BYTES,
+        PictureReport,
+        decode_picture_report,
+        picture_document_key,
+        picture_report_key,
+    )
+
+    for output_id in OUTPUT_IDS:
+        assert DISPLAY_STATE.sizes[picture_report_key(output_id)] == PICTURE_REPORT_BYTES
+        assert DISPLAY_DESIRED.sizes[picture_document_key(output_id)] == PICTURE_DOCUMENT_BYTES
+        assert output_report_key(output_id) in DISPLAY_STATE.sizes
+    session = display_session(DISPLAY_SLICE.digest)
+    report = PictureReport("HDMI-A-2", SPIKE_IDENTITY, (), 4, {}, 4)
+    BusPictureSink(session).put_picture(report)
+    assert decode_picture_report(session.state.get(picture_report_key("HDMI-A-2"))) == report
+    assert session.state.get(output_report_key("HDMI-A-2")) is None

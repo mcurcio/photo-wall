@@ -1,6 +1,8 @@
 import { useState } from "react";
 
+import { levelWords } from "../levelWords.js";
 import { copyPicture } from "../pictureApi.js";
+import type { HardwareSettingView, PictureCopyResult } from "../pictureApi.js";
 import type { usePictureSession } from "../pictureSession.js";
 import { FactGroup, FactRow, Note } from "../patterns/fact-row";
 import { LivePreviewEditor } from "../patterns/live-preview-editor";
@@ -11,6 +13,7 @@ import { Disclosure } from "../ui/disclosure";
 import { Field } from "../ui/field";
 import { Link } from "../ui/link";
 import { Section } from "../ui/section";
+import { Select } from "../ui/select";
 import { Slider } from "../ui/slider";
 import { Inline, Stack } from "../ui/stack";
 import { Switch } from "../ui/switch";
@@ -18,9 +21,7 @@ import { Switch } from "../ui/switch";
 /** The Picture tab's live session, as pictureSession.js serves it. */
 export type PictureSession = ReturnType<typeof usePictureSession>;
 type View = NonNullable<PictureSession["view"]>;
-type ActsOn = "display" | "picture-adjustment";
-type Placeable = "brightness" | "contrast";
-type CopyOutcome = "copied" | "no-display" | "same-display" | "session-open";
+type CopyOutcome = PictureCopyResult["outcome"];
 
 export interface FramePictureProps {
   frameId: string;
@@ -32,15 +33,16 @@ export interface FramePictureProps {
   otherFrames: readonly string[];
 }
 
-const PLACEABLE: readonly { setting: Placeable; label: string; noun: string }[] = [
-  { setting: "brightness", label: "Brightness", noun: "brightness" },
-  { setting: "contrast", label: "Contrast", noun: "contrast" },
-];
-const UNSET_PERCENT = 50;
-const ON_DISPLAY = "On the display";
-const ADJUSTMENT = "Photo Wall picture adjustment";
+export const DISPLAY_GROUP = "Display (hardware)";
+export const PHOTO_WALL_GROUP = "Photo Wall (software)";
 const AS_IT_HAS_IT = "As the display has it";
 const NOT_CONNECTED = "Applies when the display is connected";
+const NO_CHANGE = "100 % changes nothing";
+const CHECKING = "Checking what this display offers…";
+const CHECKED_WHEN_CONNECTED = "Photo Wall checks what this display offers when it is connected";
+const NOT_OFFERED = "Not offered by this display at its last check";
+// The Select's value for "As the display has it" (a choice's own value is its byte, in decimal).
+const AS_IT_HAS_IT_OPTION = "as-the-display-has-it";
 
 const COPY_WORDS: Record<CopyOutcome, string> = {
   copied: "Copied",
@@ -49,23 +51,43 @@ const COPY_WORDS: Record<CopyOutcome, string> = {
   "session-open": "Not copied: someone is adjusting that display now",
 };
 
+/** A display value in the display's own words: a level as a percent of its range, its own count
+ * second ("46 % (117 of 255)", levelWords.js), a choice's name ("6500 K"), else the number it
+ * answered. */
+function displayValue(row: HardwareSettingView, value: number): string {
+  const range = row.offered?.range;
+  if (range?.kind === "level" && range.maximum !== null) return levelWords(value, range.maximum);
+  return range?.choices.find((choice) => choice.value === value)?.name ?? String(value);
+}
+
 /**
- * Where brightness or contrast acts, in the tab's words (design "What the tab and the base page
- * say"): on the display or as Photo Wall picture adjustment, with the value in force; whether the
- * display took it; a value changed on the display's own buttons (only while the draft leaves the
- * setting alone, so the Pi's read of an older value is never read as a button press).
+ * One display setting's words (design "What the tab says"), `draft` the operator's change in this
+ * visit (undefined: none; null: handed back), `offeredKnown` the view's: as the display has it when
+ * nobody set it here; while what the display offers is not known (never checked yet), the value set
+ * here alone; set here but not offered at the display's last check; whether the display took the
+ * latest write or was changed on its own buttons since (Central's judgement,
+ * central/displays/hardware.py `changed_on_buttons`; never while the operator's own change is in
+ * flight); else the value set in Photo Wall, a level as a percent of its range with the display's
+ * own count second ("46 % (117 of 255)"), a list setting by its choice's name ("6500 K"). Three
+ * states never share one null: not connected (the tab's own line), not checked yet (`offeredKnown`
+ * false) and not offered at the last check.
  */
-export function whereItActs(view: View, setting: Placeable, actsOn: ActsOn | null, value: number | null,
-  touched: boolean): string {
-  const row = view[setting];
-  if (actsOn === null || view.connected === false) return NOT_CONNECTED;
+export function hardwareWords(row: HardwareSettingView, draft: number | null | undefined, offeredKnown = true): string {
+  const value = draft === undefined ? row.value : draft;
   if (value === null) return AS_IT_HAS_IT;
-  if (actsOn === "picture-adjustment") return `${ADJUSTMENT} · ${value} %`;
-  if (row.result === "not-taken" || row.result === "no-answer") return "The display did not take it";
-  if (!touched && row.result === "taken" && row.read !== null && row.read !== value) {
-    return `Changed on the display's buttons: ${row.read} %`;
+  if (row.offered === null) return offeredKnown ? NOT_OFFERED : displayValue(row, value);
+  if (draft === undefined && (row.result?.result === "not-taken" || row.result?.result === "no-answer")) {
+    return "The display did not take it";
   }
-  return `${ON_DISPLAY} · ${value} %`;
+  if (draft === undefined && row.changed_on_buttons) return `Changed on the display's buttons: ${displayValue(row, row.offered.current!)}`;
+  return displayValue(row, value);
+}
+
+/** Copy's words for one target: its outcome, and the display settings left as they are there,
+ * named from `names` (the source's rows: code to name) or by code. */
+export function copyWords(result: PictureCopyResult, names: Readonly<Record<string, string>> = {}): string {
+  const skipped = result.hardware_skipped.map((code) => names[code] ?? code);
+  return skipped.length === 0 ? COPY_WORDS[result.outcome] : `${COPY_WORDS[result.outcome]}; skipped: ${skipped.join(", ")}`;
 }
 
 function unavailableWords(session: PictureSession, piHref: string | null) {
@@ -80,18 +102,127 @@ function unavailableWords(session: PictureSession, piHref: string | null) {
   );
 }
 
-/** Copy to other Frames (#119): the four values this display keeps, never where they act or position. */
-function CopyToFrames({ frameId, otherFrames, blocked }: { frameId: string; otherFrames: readonly string[]; blocked: string | null }) {
+/** One display setting: a slider per level, a picker per list of choices (its choices and "As the
+ * display has it"), a line with no control for a setting the display answers but lists nothing for,
+ * or one it no longer offers; a hand-back ("As the display has it: …") wherever a value is set. */
+function HardwareSettingRow({ row, session, ready, offeredKnown }: {
+  row: HardwareSettingView; session: PictureSession; ready: boolean; offeredKnown: boolean;
+}) {
+  const { draft } = session;
+  const drafted = row.code in draft.hardware ? draft.hardware[row.code] : undefined;
+  const value = drafted === undefined ? row.value : drafted;
+  const words = hardwareWords(row, drafted, offeredKnown);
+  const set = (next: number | null) => session.changeHardware(row.code, next);
+  const range = row.offered?.range;
+  const handBack = value !== null && range?.kind !== "choice" && (
+    <Inline>
+      <Button variant="ghost" disabled={!ready} onClick={() => set(null)}>
+        {`${AS_IT_HAS_IT}: ${row.name.toLowerCase()}`}
+      </Button>
+    </Inline>
+  );
+  if (range?.kind === "level" && range.maximum !== null) {
+    return (
+      <Stack>
+        <Field label={row.name} notes={[words]}>
+          <Slider min={0} max={range.maximum} step={1} unit="" value={value ?? row.offered?.current ?? 0}
+            format={(shown) => levelWords(shown, range.maximum!)} disabled={!ready} onPreview={set} onCommit={set} />
+        </Field>
+        {handBack}
+      </Stack>
+    );
+  }
+  if (range?.kind === "choice") {
+    const options = [
+      { value: AS_IT_HAS_IT_OPTION, label: AS_IT_HAS_IT },
+      ...range.choices.map((choice) => ({ value: String(choice.value), label: choice.name })),
+    ];
+    const chosen = value === null ? AS_IT_HAS_IT_OPTION : String(value);
+    return (
+      <Field label={row.name} notes={[words]}>
+        <Select value={options.some((option) => option.value === chosen) ? chosen : null} options={options}
+          disabled={!ready} onChange={(next) => set(next === AS_IT_HAS_IT_OPTION ? null : Number(next))} />
+      </Field>
+    );
+  }
+  const current = row.offered?.current;
+  return (
+    <Stack>
+      <FactRow label={row.name} tone="reported">
+        {row.offered === null || value !== null ? words : current == null ? "No answer" : displayValue(row, current)}
+      </FactRow>
+      {handBack}
+    </Stack>
+  );
+}
+
+/** Display (hardware): every setting the display offers, and every one set here, in picture-list
+ * order; "Checking what this display offers" while a connected display's list is not known yet,
+ * and that it is checked once connected while one never checked is away. */
+function DisplaySettings({ view, session, ready }: { view: View; session: PictureSession; ready: boolean }) {
+  return (
+    <FactGroup title={DISPLAY_GROUP}>
+      <Stack>
+        {!view.offered_known && <Note>{view.connected === false ? CHECKED_WHEN_CONNECTED : CHECKING}</Note>}
+        {view.connected === false && <Note>{NOT_CONNECTED}</Note>}
+        {view.hardware.map((row) => (
+          <HardwareSettingRow key={row.code} row={row} session={session} ready={ready} offeredKnown={view.offered_known} />
+        ))}
+      </Stack>
+    </FactGroup>
+  );
+}
+
+/** Photo Wall (software): brightness and contrast 0–150 % (100 % changes nothing), colour
+ * temperature and gamma; the picture Photo Wall sends, never the display's own brightness. */
+function PhotoWallSettings({ view, session, ready }: { view: View; session: PictureSession; ready: boolean }) {
+  const { software } = session.draft;
+  const percent = (setting: "brightness" | "contrast", label: string, inForce: number) => {
+    const value = software[setting] ?? inForce;
+    return (
+      <Field label={label} notes={[`${value} % · ${NO_CHANGE}`]}>
+        <Slider min={0} max={150} step={1} unit="%" value={value} disabled={!ready}
+          onPreview={(next) => session.changeSoftware(setting, next)}
+          onCommit={(next) => session.changeSoftware(setting, next)} />
+      </Field>
+    );
+  };
+  const kelvin = software["colour-temperature"] ?? view.software.colour_temperature_kelvin;
+  const gamma = software.gamma ?? view.software.gamma_tenths;
+  return (
+    <FactGroup title={PHOTO_WALL_GROUP}>
+      <Stack>
+        {percent("brightness", "Brightness", view.software.brightness_percent)}
+        {percent("contrast", "Contrast", view.software.contrast_percent)}
+        <Field label="Colour temperature" notes={[`${kelvin} K`]}>
+          <Slider min={3000} max={9300} step={100} unit="K" disabled={!ready} value={kelvin}
+            onPreview={(next) => session.changeSoftware("colour-temperature", next)}
+            onCommit={(next) => session.changeSoftware("colour-temperature", next)} />
+        </Field>
+        <Field label="Gamma" notes={[(gamma / 10).toFixed(1)]}>
+          <Slider min={1.8} max={2.6} step={0.1} unit="" disabled={!ready} value={gamma / 10}
+            onPreview={(next) => session.changeSoftware("gamma", Math.round(next * 10))}
+            onCommit={(next) => session.changeSoftware("gamma", Math.round(next * 10))} />
+        </Field>
+      </Stack>
+    </FactGroup>
+  );
+}
+
+/** Copy to other Frames (#119): Photo Wall's four and the display settings set here, never position. */
+function CopyToFrames({ frameId, otherFrames, blocked, names }: {
+  frameId: string; otherFrames: readonly string[]; blocked: string | null; names: Readonly<Record<string, string>>;
+}) {
   const [chosen, setChosen] = useState<readonly string[]>([]);
   const [sending, setSending] = useState(false);
-  const [outcomes, setOutcomes] = useState<readonly { frame_id: string; outcome: CopyOutcome }[] | null>(null);
+  const [outcomes, setOutcomes] = useState<readonly PictureCopyResult[] | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
   if (otherFrames.length === 0) return null;
   const copy = async () => {
     setSending(true);
     setProblem(null);
     const result = await copyPicture(frameId, [...chosen]) as
-      { ok: true; results: { frame_id: string; outcome: CopyOutcome }[] } | { ok: false; error: string };
+      { ok: true; results: PictureCopyResult[] } | { ok: false; error: string };
     setSending(false);
     if (result.ok) {
       setOutcomes(result.results);
@@ -105,9 +236,9 @@ function CopyToFrames({ frameId, otherFrames, blocked }: { frameId: string; othe
     <Disclosure summary="Copy to other Frames">
       <Stack>
         <Note>
-          Copies this display&apos;s four kept values to the displays of the Frames you choose. Where each
-          setting acts and each Frame&apos;s position stay as they are. A percent may look different on
-          another display.
+          Copies this display&apos;s kept Photo Wall settings, and the display settings set here where the
+          other display offers them, to the displays of the Frames you choose. Each Frame&apos;s position
+          stays as it is.
         </Note>
         <Stack label="Frames to copy to">
           {otherFrames.map((other) => (
@@ -127,8 +258,8 @@ function CopyToFrames({ frameId, otherFrames, blocked }: { frameId: string; othe
         {blocked !== null && <Note>{blocked}</Note>}
         {outcomes !== null && (
           <FactGroup title="Copy results">
-            {outcomes.map(({ frame_id: other, outcome }) => (
-              <FactRow key={other} label={`Frame ${other}`} tone="set">{COPY_WORDS[outcome]}</FactRow>
+            {outcomes.map((result) => (
+              <FactRow key={result.frame_id} label={`Frame ${result.frame_id}`} tone="set">{copyWords(result, names)}</FactRow>
             ))}
           </FactGroup>
         )}
@@ -149,17 +280,16 @@ function CopyToFrames({ frameId, otherFrames, blocked }: { frameId: string; othe
 }
 
 /**
- * The Frame page's Picture tab (roadmap 1c, slice K1; design language §8 row B5, the Live model;
- * console design §5 Picture, settings #111-#114, #119): brightness, contrast, colour temperature
- * and gamma of the display that feeds this Frame. They belong to the display and move with it.
- * Each slider says where it acts, live: on the display (its own setting, over the HDMI cable) or
- * as Photo Wall picture adjustment, which changes the picture Photo Wall sends and never claims to
- * be the display's brightness. Brightness and contrast can be moved to picture adjustment, and back
- * onto the display when the display answered. Every change is sent as it is made; Done keeps it
- * once the Pi shows it, Revert puts back what was there. Copy to other Frames copies the values.
+ * The Frame page's Picture tab (roadmap 1c's Live model, design language §8 row B5; decision 0022,
+ * the picture split: console design §5 Picture, settings #111-#114, #119): two groups of the display
+ * that feeds this Frame, set apart and never coupled. Display (hardware) is the display's own
+ * settings that it offers, each untouched until someone sets it here; Photo Wall (software) changes
+ * the picture Photo Wall sends and never claims to be the display's brightness. They belong to the
+ * display and move with it. Every change is sent as it is made; Done keeps it once the Pi shows it,
+ * Revert puts back what was there. Copy to other Frames copies the kept values.
  */
 export function FramePicture({ frameId, piHref, session, otherFrames }: FramePictureProps) {
-  const { view, draft, phase } = session;
+  const { view, phase } = session;
   const reason = unavailableWords(session, piHref);
   const ready = view !== null && phase !== "idle";
   const notes = [
@@ -173,48 +303,10 @@ export function FramePicture({ frameId, piHref, session, otherFrames }: FramePic
   const controls = view === null ? <Note>Reading the display&apos;s picture…</Note> : (
     <Stack>
       <Note>These settings belong to the display that feeds this Frame and move with it.</Note>
-      {PLACEABLE.map(({ setting, label, noun }) => {
-        const touched = setting in draft.values;
-        const value = touched ? draft.values[setting]! : view[setting].value;
-        const actsOn = draft.places[setting] ?? view[setting].acts_on;
-        const set = (next: number) => session.change(setting, next);
-        return (
-          <Stack key={setting}>
-            <Field label={label} notes={[whereItActs(view, setting, actsOn, value, touched)]}>
-              <Slider min={0} max={100} step={1} unit="%" value={value ?? view[setting].read ?? UNSET_PERCENT}
-                disabled={!ready || actsOn === null} onPreview={set} onCommit={set} />
-            </Field>
-            {actsOn === "display" && (
-              <Inline>
-                <Button variant="ghost" disabled={!ready} onClick={() => session.place(setting, "picture-adjustment")}>
-                  {`Use picture adjustment for ${noun}`}
-                </Button>
-              </Inline>
-            )}
-            {actsOn === "picture-adjustment" && view[setting].answered === true && (
-              <Inline>
-                <Button variant="ghost" disabled={!ready} onClick={() => session.place(setting, "display")}>
-                  {`Use the display's own ${noun}`}
-                </Button>
-              </Inline>
-            )}
-          </Stack>
-        );
-      })}
-      <Field label="Colour temperature"
-        notes={[`${ADJUSTMENT} · ${draft.values["colour-temperature"] ?? view.colour_temperature_kelvin} K`]}>
-        <Slider min={3000} max={9300} step={100} unit="K" disabled={!ready}
-          value={draft.values["colour-temperature"] ?? view.colour_temperature_kelvin}
-          onPreview={(next) => session.change("colour-temperature", next)}
-          onCommit={(next) => session.change("colour-temperature", next)} />
-      </Field>
-      <Field label="Gamma" notes={[`${ADJUSTMENT} · ${((draft.values.gamma ?? view.gamma_tenths) / 10).toFixed(1)}`]}>
-        <Slider min={1.8} max={2.6} step={0.1} unit="" disabled={!ready}
-          value={(draft.values.gamma ?? view.gamma_tenths) / 10}
-          onPreview={(next) => session.change("gamma", Math.round(next * 10))}
-          onCommit={(next) => session.change("gamma", Math.round(next * 10))} />
-      </Field>
+      <DisplaySettings view={view} session={session} ready={ready} />
+      <PhotoWallSettings view={view} session={session} ready={ready} />
       <CopyToFrames frameId={frameId} otherFrames={otherFrames}
+        names={Object.fromEntries(view.hardware.map((row) => [row.code, row.name]))}
         blocked={session.dirty ? "Press Done or Revert first: Copy copies the kept values." : null} />
     </Stack>
   );

@@ -4,11 +4,10 @@ import { Button } from "../ui/button";
 import { Field } from "../ui/field";
 
 /** Where an equipment setting takes effect (design language P2), in the words the row shows. */
-export type ActsOn = "display-hardware" | "picture-adjustment" | "pi";
+export type ActsOn = "display-hardware" | "pi";
 
 const ACTS_ON_WORDS: Record<ActsOn, string> = {
   "display-hardware": "On the display",
-  "picture-adjustment": "Photo Wall picture adjustment",
   pi: "On the Pi",
 };
 

@@ -12,13 +12,13 @@ from central.displays.views import (
     FrameDisplayView,
     FramePictureView,
     FramePowerView,
+    HardwareEdit,
     PictureCopyRequest,
     PictureCopyResult,
-    PictureEdit,
-    PicturePlace,
     PictureSequence,
     PictureSessionView,
     PowerTestAccepted,
+    SoftwareEdit,
 )
 
 
@@ -60,7 +60,7 @@ class DisplayCommands(Protocol):
         ...
 
 
-# Roadmap 1c (run ledger .claude/runs/display-1c.md, slice C2). Refusals are DisplayRefused with
+# Roadmap 1c's Live model, two groups from the picture split (decision 0022, slice S2). Refusals are DisplayRefused with
 # the codes of central/displays/picture.py PictureRefused, plus unknown_frame 404, frame_unbound
 # 409, no_display 409, session_open 409 and unknown_session 404. Every write wakes the worker's
 # Output document source in its own transaction, as the power commands do.
@@ -74,19 +74,20 @@ class PictureQueries(Protocol):
 class PictureCommands(Protocol):
     def begin_picture(self, frame_id: str) -> PictureSessionView:
         """Open a picture session on the Display last seen on the Frame's bound Output, recording
-        what the display read back for brightness and contrast. An ended session on that Display is
-        folded first (its `reverted` result stored). unknown_frame, frame_unbound, no_display,
+        the Output's picture change (`began_at_change`). An ended session on that Display is folded
+        first (its `reverted` result stored). unknown_frame, frame_unbound, no_display,
         session_open (a live session on that Display)."""
         ...
 
-    def edit_picture(self, session_id: UUID, edit: PictureEdit) -> PictureSequence:
-        """One setting's new value, live on the Display. unknown_session, session_ended,
-        stale_sequence, out_of_range, not_placed_yet."""
+    def edit_hardware(self, session_id: UUID, edit: HardwareEdit) -> PictureSequence:
+        """One display setting's new value, or None to hand it back (as the display has it), live on
+        the Display; checked against what the display offers (`hardware.edit_refusal`).
+        unknown_session, session_ended, stale_sequence, not_offered, out_of_range."""
         ...
 
-    def place_picture(self, session_id: UUID, place: PicturePlace) -> PictureSequence:
-        """Move brightness or contrast between the display and picture adjustment. unknown_session,
-        session_ended, stale_sequence, display_did_not_answer."""
+    def edit_software(self, session_id: UUID, edit: SoftwareEdit) -> PictureSequence:
+        """One of Photo Wall's four, live on the Display. unknown_session, session_ended,
+        stale_sequence, out_of_range."""
         ...
 
     def keep_picture_alive(self, session_id: UUID) -> PictureSessionView:
@@ -103,8 +104,9 @@ class PictureCommands(Protocol):
         ...
 
     def copy_picture(self, frame_id: str, request: PictureCopyRequest) -> tuple[PictureCopyResult, ...]:
-        """Copy the four values of the source Frame's Display to each target Frame's Display, one
-        outcome per target in request order; never where they act, never position. unknown_frame
-        (the source, or any target), no_display (the source)."""
+        """Copy the source Frame's Display's software values, and its hardware values where each
+        target offers them (`picture.copied`), to each target Frame's Display, one outcome per target
+        in request order, naming the hardware codes skipped; never position. unknown_frame (the
+        source, or any target), no_display (the source)."""
         ...
 

@@ -29,9 +29,9 @@ export const WithError: Story = {
 export const SliderKind: Story = {
   name: "Slider",
   args: {
-    label: "Brightness — Photo Wall picture adjustment",
+    label: "Brightness — Photo Wall (software)",
     help: "Photo Wall brightens or dims the picture it sends; the Display's own settings do not change.",
-    children: <Slider value={150} min={0} max={200} step={5} unit="%" onCommit={() => {}} />,
+    children: <Slider value={114} min={0} max={150} step={1} unit="%" onCommit={() => {}} />,
   },
 };
 

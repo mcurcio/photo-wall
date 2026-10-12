@@ -25,6 +25,11 @@ from appliance.display_host.overlay.render import (
     render_slate,
     render_trial,
 )
+from appliance.display_host.picture import DisplayBrightness, brightness_line
+
+# The base page's lines as the picture controller words them (picture.py `brightness_line`, their one home).
+BOTH = brightness_line(114, DisplayBrightness(46, True, True))          # "Brightness: display 46 % · Photo Wall 114 %"
+AS_IT_HAS_IT = brightness_line(100, DisplayBrightness(None, False, True))
 
 WHITE = (0.94, 0.96, 1.0, 1.0)
 YELLOW = (1.0, 1.0, 0.0, 1.0)
@@ -70,8 +75,8 @@ def test_slate_base_page_text_and_geometry_at_1280():
         Text(48, 305, 18, "Base display service - app content is independently supervised",
              WHITE, "sans"),
     )                                                  # no brightness line until the controller sends one
-    lit = render_slate("HDMI-A-1", 1280, 720, "output_mode_changed", False, "Brightness: on the display · 60 %")
-    assert lit[1:] == (*page[1:], Text(48, 345, 18, "Brightness: on the display · 60 %", WHITE, "sans"))
+    lit = render_slate("HDMI-A-1", 1280, 720, "output_mode_changed", False, BOTH)
+    assert lit[1:] == (*page[1:], Text(48, 345, 18, BOTH, WHITE, "sans"))
     assert not any("Panel brightness unavailable" in getattr(op, "text", "") for op in page + lit)
 
 
@@ -272,14 +277,14 @@ def test_the_brightness_event_redraws_the_slate_with_its_line(overlay_client):
     drawn = []
     overlay, wayland, _ = overlay_client(lambda draw_list, surface: drawn.append(draw_list))
     brightness = wayland.manager.dispatcher["brightness"]
-    brightness(wayland.manager, "HDMI-A-1", "Brightness: as the display has it")   # before its configure
+    brightness(wayland.manager, "HDMI-A-1", AS_IT_HAS_IT)                # before its configure
     wayland.manager.dispatcher["output"](wayland.manager, "HDMI-A-1", 64, 32, 1, "", 0)
-    assert drawn[-1][-1].text == "Brightness: as the display has it"
+    assert drawn[-1][-1].text == AS_IT_HAS_IT
     first = wayland.buffers[0]
     first.dispatcher["release"](first)
-    brightness(wayland.manager, "HDMI-A-1", "Brightness: on the display · 60 %")
-    assert len(drawn) == 2 and drawn[-1][-1].text == "Brightness: on the display · 60 %"
+    brightness(wayland.manager, "HDMI-A-1", BOTH)
+    assert len(drawn) == 2 and drawn[-1][-1].text == BOTH
     assert wayland.acks() == [1, 1]
-    brightness(wayland.manager, "HDMI-A-1", "Brightness: on the display · 60 %")   # unchanged: no redraw
+    brightness(wayland.manager, "HDMI-A-1", BOTH)                        # unchanged: no redraw
     brightness(wayland.manager, "HDMI-A-1", "x" * 129)                            # past the shell's bound
     assert len(drawn) == 2
