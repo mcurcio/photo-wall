@@ -24,6 +24,7 @@ from central.house_time.model import HouseTime
 from central.media_repository import MediaRepository
 from central.planner import PlannerLimits, Projection, project
 from central.runtime import Contribution, Runtime, Scene
+from central.wall_plan import assignment
 from central.wall_plan.fit_settings import FitSettings
 from central.wall_plan.order import (
     LineAnswer,
@@ -36,6 +37,7 @@ from central.wall_plan.order import (
 )
 from central.wall_plan.selection import SceneSelection
 from contracts.models import FrameProfile, OutputBinding, Variant
+from contracts.on_screen import Extent
 
 PROFILES = {
     "wide": FrameProfile(width_px=1920, height_px=1080, diagonal_inches=24),
@@ -240,22 +242,45 @@ def test_a_capture_time_edited_by_another_pools_check_changes_the_next_pass(regi
     assert first_photo() == older.asset_id
 
 
-def test_an_hour_of_short_cycles_on_a_small_pool_plans_in_a_fraction_of_a_second():
-    """A perpetual Run (the Default Scene) on an 8 s cycle, three Frames and four photos: the
-    hour's plan places each photo about 340 times, and rule 1 (never one photo on two Frames at
-    once) reads only the showings that can overlap (`_Spans`). The pass holds the coordination
-    lock while it plans, so a slow one stalls every Player's readiness (the wall demo's fallback
-    gaps).
+def test_rule_1_reads_a_bounded_number_of_extents_per_photo_placed(monkeypatch):
+    """A perpetual Run (the Default Scene) on an 8 s cycle, three Frames and four photos: an
+    hour's plan places each photo about 340 times. Rule 1 (never one photo on two Frames at once)
+    reads only the showings that can overlap (`_Spans`), so the extents a pass computes and
+    compares grow with the photos it places, never with the photos placed before them. The pass
+    holds the coordination lock while it plans, so a slow one stalls every Player's readiness
+    (the wall demo's fallback gaps). Counted, not timed: the count is the same on every machine.
 
-    Mutation probe: rule 1 reading every earlier showing of the photo (the previous `free`) ->
-    about 0.55 s on a laptop where this reads 0.06 s."""
+    Mutation probe: rule 1 reading every earlier showing of the photo (`_Wall.add` putting every
+    showing in `of_asset`, the previous `free`) -> about 680 extent reads a placement in the hour,
+    four times the half hour's, where this reads 5 in both."""
+    reads = 0
+    computed, compared = assignment.on_screen_extent, Extent.overlaps
+
+    def count_computed(*args, **kwargs):
+        nonlocal reads
+        reads += 1
+        return computed(*args, **kwargs)
+
+    def count_compared(self, other):
+        nonlocal reads
+        reads += 1
+        return compared(self, other)
+
+    monkeypatch.setattr(assignment, "on_screen_extent", count_computed)
+    monkeypatch.setattr(Extent, "overlaps", count_compared)
     frames = {"left": "wide", "right": "wide", "far": "wide"}
     pool = SourcePool(source_ref=POOL, ready=True, candidates=tuple(
         photo(f"p{n}", "wide", captured=float(n)) for n in range(4)))
-    instance = wall(frames, order="shuffle", cycle=8)
-    started = time.perf_counter()
-    projection = plan(instance, frames, PoolLines({POOL: pool}), plan_seconds=3600)
-    elapsed = time.perf_counter() - started
-    print(f"an hour of 8 s cycles on three Frames: {elapsed:.3f} s")
-    assert sum(entry.asset_id is not None for entry in projection.plan) > 3 * 400
-    assert elapsed < 0.3
+
+    def reads_a_placement(plan_seconds: float) -> float:
+        nonlocal reads
+        reads = 0
+        projection = plan(wall(frames, order="shuffle", cycle=8), frames,
+                          PoolLines({POOL: pool}), plan_seconds=plan_seconds)
+        placed = sum(entry.asset_id is not None for entry in projection.plan)
+        assert placed > 3 * plan_seconds / 8 * 0.9
+        return reads / placed
+
+    half_hour, hour = reads_a_placement(1800), reads_a_placement(3600)
+    assert hour <= 1.1 * half_hour
+    assert hour < 20
