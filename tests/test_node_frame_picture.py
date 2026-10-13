@@ -1,5 +1,6 @@
 """Picture operations and the picture change text of frame protocol v4 (roadmap 1c, slice T0;
-contracts/node_frame.py), and picture operations v5 (the print look)."""
+contracts/node_frame.py), picture operations v5 (the print look) and v6 (display tuning's test
+pattern)."""
 from __future__ import annotations
 
 import json
@@ -21,6 +22,7 @@ from contracts.node_frame import (
     parse_picture_change,
     picture_change_text,
 )
+from contracts.tuning import TestPattern
 
 WARM = PictureOperations("HDMI-A-1", 6, (1.0, 0.7114, 0.4250), 0.8, 0.5, 24 / 22)
 
@@ -99,7 +101,7 @@ def test_the_largest_operations_fit_the_event():
     raw = encode_picture_operations(_operations(
         output_id=long_id, picture_change=2**63 - 1, rgb_multipliers=(1.0, 1 / 3, 1 / 7), light_factor=1 / 3 + 1,
         contrast_slope=1 / 3 + 1, gamma_exponent=1 / 3 + 1, saturation=1 / 3 + 1, highlight_knee=1 / 3,
-        black_floor=1 / 13, lut=LutMix(LutRef("f" * 64, "z" * 64), 1 / 3)))
+        black_floor=1 / 13, lut=LutMix(LutRef("f" * 64, "z" * 64), 1 / 3), test_pattern=TestPattern.BLACK_LEVEL))
     assert len(raw) <= PICTURE_OPERATIONS_BYTES   # the largest real operations fit with room to spare
 
 
@@ -144,6 +146,26 @@ def test_decoding_refuses_a_bad_lut(lut):
     value = json.loads(encode_picture_operations(PRINT))
     with pytest.raises(ValueError, match="^picture_operations$"):
         decode_picture_operations(json.dumps({**value, "lut": lut}))
+
+
+def test_v6_operations_carry_the_test_pattern_and_round_trip():
+    """Mutation probe: decode the pattern as its plain string (not TestPattern(...)) -> the
+    operations' validator refuses every pattern."""
+    for pattern in TestPattern:
+        operations = _operations(test_pattern=pattern)
+        raw = encode_picture_operations(operations)
+        assert json.loads(raw)["test_pattern"] == pattern.value
+        assert decode_picture_operations(raw) == operations
+    assert json.loads(encode_picture_operations(neutral_operations("HDMI-A-1", 1)))["test_pattern"] is None
+    value = json.loads(encode_picture_operations(_operations(test_pattern=TestPattern.WHITE)))
+    for bad in ("bars", 1, ["white"], {"pattern": "white"}):
+        with pytest.raises(ValueError, match="^picture_operations$"):
+            decode_picture_operations(json.dumps({**value, "test_pattern": bad}))
+    del value["test_pattern"]
+    with pytest.raises(ValueError, match="^picture_operations$"):
+        decode_picture_operations(json.dumps(value))
+    with pytest.raises(ValueError, match="^picture_operations$"):
+        _operations(test_pattern="white")
 
 
 def test_the_picture_change_text_both_ways():

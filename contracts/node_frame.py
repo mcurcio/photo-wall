@@ -23,6 +23,12 @@ computed, so neutral operations draw exactly the v4 pixels. The Wayland messages
 PICTURE_OPERATIONS_BYTES, and a Player and a display host from different releases refuse each
 other's text (the strict codec below), as a Pi's release ships whole.
 
+Picture operations v6 (display tuning, decision 0024) add `test_pattern` (contracts/tuning.py
+`TestPattern`): None draws the Frame's photos as before; WHITE and GREY_RAMP replace the photos
+inside every Frame's opening on the Output, Position's grid included, and pass through every step
+above and the mat; BLACK_LEVEL draws raw signal values through no step and no mat. Outside every
+opening stays black for all three. The Wayland messages are unchanged.
+
 One home each here: the operations' shape, ranges and codec; the picture change's wire text; the
 knee's and the floor's bounds. How settings become operations is Display Host's
 (appliance/display_host/picture.py `operations_for`); what each operation does, in which order,
@@ -40,8 +46,9 @@ from typing import Final
 from contracts.lut import LutRef
 from contracts.node_protocol import counter, digest, token
 from contracts.strict_json import loads_object
+from contracts.tuning import TestPattern
 
-PICTURE_OPERATIONS_BYTES: Final = 1024    # one `picture` event's operations, encoded (v5; 512 in v4)
+PICTURE_OPERATIONS_BYTES: Final = 1024    # one `picture` event's operations, encoded (v5 and v6; 512 in v4)
 LIGHT_FACTOR_MAX: Final = 2.0             # light_factor in 0..2 (Photo Wall's brightness 0..150 % is 0..1.5)
 CONTRAST_SLOPE_MAX: Final = 2.0           # contrast_slope in 0..2
 GAMMA_EXPONENT_MIN: Final = 0.5           # gamma_exponent in 0.5..2
@@ -87,9 +94,11 @@ class PictureOperations:
     (from its binding, never from here) and black outside the Output's Frame openings. Every value
     at its neutral (multipliers and factors 1, knee 1, floor 0, no LUT) changes nothing.
     `picture_change` is the picture document's change these came from, echoed by the Player's tag.
+    `test_pattern` (v6): drawn instead of the Frame's photos (the module's v6 rule; the pattern's
+    layout is player/geometry.py `test_pattern_signal`); None: the photos.
 
-    The print look's fields default to their neutral values in Python; the wire never defaults
-    them (`decode_picture_operations` needs every field)."""
+    The print look's and display tuning's fields default to their neutral values in Python; the
+    wire never defaults them (`decode_picture_operations` needs every field)."""
     output_id: str
     picture_change: int
     rgb_multipliers: tuple[float, float, float]
@@ -100,6 +109,7 @@ class PictureOperations:
     highlight_knee: float = 1.0
     black_floor: float = 0.0
     lut: LutMix | None = None
+    test_pattern: TestPattern | None = None
 
     def __post_init__(self) -> None:
         """ValueError("picture_operations") unless output_id is a node token, picture_change >= 1,
@@ -107,7 +117,8 @@ class PictureOperations:
         multiplier is in (0, 1] with the largest exactly 1.0, 0 <= light_factor <=
         LIGHT_FACTOR_MAX, 0 <= contrast_slope <= CONTRAST_SLOPE_MAX, GAMMA_EXPONENT_MIN <=
         gamma_exponent <= GAMMA_EXPONENT_MAX, 0 <= saturation <= SATURATION_MAX, HIGHLIGHT_KNEE_MIN
-        <= highlight_knee <= 1, 0 <= black_floor <= BLACK_FLOOR_MAX, and lut is None or a LutMix."""
+        <= highlight_knee <= 1, 0 <= black_floor <= BLACK_FLOOR_MAX, lut is None or a LutMix, and
+        test_pattern is None or a TestPattern."""
         multipliers = self.rgb_multipliers
         try:
             token(self.output_id)
@@ -123,21 +134,23 @@ class PictureOperations:
                  and _number(self.saturation, 0, SATURATION_MAX)
                  and _number(self.highlight_knee, HIGHLIGHT_KNEE_MIN, 1)
                  and _number(self.black_floor, 0, BLACK_FLOOR_MAX)
-                 and (self.lut is None or isinstance(self.lut, LutMix)))
+                 and (self.lut is None or isinstance(self.lut, LutMix))
+                 and (self.test_pattern is None or isinstance(self.test_pattern, TestPattern)))
         if not valid:
             raise ValueError("picture_operations")
 
 
 def neutral_operations(output_id: str, picture_change: int) -> PictureOperations:
-    """Operations that change nothing: multipliers (1, 1, 1), every factor 1, knee 1, floor 0, no LUT."""
+    """Operations that change nothing: multipliers (1, 1, 1), every factor 1, knee 1, floor 0, no
+    LUT, no test pattern."""
     return PictureOperations(output_id=output_id, picture_change=picture_change, rgb_multipliers=(1.0, 1.0, 1.0),
                              light_factor=1.0, contrast_slope=1.0, gamma_exponent=1.0, saturation=1.0,
-                             highlight_knee=1.0, black_floor=0.0, lut=None)
+                             highlight_knee=1.0, black_floor=0.0, lut=None, test_pattern=None)
 
 
 def encode_picture_operations(operations: PictureOperations) -> str:
     """Canonical JSON (sorted keys, no spaces, tuples as lists, a LutMix and its LutRef as objects of
-    their fields, floats as Python's repr) of at most PICTURE_OPERATIONS_BYTES;
+    their fields, a test pattern as its value, floats as Python's repr) of at most PICTURE_OPERATIONS_BYTES;
     ValueError("picture_operations_too_large") past it (never for valid operations: every field at
     its longest fits)."""
     value = {field.name: getattr(operations, field.name) for field in fields(PictureOperations)}
@@ -145,6 +158,7 @@ def encode_picture_operations(operations: PictureOperations) -> str:
     mix = operations.lut
     value["lut"] = None if mix is None else {"amount": mix.amount, "ref": {
         "profile_sha256": mix.ref.profile_sha256, "recipe_id": mix.ref.recipe_id}}
+    value["test_pattern"] = None if operations.test_pattern is None else operations.test_pattern.value
     raw = json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
     if len(raw.encode()) > PICTURE_OPERATIONS_BYTES:
         raise ValueError("picture_operations_too_large")
@@ -152,8 +166,9 @@ def encode_picture_operations(operations: PictureOperations) -> str:
 
 
 def decode_picture_operations(raw: str) -> PictureOperations:
-    """The operations `raw` encodes (contracts.strict_json rules; exactly the ten fields, a lut
-    exactly {amount, ref} and its ref exactly {profile_sha256, recipe_id});
+    """The operations `raw` encodes (contracts.strict_json rules; exactly the eleven fields, a lut
+    exactly {amount, ref} and its ref exactly {profile_sha256, recipe_id}, a test pattern null or
+    one of TestPattern's values);
     ValueError("picture_operations") for anything else."""
     value = loads_object(raw.encode(), max_bytes=PICTURE_OPERATIONS_BYTES) if isinstance(raw, str) else None
     if value is None or set(value) != {field.name for field in fields(PictureOperations)}:
@@ -169,7 +184,13 @@ def decode_picture_operations(raw: str) -> PictureOperations:
             mix = LutMix(LutRef(**mix["ref"]), mix["amount"])
         except ValueError as error:
             raise ValueError("picture_operations") from error
-    return PictureOperations(**{**value, "rgb_multipliers": tuple(multipliers), "lut": mix})
+    pattern = value["test_pattern"]
+    if pattern is not None:
+        try:
+            pattern = TestPattern(pattern)
+        except (ValueError, TypeError) as error:
+            raise ValueError("picture_operations") from error
+    return PictureOperations(**{**value, "rgb_multipliers": tuple(multipliers), "lut": mix, "test_pattern": pattern})
 
 
 def picture_change_text(change: int | None) -> str:

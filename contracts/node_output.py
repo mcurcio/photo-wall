@@ -61,7 +61,7 @@ from contracts.wire_codec import (
     whole,
 )
 
-SCHEMA_MAJOR: Final = 5                         # the display line's schema major (birth, envelope); 5 from the print look
+SCHEMA_MAJOR: Final = 6                         # the display line's schema major (birth, envelope); 6 from display tuning
 
 # Every Output a Node can have: the Pi 5's two HDMI connectors, and the two virtual connectors the
 # software end-to-end tier runs (player/output_discovery.py's `weston_ini` iterates these).
