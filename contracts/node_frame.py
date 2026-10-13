@@ -29,6 +29,12 @@ inside every Frame's opening on the Output, Position's grid included, and pass t
 above and the mat; BLACK_LEVEL draws raw signal values through no step and no mat. Outside every
 opening stays black for all three. The Wayland messages are unchanged.
 
+Picture operations v7 (calibration targets, decision 0026) add two `test_pattern` values,
+TARGET_PRE_SOFTWARE and TARGET_POST_SOFTWARE: the screen target (contracts/calibration_target.py)
+drawn at its physical size in every opening, raw or through Photo Wall's steps (contracts/tuning.py).
+Nothing else changes: the Player names the target's QR from its own player id and these
+operations' `output_id` and `picture_change`, so the wire carries no QR.
+
 One home each here: the operations' shape, ranges and codec; the picture change's wire text; the
 knee's and the floor's bounds. How settings become operations is Display Host's
 (appliance/display_host/picture.py `operations_for`); what each operation does, in which order,

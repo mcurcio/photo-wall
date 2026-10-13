@@ -341,6 +341,7 @@ NOT_SHIPPED: Final = (
     "scripts/nats_server.py",  # the bus tests' pinned nats-server binary; never shipped
     ".github/workflows/node-pid1.yml",
     "scripts/catalog_baselines.py",  # the console-catalog leg's baseline tool; never shipped
+    "scripts/calibration_target/**",  # the agent's calibration target reader (decision 0026); never shipped
 )
 
 

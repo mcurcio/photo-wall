@@ -12,7 +12,7 @@ import pytest
 from contracts.lut import LUT_BYTES, LutRef
 from contracts.models import CoverFit, FrameProfile, Light, Mat
 from contracts.node_frame import LutMix, PictureOperations
-from contracts.tuning import TestPattern
+from contracts.tuning import TARGET_PATTERNS, TestPattern
 from player.geometry import (
     BLACK_LEVEL_STEPS,
     GREY_RAMP_STEPS,
@@ -90,7 +90,9 @@ def test_black_level_is_raw_whatever_the_settings():
     assert final_pixel((0.0, 0.0, 0.0), operations(1.5, floor=.1), inside=True)[0] > .1
 
 
-@pytest.mark.parametrize("pattern", list(TestPattern))
+# The calibration targets join once the reference draws them (decision 0026, slice P2: this filter
+# goes, so no pattern of the five paints outside the opening).
+@pytest.mark.parametrize("pattern", [pattern for pattern in TestPattern if pattern not in TARGET_PATTERNS])
 def test_no_pattern_paints_outside_the_opening(pattern):
     corners = tilted_opening(30)
     fit = CoverFit(corners=corners, rotation=30)

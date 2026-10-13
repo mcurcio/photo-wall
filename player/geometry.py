@@ -23,6 +23,12 @@ mat shadow to the final pass, in one order (`final_pixel`), each skipped at its 
 Display tuning (decision 0024) adds the test patterns (`pattern_signal`): a look pattern (White,
 Grey ramp) replaces the photos inside the opening and passes through every step and the mat; the
 Black level is the raw signal, through no step and no mat; the per-Output mask stays last.
+
+The calibration targets (decision 0026) draw contracts/calibration_target.py's screen target at its
+physical size, centred in the opening (`opening_size_mm`, the one home of the opening's size from
+the Frame profile's diagonal, which the mat shadow uses too; `target_point`), with the QR's modules
+(player/calibration_target.py `target_modules`): `target_signal`. Pre-software is raw everywhere;
+post-software runs steps 1-6 and skips the mat shadow, but the dark box stays raw black.
 """
 
 from __future__ import annotations
@@ -33,13 +39,14 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Final
 
+from contracts.calibration_target import QrModules
 from contracts.frame_fit import Corners, OutputSize, cover_rectangle
 from contracts.kelvin import kelvin_white
 from contracts.lut import LUT_GRID, lut_offset
 from contracts.models import CornersFit, CoverFit, FrameProfile, Mat, PhotoCrop
 from contracts.node_frame import PictureOperations, srgb_to_linear
 from contracts.photo_crop import CENTRED, crop_window
-from contracts.tuning import TestPattern
+from contracts.tuning import SIGNAL_LEVELS, TestPattern
 
 Matrix = tuple[float, float, float, float, float, float, float, float, float]
 Linear = tuple[float, float, float]     # linear-light RGB, each 0..1
@@ -392,7 +399,6 @@ def lut_applied(linear: Linear, table: bytes, amount: float) -> Linear:
 
 GREY_RAMP_STEPS: Final = 11       # 0 %, 10 %, ..., 100 % of the signal
 BLACK_LEVEL_STEPS: Final = 20     # raw steps 1..20 beside black 0
-SIGNAL_LEVELS: Final = 255        # an 8-bit output's top code (the test Pi: output_bpc 8): raw step k is k / SIGNAL_LEVELS
 BLACK_LEVEL_PATCH: Final = 0.6    # the lit share of a Black level cell, in u and in the band's v, centred
 
 
@@ -415,7 +421,7 @@ def pattern_signal(pattern: TestPattern, u: float, v: float) -> Linear:
             value = min(int(u * GREY_RAMP_STEPS), GREY_RAMP_STEPS - 1) / (GREY_RAMP_STEPS - 1)
         else:
             value = u
-    else:
+    elif pattern is TestPattern.BLACK_LEVEL:
         value = 0.0
         band = (v - 1/3) * 3
         if 0 <= band < 1:
@@ -424,17 +430,59 @@ def pattern_signal(pattern: TestPattern, u: float, v: float) -> Linear:
             margin = (1 - BLACK_LEVEL_PATCH) / 2
             if margin <= position - cell < 1 - margin and margin <= band < 1 - margin:
                 value = (cell + 1) / SIGNAL_LEVELS
+    else:
+        raise ValueError("pattern")     # a calibration target is `target_signal`'s
     return (value, value, value)
+
+
+@dataclass(frozen=True)
+class TargetDraw:
+    """What one Frame needs to draw a calibration target (decision 0026): its opening's physical
+    size along the opening's u and v (`opening_size_mm`) and the QR's modules for the port's
+    picture change (player/calibration_target.py `target_modules`)."""
+    opening_mm: tuple[float, float]
+    modules: QrModules
+
+
+def opening_size_mm(fit: CornersFit | CoverFit, profile: FrameProfile) -> tuple[float, float]:
+    """The opening's physical extent along its unit square's u and v, in mm: diag_mm =
+    diagonal_inches*25.4, a = width_px/height_px, W = diag_mm*a/hypot(a,1), H = diag_mm/hypot(a,1);
+    (W, H) when the nearest quarter turn of fit.rotation (round(rotation / 90) * 90) is 0 or 180,
+    else (H, W). The one home of this rule: `mat_shadow`'s size_mm is it. Pure."""
+    raise NotImplementedError("calibration targets: slice P2")
+
+
+def target_point(u: float, v: float, opening_mm: tuple[float, float]) -> tuple[float, float]:
+    """The screen target's plane (contracts/calibration_target.py, mm) at the opening's (u, v): the
+    target centred in the opening at its physical size, its x along u when opening_mm is
+    landscape or square (W >= H), else turned a quarter clockwise (its x along v, its top at the
+    opening's right). Points beyond the target map beyond SCREEN_TARGET_MM (the surround). Pure."""
+    raise NotImplementedError("calibration targets: slice P2")
+
+
+def target_signal(pattern: TestPattern, u: float, v: float, draw: TargetDraw) -> tuple[Linear, bool]:
+    """A calibration target's ENCODED signal (0..1, equal channels) at the opening's (u, v) and
+    whether it is drawn raw: contracts.calibration_target.screen_point at `target_point`; inside
+    the QR's square the module there (dark 0.0, light and the QR_QUIET_MODULES quiet zone 1.0) of
+    `draw.modules` scaled to fill QR_MM; raw is True everywhere for TARGET_PRE_SOFTWARE and only
+    in the dark box for TARGET_POST_SOFTWARE. ValueError("pattern") for any other pattern. Pure."""
+    raise NotImplementedError("calibration targets: slice P2")
 
 
 def final_pixel(linear: Linear, operations: PictureOperations, *, inside: bool,
                 shade: Linear | None = None, lut: bytes | None = None,
-                opening_uv: tuple[float, float] | None = None) -> tuple[float, float, float, float]:
+                opening_uv: tuple[float, float] | None = None,
+                target: TargetDraw | None = None) -> tuple[float, float, float, float]:
     """One output pixel's final pass, in the print look's order (design "The order"):
     step 0 (display tuning): operations.test_pattern WHITE or GREY_RAMP replaces `linear` with
     srgb_to_linear of `pattern_signal` at `opening_uv` (the opening's unit square), and every step
     below runs as for a photo; BLACK_LEVEL is `pattern_signal` itself, every step below and the
-    shade skipped. A pattern without `opening_uv` is ValueError("opening_uv") ->
+    shade skipped. A pattern without `opening_uv` is ValueError("opening_uv"). A calibration
+    target (contracts/tuning.py TARGET_PATTERNS) is `target_signal` at `opening_uv` with `target`
+    (ValueError("target") when None): a raw point is that signal itself, every step below and the
+    shade skipped, as the Black level; any other point replaces `linear` with its srgb_to_linear
+    and runs every step below with the shade skipped (the mat shadow is a place effect, not a
+    setting the target judges) ->
     step 1 (`lut_applied`, the LUT `operations.lut` names mixed in by its amount) unless
     operations.lut is None or its bytes (`lut`) are not held -> step 2 (`saturated`) unless
     saturation == 1 -> steps 3-4: when `rolloff_skipped`, v4's white balance x light_factor

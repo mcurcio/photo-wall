@@ -159,7 +159,8 @@ def _drawn_mat(draw: _Draw) -> Mat:
 # The final pass's `test_pattern` uniform per contracts/tuning.py TestPattern (0: the photos). One
 # home: the shader's PATTERN_* names are written in from here (`_FINAL_CONSTANTS`).
 _PATTERN_CODES: dict[TestPattern | None, int] = {
-    None: 0, TestPattern.WHITE: 1, TestPattern.GREY_RAMP: 2, TestPattern.BLACK_LEVEL: 3}
+    None: 0, TestPattern.WHITE: 1, TestPattern.GREY_RAMP: 2, TestPattern.BLACK_LEVEL: 3,
+    TestPattern.TARGET_PRE_SOFTWARE: 4, TestPattern.TARGET_POST_SOFTWARE: 5}
 
 
 def _final_uniforms(gl, program: int, operations: PictureOperations | None, opening,

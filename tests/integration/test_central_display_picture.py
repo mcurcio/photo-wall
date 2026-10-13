@@ -142,7 +142,7 @@ def test_picture_documents_and_reports_cross_the_display_line_on_their_own_keys(
             power = await until(held, SECONDS, "output-HDMI-A-1 on the Node")
             first = await until(held_picture, SECONDS, "(1) picture-HDMI-A-1 on the Node")
             assert (dict(first.hardware), first.software.brightness_percent) == ({}, 100)
-            assert SCHEMA_MAJOR == 6 and first.software == NEUTRAL_SOFTWARE   # the print look's fields, neutral
+            assert SCHEMA_MAJOR == 7 and first.software == NEUTRAL_SOFTWARE   # the print look's fields, neutral
             assert (first.signal_range, first.test_pattern) == (SignalRange.AUTO, None)
 
             # (2) The Output report records the display; the picture report, what it offers.

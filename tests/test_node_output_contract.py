@@ -67,8 +67,8 @@ CANONICAL = (b'{"change":3,"method":"ddc-ci","never_off_on_other_input":true,"ou
              b'"switch_input_on_power_on":true}')
 
 
-def test_the_display_line_is_schema_6():
-    assert SCHEMA_MAJOR == 6
+def test_the_display_line_is_schema_7():
+    assert SCHEMA_MAJOR == 7
 
 
 @pytest.mark.parametrize("value, encode, decode", [

@@ -103,7 +103,7 @@ from contracts.models import (  # noqa: E402
 )
 from contracts.node_frame import LutMix, PictureOperations  # noqa: E402
 from contracts.photo_crop import CENTRED  # noqa: E402
-from contracts.tuning import TestPattern  # noqa: E402
+from contracts.tuning import TARGET_PATTERNS, TestPattern  # noqa: E402
 from player.geometry import (  # noqa: E402
     compose_pixel,
     decode_channel,
@@ -708,7 +708,9 @@ CASES = (cover_matches_the_reference(0), cover_matches_the_reference(7),
          print_sliders_match_the_reference, one_light_from_the_top_matches,
          cover_at_90_shades_the_wall_up_edge, neutral_program_takes_no_new_step, trial_mat_drawn,
          lut_matches_the_reference, two_coloured_lights_match,
-         *(pattern_matches_the_reference(pattern) for pattern in TestPattern),
+         # The calibration targets join once the shader draws them (decision 0026, slice P3: this
+         # filter goes, so every pattern is held to the reference again).
+         *(pattern_matches_the_reference(pattern) for pattern in TestPattern if pattern not in TARGET_PATTERNS),
          pattern_matches_the_reference(TestPattern.BLACK_LEVEL, Mat()))
 
 
