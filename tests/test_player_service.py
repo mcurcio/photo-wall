@@ -706,6 +706,42 @@ def test_every_failed_cycle_locates_again_and_keeps_the_registration(tmp_path, m
     asyncio.run(check())
 
 
+def test_a_clock_probe_that_never_leaves_its_pool_ends_the_cycle(tmp_path, monkeypatch):
+    """A clock probe's pool wait is LOCAL/pool: the clock loop does not just fault and keep
+    the same clients, it ends the cycle, so the next one builds fresh ones (CentralLink)."""
+    monkeypatch.setattr("player.service.BACKOFF", (.001,) * 4)
+    find = finding("http://central")
+
+    async def check():
+        service, server = await finder_rig(find)
+        steady, recovered = asyncio.Event(), asyncio.Event()
+        serve = _until_steady(server, steady)
+        starved = []
+
+        def handle(request):
+            if request.url.path == "/v1/player/time" and steady.is_set():
+                if not starved:
+                    starved.append(request)
+                    raise httpx.PoolTimeout("no slot")
+                recovered.set()
+            return serve(request)
+
+        await service.link.client.aclose()
+        service.link.client = service.link.time_client = httpx.AsyncClient(
+            transport=httpx.MockTransport(handle))
+        task = asyncio.create_task(service.run())
+        try:
+            await asyncio.wait_for(recovered.wait(), 10)
+            assert service.last_fault == "local_pool"
+            assert "host=" not in service.last_fault_detail
+            assert find.calls == 2
+        finally:
+            service.stop()
+            await asyncio.wait_for(task, 10)
+            await close(service)
+    asyncio.run(check())
+
+
 def test_a_redirect_on_a_player_request_is_named_and_relocates(tmp_path, monkeypatch, caplog):
     """A 3xx on a direct Player request (R9) is REDIRECT/unexpected, not a bare transport
     failure: the same "every failed cycle locates again, keeps the registration" recovery as a

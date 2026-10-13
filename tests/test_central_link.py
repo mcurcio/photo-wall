@@ -108,6 +108,71 @@ def test_exchange_names_network_failures_by_phase(error, phase, expected):
     assert named.host == "central.example"
 
 
+def test_a_wait_for_a_pool_slot_is_named_local_not_a_connect_timeout(tmp_path):
+    """Over a real socket: the clock-probe client has one slot, held by a probe Central has
+    not answered; a second probe never gets a connection. It is LOCAL/pool with no host,
+    never connect_timeout at Central's host (incident 2026-10-13), and it ends at the pool's
+    share of its bound, before the bound itself could name it."""
+    async def check():
+        accepted = asyncio.Event()
+
+        async def silent(reader, writer):
+            accepted.set()
+            await reader.read()             # never answers; ends when the client closes
+
+        server = await asyncio.start_server(silent, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        link = CentralLink(_trust(tmp_path), unauthorized=_Refused)
+        link.open()
+        session = Session(located(f"http://127.0.0.1:{port}"))
+
+        async def probe(bound):
+            async with link.stream(session, "GET", "/v1/player/time", authenticated=False,
+                                   time=True, timeout=bound):
+                pass
+
+        holder = asyncio.create_task(probe(10))
+        try:
+            await asyncio.wait_for(accepted.wait(), 5)
+            started = asyncio.get_running_loop().time()
+            with pytest.raises(UplinkError) as excinfo:
+                await probe(.5)
+            waited = asyncio.get_running_loop().time() - started
+        finally:
+            holder.cancel()
+            await asyncio.gather(holder, return_exceptions=True)
+            await link.aclose()
+            server.close()
+        assert (excinfo.value.cause, excinfo.value.reason) == (Cause.LOCAL, "pool")
+        assert excinfo.value.host is None
+        assert waited < .5
+    asyncio.run(check())
+
+
+def test_the_clients_it_builds_are_forgotten_on_close_and_injected_ones_kept(tmp_path):
+    """The clients live for one cycle: aclose() closes and forgets what open() built, so the
+    next open() builds fresh ones; an injected client is its owner's and stays."""
+    async def check():
+        link = CentralLink(_trust(tmp_path), unauthorized=_Refused)
+        link.open()
+        first = (link.client, link.time_client)
+        await link.aclose()
+        assert (link.client, link.time_client) == (None, None)
+        assert all(client.is_closed for client in first)
+        link.open()
+        assert link.client not in first and link.time_client not in first
+        await link.aclose()
+
+        injected = httpx.AsyncClient()
+        link = CentralLink(_trust(tmp_path), unauthorized=_Refused, client=injected)
+        link.open()
+        await link.aclose()
+        assert link.client is injected and not injected.is_closed
+        assert link.time_client is None
+        await injected.aclose()
+    asyncio.run(check())
+
+
 def test_exchange_passes_an_uplink_error_through_and_leaves_other_errors():
     central = located("http://central")
     exchange = Exchange(central, "/v1/player/state")
