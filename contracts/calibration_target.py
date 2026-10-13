@@ -36,14 +36,16 @@ the QR's modules (player/calibration_target.py `target_modules`, segno), the PDF
 """
 from __future__ import annotations
 
-from collections.abc import Mapping
+import functools
+import math
+import re
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Final
 
-from contracts.tuning import (
-    SIGNAL_LEVELS,  # noqa: F401  (slice P1: a NEAR_BLACK step k is k / SIGNAL_LEVELS)
-)
+from contracts.node_protocol import counter, token
+from contracts.tuning import SIGNAL_LEVELS
 
 # -- Sizes (millimetres; placeholders tuned on the bench, each change an erratum) --
 
@@ -67,7 +69,16 @@ PAPER_MARKER_IDS: Final = (4, 5, 6, 7)     # the same corners of the paper targe
 SCREEN_MARKER_MM: Final = 36.0             # a screen marker's black border's outer side
 PAPER_MARKER_MM: Final = 30.0              # a paper marker's
 # id -> its 4 data rows, '1' white, '0' black, top row first (cv2.aruco generateImageMarker's bits).
-MARKER_BITS: Final[Mapping[int, tuple[str, str, str, str]]] = {}
+MARKER_BITS: Final[Mapping[int, tuple[str, str, str, str]]] = {
+    0: ("1011", "0101", "0011", "0010"),
+    1: ("0000", "1111", "1001", "1010"),
+    2: ("0011", "0011", "0010", "1101"),
+    3: ("1001", "1001", "0100", "0110"),
+    4: ("0101", "0100", "1001", "1110"),
+    5: ("0111", "1001", "1100", "1101"),
+    6: ("1001", "1110", "0010", "1110"),
+    7: ("1100", "0100", "1111", "0010"),
+}
 
 # -- The values a target carries --
 
@@ -128,11 +139,12 @@ class Rect:
 
     def contains(self, x_mm: float, y_mm: float) -> bool:
         """x_mm <= x < x_mm + width_mm and y_mm <= y < y_mm + height_mm (half-open). Pure."""
-        ...
+        return (self.x_mm <= x_mm < self.x_mm + self.width_mm
+                and self.y_mm <= y_mm < self.y_mm + self.height_mm)
 
     def centre(self) -> tuple[float, float]:
         """The rectangle's centre. Pure."""
-        ...
+        return (self.x_mm + self.width_mm / 2, self.y_mm + self.height_mm / 2)
 
 
 @dataclass(frozen=True)
@@ -203,13 +215,34 @@ class TargetCode:
     def __post_init__(self) -> None:
         """ValueError("target_code") unless player_id and output_id are node tokens
         (contracts.node_protocol.token) and picture_change an int >= 1 (never a bool)."""
-        ...
+        try:
+            token(self.player_id)
+            token(self.output_id)
+            counter(self.picture_change, 1)
+        except ValueError:
+            raise ValueError("target_code") from None
 
 
 # A QR's modules, row by row, True for a dark module; no quiet zone (the drawer adds QR_QUIET_MODULES).
 QrModules = tuple[tuple[bool, ...], ...]
 
 
+# -- The layout's own measures (private: the reader and the drawers take rects, never these) --
+
+_PATCH_MM: Final = 10.0           # a PAIRED patch's side (the reader samples its middle 60 %)
+_GAP_MM: Final = 2.0              # between a screen patch and the dark box, and between a group's patches
+_PATCH_PITCH_MM: Final = _PATCH_MM + _GAP_MM
+_GROUP_GAP_MM: Final = 4.0        # between two groups along an edge
+_GROUP_PITCH_MM: Final = 3 * _PATCH_PITCH_MM - _GAP_MM + _GROUP_GAP_MM   # black, white, grey
+_STEP_MM: Final = (9.0, 8.0)      # a near-black step, along and across its ruler (>= 8 x 8 mm)
+_RULER_TOP_Y_MM: Final = 12.0     # the first ruler's top, in the band above the top groups
+_RULER_BOTTOM_X_MM: Final = 60.0  # the second ruler's left, in the band below the bottom groups
+_QR_X_MM: Final = 270.0           # the QR square's left, beside the second ruler
+_WORDS: Final = Rect(40.0, 40.0, 184.0, 116.0)   # paper_words, in the paper content's plane
+_SURROUND: Final = ScreenPoint(0.0, raw=False, qr=False)
+
+
+@functools.cache
 def calibration_target() -> CalibrationTarget:
     """The one layout, built once (cached) from the constants above. Invariants (held by
     tests/test_calibration_target_layout.py): every screen rect lies inside SCREEN_TARGET_MM and
@@ -220,7 +253,27 @@ def calibration_target() -> CalibrationTarget:
     times; four screen markers at the target's corners (SCREEN_MARKER_IDS order) and four paper
     markers at the content's corners (PAPER_MARKER_IDS order); `paper_words` at least 120 x 30 mm
     inside the content, apart from every paper rect. Pure."""
-    ...
+    # Groups: the PAIRED ones clockwise from the top-left (top, right, bottom, left edges), then
+    # the two RULER groups (above the top groups, below the bottom groups, steps reversed).
+    screen_w, screen_h = SCREEN_TARGET_MM
+    box_w, box_h = DARK_BOX_MM
+    dark_box = Rect((screen_w - box_w) / 2, (screen_h - box_h) / 2, box_w, box_h)
+    paper_in_box = (dark_box.x_mm + (box_w - PAPER_TARGET_MM[0]) / 2,
+                    dark_box.y_mm + (box_h - PAPER_TARGET_MM[1]) / 2)
+    paired = tuple(_paired_groups(dark_box, paper_in_box))
+    bottom_band = dark_box.y_mm + box_h + _GAP_MM + _PATCH_MM          # below the bottom groups
+    ruler_length = _STEP_MM[0] * len(NEAR_BLACK_STEPS)
+    rulers = (
+        _ruler(len(paired), (screen_w - ruler_length) / 2, _RULER_TOP_Y_MM, NEAR_BLACK_STEPS),
+        _ruler(len(paired) + 1, _RULER_BOTTOM_X_MM, (bottom_band + screen_h - 3 * _STEP_MM[1]) / 2,
+               tuple(reversed(NEAR_BLACK_STEPS))),
+    )
+    qr = Rect(_QR_X_MM, (bottom_band + screen_h - QR_MM) / 2, QR_MM, QR_MM)
+    markers = (_corner_markers(Surface.SCREEN, SCREEN_MARKER_IDS, SCREEN_TARGET_MM, SCREEN_MARKER_MM,
+                               SCREEN_MARKER_MM / MARKER_MODULES)
+               + _corner_markers(Surface.PAPER, PAPER_MARKER_IDS, PAPER_TARGET_MM, PAPER_MARKER_MM, 0.0))
+    return CalibrationTarget(dark_box=dark_box, qr=qr, paper_in_box=paper_in_box, paper_words=_WORDS,
+                             markers=markers, groups=paired + rulers)
 
 
 def screen_point(x_mm: float, y_mm: float) -> ScreenPoint:
@@ -228,26 +281,147 @@ def screen_point(x_mm: float, y_mm: float) -> ScreenPoint:
     zone 1.0), a patch's signal, the QR's square (`qr` True), the dark box (0.0, `raw` True), else
     the surround 0.0. Outside SCREEN_TARGET_MM: the surround. Pure; the Player's reference
     (player/geometry.py `target_signal`) and its texture are built from it."""
-    ...
+    if not Rect(0.0, 0.0, *SCREEN_TARGET_MM).contains(x_mm, y_mm):
+        return _SURROUND
+    for marker in _markers(Surface.SCREEN):
+        if _quiet_zone(marker).contains(x_mm, y_mm):
+            return ScreenPoint(1.0 if _marker_white(marker, x_mm, y_mm) else 0.0, raw=False, qr=False)
+    for patch in _patches(Surface.SCREEN):
+        if patch.rect.contains(x_mm, y_mm):
+            return ScreenPoint(patch.signal, raw=False, qr=False)
+    target = calibration_target()
+    if target.qr.contains(x_mm, y_mm):
+        return ScreenPoint(1.0, raw=False, qr=True)
+    if target.dark_box.contains(x_mm, y_mm):
+        return ScreenPoint(0.0, raw=True, qr=False)
+    return _SURROUND
 
 
 def paper_ink(x_mm: float, y_mm: float) -> bool:
     """True where the paper target prints black ink at (x_mm, y_mm) of its content's plane: a
     paper BLACK patch, a paper marker's black module. Outside PAPER_TARGET_MM: False. Pure; the
     PDF (central/displays/calibration_paper.py) is drawn from it."""
-    ...
+    if not Rect(0.0, 0.0, *PAPER_TARGET_MM).contains(x_mm, y_mm):
+        return False
+    for marker in _markers(Surface.PAPER):
+        if marker.rect.contains(x_mm, y_mm):
+            return not _marker_white(marker, x_mm, y_mm)
+    return any(patch.role is Role.BLACK and patch.rect.contains(x_mm, y_mm) for patch in _patches(Surface.PAPER))
 
 
 def code_text(code: TargetCode) -> str:
     """The QR's text: CODE_PREFIX, player_id, output_id and the decimal picture_change, joined by
     single spaces (a node token holds no space). Pure."""
-    ...
+    return f"{CODE_PREFIX} {code.player_id} {code.output_id} {code.picture_change}"
 
 
 def parsed_code(text: str) -> TargetCode | None:
     """The code `text` names, or None when it is not exactly code_text's shape (another QR, a
     misread). Pure."""
-    ...
+    fields = text.split(" ") if isinstance(text, str) else []
+    if len(fields) != 4 or fields[0] != CODE_PREFIX or not re.fullmatch(r"[1-9][0-9]*", fields[3]):
+        return None
+    try:
+        return TargetCode(fields[1], fields[2], int(fields[3]))
+    except ValueError:
+        return None
+
+
+def _paired_groups(dark_box: Rect, paper_in_box: tuple[float, float]) -> Iterator[Group]:
+    """The PAIRED groups clockwise from the top-left: along the paper content's top (left to
+    right), right (down), bottom (right to left) and left (up) edges, between the paper markers'
+    quiet zones, each grey the next of GREY_SIGNALS. In a group the paper BLACK and WHITE touch the
+    content's edge; the screen BLACK, WHITE and GREY face them across the dark box's edge, in the
+    same clockwise order (screen BLACK and WHITE straight across from their paper twins)."""
+    paper_w, paper_h = PAPER_TARGET_MM
+    px, py = paper_in_box
+    box_right, box_bottom = dark_box.x_mm + dark_box.width_mm, dark_box.y_mm + dark_box.height_mm
+    keep_out = PAPER_MARKER_MM + PAPER_MARKER_MM / MARKER_MODULES      # a paper marker and its quiet zone
+    size = _PATCH_MM
+
+    # Each edge: (t along it clockwise, paper?) -> the patch's rect in its own plane.
+    def top(t: float, paper: bool) -> Rect:
+        return Rect(t, 0.0, size, size) if paper else Rect(px + t, dark_box.y_mm - _GAP_MM - size, size, size)
+
+    def right(t: float, paper: bool) -> Rect:
+        return Rect(paper_w - size, t, size, size) if paper else Rect(box_right + _GAP_MM, py + t, size, size)
+
+    def bottom(t: float, paper: bool) -> Rect:
+        x = paper_w - t - size
+        return Rect(x, paper_h - size, size, size) if paper else Rect(px + x, box_bottom + _GAP_MM, size, size)
+
+    def left(t: float, paper: bool) -> Rect:
+        y = paper_h - t - size
+        return Rect(0.0, y, size, size) if paper else Rect(dark_box.x_mm - _GAP_MM - size, py + y, size, size)
+
+    index = 0
+    for place, length in ((top, paper_w), (right, paper_h), (bottom, paper_w), (left, paper_h)):
+        count = math.floor((length - 2 * keep_out + _GROUP_GAP_MM) / _GROUP_PITCH_MM)
+        start = (length - (count * _GROUP_PITCH_MM - _GROUP_GAP_MM)) / 2
+        for k in range(count):
+            t = start + k * _GROUP_PITCH_MM
+            yield Group(index, GroupKind.PAIRED, (
+                Patch(Surface.SCREEN, Role.BLACK, place(t, False), 0.0),
+                Patch(Surface.SCREEN, Role.WHITE, place(t + _PATCH_PITCH_MM, False), 1.0),
+                Patch(Surface.SCREEN, Role.GREY, place(t + 2 * _PATCH_PITCH_MM, False),
+                      GREY_SIGNALS[index % len(GREY_SIGNALS)]),
+                Patch(Surface.PAPER, Role.BLACK, place(t, True), 0.0),
+                Patch(Surface.PAPER, Role.WHITE, place(t + _PATCH_PITCH_MM, True), 1.0),
+            ))
+            index += 1
+
+
+def _ruler(index: int, x_mm: float, y_mm: float, steps: tuple[int, ...]) -> Group:
+    """A RULER group (PLUGE): the near-black steps in a row between two raw-0 BLACK bars, each step
+    touching both."""
+    along, across = _STEP_MM
+    length = along * len(steps)
+    return Group(index, GroupKind.RULER, (
+        Patch(Surface.SCREEN, Role.BLACK, Rect(x_mm, y_mm, length, across), 0.0),
+        *(Patch(Surface.SCREEN, Role.NEAR_BLACK, Rect(x_mm + along * i, y_mm + across, along, across),
+                step / SIGNAL_LEVELS) for i, step in enumerate(steps)),
+        Patch(Surface.SCREEN, Role.BLACK, Rect(x_mm, y_mm + 2 * across, length, across), 0.0),
+    ))
+
+
+def _corner_markers(surface: Surface, ids: tuple[int, ...], plane: tuple[float, float], side: float,
+                    inset: float) -> tuple[Marker, ...]:
+    """Four markers at a plane's corners, `inset` in from its edges, in TL, TR, BR, BL order."""
+    near, far_x, far_y = inset, plane[0] - inset - side, plane[1] - inset - side
+    places = ((near, near), (far_x, near), (far_x, far_y), (near, far_y))
+    return tuple(Marker(surface, marker_id, Rect(x, y, side, side))
+                 for marker_id, (x, y) in zip(ids, places, strict=True))
+
+
+@functools.cache
+def _markers(surface: Surface) -> tuple[Marker, ...]:
+    return tuple(marker for marker in calibration_target().markers if marker.surface is surface)
+
+
+@functools.cache
+def _patches(surface: Surface) -> tuple[Patch, ...]:
+    return tuple(patch for group in calibration_target().groups for patch in group.patches
+                 if patch.surface is surface)
+
+
+def _quiet_zone(marker: Marker) -> Rect:
+    """A screen marker's rect grown by its one-module quiet zone."""
+    module = marker.rect.width_mm / MARKER_MODULES
+    rect = marker.rect
+    return Rect(rect.x_mm - module, rect.y_mm - module, rect.width_mm + 2 * module, rect.height_mm + 2 * module)
+
+
+def _marker_white(marker: Marker, x_mm: float, y_mm: float) -> bool:
+    """Whether a marker's module at the point is white: its quiet zone and its '1' bits; the
+    one-module border and the '0' bits are black."""
+    if not marker.rect.contains(x_mm, y_mm):
+        return True
+    module = marker.rect.width_mm / MARKER_MODULES
+    column = min(MARKER_MODULES - 1, int((x_mm - marker.rect.x_mm) // module))
+    row = min(MARKER_MODULES - 1, int((y_mm - marker.rect.y_mm) // module))
+    if column in (0, MARKER_MODULES - 1) or row in (0, MARKER_MODULES - 1):
+        return False
+    return MARKER_BITS[marker.marker_id][row - 1][column - 1] == "1"
 
 
 __all__ = [

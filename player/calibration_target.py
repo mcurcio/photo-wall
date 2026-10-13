@@ -13,9 +13,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Final
 
-import segno  # noqa: F401  (the QR encoder: slice P1 encodes with it)
+import segno
 
-from contracts.calibration_target import QrModules, TargetCode
+from contracts.calibration_target import QR_ERROR, QrModules, TargetCode, code_text
 
 TEXEL_MM: Final = 0.25      # the screen target texture's texel side (finer than a 4K 43" panel's pixel)
 
@@ -24,7 +24,8 @@ def target_modules(code: TargetCode) -> QrModules:
     """The QR of contracts.calibration_target.code_text(code): segno.make(text, error=QR_ERROR,
     micro=False, boost_error=False), its matrix without the quiet zone, True for a dark module.
     Deterministic for one code (the reader decodes it with OpenCV's QRCodeDetector). Pure."""
-    raise NotImplementedError("calibration targets: slice P1")
+    symbol = segno.make(code_text(code), error=QR_ERROR, micro=False, boost_error=False)
+    return tuple(tuple(bool(module) for module in row) for row in symbol.matrix_iter(scale=1, border=0))
 
 
 @dataclass(frozen=True)
