@@ -6066,3 +6066,10 @@ Departures of the committed interfaces from /Volumes/Dock/tmp/calibration-target
 - **Probe R2-penalty does not fail on the exact right display**: there, no single knob step beats the noise even without the penalty. The test that catches it is a display 0.75 % bright (inside KEEP_SPREADS of its spread): without the penalty brightness goes to 99; with it, no change.
 - **A display warmer than the software can correct** (4500 K against paper at 5000 K: its blue cannot be raised, every multiplier being at most 1) gets a near-neutral best fit, not a fix; that is pre-software work, which the operator chooses (R8).
 - tests/calibration_target_scenes.py (R2 may touch "display models only"): `paper_matched` added, and the RAW exposure now scales the display's brightest channel to `exposure` (it scaled green, so a warm display's red clipped). The R1 scenes' displays are 6500 K, where both are the same.
+
+## calibration targets docs reconciled (docs and PR lane, 2026-10-13)
+
+- 0026 gains the slices' As built (layout groups, rules 2, 3 and 5, the suggestion's measures, the Select, the Player's proof) and a **Findings** section carrying R2's ink finding as a gap for the owner to choose on after the first real photo; the runbook and the skill tell the agent to treat a white-level gap of about 3 % or less as within the ink's error until then (a reporting rule, no code change).
+- design-language §8 B5 and console design §5 now say the Test pattern is a Select and name the two targets as the tab does.
+- The owner's notes' reading "on a display that answers DDC/CI, Photo Wall's hardware settings, which it can set" (main loop's, not his words) is not built as values: the pre-software suggestion stays directions (design Q2), and the runbook and skill name the Display (hardware) sliders as those controls.
+- Roadmap 1c's Developed cell takes this PR's link once it is open.

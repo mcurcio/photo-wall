@@ -308,6 +308,12 @@ land in `~/Downloads` on the Mac as `IMG_####.DNG`, not in the chat.
    item you think matches, and say it is your reading. Photo Wall does not record those menus: ask
    him what he changed. Post-software: values for Photo Wall's brightness, contrast, colour
    temperature and gamma, or "no change", which is the best result; the print look never moves.
+   On a display that answers DDC/CI, the pre-software controls include the tab's Display
+   (hardware) sliders; say which. `{"suggestion": {"why": "lut-unread"}}` means a post-software
+   reading with a LUT on whose table could not be read: run again with
+   `PHOTO_WALL_READ_DATABASE_URL` set. A white-level gap of about 3 % or less is within the
+   paper ink's error ([0026 › Findings](../../../docs/decisions/0026-calibration-targets.md#findings)):
+   say so rather than ask for a change.
    You never apply anything: no Picture edit, no Done, no DDC/CI write. He moves the sliders or
    the TV's controls, sends new photos, and presses Done when it reads right.
 5. **Know the limits** ([0026](../../../docs/decisions/0026-calibration-targets.md#costs)): the
