@@ -131,6 +131,8 @@ from central.displays.views import (
     OfferedView,
     PictureCopyRequest,
     PictureCopyResult,
+    PictureRestore,
+    PictureRestoreResult,
     PictureSequence,
     PictureSessionView,
     PowerTestAccepted,
@@ -1239,6 +1241,13 @@ class PgPictureSessions:
             _require_live(session, now)
             _fold_session_in(conn, stored_picture(row), session)
             notify_nodes_in(conn, _NODES_SEEING, (session.display_id,))
+
+    def restore_picture(self, session_id: UUID, request: PictureRestore) -> PictureRestoreResult:
+        """`PictureCommands.restore_picture`: the entry through picture_history_store
+        `picture_entry_in`, the rule `picture.restored` (offered: `_offered(row)`; lut_listed:
+        `lut_known_in`), the session written as an edit's (`_write_session_in`, with
+        `restored_from`)."""
+        ...
 
     def copy_picture(self, frame_id: str, request: PictureCopyRequest) -> tuple[PictureCopyResult, ...]:
         with self._db.transaction() as conn:

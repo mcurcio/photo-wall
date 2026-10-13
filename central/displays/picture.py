@@ -407,6 +407,38 @@ def with_befores(session: PictureSession, report: PictureReport) -> PictureSessi
     return replace(session, hardware_before=_in_list_order({**session.hardware_before, **befores}))
 
 
+@dataclass(frozen=True)
+class PictureRestored:
+    """A Restore's outcome (configuration snapshots; `restored`): the session after it; the entry's
+    hardware codes the display does not offer now, in picture-list order (not in the draft); whether
+    the entry's LUT is no longer on the LUTs list (the draft keeps its own LUT); and whether today's
+    recipe renders the entry's LUT (it was baked under another)."""
+    session: PictureSession
+    hardware_skipped: tuple[VcpCode, ...]
+    lut_skipped: bool
+    lut_recipe_changed: bool
+
+
+def restored(session: PictureSession, *, entry_id: UUID, entry_display_id: UUID, picture: DisplayPicture,
+             offered: tuple[HardwareSetting, ...] | None, lut_listed: bool, expected_sequence: int,
+             now: float) -> PictureRestored:
+    """The session after a Restore loads a history entry's `picture` (its id `entry_id`, written for
+    `entry_display_id`) into the draft, live on the Display; the operator still presses Done.
+    PictureRefused: session_ended 410, stale_sequence 409, then other_display 409 when
+    `entry_display_id` is not the session's Display (another display's values cross only by Copy).
+    The draft becomes:
+    - hardware: each of `picture`'s codes that `hardware.edit_refusal` allows against `offered`
+      (the rest are `hardware_skipped`, in picture-list order; `offered` None skips them all); a
+      code `picture` does not set is "as the display has it";
+    - software: `picture`'s, with its LUT under today's recipe (`LUT_RECIPE_ID`) when `lut_listed`
+      (`lut_recipe_changed` when the entry's recipe was another), else the draft's own LUT kept
+      (`lut_skipped`); `picture` with no LUT sets none;
+    - signal range: `picture`'s. The test pattern is never restored (the session's ask stays).
+    Every hardware code and software setting whose draft value changed joins the touched sets (so
+    Revert puts the display back), `restored_from` becomes `entry_id`, and the lease is touched."""
+    ...
+
+
 def _next(session: PictureSession, expected_sequence: int, now: float) -> int:
     """The session's next sequence; session_ended, then stale_sequence."""
     if not session.lease.live(now):
@@ -428,9 +460,11 @@ def _in_list_order(hardware: Mapping[VcpCode, int]) -> dict[VcpCode, int]:
 
 
 __all__ = ["PICTURE_IDLE_SECONDS", "TEST_PATTERN_SECONDS", "DisplayPicture", "PictureRefused", "PictureSession",
-           "PictureStatus", "SoftwareChoice", "SoftwareSetting", "SoftwareTouch", "TestPatternState", "answers",
+           "PictureRestored", "PictureStatus", "SoftwareChoice", "SoftwareSetting", "SoftwareTouch",
+           "TestPatternState", "answers",
            "carries", "copied", "default_picture", "edited_hardware", "edited_lut", "edited_signal_range",
            "edited_software", "edited_test_pattern", "software_touch",
            "effective_picture", "hardware_answered", "kept_picture", "picture_digest", "picture_document",
-           "picture_status", "presented", "restore_answered", "restore_of", "reverted", "session_test_pattern",
+           "picture_status", "presented", "restore_answered", "restore_of", "restored", "reverted",
+           "session_test_pattern",
            "signal_answered", "test_pattern_state", "with_befores", "with_restore"]

@@ -5875,3 +5875,38 @@ Departures from the frozen interface pages, recorded here for coherence reviews;
   Pi (one Weston drives both ports); the pattern's end line names only Off, leaving the page and the
   Pi's bound (Done and Revert are disabled while a pattern is the only change); "shown" names the
   Pi as its source; "Waiting for the Pi" replaces "restarts" until the Pi answers.
+
+## configuration snapshots, code architecture (code architect, 2026-10-13)
+
+Departures of the committed interfaces from /Volumes/Dock/tmp/config-snapshots/design.md (revision 2),
+each a refinement the design's sketch left open or a fact of the code it did not know:
+
+- **Migration number 096, not 095:** open PR #99 (fix/fleet-lock-and-delivery-churn) holds
+  `central/migrations/095_lost_grants.sql`.
+- **`EntryRef {history, key, number}` is an entry id.** Every entry has a UUID `id`
+  (`entry_id` in views); `restored_from` and both restore requests name it. The route already says
+  which history; a compound key per table (Display, port, Frame) would be encoded and decoded for
+  nothing.
+- **History lists are wrapped:** `PictureHistoryView {display, unrecorded_change, entries}` and
+  `PositionHistoryView {frame, unrecorded_change, entries}`, so design rule 3's "the reader flags it
+  until then" has a field. Each Position entry also carries `restore_refusal` (Restore's answer for
+  it now), so the tab disables Restore with the reason instead of failing on press.
+- **`restorePicture`'s `skipped: string[]`** is `hardware_skipped: VcpCode[]` plus `lut_skipped: bool`
+  (typed; mirrors Copy's `hardware_skipped`).
+- **`restorePosition` answers the trial's view** (sequence, calibration, mat), not `{sequence}`:
+  Position's draft is the console's (central/console/src/liveAdjustment.js, "THE DRAFT IS THE
+  OPERATOR'S"), so the console replaces its draft with the restored values from the answer.
+- **The picture restore rule lives in central/displays/picture.py (`restored`)**, with the session's
+  other edit rules; picture_history.py imports picture.py, never the reverse.
+- **The `*HistoryWriter` interfaces are plain store functions** (`picture_history_store.append_kept_in`,
+  `append_sent_in`; `position_history_store.record_unrecorded_in`, `append_position_in`,
+  `record_sent_in`) called at the convergence points: both sides are PostgreSQL adapters in one
+  transaction and nothing varies at run time, so an injected object would be a seam with one
+  implementation. `write_picture` takes the `PictureRecord`, so no kept write can skip its entry.
+- **Sent picture kinds are decided from the port's previous sent entry** (`picture_history.sent_record`):
+  SENT_BACK only when a draft went and the values sent differ from it; a Revert of a draft equal to
+  the kept values reads SENT_KEPT (the wall shows the kept values either way).
+- **`node_calibration_trials.session_id` is nullable** (backfilled to `trial_id`); slice S3 sets it in
+  every `_open` (begin: the new trial's id; renew: the predecessor's).
+- **The history routes live in one read module** (central/tuning_history_routes.py, the design's one
+  read contract `TuningHistoryQueries`); the two restores are their owners' routes.

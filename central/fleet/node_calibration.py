@@ -284,6 +284,19 @@ class NodeCalibration:
                 ).fetchone()
             return self._view(row)
 
+    def restore(self, frame_id: str, trial_id: UUID, *, entry_id: UUID, expected_sequence: int) -> dict:
+        """Load a Position history entry into the active trial's draft (configuration snapshots,
+        "View and restore"): an `edit` whose calibration and mat are
+        `position_history.restored_draft(entry, base_revision=<the trial's calibration_revision>)`,
+        recording `restored_from`; Done still keeps it. Answers the trial's view, as `operate`
+        does (the console replaces its draft with the answer's calibration and mat).
+        NodeControlError: trial_sequence_invalid 422 (not an int >= 1), trial_unknown 404,
+        trial_ended 410 (the trial is not active, or its lease ran out or was invalidated here),
+        unknown_entry 404 (no such entry, or trimmed), then `position_history.restore_refusal`
+        against the Frame's profile and the Display seen on its port now (other_frame,
+        made_for_other_profile, made_for_other_display, each 409), then trial_sequence_conflict 409."""
+        ...
+
     def _touched(self, row, now: float) -> float:
         """The trial's idle deadline after an edit or keepalive at `now` (never past its hard one)."""
         return touched(_lease(row), now, idle_seconds=self.inactivity_seconds).idle_until

@@ -8,10 +8,11 @@ from enum import StrEnum
 from typing import Annotated
 from uuid import UUID
 
-from pydantic import Field
+from pydantic import AwareDatetime, Field
 
 from central.displays.model import PowerStatus, PowerTest, Readiness, remaining_seconds
 from central.displays.picture import PictureStatus, SoftwareSetting, TestPatternState
+from central.displays.picture_history import PictureEntry, PictureEntryKind
 from central.house_time.calculator import local_date_time
 from central.house_time.model import HouseTime, LocalDateTime
 from contracts.models import Digest, Identifier, Instant, Model
@@ -43,6 +44,7 @@ from contracts.node_picture import (
     RangeKind,
     SignalRange,
     SignalResult,
+    SoftwarePicture,
     WriteResult,
 )
 from contracts.tuning import TestPattern
@@ -328,3 +330,87 @@ class PictureCopyResult(Model):
     frame_id: Identifier
     outcome: CopyOutcome
     hardware_skipped: tuple[VcpCodeField, ...]
+
+
+# Configuration snapshots (migration 096): a Display's picture history and the Picture tab's Restore.
+# Times are aware UTC (ISO 8601 in JSON), PostgreSQL's clock at the append: the agent reading a photo
+# matches it against these, never a phone's or a Pi's clock.
+
+class DisplayRefView(Model):
+    """A Display by id and its name today."""
+    id: UUID
+    name: str
+
+
+class FrameRefView(Model):
+    """A Frame by id and its name today."""
+    id: Identifier
+    name: str
+
+
+class PictureValuesView(Model):
+    """The values an entry records, as the Picture tab shows values: the hardware codes set in Photo
+    Wall (MCCS code -> value; a code absent is "as the display has it"), the software group (its LUT
+    named as the LUTs list names it today, or "Paper profile <8 hex>" when it is no longer listed),
+    the signal range, and the recipe its LUT was baked under then (None: no LUT)."""
+    hardware: dict[VcpCodeField, int]
+    software: SoftwarePictureView
+    signal_range: SignalRange
+    lut_recipe_id: str | None
+
+
+class PictureEntryView(Model):
+    """One picture history entry (central/displays/picture_history.py). `number`: a kept entry's
+    commit order per Display, a sent entry's port picture change; `frame`: a sent entry's Frame
+    then (None: kept, unbound, or deleted since); `test_pattern`: a sent entry's (None: off, and
+    always None when kept)."""
+    entry_id: UUID
+    display: DisplayRefView
+    kind: PictureEntryKind
+    number: Annotated[int, Field(ge=1)]
+    at: AwareDatetime
+    frame: FrameRefView | None
+    session_id: UUID | None
+    restored_from: UUID | None
+    picture: PictureValuesView
+    test_pattern: TestPattern | None
+
+
+class PictureHistoryView(Model):
+    """GET /v1/operator/displays/{display_id}/picture-history: the Display's kept and sent entries,
+    newest first by `at` then number. `unrecorded_change`: the Display's stored values differ from
+    its newest kept entry (design rule 3, flagged until the next kept write records it)."""
+    display: DisplayRefView
+    unrecorded_change: bool
+    entries: tuple[PictureEntryView, ...]
+
+
+class PictureRestore(Model):
+    """POST /v1/operator/picture-sessions/{session_id}/restores: load a picture history entry into
+    the session's draft (picture.restored)."""
+    entry_id: UUID
+    expected_sequence: Annotated[int, Field(ge=1)]
+
+
+class PictureRestoreResult(Model):
+    """An accepted Restore: the sequence the next edit names; the entry's hardware codes this display
+    does not offer now (not in the draft); whether its LUT is no longer listed (the draft kept its
+    own); whether today's LUT recipe renders it."""
+    sequence: Annotated[int, Field(ge=1)]
+    hardware_skipped: tuple[VcpCodeField, ...]
+    lut_skipped: bool
+    lut_recipe_changed: bool
+
+
+def software_view(software: SoftwarePicture, lut_name: str | None) -> SoftwarePictureView:
+    """The Photo Wall section's values; the LUT by its digest and `lut_name`, the LUTs list's name
+    for it, or "Paper profile <first 8 hex>" when it has none. The one mapping of a SoftwarePicture
+    to its view: the Picture tab's read and every picture history entry."""
+    ...
+
+
+def picture_entry_view(entry: PictureEntry, *, display_name: str, frame_name: str | None,
+                       lut_name: str | None) -> PictureEntryView:
+    """`entry` as the routes answer it, with the names read today: the Display's, the sent entry's
+    Frame's (None: no Frame then, or it was deleted) and its LUT's (`software_view`)."""
+    ...
