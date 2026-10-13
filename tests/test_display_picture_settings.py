@@ -563,11 +563,13 @@ def _before_075(registry) -> None:
 
 
 def _migrate(registry) -> None:
-    """075, then 092, then 094, on the database `_before_075` left."""
+    """075, then 092, then 094, on the database `_before_075` left, then 096's session column (the
+    table `_before_075` dropped came back without it)."""
     with registry.db.transaction() as conn:
         conn.execute(MIGRATION_075.read_text())
     migrate_092(registry)
     migrate_094(registry)
+    _sql(registry, "ALTER TABLE picture_sessions ADD COLUMN restored_from UUID NULL")
 
 
 def _stored_1b(registry, frame_id: str, *, gain: float, rotation: int = 0, corners=None) -> None:

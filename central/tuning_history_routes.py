@@ -17,15 +17,28 @@ central/fleet/node_routes.py: POST /v1/operator/frames/{frame_id}/calibration-tr
 from __future__ import annotations
 
 from typing import Any
+from uuid import UUID
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI, Request
+from fastapi.responses import JSONResponse
 
+from central.displays.views import PictureHistoryView
+from central.operator_auth import OPERATOR_PREFIX
+from central.tuning_history.model import HistoryRefused, history_page
 from central.tuning_history.ports import TuningHistoryQueries
 
 
 def mount_tuning_history_routes(app: FastAPI, *, admin: Any, queries: TuningHistoryQueries) -> None:
     """Declare the routes above on `app`; HistoryRefused becomes {"error": code} at its status."""
-    ...
+
+    @app.exception_handler(HistoryRefused)
+    async def refused(request: Request, exc: HistoryRefused) -> JSONResponse:
+        return JSONResponse({"error": exc.code}, status_code=exc.status)
+
+    @app.get(OPERATOR_PREFIX + "displays/{display_id}/picture-history", dependencies=[Depends(admin)],
+             response_model=PictureHistoryView)
+    def picture_history(display_id: UUID, before: str | None = None, limit: int | None = None) -> PictureHistoryView:
+        return queries.picture_history(display_id, history_page(before, limit))
 
 
 __all__ = ["mount_tuning_history_routes"]

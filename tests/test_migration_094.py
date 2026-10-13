@@ -14,7 +14,7 @@ import psycopg
 import pytest
 from test_display_identity import NO_SERIAL, _bind, _frame, _report, _sql, enroll_pi
 
-from central.infra.display_store import stored_picture
+from central.infra.picture_columns import stored_picture
 from contracts.node_picture import SignalRange
 
 MIGRATION = Path(__file__).parents[1] / "central/migrations/094_display_tuning.sql"

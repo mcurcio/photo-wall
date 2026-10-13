@@ -8,7 +8,7 @@ lock when it appends, so an idle key stays bounded and there is no reaper.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Final
 
 from central.displays.picture_history import PictureEntry
@@ -43,14 +43,25 @@ def utc_instant(text: str) -> datetime:
     """`text`, an ISO 8601 time with its zone ("2026-10-13T21:04:07Z", "...+01:00"), as an aware
     datetime in UTC. HistoryRefused("bad_time", 422) for anything else; a time with no zone is
     refused, never guessed."""
-    ...
+    try:
+        instant = datetime.fromisoformat(text)
+    except (TypeError, ValueError):
+        raise HistoryRefused("bad_time", 422) from None
+    if instant.utcoffset() is None:
+        raise HistoryRefused("bad_time", 422)
+    return instant.astimezone(UTC)
 
 
 def history_page(before: str | None, limit: int | None) -> HistoryPage:
     """The page a route's query names: `before` through `utc_instant` (None: the newest), `limit`
     PAGE_LIMIT_DEFAULT when None. HistoryRefused("bad_time", 422), ("bad_range", 422) for a limit
     outside 1..PAGE_LIMIT_MAX."""
-    ...
+    instant = None if before is None else utc_instant(before)
+    if limit is None:
+        limit = PAGE_LIMIT_DEFAULT
+    elif type(limit) is not int or not 1 <= limit <= PAGE_LIMIT_MAX:
+        raise HistoryRefused("bad_range", 422)
+    return HistoryPage(instant, limit)
 
 
 @dataclass(frozen=True)

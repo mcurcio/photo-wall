@@ -78,7 +78,7 @@ STORED = DisplayPicture({}, NEUTRAL_SOFTWARE, AUTO)
 def _session(draft: DisplayPicture = STORED, *, idle_until: float = 10.0,
              test_pattern: TestPatternAsk | None = None) -> PictureSession:
     return PictureSession(uuid4(), uuid4(), 1, draft, 0, {}, frozenset(), frozenset(), Lease(idle_until, None),
-                          test_pattern)
+                          test_pattern, None)
 
 
 def _answer(change: int, *, presented_change: int | None = None, signal: SignalReport | None = None,

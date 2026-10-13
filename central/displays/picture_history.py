@@ -19,13 +19,13 @@ clock at the append. The Picture tab's Restore is a session edit and lives with 
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import StrEnum
 from typing import Final
 from uuid import UUID
 
-from central.displays.picture import DisplayPicture, PictureSession
+from central.displays.picture import DisplayPicture, PictureSession, default_picture
 from contracts.node_picture import TestPatternAsk
 from contracts.tuning import TestPattern
 
@@ -86,7 +86,8 @@ def same_values(a: DisplayPicture, b: DisplayPicture) -> bool:
     """`a` and `b` set the same picture: equal hardware, software and signal range, the LUT compared
     by its paper profile alone (the stored picture names today's recipe, an entry the recipe of its
     time, and a new recipe is not a change anyone made)."""
-    ...
+    return (dict(a.hardware) == dict(b.hardware) and a.signal_range == b.signal_range
+            and _profile(a) == _profile(b) and replace(a.software, lut=None) == replace(b.software, lut=None))
 
 
 def unrecorded_record(latest_kept: PictureEntry | None, stored: DisplayPicture) -> PictureRecord | None:
@@ -94,17 +95,21 @@ def unrecorded_record(latest_kept: PictureEntry | None, stored: DisplayPicture) 
     restore, no test pattern) when it differs (`same_values`) from the newest kept entry's picture,
     or when the Display has no kept entry and `stored` is not `picture.default_picture()`; else
     None (nothing changed unseen)."""
-    ...
+    if latest_kept is None:
+        changed = not same_values(stored, default_picture())
+    else:
+        changed = not same_values(latest_kept.record.picture, stored)
+    return PictureRecord(PictureEntryKind.KEPT_UNRECORDED, stored, None, None, None) if changed else None
 
 
 def done_record(session: PictureSession) -> PictureRecord:
     """The KEPT_DONE record of `session`'s draft: its session id and `restored_from`."""
-    ...
+    return PictureRecord(PictureEntryKind.KEPT_DONE, session.draft, session.session_id, session.restored_from, None)
 
 
 def copied_record(picture: DisplayPicture) -> PictureRecord:
     """The KEPT_COPIED record of the values Copy wrote on a target Display (no session)."""
-    ...
+    return PictureRecord(PictureEntryKind.KEPT_COPIED, picture, None, None, None)
 
 
 def sent_record(*, session: PictureSession | None, now: float, previous: PictureEntry | None,
@@ -119,6 +124,12 @@ def sent_record(*, session: PictureSession | None, now: float, previous: Picture
     ValueError("sent_test_pattern") for a test pattern with no live session (the projection never
     sends one)."""
     ...
+
+
+def _profile(picture: DisplayPicture) -> str | None:
+    """The paper profile of `picture`'s LUT (None: no LUT)."""
+    lut = picture.software.lut
+    return None if lut is None else lut.profile_sha256
 
 
 __all__ = ["KEPT_KINDS", "SENT_KINDS", "PictureEntry", "PictureEntryKind", "PictureRecord", "Port",

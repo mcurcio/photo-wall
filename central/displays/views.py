@@ -406,11 +406,29 @@ def software_view(software: SoftwarePicture, lut_name: str | None) -> SoftwarePi
     """The Photo Wall section's values; the LUT by its digest and `lut_name`, the LUTs list's name
     for it, or "Paper profile <first 8 hex>" when it has none. The one mapping of a SoftwarePicture
     to its view: the Picture tab's read and every picture history entry."""
-    ...
+    lut = software.lut
+    return SoftwarePictureView(
+        brightness_percent=software.brightness_percent, contrast_percent=software.contrast_percent,
+        colour_temperature_kelvin=software.colour_temperature_kelvin, gamma_tenths=software.gamma_tenths,
+        saturation_percent=software.saturation_percent, highlight_rolloff_percent=software.highlight_rolloff_percent,
+        black_floor_tenths=software.black_floor_tenths, lut_amount_percent=software.lut_amount_percent,
+        lut=None if lut is None else LutChoiceView(profile_sha256=lut.profile_sha256,
+                                                   name=lut_name or f"Paper profile {lut.profile_sha256[:8]}"))
 
 
 def picture_entry_view(entry: PictureEntry, *, display_name: str, frame_name: str | None,
                        lut_name: str | None) -> PictureEntryView:
     """`entry` as the routes answer it, with the names read today: the Display's, the sent entry's
     Frame's (None: no Frame then, or it was deleted) and its LUT's (`software_view`)."""
-    ...
+    record, lut = entry.record, entry.record.picture.software.lut
+    return PictureEntryView(
+        entry_id=entry.entry_id, display=DisplayRefView(id=entry.display_id, name=display_name), kind=record.kind,
+        number=entry.number, at=entry.at,
+        frame=None if entry.frame_id is None or frame_name is None else FrameRefView(id=entry.frame_id,
+                                                                                    name=frame_name),
+        session_id=record.session_id, restored_from=record.restored_from,
+        picture=PictureValuesView(hardware=dict(record.picture.hardware),
+                                  software=software_view(record.picture.software, lut_name),
+                                  signal_range=record.picture.signal_range,
+                                  lut_recipe_id=None if lut is None else lut.recipe_id),
+        test_pattern=record.test_pattern)

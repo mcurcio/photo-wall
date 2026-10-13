@@ -48,6 +48,7 @@ from central.infra.house_store import PgHouse, seed_house
 from central.infra.lut_store import PgLuts
 from central.infra.photo_library_store import PgPhotoLibrary
 from central.infra.power_store import PgPower
+from central.infra.tuning_history_store import PgTuningHistory
 from central.infra.why_store import PgWhy
 from central.installation_models import FrameName, InstallationInventory, WallInventory, WallNaming
 from central.library_routes import mount_library_routes
@@ -76,6 +77,7 @@ from central.registry import (
 from central.runtime import RuntimeConflict, Scene, SceneInUse
 from central.runtime_store import RuntimeStore
 from central.source_names import SourceInUse, SourceNameService
+from central.tuning_history_routes import mount_tuning_history_routes
 from central.wall_plan.fit import FitTarget
 from central.wall_plan.fit_analysis import analyse
 from central.wall_plan.fit_settings import FIT_SETTING_RANGES
@@ -794,6 +796,7 @@ def create_app(
     mount_house_routes(app, admin=admin, queries=house, commands=house)
     pictures = PgPictureSessions(db)
     mount_picture_routes(app, admin=admin, queries=pictures, commands=pictures)
+    mount_tuning_history_routes(app, admin=admin, queries=PgTuningHistory(db))
     mount_lut_routes(app, admin=admin, player=player, luts=PgLuts(db, clock))
     if content is not None:
         mount_content_routes(app, content)

@@ -21,7 +21,7 @@ from test_display_identity import NO_SERIAL, _bind, _frame, _report, _sql, enrol
 from test_node_calibration import setup_trial
 
 from central.coordination import Coordinator
-from central.infra.display_store import stored_picture
+from central.infra.picture_columns import stored_picture
 from contracts.models import Mat, Plan, PlayerConfiguration
 from contracts.node_picture import NEUTRAL_SOFTWARE
 
