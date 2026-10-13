@@ -829,6 +829,10 @@ uvicorn central.app:create_app --factory --host 0.0.0.0 --port 8000 --ws-max-siz
 
 Keep `--ws-max-size` at 16 MiB: a Node's bus leaf rides Central's WebSocket, and nats-server sends a connection's whole backlog as one frame ([the Node bus](#the-node-bus-and-centrals-hub)).
 
+**Locks.** There is no fleet-wide lock: each device has its own fence ([coordination module](module-coordination.md)). Node requests share it, so a slow database commit for one request (the disk stalling a WAL flush) no longer makes the device's next request, or its Hardware page, fail. A boot offer, a node enrolment or a retirement waits for the device's open requests; one not granted within 5 s answers 503 `node_device_busy` with `Retry-After: 1`, and the Node retries. The Wall-wide Coordination lock is unchanged and can still time out while the disk stalls.
+
+**Upgrading across lost grants (migration 095).** Readiness reports now carry `lost_grants`; a Player built before it is refused (422) by a Central after it, and the other way round, so no new cue starts until the Player runs the matching release. Deploy Central, then reboot every Pi at once onto the new release: the Frames hold their pictures for those minutes.
+
 The node session audience is the product constant `photo-wall` (`NODE_AUDIENCE` in
 `central/fleet/node_sessions.py`), one Central per wall; no environment variable sets it.
 Every Pi boots by the node path: the V1 boot offer

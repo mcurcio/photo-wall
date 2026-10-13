@@ -39,6 +39,7 @@ def _feedback(coordinator, player, plan, *, secured=(), prepared=(), capacity_ok
         capacity_ok=capacity_ok,
         clock_uncertainty=0.01,
         observed_at=coordinator.clock.utc(),
+        lost_grants=(),
     )
 
 

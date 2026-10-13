@@ -14,6 +14,7 @@ from contracts.models import (
     CornersFit,
     FrameProfile,
     Layer,
+    LostGrant,
     Mat,
     OutputBinding,
     Plan,
@@ -662,6 +663,47 @@ def test_revoked_commit_cannot_replay_after_preparation_recovers(tmp_path):
     assert rig.renderer.outputs["hdmi1"].fallback
     rig.commit("picture")
     assert any(o.status == "presented" for o in rig.executor.tick())
+
+
+def test_a_grant_dropped_locally_is_reported_lost_in_every_report_until_regranted(tmp_path):
+    rig = Rig(tmp_path)
+    rig.offer(layer(start=103, media_origin=103))
+    rig.secure()
+    rig.executor.prepare_imminent()
+    granted = rig.commit("picture")
+    assert rig.executor.readiness().lost_grants == ()
+    rig.renderer.prepare_failures.add("picture")
+    rig.executor.prepare_imminent()
+    rig.renderer.prepare_failures.clear()
+    rig.advance(1)
+    rig.executor.prepare_imminent()
+    lost = (LostGrant(assignment_id="picture", readiness_sequence=granted.readiness_sequence),)
+    assert rig.executor.readiness().lost_grants == lost
+    assert rig.executor.readiness().lost_grants == lost
+    regranted = rig.commit("picture")
+    assert rig.executor.readiness().lost_grants == ()
+    # Central re-sends the grant the Player holds, or the earlier one without its re-granted
+    # member: neither adds anything, and neither is refused.
+    assert rig.executor.accept_commit(regranted) is False
+    assert rig.executor.accept_commit(granted) is False
+
+
+def test_a_refused_grant_is_reported_lost_with_its_own_sequence(tmp_path):
+    rig = Rig(tmp_path)
+    rig.offer(layer(start=103, media_origin=103))
+    rig.secure()
+    rig.executor.prepare_imminent()
+    ready = rig.executor.readiness()
+    for _ in range(128):              # an outage longer than the Player's report window
+        rig.executor.readiness()
+    late = Commit(plan_id="stable", revision=1, authority_epoch=1, assignment_ids=("picture",),
+                  readiness_sequence=ready.sequence, committed_at=rig.clock.utc())
+    with pytest.raises(AuthorityError, match="revoked or unknown"):
+        rig.executor.accept_commit(late)
+    assert rig.executor.readiness().lost_grants == (
+        LostGrant(assignment_id="picture", readiness_sequence=ready.sequence),)
+    rig.commit("picture")
+    assert rig.executor.readiness().lost_grants == ()
 
 
 def test_nonterminal_invalidation_preserves_bytes_requires_fresh_grant(tmp_path):

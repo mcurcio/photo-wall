@@ -253,12 +253,16 @@ class Coordinator:
         configuration = PlayerConfiguration(
             player_id=player_id, authority_epoch=epoch, configuration_revision=revision, **content
         )
-        conn.execute(
-            "INSERT INTO player_configurations VALUES(%s,%s,%s,%s) "
-            "ON CONFLICT(player_id) DO UPDATE SET authority_epoch=EXCLUDED.authority_epoch,"
-            "revision=EXCLUDED.revision,configuration=EXCLUDED.configuration",
-            (player_id, epoch, revision, Jsonb(configuration.model_dump(mode="json"))),
-        )
+        document = configuration.model_dump(mode="json")
+        # Written only when it changed: an unchanged row is never rewritten (design rule 2).
+        if old is None or (old["authority_epoch"], old["revision"], old["configuration"]) != (
+                epoch, revision, document):
+            conn.execute(
+                "INSERT INTO player_configurations VALUES(%s,%s,%s,%s) "
+                "ON CONFLICT(player_id) DO UPDATE SET authority_epoch=EXCLUDED.authority_epoch,"
+                "revision=EXCLUDED.revision,configuration=EXCLUDED.configuration",
+                (player_id, epoch, revision, Jsonb(document)),
+            )
         return configuration
 
     def configuration(self, player_id: str, epoch: int) -> PlayerConfiguration:
@@ -749,33 +753,28 @@ class Coordinator:
                     if g["id"] in membership.values()
                 )
                 rows = conn.execute(
-                    "SELECT assignment_id,committed_at,readiness_sequence FROM execution_commits "
-                    "WHERE player_id=%s AND authority_epoch=%s AND revision=%s AND valid",
+                    "SELECT group_id,assignment_id,committed_at,readiness_sequence "
+                    "FROM execution_commits WHERE player_id=%s AND authority_epoch=%s "
+                    "AND revision=%s AND valid",
                     (player_id, epoch, plan.revision),
                 ).fetchall()
-                if rows:
-                    # Groups can have been granted against different Player snapshots.
-                    commits = tuple(
-                        Commit(
-                            plan_id=plan.plan_id,
-                            revision=plan.revision,
-                            authority_epoch=epoch,
-                            readiness_sequence=sequence,
-                            assignment_ids=tuple(
-                                sorted(
-                                    r["assignment_id"]
-                                    for r in rows
-                                    if r["readiness_sequence"] == sequence
-                                )
-                            ),
-                            committed_at=max(
-                                r["committed_at"]
-                                for r in rows
-                                if r["readiness_sequence"] == sequence
-                            ),
-                        )
-                        for sequence in sorted({r["readiness_sequence"] for r in rows})
+                # One Commit per grant (group, readiness sequence): a grant written later at the
+                # same sequence (another group, or a re-granted member) never changes a Commit
+                # the Player already accepted.
+                grants: dict[tuple[int, str], list] = {}
+                for r in rows:
+                    grants.setdefault((r["readiness_sequence"], r["group_id"]), []).append(r)
+                commits = tuple(
+                    Commit(
+                        plan_id=plan.plan_id,
+                        revision=plan.revision,
+                        authority_epoch=epoch,
+                        readiness_sequence=sequence,
+                        assignment_ids=tuple(sorted(r["assignment_id"] for r in members)),
+                        committed_at=max(r["committed_at"] for r in members),
                     )
+                    for (sequence, _), members in sorted(grants.items())
+                )
             delivery = {
                 "configuration": config,
                 "plan": plan,
@@ -931,9 +930,20 @@ class Coordinator:
                             self._skip_group(conn, group["id"], "readiness_lost")
                         conn.execute(
                             "UPDATE execution_commits SET valid=FALSE WHERE player_id=%s "
-                            "AND authority_epoch=%s AND assignment_id=%s",
+                            "AND authority_epoch=%s AND assignment_id=%s AND valid",
                             (player_id, report.authority_epoch, layer.assignment_id),
                         )
+                # A grant the Player saw and no longer holds: only the one Central still holds
+                # (same sequence) is invalidated, for `_commit_due` to re-grant once; a lost
+                # grant at an older sequence is already re-granted.
+                for lost in report.lost_grants:
+                    conn.execute(
+                        "UPDATE execution_commits SET valid=FALSE WHERE player_id=%s "
+                        "AND authority_epoch=%s AND revision=%s AND assignment_id=%s "
+                        "AND readiness_sequence=%s AND valid",
+                        (player_id, report.authority_epoch, report.revision,
+                         lost.assignment_id, lost.readiness_sequence),
+                    )
             for assignment, code in failed.items():
                 self._event(conn, "readiness_lost", player_id, assignment, {"code": code})
             self._commit_due(conn, configurations, now)
@@ -1136,11 +1146,21 @@ class Coordinator:
                     break
                 participants.append((plan, layer, report.sequence))
             if ready and participants:
+                # Only a missing or invalidated grant is written: a grant the Player holds is
+                # never rewritten, so its Commit and the control delivery stay unchanged.
+                held = {(r["player_id"], r["authority_epoch"], r["revision"], r["assignment_id"])
+                        for r in conn.execute(
+                            "SELECT player_id,authority_epoch,revision,assignment_id "
+                            "FROM execution_commits WHERE group_id=%s AND valid", (group["id"],))}
                 for plan, layer, sequence in participants:
+                    if (plan.player_id, plan.authority_epoch, plan.revision,
+                            layer.assignment_id) in held:
+                        continue
                     conn.execute(
                         "INSERT INTO execution_commits VALUES(%s,%s,%s,%s,%s,%s,TRUE,%s) "
                         "ON CONFLICT(player_id,authority_epoch,revision,assignment_id) "
-                        "DO UPDATE SET valid=TRUE,committed_at=EXCLUDED.committed_at,"
+                        "DO UPDATE SET valid=TRUE,group_id=EXCLUDED.group_id,"
+                        "committed_at=EXCLUDED.committed_at,"
                         "readiness_sequence=EXCLUDED.readiness_sequence",
                         (
                             plan.player_id,
@@ -1152,9 +1172,11 @@ class Coordinator:
                             sequence,
                         ),
                     )
-                conn.execute(
-                    "UPDATE coordination_groups SET status='committed' WHERE id=%s", (group["id"],)
-                )
+                if group["status"] != "committed":
+                    conn.execute(
+                        "UPDATE coordination_groups SET status='committed' WHERE id=%s",
+                        (group["id"],),
+                    )
             elif group["status"] == "pending" and now >= group["deadline"]:
                 self._skip_group(conn, group["id"], "not_ready")
 

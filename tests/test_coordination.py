@@ -64,7 +64,8 @@ def report(coordinator, player, *, sequence=1, prepared=True):
                      and a.end > coordinator.clock.utc())
     return Readiness(plan_id=plan.plan_id, revision=plan.revision, authority_epoch=plan.authority_epoch,
                      sequence=sequence, secured=imminent, prepared=imminent if prepared else (),
-                     clock_uncertainty=.01, capacity_ok=True, observed_at=coordinator.clock.utc())
+                     clock_uncertainty=.01, capacity_ok=True, observed_at=coordinator.clock.utc(),
+                     lost_grants=())
 
 
 def test_runtime_concurrent_idempotent_admission_and_restart(registry):
@@ -220,7 +221,7 @@ def test_offers_protect_possible_secured_bytes_across_central_restart_and_new_qu
     assert retained.variant == original
     delayed = Readiness(plan_id=offered.plan_id, revision=offered.revision, authority_epoch=1,
                         sequence=1, secured=(first.assignment_id,), capacity_ok=False,
-                        observed_at=registry.clock.utc(), clock_uncertainty=.01)
+                        observed_at=registry.clock.utc(), clock_uncertainty=.01, lost_grants=())
     assert restarted.readiness(player["player_id"], delayed)
     with registry.db.transaction() as conn:
         stored = conn.execute("SELECT layer FROM assignment_locks WHERE assignment_id=%s",
