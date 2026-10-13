@@ -25,8 +25,9 @@ from fastapi.responses import JSONResponse
 from central.displays.views import PictureHistoryView
 from central.fleet.position_views import PositionHistoryView
 from central.operator_auth import OPERATOR_PREFIX
-from central.tuning_history.model import HistoryRefused, history_page
+from central.tuning_history.model import HistoryRefused, history_page, utc_instant
 from central.tuning_history.ports import TuningHistoryQueries
+from central.tuning_history.views import TuningSnapshotView
 from contracts.models import Identifier
 
 
@@ -47,6 +48,13 @@ def mount_tuning_history_routes(app: FastAPI, *, admin: Any, queries: TuningHist
     def position_history(frame_id: Identifier, before: str | None = None,
                          limit: int | None = None) -> PositionHistoryView:
         return queries.position_history(frame_id, history_page(before, limit))
+
+    @app.get(OPERATOR_PREFIX + "frames/{frame_id}/tuning-snapshot", dependencies=[Depends(admin)],
+             response_model=TuningSnapshotView)
+    def tuning_snapshot(frame_id: Identifier, at: str | None = None) -> TuningSnapshotView:
+        if at is None:
+            raise HistoryRefused("bad_time", 422)
+        return queries.snapshot_at(frame_id, utc_instant(at))
 
 
 __all__ = ["mount_tuning_history_routes"]

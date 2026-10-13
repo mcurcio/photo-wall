@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Final
 
-from central.displays.picture_history import PictureEntry
+from central.displays.picture_history import KEPT_KINDS, SENT_KINDS, PictureEntry
 from central.fleet.position_history import PositionEntry
 
 KEPT_ENTRIES: Final = 500           # per Display (picture) and per Frame (Position): kept entries kept
@@ -83,7 +83,15 @@ def snapshot_at(frame_id: str, at: datetime, *, position: PositionEntry | None, 
     `picture_kept`, else None. ValueError("snapshot_entry") when a given entry is after `at`, a
     Position entry is another Frame's, or `picture_sent` names another Frame or is not a sent kind,
     or `picture_kept` is not a kept kind."""
-    ...
+    if any(entry is not None and entry.at > at for entry in (position, picture_sent, picture_kept)):
+        raise ValueError("snapshot_entry")
+    if position is not None and position.frame_id != frame_id:
+        raise ValueError("snapshot_entry")
+    if picture_sent is not None and (picture_sent.frame_id != frame_id or picture_sent.record.kind not in SENT_KINDS):
+        raise ValueError("snapshot_entry")
+    if picture_kept is not None and picture_kept.record.kind not in KEPT_KINDS:
+        raise ValueError("snapshot_entry")
+    return TuningSnapshot(frame_id, at, position, picture_sent if picture_sent is not None else picture_kept)
 
 
 __all__ = ["KEPT_ENTRIES", "PAGE_LIMIT_DEFAULT", "PAGE_LIMIT_MAX", "SENT_ENTRIES", "HistoryPage",
