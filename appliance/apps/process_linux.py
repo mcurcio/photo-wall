@@ -9,7 +9,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from uuid import UUID
 
-from appliance.apps.broker import Launch, RunningApp
+from appliance.apps.broker import AppUnitSettling, Launch, RunningApp
 from appliance.apps.device_grants import DeviceGrant, player_device_grants
 from appliance.apps.environment import mounted_root
 from appliance.apps.lifecycle_storage import primitive, running_from
@@ -31,6 +31,8 @@ PW_DISPLAY_GID = 10005
 APP_PROPERTIES = ("LoadState", "ActiveState", "SubState", "MainPID", "InvocationID", "ControlGroup",
                   "RootDirectory")
 DISPLAY_PROPERTIES = ("ActiveState", "InvocationID")
+# A unit between states: nothing is known about its process this turn (AppUnitSettling).
+SETTLING_STATES = frozenset({"activating", "deactivating", "reloading"})
 
 
 def systemctl_show(unit: str, properties: tuple[str, ...] = APP_PROPERTIES) -> dict[str, str]:
@@ -156,6 +158,8 @@ class SystemdAppProcessDriver:
         rows = systemctl_show(UNIT)
         if rows["LoadState"] == "not-found" or (rows["ActiveState"] in ("inactive", "failed") and rows["MainPID"] == "0"):
             return None
+        if rows["ActiveState"] in SETTLING_STATES:
+            raise AppUnitSettling(rows["ActiveState"])
         if rows["ActiveState"] != "active":
             raise ValueError("app_process_ambiguous")
         return self._process_observation(rows, environment, operation_id, epoch)

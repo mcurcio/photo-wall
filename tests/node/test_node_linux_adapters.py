@@ -270,7 +270,7 @@ def stop_driver(tmp_path, monkeypatch):
 def test_stop_observation_pending_does_not_relax_public_current(stop_driver, monkeypatch):
     linux, driver, expected, group, rows, ticks, _ = stop_driver
     assert not driver._stop_sample(expected, group)
-    with pytest.raises(ValueError, match="app_process_ambiguous"):
+    with pytest.raises(linux.AppUnitSettling):                  # deactivating: an unknown turn
         driver._observe(expected.environment, expected.operation_id, expected.app_epoch)
     rows["MainPID"] = "0"
     assert not driver._stop_sample(expected, group)

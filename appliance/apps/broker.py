@@ -55,6 +55,18 @@ class EffectRecord:
     fault: str | None = None
 
 
+class AppUnitSettling(ValueError):
+    """The app unit is between states (activating, deactivating, reloading): nothing is known about
+    its process this turn; observe again next turn. Never a reason to relaunch, kill or exit.
+    `AppProcessDriver.current` raises it (process_linux.SystemdAppProcessDriver); every caller on
+    the broker's turn treats it as an unknown turn (a Weston restart takes the Player down this
+    way, display tuning, decision 0024)."""
+
+    def __init__(self, state: str) -> None:
+        super().__init__("app_unit_settling")
+        self.state = state
+
+
 class EffectJournal(Protocol):
     def get(self, operation_id: UUID) -> EffectRecord | None: ...
     def current(self) -> EffectRecord | None: ...
@@ -65,7 +77,8 @@ class EffectJournal(Protocol):
 
 class AppProcessDriver(Protocol):
     def current(self) -> RunningApp | None:
-        """None means observed absent. Unavailable/ambiguous raises."""
+        """None means observed absent. Unavailable/ambiguous raises; a unit between states raises
+        AppUnitSettling (an unknown turn)."""
         ...
 
     def verify(self, environment: AppEnvironmentRefV2) -> bool:
@@ -284,12 +297,17 @@ class AppEffectBroker:
     def reconcile(self) -> EffectRecord | None:
         """Observe ambiguous effects without starting, stopping or selecting again, except the
         paced relaunch (`relaunch_absent`) of a launch found absent: a settled one (`running`,
-        `exited`) or one whose relaunch failed (`relaunch_outcome_unknown`, E-1B-18)."""
+        `exited`) or one whose relaunch failed (`relaunch_outcome_unknown`, E-1B-18). A unit
+        between states (AppUnitSettling) is an unknown turn: the record stays as it is, nothing is
+        relaunched, and the next turn observes again."""
         with self._lock:
             record = self.journal.current()
             if record is None:
                 return None
-            running = self.driver.current()
+            try:
+                running = self.driver.current()
+            except AppUnitSettling:
+                return record
             if (running is not None and running.environment == record.command.environment
                     and running.operation_id == record.command.operation_id
                     and (record.running is None or running.process == record.running.process)):
