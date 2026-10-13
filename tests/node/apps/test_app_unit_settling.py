@@ -22,6 +22,7 @@ from test_node_boot import environment
 from appliance.apps import process_linux as linux
 from appliance.apps.broker import AppEffectBroker, ColdStart, EffectRecord, RunningApp
 from appliance.apps.lifecycle_storage import FileEffectJournal, FileRelaunchPacing, primitive
+from appliance.kernel.app_facts import APP_OBSERVATION_FAILED
 from contracts.node_protocol import NodeProcessIdentity
 
 GROUP = "/photowallapp.slice/" + linux.UNIT
@@ -56,7 +57,7 @@ class Unit:
 
     def show(self, unit, properties=linux.APP_PROPERTIES):
         if unit == linux.DISPLAY_UNIT:
-            return {"ActiveState": "active", "InvocationID": DISPLAY}
+            return {"ActiveState": "active", "InvocationID": DISPLAY, "Job": ""}
         return dict(self.rows)
 
 
@@ -74,6 +75,7 @@ def broker_turn(tmp_path, monkeypatch):
     monkeypatch.setattr(linux, "systemctl_show", unit.show)
     monkeypatch.setattr(linux, "read_proc_start_ticks", lambda proc, pid: unit.ticks.get(pid))
     monkeypatch.setattr(linux, "process_root_matches", lambda *args: True)
+    monkeypatch.setattr(linux, "boottime_ms", lambda: 50_000)       # CLOCK_BOOTTIME is Linux-only
     monkeypatch.setattr(linux.subprocess, "run", lambda *args, **kwargs: subprocess.CompletedProcess(
         args, 0, "\n", ""))                                              # `systemctl show --property=Job`
     store.write("launch", {"environment": primitive(command.environment), "operation_id": str(command.operation_id),
@@ -138,17 +140,91 @@ def test_activating_right_after_a_launch_is_waited_out_never_judged_an_exit(brok
     assert journal.current().phase == "running" and unit.launches == []
 
 
-@pytest.mark.parametrize("change", [{"RootDirectory": "/elsewhere"}, {"ActiveState": "failed"},
+def systemd_started_it_again(unit: Unit, pid: int = 777) -> NodeProcessIdentity:
+    """systemd's own restart of the Player's unit (the 2026-10-13 incident's try-restart): the same
+    unit, root and cgroup, a new process and InvocationID the broker never launched."""
+    process = NodeProcessIdentity(pid, 9999, uuid4())
+    unit.rows.update(MainPID=str(pid), InvocationID=str(process.invocation_id))
+    unit.ticks[pid] = process.start_ticks
+    (unit.driver.proc / str(pid)).mkdir(parents=True, exist_ok=True)
+    (unit.driver.proc / str(pid) / "cgroup").write_text(f"0::{GROUP}\n")
+    return process
+
+
+def test_a_run_of_the_same_root_the_broker_did_not_start_is_adopted_and_the_turn_never_raises(broker_turn):
+    """Incident 2026-10-13 (v0.35.0): a signal range change restarted Weston, systemd started the
+    Player again itself, and every broker turn raised app_process_incarnation_mismatch until the
+    broker's start limit left it failed until reboot. A run whose root, cgroup and environment
+    match the launch is the broker's own Player: adopted as a new launch (its identity and the
+    running Weston recorded), never relaunched, never fatal. Mutation probe: raise
+    app_process_incarnation_mismatch again in SystemdAppProcessDriver.current -> the turn raises."""
+    loop, unit, journal, _pacing = broker_turn
+    store = loop.driver.store
+    loop.turn()
+    epoch = store.read("launch")["epoch"]
+    process = systemd_started_it_again(unit)
+    for _ in range(3):
+        loop.turn()
+    launch = store.read("launch")
+    assert launch["running"]["process"]["pid"] == 777
+    assert launch["running"]["process"]["invocation_id"] == str(process.invocation_id)
+    assert launch["display"] == DISPLAY and launch["epoch"] == epoch + 1   # the running Weston's
+    record = journal.current()
+    assert record.phase == "running" and record.fault is None and record.running.process == process
+    assert unit.launches == []                                       # adopted, never relaunched
+    assert loop.driver.current().process == process
+
+
+def test_an_observation_fault_is_reported_and_backed_off_never_fatal(broker_turn):
+    """A driver ValueError (a unit failed with a main process left: app_process_ambiguous) is a
+    fault reported once on the node feed for the health judge, observed again on a backoff, and
+    never the broker's exit; it clears once the unit is readable again. Mutation probe: let
+    BrokerLoop.turn's reconcile raise -> the turn raises."""
+    loop, unit, journal, _pacing = broker_turn
+    reconciles = []
+    reconcile = loop.broker.reconcile
+    loop.broker.reconcile = lambda: (reconciles.append(loop.now), reconcile())[1]
+    unit.state("failed")                                             # MainPID still set
+    for _ in range(10):                                              # 1 s of turns
+        loop.turn()
+        loop.now += 100
+    faults = [e.value for e in loop.probes.feed.read(0, incarnation=None, limit=64).events
+              if e.kind == APP_OBSERVATION_FAILED]
+    assert faults == [{"reason": "app_process_ambiguous"}]
+    assert reconciles == [0]                                         # backed off, not every turn
+    assert journal.current().phase == "running"
+    unit.state("active")
+    for _ in range(30):
+        loop.turn()
+        loop.now += 100
+    assert len(reconciles) >= 2 and reconciles[1] >= 1_000
+    assert loop.observation_fault is None and journal.current().phase == "running"
+
+
+@pytest.mark.parametrize("change", [{"RootDirectory": "/elsewhere"},
                                     {"ControlGroup": "/system.slice/other.service"}])
-def test_a_unit_that_is_not_ours_is_still_ambiguous(broker_turn, change):
-    """Acceptance 3: the safety check is kept: a unit that is active but not ours (or failed with a
-    main process) raises app_process_ambiguous, never the settling wait. Mutation probe: let
-    AppUnitSettling cover it -> the error is the wait."""
+def test_a_unit_that_is_not_ours_is_stopped_and_the_player_relaunched_on_the_pacing(broker_turn, change,
+                                                                                   monkeypatch):
+    """A unit under the Player's name that is not the launch's (another root, another cgroup) is
+    never adopted and never the settling wait: the broker stops it and relaunches its own Player
+    on its pacing. Mutation probe: let AppUnitSettling cover it -> nothing is stopped."""
     loop, unit, _journal, _pacing = broker_turn
     unit.rows.update(change)
-    with pytest.raises(ValueError, match="^app_process_ambiguous$") as raised:
+    with pytest.raises(linux.ForeignAppUnit):
         loop.driver.current()
-    assert not isinstance(raised.value, linux.AppUnitSettling)
+    stops = []
+
+    def systemctl(command, **kwargs):
+        if "stop" in command:
+            stops.append(command)
+            unit.state("inactive", pid="0", load="not-found")
+        return subprocess.CompletedProcess(command, 0, "\n", "")
+    monkeypatch.setattr(linux.subprocess, "run", systemctl)
+    for _ in range(20):
+        loop.turn()
+        loop.now += 100
+    assert stops == [["/usr/bin/systemctl", "--no-block", "stop", linux.UNIT]]
+    assert unit.launches == ["not-found/inactive"]
 
 
 @pytest.mark.parametrize("state", sorted(linux.SETTLING_STATES))

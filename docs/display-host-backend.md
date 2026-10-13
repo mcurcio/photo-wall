@@ -116,9 +116,13 @@ Any other consumer of `/run/photo-wall-display` must follow the same rule: start
 after the display unit is ready, and end with the Weston incarnation it connected
 to. The app broker's `After=` orders it on READY=1. The Player's transient unit
 binds `WAYLAND_DIRECTORY` read-only at the same path, sets `WAYLAND_DISPLAY` to
-`WAYLAND_SOCKET`, and carries `BindsTo=` and `After=` the display unit
-([`app_unit_properties`](../appliance/apps/process_linux.py)): its start waits for
-READY=1 and it stops with that Weston. Each launch records the display's
+`WAYLAND_SOCKET`, and carries `StopPropagatedFrom=` and `After=` the display unit
+([`app_unit_properties`](../appliance/apps/process_linux.py)): its start waits for a
+pending Weston start's READY=1 and it stops with that Weston, but no job on the display
+unit ever starts it (`BindsTo=`, `Requires=`, `Requisite=` and `PartOf=` would each turn
+a restart of Weston into a restart of the Player; the broker is its one owner). The broker
+judges Weston up only while the display unit is active with no job pending, so a restart
+in progress never counts as the Player's own exit. Each launch records the display's
 `InvocationID`. One rule, `relaunch_absent`
 ([`broker.py`](../appliance/apps/broker.py); [the restart rule](player-architecture.md)), serves whichever launch is current:
 the boot's (`AppEffectBroker.reconcile`) or an online switch's

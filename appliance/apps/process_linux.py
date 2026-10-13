@@ -1,15 +1,17 @@
 """Base-owned exact-root systemd effect driver. No shell or host app interpreter."""
 from __future__ import annotations
 
+import logging
 import os
 import signal
 import subprocess
 import time
 from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 from uuid import UUID
 
-from appliance.apps.broker import AppUnitSettling, Launch, RunningApp
+from appliance.apps.broker import AppUnitSettling, ForeignAppUnit, Launch, RunningApp
 from appliance.apps.device_grants import DeviceGrant, player_device_grants
 from appliance.apps.environment import mounted_root
 from appliance.apps.lifecycle_storage import primitive, running_from
@@ -24,13 +26,14 @@ from contracts.app_environment import AppEnvironmentRefV2
 from contracts.node_boot import APP_PACKAGE
 from contracts.node_protocol import NodeProcessIdentity
 
+LOG = logging.getLogger(__name__)
 UNIT = "photo-wall-node-player.service"
 # pw-display's fixed id (the base's sysusers.d, debian/photo-wall-node.sysusers): the Player joins
 # it to traverse WAYLAND_DIRECTORY (0750) and connect to the socket.
 PW_DISPLAY_GID = 10005
 APP_PROPERTIES = ("LoadState", "ActiveState", "SubState", "MainPID", "InvocationID", "ControlGroup",
                   "RootDirectory")
-DISPLAY_PROPERTIES = ("ActiveState", "InvocationID")
+DISPLAY_PROPERTIES = ("ActiveState", "InvocationID", "Job")
 # A unit between states: nothing is known about its process this turn (AppUnitSettling).
 SETTLING_STATES = frozenset({"activating", "deactivating", "reloading"})
 
@@ -77,10 +80,15 @@ def process_root_matches(proc: Path, pid: int, root: Path) -> bool:
 def app_unit_properties(root: Path, devices: Sequence[DeviceGrant]) -> tuple[str, ...]:
     """Single production sandbox definition, also exercised by real PID1 probes.
 
-    The Player runs bound to one Weston incarnation (`BindsTo=` + `After=` the display unit):
-    its start waits for Weston's READY=1, and it stops when that Weston does. `Restart=no`: the
-    broker alone starts it again, at once for a new Weston incarnation and on its relaunch pacing
-    after any other exit (`appliance.apps.broker.relaunch_absent`). `PYTHONFAULTHANDLER=1` puts
+    The broker is the one owner of the Player's lifecycle: no job on another unit ever starts it.
+    It stops with its Weston incarnation (`StopPropagatedFrom=` the display unit: a stop or restart
+    of Weston, or Weston dying, stops the Player and never starts it) and a start waits for a
+    pending Weston start's READY=1 (`After=`). `BindsTo=`, `Requires=`, `Requisite=` and `PartOf=`
+    are never used: systemd turns a restart of the display unit into a try-restart along each of
+    them, which started a Player the broker never launched (incident 2026-10-13, a signal range
+    change). `Restart=no`: the broker alone starts the Player, and only while Weston is up, again
+    at once for a new Weston incarnation and on its relaunch pacing after any other exit
+    (`appliance.apps.broker.relaunch_absent`). `PYTHONFAULTHANDLER=1` puts
     the Python stack of a crash in its journal. It reaches Weston through
     WAYLAND_DIRECTORY, bound in whole at the same path (the directory outlives every Weston, so
     the bind never holds a stale socket), with WAYLAND_DISPLAY the socket's absolute path; its
@@ -96,7 +104,7 @@ def app_unit_properties(root: Path, devices: Sequence[DeviceGrant]) -> tuple[str
     if devices:
         grants += ("BindReadOnlyPaths=" + " ".join(device.path for device in devices),)
     return (
-        f"BindsTo={DISPLAY_UNIT}", f"After={DISPLAY_UNIT}",
+        f"StopPropagatedFrom={DISPLAY_UNIT}", f"After={DISPLAY_UNIT}",
         f"RootDirectory={root}", "User=10004", "Group=10004", f"SupplementaryGroups={groups}", "Slice=photowallapp.slice",
         "ProtectSystem=strict", "ProtectHome=yes", "PrivateDevices=yes", "PrivateTmp=yes",
         "NoNewPrivileges=yes", "CapabilityBoundingSet=", "RestrictSUIDSGID=yes",
@@ -133,9 +141,15 @@ class SystemdAppProcessDriver:
         return True
 
     def display_incarnation(self) -> str | None:
-        """The running Weston's InvocationID; None unless the display unit is active."""
+        """The running Weston's InvocationID; None unless the display unit is active with no job
+        pending. A Weston with a restart or stop queued is on its way out (a signal range change
+        stops the Player, then the controller, then Weston): no relaunch is judged or spawned
+        against it, so the broker's next Player is the new Weston's, at once and never counted as
+        the Player's own exit (`relaunch_absent`)."""
         rows = systemctl_show(DISPLAY_UNIT, DISPLAY_PROPERTIES)
-        return (rows["InvocationID"] or None) if rows["ActiveState"] == "active" else None
+        if rows["ActiveState"] != "active" or rows["Job"] not in ("", "0"):
+            return None
+        return rows["InvocationID"] or None
 
     def launched(self) -> Launch | None:
         """The current launch: its epoch, the Weston incarnation and the boottime recorded when
@@ -168,7 +182,7 @@ class SystemdAppProcessDriver:
                              operation_id: UUID, epoch: int) -> RunningApp:
         root = self.roots / environment.environment_sha256 / "rootfs"
         if rows["RootDirectory"] != str(root) or not rows["ControlGroup"].startswith("/photowallapp.slice/"):
-            raise ValueError("app_process_ambiguous")
+            raise ForeignAppUnit("app_process_ambiguous")
         pid = int(rows["MainPID"])
         ticks = read_proc_start_ticks(self.proc, pid)
         if ticks is None:
@@ -184,17 +198,41 @@ class SystemdAppProcessDriver:
         return RunningApp(environment, NodeProcessIdentity(pid, ticks, UUID(rows["InvocationID"])), epoch, operation_id)
 
     def current(self) -> RunningApp | None:
+        """The launch's app, observed; None when absent. A run of the launch's root, cgroup and
+        environment that is not the recorded process is adopted (`_adopt`), never an error; a unit
+        that is not the launch's, or one with no launch, raises ForeignAppUnit."""
         launch = self.store.read("launch")
         if launch is None:
             rows = systemctl_show(UNIT)
             if rows["LoadState"] == "not-found" or (rows["MainPID"] == "0" and rows["ActiveState"] in ("inactive", "failed")):
                 return None
-            raise ValueError("untracked_app_process")
+            raise ForeignAppUnit("untracked_app_process")
         running = running_from(launch["running"]) if launch.get("running") else None
         result = self._observe(AppEnvironmentRefV2(**launch["environment"]), UUID(launch["operation_id"]), launch["epoch"])
         if running is not None and result is not None and running.process != result.process:
-            raise ValueError("app_process_incarnation_mismatch")
+            return self._adopt(launch, result)
         return result
+
+    def _adopt(self, launch: dict, observed: RunningApp) -> RunningApp:
+        """A run the broker did not spawn, of its launch's root, cgroup and environment (`_observe`
+        proved them): the broker's own app, so it becomes the current launch, a new epoch with its
+        identity, the running Weston and now as its start, and its exit is paced like any other.
+        UX over strictness: the wall keeps its picture. Nothing in the base starts the unit
+        (`app_unit_properties`); this keeps a stray start, a manual one included, harmless."""
+        adopted = replace(observed, app_epoch=launch["epoch"] + 1)
+        self.store.write("launch", {**launch, "epoch": adopted.app_epoch, "running": primitive(adopted),
+                                    "display": self.display_incarnation(), "started_ms": boottime_ms()})
+        LOG.warning("broker: adopted an app run it did not start (pid %d, launch epoch %d)",
+                    adopted.process.pid, adopted.app_epoch)
+        return adopted
+
+    def stop_foreign(self) -> None:
+        """Ask PID1 to stop whatever runs under the app's unit name (a ForeignAppUnit), without
+        waiting; later turns observe the stop and the broker relaunches its own app on its
+        pacing."""
+        subprocess.run(["/usr/bin/systemctl", "--no-block", "stop", UNIT], check=True, timeout=5,
+                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       env={"PATH": "/usr/bin", "LANG": "C"})
 
     def kill(self, expected: RunningApp) -> bool:
         """SIGKILL exactly `expected`'s main process; False (no signal) on any mismatch.
