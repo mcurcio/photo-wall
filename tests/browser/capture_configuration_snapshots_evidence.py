@@ -115,6 +115,6 @@ def test_after_position(page, registry, scheme):
         _done(page)
         expect(_rows(page, KEPT)).to_have_count(2)
         _depth(page).fill("6")
-        expect(_rows(page, TRIED).first).to_contain_text("mat 6.0 mm")
+        expect(_rows(page, TRIED).first).to_contain_text("Mat depth 6.0 mm")
 
     _position(page, registry, scheme, "after-position", HistorySessions, steps)

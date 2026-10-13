@@ -81,3 +81,21 @@ export const Problem: Story = {
 };
 /** A phone's width: each row's time, words and Restore stack. */
 export const Phone: Story = { parameters: { phone: true }, args: { onOlder: () => {} } };
+/** One session's tries in a row: the newest shows, the earlier ones open on request. */
+export const SessionRun: Story = {
+  args: {
+    days: [{
+      label: "Tue 13 Oct",
+      rows: [
+        { id: "t3", time: "21:04:09", what: "Tried, not kept", notKept: true, summary: "Brightness 122 %",
+          details: [{ label: "Brightness", value: "122 %" }], restore: ENABLED, session: "s1" },
+        { id: "t2", time: "21:04:08", what: "Tried, not kept", notKept: true, summary: "Brightness 121 %",
+          details: [{ label: "Brightness", value: "121 %" }], restore: ENABLED, session: "s1" },
+        { id: "t1", time: "21:04:07", what: "Tried, not kept", notKept: true, summary: "Brightness 120 %",
+          details: [{ label: "Brightness", value: "120 %" }], restore: ENABLED, session: "s1" },
+        { id: "k", time: "20:58:31", what: "Kept (Done)", notKept: false, summary: "Brightness 110 %",
+          details: [{ label: "Brightness", value: "110 %" }], restore: ENABLED, session: "s0" },
+      ],
+    }],
+  },
+};

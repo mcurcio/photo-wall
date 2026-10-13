@@ -439,7 +439,7 @@ Built on `feat/configuration-snapshots` ([0025](decisions/0025-configuration-sna
 
 | Member | Layer | Purpose | States |
 |---|---|---|---|
-| `HistoryList` | patterns | A titled history of changes, newest first, grouped by day. Props: `title`, `intro`, `notice?` (a line above the days), `days` (each a `label` and its `rows`: `id`, `time`, `what`, `notKept`, `summary`, `details` as label and value pairs, `restore` as `disabled` with an optional `reason`), `empty`, `busy` (a skeleton with `aria-busy` while nothing is read yet), `problem?` (a node above the days), `restoring` (the row being restored: every Restore waits), `onRestore(id)`, `onOlder?` ("Show older"). A row not kept is dashed and muted, never a severity colour; a Restore reason every disabled row shares is said once above the days | Empty, Loading, Entries, Notice, RestoreDisabled, Restoring, Problem, Phone |
+| `HistoryList` | patterns | A titled history of changes, newest first, grouped by day. Props: `title`, `intro`, `notice?` (a line above the days), `days` (each a `label` and its `rows`: `id`, `time`, `what`, `notKept`, `summary`, `details` as label and value pairs, `restore` as `disabled` with an optional `reason`, `session?`), `empty`, `busy` (a skeleton with `aria-busy` while nothing is read yet), `problem?` (a node above the days), `restoring` (the row being restored: every Restore waits), `onRestore(id)`, `onOlder?` ("Show older"). A row not kept is dashed and muted, never a severity colour; rows not kept from one session follow one another as one run: its newest shows and "Show N earlier tries from this session" opens the rest; a Restore reason every disabled row shares is said once above the days. `changedSummary` is every history's one summary rule: what differs from the row below, all of it for the oldest shown | Empty, Loading, Entries, Notice, RestoreDisabled, Restoring, Problem, Phone, SessionRun |
 | `PictureHistory` | domain | The Picture tab's History: a Display's picture entries as `HistoryList` rows (each kind in words, display settings named from the tab's own read), Restore into the live picture session and what did not come back | Kept, NotKept, Unrecorded, Skipped, NoSession |
 | `PositionHistory` | domain | The Position tab's History: a Frame's Position entries (fit, rotation, mat, lights; corners under Details), Restore into the live draft, and why an entry made for another screen size or display cannot be restored | Kept, NotKept, OtherProfile, OtherDisplay, NoSession |
 
@@ -545,6 +545,12 @@ The object labels (House, Wall, Frame, Display, Pi, Photo source, Scene, Schedul
 | History | picture history (by Display), Position history (by Frame) ([0025](decisions/0025-configuration-snapshots.md)) | never "log", "audit" or "snapshot" on a tab; "configuration snapshot" is the owner's word for one Frame at one time, read by the agent |
 | Tried, not kept | a sent draft entry (`sent-draft`) | values that reached the wall while tuning and were never kept by Done |
 | Put back | a sent back entry (`sent-back`) | the wall returned to the kept values after Revert or leaving the tab |
+| Kept (Done) | a kept entry Done wrote (`kept-done`, `kept-saved`) | the values Done kept |
+| Kept (Copy from another display) | a kept picture entry Copy wrote (`kept-copied`) | another display's values copied here |
+| Kept (screen size changed) | a kept Position entry a profile change wrote (`kept-profile-changed`) | the Frame's screen size changed; its position was kept as it was |
+| Changed outside Photo Wall | a kept unrecorded entry (`kept-unrecorded`) | the stored values differed from the last kept change: changed at an unknown time before it |
+| Kept values sent again | a sent kept entry (`sent-kept`) | Central sent the kept values anew (after Done, Copy, a display newly seen); "sent", never "shown": the Pi's answer is "Presented by the Pi" |
+| Earlier tries from this session | a run of not-kept rows of one tuning session | the newest shows; the earlier ones open on request |
 | Restore | a Restore of a history entry into the session's draft | loads the editor; Done still keeps, Revert still puts back |
 
 ### Forbidden words

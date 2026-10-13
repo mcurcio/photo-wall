@@ -3,7 +3,7 @@ import { useCallback, useEffect, useState } from "react";
 import { readPositionHistory, useHistoryPages } from "../historyApi.js";
 import type { PositionEntryKind, PositionEntryView, PositionHistoryView } from "../historyApi.js";
 import { refusalWords } from "../liveAdjustment.js";
-import { type HistoryDay, HistoryList, type HistoryRow } from "../patterns/history-list";
+import { changedSummary, type HistoryDay, HistoryList, type HistoryRow } from "../patterns/history-list";
 import { pixelSize } from "../timeWords.js";
 import { degreesWords, depthWords, fromWords, strengthWords } from "./frame-mat";
 import type { PixelSize } from "./frame-position";
@@ -28,6 +28,7 @@ const UNRECORDED = "This Frame's position changed outside Photo Wall since its l
   + "The next Done records it.";
 const EMPTY = "No changes yet. They appear here when you adjust this Frame's position or press Done.";
 const OPEN_FIRST = "Open while the editor runs";
+const SAME = "Same values as the change below";
 const CORNERS = ["Top-left", "Top-right", "Bottom-right", "Bottom-left"] as const;
 // The live adjustment's phases with a session the Pi shows: Restore is offered only then.
 const LIVE = new Set(["sending", "shown"]);
@@ -45,11 +46,11 @@ const NOT_KEPT = new Set<PositionEntryKind>(["sent-draft", "sent-back"]);
 const percent = (fraction: number) => `${(fraction * 100).toFixed(1)} %`;
 const FITS = { cover: "Cover", corners: "Corners" } as const;
 
-/** One line of an entry: fit, rotation, the mat's depth and its lights, "Cover · 0° · mat 2.5 mm · 2 lights". */
-export function positionSummary(entry: PositionEntryView): string {
-  const lights = entry.mat.lights.length;
-  return [FITS[entry.fit.mode], degreesWords(entry.fit.rotation), `mat ${depthWords(entry.mat.depth_mm)}`,
-    lights === 1 ? "1 light" : `${lights} lights`].join(" · ");
+/** The pattern's one summary rule (`changedSummary`) over two entries' details: what differs from
+ * the entry below; a light the entry below had and this one has not is said by the lights' count. */
+export function positionSummary(details: readonly { label: string; value: string }[],
+  below: readonly { label: string; value: string }[] | null): string {
+  return changedSummary(details, below, { absent: () => null, same: SAME });
 }
 
 /** Every value of an entry: each corner as a share of the output (with its pixels when the output's
@@ -65,6 +66,7 @@ export function positionDetails(entry: PositionEntryView, size: PixelSize | null
     })),
     { label: "Rotation", value: degreesWords(entry.fit.rotation) },
     { label: "Mat depth", value: depthWords(entry.mat.depth_mm) },
+    { label: "Lights", value: String(entry.mat.lights.length) },
     ...entry.mat.lights.flatMap((light, index) => {
       const name = `Light ${index + 1}`;
       return [
@@ -95,15 +97,17 @@ export function restoreState(entry: PositionEntryView, adjustment: Adjustment): 
   }
 }
 
-/** The entries as the list's days (`daysOf`). */
+/** The entries as the list's days (`daysOf`), each summary against the entry below it. */
 export function positionDays(entries: readonly PositionEntryView[], adjustment: Adjustment,
   size: PixelSize | null): HistoryDay[] {
-  return daysOf(entries, (entry) => ({
+  const details = entries.map((entry) => positionDetails(entry, size));
+  return daysOf(entries, (entry, index) => ({
     what: WHAT[entry.kind],
     notKept: NOT_KEPT.has(entry.kind),
-    summary: positionSummary(entry),
-    details: positionDetails(entry, size),
+    summary: positionSummary(details[index], details[index + 1] ?? null),
+    details: details[index],
     restore: restoreState(entry, adjustment),
+    session: entry.session_id,
   }));
 }
 

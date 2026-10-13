@@ -18,10 +18,16 @@ Mutation probes (each fails the named case):
   `restoreState`) -> the other-profile case.
 - K2-entry-revision: take the answer as the draft's origin (`adopt`) instead of keeping the draft's
   own -> the restored draft is no change, Done is never offered: the tracer and the overtaken case.
+- K2-always-enabled: `restoreState` offers Restore with no live session -> the no-session case.
+- K2-no-refresh: drop PositionHistory's re-read after Done (the `savedAt` effect) -> the tracer's
+  read right after Done is missing.
+- K2-ungrouped: no session runs (HistoryList `runsOf` one row each) -> the run case's earlier try
+  is listed before its run is opened.
 """
 
 import os
 import re
+import time
 from uuid import UUID
 
 import pytest
@@ -122,6 +128,27 @@ def _rows(page, what):
     return _history(page).get_by_role("listitem").filter(has=page.get_by_text(what, exact=True))
 
 
+def _history_reads(page):
+    """The monotonic times of every History read the page begins (`reads`) and of every Done
+    (a trial's save) answered (`done`)."""
+    seen = {"reads": [], "done": []}
+
+    def answered(response):
+        request = response.request
+        if "/calibration-trials" in request.url and request.method == "POST":
+            try:
+                body = request.post_data_json or {}
+            except ValueError:
+                body = {}
+            if body.get("operation") == "save":
+                seen["done"].append(time.monotonic())
+
+    page.on("request", lambda request: seen["reads"].append(time.monotonic())
+            if "/position-history" in request.url and request.method == "GET" else None)
+    page.on("response", answered)
+    return seen
+
+
 def _done(page):
     bar = _bar(page)
     expect(bar.get_by_role("status")).to_have_text(PRESENTED)
@@ -152,15 +179,22 @@ def test_a_tried_and_a_kept_position_are_listed_and_restore_puts_the_kept_one_ba
         expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
         expect(_rows(page, KEPT)).to_have_count(1)  # the seeded Position
 
+        seen = _history_reads(page)
         field = _move(page, 2)
         expect(field).to_have_value(str(SAVED_X + 20))
-        expect(_rows(page, TRIED).first).to_contain_text("Cover · 0° · mat 0.0 mm · 0 lights")
+        # A row says what differs from the row below it: here the moved corner alone.
+        expect(_rows(page, TRIED).first).to_contain_text("Top-left")
+        expect(_rows(page, TRIED).first).not_to_contain_text("Mat depth")
         _done(page)
         expect(_rows(page, KEPT)).to_have_count(2)
+        # Read again as Done is answered, not at the next poll (CADENCE_MS 2000).
+        [done] = seen["done"]
+        assert any(done <= at <= done + 0.25 for at in seen["reads"]), (done, seen["reads"])
 
         _depth(page).fill("6")
         expect(_mat(page)).to_contain_text("6.0 mm")
-        expect(_rows(page, TRIED).first).to_contain_text("mat 6.0 mm")
+        expect(_rows(page, TRIED).first).to_contain_text("Mat depth 6.0 mm")
+        expect(_rows(page, TRIED).first).not_to_contain_text("Top-left")
 
         _rows(page, KEPT).last.get_by_role("button", name="Restore", exact=True).click()
         expect(_depth(page)).to_have_value("0")
@@ -202,7 +236,7 @@ def test_a_restored_draft_keeps_its_base_so_a_save_made_elsewhere_still_stops_it
         _save_elsewhere(registry)
 
         _depth(page).fill("4")
-        expect(_rows(page, TRIED).first).to_contain_text("mat 4.0 mm")
+        expect(_rows(page, TRIED).first).to_contain_text("Mat depth 4.0 mm")
         _rows(page, TRIED).last.get_by_role("button", name="Restore", exact=True).click()
         expect(_depth(page)).to_have_value("0")
         bar = _bar(page)
@@ -212,3 +246,38 @@ def test_a_restored_draft_keeps_its_base_so_a_save_made_elsewhere_still_stops_it
         assert round(_saved_mat(registry).depth_mm) == 0
         saved = next(frame for frame in registry.inventory().frames if frame.id == FRAME).calibration
         assert round(saved.fit.corners[0][0] * 1920) == ELSEWHERE_X
+
+
+def test_restore_waits_for_the_editor_and_says_so(page, registry):
+    """No live session (Central's own trial routes, which no Pi presents here): every Restore is
+    offered only while the editor runs, and says so."""
+    _seed(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        sign_in(page, origin)
+        open_frame(page, FRAME, "position")
+        restore = _rows(page, KEPT).first.get_by_role("button", name="Restore", exact=True)
+        expect(restore).to_be_disabled()
+        expect(restore).to_have_accessible_description("Open while the editor runs")
+
+
+def test_one_sessions_tries_show_as_one_run_whose_earlier_tries_open_on_request(page, registry, sessions):
+    """Rows not kept from one session follow one another as one run (design Q3, "grouped by
+    session"): its newest try shows, the earlier ones open on request and can be restored."""
+    _seed(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        sign_in(page, origin)
+        open_frame(page, FRAME, "position")
+        expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
+        _move(page, 3)
+        expect(_rows(page, TRIED)).to_have_count(1)
+        _depth(page).fill("4")
+        expect(_rows(page, TRIED).first).to_contain_text("Mat depth 4.0 mm")
+        expect(_rows(page, TRIED)).to_have_count(1)
+        earlier = _history(page).get_by_role("button", name="Show 1 earlier try from this session")
+        expect(earlier).to_have_attribute("aria-expanded", "false")
+        earlier.click()
+        expect(_rows(page, TRIED)).to_have_count(2)
+        expect(_history(page).get_by_role("button", name="Hide 1 earlier try from this session")).to_have_attribute(
+            "aria-expanded", "true")
+        _rows(page, TRIED).last.get_by_role("button", name="Restore", exact=True).click()
+        expect(_depth(page)).to_have_value("0")

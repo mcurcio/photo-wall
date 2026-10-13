@@ -7,7 +7,7 @@ import type {
   HardwareSettingView, PictureRestoreResult, SignalRange, SoftwarePictureView, TestPattern,
 } from "../pictureApi.js";
 import { Note } from "../patterns/fact-row";
-import { type HistoryDay, HistoryList, type HistoryRow } from "../patterns/history-list";
+import { changedSummary, type HistoryDay, HistoryList, type HistoryRow } from "../patterns/history-list";
 import { ProblemCard } from "../patterns/problem-card";
 import { dayLabel, timeOfDay } from "../timeWords.js";
 import { blackFloorWords, hardwareWords, type PictureSession } from "./frame-picture";
@@ -42,7 +42,7 @@ export const WHAT: Record<PictureEntryKind, string> = {
   "kept-unrecorded": "Changed outside Photo Wall",
   "sent-draft": "Tried, not kept",
   "sent-back": "Put back",
-  "sent-kept": "Kept values shown again",
+  "sent-kept": "Kept values sent again",
 };
 const NOT_KEPT = new Set<PictureEntryKind>(["sent-draft", "sent-back"]);
 
@@ -103,20 +103,13 @@ export function entryDetails(entry: PictureEntryView, rows: Rows, recipe: string
   ];
 }
 
-/** The values of `details` that differ from `below`'s (the entry under it in the list), in one
- * line; all of them for the oldest shown. A display setting absent is "as the display has it", a
- * test pattern absent Off. */
+/** The pattern's one summary rule (`changedSummary`) with the Picture tab's words: a display setting
+ * absent is "as the display has it", a test pattern absent Off. */
 export function summary(details: readonly { label: string; value: string }[],
   below: readonly { label: string; value: string }[] | null): string {
-  const words = (pairs: readonly { label: string; value: string }[]) => pairs.map(({ label, value }) => `${label} ${value}`)
-    .join(" · ");
-  if (below === null) return words(details);
-  const was = new Map(below.map(({ label, value }) => [label, value]));
-  const now = new Map(details.map(({ label, value }) => [label, value]));
-  const gone = below.filter(({ label }) => !now.has(label))
-    .map(({ label }) => ({ label, value: label === "Test pattern" ? "Off" : AS_IT_HAS_IT }));
-  const changed = [...details.filter(({ label, value }) => was.get(label) !== value), ...gone];
-  return changed.length === 0 ? SAME : words(changed);
+  return changedSummary(details, below, {
+    absent: (label) => (label === "Test pattern" ? "Off" : AS_IT_HAS_IT), same: SAME,
+  });
 }
 
 /**
@@ -177,6 +170,7 @@ export function historyDays(entries: readonly PictureEntryView[], rows: Rows,
     summary: summary(details[index], details[index + 1] ?? null),
     details: details[index],
     restore,
+    session: entry.session_id,
   }));
 }
 

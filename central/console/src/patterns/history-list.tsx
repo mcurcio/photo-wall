@@ -16,6 +16,9 @@ export interface HistoryRow {
   summary: string;
   details: readonly { label: string; value: string }[];
   restore: { disabled: boolean; reason?: string };
+  /** The tuning session it came from (none: not from one). Consecutive rows not kept from one
+   * session are grouped: the newest shows, the earlier ones open on request. */
+  session?: string | null;
 }
 
 /** The rows of one day, under its label. */
@@ -45,6 +48,51 @@ export interface HistoryListProps {
   /** Loads older rows; none: there are no more. */
   onOlder?: () => void;
 }
+
+/** A value `details` and `below` both name by its label, in one line, "Label value · Label value". */
+const line = (pairs: readonly { label: string; value: string }[]) =>
+  pairs.map(({ label, value }) => `${label} ${value}`).join(" · ");
+
+/**
+ * Every history's one summary rule: the values of `details` that differ from `below`'s (the row under
+ * it), in one line, then each value `below` had and `details` does not, as `absent` names it (null:
+ * not said); all of `details` for the oldest row shown (`below` null); `same` when nothing differs.
+ */
+export function changedSummary(details: readonly { label: string; value: string }[],
+  below: readonly { label: string; value: string }[] | null,
+  { absent, same }: { absent: (label: string) => string | null; same: string }): string {
+  if (below === null) return line(details);
+  const was = new Map(below.map(({ label, value }) => [label, value]));
+  const now = new Set(details.map(({ label }) => label));
+  const gone = below.filter(({ label }) => !now.has(label)).flatMap(({ label }) => {
+    const value = absent(label);
+    return value === null ? [] : [{ label, value }];
+  });
+  const changed = [...details.filter(({ label, value }) => was.get(label) !== value), ...gone];
+  return changed.length === 0 ? same : line(changed);
+}
+
+/** A day's rows as shown: a row alone, or a run of rows not kept from one session (two or more). */
+type Shown = { row: HistoryRow } | { session: string; rows: readonly HistoryRow[] };
+
+function runsOf(rows: readonly HistoryRow[]): Shown[] {
+  const shown: Shown[] = [];
+  for (const row of rows) {
+    const last = shown.at(-1);
+    const session = row.notKept ? row.session ?? null : null;
+    if (session !== null && last !== undefined && "session" in last && last.session === session) {
+      shown[shown.length - 1] = { session, rows: [...last.rows, row] };
+    } else if (session !== null && last !== undefined && "row" in last && last.row.notKept
+      && (last.row.session ?? null) === session) {
+      shown[shown.length - 1] = { session, rows: [last.row, row] };
+    } else {
+      shown.push({ row });
+    }
+  }
+  return shown;
+}
+
+const tries = (count: number) => (count === 1 ? "1 earlier try" : `${count} earlier tries`);
 
 function Skeleton() {
   return (
@@ -110,13 +158,21 @@ function Row({ row, restoring, reasonId, onRestore }: {
 /**
  * HistoryList: a titled history of changes, newest first, grouped by day; each row its time, what
  * changed and whether it was kept (a row not kept is marked: dashed and muted), a summary, every
- * value under Details, and Restore. A Restore reason every disabled row shares is said once above the
+ * value under Details, and Restore. Rows not kept from one session follow one another as one run:
+ * its newest row shows, and "Show N earlier tries from this session" opens the rest. A Restore reason every disabled row shares is said once above the
  * days. Loading shows a skeleton (`aria-busy`); "Show older" asks for the next rows.
  */
 export function HistoryList({
   title, intro, notice, days, empty, busy, problem, restoring, onRestore, onOlder,
 }: HistoryListProps) {
   const sharedId = React.useId();
+  // The runs opened, by day and session, so a poll's new rows keep a run open.
+  const [opened, setOpened] = React.useState<ReadonlySet<string>>(new Set());
+  const toggle = (key: string) => setOpened((now) => {
+    const next = new Set(now);
+    if (!next.delete(key)) next.add(key);
+    return next;
+  });
   const shown = days.filter((day) => day.rows.length > 0);
   const rows = shown.flatMap((day) => day.rows);
   const reasons = new Set(rows.map((row) => (row.restore.disabled ? row.restore.reason ?? null : null)));
@@ -135,10 +191,30 @@ export function HistoryList({
             <section key={day.label} aria-label={day.label} className="min-w-0">
               <h4 className="m-0 mb-1 text-sm font-medium text-label">{day.label}</h4>
               <ol className="m-0 flex list-none flex-col gap-1 p-0">
-                {day.rows.map((row) => (
-                  <Row key={row.id} row={row} restoring={restoring} onRestore={onRestore}
-                    reasonId={shared !== null ? sharedId : null} />
-                ))}
+                {runsOf(day.rows).map((shownRow) => {
+                  const reasonId = shared !== null ? sharedId : null;
+                  if ("row" in shownRow) {
+                    return <Row key={shownRow.row.id} row={shownRow.row} restoring={restoring} onRestore={onRestore}
+                      reasonId={reasonId} />;
+                  }
+                  const [newest, ...earlier] = shownRow.rows;
+                  const key = `${day.label}|${shownRow.session}`;
+                  const open = opened.has(key);
+                  return (
+                    <React.Fragment key={newest.id}>
+                      <Row row={newest} restoring={restoring} onRestore={onRestore} reasonId={reasonId} />
+                      {open && earlier.map((row) => (
+                        <Row key={row.id} row={row} restoring={restoring} onRestore={onRestore} reasonId={reasonId} />
+                      ))}
+                      <li className="border-0 border-l-2 border-dashed border-line-input pl-3">
+                        <Button variant="ghost" aria-expanded={open} onClick={() => toggle(key)}>
+                          {open ? `Hide ${tries(earlier.length)} from this session`
+                            : `Show ${tries(earlier.length)} from this session`}
+                        </Button>
+                      </li>
+                    </React.Fragment>
+                  );
+                })}
               </ol>
             </section>
           ))
