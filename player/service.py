@@ -1036,6 +1036,8 @@ class PlayerService:
             except UplinkError as error:
                 if error.cause is Cause.REDIRECT:
                     raise               # ends the cycle: run() locates again (0014)
+                if error.cause is Cause.LOCAL and error.reason == "pool":
+                    raise               # ends the cycle: the next one builds fresh clients
                 self._uplink_fault("clock_probe", error)
             except MainLoopLate:
                 self._main_loop_late()
@@ -1177,7 +1179,6 @@ class PlayerService:
     async def run(self):
         self._loop = asyncio.get_running_loop()
         self._task = asyncio.current_task()
-        self.link.open()
         self._proof_generation += 1
         self._proof_active = True
         proof_task = None
@@ -1187,6 +1188,7 @@ class PlayerService:
                 tasks = []
                 session_started = None
                 try:
+                    self.link.open()        # fresh HTTP clients each cycle (CentralLink)
                     if not self._located:
                         await self.locate_central()
                     if self.registration is None:
@@ -1237,6 +1239,7 @@ class PlayerService:
                         task.cancel()
                     if tasks:
                         await asyncio.gather(*tasks, return_exceptions=True)
+                    await self.link.aclose()
                     with self._lock:
                         self._offered = False
                         self._jobs = ()

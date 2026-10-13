@@ -46,6 +46,19 @@ def guarded(client: httpx.AsyncClient) -> httpx.AsyncClient:
     return client
 
 
+# A request's wait for a slot in its client's own pool ends before the exchange's bound does,
+# so a request that never got a connection fails as httpx.PoolTimeout, named local_pool, and
+# never as the bound's TimeoutError, which reads as connect_timeout at Central's host.
+POOL_SHARE: Final = 0.8
+
+
+def exchange_timeout(bound: float) -> tuple[float, float, float, float]:
+    """httpx's (connect, read, write, pool) timeouts for one exchange bounded by `bound`:
+    REQUEST_TIMEOUT to connect, read and write, and POOL_SHARE of `bound` to wait for a pool
+    slot."""
+    return REQUEST_TIMEOUT, REQUEST_TIMEOUT, REQUEST_TIMEOUT, bound * POOL_SHARE
+
+
 def central_http_client(trust: Trust, *, connections: int, keepalive: int) -> httpx.AsyncClient:
     """verify=trust.context, follow_redirects=False, trust_env=False (no proxy, netrc or
     SSL_CERT_FILE from the environment), timeout=REQUEST_TIMEOUT,
@@ -104,7 +117,9 @@ class Exchange:
         self._answered = True
 
     def name(self, error: BaseException) -> UplinkError | None:
-        """UplinkError: unchanged. Else classify(error, phase=self.phase, host=<origin host>)
+        """UplinkError: unchanged. httpx.PoolTimeout: LOCAL/pool with no host (the request
+        never left this machine's own pool, so nothing about Central was learned). Else
+        classify(error, phase=self.phase, host=<origin host>)
         when it names it. Else: httpx.TransportError -> CONNECT/protocol or TRANSFER/short by
         phase; websockets InvalidStatus -> refusal(url, response.status_code,
         location=response.headers.get("Location"), body=(response.body or b"")[:MAX_ERROR_BODY
@@ -114,6 +129,8 @@ class Exchange:
         cause)."""
         if isinstance(error, UplinkError):
             return error
+        if isinstance(error, httpx.PoolTimeout):
+            return UplinkError(Cause.LOCAL, "pool", detail=type(error).__name__)
         host = self._url.origin.host
         named = classify(error, phase=self.phase, host=host)
         if named is not None:
@@ -201,7 +218,13 @@ class CentralLink:
     `unauthorized(code)` builds the caller's exception for a 401 answer or an authenticated
     request on a Session with no registration. `client`/`time_client`/`websocket_connect` may
     be injected (tests, fixtures); any client given is guarded too. `websocket_connect=False`
-    is the caller's own "no websocket" switch and is kept as given."""
+    is the caller's own "no websocket" switch and is kept as given.
+
+    The clients it builds live for one session cycle: run() opens them as a cycle starts and
+    closes them once that cycle's tasks are cancelled, so no pooled connection outlives a
+    failed cycle. A request cancelled inside httpcore's pool can leave a connection that holds
+    a slot for good (incident 2026-10-13: the clock probe's one slot, so the Player never
+    reached Central again); a fresh pool per cycle makes that state unable to survive."""
 
     WEBSOCKET_OPTIONS: Final = dict(max_queue=4, compression=None, proxy=None, open_timeout=15,
                                     close_timeout=3, ping_interval=10, ping_timeout=10)
@@ -235,7 +258,8 @@ class CentralLink:
 
     def open(self) -> None:
         """Builds, from the one Trust, each client that was not injected: the request client
-        (4 connections, 2 keep-alive) and the clock-probe client (1, 1)."""
+        (4 connections, 2 keep-alive) and the clock-probe client (1, 1). Called as each
+        session cycle starts."""
         if self._client is None:
             self._client = central_http_client(self.trust, connections=4, keepalive=2)
             self._owned.append(self._client)
@@ -244,9 +268,14 @@ class CentralLink:
             self._owned.append(self._time_client)
 
     async def aclose(self) -> None:
-        """Closes the clients open() built; injected ones belong to their owner."""
+        """Closes and forgets the clients open() built, so the next open() builds fresh ones;
+        injected ones belong to their owner and stay."""
         owned, self._owned = self._owned, []
         for client in owned:
+            if self._client is client:
+                self._client = None
+            if self._time_client is client:
+                self._time_client = None
             await client.aclose()
 
     def _headers(self, session: Session, authenticated: bool) -> dict[str, str]:
@@ -278,7 +307,8 @@ class CentralLink:
             headers = self._headers(session, authenticated)
             async with asyncio.timeout(timeout):
                 async with client.stream(method, str(exchange.url), json=body,
-                                         headers=headers) as response:
+                                         headers=headers,
+                                         timeout=exchange_timeout(timeout)) as response:
                     exchange.answered()
                     if response.status_code == 401:
                         raise self._unauthorized("unauthorized")

@@ -7,6 +7,7 @@ leaf) produces the classified error, exercising `Exchange.name`/`classify` end t
 import asyncio
 import logging
 
+import httpcore
 import httpx
 import pytest
 import tls_fixture as tls
@@ -183,4 +184,111 @@ def test_the_run_loop_builds_both_clients_from_the_one_trust(monkeypatch, trust,
                        cache_dir=cache_dir)
 
     asyncio.run(_run_to_fault(service))
-    assert calls == [(trust, 4, 2), (trust, 1, 1)]
+    # Each cycle builds its own pair (CentralLink: the clients live for one cycle).
+    assert calls and len(calls) % 2 == 0
+    assert calls == [(trust, 4, 2), (trust, 1, 1)] * (len(calls) // 2)
+
+
+# --- A failed cycle leaves no HTTP state behind (incident 2026-10-13) ---------------------
+
+async def _serve_http(handle, *, idle):
+    """A loopback HTTP/1.1 server answering each request with `handle(httpx.Request)`. Like a
+    proxy's keep-alive timeout, it closes a connection that stays idle for `idle` seconds,
+    without having said `Connection: close`, so the client's pooled connection has expired
+    by the time it is next used."""
+
+    async def serve(reader, writer):
+        try:
+            while True:
+                head = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), idle)
+                line, *fields = head.decode("latin-1").split("\r\n")[:-2]
+                method, target, _ = line.split(" ", 2)
+                headers = [tuple(part.strip() for part in field.split(":", 1))
+                           for field in fields]
+                length = int({name.lower(): value for name, value in headers}
+                             .get("content-length", 0))
+                body = await reader.readexactly(length)
+                response = handle(httpx.Request(
+                    method, f"http://{writer.get_extra_info('sockname')[0]}{target}",
+                    headers=headers, content=body))
+                status = f"HTTP/1.1 {response.status_code} {response.reason_phrase}\r\n"
+                writer.write(status.encode() + b"".join(
+                    name + b": " + value + b"\r\n" for name, value in response.headers.raw)
+                    + b"\r\n" + response.read())
+                await writer.drain()
+        except (TimeoutError, asyncio.IncompleteReadError, ConnectionError):
+            pass
+        finally:
+            writer.close()
+
+    return await asyncio.start_server(serve, "127.0.0.1", 0)
+
+
+def test_a_failed_cycle_leaves_no_wedged_connection_for_the_next(monkeypatch, trust, cache_dir):
+    """Incident 2026-10-13: Central answered one cycle 500 while the clock probe was in flight;
+    the Player never reached Central again, held no socket, and reported every later cycle as
+    connect_timeout. httpcore assigns a new connection to a request whose kept-alive one has
+    expired, then awaits closing the expired one; run() cancelling the probe at that await
+    leaves the new, never-opened connection holding the probe pool's one slot for good.
+
+    Through the real run() and the clients CentralLink builds, over a loopback socket: the
+    server closes a connection idle for 0.3 s, so a clock probe (one a second) meets an expired
+    connection. The window is forced, not raced: httpcore's close of that expired connection
+    is held (the one patched seam) while a clock probe waits on it, and Central answers the
+    next state poll 500, so the failed cycle cancels the probe at that await. The next cycle
+    must reach Central with its own clock probe; with one client per process it never does."""
+    monkeypatch.setattr("player.service.BACKOFF", (.001,) * 4)
+    window = asyncio.Event()
+    real_close = httpcore.AsyncConnectionPool._close_connections
+
+    async def held(pool, closing):
+        if closing and not window.is_set() and any(
+                waiting.request.url.target == b"/v1/player/time" for waiting in pool._requests):
+            window.set()
+            try:
+                await asyncio.Event().wait()        # until the failed cycle cancels the probe
+            finally:
+                await real_close(pool, closing)
+        else:
+            await real_close(pool, closing)
+
+    monkeypatch.setattr(httpcore.AsyncConnectionPool, "_close_connections", held)
+
+    async def check():
+        clock = ManualClock(100)
+        fake = Server(clock)
+        failed, probes_after = [], []
+
+        def handle(request):
+            path = request.url.path
+            if path == "/v1/player/state" and window.is_set() and not failed:
+                failed.append(request)
+                return httpx.Response(500, json={"error": "fixture_outage"})
+            if path == "/v1/player/time" and failed:
+                probes_after.append(request)
+            result = fake(request)
+            if path == "/v1/enrollment/register":
+                fake.offer()
+            return result
+
+        server = await _serve_http(handle, idle=.3)
+        port = server.sockets[0].getsockname()[1]
+        service = _service(find_central=finding(f"http://127.0.0.1:{port}"), trust=trust,
+                           cache_dir=cache_dir, clock=clock)
+        task = asyncio.create_task(service.run())
+        try:
+            await asyncio.wait_for(window.wait(), 5)
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + 5
+            while not probes_after and loop.time() < deadline:
+                await asyncio.sleep(.01)
+            assert failed, "the cycle never failed"
+            assert probes_after, ("the next cycle never reached Central: "
+                                  f"{service.last_fault} {service.last_fault_detail}")
+        finally:
+            service.stop()
+            await asyncio.wait_for(task, 20)
+            await close(service)
+            server.close()
+
+    asyncio.run(check())

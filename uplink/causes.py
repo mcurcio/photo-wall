@@ -31,8 +31,8 @@ class Cause(StrEnum):
     HTTP = "http"                # a non-200 not written by Central (gateway, proxy)
     CENTRAL = "central"          # a non-200 carrying Central's own {"error": <code>}
     TRANSFER = "transfer"        # body over its bound, short, misencoded, broken or too late
-    # this machine ran out of a resource (descriptors, memory); nothing about the network was
-    # learned
+    # this machine ran out of a resource (descriptors, memory, a slot in its own connection
+    # pool); nothing about the network was learned
     LOCAL = "local"
 
 
@@ -49,7 +49,7 @@ REASONS: Mapping[Cause, frozenset[str]] = MappingProxyType({
     Cause.HTTP: frozenset({"status"}),
     Cause.CENTRAL: frozenset({"error"}),
     Cause.TRANSFER: frozenset({"limit", "short", "encoding", "deadline", "tls"}),
-    Cause.LOCAL: frozenset({"descriptors", "memory"}),
+    Cause.LOCAL: frozenset({"descriptors", "memory", "pool"}),
 })
 
 CONSOLE_LIMIT = 512
