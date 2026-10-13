@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 from uuid import UUID
 
+from central.fleet.device_fence import standing_in
 from central.fleet.host_thresholds import thresholds_document
 from central.fleet.node_bus_presence import bus_links_in
 from central.fleet.node_commands import OUTSTANDING_REBOOT_SQL
@@ -208,9 +209,7 @@ class NodeObservations:
         No fleet or device lock is taken, so a held lock never blocks this read. A superseded
         boot's sample is never served as `host`; its receipt alone is served, and only when
         the current boot has none."""
-        with self.sessions.db.transaction() as conn:
-            # Must precede the first data query (central/operator_snapshot.py).
-            conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        with self.sessions.db.read_snapshot() as conn:
             read_at = self.sessions.clock.utc()
             rows = conn.execute(_FLEET_HOSTS_SQL, {"day": int(read_at) // 86400}).fetchall()
             bus_links = bus_links_in(conn, [row["device_id"] for row in rows])
@@ -249,8 +248,8 @@ class NodeObservations:
         return {"read_at": read_at, "thresholds": thresholds_document(), "devices": devices}
 
     def status(self, device_id: str) -> dict:
-        with self.sessions.db.transaction() as conn:
-            generation = self.sessions.lock_device_generation_in(conn, device_id)
+        with self.sessions.db.read_snapshot() as conn:
+            generation = standing_in(conn, device_id).active_generation()
             rows = conn.execute("SELECT s.session_id,s.grant_payload,s.expires_at,s.revoked_at,"
                                 "p.producer_id,p.projection,b.superseded_at FROM node_sessions s "
                                 "JOIN node_producers p USING(producer_id) "

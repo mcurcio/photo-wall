@@ -1,8 +1,8 @@
 """Explicit boot/producer admission and separate, boot-scoped LAN credentials.
 
-Lock order: Fleet, device, lifecycle, boot, session,
-producer, then evidence/commands. Retirement shares the Fleet/device boundary.
-A session is a serial claim; it does not authenticate a physical device.
+Lock order: the device fence (`central/fleet/device_fence.py`: `change` to enroll, `act` to
+authenticate), boot, session, producer, then evidence/commands. A session is a serial claim; it
+does not authenticate a physical device.
 """
 from __future__ import annotations
 
@@ -17,8 +17,9 @@ from psycopg.types.json import Jsonb
 
 from central.content_catalog.catalog import device_id_for_serial, sanitize_serial
 from central.db import Database
+from central.fleet.device_fence import fence_in
+from central.fleet.models import NodeControlError
 from central.fleet.principal import SessionAdmission, _clock_sample
-from central.infra.asset_roots import lock_fleet_assets_in
 from contracts.node_boot import parse_node_boot_offer
 from contracts.node_commands import (
     NodeSessionClaim,
@@ -32,13 +33,6 @@ from contracts.node_commands import (
 from contracts.node_observation import HOST_OBSERVATION_INTERVAL_SECONDS
 from contracts.node_protocol import NodeProducerV2, digest, token
 from contracts.time import Clock
-
-
-class NodeControlError(ValueError):
-    def __init__(self, code: str, status: int = 409, *, details: dict | None = None):
-        super().__init__(code)
-        self.code, self.status, self.details = code, status, details or {}
-
 
 # One Central per wall, so the audience is the product, not an installation name.
 NODE_AUDIENCE: Final = "photo-wall"
@@ -93,17 +87,6 @@ def claim_intake_in(conn, device_id: str, kind: str, now: float) -> None:
 class NodeSessions:
     def __init__(self, db: Database, clock: Clock, config: NodeControlConfig):
         self.db, self.clock, self.config = db, clock, config
-
-    def lock_device_generation_in(self, conn, device_id: str) -> int:
-        lock_fleet_assets_in(conn)
-        device = conn.execute("SELECT retired_at FROM devices WHERE device_id=%s FOR UPDATE",
-                              (device_id,)).fetchone()
-        lifecycle = conn.execute("SELECT generation,revoked_at FROM fleet_device_lifecycle "
-                                 "WHERE device_id=%s FOR UPDATE", (device_id,)).fetchone()
-        if (device is None or lifecycle is None or device["retired_at"] is not None
-                or lifecycle["revoked_at"] is not None):
-            raise NodeControlError("node_device_unavailable", 403)
-        return lifecycle["generation"]
 
     def _offer_in(self, conn, claim: NodeSessionClaim, device_id: str, generation: int) -> None:
         """Bind the claim to its offer identity; offer age never refuses enrollment."""
@@ -172,7 +155,7 @@ class NodeSessions:
             raise NodeControlError("node_serial_invalid", 422)
         started, monotonic = _clock_sample(self.clock)
         with self.db.transaction() as conn:
-            generation = self.lock_device_generation_in(conn, device_id)
+            generation = fence_in(conn, device_id, "change").generation()
             now, later = _clock_sample(self.clock)
             if later < monotonic:
                 raise NodeControlError("node_clock_invalid", 503)
@@ -251,16 +234,17 @@ class NodeSessions:
     def _load_session_in(self, conn, session_id: UUID, *, allow_historical: bool):
         config = self.config
         started, monotonic = _clock_sample(self.clock)
-        # Read only to locate owning device, then re-read under canonical locks.
+        # Read only to locate owning device, then re-read under its fence. Every writer of a
+        # session or its admission holds `change`, so `act` needs no row lock.
         located = conn.execute("SELECT device_id FROM node_sessions WHERE session_id=%s",
                                (session_id,)).fetchone()
         if not located:
             raise NodeControlError("node_session_unavailable", 401)
-        generation = self.lock_device_generation_in(conn, located["device_id"])
+        generation = fence_in(conn, located["device_id"], "act").generation()
         row = conn.execute("SELECT s.*,b.superseded_at FROM node_sessions s "
                            "JOIN node_producers p USING(producer_id) "
                            "JOIN node_boot_admissions b USING(admission_id) "
-                           "WHERE s.session_id=%s FOR UPDATE OF s", (session_id,)).fetchone()
+                           "WHERE s.session_id=%s", (session_id,)).fetchone()
         now, later = _clock_sample(self.clock)
         if later < monotonic:
             raise NodeControlError("node_clock_invalid", 503)

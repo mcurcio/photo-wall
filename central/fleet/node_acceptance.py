@@ -11,6 +11,7 @@ from psycopg.types.json import Jsonb
 
 from central.fleet.acceptance_evidence import current_control_receipt_matches
 from central.fleet.acceptance_query import load_current_app_control_in
+from central.fleet.device_fence import fence_in
 from central.fleet.node_app_links import load_current_node_app_link_for_player_in
 from central.fleet.node_sessions import NodeControlError, NodeSessions
 from central.installation_repository import PostgresInstallationRepository
@@ -74,7 +75,7 @@ class NodeAcceptance:
         digest(environment_sha256)
         token(operator_audit_ref, 256)
         with self.sessions.db.transaction() as conn:
-            generation = self.sessions.lock_device_generation_in(conn, device_id)
+            generation = fence_in(conn, device_id, "act").generation()
             old = conn.execute("SELECT * FROM node_app_qualifications WHERE qualification_id=%s",
                                (qualification_id,)).fetchone()
             if old:
@@ -98,7 +99,7 @@ class NodeAcceptance:
                                    (qualification_id,)).fetchone()
             if request is None:
                 raise NodeControlError("node_qualification_unknown", 404)
-            generation = self.sessions.lock_device_generation_in(conn, request["device_id"])
+            generation = fence_in(conn, request["device_id"], "act").generation()
             if generation != request["device_generation"]:
                 raise NodeControlError("node_qualification_generation_changed")
             accepted = conn.execute("SELECT acceptance_id FROM node_environment_acceptances WHERE qualification_id=%s",
@@ -106,7 +107,7 @@ class NodeAcceptance:
             if accepted:
                 return {"status": "accepted", "acceptance_id": str(accepted["acceptance_id"])}
             now = self.sessions.clock.utc()
-            control = load_current_app_control_in(conn, request["device_id"])
+            control = load_current_app_control_in(conn, request["device_id"], lock=True)
             # Central re-sends the applied delivery while the state is unchanged, so its age
             # is not liveness: the control witness is that the link's receipt is the current
             # applied one (below); fresh, advancing readiness carries liveness.

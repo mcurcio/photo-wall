@@ -16,7 +16,7 @@ def test_current_control_snapshot_carries_accepted_nonce_without_public_leak(reg
         authority_epoch=epoch, delivery_id=delivery["delivery_id"], result="applied"))
     assert accepted.receipt is not None
     with registry.db.transaction() as conn:
-        snapshot = load_current_app_control_in(conn, request.device_id)
+        snapshot = load_current_app_control_in(conn, request.device_id, lock=True)
     assert snapshot is not None
     assert snapshot.player_id == player_id
     assert snapshot.authority_epoch == epoch
@@ -29,7 +29,7 @@ def test_current_control_snapshot_carries_accepted_nonce_without_public_leak(reg
 
     registry.issue_control_delivery_record(player_id, epoch, "b" * 64)
     with registry.db.transaction() as conn:
-        newer = load_current_app_control_in(conn, request.device_id)
+        newer = load_current_app_control_in(conn, request.device_id, lock=True)
     assert newer is not None and newer.applied_ack_nonce is None
     assert newer.pending_id is not None
 
@@ -37,7 +37,7 @@ def test_current_control_snapshot_carries_accepted_nonce_without_public_leak(reg
 def test_control_snapshot_refuses_missing_or_historical_player_row(registry):
     player, _, request = enroll(registry)
     with registry.db.transaction() as conn:
-        assert load_current_app_control_in(conn, "device-" + "0" * 64) is None
+        assert load_current_app_control_in(conn, "device-" + "0" * 64, lock=True) is None
         conn.execute("DELETE FROM player_control_sessions WHERE player_id=%s",
                      (player["player_id"],))
-        assert load_current_app_control_in(conn, request.device_id) is None
+        assert load_current_app_control_in(conn, request.device_id, lock=True) is None

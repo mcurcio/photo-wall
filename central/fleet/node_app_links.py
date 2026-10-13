@@ -24,7 +24,7 @@ class NodeAppLinks:
 
     @staticmethod
     def _require_current_proof_in(conn, challenge, proof, receipt) -> None:
-        control = load_current_app_control_in(conn, challenge.producer.device_id)
+        control = load_current_app_control_in(conn, challenge.producer.device_id, lock=True)
         if (control is None or control.player_id != challenge.player_id
                 or control.authority_epoch != challenge.authority_epoch
                 or control.public_key != proof.public_key
@@ -78,18 +78,19 @@ def load_current_node_app_link_in(conn, principal):
     link even when a later control delivery supersedes its original proof receipt.
     """
     producer = principal.grant.producer
-    current = load_current_node_app_link_for_device_in(conn, producer.device_id, producer.device_generation)
+    current = load_current_node_app_link_for_device_in(conn, producer.device_id, producer.device_generation,
+                                                       lock=True)
     if current is None or current[0].producer.kernel_boot_id != producer.kernel_boot_id:
         return None
     return current[0]
 
 
-def load_current_node_app_link_for_device_in(conn, device_id: str, generation: int):
+def load_current_node_app_link_for_device_in(conn, device_id: str, generation: int, *, lock: bool):
     """The current boot's accepted link and Central's admission time, or None.
 
     The device-keyed half of `load_current_node_app_link_in`, for the operator read
     (console DDD Part E G4): a link whose boot or Registry epoch is no longer current is
-    not the app a qualification would observe.
+    not the app a qualification would observe. `lock` as `load_current_app_control_in`'s.
     """
     row = conn.execute("SELECT l.payload,l.admitted_at FROM node_app_links l "
                        "JOIN node_producers p USING(producer_id) "
@@ -100,7 +101,7 @@ def load_current_node_app_link_for_device_in(conn, device_id: str, generation: i
     if row is None:
         return None
     link = parse_node_app_link(bytes(row["payload"])).challenge
-    control = load_current_app_control_in(conn, device_id)
+    control = load_current_app_control_in(conn, device_id, lock=lock)
     if control is None or (control.player_id, control.authority_epoch) != (link.player_id, link.authority_epoch):
         return None
     return link, row["admitted_at"]
@@ -121,7 +122,7 @@ def load_current_node_app_link_for_player_in(conn, player_id: str, authority_epo
     if row is None:
         return None
     link = parse_node_app_link(bytes(row["payload"])).challenge
-    control = load_current_app_control_in(conn, row["device_id"])
+    control = load_current_app_control_in(conn, row["device_id"], lock=True)
     if control is None or (control.player_id, control.authority_epoch) != (player_id, authority_epoch):
         return None
     return link

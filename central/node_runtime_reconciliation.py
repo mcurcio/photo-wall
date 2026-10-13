@@ -7,6 +7,7 @@ Output tuple matches the current DisplayHost and binding. Runs keep advancing.
 from __future__ import annotations
 
 from central.coordination import Coordinator
+from central.fleet.device_fence import fence_in
 from central.fleet.node_ingest import _projection
 from central.fleet.node_sessions import NodeControlError, NodeSessions
 from central.transaction_locks import acquire_runtime_locks
@@ -47,7 +48,7 @@ class NodeRuntimeReconciler:
                 return 0
             producer = producer_from_document(located["producer"])
             try:
-                generation = self.sessions.lock_device_generation_in(conn, producer.device_id)
+                generation = fence_in(conn, producer.device_id, "act").generation()
             except NodeControlError:
                 return self._finish(conn, work_id, "retired_generation")
             row = conn.execute("SELECT w.*,e.payload,e.disposition FROM node_reconciliation_work w "

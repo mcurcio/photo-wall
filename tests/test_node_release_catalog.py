@@ -11,6 +11,7 @@ import pytest
 from content_db import facts_of, put_file
 from test_node_release_ingest import Upstream, make_sync_world, node_upload, read, sync
 
+from central.db import Database
 from central.fleet.node_boot import NodeBootService
 from central.fleet.node_release_catalog import NodeReleaseCatalog
 from central.fleet.node_sessions import NodeControlConfig, NodeSessions
@@ -64,6 +65,9 @@ class _Recording:
                         return conn.execute(sql, *args)
                 yield Conn()
         return recorded()
+
+    # The real read snapshot, over the recording transaction.
+    read_snapshot = Database.read_snapshot
 
 
 def _boots(registry):

@@ -19,6 +19,7 @@ from uuid import UUID
 
 from psycopg.types.json import Jsonb
 
+from central.fleet.device_fence import standing_in
 from central.fleet.models import OfferAsset
 from central.fleet.node_acceptance import current_cohort_in
 from central.fleet.node_app_links import (
@@ -277,8 +278,8 @@ class NodeLifecycle:
         `qualification` (console DDD Part E G4) serves what a qualification would observe and
         what earlier ones recorded; whether an acceptance fits is `_qualified_fallback_in`'s
         judgement at stage time, never this read's."""
-        with self.sessions.db.transaction() as conn:
-            generation = self.sessions.lock_device_generation_in(conn, device_id)
+        with self.sessions.db.read_snapshot() as conn:
+            generation = standing_in(conn, device_id).active_generation()
             now = self.sessions.clock.utc()
             current = conn.execute("SELECT b.kernel_boot_id,o.offer_payload FROM node_boot_admissions b "
                                    "LEFT JOIN node_boot_offers o ON o.offer_id=b.offer_id WHERE b.device_id=%s "
@@ -317,7 +318,7 @@ class NodeLifecycle:
         """The current boot's linked app and this generation's newest five acceptances. A base
         tag is named only for the base this boot runs; an acceptance's record holds the base's
         content key alone."""
-        linked = load_current_node_app_link_for_device_in(conn, device_id, generation)
+        linked = load_current_node_app_link_for_device_in(conn, device_id, generation, lock=False)
         payload = current["offer_payload"] if current is not None else None
         base = parse_node_boot_offer(bytes(payload)).base if payload is not None else None
         acceptances = conn.execute("SELECT environment_sha256,base_content_key,accepted_at "

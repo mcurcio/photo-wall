@@ -464,7 +464,7 @@ def _central_fixture(
                     ).fetchone()
                 ),
             )
-            control = load_current_app_control_in(conn, command.producer.device_id)
+            control = load_current_app_control_in(conn, command.producer.device_id, lock=True)
             result["current_control_present"] = control is not None
             if control is None:
                 return result
