@@ -67,6 +67,15 @@ class AppUnitSettling(ValueError):
         self.state = state
 
 
+class ForeignAppUnit(ValueError):
+    """A unit under the app's name that is not the current launch's (another root, or outside the
+    app slice), or one with no launch at all: never adopted, never waited out. The broker's loop
+    stops it (`AppProcessDriver.stop_foreign`) and relaunches its own app on its pacing."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+
+
 class EffectJournal(Protocol):
     def get(self, operation_id: UUID) -> EffectRecord | None: ...
     def current(self) -> EffectRecord | None: ...
@@ -78,7 +87,13 @@ class EffectJournal(Protocol):
 class AppProcessDriver(Protocol):
     def current(self) -> RunningApp | None:
         """None means observed absent. Unavailable/ambiguous raises; a unit between states raises
-        AppUnitSettling (an unknown turn)."""
+        AppUnitSettling (an unknown turn); a unit that is not the launch's raises ForeignAppUnit.
+        A run of the launch's root, cgroup and environment that the broker did not spawn is
+        adopted as the current launch (a new epoch), never an error."""
+        ...
+
+    def stop_foreign(self) -> None:
+        """Ask for whatever runs under the app's unit name to stop, without waiting."""
         ...
 
     def verify(self, environment: AppEnvironmentRefV2) -> bool:
@@ -106,9 +121,9 @@ class AppProcessDriver(Protocol):
 # -- 1b P1b: the paced relaunch (frozen; bodies in P1b) ----------------------------------------
 # The Player's death becomes a timely restart with one owner, the broker, paced like Kubernetes'
 # CrashLoopBackOff: consecutive short runs wait 1 s, 5 s, 30 s, then 5 minutes each; a run that
-# lasted STABLE_RUN_MS starts the count again. systemd's Restart= is not used: it would start
-# runs the broker never journaled (a second supervisor, and a launch record whose process no
-# longer matches: `app_process_incarnation_mismatch`).
+# lasted STABLE_RUN_MS starts the count again. systemd's Restart= is not used, and no dependency
+# lets a job on another unit start the app (`process_linux.app_unit_properties`): either would
+# start runs the broker never launched (a second supervisor; incident 2026-10-13).
 RELAUNCH_BACKOFF_MS: Final[tuple[int, ...]] = (1_000, 5_000, 30_000, 300_000)
 STABLE_RUN_MS: Final = 600_000
 
@@ -299,7 +314,8 @@ class AppEffectBroker:
         paced relaunch (`relaunch_absent`) of a launch found absent: a settled one (`running`,
         `exited`) or one whose relaunch failed (`relaunch_outcome_unknown`, E-1B-18). A unit
         between states (AppUnitSettling) is an unknown turn: the record stays as it is, nothing is
-        relaunched, and the next turn observes again."""
+        relaunched, and the next turn observes again. Any other observation fault raises to the
+        loop (`broker_runner.BrokerLoop`), which reports it and observes again on a backoff."""
         with self._lock:
             record = self.journal.current()
             if record is None:
@@ -308,9 +324,10 @@ class AppEffectBroker:
                 running = self.driver.current()
             except AppUnitSettling:
                 return record
+            # The driver's run is the launch's, adopted when the broker did not spawn it
+            # (`AppProcessDriver.current`), so a new process of the same command is this record's.
             if (running is not None and running.environment == record.command.environment
-                    and running.operation_id == record.command.operation_id
-                    and (record.running is None or running.process == record.running.process)):
+                    and running.operation_id == record.command.operation_id):
                 record = replace(record, phase="running", running=running, fault=None)
             elif running is None and (record.phase in ("running", "exited") or (
                     record.phase == "effect_unknown" and record.fault == "relaunch_outcome_unknown")):

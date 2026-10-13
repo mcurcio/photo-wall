@@ -1,8 +1,9 @@
 """Real PID1 + full sealed Player + real Central: the node lifecycle scenarios, automated.
 
 Each scenario boots the actual sealed node in a privileged arm64 systemd container against a
-real HTTP Central on its own database: success (ordered stop-before-start, natural completion),
-failure (fallback), outage (Central unreachable for 35 s once the broker holds its stage),
+real HTTP Central on its own database: success (ordered stop-before-start, natural completion;
+before its stage, three signal range restarts of Weston under the running Player: the broker alone
+starts the Player again, never exits, and no unit fails), failure (fallback), outage (Central unreachable for 35 s once the broker holds its stage),
 reboot (a second kernel boot of the same device re-enrolls, supersedes the first and is
 commandable), refused (a board below the smallest memory class: storage refuses, nothing
 after it runs, and Host Management reports the refusal with its numbers) and join (the Node API
@@ -94,6 +95,8 @@ HOST_STATE_STREAM = "KV_state_host"
 BIRTH_SUBJECT = "$KV.state_host.birth"
 CONTROLLER_UNIT = "photo-wall-display-controller.service"
 PLAYER_UNIT = "photo-wall-node-player.service"
+SIGNAL_UNIT = "photo-wall-display-signal.service"  # a signal range change's Weston restart
+DISPLAY_RESTARTS = 3
 # Weston's RestartSec and READY=1, the broker's next turn, the Player's start and its app link.
 PLAYER_RELAUNCH_SECONDS = 60
 # A Player that dies on its own: the broker's first paced relaunch (1 s), its next turn, the
@@ -336,7 +339,7 @@ class Node:
         self.verify_display_ready(name)
 
     def player_follows_display(self, fixture):
-        """Weston crashes: the Player bound to it (BindsTo=) stops with it, and the broker starts
+        """Weston crashes: the Player stops with it (StopPropagatedFrom=), and the broker starts
         the same environment again for the new Weston incarnation, which links to Central again."""
         before = unit_properties_of(self, PLAYER_UNIT, "ActiveState,InvocationID")
         linked = status_of(fixture, self.work)["current"]
@@ -354,6 +357,49 @@ class Node:
             time.sleep(0.5)
         (self.work / "player-after-display.json").write_text(
             json.dumps({"before": before, "after": now, "linked": current}, sort_keys=True))
+
+    def player_survives_display_restarts(self, times):
+        """Incident 2026-10-13 (v0.35.0): a signal range change restarts Weston through
+        photo-wall-display-signal.service. Each of `times` restarts, under the broker's running
+        Player: within PLAYER_RELAUNCH_SECONDS a new Weston incarnation is ready, and the Player
+        is active again as the run the broker's launch record names (systemd stops it and never
+        starts it; the broker relaunches it). After them the broker never exited (NRestarts 0)
+        and no photo-wall unit is failed."""
+        evidence = []
+        for turn in range(times):
+            display = unit_properties_of(self, DISPLAY_UNIT, "ActiveState,InvocationID")
+            player = unit_properties_of(self, PLAYER_UNIT, "ActiveState,MainPID,InvocationID")
+            assert display["ActiveState"] == "active" and player["ActiveState"] == "active", (
+                turn, display, player)
+            self.run("systemctl", "start", SIGNAL_UNIT)
+            deadline = time.monotonic() + PLAYER_RELAUNCH_SECONDS
+            while True:
+                now_display = unit_properties_of(self, DISPLAY_UNIT, "ActiveState,InvocationID")
+                now = unit_properties_of(self, PLAYER_UNIT, "ActiveState,SubState,MainPID,InvocationID")
+                launch = json.loads(self.run("cat", BROKER_LAUNCH))
+                process = (launch.get("running") or {}).get("process") or {}
+                if (now_display["ActiveState"] == "active"
+                        and now_display["InvocationID"] not in ("", display["InvocationID"])
+                        and now["SubState"] == "running"
+                        and now["InvocationID"] not in ("", player["InvocationID"])
+                        and process.get("invocation_id") == now["InvocationID"]
+                        and str(process.get("pid")) == now["MainPID"]
+                        and launch.get("display") == now_display["InvocationID"]):
+                    break
+                assert time.monotonic() < deadline, (
+                    "no broker-launched Player for the restarted Weston", turn, display, now_display,
+                    player, now, launch)
+                time.sleep(0.5)
+            evidence.append({"display": [display, now_display], "player": [player, now],
+                             "launch": launch})
+        broker = unit_properties_of(self, "photo-wall-app-broker.service", "ActiveState,NRestarts")
+        failed = self.run("systemctl", "list-units", "--state=failed", "--plain", "--no-legend",
+                          "photo-wall-*").split()
+        (self.work / "display-restarts.json").write_text(
+            json.dumps({"restarts": evidence, "broker": broker, "failed": failed}, sort_keys=True))
+        assert broker == {"ActiveState": "active", "NRestarts": "0"}, broker
+        assert failed == [], failed
+        self.verify_display_ready("display-after-restarts")
 
     def player_restarts_after_a_crash(self):
         """The Player dies on its own (SIGSEGV), Weston untouched: the broker starts it again on
@@ -914,6 +960,7 @@ def test_node_pid1_lifecycle(node_pid1_inputs, node_host, registry, tmp_path, ph
                 node.verify_bus()
                 reported = assert_bus_memory_reported(fixture, node)
                 node.player_follows_display(fixture)
+                node.player_survives_display_restarts(DISPLAY_RESTARTS)
             stage_and_complete(fixture, node, phase, reference)
             if phase == "success":
                 node.verify_target_mount(reference)

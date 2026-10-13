@@ -1,10 +1,12 @@
 [Unit]
 Description=Photo Wall display restart for a signal range change
-# Started by photo-wall-display-signal.path. A range change restarts Weston (and with it the
-# controller and the Player): reset-failed first, on the display unit and on every unit bound to
-# it (the controller, which the restart stops and starts again), so no run of range changes spends
-# a crash start limit (StartLimitBurst=10 in 10 min on each); only crashes count. --no-block, so
-# this oneshot never waits on the restart.
+# Started by photo-wall-display-signal.path. A range change restarts Weston and with it the
+# controller (BindsTo= it); the Player is only stopped (StopPropagatedFrom=) and its broker starts
+# it again for the new Weston. PID1 counts every start, a requested restart included, against a
+# unit's start limit (StartLimitBurst=10 in 10 min), so reset-failed first, on the display unit and
+# on every unit bound to it, so no run of range changes spends a crash start limit; only crashes
+# count. The Player is not listed: only the broker starts it, each time a new transient unit.
+# --no-block, so this oneshot never waits on the restart.
 
 [Service]
 Type=oneshot
