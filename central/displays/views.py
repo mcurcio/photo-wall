@@ -15,6 +15,7 @@ from central.displays.picture import PictureStatus, SoftwareSetting, TestPattern
 from central.displays.picture_history import PictureEntry, PictureEntryKind
 from central.house_time.calculator import local_date_time
 from central.house_time.model import HouseTime, LocalDateTime
+from central.installation_models import FrameRefView
 from contracts.models import Digest, Identifier, Instant, Model
 from contracts.node_output import (
     InForceKind,
@@ -339,12 +340,6 @@ class PictureCopyResult(Model):
 class DisplayRefView(Model):
     """A Display by id and its name today."""
     id: UUID
-    name: str
-
-
-class FrameRefView(Model):
-    """A Frame by id and its name today."""
-    id: Identifier
     name: str
 
 

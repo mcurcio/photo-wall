@@ -47,7 +47,7 @@ from central.displays.picture import default_picture
 from central.displays.picture_history import PictureEntryKind, PictureRecord, Port
 from central.infra.display_store import _until_next_deadline, output_documents
 from central.infra.picture_history_store import append_sent_in
-from central.tuning_history import model as retention
+from central.tuning_history import bounds as retention
 from contracts.node_picture import HardwareResult, WriteResult
 
 

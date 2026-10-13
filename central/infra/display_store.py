@@ -837,7 +837,7 @@ def output_documents(conn: Any, device_id: str, now: float) -> dict[str, bytes]:
                 append_sent_in(conn, port, picture_change, display_id=row["d_id"], frame_id=row["frame_id"],
                                record=sent_record(session=picture_session(row), now=now,
                                                   previous=latest_sent_in(conn, port), picture=picture,
-                                                  test_pattern=pattern))
+                                                  test_pattern=pattern, display_id=row["d_id"]))
         documents[picture_document_key(output_id)] = encode_picture_document(wanted)
     return documents
 

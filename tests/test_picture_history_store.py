@@ -45,7 +45,7 @@ from central.displays.picture import DisplayPicture
 from central.displays.picture_history import PictureEntryKind, PictureRecord
 from central.infra import display_store
 from central.infra.picture_history_store import append_kept_in
-from central.tuning_history import model as retention
+from central.tuning_history import bounds as retention
 from contracts.lut import LutRef
 from contracts.node_picture import NEUTRAL_SOFTWARE, SignalRange
 from contracts.tuning import TestPattern
@@ -345,4 +345,18 @@ def test_a_failed_append_fails_the_done(registry, monkeypatch):
             _done(client, session)
     assert _display(registry, player)["software_contrast_percent"] == 100
     assert [str(row["id"]) for row in _sql(registry, "SELECT id FROM picture_sessions")] == [session["session_id"]]
+    assert _kept_rows(registry) == []
+
+
+def test_the_kept_write_takes_only_done_or_copy(registry):
+    """The one kept picture write refuses any other kind before it stores anything. Mutation probe
+    P1-kind-check-dropped: drop write_picture's guard -> an unrecorded or sent record is stored."""
+    player = _bound(registry)
+    display_id = _display_id(registry, player)
+    louder = replace(DisplayPicture({}, NEUTRAL_SOFTWARE, SignalRange.AUTO).software, contrast_percent=130)
+    picture = DisplayPicture({}, louder, SignalRange.AUTO)
+    for kind in (PictureEntryKind.KEPT_UNRECORDED, PictureEntryKind.SENT_DRAFT, PictureEntryKind.SENT_KEPT):
+        with registry.db.transaction() as conn, pytest.raises(ValueError, match="picture_history_kind"):
+            display_store.write_picture(conn, display_id, PictureRecord(kind, picture, None, None, None))
+    assert _display(registry, player)["software_contrast_percent"] == 100
     assert _kept_rows(registry) == []

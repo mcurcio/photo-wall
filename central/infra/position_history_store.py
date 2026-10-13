@@ -3,9 +3,10 @@ position_entries). The rules are central/fleet/position_history.py's; this modul
 and reads, nothing else.
 
 Writers (each in its caller's transaction, so a history write fails only with its change):
-- `record_unrecorded_in` then `append_position_in`: Registry's two kept writes
-  (central/registry.py `commit_calibration_trial_in`, `replace_frame_profile`), the first before
-  their UPDATE (so an unrecorded entry is made for what was there), the second after it.
+- `write_position_in`: the one kept Position write, called by Registry's Save
+  (central/registry.py `commit_calibration_trial_in`) and profile change (`replace_frame_profile`):
+  it records a change made outside Photo Wall, updates the Frame's calibration and mat (and
+  profile), and appends the kept entry together, so no kept write can skip its entry.
 - `record_sent_in`: the trial owner's `deliver_in` (central/fleet/node_calibration.py), on every
   exchange it hands a Frame: it compares without a lock and appends only when
   `position_history.sent_record` says so, re-checking under the lock.
@@ -13,7 +14,7 @@ Every append takes the Frame's row lock (FOR NO KEY UPDATE; a no-op under Regist
 numbers the entry the Frame's newest + 1, stamps `at` with `clock_timestamp()` in the INSERT, reads
 what it was made for (frames.profile and the Display seen on the Frame's bound port, display_store
 SEEN_DISPLAY_JOIN), and trims the Frame's kept kinds to KEPT_ENTRIES and its sent kinds to
-SENT_ENTRIES (central/tuning_history/model.py).
+SENT_ENTRIES (central/tuning_history/bounds.py).
 """
 from __future__ import annotations
 
@@ -35,13 +36,14 @@ from central.fleet.position_history import (
     PositionRecord,
     PositionValues,
     TrialHanded,
+    position_values,
     sent_record,
     unrecorded_record,
 )
 from central.infra.display_store import SEEN_DISPLAY_JOIN
-from central.tuning_history import model as retention
-from central.tuning_history.model import HistoryPage
-from contracts.models import FrameFit, Mat
+from central.tuning_history import bounds as retention
+from central.tuning_history.bounds import HistoryPage
+from contracts.models import Calibration, FrameFit, FrameProfile, Mat
 
 _FIT: Final = TypeAdapter(FrameFit)
 _KEPT_VALUES: Final = sorted(kind.value for kind in KEPT_KINDS)
@@ -61,7 +63,40 @@ def frame_made_for_in(conn: Any, frame_id: str) -> MadeFor | None:
     return MadeFor((int(row["profile"]["width_px"]), int(row["profile"]["height_px"])), row["display_id"])
 
 
-def append_position_in(conn: Any, frame_id: str, record: PositionRecord) -> PositionEntry:
+def write_position_in(conn: Any, frame_id: str, record: PositionRecord, *, calibration: Calibration,
+                      profile: FrameProfile | None = None) -> int:
+    """Store `calibration` and `record`'s mat on Frame `frame_id` (and `profile`, a new generation,
+    for a profile change) and append `record` as its kept entry, in the caller's transaction: the one
+    kept Position write (Save: KEPT_SAVED, no `profile`; a profile change: KEPT_PROFILE_CHANGED with
+    it). First, when the stored fit and mat differ from the Frame's newest kept entry, the change made
+    outside Photo Wall is recorded (`position_history.unrecorded_record`, design rule 3). Answers the
+    Frame's generation after the write. ValueError("position_history_kind") for another kind or a
+    `profile` that does not match it; ValueError("position_history_values") when `record`'s fit is not
+    `calibration`'s."""
+    if record.kind not in (PositionEntryKind.KEPT_SAVED, PositionEntryKind.KEPT_PROFILE_CHANGED) or (
+            (profile is None) != (record.kind is PositionEntryKind.KEPT_SAVED)):
+        raise ValueError("position_history_kind")
+    if record.values.fit != calibration.fit:
+        raise ValueError("position_history_values")
+    stored = conn.execute("SELECT calibration, mat FROM frames WHERE id=%s FOR NO KEY UPDATE", (frame_id,)).fetchone()
+    if stored is None:
+        raise LookupError("unknown_frame")
+    unrecorded = unrecorded_record(latest_kept_position_in(conn, frame_id), position_values(
+        Calibration.model_validate(stored["calibration"]), Mat.model_validate(stored["mat"])))
+    if unrecorded is not None:
+        _append_in(conn, frame_id, unrecorded)
+    sets = ["calibration=%s", "mat=%s", "configuration_revision=configuration_revision+1"]
+    params = [Jsonb(calibration.model_dump(mode="json")), Jsonb(record.values.mat.model_dump(mode="json"))]
+    if profile is not None:
+        sets += ["profile=%s", "generation=generation+1"]
+        params.append(Jsonb(profile.model_dump()))
+    generation = conn.execute(f"UPDATE frames SET {','.join(sets)} WHERE id=%s RETURNING generation",  # noqa: S608
+                              (*params, frame_id)).fetchone()["generation"]
+    _append_in(conn, frame_id, record)
+    return generation
+
+
+def _append_in(conn: Any, frame_id: str, record: PositionRecord) -> PositionEntry:
     """Append `record` as the Frame's next entry, made for its profile and seen Display now, and trim."""
     conn.execute("SELECT 1 FROM frames WHERE id=%s FOR NO KEY UPDATE", (frame_id,))
     made_for = frame_made_for_in(conn, frame_id)
@@ -86,14 +121,6 @@ def append_position_in(conn: Any, frame_id: str, record: PositionRecord) -> Posi
     return _entry(row)
 
 
-def record_unrecorded_in(conn: Any, frame_id: str, stored: PositionValues) -> None:
-    """Before a kept write: append `position_history.unrecorded_record(latest kept, stored)` when it
-    is not None (`stored`: the Frame's fit and mat as they are before the write)."""
-    record = unrecorded_record(latest_kept_position_in(conn, frame_id), stored)
-    if record is not None:
-        append_position_in(conn, frame_id, record)
-
-
 def record_sent_in(conn: Any, frame_id: str, *, trial: TrialHanded | None, saved: PositionValues) -> None:
     """After an exchange decides what it hands the Node for the Frame (`trial`, or None: the kept
     values `saved`): append `position_history.sent_record(...)` against the Frame's newest entry when
@@ -104,7 +131,7 @@ def record_sent_in(conn: Any, frame_id: str, *, trial: TrialHanded | None, saved
     conn.execute("SELECT 1 FROM frames WHERE id=%s FOR NO KEY UPDATE", (frame_id,))
     record = sent_record(trial=trial, saved=saved, latest=latest_position_in(conn, frame_id))
     if record is not None:
-        append_position_in(conn, frame_id, record)
+        _append_in(conn, frame_id, record)
 
 
 def latest_position_in(conn: Any, frame_id: str) -> PositionEntry | None:
@@ -154,5 +181,5 @@ def _entry(row: Mapping[str, Any]) -> PositionEntry:
                        row["session_id"], row["restored_from"]))
 
 
-__all__ = ["append_position_in", "frame_made_for_in", "latest_kept_position_in", "latest_position_at_in", "latest_position_in",
-           "position_entries_in", "position_entry_in", "record_sent_in", "record_unrecorded_in"]
+__all__ = ["frame_made_for_in", "latest_kept_position_in", "latest_position_at_in", "latest_position_in",
+           "position_entries_in", "position_entry_in", "record_sent_in", "write_position_in"]

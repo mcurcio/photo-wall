@@ -1,7 +1,7 @@
 """A Display's picture history, pure (configuration snapshots; owner, 2026-10-13: "configuration
 snapshots" that keep "a history of what has been done in the past"; "View and restore"): the
 history's records (central/displays/picture_history.py), Restore's rule (central/displays/picture.py
-`restored`), the page and time a route reads (central/tuning_history/model.py) and an entry's JSON.
+`restored`), the page and time a route reads (central/tuning_history/bounds.py) and an entry's JSON.
 
 The store, the routes and the Done/Copy writes are tests/test_picture_history_store.py's.
 """
@@ -39,7 +39,7 @@ from central.displays.picture_history import (
 )
 from central.displays.views import picture_entry_view
 from central.live_session import Lease
-from central.tuning_history.model import (
+from central.tuning_history.bounds import (
     PAGE_LIMIT_DEFAULT,
     HistoryRefused,
     history_page,
@@ -159,7 +159,7 @@ def test_restore_skips_what_the_display_no_longer_offers_and_an_unlisted_lut():
     order; an unlisted LUT keeps the draft's; the test pattern is the session's, unchanged.
     Mutation probe P1-no-skip: keep every entry code -> "16" lands in the draft."""
     own = LutRef(PROFILE_B, LUT_RECIPE_ID)
-    session = replace(_session(_picture(lut=own)), test_pattern=None)
+    session = replace(_session(_picture(lut=own)), test_pattern=None, display_id=DISPLAY)
     entry = _picture({"16": 3, "10": 46, "14": 5}, lut=LutRef(PROFILE_A, LUT_RECIPE_ID))
     result = _restore(session, entry, lut_listed=False)
     assert dict(result.session.draft.hardware) == {"10": 46}
@@ -239,7 +239,7 @@ def test_sent_record_while_a_session_is_live_is_its_draft_with_its_pattern():
     """Acceptance 10, branch 1. Mutation probe P2-kind-from-stored is the DB test's."""
     session = replace(_session(_picture(brightness_percent=90)), restored_from=ENTRY)
     ask = TestPatternAsk(TestPattern.GREY_RAMP, 4)
-    record = sent_record(session=session, now=1.0, previous=None, picture=session.draft, test_pattern=ask)
+    record = sent_record(session=session, now=1.0, previous=None, picture=session.draft, test_pattern=ask, display_id=DISPLAY)
     assert record == PictureRecord(PictureEntryKind.SENT_DRAFT, session.draft, session.session_id, ENTRY,
                                    TestPattern.GREY_RAMP)
 
@@ -251,10 +251,10 @@ def test_sent_record_after_a_draft_went_is_back_only_when_the_values_differ():
     draft_id = uuid4()
     previous = _sent(PictureEntryKind.SENT_DRAFT, _picture(brightness_percent=90), draft_id)
     lapsed = _session(_picture(brightness_percent=90), idle_until=0.5)
-    back = sent_record(session=lapsed, now=1.0, previous=previous, picture=default_picture(), test_pattern=None)
+    back = sent_record(session=lapsed, now=1.0, previous=previous, picture=default_picture(), test_pattern=None, display_id=DISPLAY)
     assert back == PictureRecord(PictureEntryKind.SENT_BACK, default_picture(), draft_id, None, None)
     same = sent_record(session=None, now=1.0, previous=previous, picture=_picture(brightness_percent=90),
-                       test_pattern=None)
+                       test_pattern=None, display_id=DISPLAY)
     assert same == PictureRecord(PictureEntryKind.SENT_KEPT, _picture(brightness_percent=90), None, None, None)
 
 
@@ -262,7 +262,7 @@ def test_sent_record_with_no_draft_before_is_the_kept_values():
     """Acceptance 10, branch 4: no entry yet (a Display newly seen), or the previous one not a draft."""
     for previous in (None, _sent(PictureEntryKind.SENT_KEPT, _picture(brightness_percent=90)),
                      _sent(PictureEntryKind.SENT_BACK, _picture(brightness_percent=90), uuid4())):
-        record = sent_record(session=None, now=1.0, previous=previous, picture=default_picture(), test_pattern=None)
+        record = sent_record(session=None, now=1.0, previous=previous, picture=default_picture(), test_pattern=None, display_id=DISPLAY)
         assert record == PictureRecord(PictureEntryKind.SENT_KEPT, default_picture(), None, None, None)
 
 
@@ -271,4 +271,14 @@ def test_sent_record_refuses_a_test_pattern_with_no_live_session():
     ask = TestPatternAsk(TestPattern.WHITE, 2)
     for session in (None, _session(idle_until=0.5)):
         with pytest.raises(ValueError, match="sent_test_pattern"):
-            sent_record(session=session, now=1.0, previous=None, picture=default_picture(), test_pattern=ask)
+            sent_record(session=session, now=1.0, previous=None, picture=default_picture(), test_pattern=ask, display_id=DISPLAY)
+
+
+def test_sent_record_after_another_displays_draft_is_the_kept_values():
+    """A panel swap: the port's newest sent entry is Display A's draft, and the port now reports
+    Display B. Nothing of B's was put back, so B's first entry is SENT_KEPT, never SENT_BACK naming
+    A's session."""
+    previous = _sent(PictureEntryKind.SENT_DRAFT, _picture(brightness_percent=90), uuid4())
+    record = sent_record(session=None, now=1.0, previous=previous, picture=default_picture(), test_pattern=None,
+                         display_id=uuid4())
+    assert record == PictureRecord(PictureEntryKind.SENT_KEPT, default_picture(), None, None, None)

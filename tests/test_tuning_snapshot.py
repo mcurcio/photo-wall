@@ -90,6 +90,8 @@ def test_the_tracer_a_picture_edit_and_a_position_edit_read_back_by_time(registr
     assert both["position"]["fit"]["corners"] == [list(corner) for corner in SKEWED.corners]
     exactly = _read(registry, both["position"]["at"])
     assert exactly["position"]["entry_id"] == both["position"]["entry_id"]
+    # The picture's sent entry read at its own time (probe P4-strict-at, picture's sent read).
+    assert _read(registry, both["picture"]["at"])["picture"]["entry_id"] == both["picture"]["entry_id"]
 
     earlier = _read(registry, between)
     assert (earlier["position"]["kind"], earlier["picture"]["kind"]) == ("kept-saved", "sent-draft")
@@ -109,6 +111,8 @@ def test_with_no_sent_entry_for_the_frame_the_seen_displays_kept_entry_answers(r
     assert (body["picture"]["entry_id"], body["picture"]["kind"], body["picture"]["frame"]) == (
         str(entry.entry_id), "kept-copied", None)
     assert body["picture"]["picture"]["software"]["gamma_tenths"] == 24
+    # Read at the kept entry's own time (probe P4-strict-at, picture's kept read).
+    assert _read(registry, entry.at)["picture"]["entry_id"] == str(entry.entry_id)
 
 
 def test_a_snapshot_needs_a_time_with_its_zone_and_a_known_frame(registry):

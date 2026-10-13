@@ -113,13 +113,15 @@ def copied_record(picture: DisplayPicture) -> PictureRecord:
 
 
 def sent_record(*, session: PictureSession | None, now: float, previous: PictureEntry | None,
-                picture: DisplayPicture, test_pattern: TestPatternAsk | None) -> PictureRecord:
-    """The sent record of a picture document whose picture_change rose at Central's `now`, carrying
-    `picture` (the values in force with any pending put-back, as the document) and the ask's pattern:
+                picture: DisplayPicture, test_pattern: TestPatternAsk | None, display_id: UUID) -> PictureRecord:
+    """The sent record of a picture document whose picture_change rose at Central's `now` for Display
+    `display_id` (the one seen on the port), carrying `picture` (the values in force with any pending
+    put-back, as the document) and the ask's pattern:
     - SENT_DRAFT while `session` is live at `now` (its session id and `restored_from`);
-    - else SENT_BACK when `previous` (the port's newest sent entry) is SENT_DRAFT and its picture
-      differs from `picture` (`same_values`): the draft went and the wall was put back (previous's
-      session id, no restore);
+    - else SENT_BACK when `previous` (the port's newest sent entry) is the same Display's SENT_DRAFT
+      and its picture differs from `picture` (`same_values`): the draft went and the wall was put
+      back (previous's session id, no restore); another Display's draft (a panel swap) put nothing
+      of this Display's back;
     - else SENT_KEPT (no session, no restore).
     ValueError("sent_test_pattern") for a test pattern with no live session (the projection never
     sends one)."""
@@ -128,7 +130,8 @@ def sent_record(*, session: PictureSession | None, now: float, previous: Picture
                              None if test_pattern is None else test_pattern.pattern)
     if test_pattern is not None:
         raise ValueError("sent_test_pattern")
-    if (previous is not None and previous.record.kind is PictureEntryKind.SENT_DRAFT
+    if (previous is not None and previous.display_id == display_id
+            and previous.record.kind is PictureEntryKind.SENT_DRAFT
             and not same_values(previous.record.picture, picture)):
         return PictureRecord(PictureEntryKind.SENT_BACK, picture, previous.record.session_id, None, None)
     return PictureRecord(PictureEntryKind.SENT_KEPT, picture, None, None, None)

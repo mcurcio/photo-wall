@@ -8,7 +8,7 @@ Writers (each in its caller's transaction, so a history write fails only with it
   stronger lock): the number is the Display's newest + 1.
 - `append_sent_in`: called only by display_store `output_documents` when a port's picture_change
   rises; idempotent on (player_id, output_id, picture_change).
-Each trims its own key to the newest central/tuning_history/model.py KEPT_ENTRIES (per Display) or
+Each trims its own key to the newest central/tuning_history/bounds.py KEPT_ENTRIES (per Display) or
 SENT_ENTRIES (per port) after appending. Every `at` is `clock_timestamp()` in the INSERT
 (PostgreSQL's clock). An entry's picture is stored under the displays columns' names
 (picture_columns `picture_fields`, as picture_sessions.draft) with its LUT's recipe beside it.
@@ -33,8 +33,8 @@ from central.displays.picture_history import (
     Port,
 )
 from central.infra.picture_columns import picture_fields, stored_picture
-from central.tuning_history import model as retention
-from central.tuning_history.model import HistoryPage
+from central.tuning_history import bounds as retention
+from central.tuning_history.bounds import HistoryPage
 from contracts.lut import LutRef
 from contracts.tuning import TestPattern
 

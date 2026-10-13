@@ -10,8 +10,8 @@ from uuid import UUID
 
 from pydantic import AwareDatetime, Field
 
-from central.displays.views import FrameRefView
 from central.fleet.position_history import PositionEntry, PositionEntryKind, PositionRestoreRefusal
+from central.installation_models import FrameRefView
 from contracts.models import FrameFit, Mat, Model
 
 

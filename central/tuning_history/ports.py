@@ -12,7 +12,7 @@ from uuid import UUID
 
 from central.displays.views import PictureHistoryView
 from central.fleet.position_views import PositionHistoryView
-from central.tuning_history.model import HistoryPage
+from central.tuning_history.bounds import HistoryPage
 from central.tuning_history.views import TuningSnapshotView
 
 

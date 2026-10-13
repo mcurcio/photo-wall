@@ -14,7 +14,6 @@ from central.db import Database
 from central.displays.picture_history import PictureEntry, unrecorded_record
 from central.displays.views import (
     DisplayRefView,
-    FrameRefView,
     PictureEntryView,
     PictureHistoryView,
     picture_entry_view,
@@ -36,8 +35,9 @@ from central.infra.position_history_store import (
     latest_position_at_in,
     position_entries_in,
 )
+from central.installation_models import FrameRefView
 from central.tuning_history import model
-from central.tuning_history.model import HistoryPage, HistoryRefused
+from central.tuning_history.bounds import HistoryPage, HistoryRefused
 from central.tuning_history.views import TuningSnapshotView
 from contracts.models import Calibration, Mat
 

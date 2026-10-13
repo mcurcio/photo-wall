@@ -29,7 +29,7 @@ from central.infra.display_store import (
     frame_readiness_in,
     resolve_output,
 )
-from central.infra.position_history_store import append_position_in, record_unrecorded_in
+from central.infra.position_history_store import write_position_in
 from central.infra.power_store import forget_frame_in
 from central.installation_models import (
     FrameInventory,
@@ -638,16 +638,10 @@ class Registry:
                                      profile.width_px, profile.height_px):
             raise RegistryError("oriented_profile", 422)
         calibration = Calibration.model_validate(frame["calibration"])
-        values = position_values(calibration, Mat.model_validate(frame["mat"]))
-        record_unrecorded_in(conn, frame_id, values)
         invalidated = calibration.model_copy(update={"revision": calibration.revision + 1})
-        row = conn.execute(
-            "UPDATE frames SET profile=%s,calibration=%s,generation=generation+1,"
-            "configuration_revision=configuration_revision+1 WHERE id=%s "
-            "RETURNING generation",
-            (Jsonb(profile.model_dump()), Jsonb(invalidated.model_dump(mode="json")), frame_id),
-        ).fetchone()
-        append_position_in(conn, frame_id, profile_changed_record(values))
+        row = {"generation": write_position_in(
+            conn, frame_id, profile_changed_record(position_values(calibration, Mat.model_validate(frame["mat"]))),
+            calibration=invalidated, profile=profile)}
         self._audit(conn, "frame_profile_changed", frame_id,
                     {"profile": profile.model_dump(), **row})
         return {"profile": profile.model_dump(), **row, "changed": True}
@@ -766,14 +760,9 @@ class Registry:
             raise RegistryError("calibration_revision_conflict")
         committed = Calibration.model_validate(calibration.model_dump()).model_copy(
             update={"revision": current.revision + 1})
-        record_unrecorded_in(conn, frame_id, position_values(current, Mat.model_validate(row["mat"])))
-        conn.execute("UPDATE frames SET calibration=%s,mat=%s,"
-                     "configuration_revision=configuration_revision+1 WHERE id=%s",
-                     (Jsonb(committed.model_dump(mode="json")), Jsonb(mat.model_dump(mode="json")),
-                      frame_id))
+        write_position_in(conn, frame_id, saved_record(position_values(committed, mat), session_id=session_id,
+                                                       restored_from=restored_from), calibration=committed)
         commit_position(conn, frame_id)
-        append_position_in(conn, frame_id, saved_record(position_values(committed, mat), session_id=session_id,
-                                                        restored_from=restored_from))
         self._audit(conn, "calibration_trial_commit", frame_id)
         return committed
 

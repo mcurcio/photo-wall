@@ -6,8 +6,9 @@ from __future__ import annotations
 
 from pydantic import AwareDatetime
 
-from central.displays.views import FrameRefView, PictureEntryView
+from central.displays.views import PictureEntryView
 from central.fleet.position_views import PositionEntryView
+from central.installation_models import FrameRefView
 from contracts.models import Model
 
 

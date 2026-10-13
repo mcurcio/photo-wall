@@ -9,7 +9,7 @@ contract, `central/tuning_history/ports.py` TuningHistoryQueries. One route per 
 | GET | /v1/operator/frames/{frame_id}/tuning-snapshot | at (ISO 8601 with zone, required) | TuningSnapshotView | 404 unknown_frame, 422 bad_time |
 
 Every route takes the operator `admin` dependency. `before`, `limit` and `at` are read as text and
-judged by central/tuning_history/model.py (`history_page`, `utc_instant`), so every refusal is
+judged by central/tuning_history/bounds.py (`history_page`, `utc_instant`), so every refusal is
 HistoryRefused, answered as {"error": code} at its status. The two Restores are their owners' routes
 (central/display_routes.py: POST /v1/operator/picture-sessions/{session_id}/restores;
 central/fleet/node_routes.py: POST /v1/operator/frames/{frame_id}/calibration-trials/{trial_id}/restores).
@@ -25,7 +25,7 @@ from fastapi.responses import JSONResponse
 from central.displays.views import PictureHistoryView
 from central.fleet.position_views import PositionHistoryView
 from central.operator_auth import OPERATOR_PREFIX
-from central.tuning_history.model import HistoryRefused, history_page, utc_instant
+from central.tuning_history.bounds import HistoryRefused, history_page, utc_instant
 from central.tuning_history.ports import TuningHistoryQueries
 from central.tuning_history.views import TuningSnapshotView
 from contracts.models import Identifier
