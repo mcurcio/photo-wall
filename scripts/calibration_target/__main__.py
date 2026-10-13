@@ -14,12 +14,16 @@ from collections.abc import Sequence
 from pathlib import Path
 
 import httpx
+import psycopg
+
+from contracts.tuning import TestPattern
 
 from .central_reads import CentralReads, HttpCentralReads
 from .locate import Located, locate
 from .model import Refusal, Refused, to_json
 from .photos import load_photo
 from .read import read_photos
+from .suggest import lut_acts, software_of, suggest
 
 READ: int = 0
 REFUSED: int = 2
@@ -47,7 +51,11 @@ def run(photos: Sequence[str], central: CentralReads) -> tuple[dict[str, object]
     reading = read_photos(tuple(located), entry)  # type: ignore[arg-type]
     if isinstance(reading, Refused):
         return _refused(reading, None), REFUSED
-    return {"reading": to_json(reading)}, READ
+    lut = None
+    if reading.stage is TestPattern.TARGET_POST_SOFTWARE:
+        named = lut_acts(software_of(entry))
+        lut = None if named is None else central.lut_table(named)
+    return {"reading": to_json(reading), "suggestion": to_json(suggest(reading, lut))}, READ
 
 
 def _refused(refused: Refused, photo: str | None) -> dict[str, object]:
@@ -74,7 +82,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     central = HttpCentralReads(arguments.central, token, os.environ.get("PHOTO_WALL_READ_DATABASE_URL") or None)
     try:
         out, status = run(arguments.photos, central)
-    except (ValueError, RuntimeError, OSError, httpx.HTTPError) as error:
+    except (ValueError, RuntimeError, OSError, httpx.HTTPError, psycopg.Error) as error:
         print(f"error: {error}", file=sys.stderr)
         return ERROR
     print(json.dumps(out, indent=2, sort_keys=True))

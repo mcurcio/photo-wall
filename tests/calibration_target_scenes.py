@@ -138,6 +138,16 @@ class Truth:
     lowest_distinct: int
 
 
+def paper_matched(scene: Scene, *, level: float = 1.0, kelvin: int | None = None, **display: object) -> Display:
+    """A display whose white is the scene's paper white as the reader reads it (the bare paper
+    above its ink: read.py rule 1), times `level`; at `kelvin` (default the room's) with the same
+    luminance. Other Display fields from `display`."""
+    kelvin = scene.room_kelvin if kelvin is None else kelvin
+    luminance = np.array([0.2126, 0.7152, 0.0722])
+    same = float(luminance @ np.array(kelvin_white(scene.room_kelvin))) / float(luminance @ np.array(kelvin_white(kelvin)))
+    return Display(white=level * scene.paper_white * (1 - scene.ink) * same, kelvin=kelvin, **display)  # type: ignore[arg-type]
+
+
 # -- Fields ---------------------------------------------------------------------------------------
 
 
@@ -406,7 +416,7 @@ def raw_photo(scene: Scene, name: str = "scene.dng") -> Photo:
     """What a ProRAW DNG decodes to (photos.load_photo's RAW): linear, the clip at 1.0."""
     rng = np.random.default_rng(scene.seed)
     camera = _photographed(scene) * _shading(RAW_SHADING)
-    camera *= scene.exposure / float(scene.display.light(np.ones(3))[1])
+    camera *= scene.exposure / float(np.max(scene.display.light(np.ones(3))))
     camera = cv2.GaussianBlur(camera, (0, 0), 1.0)
     noise = rng.standard_normal(camera.shape).astype(np.float32)
     # The prototype's noise per 12 MP pixel (shot over a 4000-electron white, read 0.0003); a pixel

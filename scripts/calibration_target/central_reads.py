@@ -13,7 +13,9 @@ from __future__ import annotations
 from typing import Final, Protocol
 
 import httpx
+import psycopg
 
+from central.displays.lut import LUT_RECIPE_ID, baked_lut
 from central.displays.views import PictureEntryView
 from contracts.calibration_target import TargetCode
 from contracts.lut import LutRef
@@ -52,9 +54,14 @@ class HttpCentralReads:
         return PictureEntryView.model_validate(answer.json())
 
     def lut_table(self, ref: LutRef) -> bytes | None:
-        if self._database_url is None:
+        if self._database_url is None or ref.recipe_id != LUT_RECIPE_ID:
             return None
-        raise NotImplementedError("calibration targets: slice R2")
+        with psycopg.connect(self._database_url) as connection:
+            connection.read_only = True
+            with connection.transaction():
+                row = connection.execute("SELECT profile FROM luts WHERE profile_sha256 = %s",
+                                         (ref.profile_sha256,)).fetchone()
+        return None if row is None else baked_lut(bytes(row[0]))
 
 
 TIMEOUT_SECONDS: Final = 10.0

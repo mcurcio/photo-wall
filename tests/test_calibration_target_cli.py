@@ -1,4 +1,4 @@
-"""The calibration target reader's command and edges (decision 0026, slice R1): `run` reads photo
+"""The calibration target reader's command and edges (decision 0026, slices R1 and R2): `run` reads photo
 files against a CentralReads and answers {"reading"} or {"refused"} with its exit status; `main`
 prints it; `load_photo` decodes ProRAW DNG through rawpy and normal photos through Pillow;
 HttpCentralReads reads the sent entry over the operator route with the admin token."""
@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import functools
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import httpx
@@ -14,9 +15,12 @@ import pytest
 from calibration_target_scenes import CODE, Scene, entry, raw_bytes, raw_photo
 from PIL import Image
 
+from central.displays.lut import LUT_RECIPE_ID, baked_lut
 from central.displays.views import PictureEntryView
 from contracts.calibration_target import TargetCode
 from contracts.lut import LutRef
+from contracts.node_picture import NEUTRAL_SOFTWARE
+from contracts.tuning import TestPattern
 from scripts.calibration_target import __main__ as command
 from scripts.calibration_target import central_reads, photos
 from scripts.calibration_target.model import PhotoKind
@@ -25,18 +29,22 @@ CLEAN = Scene()
 
 
 class FakeCentral:
-    """A CentralReads holding sent entries by code."""
+    """A CentralReads holding sent entries by code and LUT tables by ref."""
 
-    def __init__(self, *entries: tuple[TargetCode, PictureEntryView]) -> None:
+    def __init__(self, *entries: tuple[TargetCode, PictureEntryView],
+                 tables: dict[LutRef, bytes] | None = None) -> None:
         self.entries = dict(entries)
+        self.tables = tables or {}
         self.asked: list[TargetCode] = []
+        self.luts: list[LutRef] = []
 
     def sent_entry(self, code: TargetCode) -> PictureEntryView | None:
         self.asked.append(code)
         return self.entries.get(code)
 
     def lut_table(self, ref: LutRef) -> bytes | None:
-        return None
+        self.luts.append(ref)
+        return self.tables.get(ref)
 
 
 class FakeRaw:
@@ -57,25 +65,40 @@ class FakeRaw:
 
 
 @functools.cache
+def scene_raw(scene: Scene) -> np.ndarray:
+    return raw_bytes(raw_photo(scene))
+
+
 def clean_raw() -> np.ndarray:
-    return raw_bytes(raw_photo(CLEAN))
+    return scene_raw(CLEAN)
 
 
 @pytest.fixture
-def dng(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, list]:
-    """A .dng path whose decode is the clean scene's synthetic RAW (rawpy.imread patched)."""
+def dngs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """dngs(scene) -> a .dng path whose decode is the scene's synthetic RAW (rawpy.imread patched);
+    the second value: every postprocess call's parameters."""
     import rawpy
-    path = tmp_path / "IMG_0042.DNG"
-    path.write_bytes(b"not a real DNG: rawpy.imread is patched")
+    scenes: dict[str, Scene] = {}
     calls: list = []
-    opened: list[str] = []
 
     def imread(name: str) -> FakeRaw:
-        opened.append(name)
-        return FakeRaw(clean_raw(), calls)
+        return FakeRaw(scene_raw(scenes[Path(name).name]), calls)
+
+    def make(scene: Scene) -> Path:
+        path = tmp_path / f"IMG_{len(scenes):04d}.DNG"
+        path.write_bytes(b"not a real DNG: rawpy.imread is patched")
+        scenes[path.name] = scene
+        return path
 
     monkeypatch.setattr(rawpy, "imread", imread)
-    return path, calls
+    return make, calls
+
+
+@pytest.fixture
+def dng(dngs) -> tuple[Path, list]:
+    """A .dng of the clean scene."""
+    make, calls = dngs
+    return make(CLEAN), calls
 
 
 # -- run ------------------------------------------------------------------------------------------
@@ -85,10 +108,50 @@ def test_run_reads_a_raw_photo_against_its_sent_entry(dng: tuple[Path, list]) ->
     path, _ = dng
     central = FakeCentral((CODE, entry(CLEAN)))
     out, status = command.run([str(path)], central)
-    assert status == 0 and set(out) == {"reading"}
-    assert central.asked == [CODE]
+    assert status == 0 and set(out) == {"reading", "suggestion"}
+    assert central.asked == [CODE] and central.luts == []
     assert json.loads(json.dumps(out)) == out
     assert out["reading"]["kind"] == "raw" and out["reading"]["lowest_distinct"] == 1
+    assert out["suggestion"]["stage"] == "pre-software"
+    assert {step["property"] for step in out["suggestion"]["steps"]} == {"white-level", "white-colour", "tone", "black"}
+
+
+TINT_REF = LutRef("c0ffee" + "0" * 58, "lut33-test-recipe")
+
+
+def _tint() -> bytes:
+    from contracts.lut import LUT_BYTES, LUT_GRID, lut_offset
+    body = bytearray(LUT_BYTES)
+    top = LUT_GRID - 1
+    for b in range(LUT_GRID):
+        for g in range(LUT_GRID):
+            for r in range(LUT_GRID):
+                at = lut_offset(r, g, b)
+                body[at:at + 3] = bytes((round(255 * 0.75 * r / top), round(255 * g / top), round(255 * b / top)))
+    return bytes(body)
+
+
+POST_LUT = Scene(stage=TestPattern.TARGET_POST_SOFTWARE, software=replace(NEUTRAL_SOFTWARE, lut=TINT_REF),
+                 lut=_tint())
+
+
+def test_run_suggests_post_software_with_the_entrys_lut_table(dngs) -> None:
+    make, _ = dngs
+    central = FakeCentral((CODE, entry(POST_LUT)), tables={TINT_REF: POST_LUT.lut})
+    out, status = command.run([str(make(POST_LUT))], central)
+    assert status == 0 and central.luts == [TINT_REF]
+    assert json.loads(json.dumps(out)) == out
+    suggestion = out["suggestion"]
+    assert suggestion["stage"] == "post-software" and set(suggestion) == {"stage", "to", "no_change"}
+    assert suggestion["to"]["lut"] == {"profile_sha256": TINT_REF.profile_sha256, "recipe_id": TINT_REF.recipe_id}
+
+
+def test_run_refuses_a_post_software_suggestion_without_the_lut_table(dngs) -> None:
+    make, _ = dngs
+    out, status = command.run([str(make(POST_LUT))], FakeCentral((CODE, entry(POST_LUT))))
+    assert status == 0 and set(out) == {"reading", "suggestion"}
+    assert out["suggestion"]["why"] == "lut-unread"
+    assert json.loads(json.dumps(out)) == out
 
 
 def test_run_refuses_an_unknown_entry(dng: tuple[Path, list]) -> None:
@@ -126,7 +189,7 @@ def test_main_prints_the_json_and_returns_its_status(dng: tuple[Path, list], mon
     monkeypatch.delenv("PHOTO_WALL_READ_DATABASE_URL", raising=False)
     assert command.main([str(path), "--central", "http://central.test"]) == 0
     assert built == [("http://central.test", "secret-token", None)]
-    assert set(json.loads(capsys.readouterr().out)) == {"reading"}
+    assert set(json.loads(capsys.readouterr().out)) == {"reading", "suggestion"}
 
 
 def test_main_without_a_token_or_with_an_unreadable_photo_is_an_error(
@@ -222,4 +285,55 @@ def test_an_unknown_entry_is_none_and_another_answer_an_error(transport) -> None
 
 def test_no_lut_table_without_a_database_address(transport) -> None:
     reads = central_reads.HttpCentralReads("http://central.test", "secret-token", None)
-    assert reads.lut_table(LutRef("0" * 64, "lut33-perceptual-relcol-bpc-1-lcms2.16")) is None
+    assert reads.lut_table(LutRef("0" * 64, LUT_RECIPE_ID)) is None
+
+
+class FakeConnection:
+    """psycopg.connect's connection for one `luts` row: records read_only, transactions, SQL."""
+
+    def __init__(self, rows: dict[str, bytes], log: list) -> None:
+        self.rows, self.log = rows, log
+        self.read_only = False
+
+    def __enter__(self) -> FakeConnection:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+    def transaction(self):
+        connection = self
+
+        class Transaction:
+            def __enter__(self) -> None:
+                connection.log.append(("begin", connection.read_only))
+
+            def __exit__(self, *exc: object) -> None:
+                connection.log.append(("end",))
+
+        return Transaction()
+
+    def execute(self, sql: str, parameters: tuple):
+        self.log.append((sql, parameters))
+        row = self.rows.get(parameters[0])
+        return type("Cursor", (), {"fetchone": lambda _: None if row is None else (row,)})()
+
+
+def test_a_lut_table_is_its_profile_baked_by_todays_recipe(monkeypatch: pytest.MonkeyPatch) -> None:
+    from support.icc_paper import lut_paper
+    profile = lut_paper()
+    sha = "ab" * 32
+    log: list = []
+    connected: list[str] = []
+
+    def connect(url: str) -> FakeConnection:
+        connected.append(url)
+        return FakeConnection({sha: profile}, log)
+
+    monkeypatch.setattr(central_reads.psycopg, "connect", connect)
+    reads = central_reads.HttpCentralReads("http://central.test", "secret-token", "postgresql://reader@db/photo_wall")
+    assert reads.lut_table(LutRef(sha, LUT_RECIPE_ID)) == baked_lut(profile)
+    assert connected == ["postgresql://reader@db/photo_wall"]
+    assert log == [("begin", True), ("SELECT profile FROM luts WHERE profile_sha256 = %s", (sha,)), ("end",)]
+    assert reads.lut_table(LutRef(sha, "another-recipe")) is None
+    assert reads.lut_table(LutRef("cd" * 32, LUT_RECIPE_ID)) is None
