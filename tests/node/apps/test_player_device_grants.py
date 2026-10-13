@@ -122,9 +122,25 @@ def test_start_spawns_the_player_with_this_nodes_grants(pi5, tmp_path, monkeypat
     assert store["launch"]["display"] == "weston-1"  # the incarnation this Player is bound to
 
 
+def test_no_job_on_the_display_unit_ever_starts_the_player():
+    """One owner of the Player's lifecycle, the broker (incident 2026-10-13, v0.35.0): a signal range
+    change restarted Weston, systemd turned the restart into a try-restart of the Player bound to
+    it (`BindsTo=`), the Player came back as a run the broker never launched, and the broker
+    crashed on it. systemd's transaction code propagates a restart as a try-restart along every
+    dependency with the PROPAGATE_STOP atom (BindsTo=, Requires=, Requisite=, PartOf=); Wants=
+    starts the display along with the Player. Only StopPropagatedFrom= (stop, never restart) and
+    After= (ordering) may name the display unit. Mutation probe: restore BindsTo= -> fails."""
+    from appliance.kernel.display_paths import DISPLAY_UNIT
+
+    props = app_unit_properties(Path("/r"), ())
+    naming = sorted(p.split("=", 1)[0] for p in props if DISPLAY_UNIT in p.split("=", 1)[1].split())
+    assert naming == ["After", "StopPropagatedFrom"]
+    assert f"StopPropagatedFrom={DISPLAY_UNIT}" in props and f"After={DISPLAY_UNIT}" in props
+    assert "Restart=no" in props
+
+
 def test_the_player_reaches_weston_through_the_socket_directory_bound_to_one_incarnation():
     props = app_unit_properties(Path("/r"), ())
-    assert "BindsTo=photo-wall-display.service" in props and "After=photo-wall-display.service" in props
     binds = next(p for p in props if p.startswith("BindReadOnlyPaths=/run/photo-wall-app-proof")).split("=", 1)[1]
     assert str(WAYLAND_DIRECTORY) in binds.split()  # the directory, at the same path
     assert not any("wayland-0" in bind for bind in binds.split())  # never the socket file
@@ -141,9 +157,11 @@ def test_pw_display_is_the_bases_fixed_gid():
 
 
 @pytest.mark.parametrize("shown,expected", [
-    ("ActiveState=active\nInvocationID=0f6e0c7d9c4a4e0e8d1f2a3b4c5d6e7f\n", "0f6e0c7d-9c4a-4e0e-8d1f-2a3b4c5d6e7f"),
-    ("ActiveState=activating\nInvocationID=0f6e0c7d9c4a4e0e8d1f2a3b4c5d6e7f\n", None),
-    ("ActiveState=inactive\nInvocationID=\n", None)])
+    ("ActiveState=active\nInvocationID=0f6e0c7d9c4a4e0e8d1f2a3b4c5d6e7f\nJob=\n", "0f6e0c7d-9c4a-4e0e-8d1f-2a3b4c5d6e7f"),
+    ("ActiveState=activating\nInvocationID=0f6e0c7d9c4a4e0e8d1f2a3b4c5d6e7f\nJob=812\n", None),
+    # A restart queued (a signal range change): the Weston on its way out is not up.
+    ("ActiveState=active\nInvocationID=0f6e0c7d9c4a4e0e8d1f2a3b4c5d6e7f\nJob=813\n", None),
+    ("ActiveState=inactive\nInvocationID=\nJob=\n", None)])
 def test_the_display_incarnation_is_the_active_westons_invocation(tmp_path, monkeypatch, shown, expected):
     driver = linux.SystemdAppProcessDriver(tmp_path, None, base_abi="b", graphics_abi="g", plugin_abi="p")
     calls = []
@@ -154,7 +172,7 @@ def test_the_display_incarnation_is_the_active_westons_invocation(tmp_path, monk
     monkeypatch.setattr(linux.subprocess, "run", run)
     assert driver.display_incarnation() == expected
     assert calls == [["/usr/bin/systemctl", "show", "photo-wall-display.service",
-                      "--property=ActiveState,InvocationID"]]
+                      "--property=ActiveState,InvocationID,Job"]]
 
 
 @pytest.mark.parametrize("load,quiet,expected", [("not-found", True, True), ("loaded", True, False),

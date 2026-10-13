@@ -7,6 +7,10 @@ live here, the lowest layer both reach. Stdlib only.
 - `app_started` / `app_exited`: the loop's current run changed. A run that was the loop's
   current run on one known turn and is not on a later known turn has exited, once; a run that
   becomes current has started, once. Observed on every known turn, Central session or not.
+- `app_observation_failed`: the broker could not observe the app's unit (a driver fault, say a
+  unit failed with its main process still set); reported once per reason while it lasts, and the
+  broker observes again on a backoff (`appliance.apps.broker_runner.OBSERVATION_BACKOFF_MS`),
+  never exiting over it.
 - `app_descriptors`: every `appliance.apps.descriptors.DESCRIPTOR_SAMPLE_MS` while a run is
   current, how many file descriptors it holds against its soft limit, read from /proc.
 
@@ -20,6 +24,7 @@ from typing import Final, TypedDict
 APP_STARTED: Final = "app_started"
 APP_EXITED: Final = "app_exited"
 APP_DESCRIPTORS: Final = "app_descriptors"
+APP_OBSERVATION_FAILED: Final = "app_observation_failed"
 
 
 class RunDocument(TypedDict):
@@ -37,6 +42,12 @@ class AppRunValue(TypedDict):
     run: RunDocument
 
 
+class AppObservationFailedValue(TypedDict):
+    """The value of `app_observation_failed`: the driver's fault code (its ValueError's text)."""
+
+    reason: str
+
+
 class AppDescriptorsValue(TypedDict):
     """The value of `app_descriptors`: `open` entries in /proc/<pid>/fd, `soft_limit` the
     process's soft RLIMIT_NOFILE (/proc/<pid>/limits "Max open files")."""
@@ -46,5 +57,5 @@ class AppDescriptorsValue(TypedDict):
     soft_limit: int
 
 
-__all__ = ["APP_DESCRIPTORS", "APP_EXITED", "APP_STARTED", "AppDescriptorsValue", "AppRunValue",
-           "RunDocument"]
+__all__ = ["APP_DESCRIPTORS", "APP_EXITED", "APP_OBSERVATION_FAILED", "APP_STARTED", "AppDescriptorsValue",
+           "AppObservationFailedValue", "AppRunValue", "RunDocument"]
