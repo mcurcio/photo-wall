@@ -26,7 +26,10 @@ display" and of the Output document's body:
   `PgPictureSessions` is the Picture tab (`PictureQueries`, `PictureCommands`): the session, its
   edits, Done, Revert, Copy and Restore. Done and Copy store through `write_picture`, the one kept
   picture write, which appends the Display's kept picture history entry in the same transaction
-  (configuration snapshots, migration 096; central/infra/picture_history_store.py). Display tuning (decision 0024; migration 094): the Display's
+  (configuration snapshots, migration 096; central/infra/picture_history_store.py); each rise of a
+  port's `picture_change` with a Display seen there appends the port's sent entry
+  (`picture_history.sent_record`: a draft, the wall put back, or the kept values), so what Central
+  sent at any time stays readable. Display tuning (decision 0024; migration 094): the Display's
   signal range is stored beside its picture and a session's draft carries it; the session's test
   pattern (`picture_sessions.test_pattern`, `test_pattern_ask`) rides the picture document only
   while the session is live (`picture.session_test_pattern`). The source also wakes at the earliest idle deadline of a
@@ -118,8 +121,10 @@ from central.displays.picture import (
 from central.displays.picture_history import (
     PictureEntryKind,
     PictureRecord,
+    Port,
     copied_record,
     done_record,
+    sent_record,
     unrecorded_record,
 )
 from central.displays.ports import DisplayRefused
@@ -166,7 +171,13 @@ from central.infra.picture_columns import (
     picture_fields,
     stored_picture,
 )
-from central.infra.picture_history_store import append_kept_in, latest_kept_in, picture_entry_in
+from central.infra.picture_history_store import (
+    append_kept_in,
+    append_sent_in,
+    latest_kept_in,
+    latest_sent_in,
+    picture_entry_in,
+)
 from central.infra.power_store import power_policy_in
 from central.installation_models import FrameOutput
 from central.live_session import Lease, begin_lease, touched
@@ -779,7 +790,7 @@ def output_documents(conn: Any, device_id: str, now: float) -> dict[str, bytes]:
     house = house_time_in(conn)
     policy = power_policy_in(conn, now)
     rows = conn.execute(
-        "SELECT o.output_id, b.frame_id, d.power_method, d.switch_input_on_power_on, d.never_off_on_other_input, "
+        "SELECT o.output_id, b.frame_id, d.id AS d_id, d.power_method, d.switch_input_on_power_on, d.never_off_on_other_input, "
         f"{PICTURE_COLUMNS}, d.hardware_restore, {_SESSION_COLUMNS}, w.change, w.digest, pd.picture_change, "
         f"pd.digest AS picture_digest, {_TEST_COLUMNS} FROM (SELECT output_id FROM outputs WHERE player_id=%(player)s "
         "UNION SELECT output_id FROM output_displays WHERE player_id=%(player)s) o "
@@ -821,6 +832,12 @@ def output_documents(conn: Any, device_id: str, now: float) -> dict[str, bytes]:
                 "picture_change=EXCLUDED.picture_change, digest=EXCLUDED.digest, document=EXCLUDED.document",
                 (player_id, output_id, picture_change, digest,
                  Jsonb(json.loads(encode_picture_document(wanted)))))
+            if not _no_display(row):
+                port = Port(player_id, output_id)
+                append_sent_in(conn, port, picture_change, display_id=row["d_id"], frame_id=row["frame_id"],
+                               record=sent_record(session=picture_session(row), now=now,
+                                                  previous=latest_sent_in(conn, port), picture=picture,
+                                                  test_pattern=pattern))
         documents[picture_document_key(output_id)] = encode_picture_document(wanted)
     return documents
 

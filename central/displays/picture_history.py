@@ -123,7 +123,15 @@ def sent_record(*, session: PictureSession | None, now: float, previous: Picture
     - else SENT_KEPT (no session, no restore).
     ValueError("sent_test_pattern") for a test pattern with no live session (the projection never
     sends one)."""
-    ...
+    if session is not None and session.lease.live(now):
+        return PictureRecord(PictureEntryKind.SENT_DRAFT, picture, session.session_id, session.restored_from,
+                             None if test_pattern is None else test_pattern.pattern)
+    if test_pattern is not None:
+        raise ValueError("sent_test_pattern")
+    if (previous is not None and previous.record.kind is PictureEntryKind.SENT_DRAFT
+            and not same_values(previous.record.picture, picture)):
+        return PictureRecord(PictureEntryKind.SENT_BACK, picture, previous.record.session_id, None, None)
+    return PictureRecord(PictureEntryKind.SENT_KEPT, picture, None, None, None)
 
 
 def _profile(picture: DisplayPicture) -> str | None:

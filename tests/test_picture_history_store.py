@@ -76,6 +76,12 @@ def _history(client, display_id: UUID, **params) -> dict:
     return answer.json()
 
 
+def _kept(history: dict) -> list[dict]:
+    """The kept entries of a history answer, in its order (the projection's sent entries are
+    tests/test_picture_sent_history.py's)."""
+    return [entry for entry in history["entries"] if entry["kind"].startswith("kept-")]
+
+
 def _restore(client, session: dict, entry_id, expected: int):
     return client.post(f"/v1/operator/picture-sessions/{session['session_id']}/restores", headers=AUTH,
                        json={"entry_id": str(entry_id), "expected_sequence": expected})
@@ -130,7 +136,7 @@ def test_done_appends_one_kept_entry_and_the_display_lists_it(registry):
             row["picture"]["signal_range"], row["lut_recipe_id"]) == ({"10": 46}, 114, "auto", None)
     name = _display(registry, player)["name"]
     assert history["display"] == {"id": str(display_id), "name": name} and history["unrecorded_change"] is False
-    [entry] = history["entries"]
+    [entry] = _kept(history)
     assert (entry["entry_id"], entry["kind"], entry["number"], entry["frame"], entry["test_pattern"]) == (
         str(row["id"]), "kept-done", 1, None, None)
     assert entry["display"] == {"id": str(display_id), "name": name}
@@ -176,7 +182,7 @@ def test_a_change_made_outside_photo_wall_is_recorded_before_the_next_kept_write
         _keep(client, registry, session)
         history = _history(client, display_id)
     assert history["unrecorded_change"] is False
-    done, unrecorded = history["entries"]
+    done, unrecorded = _kept(history)
     assert [(done["kind"], done["number"]), (unrecorded["kind"], unrecorded["number"])] == [
         ("kept-done", 2), ("kept-unrecorded", 1)]
     assert (unrecorded["picture"]["software"]["brightness_percent"], unrecorded["picture"]["software"]["contrast_percent"],
@@ -195,7 +201,7 @@ def test_a_kept_entry_names_its_luts_recipe(registry):
         assert client.post(f"/v1/operator/picture-sessions/{session['session_id']}/lut-edits", headers=AUTH,
                            json={"profile_sha256": LISTED, "expected_sequence": 1}).status_code == 200
         _keep(client, registry, session)
-        [entry] = _history(client, _display_id(registry, player))["entries"]
+        [entry] = _kept(_history(client, _display_id(registry, player)))
     [row] = _kept_rows(registry)
     assert (row["lut_recipe_id"], row["picture"]["software_lut_profile"]) == (LUT_RECIPE_ID, LISTED)
     assert entry["picture"]["lut_recipe_id"] == LUT_RECIPE_ID
@@ -212,7 +218,7 @@ def test_restore_loads_an_entry_into_the_draft_and_done_names_it(registry):
         _hardware(client, first, "10", 46, 1)
         _software(client, first, "brightness", 114, 2)
         _keep(client, registry, first)
-        [kept] = _history(client, display_id)["entries"]
+        [kept] = _kept(_history(client, display_id))
         session = _begin(client)
         _software(client, session, "brightness", 80, 1)
         assert _picture(registry).software.brightness_percent == 80
@@ -226,7 +232,7 @@ def test_restore_loads_an_entry_into_the_draft_and_done_names_it(registry):
         document = _picture(registry)
         assert (dict(document.hardware), document.software.brightness_percent) == ({"10": 46}, 114)
         _keep(client, registry, session)
-        newest = _history(client, display_id)["entries"][0]
+        newest = _kept(_history(client, display_id))[0]
     assert (newest["kind"], newest["restored_from"], newest["session_id"]) == (
         "kept-done", kept["entry_id"], session["session_id"])
     assert _display(registry, player)["software_brightness_percent"] == 114
@@ -317,7 +323,7 @@ def test_a_display_keeps_its_newest_kept_entries(registry, monkeypatch):
             session = _begin(client)
             _software(client, session, "brightness", brightness, 1)
             _keep(client, registry, session)
-        entries = _history(client, _display_id(registry, player))["entries"]
+        entries = _kept(_history(client, _display_id(registry, player)))
     assert [(entry["number"], entry["picture"]["software"]["brightness_percent"]) for entry in entries] == [
         (5, 105), (4, 104), (3, 103)]
 

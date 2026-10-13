@@ -26,6 +26,7 @@ from psycopg.types.json import Jsonb
 
 from central.displays.picture_history import (
     KEPT_KINDS,
+    SENT_KINDS,
     PictureEntry,
     PictureEntryKind,
     PictureRecord,
@@ -74,7 +75,21 @@ def append_sent_in(conn: Any, port: Port, picture_change: int, *, display_id: UU
     """Append `record` (a sent kind) as the port's entry for `picture_change`, naming the Display seen
     there and the Frame bound to it (None: unbound); nothing when the port already has an entry for
     that change. Trims the port to SENT_ENTRIES. ValueError("picture_history_kind") for a kept kind."""
-    ...
+    if record.kind not in SENT_KINDS:
+        raise ValueError("picture_history_kind")
+    lut, pattern = record.picture.software.lut, record.test_pattern
+    conn.execute(
+        "INSERT INTO picture_sent_entries(id, player_id, output_id, picture_change, display_id, frame_id, kind, at, "
+        "session_id, restored_from, picture, lut_recipe_id, test_pattern) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, clock_timestamp(), %s, %s, %s, %s, %s) "
+        "ON CONFLICT (player_id, output_id, picture_change) DO NOTHING",
+        (uuid.uuid4(), port.player_id, port.output_id, picture_change, display_id, frame_id, record.kind.value,
+         record.session_id, record.restored_from, Jsonb(picture_fields(record.picture)),
+         None if lut is None else lut.recipe_id, None if pattern is None else pattern.value))
+    conn.execute("DELETE FROM picture_sent_entries WHERE player_id=%(player)s AND output_id=%(output)s "
+                 "AND picture_change <= (SELECT picture_change FROM picture_sent_entries WHERE player_id=%(player)s "
+                 "AND output_id=%(output)s ORDER BY picture_change DESC OFFSET %(keep)s LIMIT 1)",
+                 {"player": port.player_id, "output": port.output_id, "keep": retention.SENT_ENTRIES})
 
 
 def latest_kept_in(conn: Any, display_id: UUID) -> PictureEntry | None:

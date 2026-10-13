@@ -34,6 +34,7 @@ from central.displays.picture_history import (
     copied_record,
     done_record,
     same_values,
+    sent_record,
     unrecorded_record,
 )
 from central.displays.views import picture_entry_view
@@ -51,6 +52,7 @@ from contracts.node_picture import (
     HardwareSetting,
     RangeKind,
     SignalRange,
+    TestPatternAsk,
 )
 from contracts.tuning import TestPattern
 
@@ -224,3 +226,49 @@ def test_an_entrys_json_names_utc_times_and_todays_names():
     for naive in (at.replace(tzinfo=None), at.astimezone(timezone(timedelta(hours=2))).replace(tzinfo=None)):
         with pytest.raises(ValueError):
             picture_entry_view(replace(entry, at=naive), display_name="Samsung", frame_name=None, lut_name=None)
+
+
+# --- Sent entries (slice S2) ------------------------------------------------------------------------
+
+def _sent(kind: PictureEntryKind, picture: DisplayPicture, session_id=None) -> PictureEntry:
+    return PictureEntry(uuid4(), DISPLAY, 4, datetime(2026, 10, 13, 21, 4, 7, tzinfo=UTC), Port("pi", "HDMI-A-1"),
+                        "kitchen", PictureRecord(kind, picture, session_id, None, None))
+
+
+def test_sent_record_while_a_session_is_live_is_its_draft_with_its_pattern():
+    """Acceptance 10, branch 1. Mutation probe P2-kind-from-stored is the DB test's."""
+    session = replace(_session(_picture(brightness_percent=90)), restored_from=ENTRY)
+    ask = TestPatternAsk(TestPattern.GREY_RAMP, 4)
+    record = sent_record(session=session, now=1.0, previous=None, picture=session.draft, test_pattern=ask)
+    assert record == PictureRecord(PictureEntryKind.SENT_DRAFT, session.draft, session.session_id, ENTRY,
+                                   TestPattern.GREY_RAMP)
+
+
+def test_sent_record_after_a_draft_went_is_back_only_when_the_values_differ():
+    """Acceptance 10, branches 2 and 3: a lapsed session is no session. Mutation probes:
+    P2-always-kept (SENT_KEPT with no live session) -> no SENT_BACK; P2-lease-ignored (any present
+    session is live) -> the lapsed one still reads SENT_DRAFT."""
+    draft_id = uuid4()
+    previous = _sent(PictureEntryKind.SENT_DRAFT, _picture(brightness_percent=90), draft_id)
+    lapsed = _session(_picture(brightness_percent=90), idle_until=0.5)
+    back = sent_record(session=lapsed, now=1.0, previous=previous, picture=default_picture(), test_pattern=None)
+    assert back == PictureRecord(PictureEntryKind.SENT_BACK, default_picture(), draft_id, None, None)
+    same = sent_record(session=None, now=1.0, previous=previous, picture=_picture(brightness_percent=90),
+                       test_pattern=None)
+    assert same == PictureRecord(PictureEntryKind.SENT_KEPT, _picture(brightness_percent=90), None, None, None)
+
+
+def test_sent_record_with_no_draft_before_is_the_kept_values():
+    """Acceptance 10, branch 4: no entry yet (a Display newly seen), or the previous one not a draft."""
+    for previous in (None, _sent(PictureEntryKind.SENT_KEPT, _picture(brightness_percent=90)),
+                     _sent(PictureEntryKind.SENT_BACK, _picture(brightness_percent=90), uuid4())):
+        record = sent_record(session=None, now=1.0, previous=previous, picture=default_picture(), test_pattern=None)
+        assert record == PictureRecord(PictureEntryKind.SENT_KEPT, default_picture(), None, None, None)
+
+
+def test_sent_record_refuses_a_test_pattern_with_no_live_session():
+    """Mutation probe P2-pattern-allowed: drop the ValueError -> a pattern is recorded as kept."""
+    ask = TestPatternAsk(TestPattern.WHITE, 2)
+    for session in (None, _session(idle_until=0.5)):
+        with pytest.raises(ValueError, match="sent_test_pattern"):
+            sent_record(session=session, now=1.0, previous=None, picture=default_picture(), test_pattern=ask)
