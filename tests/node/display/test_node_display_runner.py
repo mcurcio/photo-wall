@@ -356,8 +356,14 @@ def test_the_signal_range_request_and_its_units_say_the_same():
     assert f"Unit={paths.SIGNAL_RANGE_UNIT}" in watch
     oneshot = (units / paths.SIGNAL_RANGE_UNIT).read_text().splitlines()
     assert "Type=oneshot" in oneshot
+    # A range change restarts the display unit and every unit bound to it (the controller): each
+    # one's start count is flushed first, so no run of range changes spends any unit's crash start
+    # limit. Derived from the units, so a new BindsTo= unit fails here until the oneshot resets it.
+    bound = sorted(unit.name for unit in units.glob("*.service")
+                   if f"BindsTo={paths.DISPLAY_UNIT}" in unit.read_text().splitlines())
+    assert bound == ["photo-wall-display-controller.service"]
     assert [line for line in oneshot if line.startswith("ExecStart")] == [
-        f"ExecStart=-/usr/bin/systemctl reset-failed {paths.DISPLAY_UNIT}",
+        f"ExecStart=-/usr/bin/systemctl reset-failed {' '.join([paths.DISPLAY_UNIT, *bound])}",
         f"ExecStart=/usr/bin/systemctl --no-block restart {paths.DISPLAY_UNIT}"]
     target = (units / "photo-wall-node.target").read_text().splitlines()
     (wants,) = [line for line in target if line.startswith("Wants=")]

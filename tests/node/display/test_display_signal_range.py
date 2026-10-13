@@ -22,6 +22,7 @@ from appliance.display_host.signal_range import (
     REQUEST_BYTES,
     FileRangeRequests,
     RangeRequest,
+    RangeUnknown,
     decode_request,
     encode_request,
     signal_outcome,
@@ -38,18 +39,20 @@ from contracts.node_picture import (
 )
 
 AUTO, FULL, LIMITED = SignalRange.AUTO, SignalRange.FULL, SignalRange.LIMITED
+NO_PROPERTY, UNREADABLE = RangeUnknown.NO_PROPERTY, RangeUnknown.UNREADABLE
 WAIT = 0.3          # the test's RESTART_WAIT_SECONDS: no restart comes here
 
 
 class Connectors:
-    """`ConnectorRangeSetter`: each Output's range in force (absent: no range property)."""
+    """`ConnectorRangeSetter`: each Output's range in force, or why it is not known (absent: no
+    range property)."""
 
-    def __init__(self, ranges: dict[str, SignalRange], *, takes: bool = True) -> None:
+    def __init__(self, ranges: dict[str, SignalRange | RangeUnknown], *, takes: bool = True) -> None:
         self.ranges, self.takes = dict(ranges), takes
         self.sets: list[tuple[str, SignalRange]] = []
 
     def read(self, output_id):
-        return self.ranges.get(output_id)
+        return self.ranges.get(output_id, NO_PROPERTY)
 
     def set(self, output_id, wanted):
         self.sets.append((output_id, wanted))
@@ -115,8 +118,10 @@ def running(tmp_path):
 # The pure rule ---------------------------------------------------------------------------------
 
 @pytest.mark.parametrize(("wanted", "in_force", "requested", "outcome"), [
-    (FULL, None, None, SignalResult.UNSUPPORTED),
-    (FULL, None, FULL, SignalResult.UNSUPPORTED),
+    (FULL, NO_PROPERTY, None, SignalResult.UNSUPPORTED),
+    (FULL, NO_PROPERTY, FULL, SignalResult.UNSUPPORTED),
+    (FULL, UNREADABLE, None, SignalResult.FAILED),
+    (AUTO, UNREADABLE, None, SignalResult.FAILED),
     (FULL, FULL, None, SignalResult.APPLIED),
     (FULL, FULL, LIMITED, SignalResult.APPLIED),
     (FULL, AUTO, FULL, SignalResult.FAILED),
@@ -125,7 +130,9 @@ def running(tmp_path):
     (AUTO, FULL, FULL, None),
 ])
 def test_signal_outcome(wanted, in_force, requested, outcome):
-    """Acceptance 1. Mutation probe: FAILED when requested != wanted -> (FULL, AUTO, LIMITED) fails."""
+    """Acceptance 1; only a connector with no range property is UNSUPPORTED, one that did not read
+    is FAILED. Mutation probes: FAILED when requested != wanted -> (FULL, AUTO, LIMITED) fails;
+    UNSUPPORTED for any unknown -> the UNREADABLE rows fail."""
     assert signal_outcome(wanted, in_force, requested) is outcome
 
 
@@ -180,6 +187,17 @@ def test_an_output_without_a_range_is_unsupported_and_never_restarts(running):
     assert requests.made == []
 
 
+def test_a_connector_that_does_not_read_fails_and_never_restarts(running):
+    """A sandbox, libdrm or ioctl fault on a real HDMI port is FAILED (Auto reported in force, as
+    nothing is known), never "no range setting", and asks no restart. Mutation probe: treat
+    UNREADABLE as no property -> UNSUPPORTED."""
+    run, requests = running(Connectors({OUTPUT: UNREADABLE}))
+    run.controller.document(OUTPUT, document(3, FULL))
+    assert signal_of(run, 3) == SignalReport(3, AUTO, SignalResult.FAILED)
+    time.sleep(WAIT + 0.2)
+    assert requests.made == []
+
+
 def test_a_restart_that_does_not_come_releases_the_ports_and_fails(running):
     """Acceptance 6: no restart within the wait -> every port's turn released, FAILED reported with
     the range in force, and the change's DDC/CI write then runs. Mutation probe: never release ->
@@ -194,13 +212,39 @@ def test_a_restart_that_does_not_come_releases_the_ports_and_fails(running):
     assert all(port._held is None for port in run.display.channel._ports.values())
 
 
+def test_a_restart_that_finds_a_port_held_asks_nothing_fails_and_frees_every_port(running):
+    """Acceptance 6, the ports not free: a power command holds Virtual-2 (the last port in
+    hold_all's order) past the wait -> no request is written, FAILED is reported with the range in
+    force, the ports already taken are released, and the change's DDC/CI write runs. Mutation
+    probes: request even when hold_all answers None -> a request; drop hold_all's release of the
+    ports it took -> HDMI-A-1 stays held and the write is no answer."""
+    run, requests = running(Connectors({OUTPUT: AUTO}))
+    run.offered()
+    held = run.display.channel._port("Virtual-2")
+    assert held.acquire(Urgency.POWER, 1.0)
+    try:
+        run.controller.document(OUTPUT, document(5, LIMITED, {"10": 46}))
+        assert signal_of(run, 5) == SignalReport(5, AUTO, SignalResult.FAILED)
+        assert run.reported(5).results == {"10": HardwareResult(WriteResult.TAKEN, 60, 46)}
+        assert requests.made == []
+        ports = run.display.channel._ports
+        assert all(ports[output_id]._held is None for output_id in ports if output_id != "Virtual-2")
+    finally:
+        held.release()
+
+
 def test_a_restart_asks_every_outputs_range(running):
-    """Every Output's wanted range rides the request: another Output's latest document's, else its
-    range in force; none for an Output without one."""
-    run, requests = running(Connectors({OUTPUT: AUTO, "HDMI-A-2": LIMITED}))
+    """Every Output's wanted range rides the request: another Output's latest document's (HDMI-A-2's
+    Full, whatever its connector holds), else its range in force (Virtual-1's Limited); none for an
+    Output without one. Mutation probe: never use another Output's document -> HDMI-A-2 rides as Auto."""
+    run, requests = running(Connectors({OUTPUT: AUTO, "HDMI-A-2": AUTO, "Virtual-1": LIMITED}),
+                            last={"HDMI-A-2": FULL})
+    run.connect("HDMI-A-2")
+    run.controller.document("HDMI-A-2", document(4, FULL, output_id="HDMI-A-2"))
+    assert signal_of(run, 4, "HDMI-A-2") == SignalReport(4, AUTO, SignalResult.FAILED)   # no restart of its own
     run.controller.document(OUTPUT, document(2, FULL))
     until(lambda: requests.made)
-    assert requests.made[0] == RangeRequest({OUTPUT: FULL, "HDMI-A-2": LIMITED})
+    assert requests.made[0] == RangeRequest({OUTPUT: FULL, "HDMI-A-2": FULL, "Virtual-1": LIMITED})
 
 
 # The request and the root step -----------------------------------------------------------------
@@ -288,10 +332,12 @@ def test_main_exits_zero_whatever_happens(monkeypatch, tmp_path):
     assert exited.value.code == 0
 
 
-def test_the_drm_reader_finds_no_range_without_a_connector_or_libdrm(tmp_path):
-    """No connector directory, or no connector_id, or no card node: no range property (None)."""
-    (tmp_path / "card1-HDMI-A-1").mkdir()
+def test_the_drm_reader_tells_no_range_property_from_a_connector_that_did_not_read(tmp_path):
+    """No connector directory: no range property. A connector whose connector_id or card node does
+    not read (no libdrm, a sandbox): unreadable, and nothing set."""
     ranges = signal_range.DrmConnectorRanges(tmp_path, tmp_path / "dri")
-    assert ranges.read(OUTPUT) is None and ranges.read("Virtual-1") is None
+    assert ranges.read(OUTPUT) is NO_PROPERTY and ranges.read("Virtual-1") is NO_PROPERTY
+    (tmp_path / "card1-HDMI-A-1").mkdir()
+    assert ranges.read(OUTPUT) is UNREADABLE
     (tmp_path / "card1-HDMI-A-1" / "connector_id").write_text("33\n")
-    assert ranges.read(OUTPUT) is None and ranges.set(OUTPUT, FULL) is False
+    assert ranges.read(OUTPUT) is UNREADABLE and ranges.set(OUTPUT, FULL) is False

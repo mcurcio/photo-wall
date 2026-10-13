@@ -11,8 +11,14 @@ is the restart request: photo-wall-display-signal.path starts photo-wall-display
 which restarts Weston, and this step sets the range before the new Weston takes the screen.
 
 Rules this module owns (one home each):
+- **What a read of the connector tells** (`RangeUnknown`): its range in force; NO_PROPERTY when
+  the Pi has no such connector or the connector has no range property (a Virtual output, not
+  HDMI); UNREADABLE when it could not be read (no libdrm, the card node or connector_id did not
+  open, an ioctl failed, a value outside PROPERTY_VALUES), with the reason in the journal. Only a
+  confirmed missing property is "no range setting".
 - **The kernel is the truth** (`signal_outcome`): UNSUPPORTED when the connector has no range
-  property (a Virtual output, not HDMI); APPLIED when the connector holds the wanted range; FAILED
+  property; FAILED when it could not be read (never a restart: nothing is known to change);
+  APPLIED when the connector holds the wanted range; FAILED
   when a restart was already asked for this range and the connector still differs, so a range the
   driver refuses is never asked again until the document's range changes or the Pi restarts (no
   restart loop); otherwise a restart is asked. Auto's outcome is never recomputed: Auto is the
@@ -40,6 +46,7 @@ import sys
 from collections.abc import Mapping
 from ctypes import POINTER, Structure, c_char, c_int, c_uint32, c_uint64
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from types import MappingProxyType
 from typing import Final, Protocol
@@ -67,6 +74,12 @@ _VALUES: Final = frozenset(str(item) for item in SignalRange)
 log = logging.getLogger(__name__)
 
 
+class RangeUnknown(Enum):
+    """Why a read of the connector gave no range (the module's first rule)."""
+    NO_PROPERTY = "no_property"     # no such connector, or it has no range property: no range setting
+    UNREADABLE = "unreadable"       # it could not be read: a fault, logged
+
+
 @dataclass(frozen=True)
 class RangeRequest:
     """The ranges a Weston restart was asked for, per Output id (OUTPUT_IDS): the controller writes
@@ -74,11 +87,13 @@ class RangeRequest:
     ranges: Mapping[str, SignalRange]
 
 
-def signal_outcome(wanted: SignalRange, in_force: SignalRange | None,
+def signal_outcome(wanted: SignalRange, in_force: SignalRange | RangeUnknown,
                    requested: SignalRange | None) -> SignalResult | None:
-    """The module's first rule. None: ask for a restart. Pure."""
-    if in_force is None:
+    """The module's second rule. None: ask for a restart. Pure."""
+    if in_force is RangeUnknown.NO_PROPERTY:
         return SignalResult.UNSUPPORTED
+    if in_force is RangeUnknown.UNREADABLE:
+        return SignalResult.FAILED
     if in_force == wanted:
         return SignalResult.APPLIED
     if requested == wanted:
@@ -103,7 +118,7 @@ def decode_request(raw: bytes) -> RangeRequest:
 
 
 class ConnectorRanges(Protocol):
-    def read(self, output_id: str) -> SignalRange | None: ...           # None: no such connector or no range property
+    def read(self, output_id: str) -> SignalRange | RangeUnknown: ...   # never raises
 
 
 class ConnectorRangeSetter(ConnectorRanges, Protocol):
@@ -158,8 +173,14 @@ class DrmConnectorRanges:
     def __init__(self, drm_root: Path = Path("/sys/class/drm"), dev_root: Path = Path("/dev/dri")) -> None:
         self._drm_root, self._dev_root = drm_root, dev_root
 
-    def read(self, output_id: str) -> SignalRange | None:
-        return self._with(output_id, lambda drm, fd, connector, found: self._range(found))
+    def read(self, output_id: str) -> SignalRange | RangeUnknown:
+        def judge(drm: ctypes.CDLL, fd: int, connector: int, found: _Found) -> SignalRange | RangeUnknown:
+            if (in_force := self._range(found)) is None:
+                log.warning("signal range: %s's %s holds a value outside %s", output_id, PROPERTY,
+                            sorted(PROPERTY_VALUES.values()))
+                return RangeUnknown.UNREADABLE
+            return in_force
+        return self._with(output_id, judge)
 
     def set(self, output_id: str, signal_range: SignalRange) -> bool:
         def write(drm: ctypes.CDLL, fd: int, connector: int, found: _Found) -> bool:
@@ -179,8 +200,10 @@ class DrmConnectorRanges:
         return _RANGES.get(name) if name is not None else None
 
     def _with(self, output_id, act):
-        """`act(drm, fd, connector_id, found)` on the connector's card; None when there is no
-        connector, no property, no libdrm or the card does not open."""
+        """`act(drm, fd, connector_id, found)` on the connector's card; NO_PROPERTY when there is
+        no such connector or it has no PROPERTY; UNREADABLE (logged) when the connector_id, libdrm
+        or the card node does not open, or an ioctl fails."""
+        answer = RangeUnknown.NO_PROPERTY
         for directory in _connectors(self._drm_root, output_id):
             try:
                 connector = int((directory / "connector_id").read_text().strip())
@@ -188,16 +211,18 @@ class DrmConnectorRanges:
                 drm = _libdrm()
                 fd = os.open(self._dev_root / card, os.O_RDWR | os.O_CLOEXEC)
             except (OSError, ValueError):
+                log.warning("signal range: %s's connector did not open", output_id, exc_info=True)
+                answer = RangeUnknown.UNREADABLE
                 continue
             try:
                 found = self._find(drm, fd, connector)
-                return None if found is None else act(drm, fd, connector, found)
+                return RangeUnknown.NO_PROPERTY if found is None else act(drm, fd, connector, found)
             except (OSError, ValueError, ctypes.ArgumentError):
                 log.warning("signal range: %s's connector did not read", output_id, exc_info=True)
-                return None
+                return RangeUnknown.UNREADABLE
             finally:
                 os.close(fd)
-        return None
+        return answer
 
     @staticmethod
     def _find(drm: ctypes.CDLL, fd: int, connector: int) -> _Found | None:
@@ -281,7 +306,7 @@ def apply_requested(request: RangeRequest, connectors: ConnectorRangeSetter, tty
         log.warning("signal range: %s did not blank", tty, exc_info=True)
     for output_id, wanted in sorted(request.ranges.items()):
         try:
-            if connectors.read(output_id) in (None, wanted):
+            if connectors.read(output_id) in (RangeUnknown.NO_PROPERTY, wanted):
                 continue
             if not connectors.set(output_id, wanted):
                 log.warning("signal range: %s did not take %s", output_id, wanted)
@@ -314,7 +339,7 @@ def main() -> None:
 
 
 __all__ = ["PROPERTY", "PROPERTY_VALUES", "REQUEST_BYTES", "RESTART_WAIT_SECONDS", "TTY", "ConnectorRangeSetter",
-           "ConnectorRanges", "DrmConnectorRanges", "FileRangeRequests", "RangeRequest", "RangeRequests",
+           "ConnectorRanges", "DrmConnectorRanges", "FileRangeRequests", "RangeRequest", "RangeRequests", "RangeUnknown",
            "apply_requested", "decode_request", "encode_request", "main", "signal_outcome"]
 
 if __name__ == "__main__":

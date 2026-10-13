@@ -80,7 +80,7 @@ Rules this module owns (one home each):
   (this document's; another Output's latest document's, else its range in force); the restart
   normally ends this process with Weston, and the next controller judges the range again. An
   outcome (or a restart that did not come: FAILED, with the range in force read again) is
-  reported as SignalReport(the change, the range in force, AUTO when there is none, the outcome);
+  reported as SignalReport(the change, the range in force, AUTO when none is known, the outcome);
   the hardware writes follow as before. The kernel is the truth: the range is read back, never
   assumed, and Auto's outcome is never recomputed.
 - **A restart waits for DDC/CI and power** (`RestartSignal.restart`): it takes every port's turn
@@ -152,6 +152,7 @@ from .signal_range import (
     ConnectorRanges,
     RangeRequest,
     RangeRequests,
+    RangeUnknown,
     signal_outcome,
 )
 
@@ -311,7 +312,7 @@ class FileAppliedPictures:
 class SignalPort(Protocol):
     """The connector's signal range (display tuning, decision 0024)."""
 
-    def in_force(self, output_id: str) -> SignalRange | None: ...   # None: no range property (not HDMI)
+    def in_force(self, output_id: str) -> SignalRange | RangeUnknown: ...   # signal_range.ConnectorRanges.read
 
     def requested(self, output_id: str) -> SignalRange | None: ...  # the range the last restart asked for
 
@@ -332,7 +333,7 @@ class RestartSignal:
         self._connectors, self._requests, self._ddc = connectors, requests, ddc
         self._wait, self._sleep = wait, sleep
 
-    def in_force(self, output_id: str) -> SignalRange | None:
+    def in_force(self, output_id: str) -> SignalRange | RangeUnknown:
         return self._connectors.read(output_id)
 
     def requested(self, output_id: str) -> SignalRange | None:
@@ -700,12 +701,13 @@ class PictureController:
             self._signal.restart(self._wanted_ranges(output_id, document.signal_range))
             outcome, in_force = SignalResult.FAILED, self._signal.in_force(output_id)
         with self._wake:
-            port.signal = SignalReport(document.picture_change, in_force or SignalRange.AUTO, outcome)
+            known = in_force if isinstance(in_force, SignalRange) else SignalRange.AUTO
+            port.signal = SignalReport(document.picture_change, known, outcome)
             self._report(output_id, port)
 
     def _wanted_ranges(self, output_id: str, wanted: SignalRange) -> dict[str, SignalRange]:
         """Every Output's wanted range for a restart: `wanted` for `output_id`; another Output's
-        latest document's, else its range in force (none when it has no range property)."""
+        latest document's, else its range in force (none when it has none or did not read)."""
         with self._wake:
             documents = {other: port.document for other, port in self._ports.items() if port.document is not None}
         ranges = {output_id: wanted}
@@ -714,7 +716,7 @@ class PictureController:
                 continue
             if other in documents:
                 ranges[other] = documents[other].signal_range
-            elif (in_force := self._signal.in_force(other)) is not None:
+            elif isinstance(in_force := self._signal.in_force(other), SignalRange):
                 ranges[other] = in_force
         return ranges
 

@@ -38,6 +38,7 @@ from appliance.display_host.picture_list import (
     FileOfferedCache,
     PictureListAsker,
 )
+from appliance.display_host.signal_range import RangeUnknown
 from contracts.kelvin import kelvin_white
 from contracts.lut import LutRef
 from contracts.node_frame import (
@@ -127,7 +128,7 @@ class NoRange:
     """`SignalPort` of an output with no range property (as a Virtual output): never a restart."""
 
     def in_force(self, output_id):
-        return None
+        return RangeUnknown.NO_PROPERTY
 
     def requested(self, output_id):
         return None
