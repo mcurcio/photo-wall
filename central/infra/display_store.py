@@ -24,7 +24,10 @@ display" and of the Output document's body:
   own `picture_change` that rises only when `picture_digest` differs (never with the Output
   document's `change`); the judge records each picture report on its Output (`picture_reports`);
   `PgPictureSessions` is the Picture tab (`PictureQueries`, `PictureCommands`): the session, its
-  two edits, Done, Revert and Copy. The source also wakes at the earliest idle deadline of a
+  edits, Done, Revert and Copy. Display tuning (decision 0024; migration 094): the Display's
+  signal range is stored beside its picture and a session's draft carries it; the session's test
+  pattern (`picture_sessions.test_pattern`, `test_pattern_ask`) rides the picture document only
+  while the session is live (`picture.session_test_pattern`). The source also wakes at the earliest idle deadline of a
   picture session on its Node's Displays, so an abandoned session's revert reaches the Pi with no
   reaper.
 
@@ -90,7 +93,9 @@ from central.displays.picture import (
     default_picture,
     edited_hardware,
     edited_lut,
+    edited_signal_range,
     edited_software,
+    edited_test_pattern,
     effective_picture,
     hardware_answered,
     kept_picture,
@@ -100,7 +105,10 @@ from central.displays.picture import (
     presented,
     restore_answered,
     restore_of,
+    session_test_pattern,
+    signal_answered,
     software_touch,
+    test_pattern_state,
     with_befores,
     with_restore,
 )
@@ -127,8 +135,12 @@ from central.displays.views import (
     PictureSessionView,
     PowerTestAccepted,
     PowerTestView,
+    SignalRangeEdit,
+    SignalView,
     SoftwareEdit,
     SoftwarePictureView,
+    TestPatternEdit,
+    TestPatternView,
     in_force_view,
 )
 from central.fleet.node_bus_presence import bus_links_in
@@ -161,10 +173,13 @@ from contracts.node_output import (
 )
 from contracts.node_picture import (
     PICTURE_LIST,
+    TEST_PATTERN_SECONDS,
     HardwareSetting,
     PictureDocument,
     PictureReport,
+    SignalRange,
     SoftwarePicture,
+    TestPatternAsk,
     decode_picture_document,
     decode_picture_report,
     encode_picture_document,
@@ -172,6 +187,7 @@ from contracts.node_picture import (
     picture_document_key,
     picture_report_key,
 )
+from contracts.tuning import TestPattern
 from nodeapi.hub import DocumentSource
 from nodeapi.pull import Read
 
@@ -410,7 +426,7 @@ def _player_of(conn: Any, device_id: str, lock: str) -> str | None:
 _PICTURE_FIELDS: Final = ("hardware_picture", "software_brightness_percent", "software_contrast_percent",
                           "colour_temperature_kelvin", "gamma_tenths", "software_saturation_percent",
                           "software_highlight_rolloff_percent", "software_black_floor_tenths", "software_lut_profile",
-                          "software_lut_amount_percent")
+                          "software_lut_amount_percent", "signal_range")
 _PICTURE_COLUMNS: Final = ", ".join("d." + field for field in _PICTURE_FIELDS)
 
 
@@ -426,7 +442,8 @@ def stored_picture(row: Mapping[str, Any]) -> DisplayPicture:
                                           row["software_saturation_percent"], row["software_highlight_rolloff_percent"],
                                           row["software_black_floor_tenths"],
                                           None if lut is None else LutRef(lut, LUT_RECIPE_ID),
-                                          row["software_lut_amount_percent"]))
+                                          row["software_lut_amount_percent"]),
+                          SignalRange(row["signal_range"]))
 
 
 def picture_fields(picture: DisplayPicture) -> dict[str, Any]:
@@ -440,7 +457,8 @@ def picture_fields(picture: DisplayPicture) -> dict[str, Any]:
             "software_highlight_rolloff_percent": software.highlight_rolloff_percent,
             "software_black_floor_tenths": software.black_floor_tenths,
             "software_lut_profile": None if software.lut is None else software.lut.profile_sha256,
-            "software_lut_amount_percent": software.lut_amount_percent}
+            "software_lut_amount_percent": software.lut_amount_percent,
+            "signal_range": picture.signal_range.value}
 
 
 def write_picture(conn: Any, display_id: UUID, picture: DisplayPicture) -> None:
@@ -454,7 +472,8 @@ def write_picture(conn: Any, display_id: UUID, picture: DisplayPicture) -> None:
 _SESSION_COLUMNS: Final = (
     "ps.id AS session_id, ps.display_id AS session_display_id, ps.frame_id AS session_frame_id, "
     "ps.sequence AS session_sequence, ps.draft AS session_draft, ps.began_at_change, ps.hardware_before, "
-    "ps.touched_hardware, ps.touched_software, ps.idle_until AS session_idle_until")
+    "ps.touched_hardware, ps.touched_software, ps.idle_until AS session_idle_until, "
+    "ps.test_pattern AS session_test_pattern, ps.test_pattern_ask AS session_test_pattern_ask")
 
 
 def picture_session(row: Mapping[str, Any]) -> PictureSession | None:
@@ -467,7 +486,13 @@ def picture_session(row: Mapping[str, Any]) -> PictureSession | None:
                           {code: int(value) for code, value in row["hardware_before"].items()},
                           frozenset(row["touched_hardware"]),
                           frozenset(software_touch(name) for name in row["touched_software"]),
-                          Lease(row["session_idle_until"], None))
+                          Lease(row["session_idle_until"], None), _test_pattern_ask(row))
+
+
+def _test_pattern_ask(row: Mapping[str, Any]) -> TestPatternAsk | None:
+    """The session's test pattern ask of a row selected with `_SESSION_COLUMNS` (None: off)."""
+    pattern = row["session_test_pattern"]
+    return None if pattern is None else TestPatternAsk(TestPattern(pattern), row["session_test_pattern_ask"])
 
 
 def live_drafts_in(conn: Any, now: float) -> dict[UUID, DisplayPicture]:
@@ -756,7 +781,8 @@ def output_documents(conn: Any, device_id: str, now: float) -> dict[str, bytes]:
     raising `picture_change` only when `picture_digest` differs (each recorded on its own row, so
     neither number moves with the other). A bound Output carries its Frame's timetable
     (`frame_timetable` over `power_policy_in` and `house_time_in`), an unbound one
-    `unbound_timetable`; an Output with no Display seen gets `default_picture()`."""
+    `unbound_timetable`; an Output with no Display seen gets `default_picture()` and no test
+    pattern, one seen carries its live session's test pattern (`picture.session_test_pattern`)."""
     player_id = _player_of(conn, device_id, "FOR SHARE")
     if player_id is None:
         return {}
@@ -794,9 +820,10 @@ def output_documents(conn: Any, device_id: str, now: float) -> dict[str, bytes]:
         documents[output_document_key(output_id)] = encode_output_document(document)
 
         picture = _picture_in_force(row, now)
-        digest = picture_digest(picture)
+        pattern = None if _no_display(row) else session_test_pattern(picture_session(row), now)
+        digest = picture_digest(picture, pattern)
         picture_change = (row["picture_change"] or 0) + (row["picture_digest"] != digest)
-        wanted = picture_document(output_id, picture_change, picture)
+        wanted = picture_document(output_id, picture_change, picture, pattern)
         if picture_change != row["picture_change"]:
             conn.execute(
                 "INSERT INTO picture_documents(player_id, output_id, picture_change, digest, document) "
@@ -813,10 +840,15 @@ def _picture_in_force(row: Mapping[str, Any], now: float) -> DisplayPicture:
     force (its open session's draft while live, `reverted` once the lease ran out with no Done;
     `picture.effective_picture`) with a Revert's pending instruction beside it
     (`picture.with_restore`), or a new Display's (`default_picture`) when none was seen."""
-    if row["colour_temperature_kelvin"] is None:
+    if _no_display(row):
         return default_picture()
     return with_restore(effective_picture(stored_picture(row), picture_session(row), now),
                         {code: int(value) for code, value in row["hardware_restore"].items()})
+
+
+def _no_display(row: Mapping[str, Any]) -> bool:
+    """No Display was seen on the Output of an `output_documents` row (its displays columns are null)."""
+    return row["colour_temperature_kelvin"] is None
 
 
 def _settings(row: Mapping[str, Any]) -> DisplaySettings | None:
@@ -1096,6 +1128,10 @@ class PgPictureSessions:
         live = session is not None and session.lease.live(now)
         status = picture_status(bound=row["player_id"] is not None and row["display_id"] is not None,
                                 picture=picture, document=document, report=report)
+        signal = None if report is None or report.signal is None else SignalView(
+            in_force=report.signal.in_force, result=report.signal.result,
+            answered=signal_answered(document, report))
+        ask = session_test_pattern(session, now)
         return FramePictureView(
             frame_id=frame_id, display_id=row["display_id"], status=status, connected=row["connected"],
             offered_known=offered is not None,
@@ -1103,6 +1139,10 @@ class PgPictureSessions:
                 picture.hardware, offered, report.results if answered and report is not None else None,
                 connected=row["connected"] is True)),
             software=_software_view(picture.software, lut_name),
+            signal_range=picture.signal_range, signal=signal,
+            test_pattern=None if ask is None else TestPatternView(
+                pattern=ask.pattern, state=test_pattern_state(ask, document, report)),
+            test_pattern_seconds=TEST_PATTERN_SECONDS,
             session=_session_view(session) if live and session is not None else None)
 
     def begin_picture(self, frame_id: str) -> PictureSessionView:
@@ -1121,7 +1161,7 @@ class PgPictureSessions:
                 raise DisplayRefused("session_open", 409)
             lease = begin_lease(now, idle_seconds=PICTURE_IDLE_SECONDS, hard_seconds=None)
             session = PictureSession(uuid.uuid4(), display_id, 1, stored, frame["output_picture_change"] or 0, {},
-                                     frozenset(), frozenset(), lease)
+                                     frozenset(), frozenset(), lease, None)
             conn.execute(
                 "INSERT INTO picture_sessions(id, display_id, frame_id, sequence, draft, began_at_change, "
                 "idle_until, created_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
@@ -1155,6 +1195,22 @@ class PgPictureSessions:
             changed = edited_lut(session, None if sha is None else LutRef(sha, LUT_RECIPE_ID),
                                  known=sha is None or lut_known_in(conn, sha),
                                  expected_sequence=edit.expected_sequence, now=now)
+            self._write_session_in(conn, changed)
+        return PictureSequence(sequence=changed.sequence)
+
+    def edit_signal_range(self, session_id: UUID, edit: SignalRangeEdit) -> PictureSequence:
+        with self._db.transaction() as conn:
+            _row, session, now = self._session_in(conn, session_id)
+            changed = edited_signal_range(session, edit.signal_range, expected_sequence=edit.expected_sequence,
+                                          now=now)
+            self._write_session_in(conn, changed)
+        return PictureSequence(sequence=changed.sequence)
+
+    def edit_test_pattern(self, session_id: UUID, edit: TestPatternEdit) -> PictureSequence:
+        with self._db.transaction() as conn:
+            _row, session, now = self._session_in(conn, session_id)
+            changed = edited_test_pattern(session, edit.test_pattern, expected_sequence=edit.expected_sequence,
+                                          now=now)
             self._write_session_in(conn, changed)
         return PictureSequence(sequence=changed.sequence)
 
@@ -1226,10 +1282,12 @@ class PgPictureSessions:
 
     @staticmethod
     def _write_session_in(conn: Any, session: PictureSession) -> None:
+        pattern = session.test_pattern
         conn.execute("UPDATE picture_sessions SET sequence=%s, draft=%s, touched_hardware=%s, touched_software=%s, "
-                     "idle_until=%s WHERE id=%s",
+                     "idle_until=%s, test_pattern=%s, test_pattern_ask=%s WHERE id=%s",
                      (session.sequence, Jsonb(picture_fields(session.draft)), sorted(session.touched_hardware),
                       sorted(setting.value for setting in session.touched_software), session.lease.idle_until,
+                      None if pattern is None else pattern.pattern.value, None if pattern is None else pattern.ask,
                       session.session_id))
         notify_nodes_in(conn, _NODES_SEEING, (session.display_id,))
 

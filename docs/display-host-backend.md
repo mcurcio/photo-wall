@@ -129,6 +129,29 @@ nothing starts, and the next turn asks again. A switch still completes only at t
 control proof. The node-pid1 success scenario crashes Weston under a linked Player
 and requires a new Player to link.
 
+**The signal range is set before Weston starts** ([0024](decisions/0024-display-tuning.md), Q2 option C).
+Weston never sends the HDMI connector's "Broadcast RGB" property and holds the DRM master while it
+runs, so the range is set between incarnations, by one privileged step, and nothing else on the
+Pi gains a privilege:
+
+- `photo-wall-display.service` gains an `ExecStartPre=` step run as root (`+`), before Weston: it
+  reads the wanted range per connector from the **request file** the display controller writes,
+  sets each connector whose value differs, and exits 0 whatever happens, so Weston always starts;
+  a range it could not set is reported by the controller, which reads the connector back. With no
+  request file every connector stays as the kernel has it (Auto after a Pi start).
+- A **path unit** watches the request file; a change starts its **oneshot**, which resets the
+  start count (`systemctl reset-failed`) of the display unit and of every unit bound to it (the
+  controller, which the restart stops and starts again) and then restarts the display unit, so a
+  run of range changes never spends a crash start limit: only crashes count against it. The restart ends the incarnation, and with it the controller
+  and the Player, under the rules above: the next incarnation sets the range first, then Weston
+  takes the screen, a new controller reads the connector and reports, and the broker starts the
+  Player again.
+- The controller (`appliance/display_host/signal_range.py`, unprivileged) only reads the connector
+  and writes the request file, and only when the document's range differs from the connector's,
+  so applying is idempotent and a Weston, Player or controller restart changes nothing (the
+  connector keeps its range). While the range changes the wall shows black: the console stays
+  blank, never a login prompt or console text.
+
 The node-pid1 scenarios start the controller alone, so Weston comes up only
 through the units' own dependencies. Every scenario then checks that `control.sock`
 existed before the controller's main process started, that the controller never

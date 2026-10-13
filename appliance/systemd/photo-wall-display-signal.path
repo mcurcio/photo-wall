@@ -1,0 +1,10 @@
+[Unit]
+Description=Photo Wall display signal range request
+# The display controller (unprivileged) writes the signal range it wants a Weston restart for
+# (appliance/kernel/display_paths.py SIGNAL_RANGE_REQUEST, replaced atomically); writing it is the
+# restart request. The display unit's privileged ExecStartPre= sets the range before the new
+# Weston takes the screen. Other files in the directory do not trigger it.
+
+[Path]
+PathChanged=/run/photo-wall-display-controller/signal-range.json
+Unit=photo-wall-display-signal.service

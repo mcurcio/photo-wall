@@ -40,9 +40,15 @@ from appliance.display_host.bus import (
     DISPLAY_VERSION,
     BusPictureSink,
 )
-from appliance.display_host.picture import FileAppliedPictures, PictureController, operations_for
+from appliance.display_host.picture import (
+    FileAppliedPictures,
+    PictureController,
+    RestartSignal,
+    operations_for,
+)
 from appliance.display_host.picture_list import FileOfferedCache
 from appliance.display_host.runner import document_feed
+from appliance.display_host.signal_range import DrmConnectorRanges, FileRangeRequests
 from appliance.host.bus import HOST_SLICE, host_session
 from contracts.lut import LutRef
 from contracts.node_frame import LutMix, decode_picture_operations, encode_picture_operations
@@ -171,7 +177,9 @@ def test_the_display_line_carries_centrals_output_document(tmp_path):
         unused = SimpleNamespace()       # no display is connected: no DDC/CI, no ask
         picture = PictureController(unused, unused, FileOfferedCache(tmp_path), shell,
                                     SimpleNamespace(put_picture=lambda report: None),
-                                    FileAppliedPictures(tmp_path), time.monotonic)
+                                    FileAppliedPictures(tmp_path), time.monotonic,
+                                    RestartSignal(DrmConnectorRanges(tmp_path), FileRangeRequests(tmp_path / "range"),
+                                                  unused))
         picture.start()
         controller = SimpleNamespace(document=lambda output_id, document: (pictures.append((output_id, document)),
                                                                           sink.put_picture(PICTURE_REPORT),
@@ -265,7 +273,7 @@ def test_the_display_line_carries_centrals_output_document(tmp_path):
                 return [operations for operations in map(decode_picture_operations, shell.texts)
                         if operations.picture_change == 9]
             [operations] = (await until(drawn, 15, "the print look's operations at the shell"))[:1]
-            assert operations == operations_for("HDMI-A-1", 9, PRINT_LOOK.software)
+            assert operations == operations_for("HDMI-A-1", 9, PRINT_LOOK.software, None)
             assert (operations.saturation, operations.lut) == (0.85, LutMix(PAPER, 0.8))
             assert operations.highlight_knee < 1 and operations.black_floor > 0
         finally:

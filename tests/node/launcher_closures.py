@@ -29,6 +29,9 @@ FORBIDDEN: Final[Mapping[str, tuple[str, ...]]] = MappingProxyType({
     "node-bootstrap": (*_EVERY, "appliance.host", "appliance.health", "appliance.display_host",
                        "appliance.central_session"),
     "display-controller": _EVERY,
+    # The root step before Weston starts: the connector and the request, never the controller.
+    "display-signal-range": (*_EVERY, "appliance.display_host.runner", "appliance.display_host.picture",
+                             "appliance.display_host.weston", "nodeapi"),
     "host-core": (*_EVERY, "appliance.apps.broker", "appliance.apps.broker_runner",
                   "appliance.apps.process_linux", "appliance.apps.environment",
                   "appliance.apps.lifecycle_storage", "appliance.display_host", "appliance.health",

@@ -2,12 +2,12 @@ import { apiWrite } from "./apiWrite.js";
 
 /**
  * The Picture tab's read and writes (roadmap 1c's Live model; decision 0022, the picture split,
- * slices S2 and S5; the print look's LUT choice): the routes of central/display_routes.py
- * `mount_picture_routes`, answered with the
- * shapes of central/displays/views.py (their one home). Each returns `{ok: true, …}` or
- * `{ok: false, error}`: a refusal answers its code (`unknown_frame`, `frame_unbound`, `no_display`,
- * `session_open`, `unknown_session`, `session_ended`, `stale_sequence`, `not_offered`,
- * `out_of_range`, `not_presented_yet`, `unknown_lut`); a lost request answers `unreachable`.
+ * slices S2 and S5; the print look's LUT choice; display tuning's signal range and test pattern): the
+ * routes of central/display_routes.py `mount_picture_routes`, answered with the shapes of
+ * central/displays/views.py (their one home). Each returns `{ok: true, …}` or `{ok: false, error}`:
+ * a refusal answers its code (`unknown_frame`, `frame_unbound`, `no_display`, `session_open`,
+ * `unknown_session`, `session_ended`, `stale_sequence`, `not_offered`, `out_of_range`,
+ * `not_presented_yet`, `unknown_lut`); a lost request answers `unreachable`.
  *
  * @typedef {string} VcpCode   An MCCS code, two upper-case hex digits ("10" brightness).
  * @typedef {"brightness"|"contrast"|"colour-temperature"|"gamma"|"saturation"|"highlight-rolloff"
@@ -34,9 +34,24 @@ import { apiWrite } from "./apiWrite.js";
  *            gamma_tenths: number, saturation_percent: number, highlight_rolloff_percent: number,
  *            black_floor_tenths: number, lut_amount_percent: number, lut: LutChoiceView|null}} SoftwarePictureView
  * @typedef {{session_id: string, sequence: number, idle_until: number}} PictureSessionView
+ * @typedef {"auto"|"full"|"limited"} SignalRange   Which numbers the Pi's HDMI signal uses for black
+ *   and white (display tuning): Auto the Pi's choice, Full 0-255, Limited 16-235.
+ * @typedef {"applied"|"unsupported"|"failed"} SignalResult
+ * @typedef {"white"|"grey-ramp"|"black-level"} TestPattern
+ * @typedef {"waiting"|"shown"|"ended"} TestPatternState
+ * @typedef {{in_force: SignalRange, result: SignalResult, answered: boolean}} SignalView   The Pi's
+ *   answer: the range its connector holds, what it made of the wanted one, and whether that answer
+ *   is for the latest change.
+ * @typedef {{pattern: TestPattern, state: TestPatternState}} TestPatternView   The live session's
+ *   test pattern: waiting for the Pi, shown, or ended (the Pi took it off at its bound).
  * @typedef {{frame_id: string, status: "no-display"|"waiting"|"shown", display_id: string|null,
  *            connected: boolean|null, offered_known: boolean, hardware: HardwareSettingView[],
- *            software: SoftwarePictureView, session: PictureSessionView|null}} FramePictureView
+ *            software: SoftwarePictureView, session: PictureSessionView|null,
+ *            signal_range: SignalRange, signal: SignalView|null, test_pattern: TestPatternView|null,
+ *            test_pattern_seconds: number}} FramePictureView
+ *   `signal_range` is the session's while one is live, else the stored one; `signal` null: no answer
+ *   since the Pi's picture controller started; `test_pattern_seconds`: how long the Pi keeps a test
+ *   pattern up.
  * @typedef {{sequence: number}} PictureSequence
  * @typedef {"copied"|"no-display"|"same-display"|"session-open"} CopyOutcome
  * @typedef {{frame_id: string, outcome: CopyOutcome, hardware_skipped: VcpCode[]}} PictureCopyResult
@@ -113,6 +128,29 @@ export function editSoftware(sessionId, edit) {
  */
 export function editLut(sessionId, edit) {
   return call("sequence", `${session(sessionId)}/lut-edits`, { method: "POST", body: edit });
+}
+
+/**
+ * The Display's signal range (POST …/signal-range-edits): kept by Done, put back by Revert.
+ *
+ * @param {string} sessionId
+ * @param {{signal_range: SignalRange, expected_sequence: number}} edit
+ * @returns {Promise<{ok: true, sequence: PictureSequence}|{ok: false, error: string}>}
+ */
+export function editSignalRange(sessionId, edit) {
+  return call("sequence", `${session(sessionId)}/signal-range-edits`, { method: "POST", body: edit });
+}
+
+/**
+ * The test pattern on every Frame of the Display, or null for none (POST …/test-pattern-edits);
+ * never kept: Done, Revert and the session's end take it off.
+ *
+ * @param {string} sessionId
+ * @param {{test_pattern: TestPattern|null, expected_sequence: number}} edit
+ * @returns {Promise<{ok: true, sequence: PictureSequence}|{ok: false, error: string}>}
+ */
+export function editTestPattern(sessionId, edit) {
+  return call("sequence", `${session(sessionId)}/test-pattern-edits`, { method: "POST", body: edit });
 }
 
 /**

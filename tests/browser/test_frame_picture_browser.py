@@ -1,6 +1,7 @@
 """The Frame page's Picture tab: the display's own settings and Photo Wall's, each on its own, live,
 with Done, Revert and Copy (decision 0022, the picture split, slices S2 and S5; roadmap 1c's Live model,
-design-language §8 row B5; console design §5 Picture, settings #111-#114, #119).
+design-language §8 row B5; console design §5 Picture, settings #111-#114, #119); display tuning's test
+pattern (#101) and signal range, each with its own probe below.
 
 Every write goes through the operator API the tab calls, on the real Registry and display store.
 The Pi is a fake that answers like one (`FakePi`): it reads the picture document the worker's own
@@ -37,6 +38,9 @@ from contracts.node_picture import (
     HardwareResult,
     HardwareSetting,
     RangeKind,
+    SignalRange,
+    SignalReport,
+    SignalResult,
     WriteResult,
 )
 
@@ -71,7 +75,13 @@ class FakePi:
     (`taken`), and the display's list re-read with those values current (the periodic re-read).
     `presenting` False holds the Player's `presented` echo back, so the latest change is not shown;
     `buttons` (code: value) is what someone set on the display's own buttons since, which the re-read
-    finds."""
+    finds.
+
+    The signal range: the connector starts at Auto; while `signalling` the Pi carries out each
+    document's range with `signal_result` (applied: the connector takes it; failed: it keeps its
+    range; unsupported: Auto, nothing set) and answers for that change, else it repeats its last
+    answer, for an older change. The test pattern: the Player presents the document's ask while
+    `presenting`, until `bound_over` says the Pi took it off at its bound."""
 
     POLL_S = 0.15
 
@@ -79,6 +89,11 @@ class FakePi:
         self.registry, self.serial, self.output_id, self.offered = registry, serial, output_id, offered
         self.presenting = True
         self.buttons = {}
+        self.signalling = True
+        self.signal_result = SignalResult.APPLIED
+        self.bound_over = False
+        self._connector = SignalRange.AUTO
+        self._signal = None
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
 
@@ -87,9 +102,15 @@ class FakePi:
         results = {code: HardwareResult(WriteResult.TAKEN, 60, value) for code, value in document.hardware.items()}
         read = {**document.hardware, **self.buttons}
         offered = tuple(replace(setting, current=read.get(setting.code, setting.current)) for setting in self.offered)
+        if self.signalling:
+            if self.signal_result is SignalResult.APPLIED:
+                self._connector = document.signal_range
+            in_force = SignalRange.AUTO if self.signal_result is SignalResult.UNSUPPORTED else self._connector
+            self._signal = SignalReport(document.picture_change, in_force, self.signal_result)
+        shown = document.test_pattern if self.presenting and not self.bound_over else None
         _picture_report(self.registry, offered=offered, for_change=document.picture_change, results=results,
                         presented=document.picture_change if self.presenting else None,
-                        serial=self.serial, output_id=self.output_id)
+                        serial=self.serial, output_id=self.output_id, signal=self._signal, test_pattern_shown=shown)
 
     def _run(self):
         while not self._stop.is_set():
@@ -577,3 +598,160 @@ def test_an_unbound_frame_is_sent_to_its_hardware_tab(page, registry):
         open_frame(page, FRAME, "picture")
         expect(_picture_tab(page).get_by_role("status")).to_have_text(
             "Choose which Pi and HDMI output feed this Frame first (Hardware tab).")
+
+
+TEST_PATTERN = "Test pattern"
+SIGNAL = "Signal range"
+RESTARTING = "Waiting for the Pi: a change restarts the picture on every display of this Pi."
+SHOWN = "The Pi reports it shown on every Frame of this display."
+PAPER = "Tape a sheet of white paper beside the Frame and match its white."
+READING = ("Switch Signal range between Full and Limited. Black darker on Full with every step visible: keep Full. "
+           "Steps vanish into black on Full: choose Limited. No change: the display follows the Pi, the glow is its "
+           "backlight; keep Full, it keeps all 256 steps.")
+
+
+def _choice(page, group, name):
+    return _group(page, group).get_by_role("radio", name=name, exact=True)
+
+
+def _sequence(registry):
+    [row] = _sql(registry, "SELECT sequence FROM picture_sessions")
+    return row["sequence"]
+
+
+def test_full_says_the_restart_until_the_pi_answers_and_done_waits_for_that_answer(page, registry):
+    """Acceptance 1 and 2: choosing Full sends exactly one signal-range-edit with the session's
+    sequence; while the Pi presents the change but has not answered its signal, the group says it
+    waits for the Pi, whose change restarts every display's picture, and Done stays disabled; once it answers, "The Pi sends Full." and
+    Done keeps Full.
+
+    Mutations: send "Full" capitalised -> Central's 422, nothing in the document; let the session
+    take the Player's echo alone as shown -> Done is enabled while the signal is unanswered."""
+    _seen(registry)
+    with FakePi(registry) as pi, operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "wall")
+        open_frame(page, FRAME, "picture")
+        bar = _bar(page)
+        done = bar.get_by_role("button", name="Done", exact=True)
+        expect(bar.get_by_role("status")).to_have_text(PRESENTED)
+        expect(_choice(page, SIGNAL, "Auto")).to_be_checked()
+        expect(_group(page, SIGNAL)).to_contain_text("The Pi chooses: Limited for TV modes.")
+        edits = _edits(page, "signal-range-edits")
+        sequence = _off_thread(_sequence, registry)
+
+        pi.signalling = False
+        _choice(page, SIGNAL, "Full").click()
+        expect(_group(page, SIGNAL)).to_contain_text(RESTARTING)
+        page.wait_for_timeout(1500)
+        expect(done).to_be_disabled()
+        assert [body for _at, body in edits] == [{"signal_range": "full", "expected_sequence": sequence}], edits
+        assert _off_thread(_picture, registry).signal_range is SignalRange.FULL
+        assert _display(registry)["signal_range"] == "auto"  # not kept yet
+
+        pi.signalling = True
+        expect(_group(page, SIGNAL)).to_contain_text("The Pi sends Full.")
+        expect(bar.get_by_role("status")).to_have_text(PRESENTED)
+        expect(done).to_be_enabled()
+        done.click()
+        expect(_picture_tab(page).get_by_role("status").filter(has_text="Saved at")).to_be_visible()
+        assert _display(registry)["signal_range"] == "full"
+        expect(_choice(page, SIGNAL, "Full")).to_be_checked()
+
+
+def test_revert_puts_the_stored_signal_range_back(page, registry):
+    """Acceptance 2: Revert after Full shows Auto again, the stored range, and the document asks for Auto."""
+    _seen(registry)
+    with FakePi(registry), operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "wall")
+        open_frame(page, FRAME, "picture")
+        bar = _bar(page)
+        expect(bar.get_by_role("status")).to_have_text(PRESENTED)
+        _choice(page, SIGNAL, "Full").click()
+        expect(_group(page, SIGNAL)).to_contain_text("The Pi sends Full.")
+        expect(bar.get_by_role("status")).to_have_text(PRESENTED)
+        bar.get_by_role("button", name="Revert", exact=True).click()
+        expect(_choice(page, SIGNAL, "Auto")).to_be_checked()
+        expect(bar.get_by_role("button", name="Revert", exact=True)).to_be_disabled()
+        assert _display(registry)["signal_range"] == "auto"
+        for _ in range(50):
+            if _off_thread(_picture, registry).signal_range is SignalRange.AUTO:
+                break
+            page.wait_for_timeout(100)
+        else:
+            raise AssertionError("Revert left the document asking for Full")
+
+
+def test_white_shows_the_paper_line_and_off_sends_null(page, registry):
+    """Acceptance 3: White sends {test_pattern: "white"}, the paper line shows, the Pi shows it on
+    every Frame of the display; Off sends {test_pattern: null}, never "off".
+
+    Mutation: send "off" for Off -> Central's 422, the pattern stays up and the body assertion fails."""
+    _seen(registry)
+    with FakePi(registry), operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "wall")
+        open_frame(page, FRAME, "picture")
+        expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
+        group = _group(page, TEST_PATTERN)
+        expect(_choice(page, TEST_PATTERN, "Off")).to_be_checked()
+        expect(group).to_contain_text("Choose Off or leave this page; the Pi takes it off by itself after 10 min.")
+        edits = _edits(page, "test-pattern-edits")
+        _choice(page, TEST_PATTERN, "White").click()
+        expect(group).to_contain_text(PAPER)
+        expect(group).to_contain_text(SHOWN)
+        assert _off_thread(_picture, registry).test_pattern.pattern.value == "white"
+
+        _choice(page, TEST_PATTERN, "Off").click()
+        expect(group).not_to_contain_text(PAPER)
+        expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
+        page.wait_for_timeout(600)
+        assert [body["test_pattern"] for _at, body in edits] == ["white", None], edits
+        assert _off_thread(_picture, registry).test_pattern is None
+
+
+def test_black_level_says_how_to_read_it_and_once_ended_is_asked_for_again(page, registry):
+    """Acceptance 4: the Black level shows the reading line; when the Pi takes it off at its bound
+    the group says so (minutes from the view) and shows Off; choosing it again sends a new edit.
+
+    Mutation: drop the reading line -> its text is not found."""
+    _seen(registry)
+    with FakePi(registry) as pi, operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "wall")
+        open_frame(page, FRAME, "picture")
+        expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
+        group = _group(page, TEST_PATTERN)
+        edits = _edits(page, "test-pattern-edits")
+        _choice(page, TEST_PATTERN, "Black level").click()
+        expect(group).to_contain_text(READING)
+        expect(group).to_contain_text(SHOWN)
+
+        pi.bound_over = True
+        expect(group).to_contain_text("Taken off after 10 min. Choose it again to show it.")
+        expect(_choice(page, TEST_PATTERN, "Off")).to_be_checked()
+        first = _off_thread(_picture, registry).test_pattern.ask
+
+        pi.bound_over = False
+        _choice(page, TEST_PATTERN, "Black level").click()
+        expect(group).to_contain_text(SHOWN)
+        expect(group).to_contain_text(READING)
+        assert [body["test_pattern"] for _at, body in edits] == ["black-level", "black-level"], edits
+        assert _off_thread(_picture, registry).test_pattern.ask > first
+
+
+def test_a_failed_signal_says_what_the_display_still_gets_and_unsupported_says_so(page, registry):
+    """Acceptance 5: a failed answer names the range the display still gets (the connector kept
+    Auto: what the Pi chooses); an output with no range setting says the connection has none.
+
+    Mutation: read signal.result "failed" as applied -> "The Pi chooses" alone, the assertion fails."""
+    _seen(registry)
+    with FakePi(registry) as pi, operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "wall")
+        open_frame(page, FRAME, "picture")
+        expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
+        pi.signal_result = SignalResult.FAILED
+        _choice(page, SIGNAL, "Full").click()
+        expect(_group(page, SIGNAL)).to_contain_text("The Pi could not change it: the display still gets what the Pi chooses.")
+        expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
+
+        pi.signal_result = SignalResult.UNSUPPORTED
+        _choice(page, SIGNAL, "Limited").click()
+        expect(_group(page, SIGNAL)).to_contain_text("This display's connection has no signal range setting.")

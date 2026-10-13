@@ -3,7 +3,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { TICK_MS, useVisible } from "./liveAdjustment.js";
 import { listLuts } from "./lutsApi.js";
 import {
-  beginPicture, editHardware, editLut, editSoftware, keepPictureAlive, pictureDone, readFramePicture, revertPicture,
+  beginPicture, editHardware, editLut, editSignalRange, editSoftware, editTestPattern, keepPictureAlive, pictureDone,
+  readFramePicture, revertPicture,
 } from "./pictureApi.js";
 
 /*
@@ -16,7 +17,10 @@ import {
  *
  * THE DRAFT IS THE OPERATOR'S. A draft holds only what the operator changed in this visit: a value
  * per display setting (null hands it back: as the display has it), per Photo Wall setting, and the
- * LUT choice (`lut.lut`: a paper profile's digest, or null for no LUT; print look). Every
+ * LUT choice (`lut.lut`: a paper profile's digest, or null for no LUT; print look), the signal range
+ * (`signal.range`) and the test pattern (`pattern.pattern`, null for none; display tuning). The test
+ * pattern is never kept: it is no change to keep (`dirty` leaves it out), and Done and Revert take
+ * it off as they end the session. Every
  * session begun while the tab is open is sent the whole draft, so the draft outlives a session that
  * ended by itself (the browser tab hidden, the Pi restarted, Central's idle window). Done and Revert
  * clear it.
@@ -30,14 +34,17 @@ import {
  * AT MOST TWO EDITS A SECOND. A change is sent at once when the last edit went EDIT_GAP_MS ago,
  * else when the gap is over, with the newest value: while a slider is dragged the display is
  * written at most twice a second (some displays save each write to memory that wears), and the
- * value where it was let go is always the last one sent. Both groups share the gap. One request is
- * in flight at a time, so each edit names the sequence the previous one answered.
+ * value where it was let go is always the last one sent. Both groups share the gap. The signal
+ * range and the test pattern are choices, never dragged: each is sent at once, ahead of a slider's
+ * paced value. One request is in flight at a time, so each edit names the sequence the previous one
+ * answered.
  *
  * THE LUTS. While the tab is open the LUTs list is read once (lutsApi.js), for the picker.
  *
  * SHOWN. The latest change counts as shown only when nothing is waiting to be sent, a read begun
- * after the last accepted change says `shown`, and that read carries the draft's values. Done is
- * offered only then; Central checks it again (`not_presented_yet`).
+ * after the last accepted change says `shown`, and that read carries the draft's values (the signal
+ * range and the test pattern among them). Central's `shown` waits for the Pi's signal answer too.
+ * Done is offered only then; Central checks it again (`not_presented_yet`).
  */
 
 /** The least time between two edits: at most 2 a second while dragging (design: "Live model"). */
@@ -97,6 +104,11 @@ export function lutValue(view) {
   return view.software.lut?.profile_sha256 ?? null;
 }
 
+/** The test pattern a read shows asked for (whatever its state); null: none. */
+export function patternValue(view) {
+  return view.test_pattern?.pattern ?? null;
+}
+
 /** A display setting's value as a read shows it; null: as the display has it. */
 export function hardwareValue(view, code) {
   return view.hardware.find((row) => row.code === code)?.value ?? null;
@@ -106,8 +118,10 @@ export function hardwareValue(view, code) {
  * @typedef {import("./pictureApi.js").FramePictureView} FramePictureView
  * @typedef {import("./pictureApi.js").SoftwareSetting} SoftwareSetting
  * @typedef {import("./pictureApi.js").VcpCode} VcpCode
+ * @typedef {import("./pictureApi.js").SignalRange} SignalRange
+ * @typedef {import("./pictureApi.js").TestPattern} TestPattern
  * @typedef {{hardware: Record<VcpCode, number|null>, software: Partial<Record<SoftwareSetting, number>>,
- *            lut: {lut?: string|null}}} Draft
+ *            lut: {lut?: string|null}, signal: {range?: SignalRange}, pattern: {pattern?: TestPattern|null}}} Draft
  * @typedef {{profile_sha256: string, name: string}} LutChoice   a LUT the picker offers
  * @typedef {"idle"|"live"|"waiting"|"shown"} Phase
  *   `idle`: no session (not open, no display, or someone else's session); `live`: a session and
@@ -115,13 +129,18 @@ export function hardwareValue(view, code) {
  * @typedef {{words: string, code: string}} Problem   `code` is Central's, for Details only.
  */
 
-const EMPTY = /** @type {Draft} */ ({ hardware: {}, software: {}, lut: {} });
-const PARTS = /** @type {const} */ (["hardware", "software", "lut"]);
-const isEmpty = (draft) => PARTS.every((part) => Object.keys(draft[part]).length === 0);
+const EMPTY = /** @type {Draft} */ ({ hardware: {}, software: {}, lut: {}, signal: {}, pattern: {} });
+// The draft's parts in the order they are sent: the choices first, each at once (`CHOICES`), then
+// the paced ones.
+const PARTS = /** @type {const} */ (["signal", "pattern", "hardware", "software", "lut"]);
+const CHOICES = new Set(["signal", "pattern"]);
+// The parts Done keeps: every one but the test pattern.
+const KEPT = PARTS.filter((part) => part !== "pattern");
+const isEmpty = (draft) => KEPT.every((part) => Object.keys(draft[part]).length === 0);
 
 /**
  * The draft's next request against what this session already took; null when it has taken it all.
- * @returns {{kind: "hardware"|"software"|"lut", key: string, value: number|string|null}|null}
+ * @returns {{kind: "signal"|"pattern"|"hardware"|"software"|"lut", key: string, value: number|string|null}|null}
  */
 function nextWrite(draft, taken) {
   for (const kind of PARTS) {
@@ -136,7 +155,9 @@ function nextWrite(draft, taken) {
 function carries(view, draft) {
   return Object.entries(draft.hardware).every(([code, value]) => hardwareValue(view, code) === value)
     && Object.entries(draft.software).every(([setting, value]) => softwareValue(view, setting) === value)
-    && (!("lut" in draft.lut) || lutValue(view) === draft.lut.lut);
+    && (!("lut" in draft.lut) || lutValue(view) === draft.lut.lut)
+    && (!("range" in draft.signal) || view.signal_range === draft.signal.range)
+    && (!("pattern" in draft.pattern) || patternValue(view) === draft.pattern.pattern);
 }
 
 /**
@@ -144,7 +165,9 @@ function carries(view, draft) {
  * @returns {{view: FramePictureView|null, phase: Phase, draft: Draft, dirty: boolean,
  *            changeHardware: (code: VcpCode, value: number|null) => void,
  *            changeSoftware: (setting: SoftwareSetting, value: number) => void,
- *            changeLut: (profileSha256: string|null) => void, luts: LutChoice[]|null,
+ *            changeLut: (profileSha256: string|null) => void,
+ *            changeSignalRange: (range: SignalRange) => void, changeTestPattern: (pattern: TestPattern|null) => void,
+ *            luts: LutChoice[]|null,
  *            done: () => Promise<boolean>, revert: () => Promise<void>, busy: boolean,
  *            error: Problem|null, unavailable: Problem|null, waitingFor: string|null,
  *            latest: number|null, savedAt: number|null, leftAt: number|null}}
@@ -172,7 +195,7 @@ export function usePictureSession({ frameId, open }) {
   // accepted writes and `readFor` is the count a read began after, so a read older than the last
   // write never says shown. `flight` is the request in flight; `acting` holds the loop.
   const state = useRef({
-    draft: EMPTY, session: null, taken: EMPTY, wrote: 0, readFor: -1, editAt: 0, waitUntil: 0,
+    draft: EMPTY, session: null, taken: EMPTY, view: null, wrote: 0, readFor: -1, editAt: 0, waitUntil: 0,
     flight: null, acting: false, live, mounted: true, timer: null,
   });
   state.current.live = live;
@@ -211,6 +234,7 @@ export function usePictureSession({ frameId, open }) {
       fail(result.error);
       return;
     }
+    current.view = result.view;
     setView(result.view);
     if (after === current.wrote) {
       current.readFor = after;
@@ -218,17 +242,21 @@ export function usePictureSession({ frameId, open }) {
     }
   }, [frameId, fail]);
 
-  /** One write of the draft (a display setting or a Photo Wall one). */
+  /** One write of the draft (a display setting, a Photo Wall one, the signal range or the test pattern). */
   const write = useCallback(async (next) => {
     const current = state.current;
     const open_ = current.session;
-    const expected = { expected_sequence: open_.sequence, value: next.value };
-    const result = next.kind === "hardware"
-      ? await editHardware(open_.session_id, { ...expected, code: next.key })
-      : next.kind === "lut"
-        ? await editLut(open_.session_id, { profile_sha256: next.value, expected_sequence: open_.sequence })
-        : await editSoftware(open_.session_id, { ...expected, setting: next.key });
-    current.editAt = performance.now() + EDIT_GAP_MS;
+    const sequence = { expected_sequence: open_.sequence };
+    const expected = { ...sequence, value: next.value };
+    const sent = {
+      hardware: () => editHardware(open_.session_id, { ...expected, code: next.key }),
+      software: () => editSoftware(open_.session_id, { ...expected, setting: next.key }),
+      lut: () => editLut(open_.session_id, { ...sequence, profile_sha256: next.value }),
+      signal: () => editSignalRange(open_.session_id, { ...sequence, signal_range: next.value }),
+      pattern: () => editTestPattern(open_.session_id, { ...sequence, test_pattern: next.value }),
+    }[next.kind];
+    const result = await sent();
+    if (!CHOICES.has(next.kind)) current.editAt = performance.now() + EDIT_GAP_MS;
     if (!current.mounted || current.session !== open_) return;
     const part = next.kind;
     if (result.ok) {
@@ -302,7 +330,7 @@ export function usePictureSession({ frameId, open }) {
       }
       const next = nextWrite(current.draft, current.taken);
       if (next !== null) {
-        const wait = current.editAt - performance.now();
+        const wait = CHOICES.has(next.kind) ? 0 : current.editAt - performance.now();
         if (wait <= 0) {
           await write(next);
         } else {
@@ -381,7 +409,7 @@ export function usePictureSession({ frameId, open }) {
     }
   }, [fly]);
 
-  /** One change to the draft's `part`; the loop sends it when the edit gap allows. */
+  /** One change to the draft's `part`; the loop sends it when the edit gap allows (a choice at once). */
   const change = useCallback((part, key, value) => {
     const current = state.current;
     if (key in current.draft[part] && current.draft[part][key] === value) return;
@@ -389,11 +417,30 @@ export function usePictureSession({ frameId, open }) {
     setShownRead(false);
     setChanges((count) => count + 1);
     clearTimeout(current.timer);
-    current.timer = setTimeout(step, Math.max(0, current.editAt - performance.now()) + 5);
+    const wait = CHOICES.has(part) ? 0 : Math.max(0, current.editAt - performance.now());
+    current.timer = setTimeout(step, wait + 5);
   }, [setDraft, step]);
   const changeHardware = useCallback((code, value) => change("hardware", code, value), [change]);
   const changeSoftware = useCallback((setting, value) => change("software", setting, value), [change]);
   const changeLut = useCallback((profileSha256) => change("lut", "lut", profileSha256), [change]);
+  const changeSignalRange = useCallback((range) => change("signal", "range", range), [change]);
+  /** A test pattern, or null for none. Choosing the one the Pi took off at its bound (`ended`) asks
+   * for it again: a new edit, which restarts the Pi's bound. */
+  const changeTestPattern = useCallback((pattern) => {
+    const current = state.current;
+    const ended = pattern !== null && current.view?.test_pattern?.pattern === pattern
+      && current.view.test_pattern.state === "ended";
+    if (ended && current.draft.pattern.pattern === pattern) {
+      const { pattern: _asked, ...rest } = current.taken.pattern;
+      setTaken({ ...current.taken, pattern: rest });
+      setShownRead(false);
+      setChanges((count) => count + 1);
+      clearTimeout(current.timer);
+      current.timer = setTimeout(step, 5);
+      return;
+    }
+    change("pattern", "pattern", pattern);
+  }, [change, setTaken, step]);
 
   const done = useCallback(() => act(async () => {
     const open_ = state.current.session;
@@ -427,8 +474,8 @@ export function usePictureSession({ frameId, open }) {
   /** @type {Phase} */
   const phase = session === null ? "idle" : shown ? "shown" : dirty ? "waiting" : "live";
   return {
-    view, phase, draft, dirty, changeHardware, changeSoftware, changeLut, luts, done, revert, busy, error, unavailable,
-    waitingFor,
+    view, phase, draft, dirty, changeHardware, changeSoftware, changeLut, changeSignalRange, changeTestPattern, luts, done,
+    revert, busy, error, unavailable, waitingFor,
     latest: session === null ? null : changes, savedAt, leftAt,
   };
 }

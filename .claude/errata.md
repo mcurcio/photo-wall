@@ -5852,3 +5852,26 @@ Order: (a) merge the iac PR that switches the factory to `central.app:create_app
   tests/test_console_print_look_ranges.py.
 - **Left for the owner:** "Soft highlights" (UI) vs "Highlight rolloff" (approved design, code) is a
   rename he has not confirmed; a clock-face picker and direction markers for lights are not built.
+
+## display tuning review fixes (fix agent, PR 97, 2026-10-13)
+
+Departures from the frozen interface pages, recorded here for coherence reviews; the full list is
+[0024](../docs/decisions/0024-display-tuning.md) "Departures from the design text".
+
+- **P2, the connector port:** `ConnectorRanges.read(output) -> SignalRange | RangeUnknown`
+  (`NO_PROPERTY`, `UNREADABLE`) and `set -> bool` (read-back equals), not
+  `SignalRangeSetter.current(connector) -> SignalRange | "unsupported"`. The first build returned
+  `None` for five causes and reported all as `unsupported`; now only a confirmed missing property
+  is `unsupported`, a connector that did not read is `failed` (journal) and asks no restart.
+- **P2, the restart oneshot:** it resets the start count of the display unit AND every unit
+  `BindsTo=` it (the controller), so range changes never spend the controller's crash start limit
+  (10 in 10 min). The page reset only the display unit. tests/node/display/test_node_display_runner.py
+  derives the bound units from the unit files.
+- **P3:** `AppUnitSettling` lives in appliance/apps/broker.py (the port's vocabulary), not
+  process_linux.py.
+- **K1 copy:** "This display's connection has no signal range setting." (page: "This output has no
+  signal range setting."); the range help and the waiting line no longer state "about 10 s"
+  (unmeasured since the broker fix) and say a change restarts the picture on every display of the
+  Pi (one Weston drives both ports); the pattern's end line names only Off, leaving the page and the
+  Pi's bound (Done and Revert are disabled while a pattern is the only change); "shown" names the
+  Pi as its source; "Waiting for the Pi" replaces "restarts" until the Pi answers.

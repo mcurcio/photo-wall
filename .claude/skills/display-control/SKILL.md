@@ -1,12 +1,12 @@
 ---
 name: display-control
-description: Operate a Photo Wall Pi's displays by hand over SSH - read a display's EDID, map HDMI ports to CEC devices and DDC/CI buses, turn a display off and on with cec-ctl or ddcutil, ask a display for the picture list (`getvcp <codes> --terse`, `capabilities`) and read and set its picture settings (brightness VCP 10, contrast VCP 12, colour preset 14, gains…), and read what the display controller did. Use it for the 1b bench step (Test off and on), the 1c and picture-split bench steps (display and Photo Wall brightness from the console read back, which codes a display answers, the time of an ask, power during an ask, Cover on the test monitor, write timing), to diagnose "Display didn't answer", "The display did not take it", "Checking what this display offers" that never clears or a power method that never answers, or to probe a new display's support. The rules (what the controller does, what Central decides) live in the docs it links; this is the runbook and its traps.
+description: Operate a Photo Wall Pi's displays by hand over SSH - read a display's EDID, map HDMI ports to CEC devices and DDC/CI buses, turn a display off and on with cec-ctl or ddcutil, ask a display for the picture list (`getvcp <codes> --terse`, `capabilities`) and read and set its picture settings (brightness VCP 10, contrast VCP 12, colour preset 14, gains…), and read what the display controller did. Read the HDMI signal range (Broadcast RGB, is_limited_range, the AVI InfoFrame) and whether a display honours it (the EDID's quantization-selectable bit). Use it for the 1b bench step (Test off and on), the display-tuning bench steps (Full and Limited on a TV, the time without photos per change), the 1c and picture-split bench steps (display and Photo Wall brightness from the console read back, which codes a display answers, the time of an ask, power during an ask, Cover on the test monitor, write timing), to diagnose "Display didn't answer", "The display did not take it", "Checking what this display offers" that never clears or a power method that never answers, or to probe a new display's support. The rules (what the controller does, what Central decides) live in the docs it links; this is the runbook and its traps.
 ---
 
 # display-control
 
 How to reach and drive the displays on a Photo Wall Pi 5, learned in the 1b spike on the test Pi
-(2026-10-10), the 1b build, the 1c build and the picture split ([0022](../../../docs/decisions/0022-picture-hardware-and-software-apart.md)). The rules are not here; they have one home each:
+(2026-10-10), the 1b build, the 1c build, the picture split ([0022](../../../docs/decisions/0022-picture-hardware-and-software-apart.md)) and the display-tuning probe on the owner's Samsung QN43Q8F (2026-10-13, [0024](../../../docs/decisions/0024-display-tuning.md)). The rules are not here; they have one home each:
 
 | Rules | Home |
 |---|---|
@@ -14,8 +14,9 @@ How to reach and drive the displays on a Photo Wall Pi 5, learned in the 1b spik
 | Picture on the Pi (the two keys, asking the picture list, power first on the port, write order, newest wins, picture operations, frame protocol v4) | [Player architecture › Picture settings](../../../docs/player-architecture.md#picture-settings-1c) |
 | How Central recognises a display, readiness, the Power and Picture tabs' words, Copy | [Operator console design §5–§7](../../../docs/operator-console-design.md#6-display-identity) |
 | Central's side: tables, routes, the LISTEN wake, what each console result means | [Runbook › Display identity and power](../../../docs/runbook.md#display-identity-and-power) |
+| The signal range and test patterns (what each is, Done and Revert, set before Weston starts, how to tune a display with no controls) | [0024](../../../docs/decisions/0024-display-tuning.md), [Display host backend › Units](../../../docs/display-host-backend.md#units-and-weston-incarnations), [Runbook › Tune a display with no controls](../../../docs/runbook.md#tune-a-display-with-no-controls) |
 | SSH access to a Node | [Runbook › Reaching a Node over SSH](../../../docs/runbook.md#reaching-a-node-over-ssh) |
-| The code | `appliance/display_host/ddc.py` (the one place `ddcutil` runs), `power_methods.py` (the exact power tool calls), `picture_list.py` (the ask), `picture.py` (writes and the base page line), `output_power.py`, `edid.py`; `contracts/node_output.py`, `contracts/node_picture.py` (the picture list and its names) |
+| The code | `appliance/display_host/ddc.py` (the one place `ddcutil` runs), `power_methods.py` (the exact power tool calls), `picture_list.py` (the ask), `picture.py` (writes and the base page line), `signal_range.py` (the connector's range), `output_power.py`, `edid.py`; `contracts/node_output.py`, `contracts/node_picture.py` (the picture list and its names) |
 
 ## Access
 
@@ -194,6 +195,39 @@ Afterwards put the settings back from the console (Revert, or "As the display ha
 value by hand), not only by hand: a hand write to a set code is reported as "Changed on the
 display's buttons" and left alone.
 
+## Signal range (Broadcast RGB)
+
+Which numbers the Pi sends for black and white: the HDMI connector's DRM property "Broadcast RGB"
+(`Automatic`, `Full`, `Limited 16:235`). Automatic sends Limited (black at 16) for every TV mode,
+4K and 1080p included. Read it, root only (`debugfs`):
+
+```sh
+sudo sh -c 'grep -A11 "^connector\[.*HDMI-A" /sys/kernel/debug/dri/*/state' | grep -E 'connector|broadcast_rgb|is_limited_range|output_bpc'
+sudo od -An -tx1 /sys/kernel/debug/dri/1/HDMI-A-1/infoframes/avi   # the AVI InfoFrame the TV gets
+```
+
+`broadcast_rgb` is the setting; `is_limited_range=y` is what goes out now; `output_bpc` the bits
+per channel. In the AVI InfoFrame (header `82 02 0d`, then the checksum), the third payload byte's
+bits 3–2 are the range the Pi labels: `0x04` limited, `0x08` full. The test Pi on v0.34.0, 4K60 on
+HDMI-A-1, read `broadcast_rgb=Automatic`, `is_limited_range=y`, `output_bpc=8`, payload byte 3
+`0x04`.
+
+**Does the display honour the label?** The EDID's CTA Video Capability Data Block (extended tag
+`0x00`, bytes `e2 00 <v>`): bit 6 of `<v>` (QS) set means RGB quantization is selectable, so the
+display follows the AVI label; bit 7 (QY) is the same for YCC. The **Samsung QN43Q8F** sends
+`e2 00 4f`: QS = 1, so it follows the Pi's label, and Full versus Limited is expected to look the
+same on it (its glow is then the backlight; the Black level test pattern tells). Read the EDID
+with `od -An -tx1 /sys/class/drm/card1-HDMI-A-1/edid` (no `edid-decode` on the image) and find
+`e2 00`.
+
+**Setting it.** Use the console (Picture tab › Signal range): the controller writes the request
+file and the display unit's root pre-start step sets the connector before Weston starts, about
+10 s without photos ([display host backend](../../../docs/display-host-backend.md#units-and-weston-incarnations)).
+By hand it cannot be set while Weston runs: Weston holds the DRM master, and a property write from
+another process is refused. The property survives a Weston restart (probed 2026-10-13) and goes
+back to Automatic at a Pi start. Afterwards read `state` again; the controller reports what it
+read back as the range in force.
+
 ## Traps
 
 - **Some monitors drop the hot-plug signal on a DDC/CI standby or input write** (the test monitor,
@@ -209,6 +243,11 @@ display's buttons" and left alone.
   the fix of [gap G15](../../../docs/player-architecture.md#observed-gaps) did not create; there
   `/dev/i2c-N` is closed to it, best detected falls to signal off and every brightness reads
   "no answer". Check `systemctl show photo-wall-display-controller -p SupplementaryGroups`.
+- **Never switch the Pi's console (VT) to probe a range change.** The 2026-10-13 probe switched
+  to tty2 so logind would pause Weston (the design's option A); systemd started `getty@tty2`, a
+  login prompt, on the wall, and it stays running after you switch back. Check with
+  `systemctl is-active getty@tty2`; stop it (`sudo systemctl stop getty@tty2`) or reboot the Pi.
+  It was still active on the test Pi when 0024 was written.
 - **Never send DDC/CI writes to a production Frame while it is showing.**
 - **`ddcutil` under `sudo -E` writes a root-owned cache into your home directory.** Use
   `--noconfig` and `XDG_CACHE_HOME=/tmp/...`, as above.

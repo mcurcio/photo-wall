@@ -20,11 +20,18 @@ from uuid import UUID
 from contracts.lut import LUT_GRID, LutRef
 from contracts.models import MAT_LIGHTS_MAX, AppliedCalibration, Mat
 from contracts.node_frame import PictureOperations
+from contracts.tuning import TestPattern
 from player.geometry import (
+    BLACK_LEVEL_PATCH,
+    BLACK_LEVEL_STEPS,
+    GREY_RAMP_STEPS,
     LUMA,
     ROLLOFF_FADE_POWER,
+    SIGNAL_LEVELS,
     Matrix,
     MatShadow,
+    homography,
+    inverse,
     mat_shadow,
     output_to_picture,
     peak,
@@ -149,13 +156,22 @@ def _drawn_mat(draw: _Draw) -> Mat:
     return draw.applied_mat if draw.applied_mat is not None else draw.composition.binding.mat
 
 
+# The final pass's `test_pattern` uniform per contracts/tuning.py TestPattern (0: the photos). One
+# home: the shader's PATTERN_* names are written in from here (`_FINAL_CONSTANTS`).
+_PATTERN_CODES: dict[TestPattern | None, int] = {
+    None: 0, TestPattern.WHITE: 1, TestPattern.GREY_RAMP: 2, TestPattern.BLACK_LEVEL: 3}
+
+
 def _final_uniforms(gl, program: int, operations: PictureOperations | None, opening,
                     shadow: MatShadow | None, *, lut_drawn: bool) -> None:
     """The final pass's operations (neutral when None), the Frame's mat shadow (None: none) and the
     per-Output mask's opening. Each step's switch is player/geometry.py's skip rule, worked here,
     so a neutral step is never computed by the shader either. `lut_drawn`: the LUT
     `operations.lut` names is bound on texture unit 1 (`NativeRenderer._bind_lut`), so step 1
-    mixes it in; otherwise step 1 is skipped."""
+    mixes it in; otherwise step 1 is skipped. A test pattern (`operations.test_pattern`) needs the
+    opening's unit square, so `to_opening` is set whenever a pattern or a shadow is on; with no
+    Frame drawn yet the opening is `_NO_OPENING`, off the output, and the pattern stays unseen (a
+    known limit: an Output shows a pattern only once a Frame has drawn there)."""
     def uniform(name: str) -> int:
         return gl.glGetUniformLocation(program, name)
 
@@ -180,10 +196,15 @@ def _final_uniforms(gl, program: int, operations: PictureOperations | None, open
     floor_on = operations is not None and operations.black_floor > 0
     gl.glUniform1i(uniform("floor_on"), int(floor_on))
     gl.glUniform1f(uniform("black_floor"), operations.black_floor if floor_on else 0.0)
+    pattern = None if operations is None else operations.test_pattern
+    gl.glUniform1i(uniform("test_pattern"), _PATTERN_CODES[pattern])
+    if shadow is not None:
+        _set_matrix(gl, program, "to_opening", shadow.to_opening)
+    elif pattern is not None:
+        _set_matrix(gl, program, "to_opening", inverse(homography(opening)))
     gl.glUniform1i(uniform("mat_on"), int(shadow is not None))
     if shadow is not None:
         lights = shadow.lights + (None,) * (MAT_LIGHTS_MAX - len(shadow.lights))
-        _set_matrix(gl, program, "to_opening", shadow.to_opening)
         gl.glUniform2f(uniform("mat_size"), *shadow.size_mm)
         gl.glUniform1i(uniform("light_count"), len(shadow.lights))
         gl.glUniform2fv(uniform("light_toward"), MAT_LIGHTS_MAX,
@@ -449,14 +470,22 @@ void main() {
 # The final pass (player/geometry.py `final_pixel`): contracts/node_frame.py PictureOperations
 # in the print look's order, each step switched off (never computed) at its neutral value, then
 # the Frame's mat shadow, then the per-Output mask LAST, so black stays black outside the opening
-# whatever the picture settings and the shadow (owner 2026-10-10 q2). geometry.py's constants are
-# written in (`_FINAL_CONSTANTS`), so each has one home.
+# whatever the picture settings and the shadow (owner 2026-10-10 q2). A test pattern (display
+# tuning, step 0) replaces the composed picture here, so Position's grid and every Frame layer are
+# replaced with no change to the layer pass; the Black level skips every step and the mat.
+# geometry.py's constants are written in (`_FINAL_CONSTANTS`), so each has one home.
 _LUT_UNIT = 1      # the LUT's texture unit; the picture is on unit 0
 _FINAL_CONSTANTS = (
     f"#define MAT_LIGHTS_MAX {MAT_LIGHTS_MAX}\n"
     f"const float LUT_GRID = {float(LUT_GRID)!r};\n"
     f"const vec3 LUMA = vec3({', '.join(repr(weight) for weight in LUMA)});\n"
-    f"const float ROLLOFF_FADE_POWER = {ROLLOFF_FADE_POWER!r};\n")
+    f"const float ROLLOFF_FADE_POWER = {ROLLOFF_FADE_POWER!r};\n"
+    f"const float GREY_RAMP_STEPS = {float(GREY_RAMP_STEPS)!r};\n"
+    f"const float BLACK_LEVEL_STEPS = {float(BLACK_LEVEL_STEPS)!r};\n"
+    f"const float SIGNAL_LEVELS = {float(SIGNAL_LEVELS)!r};\n"
+    f"const float BLACK_LEVEL_PATCH = {BLACK_LEVEL_PATCH!r};\n"
+    + "".join(f"#define PATTERN_{pattern.name} {code}\n"
+              for pattern, code in _PATTERN_CODES.items() if pattern is not None))
 _FINAL = """#version 300 es
 precision highp float;
 precision highp sampler3D;
@@ -478,6 +507,7 @@ uniform float highlight_knee;
 uniform float peak;
 uniform int floor_on;
 uniform float black_floor;
+uniform int test_pattern;
 uniform int mat_on;
 uniform mat3 to_opening;
 uniform vec2 mat_size;
@@ -539,9 +569,37 @@ vec3 mat_shade(vec2 point) {
     }
     return lit/total;
 }
+// Step 0 (geometry.py `pattern_signal`): the pattern's encoded signal at the opening's unit square.
+vec3 pattern_signal(vec2 point) {
+    vec3 q = to_opening*vec3(point, 1.0);
+    vec2 p = clamp(q.xy/q.z, 0.0, 1.0);
+    float value = 0.0;
+    if (test_pattern == PATTERN_WHITE) value = 1.0;
+    else if (test_pattern == PATTERN_GREY_RAMP) {
+        if (p.y < 0.5) value = min(floor(p.x*GREY_RAMP_STEPS), GREY_RAMP_STEPS-1.0)/(GREY_RAMP_STEPS-1.0);
+        else value = p.x;
+    } else {
+        float band = (p.y-1.0/3.0)*3.0;
+        if (band >= 0.0 && band < 1.0) {
+            float position = p.x*BLACK_LEVEL_STEPS;
+            float cell = min(floor(position), BLACK_LEVEL_STEPS-1.0);
+            float margin = (1.0-BLACK_LEVEL_PATCH)/2.0;
+            float across = position-cell;
+            if (across >= margin && across < 1.0-margin && band >= margin && band < 1.0-margin)
+                value = (cell+1.0)/SIGNAL_LEVELS;
+        }
+    }
+    return vec3(value);
+}
 void main() {
+    // The Black level is the raw signal: no step, no mat; the per-Output mask stays last.
+    if (test_pattern == PATTERN_BLACK_LEVEL) {
+        color = vec4(inside_opening(uv) ? pattern_signal(uv) : vec3(0.0), 1.0);
+        return;
+    }
     // Composition targets use OpenGL's lower-left orientation, unlike decoded bytes.
-    vec3 value = texture(picture, vec2(uv.x, 1.0-uv.y)).rgb;
+    vec3 value = test_pattern == 0 ? texture(picture, vec2(uv.x, 1.0-uv.y)).rgb
+                                   : srgb_decoded(pattern_signal(uv));
     if (lut_on == 1) value = lut_applied(value);
     if (saturation_on == 1) {
         float luminance = dot(LUMA, value);

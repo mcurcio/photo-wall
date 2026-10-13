@@ -19,6 +19,9 @@ Rules this module owns (one home each):
 - **The terse format** (`parse_terse`).
 - **The bus of an Output:** the i2c number of `/sys/class/drm/<card>-<output>/ddc` (HDMI-A-1 -> 13,
   HDMI-A-2 -> 14 on a Pi 5). No bus: every call answers None/False at once.
+- **Every port held at once** (`hold_all`): a signal range change (display tuning, decision 0024)
+  takes every port's turn at POWER, so no DDC/CI or power command is in flight and none starts
+  until it releases them.
 - **Bounded:** every call returns within its `timeout`, the lock wait included (a call whose
   deadline passes while it waits runs nothing and answers None/False).
 - `ddcutil --bus <n> --noconfig` with XDG_CACHE_HOME on the unit's private /tmp, through the
@@ -32,12 +35,14 @@ import os
 import re
 import threading
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from enum import IntEnum
 from pathlib import Path
 from subprocess import CompletedProcess
 from typing import Final
+
+from contracts.node_output import OUTPUT_IDS
 
 from .power_methods import DDC_CACHE, DDCUTIL, Runner, _ask, _connectors
 
@@ -218,6 +223,24 @@ class DdcChannel:
         (no bus, a non-zero exit, a run past `timeout` or, for PICTURE, past PICTURE_HOLD_SECONDS)."""
         done = self._command(output_id, ["capabilities"], urgency, timeout)
         return done.stdout if done is not None and done.returncode == 0 else None
+
+    def hold_all(self, *, timeout: float) -> Callable[[], None] | None:
+        """Take every port's turn at Urgency.POWER, so no DDC/CI or power command is in flight and
+        none starts; the release, or None when not every port was taken within `timeout` (those
+        taken are released)."""
+        deadline = time.monotonic() + timeout
+        taken: list[PortLock] = []
+
+        def release() -> None:
+            while taken:
+                taken.pop().release()
+        for output_id in sorted(OUTPUT_IDS):            # one order, so two holders never deadlock
+            port = self._port(output_id)
+            if not port.acquire(Urgency.POWER, max(0.0, deadline - time.monotonic())):
+                release()
+                return None
+            taken.append(port)
+        return release
 
     def _port(self, output_id: str) -> PortLock:
         with self._guard:

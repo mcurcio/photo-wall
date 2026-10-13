@@ -19,3 +19,11 @@ WAYLAND_SOCKET = WAYLAND_DIRECTORY / "wayland-0"
 # picture last had (appliance/display_host/picture.py `FileAppliedPictures`), so a controller
 # restarted with Weston does not write it again. It outlives the controller's restarts, not a reboot.
 CONTROLLER_STATE = Path("/run/photo-wall-display-controller")
+# The signal range the controller last asked a Weston restart for (appliance/display_host/
+# signal_range.py `FileRangeRequests`): writing it is the restart request (the path unit below), and
+# the display unit's privileged ExecStartPre= reads it before Weston takes the screen. In the
+# controller's runtime directory, so it never outlives a reboot.
+SIGNAL_RANGE_REQUEST = CONTROLLER_STATE / "signal-range.json"
+# The root oneshot photo-wall-display-signal.path starts when the request changes: it restarts the
+# display unit without spending its crash start limit.
+SIGNAL_RANGE_UNIT = "photo-wall-display-signal.service"

@@ -18,6 +18,16 @@ Output:
   the Player presented. The software group is never reported as a value (U9): only
   `presented_change`.
 
+Display tuning (decision 0024, schema major 6) adds a third group and one session-only field:
+- the document's `signal_range` (`SignalRange`): which numbers the Pi's HDMI signal uses for black
+  and white, the Display's, stored, kept by Done and put back by Revert like the other groups; the
+  Pi changes the connector's range only when it differs from the connector's, reads it back and
+  reports it (`SignalReport`, the report's `signal`);
+- the document's `test_pattern` (`TestPatternAsk`): shown on every Frame of the Output instead of
+  photos while the Display's picture session is live, never stored; the Pi takes it off
+  TEST_PATTERN_SECONDS after it first received that ask (its own clock alone), so a Central
+  outage cannot leave it up; the report's `test_pattern_shown` names the ask the Player presented.
+
 Rules this module owns (one home each):
 - the **picture list** (`PICTURE_LIST`): the only codes Photo Wall asks a display about, edits or
   sends, each with ddcutil's English name (the console shows that name; it never crosses the wire);
@@ -34,13 +44,18 @@ Rules this module owns (one home each):
   0..ROLLOFF_PERCENT_MAX, 0 changes nothing; black floor 0..BLACK_FLOOR_TENTHS_MAX tenths of a
   percent of white light, 0 changes nothing; a LUT or none, mixed by 0..LUT_AMOUNT_PERCENT_MAX);
 - the wire shapes, their size caps (which the bounds below make every valid value fit, so no
-  valid report is ever refused for size) and the two keys.
+  valid report is ever refused for size) and the two keys;
+- the signal range's vocabulary (`SignalRange`, `SignalResult`), a test pattern's ask
+  (`TestPatternAsk`; the patterns themselves are contracts/tuning.py's) and its bound
+  (TEST_PATTERN_SECONDS).
 
 - `WriteResult`: one DDC/CI write judged by its read-back.
 
 Rules it does NOT own: how the Pi asks and writes (appliance/display_host/picture_list.py,
-picture.py, ddc.py); what is stored on a Display, the session, Done, Revert and Copy (Central's
-central/displays/picture.py and hardware.py).
+picture.py, ddc.py); how it sets the connector's range (appliance/display_host/signal_range.py);
+what is stored on a Display, the session, Done, Revert and Copy (Central's
+central/displays/picture.py and hardware.py); how the Player draws a test pattern
+(player/geometry.py `pattern_signal`).
 """
 from __future__ import annotations
 
@@ -53,6 +68,7 @@ from typing import Any, Final
 from contracts.kelvin import KELVIN_WHITE
 from contracts.lut import LutRef
 from contracts.node_output import OUTPUT_IDS, DisplayIdentity
+from contracts.tuning import TestPattern
 from contracts.wire_codec import decode, encode, fields_of, list_of, object_of, require, whole
 
 VcpCode = str                                   # VCP_CODE_PATTERN, and on PICTURE_LIST wherever it is used
@@ -84,6 +100,9 @@ BLACK_FLOOR_TENTHS_MAX: Final = 100             # 10.0 % of white light (~0.5 % 
 BLACK_FLOOR_TENTHS_NEUTRAL: Final = 0
 LUT_AMOUNT_PERCENT_MAX: Final = 100             # how much of the LUT is mixed in
 LUT_AMOUNT_PERCENT_DEFAULT: Final = 100         # a LUT, once chosen, acts fully
+
+TEST_PATTERN_SECONDS: Final = 600               # the Pi takes a test pattern off this long after it first
+                                                # received its ask (design rule 1; a placeholder, bench-tuned)
 
 PICTURE_DOCUMENT_BYTES: Final = 1024            # a picture document's largest encoding
 PICTURE_REPORT_BYTES: Final = 32768             # a picture report's largest encoding (30 settings, 16 choices each)
@@ -131,6 +150,51 @@ class WriteResult(StrEnum):
     TAKEN = "taken"                 # the read-back equals the value written
     NOT_TAKEN = "not-taken"         # the display answered the read-back with another value
     NO_ANSWER = "no-answer"         # no read-back in time
+
+
+class SignalRange(StrEnum):
+    """Which numbers the Pi's HDMI signal uses for black and white (Linux's connector property
+    "Broadcast RGB"; HDMI's RGB quantization range). The Display's; every Display starts at AUTO."""
+    AUTO = "auto"           # the kernel's choice: Limited for TV modes (every 4K and 1080p mode)
+    FULL = "full"           # black 0, white 255
+    LIMITED = "limited"     # black 16, white 235
+
+
+class SignalResult(StrEnum):
+    """What the Pi made of a document's signal range, judged by reading the connector back."""
+    APPLIED = "applied"             # the connector holds the document's range
+    UNSUPPORTED = "unsupported"     # this output has no range setting (not HDMI); nothing was set
+    FAILED = "failed"               # not set: the connector kept `SignalReport.in_force`
+
+
+@dataclass(frozen=True)
+class TestPatternAsk:
+    """One ask to show `pattern`: `ask` is the asking edit's session sequence. A document carrying
+    a (pattern, ask) pair other than the last one the Pi received restarts the Pi's bound."""
+    __test__ = False        # a domain name, not a pytest class
+
+    pattern: TestPattern
+    ask: int
+
+    def __post_init__(self) -> None:
+        """ValueError("test_pattern") unless pattern is a TestPattern and ask an int >= 1."""
+        require(isinstance(self.pattern, TestPattern) and whole(self.ask, 1), "test_pattern")
+
+
+@dataclass(frozen=True)
+class SignalReport:
+    """The Pi's answer to the signal range of the picture change `for_change`. `in_force`: the
+    connector's range read back after the attempt (for AUTO, the property's value, never the
+    kernel's outcome recomputed; for UNSUPPORTED, AUTO: the output sends what the kernel picks)."""
+    for_change: int
+    in_force: SignalRange
+    result: SignalResult
+
+    def __post_init__(self) -> None:
+        """ValueError("signal_report") unless for_change >= 1, in_force is a SignalRange and result a
+        SignalResult."""
+        require(whole(self.for_change, 1) and isinstance(self.in_force, SignalRange)
+                and isinstance(self.result, SignalResult), "signal_report")
 
 
 class RangeKind(StrEnum):
@@ -253,20 +317,29 @@ class SoftwarePicture:
 @dataclass(frozen=True)
 class PictureDocument:
     """What is wanted of one HDMI port's picture. `hardware`: only the codes someone set (each on
-    PICTURE_LIST, a value 0..LEVEL_MAX); `software`: always complete. Treat `hardware` as read-only."""
+    PICTURE_LIST, a value 0..LEVEL_MAX); `software`: always complete; `signal_range`: the
+    Display's; `test_pattern`: the live session's ask, None when none is up. Treat `hardware` as
+    read-only.
+
+    The display-tuning fields default to "no change" (AUTO, no pattern) in Python; the wire never
+    defaults them (`decode_picture_document` needs every field)."""
     output_id: str
     picture_change: int
     hardware: Mapping[VcpCode, int]
     software: SoftwarePicture
+    signal_range: SignalRange = SignalRange.AUTO
+    test_pattern: TestPatternAsk | None = None
 
     def __post_init__(self) -> None:
         """ValueError("picture_document") unless output_id is in OUTPUT_IDS, picture_change >= 1,
-        every hardware code is on PICTURE_LIST with an int value in 0..LEVEL_MAX, and software is a
-        SoftwarePicture."""
+        every hardware code is on PICTURE_LIST with an int value in 0..LEVEL_MAX, software is a
+        SoftwarePicture, signal_range a SignalRange and test_pattern None or a TestPatternAsk."""
         require(self.output_id in OUTPUT_IDS and whole(self.picture_change, 1)
                 and isinstance(self.hardware, Mapping)
                 and all(code in PICTURE_LIST and whole(value, 0, LEVEL_MAX) for code, value in self.hardware.items())
-                and isinstance(self.software, SoftwarePicture), "picture_document")
+                and isinstance(self.software, SoftwarePicture)
+                and isinstance(self.signal_range, SignalRange)
+                and (self.test_pattern is None or isinstance(self.test_pattern, TestPatternAsk)), "picture_document")
 
 
 @dataclass(frozen=True)
@@ -297,19 +370,27 @@ class PictureReport:
     hardware writes the Pi finished (None: none yet); `results` holds a write per code it wrote for
     that change (a code already at its value, or not offered, has none), and is empty when
     for_change is None. `presented_change`: the newest picture change the Player presented (a
-    change whose picture operations equal the ones last presented counts as presented)."""
+    change whose picture operations equal the ones last presented counts as presented).
+    `signal`: the Pi's answer to the newest document's signal range (None: none carried out since
+    this controller started). `test_pattern_shown`: the ask whose pattern the Player presented
+    (None: no pattern on screen, or the Pi took it off at its bound).
+
+    The display-tuning fields default to None in Python; the wire never defaults them."""
     output_id: str
     identity: DisplayIdentity | None
     offered: tuple[HardwareSetting, ...] | None
     for_change: int | None
     results: Mapping[VcpCode, HardwareResult]
     presented_change: int | None
+    signal: SignalReport | None = None
+    test_pattern_shown: TestPatternAsk | None = None
 
     def __post_init__(self) -> None:
         """ValueError("picture_report") unless output_id is in OUTPUT_IDS, identity is None or a
         DisplayIdentity, offered is None or HardwareSettings with unique codes in PICTURE_LIST order,
         for_change and presented_change are None or >= 1, results' codes are on PICTURE_LIST with
-        HardwareResult values, and results is empty when for_change is None."""
+        HardwareResult values, results is empty when for_change is None, signal is None or a
+        SignalReport and test_pattern_shown None or a TestPatternAsk."""
         offered = self.offered
         require(self.output_id in OUTPUT_IDS
                 and (self.identity is None or isinstance(self.identity, DisplayIdentity))
@@ -321,7 +402,10 @@ class PictureReport:
                 and isinstance(self.results, Mapping)
                 and all(code in PICTURE_LIST and isinstance(result, HardwareResult)
                         for code, result in self.results.items())
-                and (self.for_change is not None or not self.results), "picture_report")
+                and (self.for_change is not None or not self.results)
+                and (self.signal is None or isinstance(self.signal, SignalReport))
+                and (self.test_pattern_shown is None or isinstance(self.test_pattern_shown, TestPatternAsk)),
+                "picture_report")
 
 
 def picture_document_key(output_id: str) -> str:
@@ -349,7 +433,9 @@ def decode_picture_document(raw: bytes) -> PictureDocument:
         lut = software["lut"]
         return PictureDocument(**{**value, "hardware": dict(object_of(value["hardware"])),
                                   "software": SoftwarePicture(**{
-                                      **software, "lut": None if lut is None else LutRef(**fields_of(LutRef, lut))})})
+                                      **software, "lut": None if lut is None else LutRef(**fields_of(LutRef, lut))}),
+                                  "signal_range": SignalRange(value["signal_range"]),
+                                  "test_pattern": _test_pattern_ask(value["test_pattern"])})
 
     return decode(raw, PICTURE_DOCUMENT_BYTES, PictureDocument, build, "picture_document")
 
@@ -368,7 +454,9 @@ def decode_picture_report(raw: bytes) -> PictureReport:
             **value,
             "identity": None if identity is None else DisplayIdentity(**fields_of(DisplayIdentity, identity)),
             "offered": None if offered is None else tuple(_hardware_setting(item) for item in list_of(offered)),
-            "results": {code: _hardware_result(result) for code, result in object_of(value["results"]).items()}})
+            "results": {code: _hardware_result(result) for code, result in object_of(value["results"]).items()},
+            "signal": _signal_report(value["signal"]),
+            "test_pattern_shown": _test_pattern_ask(value["test_pattern_shown"])})
 
     return decode(raw, PICTURE_REPORT_BYTES, PictureReport, build, "picture_report")
 
@@ -414,6 +502,21 @@ def _hardware_result(value: object) -> HardwareResult:
     return HardwareResult(**{**result, "result": WriteResult(result["result"])})
 
 
+def _test_pattern_ask(value: object) -> TestPatternAsk | None:
+    if value is None:
+        return None
+    ask = fields_of(TestPatternAsk, value)
+    return TestPatternAsk(**{**ask, "pattern": TestPattern(ask["pattern"])})
+
+
+def _signal_report(value: object) -> SignalReport | None:
+    if value is None:
+        return None
+    signal = fields_of(SignalReport, value)
+    return SignalReport(**{**signal, "in_force": SignalRange(signal["in_force"]),
+                           "result": SignalResult(signal["result"])})
+
+
 __all__ = [
     "BLACK_FLOOR_TENTHS_MAX", "BLACK_FLOOR_TENTHS_NEUTRAL", "LUT_AMOUNT_PERCENT_DEFAULT", "LUT_AMOUNT_PERCENT_MAX",
     "ROLLOFF_PERCENT_MAX", "ROLLOFF_PERCENT_NEUTRAL", "SATURATION_PERCENT_MAX", "SATURATION_PERCENT_MIN",
@@ -421,8 +524,9 @@ __all__ = [
     "CHOICE_NAME_MAX", "CHOICE_VALUE_MAX", "GAMMA_TENTHS_MAX", "GAMMA_TENTHS_MIN", "GAMMA_TENTHS_NEUTRAL",
     "KELVIN_MAX", "KELVIN_MIN", "KELVIN_NEUTRAL", "KELVIN_STEP", "LEVEL_MAX", "MAX_CHOICES",
     "NEUTRAL_SOFTWARE", "PICTURE_DOCUMENT_BYTES", "PICTURE_LIST", "PICTURE_REPORT_BYTES", "SOFTWARE_PERCENT_MAX",
-    "SOFTWARE_PERCENT_MIN", "SOFTWARE_PERCENT_NEUTRAL", "VCP_CODE_PATTERN", "Choice", "HardwareRange",
-    "HardwareResult", "HardwareSetting", "PictureDocument", "PictureReport", "RangeKind", "SoftwarePicture",
+    "SOFTWARE_PERCENT_MIN", "SOFTWARE_PERCENT_NEUTRAL", "TEST_PATTERN_SECONDS", "VCP_CODE_PATTERN", "Choice",
+    "HardwareRange", "HardwareResult", "HardwareSetting", "PictureDocument", "PictureReport", "RangeKind",
+    "SignalRange", "SignalReport", "SignalResult", "SoftwarePicture", "TestPatternAsk",
     "VcpCode", "WriteResult", "decode_picture_document", "decode_picture_report", "encode_picture_document",
     "encode_picture_report", "picture_document_key", "picture_report_key",
 ]

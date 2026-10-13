@@ -28,7 +28,11 @@ from contracts.node_picture import (
     PictureDocument,
     PictureReport,
     RangeKind,
+    SignalRange,
+    SignalReport,
+    SignalResult,
     SoftwarePicture,
+    TestPatternAsk,
     WriteResult,
     decode_picture_document,
     decode_picture_report,
@@ -37,6 +41,7 @@ from contracts.node_picture import (
     picture_document_key,
     picture_report_key,
 )
+from contracts.tuning import TestPattern
 
 IDENTITY = DisplayIdentity("XYM", 5475, "MNN", None)
 SOFTWARE = SoftwarePicture(114, 100, 6500, 22)
@@ -49,11 +54,11 @@ REPORT = PictureReport("HDMI-A-1", IDENTITY,
                         HardwareSetting("DC", READ_ONLY, None)),
                        8, {"10": HardwareResult(WriteResult.TAKEN, 60, 46)}, 8)
 
-# The frozen page's wire shapes, byte for byte (schema major 5: the print look's fields).
-DOCUMENT_BYTES = (b'{"hardware":{"10":46},"output_id":"HDMI-A-1","picture_change":8,"software":'
-                  b'{"black_floor_tenths":0,"brightness_percent":114,"colour_temperature_kelvin":6500,'
+# The frozen page's wire shapes, byte for byte (schema major 6: display tuning's fields).
+DOCUMENT_BYTES = (b'{"hardware":{"10":46},"output_id":"HDMI-A-1","picture_change":8,"signal_range":"auto",'
+                  b'"software":{"black_floor_tenths":0,"brightness_percent":114,"colour_temperature_kelvin":6500,'
                   b'"contrast_percent":100,"gamma_tenths":22,"highlight_rolloff_percent":0,"lut":null,'
-                  b'"lut_amount_percent":100,"saturation_percent":100}}')
+                  b'"lut_amount_percent":100,"saturation_percent":100},"test_pattern":null}')
 PAPER = LutRef("ab" * 32, "lut33-perceptual-relcol-bpc-1")
 PRINT_LOOK = PictureDocument("HDMI-A-1", 9, {}, SoftwarePicture(114, 100, 6500, 22, 85, 40, 20, PAPER, 80))
 
@@ -88,7 +93,8 @@ def test_the_print_look_rides_the_software_group_and_round_trips():
 def test_the_report_is_the_frozen_wire_shape_and_round_trips():
     raw = encode_picture_report(REPORT)
     value = json.loads(raw)
-    assert set(value) == {"for_change", "identity", "offered", "output_id", "presented_change", "results"}
+    assert set(value) == {"for_change", "identity", "offered", "output_id", "presented_change", "results",
+                          "signal", "test_pattern_shown"}
     assert value["offered"][0] == {"code": "10", "current": 60, "range": {"choices": [], "kind": "level", "maximum": 100}}
     assert value["offered"][1]["range"]["choices"] == [{"name": "6500 K", "value": 5}, {"name": "User 1", "value": 11}]
     assert value["results"] == {"10": {"after": 46, "before": 60, "result": "taken"}}
@@ -98,6 +104,46 @@ def test_the_report_is_the_frozen_wire_shape_and_round_trips():
     assert decode_picture_report(encode_picture_report(unknown)) == unknown
     asked_none = PictureReport("HDMI-A-2", IDENTITY, (), 3, {}, None)
     assert decode_picture_report(encode_picture_report(asked_none)) == asked_none
+
+
+def test_display_tuning_rides_the_document_and_the_report_and_round_trips():
+    """The signal range and the test pattern's ask on the document, the signal answer and the shown
+    ask on the report (decision 0024). Mutation probe: build the document's `signal_range` from the
+    plain string (not SignalRange(...)) -> the validator refuses every document; drop `signal` from
+    the report's decode -> the round trip differs."""
+    tuned = PictureDocument("HDMI-A-1", 9, {}, SOFTWARE, SignalRange.FULL, TestPatternAsk(TestPattern.WHITE, 4))
+    raw = encode_picture_document(tuned)
+    value = json.loads(raw)
+    assert value["signal_range"] == "full" and value["test_pattern"] == {"ask": 4, "pattern": "white"}
+    assert decode_picture_document(raw) == tuned
+    assert PictureDocument("HDMI-A-1", 9, {}, SOFTWARE) == PictureDocument("HDMI-A-1", 9, {}, SOFTWARE,
+                                                                           SignalRange.AUTO, None)
+    for missing in ("signal_range", "test_pattern"):
+        without = dict(value)
+        del without[missing]
+        with pytest.raises(ValueError, match="^picture_document$"):
+            decode_picture_document(json.dumps(without).encode())
+    for bad in ({**value, "signal_range": "studio"}, {**value, "test_pattern": {"ask": 0, "pattern": "white"}},
+                {**value, "test_pattern": {"ask": 4, "pattern": "bars"}}, {**value, "test_pattern": "white"}):
+        with pytest.raises(ValueError, match="^picture_document$"):
+            decode_picture_document(json.dumps(bad).encode())
+    answered = PictureReport("HDMI-A-1", IDENTITY, None, 9, {}, 9,
+                             SignalReport(9, SignalRange.AUTO, SignalResult.FAILED),
+                             TestPatternAsk(TestPattern.GREY_RAMP, 4))
+    raw = encode_picture_report(answered)
+    assert json.loads(raw)["signal"] == {"for_change": 9, "in_force": "auto", "result": "failed"}
+    assert decode_picture_report(raw) == answered
+    for bad_ask in (lambda: TestPatternAsk("white", 1), lambda: TestPatternAsk(TestPattern.WHITE, 0),
+                    lambda: TestPatternAsk(TestPattern.WHITE, True)):
+        with pytest.raises(ValueError, match="^test_pattern$"):
+            bad_ask()
+    for bad_signal in (lambda: SignalReport(0, SignalRange.FULL, SignalResult.APPLIED),
+                       lambda: SignalReport(1, "full", SignalResult.APPLIED),
+                       lambda: SignalReport(1, SignalRange.FULL, "applied")):
+        with pytest.raises(ValueError, match="^signal_report$"):
+            bad_signal()
+    with pytest.raises(ValueError, match="^picture_document$"):
+        PictureDocument("HDMI-A-1", 9, {}, SOFTWARE, "full")
 
 
 def test_the_keys_and_the_neutral_software():
@@ -115,12 +161,14 @@ def test_the_worst_valid_report_fits_the_bus():
     offered = tuple(HardwareSetting(code, HardwareRange(RangeKind.CHOICE, None, choices), 255) for code in PICTURE_LIST)
     worst = PictureReport("Virtual-2", DisplayIdentity("XYM", 65535, "M" * 13, "S" * 32), offered, 2**62,
                           {code: HardwareResult(WriteResult.NOT_TAKEN, LEVEL_MAX, LEVEL_MAX) for code in PICTURE_LIST},
-                          2**62)
+                          2**62, SignalReport(2**62, SignalRange.LIMITED, SignalResult.UNSUPPORTED),
+                          TestPatternAsk(TestPattern.BLACK_LEVEL, 2**62))
     assert len(PICTURE_LIST) == 30
     raw = encode_picture_report(worst)
     assert len(raw) <= PICTURE_REPORT_BYTES and decode_picture_report(raw) == worst
     every_code = PictureDocument("Virtual-2", 2**62, dict.fromkeys(PICTURE_LIST, LEVEL_MAX),
-                                 SoftwarePicture(150, 150, 9300, 26, 150, 100, 100, LutRef("f" * 64, "z" * 64), 100))
+                                 SoftwarePicture(150, 150, 9300, 26, 150, 100, 100, LutRef("f" * 64, "z" * 64), 100),
+                                 SignalRange.LIMITED, TestPatternAsk(TestPattern.BLACK_LEVEL, 2**62))
     assert len(encode_picture_document(every_code)) <= PICTURE_DOCUMENT_BYTES
 
 

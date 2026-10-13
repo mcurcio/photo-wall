@@ -19,6 +19,10 @@ pass, each stated once here and mirrored by player/native.py's shaders:
 The print look (design /print-look, 2026-10-12) adds a LUT, saturation, the highlight rolloff
 (which replaces the clamp after brightness, before white balance), the black floor and the Frame's
 mat shadow to the final pass, in one order (`final_pixel`), each skipped at its neutral value.
+
+Display tuning (decision 0024) adds the test patterns (`pattern_signal`): a look pattern (White,
+Grey ramp) replaces the photos inside the opening and passes through every step and the mat; the
+Black level is the raw signal, through no step and no mat; the per-Output mask stays last.
 """
 
 from __future__ import annotations
@@ -35,6 +39,7 @@ from contracts.lut import LUT_GRID, lut_offset
 from contracts.models import CornersFit, CoverFit, FrameProfile, Mat, PhotoCrop
 from contracts.node_frame import PictureOperations, srgb_to_linear
 from contracts.photo_crop import CENTRED, crop_window
+from contracts.tuning import TestPattern
 
 Matrix = tuple[float, float, float, float, float, float, float, float, float]
 Linear = tuple[float, float, float]     # linear-light RGB, each 0..1
@@ -383,9 +388,53 @@ def lut_applied(linear: Linear, table: bytes, amount: float) -> Linear:
                  for e, s in zip(encoded, sampled, strict=True))
 
 
+# -- Display tuning's test patterns (decision 0024): what a Frame shows while its Display is tuned --
+
+GREY_RAMP_STEPS: Final = 11       # 0 %, 10 %, ..., 100 % of the signal
+BLACK_LEVEL_STEPS: Final = 20     # raw steps 1..20 beside black 0
+SIGNAL_LEVELS: Final = 255        # an 8-bit output's top code (the test Pi: output_bpc 8): raw step k is k / SIGNAL_LEVELS
+BLACK_LEVEL_PATCH: Final = 0.6    # the lit share of a Black level cell, in u and in the band's v, centred
+
+
+def pattern_signal(pattern: TestPattern, u: float, v: float) -> Linear:
+    """The pattern's ENCODED signal (0..1 per channel, equal channels) at (u, v) in the Frame's
+    opening: u, v = transform(inverse(homography(fit.corners)), x, y), the opening's own unit square
+    (the mat's `to_opening`), so the pattern turns with the Frame; u and v are clamped to 0..1.
+    WHITE: 1. GREY_RAMP: v < 0.5, GREY_RAMP_STEPS equal steps across u, step i = i /
+    (GREY_RAMP_STEPS - 1); v >= 0.5, a smooth ramp, u. BLACK_LEVEL: 0, except in the middle third
+    (1/3 <= v < 2/3) where u splits into BLACK_LEVEL_STEPS equal cells and the middle
+    BLACK_LEVEL_PATCH (in u and in that band's v) of cell k (k = 1..20 from u = 0) is k /
+    SIGNAL_LEVELS. Pure.
+
+    Named pattern_signal, never test_*: a test module importing a test_* name would be collected."""
+    u, v = min(1.0, max(0.0, u)), min(1.0, max(0.0, v))
+    if pattern is TestPattern.WHITE:
+        value = 1.0
+    elif pattern is TestPattern.GREY_RAMP:
+        if v < .5:
+            value = min(int(u * GREY_RAMP_STEPS), GREY_RAMP_STEPS - 1) / (GREY_RAMP_STEPS - 1)
+        else:
+            value = u
+    else:
+        value = 0.0
+        band = (v - 1/3) * 3
+        if 0 <= band < 1:
+            position = u * BLACK_LEVEL_STEPS
+            cell = min(int(position), BLACK_LEVEL_STEPS - 1)
+            margin = (1 - BLACK_LEVEL_PATCH) / 2
+            if margin <= position - cell < 1 - margin and margin <= band < 1 - margin:
+                value = (cell + 1) / SIGNAL_LEVELS
+    return (value, value, value)
+
+
 def final_pixel(linear: Linear, operations: PictureOperations, *, inside: bool,
-                shade: Linear | None = None, lut: bytes | None = None) -> tuple[float, float, float, float]:
+                shade: Linear | None = None, lut: bytes | None = None,
+                opening_uv: tuple[float, float] | None = None) -> tuple[float, float, float, float]:
     """One output pixel's final pass, in the print look's order (design "The order"):
+    step 0 (display tuning): operations.test_pattern WHITE or GREY_RAMP replaces `linear` with
+    srgb_to_linear of `pattern_signal` at `opening_uv` (the opening's unit square), and every step
+    below runs as for a photo; BLACK_LEVEL is `pattern_signal` itself, every step below and the
+    shade skipped. A pattern without `opening_uv` is ValueError("opening_uv") ->
     step 1 (`lut_applied`, the LUT `operations.lut` names mixed in by its amount) unless
     operations.lut is None or its bytes (`lut`) are not held -> step 2 (`saturated`) unless
     saturation == 1 -> steps 3-4: when `rolloff_skipped`, v4's white balance x light_factor
@@ -398,6 +447,14 @@ def final_pixel(linear: Linear, operations: PictureOperations, *, inside: bool,
 
     A contrast result below 0 meets the exponent as 0 (a power of a negative number is undefined,
     in GLSL too); with the clamp after, this equals clamping before the exponent."""
+    pattern = operations.test_pattern
+    if pattern is not None:
+        if opening_uv is None:
+            raise ValueError("opening_uv")
+        signal = pattern_signal(pattern, *opening_uv)
+        if pattern is TestPattern.BLACK_LEVEL:
+            return (*signal, 1.0) if inside else (0.0, 0.0, 0.0, 1.0)
+        linear = tuple(srgb_to_linear(value) for value in signal)
     if operations.lut is not None and lut is not None:
         linear = lut_applied(linear, lut, operations.lut.amount)
     if operations.saturation != 1.0:
@@ -432,7 +489,7 @@ def output_pixel(x: float, y: float,
     flat linear colour and its mat shadow (None: no shadow): the colour of the last Frame whose
     opening holds (x, y), black where none does, through `final_pixel` with `inside` = some
     opening holds it and the shade of that covering Frame's shadow. Pure; the two-Frames test's
-    oracle. Each Frame's coverage is where it samples its picture (`picture_source_uv`), so the
+    oracle, for operations without a test pattern (`final_pixel` needs the opening's uv for one). Each Frame's coverage is where it samples its picture (`picture_source_uv`), so the
     per-Frame mask decides what a Frame paints; the per-Output mask is the union of the openings."""
     colour: Linear = (0.0, 0.0, 0.0)
     shadow: MatShadow | None = None

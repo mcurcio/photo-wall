@@ -25,7 +25,12 @@ from uuid import UUID
 
 from appliance.feed import Feed, answer_feed_read
 from appliance.feed_socket import FEED_READERS, FEEDS_GROUP, FeedListener
-from appliance.kernel.display_paths import CONTROLLER_STATE, DISPLAY_UNIT, RUNTIME
+from appliance.kernel.display_paths import (
+    CONTROLLER_STATE,
+    DISPLAY_UNIT,
+    RUNTIME,
+    SIGNAL_RANGE_REQUEST,
+)
 from appliance.kernel.unix_credentials import receive_credential_packet
 from contracts.node_output import (
     OUTPUT_IDS,
@@ -43,9 +48,16 @@ from .ddc import DdcChannel
 from .domain import OutputState
 from .edid import parse_edid, read_edid
 from .output_power import OutputPowerController, PiClock, ReportSink
-from .picture import DdcPictureAdapter, FileAppliedPictures, PictureController, PictureReports
+from .picture import (
+    DdcPictureAdapter,
+    FileAppliedPictures,
+    PictureController,
+    PictureReports,
+    RestartSignal,
+)
 from .picture_list import FileOfferedCache, PictureListAsker
 from .power_methods import DdcCiAdapter, HdmiCecAdapter, SignalOffAdapter, run_tool
+from .signal_range import DrmConnectorRanges, FileRangeRequests
 from .weston import MAX_PACKET, SurfaceGrant, WestonBackend, _pairs, _surface
 
 log = logging.getLogger(__name__)
@@ -247,9 +259,12 @@ def picture_controller(backend: WestonBackend, sink: PictureReports, ddc: DdcCha
     """The picture controller on the port's DDC/CI channel (the one the power controller uses, at
     picture's turn), asking each display's list there (PictureListAsker), and the shell,
     remembering each display's list (FileOfferedCache) and applied picture change in `applied` (the
-    controller's preserved runtime directory); it hears the shell's `presented` and `output` events through the backend."""
+    controller's preserved runtime directory); the signal range read from the connector, asked for
+    in the same directory (display_paths.SIGNAL_RANGE_REQUEST) behind every port's turn on the same
+    channel; it hears the shell's `presented` and `output` events through the backend."""
+    signal = RestartSignal(DrmConnectorRanges(), FileRangeRequests(applied / SIGNAL_RANGE_REQUEST.name), ddc)
     picture = PictureController(DdcPictureAdapter(ddc), PictureListAsker(ddc), FileOfferedCache(applied), backend,
-                                sink, FileAppliedPictures(applied), time.monotonic)
+                                sink, FileAppliedPictures(applied), time.monotonic, signal)
     backend.picture_events = picture
     return picture
 

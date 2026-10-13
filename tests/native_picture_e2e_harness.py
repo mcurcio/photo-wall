@@ -54,7 +54,10 @@ from dataclasses import replace
 
 sys.path[:0] = ["/repo", "/smoke"]
 DISPLAY = "/usr/lib/photo-wall/node-display"
-sys.path.append(DISPLAY)        # the installed Display Host (`appliance` is a namespace package)
+KERNEL = "/usr/lib/photo-wall/node-kernel"
+# The installed Display Host and the node kernel it imports (`appliance` is a namespace package),
+# on the path as the display-controller launcher puts them.
+sys.path += [DISPLAY, KERNEL]
 ROOT = pathlib.Path("/tmp/pw-picture-e2e")
 SOCKET = "wayland-picture"
 PLAYER_UID = 10004
@@ -310,9 +313,11 @@ def main() -> None:
         DdcPictureAdapter,
         FileAppliedPictures,
         PictureController,
+        RestartSignal,
         operations_for,
     )
     from appliance.display_host.picture_list import FileOfferedCache, PictureListAsker
+    from appliance.display_host.signal_range import DrmConnectorRanges, FileRangeRequests
     from appliance.display_host.weston import (
         CompositorPresentation,
         DiagnosticRelease,
@@ -413,7 +418,9 @@ def main() -> None:
         node_picture.OUTPUT_IDS = (*node_picture.OUTPUT_IDS, OUTPUT)
         channel = DdcChannel(never_answers, drm_root=fake_drm())
         controller = PictureController(DdcPictureAdapter(channel), PictureListAsker(channel), FileOfferedCache(applied),
-                                       backend, reports, FileAppliedPictures(applied), time.monotonic)
+                                       backend, reports, FileAppliedPictures(applied), time.monotonic,
+                                       RestartSignal(DrmConnectorRanges(fake_drm()),
+                                                     FileRangeRequests(applied / "signal-range.json"), channel))
         backend.picture_events = controller
         controller.output(OUTPUT, connected=True, identity=None)
         controller.start()
@@ -432,7 +439,7 @@ def main() -> None:
             time.sleep(0.01)
         print(f"REPORT {report}", flush=True)
         assert report.for_change == PICTURE_CHANGE and report.results == {}, report   # no hardware value
-        operations = operations_for(OUTPUT, PICTURE_CHANGE, wanted)
+        operations = operations_for(OUTPUT, PICTURE_CHANGE, wanted, None)
         assert operations.contrast_slope < 1 and operations.light_factor < 1, operations
         inside, outside = await_compare(operations, drain)
         print(f"ADJUSTED inside={inside} outside={outside}", flush=True)
