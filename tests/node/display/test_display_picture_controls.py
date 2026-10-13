@@ -123,8 +123,21 @@ def document(picture_change: int, hardware: dict[str, int] | None = None, wanted
     return PictureDocument(output_id, picture_change, hardware or {}, wanted)
 
 
+class NoRange:
+    """`SignalPort` of an output with no range property (as a Virtual output): never a restart."""
+
+    def in_force(self, output_id):
+        return None
+
+    def requested(self, output_id):
+        return None
+
+    def restart(self, ranges):
+        raise AssertionError("no restart for an output without a range")
+
+
 class Running:
-    def __init__(self, display: Display) -> None:
+    def __init__(self, display: Display, signal=None) -> None:
         self.display = display
         self.shell = Shell()
         self.reports = Reports()
@@ -133,7 +146,8 @@ class Running:
         applied.mkdir(exist_ok=True)
         self.controller = PictureController(DdcPictureAdapter(display.channel), PictureListAsker(display.channel),
                                             FileOfferedCache(applied),
-                                            self.shell, self.reports, FileAppliedPictures(applied), self.clock)
+                                            self.shell, self.reports, FileAppliedPictures(applied), self.clock,
+                                            NoRange() if signal is None else signal)
 
     def connect(self, output_id: str = OUTPUT, identity: DisplayIdentity = IDENTITY) -> None:
         self.controller.output(output_id, connected=True, identity=identity)

@@ -1,0 +1,10 @@
+[Unit]
+Description=Photo Wall display restart for a signal range change
+# Started by photo-wall-display-signal.path. A range change restarts Weston (and with it the
+# controller and the Player): reset-failed first, so a range change never spends the display
+# unit's crash start limit; --no-block, so this oneshot never waits on the restart.
+
+[Service]
+Type=oneshot
+ExecStart=-/usr/bin/systemctl reset-failed photo-wall-display.service
+ExecStart=/usr/bin/systemctl --no-block restart photo-wall-display.service

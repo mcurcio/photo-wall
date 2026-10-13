@@ -335,13 +335,47 @@ def test_the_display_paths_are_the_ones_the_base_units_and_tmpfiles_declare():
     assert {f"RuntimeDirectory={paths.CONTROLLER_STATE.name}", "RuntimeDirectoryPreserve=yes"} <= set(controller)
 
 
+def test_the_signal_range_request_and_its_units_say_the_same():
+    """Display tuning (decision 0024), acceptance 8: the privileged step before Weston, the path
+    unit watching the request the controller writes, the oneshot that restarts Weston without
+    spending its start limit, and the target that wants the path unit. Mutation probe: rename the
+    request file in the path unit -> fails."""
+    from node.launcher_closures import entries
+
+    from appliance.display_host import signal_range
+    from appliance.kernel import display_paths as paths
+
+    units = REPO / "appliance/systemd"
+    display = (units / paths.DISPLAY_UNIT).read_text().splitlines()
+    assert "ExecStartPre=+-/usr/bin/python3 -I -B /usr/lib/photo-wall/node/display-signal-range" in display
+    assert entries()["display-signal-range"] == signal_range.__name__
+    assert f"TTYPath={signal_range.TTY}" in display               # the tty the step blanks is Weston's
+    assert paths.SIGNAL_RANGE_REQUEST.parent == paths.CONTROLLER_STATE
+    watch = (units / "photo-wall-display-signal.path").read_text().splitlines()
+    assert f"PathChanged={paths.SIGNAL_RANGE_REQUEST}" in watch
+    assert f"Unit={paths.SIGNAL_RANGE_UNIT}" in watch
+    oneshot = (units / paths.SIGNAL_RANGE_UNIT).read_text().splitlines()
+    assert "Type=oneshot" in oneshot
+    assert [line for line in oneshot if line.startswith("ExecStart")] == [
+        f"ExecStart=-/usr/bin/systemctl reset-failed {paths.DISPLAY_UNIT}",
+        f"ExecStart=/usr/bin/systemctl --no-block restart {paths.DISPLAY_UNIT}"]
+    target = (units / "photo-wall-node.target").read_text().splitlines()
+    (wants,) = [line for line in target if line.startswith("Wants=")]
+    assert "photo-wall-display-signal.path" in wants.split("=", 1)[1].split()
+    installs = {tuple(line.split()) for line in (REPO / "debian/photo-wall-node.install").read_text().splitlines()}
+    assert {("appliance/launchers/display-signal-range", "usr/lib/photo-wall/node"),
+            ("appliance/systemd/photo-wall-*.path", "usr/lib/systemd/system")} <= installs
+
+
 # -- power (1b D2) ----------------------------------------------------------------------------
 
 
-def test_the_controller_unit_reaches_the_cec_and_i2c_devices_and_nothing_else():
+def test_the_controller_unit_reaches_the_cec_i2c_and_drm_devices_and_nothing_else():
     lines = (REPO / "appliance/systemd/photo-wall-display-controller.service").read_text().splitlines()
     assert "PrivateDevices=yes" not in lines
-    assert {"DevicePolicy=closed", "DeviceAllow=char-cec rw", "DeviceAllow=char-i2c rw"} <= set(lines)
+    assert [line for line in lines if line.startswith(("DevicePolicy=", "DeviceAllow="))] == [
+        "DevicePolicy=closed", "DeviceAllow=char-cec rw", "DeviceAllow=char-i2c rw",
+        "DeviceAllow=char-drm rw"]           # drm: the connector's signal range, read (display tuning)
     (groups,) = [line for line in lines if line.startswith("SupplementaryGroups=")]
     # video: /dev/cecN (root:video 0660); i2c: /dev/i2c-N (root:i2c 0660, E-1B-D2-1). Without the
     # group DeviceAllow=char-i2c opens nothing and DDC/CI never answers.
@@ -402,6 +436,12 @@ def test_one_ddc_channel_feeds_both_the_power_and_the_picture_adapters(tmp_path)
                                               ["--bus", "13", "--noconfig", "getvcp", "10", "--terse"],
                                               ["--bus", "13", "--noconfig", "getvcp", "0C", "10", "12", "14", "--terse"]]
     assert backend.picture_events is picture
+    # The signal range's restart takes the same channel's ports; its request lives beside the
+    # applied pictures (display_paths.SIGNAL_RANGE_REQUEST's name).
+    from appliance.kernel.display_paths import SIGNAL_RANGE_REQUEST
+
+    assert picture._signal._ddc is ddc
+    assert picture._signal._requests._path == tmp_path / SIGNAL_RANGE_REQUEST.name
 
 
 @pytest.mark.skipif(not LINUX, reason="the shell's control socket is SOCK_SEQPACKET with SO_PEERCRED (Linux)")

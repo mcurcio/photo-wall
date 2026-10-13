@@ -34,10 +34,12 @@ NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
-# The power methods' devices and nothing else: CEC (cec-ctl) and DDC/CI over i2c (ddcutil).
+# The power methods' devices, CEC (cec-ctl) and DDC/CI over i2c (ddcutil), and the DRM card node,
+# where it reads the connector's signal range (group video; never master: Weston holds it).
 DevicePolicy=closed
 DeviceAllow=char-cec rw
 DeviceAllow=char-i2c rw
+DeviceAllow=char-drm rw
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes
@@ -45,7 +47,9 @@ CapabilityBoundingSet=
 RestrictSUIDSGID=yes
 ReadWritePaths=/run/photo-wall-display /run/photo-wall-display-feed
 # What each display's picture last had (display_paths.CONTROLLER_STATE): kept across the
-# controller's restarts with Weston, so a value set on the display's buttons is not written back.
+# controller's restarts with Weston, so a value set on the display's buttons is not written back;
+# and the signal range last asked for (display_paths.SIGNAL_RANGE_REQUEST), which
+# photo-wall-display-signal.path watches.
 RuntimeDirectory=photo-wall-display-controller
 RuntimeDirectoryMode=0700
 RuntimeDirectoryPreserve=yes

@@ -9,8 +9,9 @@ settings on the picture list the display offers, and their values read again;
 picture_list.PictureListAsker), `OfferedCache` (each display's last list, kept across controller
 restarts; picture_list.FileOfferedCache), `PictureShell`
 (the shell's `picture` control op; weston.WestonBackend), `PictureReports` (the picture report's
-state key; bus.BusPictureSink) and `AppliedPictures` (which picture change each display last had,
-kept across controller restarts; `FileAppliedPictures`).
+state key; bus.BusPictureSink), `AppliedPictures` (which picture change each display last had,
+kept across controller restarts; `FileAppliedPictures`) and `SignalPort` (the connector's signal
+range, the last range asked for and the restart that sets it; `RestartSignal`).
 
 Rules this module owns (one home each):
 - **Two groups, never coupled:** the document's `hardware` is written over DDC/CI and only there;
@@ -71,6 +72,21 @@ Rules this module owns (one home each):
 - **The base page's line** (`brightness_line`): the display's own brightness and Photo Wall's,
   each named; it rides the shell's `picture` op beside the operations, and the shell forwards it to
   the overlay client (frame protocol v4 `brightness`).
+- **The signal step first** (display tuning, decision 0024, design rule 3): `_carry_out` runs it
+  before any hardware write and before the change is recorded as applied, so a change already
+  carried out (`AppliedPictures`) still answers its signal. Its outcome is
+  signal_range.signal_outcome(document's range, the connector's range in force, the range last
+  asked for). None: a restart is asked (`SignalPort.restart`) with every Output's wanted range
+  (this document's; another Output's latest document's, else its range in force); the restart
+  normally ends this process with Weston, and the next controller judges the range again. An
+  outcome (or a restart that did not come: FAILED, with the range in force read again) is
+  reported as SignalReport(the change, the range in force, AUTO when there is none, the outcome);
+  the hardware writes follow as before. The kernel is the truth: the range is read back, never
+  assumed, and Auto's outcome is never recomputed.
+- **A restart waits for DDC/CI and power** (`RestartSignal.restart`): it takes every port's turn
+  at POWER (ddc.DdcChannel.hold_all) before it writes the request, so no DDC/CI or power command
+  is in flight across the restart and none starts while it waits; a restart that does not come
+  within signal_range.RESTART_WAIT_SECONDS releases the turns.
 - **A test pattern's ask and its receipt** (display tuning, decision 0024, design rule 1): a
   document whose `test_pattern` differs from the ask the port holds sets the ask and its receipt
   (the controller's `clock()`, the Pi's monotonic seconds, never compared with another system's
@@ -90,7 +106,7 @@ Rules this module owns (one home each):
   otherwise. `_values` compares every operation field, the pattern too, so a change that turns a
   pattern on or off waits for the shell's echo.
 - **The report** is put whenever it changes (identity, offered, for_change, results,
-  presented_change, test_pattern_shown).
+  presented_change, signal, test_pattern_shown).
 """
 from __future__ import annotations
 
@@ -106,7 +122,7 @@ from typing import Final, Protocol
 
 from contracts.kelvin import kelvin_white
 from contracts.node_frame import HIGHLIGHT_KNEE_MIN, LutMix, PictureOperations
-from contracts.node_output import DisplayIdentity
+from contracts.node_output import OUTPUT_IDS, DisplayIdentity
 from contracts.node_picture import (
     GAMMA_TENTHS_NEUTRAL,
     PICTURE_LIST,
@@ -119,6 +135,9 @@ from contracts.node_picture import (
     PictureDocument,
     PictureReport,
     RangeKind,
+    SignalRange,
+    SignalReport,
+    SignalResult,
     SoftwarePicture,
     TestPatternAsk,
     VcpCode,
@@ -128,6 +147,13 @@ from contracts.tuning import TestPattern
 
 from .ddc import DdcChannel, Urgency, VcpAnswer, answer_value, parse_terse
 from .picture_list import ASK_AGAIN_SECONDS, OfferedCache, PictureAsk, with_current
+from .signal_range import (
+    RESTART_WAIT_SECONDS,
+    ConnectorRanges,
+    RangeRequest,
+    RangeRequests,
+    signal_outcome,
+)
 
 BRIGHTNESS_CODE: Final = "10"       # VESA MCCS luminance
 READ_SECONDS: Final = 5.0           # one VCP read's wait for the port and its run (the run itself is cut at the hold)
@@ -282,6 +308,51 @@ class FileAppliedPictures:
             log.warning("picture: could not record %s's applied change", output_id, exc_info=True)
 
 
+class SignalPort(Protocol):
+    """The connector's signal range (display tuning, decision 0024)."""
+
+    def in_force(self, output_id: str) -> SignalRange | None: ...   # None: no range property (not HDMI)
+
+    def requested(self, output_id: str) -> SignalRange | None: ...  # the range the last restart asked for
+
+    def restart(self, ranges: Mapping[str, SignalRange]) -> bool:
+        """Hold every port's DDC/CI and power turn, ask for the restart, wait; returns only False
+        (the restart did not come within RESTART_WAIT_SECONDS; the turns released). The process
+        normally ends with Weston."""
+        ...
+
+
+class RestartSignal:
+    """`SignalPort` over the connector (signal_range.DrmConnectorRanges), the request
+    (signal_range.FileRangeRequests: writing it is the restart request) and the DDC/CI channel's
+    hold of every port (the module's rule)."""
+
+    def __init__(self, connectors: ConnectorRanges, requests: RangeRequests, ddc: DdcChannel, *,
+                 wait: float = RESTART_WAIT_SECONDS, sleep: Callable[[float], None] = time.sleep) -> None:
+        self._connectors, self._requests, self._ddc = connectors, requests, ddc
+        self._wait, self._sleep = wait, sleep
+
+    def in_force(self, output_id: str) -> SignalRange | None:
+        return self._connectors.read(output_id)
+
+    def requested(self, output_id: str) -> SignalRange | None:
+        return self._requests.last().ranges.get(output_id)
+
+    def restart(self, ranges: Mapping[str, SignalRange]) -> bool:
+        deadline = time.monotonic() + self._wait
+        release = self._ddc.hold_all(timeout=self._wait)
+        if release is None:
+            log.warning("picture: the DDC/CI ports were not free for a signal range restart")
+            return False
+        try:
+            self._requests.request(RangeRequest(dict(ranges)))
+            self._sleep(max(0.0, deadline - time.monotonic()))
+        finally:
+            release()
+        log.warning("picture: the signal range restart did not come within %.0f s", self._wait)
+        return False
+
+
 class DdcPictureAdapter:
     """`PictureDdc` over the port's DDC/CI channel (ddc.DdcChannel), every call at Urgency.PICTURE."""
 
@@ -331,6 +402,7 @@ class _Port:
     history: dict[int, tuple] = field(default_factory=dict)   # picture change -> its operations' values
     presented_values: tuple | None = None
     presented_change: int | None = None
+    signal: SignalReport | None = None              # the answer to the latest signal step
     pattern_ask: TestPatternAsk | None = None       # the latest document's test pattern ask
     pattern_received: float | None = None           # clock() when that ask first arrived; None with no ask
     put: PictureReport | None = None                # the report last put
@@ -353,11 +425,12 @@ class PictureController:
     picture report."""
 
     def __init__(self, ddc: PictureDdc, ask: PictureAsk, offered: OfferedCache, shell: PictureShell,
-                 reports: PictureReports, applied: AppliedPictures, clock: Callable[[], float]) -> None:
+                 reports: PictureReports, applied: AppliedPictures, clock: Callable[[], float],
+                 signal: SignalPort) -> None:
         """`clock` is the Pi's monotonic seconds for asking and reading again, never compared
         elsewhere."""
         self._ddc, self._ask, self._offered, self._shell, self._reports = ddc, ask, offered, shell, reports
-        self._applied, self._clock = applied, clock
+        self._applied, self._clock, self._signal = applied, clock, signal
         self._ports: dict[str, _Port] = {}
         self._wake = threading.Condition()
         self._started = False
@@ -588,6 +661,7 @@ class PictureController:
             if document is None or not port.pending:
                 return
             earlier = dict(port.results) if port.carried_out_on == identity else {}
+        self._signal_step(output_id, port, document)
         last = self._applied.last(output_id)
         same = last is not None and last.identity == identity
         if same and last.picture_change == document.picture_change:
@@ -616,6 +690,33 @@ class PictureController:
             held = None if identity is None else port.lists.get(identity)
         if identity is not None and held is not None:
             self._offered.put(identity, held)        # the currents the writes read
+
+    def _signal_step(self, output_id: str, port: _Port, document: PictureDocument) -> None:
+        """`document`'s signal range: judged, a restart asked when it differs, the answer reported
+        (the module's rule)."""
+        in_force = self._signal.in_force(output_id)
+        outcome = signal_outcome(document.signal_range, in_force, self._signal.requested(output_id))
+        if outcome is None:
+            self._signal.restart(self._wanted_ranges(output_id, document.signal_range))
+            outcome, in_force = SignalResult.FAILED, self._signal.in_force(output_id)
+        with self._wake:
+            port.signal = SignalReport(document.picture_change, in_force or SignalRange.AUTO, outcome)
+            self._report(output_id, port)
+
+    def _wanted_ranges(self, output_id: str, wanted: SignalRange) -> dict[str, SignalRange]:
+        """Every Output's wanted range for a restart: `wanted` for `output_id`; another Output's
+        latest document's, else its range in force (none when it has no range property)."""
+        with self._wake:
+            documents = {other: port.document for other, port in self._ports.items() if port.document is not None}
+        ranges = {output_id: wanted}
+        for other in OUTPUT_IDS:
+            if other == output_id:
+                continue
+            if other in documents:
+                ranges[other] = documents[other].signal_range
+            elif (in_force := self._signal.in_force(other)) is not None:
+                ranges[other] = in_force
+        return ranges
 
     def _answer(self, output_id: str, port: _Port, document: PictureDocument,
                 results: dict[VcpCode, HardwareResult]) -> None:
@@ -712,7 +813,7 @@ class PictureController:
                                      and self._pattern(port) is not None) else None
         report = PictureReport(output_id, port.identity if port.connected else None, port.offered(),
                                port.for_change, dict(port.results), port.presented_change,
-                               test_pattern_shown=shown)
+                               signal=port.signal, test_pattern_shown=shown)
         if report != port.put:
             port.put = report
             self._reports.put_picture(report)
@@ -720,5 +821,6 @@ class PictureController:
 
 __all__ = ["BRIGHTNESS_CODE", "READ_SECONDS", "REREAD_SECONDS", "SHELL_SECONDS",
            "TICK_SECONDS", "WRITE_GAP_SECONDS", "WRITE_SECONDS", "Applied", "AppliedPictures", "DdcPictureAdapter", "DisplayBrightness",
-           "FileAppliedPictures", "PictureController", "PictureDdc", "PictureReports", "PictureShell",
+           "FileAppliedPictures", "PictureController", "PictureDdc", "PictureReports", "PictureShell", "RestartSignal",
+           "SignalPort",
            "brightness_line", "judged", "operations_for", "pattern_in_force", "write_order"]

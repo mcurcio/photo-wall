@@ -242,6 +242,7 @@ _NODE_DEBS: Final = (*_PROJECT, ".github/workflows/node-components.yml", "debian
                      "appliance/central_post.py", "appliance/netboot_initramfs/**",
                      "appliance/node/**", "appliance/launchers/**", "appliance/bus/**",
                      "appliance/systemd/photo-wall-*.service",
+                     "appliance/systemd/photo-wall-*.path",
                      "appliance/systemd/photowall*.slice",
                      "appliance/systemd/photo-wall-node.target")
 

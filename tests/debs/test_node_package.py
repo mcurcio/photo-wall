@@ -1,6 +1,6 @@
 """photo-wall-node, the composition the base installs (decision 0019 P2), proved on the built
 artifact: apt installs it from the local repo with every context, nats-server at the pin, systemd
-and udev; each of the seven launchers' ENTRY imports in an isolated interpreter whose path starts
+and udev; each of the eight launchers' ENTRY imports in an isolated interpreter whose path starts
 with exactly that launcher's installed PATH, every first-party module coming from those
 directories; every installed unit's ExecStart names an installed launcher directory or binary; the
 target is enabled; the system users and runtime directories are installed (and the users made);
@@ -31,6 +31,7 @@ LAUNCHERS = {
     "root-import": "appliance.apps.root_import",
     "node-bootstrap": "appliance.boot.node_bootstrap",
     "display-controller": "appliance.display_host.runner",
+    "display-signal-range": "appliance.display_host.signal_range",
     "host-core": "appliance.host.host_runner",
     "app-broker": "appliance.apps.broker_runner",
     "manager-supervisor": "appliance.node.manager_launcher",
@@ -88,8 +89,9 @@ files = subprocess.run(["dpkg", "-L", "photo-wall-node"], capture_output=True, t
 units = {}
 for file in files:
     if file.startswith("/usr/lib/systemd/system/") and Path(file).is_file():
-        units[Path(file).name] = [line.partition("=")[2] for line in Path(file).read_text().splitlines()
-                                  if line.startswith("ExecStart=")]
+        units[Path(file).name] = [line.partition("=")[2].lstrip("+-@:!") for line in
+                                  Path(file).read_text().splitlines()
+                                  if line.startswith(("ExecStart=", "ExecStartPre="))]
 report["units"] = units
 paths = {}
 for commands in units.values():
@@ -127,7 +129,7 @@ def report() -> dict:
     return json.loads(run.stdout)
 
 
-def test_the_seven_launchers_run_their_frozen_entries(report):
+def test_the_eight_launchers_run_their_frozen_entries(report):
     assert {name: each["entry"] for name, each in report["launchers"].items()} == LAUNCHERS
 
 
@@ -142,7 +144,8 @@ def test_an_exempt_edge_puts_its_target_on_the_launchers_path(report):
 
 
 def test_every_unit_starts_an_installed_launcher_or_binary(report):
-    assert len(report["units"]) == 16 and "photo-wall-node.target" in report["units"]
+    assert len(report["units"]) == 18 and "photo-wall-node.target" in report["units"]
+    assert "photo-wall-display-signal.path" in report["units"]
     assert {path for path, present in report["paths"].items() if not present} == set()
     launched = {path.removeprefix("/usr/lib/photo-wall/node/") for path in report["paths"]
                 if path.startswith("/usr/lib/photo-wall/node/")}

@@ -310,9 +310,11 @@ def main() -> None:
         DdcPictureAdapter,
         FileAppliedPictures,
         PictureController,
+        RestartSignal,
         operations_for,
     )
     from appliance.display_host.picture_list import FileOfferedCache, PictureListAsker
+    from appliance.display_host.signal_range import DrmConnectorRanges, FileRangeRequests
     from appliance.display_host.weston import (
         CompositorPresentation,
         DiagnosticRelease,
@@ -413,7 +415,9 @@ def main() -> None:
         node_picture.OUTPUT_IDS = (*node_picture.OUTPUT_IDS, OUTPUT)
         channel = DdcChannel(never_answers, drm_root=fake_drm())
         controller = PictureController(DdcPictureAdapter(channel), PictureListAsker(channel), FileOfferedCache(applied),
-                                       backend, reports, FileAppliedPictures(applied), time.monotonic)
+                                       backend, reports, FileAppliedPictures(applied), time.monotonic,
+                                       RestartSignal(DrmConnectorRanges(fake_drm()),
+                                                     FileRangeRequests(applied / "signal-range.json"), channel))
         backend.picture_events = controller
         controller.output(OUTPUT, connected=True, identity=None)
         controller.start()

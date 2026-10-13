@@ -39,6 +39,10 @@ Environment=XDG_RUNTIME_DIR=/run/photo-wall-display
 Environment=PHOTO_WALL_CONTROLLER_UID=10005
 # The public Wayland socket lives in its own tmpfiles.d directory (pw-display:pw-display 0750),
 # which outlives Weston, apart from the private control and ingress sockets.
+# The Display's signal range (display tuning, decision 0024), set before Weston takes the screen:
+# privileged ('+', Weston stays unprivileged), its failure ignored ('-', Weston starts whatever
+# happens); it blanks the tty first, so a range change shows black, never text.
+ExecStartPre=+-/usr/bin/python3 -I -B /usr/lib/photo-wall/node/display-signal-range
 # env restates XDG_RUNTIME_DIR because pam_systemd (PAMName=login) replaces it with /run/user/<uid>;
 # env execs Weston, so the main PID (NotifyAccess=main) is Weston's.
 ExecStart=/usr/bin/env XDG_RUNTIME_DIR=/run/photo-wall-display /usr/bin/weston --backend=drm --shell=/usr/lib/photo-wall/node-display/photo-wall-shell.so --modules=systemd-notify.so --socket=/run/photo-wall-display-wayland/wayland-0 --idle-time=0
