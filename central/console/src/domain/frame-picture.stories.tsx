@@ -1,6 +1,9 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
 
-import { FramePicture, LutSettings, PhotoWallSettings, type PictureSession } from "./frame-picture";
+import {
+  FramePicture, LutSettings, PhotoWallSettings, type PictureSession, SignalSettings, signalWords, TestPatternSettings,
+  testPatternWords,
+} from "./frame-picture";
 
 type View = NonNullable<PictureSession["view"]>;
 type Row = View["hardware"][number];
@@ -42,6 +45,10 @@ const VIEW: View = {
     saturation_percent: 100, highlight_rolloff_percent: 0, black_floor_tenths: 0, lut_amount_percent: 100, lut: null,
   },
   session: { session_id: "5b7f0c1e-2d4a-4f6b-9c8e-1a2b3c4d5e6f", sequence: 1, idle_until: 1_791_000_005 },
+  signal_range: "auto",
+  signal: { in_force: "auto", result: "applied", answered: true },
+  test_pattern: null,
+  test_pattern_seconds: 600,
 };
 
 // Two paper profiles on the LUTs list.
@@ -53,11 +60,13 @@ const LUTS = [
 const SESSION: PictureSession = {
   view: VIEW,
   phase: "shown",
-  draft: { hardware: {}, software: {}, lut: {} },
+  draft: { hardware: {}, software: {}, lut: {}, signal: {}, pattern: {} },
   dirty: false,
   changeHardware: () => {},
   changeSoftware: () => {},
   changeLut: () => {},
+  changeSignalRange: () => {},
+  changeTestPattern: () => {},
   luts: [],
   done: async () => true,
   revert: async () => {},
@@ -83,13 +92,13 @@ type Story = StoryObj<typeof meta>;
 export const Shown: Story = {};
 /** A display brightness change the Pi has not shown yet: Done waits. */
 export const Waiting: Story = {
-  args: { session: { ...SESSION, phase: "waiting", dirty: true, latest: 1, draft: { hardware: { "10": 75 }, software: {}, lut: {} } } },
+  args: { session: { ...SESSION, phase: "waiting", dirty: true, latest: 1, draft: { ...SESSION.draft, hardware: { "10": 75 }, software: {} } } },
 };
 /** The Pi showed the latest change: Done is offered. */
 export const ChangeShown: Story = {
   args: {
     session: {
-      ...SESSION, dirty: true, latest: 1, draft: { hardware: {}, software: { brightness: 130 }, lut: {} },
+      ...SESSION, dirty: true, latest: 1, draft: { ...SESSION.draft, hardware: {}, software: { brightness: 130 } },
       view: { ...VIEW, software: { ...VIEW.software, brightness_percent: 130 } },
     },
   },
@@ -148,7 +157,7 @@ export const Refused: Story = {
 };
 /** A list setting: its choices and "As the display has it", one being chosen in this visit. */
 export const Choices: Story = {
-  args: { session: { ...SESSION, phase: "waiting", dirty: true, latest: 1, draft: { hardware: { "14": 4 }, software: {}, lut: {} } } },
+  args: { session: { ...SESSION, phase: "waiting", dirty: true, latest: 1, draft: { ...SESSION.draft, hardware: { "14": 4 }, software: {} } } },
 };
 /** Settings the display answers but lists no choices for, or no longer offers: shown, no control. */
 export const ReadOnly: Story = {
@@ -179,7 +188,7 @@ export const PhotoWallSection: Story = {
 export const PhotoWallPrintLook: Story = {
   render: () => (
     <PhotoWallSettings view={VIEW} ready
-      session={{ ...SESSION, dirty: true, draft: { hardware: {}, software: { saturation: 85, "highlight-rolloff": 40, "black-floor": 20 }, lut: {} } }} />
+      session={{ ...SESSION, dirty: true, draft: { ...SESSION.draft, hardware: {}, software: { saturation: 85, "highlight-rolloff": 40, "black-floor": 20 } } }} />
   ),
 };
 /** Brightness and saturation at 100 % or below: nothing passes white, so soft highlights says where it acts. */
@@ -203,7 +212,7 @@ export const LutWaiting: Story = {
   render: () => (
     <LutSettings view={VIEW} ready
       session={{ ...SESSION, phase: "waiting", dirty: true, luts: LUTS,
-        draft: { hardware: {}, software: { "lut-amount": 80 }, lut: { lut: LUTS[0].profile_sha256 } } }} />
+        draft: { hardware: {}, software: { "lut-amount": 80 }, lut: { lut: LUTS[0].profile_sha256 }, signal: {}, pattern: {} } }} />
   ),
 };
 /** A LUT in force and shown, at 100 %. */
@@ -218,4 +227,63 @@ export const PhotoWallNoSession: Story = {
     <PhotoWallSettings view={{ ...VIEW, software: { ...VIEW.software, black_floor_tenths: 25 } }}
       session={{ ...SESSION, phase: "idle", latest: null }} ready={false} />
   ),
+};
+
+/** The words are the view's: a pure check the catalogue runs before any story renders (the minutes
+ * come from `test_pattern_seconds`, the range the Pi still sends from its answer). */
+const checks: [string, string][] = [
+  [testPatternWords({ pattern: "white", state: "ended" }, 600), "Taken off after 10 min. Choose it again to show it."],
+  [testPatternWords({ pattern: "white", state: "ended" }, 300), "Taken off after 5 min. Choose it again to show it."],
+  [testPatternWords({ pattern: "grey-ramp", state: "waiting" }, 600), "Waiting for the Pi"],
+  [signalWords("full", { in_force: "full", result: "applied", answered: true }), "The Pi sends Full."],
+  [signalWords("full", { in_force: "limited", result: "failed", answered: true }),
+    "The Pi could not change it: the display still gets Limited."],
+  [signalWords("full", { in_force: "auto", result: "applied", answered: false }),
+    "The display's picture restarts: about 10 s without photos."],
+  [signalWords("full", null), "The display's picture restarts: about 10 s without photos."],
+  [signalWords("auto", null), "The Pi chooses: Limited for TV modes."],
+  [signalWords("full", { in_force: "auto", result: "unsupported", answered: true }),
+    "This display's connection has no signal range setting."],
+];
+for (const [said, meant] of checks) {
+  if (said !== meant) throw new Error(`frame-picture words: ${JSON.stringify(said)} is not ${JSON.stringify(meant)}`);
+}
+
+const pattern = (test_pattern: View["test_pattern"], drafted?: "white" | "grey-ramp" | "black-level" | null) => (
+  <TestPatternSettings view={{ ...VIEW, test_pattern }} ready
+    session={{ ...SESSION, latest: 1,
+      draft: { ...SESSION.draft, pattern: drafted === undefined ? {} : { pattern: drafted } } }} />
+);
+/** White on every Frame of this display: the paper line, and the Pi shows it. */
+export const TestPatternWhiteShown: Story = { render: () => pattern({ pattern: "white", state: "shown" }, "white") };
+/** The Grey ramp chosen; the Pi has not shown it yet. */
+export const TestPatternGreyRampWaiting: Story = {
+  render: () => pattern({ pattern: "grey-ramp", state: "waiting" }, "grey-ramp"),
+};
+/** The Black level shown, with how to read it against the signal range. */
+export const TestPatternBlackLevelShown: Story = {
+  render: () => pattern({ pattern: "black-level", state: "shown" }, "black-level"),
+};
+/** The Pi took the pattern off at its bound: Off, and the words to choose it again. */
+export const TestPatternEnded: Story = { render: () => pattern({ pattern: "white", state: "ended" }, "white") };
+
+const signal = (view: Partial<View>, range?: "auto" | "full" | "limited") => (
+  <SignalSettings view={{ ...VIEW, ...view }} ready
+    session={{ ...SESSION, latest: 1, draft: { ...SESSION.draft, signal: range === undefined ? {} : { range } } }} />
+);
+/** Full kept, and the Pi sends it. */
+export const SignalFullApplied: Story = {
+  render: () => signal({ signal_range: "full", signal: { in_force: "full", result: "applied", answered: true } }),
+};
+/** Full chosen in this visit: the display's picture restarts until the Pi answers. */
+export const SignalFullRestarting: Story = {
+  render: () => signal({ signal_range: "full", signal: { in_force: "auto", result: "applied", answered: false } }, "full"),
+};
+/** The Pi could not change it: the range the display still gets. */
+export const SignalFailed: Story = {
+  render: () => signal({ signal_range: "full", signal: { in_force: "limited", result: "failed", answered: true } }, "full"),
+};
+/** A connection with no signal range setting. */
+export const SignalUnsupported: Story = {
+  render: () => signal({ signal_range: "full", signal: { in_force: "auto", result: "unsupported", answered: true } }, "full"),
 };

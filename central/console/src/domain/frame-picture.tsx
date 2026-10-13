@@ -1,8 +1,11 @@
 import { useState } from "react";
 
+import { formatAge } from "../health.js";
 import { levelWords } from "../levelWords.js";
 import { copyPicture } from "../pictureApi.js";
-import type { HardwareSettingView, PictureCopyResult, SoftwareSetting } from "../pictureApi.js";
+import type {
+  HardwareSettingView, PictureCopyResult, SignalRange, SignalView, SoftwareSetting, TestPattern, TestPatternView,
+} from "../pictureApi.js";
 import type { usePictureSession } from "../pictureSession.js";
 import { FactGroup, FactRow, Note } from "../patterns/fact-row";
 import { OwnerLinks } from "../patterns/link-to-owner";
@@ -15,6 +18,7 @@ import { Disclosure } from "../ui/disclosure";
 import { Field } from "../ui/field";
 import { Link } from "../ui/link";
 import { Section } from "../ui/section";
+import { SegmentedControl } from "../ui/segmented-control";
 import { Select } from "../ui/select";
 import { Slider } from "../ui/slider";
 import { Inline, Stack } from "../ui/stack";
@@ -57,6 +61,108 @@ const CHECKED_WHEN_CONNECTED = "Photo Wall checks what this display offers when 
 const NOT_OFFERED = "Not offered by this display at its last check";
 // The Select's value for "As the display has it" (a choice's own value is its byte, in decimal).
 const AS_IT_HAS_IT_OPTION = "as-the-display-has-it";
+
+export const TEST_PATTERN_GROUP = "Test pattern";
+export const SIGNAL_GROUP = "Signal range";
+// The SegmentedControl's value for Off (the wire's is null, never "off").
+const OFF = "off";
+const PATTERN_OPTIONS: readonly { value: TestPattern | typeof OFF; label: string }[] = [
+  { value: OFF, label: "Off" },
+  { value: "white", label: "White" },
+  { value: "grey-ramp", label: "Grey ramp" },
+  { value: "black-level", label: "Black level" },
+];
+// What to do with each pattern. The Black level's is the one home of how to read it (display
+// tuning, "Reading the Black level"); the runbook links here.
+const PATTERN_HOW: Record<TestPattern, string> = {
+  white: "Tape a sheet of white paper beside the Frame and match its white.",
+  "grey-ramp": "Every step should be told apart: the darkest from black, the lightest from white.",
+  "black-level": "Switch Signal range between Full and Limited. Black darker on Full with every step visible: "
+    + "keep Full. Steps vanish into black on Full: choose Limited. No change: the display follows the Pi, the glow "
+    + "is its backlight; keep Full, it keeps all 256 steps.",
+};
+const RANGE_NAMES: Record<SignalRange, string> = { auto: "Auto", full: "Full", limited: "Limited" };
+const RANGE_OPTIONS = (["auto", "full", "limited"] as const).map((value) => ({ value, label: RANGE_NAMES[value] }));
+const AUTO_CHOOSES = "The Pi chooses: Limited for TV modes.";
+const RANGE_RESTARTS = "Changing it restarts this display's picture: about 10 s without photos.";
+const RESTARTING = "The display's picture restarts: about 10 s without photos.";
+const NO_RANGE_SETTING = "This display's connection has no signal range setting.";
+const COPY_NO_RANGE = "Copy never copies the signal range: it follows each display.";
+
+/** A test pattern's state in words; `seconds` how long the Pi keeps one up (the view's
+ * `test_pattern_seconds`, never a literal here). */
+export function testPatternWords(view: TestPatternView, seconds: number): string {
+  if (view.state === "waiting") return "Waiting for the Pi";
+  if (view.state === "shown") return "On every Frame of this display";
+  return `Taken off after ${formatAge(seconds)}. Choose it again to show it.`;
+}
+
+/** When a test pattern goes off, in words. */
+export function testPatternEnds(seconds: number): string {
+  return `Off after Done, Revert, leaving this page, or ${formatAge(seconds)}.`;
+}
+
+/**
+ * The signal range's line: `range` the one wanted (the operator's choice in this visit, else the
+ * view's), `signal` the Pi's answer. While the Pi has not answered a range other than the one its
+ * connector holds, the display's picture restarts; then what it sends, that it could not change it
+ * (and what the display still gets), or that the connection has no such setting. Auto names what
+ * the Pi chooses. No answer yet with Auto wanted: the Pi's choice, as at every start.
+ */
+export function signalWords(range: SignalRange, signal: SignalView | null): string {
+  const sends = (inForce: SignalRange) => (inForce === "auto" ? AUTO_CHOOSES : `The Pi sends ${RANGE_NAMES[inForce]}.`);
+  if (signal === null) return range === "auto" ? AUTO_CHOOSES : RESTARTING;
+  if (!signal.answered) return signal.in_force === range && signal.result === "applied" ? sends(range) : RESTARTING;
+  if (signal.result === "unsupported") return NO_RANGE_SETTING;
+  if (signal.result === "failed") {
+    const gets = signal.in_force === "auto" ? "what the Pi chooses" : RANGE_NAMES[signal.in_force];
+    return `The Pi could not change it: the display still gets ${gets}.`;
+  }
+  return signal.in_force === range ? sends(range) : RESTARTING;
+}
+
+/** Test pattern (#101): Off, White, Grey ramp or Black level on every Frame of this display, live
+ * while the tab is open and never kept; what to do with the chosen one, and its state on the Pi. A
+ * pattern the Pi took off at its bound shows Off with the words to choose it again. */
+export function TestPatternSettings({ view, session, ready }: { view: View; session: PictureSession; ready: boolean }) {
+  const drafted = session.draft.pattern;
+  const asked = view.test_pattern;
+  const ended = asked?.state === "ended";
+  const pattern = ended ? null : "pattern" in drafted ? drafted.pattern ?? null : asked?.pattern ?? null;
+  const seconds = view.test_pattern_seconds;
+  return (
+    <FactGroup title={TEST_PATTERN_GROUP}>
+      <Stack>
+        <Field label="Show" help={testPatternEnds(seconds)}>
+          <SegmentedControl label="Show" value={pattern ?? OFF} options={PATTERN_OPTIONS} disabled={!ready}
+            onChange={(next) => session.changeTestPattern(next === OFF ? null : next)} />
+        </Field>
+        {pattern !== null && <Note>{PATTERN_HOW[pattern]}</Note>}
+        {asked !== null && (
+          <FactRow tone={asked.state === "waiting" ? "claimed" : "reported"}>{testPatternWords(asked, seconds)}</FactRow>
+        )}
+      </Stack>
+    </FactGroup>
+  );
+}
+
+/** Signal range: Auto, Full or Limited, the display's, kept by Done and put back by Revert; never
+ * copied. Its line says what the Pi made of it (`signalWords`). */
+export function SignalSettings({ view, session, ready }: { view: View; session: PictureSession; ready: boolean }) {
+  const range = session.draft.signal.range ?? view.signal_range;
+  const words = signalWords(range, view.signal);
+  return (
+    <FactGroup title={SIGNAL_GROUP}>
+      <Stack>
+        <Field label="Range" help={RANGE_RESTARTS}>
+          <SegmentedControl label="Range" value={range} options={RANGE_OPTIONS} disabled={!ready}
+            onChange={session.changeSignalRange} />
+        </Field>
+        <FactRow tone={words === RESTARTING ? "claimed" : "reported"}>{words}</FactRow>
+      </Stack>
+    </FactGroup>
+  );
+}
 
 const COPY_WORDS: Record<CopyOutcome, string> = {
   copied: "Copied",
@@ -313,6 +419,7 @@ function CopyToFrames({ frameId, otherFrames, blocked, names }: {
           other display offers them, to the displays of the Frames you choose. Each Frame&apos;s position
           stays as it is.
         </Note>
+        <Note>{COPY_NO_RANGE}</Note>
         <Stack label="Frames to copy to">
           {otherFrames.map((other) => (
             <Field key={other} label={`Frame ${other}`}>
@@ -354,8 +461,10 @@ function CopyToFrames({ frameId, otherFrames, blocked, names }: {
 
 /**
  * The Frame page's Picture tab (roadmap 1c's Live model, design language §8 row B5; decision 0022,
- * the picture split: console design §5 Picture, settings #111-#114, #119): two groups of the display
- * that feeds this Frame, set apart and never coupled. Display (hardware) is the display's own
+ * the picture split: console design §5 Picture, settings #111-#114, #119; display tuning: #101): a
+ * test pattern to tune against and the signal range first (you tune by looking at a pattern, and
+ * read the Black level by switching the range), then two groups of the display that feeds this
+ * Frame, set apart and never coupled. Display (hardware) is the display's own
  * settings that it offers, each untouched until someone sets it here; Photo Wall (software) changes
  * the picture Photo Wall sends and never claims to be the display's brightness. They belong to the
  * display and move with it. Every change is sent as it is made; Done keeps it once the Pi shows it,
@@ -376,6 +485,8 @@ export function FramePicture({ frameId, piHref, session, otherFrames }: FramePic
   const controls = view === null ? <Note>Reading the display&apos;s picture…</Note> : (
     <Stack>
       <Note>These settings belong to the display that feeds this Frame and move with it.</Note>
+      <TestPatternSettings view={view} session={session} ready={ready} />
+      <SignalSettings view={view} session={session} ready={ready} />
       <DisplaySettings view={view} session={session} ready={ready} />
       <PhotoWallSettings view={view} session={session} ready={ready} />
       <CopyToFrames frameId={frameId} otherFrames={otherFrames}
