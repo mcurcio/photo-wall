@@ -9,14 +9,15 @@ home here.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
-from enum import StrEnum
+from dataclasses import dataclass, fields, is_dataclass
+from enum import Enum, StrEnum
 from typing import Any, Final
 
 import numpy as np
+from pydantic import BaseModel
 
 from central.displays.views import PictureEntryView
-from contracts.calibration_target import Surface
+from contracts.calibration_target import PAPER_TARGET_MM, SCREEN_TARGET_MM, Surface
 from contracts.node_picture import SoftwarePicture
 from contracts.tuning import TestPattern
 
@@ -64,7 +65,21 @@ class Place:
     def words(self) -> str:
         """The place in plain words, by thirds of its target each way, e.g. "the paper's lower
         left" or "the screen target's top middle". Pure."""
-        ...
+        width, height = SCREEN_TARGET_MM if self.surface is Surface.SCREEN else PAPER_TARGET_MM
+        column = _COLUMNS[_third(self.x_mm, width)]
+        row = _ROWS[_third(self.y_mm, height)]
+        name = "the screen target's" if self.surface is Surface.SCREEN else "the paper's"
+        where = "middle" if row == column == "middle" else f"{row} {column}"
+        return f"{name} {where}"
+
+
+_ROWS: Final = ("top", "middle", "lower")
+_COLUMNS: Final = ("left", "middle", "right")
+
+
+def _third(at_mm: float, size_mm: float) -> int:
+    """Which third of `size_mm` holds `at_mm` (0, 1 or 2; beyond the edges the nearest)."""
+    return min(2, max(0, int(3 * at_mm / size_mm)))
 
 
 class DropReason(StrEnum):
@@ -197,7 +212,30 @@ Suggestion = PreSoftwareSuggestion | PostSoftwareSuggestion | SuggestionRefused
 def to_json(value: Reading | Refused | Suggestion) -> dict[str, Any]:
     """The plain JSON the command prints: enums as their values, each Place with its words, the
     entry as the operator route answers it (PictureEntryView.model_dump(mode="json")). Pure."""
-    ...
+    out = _plain(value)
+    if isinstance(value, PreSoftwareSuggestion):
+        out = {"stage": "pre-software", **out}
+    elif isinstance(value, PostSoftwareSuggestion):
+        out = {"stage": "post-software", **out}
+    return out
+
+
+def _plain(value: Any) -> Any:
+    """`value` as plain JSON values (to_json's walk). Pure."""
+    if isinstance(value, BaseModel):
+        return value.model_dump(mode="json")
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, Place):
+        return {"surface": value.surface.value, "x_mm": round(value.x_mm, 1),
+                "y_mm": round(value.y_mm, 1), "words": value.words()}
+    if is_dataclass(value) and not isinstance(value, type):
+        return {f.name: _plain(getattr(value, f.name)) for f in fields(value)}
+    if isinstance(value, (tuple, list)):
+        return [_plain(item) for item in value]
+    if isinstance(value, np.generic):
+        return value.item()
+    return value
 
 
 __all__ = [

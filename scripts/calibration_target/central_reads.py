@@ -10,7 +10,9 @@
 """
 from __future__ import annotations
 
-from typing import Protocol
+from typing import Final, Protocol
+
+import httpx
 
 from central.displays.views import PictureEntryView
 from contracts.calibration_target import TargetCode
@@ -36,13 +38,26 @@ class HttpCentralReads:
     history: PHOTO_WALL_ADMIN_TOKEN and, optionally, PHOTO_WALL_READ_DATABASE_URL."""
 
     def __init__(self, base_url: str, admin_token: str, database_url: str | None) -> None:
-        ...
+        self._client = httpx.Client(base_url=base_url, timeout=TIMEOUT_SECONDS,
+                                    headers={"Authorization": f"Bearer {admin_token}"})
+        self._database_url = database_url
 
     def sent_entry(self, code: TargetCode) -> PictureEntryView | None:
-        ...
+        answer = self._client.get(f"/v1/operator/players/{code.player_id}/outputs/{code.output_id}"
+                                  f"/picture-changes/{code.picture_change}")
+        if answer.status_code == 404:
+            return None
+        if answer.status_code != 200:
+            raise RuntimeError(f"central answered {answer.status_code}")
+        return PictureEntryView.model_validate(answer.json())
 
     def lut_table(self, ref: LutRef) -> bytes | None:
-        ...
+        if self._database_url is None:
+            return None
+        raise NotImplementedError("calibration targets: slice R2")
+
+
+TIMEOUT_SECONDS: Final = 10.0
 
 
 __all__ = ["CentralReads", "HttpCentralReads"]
