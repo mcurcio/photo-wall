@@ -54,7 +54,10 @@ from dataclasses import replace
 
 sys.path[:0] = ["/repo", "/smoke"]
 DISPLAY = "/usr/lib/photo-wall/node-display"
-sys.path.append(DISPLAY)        # the installed Display Host (`appliance` is a namespace package)
+KERNEL = "/usr/lib/photo-wall/node-kernel"
+# The installed Display Host and the node kernel it imports (`appliance` is a namespace package),
+# on the path as the display-controller launcher puts them.
+sys.path += [DISPLAY, KERNEL]
 ROOT = pathlib.Path("/tmp/pw-picture-e2e")
 SOCKET = "wayland-picture"
 PLAYER_UID = 10004

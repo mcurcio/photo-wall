@@ -44,6 +44,7 @@ from test_display_identity import (
     enroll_pi,
 )
 from test_migration_092 import before_092, migrate_092
+from test_migration_094 import before_094, migrate_094
 
 from central.app import create_app
 from central.coordination import Coordinator
@@ -549,7 +550,9 @@ def test_a_value_changed_on_the_displays_buttons_is_shown_and_not_written_back(r
 # --- Migration 075, carried through 092 --------------------------------------------------------------
 
 def _before_075(registry) -> None:
-    """The database as 1b's build left it: 092 undone, then no picture columns, the preview columns back."""
+    """The database as 1b's build left it: 094 and 092 undone, then no picture columns, the preview
+    columns back."""
+    before_094(registry)
     before_092(registry)
     _sql(registry, "DROP TABLE picture_sessions")
     _sql(registry, "ALTER TABLE displays DROP COLUMN brightness_acts_on, DROP COLUMN brightness, "
@@ -560,10 +563,11 @@ def _before_075(registry) -> None:
 
 
 def _migrate(registry) -> None:
-    """075, then 092, on the database `_before_075` left."""
+    """075, then 092, then 094, on the database `_before_075` left."""
     with registry.db.transaction() as conn:
         conn.execute(MIGRATION_075.read_text())
     migrate_092(registry)
+    migrate_094(registry)
 
 
 def _stored_1b(registry, frame_id: str, *, gain: float, rotation: int = 0, corners=None) -> None:

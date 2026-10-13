@@ -285,6 +285,13 @@ def close(actual, expected) -> bool:
     return max(abs(a - b) for a, b in zip(actual, expected, strict=True)) <= TOLERANCE
 
 
+def exact(actual, expected) -> bool:
+    """The same 8-bit code in every channel: the Black level's raw codes 1..20 (and 0 around them)
+    are its reading (Full keeps them apart, Limited merges pairs), so no tolerance hides an offset,
+    a rounding or a dither."""
+    return all(round(a * 255) == round(b * 255) for a, b in zip(actual, expected, strict=True))
+
+
 def check_fit(native: CapturingRenderer, fit, operations: PictureOperations | None, *,
               profile: FrameProfile = PROFILE, crop: PhotoCrop = CENTRED,
               mat: Mat = Mat(), palette=QUADRANTS, lut: bytes | None = None) -> tuple[int, int]:
@@ -649,10 +656,13 @@ def lut_matches_the_reference(native, frames, variant) -> None:
     assert before > 500 and after > 500, (before, after)
 
 
-def pattern_matches_the_reference(pattern: TestPattern):
+def pattern_matches_the_reference(pattern: TestPattern, mat: Mat = DEEP_MAT):
+    """The pattern drawn as the scalar reference: inside the opening (turned with the Frame), black
+    outside. With DEEP_MAT the opening's square comes from the mat's shadow; with Mat() (no shading
+    mat, the common Frame) from the opening alone. The Black level to the exact code."""
     def case(native: CapturingRenderer, frames: Frames, variant: Variant) -> None:
         fit = CoverFit(corners=OPENING, rotation=30)
-        trial = TrialFrames(fit, DEEP_MAT)
+        trial = TrialFrames(fit, mat)
         trial.operations = PictureOperations("headless", 9, (1.0, 1.0, 1.0), .8, 1.0, 1.0,
                                              black_floor=.05, test_pattern=pattern)
         native._frames = trial
@@ -661,7 +671,8 @@ def pattern_matches_the_reference(pattern: TestPattern):
         spin(0.3)
         width, height, _ = native.captured
         to_opening = inverse(homography(fit.corners))
-        shadow = mat_shadow(fit, PROFILE, DEEP_MAT)
+        shadow = mat_shadow(fit, PROFILE, mat)
+        same = exact if pattern is TestPattern.BLACK_LEVEL else close
         counts = [0, 0, 0]       # inside, outside, lit
         for i, j, x, y in samples(native, fit.corners, step=5):
             u, v = transform(to_opening, x, y)
@@ -673,15 +684,18 @@ def pattern_matches_the_reference(pattern: TestPattern):
             smooth = pattern is TestPattern.GREY_RAMP and min(point[1] for point in around) >= .5
             if inside and not smooth and len(near) != 1:
                 continue        # a step's or a cell's edge
-            expected = final_pixel((0.0, 0.0, 0.0), trial.operations, inside=inside,
-                                   shade=mat_shade(shadow, x, y), opening_uv=(u, v))
+            shade = None if shadow is None else mat_shade(shadow, x, y)
+            expected = final_pixel((0.0, 0.0, 0.0), trial.operations, inside=inside, shade=shade,
+                                   opening_uv=(u, v))
             actual = pixel(native, i, j)
             counts[0 if inside else 1] += 1
             counts[2] += inside and max(expected[:3]) > 0
-            assert close(actual, expected), ("pattern_pixel", pattern.value, i, j, actual, expected)
-        print(f"PATTERN {pattern.value} inside={counts[0]} outside={counts[1]} lit={counts[2]}", flush=True)
+            assert same(actual, expected), ("pattern_pixel", pattern.value, i, j, actual, expected)
+        print(f"PATTERN {pattern.value} mat={shadow is not None} inside={counts[0]} outside={counts[1]} "
+              f"lit={counts[2]}", flush=True)
         assert counts[0] > 500 and counts[1] > 100 and counts[2] > 20, counts
-    case.__name__ = f"{pattern.name.lower()}_pattern_matches_the_reference"
+    suffix = "" if mat is DEEP_MAT else "_without_a_mat"
+    case.__name__ = f"{pattern.name.lower()}_pattern_matches_the_reference{suffix}"
     return case
 
 
@@ -694,7 +708,8 @@ CASES = (cover_matches_the_reference(0), cover_matches_the_reference(7),
          print_sliders_match_the_reference, one_light_from_the_top_matches,
          cover_at_90_shades_the_wall_up_edge, neutral_program_takes_no_new_step, trial_mat_drawn,
          lut_matches_the_reference, two_coloured_lights_match,
-         *(pattern_matches_the_reference(pattern) for pattern in TestPattern))
+         *(pattern_matches_the_reference(pattern) for pattern in TestPattern),
+         pattern_matches_the_reference(TestPattern.BLACK_LEVEL, Mat()))
 
 
 def main() -> None:
