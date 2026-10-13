@@ -30,8 +30,11 @@ the session, the producer and evidence or commands. The fence is a per-device re
 lock: every node request and operator action on a device holds it shared (`act`), so no request
 waits on another's slow COMMIT; a boot offer, a node enrolment and retirement hold it exclusive
 (`change`), and a `change` not granted within the lock timeout answers 503 `node_device_busy`
-with Retry-After. A transaction holds at most one fence; operator device reads take none and read
-one READ ONLY snapshot. The release writer takes its own lock, alone. There is no fleet-wide lock.
+with Retry-After. A transaction holds at most one fence: taking its device again is free, an
+upgrade or a second device is refused. A post that writes a producer's evidence also holds that
+producer's row (`NodeSessions.authenticate_producer_in`), so one producer's posts run one at a
+time and a retry finds the first post's rows. Operator device reads take none and read one READ
+ONLY snapshot. The release writer takes its own lock, alone. There is no fleet-wide lock.
 
 A row, and a projected Commit, changes only when its meaning changes. A readiness report writes
 the Player's feedback row; it rewrites a grant (`execution_commits`), a group's status or the

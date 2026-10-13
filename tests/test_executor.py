@@ -706,6 +706,25 @@ def test_a_refused_grant_is_reported_lost_with_its_own_sequence(tmp_path):
     assert rig.executor.readiness().lost_grants == ()
 
 
+def test_a_grant_revoked_by_central_or_replaced_by_a_new_revision_is_never_lost(tmp_path):
+    """Only a grant the Player dropped is lost: one Central revoked, or one a new plan revision
+    replaced, needs a fresh grant, never a re-grant of the old one."""
+    rig = Rig(tmp_path)
+    rig.offer(layer(start=103, media_origin=103))
+    rig.secure()
+    rig.executor.prepare_imminent()
+    rig.commit("picture")
+    rig.executor.invalidate(["picture"])
+    rig.executor.prepare_imminent()
+    revoked = rig.executor.readiness()
+    assert (revoked.prepared, revoked.lost_grants) == (("picture",), ())
+    rig.commit("picture")
+    rig.offer(layer(start=103, media_origin=103), revision=2)
+    rig.executor.prepare_imminent()
+    replaced = rig.executor.readiness()
+    assert (replaced.prepared, replaced.lost_grants) == (("picture",), ())
+
+
 def test_nonterminal_invalidation_preserves_bytes_requires_fresh_grant(tmp_path):
     rig = Rig(tmp_path)
     rig.offer(layer())

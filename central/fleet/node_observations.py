@@ -105,12 +105,12 @@ class NodeObservations:
         facts = parse_host_facts(raw)
         canonical = encode_host_facts(facts)
         with self.sessions.db.transaction() as conn:
-            principal = self.sessions.authenticate_in(conn, session_id, credential,
-                                                       allow_historical=True)
+            principal = self.sessions.authenticate_producer_in(
+                conn, session_id, credential, allow_historical=True)
             if facts.producer != principal.grant.producer:
                 raise NodeControlError("node_producer_mismatch", 403)
             now = principal.admission.ensure_current(self.sessions.clock)
-            # The session row lock taken by authenticate_in serializes one producer's posts.
+            # authenticate_producer_in's row lock serializes one producer's posts.
             prior = conn.execute("SELECT sequence,payload,received_at FROM node_host_facts "
                                  "WHERE producer_id=%s FOR UPDATE", (principal.producer_id,)).fetchone()
             if prior is not None and facts.sequence < prior["sequence"]:
@@ -148,8 +148,8 @@ class NodeObservations:
     def _record(self, session_id, credential, observation, canonical, table):
         # Table names are internal constants selected by typed owner entry points.
         with self.sessions.db.transaction() as conn:
-            principal = self.sessions.authenticate_in(conn, session_id, credential,
-                                                       allow_historical=True)
+            principal = self.sessions.authenticate_producer_in(
+                conn, session_id, credential, allow_historical=True)
             if observation.producer != principal.grant.producer:
                 raise NodeControlError("node_producer_mismatch", 403)
             prior = conn.execute(f"SELECT payload,received_at FROM {table} "
@@ -281,7 +281,7 @@ class NodeObservations:
                             0, now - sample["received_at"])}})
             # `outstanding` and the responses come from ONE statement, so one snapshot: a
             # response committed mid-read cannot be served beside an `outstanding` that
-            # predates it (response ingest does not take the fleet lock).
+            # predates it (this read takes no lock, so it never waits on an ingest).
             commands = conn.execute("SELECT c.command_id,c.operator_audit_ref,c.issued_at,c.expires_at,"
                                     f"{OUTSTANDING_REBOOT_SQL} AS outstanding,"
                                     "(SELECT coalesce(json_agg(json_build_object("

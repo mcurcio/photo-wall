@@ -108,7 +108,7 @@ def load_current_node_app_link_for_device_in(conn, device_id: str, generation: i
 
 
 def load_current_node_app_link_for_player_in(conn, player_id: str, authority_epoch: int, now: float):
-    """Runtime owner read under its locks; exact current Fleet/session lineage only."""
+    """Runtime owner read under its locks; exact current device/session lineage only."""
     row = conn.execute("SELECT l.payload,l.device_id FROM node_app_links l "
                        "JOIN node_producers p USING(producer_id) "
                        "JOIN node_boot_admissions b USING(admission_id) "

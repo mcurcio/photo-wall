@@ -7,9 +7,11 @@ a node enrolment, retirement), and PostgreSQL queues new `act`s behind a waiting
 change is never starved. The lock is memory only: no row write, no transaction id, no WAL.
 
 Rules (design r2, rule 1): a transaction holds at most one device fence, at the strength it took;
-`fence_in` refuses a second (`device_fence_held`), and a fence not granted within the transaction's
-`lock_timeout` answers 503 `node_device_busy` with Retry-After: a `FleetError`, never a
-`NodeControlError`, so no caller mistakes a busy device for an unavailable one. Reads take no fence: they read
+`fence_in` takes the held one again for free and refuses an upgrade or a second device
+(`device_fence_held`); a fence not granted within the transaction's `lock_timeout` answers 503
+`node_device_busy` with Retry-After: a `FleetError`, never a `NodeControlError`, so no caller
+mistakes a busy device for an unavailable one. No fence is taken inside a SAVEPOINT: rolling one
+back would forget the held fence while PostgreSQL keeps its lock. Reads take no fence: they read
 `standing_in` from one READ ONLY snapshot (`Database.read_snapshot`).
 
 Lock order: Coordination -> Runtime -> device fence -> offer quota row -> devices insert ->
@@ -31,6 +33,9 @@ from psycopg.errors import LockNotAvailable
 from central.fleet.models import FleetError, NodeControlError
 
 DEVICE_FENCE_CLASS: Final = 734118329
+# The transaction-local record of the fence it holds, `<strength>:<device_id>` (`set_config`'s
+# is_local): cheaper than reading pg_locks on every node request.
+_HELD_SETTING: Final = "photo_wall.device_fence"
 Strength = Literal["act", "change"]
 
 
@@ -84,15 +89,22 @@ class FencedTransaction:
 
 
 def fence_in(conn: Any, device_id: str, strength: Strength) -> FencedTransaction:
-    """Hold `device_id`'s fence at `strength` on `conn` until its transaction ends."""
-    held = conn.execute("SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory' "
-                        "AND pid=pg_backend_pid() AND classid=%s AND objsubid=2) AS held",
-                        (DEVICE_FENCE_CLASS,)).fetchone()["held"]
+    """Hold `device_id`'s fence at `strength` on `conn` until its transaction ends. Fencing the
+    held device again at the held strength, or `act` under a held `change`, is free; an upgrade or
+    a second device could deadlock, so either raises `device_fence_held`. Which fence the
+    transaction holds is a transaction-local setting, reset at COMMIT or ROLLBACK as the lock is."""
+    held = conn.execute("SELECT current_setting(%s,true) AS held",
+                        (_HELD_SETTING,)).fetchone()["held"]
     if held:
-        raise RuntimeError("device_fence_held")
+        held_strength, _, held_device = held.partition(":")
+        if held_device != device_id or (held_strength, strength) == ("act", "change"):
+            raise RuntimeError("device_fence_held")
+        return FencedTransaction(conn, device_id, strength)
     function = "pg_advisory_xact_lock_shared" if strength == "act" else "pg_advisory_xact_lock"
     try:
-        conn.execute(f"SELECT {function}(%s,%s)", (DEVICE_FENCE_CLASS, device_key(device_id)))
+        conn.execute(f"SELECT {function}(%s,%s),set_config(%s,%s,true)",
+                     (DEVICE_FENCE_CLASS, device_key(device_id), _HELD_SETTING,
+                      f"{strength}:{device_id}"))
     except LockNotAvailable as busy:
         raise FleetError("node_device_busy", 503, retry_after=1) from busy
     return FencedTransaction(conn, device_id, strength)

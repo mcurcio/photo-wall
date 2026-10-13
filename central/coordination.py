@@ -1027,7 +1027,8 @@ class Coordinator:
                                  producer_id, evidence_id, evidence_kind: str, detail: dict) -> bool:
         """Apply one affirmatively linked Output fact without changing its Run.
 
-        Caller holds Coordination→Runtime→Fleet locks and owns the inbox transaction.
+        Caller holds Coordination→Runtime locks, then the device fence, and owns the inbox
+        transaction.
         This port rechecks Registry epoch/binding; no other Frame or Actuator is commanded.
         """
         if not holds_runtime_locks_in(conn):

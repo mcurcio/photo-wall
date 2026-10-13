@@ -734,7 +734,7 @@ class Registry:
             calibration: Calibration, mat: Mat) -> Calibration:
         """Registry-owned Save CAS inside the Trial owner's existing transaction.
 
-        Caller holds Coordination→Runtime then Fleet/session locks. This method
+        Caller holds Coordination→Runtime, then the device fence and session locks. This method
         owns the persistent Frame calibration and mat (print look: the mat rides the binding
         beside the calibration and is saved with it; it never changes the Frame output). It never
         interprets trial evidence.

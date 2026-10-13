@@ -208,7 +208,7 @@ class NodeLifecycle:
         event = parse_app_effect_event(raw)
         canonical = encode_app_effect_event(event)
         with self.sessions.db.transaction() as conn:
-            principal = self.sessions.authenticate_in(conn, session_id, credential, allow_historical=True)
+            principal = self.sessions.authenticate_producer_in(conn, session_id, credential, allow_historical=True)
             row, command = self._operation_in(conn, event.operation_id)
             self._same_boot(principal, command)
             if (event.producer, event.command_session_id, event.command_id, event.command_sha256) != (
@@ -248,7 +248,7 @@ class NodeLifecycle:
             raise ValueError("node_app_response_required")
         canonical = encode_node_message(message)
         with self.sessions.db.transaction() as conn:
-            principal = self.sessions.authenticate_in(conn, session_id, credential, allow_historical=True)
+            principal = self.sessions.authenticate_producer_in(conn, session_id, credential, allow_historical=True)
             row = conn.execute("SELECT command_payload FROM node_app_operations WHERE command_id=%s",
                                (message.command_id,)).fetchone()
             if row is None:

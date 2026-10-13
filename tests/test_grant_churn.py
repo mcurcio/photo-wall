@@ -14,13 +14,16 @@ from contracts.models import LostGrant, Readiness
 
 
 def _rows(registry, player_id):
-    """Each grant and configuration row's own version (`xmin` changes on every rewrite)."""
+    """Each grant, configuration and committed group row's own version (`xmin` changes on every
+    rewrite)."""
     with registry.db.transaction() as conn:
         grants = conn.execute("SELECT assignment_id,xmin::text AS version FROM execution_commits "
                               "WHERE player_id=%s ORDER BY assignment_id", (player_id,)).fetchall()
         configuration = conn.execute("SELECT xmin::text AS version FROM player_configurations "
                                      "WHERE player_id=%s", (player_id,)).fetchall()
-    return grants, configuration
+        groups = conn.execute("SELECT id,xmin::text AS version FROM coordination_groups "
+                              "WHERE status='committed' ORDER BY id").fetchall()
+    return grants, configuration, groups
 
 
 def test_unchanged_readiness_reports_rewrite_nothing_and_resend_the_applied_delivery(registry):
@@ -47,7 +50,7 @@ def test_unchanged_readiness_reports_rewrite_nothing_and_resend_the_applied_deli
             "result": "applied"})
         assert acked.json()["accepted"] is True
         before = _rows(registry, player["player_id"])
-        assert before[0] and before[1]
+        assert all(before)
         for sequence in range(2, 12):
             ready(sequence)
             again = client.get("/v1/player/state", headers=headers).json()
@@ -126,3 +129,19 @@ def test_a_later_grant_at_the_same_readiness_never_changes_an_accepted_commit(re
     delivery, later = _granted(coordinator, player)
     assert delivery["plan"].revision == plan.revision
     assert set(accepted) < set(later) and {sequence for sequence, _ in later} == {1}
+
+
+def test_a_grant_no_longer_prepared_is_invalidated_once(registry):
+    player = setup_players(registry, count=1)[0]
+    coordinator = Coordinator(registry.db, registry.clock)
+    schedule(coordinator, ["frame-0"])
+    registry.clock.advance(6)
+    assert coordinator.readiness(player["player_id"], _readiness(coordinator, player, 1))
+    assert _granted(coordinator, player)[1]
+    assert coordinator.readiness(player["player_id"],
+                                 _readiness(coordinator, player, 2, prepared=()))
+    assert _granted(coordinator, player)[1] == []
+    rows = _rows(registry, player["player_id"])
+    assert coordinator.readiness(player["player_id"],
+                                 _readiness(coordinator, player, 3, prepared=()))
+    assert _rows(registry, player["player_id"]) == rows

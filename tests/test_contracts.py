@@ -92,6 +92,10 @@ def test_readiness_distinguishes_file_from_preparation_and_is_deeply_immutable()
         Readiness(**common, prepared=("missing",))
     with pytest.raises(ValidationError):
         Readiness(**common, prepared=("a",), failures=[{"assignment_id": "a", "code": "decode"}])
+    lost = {**common, "lost_grants": [{"assignment_id": "a", "readiness_sequence": 1}]}
+    assert Readiness(**lost, prepared=("a",)).lost_grants[0].assignment_id == "a"
+    with pytest.raises(ValidationError, match="a lost grant must be prepared"):
+        Readiness(**lost)
 
 
 def test_plan_rejects_old_binding_generation_and_outside_validity():

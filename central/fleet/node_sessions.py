@@ -223,6 +223,19 @@ class NodeSessions:
             raise NodeControlError("node_session_unavailable", 401)
         return principal
 
+    def authenticate_producer_in(self, conn, session_id: UUID, credential: str, *,
+                                 allow_historical: bool = False) -> NodePrincipal:
+        """`authenticate_in` for a post that writes its producer's evidence. It also holds the
+        producer's row (FOR NO KEY UPDATE), so one producer's posts run one at a time: a retry
+        during the first post's slow COMMIT waits for it and finds its rows (a duplicate, never a
+        unique violation), and two responses to one command never both commit. The producer's
+        polls and every other producer never wait on it."""
+        principal = self.authenticate_in(conn, session_id, credential,
+                                         allow_historical=allow_historical)
+        conn.execute("SELECT 1 FROM node_producers WHERE producer_id=%s FOR NO KEY UPDATE",
+                     (principal.producer_id,))
+        return principal
+
     def load_operator_target_in(self, conn, session_id: UUID) -> NodePrincipal:
         """Internal owner port for an already-authenticated operator command request.
 
