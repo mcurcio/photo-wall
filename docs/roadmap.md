@@ -373,7 +373,7 @@ Requirements and needs that are not journey steps, and where each goes:
 | Several Installations ([requirements](requirements.md#operations-and-scope)) | One House per Central |
 | Household and guest roles | Everyone who signs in can change everything; a guest cannot be given Skip and Pause alone |
 | Notification channels beyond the basics | Alerts reach only the channels 7 builds |
-| Change history | Only the 10-second Undo after a change; no record of who changed what, and no Revert later |
+| Change history | Only the 10-second Undo after a change; no record of who changed what. A Display's picture and a Frame's Position, mat and lights keep their own history with Restore ([0025](decisions/0025-configuration-snapshots.md)); everything else has no Revert later |
 | Native sensors and auto-dim | Room-light brightness and motion need Home Assistant |
 | Lights and other non-display controls | Scenes cannot drive lights or relays |
 | Burn-in protection (#68) | The owner has OLED panels; a static element shown for hours (captions from 5b, a paused photo) can burn in. Until it lands, keep captions on auto-hide (#59) and Pause short |
