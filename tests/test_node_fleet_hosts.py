@@ -15,6 +15,7 @@ from test_node_boot import claim_for, cold_setup
 from test_registry import ADMIN, enroll
 
 from central.app import create_app
+from central.fleet.device_fence import fence_in
 from central.fleet.host_thresholds import HOST_SILENT_AFTER_SECONDS, thresholds_document
 from central.fleet.node_bus_presence import record_look_in
 from central.fleet.node_observations import _FLEET_HOSTS_SQL, NodeObservations
@@ -24,7 +25,6 @@ from central.fleet.node_sessions import (
     NodeControlError,
     NodeSessions,
 )
-from central.infra.asset_roots import lock_fleet_assets_in
 from contracts.node_boot import NodeBootRequestV2
 from contracts.node_observation import (
     HOST_OBSERVATION_INTERVAL_SECONDS,
@@ -264,14 +264,14 @@ def test_g12_serves_each_boxs_own_bus_link_linked_unlinked_and_never_seen(regist
                                                     "looked_at": 120.0}
 
 
-def test_a_held_fleet_lock_does_not_block_g12(registry):
+def test_a_held_device_fence_does_not_block_g12(registry):
     boots, sessions = _rig(registry)
     Host(registry, sessions, boots).post()
     held, release = threading.Event(), threading.Event()
 
     def hold():
         with registry.db.transaction() as conn:
-            lock_fleet_assets_in(conn)
+            fence_in(conn, DEVICE_ID, "change")
             conn.execute("SELECT 1 FROM devices WHERE device_id=%s FOR UPDATE", (DEVICE_ID,))
             conn.execute("SELECT 1 FROM fleet_device_lifecycle WHERE device_id=%s FOR UPDATE",
                          (DEVICE_ID,))

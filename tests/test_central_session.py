@@ -48,7 +48,7 @@ def test_operator_source_scene_program_workflow_and_player_originated_session(re
             due = tuple(layer["assignment_id"] for layer in state["plan"]["layers"] if layer["start"] == 1020)
             readiness = Readiness(plan_id=state["plan"]["plan_id"], revision=state["plan"]["revision"],
                 authority_epoch=1, sequence=1, secured=due, prepared=due, capacity_ok=True,
-                observed_at=1016, clock_uncertainty=.01)
+                observed_at=1016, clock_uncertainty=.01, lost_grants=())
             connection.send_json({"type": "readiness", "payload": readiness.model_dump(mode="json")})
             granted = connection.receive_json()
             assert granted["commits"][0]["readiness_sequence"] == 1

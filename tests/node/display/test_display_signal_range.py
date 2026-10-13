@@ -285,6 +285,29 @@ def test_the_root_step_blanks_the_tty_first_and_sets_only_what_differs(tmp_path)
     assert connectors.sets == [(OUTPUT, FULL)] and connectors.ranges[OUTPUT] is FULL
 
 
+def test_the_root_step_says_in_its_journal_what_each_output_read_was_set_and_read_back(tmp_path, caplog):
+    """The step's journal (photo-wall-display.service's ExecStartPre=) tells, per output at INFO,
+    the range it read, the range it set and what the connector read back, so a bench check of a
+    range change reads it there. Mutation probe: drop the read-back log -> fails."""
+    tty = tmp_path / "tty1"
+    tty.write_bytes(b"")
+    connectors = Connectors({OUTPUT: AUTO, "HDMI-A-2": LIMITED})
+    refusing = Connectors({OUTPUT: AUTO}, takes=False)
+    path = tmp_path / "signal-range.json"
+    path.write_bytes(encode_request(RangeRequest({OUTPUT: FULL, "HDMI-A-2": LIMITED})))
+    with caplog.at_level("INFO", logger=signal_range.__name__):
+        signal_range._main(path, connectors, tty)
+    said = [record.getMessage() for record in caplog.records if record.levelname == "INFO"]
+    assert said == [f"signal range: {OUTPUT} read auto, set full, read back full",
+                    "signal range: HDMI-A-2 read limited, wants limited: nothing to set"]
+    caplog.clear()
+    with caplog.at_level("INFO", logger=signal_range.__name__):
+        signal_range._main(path, refusing, tty)
+    said = [(record.levelname, record.getMessage()) for record in caplog.records]
+    assert ("INFO", f"signal range: {OUTPUT} read auto, set full, read back auto") in said
+    assert ("WARNING", f"signal range: {OUTPUT} did not take full") in said
+
+
 @pytest.mark.parametrize("case", ["missing", "malformed", "oversized", "symlink", "fifo", "refused", "raises",
                                   "no tty"])
 def test_the_root_step_survives_anything_and_sets_nothing_it_should_not(tmp_path, case):

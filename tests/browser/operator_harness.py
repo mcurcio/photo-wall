@@ -118,7 +118,7 @@ def report_readiness(registry, player_id):
     assert coordinator.readiness(player_id, Readiness(
         plan_id=plan.plan_id, revision=plan.revision, authority_epoch=epoch,
         sequence=next(_SEQUENCE), clock_uncertainty=.01, capacity_ok=True,
-        observed_at=registry.clock.utc()))
+        observed_at=registry.clock.utc(), lost_grants=()))
 
 
 def tile_status(page, frame_id):

@@ -12,6 +12,7 @@ from dataclasses import dataclass, replace
 from hashlib import sha256
 from uuid import UUID
 
+from central.fleet.device_fence import fence_in
 from central.fleet.node_sessions import (
     NodeControlError,
     NodeSessions,
@@ -69,7 +70,7 @@ class NodeCommands:
             "valid_for_seconds": request.valid_for_seconds}, sort_keys=True).encode()).hexdigest()
         started, monotonic = _clock_sample(self.sessions.clock)
         with self.sessions.db.transaction() as conn:
-            generation = self.sessions.lock_device_generation_in(conn, device_id)
+            generation = fence_in(conn, device_id, "act").generation()
             row = conn.execute("SELECT s.*,b.superseded_at FROM node_sessions s "
                                "JOIN node_producers p USING(producer_id) "
                                "JOIN node_boot_admissions b USING(admission_id) "
@@ -98,7 +99,7 @@ class NodeCommands:
                     raise NodeControlError("node_reboot_expired", 410)
                 return {"command": json.loads(bytes(prior["payload"])), "duplicate": True,
                         "effect_established": False}
-            # One outstanding reboot per session; the locks above serialize issuers.
+            # One outstanding reboot per session; the session row lock serializes issuers.
             if conn.execute("SELECT 1 FROM node_reboot_commands c WHERE c.session_id=%s "
                             f"AND {OUTSTANDING_REBOOT_SQL} LIMIT 1",
                             (request.session_id, now)).fetchone():

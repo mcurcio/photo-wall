@@ -306,9 +306,15 @@ def apply_requested(request: RangeRequest, connectors: ConnectorRangeSetter, tty
         log.warning("signal range: %s did not blank", tty, exc_info=True)
     for output_id, wanted in sorted(request.ranges.items()):
         try:
-            if connectors.read(output_id) in (RangeUnknown.NO_PROPERTY, wanted):
+            before = connectors.read(output_id)
+            if before in (RangeUnknown.NO_PROPERTY, wanted):
+                log.info("signal range: %s read %s, wants %s: nothing to set", output_id, before.value,
+                         wanted.value)
                 continue
-            if not connectors.set(output_id, wanted):
+            taken = connectors.set(output_id, wanted)
+            log.info("signal range: %s read %s, set %s, read back %s", output_id, before.value,
+                     wanted.value, connectors.read(output_id).value)
+            if not taken:
                 log.warning("signal range: %s did not take %s", output_id, wanted)
         except Exception:
             log.exception("signal range: %s failed", output_id)

@@ -42,14 +42,14 @@ class NodeIngest:
         message = parse_node_message(raw)
         canonical = encode_node_message(message)
         with self.sessions.db.transaction() as conn:
-            principal = self.sessions.authenticate_in(conn, session_id, credential,
-                                                       allow_historical=True)
+            principal = self.sessions.authenticate_producer_in(
+                conn, session_id, credential, allow_historical=True)
             if message.producer != principal.grant.producer:
                 raise NodeControlError("node_producer_mismatch", 403)
             if type(message) is NodeCommandResponseV2:
                 return self._response_in(conn, principal, message, canonical)
-            row = conn.execute("SELECT projection FROM node_producers WHERE producer_id=%s "
-                               "FOR UPDATE", (principal.producer_id,)).fetchone()
+            row = conn.execute("SELECT projection FROM node_producers WHERE producer_id=%s",
+                               (principal.producer_id,)).fetchone()
             kind = "event" if type(message) is NodeEventV2 else "snapshot"
             evidence_id = message.event_id if kind == "event" else message.snapshot_id
             sequence = message.sequence if kind == "event" else message.covered_through_sequence

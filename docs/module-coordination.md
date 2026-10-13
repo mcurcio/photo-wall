@@ -24,6 +24,24 @@ authorization and refuse a drained Player. No database transaction spans downloa
 decoder work or WebSocket sends. Configuration reads and offers validate current
 Player epoch and Frame generation while holding the same transaction's row locks.
 
+A fleet transaction that also needs a device takes, after Coordination and Runtime, that
+device's fence (`central/fleet/device_fence.py`), then the offer quota row, the device insert,
+the session, the producer and evidence or commands. The fence is a per-device reader/writer
+lock: every node request and operator action on a device holds it shared (`act`), so no request
+waits on another's slow COMMIT; a boot offer, a node enrolment and retirement hold it exclusive
+(`change`), and a `change` not granted within the lock timeout answers 503 `node_device_busy`
+with Retry-After. A transaction holds at most one fence: taking its device again is free, an
+upgrade or a second device is refused. A post that writes a producer's evidence also holds that
+producer's row (`NodeSessions.authenticate_producer_in`), so one producer's posts run one at a
+time and a retry finds the first post's rows. Operator device reads take none and read one READ
+ONLY snapshot. The release writer takes its own lock, alone. There is no fleet-wide lock.
+
+A row, and a projected Commit, changes only when its meaning changes. A readiness report writes
+the Player's feedback row; it rewrites a grant (`execution_commits`), a group's status or the
+Player's configuration only when that changed. A delivery projects one Commit per grant (group,
+readiness sequence), so a grant written later never changes a Commit the Player accepted, and an
+unchanged state is the same control delivery (`state_digest`), never a new one.
+
 An idle-only equipment drain persists an affected-Output snapshot and cancels
 outstanding atomic groups in the same transaction. New offers omit that Player's
 Outputs; old plan delivery carries cancellation. A prepared drain may abort only

@@ -44,7 +44,6 @@ from central.content_catalog.deployment import (
 )
 from central.content_catalog.ports import NodeReleaseRefused, StableDeployment
 from central.infra.asset_records import PgAssetRecords
-from central.infra.asset_roots import lock_fleet_assets_in
 from central.infra.transactions import PgTransaction, pg_connection
 from central.infra.upstream_guard import not_older
 from central.kernel.assets import AssetKey, AssetKind, AssetReference, OriginLocator
@@ -57,6 +56,9 @@ from contracts.time import Clock
 POLICY_CONFLICT: Final = "node_boot_policy_conflict"
 DEPLOYMENT_UNKNOWN: Final = "node_deployment_unknown"
 IDENTITY_CONFLICT: Final = "node_release_identity_conflict"
+# Serializes deployment writers with each other only: taken alone, so a release sync never waits on
+# a device's requests (the device fence, `central/fleet/device_fence.py`) and none waits on it.
+RELEASE_WRITER_LOCK: Final = 734118330
 
 
 class _Older(Exception):
@@ -102,10 +104,10 @@ def write_deployment(conn: Any, deployment: NodeDeployment, base_source: OriginL
     Refuses (`NodeReleaseRefused`) an existing id with other bytes, a base whose manager pins
     differ from the ones it was first published with, and an environment digest already
     catalogued with another reference. `base_source` names where the base tarball is
-    downloaded. Holds the fleet asset lock (`lock_fleet_assets_in`, as publishing did before
-    the release sync wrote deployments)."""
+    downloaded. Holds the release writer's lock (`RELEASE_WRITER_LOCK`) before its first read, so
+    two writers of one release serialize and the second sees the first's rows."""
     canonical = encode_node_deployment(deployment)
-    lock_fleet_assets_in(conn)
+    conn.execute("SELECT pg_advisory_xact_lock(%s)", (RELEASE_WRITER_LOCK,))
     prior = conn.execute("SELECT document FROM node_deployments WHERE deployment_id=%s",
                          (deployment.deployment_id,)).fetchone()
     if prior:

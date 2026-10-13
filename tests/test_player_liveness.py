@@ -69,7 +69,7 @@ def test_unbound_player_is_offered_an_empty_plan_and_its_report_is_heard_over_ht
         readiness = Readiness(plan_id=plan["plan_id"], revision=plan["revision"],
                               authority_epoch=plan["authority_epoch"], sequence=1,
                               clock_uncertainty=.01, capacity_ok=True,
-                              observed_at=registry.clock.utc())
+                              observed_at=registry.clock.utc(), lost_grants=())
         response = client.post("/v1/player/readiness", headers=player_headers,
                                json=readiness.model_dump(mode="json"))
         assert response.json() == {"accepted": True}

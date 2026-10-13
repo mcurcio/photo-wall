@@ -95,6 +95,15 @@ class Database:
             conn.execute("SET LOCAL statement_timeout='10s'")
             yield conn
 
+    @contextmanager
+    def read_snapshot(self):
+        """One READ ONLY, REPEATABLE READ transaction: every statement reads the same committed
+        state and none takes a lock. `SET TRANSACTION` precedes the first data query; the
+        `SET LOCAL` timeouts do not establish the snapshot."""
+        with self.transaction() as conn:
+            conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            yield conn
+
     def pool_stats(self) -> dict[str, int]:
         """Return the pool's numeric counters without exposing its connection string."""
 

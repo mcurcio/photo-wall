@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 from uuid import UUID
 
+from central.fleet.device_fence import standing_in
 from central.fleet.host_thresholds import thresholds_document
 from central.fleet.node_bus_presence import bus_links_in
 from central.fleet.node_commands import OUTSTANDING_REBOOT_SQL
@@ -104,12 +105,12 @@ class NodeObservations:
         facts = parse_host_facts(raw)
         canonical = encode_host_facts(facts)
         with self.sessions.db.transaction() as conn:
-            principal = self.sessions.authenticate_in(conn, session_id, credential,
-                                                       allow_historical=True)
+            principal = self.sessions.authenticate_producer_in(
+                conn, session_id, credential, allow_historical=True)
             if facts.producer != principal.grant.producer:
                 raise NodeControlError("node_producer_mismatch", 403)
             now = principal.admission.ensure_current(self.sessions.clock)
-            # The session row lock taken by authenticate_in serializes one producer's posts.
+            # authenticate_producer_in's row lock serializes one producer's posts.
             prior = conn.execute("SELECT sequence,payload,received_at FROM node_host_facts "
                                  "WHERE producer_id=%s FOR UPDATE", (principal.producer_id,)).fetchone()
             if prior is not None and facts.sequence < prior["sequence"]:
@@ -147,8 +148,8 @@ class NodeObservations:
     def _record(self, session_id, credential, observation, canonical, table):
         # Table names are internal constants selected by typed owner entry points.
         with self.sessions.db.transaction() as conn:
-            principal = self.sessions.authenticate_in(conn, session_id, credential,
-                                                       allow_historical=True)
+            principal = self.sessions.authenticate_producer_in(
+                conn, session_id, credential, allow_historical=True)
             if observation.producer != principal.grant.producer:
                 raise NodeControlError("node_producer_mismatch", 403)
             prior = conn.execute(f"SELECT payload,received_at FROM {table} "
@@ -208,9 +209,7 @@ class NodeObservations:
         No fleet or device lock is taken, so a held lock never blocks this read. A superseded
         boot's sample is never served as `host`; its receipt alone is served, and only when
         the current boot has none."""
-        with self.sessions.db.transaction() as conn:
-            # Must precede the first data query (central/operator_snapshot.py).
-            conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        with self.sessions.db.read_snapshot() as conn:
             read_at = self.sessions.clock.utc()
             rows = conn.execute(_FLEET_HOSTS_SQL, {"day": int(read_at) // 86400}).fetchall()
             bus_links = bus_links_in(conn, [row["device_id"] for row in rows])
@@ -249,8 +248,8 @@ class NodeObservations:
         return {"read_at": read_at, "thresholds": thresholds_document(), "devices": devices}
 
     def status(self, device_id: str) -> dict:
-        with self.sessions.db.transaction() as conn:
-            generation = self.sessions.lock_device_generation_in(conn, device_id)
+        with self.sessions.db.read_snapshot() as conn:
+            generation = standing_in(conn, device_id).active_generation()
             rows = conn.execute("SELECT s.session_id,s.grant_payload,s.expires_at,s.revoked_at,"
                                 "p.producer_id,p.projection,b.superseded_at FROM node_sessions s "
                                 "JOIN node_producers p USING(producer_id) "
@@ -282,7 +281,7 @@ class NodeObservations:
                             0, now - sample["received_at"])}})
             # `outstanding` and the responses come from ONE statement, so one snapshot: a
             # response committed mid-read cannot be served beside an `outstanding` that
-            # predates it (response ingest does not take the fleet lock).
+            # predates it (this read takes no lock, so it never waits on an ingest).
             commands = conn.execute("SELECT c.command_id,c.operator_audit_ref,c.issued_at,c.expires_at,"
                                     f"{OUTSTANDING_REBOOT_SQL} AS outstanding,"
                                     "(SELECT coalesce(json_agg(json_build_object("

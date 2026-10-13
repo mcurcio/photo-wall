@@ -3,13 +3,15 @@ from __future__ import annotations
 
 import argparse
 import http.client
+import logging
 import subprocess
 import time
 from collections.abc import Callable
 from pathlib import Path
+from typing import Final
 from uuid import UUID, uuid4
 
-from appliance.apps.broker import AppEffectBroker, ColdStart
+from appliance.apps.broker import AppEffectBroker, ColdStart, ForeignAppUnit
 from appliance.apps.descriptors import DESCRIPTOR_SAMPLE_MS, descriptor_use
 from appliance.apps.import_worker import RootImportWorker
 from appliance.apps.lifecycle_storage import (
@@ -31,7 +33,12 @@ from appliance.central_session.http import NodeHTTP
 from appliance.central_session.session import NodeSession
 from appliance.feed import Feed, answer_feed_read
 from appliance.feed_socket import FEED_READERS, FEEDS_GROUP, FeedListener
-from appliance.kernel.app_facts import APP_DESCRIPTORS, APP_EXITED, APP_STARTED
+from appliance.kernel.app_facts import (
+    APP_DESCRIPTORS,
+    APP_EXITED,
+    APP_OBSERVATION_FAILED,
+    APP_STARTED,
+)
 from appliance.kernel.boot_store import BootStore
 from appliance.kernel.clock import boot_id, boottime_ms
 from appliance.node.app_link import BrokerLinkService, deliver_app_link, owed_relink
@@ -50,6 +57,11 @@ from contracts.strict_json import loads_object
 FEED_CAPACITY = 512
 FEED_SOCKET = Path("/run/photo-wall-app-feed/feed.sock")
 MAX_FEED_REPLY = 65536  # a reader's receive buffer (the health judge's MAX_FEED_REPLY)
+# After an observation fault (the driver could not tell the app's state), the boot's owner
+# observes again after these waits, consecutive faults stepping through them; a clean observation
+# starts over. Short: such a fault is a moment between states, and the broker never exits over it.
+OBSERVATION_BACKOFF_MS: Final[tuple[int, ...]] = (1_000, 2_000, 5_000, 10_000)
+LOG = logging.getLogger(__name__)
 
 def emit_process_evidence(store, session, running, state: str) -> None:
     document = store.read("process-evidence") or {"sequence": 0, "last": None, "pending": []}
@@ -100,16 +112,21 @@ class BrokerLoop:
         self.killed: AppRunKey | None = None  # the run this broker killed: never signalled twice
         self.last_run: AppRunKey | None = None  # the run the last known turn saw
         self.sampled_at: int | None = None  # when the current run's descriptors were sampled
+        self.observation_fault: str | None = None  # the boot owner's last fault, until it clears
+        self.faults = 0  # consecutive observation faults
+        self.observe_after = 0  # boot ms before which the boot owner does not observe again
 
     def turn(self) -> None:
         self.probes.check()
         if self.online.broker.record is None:
-            self.broker.reconcile()
+            self._reconcile()
         try:
             self.online.broker.service()
-        except (OSError, ValueError, http.client.HTTPException):
+        except (OSError, ValueError, http.client.HTTPException) as error:
             if self.store.failed:
                 raise
+            if isinstance(error, ForeignAppUnit):
+                self._stop_foreign()
         # Local proofs and stop progress must run even without a Central session.
         self.links.serve_one()
         known, current, granted = self._observe()
@@ -144,6 +161,40 @@ class BrokerLoop:
             except (OSError, ValueError, http.client.HTTPException):
                 if self.store.failed:
                     raise
+
+    def _reconcile(self) -> None:
+        """The boot owner's turn. No observed state is fatal: a fault is reported once per reason
+        on the node feed (`app_observation_failed`, for the health judge) and in the journal, and
+        observed again after OBSERVATION_BACKOFF_MS; a unit that is not the launch's is stopped
+        (the owner then relaunches its own app on its pacing). Only a failed boot store exits."""
+        now = self.clock()
+        if now < self.observe_after:
+            return
+        try:
+            self.broker.reconcile()
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            if self.store.failed:
+                raise
+            if isinstance(error, ForeignAppUnit):
+                self._stop_foreign()
+            reason = str(error) if isinstance(error, ValueError) else type(error).__name__
+            if reason != self.observation_fault:
+                LOG.warning("broker: the app could not be observed (%s); observing again on a backoff",
+                            reason)
+                self.probes.feed.append(APP_OBSERVATION_FAILED, {"reason": reason})
+            self.observation_fault = reason
+            self.observe_after = now + OBSERVATION_BACKOFF_MS[min(self.faults, len(OBSERVATION_BACKOFF_MS) - 1)]
+            self.faults += 1
+        else:
+            self.observation_fault, self.faults = None, 0
+
+    def _stop_foreign(self) -> None:
+        """A unit under the app's name that is not the launch's: stop it (logged), never adopt it."""
+        LOG.warning("broker: stopping an app unit that is not its launch's")
+        try:
+            self.driver.stop_foreign()
+        except (OSError, subprocess.SubprocessError):
+            LOG.warning("broker: the stop was not accepted; asking again on a later turn", exc_info=True)
 
     def _report_run(self, run: AppRunKey | None) -> None:
         """The run's start and exit, once each, and its open files every DESCRIPTOR_SAMPLE_MS:

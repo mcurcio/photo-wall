@@ -52,9 +52,7 @@ class NodeReleaseCatalog:
         `deployments` are the 50 newest by `published_at` plus the selected and the previous
         one, wherever they fall. Each release row carries its `deployment_id` (None while the
         tag has no good manifest), its `problem`, `stable`, `in_window` and its readiness."""
-        with self.sessions.db.transaction() as conn:
-            # Must precede the first data query (operator_snapshot.py does the same).
-            conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        with self.sessions.db.read_snapshot() as conn:
             read_at = self.sessions.clock.utc()
             policy = conn.execute("SELECT revision,deployment_id,previous_deployment_id,changed_at "
                                   "FROM node_boot_policy WHERE singleton").fetchone()

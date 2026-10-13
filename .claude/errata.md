@@ -5961,3 +5961,36 @@ each a refinement the design's sketch left open or a fact of the code it did not
 - **Matching a photo's time:** the brief's "match a photo by Central's receive time" is worded as
   "on Central's clock, read as the photo arrives" (the photo reaches the agent's chat, never
   Central), in the runbook, 0025 and the display-control skill.
+## fleet lock and delivery churn review fixes (fix agent, PR 99, 2026-10-13)
+
+Design: /Volumes/Dock/tmp/fleet-lock/design.md (r2). Where the code differs from it, unresolved:
+
+- **The fence's interface (frozen-interface drift, not fixed here).** The design freezes
+  `DeviceFence.open(device_id, strength, wall) -> FencedTransaction` (opens the transaction,
+  holding `wall` = Coordination then Runtime, then the device: "no upgrade, no second device: a
+  construction-time guarantee"), `FencedTransaction.standing` as a field, and
+  `Standing = active | unrecorded`. The build has `fence_in(conn, device_id, strength)` on a
+  transaction the caller opened, a runtime guard (`RuntimeError('device_fence_held')`), the lock
+  order Coordination -> Runtime -> fence kept only by each caller, `standing()` as a method and a
+  third kind `unavailable`. The guarantee is runtime, weaker than the design's. The design parked
+  "how existing transactions are opened through `open`"; conforming means every fence caller
+  (authenticate_in's ~10 handlers, Registry.enroll/retire, the boot offer, app links, display,
+  reconciliation, acceptance) has its transaction opened by `open`. Needs an architect's call:
+  conform, or amend the design to the runtime form. This fix only made the runtime guard exact:
+  the held fence is a transaction-local setting (`set_config(..., true)`), not a pg_locks read on
+  every node request, and taking the held device again is free (the pid1 fixture's diagnostic
+  resolved a session inside a fenced transaction and got a 500; CI run 38429470593).
+- **What makes an evidence write safe.** The design's lock order still lists `session` after the
+  fence, but the tracer forbids an exclusive session lock, and removing `FOR UPDATE OF s` removed
+  the only thing serializing one producer's check-then-insert posts (a retry during a stalled
+  COMMIT answered 500 UniqueViolation; two responses to one command could both commit). Fixed with
+  the producer row (FOR NO KEY UPDATE, `NodeSessions.authenticate_producer_in`), the design's
+  `producer` step; the design should name it as the evidence writers' serialization.
+- **Costs line.** "A waiting change holds back new acts on that device up to 5 s" omits that the
+  act callers already holding Coordination and Runtime (app links, display exchange,
+  reconciliation, Player enroll, retire) wait while holding them: one device's change during a
+  commit stall can hold every Player's state poll up to 5 s. Stated in docs/runbook.md.
+- **Q2 rollout cost.** "Frames hold their pictures for those minutes" is wrong: an older Player's
+  control loop dies on the 422 and its session reconnects in a loop (player/service.py), and the
+  window lasts until the release is synced, selected and the Pi rebooted. Corrected in
+  docs/runbook.md; the PR body still carries the old text.

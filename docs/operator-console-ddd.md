@@ -398,7 +398,7 @@ fleetCommands.js                                                       (B2; R0 c
 | Audit reference | Filled automatically as `console/<date>`, plus an optional "Reason" token, both frozen at open | Required typed field: friction with no extra trust, since the console has one shared operator account |
 | Dispatch window | 30 s, shown in the dialog | Expose 1–60 s: one more number the operator cannot judge |
 | Reboot dialog home | The fleet module owns the reboot dialog and re-submits the frozen body; the shared `ConfirmAction` module (used by Show) is not extended | Add `retry` to `ConfirmAction`: widens a module shared with Show for one user |
-| Node reads | Only on an open Player page, every 5 s for that box, paused in a hidden tab. Each read cycle takes the global fleet advisory lock twice (§13). | List fan-out: node state on the list at a lock cost per box; no requirement asks for it |
+| Node reads | Only on an open Player page, every 5 s for that box, paused in a hidden tab. Each read cycle is one READ ONLY snapshot and takes no lock (the device fence, 2026-10-13; it took the global fleet advisory lock twice before, §13). | List fan-out: node state on the list at a lock cost per box; no requirement asks for it |
 | Host silence | Last-reported ages only. No "host silent" alarm, because no threshold is served. | Invent a client threshold: an unowned number (R9) |
 | Player name | Serial handle; full device and Player ids under "Identifiers" | Device id as the heading: unreadable, and it is today's problem |
 | Projection decoding | Only App Effect Broker process facts are decoded from `session.projection`, pinned by a checked-in fixture that one Python test asserts the contracts still encode identically. Surface facts are not shown as current (§13). | No decoding: the broker's process state stays hidden |
@@ -424,7 +424,7 @@ Delivery follows the owner's standing preference: the four beads are built back 
 
 **Costs.**
 - About +2,200 / −1,250 lines, about 800 of them tests, including a rewrite of the roster-based browser tests. The new CI browser suite adds roughly a minute to the browser job.
-- Every open Player page takes the global fleet advisory lock (`pg_advisory_xact_lock`, `locks.py:11-13`) plus device and lifecycle row locks twice per 5 s cycle (the device read and the app-operation read both call `lock_device_generation_in`, `node_sessions.py:92-97`). These serialize against netboot offers, enrollment and retire. Today's open node panel already does this every 3 s, so pass 1 lowers the rate, but two operators watching ten Player pages is twenty lock acquisitions per 5 s. A non-locking device read stays deferred; pass 2's display read adds one indexed query to this lock hold (§16).
+- (Superseded 2026-10-13 by the device fence, `central/fleet/device_fence.py`: the device read and the app-operation read are each one READ ONLY snapshot and take no lock.) Every open Player page took the global fleet advisory lock plus device and lifecycle row locks twice per 5 s cycle (the device read and the app-operation read both called `lock_device_generation_in`). These serialized against netboot offers, enrollment and retire, and against every node request; pass 2's display read adds one indexed query to the read (§16).
 - The list shows no node state. "Which Players have an unanswered reboot?" needs a page per Player until a summary read exists.
 - App Effect Broker and Display Host show "last reported: unknown" in pass 1. That is honest, but it leaves U6 incomplete for two of five layers: pass 2 closes it for Display Host (Q3); the broker has no heartbeat (§16).
 - The console decodes a node message encoding nested inside `projection` (broker facts only). A fixture pins it, but a wire change now also breaks the console.
@@ -468,8 +468,8 @@ The first draft of this part also designed the **node release workflows**: a Rel
 ```mermaid
 flowchart LR
   subgraph SERVED["Served today"]
-    SNAP["GET /v1/operator/snapshot<br/>(REPEATABLE READ, no fleet lock)"]
-    DEV["GET …/node/devices/{id}<br/>(device read, fleet lock)"]
+    SNAP["GET /v1/operator/snapshot<br/>(REPEATABLE READ, no lock)"]
+    DEV["GET …/node/devices/{id}<br/>(device read, READ ONLY snapshot, no lock)"]
   end
   subgraph Q3["Q3 read additions (§16)"]
     OI["interruption read<br/>snapshot.output_interruptions<br/>(current Bindings only)"]
@@ -1186,7 +1186,7 @@ The effect gate section and its read were deleted by R9.
 
 **Dropped gates.** The earlier "Stage fence" (refuse a new operation while the latest is unsettled) stays withdrawn: it refused on states that can never settle, blocked replacing a `preparing` stage that the broker replaces on purpose, and contradicted latest-wins (`node_lifecycle.py:3-4`). The narrow console rule "no send while `switching`" is not that fence: `switching` always settles (to running, fallback or unknown) and a send during it always strands. G3 is withdrawn (above).
 
-**Lock cost.** G1 takes no lock; G2 adds none; G5 adds two indexed reads to the device read, which already takes the global fleet lock through `lock_device_generation_in` (`node_sessions.py:92-93`). The shell's node-status read takes none (one singleton row, every 30 s per signed-in console). G4 adds two queries to the app-attempts read (`node_environment_acceptances` has no `(device_id, device_generation)` index, so the G4 query and Stage's `_qualified_fallback_in` both scan; rows are few, one per accepted qualification, and no migration is added; raise it if acceptances grow), which also takes the **global fleet lock** (`FLEET_ASSET_LOCK`, shared with every boot offer, Publish and Select, `node_boot.py:194`) every 5 s per open Player page; inside that hold it takes `players` and `player_control_sessions` FOR SHARE (`acceptance_query.py:19`, `:29`, a shared query left unchanged). Sampling is the heavy one: Runtime locks plus the global fleet lock, about 15 queries, every 2 s per qualifying page, for 30 s to 2 min.
+**Lock cost.** (Since the device fence, 2026-10-13, the device read and the app-attempts read are each one READ ONLY snapshot and take no lock, and the global fleet lock is gone; Sampling holds Runtime locks and its device's shared `act` fence. The rest of this paragraph is the cost as designed.) G1 takes no lock; G2 adds none; G5 adds two indexed reads to the device read, which already takes the global fleet lock through `lock_device_generation_in` (`node_sessions.py:92-93`). The shell's node-status read takes none (one singleton row, every 30 s per signed-in console). G4 adds two queries to the app-attempts read (`node_environment_acceptances` has no `(device_id, device_generation)` index, so the G4 query and Stage's `_qualified_fallback_in` both scan; rows are few, one per accepted qualification, and no migration is added; raise it if acceptances grow), which also takes the **global fleet lock** (`FLEET_ASSET_LOCK`, shared with every boot offer, Publish and Select, `node_boot.py:194`) every 5 s per open Player page; inside that hold it takes `players` and `player_control_sessions` FOR SHARE (`acceptance_query.py:19`, `:29`, a shared query left unchanged). Sampling is the heavy one: Runtime locks plus the global fleet lock, about 15 queries, every 2 s per qualifying page, for 30 s to 2 min.
 
 ## 30. Failure modes
 
