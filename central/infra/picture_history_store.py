@@ -103,6 +103,13 @@ def latest_sent_in(conn: Any, port: Port) -> PictureEntry | None:
                 (port.player_id, port.output_id))
 
 
+def sent_entry_in(conn: Any, port: Port, picture_change: int) -> PictureEntry | None:
+    """The port's sent entry for `picture_change` (the table's key); None when it has none (never
+    sent, or trimmed)."""
+    return _one(conn, _SENT + " WHERE s.player_id=%s AND s.output_id=%s AND s.picture_change=%s",
+                (port.player_id, port.output_id, picture_change))
+
+
 def picture_entry_in(conn: Any, entry_id: UUID) -> PictureEntry | None:
     """The kept or sent entry `entry_id`; None when there is none (or it was trimmed)."""
     return _one(conn, f"{_KEPT} WHERE k.id=%s UNION ALL {_SENT} WHERE s.id=%s", (entry_id, entry_id))
@@ -151,4 +158,4 @@ def _entry(row: Mapping[str, Any]) -> PictureEntry:
 
 
 __all__ = ["append_kept_in", "append_sent_in", "latest_kept_at_in", "latest_kept_in", "latest_sent_for_frame_at_in",
-           "latest_sent_in", "picture_entries_in", "picture_entry_in"]
+           "latest_sent_in", "picture_entries_in", "picture_entry_in", "sent_entry_in"]
