@@ -64,7 +64,15 @@ class PositionRestore(Model):
 def position_entry_view(entry: PositionEntry, *, frame_name: str,
                         restore_refusal: PositionRestoreRefusal | None) -> PositionEntryView:
     """`entry` as the routes answer it, with the Frame's name today and Restore's answer for it now."""
-    ...
+    width, height = entry.made_for.profile_px
+    record = entry.record
+    return PositionEntryView(
+        entry_id=entry.entry_id, frame=FrameRefView(id=entry.frame_id, name=frame_name), kind=record.kind,
+        number=entry.number, at=entry.at, session_id=record.session_id, restored_from=record.restored_from,
+        fit=record.values.fit, mat=record.values.mat,
+        made_for=MadeForView(profile_px=ProfilePxView(width=width, height=height),
+                             display_id=entry.made_for.display_id),
+        restore_refusal=restore_refusal)
 
 
 __all__ = ["MadeForView", "PositionEntryView", "PositionHistoryView", "PositionRestore", "ProfilePxView",

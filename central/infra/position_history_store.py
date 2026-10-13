@@ -17,28 +17,81 @@ SENT_ENTRIES (central/tuning_history/model.py).
 """
 from __future__ import annotations
 
-from datetime import datetime
-from typing import Any
+import uuid
+from collections.abc import Mapping
+from datetime import UTC, datetime
+from typing import Any, Final
 from uuid import UUID
 
+from psycopg.types.json import Jsonb
+from pydantic import TypeAdapter
+
 from central.fleet.position_history import (
+    KEPT_KINDS,
+    SENT_KINDS,
+    MadeFor,
     PositionEntry,
+    PositionEntryKind,
     PositionRecord,
     PositionValues,
     TrialHanded,
+    sent_record,
+    unrecorded_record,
 )
+from central.infra.display_store import SEEN_DISPLAY_JOIN
+from central.tuning_history import model as retention
 from central.tuning_history.model import HistoryPage
+from contracts.models import FrameFit, Mat
+
+_FIT: Final = TypeAdapter(FrameFit)
+_KEPT_VALUES: Final = sorted(kind.value for kind in KEPT_KINDS)
+_SENT_VALUES: Final = sorted(kind.value for kind in SENT_KINDS)
+_COLUMNS: Final = ("e.id, e.frame_id, e.number, e.kind, e.at, e.session_id, e.restored_from, e.fit, e.mat, "
+                   "e.profile_width_px, e.profile_height_px, e.display_id")
+
+
+def frame_made_for_in(conn: Any, frame_id: str) -> MadeFor | None:
+    """What an entry for Frame `frame_id` is made for now: its profile in pixels and the Display seen
+    on its bound port (None: unbound, or none seen). None when there is no such Frame. The one read
+    of it: every append, Restore's refusal and the history's `restore_refusal`."""
+    row = conn.execute("SELECT f.profile, seen.display_id FROM frames f LEFT JOIN bindings b ON b.frame_id=f.id "
+                       f"{SEEN_DISPLAY_JOIN} WHERE f.id=%s", (frame_id,)).fetchone()
+    if row is None:
+        return None
+    return MadeFor((int(row["profile"]["width_px"]), int(row["profile"]["height_px"])), row["display_id"])
 
 
 def append_position_in(conn: Any, frame_id: str, record: PositionRecord) -> PositionEntry:
     """Append `record` as the Frame's next entry, made for its profile and seen Display now, and trim."""
-    ...
+    conn.execute("SELECT 1 FROM frames WHERE id=%s FOR NO KEY UPDATE", (frame_id,))
+    made_for = frame_made_for_in(conn, frame_id)
+    if made_for is None:
+        raise LookupError("unknown_frame")
+    width, height = made_for.profile_px
+    values = record.values
+    row = conn.execute(
+        "INSERT INTO position_entries AS e (id, frame_id, number, kind, at, session_id, restored_from, fit, mat, "
+        "profile_width_px, profile_height_px, display_id) SELECT %s, %s, COALESCE(max(number), 0) + 1, %s, "
+        "clock_timestamp(), %s, %s, %s, %s, %s, %s, %s FROM position_entries WHERE frame_id=%s "
+        f"RETURNING {_COLUMNS}",
+        (uuid.uuid4(), frame_id, record.kind.value, record.session_id, record.restored_from,
+         Jsonb(values.fit.model_dump(mode="json")), Jsonb(values.mat.model_dump(mode="json")), width, height,
+         made_for.display_id, frame_id)).fetchone()
+    kinds, keep = ((_KEPT_VALUES, retention.KEPT_ENTRIES) if record.kind in KEPT_KINDS
+                   else (_SENT_VALUES, retention.SENT_ENTRIES))
+    conn.execute("DELETE FROM position_entries WHERE frame_id=%(frame)s AND kind = ANY(%(kinds)s) "
+                 "AND number <= (SELECT number FROM position_entries WHERE frame_id=%(frame)s "
+                 "AND kind = ANY(%(kinds)s) ORDER BY number DESC OFFSET %(keep)s LIMIT 1)",
+                 {"frame": frame_id, "kinds": kinds, "keep": keep})
+    return _entry(row)
 
 
 def record_unrecorded_in(conn: Any, frame_id: str, stored: PositionValues) -> None:
     """Before a kept write: append `position_history.unrecorded_record(latest kept, stored)` when it
     is not None (`stored`: the Frame's fit and mat as they are before the write)."""
-    ...
+    record = unrecorded_record(latest_kept_position_in(conn, frame_id), stored)
+    if record is not None:
+        append_position_in(conn, frame_id, record)
 
 
 def record_sent_in(conn: Any, frame_id: str, *, trial: TrialHanded | None, saved: PositionValues) -> None:
@@ -46,33 +99,60 @@ def record_sent_in(conn: Any, frame_id: str, *, trial: TrialHanded | None, saved
     values `saved`): append `position_history.sent_record(...)` against the Frame's newest entry when
     it is not None. Takes the Frame's row lock only to append (and re-reads the newest entry under
     it), so an exchange that changes nothing locks nothing."""
-    ...
+    if sent_record(trial=trial, saved=saved, latest=latest_position_in(conn, frame_id)) is None:
+        return
+    conn.execute("SELECT 1 FROM frames WHERE id=%s FOR NO KEY UPDATE", (frame_id,))
+    record = sent_record(trial=trial, saved=saved, latest=latest_position_in(conn, frame_id))
+    if record is not None:
+        append_position_in(conn, frame_id, record)
 
 
 def latest_position_in(conn: Any, frame_id: str) -> PositionEntry | None:
     """The Frame's newest entry of any kind (by number); None when it has none."""
-    ...
+    return _one(conn, f"SELECT {_COLUMNS} FROM position_entries e WHERE e.frame_id=%s "  # noqa: S608
+                      "ORDER BY e.number DESC LIMIT 1", (frame_id,))
 
 
 def latest_kept_position_in(conn: Any, frame_id: str) -> PositionEntry | None:
     """The Frame's newest kept entry (by number); None when it has none."""
-    ...
+    return _one(conn, f"SELECT {_COLUMNS} FROM position_entries e WHERE e.frame_id=%s "  # noqa: S608
+                      "AND e.kind = ANY(%s) ORDER BY e.number DESC LIMIT 1", (frame_id, _KEPT_VALUES))
 
 
 def position_entry_in(conn: Any, entry_id: UUID) -> PositionEntry | None:
     """Entry `entry_id`; None when there is none (or it was trimmed)."""
-    ...
+    return _one(conn, f"SELECT {_COLUMNS} FROM position_entries e WHERE e.id=%s", (entry_id,))  # noqa: S608
 
 
 def position_entries_in(conn: Any, frame_id: str, page: HistoryPage) -> tuple[PositionEntry, ...]:
     """One page of the Frame's entries, newest first by `at` then number."""
-    ...
+    before = "" if page.before is None else " AND e.at < %(before)s"
+    rows = conn.execute(f"SELECT {_COLUMNS} FROM position_entries e WHERE e.frame_id=%(frame)s{before} "  # noqa: S608
+                        "ORDER BY e.at DESC, e.number DESC LIMIT %(limit)s",
+                        {"frame": frame_id, "before": page.before, "limit": page.limit}).fetchall()
+    return tuple(_entry(row) for row in rows)
 
 
 def latest_position_at_in(conn: Any, frame_id: str, at: datetime) -> PositionEntry | None:
     """The Frame's newest entry with `at` at or before `at`; None when none."""
-    ...
+    return _one(conn, f"SELECT {_COLUMNS} FROM position_entries e WHERE e.frame_id=%s AND e.at <= %s "  # noqa: S608
+                      "ORDER BY e.at DESC, e.number DESC LIMIT 1", (frame_id, at))
 
 
-__all__ = ["append_position_in", "latest_kept_position_in", "latest_position_at_in", "latest_position_in",
+def _one(conn: Any, sql: str, params: tuple[Any, ...]) -> PositionEntry | None:
+    row = conn.execute(sql, params).fetchone()
+    return None if row is None else _entry(row)
+
+
+def _entry(row: Mapping[str, Any]) -> PositionEntry:
+    """The entry of a row read under `_COLUMNS`, `at` in UTC."""
+    return PositionEntry(
+        row["id"], row["frame_id"], row["number"], row["at"].astimezone(UTC),
+        MadeFor((row["profile_width_px"], row["profile_height_px"]), row["display_id"]),
+        PositionRecord(PositionEntryKind(row["kind"]),
+                       PositionValues(_FIT.validate_python(row["fit"]), Mat.model_validate(row["mat"])),
+                       row["session_id"], row["restored_from"]))
+
+
+__all__ = ["append_position_in", "frame_made_for_in", "latest_kept_position_in", "latest_position_at_in", "latest_position_in",
            "position_entries_in", "position_entry_in", "record_sent_in", "record_unrecorded_in"]

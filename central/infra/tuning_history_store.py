@@ -10,13 +10,26 @@ from uuid import UUID
 
 from central.db import Database
 from central.displays.picture_history import unrecorded_record
-from central.displays.views import DisplayRefView, PictureHistoryView, picture_entry_view
-from central.fleet.position_views import PositionHistoryView
+from central.displays.views import (
+    DisplayRefView,
+    FrameRefView,
+    PictureHistoryView,
+    picture_entry_view,
+)
+from central.fleet import position_history
+from central.fleet.position_history import position_values
+from central.fleet.position_views import PositionHistoryView, position_entry_view
 from central.infra.lut_rows import lut_name_in
 from central.infra.picture_columns import PICTURE_COLUMNS, stored_picture
 from central.infra.picture_history_store import latest_kept_in, picture_entries_in
+from central.infra.position_history_store import (
+    frame_made_for_in,
+    latest_kept_position_in,
+    position_entries_in,
+)
 from central.tuning_history.model import HistoryPage, HistoryRefused
 from central.tuning_history.views import TuningSnapshotView
+from contracts.models import Calibration, Mat
 
 
 class PgTuningHistory:
@@ -53,7 +66,22 @@ class PgTuningHistory:
         `position_history.restore_refusal` against the Frame's profile and the Display seen on its
         port now; `unrecorded_change` is `position_history.unrecorded_record(latest kept, stored) is
         not None`."""
-        ...
+        with self._db.transaction() as conn:
+            frame = conn.execute("SELECT f.name, f.calibration, f.mat FROM frames f WHERE f.id=%s",
+                                 (frame_id,)).fetchone()
+            made_for = frame_made_for_in(conn, frame_id)
+            if frame is None or made_for is None:
+                raise HistoryRefused("unknown_frame", 404)
+            stored = position_values(Calibration.model_validate(frame["calibration"]), Mat.model_validate(frame["mat"]))
+            unrecorded = position_history.unrecorded_record(latest_kept_position_in(conn, frame_id), stored) is not None
+            entries = position_entries_in(conn, frame_id, page)
+        return PositionHistoryView(
+            frame=FrameRefView(id=frame_id, name=frame["name"]), unrecorded_change=unrecorded,
+            entries=tuple(position_entry_view(
+                entry, frame_name=frame["name"],
+                restore_refusal=position_history.restore_refusal(
+                    entry, frame_id=frame_id, profile_px=made_for.profile_px, seen_display_id=made_for.display_id))
+                for entry in entries))
 
     def snapshot_at(self, frame_id: str, at: datetime) -> TuningSnapshotView:
         """HistoryRefused("unknown_frame", 404). `model.snapshot_at` over

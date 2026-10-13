@@ -8,6 +8,7 @@ from uuid import UUID
 
 from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse, Response
+from pydantic import ValidationError
 
 from central.content_routes import (
     ClientDisconnected,
@@ -31,6 +32,7 @@ from central.fleet.node_lifecycle import NodeLifecycle, OperatorAppStage
 from central.fleet.node_observations import NodeObservations
 from central.fleet.node_release_catalog import NodeReleaseCatalog
 from central.fleet.node_sessions import NodeControlConfig, NodeControlError, NodeSessions
+from central.fleet.position_views import PositionRestore
 from central.fleet.principal import PrincipalError
 from central.registry import Registry
 from central.request_body import capped_body
@@ -280,6 +282,18 @@ def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
         except (TypeError, ValueError) as exc:
             raise NodeControlError("node_trial_operation_invalid", 422) from exc
         return await invoke(lambda: trials.operate(frame_id, trial_id, **value))
+
+    @app.post("/v1/operator/frames/{frame_id}/calibration-trials/{trial_id}/restores", dependencies=[Depends(admin)])
+    async def calibration_restore(frame_id: str, trial_id: UUID, request: Request):
+        # Configuration snapshots' Restore: a Position history entry into the trial's draft; the
+        # answer is the trial's view, as an edit's (the console replaces its draft with it).
+        value = loads_object(await body(request, 4096), max_bytes=4096)
+        try:
+            restore = PositionRestore.model_validate(value)
+        except ValidationError as exc:
+            raise NodeControlError("node_trial_operation_invalid", 422) from exc
+        return await invoke(lambda: trials.restore(frame_id, trial_id, entry_id=restore.entry_id,
+                                                   expected_sequence=restore.expected_sequence))
 
     @app.post("/v2/node/display")
     async def display_exchange(request: Request):

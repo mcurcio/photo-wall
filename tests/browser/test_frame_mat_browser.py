@@ -54,7 +54,7 @@ def _save(registry, calibration, mat, expected_revision):
             conn, frame_id=FRAME, player_id=row["player_id"], authority_epoch=row["authority_epoch"],
             output_id=row["output_id"], binding_generation=row["generation"],
             config_revision=row["configuration_revision"], calibration_revision=expected_revision,
-            calibration=calibration, mat=mat)
+            calibration=calibration, mat=mat, session_id=None, restored_from=None)
 
 
 class MatSessions(FakeSessions):

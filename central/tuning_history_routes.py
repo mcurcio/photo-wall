@@ -23,9 +23,11 @@ from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from central.displays.views import PictureHistoryView
+from central.fleet.position_views import PositionHistoryView
 from central.operator_auth import OPERATOR_PREFIX
 from central.tuning_history.model import HistoryRefused, history_page
 from central.tuning_history.ports import TuningHistoryQueries
+from contracts.models import Identifier
 
 
 def mount_tuning_history_routes(app: FastAPI, *, admin: Any, queries: TuningHistoryQueries) -> None:
@@ -39,6 +41,12 @@ def mount_tuning_history_routes(app: FastAPI, *, admin: Any, queries: TuningHist
              response_model=PictureHistoryView)
     def picture_history(display_id: UUID, before: str | None = None, limit: int | None = None) -> PictureHistoryView:
         return queries.picture_history(display_id, history_page(before, limit))
+
+    @app.get(OPERATOR_PREFIX + "frames/{frame_id}/position-history", dependencies=[Depends(admin)],
+             response_model=PositionHistoryView)
+    def position_history(frame_id: Identifier, before: str | None = None,
+                         limit: int | None = None) -> PositionHistoryView:
+        return queries.position_history(frame_id, history_page(before, limit))
 
 
 __all__ = ["mount_tuning_history_routes"]

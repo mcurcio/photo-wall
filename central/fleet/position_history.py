@@ -106,24 +106,27 @@ class PositionRestoreRefusal(StrEnum):
 
 def position_values(calibration: Calibration, mat: Mat) -> PositionValues:
     """The values a stored or drafted Position records: its fit and its mat."""
-    ...
+    return PositionValues(calibration.fit, mat)
 
 
 def unrecorded_record(latest_kept: PositionEntry | None, stored: PositionValues) -> PositionRecord | None:
     """Design rule 3, before a kept write: a KEPT_UNRECORDED record of `stored` (no session, no
     restore) when it differs from the newest kept entry's values, or when the Frame has no kept entry
     and `stored` is not DEFAULT_POSITION; else None."""
-    ...
+    known = DEFAULT_POSITION if latest_kept is None else latest_kept.record.values
+    if stored == known:
+        return None
+    return PositionRecord(PositionEntryKind.KEPT_UNRECORDED, stored, None, None)
 
 
 def saved_record(values: PositionValues, *, session_id: UUID | None, restored_from: UUID | None) -> PositionRecord:
     """The KEPT_SAVED record of a Save: the trial's draft values, its session and restore."""
-    ...
+    return PositionRecord(PositionEntryKind.KEPT_SAVED, values, session_id, restored_from)
 
 
 def profile_changed_record(values: PositionValues) -> PositionRecord:
     """The KEPT_PROFILE_CHANGED record of a profile change: the Frame's fit and mat, unchanged."""
-    ...
+    return PositionRecord(PositionEntryKind.KEPT_PROFILE_CHANGED, values, None, None)
 
 
 def sent_record(*, trial: TrialHanded | None, saved: PositionValues,
@@ -135,7 +138,13 @@ def sent_record(*, trial: TrialHanded | None, saved: PositionValues,
     - no trial: SENT_BACK of `saved` (with `latest`'s session) when `latest` is SENT_DRAFT and its
       values differ from `saved`; else None (the Node already shows what is kept, or nothing was
       ever drafted)."""
-    ...
+    if trial is not None:
+        if latest is not None and latest.record.values == trial.values:
+            return None
+        return PositionRecord(PositionEntryKind.SENT_DRAFT, trial.values, trial.session_id, trial.restored_from)
+    if latest is None or latest.record.kind is not PositionEntryKind.SENT_DRAFT or latest.record.values == saved:
+        return None
+    return PositionRecord(PositionEntryKind.SENT_BACK, saved, latest.record.session_id, None)
 
 
 def restore_refusal(entry: PositionEntry, *, frame_id: str, profile_px: tuple[int, int],
@@ -144,13 +153,20 @@ def restore_refusal(entry: PositionEntry, *, frame_id: str, profile_px: tuple[in
     port `seen_display_id` is seen now, in this order: OTHER_FRAME; MADE_FOR_OTHER_PROFILE when its
     `made_for.profile_px` differs; MADE_FOR_OTHER_DISPLAY when both its `made_for.display_id` and
     `seen_display_id` are known and differ. None: it may be restored."""
-    ...
+    if entry.frame_id != frame_id:
+        return PositionRestoreRefusal.OTHER_FRAME
+    if tuple(entry.made_for.profile_px) != tuple(profile_px):
+        return PositionRestoreRefusal.MADE_FOR_OTHER_PROFILE
+    made_on = entry.made_for.display_id
+    if made_on is not None and seen_display_id is not None and made_on != seen_display_id:
+        return PositionRestoreRefusal.MADE_FOR_OTHER_DISPLAY
+    return None
 
 
 def restored_draft(entry: PositionEntry, *, base_revision: int) -> tuple[Calibration, Mat]:
     """The trial draft a Restore loads: `entry`'s fit at `base_revision` (the trial's base, so a save
     made elsewhere is still refused) and its mat."""
-    ...
+    return Calibration(revision=base_revision, fit=entry.record.values.fit), entry.record.values.mat
 
 
 __all__ = ["DEFAULT_POSITION", "KEPT_KINDS", "SENT_KINDS", "MadeFor", "PositionEntry", "PositionEntryKind",
