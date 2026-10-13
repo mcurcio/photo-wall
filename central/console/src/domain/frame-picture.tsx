@@ -72,8 +72,9 @@ const PATTERN_OPTIONS: readonly { value: TestPattern | typeof OFF; label: string
   { value: "grey-ramp", label: "Grey ramp" },
   { value: "black-level", label: "Black level" },
 ];
-// What to do with each pattern. The Black level's is the one home of how to read it (display
-// tuning, "Reading the Black level"); the runbook links here.
+// What to do with each pattern: the one home of these words, the Black level's reading included
+// (display tuning, "Reading the Black level"); the console design and the runbook describe and
+// link here, never quote.
 const PATTERN_HOW: Record<TestPattern, string> = {
   white: "Tape a sheet of white paper beside the Frame and match its white.",
   "grey-ramp": "Every step should be told apart: the darkest from black, the lightest from white.",
@@ -84,41 +85,48 @@ const PATTERN_HOW: Record<TestPattern, string> = {
 const RANGE_NAMES: Record<SignalRange, string> = { auto: "Auto", full: "Full", limited: "Limited" };
 const RANGE_OPTIONS = (["auto", "full", "limited"] as const).map((value) => ({ value, label: RANGE_NAMES[value] }));
 const AUTO_CHOOSES = "The Pi chooses: Limited for TV modes.";
-const RANGE_RESTARTS = "Changing it restarts this display's picture: about 10 s without photos.";
-const RESTARTING = "The display's picture restarts: about 10 s without photos.";
+// One Weston drives every HDMI port of a Pi, so a change restarts the picture on all of them.
+const RANGE_RESTARTS = "Changing it restarts the picture on every display of this Pi: no photos until it is back.";
+const WAITING_FOR_THE_PI = "Waiting for the Pi";
+const RANGE_WAITING = `${WAITING_FOR_THE_PI}: a change restarts the picture on every display of this Pi.`;
 const NO_RANGE_SETTING = "This display's connection has no signal range setting.";
 const COPY_NO_RANGE = "Copy never copies the signal range: it follows each display.";
 
 /** A test pattern's state in words; `seconds` how long the Pi keeps one up (the view's
  * `test_pattern_seconds`, never a literal here). */
 export function testPatternWords(view: TestPatternView, seconds: number): string {
-  if (view.state === "waiting") return "Waiting for the Pi";
-  if (view.state === "shown") return "On every Frame of this display";
+  // The Player draws a pattern inside a Frame it has drawn (0024, Known limit): after a restart it
+  // waits for the Frame's content.
+  if (view.state === "waiting") return `${WAITING_FOR_THE_PI}: it shows once the Player draws this Frame.`;
+  if (view.state === "shown") return "The Pi reports it shown on every Frame of this display.";
   return `Taken off after ${formatAge(seconds)}. Choose it again to show it.`;
 }
 
-/** When a test pattern goes off, in words. */
+/** How a test pattern goes off, in words the operator can act on now: a pattern alone changes
+ * nothing Done keeps, so Done and Revert are not named (they stay disabled until something else
+ * changes, and then take it off too). */
 export function testPatternEnds(seconds: number): string {
-  return `Off after Done, Revert, leaving this page, or ${formatAge(seconds)}.`;
+  return `Choose Off or leave this page; the Pi takes it off by itself after ${formatAge(seconds)}.`;
 }
 
 /**
  * The signal range's line: `range` the one wanted (the operator's choice in this visit, else the
  * view's), `signal` the Pi's answer. While the Pi has not answered a range other than the one its
- * connector holds, the display's picture restarts; then what it sends, that it could not change it
- * (and what the display still gets), or that the connection has no such setting. Auto names what
- * the Pi chooses. No answer yet with Auto wanted: the Pi's choice, as at every start.
+ * connector holds: waiting for the Pi (a restart is expected, never claimed); then what it sends,
+ * that it could not change it (and what the display still gets), or that the connection has no
+ * such setting. Auto names what the Pi chooses. No answer yet with Auto wanted: the Pi's choice, as
+ * at every start.
  */
 export function signalWords(range: SignalRange, signal: SignalView | null): string {
   const sends = (inForce: SignalRange) => (inForce === "auto" ? AUTO_CHOOSES : `The Pi sends ${RANGE_NAMES[inForce]}.`);
-  if (signal === null) return range === "auto" ? AUTO_CHOOSES : RESTARTING;
-  if (!signal.answered) return signal.in_force === range && signal.result === "applied" ? sends(range) : RESTARTING;
+  if (signal === null) return range === "auto" ? AUTO_CHOOSES : RANGE_WAITING;
+  if (!signal.answered) return signal.in_force === range && signal.result === "applied" ? sends(range) : RANGE_WAITING;
   if (signal.result === "unsupported") return NO_RANGE_SETTING;
   if (signal.result === "failed") {
     const gets = signal.in_force === "auto" ? "what the Pi chooses" : RANGE_NAMES[signal.in_force];
     return `The Pi could not change it: the display still gets ${gets}.`;
   }
-  return signal.in_force === range ? sends(range) : RESTARTING;
+  return signal.in_force === range ? sends(range) : RANGE_WAITING;
 }
 
 /** Test pattern (#101): Off, White, Grey ramp or Black level on every Frame of this display, live
@@ -158,7 +166,7 @@ export function SignalSettings({ view, session, ready }: { view: View; session: 
           <SegmentedControl label="Range" value={range} options={RANGE_OPTIONS} disabled={!ready}
             onChange={session.changeSignalRange} />
         </Field>
-        <FactRow tone={words === RESTARTING ? "claimed" : "reported"}>{words}</FactRow>
+        <FactRow tone={words === RANGE_WAITING ? "claimed" : "reported"}>{words}</FactRow>
       </Stack>
     </FactGroup>
   );

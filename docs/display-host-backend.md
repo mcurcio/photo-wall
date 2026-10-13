@@ -140,8 +140,9 @@ Pi gains a privilege:
   a range it could not set is reported by the controller, which reads the connector back. With no
   request file every connector stays as the kernel has it (Auto after a Pi start).
 - A **path unit** watches the request file; a change starts its **oneshot**, which resets the
-  display unit's start limit (`systemctl reset-failed`) and restarts it, so a run of range changes
-  is never refused by the start limit. The restart ends the incarnation, and with it the controller
+  start count (`systemctl reset-failed`) of the display unit and of every unit bound to it (the
+  controller, which the restart stops and starts again) and then restarts the display unit, so a
+  run of range changes never spends a crash start limit: only crashes count against it. The restart ends the incarnation, and with it the controller
   and the Player, under the rules above: the next incarnation sets the range first, then Weston
   takes the screen, a new controller reads the connector and reports, and the broker starts the
   Player again.

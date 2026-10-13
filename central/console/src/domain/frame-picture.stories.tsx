@@ -234,13 +234,14 @@ export const PhotoWallNoSession: Story = {
 const checks: [string, string][] = [
   [testPatternWords({ pattern: "white", state: "ended" }, 600), "Taken off after 10 min. Choose it again to show it."],
   [testPatternWords({ pattern: "white", state: "ended" }, 300), "Taken off after 5 min. Choose it again to show it."],
-  [testPatternWords({ pattern: "grey-ramp", state: "waiting" }, 600), "Waiting for the Pi"],
+  [testPatternWords({ pattern: "grey-ramp", state: "waiting" }, 600),
+    "Waiting for the Pi: it shows once the Player draws this Frame."],
   [signalWords("full", { in_force: "full", result: "applied", answered: true }), "The Pi sends Full."],
   [signalWords("full", { in_force: "limited", result: "failed", answered: true }),
     "The Pi could not change it: the display still gets Limited."],
   [signalWords("full", { in_force: "auto", result: "applied", answered: false }),
-    "The display's picture restarts: about 10 s without photos."],
-  [signalWords("full", null), "The display's picture restarts: about 10 s without photos."],
+    "Waiting for the Pi: a change restarts the picture on every display of this Pi."],
+  [signalWords("full", null), "Waiting for the Pi: a change restarts the picture on every display of this Pi."],
   [signalWords("auto", null), "The Pi chooses: Limited for TV modes."],
   [signalWords("full", { in_force: "auto", result: "unsupported", answered: true }),
     "This display's connection has no signal range setting."],
@@ -275,7 +276,7 @@ const signal = (view: Partial<View>, range?: "auto" | "full" | "limited") => (
 export const SignalFullApplied: Story = {
   render: () => signal({ signal_range: "full", signal: { in_force: "full", result: "applied", answered: true } }),
 };
-/** Full chosen in this visit: the display's picture restarts until the Pi answers. */
+/** Full chosen in this visit: waiting for the Pi, whose change restarts every display's picture. */
 export const SignalFullRestarting: Story = {
   render: () => signal({ signal_range: "full", signal: { in_force: "auto", result: "applied", answered: false } }, "full"),
 };

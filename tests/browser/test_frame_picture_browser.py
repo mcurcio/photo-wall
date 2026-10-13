@@ -602,7 +602,8 @@ def test_an_unbound_frame_is_sent_to_its_hardware_tab(page, registry):
 
 TEST_PATTERN = "Test pattern"
 SIGNAL = "Signal range"
-RESTARTING = "The display's picture restarts: about 10 s without photos."
+RESTARTING = "Waiting for the Pi: a change restarts the picture on every display of this Pi."
+SHOWN = "The Pi reports it shown on every Frame of this display."
 PAPER = "Tape a sheet of white paper beside the Frame and match its white."
 READING = ("Switch Signal range between Full and Limited. Black darker on Full with every step visible: keep Full. "
            "Steps vanish into black on Full: choose Limited. No change: the display follows the Pi, the glow is its "
@@ -620,8 +621,8 @@ def _sequence(registry):
 
 def test_full_says_the_restart_until_the_pi_answers_and_done_waits_for_that_answer(page, registry):
     """Acceptance 1 and 2: choosing Full sends exactly one signal-range-edit with the session's
-    sequence; while the Pi presents the change but has not answered its signal, the group says the
-    display's picture restarts and Done stays disabled; once it answers, "The Pi sends Full." and
+    sequence; while the Pi presents the change but has not answered its signal, the group says it
+    waits for the Pi, whose change restarts every display's picture, and Done stays disabled; once it answers, "The Pi sends Full." and
     Done keeps Full.
 
     Mutations: send "Full" capitalised -> Central's 422, nothing in the document; let the session
@@ -692,11 +693,11 @@ def test_white_shows_the_paper_line_and_off_sends_null(page, registry):
         expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
         group = _group(page, TEST_PATTERN)
         expect(_choice(page, TEST_PATTERN, "Off")).to_be_checked()
-        expect(group).to_contain_text("Off after Done, Revert, leaving this page, or 10 min.")
+        expect(group).to_contain_text("Choose Off or leave this page; the Pi takes it off by itself after 10 min.")
         edits = _edits(page, "test-pattern-edits")
         _choice(page, TEST_PATTERN, "White").click()
         expect(group).to_contain_text(PAPER)
-        expect(group).to_contain_text("On every Frame of this display")
+        expect(group).to_contain_text(SHOWN)
         assert _off_thread(_picture, registry).test_pattern.pattern.value == "white"
 
         _choice(page, TEST_PATTERN, "Off").click()
@@ -721,7 +722,7 @@ def test_black_level_says_how_to_read_it_and_once_ended_is_asked_for_again(page,
         edits = _edits(page, "test-pattern-edits")
         _choice(page, TEST_PATTERN, "Black level").click()
         expect(group).to_contain_text(READING)
-        expect(group).to_contain_text("On every Frame of this display")
+        expect(group).to_contain_text(SHOWN)
 
         pi.bound_over = True
         expect(group).to_contain_text("Taken off after 10 min. Choose it again to show it.")
@@ -730,7 +731,7 @@ def test_black_level_says_how_to_read_it_and_once_ended_is_asked_for_again(page,
 
         pi.bound_over = False
         _choice(page, TEST_PATTERN, "Black level").click()
-        expect(group).to_contain_text("On every Frame of this display")
+        expect(group).to_contain_text(SHOWN)
         expect(group).to_contain_text(READING)
         assert [body["test_pattern"] for _at, body in edits] == ["black-level", "black-level"], edits
         assert _off_thread(_picture, registry).test_pattern.ask > first
