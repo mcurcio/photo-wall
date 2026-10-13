@@ -42,12 +42,15 @@ from central.displays.picture import (
     DisplayPicture,
     PictureRefused,
     PictureSession,
+    SoftwareSetting,
     TestPatternState,
     copied,
     default_picture,
     edited_signal_range,
+    edited_software,
     edited_test_pattern,
     effective_picture,
+    kept_alive,
     picture_digest,
     picture_document,
     presented,
@@ -162,6 +165,26 @@ def test_the_pattern_is_the_sessions_ask_never_the_drafts_and_goes_with_the_leas
     assert (off.test_pattern, again.test_pattern) == (None, TestPatternAsk(WHITE, 4))
     same = edited_test_pattern(asked, WHITE, expected_sequence=2, now=6.0)
     assert same.test_pattern == TestPatternAsk(WHITE, 3) != asked.test_pattern
+
+
+def test_a_shown_pattern_outlives_a_minute_of_console_silence_and_a_session_without_one_ends_at_5_s():
+    """(Owner, 2026-10-14: "It would be nice if the testing screen persisted, even for a minute. The
+    current timing is so tight that switching from my phone browser to my phone camera is enough to
+    drop the white overlay".) While a test pattern is asked the idle limit is
+    TEST_PATTERN_IDLE_SECONDS, else PICTURE_IDLE_SECONDS; edits and keepalives both apply it.
+    Mutation probe: one idle limit (5 s) for both -> the pattern is gone after 30 s."""
+    asked = edited_test_pattern(_session(), WHITE, expected_sequence=1, now=5.0)
+    assert session_test_pattern(asked, 35.0) == TestPatternAsk(WHITE, 2)          # 30 s without a keepalive
+    assert session_test_pattern(asked, 64.0) == TestPatternAsk(WHITE, 2)
+    assert session_test_pattern(asked, 65.0) is None                              # 60 s: ended
+    kept = kept_alive(asked, 35.0)
+    assert session_test_pattern(kept, 94.0) == TestPatternAsk(WHITE, 2)
+    off = edited_test_pattern(asked, None, expected_sequence=2, now=6.0)
+    assert off.lease.live(10.9) and not off.lease.live(11.0)                       # no pattern: 5 s
+    plain = edited_software(_session(), SoftwareSetting.BRIGHTNESS, 90, expected_sequence=1, now=5.0)
+    assert not plain.lease.live(10.0) and not kept_alive(plain, 9.0).lease.live(14.0)
+    with pytest.raises(PictureRefused, match="session_ended"):
+        kept_alive(plain, 10.0)
 
 
 def test_the_tab_says_waiting_shown_or_ended():
@@ -302,6 +325,37 @@ def test_the_test_pattern_is_the_sessions_and_done_revert_and_the_lease_end_take
             off = _picture(registry)
             assert off.test_pattern is None and off.picture_change > document.picture_change, end
     assert "test_pattern" not in _display(registry, player)
+
+
+def _silent(registry, seconds: float) -> None:
+    """`seconds` of console silence: the session's idle deadline moved that much closer."""
+    _sql(registry, f"UPDATE picture_sessions SET idle_until = idle_until - {seconds}")
+
+
+def test_a_pattern_survives_30_s_without_a_keepalive_and_a_session_without_one_ends_at_5_s(registry):
+    """(Owner, 2026-10-14: "switching from my phone browser to my phone camera is enough to drop the
+    white overlay".) Through the routes and the document: 30 s of silence keeps White on screen, a
+    keepalive gives it another minute; with no pattern 5 s ends the session. Mutation probe: the
+    store's keepalive or edits on PICTURE_IDLE_SECONDS alone -> White is gone after 30 s."""
+    _bound(registry)
+    with _client(registry) as client:
+        session = _begin(client)
+        _pattern(client, session, "white", 1)
+        _silent(registry, 30)
+        assert _picture(registry).test_pattern == TestPatternAsk(WHITE, 2)
+        assert _view(client)["test_pattern"]["pattern"] == "white"
+        keep = client.post(f"/v1/operator/picture-sessions/{session['session_id']}/keepalive", headers=AUTH)
+        assert keep.status_code == 200, keep.text
+        _silent(registry, 55)
+        assert _picture(registry).test_pattern == TestPatternAsk(WHITE, 2)
+        _silent(registry, 6)
+        assert _picture(registry).test_pattern is None                              # a minute of silence
+        plain = _begin(client)
+        assert _software(client, plain, "brightness", 90, 1).status_code == 200
+        _silent(registry, 4)
+        assert _view(client)["session"] is not None
+        _silent(registry, 1.5)
+        assert _view(client)["session"] is None
 
 
 def test_asking_again_after_the_pi_ended_it_gives_a_new_ask_and_change(registry):

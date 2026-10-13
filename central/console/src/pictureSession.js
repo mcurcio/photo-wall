@@ -28,8 +28,14 @@ import {
  * THE SESSION RUNS WHILE THE TAB IS OPEN AND SHOWN. `open` and the browser tab visible begin a
  * session (after this page's own Revert of an earlier one is answered, so it is never read as
  * someone else's); every TICK_MS the page keeps it and reads the tab (GET …/picture), which says
- * whether the Pi has shown the latest change. Closing the tab, hiding the browser tab or leaving
- * the page ends it at once with Revert (Central's idle window is the net).
+ * whether the Pi has shown the latest change. Closing the tab or leaving the page ends it at once
+ * with Revert (Central's idle window is the net). Hiding the browser tab does too, unless the
+ * session shows a test pattern: then the page only stops keeping it, so the pattern stays up while
+ * the operator's phone goes from the browser to its camera (owner, 2026-10-14: "It would be nice if
+ * the testing screen persisted, even for a minute"). Central keeps a session with a pattern a
+ * minute without a keepalive (central/displays/picture.py `idle_seconds`, the one home of that
+ * rule); shown again within it, the page keeps the same session, and after it begins a new one with
+ * the draft.
  *
  * AT MOST TWO EDITS A SECOND. A change is sent at once when the last edit went EDIT_GAP_MS ago,
  * else when the gap is over, with the newest value: while a slider is dragged the display is
@@ -401,9 +407,11 @@ export function usePictureSession({ frameId, open }) {
     return () => { current = false; };
   }, [open]);
 
-  // Leaving the tab, hiding the browser tab or leaving the page ends the session now (Revert).
+  // Leaving the tab, hiding the browser tab or leaving the page ends the session now (Revert);
+  // hidden with a test pattern taken, it is left to Central's idle window (THE SESSION RUNS above).
+  const patternTaken = (taken.pattern.pattern ?? null) !== null;
   useEffect(() => {
-    if (live) return;
+    if (live || (open && patternTaken)) return;
     const current = state.current;
     clearTimeout(current.timer);
     if (current.session !== null) {
@@ -411,7 +419,7 @@ export function usePictureSession({ frameId, open }) {
       setSession(null);
     }
     setWaitingFor(null);
-  }, [live, end, setSession]);
+  }, [live, open, patternTaken, end, setSession]);
   useEffect(() => {
     const current = state.current;
     current.mounted = true;

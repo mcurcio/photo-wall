@@ -59,7 +59,7 @@ import logging
 import threading
 import uuid
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any, Final
 from uuid import UUID
@@ -103,6 +103,7 @@ from central.displays.picture import (
     edited_test_pattern,
     effective_picture,
     hardware_answered,
+    kept_alive,
     kept_picture,
     picture_digest,
     picture_document,
@@ -180,7 +181,7 @@ from central.infra.picture_history_store import (
 )
 from central.infra.power_store import power_policy_in
 from central.installation_models import FrameOutput
-from central.live_session import Lease, begin_lease, touched
+from central.live_session import Lease, begin_lease
 from central.power.timetable import frame_timetable, unbound_timetable
 from contracts.lut import LutRef
 from contracts.models import Calibration, FrameProfile, frame_output
@@ -1224,8 +1225,7 @@ class PgPictureSessions:
     def keep_picture_alive(self, session_id: UUID) -> PictureSessionView:
         with self._db.transaction() as conn:
             _row, session, now = self._session_in(conn, session_id)
-            _require_live(session, now)
-            kept = replace(session, lease=touched(session.lease, now, idle_seconds=PICTURE_IDLE_SECONDS))
+            kept = kept_alive(session, now)
             conn.execute("UPDATE picture_sessions SET idle_until=%s WHERE id=%s",
                          (kept.lease.idle_until, session_id))
         return _session_view(kept)

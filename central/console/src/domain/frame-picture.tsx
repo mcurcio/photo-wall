@@ -85,7 +85,7 @@ const PATTERN_OPTIONS: readonly { value: TestPattern | typeof OFF; label: string
 const TARGETS: ReadonlySet<TestPattern> = new Set<TestPattern>(["target-pre-software", "target-post-software"]);
 const PAPER_UNDER_GLASS = "Lay the printed sheet uncut in the dark box under the Frame's glass, a black card behind "
   + "it, and photograph both: ProRAW photos are read for you. The sheet says how large the Frame's opening must be. "
-  + "Keep this tab open and shown on another device while you photograph: hiding it takes the target down.";
+  + "You can switch to the camera on this device: the target stays up for a minute while this tab is hidden.";
 const PAPER_SIZES: readonly { paper: PaperSize; label: string }[] = [
   { paper: "letter", label: "Letter" }, { paper: "a4", label: "A4" },
 ];

@@ -746,6 +746,58 @@ def test_black_level_says_how_to_read_it_and_once_ended_is_asked_for_again(page,
         assert _off_thread(_picture, registry).test_pattern.ask > first
 
 
+def _visibility(page, state):
+    """The browser tab hidden or shown, as a phone switching to its camera does it."""
+    page.evaluate("""(state) => {
+        Object.defineProperty(document, "visibilityState", {configurable: true, get: () => state});
+        document.dispatchEvent(new Event("visibilitychange"));
+    }""", state)
+
+
+def test_hiding_the_tab_keeps_a_shown_pattern_and_ends_a_session_without_one(page, registry):
+    """Owner, 2026-10-14: "switching from my phone browser to my phone camera is enough to drop the
+    white overlay". Hidden with White shown, the page sends no Revert and stops its keepalives, and
+    the document keeps White past Central's 5 s window (a pattern's is a minute); shown again, the
+    same session goes on. Hidden with no pattern, the page reverts at once.
+
+    Mutation: revert on every hide (the effect without the pattern's exception) -> the DELETE is sent
+    and the document drops White."""
+    _seen(registry)
+    with FakePi(registry), operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "wall")
+        open_frame(page, FRAME, "picture")
+        expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
+        group = _group(page, TEST_PATTERN)
+        _show(page, "White")
+        expect(group).to_contain_text(SHOWN)
+        sent = []
+        page.on("request", lambda request: sent.append((request.method, request.url.rsplit("/", 1)[-1]))
+                if "/picture-sessions/" in request.url else None)
+        [before] = _off_thread(_sql, registry, "SELECT id FROM picture_sessions")
+
+        _visibility(page, "hidden")
+        page.wait_for_timeout(6500)
+        assert not any(method == "DELETE" for method, _ in sent), sent
+        assert not any(last == "keepalive" for _, last in sent), sent
+        assert _off_thread(_picture, registry).test_pattern.pattern.value == "white"
+
+        _visibility(page, "visible")
+        expect(group).to_contain_text(SHOWN)
+        page.wait_for_timeout(1200)
+        assert any(last == "keepalive" for _, last in sent), sent
+        assert _off_thread(_sql, registry, "SELECT id FROM picture_sessions") == [before]
+
+        _show(page, "Off")
+        expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
+        _visibility(page, "hidden")
+        for _ in range(50):
+            if any(method == "DELETE" for method, _ in sent):
+                break
+            page.wait_for_timeout(100)
+        else:
+            raise AssertionError(f"hidden with no pattern, the page never reverted: {sent}")
+
+
 PATTERNS = ["Off", "White", "Grey ramp", "Black level", "Target: pre-software", "Target: post-software"]
 PAPER_TARGET = {"Letter": "/v1/operator/calibration-target/paper.pdf?paper=letter",
                 "A4": "/v1/operator/calibration-target/paper.pdf?paper=a4"}
@@ -779,8 +831,8 @@ def test_both_targets_are_offered_in_either_order_with_the_paper_targets_print_l
             _show(page, label)
             expect(group).to_contain_text(SHOWN)
             expect(group).to_contain_text("Lay the printed sheet uncut in the dark box under the Frame's glass")
-            # The camera is often the phone the tab runs on: hiding the tab ends the session.
-            expect(group).to_contain_text("Keep this tab open and shown on another device while you photograph")
+            # The camera is often the phone the tab runs on: hiding the tab keeps a pattern a minute.
+            expect(group).to_contain_text("the target stays up for a minute while this tab is hidden")
             expect(_print_links(page)).to_have_text(list(PAPER_TARGET))
             for name, href in PAPER_TARGET.items():
                 expect(group.get_by_role("link", name=name, exact=True)).to_have_attribute("href", href)
