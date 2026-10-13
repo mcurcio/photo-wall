@@ -39,14 +39,21 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Final
 
-from contracts.calibration_target import QrModules
+from contracts.calibration_target import (
+    QR_MM,
+    QR_QUIET_MODULES,
+    SCREEN_TARGET_MM,
+    QrModules,
+    calibration_target,
+    screen_point,
+)
 from contracts.frame_fit import Corners, OutputSize, cover_rectangle
 from contracts.kelvin import kelvin_white
 from contracts.lut import LUT_GRID, lut_offset
 from contracts.models import CornersFit, CoverFit, FrameProfile, Mat, PhotoCrop
 from contracts.node_frame import PictureOperations, srgb_to_linear
 from contracts.photo_crop import CENTRED, crop_window
-from contracts.tuning import SIGNAL_LEVELS, TestPattern
+from contracts.tuning import SIGNAL_LEVELS, TARGET_PATTERNS, TestPattern
 
 Matrix = tuple[float, float, float, float, float, float, float, float, float]
 Linear = tuple[float, float, float]     # linear-light RGB, each 0..1
@@ -297,9 +304,8 @@ def _cot(degrees: float) -> float:
 
 def mat_shadow(fit: CornersFit | CoverFit, profile: FrameProfile, mat: Mat) -> MatShadow | None:
     """None when not mat.shades (step 7 skipped). quarter = the nearest quarter turn of fit.rotation
-    (round(rotation / 90) * 90). size: diag_mm = diagonal_inches*25.4, a = width_px/height_px,
-    W = diag_mm*a/hypot(a,1), H = diag_mm/hypot(a,1); size_mm = (W, H) when quarter is 0 or 180,
-    else (H, W). toward: alpha = radians(from_degrees + quarter), (sin alpha, -cos alpha). cot(90)
+    (round(rotation / 90) * 90). size_mm = `opening_size_mm` (the one home of the opening's size).
+    toward: alpha = radians(from_degrees + quarter), (sin alpha, -cos alpha). cot(90)
     is exactly 0.
 
     Everything is in mat space, the opening's own rectangle at its physical size, whose axes
@@ -309,11 +315,8 @@ def mat_shadow(fit: CornersFit | CoverFit, profile: FrameProfile, mat: Mat) -> M
     on the wall is lit from the wall's up whatever its tilt on the panel. Pure."""
     if not mat.shades:
         return None
-    diagonal = profile.diagonal_inches * 25.4
-    aspect = profile.width_px / profile.height_px
-    width, height = diagonal * aspect / math.hypot(aspect, 1), diagonal / math.hypot(aspect, 1)
+    size = opening_size_mm(fit, profile)
     quarter = round(fit.rotation / 90) * 90
-    size = (width, height) if quarter % 180 == 0 else (height, width)
     lights = []
     for light in mat.lights:
         if light.strength_tenths <= 0:
@@ -449,7 +452,11 @@ def opening_size_mm(fit: CornersFit | CoverFit, profile: FrameProfile) -> tuple[
     diagonal_inches*25.4, a = width_px/height_px, W = diag_mm*a/hypot(a,1), H = diag_mm/hypot(a,1);
     (W, H) when the nearest quarter turn of fit.rotation (round(rotation / 90) * 90) is 0 or 180,
     else (H, W). The one home of this rule: `mat_shadow`'s size_mm is it. Pure."""
-    raise NotImplementedError("calibration targets: slice P2")
+    diagonal = profile.diagonal_inches * 25.4
+    aspect = profile.width_px / profile.height_px
+    width, height = diagonal * aspect / math.hypot(aspect, 1), diagonal / math.hypot(aspect, 1)
+    quarter = round(fit.rotation / 90) * 90
+    return (width, height) if quarter % 180 == 0 else (height, width)
 
 
 def target_point(u: float, v: float, opening_mm: tuple[float, float]) -> tuple[float, float]:
@@ -457,7 +464,11 @@ def target_point(u: float, v: float, opening_mm: tuple[float, float]) -> tuple[f
     target centred in the opening at its physical size, its x along u when opening_mm is
     landscape or square (W >= H), else turned a quarter clockwise (its x along v, its top at the
     opening's right). Points beyond the target map beyond SCREEN_TARGET_MM (the surround). Pure."""
-    raise NotImplementedError("calibration targets: slice P2")
+    width, height = opening_mm
+    centre_x, centre_y = SCREEN_TARGET_MM[0] / 2, SCREEN_TARGET_MM[1] / 2
+    if width >= height:
+        return (centre_x + (u - .5) * width, centre_y + (v - .5) * height)
+    return (centre_x + (v - .5) * height, centre_y + (.5 - u) * width)
 
 
 def target_signal(pattern: TestPattern, u: float, v: float, draw: TargetDraw) -> tuple[Linear, bool]:
@@ -466,7 +477,26 @@ def target_signal(pattern: TestPattern, u: float, v: float, draw: TargetDraw) ->
     the QR's square the module there (dark 0.0, light and the QR_QUIET_MODULES quiet zone 1.0) of
     `draw.modules` scaled to fill QR_MM; raw is True everywhere for TARGET_PRE_SOFTWARE and only
     in the dark box for TARGET_POST_SOFTWARE. ValueError("pattern") for any other pattern. Pure."""
-    raise NotImplementedError("calibration targets: slice P2")
+    if pattern not in TARGET_PATTERNS:
+        raise ValueError("pattern")
+    x, y = target_point(u, v, draw.opening_mm)
+    point = screen_point(x, y)
+    value = point.signal
+    if point.qr:
+        value = _qr_signal(draw.modules, x, y)
+    raw = pattern is TestPattern.TARGET_PRE_SOFTWARE or point.raw
+    return (value, value, value), raw
+
+
+def _qr_signal(modules: QrModules, x: float, y: float) -> float:
+    """The QR square's signal at (x, y) of the target's plane: its modules, the quiet zone round
+    them, scaled to fill QR_MM; 0.0 for a dark module, else 1.0."""
+    square = calibration_target().qr
+    side = len(modules) + 2 * QR_QUIET_MODULES
+    column = min(side - 1, int((x - square.x_mm) / QR_MM * side)) - QR_QUIET_MODULES
+    row = min(side - 1, int((y - square.y_mm) / QR_MM * side)) - QR_QUIET_MODULES
+    dark = 0 <= row < len(modules) and 0 <= column < len(modules) and modules[row][column]
+    return 0.0 if dark else 1.0
 
 
 def final_pixel(linear: Linear, operations: PictureOperations, *, inside: bool,
@@ -496,7 +526,17 @@ def final_pixel(linear: Linear, operations: PictureOperations, *, inside: bool,
     A contrast result below 0 meets the exponent as 0 (a power of a negative number is undefined,
     in GLSL too); with the clamp after, this equals clamping before the exponent."""
     pattern = operations.test_pattern
-    if pattern is not None:
+    if pattern in TARGET_PATTERNS:
+        if opening_uv is None:
+            raise ValueError("opening_uv")
+        if target is None:
+            raise ValueError("target")
+        signal, raw = target_signal(pattern, *opening_uv, target)
+        if raw:
+            return (*signal, 1.0) if inside else (0.0, 0.0, 0.0, 1.0)
+        linear = tuple(srgb_to_linear(value) for value in signal)
+        shade = None
+    elif pattern is not None:
         if opening_uv is None:
             raise ValueError("opening_uv")
         signal = pattern_signal(pattern, *opening_uv)

@@ -9,26 +9,31 @@ import math
 
 import pytest
 
+from contracts.calibration_target import TargetCode
 from contracts.lut import LUT_BYTES, LutRef
 from contracts.models import CoverFit, FrameProfile, Light, Mat
 from contracts.node_frame import LutMix, PictureOperations
-from contracts.tuning import TARGET_PATTERNS, TestPattern
+from contracts.tuning import TestPattern
+from player.calibration_target import target_modules
 from player.geometry import (
     BLACK_LEVEL_STEPS,
     GREY_RAMP_STEPS,
     SIGNAL_LEVELS,
+    TargetDraw,
     final_pixel,
     homography,
     inside_opening,
     inverse,
     mat_shade,
     mat_shadow,
+    opening_size_mm,
     pattern_signal,
     transform,
 )
 from player.native import _FINAL, _PATTERN_CODES
 
 PROFILE = FrameProfile(width_px=1920, height_px=1080, diagonal_inches=27)
+SMALL_PROFILE = FrameProfile(width_px=1920, height_px=1080, diagonal_inches=24)
 LIT_MAT = Mat(depth_mm=8, lights=(Light(from_degrees=0, steep_degrees=30, softness_degrees=20,
                                         strength_tenths=15, colour_kelvin=3000),))
 LUT = LutMix(LutRef("ab" * 32, "lut33-test"), 1.0)
@@ -90,28 +95,29 @@ def test_black_level_is_raw_whatever_the_settings():
     assert final_pixel((0.0, 0.0, 0.0), operations(1.5, floor=.1), inside=True)[0] > .1
 
 
-# The calibration targets join once the reference draws them (decision 0026, slice P2: this filter
-# goes, so no pattern of the five paints outside the opening).
-@pytest.mark.parametrize("pattern", [pattern for pattern in TestPattern if pattern not in TARGET_PATTERNS])
+@pytest.mark.parametrize("pattern", list(TestPattern))
 def test_no_pattern_paints_outside_the_opening(pattern):
     corners = tilted_opening(30)
     fit = CoverFit(corners=corners, rotation=30)
     shadow = mat_shadow(fit, PROFILE, LIT_MAT)
+    # A calibration target on a Frame shorter than it: its markers and rulers spill past the opening.
+    target = TargetDraw(opening_size_mm(fit, SMALL_PROFILE),
+                        target_modules(TargetCode("p-" + "0" * 32, "HDMI-A-1", 1)))
     to_opening = inverse(homography(corners))
     lifted = operations(1.5, .5, floor=.1, pattern=pattern)
     inside_lit = outside = 0
-    for i in range(40):
-        for j in range(40):
-            x, y = (i + .5) / 40, (j + .5) / 40
+    for i in range(80):
+        for j in range(80):
+            x, y = (i + .5) / 80, (j + .5) / 80
             inside = inside_opening(corners, x, y)
             drawn = final_pixel((0.0, 0.0, 0.0), lifted, inside=inside, shade=mat_shade(shadow, x, y),
-                                opening_uv=transform(to_opening, x, y))
+                                opening_uv=transform(to_opening, x, y), target=target)
             if inside:
                 inside_lit += drawn[:3] != (0.0, 0.0, 0.0)
             else:
                 outside += 1
                 assert drawn == (0.0, 0.0, 0.0, 1.0), (pattern, x, y)
-    assert outside > 500 and inside_lit > 20, (outside, inside_lit)     # Black level: its cells alone
+    assert outside > 2000 and inside_lit > 40, (outside, inside_lit)    # Black level, pre-software target: their cells alone
 
 
 def test_a_pattern_needs_the_openings_uv():
