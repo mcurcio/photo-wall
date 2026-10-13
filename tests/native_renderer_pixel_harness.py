@@ -56,6 +56,13 @@ a 64x48 PNG of four flat quadrants (red, green, blue, white) written here with t
    shade, so the shader's loop past the first light and its uniform arrays (`light_toward`,
    `light_band`, `light_weight`) are held to the reference; the side band reads warmer than the
    top band, and the corner darker than both.
+17-19. <pattern>_pattern_matches_the_reference (display tuning, decision 0024, slice PL1), for
+   White, Grey ramp and Black level: with Position's trial grid on (a trial on a fallback
+   composition with no layers) and its deep mat, a Cover fit turned 30 degrees and brightness
+   80 % with a black floor, operations naming the pattern draw `final_pixel` with the opening's
+   unit square (`pattern_signal`) at every sample clear of a step's or a cell's edge, black
+   outside the opening: the look patterns shaded by the mat, the Black level raw. A renderer that
+   never set `test_pattern` draws the grid instead.
 """
 import ctypes
 import hashlib
@@ -96,15 +103,20 @@ from contracts.models import (  # noqa: E402
 )
 from contracts.node_frame import LutMix, PictureOperations  # noqa: E402
 from contracts.photo_crop import CENTRED  # noqa: E402
+from contracts.tuning import TestPattern  # noqa: E402
 from player.geometry import (  # noqa: E402
     compose_pixel,
     decode_channel,
     encode_srgb,
     final_pixel,
+    homography,
     inside_opening,
+    inverse,
     mat_shade,
     mat_shadow,
+    pattern_signal,
     picture_source_uv,
+    transform,
 )
 from player.luts import PlayerLuts  # noqa: E402
 from player.native import NativeOutput, NativeRenderer  # noqa: E402
@@ -637,6 +649,42 @@ def lut_matches_the_reference(native, frames, variant) -> None:
     assert before > 500 and after > 500, (before, after)
 
 
+def pattern_matches_the_reference(pattern: TestPattern):
+    def case(native: CapturingRenderer, frames: Frames, variant: Variant) -> None:
+        fit = CoverFit(corners=OPENING, rotation=30)
+        trial = TrialFrames(fit, DEEP_MAT)
+        trial.operations = PictureOperations("headless", 9, (1.0, 1.0, 1.0), .8, 1.0, 1.0,
+                                             black_floor=.05, test_pattern=pattern)
+        native._frames = trial
+        show(native, OutputComposition(BINDING, Calibration(fit=fit), (), True))    # the grid's canvas
+        assert until(lambda: trial.tags and trial.tags[-1][0] == "trial-" + TRIAL_SHA), trial.tags[-3:]
+        spin(0.3)
+        width, height, _ = native.captured
+        to_opening = inverse(homography(fit.corners))
+        shadow = mat_shadow(fit, PROFILE, DEEP_MAT)
+        counts = [0, 0, 0]       # inside, outside, lit
+        for i, j, x, y in samples(native, fit.corners, step=5):
+            u, v = transform(to_opening, x, y)
+            inside = inside_opening(fit.corners, x, y)
+            around = [transform(to_opening, x + dx / width, y + dy / height)
+                      for dx in (-1.5, 0, 1.5) for dy in (-1.5, 0, 1.5)]
+            near = {pattern_signal(pattern, *point) for point in around}
+            # the ramp's smooth half varies by design: compared wherever all of it is that half
+            smooth = pattern is TestPattern.GREY_RAMP and min(point[1] for point in around) >= .5
+            if inside and not smooth and len(near) != 1:
+                continue        # a step's or a cell's edge
+            expected = final_pixel((0.0, 0.0, 0.0), trial.operations, inside=inside,
+                                   shade=mat_shade(shadow, x, y), opening_uv=(u, v))
+            actual = pixel(native, i, j)
+            counts[0 if inside else 1] += 1
+            counts[2] += inside and max(expected[:3]) > 0
+            assert close(actual, expected), ("pattern_pixel", pattern.value, i, j, actual, expected)
+        print(f"PATTERN {pattern.value} inside={counts[0]} outside={counts[1]} lit={counts[2]}", flush=True)
+        assert counts[0] > 500 and counts[1] > 100 and counts[2] > 20, counts
+    case.__name__ = f"{pattern.name.lower()}_pattern_matches_the_reference"
+    return case
+
+
 CASES = (cover_matches_the_reference(0), cover_matches_the_reference(7),
          cover_matches_the_reference(90), outside_the_opening_stays_black_at_low_contrast,
          corners_fit_matches_the_reference, operations_change_the_picture_and_the_tag,
@@ -645,7 +693,8 @@ CASES = (cover_matches_the_reference(0), cover_matches_the_reference(7),
          the_diagnostic_shows_only_while_the_output_is_unbound, crop_offset_keeps_the_left_edge,
          print_sliders_match_the_reference, one_light_from_the_top_matches,
          cover_at_90_shades_the_wall_up_edge, neutral_program_takes_no_new_step, trial_mat_drawn,
-         lut_matches_the_reference, two_coloured_lights_match)
+         lut_matches_the_reference, two_coloured_lights_match,
+         *(pattern_matches_the_reference(pattern) for pattern in TestPattern))
 
 
 def main() -> None:
