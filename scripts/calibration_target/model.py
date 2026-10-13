@@ -28,16 +28,11 @@ WHITE_TOLERANCE: Final = 0.03       # relative, per channel: a white copy unlike
 GREY_TOLERANCE: Final = (0.004, 0.04)   # absolute + relative to the share: a grey copy unlike the rest
 BLACK_EDGE_TOLERANCE: Final = 0.004     # a group's black above the blacks' median by more (a share of
                                         # the white): a reflection edge crosses the group
-PHOTOS_TOLERANCE: Final = 0.02      # relative: two photos' whites must agree this closely
 SCALE_TOLERANCE: Final = 0.02       # relative: the paper's printed size against the layout, in the screen's mm
 MARKERS_NEEDED: Final = 3           # markers found per surface, of four
 CLIP_SHARE: Final = 0.01            # a patch with more of its sampled pixels clipped is unread
 DISTINCT_SIGMAS: Final = 3.0        # a near-black step apart from raw 0 by this many of the black's spreads
 KEEP_SPREADS: Final = 2.0           # a gap within this many of its spread is "keep" / no change
-INK_SHARE: Final = 0.03             # the paper's black ink, a share of its white, not measured (decision
-                                    # 0026, Findings): the white is read against the paper less its
-                                    # ink, so bare paper reads up to 1 / (1 - INK_SHARE) of it, and a
-                                    # screen white anywhere in that band is matched (both stages)
 
 
 class PhotoKind(StrEnum):
@@ -105,7 +100,6 @@ class Dropped:
 class Refusal(StrEnum):
     TARGET_NOT_FOUND = "target-not-found"     # fewer than MARKERS_NEEDED markers on a surface
     CODE_UNREADABLE = "code-unreadable"       # no QR read, or not contracts.calibration_target's code
-    DIFFERENT_ENTRIES = "different-entries"   # two photos' codes differ
     UNKNOWN_ENTRY = "unknown-entry"           # Central has no sent entry for the code
     NOT_A_TARGET = "not-a-target"             # the entry's test pattern is no calibration target
     CLIPPED = "clipped"                       # a white patch's pixels reached the sensor's clip
@@ -113,9 +107,6 @@ class Refusal(StrEnum):
     OUTSIDE_PHOTO = "outside-photo"           # a patch to read lies outside the photo: a corner cut off
     PAPER_MISPLACED = "paper-misplaced"       # the sheet, as laid, reaches over the screen target's patches
     WHITE_UNREAD = "white-unread"             # under half the white copies agree: too many groups dropped
-    PHOTOS_DISAGREE = "photos-disagree"       # two photos' whites differ: the light on the sheet changed,
-                                              # or a photo taken well off square-on (the panel's light
-                                              # changes with the angle, the paper's does not)
 
 
 @dataclass(frozen=True)
@@ -144,11 +135,10 @@ class ToneStep:
 
 @dataclass(frozen=True)
 class Reading:
-    """What the photos show. `stage`: the entry's test pattern (a calibration target). `white`:
+    """What the photo shows. `stage`: the entry's test pattern (a calibration target). `white`:
     screen white over paper white, each above its own surface's black in its group. `tone`: empty
     for a NORMAL photo. `lowest_distinct`: the lowest near-black code apart from raw 0 (None: a
-    NORMAL photo, or none apart). With two photos, per patch the darker reading (reflections only
-    add light)."""
+    NORMAL photo, or none apart)."""
     entry: PictureEntryView
     stage: TestPattern
     kind: PhotoKind
@@ -249,8 +239,8 @@ def _plain(value: Any) -> Any:
 
 
 __all__ = [
-    "BLACK_EDGE_TOLERANCE", "CLIP_SHARE", "DISTINCT_SIGMAS", "GREY_TOLERANCE", "INK_SHARE", "KEEP_SPREADS",
-    "MARKERS_NEEDED", "PATCH_SHARE", "PHOTOS_TOLERANCE", "SCALE_TOLERANCE", "WHITE_TOLERANCE",
+    "BLACK_EDGE_TOLERANCE", "CLIP_SHARE", "DISTINCT_SIGMAS", "GREY_TOLERANCE", "KEEP_SPREADS",
+    "MARKERS_NEEDED", "PATCH_SHARE", "SCALE_TOLERANCE", "WHITE_TOLERANCE",
     "Direction", "DropReason", "Dropped", "Photo", "PhotoKind", "Place", "PostSoftwareSuggestion",
     "PreProperty", "PreSoftwareStep", "PreSoftwareSuggestion", "Reading", "Refusal", "Refused", "Rgb",
     "Suggestion", "SuggestionRefusal", "SuggestionRefused", "ToneStep", "Unit", "Value", "to_json",

@@ -169,10 +169,6 @@ def uniform(value: float) -> Field:
     return lambda x, y: np.full(np.shape(x), value, np.float32)
 
 
-def summed(*fields: Field) -> Field:
-    return lambda x, y: sum(f(x, y) for f in fields)
-
-
 # -- Where things are -----------------------------------------------------------------------------
 
 
@@ -503,4 +499,4 @@ def codes(share: np.ndarray) -> np.ndarray:
 
 __all__ = ["CODE", "Display", "Scene", "Truth", "band", "blob", "codes", "entry", "grey_groups", "group_patch",
            "jpeg_photo", "paired_groups", "paper_to_wall", "raw_bytes", "raw_photo", "replace", "screen_canvas",
-           "summed", "truth", "uniform", "wall_point"]
+           "truth", "uniform", "wall_point"]

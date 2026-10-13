@@ -107,7 +107,7 @@ def dng(dngs) -> tuple[Path, list]:
 def test_run_reads_a_raw_photo_against_its_sent_entry(dng: tuple[Path, list]) -> None:
     path, _ = dng
     central = FakeCentral((CODE, entry(CLEAN)))
-    out, status = command.run([str(path)], central)
+    out, status = command.run(str(path), central)
     assert status == 0 and set(out) == {"reading", "suggestion"}
     assert central.asked == [CODE] and central.luts == []
     assert json.loads(json.dumps(out)) == out
@@ -138,7 +138,7 @@ POST_LUT = Scene(stage=TestPattern.TARGET_POST_SOFTWARE, software=replace(NEUTRA
 def test_run_suggests_post_software_with_the_entrys_lut_table(dngs) -> None:
     make, _ = dngs
     central = FakeCentral((CODE, entry(POST_LUT)), tables={TINT_REF: POST_LUT.lut})
-    out, status = command.run([str(make(POST_LUT))], central)
+    out, status = command.run(str(make(POST_LUT)), central)
     assert status == 0 and central.luts == [TINT_REF]
     assert json.loads(json.dumps(out)) == out
     suggestion = out["suggestion"]
@@ -148,7 +148,7 @@ def test_run_suggests_post_software_with_the_entrys_lut_table(dngs) -> None:
 
 def test_run_refuses_a_post_software_suggestion_without_the_lut_table(dngs) -> None:
     make, _ = dngs
-    out, status = command.run([str(make(POST_LUT))], FakeCentral((CODE, entry(POST_LUT))))
+    out, status = command.run(str(make(POST_LUT)), FakeCentral((CODE, entry(POST_LUT))))
     assert status == 0 and set(out) == {"reading", "suggestion"}
     assert out["suggestion"]["why"] == "lut-unread"
     assert json.loads(json.dumps(out)) == out
@@ -156,23 +156,23 @@ def test_run_refuses_a_post_software_suggestion_without_the_lut_table(dngs) -> N
 
 def test_run_refuses_an_unknown_entry(dng: tuple[Path, list]) -> None:
     path, _ = dng
-    out, status = command.run([str(path)], FakeCentral())
+    out, status = command.run(str(path), FakeCentral())
     assert status == 2 and out["refused"]["why"] == "unknown-entry"
 
 
 def test_run_refuses_a_photo_without_the_targets(tmp_path: Path) -> None:
     path = tmp_path / "wall.png"
     Image.new("RGB", (400, 300), (40, 40, 40)).save(path)
-    out, status = command.run([str(path)], FakeCentral())
+    out, status = command.run(str(path), FakeCentral())
     assert status == 2 and out["refused"]["why"] == "target-not-found"
     assert out["refused"]["photo"] == "wall.png"
 
 
-def test_run_takes_one_or_two_photos() -> None:
-    with pytest.raises(ValueError, match="photos"):
-        command.run([], FakeCentral())
-    with pytest.raises(ValueError, match="photos"):
-        command.run(["a", "b", "c"], FakeCentral())
+def test_main_takes_one_photo(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PHOTO_WALL_ADMIN_TOKEN", "secret-token")
+    with pytest.raises(SystemExit) as exited:
+        command.main(["a.dng", "b.dng", "--central", "http://central.test"])
+    assert exited.value.code == 2
 
 
 def test_main_prints_the_json_and_returns_its_status(dng: tuple[Path, list], monkeypatch: pytest.MonkeyPatch,

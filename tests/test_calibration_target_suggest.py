@@ -2,9 +2,9 @@
 2026-10-13: "The best possible display calibration is one that doesnt require any software
 adjustments."; the order is "the users choice -- not something that the software enforces").
 Readings come from synthetic photos (tests/calibration_target_scenes.py); the displays are matched
-to the paper white as the reader reads it (`paper_matched`: bare paper less its ink). The paper's
-ink is not measured (decision 0026, Findings): a white between that and bare paper (INK_SHARE) is
-matched in both stages, so a display matched to the bare paper is never moved either."""
+to the paper white as the reader reads it (`paper_matched`), with no correction for the paper's
+ink (owner, 2026-10-14: "Getting into the blackness of ink and the whiteness of paper is a level of
+nuance that probably doesn’t matter in practice")."""
 from __future__ import annotations
 
 import functools
@@ -21,7 +21,6 @@ from contracts.node_picture import NEUTRAL_SOFTWARE, SoftwarePicture
 from contracts.tuning import TestPattern
 from scripts.calibration_target.locate import Located, locate
 from scripts.calibration_target.model import (
-    INK_SHARE,
     Direction,
     PostSoftwareSuggestion,
     PreProperty,
@@ -33,7 +32,7 @@ from scripts.calibration_target.model import (
     Unit,
 )
 from scripts.calibration_target.photos import load_photo
-from scripts.calibration_target.read import read_photos
+from scripts.calibration_target.read import read_photo
 from scripts.calibration_target.suggest import software_of, suggest
 
 POST = TestPattern.TARGET_POST_SOFTWARE
@@ -63,7 +62,7 @@ IDENTITY = table(1.0)
 def reading(scene: Scene) -> Reading:
     found = locate(raw_photo(scene))
     assert isinstance(found, Located), found
-    out = read_photos((found,), entry(scene))
+    out = read_photo(found, entry(scene))
     assert isinstance(out, Reading), out
     return out
 
@@ -100,17 +99,8 @@ def test_pre_a_right_display_keeps_everything() -> None:
     assert all(step.direction is Direction.KEEP for step in found.values()), found
 
 
-def test_pre_a_display_matched_to_the_bare_paper_keeps_its_white() -> None:
-    """The ink's band: bare paper reads 1 / (1 - ink) of the paper less its ink."""
-    found = steps(Scene(display=paper_matched(BASE, level=1 / (1 - BASE.ink))))
-    assert found[PreProperty.WHITE_LEVEL].direction is Direction.KEEP, found
-
-
-BAND = 100 * (1 / (1 - INK_SHARE) - 1)          # the ink's band above the paper less its ink, percent
-
-
 @pytest.mark.parametrize(("level", "direction", "gap"),
-                         [(1.06, Direction.LOWER, 6.0 - BAND), (0.90, Direction.RAISE, 10.0)])
+                         [(1.06, Direction.LOWER, 6.0), (1.03, Direction.LOWER, 3.0), (0.90, Direction.RAISE, 10.0)])
 def test_pre_white_level(level: float, direction: Direction, gap: float) -> None:
     step = steps(Scene(display=paper_matched(BASE, level=level)))[PreProperty.WHITE_LEVEL]
     assert (step.direction, step.unit) == (direction, Unit.PERCENT)
@@ -144,7 +134,7 @@ def test_pre_a_normal_photo_gives_the_white_steps_only(tmp_path: Path) -> None:
     path.write_bytes(jpeg_photo(scene))
     found = locate(load_photo(path))
     assert isinstance(found, Located)
-    out = suggest(read_photos((found,), entry(scene)), None)  # type: ignore[arg-type]
+    out = suggest(read_photo(found, entry(scene)), None)  # type: ignore[arg-type]
     assert isinstance(out, PreSoftwareSuggestion)
     assert [step.property for step in out.steps] == [PreProperty.WHITE_LEVEL, PreProperty.WHITE_COLOUR]
 
@@ -167,11 +157,6 @@ def test_post_a_display_right_within_its_spread_is_no_change() -> None:
     assert out.no_change and out.to == NEUTRAL_SOFTWARE
 
 
-def test_post_a_display_matched_to_the_bare_paper_is_no_change() -> None:
-    out = post(Scene(display=paper_matched(BASE, level=1 / (1 - BASE.ink)), stage=POST))
-    assert out.no_change and out.to == NEUTRAL_SOFTWARE
-
-
 def test_post_refuses_without_the_greys(tmp_path: Path) -> None:
     """A normal photo gives the white only: the display's response is unread, so nothing is
     suggested (never a fit on an assumed display)."""
@@ -180,7 +165,7 @@ def test_post_refuses_without_the_greys(tmp_path: Path) -> None:
     path.write_bytes(jpeg_photo(scene))
     found = locate(load_photo(path))
     assert isinstance(found, Located)
-    normal = read_photos((found,), entry(scene))
+    normal = read_photo(found, entry(scene))
     assert isinstance(normal, Reading) and normal.tone == ()
     out = suggest(normal, None)
     assert isinstance(out, SuggestionRefused) and out.why is SuggestionRefusal.TONE_UNREAD
@@ -208,7 +193,7 @@ def test_post_a_display_10_percent_too_bright_is_dimmed_to_the_paper() -> None:
     assert out.to == replace(NEUTRAL_SOFTWARE, brightness_percent=out.to.brightness_percent)
     after = reading(next_change(scene, out.to))
     level = 100 * (float(np.mean(after.white.value)) - 1)
-    assert -1 <= level <= BAND + 1              # within the ink's band
+    assert abs(level) <= 1                      # the paper's white, as read
     assert post(next_change(scene, out.to)).no_change
 
 

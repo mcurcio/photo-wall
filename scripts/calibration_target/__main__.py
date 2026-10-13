@@ -1,4 +1,4 @@
-"""`python -m scripts.calibration_target PHOTO [PHOTO] --central URL`: read one or two photos of the
+"""`python -m scripts.calibration_target PHOTO --central URL`: read one photo of the
 calibration targets and print one JSON object (decision 0026): {"reading": ...} or {"refused": ...},
 and with a reading {"suggestion": ...}. The admin token comes from PHOTO_WALL_ADMIN_TOKEN, the
 optional read-only database address from PHOTO_WALL_READ_DATABASE_URL (run under `op run`).
@@ -19,10 +19,10 @@ import psycopg
 from contracts.tuning import TestPattern
 
 from .central_reads import CentralReads, HttpCentralReads
-from .locate import Located, locate
+from .locate import locate
 from .model import Refusal, Refused, to_json
 from .photos import load_photo
-from .read import read_photos
+from .read import read_photo
 from .suggest import lut_acts, software_of, suggest
 
 READ: int = 0
@@ -30,25 +30,20 @@ REFUSED: int = 2
 ERROR: int = 1
 
 
-def run(photos: Sequence[str], central: CentralReads) -> tuple[dict[str, object], int]:
-    """The command's JSON and exit status for `photos` (one or two paths) against `central`:
-    load_photo, locate each, the entry for the first code, read_photos, then suggest with the
-    entry's LUT table when it names one. ValueError("photos") for none or more than two paths."""
-    if not 1 <= len(photos) <= 2:
-        raise ValueError("photos")
-    located: list[Located] = []
-    for path in photos:
-        found = locate(load_photo(Path(path)))
-        if isinstance(found, Refused):
-            return _refused(found, Path(path).name), REFUSED
-        located.append(found)
-    entry = central.sent_entry(located[0].code)
+def run(photo: str, central: CentralReads) -> tuple[dict[str, object], int]:
+    """The command's JSON and exit status for the photo at `photo` against `central`: load_photo,
+    locate, the entry its code names, read_photo, then suggest with the entry's LUT table when it
+    names one."""
+    located = locate(load_photo(Path(photo)))
+    if isinstance(located, Refused):
+        return _refused(located, Path(photo).name), REFUSED
+    code = located.code
+    entry = central.sent_entry(code)
     if entry is None:
-        code = located[0].code
         return _refused(Refused(Refusal.UNKNOWN_ENTRY, (),
                                 f"Central has no picture change {code.picture_change} sent to "
                                 f"{code.player_id} {code.output_id}"), None), REFUSED
-    reading = read_photos(tuple(located), entry)  # type: ignore[arg-type]
+    reading = read_photo(located, entry)
     if isinstance(reading, Refused):
         return _refused(reading, None), REFUSED
     lut = None
@@ -69,19 +64,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     """Parse the arguments, build HttpCentralReads from them and the environment, print `run`'s
     JSON (indented, sorted keys) and return its status."""
     parser = argparse.ArgumentParser(prog="python -m scripts.calibration_target",
-                                     description="Read photos of the calibration targets.")
-    parser.add_argument("photos", nargs="+", metavar="PHOTO", help="one or two photos (ProRAW DNG or normal)")
+                                     description="Read a photo of the calibration targets.")
+    parser.add_argument("photo", metavar="PHOTO", help="one photo of both targets (ProRAW DNG or normal)")
     parser.add_argument("--central", required=True, help="Central's base URL")
     arguments = parser.parse_args(argv)
-    if len(arguments.photos) > 2:
-        parser.error("one or two photos")
     token = os.environ.get("PHOTO_WALL_ADMIN_TOKEN")
     if not token:
         print("PHOTO_WALL_ADMIN_TOKEN is not set (run under `op run`)", file=sys.stderr)
         return ERROR
     central = HttpCentralReads(arguments.central, token, os.environ.get("PHOTO_WALL_READ_DATABASE_URL") or None)
     try:
-        out, status = run(arguments.photos, central)
+        out, status = run(arguments.photo, central)
     except (ValueError, RuntimeError, OSError, httpx.HTTPError, psycopg.Error) as error:
         print(f"error: {error}", file=sys.stderr)
         return ERROR

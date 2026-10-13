@@ -1,4 +1,4 @@
-"""Reading located photos against their sent entry (decision 0026; the owner's reflection plan,
+"""Reading a located photo against its sent entry (decision 0026; the owner's reflection plan,
 2026-10-13). Pure.
 
 The rules, in order:
@@ -13,23 +13,20 @@ The rules, in order:
    (TOO_FEW_CLEAN_COPIES, or COPIES_DISAGREE when the copies split). Never averaged across a split.
 4. **Refuse rather than guess.** Under half the white copies left: WHITE_UNREAD, `where` the dropped
    groups' places. A white patch over CLIP_SHARE clipped: CLIPPED.
-5. **Two photos.** The codes must name one entry (DIFFERENT_ENTRIES); each photo's white is read
-   alone first and they must agree within PHOTOS_TOLERANCE (PHOTOS_DISAGREE: a shadow over the
-   whole paper shows only so); then per patch the darker of the two readings above its black is
-   kept (reflections only add light) and the copies vote as one set.
-6. **Normal photos** give the white only: `tone` empty, `lowest_distinct` None.
+5. **Normal photos** give the white only: `tone` empty, `lowest_distinct` None.
 
 A perfectly even reflection over the whole target is unseen and harmless (both surfaces and the
-viewer get it); a whole-paper shadow is unseen in one photo (decision 0026, Costs).
+viewer get it); a shadow cast over the whole paper alone is unseen (decision 0026, Costs). One photo
+is read: the two targets are compared with each other, never two photos (owner, 2026-10-14: "a
+“shadow over the whole picture” shouldn’t require a second picture. The point of using two
+calibration targets is that we are comparing them relatively.").
 
 As built (.claude/errata.md, calibration targets reader): rule 2 compares a PAIRED group's black-to-
 black difference (screen black less paper black) with the median of the groups' differences, both
 ways, as the owner's plan item 2 says ("a black-to-black difference inside a group means a
 reflection edge crosses it"): a reflection broader than a group lifts both blacks alike and keeps
 the group. A RULER group, with no paper black, compares its screen blacks with the median of every
-group's screen black. Rule 5's darker reading is taken per patch on the raw light (each photo's
-light scaled to the first's by the median ratio of the groups' screen whites), so a reflection on a
-black is dropped too; each patch is then read above its black as in rule 1.
+group's screen black.
 """
 from __future__ import annotations
 
@@ -58,7 +55,6 @@ from .model import (
     CLIP_SHARE,
     DISTINCT_SIGMAS,
     GREY_TOLERANCE,
-    PHOTOS_TOLERANCE,
     WHITE_TOLERANCE,
     Dropped,
     DropReason,
@@ -86,41 +82,19 @@ class _Light:
     noise: float
 
 
-def read_photos(located: tuple[Located] | tuple[Located, Located], entry: PictureEntryView) -> Reading | Refused:
-    """The Reading of one or two located photos of the sent entry their code names (the caller
-    fetched `entry` for located[0].code). Refused NOT_A_TARGET when entry.test_pattern is not in
-    contracts/tuning.py TARGET_PATTERNS; DIFFERENT_ENTRIES when two photos' codes differ; then the
-    module's rules. Two photos of different kinds (RAW and NORMAL) are read as NORMAL. Pure."""
-    if not 1 <= len(located) <= 2:
-        raise ValueError("located")
+def read_photo(located: Located, entry: PictureEntryView) -> Reading | Refused:
+    """The Reading of a located photo of the sent entry its code names (the caller fetched `entry`
+    for located.code). Refused NOT_A_TARGET when entry.test_pattern is not in contracts/tuning.py
+    TARGET_PATTERNS; then the module's rules. Pure."""
     if entry.test_pattern not in TARGET_PATTERNS:
         shown = "no test pattern" if entry.test_pattern is None else f"the {entry.test_pattern.value} pattern"
         return Refused(Refusal.NOT_A_TARGET, (), f"the photo's picture change showed {shown}, not a target")
-    if any(other.code != located[0].code for other in located[1:]):
-        return Refused(Refusal.DIFFERENT_ENTRIES, (), "the two photos show different picture changes")
-    kind = PhotoKind.RAW if all(one.photo.kind is PhotoKind.RAW for one in located) else PhotoKind.NORMAL
-    lights = []
-    for one in located:
-        light = _lights(one)
-        clipped = _clipped(light)
-        if clipped:
-            return Refused(Refusal.CLIPPED, clipped, f"{one.photo.name}: a white reached the camera's "
-                           "clip: take the photo a little darker")
-        lights.append(light)
-    if len(lights) == 2:
-        alone = [_read(light, entry, kind) for light in lights]
-        for reading in alone:
-            if isinstance(reading, Refused) and reading.why is not Refusal.WHITE_UNREAD:
-                return reading
-        whites = [np.array(r.white.value) for r in alone if isinstance(r, Reading)]
-        if len(whites) == 2:
-            gap = float(np.max(np.abs(whites[1] / whites[0] - 1)))
-            if gap > PHOTOS_TOLERANCE:
-                return Refused(Refusal.PHOTOS_DISAGREE, (),
-                               f"the two photos' whites differ by {100 * gap:.1f} %: the light on the "
-                               "paper changed between them (a shadow over it?)")
-        return _read(_darker(lights[0], lights[1]), entry, kind)
-    return _read(lights[0], entry, kind)
+    lights = _lights(located)
+    clipped = _clipped(lights)
+    if clipped:
+        return Refused(Refusal.CLIPPED, clipped, f"{located.photo.name}: a white reached the camera's "
+                       "clip: take the photo a little darker")
+    return _read(lights, entry, located.photo.kind)
 
 
 # -- Sampling ---------------------------------------------------------------------------------
@@ -167,23 +141,6 @@ def _sample(image: np.ndarray, clipped: np.ndarray, homography: np.ndarray, patc
 def _clipped(lights: dict[PatchKey, _Light]) -> tuple[Place, ...]:
     return tuple(_place(patch) for key, patch in _patches()
                  if patch.role is Role.WHITE and lights[key].clipped > CLIP_SHARE)
-
-
-def _darker(first: dict[PatchKey, _Light], second: dict[PatchKey, _Light]) -> dict[PatchKey, _Light]:
-    """Per patch the darker light of two photos, the second scaled to the first's exposure by the
-    median ratio of the PAIRED groups' screen white above black (the panel's light does not depend
-    on the room's)."""
-    ratios = []
-    for group in _paired():
-        black, white = _role_key(group, Surface.SCREEN, Role.BLACK), _role_key(group, Surface.SCREEN, Role.WHITE)
-        ratios.append((first[white].rgb - first[black].rgb) / (second[white].rgb - second[black].rgb))
-    scale = np.median(np.array(ratios), axis=0)
-    out = {}
-    for key, light in first.items():
-        other = second[key]
-        out[key] = _Light(rgb=np.minimum(light.rgb, other.rgb * scale), clipped=max(light.clipped, other.clipped),
-                          noise=max(light.noise, other.noise * float(np.mean(scale))))
-    return out
 
 
 # -- The layout's groups ----------------------------------------------------------------------
@@ -350,4 +307,4 @@ def _lowest_distinct(lights: dict[PatchKey, _Light], rulers: Sequence[Group]) ->
     return lowest
 
 
-__all__ = ["read_photos"]
+__all__ = ["read_photo"]

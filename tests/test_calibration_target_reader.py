@@ -1,5 +1,5 @@
-"""The calibration target reader on synthetic photos (decision 0026, slice R1): it finds both
-targets, reads the QR and reads the white, the greys and the near-black steps through the review's
+"""The calibration target reader on synthetic photos (decision 0026, slice R1): from one photo it
+finds both targets, reads the QR and reads the white, the greys and the near-black steps through the review's
 attacks, or refuses. The scenes are tests/calibration_target_scenes.py; a real ProRAW photo is the
 bench step (NOT RUN here)."""
 from __future__ import annotations
@@ -25,7 +25,6 @@ from calibration_target_scenes import (
     paired_groups,
     raw_photo,
     screen_canvas,
-    summed,
     truth,
     uniform,
     wall_point,
@@ -37,7 +36,6 @@ from contracts.calibration_target import (
     WHITE_COPIES,
     Role,
     Surface,
-    TargetCode,
     calibration_target,
     screen_point,
 )
@@ -53,10 +51,9 @@ from scripts.calibration_target.model import (
     to_json,
 )
 from scripts.calibration_target.photos import load_photo
-from scripts.calibration_target.read import read_photos
+from scripts.calibration_target.read import read_photo
 
 CLEAN = Scene()
-SECOND = dict(yaw_deg=-12.0, pitch_deg=-3.0, seed=2)        # the second photo, from the other side
 
 
 @functools.cache
@@ -66,12 +63,12 @@ def located(scene: Scene) -> Located:
     return found
 
 
-def read(*scenes: Scene) -> Reading | Refused:
-    return read_photos(tuple(located(s) for s in scenes), entry(scenes[0]))  # type: ignore[arg-type]
+def read(scene: Scene) -> Reading | Refused:
+    return read_photo(located(scene), entry(scene))
 
 
-def reading(*scenes: Scene) -> Reading:
-    out = read(*scenes)
+def reading(scene: Scene) -> Reading:
+    out = read(scene)
     assert isinstance(out, Reading), out
     return out
 
@@ -120,7 +117,7 @@ def test_tracer_reads_the_pre_software_target_from_a_raw_photo() -> None:
     assert set(_markers_found(_view(photo))) == set(SCREEN_MARKER_IDS) | set(PAPER_MARKER_IDS)
     found = locate(photo)
     assert isinstance(found, Located) and found.code == CODE
-    out = read_photos((found,), entry(CLEAN))
+    out = read_photo(found, entry(CLEAN))
     assert isinstance(out, Reading)
     assert (out.kind, out.stage) == (PhotoKind.RAW, TestPattern.TARGET_PRE_SOFTWARE)
     assert np.all(white_error(out, CLEAN) <= 0.005)
@@ -242,25 +239,15 @@ def test_too_many_groups_crossed_is_refused_white_unread_naming_where() -> None:
     assert all(place.surface is Surface.SCREEN for place in out.where)
 
 
-# -- 7. Two photos -----------------------------------------------------------------------------------
+# -- 7. A shadow over the whole paper (decision 0026, Costs) ---------------------------------------
 
 
-def test_a_shadow_over_the_whole_paper_in_one_of_two_photos_is_refused() -> None:
+def test_a_shadow_over_the_whole_paper_reads_the_screen_too_bright_by_its_depth() -> None:
+    """The stated limit: the screen makes its own light, so a shadow cast on the paper alone (the
+    photographer between the room light and the target) is not seen; stand aside of the light."""
     shadowed = Scene(room=uniform(0.85))
-    alone = reading(shadowed)               # the stated cost: one photo alone reads it too bright
-    assert np.all(np.abs(np.array(alone.white.value) / truth(shadowed).white - 1.176) <= 0.01)
-    out = read(shadowed, Scene(**SECOND))
-    assert isinstance(out, Refused) and out.why is Refusal.PHOTOS_DISAGREE
-
-
-def test_a_reflection_moving_between_two_photos_takes_the_darker_reading() -> None:
-    groups = paired_groups()
-    first = Scene(reflection=summed(*(patch_box(g, Surface.PAPER, Role.WHITE, 0.008) for g in groups[:8])))
-    second = Scene(reflection=summed(*(patch_box(g, Surface.PAPER, Role.WHITE, 0.008) for g in groups[8:])),
-                   **SECOND)
-    assert not np.all(white_error(reading(first), first) <= 0.005)     # either alone is off
-    out = reading(first, second)
-    assert np.all(white_error(out, first) <= 0.005)
+    out = reading(shadowed)
+    assert np.all(np.abs(np.array(out.white.value) / truth(shadowed).white - 1.176) <= 0.01)
 
 
 # -- 8. A normal photo -------------------------------------------------------------------------------
@@ -272,29 +259,10 @@ def test_a_normal_photo_gives_the_white_only(tmp_path: Path) -> None:
     photo = load_photo(path)
     found = locate(photo)
     assert isinstance(found, Located)
-    out = read_photos((found,), entry(CLEAN))
+    out = read_photo(found, entry(CLEAN))
     assert isinstance(out, Reading)
     assert out.kind is PhotoKind.NORMAL and out.tone == () and out.lowest_distinct is None
     assert np.all(white_error(out, CLEAN) <= 0.05)
-
-
-def test_a_raw_and_a_normal_photo_together_are_read_as_normal() -> None:
-    """A normal photo's values carry the phone's tone curve: with one in the pair, no tone and no
-    black are read, whichever photo it is."""
-    raw = located(CLEAN)
-    v = raw.photo.pixels
-    encoded = np.where(v <= 0.0031308, 12.92 * v, 1.055 * np.maximum(v, 0) ** (1 / 2.4) - 0.055).astype(np.float32)
-    normal = replace(raw, photo=replace(raw.photo, name="IMG_0003.jpg", kind=PhotoKind.NORMAL, pixels=encoded))
-    for pair in ((raw, normal), (normal, raw)):
-        out = read_photos(pair, entry(CLEAN))
-        assert isinstance(out, Reading), out
-        assert out.kind is PhotoKind.NORMAL and out.tone == () and out.lowest_distinct is None
-
-
-@pytest.mark.parametrize("count", [0, 3])
-def test_read_photos_takes_one_or_two(count: int) -> None:
-    with pytest.raises(ValueError, match="located"):
-        read_photos((located(CLEAN),) * count, entry(CLEAN))  # type: ignore[arg-type]
 
 
 # -- 9. Refusals ---------------------------------------------------------------------------------
@@ -350,19 +318,13 @@ def test_a_flat_qr_square_reads_no_text_without_dividing_by_zero() -> None:
 
 def test_a_clipped_white_is_refused() -> None:
     scene = Scene(exposure=1.1)
-    out = read_photos((located(scene),), entry(scene))
+    out = read_photo(located(scene), entry(scene))
     assert isinstance(out, Refused) and out.why is Refusal.CLIPPED and out.where
 
 
 def test_an_entry_showing_no_target_is_not_a_target() -> None:
-    out = read_photos((located(CLEAN),), entry(CLEAN, test_pattern=TestPattern.WHITE))
+    out = read_photo(located(CLEAN), entry(CLEAN, test_pattern=TestPattern.WHITE))
     assert isinstance(out, Refused) and out.why is Refusal.NOT_A_TARGET
-
-
-def test_two_photos_naming_two_entries_are_refused() -> None:
-    other = Scene(code=TargetCode(CODE.player_id, CODE.output_id, CODE.picture_change + 1), **SECOND)
-    out = read(CLEAN, other)
-    assert isinstance(out, Refused) and out.why is Refusal.DIFFERENT_ENTRIES
 
 
 # -- The JSON and the words ---------------------------------------------------------------------
