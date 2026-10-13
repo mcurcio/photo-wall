@@ -4,13 +4,13 @@ import { useCallback, useEffect, useState } from "react";
 import { readPictureHistory, useHistoryPages } from "../historyApi.js";
 import type { PictureEntryKind, PictureEntryView, PictureHistoryView } from "../historyApi.js";
 import type {
-  HardwareSettingView, PictureRestoreResult, SignalRange, SoftwarePictureView, TestPattern,
+  HardwareSettingView, PictureRestoreResult, SignalRange, SoftwarePictureView,
 } from "../pictureApi.js";
 import { Note } from "../patterns/fact-row";
 import { changedSummary, type HistoryDay, HistoryList, type HistoryRow } from "../patterns/history-list";
 import { ProblemCard } from "../patterns/problem-card";
 import { dayLabel, timeOfDay } from "../timeWords.js";
-import { blackFloorWords, hardwareWords, type PictureSession } from "./frame-picture";
+import { blackFloorWords, hardwareWords, PATTERN_NAMES, type PictureSession } from "./frame-picture";
 
 /** The read's shapes (historyApi.js, mirroring central/displays/views.py), for this module's users. */
 export type { PictureEntryView, PictureHistoryView, SoftwarePictureView };
@@ -46,10 +46,9 @@ export const WHAT: Record<PictureEntryKind, string> = {
 };
 const NOT_KEPT = new Set<PictureEntryKind>(["sent-draft", "sent-back"]);
 
-// The Picture tab's names for the signal range and the test patterns (frame-picture.tsx holds the
-// controls' own copies; these name stored values).
+// The Picture tab's names for the signal range (frame-picture.tsx holds the control's own copy; these
+// name stored values); the test patterns' are frame-picture.tsx's PATTERN_NAMES.
 const RANGES: Record<SignalRange, string> = { auto: "Auto", full: "Full", limited: "Limited" };
-const PATTERNS: Record<TestPattern, string> = { white: "White", "grey-ramp": "Grey ramp", "black-level": "Black level" };
 
 /** A Restore's refusals in words; `stale_sequence` is tried once more by the session first. */
 const REFUSALS: Record<string, string> = {
@@ -99,7 +98,7 @@ export function entryDetails(entry: PictureEntryView, rows: Rows, recipe: string
     { label: "LUT", value: lut },
     { label: "LUT amount", value: `${software.lut_amount_percent} %` },
     { label: "Signal range", value: RANGES[picture.signal_range] },
-    ...(entry.test_pattern === null ? [] : [{ label: "Test pattern", value: PATTERNS[entry.test_pattern] }]),
+    ...(entry.test_pattern === null ? [] : [{ label: "Test pattern", value: PATTERN_NAMES[entry.test_pattern] }]),
   ];
 }
 

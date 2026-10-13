@@ -105,6 +105,18 @@ type Story = StoryObj<typeof meta>;
 export const Kept: Story = {};
 /** A tuning visit: changes tried with the White pattern up, not kept (dashed), then put back by Revert. */
 export const NotKept: Story = { args: { history: NOT_KEPT } };
+/** A tuning visit with the screen target drawn raw: a try whose Details name "Target: pre-software". */
+export const TargetTried: Story = {
+  args: {
+    history: {
+      ...KEPT,
+      entries: [
+        entry("t1", "sent-draft", "2026-10-13T20:04:07Z", { hardware: { "10": 52 }, pattern: "target-pre-software" }),
+        ...KEPT.entries,
+      ],
+    },
+  },
+};
 /** The display's values changed outside Photo Wall since the last kept change. */
 export const Unrecorded: Story = {
   args: {

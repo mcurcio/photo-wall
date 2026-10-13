@@ -1,8 +1,8 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
 
 import {
-  FramePicture, LutSettings, PhotoWallSettings, type PictureSession, SignalSettings, signalWords, TestPatternSettings,
-  testPatternWords,
+  FramePicture, LutSettings, type PATTERN_NAMES, PhotoWallSettings, type PictureSession, SignalSettings, signalWords,
+  TestPatternSettings, testPatternWords,
 } from "./frame-picture";
 
 type View = NonNullable<PictureSession["view"]>;
@@ -251,7 +251,7 @@ for (const [said, meant] of checks) {
   if (said !== meant) throw new Error(`frame-picture words: ${JSON.stringify(said)} is not ${JSON.stringify(meant)}`);
 }
 
-const pattern = (test_pattern: View["test_pattern"], drafted?: "white" | "grey-ramp" | "black-level" | null) => (
+const pattern = (test_pattern: View["test_pattern"], drafted?: keyof typeof PATTERN_NAMES | null) => (
   <TestPatternSettings view={{ ...VIEW, test_pattern }} ready
     session={{ ...SESSION, latest: 1,
       draft: { ...SESSION.draft, pattern: drafted === undefined ? {} : { pattern: drafted } } }} />
@@ -265,6 +265,15 @@ export const TestPatternGreyRampWaiting: Story = {
 /** The Black level shown, with how to read it against the signal range. */
 export const TestPatternBlackLevelShown: Story = {
   render: () => pattern({ pattern: "black-level", state: "shown" }, "black-level"),
+};
+/** The screen target drawn raw, judging the display's own settings: where the paper goes, and the paper
+ * target's print links (Letter, A4); the Pi shows it. */
+export const TestPatternTargetPreSoftwareShown: Story = {
+  render: () => pattern({ pattern: "target-pre-software", state: "shown" }, "target-pre-software"),
+};
+/** The screen target through Photo Wall's settings, chosen in this visit; the Pi has not shown it yet. */
+export const TestPatternTargetPostSoftwareWaiting: Story = {
+  render: () => pattern({ pattern: "target-post-software", state: "waiting" }, "target-post-software"),
 };
 /** The Pi took the pattern off at its bound: Off, and the words to choose it again. */
 export const TestPatternEnded: Story = { render: () => pattern({ pattern: "white", state: "ended" }, "white") };
