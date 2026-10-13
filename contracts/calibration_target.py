@@ -82,7 +82,10 @@ MARKER_BITS: Final[Mapping[int, tuple[str, str, str, str]]] = {
 
 # -- The values a target carries --
 
-GREY_SIGNALS: Final = (0.70, 0.50, 0.30, 0.15, 0.05)   # the screen greys, encoded signal
+GREY_CODES: Final = (179, 128, 77, 38, 13)   # the screen greys, 8-bit codes of SIGNAL_LEVELS (about
+                                             # 0.70, 0.50, 0.30, 0.15, 0.05): on the grid the Player's
+                                             # texture stores, so drawn, reference and reader agree
+GREY_SIGNALS: Final = tuple(code / SIGNAL_LEVELS for code in GREY_CODES)   # the same, encoded signal
 GREY_COPIES: Final = 3                     # the least groups each grey is drawn in
 NEAR_BLACK_STEPS: Final = tuple(range(1, 17))           # raw codes k of 255 beside raw 0
 NEAR_BLACK_COPIES: Final = 2               # the least copies of each near-black step
@@ -114,8 +117,10 @@ SHEETS_MM: Final[Mapping[PaperSize, tuple[float, float]]] = {PaperSize.LETTER: L
 
 class Role(StrEnum):
     """What a patch is read for. BLACK: its surface's black in its group (screen raw 0, paper ink);
-    WHITE: screen signal 1 or bare paper; GREY: a screen grey of GREY_SIGNALS; NEAR_BLACK: a raw
-    screen step of NEAR_BLACK_STEPS, read against the BLACK of its ruler group."""
+    WHITE: screen signal 1 or bare paper; GREY: a screen grey of GREY_SIGNALS; NEAR_BLACK: a screen
+    step of NEAR_BLACK_STEPS, read against the BLACK of its ruler group. Every screen patch is drawn
+    raw in the pre-software target and through Photo Wall's steps in the post-software one (only
+    the dark box stays raw there: player/geometry.py `target_signal`)."""
     BLACK = "black"
     WHITE = "white"
     GREY = "grey"
@@ -425,7 +430,7 @@ def _marker_white(marker: Marker, x_mm: float, y_mm: float) -> bool:
 
 
 __all__ = [
-    "A4_MM", "BOX_SLACK_MM", "CODE_PREFIX", "DARK_BOX_MM", "GREY_COPIES", "GREY_SIGNALS", "LETTER_MM",
+    "A4_MM", "BOX_SLACK_MM", "CODE_PREFIX", "DARK_BOX_MM", "GREY_CODES", "GREY_COPIES", "GREY_SIGNALS", "LETTER_MM",
     "MARKER_BITS", "MARKER_DICTIONARY", "MARKER_MODULES", "NEAR_BLACK_COPIES", "NEAR_BLACK_STEPS",
     "PAIR_MM", "PAPER_MARKER_IDS", "PAPER_MARKER_MM", "PAPER_TARGET_MM", "PRINT_MARGIN_MM", "QR_ERROR",
     "QR_MM", "QR_QUIET_MODULES", "SCREEN_MARKER_IDS", "SCREEN_MARKER_MM", "SCREEN_TARGET_MM", "SHEETS_MM",

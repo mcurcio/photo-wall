@@ -2,7 +2,9 @@
 2026-10-13: "The best possible display calibration is one that doesnt require any software
 adjustments."; the order is "the users choice -- not something that the software enforces").
 Readings come from synthetic photos (tests/calibration_target_scenes.py); the displays are matched
-to the paper white as the reader reads it (`paper_matched`)."""
+to the paper white as the reader reads it (`paper_matched`: bare paper less its ink). The paper's
+ink is not measured (decision 0026, Findings): a white between that and bare paper (INK_SHARE) is
+matched in both stages, so a display matched to the bare paper is never moved either."""
 from __future__ import annotations
 
 import functools
@@ -19,6 +21,7 @@ from contracts.node_picture import NEUTRAL_SOFTWARE, SoftwarePicture
 from contracts.tuning import TestPattern
 from scripts.calibration_target.locate import Located, locate
 from scripts.calibration_target.model import (
+    INK_SHARE,
     Direction,
     PostSoftwareSuggestion,
     PreProperty,
@@ -31,7 +34,7 @@ from scripts.calibration_target.model import (
 )
 from scripts.calibration_target.photos import load_photo
 from scripts.calibration_target.read import read_photos
-from scripts.calibration_target.suggest import suggest
+from scripts.calibration_target.suggest import software_of, suggest
 
 POST = TestPattern.TARGET_POST_SOFTWARE
 BASE = Scene()
@@ -97,7 +100,17 @@ def test_pre_a_right_display_keeps_everything() -> None:
     assert all(step.direction is Direction.KEEP for step in found.values()), found
 
 
-@pytest.mark.parametrize(("level", "direction", "gap"), [(1.06, Direction.LOWER, 6.0), (0.90, Direction.RAISE, 10.0)])
+def test_pre_a_display_matched_to_the_bare_paper_keeps_its_white() -> None:
+    """The ink's band: bare paper reads 1 / (1 - ink) of the paper less its ink."""
+    found = steps(Scene(display=paper_matched(BASE, level=1 / (1 - BASE.ink))))
+    assert found[PreProperty.WHITE_LEVEL].direction is Direction.KEEP, found
+
+
+BAND = 100 * (1 / (1 - INK_SHARE) - 1)          # the ink's band above the paper less its ink, percent
+
+
+@pytest.mark.parametrize(("level", "direction", "gap"),
+                         [(1.06, Direction.LOWER, 6.0 - BAND), (0.90, Direction.RAISE, 10.0)])
 def test_pre_white_level(level: float, direction: Direction, gap: float) -> None:
     step = steps(Scene(display=paper_matched(BASE, level=level)))[PreProperty.WHITE_LEVEL]
     assert (step.direction, step.unit) == (direction, Unit.PERCENT)
@@ -154,6 +167,35 @@ def test_post_a_display_right_within_its_spread_is_no_change() -> None:
     assert out.no_change and out.to == NEUTRAL_SOFTWARE
 
 
+def test_post_a_display_matched_to_the_bare_paper_is_no_change() -> None:
+    out = post(Scene(display=paper_matched(BASE, level=1 / (1 - BASE.ink)), stage=POST))
+    assert out.no_change and out.to == NEUTRAL_SOFTWARE
+
+
+def test_post_refuses_without_the_greys(tmp_path: Path) -> None:
+    """A normal photo gives the white only: the display's response is unread, so nothing is
+    suggested (never a fit on an assumed display)."""
+    scene = Scene(display=paper_matched(BASE, level=1.1), stage=POST)
+    path = tmp_path / "IMG_0004.jpg"
+    path.write_bytes(jpeg_photo(scene))
+    found = locate(load_photo(path))
+    assert isinstance(found, Located)
+    normal = read_photos((found,), entry(scene))
+    assert isinstance(normal, Reading) and normal.tone == ()
+    out = suggest(normal, None)
+    assert isinstance(out, SuggestionRefused) and out.why is SuggestionRefusal.TONE_UNREAD
+    every_grey_dropped = replace(reading(scene), tone=())
+    out = suggest(every_grey_dropped, None)
+    assert isinstance(out, SuggestionRefused) and out.why is SuggestionRefusal.TONE_UNREAD
+
+
+def test_an_entry_naming_a_lut_without_its_recipe_is_an_error() -> None:
+    sent = entry(Scene(stage=POST, software=replace(NEUTRAL_SOFTWARE, lut=LUT)))
+    broken = sent.model_copy(update={"picture": sent.picture.model_copy(update={"lut_recipe_id": None})})
+    with pytest.raises(ValueError, match="entry_lut_recipe"):
+        software_of(broken)
+
+
 def test_post_a_right_display_goes_back_to_neutral() -> None:
     out = post(Scene(display=RIGHT, stage=POST, software=replace(NEUTRAL_SOFTWARE, brightness_percent=90)))
     assert not out.no_change and out.to == NEUTRAL_SOFTWARE
@@ -165,7 +207,8 @@ def test_post_a_display_10_percent_too_bright_is_dimmed_to_the_paper() -> None:
     assert not out.no_change and out.to.brightness_percent < 100
     assert out.to == replace(NEUTRAL_SOFTWARE, brightness_percent=out.to.brightness_percent)
     after = reading(next_change(scene, out.to))
-    assert abs(float(np.mean(after.white.value)) - 1) <= 2 * max(after.white.spread, 0.003)
+    level = 100 * (float(np.mean(after.white.value)) - 1)
+    assert -1 <= level <= BAND + 1              # within the ink's band
     assert post(next_change(scene, out.to)).no_change
 
 

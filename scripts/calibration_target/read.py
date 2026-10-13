@@ -8,8 +8,8 @@ The rules, in order:
 2. **Reflection edges drop the group.** A group whose screen black or paper black stands above the
    median of its surface's group blacks by more than BLACK_EDGE_TOLERANCE of the white has a
    reflection edge across it: the whole group is dropped (REFLECTION_EDGE), wherever it is.
-3. **Copies vote.** Per value, copies outside their tolerance of the median of the rest are dropped
-   (COPY_UNLIKE_THE_REST); a value with fewer than two agreeing copies is unread
+3. **Copies vote.** Per value, copies outside their tolerance of the median of all its copies are
+   dropped (COPY_UNLIKE_THE_REST); a value with fewer than two agreeing copies is unread
    (TOO_FEW_CLEAN_COPIES, or COPIES_DISAGREE when the copies split). Never averaged across a split.
 4. **Refuse rather than guess.** Under half the white copies left: WHITE_UNREAD, `where` the dropped
    groups' places. A white patch over CLIP_SHARE clipped: CLIPPED.
@@ -52,13 +52,12 @@ from contracts.calibration_target import (
 )
 from contracts.tuning import SIGNAL_LEVELS, TARGET_PATTERNS
 
-from .locate import Located
+from .locate import Located, patch_quad
 from .model import (
     BLACK_EDGE_TOLERANCE,
     CLIP_SHARE,
     DISTINCT_SIGMAS,
     GREY_TOLERANCE,
-    PATCH_SHARE,
     PHOTOS_TOLERANCE,
     WHITE_TOLERANCE,
     Dropped,
@@ -145,19 +144,13 @@ def _lights(located: Located) -> dict[PatchKey, _Light]:
 
 
 def _sample(image: np.ndarray, clipped: np.ndarray, homography: np.ndarray, patch: Patch) -> _Light:
-    rect = patch.rect
-    inset_x, inset_y = (1 - PATCH_SHARE) / 2 * rect.width_mm, (1 - PATCH_SHARE) / 2 * rect.height_mm
-    x0, y0 = rect.x_mm + inset_x, rect.y_mm + inset_y
-    x1, y1 = rect.x_mm + rect.width_mm - inset_x, rect.y_mm + rect.height_mm - inset_y
-    quad = cv2.perspectiveTransform(np.array([[[x0, y0], [x1, y0], [x1, y1], [x0, y1]]], np.float64),
-                                    homography)[0]
+    """The patch's light; `locate` refused a photo where any patch's quad leaves it."""
+    quad = patch_quad(homography, patch)
     left, top = np.floor(quad.min(axis=0)).astype(int)
     right, bottom = np.ceil(quad.max(axis=0)).astype(int)
     height, width = image.shape[:2]
     left, top = max(left, 0), max(top, 0)
     right, bottom = min(right, width), min(bottom, height)
-    if right - left < 1 or bottom - top < 1:
-        raise ValueError("patch_outside_photo")
     mask = np.zeros((bottom - top, right - left), np.uint8)
     cv2.fillConvexPoly(mask, np.round(quad - [left, top]).astype(np.int32), 1)
     inside = mask.astype(bool)
@@ -223,7 +216,7 @@ def _group_place(group: Group) -> Place:
 
 
 def _grey_key(signal: float) -> str:
-    return f"grey {signal:g}"
+    return f"grey {round(signal * SIGNAL_LEVELS)}"
 
 
 # -- Reading ----------------------------------------------------------------------------------

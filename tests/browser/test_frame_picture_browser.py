@@ -779,6 +779,8 @@ def test_both_targets_are_offered_in_either_order_with_the_paper_targets_print_l
             _show(page, label)
             expect(group).to_contain_text(SHOWN)
             expect(group).to_contain_text("Lay the printed sheet uncut in the dark box under the Frame's glass")
+            # The camera is often the phone the tab runs on: hiding the tab ends the session.
+            expect(group).to_contain_text("Keep this tab open and shown on another device while you photograph")
             expect(_print_links(page)).to_have_text(list(PAPER_TARGET))
             for name, href in PAPER_TARGET.items():
                 expect(group.get_by_role("link", name=name, exact=True)).to_have_attribute("href", href)

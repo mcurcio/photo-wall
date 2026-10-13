@@ -13,7 +13,8 @@ import httpx
 from test_player_service import close, rig
 
 from contracts.calibration_target import TargetCode
-from contracts.node_frame import PictureOperations
+from contracts.lut import LutRef
+from contracts.node_frame import LutMix, PictureOperations
 from contracts.tuning import TestPattern
 from player.calibration_target import target_modules
 from player.native import NativeOutput, NativeRenderer, _Surface
@@ -101,23 +102,44 @@ def test_the_layout_uploads_once_per_context_and_the_qr_once_per_code():
     renderer = spy_renderer()
     surface = _Surface(NativeOutput("HDMI-A-1", "photo-wall-hdmi-a-1"), None, None)
     # No player id yet: the layout, but no QR (the square draws light).
-    assert renderer._bind_target(surface, target_operations(3)) == 0
+    assert renderer._bind_target(surface, target_operations(3), lut_drawn=False) == 0
     assert (uploads(renderer, "GL_RG8"), uploads(renderer, "GL_R8")) == (1, 0)
     renderer._player_id = PLAYER
     modules = target_modules(TargetCode(PLAYER, "HDMI-A-1", 3))
     for _ in range(5):                      # five frames of one code
-        assert renderer._bind_target(surface, target_operations(3)) == len(modules)
+        assert renderer._bind_target(surface, target_operations(3), lut_drawn=False) == len(modules)
     assert (uploads(renderer, "GL_RG8"), uploads(renderer, "GL_R8")) == (1, 1)
     qr = renderer.GL.uploads[-1]
     assert qr[1:] == (len(modules), len(modules), bytes(255 if d else 0 for row in modules for d in row))
-    renderer._bind_target(surface, target_operations(4))       # a new picture change: a new QR
-    renderer._bind_target(surface, target_operations(4))
+    renderer._bind_target(surface, target_operations(4), lut_drawn=False)       # a new picture change: a new QR
+    renderer._bind_target(surface, target_operations(4), lut_drawn=False)
     assert (uploads(renderer, "GL_RG8"), uploads(renderer, "GL_R8")) == (1, 2)
     assert renderer.GL.deleted == [2]                            # the old QR's texture freed
     surface.target_layout = surface.target_qr = 0                # a new GL context (`_unrealize`)
     surface.target_code = None
-    renderer._bind_target(surface, target_operations(4))
+    renderer._bind_target(surface, target_operations(4), lut_drawn=False)
     assert (uploads(renderer, "GL_RG8"), uploads(renderer, "GL_R8")) == (2, 3)
+
+
+def test_the_post_software_qr_waits_for_the_lut_it_names():
+    """The code claims the entry's whole picture: while the LUT a post-software target names is not
+    drawn (its bytes not held yet), the square draws light, so no photo is read against a look that
+    was not on screen. The pre-software target draws no LUT, so its code never waits."""
+    renderer = spy_renderer()
+    renderer._player_id = PLAYER
+    surface = _Surface(NativeOutput("HDMI-A-1", "photo-wall-hdmi-a-1"), None, None)
+    lut = LutMix(LutRef("c0ffee" + "0" * 58, "lut33-test-recipe"), 0.6)
+    post = PictureOperations("HDMI-A-1", 5, (1.0, 1.0, 1.0), 1.0, 1.0, 1.0, lut=lut,
+                             test_pattern=TestPattern.TARGET_POST_SOFTWARE)
+    modules = len(target_modules(TargetCode(PLAYER, "HDMI-A-1", 5)))
+    assert renderer._bind_target(surface, post, lut_drawn=False) == 0
+    assert renderer._bind_target(surface, post, lut_drawn=True) == modules
+    pre = PictureOperations("HDMI-A-1", 5, (1.0, 1.0, 1.0), 1.0, 1.0, 1.0, lut=lut,
+                            test_pattern=TestPattern.TARGET_PRE_SOFTWARE)
+    assert renderer._bind_target(surface, pre, lut_drawn=False) == modules
+    without = PictureOperations("HDMI-A-1", 5, (1.0, 1.0, 1.0), 1.0, 1.0, 1.0,
+                                test_pattern=TestPattern.TARGET_POST_SOFTWARE)
+    assert renderer._bind_target(surface, without, lut_drawn=False) == modules
 
 
 def test_set_player_redraws_only_on_a_change():

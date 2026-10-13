@@ -1503,7 +1503,7 @@ class NativeRenderer:
             lut_drawn = self._bind_lut(surface, surface.operations)
             target = None
             if surface.operations is not None and surface.operations.test_pattern in TARGET_PATTERNS:
-                target = (self._bind_target(surface, surface.operations),
+                target = (self._bind_target(surface, surface.operations, lut_drawn=lut_drawn),
                           opening_size_mm(_drawn_fit(shown), shown.composition.binding.profile)
                           if shown else (1.0, 1.0))
             _final_uniforms(gl, surface.programs[1], surface.operations,
@@ -1585,13 +1585,15 @@ class NativeRenderer:
             gl.glActiveTexture(gl.GL_TEXTURE0)
         return True
 
-    def _bind_target(self, surface: _Surface, operations: PictureOperations) -> int:
+    def _bind_target(self, surface: _Surface, operations: PictureOperations, *, lut_drawn: bool) -> int:
         """Bind the calibration target's layout on _TARGET_LAYOUT_UNIT, uploaded once per GL
         context (player/calibration_target.py `target_texture`), and the QR of the code naming
         this Player, `operations`' Output and picture change on _TARGET_QR_UNIT, rebuilt
-        (`target_modules`) only when that code changes. The QR's module count; 0 with no player
-        id yet (the square draws light, so the reader refuses code-unreadable). Texture unit 0
-        stays the active unit."""
+        (`target_modules`) only when that code changes. The QR's module count; 0 (the square
+        draws light, so the reader refuses code-unreadable) with no player id yet, or while a
+        post-software target's LUT is not drawn (`lut_drawn` False: its bytes not held), so the
+        code never names a picture change whose look is not on screen (decision 0026). Texture
+        unit 0 stays the active unit."""
         gl = self.GL
         try:
             gl.glActiveTexture(gl.GL_TEXTURE0 + _TARGET_LAYOUT_UNIT)
@@ -1602,7 +1604,9 @@ class NativeRenderer:
             else:
                 gl.glBindTexture(gl.GL_TEXTURE_2D, surface.target_layout)
             gl.glActiveTexture(gl.GL_TEXTURE0 + _TARGET_QR_UNIT)
-            code = (None if self._player_id is None
+            look_missing = (operations.test_pattern is TestPattern.TARGET_POST_SOFTWARE
+                            and operations.lut is not None and not lut_drawn)
+            code = (None if self._player_id is None or look_missing
                     else (self._player_id, operations.output_id, operations.picture_change))
             if code is None:
                 return 0

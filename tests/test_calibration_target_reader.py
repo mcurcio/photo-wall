@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import functools
 import random
+import warnings
 from dataclasses import replace
 from pathlib import Path
 
@@ -40,8 +41,8 @@ from contracts.calibration_target import (
     calibration_target,
     screen_point,
 )
-from contracts.tuning import TestPattern
-from scripts.calibration_target.locate import Located, _markers_found, _view, locate
+from contracts.tuning import SIGNAL_LEVELS, TestPattern
+from scripts.calibration_target.locate import Located, _markers_found, _qr_text, _view, locate
 from scripts.calibration_target.model import (
     DropReason,
     PhotoKind,
@@ -143,8 +144,8 @@ def test_the_post_software_target_is_read_through_the_chain() -> None:
     assert np.all(white_error(out, scene) <= 0.005)
     assert grey_error(out, scene) <= 0.3
     # The chain is in the light: the 0.5 grey reads darker than the display's own sRGB step.
-    half = next(step for step in out.tone if step.signal == 0.5)
-    assert half.share.value[1] < 0.95 * truth(CLEAN).tone[0.5][1]
+    half = next(step for step in out.tone if step.signal == 128 / SIGNAL_LEVELS)
+    assert half.share.value[1] < 0.95 * truth(CLEAN).tone[half.signal][1]
 
 
 # -- 2. The TV surface's own glare (screen only) ---------------------------------------------------
@@ -166,7 +167,7 @@ def test_a_spot_on_one_screen_grey_copy_drops_that_copy() -> None:
     scene = Scene(reflection=blob(*wall_point(CLEAN, grey), 6.0, 0.15))
     out = reading(scene)
     assert [(d.value, d.where, d.why) for d in out.dropped] == [
-        (f"grey {grey.signal:g}", screen_place(index, Role.GREY), DropReason.COPY_UNLIKE_THE_REST)]
+        (f"grey {round(grey.signal * SIGNAL_LEVELS)}", screen_place(index, Role.GREY), DropReason.COPY_UNLIKE_THE_REST)]
     assert grey_error(out, scene) <= 0.3
 
 
@@ -277,6 +278,25 @@ def test_a_normal_photo_gives_the_white_only(tmp_path: Path) -> None:
     assert np.all(white_error(out, CLEAN) <= 0.05)
 
 
+def test_a_raw_and_a_normal_photo_together_are_read_as_normal() -> None:
+    """A normal photo's values carry the phone's tone curve: with one in the pair, no tone and no
+    black are read, whichever photo it is."""
+    raw = located(CLEAN)
+    v = raw.photo.pixels
+    encoded = np.where(v <= 0.0031308, 12.92 * v, 1.055 * np.maximum(v, 0) ** (1 / 2.4) - 0.055).astype(np.float32)
+    normal = replace(raw, photo=replace(raw.photo, name="IMG_0003.jpg", kind=PhotoKind.NORMAL, pixels=encoded))
+    for pair in ((raw, normal), (normal, raw)):
+        out = read_photos(pair, entry(CLEAN))
+        assert isinstance(out, Reading), out
+        assert out.kind is PhotoKind.NORMAL and out.tone == () and out.lowest_distinct is None
+
+
+@pytest.mark.parametrize("count", [0, 3])
+def test_read_photos_takes_one_or_two(count: int) -> None:
+    with pytest.raises(ValueError, match="located"):
+        read_photos((located(CLEAN),) * count, entry(CLEAN))  # type: ignore[arg-type]
+
+
 # -- 9. Refusals ---------------------------------------------------------------------------------
 
 
@@ -302,6 +322,30 @@ def test_paper_printed_at_97_percent_is_a_scale_mismatch() -> None:
     out = locate(raw_photo(Scene(paper_scale=0.97)))
     assert isinstance(out, Refused) and out.why is Refusal.SCALE_MISMATCH
     assert "97 %" in out.detail
+
+
+def test_a_corner_cut_off_with_three_markers_found_is_outside_photo_naming_where() -> None:
+    photo = raw_photo(CLEAN)
+    cut = replace(photo, pixels=photo.pixels[175:], clipped=photo.clipped[175:])     # one top marker gone
+    out = locate(cut)
+    assert isinstance(out, Refused) and out.why is Refusal.OUTSIDE_PHOTO
+    assert out.where and all(place.words().startswith("the screen target's top") for place in out.where)
+
+
+@pytest.mark.parametrize(("offset", "words"), [((0.0, 8.0), "8 mm low"), ((-9.0, 0.0), "9 mm left")])
+def test_a_sheet_laid_over_the_screen_patches_is_paper_misplaced(offset: tuple[float, float], words: str) -> None:
+    out = locate(raw_photo(Scene(paper_offset_mm=offset)))
+    assert isinstance(out, Refused) and out.why is Refusal.PAPER_MISPLACED, out
+    assert words in out.detail
+    assert out.where and all(place.surface is Surface.SCREEN for place in out.where)
+
+
+def test_a_flat_qr_square_reads_no_text_without_dividing_by_zero() -> None:
+    found = located(CLEAN)
+    flat = np.full(_view(found.photo).shape, 128, np.uint8)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert _qr_text(flat, found.screen, calibration_target().qr) is None
 
 
 def test_a_clipped_white_is_refused() -> None:

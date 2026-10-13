@@ -84,12 +84,18 @@ def test_after_target_pre_software(page, registry, scheme):
 
 @pytest.mark.parametrize("scheme", SCHEMES)
 def test_after_target_post_software(page, registry, scheme):
-    """Target: post-software shown, its line and the paper target's print links."""
+    """Target: post-software shown, its line and the paper target's print links; the try's row in
+    the History names the stage (the entry the reader reads), waited for as the pre-software one."""
     from test_frame_picture_browser import SHOWN, TEST_PATTERN, _group, _show
+    from test_picture_history_browser import TRIED, _rows
 
     def steps(page):
         _show(page, "Target: post-software")
         expect(_group(page, TEST_PATTERN)).to_contain_text(SHOWN)
         expect(_group(page, TEST_PATTERN).get_by_role("link", name="A4", exact=True)).to_be_visible()
+        tried = _rows(page, TRIED).first
+        expect(tried).to_be_visible()
+        tried.get_by_role("button", name="Details").click()
+        expect(tried).to_contain_text("Target: post-software")
 
     _picture(page, registry, scheme, "after-target-post-software", steps)

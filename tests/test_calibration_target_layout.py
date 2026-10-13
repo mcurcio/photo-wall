@@ -164,6 +164,15 @@ def test_each_grey_has_its_copies_on_two_sides():
     assert {one(g, Surface.SCREEN, Role.GREY).signal for g in PAIRED} == set(GREY_SIGNALS)
 
 
+def test_every_screen_signal_is_an_8_bit_code():
+    """The Player's texture stores round(signal * 255): a signal off the grid would be drawn
+    another value than the reference and the reader take it to be."""
+    for patch in SCREEN_PATCHES:
+        code = patch.signal * SIGNAL_LEVELS
+        assert code == round(code), patch
+        assert patch.signal == round(code) / SIGNAL_LEVELS, patch
+
+
 def test_each_near_black_step_has_its_copies_each_touching_a_black():
     steps = [(group, p) for group in RULERS for p in group.patches if p.role is Role.NEAR_BLACK]
     for k in NEAR_BLACK_STEPS:

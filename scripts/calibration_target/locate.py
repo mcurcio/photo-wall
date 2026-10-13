@@ -19,8 +19,11 @@ import numpy as np
 from contracts.calibration_target import (
     MARKER_DICTIONARY,
     PAPER_MARKER_IDS,
+    PAPER_TARGET_MM,
     SCREEN_MARKER_IDS,
+    SHEETS_MM,
     Marker,
+    Patch,
     Rect,
     Surface,
     TargetCode,
@@ -28,7 +31,16 @@ from contracts.calibration_target import (
     parsed_code,
 )
 
-from .model import MARKERS_NEEDED, SCALE_TOLERANCE, Photo, PhotoKind, Place, Refusal, Refused
+from .model import (
+    MARKERS_NEEDED,
+    PATCH_SHARE,
+    SCALE_TOLERANCE,
+    Photo,
+    PhotoKind,
+    Place,
+    Refusal,
+    Refused,
+)
 
 QR_PIXELS_PER_MM: Final = 12.0      # the QR's square is rectified at this scale before it is decoded
 QR_BORDER_MM: Final = 4.0           # and with this much of the surround round it
@@ -48,12 +60,16 @@ class Located:
 
 def locate(photo: Photo) -> Located | Refused:
     """Both targets in `photo`. Refused TARGET_NOT_FOUND when fewer than MARKERS_NEEDED of a
-    surface's four markers are found (`where`: the missing markers' places); CODE_UNREADABLE when
-    the QR's square (CalibrationTarget.qr through `screen`) yields no text or text
+    surface's four markers are found (`where`: the missing markers' places); OUTSIDE_PHOTO when a
+    patch's sampled middle (`patch_quad`) or the QR's square does not lie wholly inside the photo
+    (`where`: their places; three markers can be found with the fourth corner cut off); CODE_UNREADABLE
+    when the QR's square (CalibrationTarget.qr through `screen`) yields no text or text
     contracts.calibration_target.parsed_code refuses; SCALE_MISMATCH when the paper markers'
     spacing, mapped into the screen's mm, differs from the layout's by more than SCALE_TOLERANCE
-    (the detail names the scale found, e.g. "printed at 97 %"). A NORMAL photo is located as a
-    RAW one. Pure."""
+    (the detail names the scale found, e.g. "printed at 97 %"); PAPER_MISPLACED when the larger of
+    both sheets (SHEETS_MM, each way), centred on the paper content as printed, would overlap a
+    screen patch (`where`: those patches' places; the detail says which way the sheet is off the
+    dark box's centre). A NORMAL photo is located as a RAW one. Pure."""
     view = _view(photo)
     found = _markers_found(view)
     target = calibration_target()
@@ -67,6 +83,12 @@ def locate(photo: Photo) -> Located | Refused:
                        f"too few markers found on the {names} target")
     screen = _homography(by_surface[Surface.SCREEN], found)
     paper = _homography(by_surface[Surface.PAPER], found)
+    outside = _outside(photo, screen, paper)
+    if outside:
+        names = ", ".join(sorted({place.surface.value for place in outside}))
+        return Refused(Refusal.OUTSIDE_PHOTO, outside,
+                       f"part of the {names} target lies outside the photo: step back or centre "
+                       "the Frame in the photo")
     qr_place = Place(Surface.SCREEN, *target.qr.centre())
     code = parsed_code(_qr_text(view, screen, target.qr) or "")
     if code is None:
@@ -75,7 +97,62 @@ def locate(photo: Photo) -> Located | Refused:
     if abs(scale - 1) > SCALE_TOLERANCE:
         return Refused(Refusal.SCALE_MISMATCH, (),
                        f"printed at {100 * scale:.0f} %: print the paper target at 100 %")
+    misplaced = _paper_misplaced(screen, paper)
+    if misplaced is not None:
+        return misplaced
     return Located(photo=photo, screen=screen, paper=paper, code=code)
+
+
+def patch_quad(homography: np.ndarray, patch: Patch) -> np.ndarray:
+    """The four corners (pixels, 4 x 2) of the middle PATCH_SHARE of `patch` each way, through
+    `homography` (its surface's plane to the photo): what the reader samples. Pure."""
+    rect = patch.rect
+    inset_x, inset_y = (1 - PATCH_SHARE) / 2 * rect.width_mm, (1 - PATCH_SHARE) / 2 * rect.height_mm
+    x0, y0 = rect.x_mm + inset_x, rect.y_mm + inset_y
+    x1, y1 = rect.x_mm + rect.width_mm - inset_x, rect.y_mm + rect.height_mm - inset_y
+    return cv2.perspectiveTransform(np.array([[[x0, y0], [x1, y0], [x1, y1], [x0, y1]]], np.float64),
+                                    homography)[0]
+
+
+def _outside(photo: Photo, screen: np.ndarray, paper: np.ndarray) -> tuple[Place, ...]:
+    """The places of the patches whose sampled middle, and of the QR's square, not wholly inside
+    the photo."""
+    height, width = photo.pixels.shape[:2]
+
+    def out(quad: np.ndarray) -> bool:
+        return bool(np.any(quad < 0) or np.any(quad[:, 0] > width) or np.any(quad[:, 1] > height))
+
+    target = calibration_target()
+    places = [Place(patch.surface, *patch.rect.centre()) for group in target.groups for patch in group.patches
+              if out(patch_quad(screen if patch.surface is Surface.SCREEN else paper, patch))]
+    if out(cv2.perspectiveTransform(_corners_mm(target.qr)[None], screen)[0]):
+        places.append(Place(Surface.SCREEN, *target.qr.centre()))
+    return tuple(places)
+
+
+def _paper_misplaced(screen: np.ndarray, paper: np.ndarray) -> Refused | None:
+    """PAPER_MISPLACED when the sheet as laid would cover a screen patch (`locate`), else None."""
+    target = calibration_target()
+    to_screen = np.linalg.inv(screen) @ paper           # the paper content's plane -> the screen's
+    sheet_w, sheet_h = (max(size[axis] for size in SHEETS_MM.values()) for axis in (0, 1))
+    left, top = (PAPER_TARGET_MM[0] - sheet_w) / 2, (PAPER_TARGET_MM[1] - sheet_h) / 2
+    corners = np.array([[[left, top], [left + sheet_w, top], [left + sheet_w, top + sheet_h],
+                         [left, top + sheet_h]]], np.float64)
+    sheet = cv2.perspectiveTransform(corners, to_screen)[0].astype(np.float32)
+    covered = tuple(Place(Surface.SCREEN, *patch.rect.centre())
+                    for group in target.groups for patch in group.patches
+                    if patch.surface is Surface.SCREEN
+                    and cv2.intersectConvexConvex(sheet, _corners_mm(patch.rect).astype(np.float32))[0] > 0)
+    if not covered:
+        return None
+    centre = cv2.perspectiveTransform(np.array([[[PAPER_TARGET_MM[0] / 2, PAPER_TARGET_MM[1] / 2]]]),
+                                      to_screen)[0][0]
+    dx, dy = (float(d) for d in centre - np.array(target.dark_box.centre()))
+    off = " and ".join(f"{abs(d):.0f} mm {word[d > 0]}" for d, word in
+                       ((dx, ("left", "right")), (dy, ("high", "low"))) if abs(d) >= 0.5) or "turned"
+    return Refused(Refusal.PAPER_MISPLACED, covered,
+                   f"the sheet lies {off} of the dark box's centre, over the screen target's "
+                   "patches: lay it centred in the dark box, square to it")
 
 
 def _view(photo: Photo) -> np.ndarray:

@@ -278,7 +278,8 @@ land in `~/Downloads` on the Mac as `IMG_####.DNG`, not in the chat.
    reading with a LUT on a read-only database address, from 1Password; how, in
    [Runbook › Calibration targets](../../../docs/runbook.md#calibration-targets)):
    `op run -- .venv/bin/python -m scripts.calibration_target ~/Downloads/IMG_1234.DNG [second] --central <url>`.
-   Take the newest one or two DNGs he sent; two from either side of the Frame are better than one.
+   Take the newest one or two DNGs he sent; two, square-on and a small step apart, are better
+   than one.
    It reads the QR, fetches the sent entry it names and prints JSON; exit 0 a reading, 2 a
    refusal, 1 an error.
 2. **The stage is the entry's test pattern**, never your guess or the order he took them in:
@@ -296,11 +297,16 @@ land in `~/Downloads` on the Mac as `IMG_####.DNG`, not in the chat.
      tab had moved on as the photo was taken): pick a target again and retake.
    - `clipped`: a white reached the sensor's clip: tap the screen on the phone and lower the
      exposure, or step back from a bright light.
+   - `outside-photo`: part of a target (the named places) lies outside the photo, though enough
+     markers were found: step back or centre the Frame in the photo.
    - `scale-mismatch`: the paper is not printed at 100 %: reprint without "fit to page".
+   - `paper-misplaced`: the sheet, as laid, reaches over the screen target's patches (the detail
+     says which way it is off): open the Frame and lay it centred and square in the dark box.
    - `white-unread`: too many groups dropped (reflections or shadows over them): move the light or
      lamp that reflects over the named places, or move himself, and retake.
    - `photos-disagree`: the two photos' whites differ, so the light on the paper changed (often his
-     own shadow over the whole sheet): retake both, standing out of the light.
+     own shadow over the whole sheet), or one was taken well off square-on (the panel's light
+     changes with the angle, the paper's does not): retake both square-on, out of the light.
    Dropped groups and copies in a reading (`reflection-edge`, `copy-unlike-the-rest`, …) are not
    refusals: mention where, if many, so he can move the light next time.
 4. **Suggestions are his to make, never yours.** Pre-software: directions for the display's own
@@ -311,14 +317,20 @@ land in `~/Downloads` on the Mac as `IMG_####.DNG`, not in the chat.
    On a display that answers DDC/CI, the pre-software controls include the tab's Display
    (hardware) sliders; say which. `{"suggestion": {"why": "lut-unread"}}` means a post-software
    reading with a LUT on whose table could not be read: run again with
-   `PHOTO_WALL_READ_DATABASE_URL` set. A white-level gap of about 3 % or less is within the
-   paper ink's error ([0026 › Findings](../../../docs/decisions/0026-calibration-targets.md#findings)):
-   say so rather than ask for a change.
+   `PHOTO_WALL_READ_DATABASE_URL` set; `tone-unread`, a post-software reading with no grey read (a
+   normal photo, or every grey dropped): ask for ProRAW photos. A white anywhere between the paper
+   less its ink and the bare paper reads as matched in both stages (the reader's `INK_SHARE`,
+   [0026 › Findings](../../../docs/decisions/0026-calibration-targets.md#findings)); a gap is
+   measured from that band.
    You never apply anything: no Picture edit, no Done, no DDC/CI write. He moves the sliders or
    the TV's controls, sends new photos, and presses Done when it reads right.
 5. **Know the limits** ([0026](../../../docs/decisions/0026-calibration-targets.md#costs)): the
    camera is not the eye (ask him whether it looks matched); one photo misses a shadow over the
-   whole paper; a normal photo (JPEG, HEIC) gives the white alone. The reader has not yet read a
+   whole paper; a normal photo (JPEG, HEIC) gives the white alone; an angled photo reads the
+   panel's white off. The pre-software black only says raise or keep (a crushed step), never
+   lower: a black that glows, or a signal range the display does not expect, reads "keep". When he
+   says the dark areas glow, read the entry's `signal_range` and use the Black level pattern
+   ([0024](../../../docs/decisions/0024-display-tuning.md)) for it. The reader has not yet read a
    real ProRAW photo (NOT RUN until the first bench check): treat its first answers with care and
    look at the photo yourself.
 

@@ -8,7 +8,8 @@ order.
 
 - **Pre-software** (TARGET_PRE_SOFTWARE, the screen target drawn raw): the display's own controls,
   as directions and gap sizes only (PreSoftwareStep). White level: screen white's level over paper
-  white's, a percent gap. White colour: the white's channel balance, as a colour temperature gap in
+  white's, a percent gap to the ink's band (INK_SHARE: from the paper less its ink up to bare
+  paper; inside it, no gap). White colour: the white's channel balance, as a colour temperature gap in
   kelvin (contracts/kelvin.py's white). Tone: the screen greys' shares against sRGB(signal), as a
   gamma gap. Black: the lowest near-black code apart from raw 0 should be 1 (PLUGE, as decision
   0024's Black level): raise the display's black (its Brightness) while it is above 1. Each gap
@@ -17,12 +18,14 @@ order.
   residual, as a software picture. The display's response is taken from this reading (each grey's
   measured light against the chain's output for it now: player/geometry.py `final_pixel` over
   appliance/display_host/picture.py `operations_for` of the entry's software picture, with the
-  entry's LUT table); the aim is screen white = paper white and the greys at sRGB(final_pixel(x;
+  entry's LUT table); the aim is screen white = paper white (anywhere in the ink's band, as
+  pre-software) and the greys at sRGB(final_pixel(x;
   neutral brightness, contrast, colour temperature and gamma, the look as set)). Only those four
   move, each away from neutral only when that improves the fit by more than KEEP_SPREADS of the
   readings' spread (a penalty per step from neutral, so a display right on its own yields "no
   change"); saturation, the highlight rolloff, the black floor and the LUT (the print look) never
-  move. The black is not judged here.
+  move. The black is not judged here. Without a grey read (a NORMAL photo, or every grey dropped)
+  the display's response is unknown: SuggestionRefused TONE_UNREAD, never a fit on an assumed one.
 
 As built (.claude/errata.md, calibration targets reader R2):
 - The white colour's kelvin is the colour temperature whose white (`kelvin_white`, interpolated
@@ -80,6 +83,7 @@ from contracts.tuning import TestPattern
 from player.geometry import encode_srgb, final_pixel
 
 from .model import (
+    INK_SHARE,
     KEEP_SPREADS,
     Direction,
     PhotoKind,
@@ -107,13 +111,14 @@ KNOBS: Final[dict[str, tuple[int, int, int, int]]] = {   # name -> (neutral, min
     "gamma_tenths": (GAMMA_TENTHS_NEUTRAL, GAMMA_TENTHS_MIN, GAMMA_TENTHS_MAX, 1),
 }
 _ROUNDS: Final = 6
+_INK_TOP: Final = 1 / (1 - INK_SHARE)       # bare paper over the paper less its ink: the band's top
 
 
 def suggest(reading: Reading, lut: bytes | None) -> Suggestion:
     """The suggestion for `reading` by its stage. `lut`: the table (contracts/lut.py LUT_BYTES) of
     the LUT the entry's software picture names, None when it names none or it could not be read;
     post-software with a LUT named and `lut` None is SuggestionRefused LUT_UNREAD (never a
-    prediction without the look). Pure."""
+    prediction without the look), and with no grey read TONE_UNREAD. Pure."""
     if reading.stage is TestPattern.TARGET_PRE_SOFTWARE:
         return _pre(reading)
     return _post(reading, lut)
@@ -148,12 +153,18 @@ def _keep(gap: float, spread: float) -> bool:
     return abs(gap) <= KEEP_SPREADS * spread
 
 
+def _past_ink(level: float) -> float:
+    """How far a white level (screen over the paper less its ink) lies outside the ink's band
+    [1, _INK_TOP], relative: negative below, positive above, 0 inside."""
+    return min(level - 1.0, 0.0) + max(level - _INK_TOP, 0.0)
+
+
 # -- Pre-software ----------------------------------------------------------------------------------
 
 
 def _pre(reading: Reading) -> PreSoftwareSuggestion:
     white = np.array(reading.white.value)
-    level = 100 * (float(LUMINANCE @ white) - 1)
+    level = 100 * _past_ink(float(LUMINANCE @ white))
     steps = [PreSoftwareStep(PreProperty.WHITE_LEVEL,
                              Direction.KEEP if _keep(level, 100 * reading.white.spread)
                              else Direction.LOWER if level > 0 else Direction.RAISE,
@@ -231,6 +242,10 @@ def _gamma_fit(signals: np.ndarray, shares: np.ndarray) -> float:
 
 
 def _post(reading: Reading, lut: bytes | None) -> PostSoftwareSuggestion | SuggestionRefused:
+    if not reading.tone:
+        return SuggestionRefused(SuggestionRefusal.TONE_UNREAD,
+                                 "no grey was read (a normal photo, or every grey dropped): send a "
+                                 "ProRAW photo, two if reflections dropped the greys")
     now = software_of(reading.entry)
     if lut_acts(now) is not None and lut is None:
         return SuggestionRefused(SuggestionRefusal.LUT_UNREAD,
@@ -289,7 +304,7 @@ class _Display:
         decoded = _decoded(outputs)
         shares = np.array([step.share.value for step in reading.tone]).reshape(-1, 3)
         best_p, best_error = 1.0, float("inf")
-        for p in np.linspace(0.5, 2.0, 301) if len(shares) else (1.0,):
+        for p in np.linspace(0.5, 2.0, 301):
             above = _above_black(decoded ** p)
             predicted = above[1:] / above[0]
             error = float(np.sum((np.log(np.maximum(predicted, 1e-9)) - np.log(np.maximum(shares, 1e-9))) ** 2))
@@ -302,7 +317,8 @@ class _Display:
 def _cost(reading: Reading, display: _Display, aim: np.ndarray,
           outputs: Callable[[SoftwarePicture], np.ndarray]) -> Callable[[SoftwarePicture], float]:
     """The fit's cost of a software picture: each predicted value's distance from the aim over its
-    spread, squared and summed, plus KEEP_SPREADS squared per knob away from neutral."""
+    spread, squared and summed, plus KEEP_SPREADS squared per knob away from neutral. The white is
+    its level's distance from the ink's band (`_past_ink`) and its colour's from the aim's."""
     white_spread = max(reading.white.spread, _SMALLEST_SPREAD)
     spreads = np.array([max(step.share.spread, _SMALLEST_SPREAD) for step in reading.tone])
     aim_shares = aim[1:] / aim[0]
@@ -311,7 +327,10 @@ def _cost(reading: Reading, display: _Display, aim: np.ndarray,
         light = display.light(outputs(software))
         if np.any(light[0] <= 0):
             return float("inf")             # no white above black: nothing to read against
-        total =float(np.sum(((light[0] / aim[0] - 1) / white_spread) ** 2))
+        ratio = light[0] / aim[0]
+        level = float(LUMINANCE @ light[0]) / float(LUMINANCE @ aim[0])
+        total = (_past_ink(level) / white_spread) ** 2
+        total += float(np.sum(((ratio / level - 1) / white_spread) ** 2))
         if len(spreads):
             shares = light[1:] / light[0]
             total += float(np.sum(((shares / aim_shares - 1) / spreads[:, None]) ** 2))
