@@ -422,6 +422,15 @@ class PlayerService:
         self._main()
         self.central_link_state = state
         self._render_unbound_diagnostic()
+        self._publish_player()
+
+    def _publish_player(self) -> None:
+        """Tell the renderer the Player's registered id, which a calibration target's QR names
+        (decision 0026), or None while it has none: on every state applied and every retry, so
+        a registration dropped on 401 or a failed cycle is cleared and a new one is drawn."""
+        self._main()
+        registration = self.registration
+        self.renderer.set_player(registration.player_id if registration is not None else None)
 
     def _uplink_fault(self, code: str, error: UplinkError) -> None:
         """`code` with the console line (plus the clock summary for TIME/TLS) as its detail."""
@@ -709,6 +718,7 @@ class PlayerService:
             self._configuration_received = True
             self.central_link_state = "reachable"
             self._render_unbound_diagnostic()
+            self._publish_player()
             unbound = self._unbound_outputs
             selection = self._control_selection
             cue = state.identify_output if (
@@ -1313,6 +1323,9 @@ class UnavailableRenderer:
         pass
 
     def set_identify_output(self, output_id):
+        pass
+
+    def set_player(self, player_id):
         pass
 
     def capacity(self, compositions):

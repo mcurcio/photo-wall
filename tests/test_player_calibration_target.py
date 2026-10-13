@@ -25,7 +25,7 @@ from contracts.calibration_target import (
     paper_ink,
     screen_point,
 )
-from player.calibration_target import target_modules
+from player.calibration_target import TEXEL_MM, target_modules, target_texture
 
 LONGEST = TargetCode("p-" + "f" * 32, "Virtual-1", 2**63 - 1)
 PX_PER_MM = 4
@@ -144,3 +144,29 @@ def test_a_synthetic_paper_shows_its_markers():
     assert set(found) == {4, 5, 6, 7}
     for marker in (m for m in calibration_target().markers if m.surface is Surface.PAPER):
         assert np.abs(found[marker.marker_id] - rect_corners(marker, 20.0)).max() <= 1.0, marker.marker_id
+
+
+# -- The screen target's texture (the final pass samples it, player/native.py) ------------------
+
+def test_the_texture_is_the_layout():
+    """Every 7th texel and every patch's centre texel hold screen_point's (signal, raw) at their
+    centre; the texture is built once."""
+    texture = target_texture()
+    assert target_texture() is texture
+    assert (texture.width, texture.height) == (round(SCREEN_TARGET_MM[0] / TEXEL_MM), round(SCREEN_TARGET_MM[1] / TEXEL_MM))
+    assert len(texture.texels) == texture.width * texture.height * 2
+
+    def held(column: int, row: int) -> None:
+        point = screen_point((column + .5) * TEXEL_MM, (row + .5) * TEXEL_MM)
+        offset = (row*texture.width + column) * 2
+        assert tuple(texture.texels[offset:offset + 2]) == (round(point.signal*255), 255 if point.raw else 0), (column, row)
+
+    for row in range(0, texture.height, 7):
+        for column in range(0, texture.width, 7):
+            held(column, row)
+    for patch in (p for g in calibration_target().groups for p in g.patches if p.surface is Surface.SCREEN):
+        x, y = patch.rect.centre()
+        held(int(x / TEXEL_MM), int(y / TEXEL_MM))
+    raw = texture.texels[1::2].count(255)
+    box = calibration_target().dark_box
+    assert raw == round(box.width_mm / TEXEL_MM) * round(box.height_mm / TEXEL_MM)     # the dark box, all of it

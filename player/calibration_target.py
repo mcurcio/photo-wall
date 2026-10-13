@@ -10,12 +10,25 @@ player/geometry.py `target_signal`; this module only encodes and bakes.
 """
 from __future__ import annotations
 
+import functools
+import math
 from dataclasses import dataclass
 from typing import Final
 
 import segno
 
-from contracts.calibration_target import QR_ERROR, QrModules, TargetCode, code_text
+from contracts.calibration_target import (
+    MARKER_MODULES,
+    QR_ERROR,
+    SCREEN_TARGET_MM,
+    QrModules,
+    Rect,
+    Surface,
+    TargetCode,
+    calibration_target,
+    code_text,
+    screen_point,
+)
 
 TEXEL_MM: Final = 0.25      # the screen target texture's texel side (finer than a 4K 43" panel's pixel)
 
@@ -38,11 +51,39 @@ class TargetTexture:
     texels: bytes
 
 
+@functools.cache
 def target_texture() -> TargetTexture:
     """The screen target's texture, built once (cached) from contracts.calibration_target's rects
     (never per pixel through screen_point: a Python loop over 1540 x 1360 texels is too slow on the
     Pi). Each texel's value equals screen_point at its centre (held by a test). Pure."""
-    raise NotImplementedError("calibration targets: slice P3")
+    # Each rect is painted with screen_point at its centre (the layout's flat regions), in
+    # screen_point's precedence from the lowest: the dark box, the QR's square, the patches, then
+    # each screen marker's modules and its one-module quiet zone; the rest is the surround (0).
+    target = calibration_target()
+    width, height = round(SCREEN_TARGET_MM[0] / TEXEL_MM), round(SCREEN_TARGET_MM[1] / TEXEL_MM)
+    texels = bytearray(width * height * 2)
+    cells = []
+    for marker in (m for m in target.markers if m.surface is Surface.SCREEN):
+        module = marker.rect.width_mm / MARKER_MODULES
+        cells += [Rect(marker.rect.x_mm + column*module, marker.rect.y_mm + row*module, module, module)
+                  for row in range(-1, MARKER_MODULES + 1) for column in range(-1, MARKER_MODULES + 1)]
+    patches = [p.rect for group in target.groups for p in group.patches if p.surface is Surface.SCREEN]
+    for rect in (target.dark_box, target.qr, *patches, *cells):
+        point = screen_point(*rect.centre())
+        first_column, end_column = _texel_span(rect.x_mm, rect.width_mm, width)
+        first_row, end_row = _texel_span(rect.y_mm, rect.height_mm, height)
+        run = bytes((round(point.signal * 255), 255 if point.raw else 0)) * (end_column - first_column)
+        for row in range(first_row, end_row):
+            start = (row*width + first_column) * 2
+            texels[start:start + len(run)] = run
+    return TargetTexture(width, height, bytes(texels))
+
+
+def _texel_span(start_mm: float, length_mm: float, count: int) -> tuple[int, int]:
+    """The texels whose centres lie in [start_mm, start_mm + length_mm), as (first, end)."""
+    first = max(0, math.ceil(start_mm / TEXEL_MM - .5))
+    end = min(count, math.ceil((start_mm + length_mm) / TEXEL_MM - .5))
+    return first, max(first, end)
 
 
 __all__ = ["TEXEL_MM", "TargetTexture", "target_modules", "target_texture"]
