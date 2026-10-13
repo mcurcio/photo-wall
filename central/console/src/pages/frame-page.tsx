@@ -6,6 +6,7 @@ import { frameChip, type FrameHealth } from "../domain/frame-health-chip";
 import { FrameOverview } from "../domain/frame-overview";
 import { FrameDraftFit, FramePhotos } from "../domain/frame-photos";
 import { FramePicture } from "../domain/frame-picture";
+import { PictureHistory } from "../domain/picture-history";
 import { FramePosition, type PixelSize } from "../domain/frame-position";
 import { FrameInput, FramePower } from "../domain/frame-power";
 import { useFrameWhy } from "../domain/frame-why";
@@ -89,7 +90,8 @@ function outputSize(snapshot: object | null, frame: Frame): PixelSize | null {
  * the plan tile's words). Overview is what Central puts on it and why, and its Photos: one Fit board
  * row per Scene that shows photos here (follow-ups C1); Position is where the
  * picture sits on the Display (its fit, corners, nudges, rotation); Picture is the brightness,
- * contrast, colour temperature and gamma of the display that feeds it; Power is how the Pi turns
+ * contrast, colour temperature and gamma of the display that feeds it, with that display's History
+ * (every kept and tried change, and Restore into the editor); Power is how the Pi turns
  * its display off and on, with Test: turn off and Turn on; Hardware is which Pi and HDMI output
  * feed it (bind, unbind, Identify), the Display the Pi reports there (with the display-changed
  * card) and its Frame profile.
@@ -187,6 +189,11 @@ export function FramePage({ snapshot, bootFacts, hosts, frameId, tab, onTab, foc
               otherFrames={frames.filter((other) => other.id !== frameId).map((other) => other.id)} />
             {/* The display's input on both tabs (decision 0022 R10): Power's own row. */}
             <FrameInput key={`${frameId}:input`} frameId={frameId} />
+            {/* The display's picture history, with Restore into the editor (configuration snapshots). */}
+            {picture.view?.display_id != null && (
+              <PictureHistory key={`${frameId}:history:${picture.view.display_id}`} displayId={picture.view.display_id}
+                session={picture} />
+            )}
           </>
         )}
         {tab === "power" && (

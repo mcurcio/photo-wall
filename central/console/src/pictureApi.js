@@ -7,7 +7,8 @@ import { apiWrite } from "./apiWrite.js";
  * central/displays/views.py (their one home). Each returns `{ok: true, …}` or `{ok: false, error}`:
  * a refusal answers its code (`unknown_frame`, `frame_unbound`, `no_display`, `session_open`,
  * `unknown_session`, `session_ended`, `stale_sequence`, `not_offered`, `out_of_range`,
- * `not_presented_yet`, `unknown_lut`); a lost request answers `unreachable`.
+ * `not_presented_yet`, `unknown_lut`, and a Restore's `unknown_entry`, `other_display`); a lost request
+ * answers `unreachable`.
  *
  * @typedef {string} VcpCode   An MCCS code, two upper-case hex digits ("10" brightness).
  * @typedef {"brightness"|"contrast"|"colour-temperature"|"gamma"|"saturation"|"highlight-rolloff"
@@ -55,6 +56,13 @@ import { apiWrite } from "./apiWrite.js";
  * @typedef {{sequence: number}} PictureSequence
  * @typedef {"copied"|"no-display"|"same-display"|"session-open"} CopyOutcome
  * @typedef {{frame_id: string, outcome: CopyOutcome, hardware_skipped: VcpCode[]}} PictureCopyResult
+ * @typedef {{entry_id: string, expected_sequence: number}} PictureRestore   A picture history entry
+ *   (historyApi.js) to load into the session's draft.
+ * @typedef {{sequence: number, hardware_skipped: VcpCode[], lut_skipped: boolean,
+ *            lut_recipe_changed: boolean}} PictureRestoreResult
+ *   An accepted Restore: the sequence the next edit names; the entry's display settings this display
+ *   does not offer now (not in the draft); whether its LUT is no longer on the list (the draft keeps
+ *   its own); whether today's LUT recipe makes it.
  */
 
 /**
@@ -181,6 +189,19 @@ export function pictureDone(sessionId) {
  */
 export function revertPicture(sessionId) {
   return call("reverted", session(sessionId), { method: "DELETE" });
+}
+
+/**
+ * Restore: load a picture history entry into the session's draft, live on the display (POST
+ * …/restores; configuration snapshots). The operator still presses Done. Refused `unknown_entry`,
+ * `other_display` (another display's values cross only by Copy), `session_ended`, `stale_sequence`.
+ *
+ * @param {string} sessionId
+ * @param {PictureRestore} body
+ * @returns {Promise<{ok: true, result: PictureRestoreResult}|{ok: false, error: string}>}
+ */
+export function restorePicture(sessionId, body) {
+  return call("result", `${session(sessionId)}/restores`, { method: "POST", body });
 }
 
 /**

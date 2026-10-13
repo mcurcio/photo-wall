@@ -58,9 +58,10 @@ SAMPLES = json.loads((SRC / "routeSamples.json").read_text())
 TABLES = {"show": "showRoutes.jsx", "wall": "wallRoutes.jsx", "fleet": "fleetRoutes.jsx",
           "settings": "settingsRoutes.jsx", "neutral": "neutralRoutes.jsx"}
 # The Frame page, its Position tab and the live adjustment that writes a Frame's calibration,
-# and its Picture tab with the session and routes that write the display's picture (1c K1).
+# and its Picture tab with the session and routes that write the display's picture (1c K1), and its
+# picture History, whose Restore is a write of that session (configuration snapshots K1).
 DISPLAY_CONTROLS = {"frame-page.tsx", "frame-position.tsx", "liveAdjustment.js", "frame-picture.tsx",
-                    "pictureSession.js", "pictureApi.js"}
+                    "pictureSession.js", "pictureApi.js", "picture-history.tsx"}
 # The display's calibration routes (central/fleet/node_routes.py
 # `/v1/operator/frames/{frame_id}/calibration-…`): only the Wall side may name them. Matched with
 # the interpolated Frame id's closing brace, so no hash route can be mistaken for one.
@@ -807,6 +808,9 @@ FRAME_PAGE_IMPORTS = {
                           "useRoute.js", "useSnapshot.js"},
     "live-adjustment.tsx": {"liveAdjustment.js"},
     "frame-power.tsx": {"polledRead.js", "powerApi.js"},
+    # The Picture tab's History (configuration snapshots K1): its read and polling, and the picture
+    # routes' types (a Restore's answer).
+    "picture-history.tsx": {"historyApi.js", "pictureApi.js", "polledRead.js"},
 }
 # Roadmap 4's photo library pages, each with the legacy modules it alone may import: their routes
 # (libraryApi.js, photoSourcesApi.js) and hooks.

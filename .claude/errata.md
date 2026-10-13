@@ -5910,3 +5910,21 @@ each a refinement the design's sketch left open or a fact of the code it did not
   every `_open` (begin: the new trial's id; renew: the predecessor's).
 - **The history routes live in one read module** (central/tuning_history_routes.py, the design's one
   read contract `TuningHistoryQueries`); the two restores are their owners' routes.
+
+## configuration snapshots console lane, slice K1 Picture History (implementer, 2026-10-13)
+
+- **Owned paths:** `usePictureSession` gaining `restore` (frozen) makes `PictureSession` require it,
+  so central/console/src/domain/frame-picture.stories.tsx (not listed) gains one fixture line
+  (`restore`); no other lane owns it. The picture-history stories import the read's types through
+  picture-history.tsx (re-exported), because tests/test_console_routes_r4.py lets a domain module
+  import only its declared legacy modules; picture-history.tsx is declared there with historyApi.js,
+  pictureApi.js and polledRead.js.
+- **Hardware names:** `PictureValuesView.hardware` carries codes only, so Details names each code from
+  the Picture tab's current read (its rows' picture-list names and ranges, `hardwareWords`); a code
+  the read no longer lists shows as "Setting <code> (display)". Display settings are labelled
+  "<name> (display)" so they never collide with Photo Wall's Brightness and Contrast.
+- **Summary against the entry below:** a Done's kept row usually sits on the sent row of the same
+  values, so it reads "Same values as the change below"; its values are under Details.
+- **Not in K1's paths:** docs/design-language.md §4 must list the new `HistoryList` pattern (the
+  console-ux procedure, step 8); left to the docs unit (design unit 8). Catalogue baselines are
+  placeholders (Docker does not answer on the build host), to be replaced from CI's pinned render.
