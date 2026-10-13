@@ -1056,6 +1056,67 @@ sudo sh -c 'grep -A11 "^connector\[.*HDMI-A" /sys/kernel/debug/dri/*/state' | gr
 
 `broadcast_rgb` is the connector's setting (`Automatic`, `Full`, `Limited 16:235`); `is_limited_range` is what the kernel sends now (`y`: black at 16); `output_bpc` the bits per channel. `debugfs` is root-only. More, and the traps, in the repo skill [display-control](../.claude/skills/display-control/SKILL.md).
 
+## Configuration snapshots
+
+What a Display's picture and a Frame's Position were at any time, for the Picture and Position tabs' History and for the agent reading the owner's photos while he tunes. Why it is shaped so, the kinds and Restore's rules are [0025](decisions/0025-configuration-snapshots.md); what the tabs say is the [console design](operator-console-design.md#5-the-frame-page) (§5 Position and Picture); the agent's procedure is the [display-control skill](../.claude/skills/display-control/SKILL.md#reading-the-values-while-the-owner-tunes).
+
+**Tables** (migration 096; each a record of what was, never current state: `displays`, `picture_documents` and `frames` stay the truth):
+
+| Table | One row per | Columns |
+|---|---|---|
+| `picture_kept_entries` | Done, Copy or an unrecorded change on a Display | `id`, `display_id`, `number` (the Display's commit order), `kind` (`kept-done`, `kept-copied`, `kept-unrecorded`), `at`, `session_id`, `restored_from`, `picture`, `lut_recipe_id` |
+| `picture_sent_entries` | rise of a port's `picture_change` (what Central sent the Pi) | `id`, `player_id`, `output_id`, `picture_change` (its number), `display_id` (seen on the port), `frame_id` (bound to it then; NULL if none or deleted since), `kind` (`sent-draft`, `sent-back`, `sent-kept`), `at`, `session_id`, `restored_from`, `picture`, `lut_recipe_id`, `test_pattern` (`white`, `grey-ramp`, `black-level`; NULL: off) |
+| `position_entries` | Save, profile change, unrecorded change, or change in what the Node is handed | `id`, `frame_id`, `number` (the Frame's commit order), `kind` (`kept-saved`, `kept-profile-changed`, `kept-unrecorded`, `sent-draft`, `sent-back`), `at`, `session_id`, `restored_from`, `fit` (`contracts/models.py` FrameFit's JSON: mode, corners, rotation), `mat` (Mat's JSON: depth and lights), `profile_width_px`, `profile_height_px` and `display_id` (what it was made for: the Frame's profile and the Display seen on its port then) |
+
+`picture` is the Display's picture under the `displays` columns' names (`hardware_picture` by MCCS code, `software_brightness_percent` … `software_lut_profile`, `software_lut_amount_percent`, `signal_range`), as a session's `draft` is; `lut_recipe_id` is the recipe its LUT was baked under then (NULL: no LUT). `session_id` groups one picture session's or one Position trial's entries (a trial keeps it across renewals: `node_calibration_trials.session_id`); `restored_from` names the entry a Restore loaded (also on `picture_sessions` and `node_calibration_trials`).
+
+**Routes** (operator, admin token; the table at the top of `central/tuning_history_routes.py` is the one home of each answer and refusal). Times are ISO 8601 with a zone, answered in UTC; lists are newest first, `limit` 1 to 500 (default 100), `before` an exclusive time for the next page:
+
+```sh
+T='Authorization: Bearer <admin-token>'
+curl -H "$T" "$CENTRAL/v1/operator/displays/<display-id>/picture-history?limit=50"
+curl -H "$T" "$CENTRAL/v1/operator/frames/<frame-id>/position-history?before=2026-10-13T21:00:00Z"
+curl -H "$T" "$CENTRAL/v1/operator/frames/<frame-id>/tuning-snapshot?at=2026-10-13T21:04:07Z"
+# Restore: loads an entry into an open session's or trial's draft; Done still keeps it
+curl -X POST -H "$T" -H 'Content-Type: application/json' \
+  -d '{"entry_id":"<entry-id>","expected_sequence":7}' \
+  "$CENTRAL/v1/operator/picture-sessions/<session-id>/restores"
+curl -X POST -H "$T" -H 'Content-Type: application/json' \
+  -d '{"entry_id":"<entry-id>","expected_sequence":7}' \
+  "$CENTRAL/v1/operator/frames/<frame-id>/calibration-trials/<trial-id>/restores"
+```
+
+The snapshot answers the Frame's newest Position entry at or before `at`, and its picture: the newest sent entry naming the Frame at or before `at`, else the newest kept entry at or before `at` of the Display seen on its port now. A history answers `unrecorded_change: true` while the stored values differ from the newest kept entry (changed outside Photo Wall; the next kept write records it). Each Position entry carries `restore_refusal` (`other_frame`, `made_for_other_profile`, `made_for_other_display`, or null). A picture Restore answers `hardware_skipped` (codes this display does not offer now), `lut_skipped` (the LUT is off the list; the draft kept its own) and `lut_recipe_changed` (today's recipe renders it); it refuses `other_display` (use Copy).
+
+**Reading with SQL** (a read-only session is enough; `SET TIME ZONE 'UTC'` first so every `at` reads in UTC). A Frame at a time, its Position and its picture (when the second query finds nothing, the snapshot route falls back to the Display's kept entries):
+
+```sql
+SET TIME ZONE 'UTC';
+\set frame 'living-room'
+\set t '2026-10-13T21:04:07Z'
+SELECT kind, number, at, session_id, fit, mat FROM position_entries
+ WHERE frame_id = :'frame' AND at <= :'t' ORDER BY at DESC, number DESC LIMIT 1;
+SELECT kind, picture_change, at, session_id, picture, lut_recipe_id, test_pattern FROM picture_sent_entries
+ WHERE frame_id = :'frame' AND at <= :'t' ORDER BY at DESC, picture_change DESC LIMIT 1;
+```
+
+A Display's last hour, kept and sent together:
+
+```sql
+SET TIME ZONE 'UTC';
+\set display '<display-id>'
+SELECT at, kind, number, NULL AS frame_id, picture, NULL AS test_pattern FROM picture_kept_entries
+ WHERE display_id = :'display' AND at > now() - interval '1 hour'
+UNION ALL
+SELECT at, kind, picture_change, frame_id, picture, test_pattern FROM picture_sent_entries
+ WHERE display_id = :'display' AND at > now() - interval '1 hour'
+ORDER BY at DESC, number DESC;
+```
+
+**Retention.** Per key, the newest 500 kept and 20,000 sent entries (a Display's kept, a port's sent, a Frame's of each); each writer trims its own key when it appends, and nothing else deletes them. A deleted Frame takes its Position history. History starts at the upgrade to 096: nothing is written for the past.
+
+**The clock.** Every `at` is PostgreSQL's clock when Central recorded the change, never the Pi's or a phone's. Match a photo on Central's clock: as it arrives, read Central's time (`SELECT now()`) or the newest entries, and step back from there; never by the photo's own timestamp. A sent entry is what Central sent; the Pi shows it seconds later, about 10 s for a signal range change ([Tune a display with no controls](#tune-a-display-with-no-controls)). A change made with the TV's own remote or menus is never in the history.
+
 ## LUTs: paper profiles
 
 The print look's LUT ([0023](decisions/0023-print-look.md)) is made from a **paper profile**: the free ICC file a paper maker publishes for each paper and printer (search the maker's site for "ICC profiles", for example Hahnemühle, Canson or Ilford, and take the profile for your paper on any printer; the printer matters little here). Central keeps the profile (`luts`, migration 093) and bakes the LUT from it whenever a Player asks, so there is nothing else to keep or back up.

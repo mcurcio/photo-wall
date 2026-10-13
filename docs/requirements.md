@@ -271,4 +271,14 @@ On 2026-10-10 (chat, and the [1c gate page](https://claude.ai/artifact/GngF5gqPd
 | On existing Frames' rotation when they move to Cover | "Every frame should reset to 0 rotation" | Each Frame moved to Cover starts at angle 0. |
 | 2026-10-11, told that Cover at about 30 to 150 degrees turned a landscape Frame's picture portrait and Save refused it | ""landscape" and "portrait" are descriptions of the aspect ratio. whereas the angle of rotation is a quality of the way frames are hung on the wall, or possibly some unique conditions of how displays are mounted within the matte" | The Frame's orientation is its aspect alone; the angle never changes it and is never checked against it. Cover keeps the Frame's aspect at every angle. |
 
+On 2026-10-13 (chat) he asked for configuration snapshots while tuning a display against a sheet of paper and sending phone photos to the agent. His two answers are current choices; the design is [0025](decisions/0025-configuration-snapshots.md).
+
+| Context | The owner's words | What it asks of Photo Wall |
+|---|---|---|
+| Unprompted, while tuning | "how can we improve the tuning flow so that you can read the values as we go?" | The values on the wall while he tunes can be read afterwards. |
+| Offered three options: match a photo in the console (1), values printed on the pattern (2), a picture change history (3) | "1 and 3 are interesting. i like the value of 3 as "configuration snapshots" so it keeps a history of what has been done in the past." | Photo Wall keeps a history of the configuration over time: configuration snapshots. |
+| On option 1, in the same message | "1 is probably harder to do in a wholly automated fashion because the algorithm would have to deal with noisy pictures. its easier for you (an LLM) to deal with bad picture quality" | No photo-matching algorithm for now; the agent reads the photos. |
+| Asked what a snapshot holds | "Everything per Display+Frame (Recommended)" | The Display's picture (hardware and software settings, LUT, signal range, test pattern) and the Frame's position, mat and lights. |
+| Asked how a snapshot is used | "View and restore (Recommended)" | A list with each change's time and values; Restore loads one into the editor, and he still presses Done. |
+
 Display power stays operational state under [operations and scope](#operations-and-scope). The Power lane, the hold rule, the guard defaults and Home Assistant through MQTT discovery are design choices, not owner statements.

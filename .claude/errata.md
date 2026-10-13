@@ -5948,3 +5948,16 @@ each a refinement the design's sketch left open or a fact of the code it did not
   editor right above says why in its own words (live-adjustment.tsx keeps them private).
 - **Summary lines** are the spec's fixed format (fit, rotation, mat depth, light count), so two
   entries that differ only in their corners read the same; the corners are under Details.
+
+## configuration snapshots docs lane, slice D1 (implementer, 2026-10-13)
+
+- **design-decisions.md has no row per decision record:** records are registered inside the D-row
+  they settle (0022-0024 in D12). 0025 is a sentence in D12 ("Configuration snapshots (accepted
+  2026-10-13, 0025)"), not a new row.
+- **Roadmap left as briefed, now partly stale:** no roadmap step names this work, so no Developed
+  column changed. The "Deferred, and what that costs" row "Change history" still says "no Revert
+  later"; for a Display's picture and a Frame's Position that is no longer true (History and
+  Restore). Left for the main loop to word, since the brief limits roadmap edits to a Developed column.
+- **Matching a photo's time:** the brief's "match a photo by Central's receive time" is worded as
+  "on Central's clock, read as the photo arrives" (the photo reaches the agent's chat, never
+  Central), in the runbook, 0025 and the display-control skill.
