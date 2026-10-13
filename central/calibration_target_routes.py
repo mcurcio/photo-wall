@@ -16,14 +16,29 @@ from __future__ import annotations
 
 from typing import Any, Final
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
+from fastapi.responses import JSONResponse, Response
+
+from central.displays.calibration_paper import PDF_MEDIA_TYPE, paper_pdf
+from central.operator_auth import OPERATOR_PREFIX
+from contracts.calibration_target import PaperSize
 
 PAPER_PDF_PATH: Final = "calibration-target/paper.pdf"     # under OPERATOR_PREFIX
 
 
 def mount_calibration_target_routes(app: FastAPI, *, admin: Any) -> None:
     """Declare the route above on `app`."""
-    raise NotImplementedError("calibration targets: slice K2")
+
+    @app.get(OPERATOR_PREFIX + PAPER_PDF_PATH, dependencies=[Depends(admin)], response_class=Response,
+             responses={200: {"content": {PDF_MEDIA_TYPE: {}}}})
+    def paper_target(paper: str | None = None) -> Response:
+        try:
+            sheet = PaperSize(paper)
+        except ValueError:
+            return JSONResponse({"error": "bad_paper"}, status_code=422)
+        return Response(paper_pdf(sheet), media_type=PDF_MEDIA_TYPE, headers={
+            "Content-Disposition": f"attachment; filename=photo-wall-calibration-target-{sheet.value}.pdf",
+            "Cache-Control": "private, no-store"})
 
 
 __all__ = ["PAPER_PDF_PATH", "mount_calibration_target_routes"]
