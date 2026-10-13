@@ -1046,6 +1046,8 @@ For a display that hides its picture settings or answers no DDC/CI, with a brigh
 
 **Each range change costs about 10 s without photos.** The Pi sets the range before Weston starts, so a change restarts that display's Weston and Player ([display host backend](display-host-backend.md#units-and-weston-incarnations)); the display shows black, and the TV may take its own time to re-sync. A Pi start with a Display not on Auto pays it once. A range the Pi could not set shows on the tab with the range the display still gets; read the controller's journal ([Display identity and power](#display-identity-and-power)).
 
+**A Samsung TV (the owner's QN43Q8F) and its PC input.** Nothing here needs a TV menu: the range, the test patterns and every Photo Wall value act from Central. The QN43Q8F's EDID says it follows the range the Pi labels (quantization selectable; the [display-control skill](../.claude/skills/display-control/SKILL.md) shows how to read it), so Full and Limited should look the same on it and a glow left on the Black level is its backlight. Samsung TVs show more or fewer picture settings by the input's type (the Source list's Edit, type PC) and by Game Mode, and name their own range setting HDMI Black Level where they show it; which settings the QN43Q8F shows in each is NOT checked on the bench. If a TV does show its own range setting, leave it on its automatic choice so the Pi's label decides.
+
 **What the kernel sends**, on the Pi with sudo ([Reaching a Node over SSH](#reaching-a-node-over-ssh)):
 
 ```sh
