@@ -74,6 +74,7 @@ def _report(registry, plan, failures, *, sequence=1):
         capacity_ok=True,
         clock_uncertainty=0.01,
         observed_at=registry.clock.utc(),
+        lost_grants=(),
         failures=tuple(failures),
     )
     with registry.db.transaction() as conn:

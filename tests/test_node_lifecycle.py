@@ -18,6 +18,7 @@ from test_registry import ADMIN, enroll
 from central.app import create_app
 from central.coordination import CoordinationError
 from central.displays.model import Readiness
+from central.fleet.device_fence import standing_in
 from central.fleet.node_acceptance import current_cohort_in
 from central.fleet.node_app_links import NodeAppLinks
 from central.fleet.node_boot import NodeBootService, parse_node_deployment
@@ -118,7 +119,7 @@ def _accept(fixture, environment_sha256, *, accepted_at, generation=None, base_k
     """A stored acceptance (its qualification, then the acceptance) in the current output cohort:
     this boot's base and the current device generation unless `base_key` or `generation` says otherwise."""
     with fixture.registry.db.transaction() as conn:
-        current = fixture.sessions.lock_device_generation_in(conn, DEVICE_ID)
+        current = standing_in(conn, DEVICE_ID).active_generation()
         cohort = current_cohort_in(conn, DEVICE_ID, current, fixture.registry.clock.utc())
         generation = current if generation is None else generation
         qualification = uuid4()
@@ -208,7 +209,7 @@ def test_an_acceptance_of_another_device_generation_is_not_listed(registry):
     generation (an earlier or later registration of the box) is never served as current."""
     fixture = Rig(registry, qualified=False)
     with registry.db.transaction() as conn:
-        generation = fixture.sessions.lock_device_generation_in(conn, DEVICE_ID)
+        generation = standing_in(conn, DEVICE_ID).active_generation()
     _accept(fixture, fixture.proof.challenge.environment_sha256, accepted_at=1001, generation=generation + 1,
             audit_ref='test:other-generation')
     with registry.db.transaction() as conn:
@@ -306,7 +307,7 @@ def _wrong_acceptance(fixture, kind, environment_sha256, accepted_at):
     """An acceptance in the current cohort that differs from this boot only by its base content
     key (`kind='base'`) or its device generation (`kind='generation'`)."""
     with fixture.registry.db.transaction() as conn:
-        generation = fixture.sessions.lock_device_generation_in(conn, DEVICE_ID)
+        generation = standing_in(conn, DEVICE_ID).active_generation()
         base_key = _first_base_key(conn)
     if kind == 'base':
         _accept(fixture, environment_sha256, accepted_at=accepted_at, base_key=_other_key(base_key),

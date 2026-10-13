@@ -65,10 +65,7 @@ class OperatorSnapshotReader:
 
     def read(self) -> OperatorSnapshot:
         """Read related DB domains under one short, read-only MVCC snapshot."""
-        with self.db.transaction() as conn:
-            # Must precede the first data query. Database.transaction's SET LOCAL
-            # timeout statements do not establish the MVCC snapshot.
-            conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        with self.db.read_snapshot() as conn:
             read_at = self.clock.utc()
             inventory = self.registry.inventory_in(conn, read_at)
             reports = self.coordinator.player_reports_in(conn, read_at)

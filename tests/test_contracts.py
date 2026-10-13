@@ -74,7 +74,7 @@ def test_wire_rejects_upstream_fields_and_failure_text():
         Variant(asset_id="asset-a", recipe_id="e" * 64, sha256="a" * 64, size=1, media_type="image/jpeg", width=1, height=1,
                 url="https://upstream.invalid/secret")
     common = dict(plan_id="p", revision=1, authority_epoch=1, sequence=1,
-                  clock_uncertainty=.01, observed_at=100)
+                  clock_uncertainty=.01, observed_at=100, lost_grants=())
     with pytest.raises(ValidationError):
         Readiness(**common, failures=[{"assignment_id": "https://upstream.invalid/token", "code": "download"}])
     with pytest.raises(ValidationError):
@@ -83,7 +83,7 @@ def test_wire_rejects_upstream_fields_and_failure_text():
 
 def test_readiness_distinguishes_file_from_preparation_and_is_deeply_immutable():
     common = dict(plan_id="p", revision=1, authority_epoch=1, sequence=1,
-                  clock_uncertainty=.01, observed_at=100, secured=("a",))
+                  clock_uncertainty=.01, observed_at=100, secured=("a",), lost_grants=())
     acquired_but_failed = Readiness(**common, failures=[{"assignment_id": "a", "code": "decode"}])
     assert acquired_but_failed.prepared == ()
     with pytest.raises(ValidationError):
@@ -92,6 +92,10 @@ def test_readiness_distinguishes_file_from_preparation_and_is_deeply_immutable()
         Readiness(**common, prepared=("missing",))
     with pytest.raises(ValidationError):
         Readiness(**common, prepared=("a",), failures=[{"assignment_id": "a", "code": "decode"}])
+    lost = {**common, "lost_grants": [{"assignment_id": "a", "readiness_sequence": 1}]}
+    assert Readiness(**lost, prepared=("a",)).lost_grants[0].assignment_id == "a"
+    with pytest.raises(ValidationError, match="a lost grant must be prepared"):
+        Readiness(**lost)
 
 
 def test_plan_rejects_old_binding_generation_and_outside_validity():

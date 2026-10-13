@@ -329,6 +329,14 @@ class Failure(Model):
     code: Annotated[str, Field(pattern=r"^[a-z_]{1,64}$")]
 
 
+class LostGrant(Model):
+    """A start grant the Player saw and no longer holds: refused, or dropped since (a clock
+    blip, preparation lost and regained). `readiness_sequence` is the grant's, so Central
+    re-grants only the grant it still holds, once."""
+    assignment_id: Identifier
+    readiness_sequence: int = Field(ge=1)
+
+
 class Readiness(Model):
     plan_id: Identifier
     revision: int = Field(ge=1)
@@ -340,17 +348,23 @@ class Readiness(Model):
     clock_uncertainty: float = Field(ge=0)
     observed_at: Instant
     failures: tuple[Failure, ...] = ()
+    # Level state, repeated in every report while true; required (no default): a Player that
+    # cannot say what it lost is refused rather than left without recovery.
+    lost_grants: tuple[LostGrant, ...]
 
     @model_validator(mode="after")
     def coherent_readiness(self) -> Self:
         failed = [f.assignment_id for f in self.failures]
-        for ids in (self.secured, self.prepared, failed):
+        lost = [g.assignment_id for g in self.lost_grants]
+        for ids in (self.secured, self.prepared, failed, lost):
             if len(ids) != len(set(ids)):
                 raise ValueError("duplicate readiness assignment")
         if not set(self.prepared) <= set(self.secured):
             raise ValueError("prepared assignments must be secured")
         if set(self.prepared) & set(failed):
             raise ValueError("failed assignment cannot report prepared playback")
+        if not set(lost) <= set(self.prepared):
+            raise ValueError("a lost grant must be prepared")
         return self
 
 

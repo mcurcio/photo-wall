@@ -18,7 +18,7 @@ from pydantic import Field, model_validator
 from central.db import Database
 from central.displays.model import Readiness
 from central.fleet.acceptance_evidence import applied_is_latest
-from central.infra.asset_roots import lock_fleet_assets_in
+from central.fleet.device_fence import fence_in, retire_in
 from central.infra.display_store import (
     POSITION_COLUMNS,
     POSITION_FACTS,
@@ -197,13 +197,11 @@ class Registry:
                                      (request.nonce, request.public_key, now)).fetchone()
             if not challenge:
                 raise RegistryError("expired_or_used_challenge", 403)
-            # Serial enrollment has no OS command authority. It must still
-            # respect permanent device retirement while an offer or retirement
-            # transaction may be creating/updating the canonical row.
-            lock_fleet_assets_in(conn)
-            device = conn.execute("SELECT retired_at FROM devices WHERE device_id=%s FOR UPDATE",
-                                  (request.device_id,)).fetchone()
-            if device is not None and device["retired_at"] is not None:
+            # Serial enrollment has no OS command authority. It must still respect permanent
+            # device retirement: it acts under the device fence that retirement changes under.
+            # A device never offered (a Compose or demo Player) is unrecorded and admitted.
+            standing = fence_in(conn, request.device_id, "act").standing()
+            if standing.kind == "unavailable":
                 raise RegistryError("retired_device", 403)
             old = conn.execute("SELECT * FROM players WHERE device_id=%s FOR UPDATE",
                                (request.device_id,)).fetchone()
@@ -695,28 +693,17 @@ class Registry:
             if identity is None:
                 raise RegistryError("unknown_player", 404)
             device_id = identity["device_id"]
-            # Node boot offers and the deployment writer take this lock before
-            # the device row. Use the same order for retirement.
-            lock_fleet_assets_in(conn)
+            fenced = fence_in(conn, device_id, "change")
             now = self.clock.utc()
-            # A Player that never booted from a node offer (a Compose or demo Player) has no
-            # `devices` row; operator retirement creates its canonical tombstone.
-            conn.execute("INSERT INTO devices(device_id,first_seen,last_seen) "
-                         "VALUES(%s,%s,%s) ON CONFLICT(device_id) DO NOTHING",
-                         (device_id, now, now))
-            conn.execute("SELECT retired_at FROM devices WHERE device_id=%s FOR UPDATE",
-                         (device_id,)).fetchone()
             player = conn.execute("SELECT * FROM players WHERE id=%s FOR UPDATE", (player_id,)).fetchone()
             if player["retired_at"] is not None:
                 return
             if conn.execute("SELECT 1 FROM bindings WHERE player_id=%s LIMIT 1",
                             (player_id,)).fetchone():
                 raise RegistryError("player_bound")
-            conn.execute("UPDATE devices SET retired_at=COALESCE(retired_at,%s) "
-                         "WHERE device_id=%s", (now, device_id))
-            conn.execute("UPDATE fleet_device_lifecycle SET generation=generation+1,"
-                         "revoked_at=%s WHERE device_id=%s AND revoked_at IS NULL",
-                         (now, device_id))
+            # A Player that never booted from a node offer (a Compose or demo Player) has no
+            # `devices` row; retirement writes its canonical tombstone.
+            retire_in(fenced, now)
             conn.execute("UPDATE players SET retired_at=%s,authority_epoch=authority_epoch+1 "
                          "WHERE id=%s", (now, player_id))
             self._audit(conn, "player_retired", player_id)
@@ -747,7 +734,7 @@ class Registry:
             calibration: Calibration, mat: Mat) -> Calibration:
         """Registry-owned Save CAS inside the Trial owner's existing transaction.
 
-        Caller holds Coordination→Runtime then Fleet/session locks. This method
+        Caller holds Coordination→Runtime, then the device fence and session locks. This method
         owns the persistent Frame calibration and mat (print look: the mat rides the binding
         beside the calibration and is saved with it; it never changes the Frame output). It never
         interprets trial evidence.

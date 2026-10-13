@@ -24,9 +24,9 @@ from central.content_catalog.deployment import (
     parse_node_deployment as parse_node_deployment,
 )
 from central.content_catalog.ports import NodeReleaseRefused
+from central.fleet.device_fence import fence_in, standing_in
 from central.fleet.models import FleetError, OfferAsset
 from central.fleet.node_sessions import NodeControlError, NodeSessions
-from central.infra.asset_roots import lock_fleet_assets_in
 from central.infra.node_releases import select_deployment
 from central.infra.transactions import PgTransaction
 from central.kernel.job_types import Prefetch
@@ -115,11 +115,12 @@ class NodeBootService:
         refusal = None
         result = None
         with self.sessions.db.transaction() as conn:
-            lock_fleet_assets_in(conn)
+            # The fence comes first, so an offer never waits on it holding the global quota row.
+            fenced = fence_in(conn, device_id, "change")
             now = self.sessions.clock.utc()
             claim_quota(conn, device_id=device_id, kind="offer", now=now)
             claim_new_device(conn, device_id=device_id, serial=serial, now=now)
-            generation = self.sessions.lock_device_generation_in(conn, device_id)
+            generation = fenced.generation()
             prior = conn.execute("SELECT * FROM node_boot_offers WHERE device_id=%s AND "
                                  "(kernel_boot_id=%s OR boot_nonce=%s)",
                                  (device_id, request.kernel_boot_id, request.boot_nonce)).fetchone()
@@ -157,13 +158,12 @@ class NodeBootService:
         return result
 
     def asset(self, offer_id: UUID, role: str) -> OfferAsset:
-        with self.sessions.db.transaction() as conn:
-            lock_fleet_assets_in(conn)
+        with self.sessions.db.read_snapshot() as conn:
             row = conn.execute("SELECT * FROM node_boot_offers WHERE offer_id=%s", (offer_id,)).fetchone()
             if row is None or row["offer_payload"] is None:
                 raise NodeControlError("node_boot_offer_unknown", 404)
             offer = parse_node_boot_offer(bytes(row["offer_payload"]))
-            generation = self.sessions.lock_device_generation_in(conn, offer.device_id)
+            generation = standing_in(conn, offer.device_id).active_generation()
             if generation != offer.device_generation:
                 raise NodeControlError("node_boot_generation_stale", 403)
             if role == "base":

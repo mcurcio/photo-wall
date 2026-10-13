@@ -13,6 +13,7 @@ from contracts.models import (
     Commit,
     Failure,
     Layer,
+    LostGrant,
     Observation,
     OutputBinding,
     Plan,
@@ -51,6 +52,9 @@ class _Assignment:
     execution_until: float = 0
     offered_until: float = 0
     readiness_generation: int = 0
+    # The readiness sequence of the latest start grant (Commit) seen for this revision, accepted
+    # or refused; reported as lost while it is prepared and not committed.
+    granted_sequence: int | None = None
 
 
 @dataclass(frozen=True)
@@ -249,6 +253,7 @@ class Executor:
                     old.layer = layer
                     # Revision-specific authorization must be renewed by central.
                     old.committed = False
+                    old.granted_sequence = None
                     old.offered_until = max(old.offered_until, plan.valid_until)
                     next_assignments[key] = old
                 else:
@@ -569,15 +574,21 @@ class Executor:
             uncertainty = self.mapping.uncertainty
             if not math.isfinite(uncertainty):
                 uncertainty = 86400.0
+            prepared = tuple(sorted(a.layer.assignment_id for a in imminent
+                                    if a.prepared and a.secured
+                                    and a.layer.assignment_id not in failures))
+            # Level state: every report says which grants this Player saw and no longer holds.
+            lost = tuple(LostGrant(assignment_id=key,
+                                   readiness_sequence=self._assignments[key].granted_sequence)
+                         for key in prepared if not self._assignments[key].committed
+                         and self._assignments[key].granted_sequence is not None)
             readiness = Readiness(
                 plan_id=self._plan.plan_id, revision=self._plan.revision,
                 authority_epoch=self._last_epoch, sequence=self._sequence,
                 secured=tuple(sorted(a.layer.assignment_id for a in current if a.secured)),
-                prepared=tuple(sorted(a.layer.assignment_id for a in imminent
-                                      if a.prepared and a.secured
-                                      and a.layer.assignment_id not in failures)),
-                capacity_ok=self._capacity_ok, clock_uncertainty=uncertainty,
+                prepared=prepared, capacity_ok=self._capacity_ok, clock_uncertainty=uncertainty,
                 observed_at=now, failures=tuple(failures[key] for key in sorted(failures)),
+                lost_grants=lost,
             )
             self._reported[self._sequence] = {
                 key: self._assignments[key].readiness_generation for key in readiness.prepared
@@ -591,6 +602,18 @@ class Executor:
             if (not self._plan or commit.authority_epoch != self._last_epoch
                     or commit.plan_id != self._plan.plan_id or commit.revision != self._plan.revision):
                 raise AuthorityError("commit authority mismatch")
+            # Seen, whether accepted or refused below: a grant not held afterwards is lost.
+            for key in commit.assignment_ids:
+                if key in self._assignments:
+                    granted = self._assignments[key].granted_sequence
+                    self._assignments[key].granted_sequence = max(
+                        commit.readiness_sequence, granted or 0)
+            # A grant already held adds nothing: a Commit re-projected without a re-granted
+            # member names only assignments this Player already holds.
+            if commit.assignment_ids and all(
+                    key in self._assignments and self._assignments[key].committed
+                    for key in commit.assignment_ids):
+                return False
             now = self._now()
             if (not self._clock_gate() or not self._capacity_ok
                     or commit.committed_at > now + self.mapping.max_uncertainty
@@ -638,6 +661,8 @@ class Executor:
                 if assignment:
                     self._lose_preparation(assignment)
                     assignment.execution_layer = None
+                    # Revoked by Central, not lost: nothing to re-grant.
+                    assignment.granted_sequence = None
                     self._invalidated.add(key)
 
     def accept_revocation(self, revocation: Revocation) -> bool:

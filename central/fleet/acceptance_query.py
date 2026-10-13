@@ -1,9 +1,10 @@
 """Internal, read-only Registry snapshot for managed-attempt assessment.
 
 The caller owns one transaction and must first establish the current T1/T2
-attempt, session and lifecycle under the fleet lock order. This adapter then
+attempt, session and lifecycle under the device fence. With `lock`, this adapter then
 locks Player before its control row, so retirement, re-enrollment or a newer
-delivery cannot change the receipt while the caller assesses that snapshot.
+delivery cannot change the receipt while the caller assesses that snapshot; without
+it, it reads the caller's READ ONLY snapshot (the operator's device read).
 It does not confer command authority or write acceptance.
 """
 
@@ -12,11 +13,12 @@ from __future__ import annotations
 from central.fleet.acceptance_evidence import AppControl
 
 
-def load_current_app_control_in(conn, device_id: str) -> AppControl | None:
+def load_current_app_control_in(conn, device_id: str, *, lock: bool) -> AppControl | None:
     """Return the internal current control row for one active device Player."""
+    suffix = " FOR SHARE" if lock else ""
     player = conn.execute(
         "SELECT id,public_key,authority_epoch FROM players "
-        "WHERE device_id=%s AND retired_at IS NULL FOR SHARE",
+        "WHERE device_id=%s AND retired_at IS NULL" + suffix,
         (device_id,),
     ).fetchone()
     if player is None:
@@ -26,7 +28,7 @@ def load_current_app_control_in(conn, device_id: str) -> AppControl | None:
         "pending_digest,pending_expires,applied_sequence,applied_at,"
         "applied_delivery_id,applied_digest,applied_ack_nonce,last_result,"
         "last_result_sequence,last_delivery_id,last_result_digest,last_result_at "
-        "FROM player_control_sessions WHERE player_id=%s FOR SHARE",
+        "FROM player_control_sessions WHERE player_id=%s" + suffix,
         (player["id"],),
     ).fetchone()
     if row is None or row["authority_epoch"] != player["authority_epoch"]:

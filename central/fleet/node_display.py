@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from uuid import UUID, uuid4
 
+from central.fleet.device_fence import fence_in
 from central.fleet.node_app_links import (
     load_current_node_app_link_for_player_in,
     load_current_node_app_link_in,
@@ -310,7 +311,7 @@ class NodeDisplay:
             raise NodeControlError("display_receipt_stale", 409)
 
     def current_frame_in(self, conn, frame_id: str):
-        """Operator-side read under Runtime locks, then the same Fleet/session order."""
+        """Operator-side read under Runtime locks, then the device fence and session order."""
         row = conn.execute(
             "SELECT b.player_id,b.output_id,p.authority_epoch,p.device_id "
             "FROM bindings b JOIN players p ON p.id=b.player_id WHERE b.frame_id=%s "
@@ -319,7 +320,7 @@ class NodeDisplay:
         ).fetchone()
         if row is None:
             raise NodeControlError("trial_frame_unbound", 409)
-        generation = self.sessions.lock_device_generation_in(conn, row["device_id"])
+        generation = fence_in(conn, row["device_id"], "act").generation()
         now = self.sessions.clock.utc()
         session = conn.execute(
             "SELECT s.producer_id,s.grant_payload,s.expires_at FROM node_sessions s "
