@@ -95,7 +95,7 @@ class PictureOperations:
     at its neutral (multipliers and factors 1, knee 1, floor 0, no LUT) changes nothing.
     `picture_change` is the picture document's change these came from, echoed by the Player's tag.
     `test_pattern` (v6): drawn instead of the Frame's photos (the module's v6 rule; the pattern's
-    layout is player/geometry.py `test_pattern_signal`); None: the photos.
+    layout is player/geometry.py `pattern_signal`); None: the photos.
 
     The print look's and display tuning's fields default to their neutral values in Python; the
     wire never defaults them (`decode_picture_operations` needs every field)."""

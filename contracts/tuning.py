@@ -11,7 +11,7 @@ Rules this module owns (one home each): which test patterns exist and their wire
 
 Rules it does NOT own: when one is up and its bound (contracts/node_picture.py, Central's
 central/displays/picture.py, the Pi's appliance/display_host/picture.py), how the Player lays one
-out and where it enters the picture steps (player/geometry.py `test_pattern_signal`, `final_pixel`).
+out and where it enters the picture steps (player/geometry.py `pattern_signal`, `final_pixel`).
 """
 from __future__ import annotations
 

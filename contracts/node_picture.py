@@ -55,7 +55,7 @@ Rules it does NOT own: how the Pi asks and writes (appliance/display_host/pictur
 picture.py, ddc.py); how it sets the connector's range (appliance/display_host/signal_range.py);
 what is stored on a Display, the session, Done, Revert and Copy (Central's
 central/displays/picture.py and hardware.py); how the Player draws a test pattern
-(player/geometry.py `test_pattern_signal`).
+(player/geometry.py `pattern_signal`).
 """
 from __future__ import annotations
 
