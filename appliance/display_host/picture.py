@@ -2,7 +2,7 @@
 Photo Wall's, each on its own) and reports back (decision 0022; the picture split, slices S1 and
 S3; from roadmap 1c's controller).
 
-Pure core, effects at the edges. `operations_for`, `judged`, `write_order`
+Pure core, effects at the edges. `operations_for`, `pattern_in_force`, `judged`, `write_order`
 and `brightness_line` are pure. `PictureController` applies them through six ports: `PictureDdc`
 (one code's read and write over the port's DDC/CI channel, picture's turn), `PictureAsk` (which
 settings on the picture list the display offers, and their values read again;
@@ -71,8 +71,26 @@ Rules this module owns (one home each):
 - **The base page's line** (`brightness_line`): the display's own brightness and Photo Wall's,
   each named; it rides the shell's `picture` op beside the operations, and the shell forwards it to
   the overlay client (frame protocol v4 `brightness`).
+- **A test pattern's ask and its receipt** (display tuning, decision 0024, design rule 1): a
+  document whose `test_pattern` differs from the ask the port holds sets the ask and its receipt
+  (the controller's `clock()`, the Pi's monotonic seconds, never compared with another system's
+  clock; None for None). The same ask in a later document (a slider edit) keeps its receipt: only a
+  new ask restarts the bound. A restarted controller (a Weston restart) restarts the bound from its
+  own receipt: this state lives for its process.
+- **The Pi's bound on a test pattern** (`pattern_in_force`): the shell worker sends
+  `operations_for(..., pattern_in_force(ask, receipt, clock()))`, so the pattern rides while
+  `now - receipt < TEST_PATTERN_SECONDS`; it wakes within TICK_SECONDS of the bound and sends the
+  operations without the pattern, under the same picture_change (the Pi's own decision). A
+  Central outage cannot leave a pattern up.
+- **A test pattern never moves DDC/CI:** the ask is the shell worker's alone; the bound's end
+  neither sets `pending` nor wakes the hardware worker (a document carrying a new ask is carried
+  out as any change, and its unchanged hardware writes nothing).
+- **The pattern shown** (the report's `test_pattern_shown`): the port's ask when the operations
+  the Player last presented (`presented_values`) carry its pattern and the ask is in force; None
+  otherwise. `_values` compares every operation field, the pattern too, so a change that turns a
+  pattern on or off waits for the shell's echo.
 - **The report** is put whenever it changes (identity, offered, for_change, results,
-  presented_change).
+  presented_change, test_pattern_shown).
 """
 from __future__ import annotations
 
@@ -95,15 +113,18 @@ from contracts.node_picture import (
     ROLLOFF_PERCENT_MAX,
     SATURATION_PERCENT_NEUTRAL,
     SOFTWARE_PERCENT_NEUTRAL,
+    TEST_PATTERN_SECONDS,
     HardwareResult,
     HardwareSetting,
     PictureDocument,
     PictureReport,
     RangeKind,
     SoftwarePicture,
+    TestPatternAsk,
     VcpCode,
     WriteResult,
 )
+from contracts.tuning import TestPattern
 
 from .ddc import DdcChannel, Urgency, VcpAnswer, answer_value, parse_terse
 from .picture_list import ASK_AGAIN_SECONDS, OfferedCache, PictureAsk, with_current
@@ -119,8 +140,10 @@ _HISTORY: Final = 16                # picture changes remembered per Output for 
 
 log = logging.getLogger(__name__)
 
-def operations_for(output_id: str, picture_change: int, software: SoftwarePicture) -> PictureOperations:
-    """The Player's operations for one Output's software group (the module's rule). Pure."""
+def operations_for(output_id: str, picture_change: int, software: SoftwarePicture,
+                   test_pattern: TestPattern | None) -> PictureOperations:
+    """The Player's operations for one Output's software group (the module's rule); `test_pattern`
+    rides as given; the bound is the controller's (`pattern_in_force`). Pure."""
     rolloff = software.highlight_rolloff_percent / ROLLOFF_PERCENT_MAX
     return PictureOperations(output_id=output_id, picture_change=picture_change,
                              rgb_multipliers=kelvin_white(software.colour_temperature_kelvin),
@@ -131,7 +154,17 @@ def operations_for(output_id: str, picture_change: int, software: SoftwarePictur
                              highlight_knee=(1 - rolloff) + rolloff * HIGHLIGHT_KNEE_MIN,
                              black_floor=software.black_floor_tenths / 1000,
                              lut=None if software.lut is None or software.lut_amount_percent == 0
-                             else LutMix(software.lut, software.lut_amount_percent / 100))
+                             else LutMix(software.lut, software.lut_amount_percent / 100),
+                             test_pattern=test_pattern)
+
+
+def pattern_in_force(ask: TestPatternAsk | None, received: float | None, now: float) -> TestPattern | None:
+    """`ask.pattern` while `now - received < TEST_PATTERN_SECONDS` (`received`: the Pi's monotonic
+    clock when this ask first arrived, never compared with any other system's clock); None
+    otherwise. Pure."""
+    if ask is None or received is None or now - received >= TEST_PATTERN_SECONDS:
+        return None
+    return ask.pattern
 
 
 def judged(written: int, after: VcpAnswer | None) -> WriteResult:
@@ -269,11 +302,15 @@ class DdcPictureAdapter:
 _NEVER: Final = object()            # no display carried out yet (an identity may itself be None)
 
 
+_VALUE_FIELDS: Final = tuple(item.name for item in fields(PictureOperations)
+                             if item.name not in ("output_id", "picture_change"))
+_PATTERN_AT: Final = _VALUE_FIELDS.index("test_pattern")
+
+
 def _values(operations: PictureOperations) -> tuple:
     """What the Player does, without which change it came from: every field but output_id and
     picture_change, so a new operation is compared the moment the contract grows it."""
-    return tuple(getattr(operations, item.name) for item in fields(PictureOperations)
-                 if item.name not in ("output_id", "picture_change"))
+    return tuple(getattr(operations, name) for name in _VALUE_FIELDS)
 
 
 @dataclass
@@ -294,6 +331,8 @@ class _Port:
     history: dict[int, tuple] = field(default_factory=dict)   # picture change -> its operations' values
     presented_values: tuple | None = None
     presented_change: int | None = None
+    pattern_ask: TestPatternAsk | None = None       # the latest document's test pattern ask
+    pattern_received: float | None = None           # clock() when that ask first arrived; None with no ask
     put: PictureReport | None = None                # the report last put
     want_apply: bool = False
     want_send: bool = False                         # re-send the operations and line, even unchanged
@@ -354,6 +393,9 @@ class PictureController:
             if seen is not None and document.picture_change <= seen.picture_change:
                 return
             port.document = document         # replaces the one waiting: newest wins
+            if document.test_pattern != port.pattern_ask:       # only a new ask restarts the bound
+                port.pattern_ask = document.test_pattern
+                port.pattern_received = None if document.test_pattern is None else self._clock()
             port.pending = port.want_apply = port.want_line = True
             self._worker(output_id, port)
             self._wake.notify_all()
@@ -395,8 +437,7 @@ class PictureController:
             port.presented_values = values
             self._presented(port, picture_change)
             if port.document is not None:
-                current = operations_for(output_id, port.document.picture_change, port.document.software)
-                if _values(current) == values:
+                if _values(self._operations(output_id, port, port.document)) == values:
                     self._presented(port, port.document.picture_change)
             self._report(output_id, port)
 
@@ -435,16 +476,33 @@ class PictureController:
         """The shell worker: the operations and the line, never behind the display's port."""
         while True:
             with self._wake:
-                while not self._stopping and not (port.want_send or port.want_line):
+                while not self._stopping and not (port.want_send or port.want_line or self._pattern_ended(port)):
                     self._wake.wait(TICK_SECONDS)
                 if self._stopping:
                     return
                 force = port.want_send
                 port.want_send = port.want_line = False
             try:
-                self._send(output_id, port, force=force)
+                taken = self._send(output_id, port, force=force)
             except Exception:
                 log.exception("picture: %s's operations failed", output_id)
+                taken = False
+            if not taken:
+                with self._wake:                    # a refused send is tried again, never in a spin
+                    self._wake.wait(TICK_SECONDS)
+
+    def _pattern(self, port: _Port) -> TestPattern | None:
+        """Under the lock: the port's test pattern while it is in force (the Pi's bound)."""
+        return pattern_in_force(port.pattern_ask, port.pattern_received, self._clock())
+
+    def _operations(self, output_id: str, port: _Port, document: PictureDocument) -> PictureOperations:
+        """Under the lock: the Player's operations for `document` now, the pattern within its bound."""
+        return operations_for(output_id, document.picture_change, document.software, self._pattern(port))
+
+    def _pattern_ended(self, port: _Port) -> bool:
+        """Under the lock: the shell last took a pattern the bound has since ended."""
+        sent = port.sent
+        return sent is not None and sent[0].test_pattern is not None and self._pattern(port) is None
 
     def _refresh(self, port: _Port) -> None:
         """Ask the shell worker to send the operations and line if either changed."""
@@ -618,28 +676,29 @@ class PictureController:
         display = DisplayBrightness(percent, BRIGHTNESS_CODE in document.hardware, port.brightness_took)
         return brightness_line(document.software.brightness_percent, display)
 
-    def _send(self, output_id: str, port: _Port, *, force: bool) -> None:
+    def _send(self, output_id: str, port: _Port, *, force: bool) -> bool:
         """The Output's operations and base page line to the shell, when either differs from what
-        the shell last took (or `force`: a re-send)."""
+        the shell last took (or `force`: a re-send); False when the shell did not take them."""
         with self._wake:
             document = port.document
             if document is None:
-                return
-            operations = operations_for(output_id, document.picture_change, document.software)
+                return True
+            operations = self._operations(output_id, port, document)
             line = self._line(port, document)
             if not force and port.sent == (operations, line):
-                return
+                return True
             port.history[document.picture_change] = _values(operations)
             while len(port.history) > _HISTORY:
                 del port.history[next(iter(port.history))]
             if port.presented_values == _values(operations):
                 self._presented(port, document.picture_change)
-                self._report(output_id, port)
+            self._report(output_id, port)               # the pattern shown ends with its bound
         if self._shell.picture(operations, timeout=SHELL_SECONDS, brightness=line):
             with self._wake:
                 port.sent = (operations, line)
-        else:
-            log.warning("picture: the shell did not take %s's operations", output_id)
+            return True
+        log.warning("picture: the shell did not take %s's operations", output_id)
+        return False
 
     @staticmethod
     def _presented(port: _Port, change: int) -> None:
@@ -647,8 +706,13 @@ class PictureController:
 
     def _report(self, output_id: str, port: _Port) -> None:
         """Under the lock: the Output's picture report, put when it differs from the last put."""
+        presented = port.presented_values
+        shown = port.pattern_ask if (port.pattern_ask is not None and presented is not None
+                                     and presented[_PATTERN_AT] == port.pattern_ask.pattern
+                                     and self._pattern(port) is not None) else None
         report = PictureReport(output_id, port.identity if port.connected else None, port.offered(),
-                               port.for_change, dict(port.results), port.presented_change)
+                               port.for_change, dict(port.results), port.presented_change,
+                               test_pattern_shown=shown)
         if report != port.put:
             port.put = report
             self._reports.put_picture(report)
@@ -657,4 +721,4 @@ class PictureController:
 __all__ = ["BRIGHTNESS_CODE", "READ_SECONDS", "REREAD_SECONDS", "SHELL_SECONDS",
            "TICK_SECONDS", "WRITE_GAP_SECONDS", "WRITE_SECONDS", "Applied", "AppliedPictures", "DdcPictureAdapter", "DisplayBrightness",
            "FileAppliedPictures", "PictureController", "PictureDdc", "PictureReports", "PictureShell",
-           "brightness_line", "judged", "operations_for", "write_order"]
+           "brightness_line", "judged", "operations_for", "pattern_in_force", "write_order"]

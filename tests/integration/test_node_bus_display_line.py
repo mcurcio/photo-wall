@@ -265,7 +265,7 @@ def test_the_display_line_carries_centrals_output_document(tmp_path):
                 return [operations for operations in map(decode_picture_operations, shell.texts)
                         if operations.picture_change == 9]
             [operations] = (await until(drawn, 15, "the print look's operations at the shell"))[:1]
-            assert operations == operations_for("HDMI-A-1", 9, PRINT_LOOK.software)
+            assert operations == operations_for("HDMI-A-1", 9, PRINT_LOOK.software, None)
             assert (operations.saturation, operations.lut) == (0.85, LutMix(PAPER, 0.8))
             assert operations.highlight_knee < 1 and operations.black_floor > 0
         finally:

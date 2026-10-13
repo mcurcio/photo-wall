@@ -245,7 +245,7 @@ def test_empty_hardware_is_carried_out_at_once_even_with_no_display(display, run
     report = run.reported(1)
     assert report.results == {} and report.identity is None and report.offered is None
     assert display.calls() == []
-    assert run.shell.last() == (operations_for(OUTPUT, 1, software(brightness=40)),
+    assert run.shell.last() == (operations_for(OUTPUT, 1, software(brightness=40), None),
                                 "Brightness: as the display has it · Photo Wall 40 %")
 
 
@@ -341,7 +341,7 @@ def test_colour_temperature_shows_white_as_charitys_table(kelvin):
     multipliers = kelvin_white(kelvin)
     assert multipliers == pytest.approx(expected, abs=1e-3)
     assert max(multipliers) == 1.0
-    operations = operations_for(OUTPUT, 1, software(kelvin=kelvin))
+    operations = operations_for(OUTPUT, 1, software(kelvin=kelvin), None)
     assert operations.rgb_multipliers == multipliers
     white = final_pixel((1.0, 1.0, 1.0), operations, inside=True)[:3]
     assert white == pytest.approx([_encoded(value) for value in expected], abs=2e-3)
@@ -349,8 +349,8 @@ def test_colour_temperature_shows_white_as_charitys_table(kelvin):
 
 def test_the_neutral_values_change_nothing_and_the_ranges_hold():
     assert kelvin_white(6500) == (1.0, 1.0, 1.0)
-    assert operations_for(OUTPUT, 3, NEUTRAL_SOFTWARE) == neutral_operations(OUTPUT, 3)
-    widest = operations_for(OUTPUT, 3, software(150, 0, 6500, 18))
+    assert operations_for(OUTPUT, 3, NEUTRAL_SOFTWARE, None) == neutral_operations(OUTPUT, 3)
+    widest = operations_for(OUTPUT, 3, software(150, 0, 6500, 18), None)
     assert (widest.light_factor, widest.contrast_slope, widest.gamma_exponent) == (1.5, 0.0, 18 / 22)
     for kelvin in range(3000, 9301, 100):
         assert max(kelvin_white(kelvin)) == 1.0
@@ -371,16 +371,16 @@ def test_the_print_look_becomes_operations_and_each_neutral_is_exactly_skipped()
     """Each print-look field at its neutral is the neutral operation exactly (so the Player skips
     the step); the ends of each range hold in the contract. Mutation probe: knee = 1 - rolloff / 100
     (no HIGHLIGHT_KNEE_MIN) -> rolloff 100 gives knee 0, which the contract refuses."""
-    assert operations_for(OUTPUT, 3, print_look()) == neutral_operations(OUTPUT, 3)
-    assert operations_for(OUTPUT, 3, print_look(lut=PAPER, amount=0)) == neutral_operations(OUTPUT, 3)
-    most = operations_for(OUTPUT, 3, print_look(saturation=150, rolloff=100, floor=100))
+    assert operations_for(OUTPUT, 3, print_look(), None) == neutral_operations(OUTPUT, 3)
+    assert operations_for(OUTPUT, 3, print_look(lut=PAPER, amount=0), None) == neutral_operations(OUTPUT, 3)
+    most = operations_for(OUTPUT, 3, print_look(saturation=150, rolloff=100, floor=100), None)
     assert (most.saturation, most.highlight_knee) == (1.5, HIGHLIGHT_KNEE_MIN)
     assert most.black_floor == 0.1
-    grey = operations_for(OUTPUT, 3, print_look(saturation=0, rolloff=40))
+    grey = operations_for(OUTPUT, 3, print_look(saturation=0, rolloff=40), None)
     assert grey.saturation == 0.0
     assert grey.highlight_knee == pytest.approx(1 - 0.4 * (1 - HIGHLIGHT_KNEE_MIN), abs=1e-12)
     for rolloff in range(101):                                     # every step stays inside the contract
-        assert HIGHLIGHT_KNEE_MIN <= operations_for(OUTPUT, 3, print_look(rolloff=rolloff)).highlight_knee <= 1
+        assert HIGHLIGHT_KNEE_MIN <= operations_for(OUTPUT, 3, print_look(rolloff=rolloff), None).highlight_knee <= 1
 
 
 @pytest.mark.parametrize("gamma", [18, 26])
@@ -388,15 +388,15 @@ def test_the_black_floor_is_a_share_of_white_light_whatever_photo_walls_gamma(ga
     """2.0 % of white light is the share 0.02 at any gamma look: the Player lifts in the panel's
     light (player/geometry.py `floor_lifted`). Mutation probe: scale by gamma_tenths -> 18 and 26
     differ."""
-    assert operations_for(OUTPUT, 1, print_look(floor=20, gamma=gamma)).black_floor == 0.02
+    assert operations_for(OUTPUT, 1, print_look(floor=20, gamma=gamma), None).black_floor == 0.02
 
 
 def test_the_lut_is_mixed_in_by_its_amount_and_none_at_zero_or_without_a_lut():
     """Mutation probe: emit LutMix at amount 0 -> the contract's ValueError."""
-    assert operations_for(OUTPUT, 1, print_look(lut=PAPER, amount=0)).lut is None
-    assert operations_for(OUTPUT, 1, print_look(lut=PAPER, amount=80)).lut == LutMix(PAPER, 0.8)
-    assert operations_for(OUTPUT, 1, print_look(lut=PAPER)).lut == LutMix(PAPER, 1.0)
-    assert operations_for(OUTPUT, 1, print_look(amount=100)).lut is None
+    assert operations_for(OUTPUT, 1, print_look(lut=PAPER, amount=0), None).lut is None
+    assert operations_for(OUTPUT, 1, print_look(lut=PAPER, amount=80), None).lut == LutMix(PAPER, 0.8)
+    assert operations_for(OUTPUT, 1, print_look(lut=PAPER), None).lut == LutMix(PAPER, 1.0)
+    assert operations_for(OUTPUT, 1, print_look(amount=100), None).lut is None
 
 
 def test_the_base_page_names_each_brightness_and_never_the_software_as_the_panels():
@@ -480,7 +480,7 @@ def test_a_change_to_the_print_look_only_waits_for_the_shell_to_present_it(displ
     assert run.reports.latest().presented_change == 6
     run.controller.document(OUTPUT, document(7, {}, look))
     until(lambda: run.shell.sent and run.shell.last()[0].picture_change == 7)
-    assert run.shell.last()[0] == operations_for(OUTPUT, 7, look) != neutral_operations(OUTPUT, 7)
+    assert run.shell.last()[0] == operations_for(OUTPUT, 7, look, None) != neutral_operations(OUTPUT, 7)
     time.sleep(0.2)
     assert run.reported(7).presented_change == 6
     run.controller.presented(OUTPUT, 7)

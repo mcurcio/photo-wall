@@ -432,7 +432,7 @@ def main() -> None:
             time.sleep(0.01)
         print(f"REPORT {report}", flush=True)
         assert report.for_change == PICTURE_CHANGE and report.results == {}, report   # no hardware value
-        operations = operations_for(OUTPUT, PICTURE_CHANGE, wanted)
+        operations = operations_for(OUTPUT, PICTURE_CHANGE, wanted, None)
         assert operations.contrast_slope < 1 and operations.light_factor < 1, operations
         inside, outside = await_compare(operations, drain)
         print(f"ADJUSTED inside={inside} outside={outside}", flush=True)
