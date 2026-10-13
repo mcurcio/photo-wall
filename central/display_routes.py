@@ -13,6 +13,8 @@ slices C1-C3; a composition-root module like library_routes.py). One route per q
 | POST | /v1/operator/picture-sessions/{session_id}/hardware-edits | HardwareEdit | PictureSequence | 404 unknown_session, 410 session_ended, 409 stale_sequence, not_offered, 422 out_of_range |
 | POST | /v1/operator/picture-sessions/{session_id}/software-edits | SoftwareEdit | PictureSequence | 404, 410, 409 stale_sequence, 422 out_of_range |
 | POST | /v1/operator/picture-sessions/{session_id}/lut-edits | LutEdit | PictureSequence | 404, 410, 409 stale_sequence, 422 unknown_lut |
+| POST | /v1/operator/picture-sessions/{session_id}/signal-range-edits | SignalRangeEdit | PictureSequence | 404 unknown_session, 410 session_ended, 409 stale_sequence, 422 (a value outside SignalRange) |
+| POST | /v1/operator/picture-sessions/{session_id}/test-pattern-edits | TestPatternEdit | PictureSequence | 404 unknown_session, 410 session_ended, 409 stale_sequence, 422 (a value outside TestPattern) |
 | POST | /v1/operator/picture-sessions/{session_id}/keepalive | | PictureSessionView | 404, 410 |
 | POST | /v1/operator/picture-sessions/{session_id}/done | | 204 | 404, 410, 409 not_presented_yet |
 | DELETE | /v1/operator/picture-sessions/{session_id} | | 204 (Revert) | 404, 410 |
@@ -22,9 +24,10 @@ Every route takes the operator `admin` dependency, as every /v1/operator route d
 answers {"error": code} with its status, the shape apiWrite.js reads. create_app mounts them through
 `mount_display_routes`: GET display (slice C1) and the Power tab's four, `_mount_power_routes`
 (slice C3). POST is Test: turn off; DELETE is Turn on, which ends the test so the request underneath
-takes over (owner q1, 2026-10-10). The Picture tab's nine (roadmap 1c's Live model; decision 0022,
+takes over (owner q1, 2026-10-10). The Picture tab's eleven (roadmap 1c's Live model; decision 0022,
 the picture split, slice S2: one edit route per group; the print look's LUT choice its own, since
-it names a LUT where the software edit sets a number) are `mount_picture_routes`, which create_app
+it names a LUT where the software edit sets a number; display tuning's signal range and test
+pattern, decision 0024, one each) are `mount_picture_routes`, which create_app
 mounts too; picture refusals (central/displays/picture.py PictureRefused) answer the same way.
 """
 from __future__ import annotations
@@ -55,7 +58,9 @@ from central.displays.views import (
     PictureSequence,
     PictureSessionView,
     PowerTestAccepted,
+    SignalRangeEdit,
     SoftwareEdit,
+    TestPatternEdit,
 )
 from central.operator_auth import OPERATOR_PREFIX
 from contracts.models import Identifier
@@ -104,7 +109,7 @@ def _mount_power_routes(app: FastAPI, *, admin: Any, queries: DisplayQueries, co
 
 
 def mount_picture_routes(app: FastAPI, *, admin: Any, queries: PictureQueries, commands: PictureCommands) -> None:
-    """The Picture tab's nine routes, mounted by create_app beside
+    """The Picture tab's eleven routes, mounted by create_app beside
     `mount_display_routes` (whose handler answers DisplayRefused); PictureRefused answers the same way."""
 
     @app.exception_handler(PictureRefused)
@@ -134,6 +139,16 @@ def mount_picture_routes(app: FastAPI, *, admin: Any, queries: PictureQueries, c
               response_model=PictureSequence)
     def edit_lut(session_id: UUID, request: LutEdit) -> PictureSequence:
         return commands.edit_lut(session_id, request)
+
+    @app.post(PICTURE_SESSIONS + "{session_id}/signal-range-edits", dependencies=[Depends(admin)],
+              response_model=PictureSequence)
+    def edit_signal_range(session_id: UUID, request: SignalRangeEdit) -> PictureSequence:
+        return commands.edit_signal_range(session_id, request)
+
+    @app.post(PICTURE_SESSIONS + "{session_id}/test-pattern-edits", dependencies=[Depends(admin)],
+              response_model=PictureSequence)
+    def edit_test_pattern(session_id: UUID, request: TestPatternEdit) -> PictureSequence:
+        return commands.edit_test_pattern(session_id, request)
 
     @app.post(PICTURE_SESSIONS + "{session_id}/keepalive", dependencies=[Depends(admin)],
               response_model=PictureSessionView)

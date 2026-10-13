@@ -23,6 +23,7 @@ import asyncio
 import json
 from dataclasses import replace
 from pathlib import Path
+from typing import Final
 
 from fastapi.testclient import TestClient
 from psycopg.types.json import Jsonb
@@ -75,6 +76,10 @@ from contracts.node_picture import (
     PictureDocument,
     PictureReport,
     RangeKind,
+    SignalRange,
+    SignalReport,
+    SignalResult,
+    TestPatternAsk,
     WriteResult,
     decode_picture_document,
     encode_picture_report,
@@ -111,12 +116,22 @@ def _picture(registry, serial: str = SERIAL, output_id: str = "HDMI-A-1") -> Pic
     return _documents(registry, serial, output_id)[1]
 
 
+_SIGNAL_APPLIED: Final = object()     # `_picture_report`'s default signal: the change's range applied
+
+
 def _picture_report(registry, *, offered: tuple[HardwareSetting, ...] | None = OFFERED, for_change: int | None = None,
                     results: dict | None = None, presented: int | None = None, serial: str = SERIAL,
                     output_id: str = "HDMI-A-1", identity: DisplayIdentity | None = NO_SERIAL,
-                    data: bytes | None = None) -> None:
-    """The Pi's picture report, recorded by Central's link store on the display line's state bucket."""
-    report = PictureReport(output_id, identity, offered, for_change, results or {}, presented)
+                    data: bytes | None = None, signal: SignalReport | None | object = _SIGNAL_APPLIED,
+                    test_pattern_shown: TestPatternAsk | None = None) -> None:
+    """The Pi's picture report, recorded by Central's link store on the display line's state bucket.
+    `signal` by default answers `for_change` (Auto in force, applied), as a Pi on Auto does; None
+    with no `for_change`."""
+    if signal is _SIGNAL_APPLIED:
+        signal = None if for_change is None else SignalReport(for_change, SignalRange.AUTO, SignalResult.APPLIED)
+    assert signal is None or isinstance(signal, SignalReport)
+    report = PictureReport(output_id, identity, offered, for_change, results or {}, presented, signal,
+                           test_pattern_shown)
     token = Token(EPOCH, next(_SEQ))
     read = Read(token, "$KV.state_display." + picture_report_key(output_id), {},
                 encode_picture_report(report) if data is None else data)
@@ -793,11 +808,11 @@ def test_done_never_counts_a_report_for_a_document_whose_print_look_differs():
     """(20) Pure: a report answering a document whose saturation differs from the draft is not
     `presented`, so Done waits. Mutation probe: `carries` compares the four picture-split fields
     only -> presented."""
-    draft = DisplayPicture({}, replace(NEUTRAL_SOFTWARE, saturation_percent=80))
+    draft = DisplayPicture({}, replace(NEUTRAL_SOFTWARE, saturation_percent=80), SignalRange.AUTO)
+    report = PictureReport("HDMI-A-1", NO_SERIAL, OFFERED, 3, {}, 3,
+                           SignalReport(3, SignalRange.AUTO, SignalResult.APPLIED))
     for software in (NEUTRAL_SOFTWARE, replace(draft.software, black_floor_tenths=5),
                      replace(draft.software, highlight_rolloff_percent=5), replace(draft.software, lut_amount_percent=5)):
         document = PictureDocument("HDMI-A-1", 3, {}, software)
-        report = PictureReport("HDMI-A-1", NO_SERIAL, OFFERED, 3, {}, 3)
         assert not presented(draft, document, report)
-    assert presented(draft, PictureDocument("HDMI-A-1", 3, {}, draft.software),
-                     PictureReport("HDMI-A-1", NO_SERIAL, OFFERED, 3, {}, 3))
+    assert presented(draft, PictureDocument("HDMI-A-1", 3, {}, draft.software), report)

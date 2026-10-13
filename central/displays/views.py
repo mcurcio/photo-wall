@@ -11,7 +11,7 @@ from uuid import UUID
 from pydantic import Field
 
 from central.displays.model import PowerStatus, PowerTest, Readiness, remaining_seconds
-from central.displays.picture import PictureStatus, SoftwareSetting
+from central.displays.picture import PictureStatus, SoftwareSetting, TestPatternState
 from central.house_time.calculator import local_date_time
 from central.house_time.model import HouseTime, LocalDateTime
 from contracts.models import Digest, Identifier, Instant, Model
@@ -41,8 +41,11 @@ from contracts.node_picture import (
     SOFTWARE_PERCENT_MIN,
     VCP_CODE_PATTERN,
     RangeKind,
+    SignalRange,
+    SignalResult,
     WriteResult,
 )
+from contracts.tuning import TestPattern
 
 
 class ModeView(Model):
@@ -253,6 +256,37 @@ class LutEdit(Model):
     expected_sequence: Annotated[int, Field(ge=1)]
 
 
+class SignalRangeEdit(Model):
+    """POST /v1/operator/picture-sessions/{session_id}/signal-range-edits: the Display's signal range
+    (decision 0024), live in the session, kept by Done, put back by Revert."""
+    signal_range: SignalRange
+    expected_sequence: Annotated[int, Field(ge=1)]
+
+
+class TestPatternEdit(Model):
+    """POST /v1/operator/picture-sessions/{session_id}/test-pattern-edits: the session's test
+    pattern, or None to take it off; never kept."""
+    __test__ = False        # a domain name, not a pytest class
+
+    test_pattern: TestPattern | None
+    expected_sequence: Annotated[int, Field(ge=1)]
+
+
+class SignalView(Model):
+    """The Pi's answer to the signal range, from the Output's latest picture report."""
+    in_force: SignalRange           # the connector's range the Pi read back
+    result: SignalResult
+    answered: bool                  # it answers the recorded document (picture.signal_answered)
+
+
+class TestPatternView(Model):
+    """The live session's test pattern and what the tab says of it."""
+    __test__ = False        # a domain name, not a pytest class
+
+    pattern: TestPattern
+    state: TestPatternState
+
+
 # The LUTs list (print look, design "The LUT"): the paper profiles the house keeps, each the one
 # source of the LUT baked from it.
 
@@ -281,6 +315,10 @@ class FramePictureView(Model):
                                                     # while connected); a list kept while the display is away stays known
     hardware: tuple[HardwareSettingView, ...]       # hardware.hardware_rows, names from PICTURE_LIST
     software: SoftwarePictureView
+    signal_range: SignalRange                       # in force: the draft's while a session is live, else stored
+    signal: SignalView | None                       # the latest report's; None: none since the Pi's controller started
+    test_pattern: TestPatternView | None            # the live session's; None: off
+    test_pattern_seconds: int                       # the Pi's bound (contracts.node_picture.TEST_PATTERN_SECONDS)
     session: PictureSessionView | None              # the Display's open session, if any
 
 

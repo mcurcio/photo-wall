@@ -41,10 +41,12 @@ from contracts.node_picture import (
     PictureDocument,
     PictureReport,
     RangeKind,
+    SignalRange,
     SoftwarePicture,
     WriteResult,
 )
 
+AUTO = SignalRange.AUTO
 HERE = DisplayIdentity("DEL", 41234, "DELL U2720Q", None)
 THERE = DisplayIdentity("GSM", 23305, "LG HDR 4K", None)
 
@@ -93,8 +95,8 @@ def test_copy_skips_every_hardware_code_when_either_list_is_unknown_or_the_kinds
 
 
 def test_copy_carries_all_software_and_leaves_the_targets_other_hardware_values():
-    source = DisplayPicture({"10": 46, "14": 5}, SoftwarePicture(114, 90, 5000, 24))
-    target = DisplayPicture({"12": 30, "14": 4}, NEUTRAL_SOFTWARE)
+    source = DisplayPicture({"10": 46, "14": 5}, SoftwarePicture(114, 90, 5000, 24), AUTO)
+    target = DisplayPicture({"12": 30, "14": 4}, NEUTRAL_SOFTWARE, AUTO)
     result, skipped = copied(source, target, source_offered=(_level("10", 100), _choices("14", (5, "6500 K"))),
                              target_offered=(_level("10", 255), _choices("14", (4, "x"), (5, "sRGB"))))
     assert dict(result.hardware) == {"10": 117, "12": 30, "14": 4} and list(result.hardware) == ["10", "12", "14"]
@@ -117,8 +119,8 @@ def test_a_report_that_does_not_know_the_list_yet_keeps_the_known_list_of_the_sa
 
 
 def _session(began_at_change: int, befores: dict | None = None) -> PictureSession:
-    return PictureSession(uuid4(), uuid4(), 1, DisplayPicture({}, NEUTRAL_SOFTWARE), began_at_change,
-                          befores or {}, frozenset({"10"}), frozenset(), Lease(10.0, None))
+    return PictureSession(uuid4(), uuid4(), 1, DisplayPicture({}, NEUTRAL_SOFTWARE, AUTO), began_at_change,
+                          befores or {}, frozenset({"10"}), frozenset(), Lease(10.0, None), None)
 
 
 def test_a_session_keeps_the_first_before_per_code_from_changes_after_it_began():
@@ -200,13 +202,13 @@ def test_revert_is_a_one_time_instruction_never_a_stored_value():
     rides the document beside the values in force (`with_restore`, in force wins) until the Pi
     answers a document that carries it. Mutation probes: `restore_answered` ignores the document's
     hardware -> an older document clears it; `with_restore` lets the instruction win -> 46 is lost."""
-    stored = DisplayPicture({}, NEUTRAL_SOFTWARE)
+    stored = DisplayPicture({}, NEUTRAL_SOFTWARE, AUTO)
     ended = _session(3, {"10": 60})                                           # lease ended at 10.0
     assert restore_of(stored, ended) == {"10": 60}
-    assert restore_of(DisplayPicture({"10": 46}, NEUTRAL_SOFTWARE), ended) == {}   # stored: nothing to put back
+    assert restore_of(DisplayPicture({"10": 46}, NEUTRAL_SOFTWARE, AUTO), ended) == {}   # stored: nothing to put back
     assert dict(kept_picture(stored, ended, 11.0).hardware) == {}             # the tab: as the display has it
     assert dict(with_restore(stored, {"10": 60}).hardware) == {"10": 60}
-    set_here = DisplayPicture({"10": 46}, NEUTRAL_SOFTWARE)
+    set_here = DisplayPicture({"10": 46}, NEUTRAL_SOFTWARE, AUTO)
     assert dict(with_restore(set_here, {"10": 60}).hardware) == {"10": 46}
     answered = _report(HERE, None, for_change=9)
     assert restore_answered({"10": 60}, stored, _document(9, {"10": 60}), answered)

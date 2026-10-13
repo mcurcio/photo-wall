@@ -32,9 +32,18 @@ One home each for:
   shown as the latest.
 - **Done waits for the Pi** (`presented`, `picture_status`): SHOWN once the report answers the
   document that carries exactly the picture Done would keep and the Player presented it.
+- **Display tuning** (decision 0024; design rules 1-3): the Display's **signal range** (the Pi's
+  HDMI RGB quantization range, `SignalRange`) is a third group, stored, live in the session's draft,
+  kept by Done and put back by Revert and the lease's end (`reverted` keeps the stored one); Done
+  also waits for the Pi's signal answer for the change (`signal_answered`: any result answers). A
+  **test pattern** is the session's, never the draft's and never stored (`edited_test_pattern`,
+  `TestPatternAsk`): it rides the document only while the session is live (`session_test_pattern`),
+  so Done, Revert and the lease's end each take it off; `test_pattern_state` says what the tab
+  shows of it.
 - **Copy** (#119; owner, 2026-10-12: "Both (Recommended)"; "Only ones set in Photo Wall
   (Recommended)"): every software value, the print look's included; the hardware values set on the source where the
-  target offers them (hardware.py's rule, slice S4); never position.
+  target offers them (hardware.py's rule, slice S4); never position, never the signal range (it
+  follows each display).
 """
 from __future__ import annotations
 
@@ -52,12 +61,16 @@ from contracts.lut import LutRef
 from contracts.node_picture import (
     NEUTRAL_SOFTWARE,
     PICTURE_LIST,
+    TEST_PATTERN_SECONDS,
     HardwareSetting,
     PictureDocument,
     PictureReport,
+    SignalRange,
     SoftwarePicture,
+    TestPatternAsk,
     VcpCode,
 )
+from contracts.tuning import TestPattern
 
 PICTURE_IDLE_SECONDS: Final = 5.0     # a picture session ends this long after its last edit or keepalive
 
@@ -108,6 +121,16 @@ class PictureStatus(StrEnum):
     SHOWN = "shown"             # written to the display and presented by the Player: Done may keep it
 
 
+class TestPatternState(StrEnum):
+    """What the tab says of the session's test pattern."""
+    __test__ = False        # a domain name, not a pytest class
+
+    WAITING = "waiting"     # asked; the Pi has not reported it on screen yet
+    SHOWN = "shown"         # the report's test_pattern_shown is this ask
+    ENDED = "ended"         # the report answers and presents the document carrying this ask, yet shows
+                            # no pattern: the Pi took it off at its bound (TEST_PATTERN_SECONDS)
+
+
 class PictureRefused(Exception):
     """A refusal the routes answer as {"error": code}: stale_sequence 409, not_offered 409,
     out_of_range 422, unknown_lut 422, session_ended 410, not_presented_yet 409."""
@@ -121,16 +144,19 @@ class PictureRefused(Exception):
 @dataclass(frozen=True)
 class DisplayPicture:
     """The Display record's picture: `hardware`, only codes set in Photo Wall (treat as read-only);
-    `software`, always complete."""
+    `software`, always complete; `signal_range`, the Pi's HDMI signal range for this display (no
+    default: every constructor decides, and Copy keeps the target's)."""
     hardware: Mapping[VcpCode, int]
     software: SoftwarePicture
+    signal_range: SignalRange
 
 
 @dataclass(frozen=True)
 class PictureSession:
     """One open picture session on one Display (picture_sessions row). `began_at_change`: the
     Output's picture change at begin (0: none), so the befores come from later results;
-    `hardware_before`: the first `before` the Pi reported per code in this session (slice S4)."""
+    `hardware_before`: the first `before` the Pi reported per code in this session (slice S4);
+    `test_pattern`: the session's test pattern ask, never in the draft (None: off)."""
     session_id: UUID
     display_id: UUID
     sequence: int
@@ -140,11 +166,13 @@ class PictureSession:
     touched_hardware: frozenset[VcpCode]
     touched_software: frozenset[SoftwareTouch]
     lease: Lease
+    test_pattern: TestPatternAsk | None
 
 
 def default_picture() -> DisplayPicture:
-    """A new Display's: no hardware value set, the software group neutral (NEUTRAL_SOFTWARE)."""
-    return DisplayPicture({}, NEUTRAL_SOFTWARE)
+    """A new Display's: no hardware value set, the software group neutral (NEUTRAL_SOFTWARE), the
+    signal range Auto (the kernel's choice: no change)."""
+    return DisplayPicture({}, NEUTRAL_SOFTWARE, SignalRange.AUTO)
 
 
 def effective_picture(stored: DisplayPicture, session: PictureSession | None, now: float) -> DisplayPicture:
@@ -165,7 +193,8 @@ def kept_picture(stored: DisplayPicture, session: PictureSession | None, now: fl
 def reverted(stored: DisplayPicture, session: PictureSession) -> DisplayPicture:
     """The one-time instruction that puts the display back: `stored`, with each touched hardware
     code absent from `stored.hardware` at `session.hardware_before[code]` when the Pi reported one,
-    so the display goes back to what it showed before the session. Never stored."""
+    so the display goes back to what it showed before the session; the signal range is `stored`'s.
+    Never stored."""
     back = {code: session.hardware_before[code] for code in session.touched_hardware
             if code not in stored.hardware and code in session.hardware_before}
     if not back:
@@ -221,15 +250,52 @@ def edited_lut(session: PictureSession, lut: LutRef | None, *, known: bool, expe
                    lease=touched(session.lease, now, idle_seconds=PICTURE_IDLE_SECONDS))
 
 
-def picture_document(output_id: str, picture_change: int, picture: DisplayPicture) -> PictureDocument:
-    """The Output's picture document at `picture_change`."""
-    return PictureDocument(output_id, picture_change, dict(picture.hardware), picture.software)
+def edited_signal_range(session: PictureSession, signal_range: SignalRange, *, expected_sequence: int,
+                        now: float) -> PictureSession:
+    """The session after the signal range's edit: the draft's range, live on the Display, kept by
+    Done and put back by Revert. PictureRefused: session_ended, stale_sequence, out_of_range 422
+    (not a SignalRange)."""
+    sequence = _next(session, expected_sequence, now)
+    if not isinstance(signal_range, SignalRange):
+        raise PictureRefused("out_of_range", 422)
+    return replace(session, sequence=sequence, draft=replace(session.draft, signal_range=signal_range),
+                   lease=touched(session.lease, now, idle_seconds=PICTURE_IDLE_SECONDS))
 
 
-def picture_digest(picture: DisplayPicture) -> str:
-    """sha256 hex of the canonical {hardware, software}; the projector raises the Output's
-    `picture_change` when it differs."""
-    body = {"hardware": dict(picture.hardware), "software": asdict(picture.software)}
+def edited_test_pattern(session: PictureSession, pattern: TestPattern | None, *, expected_sequence: int,
+                        now: float) -> PictureSession:
+    """The session after the test pattern's edit: `test_pattern` the ask (`pattern`, this edit's
+    sequence, so asking again gives a new ask the Pi bounds afresh), or None (off); the draft is
+    untouched. PictureRefused: session_ended, stale_sequence, out_of_range 422 (not a TestPattern)."""
+    sequence = _next(session, expected_sequence, now)
+    if pattern is not None and not isinstance(pattern, TestPattern):
+        raise PictureRefused("out_of_range", 422)
+    ask = None if pattern is None else TestPatternAsk(pattern, sequence)
+    return replace(session, sequence=sequence, test_pattern=ask,
+                   lease=touched(session.lease, now, idle_seconds=PICTURE_IDLE_SECONDS))
+
+
+def session_test_pattern(session: PictureSession | None, now: float) -> TestPatternAsk | None:
+    """The test pattern the picture document carries at Central's `now`: the live session's ask;
+    None with no session or once its lease ended, so Done, Revert and the lease's end each take it
+    off (design rule 1). The Pi's own bound (TEST_PATTERN_SECONDS) covers Central going away."""
+    return session.test_pattern if session is not None and session.lease.live(now) else None
+
+
+def picture_document(output_id: str, picture_change: int, picture: DisplayPicture,
+                     test_pattern: TestPatternAsk | None) -> PictureDocument:
+    """The Output's picture document at `picture_change`: `picture`'s three groups and the live
+    session's `test_pattern` (`session_test_pattern`)."""
+    return PictureDocument(output_id, picture_change, dict(picture.hardware), picture.software,
+                           picture.signal_range, test_pattern)
+
+
+def picture_digest(picture: DisplayPicture, test_pattern: TestPatternAsk | None) -> str:
+    """sha256 hex of the canonical {hardware, software, signal_range, test_pattern}; the projector
+    raises the Output's `picture_change` when it differs, so any of them moving raises it."""
+    pattern = None if test_pattern is None else {"pattern": test_pattern.pattern.value, "ask": test_pattern.ask}
+    body = {"hardware": dict(picture.hardware), "software": asdict(picture.software),
+            "signal_range": picture.signal_range.value, "test_pattern": pattern}
     return hashlib.sha256(json.dumps(body, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
@@ -239,10 +305,11 @@ def answers(document: PictureDocument | None, report: PictureReport | None) -> b
 
 
 def carries(document: PictureDocument | None, picture: DisplayPicture) -> bool:
-    """`document` carries exactly `picture`, both groups (the document is projected from the
-    session asynchronously, so the recorded one may still be the previous)."""
+    """`document` carries exactly `picture`, all three groups (the document is projected from the
+    session asynchronously, so the recorded one may still be the previous). The test pattern is not
+    read: it is never the draft's."""
     return (document is not None and dict(document.hardware) == dict(picture.hardware)
-            and document.software == picture.software)
+            and document.software == picture.software and document.signal_range == picture.signal_range)
 
 
 def hardware_answered(hardware: Mapping[VcpCode, int], document: PictureDocument | None,
@@ -252,13 +319,34 @@ def hardware_answered(hardware: Mapping[VcpCode, int], document: PictureDocument
     return answers(document, report) and document is not None and dict(document.hardware) == dict(hardware)
 
 
+def signal_answered(document: PictureDocument | None, report: PictureReport | None) -> bool:
+    """The Pi answered `document`'s signal range: `report.signal` is for its picture_change. Any
+    result answers it (applied, unsupported or failed; the tab shows which and the range in force)."""
+    return (document is not None and report is not None and report.signal is not None
+            and report.signal.for_change == document.picture_change)
+
+
 def presented(picture: DisplayPicture, document: PictureDocument | None, report: PictureReport | None) -> bool:
-    """The Pi answered the document that carries exactly `picture`, not an older one, and the
-    Player presented it: a report answering the previous document must neither show the Picture
-    tab `shown` nor let Done keep the draft."""
-    return (carries(document, picture) and answers(document, report) and report is not None
-            and document is not None and report.presented_change is not None
-            and report.presented_change >= document.picture_change)
+    """The Pi answered the document that carries exactly `picture`, not an older one, its signal
+    range included (`signal_answered`), and the Player presented it: a report answering the previous
+    document must neither show the Picture tab `shown` nor let Done keep the draft."""
+    return carries(document, picture) and _presents(document, report) and signal_answered(document, report)
+
+
+def test_pattern_state(ask: TestPatternAsk, document: PictureDocument | None,
+                       report: PictureReport | None) -> TestPatternState:
+    """SHOWN when the report's `test_pattern_shown` is `ask`; ENDED when the report answers and
+    presents the document carrying `ask` yet shows no pattern (the Pi took it off at its bound,
+    TEST_PATTERN_SECONDS after it received it); else WAITING."""
+    if report is not None and report.test_pattern_shown == ask:
+        return TestPatternState.SHOWN
+    if (document is not None and document.test_pattern == ask and _presents(document, report)
+            and report is not None and report.test_pattern_shown is None):
+        return TestPatternState.ENDED
+    return TestPatternState.WAITING
+
+
+test_pattern_state.__test__ = False     # a domain rule, not a pytest test (tests import it by name)
 
 
 def picture_status(*, bound: bool, picture: DisplayPicture, document: PictureDocument | None,
@@ -298,10 +386,11 @@ def copied(source: DisplayPicture, target: DisplayPicture, *,
     """(`target` with `source`'s software and the copied hardware merged over the target's, the
     source codes skipped in picture-list order): `hardware.copied_hardware` decides which hardware
     values carry over; a skipped code, and every target code the source does not set, stays as it
-    is on the target."""
+    is on the target, and so does the target's signal range (it follows each display)."""
     hardware, skipped = copied_hardware(source.hardware, source_offered=source_offered,
                                         target_offered=target_offered)
-    return DisplayPicture(_in_list_order({**target.hardware, **hardware}), source.software), skipped
+    return DisplayPicture(_in_list_order({**target.hardware, **hardware}), source.software,
+                          target.signal_range), skipped
 
 
 def with_befores(session: PictureSession, report: PictureReport) -> PictureSession:
@@ -328,12 +417,20 @@ def _next(session: PictureSession, expected_sequence: int, now: float) -> int:
         raise PictureRefused("stale_sequence", 409) from None
 
 
+def _presents(document: PictureDocument | None, report: PictureReport | None) -> bool:
+    """`report` answers `document` and the Player presented that change (or a later one)."""
+    return (answers(document, report) and document is not None and report is not None
+            and report.presented_change is not None and report.presented_change >= document.picture_change)
+
+
 def _in_list_order(hardware: Mapping[VcpCode, int]) -> dict[VcpCode, int]:
     return {code: hardware[code] for code in PICTURE_LIST if code in hardware}
 
 
-__all__ = ["PICTURE_IDLE_SECONDS", "DisplayPicture", "PictureRefused", "PictureSession", "PictureStatus",
-           "SoftwareChoice", "SoftwareSetting", "SoftwareTouch", "answers", "carries", "copied", "default_picture",
-           "edited_hardware", "edited_lut", "edited_software", "software_touch",
+__all__ = ["PICTURE_IDLE_SECONDS", "TEST_PATTERN_SECONDS", "DisplayPicture", "PictureRefused", "PictureSession",
+           "PictureStatus", "SoftwareChoice", "SoftwareSetting", "SoftwareTouch", "TestPatternState", "answers",
+           "carries", "copied", "default_picture", "edited_hardware", "edited_lut", "edited_signal_range",
+           "edited_software", "edited_test_pattern", "software_touch",
            "effective_picture", "hardware_answered", "kept_picture", "picture_digest", "picture_document",
-           "picture_status", "presented", "restore_answered", "restore_of", "reverted", "with_befores", "with_restore"]
+           "picture_status", "presented", "restore_answered", "restore_of", "reverted", "session_test_pattern",
+           "signal_answered", "test_pattern_state", "with_befores", "with_restore"]

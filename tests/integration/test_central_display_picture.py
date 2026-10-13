@@ -9,9 +9,11 @@ knows what the display offers. (3) A hardware edit made through the operator API
 process, reaches the Node's `picture-HDMI-A-1` with a new picture change within 3 s while
 `output-HDMI-A-1` keeps its change: carried by the notification (no reconcile runs between the edit
 and its arrival). Mutation probe: drop the session write's NOTIFY -> the edit arrives only at the
-session's idle deadline, past 3 s. (Print look) the display line is schema major 5 and the
-document Central writes decodes with the print look's fields (the Display's neutral ones); the v4
-software shape would not decode (contracts.node_picture's strict decoder).
+session's idle deadline, past 3 s. (Print look) the document Central writes decodes with the print
+look's fields (the Display's neutral ones); the v4 software shape would not decode
+(contracts.node_picture's strict decoder). (Display tuning, decision 0024) the display line is
+schema major 6: (4) the session's signal range and test pattern reach the Node's document, and the
+Node's signal answer and the pattern it shows come back to the Picture tab.
 """
 from __future__ import annotations
 
@@ -50,12 +52,17 @@ from contracts.node_picture import (
     HardwareSetting,
     PictureReport,
     RangeKind,
+    SignalRange,
+    SignalReport,
+    SignalResult,
+    TestPatternAsk,
     decode_picture_document,
     encode_picture_report,
     picture_document_key,
     picture_report_key,
 )
 from contracts.time import ManualClock
+from contracts.tuning import TestPattern
 from nodeapi.hub import NodeLink
 from nodeapi.node import NodeSession, Release
 
@@ -68,10 +75,13 @@ def _report() -> bytes:
     return encode_output_report(OutputReport("HDMI-A-1", True, NO_SERIAL, MODE, (), None, None, None, None))
 
 
-def _picture_report() -> bytes:
-    """The Pi's picture report on HDMI-A-1: the monitor offers brightness as a level of 100, read at 40."""
+def _picture_report(signal: SignalReport | None = None, shown: TestPatternAsk | None = None) -> bytes:
+    """The Pi's picture report on HDMI-A-1: the monitor offers brightness as a level of 100, read at 40;
+    with `signal`, it answers that change (presented), showing `shown`."""
+    change = None if signal is None else signal.for_change
     return encode_picture_report(PictureReport(
-        "HDMI-A-1", NO_SERIAL, (HardwareSetting("10", HardwareRange(RangeKind.LEVEL, 100, ()), 40),), None, {}, None))
+        "HDMI-A-1", NO_SERIAL, (HardwareSetting("10", HardwareRange(RangeKind.LEVEL, 100, ()), 40),), change, {},
+        change, signal, shown))
 
 
 def test_picture_documents_and_reports_cross_the_display_line_on_their_own_keys(database, tmp_path, monkeypatch):
@@ -132,7 +142,8 @@ def test_picture_documents_and_reports_cross_the_display_line_on_their_own_keys(
             power = await until(held, SECONDS, "output-HDMI-A-1 on the Node")
             first = await until(held_picture, SECONDS, "(1) picture-HDMI-A-1 on the Node")
             assert (dict(first.hardware), first.software.brightness_percent) == ({}, 100)
-            assert SCHEMA_MAJOR == 5 and first.software == NEUTRAL_SOFTWARE   # the print look's fields, neutral
+            assert SCHEMA_MAJOR == 6 and first.software == NEUTRAL_SOFTWARE   # the print look's fields, neutral
+            assert (first.signal_range, first.test_pattern) == (SignalRange.AUTO, None)
 
             # (2) The Output report records the display; the picture report, what it offers.
             display.state.put(output_report_key("HDMI-A-1"), _report())
@@ -171,6 +182,36 @@ def test_picture_documents_and_reports_cross_the_display_line_on_their_own_keys(
             assert carried.picture_change == settled_picture.picture_change + 1
             assert (await held()).change == power.change   # picture never costs power
             assert len(reconciles) == reconciled   # no reconcile carried it
+
+            # (4) The signal range and the test pattern cross the line both ways.
+            session = begun.json()["session_id"]
+            ranged = await asyncio.to_thread(
+                client.post, f"/v1/operator/picture-sessions/{session}/signal-range-edits", headers=AUTH,
+                json={"signal_range": "full", "expected_sequence": 2})
+            assert ranged.status_code == 200, ranged.text
+            asked = await asyncio.to_thread(
+                client.post, f"/v1/operator/picture-sessions/{session}/test-pattern-edits", headers=AUTH,
+                json={"test_pattern": "white", "expected_sequence": 3})
+            assert asked.json() == {"sequence": 4}, asked.text
+
+            async def tuned():
+                found = await held_picture()
+                return found if found and found.test_pattern is not None else None
+            tuning = await until(tuned, 3, "(4) the signal range and test pattern on the Node")
+            assert (tuning.signal_range, tuning.test_pattern) == (SignalRange.FULL, TestPatternAsk(TestPattern.WHITE, 4))
+            display.state.put(picture_report_key("HDMI-A-1"), _picture_report(
+                SignalReport(tuning.picture_change, SignalRange.FULL, SignalResult.APPLIED), tuning.test_pattern))
+            kept = await asyncio.to_thread(client.post, f"/v1/operator/picture-sessions/{session}/keepalive",
+                                           headers=AUTH)       # the pattern is the live session's
+            assert kept.status_code == 200, kept.text
+
+            async def answered():
+                view = (await asyncio.to_thread(client.get, "/v1/operator/frames/kitchen/picture",
+                                                headers=AUTH)).json()
+                return view if view["signal"] is not None else None
+            view = await until(answered, 3, "(4) the Node's signal answer on the Picture tab")
+            assert view["signal"] == {"in_force": "full", "result": "applied", "answered": True}
+            assert view["test_pattern"] == {"pattern": "white", "state": "shown"}
             assert not running.done()
         finally:
             stop.set()

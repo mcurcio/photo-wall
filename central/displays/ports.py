@@ -19,7 +19,9 @@ from central.displays.views import (
     PictureSequence,
     PictureSessionView,
     PowerTestAccepted,
+    SignalRangeEdit,
     SoftwareEdit,
+    TestPatternEdit,
 )
 
 
@@ -95,6 +97,17 @@ class PictureCommands(Protocol):
     def edit_lut(self, session_id: UUID, edit: LutEdit) -> PictureSequence:
         """The LUT choice, live on the Display: a listed paper profile's LUT under the current
         recipe, or none. unknown_session, session_ended, stale_sequence, unknown_lut."""
+        ...
+
+    def edit_signal_range(self, session_id: UUID, edit: SignalRangeEdit) -> PictureSequence:
+        """The Display's signal range, live on the Display (decision 0024): kept by Done, put back
+        by Revert and the lease's end. unknown_session, session_ended, stale_sequence."""
+        ...
+
+    def edit_test_pattern(self, session_id: UUID, edit: TestPatternEdit) -> PictureSequence:
+        """The session's test pattern, or None to take it off: a new ask at the edit's sequence,
+        never stored, off at Done, Revert and the lease's end. unknown_session, session_ended,
+        stale_sequence."""
         ...
 
     def keep_picture_alive(self, session_id: UUID) -> PictureSessionView:
