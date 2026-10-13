@@ -5928,3 +5928,23 @@ each a refinement the design's sketch left open or a fact of the code it did not
 - **Not in K1's paths:** docs/design-language.md §4 must list the new `HistoryList` pattern (the
   console-ux procedure, step 8); left to the docs unit (design unit 8). Catalogue baselines are
   placeholders (Docker does not answer on the build host), to be replaced from CI's pinned render.
+
+## configuration snapshots console lane, slice K2 Position History (implementer, 2026-10-13)
+
+- **Owned paths:** `useFrameAdjustment` gaining `restore` (frozen) makes `Adjustment` require it, so
+  central/console/src/domain/frame-position.stories.tsx (not listed) gains one fixture line. K1's
+  central/console/src/domain/picture-history.tsx (not in K2's list; this lane's own file) now holds
+  the two tabs' shared layout (`daysOf`, `shownEntries`, `historyProblem`), and historyApi.js the
+  shared paging and polling (`useHistoryPages`), so Position's History duplicates neither.
+- **Probe K2-entry-revision is equivalent as worded:** Central's Restore answers the draft at the
+  trial's base revision (`position_history.restored_draft(base_revision=...)`), which is the draft's
+  own base, so "take the answer's revision" changes nothing. The probe run instead takes the answer as
+  the draft's origin (`adopt`): the restored draft is then no change and Done is never offered.
+  The OVERTAKEN case proves Central's Save CAS still refuses a restored draft after a save elsewhere.
+- **Restoring the newest kept Position is no change:** the draft equals its origin, so Done is not
+  offered (as after a Revert); the tracer restores an older kept row. Picture's Restore differs: its
+  draft becomes every restored value, so Done is offered (the session's draft is Central's there).
+- **Not-live reason:** Restore says "Open while the editor runs" whenever no live session runs; the
+  editor right above says why in its own words (live-adjustment.tsx keeps them private).
+- **Summary lines** are the spec's fixed format (fit, rotation, mat depth, light count), so two
+  entries that differ only in their corners read the same; the corners are under Details.

@@ -1,6 +1,7 @@
+import type * as React from "react";
 import { useCallback, useEffect, useState } from "react";
 
-import { readPictureHistory } from "../historyApi.js";
+import { readPictureHistory, useHistoryPages } from "../historyApi.js";
 import type { PictureEntryKind, PictureEntryView, PictureHistoryView } from "../historyApi.js";
 import type {
   HardwareSettingView, PictureRestoreResult, SignalRange, SoftwarePictureView, TestPattern,
@@ -8,7 +9,6 @@ import type {
 import { Note } from "../patterns/fact-row";
 import { type HistoryDay, HistoryList, type HistoryRow } from "../patterns/history-list";
 import { ProblemCard } from "../patterns/problem-card";
-import { usePolledRead } from "../polledRead.js";
 import { dayLabel, timeOfDay } from "../timeWords.js";
 import { blackFloorWords, hardwareWords, type PictureSession } from "./frame-picture";
 
@@ -23,11 +23,6 @@ export interface PictureHistoryProps {
   /** Called after an accepted Restore. */
   onRestored?: () => void;
 }
-
-/** How often the list is read while the tab is shown. */
-const CADENCE_MS = 2000;
-/** Entries per read: the newest page, and each "Show older". */
-const PAGE = 50;
 
 const TITLE = "History";
 const INTRO = "Every change to this display's picture, newest first. Restore puts one back in the editor; "
@@ -124,35 +119,65 @@ export function summary(details: readonly { label: string; value: string }[],
   return changed.length === 0 ? SAME : words(changed);
 }
 
-const epoch = (at: string) => Date.parse(at) / 1000;
+/**
+ * Any history's entries as the list's days, newest first: grouped by the house's day (`dayLabel`),
+ * each row named by its entry id with its time with seconds (`timeOfDay`), the rest from `row`. The
+ * Picture and Position tabs' one way to lay out a history.
+ */
+export function daysOf<E extends { entry_id: string; at: string }>(entries: readonly E[],
+  row: (entry: E, index: number) => Omit<HistoryRow, "id" | "time">): HistoryDay[] {
+  const days: { label: string; rows: HistoryRow[] }[] = [];
+  entries.forEach((entry, index) => {
+    const at = Date.parse(entry.at) / 1000;
+    const label = dayLabel(at);
+    const shown: HistoryRow = { id: entry.entry_id, time: timeOfDay(at), ...row(entry, index) };
+    if (days.at(-1)?.label === label) days.at(-1)!.rows.push(shown);
+    else days.push({ label, rows: [shown] });
+  });
+  return days;
+}
+
+/** The newest page's entries, then the older ones loaded, each once. */
+export function shownEntries<E extends { entry_id: string }>(newest: readonly E[], older: readonly E[]): E[] {
+  const seen = new Set(newest.map((entry) => entry.entry_id));
+  return [...newest, ...older.filter((entry) => !seen.has(entry.entry_id))];
+}
+
+/** A History's problem: its read failed (with Retry), else the last Restore was refused (`words`). */
+export function historyProblem({ readError, refused, what, words, onRetry }: {
+  readError: string | null; refused: string | null; what: string; words: (code: string) => string; onRetry: () => void;
+}): React.ReactNode {
+  if (readError !== null) {
+    return (
+      <ProblemCard scope="central" variant="inline" verdict={{ severity: "unknown", label: "Can't tell", receipt: null }}
+        what={`Photo Wall's server did not answer with ${what}.`} doing={null}
+        action={{ label: "Retry", onAction: onRetry }}
+        details={<Note>{`Photo Wall's answer: ${readError}`}</Note>} />
+    );
+  }
+  if (refused === null) return undefined;
+  return (
+    <ProblemCard scope="central" variant="inline" live verdict={{ severity: "notice", label: "Not restored", receipt: null }}
+      what={words(refused)} doing={null} details={<Note>{`Photo Wall's answer: ${refused}`}</Note>} />
+  );
+}
 
 /**
- * The entries as the list's days: grouped by the house's day (`dayLabel`), each row its time with
- * seconds (`timeOfDay`), its kind in words, a summary against the entry below it, every value, and
- * Restore as `restore` says.
+ * The entries as the list's days (`daysOf`), each row its kind in words, a summary against the
+ * entry below it, every value, and Restore as `restore` says.
  */
 export function historyDays(entries: readonly PictureEntryView[], rows: Rows,
   restore: HistoryRow["restore"]): HistoryDay[] {
   const recipe = entries.find((entry) => entry.kind.startsWith("kept-") && entry.picture.lut_recipe_id !== null)
     ?.picture.lut_recipe_id ?? null;
   const details = entries.map((entry) => entryDetails(entry, rows, recipe));
-  const days: { label: string; rows: HistoryRow[] }[] = [];
-  entries.forEach((entry, index) => {
-    const at = epoch(entry.at);
-    const label = dayLabel(at);
-    const row: HistoryRow = {
-      id: entry.entry_id,
-      time: timeOfDay(at),
-      what: WHAT[entry.kind],
-      notKept: NOT_KEPT.has(entry.kind),
-      summary: summary(details[index], details[index + 1] ?? null),
-      details: details[index],
-      restore,
-    };
-    if (days.at(-1)?.label === label) days.at(-1)!.rows.push(row);
-    else days.push({ label, rows: [row] });
-  });
-  return days;
+  return daysOf(entries, (entry, index) => ({
+    what: WHAT[entry.kind],
+    notKept: NOT_KEPT.has(entry.kind),
+    summary: summary(details[index], details[index + 1] ?? null),
+    details: details[index],
+    restore,
+  }));
 }
 
 /** What an accepted Restore did not bring back, in words (none: all of it came back). */
@@ -196,23 +221,15 @@ export function PictureHistoryList({
   history, older = [], session, busy, readError = null, outcome = null, restoring, onRestore, onRetry, onOlder,
 }: PictureHistoryListProps) {
   const rows: Rows = Object.fromEntries((session.view?.hardware ?? []).map((row) => [row.code, row]));
-  const newest = history?.entries ?? [];
-  const seen = new Set(newest.map((entry) => entry.entry_id));
-  const entries = [...newest, ...older.filter((entry) => !seen.has(entry.entry_id))];
+  const entries = shownEntries(history?.entries ?? [], older);
   const notes = [
     ...(history?.unrecorded_change ? [UNRECORDED] : []),
     ...(outcome !== null && "notes" in outcome ? outcome.notes : []),
   ];
-  const problem = readError !== null ? (
-    <ProblemCard scope="central" variant="inline" verdict={{ severity: "unknown", label: "Can't tell", receipt: null }}
-      what="Photo Wall's server did not answer with this display's history." doing={null}
-      action={{ label: "Retry", onAction: onRetry }}
-      details={<Note>{`Photo Wall's answer: ${readError}`}</Note>} />
-  ) : outcome !== null && "error" in outcome ? (
-    <ProblemCard scope="central" variant="inline" live verdict={{ severity: "notice", label: "Not restored", receipt: null }}
-      what={REFUSALS[outcome.error] ?? "Photo Wall refused the restore."} doing={null}
-      details={<Note>{`Photo Wall's answer: ${outcome.error}`}</Note>} />
-  ) : undefined;
+  const problem = historyProblem({
+    readError, refused: outcome !== null && "error" in outcome ? outcome.error : null, what: "this display's history",
+    words: (code) => REFUSALS[code] ?? "Photo Wall refused the restore.", onRetry,
+  });
   return (
     <HistoryList title={TITLE} intro={INTRO} notice={notes.length === 0 ? undefined : notes.join(" ")}
       days={historyDays(entries, rows, restoreState(session))} empty={EMPTY} busy={busy} problem={problem}
@@ -220,26 +237,19 @@ export function PictureHistoryList({
   );
 }
 
-type Read = { history: PictureHistoryView | null; error: string | null; full: boolean } | null;
-
 /**
  * The Picture tab's History (configuration snapshots; owner, 2026-10-13: "configuration snapshots"
  * that keep "a history of what has been done in the past", used to "View and restore"): every kept
- * and not-kept change of the Display's picture, newest first by day, read every CADENCE_MS while the
- * tab is shown and again after a Restore, Done or Revert. Restore loads an entry into the live
+ * and not-kept change of the Display's picture, newest first by day, read while the tab is shown
+ * (historyApi.js `useHistoryPages`) and again after a Restore, Done or Revert. Restore loads an entry into the live
  * editor (pictureSession.js `restore`); the operator still presses Done. "Show older" reads the page
  * before the last entry shown; a later poll refreshes only the newest page.
  */
 export function PictureHistory({ displayId, session, onRestored }: PictureHistoryProps) {
-  const load = useCallback(async (previous: Read): Promise<Read> => {
-    const result = await readPictureHistory(displayId, { limit: PAGE }) as
-      { ok: true; history: PictureHistoryView } | { ok: false; error: string };
-    return result.ok ? { history: result.history, error: null, full: result.history.entries.length === PAGE }
-      : { history: previous?.history ?? null, error: result.error, full: previous?.full ?? false };
-  }, [displayId]);
-  const { value: read, refresh } = usePolledRead(load, { cadenceMs: CADENCE_MS, initial: null as Read });
-  const [older, setOlder] = useState<{ entries: readonly PictureEntryView[]; full: boolean } | null>(null);
-  const [loadingOlder, setLoadingOlder] = useState(false);
+  const read = useCallback((page: { before?: string; limit: number }) => readPictureHistory(displayId, page) as
+    Promise<{ ok: true; history: PictureHistoryView } | { ok: false; error: string }>, [displayId]);
+  const pages = useHistoryPages(read);
+  const { refresh } = pages;
   const [restoring, setRestoring] = useState<string | null>(null);
   const [outcome, setOutcome] = useState<PictureHistoryListProps["outcome"]>(null);
 
@@ -263,24 +273,10 @@ export function PictureHistory({ displayId, session, onRestored }: PictureHistor
     void refresh();
   };
 
-  const entries = [...(read?.history?.entries ?? []), ...(older?.entries ?? [])];
-  const more = older === null ? read?.full === true : older.full;
-  const showOlder = async () => {
-    const last = entries.at(-1);
-    if (last === undefined || loadingOlder) return;
-    setLoadingOlder(true);
-    const result = await readPictureHistory(displayId, { before: last.at, limit: PAGE }) as
-      { ok: true; history: PictureHistoryView } | { ok: false; error: string };
-    setLoadingOlder(false);
-    if (result.ok) {
-      setOlder({ entries: [...(older?.entries ?? []), ...result.history.entries], full: result.history.entries.length === PAGE });
-    }
-  };
-
   return (
-    <PictureHistoryList history={read?.history ?? null} older={older?.entries ?? []} session={session}
-      busy={read === null || loadingOlder} readError={read?.error ?? null} outcome={outcome}
+    <PictureHistoryList history={pages.history} older={pages.olderEntries} session={session}
+      busy={pages.loading} readError={pages.error} outcome={outcome}
       restoring={restoring} onRestore={(id) => { void restore(id); }} onRetry={() => { void refresh(); }}
-      onOlder={more ? () => { void showOlder(); } : undefined} />
+      onOlder={pages.more ? () => { void pages.older(); } : undefined} />
   );
 }

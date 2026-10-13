@@ -7,6 +7,7 @@ import { FrameOverview } from "../domain/frame-overview";
 import { FrameDraftFit, FramePhotos } from "../domain/frame-photos";
 import { FramePicture } from "../domain/frame-picture";
 import { PictureHistory } from "../domain/picture-history";
+import { PositionHistory } from "../domain/position-history";
 import { FramePosition, type PixelSize } from "../domain/frame-position";
 import { FrameInput, FramePower } from "../domain/frame-power";
 import { useFrameWhy } from "../domain/frame-why";
@@ -89,7 +90,8 @@ function outputSize(snapshot: object | null, frame: Frame): PixelSize | null {
  * tab each. The header names the Frame, its way back to the Wall and its health (health.js,
  * the plan tile's words). Overview is what Central puts on it and why, and its Photos: one Fit board
  * row per Scene that shows photos here (follow-ups C1); Position is where the
- * picture sits on the Display (its fit, corners, nudges, rotation); Picture is the brightness,
+ * picture sits on the Display (its fit, corners, nudges, rotation), with the Frame's Position
+ * History; Picture is the brightness,
  * contrast, colour temperature and gamma of the display that feeds it, with that display's History
  * (every kept and tried change, and Restore into the editor); Power is how the Pi turns
  * its display off and on, with Test: turn off and Turn on; Hardware is which Pi and HDMI output
@@ -176,12 +178,17 @@ export function FramePage({ snapshot, bootFacts, hosts, frameId, tab, onTab, foc
           </>
         )}
         {tab === "position" && (
-          <FramePosition adjustment={adjustment} size={outputSize(snapshot, frame)} piHref={piHref}
-            readiness={frame.readiness}
-            whatFits={(
-              <FrameDraftFit snapshot={snapshot} frameId={frameId} profile={wholeProfile(frame.profile)}
-                calibration={{ revision: frame.calibration?.revision ?? 1, fit: adjustment.draft.fit }} />
-            )} />
+          <>
+            <FramePosition adjustment={adjustment} size={outputSize(snapshot, frame)} piHref={piHref}
+              readiness={frame.readiness}
+              whatFits={(
+                <FrameDraftFit snapshot={snapshot} frameId={frameId} profile={wholeProfile(frame.profile)}
+                  calibration={{ revision: frame.calibration?.revision ?? 1, fit: adjustment.draft.fit }} />
+              )} />
+            {/* The Frame's Position history, with Restore into the draft (configuration snapshots). */}
+            <PositionHistory key={`${frameId}:position-history`} frameId={frameId} adjustment={adjustment}
+              size={outputSize(snapshot, frame)} />
+          </>
         )}
         {tab === "picture" && (
           <>

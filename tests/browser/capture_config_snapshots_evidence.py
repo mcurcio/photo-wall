@@ -1,4 +1,5 @@
-"""Screenshots of configuration snapshots: the Frame page's Picture tab before and after its History.
+"""Screenshots of configuration snapshots: the Frame page's Picture and Position tabs before and after
+their History.
 
 Not a test (no `test_` prefix, so CI never collects it). Run it by path, against a built console
 and the test database, as the browser tier runs (AGENTS.md Verify):
@@ -9,8 +10,8 @@ and the test database, as the browser tier runs (AGENTS.md Verify):
 `-k before` runs on a checkout of main with this file copied there: the `before` case imports
 nothing main lacks. PNGs go to $PHOTO_WALL_EVIDENCE_DIR (default docs/evidence/config-snapshots), one
 per state and colour scheme. Seeding reuses the browser tests' own helpers
-(test_frame_picture_browser.py, test_picture_history_browser.py), so every state shown here is one
-those tests prove.
+(test_frame_picture_browser.py, test_picture_history_browser.py, test_frame_mat_browser.py,
+test_position_history_browser.py), so every state shown here is one those tests prove.
 """
 
 import os
@@ -18,7 +19,7 @@ from pathlib import Path
 
 import pytest
 from console_tasks import connect, open_frame
-from operator_harness import operator_server
+from operator_harness import operator_server, sign_in
 from playwright.sync_api import expect
 
 pytestmark = pytest.mark.skipif(
@@ -77,3 +78,56 @@ def test_after_picture_history(page, registry, scheme):
         return {"tab": "after-picture-tab", "after-picture-history": _history(page)}
 
     _picture(page, registry, scheme, act)
+
+
+def _position(page, registry, scheme, act=None, history=False):
+    """The Position tab once the Pi presents; `act(page)` then returns what else to shoot. The fake
+    Central's session routes are test_frame_mat_browser.py's, with the history's exchanges and
+    Restore (test_position_history_browser.py) when `history`."""
+    from test_console_frame_page_browser import FRAME, PRESENTED, _bar, _seed
+    from test_frame_mat_browser import MatSessions
+
+    _seed(registry)
+    page.set_viewport_size({"width": 1280, "height": 900})
+    page.emulate_media(color_scheme=scheme)
+    if history:
+        from test_position_history_browser import HistorySessions
+        HistorySessions(page, registry)
+    else:
+        MatSessions(page, registry)
+    try:
+        with operator_server(registry.db, registry.clock) as origin:
+            sign_in(page, origin)
+            open_frame(page, FRAME, "position")
+            expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
+            shots = act(page) if act else {"tab": "before-position-tab"}
+            _shoot(page.get_by_role("tabpanel", name="Position"), shots.pop("tab"), scheme)
+            for name, locator in shots.items():
+                _shoot(locator, name, scheme)
+    finally:
+        page.unroute_all(behavior="ignoreErrors")
+
+
+@pytest.mark.parametrize("scheme", SCHEMES)
+def test_before_position(page, registry, scheme):
+    """Base: the Position tab as main left it (no History)."""
+    _position(page, registry, scheme)
+
+
+@pytest.mark.parametrize("scheme", SCHEMES)
+def test_after_position_history(page, registry, scheme):
+    """A corner moved and kept by Done, then a deeper mat tried and not kept: the tab with its
+    History, and the History with the kept row's Details open."""
+    from test_console_frame_page_browser import _move
+    from test_position_history_browser import KEPT, TRIED, _depth, _done, _history, _rows
+
+    def act(page):
+        _move(page, 2)
+        _done(page)
+        expect(_rows(page, KEPT)).to_have_count(2)
+        _depth(page).fill("6")
+        expect(_rows(page, TRIED).first).to_contain_text("mat 6.0 mm")
+        _rows(page, KEPT).first.get_by_role("button", name="Details").click()
+        return {"tab": "after-position-tab", "after-position-history": _history(page)}
+
+    _position(page, registry, scheme, act, history=True)
