@@ -298,7 +298,7 @@ Display tuning ([0024](decisions/0024-display-tuning.md)) adds a test pattern to
 
 - **One place decides, per Output.** The Player's draw for an Output is the only place that chooses between the photos, Position's grid and a pattern: a pattern replaces every Frame's layer on that Output, the grid included; the grid stays the Frame's own input and returns when the pattern goes.
 - **Look patterns versus the raw Black level.** White and Grey ramp stand in for the Frame's photo inside each opening and then pass through every step of [0023](decisions/0023-print-look.md)'s order and the Frame's mat, so they show what a photo gets. The Black level enters after them: raw signal values (0 with steps 1 to 20 beside it), through no Photo Wall step and no mat, so no setting can hide or fake a signal range fault. Outside every opening stays black for all three.
-- **One layout, held equal.** [`player/geometry.py`](../player/geometry.py) `test_pattern_signal` is the layout of each pattern in an opening and `final_pixel` where it enters; the shader in `player/native.py` mirrors them and the pixel harness holds them equal, as for the print look.
+- **One layout, held equal.** [`player/geometry.py`](../player/geometry.py) `pattern_signal` is the layout of each pattern in an opening and `final_pixel` where it enters; the shader in `player/native.py` mirrors them and the pixel harness holds them equal, as for the print look.
 - **Known limit:** a pattern is drawn inside a Frame's opening, so an Output with no Frame drawn shows none.
 
 ## Each photo's crop (5a)
