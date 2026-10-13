@@ -1069,7 +1069,7 @@ What a Display's picture and a Frame's Position were at any time, for the Pictur
 | Table | One row per | Columns |
 |---|---|---|
 | `picture_kept_entries` | Done, Copy or an unrecorded change on a Display | `id`, `display_id`, `number` (the Display's commit order), `kind` (`kept-done`, `kept-copied`, `kept-unrecorded`), `at`, `session_id`, `restored_from`, `picture`, `lut_recipe_id` |
-| `picture_sent_entries` | rise of a port's `picture_change` (what Central sent the Pi) | `id`, `player_id`, `output_id`, `picture_change` (its number), `display_id` (seen on the port), `frame_id` (bound to it then; NULL if none or deleted since), `kind` (`sent-draft`, `sent-back`, `sent-kept`), `at`, `session_id`, `restored_from`, `picture`, `lut_recipe_id`, `test_pattern` (`white`, `grey-ramp`, `black-level`; NULL: off) |
+| `picture_sent_entries` | rise of a port's `picture_change` (what Central sent the Pi) | `id`, `player_id`, `output_id`, `picture_change` (its number), `display_id` (seen on the port), `frame_id` (bound to it then; NULL if none or deleted since), `kind` (`sent-draft`, `sent-back`, `sent-kept`), `at`, `session_id`, `restored_from`, `picture`, `lut_recipe_id`, `test_pattern` (`white`, `grey-ramp`, `black-level`, `target-pre-software`, `target-post-software` (migration 097, [0026](decisions/0026-calibration-targets.md)); NULL: off) |
 | `position_entries` | Save, profile change, unrecorded change, or change in what the Node is handed | `id`, `frame_id`, `number` (the Frame's commit order), `kind` (`kept-saved`, `kept-profile-changed`, `kept-unrecorded`, `sent-draft`, `sent-back`), `at`, `session_id`, `restored_from`, `fit` (`contracts/models.py` FrameFit's JSON: mode, corners, rotation), `mat` (Mat's JSON: depth and lights), `profile_width_px`, `profile_height_px` and `display_id` (what it was made for: the Frame's profile and the Display seen on its port then) |
 
 `picture` is the Display's picture under the `displays` columns' names (`hardware_picture` by MCCS code, `software_brightness_percent` … `software_lut_profile`, `software_lut_amount_percent`, `signal_range`), as a session's `draft` is; `lut_recipe_id` is the recipe its LUT was baked under then (NULL: no LUT). `session_id` groups one picture session's or one Position trial's entries (a trial keeps it across renewals: `node_calibration_trials.session_id`); `restored_from` names the entry a Restore loaded (also on `picture_sessions` and `node_calibration_trials`).
@@ -1081,6 +1081,8 @@ T='Authorization: Bearer <admin-token>'
 curl -H "$T" "$CENTRAL/v1/operator/displays/<display-id>/picture-history?limit=50"
 curl -H "$T" "$CENTRAL/v1/operator/frames/<frame-id>/position-history?before=2026-10-13T21:00:00Z"
 curl -H "$T" "$CENTRAL/v1/operator/frames/<frame-id>/tuning-snapshot?at=2026-10-13T21:04:07Z"
+# One port's sent entry by its picture change (what a calibration target's QR names; 404 unknown_entry)
+curl -H "$T" "$CENTRAL/v1/operator/players/<player-id>/outputs/HDMI-A-1/picture-changes/<n>"
 # Restore: loads an entry into an open session's or trial's draft; Done still keeps it
 curl -X POST -H "$T" -H 'Content-Type: application/json' \
   -d '{"entry_id":"<entry-id>","expected_sequence":7}' \
@@ -1120,6 +1122,31 @@ ORDER BY at DESC, number DESC;
 **Retention.** Per key, the newest 500 kept and 20,000 sent entries (a Display's kept, a port's sent, a Frame's of each); each writer trims its own key when it appends, and nothing else deletes them. A deleted Frame takes its Position history. History starts at the upgrade to 096: nothing is written for the past.
 
 **The clock.** Every `at` is PostgreSQL's clock when Central recorded the change, never the Pi's or a phone's. Match a photo on Central's clock: as it arrives, read Central's time (`SELECT now()`) or the newest entries, and step back from there; never by the photo's own timestamp. A sent entry is what Central sent; the Pi shows it seconds later, about 10 s for a signal range change ([Tune a display with no controls](#tune-a-display-with-no-controls)). A change made with the TV's own remote or menus is never in the history.
+
+## Calibration targets
+
+Two targets read together from a phone photo, so the agent can say what to change on a display: the **screen target** the Player draws in each Frame's opening and the **paper target** Central prints. Why they are shaped so, both stages and what each aims at are [0026](decisions/0026-calibration-targets.md); the layout and every size are `contracts/calibration_target.py`'s; what the Picture tab says is the [console design](operator-console-design.md#5-the-frame-page) (§5 Picture); the agent's procedure and what each refusal asks is the [display-control skill](../.claude/skills/display-control/SKILL.md#reading-the-calibration-targets).
+
+1. **Print the paper.** From the Picture tab's print link, or the operator route (admin token), Letter or A4:
+
+   ```sh
+   curl -o target.pdf -H 'Authorization: Bearer <admin-token>' "$CENTRAL/v1/operator/calibration-target/paper.pdf?paper=letter"
+   ```
+
+   Print at 100 % (no "fit to page"), black ink only, on the paper the print look imitates. Refusal: 422 `bad_paper` (neither `letter` nor `a4`).
+2. **Lay it under the glass.** Open the Frame, lay the sheet uncut on the panel with a black card behind it, and close the glass over both. The screen target draws a dark box for the sheet; the sheet's printed size must match it (the reader refuses `scale-mismatch` otherwise). The Frame's opening must be at least as large as the screen target ([0026](decisions/0026-calibration-targets.md#costs)).
+3. **Pick a target.** On the Frame's Picture tab, Test pattern › the pre-software target (the screen drawn raw: tune the display's own controls) or the post-software target (through Photo Wall's settings: the residual). Either, in any order; the session's usual rules hold (live while the tab runs, off by Done, Revert, leaving the tab or after 10 minutes on the Pi).
+4. **Take the photos.** On the iPhone, Apple ProRAW on, the whole Frame in view, no part of a white at the sensor's clip; a second from the Frame's other side catches a shadow over the whole paper. AirDrop them to the Mac (`~/Downloads`). A normal photo (JPEG, HEIC) gives the white alone.
+5. **Read them** on the Mac, from the repository, with the admin token (and, for a post-software reading with a LUT on, a read-only database address) from 1Password:
+
+   ```sh
+   op run -- .venv/bin/python -m scripts.calibration_target ~/Downloads/IMG_1234.DNG [~/Downloads/IMG_1235.DNG] --central <url>
+   ```
+
+   `op run` resolves `PHOTO_WALL_ADMIN_TOKEN` and, optionally, `PHOTO_WALL_READ_DATABASE_URL` from their `op://` references in the environment (or `--env-file`); never put either on the command line. It prints one JSON object, `{"reading": …, "suggestion": …}` or `{"refused": …}`, and exits 0 for a reading, 2 for a refusal, 1 for an error (a file unreadable, Central unreachable). The reader only reads: it fetches the sent entry the QR names (above, [Configuration snapshots](#configuration-snapshots)) and never writes to Central.
+6. **Change, then read again.** Move what the suggestion says (the display's own controls for the pre-software target, Photo Wall's sliders for the post-software one), take new photos, and press **Done** on the tab when it reads right.
+
+The reader (`scripts/calibration_target/`) is the agent's tool and is never shipped; its thresholds have one home, `scripts/calibration_target/model.py`. **NOT RUN on real hardware yet:** a real ProRAW photo read end to end; the screen target's drawn size on the test Pi; post-software suggestions against real readings; the Samsung QN43Q8F's camera-versus-eye gap. CI reads synthetic photos only.
 
 ## LUTs: paper profiles
 

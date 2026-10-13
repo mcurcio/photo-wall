@@ -6019,3 +6019,10 @@ Departures of the committed interfaces from /Volumes/Dock/tmp/calibration-target
 - **The QR is encoded on the Player** (segno, Debian trixie's python3-segno 1.6.6; pinned the same in the dev group) from its own player id and the operations' output and picture change: no wire field carries it.
 - **The design's tracer needs a real ProRAW photo**; CI cannot take one. The CI tracer is a synthetic photo of the Player's reference target and the layout's paper, read end to end (slice R1); the real photo stays the bench step (NOT RUN).
 - **The run brief's tracer** ("a Picture Done records a snapshot that the list shows and Restore loads back into the editor") is configuration snapshots' (#100, built), not this feature's: the plan uses the design's.
+
+## calibration targets docs (docs lane D1, 2026-10-13)
+
+- **D1's base was not wave 4.** The brief said D1 runs after P3, K1, K2, U1 and R2 landed; origin/feat/calibration-targets held only the interfaces commit (71f49edd). The docs are written against the frozen interfaces; 0026's "As built" carries the interface departures only (no slice errata existed). Where a slice lands words or behaviour the docs name, reconcile: the console's labels for the two targets and their `PATTERN_HOW` lines (the docs quote neither; the glossary's "Screen target (pre-software, post-software)" follows the design's new-terms table, not U1), the Picture tab's print link, the sent-entry route's answer.
+- **Q1 as recommended versus as built.** The design recommended two photos every round; the interfaces take one or two (the reflection plan's item 4 made the second optional). 0026 records both; the runbook and the skill ask for two.
+- **"deliver me one PR" is display tuning's words, not this feature's.** The brief said Q1 and Q2 were taken as recommended under "deliver me one PR"; owner-notes.md records them taken as recommended under "build". 0026 follows the notes.
+- **Roadmap Developed column:** no pull request exists yet for feat/calibration-targets, and the column names merged pull requests (display tuning's #97 was added after its merge), so 1c's Developed cell is unchanged; the PR fills it.
