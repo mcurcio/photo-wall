@@ -120,7 +120,7 @@ def test_a_report_that_does_not_know_the_list_yet_keeps_the_known_list_of_the_sa
 
 def _session(began_at_change: int, befores: dict | None = None) -> PictureSession:
     return PictureSession(uuid4(), uuid4(), 1, DisplayPicture({}, NEUTRAL_SOFTWARE, AUTO), began_at_change,
-                          befores or {}, frozenset({"10"}), frozenset(), Lease(10.0, None), None)
+                          befores or {}, frozenset({"10"}), frozenset(), Lease(10.0, None), None, None)
 
 
 def test_a_session_keeps_the_first_before_per_code_from_changes_after_it_began():

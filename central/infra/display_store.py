@@ -24,7 +24,12 @@ display" and of the Output document's body:
   own `picture_change` that rises only when `picture_digest` differs (never with the Output
   document's `change`); the judge records each picture report on its Output (`picture_reports`);
   `PgPictureSessions` is the Picture tab (`PictureQueries`, `PictureCommands`): the session, its
-  edits, Done, Revert and Copy. Display tuning (decision 0024; migration 094): the Display's
+  edits, Done, Revert, Copy and Restore. Done and Copy store through `write_picture`, the one kept
+  picture write, which appends the Display's kept picture history entry in the same transaction
+  (configuration snapshots, migration 096; central/infra/picture_history_store.py); each rise of a
+  port's `picture_change` with a Display seen there appends the port's sent entry
+  (`picture_history.sent_record`: a draft, the wall put back, or the kept values), so what Central
+  sent at any time stays readable. Display tuning (decision 0024; migration 094): the Display's
   signal range is stored beside its picture and a session's draft carries it; the session's test
   pattern (`picture_sessions.test_pattern`, `test_pattern_ask`) rides the picture document only
   while the session is live (`picture.session_test_pattern`). The source also wakes at the earliest idle deadline of a
@@ -105,12 +110,22 @@ from central.displays.picture import (
     presented,
     restore_answered,
     restore_of,
+    restored,
     session_test_pattern,
     signal_answered,
     software_touch,
     test_pattern_state,
     with_befores,
     with_restore,
+)
+from central.displays.picture_history import (
+    PictureEntryKind,
+    PictureRecord,
+    Port,
+    copied_record,
+    done_record,
+    sent_record,
+    unrecorded_record,
 )
 from central.displays.ports import DisplayRefused
 from central.displays.views import (
@@ -125,12 +140,13 @@ from central.displays.views import (
     HardwareRangeView,
     HardwareResultView,
     HardwareSettingView,
-    LutChoiceView,
     LutEdit,
     ModeView,
     OfferedView,
     PictureCopyRequest,
     PictureCopyResult,
+    PictureRestore,
+    PictureRestoreResult,
     PictureSequence,
     PictureSessionView,
     PowerTestAccepted,
@@ -138,10 +154,10 @@ from central.displays.views import (
     SignalRangeEdit,
     SignalView,
     SoftwareEdit,
-    SoftwarePictureView,
     TestPatternEdit,
     TestPatternView,
     in_force_view,
+    software_view,
 )
 from central.fleet.node_bus_presence import bus_links_in
 from central.house_time.calculator import day_start, house_date
@@ -149,6 +165,19 @@ from central.infra.house_store import house_time_in
 from central.infra.lut_rows import lut_known_in, lut_name_in
 from central.infra.node_link_store import PgLinkStores
 from central.infra.output_wakes import OUTPUT_DOCUMENTS_CHANNEL, notify_nodes_in
+from central.infra.picture_columns import (
+    PICTURE_COLUMNS,
+    PICTURE_FIELDS,
+    picture_fields,
+    stored_picture,
+)
+from central.infra.picture_history_store import (
+    append_kept_in,
+    append_sent_in,
+    latest_kept_in,
+    latest_sent_in,
+    picture_entry_in,
+)
 from central.infra.power_store import power_policy_in
 from central.installation_models import FrameOutput
 from central.live_session import Lease, begin_lease, touched
@@ -177,8 +206,6 @@ from contracts.node_picture import (
     HardwareSetting,
     PictureDocument,
     PictureReport,
-    SignalRange,
-    SoftwarePicture,
     TestPatternAsk,
     decode_picture_document,
     decode_picture_report,
@@ -421,51 +448,23 @@ def _player_of(conn: Any, device_id: str, lock: str) -> str | None:
 
 # --- The Display's picture (decision 0022, the picture split, slice S2; migration 092) -----------
 
-# A displays row `d` gives these; `stored_picture` reads them, `write_picture` writes them. A
-# session's draft is stored under the same names.
-_PICTURE_FIELDS: Final = ("hardware_picture", "software_brightness_percent", "software_contrast_percent",
-                          "colour_temperature_kelvin", "gamma_tenths", "software_saturation_percent",
-                          "software_highlight_rolloff_percent", "software_black_floor_tenths", "software_lut_profile",
-                          "software_lut_amount_percent", "signal_range")
-_PICTURE_COLUMNS: Final = ", ".join("d." + field for field in _PICTURE_FIELDS)
-
-
-def stored_picture(row: Mapping[str, Any]) -> DisplayPicture:
-    """The DisplayPicture of a mapping with `_PICTURE_FIELDS` (a displays row, or a session's draft).
-    The LUT is stored as its paper profile's digest alone; its recipe is never stored, so it is
-    always the current `LUT_RECIPE_ID`."""
-    hardware = {code: int(value) for code, value in row["hardware_picture"].items()}
-    lut = row["software_lut_profile"]
-    return DisplayPicture({code: hardware[code] for code in PICTURE_LIST if code in hardware},
-                          SoftwarePicture(row["software_brightness_percent"], row["software_contrast_percent"],
-                                          row["colour_temperature_kelvin"], row["gamma_tenths"],
-                                          row["software_saturation_percent"], row["software_highlight_rolloff_percent"],
-                                          row["software_black_floor_tenths"],
-                                          None if lut is None else LutRef(lut, LUT_RECIPE_ID),
-                                          row["software_lut_amount_percent"]),
-                          SignalRange(row["signal_range"]))
-
-
-def picture_fields(picture: DisplayPicture) -> dict[str, Any]:
-    """`picture` under the stored columns' names (`_PICTURE_FIELDS`); the LUT as its profile's digest."""
-    software = picture.software
-    return {"hardware_picture": dict(picture.hardware),
-            "software_brightness_percent": software.brightness_percent,
-            "software_contrast_percent": software.contrast_percent,
-            "colour_temperature_kelvin": software.colour_temperature_kelvin, "gamma_tenths": software.gamma_tenths,
-            "software_saturation_percent": software.saturation_percent,
-            "software_highlight_rolloff_percent": software.highlight_rolloff_percent,
-            "software_black_floor_tenths": software.black_floor_tenths,
-            "software_lut_profile": None if software.lut is None else software.lut.profile_sha256,
-            "software_lut_amount_percent": software.lut_amount_percent,
-            "signal_range": picture.signal_range.value}
-
-
-def write_picture(conn: Any, display_id: UUID, picture: DisplayPicture) -> None:
-    """Store `picture` on the Display, in the caller's transaction."""
-    fields = {**picture_fields(picture), "hardware_picture": Jsonb(dict(picture.hardware))}
-    conn.execute(f"UPDATE displays SET {', '.join(f + '=%s' for f in _PICTURE_FIELDS)} WHERE id=%s",  # noqa: S608
-                 (*(fields[f] for f in _PICTURE_FIELDS), display_id))
+def write_picture(conn: Any, display_id: UUID, record: PictureRecord) -> None:
+    """Store `record.picture` on the Display and append `record` as its next kept picture history
+    entry, in the caller's transaction (a failed append fails the Done or Copy): the one kept picture
+    write. First, when the stored values differ from the Display's newest kept entry, the change
+    made outside Photo Wall is recorded (`picture_history.unrecorded_record`, design rule 3).
+    ValueError("picture_history_kind") unless `record` is KEPT_DONE or KEPT_COPIED."""
+    if record.kind not in (PictureEntryKind.KEPT_DONE, PictureEntryKind.KEPT_COPIED):
+        raise ValueError("picture_history_kind")
+    row = conn.execute(f"SELECT {PICTURE_COLUMNS} FROM displays d WHERE d.id=%s FOR NO KEY UPDATE",  # noqa: S608
+                       (display_id,)).fetchone()
+    unrecorded = unrecorded_record(latest_kept_in(conn, display_id), stored_picture(row))
+    if unrecorded is not None:
+        append_kept_in(conn, display_id, unrecorded)
+    fields = {**picture_fields(record.picture), "hardware_picture": Jsonb(dict(record.picture.hardware))}
+    conn.execute(f"UPDATE displays SET {', '.join(f + '=%s' for f in PICTURE_FIELDS)} WHERE id=%s",  # noqa: S608
+                 (*(fields[f] for f in PICTURE_FIELDS), display_id))
+    append_kept_in(conn, display_id, record)
 
 
 # A picture_sessions row `ps` gives these; `picture_session` reads them.
@@ -473,7 +472,8 @@ _SESSION_COLUMNS: Final = (
     "ps.id AS session_id, ps.display_id AS session_display_id, ps.frame_id AS session_frame_id, "
     "ps.sequence AS session_sequence, ps.draft AS session_draft, ps.began_at_change, ps.hardware_before, "
     "ps.touched_hardware, ps.touched_software, ps.idle_until AS session_idle_until, "
-    "ps.test_pattern AS session_test_pattern, ps.test_pattern_ask AS session_test_pattern_ask")
+    "ps.test_pattern AS session_test_pattern, ps.test_pattern_ask AS session_test_pattern_ask, "
+    "ps.restored_from AS session_restored_from")
 
 
 def picture_session(row: Mapping[str, Any]) -> PictureSession | None:
@@ -486,7 +486,8 @@ def picture_session(row: Mapping[str, Any]) -> PictureSession | None:
                           {code: int(value) for code, value in row["hardware_before"].items()},
                           frozenset(row["touched_hardware"]),
                           frozenset(software_touch(name) for name in row["touched_software"]),
-                          Lease(row["session_idle_until"], None), _test_pattern_ask(row))
+                          Lease(row["session_idle_until"], None), _test_pattern_ask(row),
+                          row["session_restored_from"])
 
 
 def _test_pattern_ask(row: Mapping[str, Any]) -> TestPatternAsk | None:
@@ -520,7 +521,7 @@ def record_picture_report(conn: Any, player_id: str, report: PictureReport, now:
         "INSERT INTO picture_reports(player_id, output_id, report, reported_at) VALUES (%s, %s, %s, %s) "
         "ON CONFLICT (player_id, output_id) DO UPDATE SET report=EXCLUDED.report, reported_at=EXCLUDED.reported_at",
         (player_id, report.output_id, Jsonb(json.loads(encode_picture_report(report))), now))
-    row = conn.execute(f"SELECT {_SESSION_COLUMNS}, {_PICTURE_COLUMNS}, pd.document AS picture_document "  # noqa: S608
+    row = conn.execute(f"SELECT {_SESSION_COLUMNS}, {PICTURE_COLUMNS}, pd.document AS picture_document "  # noqa: S608
                        "FROM output_displays o JOIN picture_sessions ps ON ps.display_id=o.display_id "
                        "JOIN displays d ON d.id=ps.display_id LEFT JOIN picture_documents pd "
                        "ON pd.player_id=o.player_id AND pd.output_id=o.output_id "
@@ -533,7 +534,7 @@ def record_picture_report(conn: Any, player_id: str, report: PictureReport, now:
             conn.execute("UPDATE picture_sessions SET hardware_before=%s WHERE id=%s",
                          (Jsonb(dict(kept.hardware_before)), session.session_id))
         session = kept
-    display = conn.execute(f"SELECT d.id AS d_id, {_PICTURE_COLUMNS}, d.hardware_restore, "  # noqa: S608
+    display = conn.execute(f"SELECT d.id AS d_id, {PICTURE_COLUMNS}, d.hardware_restore, "  # noqa: S608
                            "pd.document AS picture_document FROM output_displays o JOIN displays d ON d.id=o.display_id "
                            "LEFT JOIN picture_documents pd ON pd.player_id=o.player_id AND pd.output_id=o.output_id "
                            "WHERE o.player_id=%s AND o.output_id=%s FOR UPDATE OF d",
@@ -789,8 +790,8 @@ def output_documents(conn: Any, device_id: str, now: float) -> dict[str, bytes]:
     house = house_time_in(conn)
     policy = power_policy_in(conn, now)
     rows = conn.execute(
-        "SELECT o.output_id, b.frame_id, d.power_method, d.switch_input_on_power_on, d.never_off_on_other_input, "
-        f"{_PICTURE_COLUMNS}, d.hardware_restore, {_SESSION_COLUMNS}, w.change, w.digest, pd.picture_change, "
+        "SELECT o.output_id, b.frame_id, d.id AS d_id, d.power_method, d.switch_input_on_power_on, d.never_off_on_other_input, "
+        f"{PICTURE_COLUMNS}, d.hardware_restore, {_SESSION_COLUMNS}, w.change, w.digest, pd.picture_change, "
         f"pd.digest AS picture_digest, {_TEST_COLUMNS} FROM (SELECT output_id FROM outputs WHERE player_id=%(player)s "
         "UNION SELECT output_id FROM output_displays WHERE player_id=%(player)s) o "
         "LEFT JOIN output_displays s ON s.player_id=%(player)s AND s.output_id=o.output_id "
@@ -831,6 +832,12 @@ def output_documents(conn: Any, device_id: str, now: float) -> dict[str, bytes]:
                 "picture_change=EXCLUDED.picture_change, digest=EXCLUDED.digest, document=EXCLUDED.document",
                 (player_id, output_id, picture_change, digest,
                  Jsonb(json.loads(encode_picture_document(wanted)))))
+            if not _no_display(row):
+                port = Port(player_id, output_id)
+                append_sent_in(conn, port, picture_change, display_id=row["d_id"], frame_id=row["frame_id"],
+                               record=sent_record(session=picture_session(row), now=now,
+                                                  previous=latest_sent_in(conn, port), picture=picture,
+                                                  test_pattern=pattern, display_id=row["d_id"]))
         documents[picture_document_key(output_id)] = encode_picture_document(wanted)
     return documents
 
@@ -1034,13 +1041,13 @@ _PICTURE_FACTS_JOIN: Final = (
 # and the Output's picture facts.
 _PICTURE_FRAME: Final = (
     f"SELECT f.id AS frame_id, b.player_id, seen.display_id, seen.connected, {_PICTURE_FACTS}, "  # noqa: S608
-    f"d.id AS d_id, {_PICTURE_COLUMNS}, {_SESSION_COLUMNS} FROM frames f LEFT JOIN bindings b ON b.frame_id=f.id "
+    f"d.id AS d_id, {PICTURE_COLUMNS}, {_SESSION_COLUMNS} FROM frames f LEFT JOIN bindings b ON b.frame_id=f.id "
     f"{SEEN_DISPLAY_JOIN} LEFT JOIN displays d ON d.id=seen.display_id "
     f"LEFT JOIN picture_sessions ps ON ps.display_id=d.id {_PICTURE_FACTS_JOIN}")
 
 # A session `ps` with its Display and the picture facts of the Output of the Frame it was opened on.
 _PICTURE_SESSION: Final = (
-    f"SELECT {_SESSION_COLUMNS}, {_PICTURE_COLUMNS}, {_PICTURE_FACTS} FROM picture_sessions ps "  # noqa: S608
+    f"SELECT {_SESSION_COLUMNS}, {PICTURE_COLUMNS}, {_PICTURE_FACTS} FROM picture_sessions ps "  # noqa: S608
     "JOIN displays d ON d.id=ps.display_id LEFT JOIN bindings b ON b.frame_id=ps.frame_id "
     f"{SEEN_DISPLAY_JOIN} {_PICTURE_FACTS_JOIN} WHERE ps.id=%s FOR UPDATE OF ps, d")
 
@@ -1138,7 +1145,7 @@ class PgPictureSessions:
             hardware=tuple(_hardware_view(hardware) for hardware in hardware_rows(
                 picture.hardware, offered, report.results if answered and report is not None else None,
                 connected=row["connected"] is True)),
-            software=_software_view(picture.software, lut_name),
+            software=software_view(picture.software, lut_name),
             signal_range=picture.signal_range, signal=signal,
             test_pattern=None if ask is None else TestPatternView(
                 pattern=ask.pattern, state=test_pattern_state(ask, document, report)),
@@ -1161,7 +1168,7 @@ class PgPictureSessions:
                 raise DisplayRefused("session_open", 409)
             lease = begin_lease(now, idle_seconds=PICTURE_IDLE_SECONDS, hard_seconds=None)
             session = PictureSession(uuid.uuid4(), display_id, 1, stored, frame["output_picture_change"] or 0, {},
-                                     frozenset(), frozenset(), lease, None)
+                                     frozenset(), frozenset(), lease, None, None)
             conn.execute(
                 "INSERT INTO picture_sessions(id, display_id, frame_id, sequence, draft, began_at_change, "
                 "idle_until, created_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
@@ -1229,7 +1236,7 @@ class PgPictureSessions:
             _require_live(session, now)
             if not presented(session.draft, _stored_picture_document(row), _stored_picture_report(row)):
                 raise PictureRefused("not_presented_yet", 409)
-            self._end_in(conn, session, session.draft)
+            self._end_in(conn, session)
 
     def revert_picture(self, session_id: UUID) -> None:
         """End the session: the stored values stay, and the display is put back once
@@ -1239,6 +1246,25 @@ class PgPictureSessions:
             _require_live(session, now)
             _fold_session_in(conn, stored_picture(row), session)
             notify_nodes_in(conn, _NODES_SEEING, (session.display_id,))
+
+    def restore_picture(self, session_id: UUID, request: PictureRestore) -> PictureRestoreResult:
+        """`PictureCommands.restore_picture`: the entry through picture_history_store
+        `picture_entry_in`, the rule `picture.restored` (offered: `_offered(row)`; lut_listed:
+        `lut_known_in`), the session written as an edit's (`_write_session_in`, with
+        `restored_from`)."""
+        with self._db.transaction() as conn:
+            row, session, now = self._session_in(conn, session_id)
+            entry = picture_entry_in(conn, request.entry_id)
+            if entry is None:
+                raise DisplayRefused("unknown_entry", 404)
+            lut = entry.record.picture.software.lut
+            result = restored(session, entry_id=entry.entry_id, entry_display_id=entry.display_id,
+                              picture=entry.record.picture, offered=_offered(row),
+                              lut_listed=lut is None or lut_known_in(conn, lut.profile_sha256),
+                              expected_sequence=request.expected_sequence, now=now)
+            self._write_session_in(conn, result.session)
+        return PictureRestoreResult(sequence=result.session.sequence, hardware_skipped=result.hardware_skipped,
+                                    lut_skipped=result.lut_skipped, lut_recipe_changed=result.lut_recipe_changed)
 
     def copy_picture(self, frame_id: str, request: PictureCopyRequest) -> tuple[PictureCopyResult, ...]:
         with self._db.transaction() as conn:
@@ -1264,7 +1290,7 @@ class PgPictureSessions:
                 else:
                     result, skipped = copied(values, stored, source_offered=source_offered,
                                              target_offered=_offered(frames[target]))
-                    write_picture(conn, display_id, result)
+                    write_picture(conn, display_id, copied_record(result))
                     notify_nodes_in(conn, _NODES_SEEING, (display_id,))
                     outcome = CopyOutcome.COPIED
                 outcomes.append(PictureCopyResult(frame_id=target, outcome=outcome, hardware_skipped=skipped))
@@ -1284,17 +1310,18 @@ class PgPictureSessions:
     def _write_session_in(conn: Any, session: PictureSession) -> None:
         pattern = session.test_pattern
         conn.execute("UPDATE picture_sessions SET sequence=%s, draft=%s, touched_hardware=%s, touched_software=%s, "
-                     "idle_until=%s, test_pattern=%s, test_pattern_ask=%s WHERE id=%s",
+                     "idle_until=%s, test_pattern=%s, test_pattern_ask=%s, restored_from=%s WHERE id=%s",
                      (session.sequence, Jsonb(picture_fields(session.draft)), sorted(session.touched_hardware),
                       sorted(setting.value for setting in session.touched_software), session.lease.idle_until,
                       None if pattern is None else pattern.pattern.value, None if pattern is None else pattern.ask,
-                      session.session_id))
+                      session.restored_from, session.session_id))
         notify_nodes_in(conn, _NODES_SEEING, (session.display_id,))
 
     @staticmethod
-    def _end_in(conn: Any, session: PictureSession, picture: DisplayPicture) -> None:
-        """Store `picture` on the Display and end the session, in one transaction."""
-        write_picture(conn, session.display_id, picture)
+    def _end_in(conn: Any, session: PictureSession) -> None:
+        """Done: store the session's draft on the Display (its kept-done entry beside it) and end the
+        session, in one transaction."""
+        write_picture(conn, session.display_id, done_record(session))
         conn.execute("DELETE FROM picture_sessions WHERE id=%s", (session.session_id,))
         notify_nodes_in(conn, _NODES_SEEING, (session.display_id,))
 
@@ -1313,7 +1340,7 @@ def _fold_session_in(conn: Any, stored: DisplayPicture, session: PictureSession)
 def _fold_in(conn: Any, display_id: UUID, now: float) -> DisplayPicture | None:
     """The Display's stored picture with its row locked, after folding a session whose lease ran out
     (`_fold_session_in`: the stored values unchanged); None while a live session holds it."""
-    row = conn.execute(f"SELECT {_PICTURE_COLUMNS}, {_SESSION_COLUMNS} FROM displays d "  # noqa: S608
+    row = conn.execute(f"SELECT {PICTURE_COLUMNS}, {_SESSION_COLUMNS} FROM displays d "  # noqa: S608
                        "LEFT JOIN picture_sessions ps ON ps.display_id=d.id WHERE d.id=%s FOR NO KEY UPDATE OF d",
                        (display_id,)).fetchone()
     stored, session = stored_picture(row), picture_session(row)
@@ -1330,19 +1357,6 @@ def _require_live(session: PictureSession, now: float) -> None:
         raise PictureRefused("session_ended", 410)
 
 
-def _software_view(software: SoftwarePicture, lut_name: str | None) -> SoftwarePictureView:
-    """The Photo Wall section's values; the LUT choice by its digest and `lut_name`, the LUTs
-    list's name for it (a LUT in use stays on the list, so it has one)."""
-    lut = software.lut
-    return SoftwarePictureView(
-        brightness_percent=software.brightness_percent, contrast_percent=software.contrast_percent,
-        colour_temperature_kelvin=software.colour_temperature_kelvin, gamma_tenths=software.gamma_tenths,
-        saturation_percent=software.saturation_percent, highlight_rolloff_percent=software.highlight_rolloff_percent,
-        black_floor_tenths=software.black_floor_tenths, lut_amount_percent=software.lut_amount_percent,
-        lut=None if lut is None else LutChoiceView(profile_sha256=lut.profile_sha256,
-                                                   name=lut_name or f"Paper profile {lut.profile_sha256[:8]}"))
-
-
 def _session_view(session: PictureSession) -> PictureSessionView:
     return PictureSessionView(session_id=session.session_id, sequence=session.sequence,
                               idle_until=session.lease.idle_until)
@@ -1353,5 +1367,4 @@ __all__ = ["DOCUMENT_STREAM", "OUTPUT_DOCUMENTS_CHANNEL", "POSITION_COLUMNS", "P
            "PgPictureSessions",
            "commit_position", "frame_position", "frame_readiness", "frame_readiness_in", "live_drafts_in",
            "output_documents",
-           "picture_fields", "power_facts_in", "record_picture_report", "record_report", "resolve_output",
-           "stored_picture", "write_picture"]
+           "power_facts_in", "record_picture_report", "record_report", "resolve_output", "write_picture"]

@@ -35,9 +35,9 @@ def test_087_names_a_secured_locks_variant_and_keeps_serving_its_bytes(empty_dat
     this test fails."""
     db = Database(empty_database)
     try:
-        # Power and the week's tables (089-091) and the Frame's mat (093), which seeding through
-        # today's code reads and writes.
-        migrate_before(db, "087", also=("089_", "090_", "091_", "093_"))
+        # Power and the week's tables (089-091), the Frame's mat (093) and its Position history
+        # (096), which seeding through today's code reads and writes.
+        migrate_before(db, "087", also=("089_", "090_", "091_", "093_", "096_"))
         registry = Registry(db, ManualClock(1000))
         frame(registry, "portrait")
         picture = photo("photo-1", taken_at=900)

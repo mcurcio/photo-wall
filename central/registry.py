@@ -19,6 +19,7 @@ from central.db import Database
 from central.displays.model import Readiness
 from central.fleet.acceptance_evidence import applied_is_latest
 from central.fleet.device_fence import fence_in, retire_in
+from central.fleet.position_history import position_values, profile_changed_record, saved_record
 from central.infra.display_store import (
     POSITION_COLUMNS,
     POSITION_FACTS,
@@ -28,6 +29,7 @@ from central.infra.display_store import (
     frame_readiness_in,
     resolve_output,
 )
+from central.infra.position_history_store import write_position_in
 from central.infra.power_store import forget_frame_in
 from central.installation_models import (
     FrameInventory,
@@ -611,7 +613,9 @@ class Registry:
         """Replace display dimensions after an optimistic generation check.
 
         The persistent Frame and its placement remain the same. A changed display
-        profile invalidates committed calibration.
+        profile invalidates committed calibration. A change is a kept Position write
+        (configuration snapshots, migration 096): its kept-profile-changed entry, made for the new
+        profile, follows any change made outside Photo Wall recorded first.
         """
         if not holds_runtime_locks_in(conn):
             raise RegistryError("frame_runtime_snapshot_required", 500)
@@ -635,12 +639,9 @@ class Registry:
             raise RegistryError("oriented_profile", 422)
         calibration = Calibration.model_validate(frame["calibration"])
         invalidated = calibration.model_copy(update={"revision": calibration.revision + 1})
-        row = conn.execute(
-            "UPDATE frames SET profile=%s,calibration=%s,generation=generation+1,"
-            "configuration_revision=configuration_revision+1 WHERE id=%s "
-            "RETURNING generation",
-            (Jsonb(profile.model_dump()), Jsonb(invalidated.model_dump(mode="json")), frame_id),
-        ).fetchone()
+        row = {"generation": write_position_in(
+            conn, frame_id, profile_changed_record(position_values(calibration, Mat.model_validate(frame["mat"]))),
+            calibration=invalidated, profile=profile)}
         self._audit(conn, "frame_profile_changed", frame_id,
                     {"profile": profile.model_dump(), **row})
         return {"profile": profile.model_dump(), **row, "changed": True}
@@ -731,13 +732,17 @@ class Registry:
     def commit_calibration_trial_in(self, conn, *, frame_id: str, player_id: str,
             authority_epoch: int, output_id: str, binding_generation: int,
             config_revision: int, calibration_revision: int,
-            calibration: Calibration, mat: Mat) -> Calibration:
+            calibration: Calibration, mat: Mat, session_id: uuid.UUID | None,
+            restored_from: uuid.UUID | None) -> Calibration:
         """Registry-owned Save CAS inside the Trial owner's existing transaction.
 
         Caller holds Coordination→Runtime, then the device fence and session locks. This method
         owns the persistent Frame calibration and mat (print look: the mat rides the binding
         beside the calibration and is saved with it; it never changes the Frame output). It never
-        interprets trial evidence.
+        interprets trial evidence. It is a kept Position write (configuration snapshots, migration
+        096): a change made outside Photo Wall is recorded first, then the Save's kept-saved entry
+        (the trial's `session_id`, and `restored_from` when its draft came from a Restore), in this
+        transaction.
         """
         if not holds_runtime_locks_in(conn):
             raise RegistryError("calibration_runtime_locks_required")
@@ -755,10 +760,8 @@ class Registry:
             raise RegistryError("calibration_revision_conflict")
         committed = Calibration.model_validate(calibration.model_dump()).model_copy(
             update={"revision": current.revision + 1})
-        conn.execute("UPDATE frames SET calibration=%s,mat=%s,"
-                     "configuration_revision=configuration_revision+1 WHERE id=%s",
-                     (Jsonb(committed.model_dump(mode="json")), Jsonb(mat.model_dump(mode="json")),
-                      frame_id))
+        write_position_in(conn, frame_id, saved_record(position_values(committed, mat), session_id=session_id,
+                                                       restored_from=restored_from), calibration=committed)
         commit_position(conn, frame_id)
         self._audit(conn, "calibration_trial_commit", frame_id)
         return committed

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { apiWrite } from "./apiWrite.js";
 import { isBound } from "./join.js";
-import { draftKey, useDraft } from "./useDraft.js";
+import { draftKey, fitOf, useDraft } from "./useDraft.js";
 import { useMutate } from "./useMutate.js";
 
 /*
@@ -40,6 +40,12 @@ import { useMutate } from "./useMutate.js";
  * stop it until the operator answers (STOPPING: someone saved meanwhile; the Frame lost its
  * Pi): the session is ended and the page waits for Revert.
  *
+ * RESTORE (`restore`) loads a Position history entry (historyApi.js) into the session: it waits for a
+ * loop request in flight like Done, names the session's sequence (tried once more after a
+ * `trial_sequence_conflict`, once a keepalive has read the session again), and on success the draft's
+ * fit and mat become the answer's while the draft keeps its own base revision, so a save made
+ * elsewhere meanwhile still stops it (OVERTAKEN). The operator still presses Done.
+ *
  * DONE (`save`) is offered only once the Pi has shown the latest change (Central refuses it
  * otherwise); REVERT ends the session and returns the draft to the saved calibration and mat. Both are
  * the operator's: `busy` is true only while one runs, never for the loop's own requests, and
@@ -68,7 +74,19 @@ const REFUSALS = {
   trial_baseline_revision_changed: OVERTAKEN,
   calibration_revision_conflict: OVERTAKEN,
   calibration_trial_baseline_changed: OVERTAKEN,
+  // A Restore's (configuration snapshots K2).
+  trial_ended: "The editor closed. It starts again in a moment; then restore.",
+  trial_unknown: "The editor closed. It starts again in a moment; then restore.",
+  unknown_entry: "That change is no longer in the history.",
+  made_for_other_profile: "Made for another screen size.",
+  made_for_other_display: "Made on another display.",
+  other_frame: "That change was another Frame's.",
 };
+
+/** A refusal's words (REFUSALS), or Central's code in a sentence when it has none. */
+export function refusalWords(code) {
+  return code === NO_ANSWER ? NO_ANSWER_WORDS : REFUSALS[code] ?? "Photo Wall refused the change.";
+}
 const NO_ANSWER = "no_answer";
 const NO_ANSWER_WORDS = "Photo Wall's server did not answer.";
 // The refusals that stop the live adjustment until the operator presses Revert.
@@ -120,6 +138,7 @@ export function useVisible() {
  *            changeMat: (mat: Mat) => void, dirty: boolean, phase: Phase, error: Problem|null, busy: boolean,
  *            ack: {revision: number, at: number}|null, latest: number|null,
  *            done: () => Promise<boolean>, revert: () => Promise<void>, retry: () => void,
+ *            restore: (entryId: string) => Promise<{ok: true}|{ok: false, error: string}>,
  *            savedAt: number|null, leftAt: number|null}}
  *   `latest` is the number of the change last made (null with no session); `ack` the newest
  *   one the Pi presented and when (Central's clock, seconds), so Done is offered only when
@@ -168,8 +187,7 @@ export function useFrameAdjustment({ frameId, frame, open }) {
     setRow(next);
   }, []);
   const fail = useCallback((code) => {
-    const problem = { words: code === NO_ANSWER ? NO_ANSWER_WORDS : REFUSALS[code] ?? "Photo Wall refused the change.",
-      code, stops: STOPPING.has(code) };
+    const problem = { words: refusalWords(code), code, stops: STOPPING.has(code) };
     state.current.error = problem;
     setError(problem);
   }, []);
@@ -384,6 +402,42 @@ export function useFrameAdjustment({ frameId, frame, open }) {
     setError(null);
     state.current.waitUntil = 0;
   }), [act, end, keep, clearDraft]);
+  /**
+   * Restore a Position history entry into the draft (see RESTORE above). `trial_ended` while no
+   * session runs; a refusal's code otherwise (`refusalWords`).
+   * @param {string} entryId
+   * @returns {Promise<{ok: true}|{ok: false, error: string}>}
+   */
+  const restore = useCallback(async (entryId) => (await act(async () => {
+    const current = state.current;
+    for (let attempt = 0; ; attempt += 1) {
+      const session = current.row;
+      if (session === null || session.state !== "active") return { ok: false, error: "trial_ended" };
+      let result;
+      try {
+        result = await apiWrite(`${path}/${session.trial_id}/restores`, {
+          method: "POST", body: { entry_id: entryId, expected_sequence: session.sequence },
+        });
+      } catch {
+        return { ok: false, error: NO_ANSWER };
+      }
+      if (!current.mounted || !current.live) return { ok: false, error: "trial_ended" };
+      if (result.ok) {
+        keep(result.data);
+        // The draft becomes the answer's fit and mat; its base (the saved revision it was made
+        // from) stays the draft's own.
+        const { mode, corners, rotation } = fitOf(result.data.calibration);
+        change({ mode, corners, rotation });
+        changeMat(result.data.mat);
+        return { ok: true };
+      }
+      const code = result.error ?? `http_${result.status}`;
+      if (code === "trial_sequence_conflict" && attempt === 0 && await send("keepalive") !== null) continue;
+      // The session as served may have moved on: read it before editing again.
+      current.resync = true;
+      return { ok: false, error: code };
+    }
+  })) ?? { ok: false, error: "busy" }, [act, path, keep, change, changeMat, send]);
   const retry = useCallback(() => {
     state.current.error = null;
     setError(null);
@@ -393,6 +447,6 @@ export function useFrameAdjustment({ frameId, frame, open }) {
 
   return {
     draft, change, changeMat, dirty, phase, error, busy, ack, latest, savedAt, leftAt,
-    done, revert, retry,
+    done, revert, retry, restore,
   };
 }

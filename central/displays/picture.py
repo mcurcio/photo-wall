@@ -44,6 +44,12 @@ One home each for:
   (Recommended)"): every software value, the print look's included; the hardware values set on the source where the
   target offers them (hardware.py's rule, slice S4); never position, never the signal range (it
   follows each display).
+- **Restore** (configuration snapshots, migration 096; owner, 2026-10-13: "View and restore"):
+  `restored` loads a picture history entry of the session's own Display into the draft, live and
+  put back by Revert like any edit; Done still keeps it, and that kept entry names the entry it
+  came from (`restored_from`). Hardware the display no longer offers is skipped, an unlisted LUT
+  keeps the draft's, a LUT baked under an older recipe is rendered by today's, and the test pattern
+  is never restored. Another Display's values cross only by Copy.
 """
 from __future__ import annotations
 
@@ -56,6 +62,7 @@ from typing import Final
 from uuid import UUID
 
 from central.displays.hardware import copied_hardware, edit_refusal
+from central.displays.lut import LUT_RECIPE_ID
 from central.live_session import Lease, StaleSequence, next_sequence, touched
 from contracts.lut import LutRef
 from contracts.node_picture import (
@@ -156,7 +163,8 @@ class PictureSession:
     """One open picture session on one Display (picture_sessions row). `began_at_change`: the
     Output's picture change at begin (0: none), so the befores come from later results;
     `hardware_before`: the first `before` the Pi reported per code in this session (slice S4);
-    `test_pattern`: the session's test pattern ask, never in the draft (None: off)."""
+    `test_pattern`: the session's test pattern ask, never in the draft (None: off); `restored_from`:
+    the picture history entry the draft was last restored from (None: none)."""
     session_id: UUID
     display_id: UUID
     sequence: int
@@ -167,6 +175,7 @@ class PictureSession:
     touched_software: frozenset[SoftwareTouch]
     lease: Lease
     test_pattern: TestPatternAsk | None
+    restored_from: UUID | None
 
 
 def default_picture() -> DisplayPicture:
@@ -407,6 +416,61 @@ def with_befores(session: PictureSession, report: PictureReport) -> PictureSessi
     return replace(session, hardware_before=_in_list_order({**session.hardware_before, **befores}))
 
 
+@dataclass(frozen=True)
+class PictureRestored:
+    """A Restore's outcome (configuration snapshots; `restored`): the session after it; the entry's
+    hardware codes the display does not offer now, in picture-list order (not in the draft); whether
+    the entry's LUT is no longer on the LUTs list (the draft keeps its own LUT); and whether today's
+    recipe renders the entry's LUT (it was baked under another)."""
+    session: PictureSession
+    hardware_skipped: tuple[VcpCode, ...]
+    lut_skipped: bool
+    lut_recipe_changed: bool
+
+
+def restored(session: PictureSession, *, entry_id: UUID, entry_display_id: UUID, picture: DisplayPicture,
+             offered: tuple[HardwareSetting, ...] | None, lut_listed: bool, expected_sequence: int,
+             now: float) -> PictureRestored:
+    """The session after a Restore loads a history entry's `picture` (its id `entry_id`, written for
+    `entry_display_id`) into the draft, live on the Display; the operator still presses Done.
+    PictureRefused: session_ended 410, stale_sequence 409, then other_display 409 when
+    `entry_display_id` is not the session's Display (another display's values cross only by Copy).
+    The draft becomes:
+    - hardware: each of `picture`'s codes that `hardware.edit_refusal` allows against `offered`
+      (the rest are `hardware_skipped`, in picture-list order; `offered` None skips them all); a
+      code `picture` does not set is "as the display has it";
+    - software: `picture`'s, with its LUT under today's recipe (`LUT_RECIPE_ID`) when `lut_listed`
+      (`lut_recipe_changed` when the entry's recipe was another), else the draft's own LUT kept
+      (`lut_skipped`); `picture` with no LUT sets none;
+    - signal range: `picture`'s. The test pattern is never restored (the session's ask stays).
+    Every hardware code and software setting whose draft value changed joins the touched sets (so
+    Revert puts the display back), `restored_from` becomes `entry_id`, and the lease is touched."""
+    sequence = _next(session, expected_sequence, now)
+    if entry_display_id != session.display_id:
+        raise PictureRefused("other_display", 409)
+    hardware = {code: value for code, value in picture.hardware.items() if edit_refusal(code, value, offered) is None}
+    skipped = tuple(code for code in PICTURE_LIST if code in picture.hardware and code not in hardware)
+    entry_lut = picture.software.lut
+    lut_skipped = entry_lut is not None and not lut_listed
+    lut = (session.draft.software.lut if lut_skipped
+           else None if entry_lut is None else LutRef(entry_lut.profile_sha256, LUT_RECIPE_ID))
+    draft = DisplayPicture(_in_list_order(hardware), replace(picture.software, lut=lut), picture.signal_range)
+    before = session.draft
+    touched_hardware = {code for code in {*before.hardware, *draft.hardware}
+                        if before.hardware.get(code) != draft.hardware.get(code)}
+    touched_software: set[SoftwareTouch] = {
+        setting for setting, field in _SOFTWARE_FIELDS.items()
+        if getattr(before.software, field) != getattr(draft.software, field)}
+    if before.software.lut != draft.software.lut:
+        touched_software.add(SoftwareChoice.LUT)
+    return PictureRestored(
+        replace(session, sequence=sequence, draft=draft, touched_hardware=session.touched_hardware | touched_hardware,
+                touched_software=session.touched_software | touched_software, restored_from=entry_id,
+                lease=touched(session.lease, now, idle_seconds=PICTURE_IDLE_SECONDS)),
+        skipped, lut_skipped,
+        entry_lut is not None and not lut_skipped and entry_lut.recipe_id != LUT_RECIPE_ID)
+
+
 def _next(session: PictureSession, expected_sequence: int, now: float) -> int:
     """The session's next sequence; session_ended, then stale_sequence."""
     if not session.lease.live(now):
@@ -428,9 +492,11 @@ def _in_list_order(hardware: Mapping[VcpCode, int]) -> dict[VcpCode, int]:
 
 
 __all__ = ["PICTURE_IDLE_SECONDS", "TEST_PATTERN_SECONDS", "DisplayPicture", "PictureRefused", "PictureSession",
-           "PictureStatus", "SoftwareChoice", "SoftwareSetting", "SoftwareTouch", "TestPatternState", "answers",
+           "PictureRestored", "PictureStatus", "SoftwareChoice", "SoftwareSetting", "SoftwareTouch",
+           "TestPatternState", "answers",
            "carries", "copied", "default_picture", "edited_hardware", "edited_lut", "edited_signal_range",
            "edited_software", "edited_test_pattern", "software_touch",
            "effective_picture", "hardware_answered", "kept_picture", "picture_digest", "picture_document",
-           "picture_status", "presented", "restore_answered", "restore_of", "reverted", "session_test_pattern",
+           "picture_status", "presented", "restore_answered", "restore_of", "restored", "reverted",
+           "session_test_pattern",
            "signal_answered", "test_pattern_state", "with_befores", "with_restore"]

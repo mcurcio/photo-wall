@@ -5876,6 +5876,91 @@ Departures from the frozen interface pages, recorded here for coherence reviews;
   Pi's bound (Done and Revert are disabled while a pattern is the only change); "shown" names the
   Pi as its source; "Waiting for the Pi" replaces "restarts" until the Pi answers.
 
+## configuration snapshots, code architecture (code architect, 2026-10-13)
+
+Departures of the committed interfaces from /Volumes/Dock/tmp/config-snapshots/design.md (revision 2),
+each a refinement the design's sketch left open or a fact of the code it did not know:
+
+- **Migration number 096, not 095:** open PR #99 (fix/fleet-lock-and-delivery-churn) holds
+  `central/migrations/095_lost_grants.sql`.
+- **`EntryRef {history, key, number}` is an entry id.** Every entry has a UUID `id`
+  (`entry_id` in views); `restored_from` and both restore requests name it. The route already says
+  which history; a compound key per table (Display, port, Frame) would be encoded and decoded for
+  nothing.
+- **History lists are wrapped:** `PictureHistoryView {display, unrecorded_change, entries}` and
+  `PositionHistoryView {frame, unrecorded_change, entries}`, so design rule 3's "the reader flags it
+  until then" has a field. Each Position entry also carries `restore_refusal` (Restore's answer for
+  it now), so the tab disables Restore with the reason instead of failing on press.
+- **`restorePicture`'s `skipped: string[]`** is `hardware_skipped: VcpCode[]` plus `lut_skipped: bool`
+  (typed; mirrors Copy's `hardware_skipped`).
+- **`restorePosition` answers the trial's view** (sequence, calibration, mat), not `{sequence}`:
+  Position's draft is the console's (central/console/src/liveAdjustment.js, "THE DRAFT IS THE
+  OPERATOR'S"), so the console replaces its draft with the restored values from the answer.
+- **The picture restore rule lives in central/displays/picture.py (`restored`)**, with the session's
+  other edit rules; picture_history.py imports picture.py, never the reverse.
+- **The `*HistoryWriter` interfaces are plain store functions** (`picture_history_store.append_kept_in`,
+  `append_sent_in`; `position_history_store.record_unrecorded_in`, `append_position_in`,
+  `record_sent_in`) called at the convergence points: both sides are PostgreSQL adapters in one
+  transaction and nothing varies at run time, so an injected object would be a seam with one
+  implementation. `write_picture` takes the `PictureRecord`, so no kept write can skip its entry.
+- **Sent picture kinds are decided from the port's previous sent entry** (`picture_history.sent_record`):
+  SENT_BACK only when a draft went and the values sent differ from it; a Revert of a draft equal to
+  the kept values reads SENT_KEPT (the wall shows the kept values either way).
+- **`node_calibration_trials.session_id` is nullable** (backfilled to `trial_id`); slice S3 sets it in
+  every `_open` (begin: the new trial's id; renew: the predecessor's).
+- **The history routes live in one read module** (central/tuning_history_routes.py, the design's one
+  read contract `TuningHistoryQueries`); the two restores are their owners' routes.
+
+## configuration snapshots console lane, slice K1 Picture History (implementer, 2026-10-13)
+
+- **Owned paths:** `usePictureSession` gaining `restore` (frozen) makes `PictureSession` require it,
+  so central/console/src/domain/frame-picture.stories.tsx (not listed) gains one fixture line
+  (`restore`); no other lane owns it. The picture-history stories import the read's types through
+  picture-history.tsx (re-exported), because tests/test_console_routes_r4.py lets a domain module
+  import only its declared legacy modules; picture-history.tsx is declared there with historyApi.js,
+  pictureApi.js and polledRead.js.
+- **Hardware names:** `PictureValuesView.hardware` carries codes only, so Details names each code from
+  the Picture tab's current read (its rows' picture-list names and ranges, `hardwareWords`); a code
+  the read no longer lists shows as "Setting <code> (display)". Display settings are labelled
+  "<name> (display)" so they never collide with Photo Wall's Brightness and Contrast.
+- **Summary against the entry below:** a Done's kept row usually sits on the sent row of the same
+  values, so it reads "Same values as the change below"; its values are under Details.
+- **Not in K1's paths:** docs/design-language.md §4 must list the new `HistoryList` pattern (the
+  console-ux procedure, step 8); left to the docs unit (design unit 8). Catalogue baselines are
+  placeholders (Docker does not answer on the build host), to be replaced from CI's pinned render.
+
+## configuration snapshots console lane, slice K2 Position History (implementer, 2026-10-13)
+
+- **Owned paths:** `useFrameAdjustment` gaining `restore` (frozen) makes `Adjustment` require it, so
+  central/console/src/domain/frame-position.stories.tsx (not listed) gains one fixture line. K1's
+  central/console/src/domain/picture-history.tsx (not in K2's list; this lane's own file) now holds
+  the two tabs' shared layout (`daysOf`, `shownEntries`, `historyProblem`), and historyApi.js the
+  shared paging and polling (`useHistoryPages`), so Position's History duplicates neither.
+- **Probe K2-entry-revision is equivalent as worded:** Central's Restore answers the draft at the
+  trial's base revision (`position_history.restored_draft(base_revision=...)`), which is the draft's
+  own base, so "take the answer's revision" changes nothing. The probe run instead takes the answer as
+  the draft's origin (`adopt`): the restored draft is then no change and Done is never offered.
+  The OVERTAKEN case proves Central's Save CAS still refuses a restored draft after a save elsewhere.
+- **Restoring the newest kept Position is no change:** the draft equals its origin, so Done is not
+  offered (as after a Revert); the tracer restores an older kept row. Picture's Restore differs: its
+  draft becomes every restored value, so Done is offered (the session's draft is Central's there).
+- **Not-live reason:** Restore says "Open while the editor runs" whenever no live session runs; the
+  editor right above says why in its own words (live-adjustment.tsx keeps them private).
+- **Summary lines** are the spec's fixed format (fit, rotation, mat depth, light count), so two
+  entries that differ only in their corners read the same; the corners are under Details.
+
+## configuration snapshots docs lane, slice D1 (implementer, 2026-10-13)
+
+- **design-decisions.md has no row per decision record:** records are registered inside the D-row
+  they settle (0022-0024 in D12). 0025 is a sentence in D12 ("Configuration snapshots (accepted
+  2026-10-13, 0025)"), not a new row.
+- **Roadmap left as briefed, now partly stale:** no roadmap step names this work, so no Developed
+  column changed. The "Deferred, and what that costs" row "Change history" still says "no Revert
+  later"; for a Display's picture and a Frame's Position that is no longer true (History and
+  Restore). Left for the main loop to word, since the brief limits roadmap edits to a Developed column.
+- **Matching a photo's time:** the brief's "match a photo by Central's receive time" is worded as
+  "on Central's clock, read as the photo arrives" (the photo reaches the agent's chat, never
+  Central), in the runbook, 0025 and the display-control skill.
 ## fleet lock and delivery churn review fixes (fix agent, PR 99, 2026-10-13)
 
 Design: /Volumes/Dock/tmp/fleet-lock/design.md (r2). Where the code differs from it, unresolved:
@@ -5909,3 +5994,15 @@ Design: /Volumes/Dock/tmp/fleet-lock/design.md (r2). Where the code differs from
   control loop dies on the 422 and its session reconnects in a loop (player/service.py), and the
   window lasts until the release is synced, selected and the Pi rebooted. Corrected in
   docs/runbook.md; the PR body still carries the old text.
+
+## configuration snapshots review fixes (fix agent, PR 100, 2026-10-13)
+
+- **Merged main (PR 99) into the branch, not rebased** (a rebase of a pushed shared branch needs a force push). central/registry.py keeps #99's device fence beside the Position history imports. Lock order checked: the node display exchange takes Coordination -> Runtime -> fence(act) -> the trial row -> the frames row (`record_sent_in`); the operator trial path the same order to `frames FOR UPDATE`; both hold the exclusive Runtime lock, so they never interleave. A `git pull --rebase` run on the merge commit linearized two of main's commits (d6ad5ead, 27e07a21 on the branch) and they were pushed before the rebase was aborted; the following merge (2dd881f7) has the same tree as the intended merge (0ecb4ba6). History carries those two copies; no force push was made.
+- **Slice page S3 acceptance 6 is wrong for HTTP:** `PositionRestore.expected_sequence` is `ge=1`, so the route answers `node_trial_operation_invalid` 422 for a sequence below 1, as the trial's `operate` route already does; `trial_sequence_invalid` is the method's own refusal, reached only by a direct call. Kept as built (one refusal per route shape); tests/test_position_history_store.py's route test asserts it.
+- **A sent picture entry is sent-back only after the same Display's draft** (`picture_history.sent_record` gains `display_id`): after a panel swap the new Display's first entry is sent-kept, never a put-back naming the old Display's session.
+- **One kept Position write** (`position_history_store.write_position_in`): Registry's Save and profile change no longer pair `record_unrecorded_in` and `append_position_in` themselves; the store reads the stored fit and mat, records an outside change, updates `frames` and appends, as `write_picture` does. `append_position_in` and `record_unrecorded_in` are gone from the public surface.
+- **Retention and the page moved** to central/tuning_history/bounds.py (knows neither owner); FrameRefView to central/installation_models.py. Migration 096's comment still names `central/tuning_history/model.py` for KEPT_ENTRIES: migrations are checksum-verified, so the comment is left as written.
+- **Tests outside the owned lists:** tests/test_upgrade_087.py applies 096 for seeding (a co-change of 096); tests/test_display_picture_settings.py now applies 096's own `ALTER TABLE picture_sessions` statement from the migration file instead of a hand-written copy.
+- **Console:** design Q3's "grouped by session" is built: rows not kept from one session that follow one another are one run (newest shown, "Show N earlier tries from this session"); both tabs use one summary rule, `changedSummary` in patterns/history-list.tsx (what differs from the row below); Position's details gain the lights' count; "Kept values shown again" is "Kept values sent again"; the glossary names every kind. The duplicate evidence script and folder (tests/browser/capture_config_snapshots_evidence.py, docs/evidence/config-snapshots/) are deleted; docs/evidence/configuration-snapshots/ is the one set.
+- **K2-no-refresh is an equivalent mutant** while PositionHistory's effect also depends on `live`: Done ends the session and the `live` flip re-reads at once. Dropping both dependencies fails the tracer's read-after-Done timing check.
+- **Catalogue baselines:** replaced from CI's pinned console-catalog render (its actuals artifact), Docker being unavailable locally.

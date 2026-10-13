@@ -70,6 +70,7 @@ const SESSION: PictureSession = {
   luts: [],
   done: async () => true,
   revert: async () => {},
+  restore: async () => ({ ok: false, error: "session_ended" }),
   busy: false,
   error: null,
   unavailable: null,

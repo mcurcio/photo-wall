@@ -20,6 +20,7 @@ const ADJUSTMENT: Adjustment = {
   done: async () => true,
   revert: async () => {},
   retry: () => {},
+  restore: async () => ({ ok: false, error: "trial_ended" }),
   savedAt: null,
   leftAt: null,
 };

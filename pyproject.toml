@@ -145,6 +145,16 @@ source_modules = ["central.displays"]
 forbidden_modules = ["nodeapi", "central.infra", "central.db", "central.registry", "central.app"]
 
 [[tool.importlinter.contracts]]
+# Configuration snapshots (migration 096): a Frame's Position history, its views and the snapshot's
+# read contract are pure; PostgreSQL is reached only through central/infra, HTTP only through the
+# route modules.
+name = "Position history and the configuration snapshot are pure"
+type = "forbidden"
+source_modules = ["central.fleet.position_history", "central.fleet.position_views", "central.tuning_history"]
+forbidden_modules = ["psycopg", "psycopg_pool", "procrastinate", "fastapi", "starlette", "nodeapi",
+                     "central.infra", "central.db", "central.registry", "central.app"]
+
+[[tool.importlinter.contracts]]
 # Roadmap 4 (run ledger .claude/runs/photo-4.md): the photo library's vocabulary and rules are pure;
 # the media worker imports them, never the other way, and Central reaches the store through infra.
 name = "The photo library domain is pure"

@@ -91,6 +91,7 @@ from nodeapi.epoch import Token
 from nodeapi.pull import Batch, Read
 
 MIGRATION_075 = Path(__file__).parents[1] / "central/migrations/075_display_picture.sql"
+MIGRATION_096 = Path(__file__).parents[1] / "central/migrations/096_tuning_history.sql"
 SERIAL = "pi-picture"
 SKEWED_CORNERS = [[0.1, 0.05], [0.95, 0.0], [1.0, 1.0], [0.0, 0.9]]
 # The test monitor as the Pi asked it: brightness and contrast as levels of 100, a colour preset list.
@@ -563,11 +564,15 @@ def _before_075(registry) -> None:
 
 
 def _migrate(registry) -> None:
-    """075, then 092, then 094, on the database `_before_075` left."""
+    """075, then 092, then 094, on the database `_before_075` left, then 096's own statement for the
+    session column (the table `_before_075` dropped came back without it; 096's history tables
+    were never dropped)."""
     with registry.db.transaction() as conn:
         conn.execute(MIGRATION_075.read_text())
     migrate_092(registry)
     migrate_094(registry)
+    statement, = (part for part in MIGRATION_096.read_text().split(";") if "ALTER TABLE picture_sessions" in part)
+    _sql(registry, statement)
 
 
 def _stored_1b(registry, frame_id: str, *, gain: float, rotation: int = 0, corners=None) -> None:

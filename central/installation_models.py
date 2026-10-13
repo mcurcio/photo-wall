@@ -42,6 +42,12 @@ class OutputInventory(Model):
 Name = Annotated[str, Field(min_length=1, max_length=60)]
 
 
+class FrameRefView(Model):
+    """A Frame by id and its name today (a history entry's or a snapshot's reference to it)."""
+    id: Identifier
+    name: str
+
+
 class FrameName(Model):
     """PUT /v1/operator/frames/{frame_id}/name."""
     name: Name

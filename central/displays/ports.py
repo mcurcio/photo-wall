@@ -16,6 +16,8 @@ from central.displays.views import (
     LutEdit,
     PictureCopyRequest,
     PictureCopyResult,
+    PictureRestore,
+    PictureRestoreResult,
     PictureSequence,
     PictureSessionView,
     PowerTestAccepted,
@@ -121,6 +123,13 @@ class PictureCommands(Protocol):
 
     def revert_picture(self, session_id: UUID) -> None:
         """Store `reverted(...)` and end the session. unknown_session, session_ended."""
+        ...
+
+    def restore_picture(self, session_id: UUID, request: PictureRestore) -> PictureRestoreResult:
+        """Load a picture history entry of the session's Display into its draft, live on the Display
+        (`picture.restored`; configuration snapshots, "View and restore"): Done still keeps it.
+        unknown_session 404, unknown_entry 404 (no such entry, or trimmed), session_ended 410,
+        stale_sequence 409, other_display 409 (another Display's entry: use Copy)."""
         ...
 
     def copy_picture(self, frame_id: str, request: PictureCopyRequest) -> tuple[PictureCopyResult, ...]:

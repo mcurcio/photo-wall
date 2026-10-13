@@ -1,12 +1,12 @@
 ---
 name: display-control
-description: Operate a Photo Wall Pi's displays by hand over SSH - read a display's EDID, map HDMI ports to CEC devices and DDC/CI buses, turn a display off and on with cec-ctl or ddcutil, ask a display for the picture list (`getvcp <codes> --terse`, `capabilities`) and read and set its picture settings (brightness VCP 10, contrast VCP 12, colour preset 14, gains…), and read what the display controller did. Read the HDMI signal range (Broadcast RGB, is_limited_range, the AVI InfoFrame) and whether a display honours it (the EDID's quantization-selectable bit). Use it for the 1b bench step (Test off and on), the display-tuning bench steps (Full and Limited on a TV, the time without photos per change), the 1c and picture-split bench steps (display and Photo Wall brightness from the console read back, which codes a display answers, the time of an ask, power during an ask, Cover on the test monitor, write timing), to diagnose "Display didn't answer", "The display did not take it", "Checking what this display offers" that never clears or a power method that never answers, or to probe a new display's support. The rules (what the controller does, what Central decides) live in the docs it links; this is the runbook and its traps.
+description: Operate a Photo Wall Pi's displays by hand over SSH - read a display's EDID, map HDMI ports to CEC devices and DDC/CI buses, turn a display off and on with cec-ctl or ddcutil, ask a display for the picture list (`getvcp <codes> --terse`, `capabilities`) and read and set its picture settings (brightness VCP 10, contrast VCP 12, colour preset 14, gains…), and read what the display controller did. Read the HDMI signal range (Broadcast RGB, is_limited_range, the AVI InfoFrame) and whether a display honours it (the EDID's quantization-selectable bit). Use it for the 1b bench step (Test off and on), the display-tuning bench steps (Full and Limited on a TV, the time without photos per change), the 1c and picture-split bench steps (display and Photo Wall brightness from the console read back, which codes a display answers, the time of an ask, power during an ask, Cover on the test monitor, write timing), to diagnose "Display didn't answer", "The display did not take it", "Checking what this display offers" that never clears or a power method that never answers, or to probe a new display's support. Also, when the owner sends a photo of a Frame while tuning, read the picture and Position values Central sent it at that time (configuration snapshots). The rules (what the controller does, what Central decides) live in the docs it links; this is the runbook and its traps.
 ---
 
 # display-control
 
 How to reach and drive the displays on a Photo Wall Pi 5, learned in the 1b spike on the test Pi
-(2026-10-10), the 1b build, the 1c build, the picture split ([0022](../../../docs/decisions/0022-picture-hardware-and-software-apart.md)) and the display-tuning probe on the owner's Samsung QN43Q8F (2026-10-13, [0024](../../../docs/decisions/0024-display-tuning.md)). The rules are not here; they have one home each:
+(2026-10-10), the 1b build, the 1c build, the picture split ([0022](../../../docs/decisions/0022-picture-hardware-and-software-apart.md)) and the display-tuning probe on the owner's Samsung QN43Q8F (2026-10-13, [0024](../../../docs/decisions/0024-display-tuning.md)), and configuration snapshots (2026-10-13, [0025](../../../docs/decisions/0025-configuration-snapshots.md)). The rules are not here; they have one home each:
 
 | Rules | Home |
 |---|---|
@@ -15,6 +15,7 @@ How to reach and drive the displays on a Photo Wall Pi 5, learned in the 1b spik
 | How Central recognises a display, readiness, the Power and Picture tabs' words, Copy | [Operator console design §5–§7](../../../docs/operator-console-design.md#6-display-identity) |
 | Central's side: tables, routes, the LISTEN wake, what each console result means | [Runbook › Display identity and power](../../../docs/runbook.md#display-identity-and-power) |
 | The signal range and test patterns (what each is, Done and Revert, set before Weston starts, how to tune a display with no controls) | [0024](../../../docs/decisions/0024-display-tuning.md), [Display host backend › Units](../../../docs/display-host-backend.md#units-and-weston-incarnations), [Runbook › Tune a display with no controls](../../../docs/runbook.md#tune-a-display-with-no-controls) |
+| What the picture and Position were at a time (configuration snapshots: the kinds, Restore, the routes, tables and SQL) | [0025](../../../docs/decisions/0025-configuration-snapshots.md), [Runbook › Configuration snapshots](../../../docs/runbook.md#configuration-snapshots); `GET /v1/operator/frames/{id}/tuning-snapshot?at=`, `GET /v1/operator/displays/{id}/picture-history`, `GET /v1/operator/frames/{id}/position-history` |
 | SSH access to a Node | [Runbook › Reaching a Node over SSH](../../../docs/runbook.md#reaching-a-node-over-ssh) |
 | The code | `appliance/display_host/ddc.py` (the one place `ddcutil` runs), `power_methods.py` (the exact power tool calls), `picture_list.py` (the ask), `picture.py` (writes and the base page line), `signal_range.py` (the connector's range), `output_power.py`, `edid.py`; `contracts/node_output.py`, `contracts/node_picture.py` (the picture list and its names) |
 
@@ -227,6 +228,43 @@ By hand it cannot be set while Weston runs: Weston holds the DRM master, and a p
 another process is refused. The property survives a Weston restart (probed 2026-10-13) and goes
 back to Automatic at a Pi start. Afterwards read `state` again; the controller reports what it
 read back as the range in force.
+
+## Reading the values while the owner tunes
+
+Owner, 2026-10-13: "how can we improve the tuning flow so that you can read the values as we go?";
+for matching a photo, "its easier for you (an LLM) to deal with bad picture quality". So when he
+sends a phone photo of a Frame while tuning (the paper sheet, a test pattern), read what Central
+had sent that Frame at that moment, and judge the photo yourself; no algorithm does it.
+
+1. **Take the time on Central's clock.** As the photo arrives, read Central's time (the newest
+   entry's `at`, or `SELECT now()`), never the phone's timestamp or your own clock; the photo was
+   taken a little before it reached you. Every `at` is UTC.
+2. **Read the snapshot:** `GET /v1/operator/frames/<frame-id>/tuning-snapshot?at=<UTC, e.g.
+   2026-10-13T21:04:07Z>` with the admin token (curl and the paging routes in
+   [Runbook › Configuration snapshots](../../../docs/runbook.md#configuration-snapshots)). It
+   answers the Frame's Position entry (`fit`, `mat` with its lights) and its picture entry
+   (`picture.hardware` by MCCS code, `picture.software`, `picture.signal_range`, the LUT and its
+   recipe, `test_pattern`). For the minutes around it, read the Display's
+   `…/picture-history` (newest first; `before=` pages back) and match the step he changed.
+3. **What each kind means** (the table is [0025](../../../docs/decisions/0025-configuration-snapshots.md#decision)):
+   `sent-draft` is on the wall but not kept (he has not pressed Done); `sent-back` is the wall put
+   back after Revert or a closed tab; `sent-kept` and the `kept-*` kinds are what Photo Wall keeps.
+   Entries of one session share `session_id`. `unrecorded_change: true` means the stored values
+   changed outside Photo Wall since the newest kept entry.
+4. **Allow for the Pi.** An entry is what Central sent, not what the Pi confirmed: the Pi shows it
+   seconds later, about 10 s for a signal range change, so a photo taken right after a change may
+   still show the step before. A pattern the Pi dropped at its own 10 minutes still shows in the
+   entry.
+5. **What is never seen:** the TV's own remote and menus (a Samsung's picture mode, its HDMI Black
+   Level, Game Mode), the room's light, and the phone's exposure. A display (hardware) value
+   changed on the display's buttons shows on the Picture tab ("Changed on the display's
+   buttons"), not in the history.
+
+**Without the operator token**, read the same with a read-only SQL session on Central's database
+(SELECT only; never write): the two recipes in
+[Runbook › Configuration snapshots](../../../docs/runbook.md#configuration-snapshots) give a Frame
+at a time and a Display's last hour. Say which values you read, with their `at`, when you answer
+him; to put old values back he presses Restore on the tab and then Done.
 
 ## Traps
 

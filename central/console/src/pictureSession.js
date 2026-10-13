@@ -4,7 +4,7 @@ import { TICK_MS, useVisible } from "./liveAdjustment.js";
 import { listLuts } from "./lutsApi.js";
 import {
   beginPicture, editHardware, editLut, editSignalRange, editSoftware, editTestPattern, keepPictureAlive, pictureDone,
-  readFramePicture, revertPicture,
+  readFramePicture, restorePicture, revertPicture,
 } from "./pictureApi.js";
 
 /*
@@ -38,6 +38,12 @@ import {
  * range and the test pattern are choices, never dragged: each is sent at once, ahead of a slider's
  * paced value. One request is in flight at a time, so each edit names the sequence the previous one
  * answered.
+ *
+ * RESTORE. A picture history entry (historyApi.js) is loaded into Central's draft as one edit of the
+ * session (`restore`): it waits for the request in flight like Done, names the current sequence, is
+ * tried once more after a `stale_sequence`, and on success the draft becomes what the session now
+ * holds, read back from Central (`restoredDraft`), so nothing of the old draft is sent over it and the
+ * sliders show the restored values. The test pattern is never restored: the draft keeps its own.
  *
  * THE LUTS. While the tab is open the LUTs list is read once (lutsApi.js), for the picker.
  *
@@ -151,6 +157,23 @@ function nextWrite(draft, taken) {
   return null;
 }
 
+/**
+ * The draft after a Restore, from the first read that follows it: every Photo Wall value, the LUT and
+ * the signal range as the session holds them, each display setting set there or in `before` (one
+ * handed back reads null), and `before`'s test pattern (never restored).
+ * @param {FramePictureView} view
+ * @param {Draft} before
+ * @returns {Draft}
+ */
+export function restoredDraft(view, before) {
+  const hardware = Object.fromEntries(view.hardware
+    .filter((row) => row.value !== null || row.code in before.hardware)
+    .map((row) => [row.code, row.value]));
+  for (const code of Object.keys(before.hardware)) if (!(code in hardware)) hardware[code] = null;
+  const software = Object.fromEntries(SOFTWARE_SETTINGS.map((setting) => [setting, softwareValue(view, setting)]));
+  return { hardware, software, lut: { lut: lutValue(view) }, signal: { range: view.signal_range }, pattern: before.pattern };
+}
+
 /** Whether a read carries every part of the draft. */
 function carries(view, draft) {
   return Object.entries(draft.hardware).every(([code, value]) => hardwareValue(view, code) === value)
@@ -168,7 +191,9 @@ function carries(view, draft) {
  *            changeLut: (profileSha256: string|null) => void,
  *            changeSignalRange: (range: SignalRange) => void, changeTestPattern: (pattern: TestPattern|null) => void,
  *            luts: LutChoice[]|null,
- *            done: () => Promise<boolean>, revert: () => Promise<void>, busy: boolean,
+ *            done: () => Promise<boolean>, revert: () => Promise<void>,
+ *            restore: (entryId: string) => Promise<{ok: true, result: import("./pictureApi.js").PictureRestoreResult}|{ok: false, error: string}>,
+ *            busy: boolean,
  *            error: Problem|null, unavailable: Problem|null, waitingFor: string|null,
  *            latest: number|null, savedAt: number|null, leftAt: number|null}}
  *   `unavailable`: why no session can begin (no Pi, no display); `waitingFor`: someone else's
@@ -196,7 +221,7 @@ export function usePictureSession({ frameId, open }) {
   // write never says shown. `flight` is the request in flight; `acting` holds the loop.
   const state = useRef({
     draft: EMPTY, session: null, taken: EMPTY, view: null, wrote: 0, readFor: -1, editAt: 0, waitUntil: 0,
-    flight: null, acting: false, live, mounted: true, timer: null,
+    flight: null, acting: false, live, mounted: true, timer: null, restored: false,
   });
   state.current.live = live;
   const path = `frame:${frameId}`;
@@ -211,7 +236,10 @@ export function usePictureSession({ frameId, open }) {
   }, []);
   const setSession = useCallback((next) => {
     state.current.session = next;
-    if (next === null) setTaken(EMPTY);
+    if (next === null) {
+      setTaken(EMPTY);
+      state.current.restored = false;
+    }
     setSessionState(next);
   }, [setTaken]);
   const fail = useCallback((code) => setError({ words: REFUSALS[code] ?? "Photo Wall refused the change.", code }), []);
@@ -236,11 +264,18 @@ export function usePictureSession({ frameId, open }) {
     }
     current.view = result.view;
     setView(result.view);
+    if (current.restored && current.session !== null) {
+      // The first read after a Restore: the draft becomes what the session holds, all of it taken.
+      current.restored = false;
+      const next = restoredDraft(result.view, current.draft);
+      setDraft(next);
+      setTaken({ ...next, pattern: current.taken.pattern });
+    }
     if (after === current.wrote) {
       current.readFor = after;
       setShownRead(result.view.status === "shown" && carries(result.view, current.draft));
     }
-  }, [frameId, fail]);
+  }, [frameId, fail, setDraft, setTaken]);
 
   /** One write of the draft (a display setting, a Photo Wall one, the signal range or the test pattern). */
   const write = useCallback(async (next) => {
@@ -459,6 +494,43 @@ export function usePictureSession({ frameId, open }) {
     state.current.waitUntil = 0;
     return true;
   }), [act, fail, setDraft, setSession]);
+  /**
+   * Restore a picture history entry into the session's draft (one edit; see RESTORE above).
+   * @param {string} entryId
+   * @returns {Promise<{ok: true, result: import("./pictureApi.js").PictureRestoreResult}|{ok: false, error: string}>}
+   */
+  const restore = useCallback(async (entryId) => (await act(async () => {
+    const current = state.current;
+    let open_ = current.session;
+    if (open_ === null) return { ok: false, error: "session_ended" };
+    let result = await restorePicture(open_.session_id, { entry_id: entryId, expected_sequence: open_.sequence });
+    if (!result.ok && result.error === "stale_sequence") {
+      const kept = await keepPictureAlive(open_.session_id);
+      if (kept.ok && current.session === open_) {
+        open_ = { ...open_, sequence: kept.session.sequence };
+        setSession(open_);
+        result = await restorePicture(open_.session_id, { entry_id: entryId, expected_sequence: open_.sequence });
+      }
+    }
+    if (!current.mounted || current.session !== open_) return result;
+    if (!result.ok) {
+      if (GONE.has(result.error)) setSession(null);
+      return result;
+    }
+    // Nothing of the old draft may be sent over the restored values: the draft holds only the test
+    // pattern until the read below (or the loop's next one) folds the session's values in.
+    const kept = { ...EMPTY, pattern: current.draft.pattern };
+    setDraft(kept);
+    setTaken({ ...EMPTY, pattern: current.taken.pattern });
+    current.restored = true;
+    current.wrote += 1;
+    setShownRead(false);
+    setSession({ ...open_, sequence: result.result.sequence });
+    setChanges((count) => count + 1);
+    setError(null);
+    await read();
+    return result;
+  })) ?? { ok: false, error: "busy" }, [act, read, setDraft, setSession, setTaken]);
   const revert = useCallback(() => act(async () => {
     const open_ = state.current.session;
     setSession(null);
@@ -475,7 +547,7 @@ export function usePictureSession({ frameId, open }) {
   const phase = session === null ? "idle" : shown ? "shown" : dirty ? "waiting" : "live";
   return {
     view, phase, draft, dirty, changeHardware, changeSoftware, changeLut, changeSignalRange, changeTestPattern, luts, done,
-    revert, busy, error, unavailable, waitingFor,
+    revert, restore, busy, error, unavailable, waitingFor,
     latest: session === null ? null : changes, savedAt, leftAt,
   };
 }

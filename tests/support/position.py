@@ -33,4 +33,5 @@ def save_position(registry, frame_id: str, calibration: Calibration | None = Non
             config_revision=row["configuration_revision"],
             calibration_revision=(Calibration.model_validate(row["calibration"]).revision
                                   if expected_revision is None else expected_revision),
-            calibration=FULL_SCREEN_CORNERS if calibration is None else calibration, mat=mat)
+            calibration=FULL_SCREEN_CORNERS if calibration is None else calibration, mat=mat,
+            session_id=None, restored_from=None)

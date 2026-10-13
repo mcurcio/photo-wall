@@ -71,7 +71,7 @@ def _commit_by_trial(registry, frame_id: str, player_id: str) -> None:
             conn, frame_id=frame_id, player_id=player_id, authority_epoch=_epoch(registry, player_id),
             output_id=frame.output_id, binding_generation=frame.generation,
             config_revision=frame.configuration_revision, calibration_revision=frame.calibration.revision,
-            calibration=Calibration(fit=CornersFit()), mat=Mat())
+            calibration=Calibration(fit=CornersFit()), mat=Mat(), session_id=None, restored_from=None)
 
 
 POSITION_COMMITS = pytest.mark.parametrize("commit", [_commit_by_calibrate, _commit_by_trial],
