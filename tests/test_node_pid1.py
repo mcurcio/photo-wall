@@ -378,13 +378,14 @@ class Node:
                 now = unit_properties_of(self, PLAYER_UNIT, "ActiveState,SubState,MainPID,InvocationID")
                 launch = json.loads(self.run("cat", BROKER_LAUNCH))
                 process = (launch.get("running") or {}).get("process") or {}
+                # systemctl shows an InvocationID as 32 hex digits; the broker's record holds UUIDs.
                 if (now_display["ActiveState"] == "active"
                         and now_display["InvocationID"] not in ("", display["InvocationID"])
                         and now["SubState"] == "running"
                         and now["InvocationID"] not in ("", player["InvocationID"])
-                        and process.get("invocation_id") == now["InvocationID"]
+                        and same_invocation(process.get("invocation_id"), now["InvocationID"])
                         and str(process.get("pid")) == now["MainPID"]
-                        and launch.get("display") == now_display["InvocationID"]):
+                        and same_invocation(launch.get("display"), now_display["InvocationID"])):
                     break
                 assert time.monotonic() < deadline, (
                     "no broker-launched Player for the restarted Weston", turn, display, now_display,
@@ -1052,6 +1053,11 @@ def test_node_pid1_reboot(node_pid1_inputs, node_host, registry, tmp_path):
             print("PASS real PID1/Central phase", phase, "evidence", work, flush=True)
         finally:
             second.capture_and_remove(fixture, sys.exc_info()[1])
+
+
+def same_invocation(recorded, shown):
+    """A recorded InvocationID (a UUID's text) and systemctl's (32 hex digits) name one run."""
+    return bool(recorded and shown) and uuid.UUID(recorded) == uuid.UUID(shown)
 
 
 def unit_properties_of(node, unit, names):
