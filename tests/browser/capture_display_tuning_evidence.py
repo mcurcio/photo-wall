@@ -69,10 +69,10 @@ def test_after_picture(page, registry, scheme):
 @pytest.mark.parametrize("scheme", SCHEMES)
 def test_after_white(page, registry, scheme):
     """Test pattern White: the paper-sheet line, on every Frame of the display."""
-    from test_frame_picture_browser import PAPER, TEST_PATTERN, _choice, _group
+    from test_frame_picture_browser import PAPER, TEST_PATTERN, _group, _show
 
     def choose(page):
-        _choice(page, TEST_PATTERN, "White").click()
+        _show(page, "White")
         expect(_group(page, TEST_PATTERN)).to_contain_text(PAPER)
 
     _picture(page, registry, scheme, "after-white", choose)
@@ -82,10 +82,10 @@ def test_after_white(page, registry, scheme):
 def test_after_black_level_full(page, registry, scheme):
     """Test pattern Black level with Signal range Full applied by the Pi: the reading line and
     "The Pi sends Full."."""
-    from test_frame_picture_browser import READING, SIGNAL, TEST_PATTERN, _choice, _group
+    from test_frame_picture_browser import READING, SIGNAL, TEST_PATTERN, _choice, _group, _show
 
     def choose(page):
-        _choice(page, TEST_PATTERN, "Black level").click()
+        _show(page, "Black level")
         expect(_group(page, TEST_PATTERN)).to_contain_text(READING)
         _choice(page, SIGNAL, "Full").click()
         expect(_group(page, SIGNAL)).to_contain_text("The Pi sends Full.")

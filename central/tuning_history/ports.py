@@ -10,7 +10,7 @@ from datetime import datetime
 from typing import Protocol
 from uuid import UUID
 
-from central.displays.views import PictureHistoryView
+from central.displays.views import PictureEntryView, PictureHistoryView
 from central.fleet.position_views import PositionHistoryView
 from central.tuning_history.bounds import HistoryPage
 from central.tuning_history.views import TuningSnapshotView
@@ -30,6 +30,13 @@ class TuningHistoryQueries(Protocol):
     def snapshot_at(self, frame_id: str, at: datetime) -> TuningSnapshotView:
         """The Frame's snapshot at `at` (model.snapshot_at over the three latest-at reads).
         HistoryRefused("unknown_frame", 404)."""
+        ...
+
+    def sent_picture_entry(self, player_id: str, output_id: str, picture_change: int) -> PictureEntryView:
+        """The sent picture entry of one port's picture change (picture_sent_entries' key; the
+        calibration target's QR names it, decision 0026): what Central sent that port then, in the
+        picture history's entry shape. HistoryRefused("unknown_entry", 404) when the port has no
+        such entry (never sent, trimmed, an unknown player or port, or a change below 1)."""
         ...
 
 

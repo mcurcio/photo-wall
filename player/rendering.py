@@ -69,6 +69,8 @@ class Renderer(Protocol):
 
     def set_identify_output(self, output_id: str | None) -> None: ...
 
+    def set_player(self, player_id: str | None) -> None: ...   # the Player's registered id; None: none yet
+
     def prepare(self, layer: LocalLayer) -> PrepareResult: ...
 
     def capacity(self, compositions: tuple[OutputComposition, ...]) -> CapacityResult: ...
@@ -106,6 +108,7 @@ class RecordingRenderer:
         self.configuration_received = False
         self.central_link_history: list[str] = ["connecting"]
         self.identify_output: str | None = None
+        self.player_id: str | None = None
 
     def set_unbound_outputs(self, output_ids: tuple[str, ...], player_id: str | None,
                             central_link_state: Literal["connecting", "reachable", "retrying"] = "reachable",
@@ -118,6 +121,9 @@ class RecordingRenderer:
 
     def set_identify_output(self, output_id: str | None) -> None:
         self.identify_output = output_id
+
+    def set_player(self, player_id: str | None) -> None:
+        self.player_id = player_id
 
     def prepare(self, layer: LocalLayer) -> PrepareResult:
         self.preparations.append(layer)

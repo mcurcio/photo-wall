@@ -1,12 +1,12 @@
 ---
 name: display-control
-description: Operate a Photo Wall Pi's displays by hand over SSH - read a display's EDID, map HDMI ports to CEC devices and DDC/CI buses, turn a display off and on with cec-ctl or ddcutil, ask a display for the picture list (`getvcp <codes> --terse`, `capabilities`) and read and set its picture settings (brightness VCP 10, contrast VCP 12, colour preset 14, gains…), and read what the display controller did. Read the HDMI signal range (Broadcast RGB, is_limited_range, the AVI InfoFrame) and whether a display honours it (the EDID's quantization-selectable bit). Use it for the 1b bench step (Test off and on), the display-tuning bench steps (Full and Limited on a TV, the time without photos per change), the 1c and picture-split bench steps (display and Photo Wall brightness from the console read back, which codes a display answers, the time of an ask, power during an ask, Cover on the test monitor, write timing), to diagnose "Display didn't answer", "The display did not take it", "Checking what this display offers" that never clears or a power method that never answers, or to probe a new display's support. Also, when the owner sends a photo of a Frame while tuning, read the picture and Position values Central sent it at that time (configuration snapshots). The rules (what the controller does, what Central decides) live in the docs it links; this is the runbook and its traps.
+description: Operate a Photo Wall Pi's displays by hand over SSH - read a display's EDID, map HDMI ports to CEC devices and DDC/CI buses, turn a display off and on with cec-ctl or ddcutil, ask a display for the picture list (`getvcp <codes> --terse`, `capabilities`) and read and set its picture settings (brightness VCP 10, contrast VCP 12, colour preset 14, gains…), and read what the display controller did. Read the HDMI signal range (Broadcast RGB, is_limited_range, the AVI InfoFrame) and whether a display honours it (the EDID's quantization-selectable bit). Use it for the 1b bench step (Test off and on), the display-tuning bench steps (Full and Limited on a TV, the time without photos per change), the 1c and picture-split bench steps (display and Photo Wall brightness from the console read back, which codes a display answers, the time of an ask, power during an ask, Cover on the test monitor, write timing), to diagnose "Display didn't answer", "The display did not take it", "Checking what this display offers" that never clears or a power method that never answers, or to probe a new display's support. Also, when the owner sends a photo of a Frame while tuning, read the picture and Position values Central sent it at that time (configuration snapshots); when he AirDrops ProRAW photos of the calibration targets, read them with the reader script and tell him what to change. The rules (what the controller does, what Central decides) live in the docs it links; this is the runbook and its traps.
 ---
 
 # display-control
 
 How to reach and drive the displays on a Photo Wall Pi 5, learned in the 1b spike on the test Pi
-(2026-10-10), the 1b build, the 1c build, the picture split ([0022](../../../docs/decisions/0022-picture-hardware-and-software-apart.md)) and the display-tuning probe on the owner's Samsung QN43Q8F (2026-10-13, [0024](../../../docs/decisions/0024-display-tuning.md)), and configuration snapshots (2026-10-13, [0025](../../../docs/decisions/0025-configuration-snapshots.md)). The rules are not here; they have one home each:
+(2026-10-10), the 1b build, the 1c build, the picture split ([0022](../../../docs/decisions/0022-picture-hardware-and-software-apart.md)) and the display-tuning probe on the owner's Samsung QN43Q8F (2026-10-13, [0024](../../../docs/decisions/0024-display-tuning.md)), configuration snapshots (2026-10-13, [0025](../../../docs/decisions/0025-configuration-snapshots.md)) and the calibration targets (2026-10-13, [0026](../../../docs/decisions/0026-calibration-targets.md)). The rules are not here; they have one home each:
 
 | Rules | Home |
 |---|---|
@@ -16,6 +16,7 @@ How to reach and drive the displays on a Photo Wall Pi 5, learned in the 1b spik
 | Central's side: tables, routes, the LISTEN wake, what each console result means | [Runbook › Display identity and power](../../../docs/runbook.md#display-identity-and-power) |
 | The signal range and test patterns (what each is, Done and Revert, set before Weston starts, how to tune a display with no controls) | [0024](../../../docs/decisions/0024-display-tuning.md), [Display host backend › Units](../../../docs/display-host-backend.md#units-and-weston-incarnations), [Runbook › Tune a display with no controls](../../../docs/runbook.md#tune-a-display-with-no-controls) |
 | What the picture and Position were at a time (configuration snapshots: the kinds, Restore, the routes, tables and SQL) | [0025](../../../docs/decisions/0025-configuration-snapshots.md), [Runbook › Configuration snapshots](../../../docs/runbook.md#configuration-snapshots); `GET /v1/operator/frames/{id}/tuning-snapshot?at=`, `GET /v1/operator/displays/{id}/picture-history`, `GET /v1/operator/frames/{id}/position-history` |
+| The calibration targets (both stages, what each aims at, the layout, the reader's rules) | [0026](../../../docs/decisions/0026-calibration-targets.md), [Runbook › Calibration targets](../../../docs/runbook.md#calibration-targets); the layout `contracts/calibration_target.py`, the reader's thresholds `scripts/calibration_target/model.py` |
 | SSH access to a Node | [Runbook › Reaching a Node over SSH](../../../docs/runbook.md#reaching-a-node-over-ssh) |
 | The code | `appliance/display_host/ddc.py` (the one place `ddcutil` runs), `power_methods.py` (the exact power tool calls), `picture_list.py` (the ask), `picture.py` (writes and the base page line), `signal_range.py` (the connector's range), `output_power.py`, `edid.py`; `contracts/node_output.py`, `contracts/node_picture.py` (the picture list and its names) |
 
@@ -265,6 +266,70 @@ had sent that Frame at that moment, and judge the photo yourself; no algorithm d
 [Runbook › Configuration snapshots](../../../docs/runbook.md#configuration-snapshots) give a Frame
 at a time and a Display's last hour. Say which values you read, with their `at`, when you answer
 him; to put old values back he presses Restore on the tab and then Done.
+
+## Reading the calibration targets
+
+Owner, 2026-10-13: "build the calibration targets"; the two stages are "the users choice -- not
+something that the software enforces". He lays the printed paper target under the Frame's glass,
+picks a target on the Picture tab and AirDrops a photo from his iPhone 14 Pro (ProRAW on): it
+lands in `~/Downloads` on the Mac as `IMG_####.DNG`, not in the chat. He may photograph with the phone the
+tab runs on: a test pattern stays up a minute while the tab is hidden (the picture session's idle
+limit, `central/displays/picture.py` `idle_seconds`), and the tab keeps it once he is back.
+
+1. **Run the reader** from the repository on the Mac (the admin token, and for a post-software
+   reading with a LUT on a read-only database address, from 1Password; how, in
+   [Runbook › Calibration targets](../../../docs/runbook.md#calibration-targets)):
+   `op run -- .venv/bin/python -m scripts.calibration_target ~/Downloads/IMG_1234.DNG --central <url>`.
+   Read the newest DNG he sent; one photo is enough (owner, 2026-10-14: "The point of using two
+   calibration targets is that we are comparing them relatively.").
+   It reads the QR, fetches the sent entry it names and prints JSON; exit 0 a reading, 2 a
+   refusal, 1 an error.
+2. **The stage is the entry's test pattern**, never your guess or the order he took them in:
+   `target-pre-software` judges the display's own controls, `target-post-software` the residual for
+   Photo Wall's values. Say which you read, with the entry's `at` and picture change.
+3. **A refusal is a request to him**, with its `where` in plain words (the JSON's place words):
+   - `target-not-found`: the markers are out of view, blurred or glared over: retake with the
+     whole Frame in view and the named corner clear.
+   - `code-unreadable`: the screen's QR did not read: retake straighter or closer, glare off it.
+   - `unknown-entry`: Central has no such sent entry (another Central, or trimmed): pick the target
+     again on the tab and retake.
+   - `not-a-target`: the entry the QR names has no calibration target as its test pattern (the
+     tab had moved on as the photo was taken): pick a target again and retake.
+   - `clipped`: a white reached the sensor's clip: tap the screen on the phone and lower the
+     exposure, or step back from a bright light.
+   - `outside-photo`: part of a target (the named places) lies outside the photo, though enough
+     markers were found: step back or centre the Frame in the photo.
+   - `scale-mismatch`: the paper is not printed at 100 %: reprint without "fit to page".
+   - `paper-misplaced`: the sheet, as laid, reaches over the screen target's patches (the detail
+     says which way it is off): open the Frame and lay it centred and square in the dark box.
+   - `white-unread`: too many groups dropped (reflections or shadows over them): move the light or
+     lamp that reflects over the named places, or move himself, and retake.
+   Dropped groups and copies in a reading (`reflection-edge`, `copy-unlike-the-rest`, …) are not
+   refusals: mention where, if many, so he can move the light next time.
+4. **Suggestions are his to make, never yours.** Pre-software: directions for the display's own
+   controls (raise, lower, warmer, cooler or keep, with the gap's size); name the Samsung's menu
+   item you think matches, and say it is your reading. Photo Wall does not record those menus: ask
+   him what he changed. Post-software: values for Photo Wall's brightness, contrast, colour
+   temperature and gamma, or "no change", which is the best result; the print look never moves.
+   On a display that answers DDC/CI, the pre-software controls include the tab's Display
+   (hardware) sliders; say which. `{"suggestion": {"why": "lut-unread"}}` means a post-software
+   reading with a LUT on whose table could not be read: run again with
+   `PHOTO_WALL_READ_DATABASE_URL` set; `tone-unread`, a post-software reading with no grey read (a
+   normal photo, or every grey dropped): ask for a ProRAW photo. The paper's white is matched as
+   read, with no correction for its ink (owner, 2026-10-14: "a level of nuance that probably
+   doesn’t matter in practice").
+   You never apply anything: no Picture edit, no Done, no DDC/CI write. He moves the sliders or
+   the TV's controls, sends new photos, and presses Done when it reads right.
+5. **Know the limits** ([0026](../../../docs/decisions/0026-calibration-targets.md#costs)): the
+   camera is not the eye (ask him whether it looks matched); a shadow he casts over the paper
+   alone (standing between the room light and the Frame) reads the screen too bright and is not
+   detected, so ask him to stand aside of the light; a normal photo (JPEG, HEIC) gives the white alone; an angled photo reads the
+   panel's white off. The pre-software black only says raise or keep (a crushed step), never
+   lower: a black that glows, or a signal range the display does not expect, reads "keep". When he
+   says the dark areas glow, read the entry's `signal_range` and use the Black level pattern
+   ([0024](../../../docs/decisions/0024-display-tuning.md)) for it. The reader has not yet read a
+   real ProRAW photo (NOT RUN until the first bench check): treat its first answers with care and
+   look at the photo yourself.
 
 ## Traps
 

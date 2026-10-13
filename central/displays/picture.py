@@ -80,6 +80,7 @@ from contracts.node_picture import (
 from contracts.tuning import TestPattern
 
 PICTURE_IDLE_SECONDS: Final = 5.0     # a picture session ends this long after its last edit or keepalive
+TEST_PATTERN_IDLE_SECONDS: Final = 60.0   # ... while it asks a test pattern (`idle_seconds`)
 
 
 class SoftwareSetting(StrEnum):
@@ -226,7 +227,7 @@ def edited_hardware(session: PictureSession, code: VcpCode, value: int | None, *
         hardware[code] = value
     return replace(session, sequence=sequence, draft=replace(session.draft, hardware=_in_list_order(hardware)),
                    touched_hardware=session.touched_hardware | {code},
-                   lease=touched(session.lease, now, idle_seconds=PICTURE_IDLE_SECONDS))
+                   lease=_touched(session, now))
 
 
 def edited_software(session: PictureSession, setting: SoftwareSetting, value: int, *,
@@ -242,7 +243,7 @@ def edited_software(session: PictureSession, setting: SoftwareSetting, value: in
         raise PictureRefused("out_of_range", 422) from None
     return replace(session, sequence=sequence, draft=replace(session.draft, software=software),
                    touched_software=session.touched_software | {setting},
-                   lease=touched(session.lease, now, idle_seconds=PICTURE_IDLE_SECONDS))
+                   lease=_touched(session, now))
 
 
 def edited_lut(session: PictureSession, lut: LutRef | None, *, known: bool, expected_sequence: int,
@@ -256,7 +257,7 @@ def edited_lut(session: PictureSession, lut: LutRef | None, *, known: bool, expe
     software = replace(session.draft.software, lut=lut)
     return replace(session, sequence=sequence, draft=replace(session.draft, software=software),
                    touched_software=session.touched_software | {SoftwareChoice.LUT},
-                   lease=touched(session.lease, now, idle_seconds=PICTURE_IDLE_SECONDS))
+                   lease=_touched(session, now))
 
 
 def edited_signal_range(session: PictureSession, signal_range: SignalRange, *, expected_sequence: int,
@@ -268,7 +269,7 @@ def edited_signal_range(session: PictureSession, signal_range: SignalRange, *, e
     if not isinstance(signal_range, SignalRange):
         raise PictureRefused("out_of_range", 422)
     return replace(session, sequence=sequence, draft=replace(session.draft, signal_range=signal_range),
-                   lease=touched(session.lease, now, idle_seconds=PICTURE_IDLE_SECONDS))
+                   lease=_touched(session, now))
 
 
 def edited_test_pattern(session: PictureSession, pattern: TestPattern | None, *, expected_sequence: int,
@@ -280,8 +281,7 @@ def edited_test_pattern(session: PictureSession, pattern: TestPattern | None, *,
     if pattern is not None and not isinstance(pattern, TestPattern):
         raise PictureRefused("out_of_range", 422)
     ask = None if pattern is None else TestPatternAsk(pattern, sequence)
-    return replace(session, sequence=sequence, test_pattern=ask,
-                   lease=touched(session.lease, now, idle_seconds=PICTURE_IDLE_SECONDS))
+    return _kept(replace(session, sequence=sequence, test_pattern=ask), now)
 
 
 def session_test_pattern(session: PictureSession | None, now: float) -> TestPatternAsk | None:
@@ -466,9 +466,34 @@ def restored(session: PictureSession, *, entry_id: UUID, entry_display_id: UUID,
     return PictureRestored(
         replace(session, sequence=sequence, draft=draft, touched_hardware=session.touched_hardware | touched_hardware,
                 touched_software=session.touched_software | touched_software, restored_from=entry_id,
-                lease=touched(session.lease, now, idle_seconds=PICTURE_IDLE_SECONDS)),
+                lease=_touched(session, now)),
         skipped, lut_skipped,
         entry_lut is not None and not lut_skipped and entry_lut.recipe_id != LUT_RECIPE_ID)
+
+
+def idle_seconds(session: PictureSession) -> float:
+    """How long the session lives after its last edit or keepalive (the one home of the rule):
+    TEST_PATTERN_IDLE_SECONDS while it asks a test pattern, so the pattern stays up while the
+    operator's phone goes from the browser to its camera (owner, 2026-10-14: "It would be nice if
+    the testing screen persisted, even for a minute"); PICTURE_IDLE_SECONDS otherwise. The Pi's own
+    bound on a pattern (TEST_PATTERN_SECONDS) is unchanged."""
+    return TEST_PATTERN_IDLE_SECONDS if session.test_pattern is not None else PICTURE_IDLE_SECONDS
+
+
+def kept_alive(session: PictureSession, now: float) -> PictureSession:
+    """The session after a keepalive at `now`: its lease touched (`idle_seconds`). PictureRefused
+    session_ended once the lease ran out."""
+    if not session.lease.live(now):
+        raise PictureRefused("session_ended", 410)
+    return _kept(session, now)
+
+
+def _kept(session: PictureSession, now: float) -> PictureSession:
+    return replace(session, lease=_touched(session, now))
+
+
+def _touched(session: PictureSession, now: float) -> Lease:
+    return touched(session.lease, now, idle_seconds=idle_seconds(session))
 
 
 def _next(session: PictureSession, expected_sequence: int, now: float) -> int:
@@ -491,12 +516,12 @@ def _in_list_order(hardware: Mapping[VcpCode, int]) -> dict[VcpCode, int]:
     return {code: hardware[code] for code in PICTURE_LIST if code in hardware}
 
 
-__all__ = ["PICTURE_IDLE_SECONDS", "TEST_PATTERN_SECONDS", "DisplayPicture", "PictureRefused", "PictureSession",
+__all__ = ["PICTURE_IDLE_SECONDS", "TEST_PATTERN_IDLE_SECONDS", "TEST_PATTERN_SECONDS", "DisplayPicture", "PictureRefused", "PictureSession",
            "PictureRestored", "PictureStatus", "SoftwareChoice", "SoftwareSetting", "SoftwareTouch",
            "TestPatternState", "answers",
            "carries", "copied", "default_picture", "edited_hardware", "edited_lut", "edited_signal_range",
            "edited_software", "edited_test_pattern", "software_touch",
-           "effective_picture", "hardware_answered", "kept_picture", "picture_digest", "picture_document",
+           "effective_picture", "hardware_answered", "idle_seconds", "kept_alive", "kept_picture", "picture_digest", "picture_document",
            "picture_status", "presented", "restore_answered", "restore_of", "restored", "reverted",
            "session_test_pattern",
            "signal_answered", "test_pattern_state", "with_befores", "with_restore"]

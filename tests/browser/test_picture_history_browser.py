@@ -17,6 +17,8 @@ Mutation probes (each fails the named case):
 - K1-always-enabled: `restoreState` always enabled -> the other-window case.
 - K1-silent-skip: `restoreNotes` says nothing -> the skipped-setting case.
 - K1-no-notice: no `unrecorded_change` Note -> the unrecorded case.
+- U1-label (calibration targets): drop "target-pre-software" from frame-picture.tsx's PATTERN_NAMES
+  -> the typecheck fails (Record<TestPattern, string>), and the target try's Details lack its name.
 """
 
 import os
@@ -35,6 +37,7 @@ from test_frame_picture_browser import (
     _bar,
     _press,
     _seen,
+    _show,
     _slider,
     _store,
 )
@@ -167,6 +170,20 @@ def test_a_restore_names_the_display_settings_this_display_no_longer_offers(page
         expect(_slider(page, DISPLAY, "Brightness")).to_have_count(0)  # no longer offered
         _rows(page, KEPT).first.get_by_role("button", name="Restore", exact=True).click()
         expect(_history(page)).to_contain_text("Not restored: Brightness (this display does not offer them now).")
+
+
+def test_a_target_try_names_its_stage_in_the_rows_details(page, registry):
+    """Calibration targets U1, acceptance 3: the screen target drawn raw is a Tried row whose Details
+    read "Test pattern Target: pre-software"."""
+    _seen(registry)
+    with FakePi(registry), operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "wall")
+        open_frame(page, FRAME, "picture")
+        expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
+        _show(page, "Target: pre-software")
+        tried = _rows(page, TRIED)
+        expect(tried.first).to_be_visible()
+        expect(_values(tried.first)).to_contain_text(re.compile(r"Test pattern\s*Target: pre-software"))
 
 
 def test_values_changed_outside_photo_wall_are_said_until_the_next_done(page, registry):

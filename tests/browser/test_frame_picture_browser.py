@@ -614,6 +614,15 @@ def _choice(page, group, name):
     return _group(page, group).get_by_role("radio", name=name, exact=True)
 
 
+def _shown_pattern(page):
+    """The Test pattern's picker (a Select: six choices)."""
+    return _group(page, TEST_PATTERN).get_by_role("combobox", name="Show", exact=True)
+
+
+def _show(page, label):
+    _shown_pattern(page).select_option(label=label)
+
+
 def _sequence(registry):
     [row] = _sql(registry, "SELECT sequence FROM picture_sessions")
     return row["sequence"]
@@ -692,15 +701,15 @@ def test_white_shows_the_paper_line_and_off_sends_null(page, registry):
         open_frame(page, FRAME, "picture")
         expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
         group = _group(page, TEST_PATTERN)
-        expect(_choice(page, TEST_PATTERN, "Off")).to_be_checked()
+        expect(_shown_pattern(page)).to_have_value("off")
         expect(group).to_contain_text("Choose Off or leave this page; the Pi takes it off by itself after 10 min.")
         edits = _edits(page, "test-pattern-edits")
-        _choice(page, TEST_PATTERN, "White").click()
+        _show(page, "White")
         expect(group).to_contain_text(PAPER)
         expect(group).to_contain_text(SHOWN)
         assert _off_thread(_picture, registry).test_pattern.pattern.value == "white"
 
-        _choice(page, TEST_PATTERN, "Off").click()
+        _show(page, "Off")
         expect(group).not_to_contain_text(PAPER)
         expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
         page.wait_for_timeout(600)
@@ -720,21 +729,130 @@ def test_black_level_says_how_to_read_it_and_once_ended_is_asked_for_again(page,
         expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
         group = _group(page, TEST_PATTERN)
         edits = _edits(page, "test-pattern-edits")
-        _choice(page, TEST_PATTERN, "Black level").click()
+        _show(page, "Black level")
         expect(group).to_contain_text(READING)
         expect(group).to_contain_text(SHOWN)
 
         pi.bound_over = True
         expect(group).to_contain_text("Taken off after 10 min. Choose it again to show it.")
-        expect(_choice(page, TEST_PATTERN, "Off")).to_be_checked()
+        expect(_shown_pattern(page)).to_have_value("off")
         first = _off_thread(_picture, registry).test_pattern.ask
 
         pi.bound_over = False
-        _choice(page, TEST_PATTERN, "Black level").click()
+        _show(page, "Black level")
         expect(group).to_contain_text(SHOWN)
         expect(group).to_contain_text(READING)
         assert [body["test_pattern"] for _at, body in edits] == ["black-level", "black-level"], edits
         assert _off_thread(_picture, registry).test_pattern.ask > first
+
+
+def _visibility(page, state):
+    """The browser tab hidden or shown, as a phone switching to its camera does it."""
+    page.evaluate("""(state) => {
+        Object.defineProperty(document, "visibilityState", {configurable: true, get: () => state});
+        document.dispatchEvent(new Event("visibilitychange"));
+    }""", state)
+
+
+def test_hiding_the_tab_keeps_a_shown_pattern_and_ends_a_session_without_one(page, registry):
+    """Owner, 2026-10-14: "switching from my phone browser to my phone camera is enough to drop the
+    white overlay". Hidden with White shown, the page sends no Revert and stops its keepalives, and
+    the document keeps White past Central's 5 s window (a pattern's is a minute); shown again, the
+    same session goes on. Hidden with no pattern, the page reverts at once.
+
+    Mutation: revert on every hide (the effect without the pattern's exception) -> the DELETE is sent
+    and the document drops White."""
+    _seen(registry)
+    with FakePi(registry), operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "wall")
+        open_frame(page, FRAME, "picture")
+        expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
+        group = _group(page, TEST_PATTERN)
+        _show(page, "White")
+        expect(group).to_contain_text(SHOWN)
+        sent = []
+        page.on("request", lambda request: sent.append((request.method, request.url.rsplit("/", 1)[-1]))
+                if "/picture-sessions/" in request.url else None)
+        [before] = _off_thread(_sql, registry, "SELECT id FROM picture_sessions")
+
+        _visibility(page, "hidden")
+        page.wait_for_timeout(6500)
+        assert not any(method == "DELETE" for method, _ in sent), sent
+        assert not any(last == "keepalive" for _, last in sent), sent
+        assert _off_thread(_picture, registry).test_pattern.pattern.value == "white"
+
+        _visibility(page, "visible")
+        expect(group).to_contain_text(SHOWN)
+        page.wait_for_timeout(1200)
+        assert any(last == "keepalive" for _, last in sent), sent
+        assert _off_thread(_sql, registry, "SELECT id FROM picture_sessions") == [before]
+
+        _show(page, "Off")
+        expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
+        _visibility(page, "hidden")
+        for _ in range(50):
+            if any(method == "DELETE" for method, _ in sent):
+                break
+            page.wait_for_timeout(100)
+        else:
+            raise AssertionError(f"hidden with no pattern, the page never reverted: {sent}")
+
+
+PATTERNS = ["Off", "White", "Grey ramp", "Black level", "Target: pre-software", "Target: post-software"]
+PAPER_TARGET = {"Letter": "/v1/operator/calibration-target/paper.pdf?paper=letter",
+                "A4": "/v1/operator/calibration-target/paper.pdf?paper=a4"}
+
+
+def _print_links(page):
+    return _group(page, TEST_PATTERN).get_by_role("link")
+
+
+def test_both_targets_are_offered_in_either_order_with_the_paper_targets_print_links(page, registry):
+    """Calibration targets U1, acceptance 1 and 2 (owner R7, R8: either stage, any order; R1: the
+    printable sheet): the picker lists six patterns; each target posts exactly its wire value, post
+    before pre and back, with nothing gating either; the Pi shows each; with a target chosen the tab
+    shows Letter and A4 linking to the paper target, and none with another pattern or Off.
+
+    Mutations: U1-wire, send "target-pre" -> Central's 422 and the body assertion fails; U1-links,
+    render the links for every pattern -> the Off and White assertions fail."""
+    _seen(registry)
+    with FakePi(registry), operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "wall")
+        open_frame(page, FRAME, "picture")
+        expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
+        group = _group(page, TEST_PATTERN)
+        expect(_shown_pattern(page).get_by_role("option")).to_have_text(PATTERNS)
+        expect(_print_links(page)).to_have_count(0)
+        edits = _edits(page, "test-pattern-edits")
+
+        for label, wire in [("Target: post-software", "target-post-software"),
+                            ("Target: pre-software", "target-pre-software"),
+                            ("Target: post-software", "target-post-software")]:
+            _show(page, label)
+            expect(group).to_contain_text(SHOWN)
+            expect(group).to_contain_text("Lay the printed sheet uncut in the dark box under the Frame's glass")
+            # The camera is often the phone the tab runs on: hiding the tab keeps a pattern a minute.
+            expect(group).to_contain_text("the target stays up for a minute while this tab is hidden")
+            expect(_print_links(page)).to_have_text(list(PAPER_TARGET))
+            for name, href in PAPER_TARGET.items():
+                expect(group.get_by_role("link", name=name, exact=True)).to_have_attribute("href", href)
+            for _ in range(50):
+                ask = _off_thread(_picture, registry).test_pattern
+                if ask is not None and ask.pattern.value == wire:
+                    break
+                page.wait_for_timeout(100)
+            else:
+                raise AssertionError(f"the document never asked for {wire}")
+
+        _show(page, "White")
+        expect(group).to_contain_text(PAPER)
+        expect(_print_links(page)).to_have_count(0)
+        _show(page, "Off")
+        expect(_print_links(page)).to_have_count(0)
+        expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
+        page.wait_for_timeout(600)
+        assert [body["test_pattern"] for _at, body in edits] == [
+            "target-post-software", "target-pre-software", "target-post-software", "white", None], edits
 
 
 def test_a_failed_signal_says_what_the_display_still_gets_and_unsupported_says_so(page, registry):

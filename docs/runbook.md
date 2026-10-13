@@ -1046,7 +1046,7 @@ For a display that hides its picture settings or answers no DDC/CI, with a brigh
 2. **The Black level.** Choose Test pattern › **Black level** (the raw signal: no Photo Wall step and no mat acts on it) and read it by the tab's own line, which is the one home of that reading ([console design §5](operator-console-design.md#5-the-frame-page), Picture row): it compares Signal range **Full** with **Limited**.
 3. **Full versus Limited.** Full sends black as 0 and white as 255; Limited sends 16 and 235 and labels the signal so; Auto is the Pi's choice, Limited for every TV mode (4K and 1080p). A display that expects one and gets the other shows black as grey (Limited into a Full display) or merges its darkest steps into black (Full into a Limited display).
 4. **The Grey ramp.** Choose Test pattern › **Grey ramp** to check the steps from black to white through Photo Wall's values: every step distinct, no step merged, no bands in the smooth ramp.
-5. **Done** keeps the range (and the other values); Revert or leaving the tab puts the range back and takes the pattern off. A pattern also goes off by itself 10 minutes after the Pi received it.
+5. **Done** keeps the range (and the other values); Revert or leaving the tab puts the range back and takes the pattern off. A pattern also goes off by itself 10 minutes after the Pi received it. While a pattern is shown, hiding the browser tab (switching to the phone's camera) does not end the session: Central keeps it a minute without the tab's keepalives, and the tab carries on when shown again; with no pattern, hiding the tab ends the session at once (Revert) and Central's net is 5 s.
 
 **Each range change costs about 10 s without photos on every display of that Pi** (not measured since the broker fix; to re-measure on the bench). The Pi sets the range before Weston starts, and one Weston drives both HDMI ports, so a change restarts the Weston and Player of every display on the Pi, and a test pattern on the other display starts its 10 minutes again ([display host backend](display-host-backend.md#units-and-weston-incarnations)); the display shows black, and the TV may take its own time to re-sync. A Pi start with a Display not on Auto pays it once. A range the Pi could not set shows on the tab with the range the display still gets; read the controller's journal ([Display identity and power](#display-identity-and-power)).
 
@@ -1069,7 +1069,7 @@ What a Display's picture and a Frame's Position were at any time, for the Pictur
 | Table | One row per | Columns |
 |---|---|---|
 | `picture_kept_entries` | Done, Copy or an unrecorded change on a Display | `id`, `display_id`, `number` (the Display's commit order), `kind` (`kept-done`, `kept-copied`, `kept-unrecorded`), `at`, `session_id`, `restored_from`, `picture`, `lut_recipe_id` |
-| `picture_sent_entries` | rise of a port's `picture_change` (what Central sent the Pi) | `id`, `player_id`, `output_id`, `picture_change` (its number), `display_id` (seen on the port), `frame_id` (bound to it then; NULL if none or deleted since), `kind` (`sent-draft`, `sent-back`, `sent-kept`), `at`, `session_id`, `restored_from`, `picture`, `lut_recipe_id`, `test_pattern` (`white`, `grey-ramp`, `black-level`; NULL: off) |
+| `picture_sent_entries` | rise of a port's `picture_change` (what Central sent the Pi) | `id`, `player_id`, `output_id`, `picture_change` (its number), `display_id` (seen on the port), `frame_id` (bound to it then; NULL if none or deleted since), `kind` (`sent-draft`, `sent-back`, `sent-kept`), `at`, `session_id`, `restored_from`, `picture`, `lut_recipe_id`, `test_pattern` (`white`, `grey-ramp`, `black-level`, `target-pre-software`, `target-post-software` (migration 097, [0026](decisions/0026-calibration-targets.md)); NULL: off) |
 | `position_entries` | Save, profile change, unrecorded change, or change in what the Node is handed | `id`, `frame_id`, `number` (the Frame's commit order), `kind` (`kept-saved`, `kept-profile-changed`, `kept-unrecorded`, `sent-draft`, `sent-back`), `at`, `session_id`, `restored_from`, `fit` (`contracts/models.py` FrameFit's JSON: mode, corners, rotation), `mat` (Mat's JSON: depth and lights), `profile_width_px`, `profile_height_px` and `display_id` (what it was made for: the Frame's profile and the Display seen on its port then) |
 
 `picture` is the Display's picture under the `displays` columns' names (`hardware_picture` by MCCS code, `software_brightness_percent` … `software_lut_profile`, `software_lut_amount_percent`, `signal_range`), as a session's `draft` is; `lut_recipe_id` is the recipe its LUT was baked under then (NULL: no LUT). `session_id` groups one picture session's or one Position trial's entries (a trial keeps it across renewals: `node_calibration_trials.session_id`); `restored_from` names the entry a Restore loaded (also on `picture_sessions` and `node_calibration_trials`).
@@ -1081,6 +1081,8 @@ T='Authorization: Bearer <admin-token>'
 curl -H "$T" "$CENTRAL/v1/operator/displays/<display-id>/picture-history?limit=50"
 curl -H "$T" "$CENTRAL/v1/operator/frames/<frame-id>/position-history?before=2026-10-13T21:00:00Z"
 curl -H "$T" "$CENTRAL/v1/operator/frames/<frame-id>/tuning-snapshot?at=2026-10-13T21:04:07Z"
+# One port's sent entry by its picture change (what a calibration target's QR names; 404 unknown_entry)
+curl -H "$T" "$CENTRAL/v1/operator/players/<player-id>/outputs/HDMI-A-1/picture-changes/<n>"
 # Restore: loads an entry into an open session's or trial's draft; Done still keeps it
 curl -X POST -H "$T" -H 'Content-Type: application/json' \
   -d '{"entry_id":"<entry-id>","expected_sequence":7}' \
@@ -1120,6 +1122,37 @@ ORDER BY at DESC, number DESC;
 **Retention.** Per key, the newest 500 kept and 20,000 sent entries (a Display's kept, a port's sent, a Frame's of each); each writer trims its own key when it appends, and nothing else deletes them. A deleted Frame takes its Position history. History starts at the upgrade to 096: nothing is written for the past.
 
 **The clock.** Every `at` is PostgreSQL's clock when Central recorded the change, never the Pi's or a phone's. Match a photo on Central's clock: as it arrives, read Central's time (`SELECT now()`) or the newest entries, and step back from there; never by the photo's own timestamp. A sent entry is what Central sent; the Pi shows it seconds later, about 10 s for a signal range change ([Tune a display with no controls](#tune-a-display-with-no-controls)). A change made with the TV's own remote or menus is never in the history.
+
+## Calibration targets
+
+Two targets read together from a phone photo, so the agent can say what to change on a display: the **screen target** the Player draws in each Frame's opening and the **paper target** Central prints. Why they are shaped so, both stages and what each aims at are [0026](decisions/0026-calibration-targets.md); the layout and every size are `contracts/calibration_target.py`'s; what the Picture tab says is the [console design](operator-console-design.md#5-the-frame-page) (§5 Picture); the agent's procedure and what each refusal asks is the [display-control skill](../.claude/skills/display-control/SKILL.md#reading-the-calibration-targets).
+
+1. **Print the paper.** From the Picture tab's print link, or the operator route (admin token), Letter or A4:
+
+   ```sh
+   curl -o target.pdf -H 'Authorization: Bearer <admin-token>' "$CENTRAL/v1/operator/calibration-target/paper.pdf?paper=letter"
+   ```
+
+   Print at 100 % (no "fit to page"), black ink only, on the paper the print look imitates. Refusal: 422 `bad_paper` (neither `letter` nor `a4`).
+2. **Lay it under the glass.** Open the Frame, lay the sheet uncut on the panel with a black card behind it, and close the glass over both. The screen target draws a dark box for the sheet: lay it centred and square in the box (the reader refuses `paper-misplaced` when the sheet would reach over the screen's patches, saying which way it is off); the sheet's printed size must match it (the reader refuses `scale-mismatch` otherwise). The Frame's opening must be at least as large as the screen target ([0026](decisions/0026-calibration-targets.md#costs)).
+3. **Pick a stage.** On the Frame's Picture tab, Test pattern › Show:
+   - **Target: pre-software** (stage 1, the display): the screen target drawn raw, every Photo Wall step skipped (the signal range still applies). The suggestion is for the display's own controls (its menu, or on a display that answers DDC/CI the tab's Display (hardware) sliders), as a direction and a rough size.
+   - **Target: post-software** (stage 2, Photo Wall): the screen target drawn through Photo Wall's settings. The suggestion covers only what the display left over, in Photo Wall's brightness, contrast, colour temperature and gamma, and prefers no change: a display right on its own reads "no change", the best result. The print look (LUT, saturation, soft highlights, black floor) is the intended look and never moves.
+
+   Either, in any order: nothing enforces one before the other or remembers an earlier reading. The session's usual rules hold (live while the tab runs, off by Done, Revert, leaving the tab or after 10 minutes on the Pi). You can photograph with the phone the tab runs on: while a test pattern is shown, hiding the tab (opening the Camera) keeps it up for a minute, and coming back to the tab within it keeps the same session ([0024](decisions/0024-display-tuning.md)).
+4. **Take the photo.** On the iPhone, Apple ProRAW on, the whole Frame in view (a corner cut off is refused `outside-photo`), no part of a white at the sensor's clip, square-on to the Frame: a panel's light changes with the viewing angle and the paper's does not, so an angled photo reads the white wrong. Stand aside of the room's light: your shadow on the paper darkens the paper only (the screen makes its own light), and nothing detects it. One photo is enough: the two targets are compared with each other. AirDrop it to the Mac (`~/Downloads`). A normal photo (JPEG, HEIC) gives the white alone.
+
+   Reflections only add light, and the reader is built for uneven ones: screen and paper patches sit in tight pairs, so a reflection larger than a pair lifts both alike; a group whose screen and paper blacks disagree has a reflection edge across it and is dropped, wherever it is (the middle is trusted no more than the edges); each value is read from copies round the target, and a copy unlike the rest is dropped. Every drop is reported with its place. Too many dropped is a refusal naming where to move a lamp or yourself. What it cannot see: a reflection perfectly even over the whole target (harmless: the viewer sees it too), a shadow over the whole paper alone (stand aside of the light), and the camera's difference from the eye.
+5. **Read it** on the Mac, from the repository, with the admin token (and, for a post-software reading with a LUT on, a read-only database address) from 1Password:
+
+   ```sh
+   op run -- .venv/bin/python -m scripts.calibration_target ~/Downloads/IMG_1234.DNG --central <url>
+   ```
+
+   `op run` resolves `PHOTO_WALL_ADMIN_TOKEN` and, optionally, `PHOTO_WALL_READ_DATABASE_URL` from their `op://` references in the environment (or `--env-file`); never put either on the command line. It prints one JSON object, `{"reading": …, "suggestion": …}` or `{"refused": …}`, and exits 0 for a reading, 2 for a refusal, 1 for an error (a file unreadable, Central unreachable). The reader only reads: it fetches the sent entry the QR names (above, [Configuration snapshots](#configuration-snapshots)) and never writes to Central.
+6. **Change, then read again.** Move what the suggestion says (the display's own controls for the pre-software target, Photo Wall's sliders for the post-software one), take a new photo, and press **Done** on the tab when it reads right.
+
+The reader (`scripts/calibration_target/`) is the agent's tool and is never shipped; its thresholds have one home, `scripts/calibration_target/model.py`. It matches the paper's white as read, with no correction for the paper's ink. **NOT RUN on real hardware yet:** a real ProRAW photo read end to end; the screen target's drawn size on the test Pi; post-software suggestions against real readings; the Samsung QN43Q8F's camera-versus-eye gap and its change with the viewing angle. CI reads synthetic photos only.
 
 ## LUTs: paper profiles
 

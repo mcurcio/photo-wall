@@ -22,6 +22,7 @@ from pydantic import Field, model_validator
 from central import cache_layout
 from central.assets.frame_media import FrameMediaRefused
 from central.assets.reader import Unavailable
+from central.calibration_target_routes import mount_calibration_target_routes
 from central.content_routes import (
     error_response,
     mount_content_routes,
@@ -797,6 +798,7 @@ def create_app(
     pictures = PgPictureSessions(db)
     mount_picture_routes(app, admin=admin, queries=pictures, commands=pictures)
     mount_tuning_history_routes(app, admin=admin, queries=PgTuningHistory(db))
+    mount_calibration_target_routes(app, admin=admin)
     mount_lut_routes(app, admin=admin, player=player, luts=PgLuts(db, clock))
     if content is not None:
         mount_content_routes(app, content)

@@ -38,7 +38,10 @@ import { apiWrite } from "./apiWrite.js";
  * @typedef {"auto"|"full"|"limited"} SignalRange   Which numbers the Pi's HDMI signal uses for black
  *   and white (display tuning): Auto the Pi's choice, Full 0-255, Limited 16-235.
  * @typedef {"applied"|"unsupported"|"failed"} SignalResult
- * @typedef {"white"|"grey-ramp"|"black-level"} TestPattern
+ * @typedef {"white"|"grey-ramp"|"black-level"|"target-pre-software"|"target-post-software"} TestPattern
+ *   The two targets are the screen target (calibration targets, decision 0026): drawn raw, through no
+ *   Photo Wall step (pre-software), or through them (post-software); either, in any order.
+ * @typedef {"letter"|"a4"} PaperSize   The paper the paper target is printed on.
  * @typedef {"waiting"|"shown"|"ended"} TestPatternState
  * @typedef {{in_force: SignalRange, result: SignalResult, answered: boolean}} SignalView   The Pi's
  *   answer: the range its connector holds, what it made of the wanted one, and whether that answer
@@ -159,6 +162,18 @@ export function editSignalRange(sessionId, edit) {
  */
 export function editTestPattern(sessionId, edit) {
   return call("sequence", `${session(sessionId)}/test-pattern-edits`, { method: "POST", body: edit });
+}
+
+/**
+ * The paper target to print (GET /v1/operator/calibration-target/paper.pdf; calibration targets,
+ * decision 0026): the path's one home in the console, for a link the browser downloads (the session
+ * cookie goes with it; Central answers it as an attachment).
+ *
+ * @param {PaperSize} paper
+ * @returns {string}
+ */
+export function paperTargetUrl(paper) {
+  return `/v1/operator/calibration-target/paper.pdf?paper=${encodeURIComponent(paper)}`;
 }
 
 /**

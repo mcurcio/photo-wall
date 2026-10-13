@@ -2,9 +2,9 @@ import { useState } from "react";
 
 import { formatAge } from "../health.js";
 import { levelWords } from "../levelWords.js";
-import { copyPicture } from "../pictureApi.js";
+import { copyPicture, paperTargetUrl } from "../pictureApi.js";
 import type {
-  HardwareSettingView, PictureCopyResult, SignalRange, SignalView, SoftwareSetting, TestPattern, TestPatternView,
+  HardwareSettingView, PaperSize, PictureCopyResult, SignalRange, SignalView, SoftwareSetting, TestPattern, TestPatternView,
 } from "../pictureApi.js";
 import type { usePictureSession } from "../pictureSession.js";
 import { FactGroup, FactRow, Note } from "../patterns/fact-row";
@@ -64,19 +64,38 @@ const AS_IT_HAS_IT_OPTION = "as-the-display-has-it";
 
 export const TEST_PATTERN_GROUP = "Test pattern";
 export const SIGNAL_GROUP = "Signal range";
-// The SegmentedControl's value for Off (the wire's is null, never "off").
+// The Select's value for Off (the wire's is null, never "off").
 const OFF = "off";
+/** Each test pattern's name: the one home, the Picture History's rows included (picture-history.tsx). */
+export const PATTERN_NAMES: Record<TestPattern, string> = {
+  white: "White",
+  "grey-ramp": "Grey ramp",
+  "black-level": "Black level",
+  "target-pre-software": "Target: pre-software",
+  "target-post-software": "Target: post-software",
+};
+// Six choices: a Select (design language §4: a SegmentedControl holds two to five).
 const PATTERN_OPTIONS: readonly { value: TestPattern | typeof OFF; label: string }[] = [
   { value: OFF, label: "Off" },
-  { value: "white", label: "White" },
-  { value: "grey-ramp", label: "Grey ramp" },
-  { value: "black-level", label: "Black level" },
+  ...(Object.keys(PATTERN_NAMES) as TestPattern[]).map((value) => ({ value, label: PATTERN_NAMES[value] })),
+];
+// The two screen targets (calibration targets, decision 0026), either in any order (owner,
+// 2026-10-13: "thats the users choice -- not something that the software enforces"): the tab never
+// orders or gates them. The size the Frame's opening needs is printed on the sheet, never said here.
+const TARGETS: ReadonlySet<TestPattern> = new Set<TestPattern>(["target-pre-software", "target-post-software"]);
+const PAPER_UNDER_GLASS = "Lay the printed sheet uncut in the dark box under the Frame's glass, a black card behind "
+  + "it, and photograph both: ProRAW photos are read for you. The sheet says how large the Frame's opening must be. "
+  + "You can switch to the camera on this device: the target stays up for a minute while this tab is hidden.";
+const PAPER_SIZES: readonly { paper: PaperSize; label: string }[] = [
+  { paper: "letter", label: "Letter" }, { paper: "a4", label: "A4" },
 ];
 // What to do with each pattern: the one home of these words, the Black level's reading included
 // (display tuning, "Reading the Black level"); the console design and the runbook describe and
 // link here, never quote.
 const PATTERN_HOW: Record<TestPattern, string> = {
   white: "Tape a sheet of white paper beside the Frame and match its white.",
+  "target-pre-software": `Judges the display's own settings: the target skips every Photo Wall step. ${PAPER_UNDER_GLASS}`,
+  "target-post-software": `Judges Photo Wall's settings: the target goes through them. ${PAPER_UNDER_GLASS}`,
   "grey-ramp": "Every step should be told apart: the darkest from black, the lightest from white.",
   "black-level": "Switch Signal range between Full and Limited. Black darker on Full with every step visible: "
     + "keep Full. Steps vanish into black on Full: choose Limited. No change: the display follows the Pi, the glow "
@@ -129,9 +148,23 @@ export function signalWords(range: SignalRange, signal: SignalView | null): stri
   return signal.in_force === range ? sends(range) : RANGE_WAITING;
 }
 
-/** Test pattern (#101): Off, White, Grey ramp or Black level on every Frame of this display, live
- * while the tab is open and never kept; what to do with the chosen one, and its state on the Pi. A
- * pattern the Pi took off at its bound shows Off with the words to choose it again. */
+/** The paper target's print links, Letter and A4 (pictureApi.js `paperTargetUrl`); Central answers
+ * each as a download. */
+function PrintPaperTarget() {
+  return (
+    <Note>
+      {"Print the paper target: "}
+      {PAPER_SIZES.map(({ paper, label }, index) => (
+        <span key={paper}>{index > 0 && " · "}<Link href={paperTargetUrl(paper)}>{label}</Link></span>
+      ))}
+    </Note>
+  );
+}
+
+/** Test pattern (#101): Off, White, Grey ramp, Black level, or a screen target (pre-software or
+ * post-software, either in any order) on every Frame of this display, live while the tab is open and
+ * never kept; what to do with the chosen one, the paper target's print links with a target, and its
+ * state on the Pi. A pattern the Pi took off at its bound shows Off with the words to choose it again. */
 export function TestPatternSettings({ view, session, ready }: { view: View; session: PictureSession; ready: boolean }) {
   const drafted = session.draft.pattern;
   const asked = view.test_pattern;
@@ -142,10 +175,11 @@ export function TestPatternSettings({ view, session, ready }: { view: View; sess
     <FactGroup title={TEST_PATTERN_GROUP}>
       <Stack>
         <Field label="Show" help={testPatternEnds(seconds)}>
-          <SegmentedControl label="Show" value={pattern ?? OFF} options={PATTERN_OPTIONS} disabled={!ready}
+          <Select value={pattern ?? OFF} options={PATTERN_OPTIONS} disabled={!ready} width="fit"
             onChange={(next) => session.changeTestPattern(next === OFF ? null : next)} />
         </Field>
         {pattern !== null && <Note>{PATTERN_HOW[pattern]}</Note>}
+        {pattern !== null && TARGETS.has(pattern) && <PrintPaperTarget />}
         {asked !== null && (
           <FactRow tone={asked.state === "waiting" ? "claimed" : "reported"}>{testPatternWords(asked, seconds)}</FactRow>
         )}

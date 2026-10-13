@@ -150,7 +150,10 @@ def test_story_renders_clean_passes_axe_and_matches_its_baseline(
         BASELINES.mkdir(exist_ok=True)
         shot.save(baseline)
         return
-    assert baseline.exists(), f"no baseline for {story} ({scheme}): run {UPDATE_COMMAND}"
+    if not baseline.exists():
+        actual = ACTUALS / f"{story}.{scheme}.actual.png"     # CI's render, for a new baseline
+        shot.save(actual)
+        pytest.fail(f"no baseline for {story} ({scheme}): actual saved at {actual}; run {UPDATE_COMMAND}")
     share = differing_share(shot, Image.open(baseline))
     if share > DIFFERING:
         actual = ACTUALS / f"{story}.{scheme}.actual.png"

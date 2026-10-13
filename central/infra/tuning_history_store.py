@@ -11,7 +11,7 @@ from typing import Any
 from uuid import UUID
 
 from central.db import Database
-from central.displays.picture_history import PictureEntry, unrecorded_record
+from central.displays.picture_history import PictureEntry, Port, unrecorded_record
 from central.displays.views import (
     DisplayRefView,
     PictureEntryView,
@@ -28,6 +28,7 @@ from central.infra.picture_history_store import (
     latest_kept_in,
     latest_sent_for_frame_at_in,
     picture_entries_in,
+    sent_entry_in,
 )
 from central.infra.position_history_store import (
     frame_made_for_in,
@@ -91,6 +92,15 @@ class PgTuningHistory:
         return TuningSnapshotView(frame=FrameRefView(id=frame_id, name=frame["name"]), at=snapshot.at,
                                   position=positions[0] if positions else None,
                                   picture=pictures[0] if pictures else None)
+
+    def sent_picture_entry(self, player_id: str, output_id: str, picture_change: int) -> PictureEntryView:
+        """HistoryRefused("unknown_entry", 404). The entry under picture_sent_entries' key
+        (`sent_entry_in`), answered as the picture history answers it."""
+        with self._db.transaction() as conn:
+            entry = sent_entry_in(conn, Port(player_id, output_id), picture_change)
+            if entry is None:
+                raise HistoryRefused("unknown_entry", 404)
+            return _picture_views_in(conn, (entry,))[0]
 
 
 def _frame_in(conn: Any, frame_id: str) -> tuple[Any, MadeFor]:

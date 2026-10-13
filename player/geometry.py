@@ -23,6 +23,12 @@ mat shadow to the final pass, in one order (`final_pixel`), each skipped at its 
 Display tuning (decision 0024) adds the test patterns (`pattern_signal`): a look pattern (White,
 Grey ramp) replaces the photos inside the opening and passes through every step and the mat; the
 Black level is the raw signal, through no step and no mat; the per-Output mask stays last.
+
+The calibration targets (decision 0026) draw contracts/calibration_target.py's screen target at its
+physical size, centred in the opening (`opening_size_mm`, the one home of the opening's size from
+the Frame profile's diagonal, which the mat shadow uses too; `target_point`), with the QR's modules
+(player/calibration_target.py `target_modules`): `target_signal`. Pre-software is raw everywhere;
+post-software runs steps 1-6 and skips the mat shadow, but the dark box stays raw black.
 """
 
 from __future__ import annotations
@@ -33,13 +39,21 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Final
 
+from contracts.calibration_target import (
+    QR_MM,
+    QR_QUIET_MODULES,
+    SCREEN_TARGET_MM,
+    QrModules,
+    calibration_target,
+    screen_point,
+)
 from contracts.frame_fit import Corners, OutputSize, cover_rectangle
 from contracts.kelvin import kelvin_white
 from contracts.lut import LUT_GRID, lut_offset
 from contracts.models import CornersFit, CoverFit, FrameProfile, Mat, PhotoCrop
 from contracts.node_frame import PictureOperations, srgb_to_linear
 from contracts.photo_crop import CENTRED, crop_window
-from contracts.tuning import TestPattern
+from contracts.tuning import SIGNAL_LEVELS, TARGET_PATTERNS, TestPattern
 
 Matrix = tuple[float, float, float, float, float, float, float, float, float]
 Linear = tuple[float, float, float]     # linear-light RGB, each 0..1
@@ -290,9 +304,8 @@ def _cot(degrees: float) -> float:
 
 def mat_shadow(fit: CornersFit | CoverFit, profile: FrameProfile, mat: Mat) -> MatShadow | None:
     """None when not mat.shades (step 7 skipped). quarter = the nearest quarter turn of fit.rotation
-    (round(rotation / 90) * 90). size: diag_mm = diagonal_inches*25.4, a = width_px/height_px,
-    W = diag_mm*a/hypot(a,1), H = diag_mm/hypot(a,1); size_mm = (W, H) when quarter is 0 or 180,
-    else (H, W). toward: alpha = radians(from_degrees + quarter), (sin alpha, -cos alpha). cot(90)
+    (round(rotation / 90) * 90). size_mm = `opening_size_mm` (the one home of the opening's size).
+    toward: alpha = radians(from_degrees + quarter), (sin alpha, -cos alpha). cot(90)
     is exactly 0.
 
     Everything is in mat space, the opening's own rectangle at its physical size, whose axes
@@ -302,11 +315,8 @@ def mat_shadow(fit: CornersFit | CoverFit, profile: FrameProfile, mat: Mat) -> M
     on the wall is lit from the wall's up whatever its tilt on the panel. Pure."""
     if not mat.shades:
         return None
-    diagonal = profile.diagonal_inches * 25.4
-    aspect = profile.width_px / profile.height_px
-    width, height = diagonal * aspect / math.hypot(aspect, 1), diagonal / math.hypot(aspect, 1)
+    size = opening_size_mm(fit, profile)
     quarter = round(fit.rotation / 90) * 90
-    size = (width, height) if quarter % 180 == 0 else (height, width)
     lights = []
     for light in mat.lights:
         if light.strength_tenths <= 0:
@@ -392,7 +402,6 @@ def lut_applied(linear: Linear, table: bytes, amount: float) -> Linear:
 
 GREY_RAMP_STEPS: Final = 11       # 0 %, 10 %, ..., 100 % of the signal
 BLACK_LEVEL_STEPS: Final = 20     # raw steps 1..20 beside black 0
-SIGNAL_LEVELS: Final = 255        # an 8-bit output's top code (the test Pi: output_bpc 8): raw step k is k / SIGNAL_LEVELS
 BLACK_LEVEL_PATCH: Final = 0.6    # the lit share of a Black level cell, in u and in the band's v, centred
 
 
@@ -415,7 +424,7 @@ def pattern_signal(pattern: TestPattern, u: float, v: float) -> Linear:
             value = min(int(u * GREY_RAMP_STEPS), GREY_RAMP_STEPS - 1) / (GREY_RAMP_STEPS - 1)
         else:
             value = u
-    else:
+    elif pattern is TestPattern.BLACK_LEVEL:
         value = 0.0
         band = (v - 1/3) * 3
         if 0 <= band < 1:
@@ -424,17 +433,86 @@ def pattern_signal(pattern: TestPattern, u: float, v: float) -> Linear:
             margin = (1 - BLACK_LEVEL_PATCH) / 2
             if margin <= position - cell < 1 - margin and margin <= band < 1 - margin:
                 value = (cell + 1) / SIGNAL_LEVELS
+    else:
+        raise ValueError("pattern")     # a calibration target is `target_signal`'s
     return (value, value, value)
+
+
+@dataclass(frozen=True)
+class TargetDraw:
+    """What one Frame needs to draw a calibration target (decision 0026): its opening's physical
+    size along the opening's u and v (`opening_size_mm`) and the QR's modules for the port's
+    picture change (player/calibration_target.py `target_modules`)."""
+    opening_mm: tuple[float, float]
+    modules: QrModules
+
+
+def opening_size_mm(fit: CornersFit | CoverFit, profile: FrameProfile) -> tuple[float, float]:
+    """The opening's physical extent along its unit square's u and v, in mm: diag_mm =
+    diagonal_inches*25.4, a = width_px/height_px, W = diag_mm*a/hypot(a,1), H = diag_mm/hypot(a,1);
+    (W, H) when the nearest quarter turn of fit.rotation (round(rotation / 90) * 90) is 0 or 180,
+    else (H, W). The one home of this rule: `mat_shadow`'s size_mm is it. Pure."""
+    diagonal = profile.diagonal_inches * 25.4
+    aspect = profile.width_px / profile.height_px
+    width, height = diagonal * aspect / math.hypot(aspect, 1), diagonal / math.hypot(aspect, 1)
+    quarter = round(fit.rotation / 90) * 90
+    return (width, height) if quarter % 180 == 0 else (height, width)
+
+
+def target_point(u: float, v: float, opening_mm: tuple[float, float]) -> tuple[float, float]:
+    """The screen target's plane (contracts/calibration_target.py, mm) at the opening's (u, v): the
+    target centred in the opening at its physical size, its x along u when opening_mm is
+    landscape or square (W >= H), else turned a quarter clockwise (its x along v, its top at the
+    opening's right). Points beyond the target map beyond SCREEN_TARGET_MM (the surround). Pure."""
+    width, height = opening_mm
+    centre_x, centre_y = SCREEN_TARGET_MM[0] / 2, SCREEN_TARGET_MM[1] / 2
+    if width >= height:
+        return (centre_x + (u - .5) * width, centre_y + (v - .5) * height)
+    return (centre_x + (v - .5) * height, centre_y + (.5 - u) * width)
+
+
+def target_signal(pattern: TestPattern, u: float, v: float, draw: TargetDraw) -> tuple[Linear, bool]:
+    """A calibration target's ENCODED signal (0..1, equal channels) at the opening's (u, v) and
+    whether it is drawn raw: contracts.calibration_target.screen_point at `target_point`; inside
+    the QR's square the module there (dark 0.0, light and the QR_QUIET_MODULES quiet zone 1.0) of
+    `draw.modules` scaled to fill QR_MM; raw is True everywhere for TARGET_PRE_SOFTWARE and only
+    in the dark box for TARGET_POST_SOFTWARE. ValueError("pattern") for any other pattern. Pure."""
+    if pattern not in TARGET_PATTERNS:
+        raise ValueError("pattern")
+    x, y = target_point(u, v, draw.opening_mm)
+    point = screen_point(x, y)
+    value = point.signal
+    if point.qr:
+        value = _qr_signal(draw.modules, x, y)
+    raw = pattern is TestPattern.TARGET_PRE_SOFTWARE or point.raw
+    return (value, value, value), raw
+
+
+def _qr_signal(modules: QrModules, x: float, y: float) -> float:
+    """The QR square's signal at (x, y) of the target's plane: its modules, the quiet zone round
+    them, scaled to fill QR_MM; 0.0 for a dark module, else 1.0."""
+    square = calibration_target().qr
+    side = len(modules) + 2 * QR_QUIET_MODULES
+    column = min(side - 1, int((x - square.x_mm) / QR_MM * side)) - QR_QUIET_MODULES
+    row = min(side - 1, int((y - square.y_mm) / QR_MM * side)) - QR_QUIET_MODULES
+    dark = 0 <= row < len(modules) and 0 <= column < len(modules) and modules[row][column]
+    return 0.0 if dark else 1.0
 
 
 def final_pixel(linear: Linear, operations: PictureOperations, *, inside: bool,
                 shade: Linear | None = None, lut: bytes | None = None,
-                opening_uv: tuple[float, float] | None = None) -> tuple[float, float, float, float]:
+                opening_uv: tuple[float, float] | None = None,
+                target: TargetDraw | None = None) -> tuple[float, float, float, float]:
     """One output pixel's final pass, in the print look's order (design "The order"):
     step 0 (display tuning): operations.test_pattern WHITE or GREY_RAMP replaces `linear` with
     srgb_to_linear of `pattern_signal` at `opening_uv` (the opening's unit square), and every step
     below runs as for a photo; BLACK_LEVEL is `pattern_signal` itself, every step below and the
-    shade skipped. A pattern without `opening_uv` is ValueError("opening_uv") ->
+    shade skipped. A pattern without `opening_uv` is ValueError("opening_uv"). A calibration
+    target (contracts/tuning.py TARGET_PATTERNS) is `target_signal` at `opening_uv` with `target`
+    (ValueError("target") when None): a raw point is that signal itself, every step below and the
+    shade skipped, as the Black level; any other point replaces `linear` with its srgb_to_linear
+    and runs every step below with the shade skipped (the mat shadow is a place effect, not a
+    setting the target judges) ->
     step 1 (`lut_applied`, the LUT `operations.lut` names mixed in by its amount) unless
     operations.lut is None or its bytes (`lut`) are not held -> step 2 (`saturated`) unless
     saturation == 1 -> steps 3-4: when `rolloff_skipped`, v4's white balance x light_factor
@@ -448,7 +526,17 @@ def final_pixel(linear: Linear, operations: PictureOperations, *, inside: bool,
     A contrast result below 0 meets the exponent as 0 (a power of a negative number is undefined,
     in GLSL too); with the clamp after, this equals clamping before the exponent."""
     pattern = operations.test_pattern
-    if pattern is not None:
+    if pattern in TARGET_PATTERNS:
+        if opening_uv is None:
+            raise ValueError("opening_uv")
+        if target is None:
+            raise ValueError("target")
+        signal, raw = target_signal(pattern, *opening_uv, target)
+        if raw:
+            return (*signal, 1.0) if inside else (0.0, 0.0, 0.0, 1.0)
+        linear = tuple(srgb_to_linear(value) for value in signal)
+        shade = None
+    elif pattern is not None:
         if opening_uv is None:
             raise ValueError("opening_uv")
         signal = pattern_signal(pattern, *opening_uv)
