@@ -27,8 +27,9 @@ from pathlib import Path
 import pytest
 from PIL import Image, ImageChops
 
+ENABLED = os.environ.get("PHOTO_WALL_BROWSER_TESTS") == "1"
 pytestmark = pytest.mark.skipif(
-    os.environ.get("PHOTO_WALL_BROWSER_TESTS") != "1",
+    not ENABLED,
     reason="set PHOTO_WALL_BROWSER_TESTS=1 and install Playwright Chromium",
 )
 
@@ -83,7 +84,15 @@ def build_catalog():
     return json.loads((CATALOG / "index.json").read_text())["entries"]
 
 
+# Every other tier collects this module only to deselect (`-m "not browser"`) or skip it: one stand-in
+# id keeps it collectable there without building the catalog, a Storybook build that held up every
+# xdist worker's collection in the unit leg.
+UNBUILT = "catalog-not-built"
+
+
 def stories():
+    if not ENABLED:
+        return [UNBUILT]
     return sorted(e["id"] for e in build_catalog().values() if e["type"] == "story")
 
 

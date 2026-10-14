@@ -87,7 +87,16 @@ def _bounded(value: float | None) -> float | None:
 
 
 class TimeMapping:
-    """A step invalidates coordinated readiness; remap only from a new trusted sample."""
+    """A step invalidates coordinated readiness; remap only from a new trusted sample.
+
+    A rejected probe drops the mapping only when it is evidence against it: a probe that is not
+    this Player's or this epoch's, an impossible transport reading, or a Central clock that
+    disagrees beyond `max_uncertainty` even at the edge of the round trip
+    (`abs(offset) - rtt / 2`). A probe too slow or too disturbed to measure (a long round trip, a
+    late application, drift while it was in flight) says nothing about the clocks: it is counted
+    and reported, and the last trusted sample stays until its own age or a step ends it
+    (`healthy`). One slow answer from Central never withholds readiness.
+    """
 
     def __init__(self, clock: Clock, max_uncertainty: float = .100, max_step: float = .250,
                  max_age: float = 30):
@@ -108,14 +117,16 @@ class TimeMapping:
     def diagnostics(self) -> ClockDiagnostics:
         return self._diagnostics
 
-    def _record(self, status: ClockStatus, *, accepted: bool = False, **values) -> bool:
+    def _record(self, status: ClockStatus, *, accepted: bool = False, discard: bool = True,
+                **values) -> bool:
         self._samples += 1
         if accepted:
             self._accepted += 1
         else:
             self._rejected += 1
-            self._sample = None
-            self.uncertainty = math.inf
+            if discard:
+                self._sample = None
+                self.uncertainty = math.inf
         self._diagnostics = ClockDiagnostics(
             status=status,
             samples=self._samples,
@@ -187,13 +198,14 @@ class TimeMapping:
         )) or rtt < 0:
             return self._record("transport_time", **values)
         if abs(transport_drift) > max_drift:
-            return self._record("transport_drift", **values)
+            return self._record("transport_drift", discard=False, **values)
         if not math.isfinite(uncertainty) or uncertainty > self.max_uncertainty:
-            return self._record("uncertainty", **values)
+            disagrees = not math.isfinite(uncertainty) or abs(central_offset) - rtt / 2 > self.max_uncertainty
+            return self._record("uncertainty", discard=disagrees, **values)
         if not 0 <= apply_age <= max_apply_age:
-            return self._record("apply_age", **values)
+            return self._record("apply_age", discard=False, **values)
         if abs(apply_drift) > max_drift:
-            return self._record("apply_drift", **values)
+            return self._record("apply_drift", discard=False, **values)
         self._sample = applied_utc, applied_monotonic
         self.uncertainty = uncertainty
         return self._record("healthy", accepted=True, **values)

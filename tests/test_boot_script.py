@@ -23,6 +23,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -55,19 +56,24 @@ def shell(request) -> list[str]:
 
 
 def _run(shell: list[str], command: str, *, env_overrides: dict[str, str],
-         timeout: float = 2.0) -> str:
+         timeout: float = 2.0, restarted: Path | None = None) -> str:
     """Run `command` under `shell` in its own process group, killing the WHOLE
-    group after `timeout` -- `photowall_restart` never returns (its final
-    `sleep 60` loop is a child process that would otherwise keep the stdout
-    pipe open past a plain `process.kill()`, hanging `communicate()` forever)."""
+    group once it exits, once `restarted` (the sysrq trigger) holds the restart
+    `photowall_restart` writes last, or after `timeout` -- `photowall_restart`
+    never returns (its final `sleep 60` loop is a child process that would
+    otherwise keep the stdout pipe open past a plain `process.kill()`, hanging
+    `communicate()` forever). The trigger's write is its last act before that
+    loop, so a test that waits for it waits no longer than the script runs."""
     env = {"PATH": "/usr/bin:/bin", **env_overrides}
     process = subprocess.Popen([*shell, "-c", command], env=env, start_new_session=True,
                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-    try:
-        stdout, _ = process.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
+    deadline = time.monotonic() + timeout
+    while (process.poll() is None and time.monotonic() < deadline
+           and not (restarted is not None and restarted.read_text() == "b\n")):
+        time.sleep(0.01)
+    if process.poll() is None:
         os.killpg(os.getpgid(process.pid), signal.SIGKILL)
-        stdout, _ = process.communicate()
+    stdout, _ = process.communicate()
     return stdout
 
 
@@ -82,7 +88,8 @@ def _env(tmp_path, *, watchdog="watchdog0") -> dict[str, str]:
 def test_photowall_restart_writes_b_to_the_sysrq_trigger_and_opens_the_watchdog(tmp_path, shell):
     env = _env(tmp_path)
     (tmp_path / "sysrq-trigger").write_text("")
-    _run(shell, f". '{SCRIPT}'; photowall_restart", env_overrides=env)
+    _run(shell, f". '{SCRIPT}'; photowall_restart", env_overrides=env,
+         restarted=tmp_path / "sysrq-trigger")
     assert (tmp_path / "sysrq-trigger").read_text() == "b\n"
     # The guarded open (arm-if-stage-1-never-did, then a bare close) touched
     # the first candidate path -- no assertion that it pets zero times: the
@@ -98,7 +105,8 @@ def test_photowall_restart_falls_back_to_the_second_watchdog_path(tmp_path, shel
     env = _env(tmp_path)
     env["PHOTOWALL_WATCHDOG_PATHS"] = f"{tmp_path / 'no-such-dir' / 'watchdog0'} {tmp_path / 'watchdog'}"
     (tmp_path / "sysrq-trigger").write_text("")
-    _run(shell, f". '{SCRIPT}'; photowall_restart", env_overrides=env)
+    _run(shell, f". '{SCRIPT}'; photowall_restart", env_overrides=env,
+         restarted=tmp_path / "sysrq-trigger")
     assert (tmp_path / "sysrq-trigger").read_text() == "b\n"
     assert (tmp_path / "watchdog").exists()
 
@@ -128,7 +136,7 @@ def test_a_failing_init_reaches_photowall_restart_and_the_sysrq_trigger(tmp_path
         shell,
         f". '{SCRIPT}'; "
         "if ! false; then echo 'photo-wall: netboot_failed'; photowall_restart; fi",
-        env_overrides=env,
+        env_overrides=env, restarted=tmp_path / "sysrq-trigger",
     )
     assert "photo-wall: netboot_failed" in stdout
     assert (tmp_path / "sysrq-trigger").read_text() == "b\n"
@@ -146,7 +154,7 @@ def test_panic_redefined_after_a_stub_scripts_functions_wins_over_the_stub(tmp_p
     stdout = _run(
         shell,
         f". '{functions_stub}'; . '{SCRIPT}'; panic 'No init found'",
-        env_overrides=env,
+        env_overrides=env, restarted=tmp_path / "sysrq-trigger",
     )
     assert "No init found" in stdout
     assert "stub-panic" not in stdout

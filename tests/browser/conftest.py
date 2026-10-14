@@ -1,6 +1,5 @@
 """Bounded public evidence for the opt-in, disposable operator browser checks."""
 
-import hashlib
 import importlib.metadata
 import json
 import os
@@ -10,6 +9,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from support.shards import in_shard, shard
 from test_registry import enroll
 
 # The Bead 17 cutover retired the legacy flat-page tests (test_operator_browser.py,
@@ -96,49 +96,8 @@ COLLECTOR = pytest.StashKey[EvidenceCollector]()
 
 
 def pytest_configure(config):
-    shard()   # a malformed PHOTO_WALL_BROWSER_SHARD stops the run here, in every process
     config.stash[COLLECTOR] = collector = EvidenceCollector()
     config.pluginmanager.register(collector, "operator-browser-evidence")
-
-
-# CI's browser leg runs as SHARDS parallel jobs (checks.yml, the owner's ~4 min per leg):
-# a run without PHOTO_WALL_BROWSER_SHARD is whole. A test belongs to the shard its function's name
-# hashes to, so every process (the xdist controller included, which collects nothing) agrees, and
-# the shards together run every test once.
-SHARD_VARIABLE = "PHOTO_WALL_BROWSER_SHARD"
-
-
-def shard() -> tuple[int, int] | None:
-    """(index, count) from PHOTO_WALL_BROWSER_SHARD "index/count" (index from 1), or None."""
-    text = os.environ.get(SHARD_VARIABLE)
-    if not text:
-        return None
-    match = re.fullmatch(r"([1-9][0-9]*)/([1-9][0-9]*)", text)
-    if match is None or int(match[1]) > int(match[2]):
-        raise pytest.UsageError(f"{SHARD_VARIABLE} must be index/count, got {text!r}")
-    return int(match[1]), int(match[2])
-
-
-def in_shard(name: str, selected: tuple[int, int] | None) -> bool:
-    if selected is None:
-        return True
-    index, count = selected
-    return int(hashlib.sha256(name.encode()).hexdigest(), 16) % count == index - 1
-
-
-def pytest_collection_modifyitems(config, items):
-    selected = shard()
-    if selected is None:
-        return
-    browser = Path(__file__).parent
-    kept, dropped = [], []
-    for item in items:
-        name = getattr(item, "originalname", item.name)
-        mine = not item.path.is_relative_to(browser) or in_shard(name, selected)
-        (kept if mine else dropped).append(item)
-    if dropped:
-        config.hook.pytest_deselected(items=dropped)
-        items[:] = kept
 
 
 @pytest.fixture

@@ -62,7 +62,8 @@ class Stub:
 
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.server.daemon_threads = True
-        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        # A short poll: `shutdown` waits for the loop's next poll, half a second a test by default.
+        threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True).start()
         self.url = f"http://127.0.0.1:{self.server.server_address[1]}/v2/node/boot-offers/x/artifacts/app"
 
     def close(self):
