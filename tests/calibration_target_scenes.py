@@ -299,6 +299,12 @@ def _warp(image: np.ndarray, matrix: np.ndarray, interpolation: int = cv2.INTER_
                                borderValue=0)
 
 
+def _paint(light: np.ndarray, value: np.ndarray, where: np.ndarray) -> None:
+    """`light[where] = value[where]` (or a colour), in place without boolean indexing's copies: the
+    same values, a fraction of the time on a whole photo."""
+    np.copyto(light, value, casting="same_kind", where=where[..., None])
+
+
 def radiance(scene: Scene) -> np.ndarray:
     """The light reaching the camera from each photo pixel (H x W x 3, linear), before the lens."""
     width, height = PHOTO_SIZE
@@ -317,7 +323,7 @@ def radiance(scene: Scene) -> np.ndarray:
     t = GLASS_T if scene.glass else 1.0
     light = (0.55 * room).astype(np.float32)                       # the wall
     border = glass & ~opening
-    light[border] = (0.10 * room * t * t)[border]
+    _paint(light, 0.10 * room * t * t, border)
     # The screen, emissive.
     canvas = screen_light(scene)
     to_canvas = to_photo @ screen_to_wall(scene) @ _scale(1 / CANVAS_PX) @ _move(-0.5, -0.5)
@@ -328,9 +334,8 @@ def radiance(scene: Scene) -> np.ndarray:
         cosine = np.abs(centre[2]) / np.sqrt((x - centre[0]) ** 2 + (y - centre[1]) ** 2 + centre[2] ** 2)
         gain = gain * np.maximum(0.2, 1 - 0.8 * (1 - cosine ** 2))[..., None]
     screen = opening & inside
-    light[opening] = 0.0                                           # the surround is raw black
-    light[opening] += (scene.display.light(np.zeros(3)) * t)
-    light[screen] = (shown * gain)[screen]
+    _paint(light, scene.display.light(np.zeros(3)) * t, opening)   # the surround is raw black
+    _paint(light, shown * gain, screen)
     # The card and the paper.
     if scene.piece is not None:
         row, column, rows, columns = scene.piece
@@ -340,7 +345,7 @@ def radiance(scene: Scene) -> np.ndarray:
             grow = scene.card_mm / (PAPER_SQUARE_MM * scene.paper_scale)
             card = np.ones((int((rows + 2 * grow) * 20), int((columns + 2 * grow) * 20)), np.float32)
             covered = _warp(card, to_photo @ to_wall @ _move(column - grow, row - grow) @ _scale(1 / 20)) > 0.5
-            light[covered] = (scene.card * room * paper_t)[covered]
+            _paint(light, scene.card * room * paper_t, covered)
         raster = board_raster(Surface.PAPER)
         sheet = np.frombuffer(raster.pixels, np.uint8).reshape(raster.height, raster.width).astype(np.float32) / 255
         sheet = sheet[row * SQUARE_PX:(row + rows) * SQUARE_PX, column * SQUARE_PX:(column + columns) * SQUARE_PX]
@@ -350,7 +355,7 @@ def radiance(scene: Scene) -> np.ndarray:
         to_sheet = to_photo @ to_wall @ _move(column, row) @ _scale(1 / SQUARE_PX) @ _move(-0.5, -0.5)
         paper = _warp(np.ascontiguousarray(reflectance), to_sheet)
         on = _warp(np.ones_like(reflectance), to_sheet) > 0.5
-        light[on] = (paper[..., None] * room * paper_t)[on]
+        _paint(light, paper[..., None] * room * paper_t, on)
     else:
         on = np.zeros_like(opening)
     # Reflections on the glass: additive, in the panel white's units.
