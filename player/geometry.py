@@ -29,6 +29,13 @@ physical size, centred in the opening (`opening_size_mm`, the one home of the op
 the Frame profile's diagonal, which the mat shadow uses too; `target_point`), with the QR's modules
 (player/calibration_target.py `target_modules`): `target_signal`. Pre-software is raw everywhere;
 post-software runs steps 1-6 and skips the mat shadow, but the dark box stays raw black.
+
+Calibration targets v2 (decision 0027) draw the screen board instead (contracts/calibration_target.py
+"v2"): SCREEN_ROWS squares across the opening's short side, as many columns as fit
+(`screen_columns`), centred along its long side, turned a quarter clockwise in a portrait opening
+(`board_draw`, `board_point`); each point the board raster's pixel, or a QR copy's module
+(`board_signal`). The v1 functions above (`TargetDraw`, `target_point`, `target_signal`) retire
+when the shader draws v2.
 """
 
 from __future__ import annotations
@@ -445,6 +452,50 @@ class TargetDraw:
     picture change (player/calibration_target.py `target_modules`)."""
     opening_mm: tuple[float, float]
     modules: QrModules
+
+
+@dataclass(frozen=True)
+class BoardDraw:
+    """What one Frame needs to draw a calibration target v2 (decision 0027). `aspect`: its
+    opening's physical long side over its short side (>= 1; `opening_size_mm`); `portrait`: the
+    opening is taller than wide, so the board is turned a quarter clockwise (its top at the
+    opening's right); `modules`: the QR naming the port's picture change
+    (player/calibration_target.py `target_modules`), None while there is no code (no player id
+    yet, or a post-software look not on screen): every QR square then draws light."""
+    aspect: float
+    portrait: bool
+    modules: QrModules | None
+
+    @property
+    def columns(self) -> int:
+        """The board's columns shown: contracts.calibration_target.screen_columns(aspect)."""
+        ...
+
+
+def board_draw(fit: CornersFit | CoverFit, profile: FrameProfile, modules: QrModules | None) -> BoardDraw:
+    """The BoardDraw of a Frame's opening: (W, H) = `opening_size_mm`(fit, profile); aspect
+    max(W, H) / min(W, H); portrait when W < H. Pure."""
+    ...
+
+
+def board_point(u: float, v: float, draw: BoardDraw) -> tuple[float, float]:
+    """The screen board's point (column, row), in squares, at the opening's unit-square (u, v).
+    With n = draw.aspect * SCREEN_ROWS squares along the long side and the board's draw.columns
+    centred on it (offset (n - columns) / 2): landscape, (u * n - offset, v * SCREEN_ROWS);
+    portrait, turned a quarter clockwise, (v * n - offset, (1 - u) * SCREEN_ROWS). Points outside
+    [0, columns) x [0, SCREEN_ROWS) are the surround. Pure."""
+    ...
+
+
+def board_signal(column: float, row: float, draw: BoardDraw) -> float:
+    """The screen board's ENCODED signal (0..1, one value for every channel) at (column, row) in
+    squares, first match: 0.0 outside [0, draw.columns) x [0, SCREEN_ROWS); inside the QR squares
+    of a copy of qr_copies(draw.columns), the module there (dark 0.0; light and the
+    QR_QUIET_MODULES quiet zone 1.0; all 1.0 when draw.modules is None), the modules and their
+    quiet zone scaled to fill QR_SQUARES; else board_raster(SCREEN)'s pixel at
+    (floor(column * SQUARE_PX), floor(row * SQUARE_PX)) over 255. Pure; the shader's
+    `board_signal` mirrors it (tests/native_renderer_pixel_harness.py)."""
+    ...
 
 
 def opening_size_mm(fit: CornersFit | CoverFit, profile: FrameProfile) -> tuple[float, float]:

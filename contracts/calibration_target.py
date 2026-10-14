@@ -1,6 +1,19 @@
 """The calibration targets' layout and code (decision 0026; owner, 2026-10-13: "build the calibration
 targets"). Stdlib only: the Pi's Player draws the screen target from it.
 
+**v2 (decision 0027; owner, 2026-10-14: "Start working on a v2 that isn't so picky")**, the section
+"v2" below: both targets are OpenCV ChArUco boards (cv2.aruco.CharucoBoard; prior art), so any
+part of either, at any scale, turn or print, locates itself. This module keeps the boards'
+constants, which square is what (`square`), the QR copies and rulers, the code's text, and the
+two rasters OpenCV drew at build time (`board_raster`; scripts/calibration_boards.py writes them
+into contracts/calibration_boards.py, a test regenerates and compares them). The Pi never imports
+OpenCV. Rules v2 does NOT own: the cv2 board objects (scripts/calibration_target/boards.py), how
+the Player maps an opening to the board (player/geometry.py `board_point`, `board_signal`), the
+PDF (central/displays/calibration_paper.py), how a photo is read (scripts/calibration_target/).
+
+The v1 layout (everything above the "v2" section: millimetres, the dark box, hand-placed marker
+bits) is retiring: its last importers move to v2 slice by slice, and the closing slice deletes it.
+
 Two targets read from one phone photo by the agent's reader (scripts/calibration_target/):
 - the **screen target**, drawn by the Player at its physical size in a Frame's opening while the
   picture session's test pattern is a target (contracts/tuning.py TARGET_PATTERNS): four ArUco
@@ -332,6 +345,133 @@ def parsed_code(text: str) -> TargetCode | None:
         return None
 
 
+# == v2 (decision 0027): both targets are OpenCV ChArUco boards ==================================
+#
+# A board is OpenCV's ChArUco board: a chessboard whose white squares each hold an ArUco marker of
+# BOARD_DICTIONARY, unless the layout leaves the marker out (OpenCV's detector treats a left-out
+# marker as a covered square, so measuring squares cost nothing in detection). Coordinates are
+# board squares: (row, column) of a square, row 0 at the board's top, column 0 at its left; a
+# point (column, row) in squares, x right, y down. Both boards are drawn with OpenCV's non-legacy
+# pattern: the top-left square is black, so a square is white when row + column is odd.
+
+BOARD_DICTIONARY: Final = "DICT_4X4_250"   # cv2.aruco's predefined dictionary of both boards' markers
+BOARD_MARKER_SHARE: Final = 0.75           # a marker's side over its square's (markerLength, squareLength 1)
+SQUARE_PX: Final = 16                      # the rasters' pixels a square: a marker 12 px, its 6 modules 2 px
+SCREEN_ROWS: Final = 10                    # the screen board's rows, across the opening's short side
+SCREEN_COLUMNS_MAX: Final = 25             # the screen board's columns; an opening shows the first
+                                           # `screen_columns` of them (its 125 white squares: ids 0-124)
+PAPER_ROWS: Final = 13                     # the paper board's rows (its 110 white squares: ids 125-234)
+PAPER_COLUMNS: Final = 17                  # the paper board's columns
+BOARD_FIRST_ID: Final[Mapping[Surface, int]] = {Surface.SCREEN: 0, Surface.PAPER: 125}
+
+QR_PERIOD: Final = 8                       # the QR copies repeat every this many columns
+QR_COPY_PLACES: Final = ((1, 1), (5, 5))   # (row, column within a period) of each copy's top-left square
+QR_SQUARES: Final = 3                      # a QR copy's side in squares, its QR_QUIET_MODULES quiet zone inside
+RULER_BAND: Final = (0.25, 0.75)           # the share of its row a ruler's steps fill, top to bottom;
+                                           # raw 0 above and below (PLUGE's bars)
+
+
+class Square(StrEnum):
+    """What one board square is. MARKER: OpenCV's marker on white (the board's own drawing). WHITE:
+    a white square left without its marker: screen signal 1, bare paper. BLACK: a black square:
+    screen signal 0, the paper's ink (any ink). GREY: a white square left out, drawn at its
+    `grey_code` (screen only). QR: a square of a QR copy (screen only; the Player draws the modules
+    on light). RULER: a square of a QR copy's near-black ruler (screen only; `ruler_steps`)."""
+    MARKER = "marker"
+    WHITE = "white"
+    BLACK = "black"
+    GREY = "grey"
+    QR = "qr"
+    RULER = "ruler"
+
+
+@dataclass(frozen=True)
+class QrCopy:
+    """One QR copy on the screen board: its QR fills the QR_SQUARES x QR_SQUARES squares from
+    (row, column), the QR_QUIET_MODULES quiet zone inside them; its ruler is the row below
+    (row + QR_SQUARES), the same columns."""
+    row: int
+    column: int
+
+
+@dataclass(frozen=True)
+class RulerStep:
+    """One near-black step of a ruler: drawn at raw code `code` (of NEAR_BLACK_STEPS) over
+    [left, right) x [top, bottom) in board squares."""
+    code: int
+    left: float
+    right: float
+    top: float
+    bottom: float
+
+
+@dataclass(frozen=True)
+class Raster:
+    """A board as OpenCV drew it (`board_raster`): `width` x `height` pixels at SQUARE_PX a square,
+    one byte a pixel, row-major, the top row first. Screen: the encoded signal (0..255; QR squares
+    255, their modules left to the Player). Paper: 0 for ink, 255 for bare paper."""
+    width: int
+    height: int
+    pixels: bytes
+
+
+def board_ids(surface: Surface) -> range:
+    """The ids OpenCV's board gives its white squares, in its own order (row-major): from
+    BOARD_FIRST_ID[surface], one per white square of the whole board (SCREEN_COLUMNS_MAX columns
+    on the screen). Pure."""
+    ...
+
+
+def square(surface: Surface, row: int, column: int) -> Square:
+    """What the square at (row, column) of `surface`'s whole board is. ValueError("square") outside
+    its rows and columns (SCREEN_ROWS x SCREEN_COLUMNS_MAX, PAPER_ROWS x PAPER_COLUMNS). Pure.
+
+    Screen, first match: QR in a copy's QR squares and RULER in its ruler row (`qr_copies` of
+    SCREEN_COLUMNS_MAX); BLACK when row + column is even; else by (column + 2 * row) // 2 % 3:
+    0 MARKER, 1 WHITE, 2 GREY. Paper: BLACK when row + column is even; else MARKER on even rows,
+    WHITE on odd rows."""
+    ...
+
+
+def grey_code(row: int, column: int) -> int:
+    """The 8-bit code a screen GREY square is drawn at: GREY_CODES[(column // 2 + 3 * row) %
+    len(GREY_CODES)], so each grey has copies all over the board. ValueError("grey_code") for a
+    square that is not GREY. Pure."""
+    ...
+
+
+def qr_copies(columns: int) -> tuple[QrCopy, ...]:
+    """The QR copies wholly inside the board's first `columns` columns: for each period start p
+    (0, QR_PERIOD, ...) and each (row, offset) of QR_COPY_PLACES, QrCopy(row, p + offset) when
+    p + offset + QR_SQUARES <= columns; by column, then row. ValueError("columns") unless
+    1 <= columns <= SCREEN_COLUMNS_MAX. Pure."""
+    ...
+
+
+def ruler_steps(copy: QrCopy) -> tuple[RulerStep, ...]:
+    """The copy's ruler: one RulerStep per NEAR_BLACK_STEPS code in order, side by side across its
+    QR_SQUARES columns (each QR_SQUARES / len(NEAR_BLACK_STEPS) squares wide; at SQUARE_PX a whole
+    number of pixels), its top and bottom RULER_BAND of the ruler row. Pure."""
+    ...
+
+
+def screen_columns(aspect: float) -> int:
+    """How many of the screen board's columns an opening shows: SCREEN_ROWS squares across its
+    short side, so floor(aspect * SCREEN_ROWS) along its long side (a 1e-9 slack for a float
+    aspect), at most SCREEN_COLUMNS_MAX. `aspect`: the opening's physical long side over its short
+    side. ValueError("aspect") unless finite and >= 1. Pure."""
+    ...
+
+
+def board_raster(surface: Surface) -> Raster:
+    """`surface`'s whole board as OpenCV's CharucoBoard.generateImage drew it at SQUARE_PX a
+    square (no margin, one-module marker borders), its left-out squares painted per `square`
+    (WHITE 255, GREY its `grey_code`, QR 255, RULER 0 with its `ruler_steps` at their codes):
+    contracts/calibration_boards.py's data, written by scripts/calibration_boards.py (imported here
+    at first use; built once). Pure."""
+    ...
+
+
 def _paired_groups(dark_box: Rect, paper_in_box: tuple[float, float]) -> Iterator[Group]:
     """The PAIRED groups clockwise from the top-left: along the paper content's top (left to
     right), right (down), bottom (right to left) and left (up) edges, between the paper markers'
@@ -437,4 +577,9 @@ __all__ = [
     "WHITE_COPIES", "CalibrationTarget", "Group", "GroupKind", "Marker", "PaperSize",
     "Patch", "QrModules", "Rect", "Role", "ScreenPoint", "Surface", "TargetCode", "calibration_target",
     "code_text", "paper_ink", "parsed_code", "screen_point",
+    # v2 (decision 0027)
+    "BOARD_DICTIONARY", "BOARD_FIRST_ID", "BOARD_MARKER_SHARE", "PAPER_COLUMNS", "PAPER_ROWS", "QR_COPY_PLACES",
+    "QR_PERIOD", "QR_SQUARES", "RULER_BAND", "SCREEN_COLUMNS_MAX", "SCREEN_ROWS", "SQUARE_PX", "QrCopy", "Raster",
+    "RulerStep", "Square", "board_ids", "board_raster", "grey_code", "qr_copies", "ruler_steps", "screen_columns",
+    "square",
 ]
