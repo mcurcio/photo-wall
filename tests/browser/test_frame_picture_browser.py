@@ -776,6 +776,11 @@ def test_hiding_the_tab_keeps_a_shown_pattern_and_ends_a_session_without_one(pag
         [before] = _off_thread(_sql, registry, "SELECT id FROM picture_sessions")
 
         _visibility(page, "hidden")
+        # A keepalive tick that fired before React took the hide in (its re-render clears the
+        # interval) is not the page's answer to the hide: judge only what is sent once it settled.
+        page.wait_for_timeout(300)
+        assert not any(method == "DELETE" for method, _ in sent), sent
+        sent.clear()
         page.wait_for_timeout(6500)
         assert not any(method == "DELETE" for method, _ in sent), sent
         assert not any(last == "keepalive" for _, last in sent), sent
@@ -835,6 +840,9 @@ def test_both_targets_are_offered_in_either_order_with_the_paper_targets_print_l
             # Design v2's three sentences: any size of paper, anywhere on the screen.
             expect(group).to_contain_text("cut a piece if the screen is small")
             expect(group).to_contain_text("ProRAW reads best")
+            # Owner, 2026-10-14: switching to the phone's camera dropped the target; it now stays.
+            expect(group).to_contain_text("the target stays up for a minute while this tab is hidden")
+            expect(group).not_to_contain_text("Show a target")
             expect(group).not_to_contain_text("dark box")
             expect(group).not_to_contain_text("uncut")
             expect(_print_links(page)).to_have_text(list(PAPER_TARGET))

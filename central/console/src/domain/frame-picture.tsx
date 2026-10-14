@@ -86,8 +86,9 @@ const TARGETS: ReadonlySet<TestPattern> = new Set<TestPattern>(["target-pre-soft
 // The calibration targets' instructions: their one home (design v2's three sentences); the runbook
 // and the decision link here, never quote.
 const TARGET_HOW = "Print the paper target on any printer, cut a piece if the screen is small, and lay it on the "
-  + "screen (under the glass if there is one) with a black card behind it. Show a target and take one photo that "
-  + "holds the paper and some of the screen, your shadow off the paper. AirDrop it to the Mac; ProRAW reads best.";
+  + "screen (under the glass if there is one) with a black card behind it. Take one photo that holds the paper and "
+  + "some of the screen, your shadow off the paper: the target stays up for a minute while this tab is hidden, so "
+  + "this phone's camera will do. AirDrop it to the Mac; ProRAW reads best.";
 const PAPER_SIZES: readonly { paper: PaperSize; label: string }[] = [
   { paper: "letter", label: "Letter" }, { paper: "a4", label: "A4" },
 ];
