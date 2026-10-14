@@ -1,6 +1,6 @@
-"""The calibration target's code on the Player (decision 0026): the registered player id reaches
-the renderer and is cleared when the registration goes (player/service.py), and the native
-renderer uploads the target's layout once per GL context and its QR once per code
+"""The calibration target's code on the Player (decisions 0026, 0027): the registered player id
+reaches the renderer and is cleared when the registration goes (player/service.py), and the native
+renderer uploads the screen board's raster once per GL context and its QR once per code
 (player/native.py `_bind_target`), never per frame. The pixels are the Linux pixel harness's
 (tests/native_renderer_pixel_harness.py)."""
 from __future__ import annotations
@@ -12,7 +12,7 @@ import threading
 import httpx
 from test_player_service import close, rig
 
-from contracts.calibration_target import TargetCode
+from contracts.calibration_target import Surface, TargetCode, board_raster
 from contracts.lut import LutRef
 from contracts.node_frame import LutMix, PictureOperations
 from contracts.tuning import TestPattern
@@ -65,7 +65,7 @@ class SpyGL:
 
     def __getattr__(self, name: str):
         if name.startswith("GL_"):
-            return name if name in ("GL_RG8", "GL_R8") else 0x1000
+            return name if name in ("GL_R8", "GL_RED") else 0x1000
         return lambda *args: None
 
     def glGenTextures(self, _count):
@@ -74,8 +74,8 @@ class SpyGL:
     def glDeleteTextures(self, textures):
         self.deleted.extend(textures)
 
-    def glTexImage2D(self, _target, _level, internal, width, height, _border, _layout, _type, data):
-        self.uploads.append((internal, width, height, data))
+    def glTexImage2D(self, _target, _level, internal, width, height, _border, layout, _type, data):
+        self.uploads.append((internal, layout, width, height, data))
 
 
 def spy_renderer() -> NativeRenderer:
@@ -94,31 +94,39 @@ def target_operations(change: int) -> PictureOperations:
                              test_pattern=TestPattern.TARGET_PRE_SOFTWARE)
 
 
-def uploads(renderer: NativeRenderer, internal: str) -> int:
-    return sum(1 for upload in renderer.GL.uploads if upload[0] == internal)
+def uploads(renderer: NativeRenderer) -> tuple[int, int]:
+    """(the board raster's uploads, the QR's uploads): both one byte a texel (R8 of RED), told
+    apart by the raster's size and bytes."""
+    raster = board_raster(Surface.SCREEN)
+    board = ("GL_R8", "GL_RED", raster.width, raster.height, raster.pixels)
+    boards = sum(1 for upload in renderer.GL.uploads if upload == board)
+    qrs = sum(1 for upload in renderer.GL.uploads
+              if upload != board and upload[:2] == board[:2] and upload[2] == upload[3])
+    assert boards + qrs == len(renderer.GL.uploads), [upload[:4] for upload in renderer.GL.uploads]
+    return boards, qrs
 
 
 def test_the_layout_uploads_once_per_context_and_the_qr_once_per_code():
     renderer = spy_renderer()
     surface = _Surface(NativeOutput("HDMI-A-1", "photo-wall-hdmi-a-1"), None, None)
-    # No player id yet: the layout, but no QR (the square draws light).
+    # No player id yet: the board's raster, but no QR (every QR square draws light).
     assert renderer._bind_target(surface, target_operations(3), lut_drawn=False) == 0
-    assert (uploads(renderer, "GL_RG8"), uploads(renderer, "GL_R8")) == (1, 0)
+    assert uploads(renderer) == (1, 0)
     renderer._player_id = PLAYER
     modules = target_modules(TargetCode(PLAYER, "HDMI-A-1", 3))
     for _ in range(5):                      # five frames of one code
         assert renderer._bind_target(surface, target_operations(3), lut_drawn=False) == len(modules)
-    assert (uploads(renderer, "GL_RG8"), uploads(renderer, "GL_R8")) == (1, 1)
+    assert uploads(renderer) == (1, 1)
     qr = renderer.GL.uploads[-1]
-    assert qr[1:] == (len(modules), len(modules), bytes(255 if d else 0 for row in modules for d in row))
+    assert qr[2:] == (len(modules), len(modules), bytes(255 if d else 0 for row in modules for d in row))
     renderer._bind_target(surface, target_operations(4), lut_drawn=False)       # a new picture change: a new QR
     renderer._bind_target(surface, target_operations(4), lut_drawn=False)
-    assert (uploads(renderer, "GL_RG8"), uploads(renderer, "GL_R8")) == (1, 2)
+    assert uploads(renderer) == (1, 2)
     assert renderer.GL.deleted == [2]                            # the old QR's texture freed
     surface.target_layout = surface.target_qr = 0                # a new GL context (`_unrealize`)
     surface.target_code = None
     renderer._bind_target(surface, target_operations(4), lut_drawn=False)
-    assert (uploads(renderer, "GL_RG8"), uploads(renderer, "GL_R8")) == (2, 3)
+    assert uploads(renderer) == (2, 3)
 
 
 def test_the_post_software_qr_waits_for_the_lut_it_names():

@@ -19,14 +19,13 @@ from player.geometry import (
     BLACK_LEVEL_STEPS,
     GREY_RAMP_STEPS,
     SIGNAL_LEVELS,
-    TargetDraw,
+    board_draw,
     final_pixel,
     homography,
     inside_opening,
     inverse,
     mat_shade,
     mat_shadow,
-    opening_size_mm,
     pattern_signal,
     transform,
 )
@@ -100,9 +99,8 @@ def test_no_pattern_paints_outside_the_opening(pattern):
     corners = tilted_opening(30)
     fit = CoverFit(corners=corners, rotation=30)
     shadow = mat_shadow(fit, PROFILE, LIT_MAT)
-    # A calibration target on a Frame shorter than it: its markers and rulers spill past the opening.
-    target = TargetDraw(opening_size_mm(fit, SMALL_PROFILE),
-                        target_modules(TargetCode("p-" + "0" * 32, "HDMI-A-1", 1)))
+    # A calibration target's board, drawn across the whole opening: none of it past the opening.
+    board = board_draw(fit, SMALL_PROFILE, target_modules(TargetCode("p-" + "0" * 32, "HDMI-A-1", 1)))
     to_opening = inverse(homography(corners))
     lifted = operations(1.5, .5, floor=.1, pattern=pattern)
     inside_lit = outside = 0
@@ -111,7 +109,7 @@ def test_no_pattern_paints_outside_the_opening(pattern):
             x, y = (i + .5) / 80, (j + .5) / 80
             inside = inside_opening(corners, x, y)
             drawn = final_pixel((0.0, 0.0, 0.0), lifted, inside=inside, shade=mat_shade(shadow, x, y),
-                                opening_uv=transform(to_opening, x, y), target=target)
+                                opening_uv=transform(to_opening, x, y), board=board)
             if inside:
                 inside_lit += drawn[:3] != (0.0, 0.0, 0.0)
             else:

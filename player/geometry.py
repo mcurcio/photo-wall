@@ -24,18 +24,14 @@ Display tuning (decision 0024) adds the test patterns (`pattern_signal`): a look
 Grey ramp) replaces the photos inside the opening and passes through every step and the mat; the
 Black level is the raw signal, through no step and no mat; the per-Output mask stays last.
 
-The calibration targets (decision 0026) draw contracts/calibration_target.py's screen target at its
-physical size, centred in the opening (`opening_size_mm`, the one home of the opening's size from
-the Frame profile's diagonal, which the mat shadow uses too; `target_point`), with the QR's modules
-(player/calibration_target.py `target_modules`): `target_signal`. Pre-software is raw everywhere;
-post-software runs steps 1-6 and skips the mat shadow, but the dark box stays raw black.
-
-Calibration targets v2 (decision 0027) draw the screen board instead (contracts/calibration_target.py
-"v2"): SCREEN_ROWS squares across the opening's short side, as many columns as fit
-(`screen_columns`), centred along its long side, turned a quarter clockwise in a portrait opening
-(`board_draw`, `board_point`); each point the board raster's pixel, or a QR copy's module
-(`board_signal`). The v1 functions above (`TargetDraw`, `target_point`, `target_signal`) retire
-when the shader draws v2.
+The calibration targets v2 (decision 0027) draw the screen board (contracts/calibration_target.py
+"v2", OpenCV's ChArUco board drawn at build time as `board_raster`): SCREEN_ROWS squares across the
+opening's short side, as many columns as fit (`screen_columns`), centred along its long side,
+turned a quarter clockwise in a portrait opening (`board_draw`, `board_point`); each point the
+raster's pixel, or a QR copy's module (`board_signal`; player/calibration_target.py
+`target_modules`). The opening's size has one home, `opening_size_mm`, which the mat shadow uses
+too. Pre-software is the board's signal raw everywhere in the opening; post-software runs it
+through every step but the mat shadow, with no raw region (v1's dark box is gone).
 """
 
 from __future__ import annotations
@@ -47,19 +43,15 @@ from dataclasses import dataclass
 from typing import Final
 
 from contracts.calibration_target import (
-    QR_MM,
     QR_QUIET_MODULES,
     QR_SQUARES,
     SCREEN_ROWS,
-    SCREEN_TARGET_MM,
     SQUARE_PX,
     QrModules,
     Surface,
     board_raster,
-    calibration_target,
     qr_copies,
     screen_columns,
-    screen_point,
 )
 from contracts.frame_fit import Corners, OutputSize, cover_rectangle
 from contracts.kelvin import kelvin_white
@@ -448,17 +440,8 @@ def pattern_signal(pattern: TestPattern, u: float, v: float) -> Linear:
             if margin <= position - cell < 1 - margin and margin <= band < 1 - margin:
                 value = (cell + 1) / SIGNAL_LEVELS
     else:
-        raise ValueError("pattern")     # a calibration target is `target_signal`'s
+        raise ValueError("pattern")     # a calibration target is `board_signal`'s
     return (value, value, value)
-
-
-@dataclass(frozen=True)
-class TargetDraw:
-    """What one Frame needs to draw a calibration target (decision 0026): its opening's physical
-    size along the opening's u and v (`opening_size_mm`) and the QR's modules for the port's
-    picture change (player/calibration_target.py `target_modules`)."""
-    opening_mm: tuple[float, float]
-    modules: QrModules
 
 
 @dataclass(frozen=True)
@@ -534,60 +517,21 @@ def opening_size_mm(fit: CornersFit | CoverFit, profile: FrameProfile) -> tuple[
     return (width, height) if quarter % 180 == 0 else (height, width)
 
 
-def target_point(u: float, v: float, opening_mm: tuple[float, float]) -> tuple[float, float]:
-    """The screen target's plane (contracts/calibration_target.py, mm) at the opening's (u, v): the
-    target centred in the opening at its physical size, its x along u when opening_mm is
-    landscape or square (W >= H), else turned a quarter clockwise (its x along v, its top at the
-    opening's right). Points beyond the target map beyond SCREEN_TARGET_MM (the surround). Pure."""
-    width, height = opening_mm
-    centre_x, centre_y = SCREEN_TARGET_MM[0] / 2, SCREEN_TARGET_MM[1] / 2
-    if width >= height:
-        return (centre_x + (u - .5) * width, centre_y + (v - .5) * height)
-    return (centre_x + (v - .5) * height, centre_y + (.5 - u) * width)
-
-
-def target_signal(pattern: TestPattern, u: float, v: float, draw: TargetDraw) -> tuple[Linear, bool]:
-    """A calibration target's ENCODED signal (0..1, equal channels) at the opening's (u, v) and
-    whether it is drawn raw: contracts.calibration_target.screen_point at `target_point`; inside
-    the QR's square the module there (dark 0.0, light and the QR_QUIET_MODULES quiet zone 1.0) of
-    `draw.modules` scaled to fill QR_MM; raw is True everywhere for TARGET_PRE_SOFTWARE and only
-    in the dark box for TARGET_POST_SOFTWARE. ValueError("pattern") for any other pattern. Pure."""
-    if pattern not in TARGET_PATTERNS:
-        raise ValueError("pattern")
-    x, y = target_point(u, v, draw.opening_mm)
-    point = screen_point(x, y)
-    value = point.signal
-    if point.qr:
-        value = _qr_signal(draw.modules, x, y)
-    raw = pattern is TestPattern.TARGET_PRE_SOFTWARE or point.raw
-    return (value, value, value), raw
-
-
-def _qr_signal(modules: QrModules, x: float, y: float) -> float:
-    """The QR square's signal at (x, y) of the target's plane: its modules, the quiet zone round
-    them, scaled to fill QR_MM; 0.0 for a dark module, else 1.0."""
-    square = calibration_target().qr
-    side = len(modules) + 2 * QR_QUIET_MODULES
-    column = min(side - 1, int((x - square.x_mm) / QR_MM * side)) - QR_QUIET_MODULES
-    row = min(side - 1, int((y - square.y_mm) / QR_MM * side)) - QR_QUIET_MODULES
-    dark = 0 <= row < len(modules) and 0 <= column < len(modules) and modules[row][column]
-    return 0.0 if dark else 1.0
-
-
 def final_pixel(linear: Linear, operations: PictureOperations, *, inside: bool,
                 shade: Linear | None = None, lut: bytes | None = None,
                 opening_uv: tuple[float, float] | None = None,
-                target: TargetDraw | None = None) -> tuple[float, float, float, float]:
+                board: BoardDraw | None = None) -> tuple[float, float, float, float]:
     """One output pixel's final pass, in the print look's order (design "The order"):
     step 0 (display tuning): operations.test_pattern WHITE or GREY_RAMP replaces `linear` with
     srgb_to_linear of `pattern_signal` at `opening_uv` (the opening's unit square), and every step
     below runs as for a photo; BLACK_LEVEL is `pattern_signal` itself, every step below and the
     shade skipped. A pattern without `opening_uv` is ValueError("opening_uv"). A calibration
-    target (contracts/tuning.py TARGET_PATTERNS) is `target_signal` at `opening_uv` with `target`
-    (ValueError("target") when None): a raw point is that signal itself, every step below and the
-    shade skipped, as the Black level; any other point replaces `linear` with its srgb_to_linear
-    and runs every step below with the shade skipped (the mat shadow is a place effect, not a
-    setting the target judges) ->
+    target (contracts/tuning.py TARGET_PATTERNS) needs `board` (ValueError("board") when None;
+    other patterns ignore it); its signal is s = board_signal(*board_point(*opening_uv, board),
+    board): TARGET_PRE_SOFTWARE is (s, s, s, 1) inside, every step below and the shade skipped,
+    as the Black level; TARGET_POST_SOFTWARE replaces `linear` with srgb_to_linear(s) and runs
+    every step below with the shade skipped (the mat shadow is a place effect, not a setting the
+    target judges), no region raw ->
     step 1 (`lut_applied`, the LUT `operations.lut` names mixed in by its amount) unless
     operations.lut is None or its bytes (`lut`) are not held -> step 2 (`saturated`) unless
     saturation == 1 -> steps 3-4: when `rolloff_skipped`, v4's white balance x light_factor
@@ -604,12 +548,12 @@ def final_pixel(linear: Linear, operations: PictureOperations, *, inside: bool,
     if pattern in TARGET_PATTERNS:
         if opening_uv is None:
             raise ValueError("opening_uv")
-        if target is None:
-            raise ValueError("target")
-        signal, raw = target_signal(pattern, *opening_uv, target)
-        if raw:
-            return (*signal, 1.0) if inside else (0.0, 0.0, 0.0, 1.0)
-        linear = tuple(srgb_to_linear(value) for value in signal)
+        if board is None:
+            raise ValueError("board")
+        signal = board_signal(*board_point(*opening_uv, board), board)
+        if pattern is TestPattern.TARGET_PRE_SOFTWARE:
+            return (signal, signal, signal, 1.0) if inside else (0.0, 0.0, 0.0, 1.0)
+        linear = (srgb_to_linear(signal),) * 3
         shade = None
     elif pattern is not None:
         if opening_uv is None:
