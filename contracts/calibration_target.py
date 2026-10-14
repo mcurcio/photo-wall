@@ -434,9 +434,11 @@ def square(surface: Surface, row: int, column: int) -> Square:
 
 
 def grey_code(row: int, column: int) -> int:
-    """The 8-bit code a screen GREY square is drawn at: GREY_CODES[(column // 2 + 3 * row) %
-    len(GREY_CODES)], so each grey has copies all over the board. ValueError("grey_code") for a
-    square that is not GREY. Pure."""
+    """The 8-bit code a screen GREY square is drawn at: GREY_CODES[k % len(GREY_CODES)], k the
+    square's rank among the whole screen board's GREY squares taken column by column (left to
+    right, each column top to bottom), so any run of columns holds every grey about equally (a
+    13-column board: each at least twice) and a cropped board keeps them all.
+    ValueError("grey_code") for a square that is not GREY. Pure."""
     ...
 
 
