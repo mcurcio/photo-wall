@@ -12,7 +12,7 @@ from pathlib import Path
 import httpx
 import numpy as np
 import pytest
-from calibration_target_scenes import CODE, Scene, entry, raw_bytes, raw_photo
+from calibration_target_scenes import CODE, Scene, entry, paper_matched, raw_bytes, raw_photo
 from PIL import Image
 
 from central.displays.lut import LUT_RECIPE_ID, baked_lut
@@ -147,8 +147,25 @@ def test_run_suggests_post_software_with_the_entrys_lut_table(dngs) -> None:
     assert status == 0 and central.luts == [TINT_REF]
     assert json.loads(json.dumps(out)) == out
     suggestion = out["suggestion"]
-    assert suggestion["stage"] == "post-software" and set(suggestion) == {"stage", "to", "no_change"}
+    assert suggestion["stage"] == "post-software" and set(suggestion) == {"stage", "to", "no_change", "unsure"}
     assert suggestion["to"]["lut"] == {"profile_sha256": TINT_REF.profile_sha256, "recipe_id": TINT_REF.recipe_id}
+
+
+def test_run_says_unsure_when_the_viewing_angle_can_explain_a_dim_screen(dngs) -> None:
+    """A screen 10 % dim photographed at 30 degrees: the panel's own off-axis dimming could be all of
+    it, so the white level is "unsure" before software, and after it brightness is held, named in
+    "unsure"."""
+    make, _ = dngs
+    dim = Scene(display=paper_matched(CLEAN, level=0.9), yaw_deg=30.0, pitch_deg=0.0)
+    out, status = command.run(str(make(dim)), FakeCentral((CODE, entry(dim))))
+    assert status == 0 and json.loads(json.dumps(out)) == out
+    level = next(step for step in out["suggestion"]["steps"] if step["property"] == "white-level")
+    assert level["direction"] == "unsure"
+    dimmed = Scene(stage=TestPattern.TARGET_POST_SOFTWARE, display=paper_matched(CLEAN),
+                   software=replace(NEUTRAL_SOFTWARE, brightness_percent=90), yaw_deg=30.0, pitch_deg=0.0)
+    out, status = command.run(str(make(dimmed)), FakeCentral((CODE, entry(dimmed))))
+    assert status == 0 and out["suggestion"]["unsure"] == ["white-level"]
+    assert out["suggestion"]["to"]["brightness_percent"] == 90
 
 
 def test_run_refuses_a_post_software_suggestion_without_the_lut_table(dngs) -> None:

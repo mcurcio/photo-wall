@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, fields, is_dataclass
 from enum import Enum, StrEnum
+from math import radians, sin
 from typing import Any, Final
 
 import numpy as np
@@ -52,6 +53,20 @@ FALLOFF_MAX: Final = 0.4            # the largest lens falloff k (1 - k r^2) the
 GREY_TOLERANCE: Final = (0.004, 0.04)   # absolute + relative to the share: a grey copy unlike the rest
 DISTINCT_SIGMAS: Final = 3.0        # a near-black step apart from raw 0 by this many of its noise
 KEEP_SPREADS: Final = 2.0           # a gap within this many of its spread is "keep" / no change
+
+# -- The viewing angle's bound (suggest; design-v2 "Angle": measured, not corrected, bounded one-sided) --
+PANEL_DIMMING_AT_35: Final = 0.25   # placeholder for the bench: a VA panel may lose about a quarter of its
+                                    # white at 35 degrees off its axis
+_DIMMING_MAX: Final = 0.9
+
+
+def angle_dimming(degrees: float) -> float:
+    """The most the panel's own off-axis dimming can lower the screen white read at `degrees` off its
+    axis, as a share of its white: PANEL_DIMMING_AT_35 * sin(degrees)^2 / sin(35 degrees)^2, clipped
+    to [0, 0.9]. A dimmer screen can only be off-axis loss, never a brighter one, so the bound is
+    one-sided. Pure."""
+    share = PANEL_DIMMING_AT_35 * sin(radians(degrees)) ** 2 / sin(radians(35.0)) ** 2
+    return min(_DIMMING_MAX, max(0.0, share))
 
 
 class PhotoKind(StrEnum):
@@ -202,6 +217,7 @@ class Direction(StrEnum):
     WARMER = "warmer"
     COOLER = "cooler"
     KEEP = "keep"           # the gap is within KEEP_SPREADS of its spread
+    UNSURE = "unsure"       # the gap is within what the viewing angle can explain: take the photo squarer
 
 
 class Unit(StrEnum):
@@ -230,9 +246,12 @@ class PreSoftwareSuggestion:
 class PostSoftwareSuggestion:
     """The software picture to try: the entry's, with only brightness, contrast, colour temperature
     and gamma moved, each away from neutral only when that moves the readings by more than
-    KEEP_SPREADS of their spread; `no_change` when `to` equals the entry's software picture."""
+    KEEP_SPREADS of their spread; `no_change` when `to` equals the entry's software picture.
+    `unsure`: the properties held at the entry's values because raising them would be within
+    angle_dimming (WHITE_LEVEL: brightness; take the photo squarer); empty otherwise."""
     to: SoftwarePicture
     no_change: bool
+    unsure: tuple[PreProperty, ...]
 
 
 class SuggestionRefusal(StrEnum):
@@ -283,10 +302,10 @@ def _plain(value: Any) -> Any:
 __all__ = [
     "CHARUCO_CORNERS_MIN", "CLIP_SHARE", "CONTRAST_FLOOR", "COVERED_SHARE", "DISTINCT_SIGMAS", "EDGE_TOLERANCE",
     "FALLOFF_KEEP", "FALLOFF_MAX", "GREY_TOLERANCE", "HOMOGRAPHY_PX", "KEEP_SPREADS", "MIN_PAPER_MARKERS",
-    "MIN_SCREEN_MARKERS", "NEAREST", "PAPER_REACH_SQUARES", "QR_MARGIN_SQUARES", "QR_PX_PER_SQUARE",
+    "MIN_SCREEN_MARKERS", "NEAREST", "PANEL_DIMMING_AT_35", "PAPER_REACH_SQUARES", "QR_MARGIN_SQUARES", "QR_PX_PER_SQUARE",
     "RECTIFIED_PX", "SAMPLE_SHARE", "SMALL_SQUARE_PX", "VIEW_WHITE_PERCENTILE", "WHITE_TOLERANCE",
     "Angle", "Direction", "DropReason", "Dropped", "FocalSource", "Photo", "PhotoKind", "Place",
     "PostSoftwareSuggestion", "PreProperty", "PreSoftwareStep", "PreSoftwareSuggestion", "Reading", "Refusal",
     "Refused", "Rgb", "Suggestion", "SuggestionRefusal", "SuggestionRefused", "ToneStep", "Unit", "Value",
-    "to_json",
+    "angle_dimming", "to_json",
 ]

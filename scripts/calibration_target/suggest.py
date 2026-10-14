@@ -1,4 +1,4 @@
-"""What to change, by stage (decision 0026; owner, 2026-10-13: "the calibration has two stages:
+"""What to change, by stage (decisions 0026, 0027; owner, 2026-10-13: "the calibration has two stages:
 pre-software-adjust and post-software-adjust. The best possible display calibration is one that
 doesnt require any software adjustments."; their order is "the users choice -- not something that
 the software enforces"). Pure.
@@ -10,7 +10,10 @@ order.
   as directions and gap sizes only (PreSoftwareStep). White level: screen white's level over paper
   white's as read, a percent gap from 1. White colour: the white's channel balance, as a colour
   temperature gap in kelvin (contracts/kelvin.py's white). Tone: the screen greys' shares against sRGB(signal), as a
-  gamma gap. Black: the lowest near-black code apart from raw 0 should be 1 (PLUGE, as decision
+  gamma gap. The white level's raise is bounded by the viewing angle (design-v2, "Angle"; measured,
+  never corrected): the panel's own off-axis dimming can only make the screen read dimmer, so LOWER
+  is sure at any angle, and RAISE is said only when the shortfall exceeds `angle_dimming` of the
+  reading's angle; within it the step is UNSURE (take the photo squarer). Black: the lowest near-black code apart from raw 0 should be 1 (PLUGE, as decision
   0024's Black level): raise the display's black (its Brightness) while it is above 1. Each gap
   within KEEP_SPREADS of its spread is KEEP. A NORMAL photo yields the two white steps only.
 - **Post-software** (TARGET_POST_SOFTWARE, through Photo Wall's steps but the mat shadow): the
@@ -24,6 +27,15 @@ order.
   change"); saturation, the highlight rolloff, the black floor and the LUT (the print look) never
   move. The black is not judged here. Without a grey read (a NORMAL photo, or every grey dropped)
   the display's response is unknown: SuggestionRefused TONE_UNREAD, never a fit on an assumed one.
+  A brightness raise for a shortfall within `angle_dimming` is not made: brightness stays at the
+  entry's and `unsure` names WHITE_LEVEL.
+
+Library steps (owner, 2026-10-14: "Make sure that you are using standard libraries and not building
+the algorithm"): the sRGB transfer function is colour-science's; both exponent fits are
+scipy.optimize.minimize_scalar (bounded). Kept by hand, each with its reason: the whole-step knob
+search (no library integer search fits whole steps with a cost per step from neutral, in 15 lines)
+and `_kelvin_of` (it inverts Photo Wall's own kelvin table, contracts/kelvin.py; a library's
+correlated colour temperature is a different scale).
 
 As built (.claude/errata.md, calibration targets reader R2):
 - The white colour's kelvin is the colour temperature whose white (`kelvin_white`, interpolated
@@ -45,11 +57,13 @@ As built (.claude/errata.md, calibration targets reader R2):
 """
 from __future__ import annotations
 
+import warnings
 from collections.abc import Callable, Sequence
 from dataclasses import replace
 from typing import Final
 
 import numpy as np
+from scipy.optimize import minimize_scalar
 
 from appliance.display_host.picture import operations_for
 from central.displays.views import PictureEntryView
@@ -78,7 +92,7 @@ from contracts.node_picture import (
     SoftwarePicture,
 )
 from contracts.tuning import TestPattern
-from player.geometry import encode_srgb, final_pixel
+from player.geometry import final_pixel
 
 from .model import (
     KEEP_SPREADS,
@@ -94,7 +108,13 @@ from .model import (
     SuggestionRefused,
     ToneStep,
     Unit,
+    angle_dimming,
 )
+
+with warnings.catch_warnings():
+    # colour-science warns at import that matplotlib (its plotting, unused here) is missing.
+    warnings.filterwarnings("ignore", message='"Matplotlib" related API')
+    import colour
 
 LUMINANCE: Final = np.array([0.2126, 0.7152, 0.0722])      # Rec. 709 / sRGB Y of linear RGB
 KELVIN_FINE: Final = 10                     # the kelvin fit's grid between the table's rows
@@ -108,6 +128,8 @@ KNOBS: Final[dict[str, tuple[int, int, int, int]]] = {   # name -> (neutral, min
     "gamma_tenths": (GAMMA_TENTHS_NEUTRAL, GAMMA_TENTHS_MIN, GAMMA_TENTHS_MAX, 1),
 }
 _ROUNDS: Final = 6
+GAMMA_FIT: Final = (1.0, 4.0)               # the display gamma the tone fit searches (Photo Wall's units)
+EXPONENT_FIT: Final = (0.5, 2.0)            # the post-software display's exponent over sRGB
 
 
 def suggest(reading: Reading, lut: bytes | None) -> Suggestion:
@@ -155,9 +177,7 @@ def _keep(gap: float, spread: float) -> bool:
 def _pre(reading: Reading) -> PreSoftwareSuggestion:
     white = np.array(reading.white.value)
     level = 100 * (float(LUMINANCE @ white) - 1)
-    steps = [PreSoftwareStep(PreProperty.WHITE_LEVEL,
-                             Direction.KEEP if _keep(level, 100 * reading.white.spread)
-                             else Direction.LOWER if level > 0 else Direction.RAISE,
+    steps = [PreSoftwareStep(PreProperty.WHITE_LEVEL, _level_direction(level, reading),
                              round(abs(level), 1), Unit.PERCENT)]
     kelvin, kelvin_spread = _kelvin(white, reading.white.spread)
     gap = kelvin - KELVIN_WHITE
@@ -179,6 +199,22 @@ def _pre(reading: Reading) -> PreSoftwareSuggestion:
     steps.append(PreSoftwareStep(PreProperty.BLACK, Direction.KEEP if black_gap == 0 else Direction.RAISE,
                                  float(black_gap), Unit.STEP))
     return PreSoftwareSuggestion(tuple(steps))
+
+
+def _level_direction(level: float, reading: Reading) -> Direction:
+    """The white level's direction for a gap of `level` percent: KEEP within KEEP_SPREADS of its
+    spread; LOWER when brighter (the angle only dims); RAISE when the shortfall exceeds what the
+    viewing angle can explain, else UNSURE."""
+    if _keep(level, 100 * reading.white.spread):
+        return Direction.KEEP
+    if level > 0:
+        return Direction.LOWER
+    return Direction.RAISE if not _within_angle(level, reading) else Direction.UNSURE
+
+
+def _within_angle(level: float, reading: Reading) -> bool:
+    """A shortfall of `level` percent (negative) the panel's off-axis dimming could explain."""
+    return level < 0 and -level / 100 <= angle_dimming(reading.angle.degrees)
 
 
 def _chromaticity(rgb: np.ndarray) -> np.ndarray:
@@ -222,10 +258,13 @@ def _gamma(tone: Sequence[ToneStep]) -> tuple[float, float]:
 
 
 def _gamma_fit(signals: np.ndarray, shares: np.ndarray) -> float:
-    encoded = np.array([encode_srgb(float(s)) for s in shares])
-    exponents = np.linspace(0.5, 2.0, 1501)
-    errors = [float(np.sum((encoded - signals ** q) ** 2)) for q in exponents]
-    return float(GAMMA_TENTHS_NEUTRAL / 10 * exponents[int(np.argmin(errors))])
+    """The gamma g in GAMMA_FIT for which the shares, encoded as sRGB, best follow
+    signal ** (g / neutral) (least squares; scipy's bounded scalar minimiser)."""
+    encoded = colour.cctf_encoding(np.clip(shares, 0.0, 1.0), function="sRGB")
+    neutral = GAMMA_TENTHS_NEUTRAL / 10
+    found = minimize_scalar(lambda g: float(np.sum((encoded - signals ** (g / neutral)) ** 2)),
+                            bounds=GAMMA_FIT, method="bounded", options={"xatol": 1e-4})
+    return float(found.x)
 
 
 # -- Post-software ---------------------------------------------------------------------------------
@@ -251,11 +290,25 @@ def _post(reading: Reading, lut: bytes | None) -> PostSoftwareSuggestion | Sugge
     display = _Display.fitted(outputs(now), reading)
     aim = _above_black(_decoded(outputs(_neutral_four(now))))
     cost = _cost(reading, display, aim, outputs)
-    best = _neutral_four(now)
-    best_cost = cost(best)
+    best = _searched(_neutral_four(now), cost, KNOBS)
+    unsure: tuple[PreProperty, ...] = ()
+    level = 100 * (float(LUMINANCE @ np.array(reading.white.value)) - 1)
+    if best.brightness_percent > now.brightness_percent and _within_angle(level, reading):
+        # The shortfall may be the panel's off-axis dimming: brightness is never raised for it.
+        held = {knob: limits for knob, limits in KNOBS.items() if knob != "brightness_percent"}
+        best = _searched(replace(_neutral_four(now), brightness_percent=now.brightness_percent), cost, held)
+        unsure = (PreProperty.WHITE_LEVEL,)
+    return PostSoftwareSuggestion(to=best, no_change=best == now, unsure=unsure)
+
+
+def _searched(start: SoftwarePicture, cost: Callable[[SoftwarePicture], float],
+              knobs: dict[str, tuple[int, int, int, int]]) -> SoftwarePicture:
+    """The knobs' whole steps searched one at a time from `start` for the least cost (kept by hand: no
+    library integer search weighs whole steps against a cost per step from neutral)."""
+    best, best_cost = start, cost(start)
     for _ in range(_ROUNDS):
         moved = False
-        for knob, (_, low, high, step) in KNOBS.items():
+        for knob, (_, low, high, step) in knobs.items():
             for value in range(low, high + 1, step):
                 trial = replace(best, **{knob: value})
                 trial_cost = cost(trial)
@@ -263,7 +316,7 @@ def _post(reading: Reading, lut: bytes | None) -> PostSoftwareSuggestion | Sugge
                     best, best_cost, moved = trial, trial_cost, True
         if not moved:
             break
-    return PostSoftwareSuggestion(to=best, no_change=best == now)
+    return best
 
 
 def _neutral_four(software: SoftwarePicture) -> SoftwarePicture:
@@ -271,7 +324,7 @@ def _neutral_four(software: SoftwarePicture) -> SoftwarePicture:
 
 
 def _decoded(encoded: np.ndarray) -> np.ndarray:
-    return np.vectorize(srgb_to_linear)(encoded)
+    return np.asarray(colour.cctf_decoding(np.asarray(encoded, np.float64), function="sRGB"))
 
 
 def _above_black(light: np.ndarray) -> np.ndarray:
@@ -293,13 +346,13 @@ class _Display:
     def fitted(cls, outputs: np.ndarray, reading: Reading) -> _Display:
         decoded = _decoded(outputs)
         shares = np.array([step.share.value for step in reading.tone]).reshape(-1, 3)
-        best_p, best_error = 1.0, float("inf")
-        for p in np.linspace(0.5, 2.0, 301):
+
+        def error(p: float) -> float:
             above = _above_black(decoded ** p)
             predicted = above[1:] / above[0]
-            error = float(np.sum((np.log(np.maximum(predicted, 1e-9)) - np.log(np.maximum(shares, 1e-9))) ** 2))
-            if error < best_error:
-                best_p, best_error = float(p), error
+            return float(np.sum((np.log(np.maximum(predicted, 1e-9)) - np.log(np.maximum(shares, 1e-9))) ** 2))
+
+        best_p = float(minimize_scalar(error, bounds=EXPONENT_FIT, method="bounded", options={"xatol": 1e-4}).x)
         white_above = _above_black(decoded ** best_p)[0]
         return cls(np.array(reading.white.value) / np.maximum(white_above, 1e-9), best_p)
 
