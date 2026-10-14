@@ -13,9 +13,11 @@ order.
   gamma gap. The white level's raise is bounded by the viewing angle (design-v2, "Angle"; measured,
   never corrected): the panel's own off-axis dimming can only make the screen read dimmer, so LOWER
   is sure at any angle, and RAISE is said only when the shortfall exceeds `angle_dimming` of the
-  reading's angle; within it the step is UNSURE (take the photo squarer). Black: the lowest near-black code apart from raw 0 should be 1 (PLUGE, as decision
-  0024's Black level): raise the display's black (its Brightness) while it is above 1. Each gap
-  within KEEP_SPREADS of its spread is KEEP. A NORMAL photo yields the two white steps only.
+  reading's angle; within it the step is UNSURE (take the photo squarer). Black: the lowest
+  near-black code apart from raw 0 should be 1 (PLUGE, as decision 0024's Black level): raise the
+  display's black (its Brightness) while it is above 1. Each other step is judged by model.py
+  `judged`: KEEP only when the reading proves the gap within MATCH_TOLERANCE, RETAKE when its
+  spread is too wide to tell. A NORMAL photo yields the two white steps only.
 - **Post-software** (TARGET_POST_SOFTWARE, through Photo Wall's steps but the mat shadow): the
   residual, as a software picture. The display's response is taken from this reading (each grey's
   measured light against the chain's output for it now: player/geometry.py `final_pixel` over
@@ -28,7 +30,9 @@ order.
   move. The black is not judged here. Without a grey read (a NORMAL photo, or every grey dropped)
   the display's response is unknown: SuggestionRefused TONE_UNREAD, never a fit on an assumed one.
   A brightness raise for a shortfall within `angle_dimming` is not made: brightness stays at the
-  entry's and `unsure` names WHITE_LEVEL.
+  entry's and `unsure` names WHITE_LEVEL. "No change" is said only when the white level, white
+  colour and tone, measured as pre-software but against the aim, are each proven matched
+  (`judged`); a property whose spread is too wide to tell is named in `retake`.
 
 Library steps (owner, 2026-10-14: "Make sure that you are using standard libraries and not building
 the algorithm"): the sRGB transfer function is colour-science's; both exponent fits are
@@ -96,6 +100,7 @@ from player.geometry import final_pixel
 
 from .model import (
     KEEP_SPREADS,
+    MATCH_TOLERANCE,
     Direction,
     PhotoKind,
     PostSoftwareSuggestion,
@@ -108,7 +113,9 @@ from .model import (
     SuggestionRefused,
     ToneStep,
     Unit,
+    Verdict,
     angle_dimming,
+    judged,
 )
 
 with warnings.catch_warnings():
@@ -167,48 +174,72 @@ def _operations(software: SoftwarePicture) -> PictureOperations:
     return operations_for(OUTPUT_IDS[0], 1, software, None)
 
 
-def _keep(gap: float, spread: float) -> bool:
-    return abs(gap) <= KEEP_SPREADS * spread
+# -- What each property measures (both stages) ---------------------------------------------------------
+
+
+Measures = dict[PreProperty, tuple[float, float]]
+
+
+def _measures(white: np.ndarray, spread: float, tone: Sequence[ToneStep]) -> Measures:
+    """Each property's gap from its aim and how far the spreads move it, in its step's unit: the
+    white level in percent (LUMINANCE of `white` less 1), its colour in kelvin (against
+    KELVIN_WHITE), the tone in gamma (against GAMMA_TENTHS_NEUTRAL, when greys were read). `white`
+    and the greys' shares are already over their aims (pre-software: paper white and sRGB)."""
+    kelvin, kelvin_spread = _kelvin(white, spread)
+    out = {PreProperty.WHITE_LEVEL: (100 * (float(LUMINANCE @ white) - 1), 100 * spread),
+           PreProperty.WHITE_COLOUR: (kelvin - KELVIN_WHITE, kelvin_spread)}
+    if tone:
+        gamma, gamma_spread = _gamma(tone)
+        out[PreProperty.TONE] = (gamma - GAMMA_TENTHS_NEUTRAL / 10, gamma_spread)
+    return out
+
+
+def _verdicts(measures: Measures) -> dict[PreProperty, Verdict]:
+    return {prop: judged(gap, spread, MATCH_TOLERANCE[prop]) for prop, (gap, spread) in measures.items()}
 
 
 # -- Pre-software ----------------------------------------------------------------------------------
 
 
 def _pre(reading: Reading) -> PreSoftwareSuggestion:
-    white = np.array(reading.white.value)
-    level = 100 * (float(LUMINANCE @ white) - 1)
-    steps = [PreSoftwareStep(PreProperty.WHITE_LEVEL, _level_direction(level, reading),
-                             round(abs(level), 1), Unit.PERCENT)]
-    kelvin, kelvin_spread = _kelvin(white, reading.white.spread)
-    gap = kelvin - KELVIN_WHITE
+    tone = () if reading.kind is PhotoKind.NORMAL else reading.tone
+    measures = _measures(np.array(reading.white.value), reading.white.spread, tone)
+    verdicts = _verdicts(measures)
+    level, level_spread = measures[PreProperty.WHITE_LEVEL]
+    steps = [PreSoftwareStep(PreProperty.WHITE_LEVEL,
+                             _level_direction(level, verdicts[PreProperty.WHITE_LEVEL], reading),
+                             round(abs(level), 1), Unit.PERCENT, round(level_spread, 1))]
+    gap, spread = measures[PreProperty.WHITE_COLOUR]
     steps.append(PreSoftwareStep(PreProperty.WHITE_COLOUR,
-                                 Direction.KEEP if _keep(gap, kelvin_spread)
-                                 else Direction.COOLER if gap < 0 else Direction.WARMER,
-                                 float(round(abs(gap), -1)), Unit.KELVIN))
+                                 _direction(verdicts[PreProperty.WHITE_COLOUR],
+                                            Direction.COOLER if gap < 0 else Direction.WARMER),
+                                 float(round(abs(gap), -1)), Unit.KELVIN, float(round(spread, -1))))
     if reading.kind is PhotoKind.NORMAL:
         return PreSoftwareSuggestion(tuple(steps))
-    if reading.tone:
-        gamma, gamma_spread = _gamma(reading.tone)
-        gap = gamma - GAMMA_TENTHS_NEUTRAL / 10
+    if PreProperty.TONE in measures:
+        gap, spread = measures[PreProperty.TONE]
         steps.append(PreSoftwareStep(PreProperty.TONE,
-                                     Direction.KEEP if _keep(gap, gamma_spread)
-                                     else Direction.LOWER if gap > 0 else Direction.RAISE,
-                                     round(abs(gap), 2), Unit.GAMMA))
+                                     _direction(verdicts[PreProperty.TONE],
+                                                Direction.LOWER if gap > 0 else Direction.RAISE),
+                                     round(abs(gap), 2), Unit.GAMMA, round(spread, 2)))
     lowest = reading.lowest_distinct
     black_gap = len(NEAR_BLACK_STEPS) if lowest is None else lowest - 1
     steps.append(PreSoftwareStep(PreProperty.BLACK, Direction.KEEP if black_gap == 0 else Direction.RAISE,
-                                 float(black_gap), Unit.STEP))
+                                 float(black_gap), Unit.STEP, 0.0))
     return PreSoftwareSuggestion(tuple(steps))
 
 
-def _level_direction(level: float, reading: Reading) -> Direction:
-    """The white level's direction for a gap of `level` percent: KEEP within KEEP_SPREADS of its
-    spread; LOWER when brighter (the angle only dims); RAISE when the shortfall exceeds what the
+def _direction(verdict: Verdict, moving: Direction) -> Direction:
+    """KEEP when proven matched, RETAKE when undecided, else `moving`."""
+    return {Verdict.MATCHED: Direction.KEEP, Verdict.UNDECIDED: Direction.RETAKE}.get(verdict, moving)
+
+
+def _level_direction(level: float, verdict: Verdict, reading: Reading) -> Direction:
+    """The white level's direction for a gap of `level` percent: KEEP or RETAKE by its verdict;
+    otherwise LOWER when brighter (the angle only dims); RAISE when the shortfall exceeds what the
     viewing angle can explain, else UNSURE."""
-    if _keep(level, 100 * reading.white.spread):
-        return Direction.KEEP
-    if level > 0:
-        return Direction.LOWER
+    if level > 0 or verdict is not Verdict.OFF:
+        return _direction(verdict, Direction.LOWER)
     return Direction.RAISE if not _within_angle(level, reading) else Direction.UNSURE
 
 
@@ -298,7 +329,21 @@ def _post(reading: Reading, lut: bytes | None) -> PostSoftwareSuggestion | Sugge
         held = {knob: limits for knob, limits in KNOBS.items() if knob != "brightness_percent"}
         best = _searched(replace(_neutral_four(now), brightness_percent=now.brightness_percent), cost, held)
         unsure = (PreProperty.WHITE_LEVEL,)
-    return PostSoftwareSuggestion(to=best, no_change=best == now, unsure=unsure)
+    verdicts = _verdicts(_against_aim(reading, aim))
+    retake = tuple(prop for prop, verdict in verdicts.items() if verdict is Verdict.UNDECIDED)
+    proven = all(verdict is Verdict.MATCHED for verdict in verdicts.values())
+    return PostSoftwareSuggestion(to=best, no_change=best == now and proven, unsure=unsure, retake=retake)
+
+
+def _against_aim(reading: Reading, aim: np.ndarray) -> Measures:
+    """The reading's measures (as pre-software's) with the white over the aim's white and each grey's
+    share over the aim's, carried back onto sRGB(signal), so a reading on the aim measures 0."""
+    aim_shares = aim[1:] / aim[0]
+    signals = _decoded(np.array([step.signal for step in reading.tone]))
+    tone = tuple(replace(step, share=replace(step.share, value=tuple(
+        np.array(step.share.value) / aim_shares[index] * signals[index])))
+        for index, step in enumerate(reading.tone))
+    return _measures(np.array(reading.white.value) / aim[0], reading.white.spread, tone)
 
 
 def _searched(start: SoftwarePicture, cost: Callable[[SoftwarePicture], float],

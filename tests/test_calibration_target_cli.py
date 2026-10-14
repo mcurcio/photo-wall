@@ -147,7 +147,7 @@ def test_run_suggests_post_software_with_the_entrys_lut_table(dngs) -> None:
     assert status == 0 and central.luts == [TINT_REF]
     assert json.loads(json.dumps(out)) == out
     suggestion = out["suggestion"]
-    assert suggestion["stage"] == "post-software" and set(suggestion) == {"stage", "to", "no_change", "unsure"}
+    assert suggestion["stage"] == "post-software" and set(suggestion) == {"stage", "to", "no_change", "unsure", "retake"}
     assert suggestion["to"]["lut"] == {"profile_sha256": TINT_REF.profile_sha256, "recipe_id": TINT_REF.recipe_id}
 
 

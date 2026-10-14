@@ -12,9 +12,11 @@ home here.
 """
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, fields, is_dataclass
 from enum import Enum, StrEnum
 from math import radians, sin
+from types import MappingProxyType
 from typing import Any, Final
 
 import numpy as np
@@ -59,7 +61,7 @@ GREY_TOLERANCE: Final = (0.004, 0.04)   # absolute + relative to the share: a gr
 GREY_WHITES: Final = 4              # the screen whites nearest a grey that it is read against
 DISTINCT_SIGMAS: Final = 3.0        # a near-black step apart from raw 0 by this many of its noise
 MEDIAN_ERROR: Final = 1.2533        # a median's standard error over a mean's, normal noise (sqrt(pi / 2))
-KEEP_SPREADS: Final = 2.0           # a gap within this many of its spread is "keep" / no change
+KEEP_SPREADS: Final = 2.0           # a gap over this many of its spread is one the reading shows
 
 # -- The viewing angle's bound (suggest; design-v2 "Angle": measured, not corrected, bounded one-sided) --
 PANEL_DIMMING_AT_35: Final = 0.25   # placeholder for the bench: a VA panel may lose about a quarter of its
@@ -219,13 +221,46 @@ class PreProperty(StrEnum):
     BLACK = "black"
 
 
+# -- Keep only what the reading proves (owner, 2026-10-14: "It shouldn’t say “change nothing” unless it
+# can prove the system is perfectly calibrated. “Retake the photo” is closer to the truth") --
+# The gap within which a property counts as matched, in its step's unit; placeholders for the bench,
+# like every threshold here. BLACK has none: its PLUGE test is exact (raw steps).
+MATCH_TOLERANCE: Final[Mapping[PreProperty, float]] = MappingProxyType({
+    PreProperty.WHITE_LEVEL: 3.0,       # percent of paper white
+    PreProperty.WHITE_COLOUR: 200.0,    # kelvin (two of Photo Wall's colour temperature steps)
+    PreProperty.TONE: 0.1,              # gamma (one of Photo Wall's gamma steps)
+})
+
+
+class Verdict(StrEnum):
+    """What a gap and its spread prove (`judged`)."""
+    MATCHED = "matched"     # proven within MATCH_TOLERANCE: keep, no change
+    OFF = "off"             # a gap the reading shows: move
+    UNDECIDED = "undecided"  # the spread too wide to tell a match from a gap: retake
+
+
+def judged(gap: float, spread: float, tolerance: float) -> Verdict:
+    """The one rule for keeping (owner, 2026-10-14, above): MATCHED only when the gap and
+    KEEP_SPREADS of its spread both lie within `tolerance` (|gap| + KEEP_SPREADS * spread <=
+    tolerance), so the reading proves the match; else OFF when the gap is over KEEP_SPREADS of its
+    spread (the reading shows it); else UNDECIDED: the spread is too wide to tell, so the answer is
+    to retake the photo (with what reflects on the paper moved; the reading's `dropped` says where),
+    never "keep". `gap`, `spread` and `tolerance` in one unit. Pure."""
+    if abs(gap) + KEEP_SPREADS * spread <= tolerance:
+        return Verdict.MATCHED
+    if abs(gap) > KEEP_SPREADS * spread:
+        return Verdict.OFF
+    return Verdict.UNDECIDED
+
+
 class Direction(StrEnum):
     RAISE = "raise"
     LOWER = "lower"
     WARMER = "warmer"
     COOLER = "cooler"
-    KEEP = "keep"           # the gap is within KEEP_SPREADS of its spread
+    KEEP = "keep"           # proven matched (Verdict.MATCHED)
     UNSURE = "unsure"       # the gap is within what the viewing angle can explain: take the photo squarer
+    RETAKE = "retake"       # the spread too wide to tell a match from a gap (Verdict.UNDECIDED)
 
 
 class Unit(StrEnum):
@@ -238,11 +273,13 @@ class Unit(StrEnum):
 @dataclass(frozen=True)
 class PreSoftwareStep:
     """One of the display's own controls to move: a direction and the gap's size, never a menu
-    value (design Q2, as recommended: the display's menus are not recorded)."""
+    value (design Q2, as recommended: the display's menus are not recorded); `spread`: how far the
+    reading's spread moves the gap, in its unit (0 for the black: exact), the reason for a RETAKE."""
     property: PreProperty
     direction: Direction
     gap: float
     unit: Unit
+    spread: float
 
 
 @dataclass(frozen=True)
@@ -254,12 +291,17 @@ class PreSoftwareSuggestion:
 class PostSoftwareSuggestion:
     """The software picture to try: the entry's, with only brightness, contrast, colour temperature
     and gamma moved, each away from neutral only when that moves the readings by more than
-    KEEP_SPREADS of their spread; `no_change` when `to` equals the entry's software picture.
-    `unsure`: the properties held at the entry's values because raising them would be within
-    angle_dimming (WHITE_LEVEL: brightness; take the photo squarer); empty otherwise."""
+    KEEP_SPREADS of their spread. `no_change` only when `to` equals the entry's software picture
+    AND the white level, white colour and tone are each proven matched to the aim (`judged`
+    MATCHED); `to` equal to the entry's with `no_change` false: not proven (`retake`, `unsure`, or a
+    gap the four cannot close, pre-software work). `unsure`: the properties held at the entry's
+    values because raising them would be within angle_dimming (WHITE_LEVEL: brightness; take the
+    photo squarer). `retake`: the properties whose spread is too wide to tell a match from a gap
+    (`judged` UNDECIDED): retake the photo. Each empty otherwise."""
     to: SoftwarePicture
     no_change: bool
     unsure: tuple[PreProperty, ...]
+    retake: tuple[PreProperty, ...]
 
 
 class SuggestionRefusal(StrEnum):
@@ -310,11 +352,11 @@ def _plain(value: Any) -> Any:
 __all__ = [
     "CHARUCO_CORNERS_MIN", "CLIP_SHARE", "CONTRAST_FLOOR", "COVERED_SHARE", "DISTINCT_SIGMAS", "EDGE_TOLERANCE",
     "FALLOFF_KEEP", "FALLOFF_MAX", "FOCAL_FALLBACK", "FOCAL_RANGE", "GREY_TOLERANCE", "GREY_WHITES",
-    "HOMOGRAPHY_PX", "MARKER_MIN_PERIMETER", "MEDIAN_ERROR", "KEEP_SPREADS", "MIN_PAPER_MARKERS",
+    "HOMOGRAPHY_PX", "MARKER_MIN_PERIMETER", "MATCH_TOLERANCE", "MEDIAN_ERROR", "KEEP_SPREADS", "MIN_PAPER_MARKERS",
     "MIN_SCREEN_MARKERS", "NEAREST", "PANEL_DIMMING_AT_35", "PAPER_REACH_SQUARES", "QR_MARGIN_SQUARES", "QR_PX_PER_SQUARE", "QR_SQUARE_PX",
     "RECTIFIED_PX", "SAMPLE_SHARE", "SMALL_SQUARE_PX", "VIEW_WHITE_PERCENTILE", "WHITE_TOLERANCE",
     "Angle", "Direction", "DropReason", "Dropped", "FocalSource", "Photo", "PhotoKind", "Place",
     "PostSoftwareSuggestion", "PreProperty", "PreSoftwareStep", "PreSoftwareSuggestion", "Reading", "Refusal",
     "Refused", "Rgb", "Suggestion", "SuggestionRefusal", "SuggestionRefused", "ToneStep", "Unit", "Value",
-    "angle_dimming", "to_json",
+    "Verdict", "angle_dimming", "judged", "to_json",
 ]

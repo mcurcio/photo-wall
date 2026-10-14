@@ -172,7 +172,8 @@ def test_a_screen_10_percent_dim_at_30_degrees_is_unsure_before_and_after_softwa
     assert step.gap == pytest.approx(10.0, abs=1.0)
     out = post(shot(display=RIGHT, stage=POST, software=DIMMED, yaw_deg=30.0, pitch_deg=0.0))
     assert out.unsure == (PreProperty.WHITE_LEVEL,)
-    assert out.to.brightness_percent == DIMMED.brightness_percent and out.no_change
+    # Held, and never "no change": the reading does not prove the white matched.
+    assert out.to == DIMMED and not out.no_change
 
 
 def test_the_same_square_on_is_raised() -> None:
@@ -276,6 +277,46 @@ def test_post_with_a_lut_reads_its_table() -> None:
     assert out.to.brightness_percent < 100
     assert post(scene, IDENTITY).to != out.to          # predicted without the look: another picture
     assert post(next_change(scene, out.to), TINT).no_change     # drawn with it: the aim is met
+
+
+# -- Keep only what the reading proves (owner, 2026-10-14: "It shouldn’t say “change nothing” unless it
+# can prove the system is perfectly calibrated. “Retake the photo” is closer to the truth") ---------------
+
+
+def loose(scene: Scene, spread: float) -> Reading:
+    """The scene's reading with its white's spread widened to `spread` (as an uneven reflection on
+    the paper widens it, read.py row 7)."""
+    found = reading(scene)
+    return replace(found, white=replace(found.white, spread=spread))
+
+
+def test_pre_a_right_display_read_too_loosely_says_retake_never_keep() -> None:
+    out = suggest(loose(shot(display=RIGHT), 0.03), None)
+    assert isinstance(out, PreSoftwareSuggestion)
+    found = {step.property: step for step in out.steps}
+    assert found[PreProperty.WHITE_LEVEL].direction is Direction.RETAKE
+    assert found[PreProperty.WHITE_LEVEL].spread == pytest.approx(3.0)
+    assert found[PreProperty.WHITE_COLOUR].direction is Direction.RETAKE
+    assert found[PreProperty.TONE].direction is Direction.KEEP          # the greys were read tightly
+
+
+def test_pre_a_gap_the_loose_reading_still_shows_is_named() -> None:
+    step = {s.property: s for s in suggest(loose(shot(display=paper_matched(BASE, level=1.1)), 0.03),
+                                            None).steps}[PreProperty.WHITE_LEVEL]  # type: ignore[union-attr]
+    assert (step.direction, step.gap) == (Direction.LOWER, pytest.approx(10.0, abs=1.0))
+
+
+def test_post_a_right_display_read_too_loosely_is_never_no_change() -> None:
+    out = suggest(loose(shot(display=RIGHT, stage=POST), 0.03), None)
+    assert isinstance(out, PostSoftwareSuggestion)
+    assert out.to == NEUTRAL_SOFTWARE and not out.no_change
+    assert PreProperty.WHITE_LEVEL in out.retake
+
+
+def test_a_right_display_read_tightly_is_proven_matched() -> None:
+    out = post(shot(display=RIGHT, stage=POST))
+    assert out.no_change and out.retake == ()
+    assert all(step.direction is Direction.KEEP for step in steps(shot(display=RIGHT)).values())
 
 
 # -- No order (owner R8) ------------------------------------------------------------------------------
