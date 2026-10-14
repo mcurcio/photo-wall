@@ -18,16 +18,22 @@ from typing import Any, Literal
 from uuid import UUID
 
 from contracts.calibration_target import (
+    QR_COPY_PLACES,
+    QR_PERIOD,
     QR_QUIET_MODULES,
-    SCREEN_TARGET_MM,
+    QR_SQUARES,
+    SCREEN_COLUMNS_MAX,
+    SCREEN_ROWS,
+    SQUARE_PX,
+    Surface,
     TargetCode,
-    calibration_target,
+    board_raster,
 )
 from contracts.lut import LUT_GRID, LutRef
 from contracts.models import MAT_LIGHTS_MAX, AppliedCalibration, Mat
 from contracts.node_frame import PictureOperations
 from contracts.tuning import TARGET_PATTERNS, TestPattern
-from player.calibration_target import TEXEL_MM, target_modules, target_texture
+from player.calibration_target import target_modules
 from player.geometry import (
     BLACK_LEVEL_PATCH,
     BLACK_LEVEL_STEPS,
@@ -35,12 +41,13 @@ from player.geometry import (
     LUMA,
     ROLLOFF_FADE_POWER,
     SIGNAL_LEVELS,
+    BoardDraw,
     Matrix,
     MatShadow,
+    board_draw,
     homography,
     inverse,
     mat_shadow,
-    opening_size_mm,
     output_to_picture,
     peak,
     photo_rect,
@@ -173,7 +180,7 @@ _PATTERN_CODES: dict[TestPattern | None, int] = {
 
 def _final_uniforms(gl, program: int, operations: PictureOperations | None, opening,
                     shadow: MatShadow | None, *, lut_drawn: bool,
-                    target: tuple[int, tuple[float, float]] | None = None) -> None:
+                    target: tuple[int, BoardDraw] | None = None) -> None:
     """The final pass's operations (neutral when None), the Frame's mat shadow (None: none) and the
     per-Output mask's opening. Each step's switch is player/geometry.py's skip rule, worked here,
     so a neutral step is never computed by the shader either. `lut_drawn`: the LUT
@@ -182,9 +189,10 @@ def _final_uniforms(gl, program: int, operations: PictureOperations | None, open
     opening's unit square, so `to_opening` is set whenever a pattern or a shadow is on; with no
     Frame drawn yet the opening is `_NO_OPENING`, off the output, and the pattern stays unseen (a
     known limit: an Output shows a pattern only once a Frame has drawn there). `target`: for a
-    calibration target, the QR's module count bound on _TARGET_QR_UNIT (0: no code, the square
-    draws light) and the opening's size in mm (`opening_size_mm`); its layout is bound on
-    _TARGET_LAYOUT_UNIT (`NativeRenderer._bind_target`)."""
+    calibration target, the QR's module count bound on _TARGET_QR_UNIT (0: no code, every QR
+    square draws light) and the opening's BoardDraw (`board_draw`: its columns, aspect and turn;
+    its modules unread, the count stands for them); the board's raster is bound on
+    _TARGET_LAYOUT_UNIT (`NativeRenderer._bind_target`). None: no columns, so nothing is drawn."""
     def uniform(name: str) -> int:
         return gl.glGetUniformLocation(program, name)
 
@@ -213,9 +221,11 @@ def _final_uniforms(gl, program: int, operations: PictureOperations | None, open
     gl.glUniform1i(uniform("test_pattern"), _PATTERN_CODES[pattern])
     gl.glUniform1i(uniform("target_layout"), _TARGET_LAYOUT_UNIT)   # each sampler on its own unit
     gl.glUniform1i(uniform("target_qr"), _TARGET_QR_UNIT)
-    modules, opening_mm = target if target is not None else (0, (1.0, 1.0))
+    modules, draw = target if target is not None else (0, None)
     gl.glUniform1i(uniform("target_qr_modules"), modules)
-    gl.glUniform2f(uniform("target_opening_mm"), *opening_mm)
+    gl.glUniform1i(uniform("target_columns"), draw.columns if draw is not None else 0)
+    gl.glUniform1f(uniform("target_aspect"), draw.aspect if draw is not None else 1.0)
+    gl.glUniform1i(uniform("target_portrait"), int(draw is not None and draw.portrait))
     if shadow is not None:
         _set_matrix(gl, program, "to_opening", shadow.to_opening)
     elif pattern is not None:
@@ -388,10 +398,10 @@ class _Surface:
     # The LUT texture (GL_TEXTURE_3D on _LUT_UNIT) and the LUT it holds; 0 and None: none yet.
     lut_texture: int = 0
     lut_ref: LutRef | None = None
-    # The calibration target's textures (decision 0026): the layout (RG8 on _TARGET_LAYOUT_UNIT,
-    # uploaded once per GL context) and the QR (R8 on _TARGET_QR_UNIT) of `target_code`, the
-    # (player id, Output, picture change) it names, rebuilt only when that changes; 0 and None:
-    # none yet.
+    # The calibration target's textures (decision 0027): the screen board's raster (R8 on
+    # _TARGET_LAYOUT_UNIT, uploaded once per GL context) and the QR (R8 on _TARGET_QR_UNIT) of
+    # `target_code`, the (player id, Output, picture change) it names, rebuilt only when that
+    # changes; 0 and None: none yet.
     target_layout: int = 0
     target_qr: int = 0
     target_code: tuple[str, str, int] | None = None
@@ -501,9 +511,8 @@ void main() {
 # replaced with no change to the layer pass; the Black level skips every step and the mat.
 # geometry.py's constants are written in (`_FINAL_CONSTANTS`), so each has one home.
 _LUT_UNIT = 1      # the LUT's texture unit; the picture is on unit 0
-_TARGET_LAYOUT_UNIT = 2     # the calibration target's layout (player/calibration_target.py TargetTexture)
+_TARGET_LAYOUT_UNIT = 2     # the screen board's raster (contracts.calibration_target.board_raster)
 _TARGET_QR_UNIT = 3         # its QR's modules
-_TARGET_QR = calibration_target().qr
 _FINAL_CONSTANTS = (
     f"#define MAT_LIGHTS_MAX {MAT_LIGHTS_MAX}\n"
     f"const float LUT_GRID = {float(LUT_GRID)!r};\n"
@@ -515,10 +524,14 @@ _FINAL_CONSTANTS = (
     f"const float BLACK_LEVEL_PATCH = {BLACK_LEVEL_PATCH!r};\n"
     + "".join(f"#define PATTERN_{pattern.name} {code}\n"
               for pattern, code in _PATTERN_CODES.items() if pattern is not None)
-    + f"const vec2 SCREEN_TARGET_MM = vec2({float(SCREEN_TARGET_MM[0])!r}, {float(SCREEN_TARGET_MM[1])!r});\n"
-    f"const float TARGET_TEXEL_MM = {float(TEXEL_MM)!r};\n"
-    f"const vec2 TARGET_QR = vec2({float(_TARGET_QR.x_mm)!r}, {float(_TARGET_QR.y_mm)!r});\n"
-    f"const float TARGET_QR_MM = {float(_TARGET_QR.width_mm)!r};\n"
+    + f"const float SCREEN_ROWS = {float(SCREEN_ROWS)!r};\n"
+    f"const float SQUARE_PX = {float(SQUARE_PX)!r};\n"
+    f"const int QR_PERIOD = {QR_PERIOD};\n"
+    f"#define QR_PERIODS {-(-SCREEN_COLUMNS_MAX // QR_PERIOD)}\n"
+    f"#define QR_COPY_COUNT {len(QR_COPY_PLACES)}\n"
+    f"const ivec2 QR_COPY_PLACES[QR_COPY_COUNT] = ivec2[QR_COPY_COUNT]("
+    + ", ".join(f"ivec2({row}, {offset})" for row, offset in QR_COPY_PLACES) + ");\n"
+    f"const int QR_SQUARES = {QR_SQUARES};\n"
     f"const float QR_QUIET_MODULES = {float(QR_QUIET_MODULES)!r};\n")
 _FINAL = """#version 300 es
 precision highp float;
@@ -545,7 +558,9 @@ uniform int test_pattern;
 uniform sampler2D target_layout;
 uniform sampler2D target_qr;
 uniform int target_qr_modules;
-uniform vec2 target_opening_mm;
+uniform int target_columns;
+uniform float target_aspect;
+uniform int target_portrait;
 uniform int mat_on;
 uniform mat3 to_opening;
 uniform vec2 mat_size;
@@ -629,34 +644,38 @@ vec3 pattern_signal(vec2 point) {
     }
     return vec3(value);
 }
-// The calibration targets (geometry.py `target_point`): the target's plane (mm) at the opening's
-// unit square, centred at its size, turned a quarter clockwise in a portrait opening.
-vec2 target_point(vec2 p) {
-    vec2 centre = SCREEN_TARGET_MM*0.5;
-    if (target_opening_mm.x >= target_opening_mm.y) return centre+(p-0.5)*target_opening_mm;
-    return vec2(centre.x+(p.y-0.5)*target_opening_mm.y, centre.y+(0.5-p.x)*target_opening_mm.x);
+// The calibration targets v2 (geometry.py `board_point`): the screen board's point (column, row)
+// in squares at the opening's unit square, its columns centred along the long side, turned a
+// quarter clockwise in a portrait opening.
+vec2 board_point(vec2 p) {
+    float n = target_aspect*SCREEN_ROWS;
+    float offset = (n-float(target_columns))*0.5;
+    if (target_portrait == 0) return vec2(p.x*n-offset, p.y*SCREEN_ROWS);
+    return vec2(p.y*n-offset, (1.0-p.x)*SCREEN_ROWS);
 }
-// geometry.py `target_signal`: (the encoded signal, 1.0 where it is drawn raw). The layout's
-// texel (row 0 at the target's top) holds the signal and the raw mark; the QR's square takes
-// its module (dark 0, light and the quiet zone 1; no code: all light).
-vec2 target_signal(vec2 point) {
-    vec3 q = to_opening*vec3(point, 1.0);
-    vec2 mm = target_point(q.xy/q.z);
-    float raw = test_pattern == PATTERN_TARGET_PRE_SOFTWARE ? 1.0 : 0.0;
-    if (any(lessThan(mm, vec2(0.0))) || any(greaterThanEqual(mm, SCREEN_TARGET_MM))) return vec2(0.0, raw);
-    vec2 texel = texelFetch(target_layout, ivec2(mm/TARGET_TEXEL_MM), 0).rg;
-    float value = texel.r;
-    vec2 square = mm-TARGET_QR;
-    if (all(greaterThanEqual(square, vec2(0.0))) && all(lessThan(square, vec2(TARGET_QR_MM)))) {
-        value = 1.0;
-        if (target_qr_modules > 0) {
+// geometry.py `board_signal`: the encoded signal at a board point. Black off the board; in a QR
+// copy's squares its module (dark 0; light and the quiet zone 1; no code: all light), the modules
+// and their quiet zone filling QR_SQUARES; else the raster's pixel (row 0 at the board's top).
+float board_signal(vec2 point) {
+    if (any(lessThan(point, vec2(0.0))) || point.x >= float(target_columns) || point.y >= SCREEN_ROWS)
+        return 0.0;
+    for (int k = 0; k < QR_PERIODS; k++) {
+        for (int c = 0; c < QR_COPY_COUNT; c++) {
+            ivec2 place = QR_COPY_PLACES[c];
+            int column = k*QR_PERIOD+place.y;
+            if (column+QR_SQUARES > target_columns) continue;
+            vec2 square = point-vec2(float(column), float(place.x));
+            if (any(lessThan(square, vec2(0.0))) || any(greaterThanEqual(square, vec2(float(QR_SQUARES)))))
+                continue;
+            if (target_qr_modules == 0) return 1.0;
             float side = float(target_qr_modules)+2.0*QR_QUIET_MODULES;
-            ivec2 cell = ivec2(min(floor(square/TARGET_QR_MM*side), vec2(side-1.0)))-ivec2(int(QR_QUIET_MODULES));
+            ivec2 cell = ivec2(min(floor(square/float(QR_SQUARES)*side), vec2(side-1.0)))-ivec2(int(QR_QUIET_MODULES));
             if (all(greaterThanEqual(cell, ivec2(0))) && all(lessThan(cell, ivec2(target_qr_modules))))
-                value = texelFetch(target_qr, cell, 0).r > 0.5 ? 0.0 : 1.0;
+                return texelFetch(target_qr, cell, 0).r > 0.5 ? 0.0 : 1.0;
+            return 1.0;
         }
     }
-    return vec2(value, max(raw, texel.g > 0.5 ? 1.0 : 0.0));
+    return texelFetch(target_layout, ivec2(floor(point*SQUARE_PX)), 0).r;
 }
 void main() {
     // The Black level is the raw signal: no step, no mat; the per-Output mask stays last.
@@ -664,17 +683,19 @@ void main() {
         color = vec4(inside_opening(uv) ? pattern_signal(uv) : vec3(0.0), 1.0);
         return;
     }
-    // A calibration target: a raw point is its signal, as the Black level; any other runs every
-    // step below but the mat shadow (a place effect, not a setting the target judges).
+    // A calibration target: pre-software is the board's signal raw (as the Black level), black
+    // outside; post-software runs every step below but the mat shadow (a place effect, not a
+    // setting the target judges).
     bool drawing_target = test_pattern == PATTERN_TARGET_PRE_SOFTWARE || test_pattern == PATTERN_TARGET_POST_SOFTWARE;
     vec3 value;
     if (drawing_target) {
-        vec2 drawn = target_signal(uv);
-        if (drawn.y > 0.5) {
-            color = vec4(inside_opening(uv) ? vec3(drawn.x) : vec3(0.0), 1.0);
+        vec3 q = to_opening*vec3(uv, 1.0);
+        float signal = board_signal(board_point(q.xy/q.z));
+        if (test_pattern == PATTERN_TARGET_PRE_SOFTWARE) {
+            color = vec4(inside_opening(uv) ? vec3(signal) : vec3(0.0), 1.0);
             return;
         }
-        value = srgb_decoded(vec3(drawn.x));
+        value = srgb_decoded(vec3(signal));
     } else {
         // Composition targets use OpenGL's lower-left orientation, unlike decoded bytes.
         value = test_pattern == 0 ? texture(picture, vec2(uv.x, 1.0-uv.y)).rgb
@@ -1503,9 +1524,9 @@ class NativeRenderer:
             lut_drawn = self._bind_lut(surface, surface.operations)
             target = None
             if surface.operations is not None and surface.operations.test_pattern in TARGET_PATTERNS:
-                target = (self._bind_target(surface, surface.operations, lut_drawn=lut_drawn),
-                          opening_size_mm(_drawn_fit(shown), shown.composition.binding.profile)
-                          if shown else (1.0, 1.0))
+                modules = self._bind_target(surface, surface.operations, lut_drawn=lut_drawn)
+                if shown:
+                    target = (modules, board_draw(_drawn_fit(shown), shown.composition.binding.profile, None))
             _final_uniforms(gl, surface.programs[1], surface.operations,
                             _drawn_fit(shown).corners if shown else _NO_OPENING, shadow,
                             lut_drawn=lut_drawn, target=target)
@@ -1586,21 +1607,21 @@ class NativeRenderer:
         return True
 
     def _bind_target(self, surface: _Surface, operations: PictureOperations, *, lut_drawn: bool) -> int:
-        """Bind the calibration target's layout on _TARGET_LAYOUT_UNIT, uploaded once per GL
-        context (player/calibration_target.py `target_texture`), and the QR of the code naming
-        this Player, `operations`' Output and picture change on _TARGET_QR_UNIT, rebuilt
+        """Bind the screen board's raster on _TARGET_LAYOUT_UNIT, uploaded once per GL context as
+        R8 (contracts.calibration_target.board_raster(SCREEN), top row first), and the QR of the
+        code naming this Player, `operations`' Output and picture change on _TARGET_QR_UNIT, rebuilt
         (`target_modules`) only when that code changes. The QR's module count; 0 (the square
         draws light, so the reader refuses code-unreadable) with no player id yet, or while a
         post-software target's LUT is not drawn (`lut_drawn` False: its bytes not held), so the
-        code never names a picture change whose look is not on screen (decision 0026). Texture
+        code never names a picture change whose look is not on screen (decision 0027). Texture
         unit 0 stays the active unit."""
         gl = self.GL
         try:
             gl.glActiveTexture(gl.GL_TEXTURE0 + _TARGET_LAYOUT_UNIT)
             if not surface.target_layout:
-                layout = target_texture()
+                raster = board_raster(Surface.SCREEN)
                 surface.target_layout = self._target_texture(
-                    gl.GL_RG8, gl.GL_RG, layout.width, layout.height, layout.texels)
+                    gl.GL_R8, gl.GL_RED, raster.width, raster.height, raster.pixels)
             else:
                 gl.glBindTexture(gl.GL_TEXTURE_2D, surface.target_layout)
             gl.glActiveTexture(gl.GL_TEXTURE0 + _TARGET_QR_UNIT)

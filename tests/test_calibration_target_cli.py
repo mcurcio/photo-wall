@@ -1,6 +1,6 @@
-"""The calibration target reader's command and edges (decision 0026, slices R1 and R2): `run` reads photo
-files against a CentralReads and answers {"reading"} or {"refused"} with its exit status; `main`
-prints it; `load_photo` decodes ProRAW DNG through rawpy and normal photos through Pillow;
+"""The calibration target reader's command and edges (decisions 0026, 0027): `run` reads photo files
+against a CentralReads and answers {"reading"} or {"refused"} with its exit status; `main` prints
+it; `load_photo` decodes ProRAW DNG through rawpy and normal photos through Pillow, both to linear light;
 HttpCentralReads reads the sent entry over the operator route with the admin token."""
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from pathlib import Path
 import httpx
 import numpy as np
 import pytest
-from calibration_target_scenes import CODE, Scene, entry, raw_bytes, raw_photo
+from calibration_target_scenes import CODE, Scene, entry, paper_matched, raw_bytes, raw_photo
 from PIL import Image
 
 from central.displays.lut import LUT_RECIPE_ID, baked_lut
@@ -112,6 +112,11 @@ def test_run_reads_a_raw_photo_against_its_sent_entry(dng: tuple[Path, list]) ->
     assert central.asked == [CODE] and central.luts == []
     assert json.loads(json.dumps(out)) == out
     assert out["reading"]["kind"] == "raw" and out["reading"]["lowest_distinct"] == 1
+    assert out["reading"]["ink"] == pytest.approx(CLEAN.ink, abs=0.02)
+    assert 0 <= out["reading"]["falloff"] <= 0.4
+    assert out["reading"]["angle"]["focal"] == "estimated" and 0 < out["reading"]["angle"]["degrees"] < 60
+    for dropped in out["reading"]["dropped"]:
+        assert set(dropped["where"]) == {"surface", "row", "column", "x", "y", "words"}
     assert out["suggestion"]["stage"] == "pre-software"
     assert {step["property"] for step in out["suggestion"]["steps"]} == {"white-level", "white-colour", "tone", "black"}
 
@@ -142,8 +147,25 @@ def test_run_suggests_post_software_with_the_entrys_lut_table(dngs) -> None:
     assert status == 0 and central.luts == [TINT_REF]
     assert json.loads(json.dumps(out)) == out
     suggestion = out["suggestion"]
-    assert suggestion["stage"] == "post-software" and set(suggestion) == {"stage", "to", "no_change"}
+    assert suggestion["stage"] == "post-software" and set(suggestion) == {"stage", "to", "no_change", "unsure", "retake"}
     assert suggestion["to"]["lut"] == {"profile_sha256": TINT_REF.profile_sha256, "recipe_id": TINT_REF.recipe_id}
+
+
+def test_run_says_unsure_when_the_viewing_angle_can_explain_a_dim_screen(dngs) -> None:
+    """A screen 10 % dim photographed at 30 degrees: the panel's own off-axis dimming could be all of
+    it, so the white level is "unsure" before software, and after it brightness is held, named in
+    "unsure"."""
+    make, _ = dngs
+    dim = Scene(display=paper_matched(CLEAN, level=0.9), yaw_deg=30.0, pitch_deg=0.0)
+    out, status = command.run(str(make(dim)), FakeCentral((CODE, entry(dim))))
+    assert status == 0 and json.loads(json.dumps(out)) == out
+    level = next(step for step in out["suggestion"]["steps"] if step["property"] == "white-level")
+    assert level["direction"] == "unsure"
+    dimmed = Scene(stage=TestPattern.TARGET_POST_SOFTWARE, display=paper_matched(CLEAN),
+                   software=replace(NEUTRAL_SOFTWARE, brightness_percent=90), yaw_deg=30.0, pitch_deg=0.0)
+    out, status = command.run(str(make(dimmed)), FakeCentral((CODE, entry(dimmed))))
+    assert status == 0 and out["suggestion"]["unsure"] == ["white-level"]
+    assert out["suggestion"]["to"]["brightness_percent"] == 90
 
 
 def test_run_refuses_a_post_software_suggestion_without_the_lut_table(dngs) -> None:
@@ -158,6 +180,16 @@ def test_run_refuses_an_unknown_entry(dng: tuple[Path, list]) -> None:
     path, _ = dng
     out, status = command.run(str(path), FakeCentral())
     assert status == 2 and out["refused"]["why"] == "unknown-entry"
+
+
+def test_run_refuses_an_unread_code_with_the_places_tried(dngs) -> None:
+    make, _ = dngs
+    out, status = command.run(str(make(replace(CLEAN, code_drawn=False))), FakeCentral())
+    assert status == 2 and out["refused"]["why"] == "code-unreadable"
+    assert out["refused"]["where"] and json.loads(json.dumps(out)) == out
+    where = out["refused"]["where"][0]
+    assert where["surface"] == "screen" and where["words"].startswith("the screen, the photo's ")
+    assert set(where) == {"surface", "row", "column", "x", "y", "words"}
 
 
 def test_run_refuses_a_photo_without_the_targets(tmp_path: Path) -> None:
@@ -207,17 +239,19 @@ def test_main_without_a_token_or_with_an_unreadable_photo_is_an_error(
 
 
 @pytest.mark.parametrize("suffix", [".png", ".jpg"])
-def test_a_normal_photo_is_its_8_bit_values(tmp_path: Path, suffix: str) -> None:
+def test_a_normal_photo_is_its_8_bit_values_decoded_to_linear_light(tmp_path: Path, suffix: str) -> None:
     values = np.zeros((4, 6, 3), np.uint8)
     values[0, 0] = (255, 128, 0)
     values[1, 1] = (51, 102, 204)
     path = tmp_path / f"photo{suffix}"
     Image.fromarray(values).save(path, quality=100) if suffix == ".jpg" else Image.fromarray(values).save(path)
     photo = photos.load_photo(path)
-    assert photo.kind is PhotoKind.NORMAL and photo.name == path.name
+    assert photo.kind is PhotoKind.NORMAL and photo.name == path.name and photo.focal_px is None
     assert photo.pixels.shape == (4, 6, 3) and photo.pixels.dtype == np.float32
     if suffix == ".png":
-        assert np.allclose(photo.pixels * 255, values)
+        encoded = values / 255                      # the sRGB standard's decoding, written out as the reference
+        linear = np.where(encoded <= 0.04045, encoded / 12.92, ((encoded + 0.055) / 1.055) ** 2.4)
+        assert np.allclose(photo.pixels, linear, atol=1e-6)
         assert photo.clipped[0, 0] and not photo.clipped[1, 1]
     else:
         assert photo.clipped.shape == (4, 6) and photo.pixels.max() <= 1.0

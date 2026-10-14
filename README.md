@@ -36,6 +36,10 @@ Once central is running, bringing a display online is four steps, and **none of 
 
 That is the whole model: **one published release** (the boot tree, the base and the app images, from GitHub), one boot server, zero per-device setup. The hashes Central and the Pi check are **corruption checks only**; nothing here is signed. The detailed map (what you provide, the assets, and how a Player comes online) is in [Provision Player appliances](#provision-player-appliances).
 
+**The paper calibration target** ([print it](docs/runbook.md#calibration-targets)): [Letter](central/displays/calibration_sheets/photo-wall-calibration-target-letter.pdf) · [A4](central/displays/calibration_sheets/photo-wall-calibration-target-a4.pdf) · [4 × 6 in photo print](central/displays/calibration_sheets/photo-wall-calibration-target-4x6.pdf). Print it on any printer and ink, lay it on a Frame's screen while the screen shows its own target, and one phone photo of both tells how far the display's picture is from the paper.
+
+<img src="central/displays/calibration_sheets/photo-wall-calibration-target.png" alt="The paper calibration target: a chessboard of OpenCV ChArUco markers" width="272">
+
 ### Run the control plane locally
 
 **You need:** Git, Docker Engine or Desktop with Compose, and Python 3.12 (for the config script and development tests). No paid runtime service is required.

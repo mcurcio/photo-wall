@@ -2,6 +2,8 @@
 
 **Date:** 2026-10-13 · **Layer:** system (a test pattern pair drawn by the Player, a printable sheet from Central, one more read of the picture history, and the agent's reader under `scripts/`; no table, job or worker) · **Status:** accepted design, built on the branch `feat/calibration-targets` (one pull request, after [#100](https://github.com/mcurcio/photo-wall/pull/100)). **Decision owner:** the owner, in chat on 2026-10-13 (his words below). The design's two questions (Q1, Q2) were taken as recommended when he said "build the calibration targets"; on 2026-10-14 he answered Q1 himself (one photo) and ruled out an ink correction (both below). Everything else not quoted from him is a design choice he may reopen, not his ruling.
 
+> **Superseded in part by [0027](0027-calibration-targets-v2.md) (2026-10-14): the layout, the sheet and the reader.** Both targets are now OpenCV ChArUco boards; the millimetre layout, the dark box, the uncut sheet at 100 % in black ink, the whole Frame in view and the refusals that enforced them are gone. The two stages and what each aims at, the suggestions, the entry lookup (the QR names the sent picture entry) and the minute-long pattern stand as decided here.
+
 **Builds on:** [0022](0022-picture-hardware-and-software-apart.md) (the Display's two picture groups, the session, Done, Revert), [0023](0023-print-look.md) (the print look and the picture pipeline's order), [0024](0024-display-tuning.md) (the signal range, test patterns, the paper-sheet test) and [0025](0025-configuration-snapshots.md) (the sent picture entries a photo is matched against).
 
 ## Problem

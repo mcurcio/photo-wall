@@ -1,6 +1,7 @@
 """The paper target's operator route (central/calibration_target_routes.py): GET
-/v1/operator/calibration-target/paper.pdf?paper=letter|a4. On a bare FastAPI app with the mount
+/v1/operator/calibration-target/paper.pdf?paper=letter|a4|4x6. On a bare FastAPI app with the mount
 and a stub admin dependency (no database); the real app's guard is tests/test_operator_scope.py's.
+The route answers the committed sheet, which tests/test_calibration_boards.py holds to a fresh draw.
 """
 from __future__ import annotations
 
@@ -9,7 +10,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.testclient import TestClient
 
 from central.calibration_target_routes import PAPER_PDF_PATH, mount_calibration_target_routes
-from central.displays.calibration_paper import PDF_MEDIA_TYPE, paper_pdf
+from central.displays.calibration_paper import PDF_MEDIA_TYPE, sheet_path
 from central.operator_auth import OPERATOR_PREFIX
 from contracts.calibration_target import PaperSize
 
@@ -38,7 +39,8 @@ def test_the_route_answers_the_pdf_as_an_attachment_never_cached(client, paper):
     assert answer.headers["content-disposition"] == (
         f"attachment; filename=photo-wall-calibration-target-{paper.value}.pdf")
     assert answer.headers["cache-control"] == "private, no-store"
-    assert answer.content == paper_pdf(paper)
+    assert answer.content == sheet_path(paper).read_bytes()
+    assert answer.content.startswith(b"%PDF-")
 
 
 @pytest.mark.parametrize("params", [{}, {"paper": "legal"}, {"paper": "LETTER"}, {"paper": ""}])

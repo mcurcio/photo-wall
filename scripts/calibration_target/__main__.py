@@ -1,5 +1,5 @@
 """`python -m scripts.calibration_target PHOTO --central URL`: read one photo of the
-calibration targets and print one JSON object (decision 0026): {"reading": ...} or {"refused": ...},
+calibration targets and print one JSON object (decision 0027): {"reading": ...} or {"refused": ...},
 and with a reading {"suggestion": ...}. The admin token comes from PHOTO_WALL_ADMIN_TOKEN, the
 optional read-only database address from PHOTO_WALL_READ_DATABASE_URL (run under `op run`).
 Exit status 0 for a reading, 2 for a refusal, 1 for an error (a file unreadable, Central

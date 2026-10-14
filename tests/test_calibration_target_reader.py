@@ -1,345 +1,387 @@
-"""The calibration target reader on synthetic photos (decision 0026, slice R1): from one photo it
-finds both targets, reads the QR and reads the white, the greys and the near-black steps through the review's
-attacks, or refuses. The scenes are tests/calibration_target_scenes.py; a real ProRAW photo is the
-bench step (NOT RUN here)."""
+"""The calibration target reader on synthetic photos (decision 0027, slice R1; owner, 2026-10-14:
+"Start working on a v2 that isn't so picky", "Some of my displays are smaller than a sheet of
+paper"): it reads what the photo shows (any display, any piece of the paper at any scale, place and
+turn, any framing, grey ink, uneven reflections, lens falloff), states what it dropped and where, and
+refuses only for a real failure. The scenes are tests/calibration_target_scenes.py; a real ProRAW
+photo is the bench's (NOT RUN here)."""
 from __future__ import annotations
 
 import functools
-import random
-import warnings
 from dataclasses import replace
-from pathlib import Path
 
 import numpy as np
 import pytest
 from calibration_target_scenes import (
-    CODE,
-    Display,
+    FIVE_INCH,
+    PAPER_SQUARE_MM,
+    PHOTO_SIZE,
+    TV43,
     Scene,
-    band,
-    blob,
-    codes,
+    board_draw,
+    camera,
     entry,
-    group_patch,
-    jpeg_photo,
-    paired_groups,
+    focal_px,
+    paper_middle,
     raw_photo,
-    screen_canvas,
+    screen_to_wall,
+    true_angle,
     truth,
-    uniform,
-    wall_point,
 )
 
 from contracts.calibration_target import (
-    PAPER_MARKER_IDS,
-    SCREEN_MARKER_IDS,
-    WHITE_COPIES,
-    Role,
+    PAPER_COLUMNS,
+    PAPER_ROWS,
+    SCREEN_ROWS,
+    Square,
     Surface,
-    calibration_target,
-    screen_point,
+    square,
 )
-from contracts.tuning import SIGNAL_LEVELS, TestPattern
-from scripts.calibration_target.locate import Located, _markers_found, _qr_text, _view, locate
+from contracts.tuning import TestPattern
+from scripts.calibration_target.locate import Located, locate
 from scripts.calibration_target.model import (
     DropReason,
-    PhotoKind,
-    Place,
+    FocalSource,
+    Photo,
     Reading,
     Refusal,
     Refused,
-    to_json,
 )
-from scripts.calibration_target.photos import load_photo
 from scripts.calibration_target.read import read_photo
 
-CLEAN = Scene()
+
+def _framed(scene: Scene, left_mm: float, right_mm: float, middle_y_mm: float) -> Scene:
+    """`scene` photographed square-on so the photo's width spans the wall from left_mm to right_mm."""
+    distance = scene.focal_widths * PHOTO_SIZE[0] * (right_mm - left_mm) / PHOTO_SIZE[0]
+    return replace(scene, distance_mm=distance, aim_mm=((left_mm + right_mm) / 2, middle_y_mm))
+
+
+def _closer(scene: Scene, square_px: float = 32.0) -> Scene:
+    """`scene` with the camera aimed between the paper and the opening's middle, close enough for the
+    paper's squares to span `square_px` (never farther than the default framing): any framing reads."""
+    framed = scene.focal_widths * PHOTO_SIZE[0] * (scene.opening_mm[0] + 50) / (0.92 * PHOTO_SIZE[0])
+    distance = min(framed, scene.focal_widths * PHOTO_SIZE[0] * PAPER_SQUARE_MM * scene.paper_scale / square_px)
+    paper, opening = np.array(paper_middle(scene)), np.array(scene.opening_mm) / 2
+    aim = tuple(float(v) for v in (paper + opening) / 2)
+    return replace(scene, distance_mm=distance, aim_mm=aim)
+
+
+def _inside(rng: np.random.Generator, opening: tuple[float, float], piece: tuple[int, int, int, int],
+            scale: float) -> tuple[float, float]:
+    """A middle for the piece whose circle (with the card) stays inside the opening, when it can."""
+    radius = 0.5 * np.hypot(piece[2], piece[3]) * PAPER_SQUARE_MM * scale + 6
+    width, height = opening
+    return (float(rng.uniform(min(radius, width / 2), max(width - radius, width / 2))),
+            float(rng.uniform(min(radius, height / 2), max(height - radius, height / 2))))
+
+
+def _piece(rng: np.random.Generator) -> tuple[int, int, int, int]:
+    if rng.random() < 0.3:
+        return (0, 0, PAPER_ROWS, PAPER_COLUMNS)
+    rows, columns = int(rng.integers(4, PAPER_ROWS)), int(rng.integers(4, PAPER_COLUMNS))
+    return (int(rng.integers(0, PAPER_ROWS - rows + 1)), int(rng.integers(0, PAPER_COLUMNS - columns + 1)), rows, columns)
+
+
+def anywhere(seed: int) -> Scene:
+    """The paper anywhere on a 43-inch Frame: any piece, turn and place, 50-120 % scale, a mild
+    reflection, any room light; the photo taken at a small angle, framed on the paper."""
+    rng = np.random.default_rng(seed)
+    piece = _piece(rng)
+    scale = float(rng.uniform(0.5, 1.2))
+    scene = Scene(piece=piece, paper_scale=scale, paper_mm=_inside(rng, TV43, piece, scale),
+                  paper_turn_deg=float(rng.uniform(0, 360)), yaw_deg=float(rng.uniform(-10, 10)),
+                  pitch_deg=float(rng.uniform(-8, 8)), paper_white=float(rng.uniform(0.3, 1.0)),
+                  reflections=(("blob", float(rng.uniform(0, TV43[0])), float(rng.uniform(0, TV43[1])),
+                                float(rng.uniform(0.1, 0.25)) * TV43[1], float(rng.uniform(0, 0.03))),),
+                  seed=seed)
+    return _closer(scene)
+
+
+def heavy(seed: int, ink: float) -> Scene:
+    """Uneven reflections on a 43-inch Frame's glass (the prototype's): 1-2 sharp windows (5-20 % of
+    the screen's white), 1-3 blobs (2-15 %) and a gradient (up to 5 %)."""
+    rng = np.random.default_rng(seed)
+    width, height = TV43
+    reflections = []
+    for _ in range(int(rng.integers(1, 3))):
+        w, h = float(rng.uniform(0.1, 0.4)) * width, float(rng.uniform(0.15, 0.6)) * height
+        reflections.append(("window", float(rng.uniform(-0.1, 0.9)) * width, float(rng.uniform(-0.1, 0.8)) * height,
+                            w, h, float(rng.uniform(0.05, 0.2))))
+    for _ in range(int(rng.integers(1, 4))):
+        reflections.append(("blob", float(rng.uniform(0, width)), float(rng.uniform(0, height)),
+                            float(rng.uniform(0.05, 0.3)) * height, float(rng.uniform(0.02, 0.15))))
+    reflections.append(("grad", float(rng.uniform(0, 0.05)), float(rng.uniform(0, 0.05))))
+    return Scene(ink=ink, reflections=tuple(reflections), paper_turn_deg=float(rng.uniform(0, 360)),
+                 paper_scale=0.9, paper_white=float(rng.uniform(0.4, 1.0)), seed=seed)
+
+
+def tracer_scene() -> Scene:
+    """A 5-inch 16:9 opening (110 x 62 mm, 17 columns) with a 5 x 6-square piece printed small
+    (4 mm squares) in ink at 40 % of paper white, turned 30 degrees, photographed at a 2x lens so
+    a third of the board's columns lie outside the photo."""
+    draw = board_draw(Scene(opening_mm=FIVE_INCH))
+    square_mm = FIVE_INCH[1] / SCREEN_ROWS
+    board_left = (FIVE_INCH[0] - draw.columns * square_mm) / 2
+    scene = Scene(opening_mm=FIVE_INCH, piece=(2, 4, 5, 6), paper_scale=4 / PAPER_SQUARE_MM, paper_mm=(60.0, 45.0),
+                  paper_turn_deg=30.0, ink=0.4, focal_widths=1.5, yaw_deg=0.0, pitch_deg=0.0)
+    return _framed(scene, board_left + draw.columns / 3 * square_mm, FIVE_INCH[0] + 15, FIVE_INCH[1] / 2)
 
 
 @functools.cache
-def located(scene: Scene) -> Located:
-    found = locate(raw_photo(scene))
-    assert isinstance(found, Located), found
-    return found
+def located(scene: Scene, *, focal: bool = False) -> Located:
+    photo = raw_photo(scene)
+    if focal:
+        photo = replace(photo, focal_px=focal_px(scene))
+    out = locate(photo)
+    assert isinstance(out, Located), out
+    return out
 
 
-def read(scene: Scene) -> Reading | Refused:
-    return read_photo(located(scene), entry(scene))
-
-
-def reading(scene: Scene) -> Reading:
-    out = read(scene)
+def reading(scene: Scene, *, focal: bool = False) -> Reading:
+    out = read_photo(located(scene, focal=focal), entry(scene))
     assert isinstance(out, Reading), out
     return out
 
 
-def white_error(found: Reading, scene: Scene) -> np.ndarray:
-    return np.abs(np.array(found.white.value) / truth(scene).white - 1)
+def refused(scene: Scene, photo: Photo | None = None, test_pattern: TestPattern | None = None) -> Refused:
+    found = locate(raw_photo(scene) if photo is None else photo)
+    if isinstance(found, Refused):
+        return found
+    out = read_photo(found, entry(scene, test_pattern=test_pattern))
+    assert isinstance(out, Refused), out
+    return out
 
 
-def grey_error(found: Reading, scene: Scene) -> float:
-    true = truth(scene).tone
-    assert {step.signal for step in found.tone} == set(true)
-    return max(float(np.max(np.abs(codes(np.array(step.share.value)) - codes(true[step.signal]))))
-               for step in found.tone)
+def error(scene: Scene, read: Reading) -> float:
+    """The reading's white's largest relative error over the channels."""
+    return float(np.max(np.abs(np.array(read.white.value) / truth(scene).white - 1)))
 
 
-def screen_place(index: int, role: Role) -> Place:
-    return Place(Surface.SCREEN, *group_patch(index, Surface.SCREEN, role).rect.centre())
+def assert_places(read: Reading | Refused, items: object = None) -> None:
+    places = [d.where for d in read.dropped] if isinstance(read, Reading) else list(read.where)
+    for where in places:
+        assert 0 <= where.x <= 1 and 0 <= where.y <= 1, where
+        assert where.words().startswith(f"the {where.surface.value}, the photo's ")
 
 
-def patch_box(index: int, surface: Surface, role: Role, peak: float, scene: Scene = CLEAN):
-    """A reflection exactly over one patch."""
-    patch = group_patch(index, surface, role)
-    x, y = wall_point(scene, patch)
-    w, h = patch.rect.width_mm, patch.rect.height_mm
-    return band(x - w / 2, x + w / 2, y - h / 2, y + h / 2, peak)
+# -- RA0: the tracer ------------------------------------------------------------------------------------
 
 
-# -- The scene draws what the layout says ---------------------------------------------------------
+def test_tracer_a_5_inch_frame_with_a_grey_ink_piece_turned_and_a_third_cut_off() -> None:
+    scene = tracer_scene()
+    found = located(scene)
+    columns = board_draw(scene).columns
+    seen = {square_column for square_column in range(columns)
+            if any(abs(p[0] - square_column - 0.5) < 0.5 for p in found.screen.object_points)}
+    assert len(seen) <= 2 * columns / 3 + 1             # a third of the board is out of the photo
+    read = reading(scene)
+    assert error(scene, read) <= 0.015, (read.white, truth(scene).white)
+    assert read.ink == pytest.approx(0.4, abs=0.03)
 
 
-def test_the_scenes_screen_is_screen_point() -> None:
-    signal, raw = screen_canvas()
-    rng = random.Random(5)
-    from calibration_target_scenes import MARGIN_MM, PX_PER_MM
-    for _ in range(400):
-        row, column = rng.randrange(signal.shape[0]), rng.randrange(signal.shape[1])
-        point = screen_point((column + 0.5) / PX_PER_MM - MARGIN_MM, (row + 0.5) / PX_PER_MM - MARGIN_MM)
-        assert (signal[row, column], raw[row, column]) == (pytest.approx(point.signal), point.raw)
+# -- RA1: the paper anywhere -------------------------------------------------------------------------------
 
 
-# -- 1. The tracer --------------------------------------------------------------------------------
+def test_the_uncut_sheet_centred_square_on() -> None:
+    scene = Scene(yaw_deg=0.0, pitch_deg=0.0)
+    assert error(scene, reading(scene)) <= 0.015
 
 
-def test_tracer_reads_the_pre_software_target_from_a_raw_photo() -> None:
-    photo = raw_photo(CLEAN)
-    assert set(_markers_found(_view(photo))) == set(SCREEN_MARKER_IDS) | set(PAPER_MARKER_IDS)
-    found = locate(photo)
-    assert isinstance(found, Located) and found.code == CODE
-    out = read_photo(found, entry(CLEAN))
-    assert isinstance(out, Reading)
-    assert (out.kind, out.stage) == (PhotoKind.RAW, TestPattern.TARGET_PRE_SOFTWARE)
-    assert np.all(white_error(out, CLEAN) <= 0.005)
-    assert out.white.spread <= 0.01 and out.white.copies >= WHITE_COPIES
-    assert grey_error(out, CLEAN) <= 0.3
-    assert out.lowest_distinct == truth(CLEAN).lowest_distinct == 1
-    assert out.dropped == ()
+CODE_CAUSES = ("needs about", "clear of the paper")
 
 
-def test_a_display_crushing_steps_1_to_3_reads_lowest_distinct_4() -> None:
-    scene = Scene(display=Display(crush=3))
-    assert reading(scene).lowest_distinct == 4
+@pytest.mark.parametrize("seed", range(24))
+def test_the_paper_anywhere_reads_or_names_why_the_code_is_unread(seed: int) -> None:
+    """Every seed of anywhere(), none left out: the photo reads within 1.5 %, or is refused only
+    because no QR copy could be read, the detail naming which of the two causes it was (the squares
+    too small for the QR, or no whole copy clear of the paper in the photo). 18 of these 24 read
+    (decision 0027)."""
+    scene = anywhere(seed)
+    found = locate(raw_photo(scene))
+    out = found if isinstance(found, Refused) else read_photo(found, entry(scene))
+    if isinstance(out, Refused):
+        assert out.why is Refusal.CODE_UNREADABLE, out
+        assert any(cause in out.detail for cause in CODE_CAUSES), out.detail
+        assert_places(out)
+        return
+    assert error(scene, out) <= 0.015, (out.white, truth(scene).white)
 
 
-def test_the_post_software_target_is_read_through_the_chain() -> None:
-    from contracts.node_picture import NEUTRAL_SOFTWARE
-    scene = Scene(stage=TestPattern.TARGET_POST_SOFTWARE,
-                  software=replace(NEUTRAL_SOFTWARE, brightness_percent=80, gamma_tenths=24))
-    out = reading(scene)
-    assert out.stage is TestPattern.TARGET_POST_SOFTWARE
-    assert np.all(white_error(out, scene) <= 0.005)
-    assert grey_error(out, scene) <= 0.3
-    # The chain is in the light: the 0.5 grey reads darker than the display's own sRGB step.
-    half = next(step for step in out.tone if step.signal == 128 / SIGNAL_LEVELS)
-    assert half.share.value[1] < 0.95 * truth(CLEAN).tone[half.signal][1]
+@pytest.mark.parametrize(("card_mm", "turn"), [(45.0, 0.0), (30.0, 20.0)])
+def test_a_black_card_larger_than_the_paper_still_reads(card_mm: float, turn: float) -> None:
+    """A dark card reaching over the screen squares round the paper: the screen whites it covers
+    drop, the rest read."""
+    scene = Scene(card_mm=card_mm, card=0.005, paper_turn_deg=turn)
+    assert error(scene, reading(scene)) <= 0.015
 
 
-# -- 2. The TV surface's own glare (screen only) ---------------------------------------------------
+def test_a_lamps_glint_on_the_screen_white_nearest_a_small_piece_is_outvoted() -> None:
+    """A point lamp's glint lights one screen white beside the tracer's piece (its blacks untouched, so
+    row 6 keeps it): paired with the median of its NEAREST screen whites, no paper white takes it as
+    the screen's white."""
+    scene = tracer_scene()
+    wall = screen_to_wall(scene) @ np.array([7.5, 4.5, 1.0])             # the WHITE square at row 4, column 7
+    assert square(Surface.SCREEN, 4, 7) is Square.WHITE
+    glinted = replace(scene, reflections=(("blob", float(wall[0] / wall[2]), float(wall[1] / wall[2]), 1.0, 0.4),))
+    assert error(glinted, reading(glinted)) <= 0.015
 
 
-def test_tv_surface_glare_is_read_away_against_the_screens_own_black() -> None:
-    scene = Scene(tv_glare=uniform(0.03))
-    out = reading(scene)
-    assert np.all(white_error(out, scene) <= 0.005)
-    assert grey_error(out, scene) <= 0.5
+# -- RA2: a third of a 43-inch Frame cut off, 12 % lens falloff --------------------------------------------
 
 
-# -- 3. Spots ---------------------------------------------------------------------------------------
+def test_a_third_of_a_43_inch_frame_cut_off_with_12_percent_lens_falloff() -> None:
+    draw = board_draw(Scene())
+    square_mm = TV43[1] / SCREEN_ROWS
+    board_left = (TV43[0] - draw.columns * square_mm) / 2
+    scene = _framed(Scene(vignette=0.12, paper_scale=0.8, paper_mm=(560.0, 300.0), paper_turn_deg=-20.0,
+                          yaw_deg=0.0, pitch_deg=0.0),
+                    board_left + draw.columns / 3 * square_mm, TV43[0] + 40, TV43[1] / 2)
+    read = reading(scene)
+    assert error(scene, read) <= 0.015, (read.white, truth(scene).white)
+    assert read.falloff == pytest.approx(0.12, abs=0.04)
 
 
-def test_a_spot_on_one_screen_grey_copy_drops_that_copy() -> None:
-    index = paired_groups()[2]
-    grey = group_patch(index, Surface.SCREEN, Role.GREY)
-    scene = Scene(reflection=blob(*wall_point(CLEAN, grey), 6.0, 0.15))
-    out = reading(scene)
-    assert [(d.value, d.where, d.why) for d in out.dropped] == [
-        (f"grey {round(grey.signal * SIGNAL_LEVELS)}", screen_place(index, Role.GREY), DropReason.COPY_UNLIKE_THE_REST)]
-    assert grey_error(out, scene) <= 0.3
+# -- RA3: uneven reflections, black and grey ink -------------------------------------------------------
 
 
-def test_a_spot_on_one_paper_white_drops_that_white_copy() -> None:
-    index = paired_groups()[3]
-    scene = Scene(reflection=blob(*wall_point(CLEAN, group_patch(index, Surface.PAPER, Role.WHITE)), 6.0, 0.15))
-    out = reading(scene)
-    assert [(d.value, d.why) for d in out.dropped] == [("white", DropReason.COPY_UNLIKE_THE_REST)]
-    assert np.all(white_error(out, scene) <= 0.005)
+UNEVEN_TOLERANCE = 0.035
 
 
-# -- 4. Panel unevenness ----------------------------------------------------------------------------
+@pytest.mark.parametrize("ink", [0.04, 0.4])
+@pytest.mark.parametrize("seed", range(16))
+def test_uneven_reflections_read_within_tolerance_or_say_how_unsure(seed: int, ink: float) -> None:
+    """Every seed of heavy(), none left out. A reflection over the paper alone looks like greyer ink
+    (Detection row 7; .claude/errata.md, calibration targets v2): a reading off by more than 3.5 %
+    must say so, its white's spread over 3.5 %, never a confident wrong white. Every drop has its
+    place, a refusal is white-unread, and the ink lies in [0, 1).
 
+    Mutation: the white's spread without the paper's unevenness -> seeds 3, 4, 7, 14 and 15 read
+    5-35 % off with a spread of about 1 %."""
+    scene = heavy(seed, ink)
+    found = locate(raw_photo(scene))
+    assert isinstance(found, Located), found
+    out = read_photo(found, entry(scene))
+    assert_places(out)
+    if isinstance(out, Refused):
+        assert out.why is Refusal.WHITE_UNREAD, out
+        return
+    assert 0 <= out.ink < 1, out.ink
+    off = error(scene, out)
+    if off > UNEVEN_TOLERANCE:
+        assert out.white.spread > UNEVEN_TOLERANCE, (off, out.white)
 
-@pytest.mark.parametrize("edge_dim", [0.05, 0.10, 0.20])
-def test_a_panel_dimmer_at_its_edges_reads_each_grey_against_its_own_groups_white(edge_dim: float) -> None:
-    scene = Scene(display=Display(edge_dim=edge_dim))
-    out = reading(scene)
-    assert np.all(white_error(out, scene) <= 0.01)
-    assert grey_error(out, scene) <= 0.3
 
+def test_a_reflection_edge_across_a_white_drops_it_with_its_place() -> None:
+    scene = heavy(20, 0.04)
+    read = reading(scene)
+    assert any(d.why is DropReason.REFLECTION_EDGE for d in read.dropped)
+    assert_places(read)
 
-# -- 5. A reflection edge across a group, wherever it is --------------------------------------------
 
+# -- RA4: the viewing angle ---------------------------------------------------------------------------------
 
-def _middle_edge() -> tuple[Scene, int]:
-    """A reflection over the middle of the target whose top edge runs between the top-middle
-    group's screen row and its paper row (owner: "what if the reflection is only in the middle?")."""
-    index = paired_groups()[2]
-    x, _ = wall_point(CLEAN, group_patch(index, Surface.SCREEN, Role.WHITE))
-    box = calibration_target().dark_box
-    return Scene(reflection=band(x - 25, x + 25, box.y_mm + 2, box.y_mm + box.height_mm / 2, 0.06)), index
 
+def _screen_whites_true_angle(scene: Scene) -> float:
+    """The true angle at the screen's white squares in the photo, clear of the paper."""
+    _, to_photo, _ = camera(scene)
+    to_wall = screen_to_wall(scene)
+    middle = np.array(paper_middle(scene))
+    reach = 0.5 * np.hypot(PAPER_ROWS, PAPER_COLUMNS) * PAPER_SQUARE_MM * scene.paper_scale + 6
+    points = []
+    for row in range(SCREEN_ROWS):
+        for column in range(board_draw(scene).columns):
+            if square(Surface.SCREEN, row, column) is not Square.WHITE:
+                continue
+            wall = to_wall @ np.array([column + 0.5, row + 0.5, 1.0])
+            if np.linalg.norm(wall[:2] / wall[2] - middle) < reach:
+                continue
+            p = to_photo @ wall
+            x, y = p[0] / p[2], p[1] / p[2]
+            if 0 <= x < PHOTO_SIZE[0] and 0 <= y < PHOTO_SIZE[1]:
+                points.append((x, y))
+    return true_angle(scene, np.array(points))
 
-def _side_edge() -> tuple[Scene, int]:
-    """A reflection at the target's right edge, over one right group's screen patches and not its
-    paper twins."""
-    index = next(i for i in paired_groups() if group_patch(i, Surface.SCREEN, Role.WHITE).rect.x_mm
-                 > calibration_target().dark_box.x_mm + calibration_target().dark_box.width_mm)
-    index += 1
-    _, y = wall_point(CLEAN, group_patch(index, Surface.SCREEN, Role.WHITE))
-    box = calibration_target().dark_box
-    return Scene(reflection=band(box.x_mm + box.width_mm - 0.5, 420, y - 15, y + 15, 0.06)), index
 
+ANGLED = Scene(yaw_deg=35.0, pitch_deg=0.0, focal_widths=1.2, paper_scale=0.9, paper_mm=(380.0, 270.0))
 
-@pytest.mark.parametrize("edge", [_middle_edge, _side_edge], ids=["middle", "side"])
-def test_a_reflection_edge_across_a_group_drops_the_group(edge) -> None:
-    scene, index = edge()
-    out = reading(scene)
-    edges = [d for d in out.dropped if d.why is DropReason.REFLECTION_EDGE]
-    assert [d.value for d in edges] == ["group"]
-    white = group_patch(index, Surface.SCREEN, Role.WHITE).rect.centre()
-    assert abs(edges[0].where.x_mm - white[0]) < 13 and abs(edges[0].where.y_mm - white[1]) < 13
-    assert np.all(white_error(out, scene) <= 0.005)
-    assert grey_error(out, scene) <= 0.3
 
+def test_the_angle_with_the_exif_focal_length_is_within_a_degree() -> None:
+    read = reading(ANGLED, focal=True)
+    assert read.angle.focal is FocalSource.EXIF
+    assert read.angle.degrees == pytest.approx(_screen_whites_true_angle(ANGLED), abs=1.0)
 
-# -- 6. Too many groups crossed ----------------------------------------------------------------------
 
+def test_the_angle_without_a_focal_length_is_estimated_within_5_degrees() -> None:
+    read = reading(ANGLED)
+    assert read.angle.focal is FocalSource.ESTIMATED
+    assert read.angle.degrees == pytest.approx(_screen_whites_true_angle(ANGLED), abs=5.0)
 
-def test_too_many_groups_crossed_is_refused_white_unread_naming_where() -> None:
-    box = calibration_target().dark_box
-    cx, cy = box.x_mm + box.width_mm / 2, box.y_mm + box.height_mm / 2
-    inside = band(box.x_mm, box.x_mm + box.width_mm, box.y_mm, box.y_mm + box.height_mm, 1.0)
 
-    def round_the_box(x, y):     # stronger the further round the box: every group's edge differs
-        return 0.1 * (np.arctan2(y - cy, x - cx) + np.pi) / (2 * np.pi) * (1 - inside(x, y))
+# -- RA5: clipped whites ------------------------------------------------------------------------------------
 
-    out = read(Scene(reflection=round_the_box))
-    assert isinstance(out, Refused) and out.why is Refusal.WHITE_UNREAD
-    assert len(out.where) > len(paired_groups()) / 2
-    assert all(place.surface is Surface.SCREEN for place in out.where)
 
+def test_clipped_whites_drop_and_the_rest_read() -> None:
+    """A bright window's reflection clips the paper whites under it; the rest read."""
+    scene = Scene(paper_white=1.2, reflections=(("window", 340.0, 160.0, 130.0, 100.0, 0.8),), yaw_deg=0.0,
+                  pitch_deg=0.0)
+    read = reading(scene)
+    clipped = [d for d in read.dropped if d.why is DropReason.CLIPPED]
+    assert clipped and all(d.where.surface is Surface.PAPER for d in clipped)
+    assert_places(read)
+    assert error(scene, read) <= 0.015
 
-# -- 7. A shadow over the whole paper (decision 0026, Costs) ---------------------------------------
 
+def test_every_paper_white_clipped_is_white_unread_naming_the_clip() -> None:
+    out = refused(Scene(paper_white=3.0))
+    assert out.why is Refusal.WHITE_UNREAD and "clipped" in out.detail
+    assert out.where and all(w.surface is Surface.PAPER for w in out.where)
+    assert_places(out)
 
-def test_a_shadow_over_the_whole_paper_reads_the_screen_too_bright_by_its_depth() -> None:
-    """The stated limit: the screen makes its own light, so a shadow cast on the paper alone (the
-    photographer between the room light and the target) is not seen; stand aside of the light."""
-    shadowed = Scene(room=uniform(0.85))
-    out = reading(shadowed)
-    assert np.all(np.abs(np.array(out.white.value) / truth(shadowed).white - 1.176) <= 0.01)
 
+# -- RA6: each refusal for its real failure -----------------------------------------------------------------
 
-# -- 8. A normal photo -------------------------------------------------------------------------------
 
+def test_no_screen_target_is_target_not_found() -> None:
+    out = refused(Scene(screen_shown=False))
+    assert out.why is Refusal.TARGET_NOT_FOUND and "screen" in out.detail
 
-def test_a_normal_photo_gives_the_white_only(tmp_path: Path) -> None:
-    path = tmp_path / "IMG_0001.jpg"
-    path.write_bytes(jpeg_photo(CLEAN))
-    photo = load_photo(path)
-    found = locate(photo)
-    assert isinstance(found, Located)
-    out = read_photo(found, entry(CLEAN))
-    assert isinstance(out, Reading)
-    assert out.kind is PhotoKind.NORMAL and out.tone == () and out.lowest_distinct is None
-    assert np.all(white_error(out, CLEAN) <= 0.05)
 
+def test_a_paper_too_small_in_the_photo_says_come_closer_or_print_larger() -> None:
+    out = refused(Scene(paper_scale=0.15))
+    assert out.why is Refusal.TARGET_NOT_FOUND and "come closer or print it larger" in out.detail
 
-# -- 9. Refusals ---------------------------------------------------------------------------------
 
+def test_a_screen_found_with_squares_too_small_gives_their_size() -> None:
+    """Photographed from 3.6 m, the 43-inch Frame's squares span about 19 px: the screen board's one
+    marker found is too few, and the refusal says how small its squares were and what is needed."""
+    out = refused(Scene(distance_mm=3600.0, yaw_deg=0.0, pitch_deg=0.0))
+    assert out.why is Refusal.TARGET_NOT_FOUND
+    assert "the screen target's squares span" in out.detail and "about 20 are needed" in out.detail, out.detail
 
-def test_two_paper_markers_hidden_is_target_not_found_naming_them() -> None:
-    hidden = PAPER_MARKER_IDS[:2]
-    out = locate(raw_photo(Scene(hidden_markers=frozenset(hidden))))
-    assert isinstance(out, Refused) and out.why is Refusal.TARGET_NOT_FOUND
-    markers = {m.marker_id: m for m in calibration_target().markers}
-    assert out.where == tuple(Place(Surface.PAPER, *markers[i].rect.centre()) for i in hidden)
 
+def test_the_paper_beside_the_frame_is_off_the_screen() -> None:
+    seven = (155.0, 87.0)
+    scene = Scene(opening_mm=seven, on_screen=False, paper_scale=0.5, paper_mm=(270.0, 50.0), yaw_deg=0.0,
+                  pitch_deg=0.0)
+    scene = _framed(scene, -30.0, 340.0, 60.0)
+    out = refused(scene)
+    assert out.why is Refusal.PAPER_OFF_SCREEN
+    assert len(out.where) == 1 and out.where[0].surface is Surface.PAPER and out.where[0].x > 0.6
+    assert_places(out)
 
-def test_one_marker_hidden_is_still_located() -> None:
-    assert isinstance(locate(raw_photo(Scene(hidden_markers=frozenset({SCREEN_MARKER_IDS[1]})))), Located)
 
-
-def test_a_covered_qr_is_code_unreadable() -> None:
-    out = locate(raw_photo(Scene(qr_covered=True)))
-    assert isinstance(out, Refused) and out.why is Refusal.CODE_UNREADABLE
-    assert out.where == (Place(Surface.SCREEN, *calibration_target().qr.centre()),)
-
-
-def test_paper_printed_at_97_percent_is_a_scale_mismatch() -> None:
-    out = locate(raw_photo(Scene(paper_scale=0.97)))
-    assert isinstance(out, Refused) and out.why is Refusal.SCALE_MISMATCH
-    assert "97 %" in out.detail
-
-
-def test_a_corner_cut_off_with_three_markers_found_is_outside_photo_naming_where() -> None:
-    photo = raw_photo(CLEAN)
-    cut = replace(photo, pixels=photo.pixels[175:], clipped=photo.clipped[175:])     # one top marker gone
-    out = locate(cut)
-    assert isinstance(out, Refused) and out.why is Refusal.OUTSIDE_PHOTO
-    assert out.where and all(place.words().startswith("the screen target's top") for place in out.where)
-
-
-@pytest.mark.parametrize(("offset", "words"), [((0.0, 8.0), "8 mm low"), ((-9.0, 0.0), "9 mm left")])
-def test_a_sheet_laid_over_the_screen_patches_is_paper_misplaced(offset: tuple[float, float], words: str) -> None:
-    out = locate(raw_photo(Scene(paper_offset_mm=offset)))
-    assert isinstance(out, Refused) and out.why is Refusal.PAPER_MISPLACED, out
-    assert words in out.detail
-    assert out.where and all(place.surface is Surface.SCREEN for place in out.where)
-
-
-def test_a_flat_qr_square_reads_no_text_without_dividing_by_zero() -> None:
-    found = located(CLEAN)
-    flat = np.full(_view(found.photo).shape, 128, np.uint8)
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")
-        assert _qr_text(flat, found.screen, calibration_target().qr) is None
-
-
-def test_a_clipped_white_is_refused() -> None:
-    scene = Scene(exposure=1.1)
-    out = read_photo(located(scene), entry(scene))
-    assert isinstance(out, Refused) and out.why is Refusal.CLIPPED and out.where
+def test_no_code_drawn_is_code_unreadable() -> None:
+    out = refused(Scene(code_drawn=False))
+    assert out.why is Refusal.CODE_UNREADABLE and out.where
+    assert_places(out)
 
 
 def test_an_entry_showing_no_target_is_not_a_target() -> None:
-    out = read_photo(located(CLEAN), entry(CLEAN, test_pattern=TestPattern.WHITE))
-    assert isinstance(out, Refused) and out.why is Refusal.NOT_A_TARGET
+    out = refused(Scene(), test_pattern=TestPattern.WHITE)
+    assert out.why is Refusal.NOT_A_TARGET
 
 
-# -- The JSON and the words ---------------------------------------------------------------------
-
-
-def test_places_in_plain_words() -> None:
-    assert Place(Surface.PAPER, 10, 190).words() == "the paper's lower left"
-    assert Place(Surface.SCREEN, 190, 5).words() == "the screen target's top middle"
-    assert Place(Surface.SCREEN, 190, 170).words() == "the screen target's middle"
-
-
-def test_a_reading_is_plain_json() -> None:
-    import json
-    out = to_json(reading(CLEAN))
-    assert json.loads(json.dumps(out)) == out
-    assert out["stage"] == "target-pre-software" and out["kind"] == "raw"
-    assert out["entry"]["number"] == CODE.picture_change
-    assert len(out["white"]["value"]) == 3
+def test_the_paper_whites_under_a_black_card_are_white_unread() -> None:
+    out = refused(Scene(paper_whites_covered=True))
+    assert out.why is Refusal.WHITE_UNREAD and "covered" in out.detail
+    assert out.where and all(w.surface is Surface.PAPER for w in out.where)
+    assert_places(out)

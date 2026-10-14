@@ -63,20 +63,21 @@ a 64x48 PNG of four flat quadrants (red, green, blue, white) written here with t
    unit square (`pattern_signal`) at every sample clear of a step's or a cell's edge, black
    outside the opening: the look patterns shaded by the mat, the Black level raw. A renderer that
    never set `test_pattern` draws the grid instead.
-20-23. target_<stage>_matches_the_reference[_portrait] (calibration targets, decision 0026, slice
-   P3): on a 22-inch 4:3 Frame (447 x 335 mm, the whole screen target in view) with Position's
-   deep mat, a brightness of 80 % and a black floor, Target: pre-software and post-software drawn
-   in a Cover fit turned 30 degrees and in a portrait opening (Cover at 90, the target turned a
-   quarter clockwise) equal `final_pixel` with the target (`target_signal`) at every sample clear
-   of a patch's, a module's or the opening's edge and at every patch centre in view: pre to the
-   exact code (raw everywhere), post within the tolerance (through the steps, never the mat), and
-   the dark box raw black (0) under the floor in both.
-24. the_target_qr_names_the_port: the pre-software target over the whole output; with no player
-   id the QR's square is all light; once the renderer is given one, the pixel nearest every
-   module's centre (the quiet zone included) is that module of `target_modules(TargetCode(player,
-   "headless", 9))`, to the exact code. The modules decode with OpenCV (tests/
-   test_player_calibration_target.py); this image has no OpenCV and its 640 x 480 output gives a
-   module about 1.3 px, so the harness holds the modules, not a decode.
+20-25. target_<stage>_matches_the_reference[_portrait|_small] (calibration targets v2, decision
+   0027, slice P1): Target: pre-software and post-software over Position's trial grid with its
+   deep mat, a brightness of 80 % and a black floor, in three openings: (a) a 22-inch 4:3 Frame
+   in a Cover fit turned 30 degrees (13 columns), (b) the same in Cover at 90 (a portrait opening,
+   the board turned a quarter clockwise) and (c) a 5-inch 800 x 480 Frame in Cover at 0 (16
+   columns). Every sample clear of a square's, a module's or the opening's edge equals
+   `final_pixel` with the board (`board_draw`, `board_point`, `board_signal`): pre to the exact
+   code (raw everywhere), post within the tolerance (through the steps, never the mat; no raw
+   region, so a BLACK square reads the floor); black outside the opening.
+26. the_target_qr_names_the_port: the pre-software target over the whole output (13 columns);
+   with no player id every QR square is all light; once the renderer is given one, in every copy
+   of `qr_copies(columns)` the pixel nearest every module's centre (the quiet zone included) is
+   that module of `target_modules(TargetCode(player, "headless", 9))`, to the exact code. The
+   modules decode with OpenCV (tests/test_player_calibration_target.py); this image has no
+   OpenCV, so the harness holds the modules, not a decode.
 """
 import ctypes
 import hashlib
@@ -103,12 +104,11 @@ os.environ.update(XDG_RUNTIME_DIR=str(RUNTIME), WAYLAND_DISPLAY=SOCKET,
 from gi.repository import GLib  # noqa: E402
 
 from contracts.calibration_target import (  # noqa: E402
-    QR_MM,
     QR_QUIET_MODULES,
-    SCREEN_TARGET_MM,
-    Surface,
+    QR_SQUARES,
+    SCREEN_ROWS,
     TargetCode,
-    calibration_target,
+    qr_copies,
 )
 from contracts.lut import LUT_BYTES, LUT_GRID, LutRef, lut_offset  # noqa: E402
 from contracts.models import (  # noqa: E402
@@ -128,7 +128,10 @@ from contracts.photo_crop import CENTRED  # noqa: E402
 from contracts.tuning import TARGET_PATTERNS, TestPattern  # noqa: E402
 from player.calibration_target import target_modules  # noqa: E402
 from player.geometry import (  # noqa: E402
-    TargetDraw,
+    BoardDraw,
+    board_draw,
+    board_point,
+    board_signal,
     compose_pixel,
     decode_channel,
     encode_srgb,
@@ -138,10 +141,8 @@ from player.geometry import (  # noqa: E402
     inverse,
     mat_shade,
     mat_shadow,
-    opening_size_mm,
     pattern_signal,
     picture_source_uv,
-    target_signal,
     transform,
 )
 from player.luts import PlayerLuts  # noqa: E402
@@ -725,104 +726,100 @@ def pattern_matches_the_reference(pattern: TestPattern, mat: Mat = DEEP_MAT):
     return case
 
 
-# -- The calibration targets (decision 0026, slice P3) ---------------------------------------------
+# -- The calibration targets v2 (decision 0027, slice P1) -----------------------------------------
 
 TARGET_PROFILE = FrameProfile(width_px=1600, height_px=1200, diagonal_inches=22)    # 447 x 335 mm
-TARGET_BINDING = BINDING.model_copy(update={"profile": TARGET_PROFILE})
+SMALL_TARGET_PROFILE = FrameProfile(width_px=800, height_px=480, diagonal_inches=5)  # smaller than a sheet
 HARNESS_PLAYER = "p-" + "0123456789abcdef" * 2
 TARGET_CODE = TargetCode(HARNESS_PLAYER, "headless", 9)
 
 
-def show_target(native: CapturingRenderer, pattern: TestPattern, fit, mat: Mat) -> TrialFrames:
-    """The target drawn over Position's trial grid on TARGET_BINDING, brightness 80 % and a floor."""
+def show_target(native: CapturingRenderer, pattern: TestPattern, fit, mat: Mat,
+                profile: FrameProfile = TARGET_PROFILE) -> TrialFrames:
+    """The target drawn over Position's trial grid on a binding of `profile`, brightness 80 % and
+    a floor."""
     trial = TrialFrames(fit, mat)
     trial.operations = PictureOperations("headless", 9, (1.0, .95, .9), .8, 1.1, 1.0,
                                          black_floor=.05, test_pattern=pattern)
     native._frames = trial
-    show(native, OutputComposition(TARGET_BINDING, Calibration(fit=fit), (), True))
+    binding = BINDING.model_copy(update={"profile": profile})
+    show(native, OutputComposition(binding, Calibration(fit=fit), (), True))
     assert until(lambda: trial.tags and trial.tags[-1][0] == "trial-" + TRIAL_SHA), trial.tags[-3:]
     spin(0.3)
     return trial
 
 
-def target_output_point(x_mm: float, y_mm: float, fit, opening_mm) -> tuple[float, float]:
-    """Where on the output (fractions) the target's (x_mm, y_mm) is drawn: `target_point` undone,
-    then the opening's corners."""
-    width, height = opening_mm
-    dx, dy = x_mm - SCREEN_TARGET_MM[0] / 2, y_mm - SCREEN_TARGET_MM[1] / 2
-    u, v = (dx / width + .5, dy / height + .5) if width >= height else (.5 - dy / width, dx / height + .5)
+def board_output_point(column: float, row: float, fit, draw: BoardDraw) -> tuple[float, float]:
+    """Where on the output (fractions) the board's point (column, row) is drawn: `board_point`
+    undone, then the opening's corners."""
+    along = draw.aspect * SCREEN_ROWS
+    shifted = column + (along - draw.columns) / 2
+    u, v = (1 - row / SCREEN_ROWS, shifted / along) if draw.portrait else (shifted / along, row / SCREEN_ROWS)
     return transform(homography(fit.corners), u, v)
 
 
-def target_matches_the_reference(pattern: TestPattern, rotation: float):
+def target_matches_the_reference(pattern: TestPattern, rotation: float,
+                                 profile: FrameProfile = TARGET_PROFILE, columns: int = 13):
     def case(native: CapturingRenderer, frames: Frames, variant: Variant) -> None:
         native.set_player(HARNESS_PLAYER)
         fit = CoverFit(corners=OPENING, rotation=rotation)
-        trial = show_target(native, pattern, fit, DEEP_MAT)
+        trial = show_target(native, pattern, fit, DEEP_MAT, profile)
         width, height, _ = native.captured
-        draw = TargetDraw(opening_size_mm(fit, TARGET_PROFILE), target_modules(TARGET_CODE))
+        draw = board_draw(fit, profile, target_modules(TARGET_CODE))
+        assert draw.columns == columns and draw.portrait == (rotation % 180 >= 45), draw
         to_opening = inverse(homography(fit.corners))
-        shadow = mat_shadow(fit, TARGET_PROFILE, DEEP_MAT)
+        shadow = mat_shadow(fit, profile, DEEP_MAT)
         same = exact if pattern is TestPattern.TARGET_PRE_SOFTWARE else close
 
-        def expected_at(x: float, y: float):
-            return final_pixel((0.0, 0.0, 0.0), trial.operations, inside=inside_opening(fit.corners, x, y),
-                               shade=mat_shade(shadow, x, y), opening_uv=transform(to_opening, x, y), target=draw)
+        def signal(x: float, y: float) -> float:
+            return board_signal(*board_point(*transform(to_opening, x, y), draw), draw)
 
-        counts = [0, 0, 0, 0]       # inside, outside, the dark box's raw black, patch centres
+        counts = [0, 0]             # inside, outside
+        seen = set()                # the signals compared inside
         for i, j, x, y in samples(native, fit.corners, step=5):
-            near = {target_signal(pattern, *transform(to_opening, x + dx / width, y + dy / height), draw)
-                    for dx in (-1.5, 0, 1.5) for dy in (-1.5, 0, 1.5)}
+            near = {signal(x + dx / width, y + dy / height) for dx in (-1.5, 0, 1.5) for dy in (-1.5, 0, 1.5)}
             if len(near) != 1:
-                continue        # a patch's or a module's edge
+                continue        # a square's or a module's edge
             inside = inside_opening(fit.corners, x, y)
-            expected, actual = expected_at(x, y), pixel(native, i, j)
+            expected = final_pixel((0.0, 0.0, 0.0), trial.operations, inside=inside, shade=mat_shade(shadow, x, y),
+                                   opening_uv=transform(to_opening, x, y), board=draw)
+            actual = pixel(native, i, j)
             assert same(actual, expected), ("target_pixel", pattern.value, rotation, i, j, actual, expected)
             counts[0 if inside else 1] += 1
-            box = inside and near == {((0.0, 0.0, 0.0), True)} and pattern is TestPattern.TARGET_POST_SOFTWARE
-            if box or (inside and pattern is TestPattern.TARGET_PRE_SOFTWARE and expected[:3] == (0.0,) * 3):
-                assert actual[:3] == (0.0, 0.0, 0.0), ("raw_black", i, j, actual)
-                counts[2] += 1
-        for patch in (p for g in calibration_target().groups for p in g.patches if p.surface is Surface.SCREEN):
-            x, y = target_output_point(*patch.rect.centre(), fit, draw.opening_mm)
-            i, j = int(x * width), int(y * height)
-            if not all(inside_opening(fit.corners, (i + .5 + dx) / width, (j + .5 + dy) / height)
-                       for dx in (-2, 2) for dy in (-2, 2)):
-                continue
-            expected, actual = expected_at((i + .5) / width, (j + .5) / height), pixel(native, i, j)
-            assert same(actual, expected), ("patch_centre", pattern.value, rotation, patch.role.value, i, j,
-                                            actual, expected)
-            counts[3] += 1
-        print(f"TARGET {pattern.value} rotation={rotation} inside={counts[0]} outside={counts[1]} "
-              f"raw_black={counts[2]} patches={counts[3]}", flush=True)
-        assert counts[0] > 500 and counts[1] > 100 and counts[2] > 100 and counts[3] > 40, counts
-    turn = "" if rotation % 180 < 45 else "_portrait"
-    case.__name__ = f"{pattern.name.lower()}_matches_the_reference{turn}"
+            if inside:
+                seen |= near
+        print(f"TARGET {pattern.value} rotation={rotation} columns={draw.columns} inside={counts[0]} "
+              f"outside={counts[1]} signals={len(seen)}", flush=True)
+        assert counts[0] > 500 and counts[1] > 100 and {0.0, 1.0} < seen and len(seen) >= 5, (counts, seen)
+    turn = "_portrait" if rotation % 180 >= 45 else ""
+    small = "" if profile is TARGET_PROFILE else "_small"
+    case.__name__ = f"{pattern.name.lower()}_matches_the_reference{turn}{small}"
     return case
 
 
 def the_target_qr_names_the_port(native, frames, variant) -> None:
-    fit = CoverFit()            # the whole output: about 1.4 px a mm, a module about 1.3 px
-    trial = show_target(native, TestPattern.TARGET_PRE_SOFTWARE, fit, Mat())
+    fit = CoverFit()            # the whole output: 48 px a square, a module about 3.5 px
+    show_target(native, TestPattern.TARGET_PRE_SOFTWARE, fit, Mat())
     width, height, _ = native.captured
     modules = target_modules(TARGET_CODE)
-    draw = TargetDraw(opening_size_mm(fit, TARGET_PROFILE), modules)
+    draw = board_draw(fit, TARGET_PROFILE, modules)
+    assert not draw.portrait, draw
+    to_opening = inverse(homography(fit.corners))
     side = len(modules) + 2 * QR_QUIET_MODULES
-    square = calibration_target().qr
+    copies = qr_copies(draw.columns)
     centres = []                # (i, j, the module's signal), the pixel nearest each module's centre
-    for row in range(side):
-        for column in range(side):
-            r, c = row - QR_QUIET_MODULES, column - QR_QUIET_MODULES
-            dark = 0 <= r < len(modules) and 0 <= c < len(modules) and modules[r][c]
-            x, y = target_output_point(square.x_mm + (column + .5) * QR_MM / side,
-                                       square.y_mm + (row + .5) * QR_MM / side, fit, draw.opening_mm)
-            i, j = int(x * width), int(y * height)
-            # the pixel lies in its module (the reference agrees), so a slip of one module fails
-            signal, _ = target_signal(trial.operations.test_pattern,
-                                      *transform(inverse(homography(fit.corners)), (i + .5) / width, (j + .5) / height),
-                                      draw)
-            assert signal == ((0.0 if dark else 1.0),) * 3, ("module_pixel", row, column, i, j, signal)
-            centres.append((i, j, 0.0 if dark else 1.0))
+    for copy in copies:
+        for row in range(side):
+            for column in range(side):
+                r, c = row - QR_QUIET_MODULES, column - QR_QUIET_MODULES
+                dark = 0 <= r < len(modules) and 0 <= c < len(modules) and modules[r][c]
+                x, y = board_output_point(copy.column + (column + .5) * QR_SQUARES / side,
+                                          copy.row + (row + .5) * QR_SQUARES / side, fit, draw)
+                i, j = int(x * width), int(y * height)
+                # the pixel lies in its module (the reference agrees), so a slip of one module fails
+                point = board_point(*transform(to_opening, (i + .5) / width, (j + .5) / height), draw)
+                assert board_signal(*point, draw) == (0.0 if dark else 1.0), ("module_pixel", copy, row, column, i, j)
+                centres.append((i, j, 0.0 if dark else 1.0))
     unnamed = [pixel(native, i, j) for i, j, _ in centres]
     assert all(exact(actual, (1.0, 1.0, 1.0, 1.0)) for actual in unnamed), "a QR drawn with no player id"
     first_dark = next((i, j) for i, j, value in centres if value == 0.0)
@@ -834,14 +831,15 @@ def the_target_qr_names_the_port(native, frames, variant) -> None:
         actual = pixel(native, i, j)
         assert exact(actual, (value, value, value, 1.0)), ("qr_module", i, j, actual, value)
         dark += value == 0.0
-    print(f"QR modules={len(modules)} centres={len(centres)} dark={dark}", flush=True)
-    assert len(modules) >= 21 and dark > 100, (len(modules), dark)
+    print(f"QR copies={len(copies)} modules={len(modules)} centres={len(centres)} dark={dark}", flush=True)
+    assert len(copies) >= 2 and len(modules) >= 21 and dark > 100 * len(copies), (len(copies), len(modules), dark)
 
 
 def pattern_cases(pattern: TestPattern):
-    """Every pattern's cases: a calibration target in two fits, any other through the opening."""
+    """Every pattern's cases: a calibration target in three openings, any other through the opening."""
     if pattern in TARGET_PATTERNS:
-        return (target_matches_the_reference(pattern, 30), target_matches_the_reference(pattern, 90))
+        return (target_matches_the_reference(pattern, 30), target_matches_the_reference(pattern, 90),
+                target_matches_the_reference(pattern, 0, SMALL_TARGET_PROFILE, 16))
     return (pattern_matches_the_reference(pattern),)
 
 

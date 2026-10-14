@@ -81,21 +81,24 @@ const PATTERN_OPTIONS: readonly { value: TestPattern | typeof OFF; label: string
 ];
 // The two screen targets (calibration targets, decision 0026), either in any order (owner,
 // 2026-10-13: "thats the users choice -- not something that the software enforces"): the tab never
-// orders or gates them. The size the Frame's opening needs is printed on the sheet, never said here.
+// orders or gates them.
 const TARGETS: ReadonlySet<TestPattern> = new Set<TestPattern>(["target-pre-software", "target-post-software"]);
-const PAPER_UNDER_GLASS = "Lay the printed sheet uncut in the dark box under the Frame's glass, a black card behind "
-  + "it, and photograph both: ProRAW photos are read for you. The sheet says how large the Frame's opening must be. "
-  + "You can switch to the camera on this device: the target stays up for a minute while this tab is hidden.";
+// The calibration targets' instructions: their one home (design v2's three sentences); the runbook
+// and the decision link here, never quote.
+const TARGET_HOW = "Print the paper target on any printer, cut a piece if the screen is small, and lay it on the "
+  + "screen (under the glass if there is one) with a black card behind it. Take one photo that holds the paper and "
+  + "some of the screen, your shadow off the paper: the target stays up for a minute while this tab is hidden, so "
+  + "this phone's camera will do. AirDrop it to the Mac; ProRAW reads best.";
 const PAPER_SIZES: readonly { paper: PaperSize; label: string }[] = [
-  { paper: "letter", label: "Letter" }, { paper: "a4", label: "A4" },
+  { paper: "letter", label: "Letter" }, { paper: "a4", label: "A4" }, { paper: "4x6", label: "4 × 6 in photo" },
 ];
 // What to do with each pattern: the one home of these words, the Black level's reading included
 // (display tuning, "Reading the Black level"); the console design and the runbook describe and
 // link here, never quote.
 const PATTERN_HOW: Record<TestPattern, string> = {
   white: "Tape a sheet of white paper beside the Frame and match its white.",
-  "target-pre-software": `Judges the display's own settings: the target skips every Photo Wall step. ${PAPER_UNDER_GLASS}`,
-  "target-post-software": `Judges Photo Wall's settings: the target goes through them. ${PAPER_UNDER_GLASS}`,
+  "target-pre-software": `Judges the display's own settings: the target skips every Photo Wall step. ${TARGET_HOW}`,
+  "target-post-software": `Judges Photo Wall's settings: the target goes through them. ${TARGET_HOW}`,
   "grey-ramp": "Every step should be told apart: the darkest from black, the lightest from white.",
   "black-level": "Switch Signal range between Full and Limited. Black darker on Full with every step visible: "
     + "keep Full. Steps vanish into black on Full: choose Limited. No change: the display follows the Pi, the glow "
@@ -148,8 +151,8 @@ export function signalWords(range: SignalRange, signal: SignalView | null): stri
   return signal.in_force === range ? sends(range) : RANGE_WAITING;
 }
 
-/** The paper target's print links, Letter and A4 (pictureApi.js `paperTargetUrl`); Central answers
- * each as a download. */
+/** The paper target's print links, Letter, A4 and a 4 × 6 in photo print (pictureApi.js
+ * `paperTargetUrl`); Central answers each committed sheet as a download. */
 function PrintPaperTarget() {
   return (
     <Note>

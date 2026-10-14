@@ -776,6 +776,11 @@ def test_hiding_the_tab_keeps_a_shown_pattern_and_ends_a_session_without_one(pag
         [before] = _off_thread(_sql, registry, "SELECT id FROM picture_sessions")
 
         _visibility(page, "hidden")
+        # A keepalive tick that fired before React took the hide in (its re-render clears the
+        # interval) is not the page's answer to the hide: judge only what is sent once it settled.
+        page.wait_for_timeout(300)
+        assert not any(method == "DELETE" for method, _ in sent), sent
+        sent.clear()
         page.wait_for_timeout(6500)
         assert not any(method == "DELETE" for method, _ in sent), sent
         assert not any(last == "keepalive" for _, last in sent), sent
@@ -800,7 +805,8 @@ def test_hiding_the_tab_keeps_a_shown_pattern_and_ends_a_session_without_one(pag
 
 PATTERNS = ["Off", "White", "Grey ramp", "Black level", "Target: pre-software", "Target: post-software"]
 PAPER_TARGET = {"Letter": "/v1/operator/calibration-target/paper.pdf?paper=letter",
-                "A4": "/v1/operator/calibration-target/paper.pdf?paper=a4"}
+                "A4": "/v1/operator/calibration-target/paper.pdf?paper=a4",
+                "4 × 6 in photo": "/v1/operator/calibration-target/paper.pdf?paper=4x6"}
 
 
 def _print_links(page):
@@ -811,10 +817,12 @@ def test_both_targets_are_offered_in_either_order_with_the_paper_targets_print_l
     """Calibration targets U1, acceptance 1 and 2 (owner R7, R8: either stage, any order; R1: the
     printable sheet): the picker lists six patterns; each target posts exactly its wire value, post
     before pre and back, with nothing gating either; the Pi shows each; with a target chosen the tab
-    shows Letter and A4 linking to the paper target, and none with another pattern or Off.
+    shows Letter, A4 and 4 × 6 in photo linking to the paper target and v2's three sentences (a piece of paper
+    anywhere on the screen; no dark box, no uncut sheet), and none with another pattern or Off.
 
     Mutations: U1-wire, send "target-pre" -> Central's 422 and the body assertion fails; U1-links,
-    render the links for every pattern -> the Off and White assertions fail."""
+    render the links for every pattern -> the Off and White assertions fail; K1-words, restore v1's
+    PAPER_UNDER_GLASS -> the "cut a piece" assertion fails."""
     _seen(registry)
     with FakePi(registry), operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall")
@@ -830,9 +838,14 @@ def test_both_targets_are_offered_in_either_order_with_the_paper_targets_print_l
                             ("Target: post-software", "target-post-software")]:
             _show(page, label)
             expect(group).to_contain_text(SHOWN)
-            expect(group).to_contain_text("Lay the printed sheet uncut in the dark box under the Frame's glass")
-            # The camera is often the phone the tab runs on: hiding the tab keeps a pattern a minute.
+            # Design v2's three sentences: any size of paper, anywhere on the screen.
+            expect(group).to_contain_text("cut a piece if the screen is small")
+            expect(group).to_contain_text("ProRAW reads best")
+            # Owner, 2026-10-14: switching to the phone's camera dropped the target; it now stays.
             expect(group).to_contain_text("the target stays up for a minute while this tab is hidden")
+            expect(group).not_to_contain_text("Show a target")
+            expect(group).not_to_contain_text("dark box")
+            expect(group).not_to_contain_text("uncut")
             expect(_print_links(page)).to_have_text(list(PAPER_TARGET))
             for name, href in PAPER_TARGET.items():
                 expect(group.get_by_role("link", name=name, exact=True)).to_have_attribute("href", href)
