@@ -216,7 +216,9 @@ def test_the_operations_go_to_the_shell_before_any_hardware_write(display, runni
     run.offered()
     run.controller.document(OUTPUT, document(2, {"10": 46}, software(contrast=80)))
     until(lambda: display.writes() == [["10", "46"]], timeout=5)
-    assert run.shell.sent and run.shell.sent[0][0].contrast_slope == 0.8   # while the write still runs
+    until(lambda: bool(run.shell.sent), timeout=0.5)    # the shell worker never waits on the display
+    assert run.shell.sent[0][0].contrast_slope == 0.8
+    assert [call["at"] for call in display.calls() if call["args"][0] == "setvcp"] == ["start"]   # still writing
     assert run.reports.latest().for_change is None
     run.reported(2)
 
@@ -260,8 +262,8 @@ def test_empty_hardware_is_carried_out_at_once_even_with_no_display(display, run
     report = run.reported(1)
     assert report.results == {} and report.identity is None and report.offered is None
     assert display.calls() == []
-    assert run.shell.last() == (operations_for(OUTPUT, 1, software(brightness=40), None),
-                                "Brightness: as the display has it · Photo Wall 40 %")
+    until(lambda: run.shell.sent and run.shell.last() == (operations_for(OUTPUT, 1, software(brightness=40), None),
+                                                           "Brightness: as the display has it · Photo Wall 40 %"))
 
 
 def test_a_value_the_display_already_has_or_past_its_range_is_not_written(display, running):
@@ -503,15 +505,25 @@ def test_a_change_to_the_print_look_only_waits_for_the_shell_to_present_it(displ
 
 
 def test_an_older_or_equal_picture_change_writes_nothing(display, running):
+    """Newest wins by picture_change: an equal or older change, whatever it carries, writes nothing
+    and never reaches the shell. Change 3 settles first: its report comes before the line that
+    follows its write (`_finish` reports, then refreshes the line), so the test waits for that
+    line, never for the report alone. The forced re-send is the barrier: it carries whatever
+    document the controller holds. Mutation probe: drop the `<=` check in `document` (or make it
+    `<`) -> the re-send carries change 2 (or change 3 at 50 %)."""
     run = running()
     run.controller.document(OUTPUT, document(3, {"10": 46}))
     run.reported(3)
+    settled = (operations_for(OUTPUT, 3, NEUTRAL_SOFTWARE, None), "Brightness: display 46 % · Photo Wall 100 %")
+    until(lambda: bool(run.shell.sent) and run.shell.last() == settled)
     sent = len(run.shell.sent)
     display.vcp("10", 35, 100)                          # someone on the display's buttons
-    run.controller.document(OUTPUT, document(3, {"10": 46}))
+    run.controller.document(OUTPUT, document(3, {"10": 46}, software(brightness=50)))
     run.controller.document(OUTPUT, document(2, {"10": 10}))
-    time.sleep(0.5)
-    assert display.writes() == [["10", "46"]] and len(run.shell.sent) == sent
+    run.controller.shell_output(OUTPUT)                 # the re-send: what the controller holds now
+    until(lambda: len(run.shell.sent) == sent + 1)
+    assert run.shell.last() == settled
+    assert display.writes() == [["10", "46"]] and run.reports.latest().for_change == 3
 
 
 def test_a_restarted_controller_does_not_write_a_change_the_display_already_had(display, running):
@@ -549,9 +561,8 @@ def test_another_display_is_asked_and_written_and_a_blip_is_not_asked_again(disp
     run = running(connect=False)
     run.controller.output(OUTPUT, connected=False, identity=None)
     run.controller.document(OUTPUT, document(1, {"10": 46}))
-    time.sleep(0.5)
+    assert run.reported(1).results == {}                                    # the change is answered
     assert display.calls() == []                                            # the hardware waits for a display
-    assert run.reports.latest().for_change == 1 and run.reports.latest().results == {}   # the change is answered
     run.connect()
     until(lambda: run.reports.latest().results == {"10": HardwareResult(WriteResult.TAKEN, 60, 46)})
     run.controller.output(OUTPUT, connected=False, identity=None)           # a blip
