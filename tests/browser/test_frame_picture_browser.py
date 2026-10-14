@@ -813,6 +813,16 @@ def _print_links(page):
     return _group(page, TEST_PATTERN).get_by_role("link")
 
 
+def _await_asked(page, registry, wire):
+    """Waits for Central's Output document to ask for the test pattern `wire` (None: none)."""
+    for _ in range(50):
+        ask = _off_thread(_picture, registry).test_pattern
+        if (None if ask is None else ask.pattern.value) == wire:
+            return
+        page.wait_for_timeout(100)
+    raise AssertionError(f"the document never asked for {wire}")
+
+
 def test_both_targets_are_offered_in_either_order_with_the_paper_targets_print_links(page, registry):
     """Calibration targets U1, acceptance 1 and 2 (owner R7, R8: either stage, any order; R1: the
     printable sheet): the picker lists six patterns; each target posts exactly its wire value, post
@@ -849,21 +859,19 @@ def test_both_targets_are_offered_in_either_order_with_the_paper_targets_print_l
             expect(_print_links(page)).to_have_text(list(PAPER_TARGET))
             for name, href in PAPER_TARGET.items():
                 expect(group.get_by_role("link", name=name, exact=True)).to_have_attribute("href", href)
-            for _ in range(50):
-                ask = _off_thread(_picture, registry).test_pattern
-                if ask is not None and ask.pattern.value == wire:
-                    break
-                page.wait_for_timeout(100)
-            else:
-                raise AssertionError(f"the document never asked for {wire}")
+            _await_asked(page, registry, wire)
 
+        # The page sends its draft, not each click (pictureSession.js, AT MOST TWO EDITS A SECOND):
+        # Off chosen while White still waits behind the request in flight replaces it. So White
+        # is let reach the document before Off, as an operator who looks at it would.
         _show(page, "White")
         expect(group).to_contain_text(PAPER)
         expect(_print_links(page)).to_have_count(0)
+        _await_asked(page, registry, "white")
         _show(page, "Off")
         expect(_print_links(page)).to_have_count(0)
         expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
-        page.wait_for_timeout(600)
+        _await_asked(page, registry, None)
         assert [body["test_pattern"] for _at, body in edits] == [
             "target-post-software", "target-pre-software", "target-post-software", "white", None], edits
 

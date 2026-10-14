@@ -43,7 +43,9 @@ import {
  * value where it was let go is always the last one sent. Both groups share the gap. The signal
  * range and the test pattern are choices, never dragged: each is sent at once, ahead of a slider's
  * paced value. One request is in flight at a time, so each edit names the sequence the previous one
- * answered.
+ * answered. The page sends its draft, never a queue of clicks: a choice made while a request is in
+ * flight waits for the loop's next step, and a newer choice made meanwhile replaces it (pick White,
+ * then Off, both while a read is in flight, and only Off is sent).
  *
  * RESTORE. A picture history entry (historyApi.js) is loaded into Central's draft as one edit of the
  * session (`restore`): it waits for the request in flight like Done, names the current sequence, is
