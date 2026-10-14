@@ -27,7 +27,8 @@ Display tuning (decision 0024, schema major 6) adds a third group and one sessio
   photos while the Display's picture session is live, never stored; the Pi takes it off
   TEST_PATTERN_SECONDS after it first received that ask (its own clock alone), so a Central
   outage cannot leave it up; the report's `test_pattern_shown` names the ask the Player presented.
-  Schema major 7 (calibration targets, decision 0026): the ask may name either calibration target.
+  Schema major 7 (calibration targets, decisions 0026 and 0027): the ask may name either calibration
+  target, the screen board drawn raw or through Photo Wall's steps.
 
 Rules this module owns (one home each):
 - the **picture list** (`PICTURE_LIST`): the only codes Photo Wall asks a display about, edits or
