@@ -49,9 +49,16 @@ from typing import Final
 from contracts.calibration_target import (
     QR_MM,
     QR_QUIET_MODULES,
+    QR_SQUARES,
+    SCREEN_ROWS,
     SCREEN_TARGET_MM,
+    SQUARE_PX,
     QrModules,
+    Surface,
+    board_raster,
     calibration_target,
+    qr_copies,
+    screen_columns,
     screen_point,
 )
 from contracts.frame_fit import Corners, OutputSize, cover_rectangle
@@ -469,13 +476,14 @@ class BoardDraw:
     @property
     def columns(self) -> int:
         """The board's columns shown: contracts.calibration_target.screen_columns(aspect)."""
-        ...
+        return screen_columns(self.aspect)
 
 
 def board_draw(fit: CornersFit | CoverFit, profile: FrameProfile, modules: QrModules | None) -> BoardDraw:
     """The BoardDraw of a Frame's opening: (W, H) = `opening_size_mm`(fit, profile); aspect
     max(W, H) / min(W, H); portrait when W < H. Pure."""
-    ...
+    width, height = opening_size_mm(fit, profile)
+    return BoardDraw(max(width, height) / min(width, height), width < height, modules)
 
 
 def board_point(u: float, v: float, draw: BoardDraw) -> tuple[float, float]:
@@ -484,7 +492,11 @@ def board_point(u: float, v: float, draw: BoardDraw) -> tuple[float, float]:
     centred on it (offset (n - columns) / 2): landscape, (u * n - offset, v * SCREEN_ROWS);
     portrait, turned a quarter clockwise, (v * n - offset, (1 - u) * SCREEN_ROWS). Points outside
     [0, columns) x [0, SCREEN_ROWS) are the surround. Pure."""
-    ...
+    along = draw.aspect * SCREEN_ROWS
+    offset = (along - draw.columns) / 2
+    if draw.portrait:
+        return (v * along - offset, (1 - u) * SCREEN_ROWS)
+    return (u * along - offset, v * SCREEN_ROWS)
 
 
 def board_signal(column: float, row: float, draw: BoardDraw) -> float:
@@ -495,7 +507,19 @@ def board_signal(column: float, row: float, draw: BoardDraw) -> float:
     quiet zone scaled to fill QR_SQUARES; else board_raster(SCREEN)'s pixel at
     (floor(column * SQUARE_PX), floor(row * SQUARE_PX)) over 255. Pure; the shader's
     `board_signal` mirrors it (tests/native_renderer_pixel_harness.py)."""
-    ...
+    if not (0 <= column < draw.columns and 0 <= row < SCREEN_ROWS):
+        return 0.0
+    for copy in qr_copies(draw.columns):
+        if copy.column <= column < copy.column + QR_SQUARES and copy.row <= row < copy.row + QR_SQUARES:
+            if draw.modules is None:
+                return 1.0
+            side = len(draw.modules) + 2 * QR_QUIET_MODULES
+            module_column = min(side - 1, int((column - copy.column) / QR_SQUARES * side)) - QR_QUIET_MODULES
+            module_row = min(side - 1, int((row - copy.row) / QR_SQUARES * side)) - QR_QUIET_MODULES
+            inside = 0 <= module_row < len(draw.modules) and 0 <= module_column < len(draw.modules)
+            return 0.0 if inside and draw.modules[module_row][module_column] else 1.0
+    raster = board_raster(Surface.SCREEN)
+    return raster.pixels[math.floor(row * SQUARE_PX) * raster.width + math.floor(column * SQUARE_PX)] / 255
 
 
 def opening_size_mm(fit: CornersFit | CoverFit, profile: FrameProfile) -> tuple[float, float]:

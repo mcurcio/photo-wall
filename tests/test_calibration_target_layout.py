@@ -2,14 +2,14 @@
 invariants its `calibration_target()` docstring names, the owner's reflection plan (2026-10-13:
 tight screen/paper pairs, a screen black and a paper black in every local group, repeated groups
 round the whole box), the markers' bits against OpenCV's own dictionary, the point lookups the
-Player and the PDF draw from, the print fit on Letter and A4, and the QR's text."""
+Player and the PDF draw from, and the print fit on Letter and A4 (the QR's text:
+tests/test_calibration_board_layout.py)."""
 from __future__ import annotations
 
 import itertools
 import math
 
 import cv2
-import pytest
 
 from contracts.calibration_target import (
     A4_MM,
@@ -37,14 +37,10 @@ from contracts.calibration_target import (
     Rect,
     Role,
     Surface,
-    TargetCode,
     calibration_target,
-    code_text,
     paper_ink,
-    parsed_code,
     screen_point,
 )
-from contracts.node_output import OUTPUT_IDS
 from contracts.tuning import SIGNAL_LEVELS
 
 TARGET = calibration_target()
@@ -54,7 +50,6 @@ SCREEN_MARKERS = [marker for marker in TARGET.markers if marker.surface is Surfa
 PAPER_MARKERS = [marker for marker in TARGET.markers if marker.surface is Surface.PAPER]
 PAIRED = [group for group in TARGET.groups if group.kind is GroupKind.PAIRED]
 RULERS = [group for group in TARGET.groups if group.kind is GroupKind.RULER]
-PLAYER_ID = "p-" + "0123456789abcdef" * 2
 
 
 def module_mm(marker: Marker) -> float:
@@ -303,33 +298,3 @@ def test_the_screen_target_holds_box_ring_markers_and_qr():
     rects = ([TARGET.dark_box, TARGET.qr] + [p.rect for p in SCREEN_PATCHES]
              + [with_quiet_zone(m) for m in SCREEN_MARKERS])
     assert all(inside(rect, plane) for rect in rects)
-
-
-# -- 5. The code -------------------------------------------------------------------------------
-
-@pytest.mark.parametrize("output_id", OUTPUT_IDS)
-@pytest.mark.parametrize("change", [1, 2**63 - 1])
-def test_code_text_round_trips(output_id, change):
-    code = TargetCode(PLAYER_ID, output_id, change)
-    text = code_text(code)
-    assert text == f"PWCT1 {PLAYER_ID} {output_id} {change}"
-    assert parsed_code(text) == code
-
-
-@pytest.mark.parametrize("text", [
-    f"PWCT2 {PLAYER_ID} HDMI-A-1 3", f"PWCT1 {PLAYER_ID} HDMI-A-1", f"PWCT1 {PLAYER_ID} HDMI-A-1 3 4",
-    f"PWCT1 {PLAYER_ID} HDMI-A-1 0", f"PWCT1 {PLAYER_ID} HDMI-A-1 01", f"PWCT1 {PLAYER_ID} HDMI-A-1 -1",
-    "PWCT1 -bad HDMI-A-1 3", f"PWCT1 {PLAYER_ID} HDMI A-1 3", f"PWCT1  {PLAYER_ID} HDMI-A-1 3",
-    f"PWCT1 {PLAYER_ID} HDMI-A-1 {2**63}", f"PWCT1 {PLAYER_ID} HDMI-A-1 3 ", "", "https://example.com",
-])
-def test_parsed_code_refuses_anything_else(text):
-    assert parsed_code(text) is None
-
-
-@pytest.mark.parametrize("fields", [
-    (PLAYER_ID, "HDMI-A-1", 0), (PLAYER_ID, "HDMI-A-1", True), (PLAYER_ID, "HDMI-A-1", -1),
-    (PLAYER_ID, "HDMI-A-1", 2**63), ("bad id", "HDMI-A-1", 1), (PLAYER_ID, "", 1), (PLAYER_ID, "HDMI-A-1", 1.0),
-])
-def test_target_code_refuses_a_bad_field(fields):
-    with pytest.raises(ValueError, match="target_code"):
-        TargetCode(*fields)

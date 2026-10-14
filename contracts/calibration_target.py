@@ -106,7 +106,7 @@ WHITE_COPIES: Final = 12                   # the least groups (each carries one 
 
 # -- The code (a QR, the owner's idea; OpenCV's detector reads it) --
 
-CODE_PREFIX: Final = "PWCT1"               # the code text's first word: Photo Wall calibration target, v1
+CODE_PREFIX: Final = "PWCT2"               # the code text's first word: Photo Wall calibration target, v2
 QR_ERROR: Final = "m"                      # segno's error correction level (15 %)
 QR_QUIET_MODULES: Final = 4                # QR's quiet zone (ISO/IEC 18004), drawn white
 QR_MM: Final = 40.0                        # the QR's square side, quiet zone included (version 5
@@ -419,7 +419,9 @@ def board_ids(surface: Surface) -> range:
     """The ids OpenCV's board gives its white squares, in its own order (row-major): from
     BOARD_FIRST_ID[surface], one per white square of the whole board (SCREEN_COLUMNS_MAX columns
     on the screen). Pure."""
-    ...
+    columns, rows = _board_size(surface)
+    first = BOARD_FIRST_ID[surface]
+    return range(first, first + columns * rows // 2)
 
 
 def square(surface: Surface, row: int, column: int) -> Square:
@@ -430,7 +432,21 @@ def square(surface: Surface, row: int, column: int) -> Square:
     SCREEN_COLUMNS_MAX); BLACK when row + column is even; else by (column + 2 * row) // 2 % 3:
     0 MARKER, 1 WHITE, 2 GREY. Paper: BLACK when row + column is even; else MARKER on even rows,
     WHITE on odd rows."""
-    ...
+    columns, rows = _board_size(surface)
+    if not (0 <= row < rows and 0 <= column < columns):
+        raise ValueError("square")
+    if surface is Surface.SCREEN:
+        for copy in qr_copies(SCREEN_COLUMNS_MAX):
+            if copy.column <= column < copy.column + QR_SQUARES:
+                if copy.row <= row < copy.row + QR_SQUARES:
+                    return Square.QR
+                if row == copy.row + QR_SQUARES:
+                    return Square.RULER
+    if (row + column) % 2 == 0:
+        return Square.BLACK
+    if surface is Surface.SCREEN:
+        return (Square.MARKER, Square.WHITE, Square.GREY)[(column + 2 * row) // 2 % 3]
+    return Square.MARKER if row % 2 == 0 else Square.WHITE
 
 
 def grey_code(row: int, column: int) -> int:
@@ -439,22 +455,34 @@ def grey_code(row: int, column: int) -> int:
     right, each column top to bottom), so any run of columns holds every grey about equally (a
     13-column board: each at least twice) and a cropped board keeps them all.
     ValueError("grey_code") for a square that is not GREY. Pure."""
-    ...
+    code = _grey_codes().get((row, column))
+    if code is None:
+        raise ValueError("grey_code")
+    return code
 
 
+@functools.cache
 def qr_copies(columns: int) -> tuple[QrCopy, ...]:
     """The QR copies wholly inside the board's first `columns` columns: for each period start p
     (0, QR_PERIOD, ...) and each (row, offset) of QR_COPY_PLACES, QrCopy(row, p + offset) when
     p + offset + QR_SQUARES <= columns; by column, then row. ValueError("columns") unless
     1 <= columns <= SCREEN_COLUMNS_MAX. Pure."""
-    ...
+    if isinstance(columns, bool) or not isinstance(columns, int) or not 1 <= columns <= SCREEN_COLUMNS_MAX:
+        raise ValueError("columns")
+    copies = (QrCopy(row, start + offset) for start in range(0, columns, QR_PERIOD)
+              for row, offset in QR_COPY_PLACES if start + offset + QR_SQUARES <= columns)
+    return tuple(sorted(copies, key=lambda copy: (copy.column, copy.row)))
 
 
 def ruler_steps(copy: QrCopy) -> tuple[RulerStep, ...]:
     """The copy's ruler: one RulerStep per NEAR_BLACK_STEPS code in order, side by side across its
     QR_SQUARES columns (each QR_SQUARES / len(NEAR_BLACK_STEPS) squares wide; at SQUARE_PX a whole
     number of pixels), its top and bottom RULER_BAND of the ruler row. Pure."""
-    ...
+    width = QR_SQUARES / len(NEAR_BLACK_STEPS)
+    top = copy.row + QR_SQUARES
+    return tuple(RulerStep(code, copy.column + index * width, copy.column + (index + 1) * width,
+                           top + RULER_BAND[0], top + RULER_BAND[1])
+                 for index, code in enumerate(NEAR_BLACK_STEPS))
 
 
 def screen_columns(aspect: float) -> int:
@@ -462,16 +490,37 @@ def screen_columns(aspect: float) -> int:
     short side, so floor(aspect * SCREEN_ROWS) along its long side (a 1e-9 slack for a float
     aspect), at most SCREEN_COLUMNS_MAX. `aspect`: the opening's physical long side over its short
     side. ValueError("aspect") unless finite and >= 1. Pure."""
-    ...
+    if isinstance(aspect, bool) or not isinstance(aspect, int | float) or not math.isfinite(aspect) or aspect < 1:
+        raise ValueError("aspect")
+    return min(SCREEN_COLUMNS_MAX, math.floor(aspect * SCREEN_ROWS + 1e-9))
 
 
+@functools.cache
 def board_raster(surface: Surface) -> Raster:
     """`surface`'s whole board as OpenCV's CharucoBoard.generateImage drew it at SQUARE_PX a
     square (no margin, one-module marker borders), its left-out squares painted per `square`
     (WHITE 255, GREY its `grey_code`, QR 255, RULER 0 with its `ruler_steps` at their codes):
     contracts/calibration_boards.py's data, written by scripts/calibration_boards.py (imported here
     at first use; built once). Pure."""
-    ...
+    from contracts import calibration_boards  # data only; read once, on the first draw
+
+    width, height, pixels = calibration_boards.SCREEN if surface is Surface.SCREEN else calibration_boards.PAPER
+    return Raster(width, height, pixels)
+
+
+def _board_size(surface: Surface) -> tuple[int, int]:
+    """`surface`'s whole board as (columns, rows)."""
+    if surface is Surface.SCREEN:
+        return SCREEN_COLUMNS_MAX, SCREEN_ROWS
+    return PAPER_COLUMNS, PAPER_ROWS
+
+
+@functools.cache
+def _grey_codes() -> Mapping[tuple[int, int], int]:
+    """(row, column) -> code of every screen GREY square, ranked column by column (`grey_code`)."""
+    greys = ((row, column) for column in range(SCREEN_COLUMNS_MAX) for row in range(SCREEN_ROWS)
+             if square(Surface.SCREEN, row, column) is Square.GREY)
+    return {place: GREY_CODES[rank % len(GREY_CODES)] for rank, place in enumerate(greys)}
 
 
 def _paired_groups(dark_box: Rect, paper_in_box: tuple[float, float]) -> Iterator[Group]:
