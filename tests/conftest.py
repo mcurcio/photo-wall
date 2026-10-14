@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 from support.database import TestDatabases, server_dsn
+from support.shards import select_shard, shard
 
 from central.db import Database
 from central.registry import Registry
@@ -45,6 +46,7 @@ CI_SKIP_ALLOWLIST = (
 
 
 def pytest_configure(config):
+    shard()   # a malformed PHOTO_WALL_TEST_SHARD stops the run here, in every process
     # One id per run, shared by its xdist workers: it names the run's databases.
     config.stash[_RUN_ID] = getattr(config, "workerinput", {}).get("testrunuid") or uuid.uuid4().hex
     config.addinivalue_line("markers", "db: needs PostgreSQL (derived from its fixtures)")
@@ -55,9 +57,9 @@ def pytest_configure(config):
 
 
 @pytest.hookimpl(tryfirst=True)  # before `-m` deselects and xdist reads the groups
-def pytest_collection_modifyitems(items):
+def pytest_collection_modifyitems(config, items):
     """Derive each test's tier: `browser` by path, else `db` by its fixtures, else unit; and
-    `immich` by its fixtures, whatever its tier."""
+    `immich` by its fixtures, whatever its tier. Then keep this run's shard (support/shards.py)."""
     for item in items:
         immich = IMMICH_ROOT in getattr(item, "fixturenames", ())
         if immich:
@@ -72,6 +74,7 @@ def pytest_collection_modifyitems(items):
             if "module_registry" in item.fixturenames and not immich:
                 # One system for the whole module, its tests in order: keep them on one worker.
                 item.add_marker(pytest.mark.xdist_group(item.module.__name__))
+    select_shard(config, items)
 
 
 def pytest_sessionfinish(session):

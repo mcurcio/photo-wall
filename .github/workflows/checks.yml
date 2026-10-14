@@ -45,15 +45,23 @@ jobs:
       - run: npm --prefix central/console run lint
       - run: npm --prefix central/console run build-storybook
 
+  # Two shards (PHOTO_WALL_TEST_SHARD, tests/support/shards.py: a test belongs to the shard its
+  # name hashes to), each well inside its 4 minutes; `checks` succeeds only when both do.
   unit:
     runs-on: ubuntu-24.04
     timeout-minutes: 4
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - uses: ./.github/actions/python-uv
       - run: uv sync --frozen
       - uses: ./.github/actions/console-bundle
       - name: Run the unit tier, with no database
+        env:
+          PHOTO_WALL_TEST_SHARD: ${{ matrix.shard }}/2
         run: |
           .venv/bin/python -m pytest -q --tb=short --durations=25 \
             -m "not db and not browser" -n 4 --dist worksteal
@@ -136,8 +144,8 @@ jobs:
           .venv/bin/python scripts/test_local.py -q --tb=short --durations=25 \
             -m "db and not immich" -n 4 --dist loadgroup
 
-  # Three shards (PHOTO_WALL_BROWSER_SHARD, tests/browser/conftest.py: a test belongs to the shard
-  # its name hashes to), so each leg stays near the ~4 min budget; each writes its shard's evidence.
+  # Three shards (PHOTO_WALL_TEST_SHARD, tests/support/shards.py: a test belongs to the shard its
+  # name hashes to), so each leg stays near the ~4 min budget; each writes its shard's evidence.
   browser:
     runs-on: ubuntu-24.04
     timeout-minutes: 7
@@ -163,7 +171,7 @@ jobs:
             --volume "$GITHUB_WORKSPACE:/work:ro" \
             --volume "$RUNNER_TEMP/operator-browser:/evidence" --workdir /work \
             --env PHOTO_WALL_BROWSER_TESTS=1 --env PYTHONDONTWRITEBYTECODE=1 \
-            --env PHOTO_WALL_BROWSER_SHARD=${{ matrix.shard }}/3 \
+            --env PHOTO_WALL_TEST_SHARD=${{ matrix.shard }}/3 \
             --env PHOTO_WALL_TEST_REQUIRE_DATABASE --env CI \
             --env GITHUB_SHA --env GITHUB_EVENT_NAME --env GITHUB_ACTIONS \
             --env UV_PROJECT_ENVIRONMENT=/tmp/photo-wall-browser-venv \
