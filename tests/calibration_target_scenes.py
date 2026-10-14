@@ -25,6 +25,7 @@ from __future__ import annotations
 import functools
 import math
 import uuid
+import warnings
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Final
@@ -33,6 +34,7 @@ import cv2
 import numpy as np
 
 from appliance.display_host.picture import operations_for
+from central.displays.calibration_paper import PAPER_SQUARE_MM
 from central.displays.picture_history import PictureEntryKind
 from central.displays.views import (
     DisplayRefView,
@@ -61,12 +63,16 @@ from player.calibration_target import target_modules
 from player.geometry import BoardDraw, board_point, board_signal, final_pixel
 from scripts.calibration_target.model import Photo, PhotoKind
 
+with warnings.catch_warnings():
+    # colour-science warns at import that matplotlib (its plotting, unused here) is missing.
+    warnings.filterwarnings("ignore", message='"Matplotlib" related API')
+    import colour
+
 PHOTO_SIZE: Final = (2016, 1512)        # a 12 MP photo at half its side: the suite's time
 CANVAS_PX: Final = 48                   # the screen canvas's pixels a square (at least 40)
 GLASS_T: Final = 0.92                   # the Frame glass's transmission
 BORDER_MM: Final = 25.0                 # the Frame's border round the opening
 CARD_MM: Final = 6.0                    # the black card beyond the paper on every side, by default
-PAPER_SQUARE_MM: Final = 15.0           # a paper square printed at scale 1
 CODE: Final = TargetCode("pi-wall-1", "HDMI-A-1", 41)
 TV43: Final = (950.0, 535.0)            # a 43-inch 16:9 opening
 FIVE_INCH: Final = (110.0, 62.0)        # a 5-inch 16:9 opening
@@ -90,7 +96,7 @@ class Display:
         s = np.clip(signal, 0.0, 1.0)
         if self.crush:
             s = np.where(np.round(s * SIGNAL_LEVELS) <= self.crush, 0.0, s)
-        response = np.where(s <= 0.04045, s / 12.92, ((s + 0.055) / 1.055) ** 2.4) if self.gamma is None \
+        response = colour.cctf_decoding(s, function="sRGB").astype(s.dtype) if self.gamma is None \
             else s ** self.gamma
         return self.white * np.array(kelvin_white(self.kelvin), np.float32) * (self.black + (1 - self.black) * response)
 
@@ -417,7 +423,7 @@ def jpeg_photo(scene: Scene) -> bytes:
     level = np.maximum(light.mean(axis=2), 1e-4)
     local = cv2.GaussianBlur(np.log(level), (0, 0), width / 12)
     light = np.clip(light * np.exp(-0.3 * (local - np.log(level).mean()))[..., None], 0, 1)
-    encoded = np.where(light <= .0031308, 12.92 * light, 1.055 * light ** (1 / 2.4) - .055)
+    encoded = colour.cctf_encoding(light, function="sRGB")
     encoded = 0.75 * encoded + 0.25 * encoded * encoded * (3 - 2 * encoded)
     encoded = cv2.GaussianBlur(encoded.astype(np.float32), (0, 0), 1.0)
     encoded = encoded + rng.normal(0, 0.004, encoded.shape).astype(np.float32)

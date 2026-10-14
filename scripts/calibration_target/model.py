@@ -35,6 +35,11 @@ HOMOGRAPHY_PX: Final = 3.0          # USAC_MAGSAC's reprojection threshold, phot
 SMALL_SQUARE_PX: Final = 20.0       # a found square under this side is too small to read: come closer
 VIEW_WHITE_PERCENTILE: Final = 99.5  # a RAW photo is shown to the detectors with this percentile at white
 QR_PX_PER_SQUARE: Final = 120       # a QR copy is rectified at this scale before it is decoded
+QR_SQUARE_PX: Final = 30.0          # a QR copy decodes from about this side of a screen square in the photo
+                                    # (3 squares for 41 modules: about 2.2 px a module)
+FOCAL_RANGE: Final = (0.3, 3.0)     # an estimated focal length outside this many photo widths is not trusted
+FOCAL_FALLBACK: Final = 0.667       # and replaced by a phone's main camera's (about 26 mm equivalent), in widths
+MARKER_MIN_PERIMETER: Final = 0.008  # DetectorParameters.minMarkerPerimeterRate: a small piece's markers count
 QR_MARGIN_SQUARES: Final = 0.25     # with this much of the surround round it
 PAPER_REACH_SQUARES: Final = 3.0    # the paper's middle at most this many columns beyond the found screen markers
 
@@ -48,10 +53,12 @@ COVERED_SHARE: Final = 0.5          # a white under this share of its surface's 
 CLIP_SHARE: Final = 0.01            # a square with more of its sampled pixels clipped is dropped
 NEAREST: Final = 6                  # the screen whites (and the ink's screen blacks) near each paper white
 WHITE_TOLERANCE: Final = 0.04       # relative, per channel: a white ratio unlike the median of its copies
-FALLOFF_KEEP: Final = 0.03          # the falloff fit's second pass keeps log whites within this of the first
+FALLOFF_KEEP: Final = 0.03          # the falloff fit's robust loss scale: log whites farther off count less
 FALLOFF_MAX: Final = 0.4            # the largest lens falloff k (1 - k r^2) the fit may report
 GREY_TOLERANCE: Final = (0.004, 0.04)   # absolute + relative to the share: a grey copy unlike the rest
+GREY_WHITES: Final = 4              # the screen whites nearest a grey that it is read against
 DISTINCT_SIGMAS: Final = 3.0        # a near-black step apart from raw 0 by this many of its noise
+MEDIAN_ERROR: Final = 1.2533        # a median's standard error over a mean's, normal noise (sqrt(pi / 2))
 KEEP_SPREADS: Final = 2.0           # a gap within this many of its spread is "keep" / no change
 
 # -- The viewing angle's bound (suggest; design-v2 "Angle": measured, not corrected, bounded one-sided) --
@@ -170,7 +177,8 @@ class Refused:
 @dataclass(frozen=True)
 class Value:
     """A value read from its agreeing copies: their median; `spread` the widest agreeing copy's
-    relative distance from it (the uncertainty); `copies` how many agree (at least 2)."""
+    relative distance from it (the uncertainty; a Reading's white adds how far an uneven reflection
+    on the paper may have moved the ink, read.py row 7); `copies` how many agree (at least 2)."""
     value: Rgb
     spread: float
     copies: int
@@ -301,8 +309,9 @@ def _plain(value: Any) -> Any:
 
 __all__ = [
     "CHARUCO_CORNERS_MIN", "CLIP_SHARE", "CONTRAST_FLOOR", "COVERED_SHARE", "DISTINCT_SIGMAS", "EDGE_TOLERANCE",
-    "FALLOFF_KEEP", "FALLOFF_MAX", "GREY_TOLERANCE", "HOMOGRAPHY_PX", "KEEP_SPREADS", "MIN_PAPER_MARKERS",
-    "MIN_SCREEN_MARKERS", "NEAREST", "PANEL_DIMMING_AT_35", "PAPER_REACH_SQUARES", "QR_MARGIN_SQUARES", "QR_PX_PER_SQUARE",
+    "FALLOFF_KEEP", "FALLOFF_MAX", "FOCAL_FALLBACK", "FOCAL_RANGE", "GREY_TOLERANCE", "GREY_WHITES",
+    "HOMOGRAPHY_PX", "MARKER_MIN_PERIMETER", "MEDIAN_ERROR", "KEEP_SPREADS", "MIN_PAPER_MARKERS",
+    "MIN_SCREEN_MARKERS", "NEAREST", "PANEL_DIMMING_AT_35", "PAPER_REACH_SQUARES", "QR_MARGIN_SQUARES", "QR_PX_PER_SQUARE", "QR_SQUARE_PX",
     "RECTIFIED_PX", "SAMPLE_SHARE", "SMALL_SQUARE_PX", "VIEW_WHITE_PERCENTILE", "WHITE_TOLERANCE",
     "Angle", "Direction", "DropReason", "Dropped", "FocalSource", "Photo", "PhotoKind", "Place",
     "PostSoftwareSuggestion", "PreProperty", "PreSoftwareStep", "PreSoftwareSuggestion", "Reading", "Refusal",

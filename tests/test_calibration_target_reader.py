@@ -186,12 +186,24 @@ def test_the_uncut_sheet_centred_square_on() -> None:
     assert error(scene, reading(scene)) <= 0.015
 
 
-# Seed 15 is left out: the paper lies on the only QR copy in its photo, a real CODE_UNREADABLE.
-@pytest.mark.parametrize("seed", [11, 12, 13, 14, 16])
-def test_the_paper_anywhere_at_any_turn_scale_and_piece(seed: int) -> None:
+CODE_CAUSES = ("needs about", "clear of the paper")
+
+
+@pytest.mark.parametrize("seed", range(24))
+def test_the_paper_anywhere_reads_or_names_why_the_code_is_unread(seed: int) -> None:
+    """Every seed of anywhere(), none left out: the photo reads within 1.5 %, or is refused only
+    because no QR copy could be read, the detail naming which of the two causes it was (the squares
+    too small for the QR, or no whole copy clear of the paper in the photo). 18 of these 24 read
+    (decision 0027)."""
     scene = anywhere(seed)
-    read = reading(scene)
-    assert error(scene, read) <= 0.015, (scene, read.white, truth(scene).white)
+    found = locate(raw_photo(scene))
+    out = found if isinstance(found, Refused) else read_photo(found, entry(scene))
+    if isinstance(out, Refused):
+        assert out.why is Refusal.CODE_UNREADABLE, out
+        assert any(cause in out.detail for cause in CODE_CAUSES), out.detail
+        assert_places(out)
+        return
+    assert error(scene, out) <= 0.015, (out.white, truth(scene).white)
 
 
 @pytest.mark.parametrize(("card_mm", "turn"), [(45.0, 0.0), (30.0, 20.0)])
@@ -231,13 +243,36 @@ def test_a_third_of_a_43_inch_frame_cut_off_with_12_percent_lens_falloff() -> No
 # -- RA3: uneven reflections, black and grey ink -------------------------------------------------------
 
 
-# Scenes where no reflection edge separates the paper from the screen blacks nearest it: one that
-# does misleads the ink (Detection row 7) by its whole step (.claude/errata.md, reader lane R1).
-@pytest.mark.parametrize(("seed", "ink"), [(20, 0.04), (27, 0.04), (29, 0.4), (33, 0.4)])
-def test_uneven_reflections_drop_their_squares_with_their_places(seed: int, ink: float) -> None:
+UNEVEN_TOLERANCE = 0.035
+
+
+@pytest.mark.parametrize("ink", [0.04, 0.4])
+@pytest.mark.parametrize("seed", range(16))
+def test_uneven_reflections_read_within_tolerance_or_say_how_unsure(seed: int, ink: float) -> None:
+    """Every seed of heavy(), none left out. A reflection over the paper alone looks like greyer ink
+    (Detection row 7; .claude/errata.md, calibration targets v2): a reading off by more than 3.5 %
+    must say so, its white's spread over 3.5 %, never a confident wrong white. Every drop has its
+    place, a refusal is white-unread, and the ink lies in [0, 1).
+
+    Mutation: the white's spread without the paper's unevenness -> seeds 3, 4, 7, 14 and 15 read
+    5-35 % off with a spread of about 1 %."""
     scene = heavy(seed, ink)
+    found = locate(raw_photo(scene))
+    assert isinstance(found, Located), found
+    out = read_photo(found, entry(scene))
+    assert_places(out)
+    if isinstance(out, Refused):
+        assert out.why is Refusal.WHITE_UNREAD, out
+        return
+    assert 0 <= out.ink < 1, out.ink
+    off = error(scene, out)
+    if off > UNEVEN_TOLERANCE:
+        assert out.white.spread > UNEVEN_TOLERANCE, (off, out.white)
+
+
+def test_a_reflection_edge_across_a_white_drops_it_with_its_place() -> None:
+    scene = heavy(20, 0.04)
     read = reading(scene)
-    assert error(scene, read) <= 0.035, (scene.reflections, read.white, truth(scene).white)
     assert any(d.why is DropReason.REFLECTION_EDGE for d in read.dropped)
     assert_places(read)
 
@@ -313,6 +348,14 @@ def test_no_screen_target_is_target_not_found() -> None:
 def test_a_paper_too_small_in_the_photo_says_come_closer_or_print_larger() -> None:
     out = refused(Scene(paper_scale=0.15))
     assert out.why is Refusal.TARGET_NOT_FOUND and "come closer or print it larger" in out.detail
+
+
+def test_a_screen_found_with_squares_too_small_gives_their_size() -> None:
+    """Photographed from 3.6 m, the 43-inch Frame's squares span about 19 px: the screen board's one
+    marker found is too few, and the refusal says how small its squares were and what is needed."""
+    out = refused(Scene(distance_mm=3600.0, yaw_deg=0.0, pitch_deg=0.0))
+    assert out.why is Refusal.TARGET_NOT_FOUND
+    assert "the screen target's squares span" in out.detail and "about 20 are needed" in out.detail, out.detail
 
 
 def test_the_paper_beside_the_frame_is_off_the_screen() -> None:

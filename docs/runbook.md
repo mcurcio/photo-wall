@@ -1156,7 +1156,7 @@ Two targets read together from one phone photo, so the agent can say what to cha
 |---|---|
 | `target-not-found` | get more of the screen in the photo, or come closer; for the paper, come closer or print it larger (the detail gives the squares' size) |
 | `paper-off-screen` | lay the paper on the screen, not beside it |
-| `code-unreadable` | take more of the screen, or closer, glare off a QR copy |
+| `code-unreadable` | the detail says which: the screen's squares too small for a QR (come closer), or no whole QR clear of the paper in the photo (take more of the screen, keep the paper off a copy, glare off it) |
 | `unknown-entry` | pick the target again on the tab and retake (another Central, or the entry trimmed) |
 | `not-a-target` | the tab had moved on: pick a target again and retake |
 | `white-unread` | move the light, lamp or yourself away from the places named, and retake |

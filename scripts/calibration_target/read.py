@@ -3,8 +3,8 @@
 
 Library steps: each surface rectified into its board's squares (cv2.warpPerspective), each square
 the numpy median of its middle SAMPLE_SHARE (row 5), its noise scipy's median absolute deviation;
-the lens falloff fitted by numpy.linalg.lstsq (row 8). The four bespoke rules, each because no
-library models it:
+the lens falloff fitted by scipy.optimize.least_squares with a robust loss (row 8). The bespoke
+rules, each because no library models it:
 - **Row 6, each white over its own blacks.** A white square less the median of its black
   neighbours; a spread across those blacks over EDGE_TOLERANCE of the surface's white means a
   reflection edge crosses it (REFLECTION_EDGE). Reflections only add light and are uneven (owner,
@@ -12,12 +12,24 @@ library models it:
   no library knows. A white too little over its blacks, or far under its surface's whites, is
   covered; one over CLIP_SHARE clipped is CLIPPED. Every drop is reported with its place.
 - **Row 7, the ink's level.** (paper black - the screen blacks near it) / (paper white - the same),
-  one value per photo: the ink need not be black (owner, 2026-10-14: "My black ink is running low
-  and printing gray-ish"), and no library knows the print. The paper's white above its own blacks
-  is divided by (1 - ink): the bare paper's white.
+  the median over the paper whites, one value per photo, clipped to what row 6 lets through
+  ([0, 1/CONTRAST_FLOOR]): the ink need not be black (owner, 2026-10-14: "My black ink is
+  running low and printing gray-ish"), and no library knows the print. The paper's white above its
+  own blacks is divided by (1 - ink): the bare paper's white. The ink is right only where the
+  reflection on the paper equals that on the screen blacks beside it, which the photo cannot show
+  (a reflection lying over the paper alone looks like greyer ink). What it does show is how
+  unevenly reflections light the paper itself: the range of the paper's black levels, as a share
+  of the paper's white above them, is added to the white's spread, so a reading under an uneven
+  reflection says how unsure it is rather than giving a confident wrong white (.claude/errata.md,
+  calibration targets v2 fix; the estimator itself is for the owner, decision 0027 Findings).
 - **Row 8, lens falloff.** One radial falloff 1 - k r^2 (the DNG standard's FixVignetteRadial
   form) shared by both surfaces' whites: no library estimates a lens's falloff from one photo
   without a profile. Without it the whites paired by nearness carry the lens's falloff between them.
+- **The rulers, a step apart from raw 0.** Each near-black step less the raw-0 bars above and
+  below it, against DISTINCT_SIGMAS of that difference's noise (a median's error: MEDIAN_ERROR
+  times the pixels' normal-scaled MAD over the photo pixels behind them, the bars' added in
+  quadrature): PLUGE (decision 0024's Black level) as a significance test. A scipy.stats test asks
+  it of independent samples, which rectified pixels interpolated from fewer photo pixels are not.
 - **Row 9, pairing and vote.** Each paper white against the median of the NEAREST screen whites;
   ratios beyond WHITE_TOLERANCE of the median are dropped with their places. The tolerance is
   physical and the places are what the reading reports; a statistical clip (sigma, MAD) would widen
@@ -33,12 +45,13 @@ them relatively.").
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from math import sqrt
 from typing import Final
 
 import cv2
 import numpy as np
+from scipy.optimize import least_squares
 from scipy.stats import median_abs_deviation
 
 from central.displays.views import PictureEntryView
@@ -69,6 +82,8 @@ from .model import (
     FALLOFF_KEEP,
     FALLOFF_MAX,
     GREY_TOLERANCE,
+    GREY_WHITES,
+    MEDIAN_ERROR,
     NEAREST,
     RECTIFIED_PX,
     SAMPLE_SHARE,
@@ -84,8 +99,6 @@ from .model import (
     Value,
 )
 
-_MEDIAN_ERROR: Final = 1.2533       # a median's standard error over a mean's, normal noise (sqrt(pi / 2))
-_GREY_WHITES: Final = 4             # the screen whites nearest a grey that it is read against
 _MEASURED: Final = (Square.WHITE, Square.BLACK, Square.GREY)
 
 
@@ -137,7 +150,7 @@ def read_photo(located: Located, entry: PictureEntryView) -> Reading | Refused:
     screen_at = np.array([w.square.at for w in screen_whites.values()])
     screen_above = np.array([w.above for w in screen_whites.values()])
     paper_at = np.array([w.square.at for w in paper_whites.values()])
-    ink = _ink(paper_whites, screen, located)
+    ink = _ink(paper_whites, screen)
     paper_above = np.array([w.above for w in paper_whites.values()]) / (1 - ink)
     falloff = _falloff(screen_at, screen_above, paper_at, paper_above, (width, height))
     screen_flat = screen_above / _lens(falloff, screen_at, (width, height))[:, None]
@@ -149,6 +162,8 @@ def read_photo(located: Located, entry: PictureEntryView) -> Reading | Refused:
         ratios.append((np.median(screen_flat[near], axis=0) / value, white.square.place))
     white, drops = _vote("white", ratios, _white_close)
     dropped += drops
+    if white is not None:
+        white = replace(white, spread=white.spread + _uneven(paper_whites))
     if white is None:
         mine = [d for d in dropped if d.value == "white"]
         return Refused(Refusal.WHITE_UNREAD, tuple(d.where for d in mine),
@@ -289,24 +304,31 @@ def _counts(dropped: Sequence[Dropped]) -> str:
 # -- Row 7: the ink's level ------------------------------------------------------------------------
 
 
-def _ink(paper_whites: dict[Key, _White], screen: dict[Key, _Read], located: Located) -> float:
-    """The print's ink as a share of bare paper white: per paper white, (its blacks - the screen's
-    NEAREST blacks near it) / (it - the same), the median over those whose screen blacks are flat
-    (within EDGE_TOLERANCE of the paper white) when at least 3, else over all."""
+_INK_MAX: Final = 1 / CONTRAST_FLOOR        # greyer ink leaves its whites under row 6's floor
+
+
+def _ink(paper_whites: dict[Key, _White], screen: dict[Key, _Read]) -> float:
+    """The print's ink as a share of bare paper white: per paper white, (its blacks - the median of
+    the screen's NEAREST blacks near it) / (it - the same), their median, clipped to [0, _INK_MAX]."""
     blacks = [read for read in screen.values() if read.kind is Square.BLACK]
     if not blacks:
         return 0.0
     black_at = np.array([read.at for read in blacks])
     black_rgb = np.array([read.rgb for read in blacks])
-    paper_white = float(np.median([w.rgb.mean() for w in paper_whites.values()]))
-    shares, flat = [], []
+    shares = []
     for white in paper_whites.values():
         near = black_rgb[np.argsort(np.linalg.norm(black_at - white.square.at, axis=1))[:NEAREST]]
         screen_black = np.median(near, axis=0)
         shares.append(float(((white.blacks - screen_black) / (white.rgb - screen_black)).mean()))
-        flat.append(float(np.ptp(near.mean(axis=1))) <= EDGE_TOLERANCE * paper_white)
-    shares_array, flat_array = np.array(shares), np.array(flat)
-    return float(np.median(shares_array[flat_array] if flat_array.sum() >= 3 else shares_array))
+    return float(np.clip(np.median(shares), 0.0, _INK_MAX))
+
+
+def _uneven(paper_whites: dict[Key, _White]) -> float:
+    """How far an uneven reflection may have moved the ink, as a share of the white: the range of
+    the paper whites' black levels over the median paper white above them."""
+    levels = [w.blacks.mean() for w in paper_whites.values()]
+    above = float(np.median([w.above.mean() for w in paper_whites.values()]))
+    return float(np.ptp(levels)) / above if above > 0 else float("inf")
 
 
 # -- Row 8: lens falloff ---------------------------------------------------------------------------
@@ -324,21 +346,19 @@ def _lens(falloff: float, at: np.ndarray, size: tuple[int, int]) -> np.ndarray:
 
 def _falloff(screen_at: np.ndarray, screen: np.ndarray, paper_at: np.ndarray, paper: np.ndarray,
              size: tuple[int, int]) -> float:
-    """k of 1 - k r^2 shared by both surfaces' whites: least squares on their log means with one
-    level per surface (log(1 - k r^2) ~ -k r^2), a second pass keeping those within FALLOFF_KEEP,
-    k clipped to [0, FALLOFF_MAX]."""
+    """k of 1 - k r^2 shared by both surfaces' whites: a robust least-squares fit
+    (scipy.optimize.least_squares, soft-L1 loss at scale FALLOFF_KEEP) of their log means with one
+    level per surface (log(1 - k r^2) ~ -k r^2), k bounded to [0, FALLOFF_MAX]; 0 with under 4."""
     logs = np.log(np.maximum(np.concatenate([screen.mean(axis=1), paper.mean(axis=1)]), 1e-12))
+    if len(logs) < 4:
+        return 0.0
     r2 = np.concatenate([_radius2(screen_at, size), _radius2(paper_at, size)])
     n, m = len(screen_at), len(paper_at)
     design = np.column_stack([np.r_[np.ones(n), np.zeros(m)], np.r_[np.zeros(n), np.ones(m)], -r2])
-    keep = np.ones(len(logs), bool)
-    coefficients = np.zeros(3)
-    for _ in range(2):
-        if keep.sum() < 4:
-            break
-        coefficients, *_ = np.linalg.lstsq(design[keep], logs[keep], rcond=None)
-        keep = np.abs(design @ coefficients - logs) < FALLOFF_KEEP
-    return float(np.clip(coefficients[2], 0.0, FALLOFF_MAX))
+    start = np.array([np.median(logs[:n]), np.median(logs[n:]), 0.0])
+    fit = least_squares(lambda c: design @ c - logs, start, loss="soft_l1", f_scale=FALLOFF_KEEP,
+                        bounds=([-np.inf, -np.inf, 0.0], [np.inf, np.inf, FALLOFF_MAX]))
+    return float(fit.x[2])
 
 
 # -- Row 9: the vote ----------------------------------------------------------------------------------
@@ -376,7 +396,7 @@ def _vote(name: str, copies: Sequence[tuple[np.ndarray, Place]],
 
 def _tone(screen: dict[Key, _Read], whites: dict[Key, _White], whites_flat: np.ndarray, falloff: float,
           size: tuple[int, int]) -> tuple[tuple[ToneStep, ...], list[Dropped]]:
-    """Each grey over its blacks against the _GREY_WHITES screen whites nearest it (both with the
+    """Each grey over its blacks against the GREY_WHITES screen whites nearest it (both with the
     lens falloff taken out), its copies voted per code; the steps by signal, brightest first."""
     white_at = np.array([w.square.at for w in whites.values()])
     surface_white = float(np.median([w.rgb.mean() for w in whites.values()]))
@@ -393,7 +413,7 @@ def _tone(screen: dict[Key, _Read], whites: dict[Key, _White], whites_flat: np.n
         if float(np.ptp(np.array(blacks).mean(axis=1))) > EDGE_TOLERANCE * surface_white:
             dropped.append(Dropped(_grey_name(code), read.place, DropReason.REFLECTION_EDGE))
             continue
-        near = np.argsort(np.linalg.norm(white_at - read.at, axis=1))[:_GREY_WHITES]
+        near = np.argsort(np.linalg.norm(white_at - read.at, axis=1))[:GREY_WHITES]
         above = (read.rgb - np.median(blacks, axis=0)) / _lens(falloff, read.at[None], size)[0]
         copies.setdefault(code, []).append((above / np.median(whites_flat[near], axis=0), read.place))
     steps = []
@@ -467,7 +487,7 @@ def _ruler(located: Located, copy: QrCopy) -> list[tuple[int, float, float]]:
         values = grey[y0:max(y1, y0 + 1), x0:max(x1, x0 + 1)].ravel()
         independent = max(1.0, min(len(values), len(values) * photo_per_pixel))
         sigma = float(median_abs_deviation(values, scale="normal"))
-        return float(np.median(values)), _MEDIAN_ERROR * sigma / sqrt(independent)
+        return float(np.median(values)), MEDIAN_ERROR * sigma / sqrt(independent)
 
     out = []
     for step in ruler_steps(copy):

@@ -96,6 +96,8 @@ def test_the_focal_length_is_the_35_mm_equivalent_over_the_diagonal(tmp_path: Pa
 
 
 def test_a_turned_file_uses_its_turned_size(tmp_path: Path) -> None:
+    """The pixels come upright. The focal length's check only shows it is read: the diagonal is the
+    same either way round, so the turn cannot change it."""
     photo = photos.load_photo(jpeg(tmp_path / "turned.jpg", np.zeros((30, 40, 3), np.uint8),
                                    exif=with_focal(26, orientation=6)))
     assert photo.pixels.shape == (40, 30, 3)

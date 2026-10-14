@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import warnings
 from dataclasses import dataclass
-from typing import Final
 
 import cv2
 import numpy as np
@@ -40,12 +39,16 @@ from contracts.calibration_target import (
 from .boards import charuco_board, marker_squares
 from .model import (
     CHARUCO_CORNERS_MIN,
+    FOCAL_FALLBACK,
+    FOCAL_RANGE,
     HOMOGRAPHY_PX,
+    MARKER_MIN_PERIMETER,
     MIN_PAPER_MARKERS,
     MIN_SCREEN_MARKERS,
     PAPER_REACH_SQUARES,
     QR_MARGIN_SQUARES,
     QR_PX_PER_SQUARE,
+    QR_SQUARE_PX,
     SMALL_SQUARE_PX,
     VIEW_WHITE_PERCENTILE,
     Angle,
@@ -61,10 +64,6 @@ with warnings.catch_warnings():
     # colour-science warns at import that matplotlib (its plotting, unused here) is missing.
     warnings.filterwarnings("ignore", message='"Matplotlib" related API')
     import colour
-
-_FOCAL_RANGE: Final = (0.3, 3.0)    # an estimated focal length outside this many photo widths is not trusted
-_FOCAL_FALLBACK: Final = 0.667      # and replaced by a phone's main camera's (about 26 mm equivalent), in widths
-_MARKER_MIN_PERIMETER: Final = 0.008  # DetectorParameters.minMarkerPerimeterRate: a small piece's markers count
 
 
 @dataclass(frozen=True, eq=False)
@@ -138,7 +137,8 @@ def locate(photo: Photo) -> Located | Refused:
     board has under MIN_SCREEN_MARKERS markers found or the paper's under MIN_PAPER_MARKERS (the
     detail: come closer or print larger, with the square size when one was found under
     SMALL_SQUARE_PX); CODE_UNREADABLE when no QR copy within the found screen columns (-4/+5)
-    decodes to a code (`where`: the copies tried); PAPER_OFF_SCREEN when the paper outline's centre
+    decodes to a code (`where`: the copies tried; the detail names the cause: the screen's squares
+    under QR_SQUARE_PX, else no whole copy clear of the paper); PAPER_OFF_SCREEN when the paper outline's centre
     lies outside the screen board's rows or more than PAPER_REACH_SQUARES columns beyond its found
     markers' (`where`: the paper's middle). Pure."""
     view = detector_view(photo)
@@ -155,8 +155,7 @@ def locate(photo: Photo) -> Located | Refused:
     columns = [marker_squares(Surface.SCREEN)[i][1] for i in screen.markers]
     code, tried = _code(view, screen, min(columns) - 4, max(columns) + 5)
     if code is None:
-        return Refused(Refusal.CODE_UNREADABLE, tried,
-                       "no QR on the screen target was read: let one whole QR into the photo, in focus")
+        return Refused(Refusal.CODE_UNREADABLE, tried, _unread_code(screen))
     outline = _paper_outline(screen, paper)
     column, row = outline.mean(axis=0)
     if not (0 <= row <= SCREEN_ROWS) or not (min(columns) - PAPER_REACH_SQUARES <= column
@@ -172,8 +171,8 @@ def viewing_angle(board: Board, size: tuple[int, int], focal_px: float | None, a
     """The median angle, in degrees, between `board`'s normal and the camera's rays to `at` (N x 2
     photo pixels), its pose from cv2.solvePnP (IPPE) with K of `focal_px` (the EXIF focal length;
     principal point the photo's centre); without it, the focal length cv2.calibrateCamera
-    estimates from the one view with everything else fixed, one outside _FOCAL_RANGE widths
-    replaced by _FOCAL_FALLBACK widths (ESTIMATED). `size`: (width, height). Pure."""
+    estimates from the one view with everything else fixed, one outside FOCAL_RANGE widths
+    replaced by FOCAL_FALLBACK widths (ESTIMATED). `size`: (width, height). Pure."""
     width, height = size
     focal, source = (focal_px, FocalSource.EXIF) if focal_px else (_estimated_focal(board, size), FocalSource.ESTIMATED)
     camera = np.array([[focal, 0, width / 2], [0, focal, height / 2], [0, 0, 1]])
@@ -196,7 +195,7 @@ def place(surface: Surface, row: float, column: float, to_photo: np.ndarray, pho
 
 def _estimated_focal(board: Board, size: tuple[int, int]) -> float:
     width, height = size
-    guess = np.array([[_FOCAL_FALLBACK * width, 0, width / 2], [0, _FOCAL_FALLBACK * width, height / 2], [0, 0, 1]])
+    guess = np.array([[FOCAL_FALLBACK * width, 0, width / 2], [0, FOCAL_FALLBACK * width, height / 2], [0, 0, 1]])
     flags = (cv2.CALIB_USE_INTRINSIC_GUESS | cv2.CALIB_FIX_PRINCIPAL_POINT | cv2.CALIB_FIX_ASPECT_RATIO
              | cv2.CALIB_ZERO_TANGENT_DIST | cv2.CALIB_FIX_K1 | cv2.CALIB_FIX_K2 | cv2.CALIB_FIX_K3)
     try:
@@ -204,10 +203,10 @@ def _estimated_focal(board: Board, size: tuple[int, int]) -> float:
                                                 [board.image_points.astype(np.float32)], size, guess,
                                                 np.zeros(5), flags=flags)
     except cv2.error:
-        return _FOCAL_FALLBACK * width
+        return FOCAL_FALLBACK * width
     focal = float(found[0, 0])
-    low, high = _FOCAL_RANGE
-    return focal if low * width < focal < high * width else _FOCAL_FALLBACK * width
+    low, high = FOCAL_RANGE
+    return focal if low * width < focal < high * width else FOCAL_FALLBACK * width
 
 
 _DETECTORS: dict[Surface, cv2.aruco.CharucoDetector] = {}
@@ -219,7 +218,7 @@ def _detector(surface: Surface) -> cv2.aruco.CharucoDetector:
     if surface not in _DETECTORS:
         markers = cv2.aruco.DetectorParameters()
         markers.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
-        markers.minMarkerPerimeterRate = _MARKER_MIN_PERIMETER
+        markers.minMarkerPerimeterRate = MARKER_MIN_PERIMETER
         charuco = cv2.aruco.CharucoParameters()
         charuco.minMarkers = 1
         _DETECTORS[surface] = cv2.aruco.CharucoDetector(charuco_board(surface), charuco, markers)
@@ -233,6 +232,17 @@ def _small(*boards: Board | None) -> str:
             return (f" (the {board.surface.value} target's squares span {board.square_px:.0f} px in the photo; "
                     f"about {SMALL_SQUARE_PX:.0f} are needed)")
     return ""
+
+
+def _unread_code(screen: Board) -> str:
+    """Why no QR copy was read, in words to act on: the screen's squares too small for the QR (the
+    code's own need, QR_SQUARE_PX, larger than finding the boards'), else no whole copy clear of the
+    paper in the photo."""
+    if screen.square_px < QR_SQUARE_PX:
+        return (f"no QR on the screen target was read: its squares span {screen.square_px:.0f} px in the photo "
+                f"and a QR needs about {QR_SQUARE_PX:.0f}: come closer")
+    return ("no QR on the screen target was read: let one whole QR into the photo, in focus and clear of the "
+            "paper")
 
 
 def _code(view: np.ndarray, screen: Board, low: int, high: int) -> tuple[TargetCode | None, tuple[Place, ...]]:

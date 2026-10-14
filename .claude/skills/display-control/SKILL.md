@@ -306,7 +306,9 @@ tab is hidden (the picture session's idle limit, `central/displays/picture.py` `
    - `target-not-found`: some of the screen or the paper was not found; the detail says which and,
      when the squares were too small, their size: come closer or print the paper larger.
    - `paper-off-screen`: the paper's middle lies off the screen board: lay it on the screen.
-   - `code-unreadable`: no QR copy read: take more of the screen, or closer, glare off a copy.
+   - `code-unreadable`: no QR copy read; the detail says whether the screen's squares were too
+     small for a QR (come closer) or no whole copy lay clear of the paper (take more of the screen,
+     keep the paper off a copy, glare off it).
    - `unknown-entry`: Central has no such sent entry (another Central, or trimmed): pick the target
      again on the tab and retake.
    - `not-a-target`: the entry the QR names has no calibration target as its test pattern (the
@@ -330,9 +332,11 @@ tab is hidden (the picture session's idle limit, `central/displays/picture.py` `
 6. **Know the limits** ([0027](../../../docs/decisions/0027-calibration-targets-v2.md#costs)): the
    camera is not the eye (ask him whether it looks matched); a shadow he casts over the paper alone
    reads the screen too bright and is not detected, so ask him to keep his shadow off the paper; an
-   uneven reflection along the paper's border can bias the white through the ink's level
-   ([0027 Findings](../../../docs/decisions/0027-calibration-targets-v2.md#findings)): when `ink`
-   looks implausible or the drops crowd round the paper, ask for a retake with the light moved. The
+   uneven reflection on the paper can bias the white through the ink's level
+   ([0027 Findings](../../../docs/decisions/0027-calibration-targets-v2.md#findings)): the white's
+   `spread` then carries how unevenly the paper is lit, so a wide spread (a few percent or more)
+   reads "keep" where it cannot tell; say so and ask for a retake with the light moved rather than
+   calling the display right. A reflection lying evenly over the paper alone is still unseen. The
    pre-software black only says raise or keep (0026's finding): when he says the dark areas glow,
    read the entry's `signal_range` and use the Black level pattern
    ([0024](../../../docs/decisions/0024-display-tuning.md)). The reader has not yet read a real photo
