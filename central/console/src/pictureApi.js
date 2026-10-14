@@ -41,7 +41,8 @@ import { apiWrite } from "./apiWrite.js";
  * @typedef {"white"|"grey-ramp"|"black-level"|"target-pre-software"|"target-post-software"} TestPattern
  *   The two targets are the screen target (calibration targets, decision 0026): drawn raw, through no
  *   Photo Wall step (pre-software), or through them (post-software); either, in any order.
- * @typedef {"letter"|"a4"} PaperSize   The paper the paper target is printed on.
+ * @typedef {"letter"|"a4"|"4x6"} PaperSize   The paper the paper target is printed on (4x6: a 4 x 6 in
+ *   photo print, carrying fewer squares of the same size).
  * @typedef {"waiting"|"shown"|"ended"} TestPatternState
  * @typedef {{in_force: SignalRange, result: SignalResult, answered: boolean}} SignalView   The Pi's
  *   answer: the range its connector holds, what it made of the wanted one, and whether that answer

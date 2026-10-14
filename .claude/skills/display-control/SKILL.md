@@ -272,7 +272,8 @@ him; to put old values back he presses Restore on the tab and then Done.
 Owner, 2026-10-13: "build the calibration targets"; the two stages are "the users choice -- not
 something that the software enforces". 2026-10-14, for v2 ([0027](../../../docs/decisions/0027-calibration-targets-v2.md)):
 "Start working on a v2 that isn’t so picky". He prints the paper board on any printer and ink, at
-any size (a cut piece for a small screen), lays it anywhere on the screen (under the glass when
+any size (Letter, A4 or a 4 × 6 in photo print, the same 15 mm squares; a cut piece for a small
+screen), lays it anywhere on the screen (under the glass when
 there is one, a black card behind), picks a target on the Picture tab and AirDrops one photo from
 his iPhone 14 Pro: a ProRAW photo lands in `~/Downloads` on the Mac as `IMG_####.DNG`, not in the
 chat. He may photograph with the phone the tab runs on: a test pattern stays up a minute while the
@@ -316,11 +317,20 @@ tab is hidden (the picture session's idle limit, `central/displays/picture.py` `
    - `white-unread`: too few agreeing whites on a surface after the drops: move the light, lamp
      or himself away from the named places, and retake.
 5. **Suggestions are his to make, never yours.** Pre-software: directions for the display's own
-   controls (raise, lower, warmer, cooler, keep, or `unsure`, with the gap's size); name the
+   controls (raise, lower, warmer, cooler, keep, `unsure` or `retake`, with the gap's size and its
+   `spread`); name the
    Samsung's menu item you think matches, and say it is your reading. Photo Wall does not record
    those menus: ask him what he changed. Post-software: values for Photo Wall's brightness,
    contrast, colour temperature and gamma, or "no change", which is the best result; the print
-   look never moves. **`unsure`** (a pre-software direction, or a post-software `unsure` list)
+   look never moves. **`keep` and "no change" are proven** (owner, 2026-10-14: "It shouldn’t say
+   “change nothing” unless it can prove the system is perfectly calibrated. “Retake the photo” is
+   closer to the truth"): said only when the gap, widened by its spread, lies within the match
+   tolerance (`model.py` `judged`, `MATCH_TOLERANCE`). **`retake`** (a pre-software direction, or a
+   post-software `retake` list) means the spread is too wide to tell a match from a gap: never call
+   the display right; ask for a new photo with the light, lamp or himself moved off the paper (the
+   reading's `dropped` places say where). A post-software `to` equal to the entry's with
+   `no_change` false and nothing in `retake` or `unsure` is a gap the four cannot close: pre-software
+   work. **`unsure`** (a pre-software direction, or a post-software `unsure` list)
    means the screen read dimmer by no more than the viewing angle can explain: ask for a squarer
    photo, or the 2x lens from farther, before saying "raise". On a display that answers DDC/CI,
    the pre-software controls include the tab's Display (hardware) sliders; say which.
@@ -335,8 +345,7 @@ tab is hidden (the picture session's idle limit, `central/displays/picture.py` `
    uneven reflection on the paper can bias the white through the ink's level
    ([0027 Findings](../../../docs/decisions/0027-calibration-targets-v2.md#findings)): the white's
    `spread` then carries how unevenly the paper is lit, so a wide spread (a few percent or more)
-   reads "keep" where it cannot tell; say so and ask for a retake with the light moved rather than
-   calling the display right. A reflection lying evenly over the paper alone is still unseen. The
+   reads `retake` where it cannot tell; ask for it with the light moved. A reflection lying evenly over the paper alone is still unseen. The
    pre-software black only says raise or keep (0026's finding): when he says the dark areas glow,
    read the entry's `signal_range` and use the Black level pattern
    ([0024](../../../docs/decisions/0024-display-tuning.md)). The reader has not yet read a real photo

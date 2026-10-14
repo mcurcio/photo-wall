@@ -1,20 +1,30 @@
-"""Draw both calibration boards with OpenCV and write them into contracts/ (decision 0027; owner,
-2026-10-14: "Make sure that you are using standard libraries and not building the algorithm").
+"""Draw both calibration boards with OpenCV and write them into contracts/, and the paper board's
+printable sheets beside Central (decision 0027; owner, 2026-10-14: "Make sure that you are using
+standard libraries and not building the algorithm"; "The printable calibration target should land
+as a likable [linkable] asset on GitHub somewhere, probably even the README. I don’t want the assets
+replaced by every GHA run if they haven’t changed.").
 
 The Pi and `contracts` never import OpenCV, so the boards are drawn here, at build time, by
 cv2.aruco.CharucoBoard.generateImage (scripts/calibration_target/boards.py `charuco_board`) at
 SQUARE_PX a square, with the squares the layout leaves out painted per
 contracts.calibration_target `square` (WHITE 255, GREY `grey_code`, QR 255, RULER 0 with its
 `ruler_steps`), and written as contracts/calibration_boards.py (stdlib data: zlib-compressed,
-base85 text). tests/test_calibration_boards.py regenerates both and compares the file's bytes.
+base85 text). The sheets: one PDF per contracts.calibration_target PaperSize (`sheet_pdf`: the
+paper board's `sheet_squares` piece at PAPER_SQUARE_MM a square, centred, one bit a dot at
+PAPER_DPI, Pillow's PDF writer with fixed metadata) and one PNG preview (`preview_png`), written
+into central/displays/calibration_paper.py's SHEETS_DIR, which Central's print route answers and
+the README links. Every output is the same bytes for the same layout, and
+tests/test_calibration_boards.py regenerates them all and compares the bytes, so CI never rewrites
+them and only a layout change does.
 
-    python -m scripts.calibration_boards            # rewrite contracts/calibration_boards.py
-    python -m scripts.calibration_boards --check    # exit 1 when the file differs from a fresh draw
+    python -m scripts.calibration_boards            # rewrite the rasters' module and the sheets
+    python -m scripts.calibration_boards --check    # exit 1 when any file differs from a fresh draw
 """
 from __future__ import annotations
 
 import argparse
 import base64
+import io
 import sys
 import zlib
 from collections.abc import Sequence
@@ -22,19 +32,25 @@ from pathlib import Path
 from typing import Final
 
 import numpy as np
+from PIL import Image, ImageOps
 
+from central.displays.calibration_paper import PREVIEW_NAME, SHEETS_DIR, sheet_name
 from contracts.calibration_target import (
     PAPER_COLUMNS,
     PAPER_ROWS,
+    PAPER_SQUARE_MM,
     SCREEN_COLUMNS_MAX,
     SCREEN_ROWS,
+    SHEETS_MM,
     SQUARE_PX,
+    PaperSize,
     Raster,
     Square,
     Surface,
     grey_code,
     qr_copies,
     ruler_steps,
+    sheet_squares,
     square,
 )
 from scripts.calibration_target.boards import charuco_board
@@ -42,6 +58,12 @@ from scripts.calibration_target.boards import charuco_board
 GENERATED: Final = Path(__file__).resolve().parents[1] / "contracts" / "calibration_boards.py"
 _COMMAND: Final = "python -m scripts.calibration_boards"
 _WIDTH: Final = 96          # a data line's characters, inside its quotes and indent (under 100 columns)
+
+PAPER_DPI: Final = 600          # the sheets' dots per inch: a dot is about 0.04 mm
+PREVIEW_PX: Final = 32          # the preview's pixels a square
+_MM_PER_INCH: Final = 25.4
+_INK_BELOW: Final = 128         # an 'L' board pixel below this is ink
+SHEET_TITLES: Final = {PaperSize.LETTER: "Letter", PaperSize.A4: "A4", PaperSize.FOUR_BY_SIX: "4 x 6 in"}
 
 
 def screen_raster() -> Raster:
@@ -92,19 +114,70 @@ def module_text(screen: Raster, paper: Raster) -> str:
     ])
 
 
+def sheet_image(paper: PaperSize, board: Raster) -> Image.Image:
+    """The sheet `paper` as a mode "1" image at PAPER_DPI (width and height round(mm / 25.4 *
+    PAPER_DPI)), white, with the top-left sheet_squares(paper) piece of the paper `board` scaled by
+    nearest neighbour to PAPER_SQUARE_MM a square, thresholded at 128 and pasted centred. Pure."""
+    sheet_w, sheet_h = SHEETS_MM[paper]
+    columns, rows = sheet_squares(paper)
+    sheet = Image.new("1", (_dots(sheet_w), _dots(sheet_h)), 1)
+    piece = _board_image(board).crop((0, 0, columns * SQUARE_PX, rows * SQUARE_PX)).resize(
+        (_dots(columns * PAPER_SQUARE_MM), _dots(rows * PAPER_SQUARE_MM)), Image.Resampling.NEAREST,
+    ).point(lambda value: 255 if value >= _INK_BELOW else 0, mode="1")
+    sheet.paste(piece, ((sheet.width - piece.width) // 2, (sheet.height - piece.height) // 2))
+    return sheet
+
+
+def sheet_pdf(paper: PaperSize, board: Raster) -> bytes:
+    """sheet_image(paper, board) as a one-page PDF whose page is the sheet's size (Pillow's PDF
+    writer at resolution PAPER_DPI; a one-bit image is stored CCITT G4), titled "Photo Wall
+    calibration target (<SHEET_TITLES[paper]>)", with no creation or modification date: the same
+    bytes for the same board every time. Pure."""
+    out = io.BytesIO()
+    sheet_image(paper, board).save(out, "PDF", resolution=PAPER_DPI,
+                                   title=f"Photo Wall calibration target ({SHEET_TITLES[paper]})",
+                                   creationDate=None, modDate=None)
+    return out.getvalue()
+
+
+def preview_png(board: Raster) -> bytes:
+    """The whole paper `board` for the README: PREVIEW_PX a square (nearest neighbour), a square of
+    white round it, one bit a pixel, as a PNG with no metadata. Pure."""
+    image = _board_image(board)
+    image = image.resize((image.width * PREVIEW_PX // SQUARE_PX, image.height * PREVIEW_PX // SQUARE_PX),
+                         Image.Resampling.NEAREST)
+    image = ImageOps.expand(image, border=PREVIEW_PX, fill=255).convert("1", dither=Image.Dither.NONE)
+    out = io.BytesIO()
+    image.save(out, "PNG", optimize=False)
+    return out.getvalue()
+
+
+def outputs() -> dict[Path, bytes]:
+    """Every file this script writes, by path, as a fresh draw: GENERATED (module_text), and in
+    SHEETS_DIR each PaperSize's sheet_pdf under sheet_name and the preview under PREVIEW_NAME."""
+    paper = paper_raster()
+    files = {GENERATED: module_text(screen_raster(), paper).encode("utf-8")}
+    files |= {SHEETS_DIR / sheet_name(size): sheet_pdf(size, paper) for size in PaperSize}
+    files[SHEETS_DIR / PREVIEW_NAME] = preview_png(paper)
+    return files
+
+
 def main(argv: Sequence[str] | None = None) -> int:
-    """Write module_text(screen_raster(), paper_raster()) to GENERATED and return 0; with
-    `--check`, write nothing and return 1 when GENERATED's text differs (naming the command that
-    rewrites it on stderr), else 0."""
-    parser = argparse.ArgumentParser(prog=_COMMAND, description="Draw both calibration boards.")
-    parser.add_argument("--check", action="store_true", help="exit 1 when the file is stale")
+    """Write every `outputs` file and return 0; with `--check`, write nothing and return 1 when any
+    file is missing or differs from its fresh draw (naming them and the command that rewrites them
+    on stderr), else 0."""
+    parser = argparse.ArgumentParser(prog=_COMMAND, description="Draw both calibration boards and the sheets.")
+    parser.add_argument("--check", action="store_true", help="exit 1 when a file is stale")
     check = parser.parse_args(argv).check
-    text = module_text(screen_raster(), paper_raster())
+    files = outputs()
     if not check:
-        GENERATED.write_text(text, encoding="utf-8")
+        for path, data in files.items():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
         return 0
-    if not GENERATED.exists() or GENERATED.read_text(encoding="utf-8") != text:
-        print(f"{GENERATED.name} differs from a fresh draw; rewrite it with: {_COMMAND}", file=sys.stderr)
+    stale = [path.name for path, data in files.items() if not path.exists() or path.read_bytes() != data]
+    if stale:
+        print(f"{', '.join(stale)} differ from a fresh draw; rewrite them with: {_COMMAND}", file=sys.stderr)
         return 1
     return 0
 
@@ -123,6 +196,14 @@ def _drawn(surface: Surface, columns: int, rows: int) -> np.ndarray:
             image[row * SQUARE_PX:(row + 1) * SQUARE_PX, column * SQUARE_PX:(column + 1) * SQUARE_PX] = (
                 grey_code(row, column) if value is None else value)
     return image
+
+
+def _board_image(board: Raster) -> Image.Image:
+    return Image.frombytes("L", (board.width, board.height), board.pixels)
+
+
+def _dots(mm: float) -> int:
+    return round(mm / _MM_PER_INCH * PAPER_DPI)
 
 
 def _px(squares: float) -> int:

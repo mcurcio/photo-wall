@@ -90,7 +90,7 @@ const TARGET_HOW = "Print the paper target on any printer, cut a piece if the sc
   + "some of the screen, your shadow off the paper: the target stays up for a minute while this tab is hidden, so "
   + "this phone's camera will do. AirDrop it to the Mac; ProRAW reads best.";
 const PAPER_SIZES: readonly { paper: PaperSize; label: string }[] = [
-  { paper: "letter", label: "Letter" }, { paper: "a4", label: "A4" },
+  { paper: "letter", label: "Letter" }, { paper: "a4", label: "A4" }, { paper: "4x6", label: "4 × 6 in photo" },
 ];
 // What to do with each pattern: the one home of these words, the Black level's reading included
 // (display tuning, "Reading the Black level"); the console design and the runbook describe and
@@ -151,8 +151,8 @@ export function signalWords(range: SignalRange, signal: SignalView | null): stri
   return signal.in_force === range ? sends(range) : RANGE_WAITING;
 }
 
-/** The paper target's print links, Letter and A4 (pictureApi.js `paperTargetUrl`); Central answers
- * each as a download. */
+/** The paper target's print links, Letter, A4 and a 4 × 6 in photo print (pictureApi.js
+ * `paperTargetUrl`); Central answers each committed sheet as a download. */
 function PrintPaperTarget() {
   return (
     <Note>

@@ -1,6 +1,8 @@
 """Both calibration boards as OpenCV draws them (decision 0027; owner, 2026-10-14: "Make sure that
 you are using standard libraries and not building the algorithm"): the generated rasters in
-contracts/calibration_boards.py match a fresh draw by scripts/calibration_boards.py, OpenCV's
+contracts/calibration_boards.py and the committed printable sheets (owner, 2026-10-14: "I don’t
+want the assets replaced by every GHA run if they haven’t changed") match a fresh draw by
+scripts/calibration_boards.py byte for byte, OpenCV's
 board agrees with contracts/calibration_target.py's squares, and each raster paints every square
 the layout leaves out as `square` says."""
 from __future__ import annotations
@@ -12,6 +14,7 @@ import cv2
 import numpy as np
 import pytest
 
+from central.displays.calibration_paper import PREVIEW_NAME, SHEETS_DIR, sheet_path
 from contracts.calibration_target import (
     BOARD_MARKER_SHARE,
     PAPER_COLUMNS,
@@ -21,6 +24,7 @@ from contracts.calibration_target import (
     SCREEN_COLUMNS_MAX,
     SCREEN_ROWS,
     SQUARE_PX,
+    PaperSize,
     Square,
     Surface,
     board_ids,
@@ -30,7 +34,14 @@ from contracts.calibration_target import (
     ruler_steps,
     square,
 )
-from scripts.calibration_boards import GENERATED, main, module_text, paper_raster, screen_raster
+from scripts.calibration_boards import (
+    GENERATED,
+    main,
+    module_text,
+    outputs,
+    paper_raster,
+    screen_raster,
+)
 from scripts.calibration_target.boards import charuco_board, marker_squares
 
 SIZES = {Surface.SCREEN: (SCREEN_ROWS, SCREEN_COLUMNS_MAX), Surface.PAPER: (PAPER_ROWS, PAPER_COLUMNS)}
@@ -56,12 +67,27 @@ def test_the_generated_rasters_are_a_fresh_draw():
     assert board_raster(Surface.PAPER) == paper_raster()
 
 
-def test_the_check_names_the_command_when_the_file_is_stale(tmp_path, monkeypatch, capsys):
-    stale = tmp_path / "calibration_boards.py"
-    stale.write_text("# stale\n", encoding="utf-8")
-    monkeypatch.setattr("scripts.calibration_boards.GENERATED", stale)
+def test_the_committed_sheets_are_a_fresh_draw():
+    """Every PaperSize's PDF and the preview are committed and the same bytes as a fresh draw, so a
+    CI run that draws them again changes nothing. Probe S1-date: a creationDate passed to the PDF
+    writer -> the check fails (its bytes change with the time)."""
+    files = outputs()
+    assert {path for path in files if path.parent == SHEETS_DIR} == {
+        *(sheet_path(paper) for paper in PaperSize), SHEETS_DIR / PREVIEW_NAME}
+    for path, data in files.items():
+        assert path.read_bytes() == data, path.name
+
+
+@pytest.mark.parametrize("stale_name", ["calibration_boards.py", "photo-wall-calibration-target-4x6.pdf"])
+def test_the_check_names_the_command_when_a_file_is_stale(stale_name, tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr("scripts.calibration_boards.GENERATED", tmp_path / "calibration_boards.py")
+    monkeypatch.setattr("scripts.calibration_boards.SHEETS_DIR", tmp_path / "sheets")
+    assert main([]) == 0 and main(["--check"]) == 0
+    stale = next(path for path in outputs() if path.name == stale_name)
+    stale.write_bytes(b"# stale\n")
     assert main(["--check"]) == 1
-    assert "python -m scripts.calibration_boards" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert stale_name in err and "python -m scripts.calibration_boards" in err
     assert main([]) == 0 and main(["--check"]) == 0
 
 

@@ -9,19 +9,21 @@ turn or print, locates itself:
   pattern is a target (contracts/tuning.py TARGET_PATTERNS): SCREEN_ROWS squares across the
   opening's short side and the first `screen_columns` columns along its long side, with whites,
   greys, QR copies naming the port's picture change and their near-black rulers;
-- the **paper board**, printed by Central (central/displays/calibration_paper.py) on any printer,
+- the **paper board**, printed from Central's committed sheets (central/displays/calibration_paper.py) on any printer,
   in any ink, at any size, laid whole or as a cut piece anywhere on the screen, under the glass
   when there is one, with a black card behind it.
 
 Rules this module owns (one home each): both boards' constants, which square is what (`square`,
 `grey_code`), the QR copies and their rulers (`qr_copies`, `ruler_steps`), how many columns an
-opening shows (`screen_columns`), the sheets, the code's text (`code_text`, `parsed_code`), and the
-two rasters OpenCV drew at build time (`board_raster`; scripts/calibration_boards.py writes them
-into contracts/calibration_boards.py, a test regenerates and compares them). The Pi never imports
+opening shows (`screen_columns`), the sheets and the piece of the paper board each carries
+(`sheet_squares`), the code's text (`code_text`, `parsed_code`), and the two rasters OpenCV drew
+at build time (`board_raster`; scripts/calibration_boards.py writes them into
+contracts/calibration_boards.py, a test regenerates and compares them). The Pi never imports
 OpenCV. Rules it does NOT own: the cv2 board objects (scripts/calibration_target/boards.py), how
 the Player maps an opening to the board and which stage is raw (player/geometry.py `board_point`,
-`board_signal`), the QR's modules (player/calibration_target.py `target_modules`, segno), the PDF
-(central/displays/calibration_paper.py), how a photo is read (scripts/calibration_target/).
+`board_signal`), the QR's modules (player/calibration_target.py `target_modules`, segno), the
+printed sheets (drawn by scripts/calibration_boards.py, committed where
+central/displays/calibration_paper.py names them), how a photo is read (scripts/calibration_target/).
 """
 from __future__ import annotations
 
@@ -39,7 +41,11 @@ from contracts.node_protocol import counter, token
 
 LETTER_MM: Final = (279.4, 215.9)          # a US Letter sheet, landscape
 A4_MM: Final = (297.0, 210.0)              # an ISO A4 sheet, landscape
+FOUR_BY_SIX_MM: Final = (152.4, 101.6)     # a 4 x 6 inch photo print, landscape
 PRINT_MARGIN_MM: Final = 6.35              # the least unprinted edge a home printer leaves
+PAPER_SQUARE_MM: Final = 15.0              # a paper board square at 100 %, on every sheet (owner, 2026-10-14:
+                                           # "Can I print it on a 4x6 photo printer?": a small sheet
+                                           # carries fewer squares, never smaller ones)
 
 # -- The values a target carries --
 
@@ -65,9 +71,11 @@ class PaperSize(StrEnum):
     """The sheet the paper target is printed on, landscape (the PDF route's `paper`)."""
     LETTER = "letter"
     A4 = "a4"
+    FOUR_BY_SIX = "4x6"
 
 
-SHEETS_MM: Final[Mapping[PaperSize, tuple[float, float]]] = {PaperSize.LETTER: LETTER_MM, PaperSize.A4: A4_MM}
+SHEETS_MM: Final[Mapping[PaperSize, tuple[float, float]]] = {
+    PaperSize.LETTER: LETTER_MM, PaperSize.A4: A4_MM, PaperSize.FOUR_BY_SIX: FOUR_BY_SIX_MM}
 
 
 @dataclass(frozen=True)
@@ -252,6 +260,17 @@ def ruler_steps(copy: QrCopy) -> tuple[RulerStep, ...]:
                  for index, code in enumerate(NEAR_BLACK_STEPS))
 
 
+def sheet_squares(paper: PaperSize) -> tuple[int, int]:
+    """(columns, rows) of the paper board that `paper` carries: its top-left piece (from row 0 and
+    column 0, so OpenCV's own pattern and marker ids hold and the reader reads it as any cut piece),
+    as many PAPER_SQUARE_MM squares each way as fit the sheet less PRINT_MARGIN_MM on each side, at
+    most the whole board (PAPER_COLUMNS x PAPER_ROWS). Letter and A4: the whole 17 x 13; 4x6: 9 x 5.
+    Pure."""
+    width, height = SHEETS_MM[paper]
+    fit = lambda mm: math.floor((mm - 2 * PRINT_MARGIN_MM) / PAPER_SQUARE_MM)  # noqa: E731
+    return min(PAPER_COLUMNS, fit(width)), min(PAPER_ROWS, fit(height))
+
+
 def screen_columns(aspect: float) -> int:
     """How many of the screen board's columns an opening shows: SCREEN_ROWS squares across its
     short side, so floor(aspect * SCREEN_ROWS) along its long side (a 1e-9 slack for a float
@@ -291,9 +310,10 @@ def _grey_codes() -> Mapping[tuple[int, int], int]:
 
 
 __all__ = [
-    "A4_MM", "BOARD_DICTIONARY", "BOARD_FIRST_ID", "BOARD_MARKER_SHARE", "CODE_PREFIX", "GREY_CODES", "LETTER_MM",
-    "NEAR_BLACK_STEPS", "PAPER_COLUMNS", "PAPER_ROWS", "PRINT_MARGIN_MM", "QR_COPY_PLACES", "QR_ERROR", "QR_PERIOD",
+    "A4_MM", "BOARD_DICTIONARY", "BOARD_FIRST_ID", "BOARD_MARKER_SHARE", "CODE_PREFIX", "FOUR_BY_SIX_MM", "GREY_CODES",
+    "LETTER_MM", "NEAR_BLACK_STEPS", "PAPER_COLUMNS", "PAPER_ROWS", "PAPER_SQUARE_MM", "PRINT_MARGIN_MM", "QR_COPY_PLACES", "QR_ERROR", "QR_PERIOD",
     "QR_QUIET_MODULES", "QR_SQUARES", "RULER_BAND", "SCREEN_COLUMNS_MAX", "SCREEN_ROWS", "SHEETS_MM", "SQUARE_PX",
     "PaperSize", "QrCopy", "QrModules", "Raster", "RulerStep", "Square", "Surface", "TargetCode", "board_ids",
-    "board_raster", "code_text", "grey_code", "parsed_code", "qr_copies", "ruler_steps", "screen_columns", "square",
+    "board_raster", "code_text", "grey_code", "parsed_code", "qr_copies", "ruler_steps", "screen_columns",
+    "sheet_squares", "square",
 ]

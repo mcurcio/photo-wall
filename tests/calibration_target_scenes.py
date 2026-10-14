@@ -34,7 +34,6 @@ import cv2
 import numpy as np
 
 from appliance.display_host.picture import operations_for
-from central.displays.calibration_paper import PAPER_SQUARE_MM
 from central.displays.picture_history import PictureEntryKind
 from central.displays.views import (
     DisplayRefView,
@@ -46,6 +45,7 @@ from central.displays.views import (
 from contracts.calibration_target import (
     PAPER_COLUMNS,
     PAPER_ROWS,
+    PAPER_SQUARE_MM,
     QR_QUIET_MODULES,
     QR_SQUARES,
     SCREEN_ROWS,

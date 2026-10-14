@@ -1,9 +1,11 @@
 """The paper calibration target to print (decisions 0026, 0027; owner, 2026-10-13: "photo-wall could
-give me a printable asset"): central/displays/calibration_paper.py.
+give me a printable asset"; 2026-10-14: "Can I print it on a 4x6 photo printer?"): the sheets
+scripts/calibration_boards.py draws and commits (central/displays/calibration_paper.py names them).
 
-(CA1) each sheet is its size at PAPER_DPI, the board centred inside the printer's margin; (CA2) the
-reader's own ChArUco board finds the printed board, whole and as a small cut piece; (CA3) only black
-and white dots; (CA4) the PDF is one page the sheet's size, titled, the same bytes every time.
+(CA1) each sheet is its size at PAPER_DPI, its piece of the board (`sheet_squares`) centred inside
+the printer's margin at PAPER_SQUARE_MM a square; (CA2) the reader's own ChArUco board finds the
+printed board, whole, as the 4x6 sheet's piece and as a small cut piece; (CA3) only black and white
+dots; (CA4) the PDF is one page the sheet's size, titled, the same bytes every time.
 """
 from __future__ import annotations
 
@@ -14,25 +16,36 @@ import numpy as np
 import pytest
 from PIL import Image, ImageOps, PdfParser
 
-from central.displays.calibration_paper import PAPER_DPI, PAPER_SQUARE_MM, paper_pdf, paper_raster
 from contracts.calibration_target import (
     PAPER_COLUMNS,
     PAPER_ROWS,
+    PAPER_SQUARE_MM,
     PRINT_MARGIN_MM,
     SHEETS_MM,
     PaperSize,
     Surface,
+    board_raster,
+    sheet_squares,
 )
+from scripts.calibration_boards import PAPER_DPI, sheet_image, sheet_pdf
 from scripts.calibration_target.boards import charuco_board, marker_squares
 
-POINTS = {PaperSize.LETTER: (792.0, 612.0), PaperSize.A4: (841.89, 595.28)}
-TITLES = {PaperSize.LETTER: "Letter", PaperSize.A4: "A4"}
+POINTS = {PaperSize.LETTER: (792.0, 612.0), PaperSize.A4: (841.89, 595.28), PaperSize.FOUR_BY_SIX: (432.0, 288.0)}
+TITLES = {PaperSize.LETTER: "Letter", PaperSize.A4: "A4", PaperSize.FOUR_BY_SIX: "4 x 6 in"}
 READ_REDUCTION = 4             # 600 DPI to 150 DPI: what a phone photo of the sheet resolves, roughly
 INNER_CORNERS = (PAPER_COLUMNS - 1) * (PAPER_ROWS - 1)
 
 
 def _dots(mm: float, dpi: float = PAPER_DPI) -> int:
     return round(mm / 25.4 * dpi)
+
+
+def paper_raster(paper: PaperSize):
+    return sheet_image(paper, board_raster(Surface.PAPER))
+
+
+def paper_pdf(paper: PaperSize) -> bytes:
+    return sheet_pdf(paper, board_raster(Surface.PAPER))
 
 
 @pytest.fixture(scope="module", params=list(PaperSize))
@@ -58,11 +71,13 @@ def test_each_sheet_is_its_size_and_the_board_is_centred_inside_the_margin(sheet
     paper, image, inked = sheet
     sheet_w, sheet_h = SHEETS_MM[paper]
     assert image.size == (_dots(sheet_w), _dots(sheet_h))
-    # The board's four corner squares are ink, so the ink's bounding box is the board.
+    # The piece's corner squares are ink (an odd number of columns and rows from the board's black
+    # top-left), so the ink's bounding box is the piece.
+    columns_kept, rows_kept = sheet_squares(paper)
     rows, columns = np.flatnonzero(inked.any(axis=1)), np.flatnonzero(inked.any(axis=0))
     top, bottom, left, right = rows[0], rows[-1] + 1, columns[0], columns[-1] + 1
-    assert (right - left, bottom - top) == (_dots(PAPER_COLUMNS * PAPER_SQUARE_MM),
-                                            _dots(PAPER_ROWS * PAPER_SQUARE_MM))
+    assert (right - left, bottom - top) == (_dots(columns_kept * PAPER_SQUARE_MM),
+                                            _dots(rows_kept * PAPER_SQUARE_MM))
     assert abs(left - (image.width - right)) <= 1 and abs(top - (image.height - bottom)) <= 1
     margin = _dots(PRINT_MARGIN_MM)
     assert min(left, top, image.width - right, image.height - bottom) >= margin
@@ -88,6 +103,25 @@ def test_the_readers_board_finds_the_printed_board_whole_and_cut_small():
     inside = {marker_id for marker_id, (row, column) in marker_squares(Surface.PAPER).items()
               if first_row <= row < first_row + 4 and first_column <= column < first_column + 4}
     assert found and found <= inside, (found, inside)
+
+
+def test_the_sheets_carry_the_whole_board_or_the_4x6_piece():
+    """A small sheet carries fewer squares, never smaller ones (owner, 2026-10-14: "Can I print it on
+    a 4x6 photo printer?"). Probe C1-fit: the margin left out of sheet_squares -> 4x6 holds 10 x 6."""
+    assert sheet_squares(PaperSize.LETTER) == sheet_squares(PaperSize.A4) == (PAPER_COLUMNS, PAPER_ROWS)
+    assert sheet_squares(PaperSize.FOUR_BY_SIX) == (9, 5)
+
+
+def test_the_readers_board_finds_the_4x6_sheets_piece():
+    """CA2 for the 4x6 sheet at 150 DPI: every marker of its 9 x 5 piece, and only those (the reader
+    reads it as any cut piece of the one paper board). Probe C1-crop: the piece cropped from the
+    board's middle -> other ids are found."""
+    image = paper_raster(PaperSize.FOUR_BY_SIX).convert("L").reduce(READ_REDUCTION)
+    markers, corners = _detect(image)
+    columns, rows = sheet_squares(PaperSize.FOUR_BY_SIX)
+    assert markers == {marker_id for marker_id, (row, column) in marker_squares(Surface.PAPER).items()
+                       if row < rows and column < columns}
+    assert len(corners) >= (columns - 1) * (rows - 1) - 2, len(corners)
 
 
 def test_only_black_and_white_dots(sheet):

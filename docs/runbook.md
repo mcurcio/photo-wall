@@ -1127,17 +1127,17 @@ ORDER BY at DESC, number DESC;
 
 Two targets read together from one phone photo, so the agent can say what to change on a display: the **screen board** the Player draws in each Frame's opening and the **paper board** Central prints, both OpenCV ChArUco boards. Why they are shaped so is [0027](decisions/0027-calibration-targets-v2.md); both stages and what each aims at are [0026](decisions/0026-calibration-targets.md)'s; the layout is `contracts/calibration_target.py`'s; the operator's instructions have one home, the Picture tab's words under each target ([console design §5](operator-console-design.md#5-the-frame-page)); the agent's procedure and what each refusal asks is the [display-control skill](../.claude/skills/display-control/SKILL.md#reading-the-calibration-targets).
 
-1. **Print the paper.** From the Picture tab's print link, or the operator route (admin token), Letter or A4:
+1. **Print the paper.** Letter, A4 or a 4 × 6 in photo print: from the Picture tab's print link, the [README](../README.md)'s links, or the operator route (admin token):
 
    ```sh
    curl -o target.pdf -H 'Authorization: Bearer <admin-token>' "$CENTRAL/v1/operator/calibration-target/paper.pdf?paper=letter"
    ```
 
-   Any printer and any ink (grey or colour black reads: the reader measures the ink in the same photo), at any size. For a screen smaller than the sheet, cut a piece, or print it smaller. Refusal: 422 `bad_paper` (neither `letter` nor `a4`).
+   All three are the same committed files (`central/displays/calibration_sheets/`): the route serves them as they are. Every sheet keeps 15 mm squares (`PAPER_SQUARE_MM`); a small sheet carries fewer of them, the 4 × 6 in print the board's top-left 9 × 5 squares (`sheet_squares`), which reads as any cut piece does. Any printer and any ink (grey or colour black reads: the reader measures the ink in the same photo), at any size. For a screen smaller than the sheet, cut a piece, or print it smaller. Refusal: 422 `bad_paper` (not `letter`, `a4` or `4x6`).
 2. **Lay it on the screen**, anywhere and at any turn, under the glass when the Frame has glass, with a black card behind it: the paper must lie in the screen's plane. It may cover part of the screen board; those squares are skipped.
 3. **Pick a stage.** On the Frame's Picture tab, Test pattern › Show:
    - **Target: pre-software** (stage 1, the display): the screen board drawn raw, every Photo Wall step skipped (the signal range still applies). The suggestion is for the display's own controls (its menu, or on a display that answers DDC/CI the tab's Display (hardware) sliders), as a direction and a rough size.
-   - **Target: post-software** (stage 2, Photo Wall): the screen board drawn through Photo Wall's settings (all but the mat shadow). The suggestion covers only what the display left over, in Photo Wall's brightness, contrast, colour temperature and gamma, and prefers no change: a display right on its own reads "no change", the best result. The print look (LUT, saturation, soft highlights, black floor) is the intended look and never moves.
+   - **Target: post-software** (stage 2, Photo Wall): the screen board drawn through Photo Wall's settings (all but the mat shadow). The suggestion covers only what the display left over, in Photo Wall's brightness, contrast, colour temperature and gamma, and prefers no change: a display right on its own reads "no change", the best result, once the photo proves it. The print look (LUT, saturation, soft highlights, black floor) is the intended look and never moves.
 
    Either, in any order: nothing enforces one before the other or remembers an earlier reading. The session's usual rules hold (live while the tab runs, off by Done, Revert, leaving the tab or after 10 minutes on the Pi). You can photograph with the phone the tab runs on: while a test pattern is shown, hiding the tab keeps it up for a minute, and coming back within it keeps the same session ([0024](decisions/0024-display-tuning.md)).
 4. **Take one photo** holding the paper and some of the screen, at a reasonable angle, your shadow off the paper. ProRAW reads white, tone and black; a normal photo (JPEG, HEIC) gives a rough white only. A small display is photographed close: its QR copies read from about 30 px a square. AirDrop it to the Mac (`~/Downloads`).
@@ -1149,6 +1149,8 @@ Two targets read together from one phone photo, so the agent can say what to cha
 
    `op run` resolves `PHOTO_WALL_ADMIN_TOKEN` and, optionally, `PHOTO_WALL_READ_DATABASE_URL` from their `op://` references in the environment (or `--env-file`); never put either on the command line. It prints one JSON object, `{"reading": …, "suggestion": …}` or `{"refused": …}`, and exits 0 for a reading, 2 for a refusal, 1 for an error (a file unreadable, Central unreachable). The reader only reads: it fetches the sent entry the QR names ([Configuration snapshots](#configuration-snapshots)) and never writes to Central.
 6. **Change, then read again.** Move what the suggestion says, take a new photo, and press **Done** on the tab when it reads right.
+
+**Keep, no change, or retake** (owner, 2026-10-14: "It shouldn’t say “change nothing” unless it can prove the system is perfectly calibrated. “Retake the photo” is closer to the truth"). A step reads `keep` (pre-software), and a post-software suggestion `no_change`, only when the gap, widened by `KEEP_SPREADS` of its spread, lies within the property's match tolerance (`MATCH_TOLERANCE`, a placeholder for the bench like every threshold there). A gap over `KEEP_SPREADS` of its spread is named (raise, lower, warmer, cooler). Otherwise the photo cannot tell, and the answer is `retake` (pre-software, with the step's `spread`) or the property in the post-software `retake` list: take the photo again with the light moved off the paper (the reading's `dropped` says where). The rule's one home is `scripts/calibration_target/model.py` `judged`.
 
 **Refusals, and what to do** (each stands for a real failure, [0027](decisions/0027-calibration-targets-v2.md#the-refusals-that-remain-each-for-a-real-failure)):
 
@@ -1163,11 +1165,11 @@ Two targets read together from one phone photo, so the agent can say what to cha
 
 Dropped squares in a reading (`reflection-edge`, `covered`, `clipped`, `copy-unlike-the-rest`, …) are not refusals: each has its place, so the light can be moved next time.
 
-**Regenerating the boards.** The rasters are drawn by OpenCV at build time; after changing the boards' constants, rewrite them and commit the result (a test regenerates and compares the bytes):
+**Regenerating the boards and the sheets.** The rasters and the printable sheets (one PDF per paper size and the README's PNG preview, in `central/displays/calibration_sheets/`) are drawn at build time, the same bytes for the same layout; after changing the boards' constants or a sheet, rewrite them and commit the result. A test regenerates them all and compares the bytes, so CI never rewrites them:
 
 ```sh
-.venv/bin/python -m scripts.calibration_boards          # rewrite contracts/calibration_boards.py
-.venv/bin/python -m scripts.calibration_boards --check  # exit 1 when the file differs
+.venv/bin/python -m scripts.calibration_boards          # rewrite contracts/calibration_boards.py and the sheets
+.venv/bin/python -m scripts.calibration_boards --check  # exit 1 when any file differs
 ```
 
 The reader (`scripts/calibration_target/`) is the agent's tool and is never shipped; its thresholds have one home, `scripts/calibration_target/model.py`. **NOT RUN on real hardware yet:** [0027](decisions/0027-calibration-targets-v2.md#not-run) lists the bench steps. CI reads synthetic photos only.

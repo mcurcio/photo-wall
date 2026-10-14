@@ -805,7 +805,8 @@ def test_hiding_the_tab_keeps_a_shown_pattern_and_ends_a_session_without_one(pag
 
 PATTERNS = ["Off", "White", "Grey ramp", "Black level", "Target: pre-software", "Target: post-software"]
 PAPER_TARGET = {"Letter": "/v1/operator/calibration-target/paper.pdf?paper=letter",
-                "A4": "/v1/operator/calibration-target/paper.pdf?paper=a4"}
+                "A4": "/v1/operator/calibration-target/paper.pdf?paper=a4",
+                "4 × 6 in photo": "/v1/operator/calibration-target/paper.pdf?paper=4x6"}
 
 
 def _print_links(page):
@@ -816,7 +817,7 @@ def test_both_targets_are_offered_in_either_order_with_the_paper_targets_print_l
     """Calibration targets U1, acceptance 1 and 2 (owner R7, R8: either stage, any order; R1: the
     printable sheet): the picker lists six patterns; each target posts exactly its wire value, post
     before pre and back, with nothing gating either; the Pi shows each; with a target chosen the tab
-    shows Letter and A4 linking to the paper target and v2's three sentences (a piece of paper
+    shows Letter, A4 and 4 × 6 in photo linking to the paper target and v2's three sentences (a piece of paper
     anywhere on the screen; no dark box, no uncut sheet), and none with another pattern or Off.
 
     Mutations: U1-wire, send "target-pre" -> Central's 422 and the body assertion fails; U1-links,
