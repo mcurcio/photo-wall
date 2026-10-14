@@ -1,6 +1,7 @@
-"""Screenshots of calibration targets (0026): the Frame page's Picture tab before and after, the one
-console view the delivery changes (the Test pattern becomes a Select with the two screen targets and
-the paper target's print links; a target's try names its stage in the History).
+"""Screenshots of calibration targets v2 (0026): the Frame page's Picture tab after, the one console
+view v2 changes (a target's words shrink to three sentences: any printer, a piece of paper anywhere
+on the screen, one photo; the print links and the History's stage stay). The before is v1's
+docs/evidence/calibration-targets/after-*.
 
 Not a test (no `test_` prefix, so CI never collects it). Run it by path, against a built console
 and the test database, as the browser tier runs (AGENTS.md Verify):
@@ -8,8 +9,7 @@ and the test database, as the browser tier runs (AGENTS.md Verify):
     PHOTO_WALL_BROWSER_TESTS=1 .venv/bin/python scripts/test_local.py -q \
         tests/browser/capture_calibration_targets_evidence.py --browser chromium -k after
 
-`-k before` runs on a checkout of main with this file copied there: the `before` case imports
-nothing main lacks. PNGs go to $PHOTO_WALL_EVIDENCE_DIR (default docs/evidence/calibration-targets),
+PNGs go to $PHOTO_WALL_EVIDENCE_DIR (default docs/evidence/calibration-targets-v2),
 one per state and colour scheme, each the whole page. Seeding and every step reuse the browser
 tests' own helpers, so every state shown here is one those tests prove.
 """
@@ -26,7 +26,7 @@ pytestmark = pytest.mark.skipif(
     reason="set PHOTO_WALL_BROWSER_TESTS=1 and install Playwright Chromium",
 )
 
-OUT = Path(os.environ.get("PHOTO_WALL_EVIDENCE_DIR", "docs/evidence/calibration-targets"))
+OUT = Path(os.environ.get("PHOTO_WALL_EVIDENCE_DIR", "docs/evidence/calibration-targets-v2"))
 SCHEMES = ["dark", "light"]
 
 
@@ -52,27 +52,16 @@ def _picture(page, registry, scheme, name, steps):
 
 
 @pytest.mark.parametrize("scheme", SCHEMES)
-def test_before_white(page, registry, scheme):
-    """Base: main's Test pattern (four choices) with White shown."""
-    from test_frame_picture_browser import PAPER, TEST_PATTERN, _choice, _group
-
-    def steps(page):
-        _choice(page, TEST_PATTERN, "White").click()
-        expect(_group(page, TEST_PATTERN)).to_contain_text(PAPER)
-
-    _picture(page, registry, scheme, "before-white", steps)
-
-
-@pytest.mark.parametrize("scheme", SCHEMES)
 def test_after_target_pre_software(page, registry, scheme):
-    """Target: pre-software shown, its line and the paper target's print links; the try's Details
-    in the History name the stage."""
+    """Target: pre-software shown, v2's three sentences and the paper target's print links; the
+    try's Details in the History name the stage."""
     from test_frame_picture_browser import SHOWN, TEST_PATTERN, _group, _show
     from test_picture_history_browser import TRIED, _rows
 
     def steps(page):
         _show(page, "Target: pre-software")
         expect(_group(page, TEST_PATTERN)).to_contain_text(SHOWN)
+        expect(_group(page, TEST_PATTERN)).to_contain_text("cut a piece if the screen is small")
         expect(_group(page, TEST_PATTERN).get_by_role("link", name="Letter", exact=True)).to_be_visible()
         tried = _rows(page, TRIED).first
         expect(tried).to_be_visible()
@@ -84,7 +73,7 @@ def test_after_target_pre_software(page, registry, scheme):
 
 @pytest.mark.parametrize("scheme", SCHEMES)
 def test_after_target_post_software(page, registry, scheme):
-    """Target: post-software shown, its line and the paper target's print links; the try's row in
+    """Target: post-software shown, v2's three sentences and the paper target's print links; the try's row in
     the History names the stage (the entry the reader reads), waited for as the pre-software one."""
     from test_frame_picture_browser import SHOWN, TEST_PATTERN, _group, _show
     from test_picture_history_browser import TRIED, _rows
@@ -92,6 +81,7 @@ def test_after_target_post_software(page, registry, scheme):
     def steps(page):
         _show(page, "Target: post-software")
         expect(_group(page, TEST_PATTERN)).to_contain_text(SHOWN)
+        expect(_group(page, TEST_PATTERN)).to_contain_text("ProRAW reads best")
         expect(_group(page, TEST_PATTERN).get_by_role("link", name="A4", exact=True)).to_be_visible()
         tried = _rows(page, TRIED).first
         expect(tried).to_be_visible()

@@ -811,10 +811,12 @@ def test_both_targets_are_offered_in_either_order_with_the_paper_targets_print_l
     """Calibration targets U1, acceptance 1 and 2 (owner R7, R8: either stage, any order; R1: the
     printable sheet): the picker lists six patterns; each target posts exactly its wire value, post
     before pre and back, with nothing gating either; the Pi shows each; with a target chosen the tab
-    shows Letter and A4 linking to the paper target, and none with another pattern or Off.
+    shows Letter and A4 linking to the paper target and v2's three sentences (a piece of paper
+    anywhere on the screen; no dark box, no uncut sheet), and none with another pattern or Off.
 
     Mutations: U1-wire, send "target-pre" -> Central's 422 and the body assertion fails; U1-links,
-    render the links for every pattern -> the Off and White assertions fail."""
+    render the links for every pattern -> the Off and White assertions fail; K1-words, restore v1's
+    PAPER_UNDER_GLASS -> the "cut a piece" assertion fails."""
     _seen(registry)
     with FakePi(registry), operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall")
@@ -830,9 +832,11 @@ def test_both_targets_are_offered_in_either_order_with_the_paper_targets_print_l
                             ("Target: post-software", "target-post-software")]:
             _show(page, label)
             expect(group).to_contain_text(SHOWN)
-            expect(group).to_contain_text("Lay the printed sheet uncut in the dark box under the Frame's glass")
-            # The camera is often the phone the tab runs on: hiding the tab keeps a pattern a minute.
-            expect(group).to_contain_text("the target stays up for a minute while this tab is hidden")
+            # Design v2's three sentences: any size of paper, anywhere on the screen.
+            expect(group).to_contain_text("cut a piece if the screen is small")
+            expect(group).to_contain_text("ProRAW reads best")
+            expect(group).not_to_contain_text("dark box")
+            expect(group).not_to_contain_text("uncut")
             expect(_print_links(page)).to_have_text(list(PAPER_TARGET))
             for name, href in PAPER_TARGET.items():
                 expect(group.get_by_role("link", name=name, exact=True)).to_have_attribute("href", href)
