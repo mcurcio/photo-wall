@@ -77,6 +77,7 @@ PLAYER_RUNNER = r'''
 import ast
 import collections
 import hashlib
+import dataclasses
 import importlib.util
 import json
 import os
@@ -169,6 +170,10 @@ class AuditedService(PlayerService):
         self.commits_checked = set()
         self.commit_checks = 0
         self.commit_failures = set()
+        # When each plan revision and each Commit reached this Player: a revision that lands
+        # just before a start, ahead of its own Commit, reads off this log.
+        self.deliveries = collections.deque(maxlen=64)
+        self.plan_revision = None
 
     async def request(self, method, path, *, body=None, authenticated=True):
         if path == '/v1/player/readiness':
@@ -180,12 +185,20 @@ class AuditedService(PlayerService):
         return await super().request(method, path, body=body, authenticated=authenticated)
 
     def _apply_state(self, state):
+        if state.plan is not None and state.plan.revision != self.plan_revision:
+            self.plan_revision = state.plan.revision
+            with self.audit_lock:
+                self.deliveries.append(dict(kind='plan', utc=time.time(), revision=state.plan.revision,
+                    issued_at=state.plan.issued_at, starts=sorted({layer.start for layer in state.plan.layers})))
         for commit in state.commits:
             key = (commit.authority_epoch, commit.plan_id, commit.revision, commit.readiness_sequence)
             identity = (*key, commit.assignment_ids)
             with self.audit_lock:
                 if identity in self.commits_checked:
                     continue
+                self.deliveries.append(dict(kind='commit', utc=time.time(), revision=commit.revision,
+                    readiness_sequence=commit.readiness_sequence, committed_at=commit.committed_at,
+                    assignment_ids=list(commit.assignment_ids)))
                 report = self.reports.get(key)
                 if (report is None or not report['capacity_ok'] or report['clock_uncertainty'] > .1
                         or not set(commit.assignment_ids) <= set(report['prepared'])):
@@ -240,13 +253,15 @@ while not (stopping[0] and service.stopped):
                 capacity_ok=sample['capacity_ok'], prepared_count=len(sample['prepared']),
                 failure_codes=sorted({item['code'] for item in sample['failures']}))
                 for sample in list(service.reports.values())[-64:]]
+            deliveries = list(service.deliveries)
         report = dict(schema=1, scope='simulated_actuation', utc=time.time(),
             monotonic=start, player_id=registration.player_id if registration else None,
             authority_epoch=registration.authority_epoch if registration else None,
             persistence='volatile',
             fault=service.last_fault,
             outputs=count, events=list(renderer.events), recent_readiness=readiness_samples, commit_checks=checks,
-            commit_failures=failures,
+            commit_failures=failures, deliveries=deliveries,
+            clock=dataclasses.asdict(service.mapping.diagnostics),
             forbidden_imports_absent=all(importlib.util.find_spec(name) is None
                                          for name in ('central', 'media', 'immich')))
         data = json.dumps(report, sort_keys=True, separators=(',', ':')).encode()

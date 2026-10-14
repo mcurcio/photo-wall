@@ -27,7 +27,7 @@ No local journal bridges a crash. A restarted process initially shows black, est
 
 ## Timing, continuity, and presentation
 
-Only active committed layers execute. Preparation is limited to current and imminent work. The authenticated `/v1/player/time` mapping gates readiness and local scheduling. A stale, stepped, or uncertain mapping prevents new clock-dependent work while already authorized visible output may remain until its lease expires.
+Only active committed layers execute. A Commit grants one revision's layer; a newer revision that keeps the content reaches the Player before Central can commit it (that needs the Player's readiness for the newer revision), so the grant already accepted still starts the content at its time, in the order it granted, until the fresh Commit renews it. Whatever ends a Commit (revocation, lost preparation, clock health) ends the carried grant too. Preparation is limited to current and imminent work. The authenticated `/v1/player/time` mapping gates readiness and local scheduling. A stale, stepped, or uncertain mapping prevents new clock-dependent work while already authorized visible output may remain until its lease expires.
 
 Layer start, end, media origin, fades, and ordering remain central facts. Covered video resumes at current logical position. What a Frame keeps for when nothing plays is the after-state Central planned on each layer, which the Player applies for the current process and binding ([what a Frame keeps](execution-contract.md#what-a-frame-keeps)). Cache presence or preroll alone cannot become fallback. Failed replacement preparation or presentation preserves a still-valid existing composition; expired or revoked authority falls through to an authorized retained still or black.
 

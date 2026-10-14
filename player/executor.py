@@ -55,6 +55,12 @@ class _Assignment:
     # The readiness sequence of the latest start grant (Commit) seen for this revision, accepted
     # or refused; reported as lost while it is prepared and not committed.
     granted_sequence: int | None = None
+    # What the latest accepted Commit authorized: this layer (Central's ordering at that
+    # revision) between `granted_from` and `granted_until`. A rolling revision that keeps the
+    # content keeps the grant until a fresh Commit renews it; every loss of the Commit ends it.
+    granted_layer: Layer | None = None
+    granted_from: float = 0
+    granted_until: float = 0
 
 
 @dataclass(frozen=True)
@@ -251,7 +257,9 @@ class Executor:
                 old = self._assignments.get(key) or self._inactive.pop(key, None)
                 if old and _content_identity(layer) == _content_identity(old.layer):
                     old.layer = layer
-                    # Revision-specific authorization must be renewed by central.
+                    # Revision-specific authorization must be renewed by central. Until it
+                    # is, the grant already accepted still starts this content at its time:
+                    # the newer revision arrives before its own Commit can.
                     old.committed = False
                     old.granted_sequence = None
                     old.offered_until = max(old.offered_until, plan.valid_until)
@@ -504,13 +512,20 @@ class Executor:
         healthy = self.mapping.healthy()
         if not healthy:
             for assignment in self._assignments.values():
-                assignment.committed = False
+                self._end_grant(assignment)
                 assignment.readiness_generation += 1
         return healthy
 
     @staticmethod
-    def _lose_preparation(assignment: _Assignment) -> None:
-        assignment.prepared = assignment.committed = False
+    def _end_grant(assignment: _Assignment) -> None:
+        """The Commit is lost: neither this revision's nor a carried one starts the content."""
+        assignment.committed = False
+        assignment.granted_layer = None
+
+    @classmethod
+    def _lose_preparation(cls, assignment: _Assignment) -> None:
+        assignment.prepared = False
+        cls._end_grant(assignment)
         assignment.execution_layer = None
         assignment.readiness_generation += 1
 
@@ -532,11 +547,11 @@ class Executor:
                 if result.status == "failed":
                     assignment.failure = result.code if result.code != "none" else "decode"
                     if not assignment.started:
-                        assignment.committed = False
+                        self._end_grant(assignment)
                 elif result.status == "pending":
                     assignment.failure = None
                     if not assignment.started:
-                        assignment.committed = False
+                        self._end_grant(assignment)
                 else:
                     assignment.failure = None
             self._capacity_ok = self.renderer.capacity(self._compositions(imminent, now)).available
@@ -639,6 +654,9 @@ class Executor:
             changed = any(not a.committed for a in assignments)
             for assignment in assignments:
                 assignment.committed = True
+                assignment.granted_layer = assignment.layer
+                assignment.granted_from = self._plan.valid_from
+                assignment.granted_until = self._plan.valid_until
                 self._invalidated.discard(assignment.layer.assignment_id)
             return changed
 
@@ -815,11 +833,12 @@ class Executor:
                 if (not assignment.secured or not assignment.prepared or assignment.failure
                         or not self._current_authority(assignment)):
                     continue
-                if (assignment.committed and self._plan and self.mapping.healthy()
-                        and max(assignment.layer.start, self._plan.valid_from) <= now
-                        < min(assignment.layer.end, self._plan.valid_until)):
-                    assignment.execution_layer = assignment.layer
-                    assignment.execution_until = self._plan.valid_until
+                granted = assignment.granted_layer
+                if (granted is not None and self.mapping.healthy()
+                        and max(granted.start, assignment.granted_from) <= now
+                        < min(granted.end, assignment.granted_until)):
+                    assignment.execution_layer = granted
+                    assignment.execution_until = assignment.granted_until
                 executing = assignment.execution_layer
                 if (executing is not None and executing.start <= now
                         < min(executing.end, assignment.execution_until)):

@@ -779,6 +779,56 @@ def test_rolling_revision_preserves_original_execution_order_and_lease(tmp_path)
     assert rig.renderer.outputs["hdmi1"].layers == ()
 
 
+def test_a_rolling_revision_before_start_keeps_the_granted_start(tmp_path):
+    """A Commit is Central's grant to start that content at its time. A newer revision that
+    keeps the content arrives with no Commit of its own (Central grants one only after the
+    Player reports readiness for it), so voiding the grant would leave the Frame on fallback
+    at the start until the fresh Commit lands. The grant starts on time, in the order Central
+    committed, and the fresh Commit renews it."""
+    rig = Rig(tmp_path)
+    upcoming = layer("next", start=103, media_origin=103, data=b"next", priority=10)
+    rig.offer(upcoming)
+    rig.secure("next", b"next")
+    rig.executor.prepare_imminent()
+    rig.commit("next")
+    rig.advance(2.9)
+    rig.offer(upcoming.model_copy(update={"priority": -10}), revision=2)
+    rig.executor.prepare_imminent()
+    rig.advance(.2)
+    observations = rig.executor.tick()
+    assert [o.assignment_id for o in observations if o.status == "presented"] == ["next"]
+    assert not rig.renderer.outputs["hdmi1"].fallback
+    assert rig.renderer.outputs["hdmi1"].layers[-1].layer.priority == 10
+    rig.executor.prepare_imminent()
+    rig.commit("next")
+    rig.executor.tick()
+    assert rig.renderer.outputs["hdmi1"].layers[-1].layer.priority == -10
+
+
+@pytest.mark.parametrize("ended_by", ["revocation", "clock_step"])
+def test_a_carried_grant_ends_as_a_commit_does(tmp_path, ended_by):
+    """The carried grant is the Commit itself, not a new authority: Central's revocation or a
+    clock step ends it exactly as it ends a Commit of the current revision."""
+    rig = Rig(tmp_path)
+    upcoming = layer("next", start=103, media_origin=103, data=b"next")
+    rig.offer(upcoming)
+    rig.secure("next", b"next")
+    rig.executor.prepare_imminent()
+    rig.commit("next")
+    rig.advance(1)
+    rig.offer(upcoming, revision=2)
+    if ended_by == "revocation":
+        rig.executor.invalidate(["next"])
+    else:
+        rig.clock.step_utc(1)
+        rig.executor.readiness()
+        rig.mapping.establish(.01)
+    rig.advance(2.1)
+    rig.executor.prepare_imminent()
+    rig.executor.tick()
+    assert rig.renderer.outputs["hdmi1"].fallback
+
+
 def test_omitted_secured_assignment_keeps_lease_and_immutable_identity(tmp_path):
     rig = Rig(tmp_path)
     rig.offer(layer(end=110), valid_until=110)
