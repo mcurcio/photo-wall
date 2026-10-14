@@ -1,27 +1,30 @@
-"""Synthetic photos of both calibration targets for the reader's tests (decision 0026), ported from
-the design's prototype (scene3.py, simulate.py, run4.py) onto the committed layout.
+"""Synthetic phone photos of both calibration boards for the reader's tests (decision 0027), ported from
+the design's prototype (proto-v3 scene_v3.py) onto the committed boards.
 
-The wall plane is the screen target's (contracts/calibration_target.py, mm). The screen draws
-`screen_point` (rasterised exactly: it is evaluated once per region between the layout's edges)
-with the QR of `player.calibration_target.target_modules` in its square; pre-software every point
-is raw, post-software every point but the dark box passes the chain (appliance/display_host/
-picture.py `operations_for` of the entry's software, player/geometry.py `final_pixel` as a photo
-pixel, no shade). The paper target (`paper_ink`) lies on the panel in the dark box at
-`paper_in_box`, with a placement error and a tilt. Light is linear sRGB (the camera's space after
-the DNG's own colour matrix): the display's white is its level times `kelvin_white`, the paper's is
-the room's. Reflections on the Frame glass add to both surfaces, the TV surface's own glare to the
-screen only, room light and shadows multiply the paper, panel unevenness multiplies the screen.
+The wall plane is millimetres, its origin at the Frame opening's top-left, x right, y down. Layers
+back to front: the wall, the Frame's border, the screen board (emissive), a black card, the paper
+piece. The screen board is what the Player draws (player/geometry.py `board_point` places it in the
+opening, `board_signal` gives each point, with the QR of player/calibration_target.py
+`target_modules`); pre-software every point is raw, post-software every point passes the chain
+(appliance/display_host/picture.py `operations_for` of the entry's software, player/geometry.py
+`final_pixel`). The paper is a piece of contracts.calibration_target `board_raster(PAPER)` (rows and
+columns of the sheet) at any scale and turn, its ink of any reflectance. The glass passes the
+screen's light once and a paper's under it twice, and adds reflections (sharp windows, soft blobs,
+a gradient); the room light falls across the wall. Optional: the panel's light falling with the
+viewing angle (VA-like). The camera is a pinhole at a yaw and pitch with lens falloff 1 - k r^2:
+RAW (shot and read noise, the sensor's clip at 1.0) or a phone JPEG (auto white balance and
+exposure, local tone mapping, an S-curve, 8 bits). Light is linear sRGB: the display's white is its
+level times `kelvin_white`, the paper's the room's.
 
-The photo is a pinhole view at an angle, at most PHOTO_SIZE: RAW (lens shading, shot and read
-noise, the sensor's clip at 1.0) or a normal JPEG (auto white balance, auto exposure, an S-curve,
-8 bits).
+No per-pixel Python loop: the screen board is evaluated once per region between its edges (the
+raster's pixels and the QR's modules), cached per (columns, code), and the photo is drawn with
+cv2.warpPerspective and numpy.
 """
 from __future__ import annotations
 
 import functools
 import math
 import uuid
-from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Final
@@ -39,69 +42,57 @@ from central.displays.views import (
     SoftwarePictureView,
 )
 from contracts.calibration_target import (
-    LETTER_MM,
-    MARKER_MODULES,
-    PAPER_TARGET_MM,
+    PAPER_COLUMNS,
+    PAPER_ROWS,
     QR_QUIET_MODULES,
-    SCREEN_TARGET_MM,
-    GroupKind,
-    Patch,
-    Rect,
-    Role,
+    QR_SQUARES,
+    SCREEN_ROWS,
+    SQUARE_PX,
     Surface,
     TargetCode,
-    calibration_target,
-    paper_ink,
-    screen_point,
+    board_raster,
+    qr_copies,
 )
 from contracts.kelvin import kelvin_white
 from contracts.node_frame import srgb_to_linear
 from contracts.node_picture import NEUTRAL_SOFTWARE, SignalRange, SoftwarePicture
 from contracts.tuning import SIGNAL_LEVELS, TestPattern
 from player.calibration_target import target_modules
-from player.geometry import final_pixel
+from player.geometry import BoardDraw, board_point, board_signal, final_pixel
 from scripts.calibration_target.model import Photo, PhotoKind
 
-PX_PER_MM: Final = 4.0                  # the wall canvas
-MARGIN_MM: Final = 20.0                 # of the opening round the screen target
-PHOTO_SIZE: Final = (2000, 1700)        # the photo, at most (the brief's bound for the suite's time)
-QR_SUPERSAMPLE: Final = 4
-RAW_SHADING: Final = 0.01            # lens shading left after the DNG's own correction (r² at the corner, a guess:
-                                    # every screen patch lies outside its paper twin, so it biases the white low)
+PHOTO_SIZE: Final = (2016, 1512)        # a 12 MP photo at half its side: the suite's time
+CANVAS_PX: Final = 48                   # the screen canvas's pixels a square (at least 40)
+GLASS_T: Final = 0.92                   # the Frame glass's transmission
+BORDER_MM: Final = 25.0                 # the Frame's border round the opening
+CARD_MM: Final = 6.0                    # the black card beyond the paper on every side, by default
+PAPER_SQUARE_MM: Final = 15.0           # a paper square printed at scale 1
 CODE: Final = TargetCode("pi-wall-1", "HDMI-A-1", 41)
+TV43: Final = (950.0, 535.0)            # a 43-inch 16:9 opening
+FIVE_INCH: Final = (110.0, 62.0)        # a 5-inch 16:9 opening
 
-Field = Callable[[np.ndarray, np.ndarray], np.ndarray]     # wall (x_mm, y_mm) -> value
+Reflection = tuple   # ("window", x, y, w, h, peak) | ("blob", x, y, sigma, peak) | ("grad", kx, ky), wall mm
 
 
 @dataclass(frozen=True)
 class Display:
     """A display's own response to a raw signal: `white` its peak's level, `kelvin` its white's
     colour, `black` raw 0's light (a share of its white), `gamma` None for the sRGB curve, `crush`
-    the codes 1..crush shown as raw 0, `edge_dim` how much dimmer it is at its top and bottom
-    edges than at its middle."""
+    the codes 1..crush shown as raw 0."""
     white: float = 1.0
     kelvin: int = 6500
     black: float = 0.0008
     gamma: float | None = None
     crush: int = 0
-    edge_dim: float = 0.0
 
     def light(self, signal: np.ndarray) -> np.ndarray:
         """Linear light for an encoded signal (..., 3)."""
         s = np.clip(signal, 0.0, 1.0)
         if self.crush:
             s = np.where(np.round(s * SIGNAL_LEVELS) <= self.crush, 0.0, s)
-        if self.gamma is None:
-            response = np.where(s <= 0.04045, s / 12.92, ((s + 0.055) / 1.055) ** 2.4)
-        else:
-            response = s ** self.gamma
-        colour = self.white * np.array(kelvin_white(self.kelvin))
-        return colour * (self.black + (1 - self.black) * response)
-
-    def panel(self, y_mm: np.ndarray) -> np.ndarray:
-        """The panel's own light across the target, 1 at its middle (edge-lit unevenness)."""
-        middle = SCREEN_TARGET_MM[1] / 2
-        return 1 - self.edge_dim * ((y_mm - middle) / middle) ** 2
+        response = np.where(s <= 0.04045, s / 12.92, ((s + 0.055) / 1.055) ** 2.4) if self.gamma is None \
+            else s ** self.gamma
+        return self.white * np.array(kelvin_white(self.kelvin), np.float32) * (self.black + (1 - self.black) * response)
 
 
 @dataclass(frozen=True)
@@ -111,315 +102,302 @@ class Scene:
     software: SoftwarePicture = NEUTRAL_SOFTWARE
     lut: bytes | None = None
     code: TargetCode = CODE
-    paper_white: float = 0.8            # bare paper's light under the room, against the display's white 1
+    code_drawn: bool = True                 # False: the Player has no code (BoardDraw.modules None)
+    screen_shown: bool = True               # False: the screen shows nothing (black)
+    opening_mm: tuple[float, float] = TV43
+    glass: bool = True
+    # The paper: (row, column, rows, columns) of the sheet, its print scale, its middle (wall mm;
+    # None: the opening's middle), its turn; None: no paper in the photo.
+    piece: tuple[int, int, int, int] | None = (0, 0, PAPER_ROWS, PAPER_COLUMNS)
+    paper_scale: float = 1.0
+    paper_mm: tuple[float, float] | None = None
+    paper_turn_deg: float = 0.0
+    on_screen: bool = True                  # under the glass on the panel (with a card); else beside the Frame
+    card_mm: float = CARD_MM                # the black card beyond the paper on every side
+    card: float = 0.03                      # the card's reflectance
+    paper_whites_covered: bool = False      # a black card over the paper's white squares
+    paper_white: float = 0.8                # bare paper's light under the room, against the display's white 1
     room_kelvin: int = 5000
-    ink: float = 0.03                   # black ink's reflectance
-    room: Field | None = None           # multiplies the paper's light; None: even
-    reflection: Field | None = None     # the Frame glass: adds to both surfaces (a share of white 1)
-    tv_glare: Field | None = None       # the TV's own surface: adds to the screen only
-    paper_offset_mm: tuple[float, float] = (1.2, -0.8)
-    paper_tilt_deg: float = 0.6
-    paper_scale: float = 1.0            # the printer's scale
-    hidden_markers: frozenset[int] = frozenset()
-    qr_covered: bool = False
-    yaw_deg: float = 12.0
-    pitch_deg: float = 4.0
-    exposure: float = 0.6               # RAW: white 1's green in the photo
+    room_gradient: tuple[float, float] = (0.00004, 0.00002)   # the room light's change per mm, x and y
+    ink: float = 0.04                       # the print's ink reflectance
+    reflections: tuple[Reflection, ...] = ()
+    va_falloff: bool = False                # the panel's light falls with the viewing angle (VA-like)
+    yaw_deg: float = 8.0
+    pitch_deg: float = 3.0
+    distance_mm: float | None = None        # None: the opening and its border fill most of the photo
+    aim_mm: tuple[float, float] | None = None   # None: the opening's middle
+    focal_widths: float = 0.75              # the lens's focal length in photo widths
+    vignette: float = 0.03                  # lens falloff k of 1 - k r^2, r over half the width
+    exposure: float = 0.6                   # RAW: the display's white 1 in the photo
+    jpeg_exposure: float = 1.0
     seed: int = 1
 
 
 @dataclass(frozen=True)
 class Truth:
-    """What the reader must recover, from the scene with no reflection, glare or room unevenness
-    and no camera: screen white over paper white (median over the groups), each grey's share of
-    its group's screen white, and the lowest near-black code the display separates."""
+    """What the reader must recover, from the scene with no reflection, angle falloff or camera:
+    screen white above its black over bare paper white, at the paper's middle (per channel)."""
     white: np.ndarray
-    tone: dict[float, np.ndarray]
-    lowest_distinct: int
 
 
 def paper_matched(scene: Scene, *, level: float = 1.0, kelvin: int | None = None, **display: object) -> Display:
-    """A display whose white is the scene's paper white as the reader reads it (the bare paper
-    above its ink: read.py rule 1), times `level`; at `kelvin` (default the room's) with the same
-    luminance. Other Display fields from `display`."""
+    """A display whose white reads as the scene's bare paper white (the reader's aim) at the paper's
+    middle, times `level`; at `kelvin` (default the room's) with the same luminance. Other Display
+    fields from `display`."""
     kelvin = scene.room_kelvin if kelvin is None else kelvin
     luminance = np.array([0.2126, 0.7152, 0.0722])
     same = float(luminance @ np.array(kelvin_white(scene.room_kelvin))) / float(luminance @ np.array(kelvin_white(kelvin)))
-    return Display(white=level * scene.paper_white * (1 - scene.ink) * same, kelvin=kelvin, **display)  # type: ignore[arg-type]
+    black = float(display.get("black", Display.black))  # type: ignore[arg-type]
+    glass = GLASS_T if scene.glass and scene.on_screen else 1.0
+    white = level * scene.paper_white * _room(scene, *paper_middle(scene)) * glass * same / (1 - black)
+    return Display(white=white, kelvin=kelvin, **display)  # type: ignore[arg-type]
 
 
-# -- Fields ---------------------------------------------------------------------------------------
+# -- Where things are --------------------------------------------------------------------------------
 
 
-def blob(x_mm: float, y_mm: float, diameter_mm: float, peak: float) -> Field:
-    """A round spot (a bulb's reflection): `peak` at its centre, about `diameter_mm` across."""
-    radius = diameter_mm / 2
-    return lambda x, y: peak * np.exp(-(((x - x_mm) / radius) ** 2 + ((y - y_mm) / radius) ** 2) * 2)
+def _move(dx: float, dy: float) -> np.ndarray:
+    return np.array([[1, 0, dx], [0, 1, dy], [0, 0, 1]], np.float64)
 
 
-def band(x0: float, x1: float, y0: float, y1: float, peak: float, soft_mm: float = 0.8) -> Field:
-    """A sharp-edged bright rectangle (a window pane's reflection)."""
-    def edge(v: np.ndarray, lo: float, hi: float) -> np.ndarray:
-        return (1 / (1 + np.exp(np.clip(-(v - lo) / soft_mm, -50, 50)))
-                / (1 + np.exp(np.clip((v - hi) / soft_mm, -50, 50))))
-    return lambda x, y: peak * edge(x, x0, x1) * edge(y, y0, y1)
+def _scale(sx: float, sy: float | None = None) -> np.ndarray:
+    return np.diag([sx, sx if sy is None else sy, 1.0])
 
 
-def uniform(value: float) -> Field:
-    return lambda x, y: np.full(np.shape(x), value, np.float32)
+def _turn(degrees: float) -> np.ndarray:
+    a = math.radians(degrees)
+    return np.array([[math.cos(a), -math.sin(a), 0], [math.sin(a), math.cos(a), 0], [0, 0, 1]])
 
 
-# -- Where things are -----------------------------------------------------------------------------
+def board_draw(scene: Scene) -> BoardDraw:
+    width, height = scene.opening_mm
+    modules = target_modules(scene.code) if scene.code_drawn else None
+    return BoardDraw(aspect=max(width, height) / min(width, height), portrait=width < height, modules=modules)
+
+
+def screen_to_wall(scene: Scene) -> np.ndarray:
+    """The screen board's (column, row), in squares, to the wall (mm): board_point's map inverted
+    (a landscape opening: affine)."""
+    draw = board_draw(scene)
+    origin = np.array(board_point(0.0, 0.0, draw))
+    along_u = np.array(board_point(1.0, 0.0, draw)) - origin
+    along_v = np.array(board_point(0.0, 1.0, draw)) - origin
+    uv_to_board = np.array([[along_u[0], along_v[0], origin[0]], [along_u[1], along_v[1], origin[1]], [0, 0, 1]])
+    return _scale(*scene.opening_mm) @ np.linalg.inv(uv_to_board)
+
+
+def paper_middle(scene: Scene) -> tuple[float, float]:
+    if scene.paper_mm is not None:
+        return scene.paper_mm
+    return scene.opening_mm[0] / 2, scene.opening_mm[1] / 2
 
 
 def paper_to_wall(scene: Scene) -> np.ndarray:
-    """The paper content's plane (mm) to the wall's (mm), 2 x 3: the sheet centred in the dark box
-    plus the placement error, tilted about the content's centre, at the printer's scale."""
-    target = calibration_target()
-    cu, cv = PAPER_TARGET_MM[0] / 2, PAPER_TARGET_MM[1] / 2
-    t = math.radians(scene.paper_tilt_deg)
-    k = scene.paper_scale
-    rotation = k * np.array([[math.cos(t), -math.sin(t)], [math.sin(t), math.cos(t)]])
-    centre = np.array(target.paper_in_box) + [cu, cv] + scene.paper_offset_mm
-    offset = centre - rotation @ np.array([cu, cv])
-    return np.c_[rotation, offset]
+    """The paper board's (column, row), in squares, to the wall (mm): the piece's middle at
+    paper_middle, turned, at its print scale."""
+    row, column, rows, columns = scene.piece  # type: ignore[misc]
+    return (_move(*paper_middle(scene)) @ _turn(scene.paper_turn_deg) @ _scale(PAPER_SQUARE_MM * scene.paper_scale)
+            @ _move(-(column + columns / 2), -(row + rows / 2)))
 
 
-def wall_point(scene: Scene, patch: Patch) -> tuple[float, float]:
-    """A patch's centre on the wall."""
-    x, y = patch.rect.centre()
-    if patch.surface is Surface.SCREEN:
-        return x, y
-    wx, wy = paper_to_wall(scene) @ np.array([x, y, 1.0])
-    return float(wx), float(wy)
+def camera(scene: Scene) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """K, the wall (mm) -> photo homography and the camera's centre (mm, z toward the viewer < 0)."""
+    width, height = PHOTO_SIZE
+    focal = scene.focal_widths * width
+    k = np.array([[focal, 0, width / 2], [0, focal, height / 2], [0, 0, 1]])
+    ow, oh = scene.opening_mm
+    aim = np.array([*(scene.aim_mm or (ow / 2, oh / 2)), 0.0])
+    distance = scene.distance_mm or focal * (ow + 2 * BORDER_MM) / (0.92 * width)
+    yaw, pitch = math.radians(scene.yaw_deg), math.radians(scene.pitch_deg)
+    axis = np.array([math.sin(yaw) * math.cos(pitch), math.sin(pitch), math.cos(yaw) * math.cos(pitch)])
+    centre = aim - distance * axis
+    x = np.cross([0, 1.0, 0], axis)
+    x /= np.linalg.norm(x)
+    rotation = np.stack([x, np.cross(axis, x), axis])
+    to_photo = k @ np.column_stack([rotation[:, 0], rotation[:, 1], -rotation @ centre])
+    return k, to_photo / to_photo[2, 2], centre
 
 
-def group_patch(group_index: int, surface: Surface, role: Role) -> Patch:
-    group = calibration_target().groups[group_index]
-    return next(p for p in group.patches if p.surface is surface and p.role is role)
+def focal_px(scene: Scene) -> float:
+    """The scene's true focal length in photo pixels (what EXIF would say)."""
+    return scene.focal_widths * PHOTO_SIZE[0]
 
 
-def paired_groups() -> tuple[int, ...]:
-    return tuple(g.index for g in calibration_target().groups if g.kind is GroupKind.PAIRED)
+def true_angle(scene: Scene, points: np.ndarray) -> float:
+    """The median true viewing angle (degrees) at photo points (N x 2) on the wall."""
+    _, to_photo, centre = camera(scene)
+    wall = np.linalg.inv(to_photo) @ np.vstack([np.asarray(points, np.float64).T, np.ones(len(points))])
+    x, y = wall[0] / wall[2], wall[1] / wall[2]
+    cosine = abs(centre[2]) / np.sqrt((x - centre[0]) ** 2 + (y - centre[1]) ** 2 + centre[2] ** 2)
+    return float(np.median(np.degrees(np.arccos(cosine))))
 
 
-def grey_groups(signal: float) -> tuple[int, ...]:
-    return tuple(g.index for g in calibration_target().groups if g.kind is GroupKind.PAIRED
-                 and any(p.role is Role.GREY and p.signal == signal for p in g.patches))
-
-
-# -- The canvas ------------------------------------------------------------------------------------
-
-
-def _grid() -> tuple[np.ndarray, np.ndarray]:
-    width = int(round((SCREEN_TARGET_MM[0] + 2 * MARGIN_MM) * PX_PER_MM))
-    height = int(round((SCREEN_TARGET_MM[1] + 2 * MARGIN_MM) * PX_PER_MM))
-    xs = (np.arange(width) + 0.5) / PX_PER_MM - MARGIN_MM
-    ys = (np.arange(height) + 0.5) / PX_PER_MM - MARGIN_MM
-    return xs, ys
-
-
-def _edges(rects: list[Rect], lines: list[float], low: float, high: float, axis: int) -> np.ndarray:
-    values = {low, high, *lines}
-    for r in rects:
-        start, size = (r.x_mm, r.width_mm) if axis == 0 else (r.y_mm, r.height_mm)
-        values.update((start, start + size))
-    return np.array(sorted(values))
-
-
-def _rasterised(function: Callable[[float, float], object], xs: np.ndarray, ys: np.ndarray,
-                edges_x: np.ndarray, edges_y: np.ndarray) -> tuple[np.ndarray, np.ndarray, list]:
-    """`function` evaluated once per cell between the edges; each pixel centre takes its cell's."""
-    centres_x = np.r_[edges_x[0] - 1, (edges_x[:-1] + edges_x[1:]) / 2, edges_x[-1] + 1]
-    centres_y = np.r_[edges_y[0] - 1, (edges_y[:-1] + edges_y[1:]) / 2, edges_y[-1] + 1]
-    cells = [[function(float(cx), float(cy)) for cx in centres_x] for cy in centres_y]
-    column = np.searchsorted(edges_x, xs, side="right")
-    row = np.searchsorted(edges_y, ys, side="right")
-    return row, column, cells
-
-
-def _marker_lines(surface: Surface, axis: int, quiet: bool) -> list[float]:
-    lines = []
-    for marker in calibration_target().markers:
-        if marker.surface is not surface:
-            continue
-        start = marker.rect.x_mm if axis == 0 else marker.rect.y_mm
-        module = marker.rect.width_mm / MARKER_MODULES
-        span = range(-1, MARKER_MODULES + 2) if quiet else range(MARKER_MODULES + 1)
-        lines.extend(start + k * module for k in span)
-    return lines
+# -- The screen board as the Player draws it -------------------------------------------------------
 
 
 @functools.cache
-def screen_canvas() -> tuple[np.ndarray, np.ndarray]:
-    """The screen target's encoded signal and its raw flag at every canvas pixel, from
-    `screen_point` (the QR's square left at 1.0: `_with_code` draws it)."""
-    target = calibration_target()
-    rects = [p.rect for g in target.groups for p in g.patches if p.surface is Surface.SCREEN]
-    rects += [target.qr, target.dark_box]
-    xs, ys = _grid()
-    edges_x = _edges(rects, _marker_lines(Surface.SCREEN, 0, True), 0.0, SCREEN_TARGET_MM[0], 0)
-    edges_y = _edges(rects, _marker_lines(Surface.SCREEN, 1, True), 0.0, SCREEN_TARGET_MM[1], 1)
-    row, column, cells = _rasterised(screen_point, xs, ys, edges_x, edges_y)
-    signal = np.array([[c.signal for c in line] for line in cells], np.float32)
-    raw = np.array([[c.raw for c in line] for line in cells], bool)
-    return signal[np.ix_(row, column)], raw[np.ix_(row, column)]
-
-
-def _sheet() -> tuple[float, float]:
-    """The sheet's margin round the content (Letter, centred)."""
-    return (LETTER_MM[0] - PAPER_TARGET_MM[0]) / 2, (LETTER_MM[1] - PAPER_TARGET_MM[1]) / 2
-
-
-@functools.cache
-def paper_canvas() -> np.ndarray:
-    """1 where the sheet is bare, 0 where `paper_ink` prints, over the sheet (content plane mm,
-    PX_PER_MM, its origin at the sheet's top-left)."""
-    target = calibration_target()
-    margin_x, margin_y = _sheet()
-    width, height = int(round(LETTER_MM[0] * PX_PER_MM)), int(round(LETTER_MM[1] * PX_PER_MM))
-    xs = (np.arange(width) + 0.5) / PX_PER_MM - margin_x
-    ys = (np.arange(height) + 0.5) / PX_PER_MM - margin_y
-    rects = [p.rect for g in target.groups for p in g.patches if p.surface is Surface.PAPER]
-    edges_x = _edges(rects, _marker_lines(Surface.PAPER, 0, False), 0.0, PAPER_TARGET_MM[0], 0)
-    edges_y = _edges(rects, _marker_lines(Surface.PAPER, 1, False), 0.0, PAPER_TARGET_MM[1], 1)
-    row, column, cells = _rasterised(lambda x, y: 0.0 if paper_ink(x, y) else 1.0, xs, ys, edges_x, edges_y)
-    return np.array(cells, np.float32)[np.ix_(row, column)]
-
-
-def _with_code(scene: Scene, signal: np.ndarray) -> np.ndarray:
-    """The QR's modules drawn into its square (supersampled, then averaged), and covered markers
-    drawn as the surround."""
-    target = calibration_target()
-    xs, ys = _grid()
-    out = signal.copy()
-    qr = target.qr
-    columns = np.nonzero((xs >= qr.x_mm) & (xs < qr.x_mm + qr.width_mm))[0]
-    rows = np.nonzero((ys >= qr.y_mm) & (ys < qr.y_mm + qr.height_mm))[0]
-    if scene.qr_covered:
-        out[np.ix_(rows, columns)] = 0.5
-    else:
-        modules = np.array(target_modules(scene.code), bool)
-        quiet = QR_QUIET_MODULES
-        count = modules.shape[0] + 2 * quiet
-        padded = np.zeros((count, count), bool)
-        padded[quiet:quiet + modules.shape[0], quiet:quiet + modules.shape[0]] = modules
-        module_mm = qr.width_mm / count
-        n = QR_SUPERSAMPLE
-        sub = (np.arange(n) + 0.5) / (n * PX_PER_MM) - 0.5 / PX_PER_MM
-        fine_x = (xs[columns][:, None] + sub[None, :]).ravel()
-        fine_y = (ys[rows][:, None] + sub[None, :]).ravel()
-        mx = np.clip(((fine_x - qr.x_mm) / module_mm).astype(int), 0, count - 1)
-        my = np.clip(((fine_y - qr.y_mm) / module_mm).astype(int), 0, count - 1)
-        fine = np.where(padded[np.ix_(my, mx)], 0.0, 1.0)
-        out[np.ix_(rows, columns)] = fine.reshape(len(rows), n, len(columns), n).mean(axis=(1, 3))
-    for marker in target.markers:
-        if marker.surface is Surface.SCREEN and marker.marker_id in scene.hidden_markers:
-            module = marker.rect.width_mm / MARKER_MODULES
-            x0, y0 = marker.rect.x_mm - module, marker.rect.y_mm - module
-            size = marker.rect.width_mm + 2 * module
-            out[np.ix_((ys >= y0) & (ys < y0 + size), (xs >= x0) & (xs < x0 + size))] = 0.0
-    return out
+def _screen_signal(columns: int, aspect: float, modules: tuple | None) -> np.ndarray:
+    """board_signal over the board's columns x SCREEN_ROWS at CANVAS_PX a square: evaluated once per
+    region between the raster's pixel edges and the QR modules' edges, each canvas pixel its
+    region's value."""
+    draw = BoardDraw(aspect=aspect, portrait=False, modules=modules)
+    edges_x = {k / SQUARE_PX for k in range(columns * SQUARE_PX + 1)}
+    edges_y = {k / SQUARE_PX for k in range(SCREEN_ROWS * SQUARE_PX + 1)}
+    if modules is not None:
+        count = len(modules) + 2 * QR_QUIET_MODULES
+        for copy in qr_copies(columns):
+            edges_x |= {copy.column + j * QR_SQUARES / count for j in range(count + 1)}
+            edges_y |= {copy.row + j * QR_SQUARES / count for j in range(count + 1)}
+    xs, ys = np.array(sorted(edges_x)), np.array(sorted(edges_y))
+    middles_x, middles_y = (xs[:-1] + xs[1:]) / 2, (ys[:-1] + ys[1:]) / 2
+    cells = np.array([[board_signal(float(x), float(y), draw) for x in middles_x] for y in middles_y], np.float32)
+    centres_x = (np.arange(columns * CANVAS_PX) + 0.5) / CANVAS_PX
+    centres_y = (np.arange(SCREEN_ROWS * CANVAS_PX) + 0.5) / CANVAS_PX
+    return cells[np.ix_(np.searchsorted(ys, centres_y, side="right") - 1,
+                        np.searchsorted(xs, centres_x, side="right") - 1)]
 
 
 def _chain(scene: Scene, signal: np.ndarray) -> np.ndarray:
-    """Post-software: each encoded value through the chain as a photo pixel (one call per value)."""
+    """Post-software: each encoded value through the chain (one call per distinct value)."""
     operations = operations_for(scene.code.output_id, scene.code.picture_change, scene.software, None)
     values, inverse = np.unique(signal, return_inverse=True)
-    mapped = np.array([final_pixel((srgb_to_linear(float(v)),) * 3, operations, inside=True,
-                                   lut=scene.lut)[:3] for v in values], np.float32)
+    mapped = np.array([final_pixel((srgb_to_linear(float(v)),) * 3, operations, inside=True, lut=scene.lut)[:3]
+                       for v in values], np.float32)
     return mapped[inverse.reshape(signal.shape)]
 
 
-def wall_light(scene: Scene, *, clean: bool = False) -> np.ndarray:
-    """The light leaving the wall (linear sRGB, H x W x 3). `clean`: no reflection, glare or room
-    unevenness (the truth's)."""
-    signal, raw = screen_canvas()
-    signal = _with_code(scene, signal)
+def screen_light(scene: Scene) -> np.ndarray:
+    """The screen board's light on its canvas (H x W x 3, linear), before the glass."""
+    draw = board_draw(scene)
+    signal = _screen_signal(draw.columns, draw.aspect, draw.modules)
+    if not scene.screen_shown:
+        signal = np.zeros_like(signal)
     if scene.stage is TestPattern.TARGET_PRE_SOFTWARE:
         drawn = np.repeat(signal[..., None], 3, axis=2)
     else:
-        drawn = np.where(raw[..., None], signal[..., None], _chain(scene, signal))
-    xs, ys = _grid()
-    xx, yy = np.meshgrid(xs, ys)
-    light = scene.display.light(drawn) * scene.display.panel(yy)[..., None]
-    light = light.astype(np.float32)
-
-    margin_x, margin_y = _sheet()
-    to_wall = np.vstack([paper_to_wall(scene), [0, 0, 1]])
-    sheet_px_to_mm = np.array([[1 / PX_PER_MM, 0, -margin_x], [0, 1 / PX_PER_MM, -margin_y], [0, 0, 1]])
-    wall_mm_to_px = np.array([[PX_PER_MM, 0, MARGIN_MM * PX_PER_MM - 0.5],
-                              [0, PX_PER_MM, MARGIN_MM * PX_PER_MM - 0.5], [0, 0, 1]])
-    sheet_px_centre = np.array([[1, 0, 0.5], [0, 1, 0.5], [0, 0, 1]])
-    transform = (wall_mm_to_px @ to_wall @ sheet_px_to_mm @ sheet_px_centre)[:2]
-    size = (xx.shape[1], xx.shape[0])
-    sheet = paper_canvas()
-    reflectance = scene.ink + (1 - scene.ink) * sheet
-    for marker in calibration_target().markers:
-        if marker.surface is Surface.PAPER and marker.marker_id in scene.hidden_markers:
-            r = marker.rect
-            x0 = int((r.x_mm + margin_x - 1) * PX_PER_MM)
-            y0 = int((r.y_mm + margin_y - 1) * PX_PER_MM)
-            side = int((r.width_mm + 2) * PX_PER_MM)
-            reflectance[y0:y0 + side, x0:x0 + side] = 1.0
-    paper = cv2.warpAffine(reflectance, transform, size, flags=cv2.INTER_LINEAR)
-    mask = cv2.warpAffine(np.ones_like(reflectance), transform, size, flags=cv2.INTER_LINEAR)
-    room = np.ones_like(xx) if clean or scene.room is None else scene.room(xx, yy)
-    paper_light = (scene.paper_white * np.array(kelvin_white(scene.room_kelvin), np.float32)
-                   * (paper * room)[..., None])
-    light = light * (1 - mask[..., None]) + paper_light * mask[..., None]
-    if not clean and scene.tv_glare is not None:
-        light += (scene.tv_glare(xx, yy) * (1 - mask))[..., None].astype(np.float32)
-    if not clean and scene.reflection is not None:
-        light += scene.reflection(xx, yy)[..., None].astype(np.float32)
-    return light.astype(np.float32)
+        drawn = _chain(scene, signal)
+    return scene.display.light(drawn).astype(np.float32)
 
 
-# -- The camera -----------------------------------------------------------------------------------
+# -- The photo ------------------------------------------------------------------------------------------
 
 
-def _projection(scene: Scene, canvas: tuple[int, int]) -> np.ndarray:
-    """Canvas pixels to photo pixels: a pinhole turned by yaw and pitch, framing the canvas."""
+def _room(scene: Scene, x: np.ndarray | float, y: np.ndarray | float) -> np.ndarray | float:
+    """The room light's relative level across the wall (1 at the opening's middle)."""
+    gx, gy = scene.room_gradient
+    return 1 + gx * (x - scene.opening_mm[0] / 2) + gy * (y - scene.opening_mm[1] / 2)
+
+
+def _warp(image: np.ndarray, matrix: np.ndarray, interpolation: int = cv2.INTER_LINEAR) -> np.ndarray:
+    return cv2.warpPerspective(image, matrix, PHOTO_SIZE, flags=interpolation, borderMode=cv2.BORDER_CONSTANT,
+                               borderValue=0)
+
+
+def radiance(scene: Scene) -> np.ndarray:
+    """The light reaching the camera from each photo pixel (H x W x 3, linear), before the lens."""
     width, height = PHOTO_SIZE
-    focal = width / (2 * math.tan(math.radians(69 / 2)))
-    w_mm, h_mm = canvas[0] / PX_PER_MM, canvas[1] / PX_PER_MM
-    corners = np.array([[-w_mm / 2, -h_mm / 2, 0], [w_mm / 2, -h_mm / 2, 0],
-                        [w_mm / 2, h_mm / 2, 0], [-w_mm / 2, h_mm / 2, 0]], np.float64)
-    rotation = cv2.Rodrigues(np.array([math.radians(scene.pitch_deg), math.radians(scene.yaw_deg), 0.0]))[0]
-    distance = 1.12 * focal * w_mm / width
-    camera = np.array([[focal, 0, width / 2], [0, focal, height / 2], [0, 0, 1]])
-    points, _ = cv2.projectPoints(corners, cv2.Rodrigues(rotation)[0], np.array([0.0, 0.0, distance]), camera, None)
-    source = np.float32([[0, 0], [canvas[0], 0], [canvas[0], canvas[1]], [0, canvas[1]]])
-    return cv2.getPerspectiveTransform(source, points.reshape(4, 2).astype(np.float32))
+    _, to_photo, centre = camera(scene)
+    yy, xx = np.mgrid[0:height, 0:width].astype(np.float32)
+    inverse = np.linalg.inv(to_photo)
+    w = inverse[2, 0] * xx + inverse[2, 1] * yy + inverse[2, 2]
+    x = (inverse[0, 0] * xx + inverse[0, 1] * yy + inverse[0, 2]) / w
+    y = (inverse[1, 0] * xx + inverse[1, 1] * yy + inverse[1, 2]) / w
+    ow, oh = scene.opening_mm
+    tint = np.array(kelvin_white(scene.room_kelvin), np.float32)
+    room = (scene.paper_white * _room(scene, x, y))[..., None] * tint
+    glass = ((x > -BORDER_MM) & (x < ow + BORDER_MM) & (y > -BORDER_MM) & (y < oh + BORDER_MM)) if scene.glass \
+        else np.zeros_like(x, bool)
+    opening = (x >= 0) & (x < ow) & (y >= 0) & (y < oh)
+    t = GLASS_T if scene.glass else 1.0
+    light = (0.55 * room).astype(np.float32)                       # the wall
+    border = glass & ~opening
+    light[border] = (0.10 * room * t * t)[border]
+    # The screen, emissive.
+    canvas = screen_light(scene)
+    to_canvas = to_photo @ screen_to_wall(scene) @ _scale(1 / CANVAS_PX) @ _move(-0.5, -0.5)
+    shown = _warp(canvas, to_canvas)
+    inside = _warp(np.ones(canvas.shape[:2], np.float32), to_canvas) > 0.5
+    gain = t
+    if scene.va_falloff:
+        cosine = np.abs(centre[2]) / np.sqrt((x - centre[0]) ** 2 + (y - centre[1]) ** 2 + centre[2] ** 2)
+        gain = gain * np.maximum(0.2, 1 - 0.8 * (1 - cosine ** 2))[..., None]
+    screen = opening & inside
+    light[opening] = 0.0                                           # the surround is raw black
+    light[opening] += (scene.display.light(np.zeros(3)) * t)
+    light[screen] = (shown * gain)[screen]
+    # The card and the paper.
+    if scene.piece is not None:
+        row, column, rows, columns = scene.piece
+        paper_t = t * t if scene.on_screen else 1.0
+        to_wall = paper_to_wall(scene)
+        if scene.on_screen:
+            grow = scene.card_mm / (PAPER_SQUARE_MM * scene.paper_scale)
+            card = np.ones((int((rows + 2 * grow) * 20), int((columns + 2 * grow) * 20)), np.float32)
+            covered = _warp(card, to_photo @ to_wall @ _move(column - grow, row - grow) @ _scale(1 / 20)) > 0.5
+            light[covered] = (scene.card * room * paper_t)[covered]
+        raster = board_raster(Surface.PAPER)
+        sheet = np.frombuffer(raster.pixels, np.uint8).reshape(raster.height, raster.width).astype(np.float32) / 255
+        sheet = sheet[row * SQUARE_PX:(row + rows) * SQUARE_PX, column * SQUARE_PX:(column + columns) * SQUARE_PX]
+        if scene.paper_whites_covered:
+            sheet = _whites_covered(sheet, row, column)
+        reflectance = scene.ink + (1 - scene.ink) * sheet
+        to_sheet = to_photo @ to_wall @ _move(column, row) @ _scale(1 / SQUARE_PX) @ _move(-0.5, -0.5)
+        paper = _warp(np.ascontiguousarray(reflectance), to_sheet)
+        on = _warp(np.ones_like(reflectance), to_sheet) > 0.5
+        light[on] = (paper[..., None] * room * paper_t)[on]
+    else:
+        on = np.zeros_like(opening)
+    # Reflections on the glass: additive, in the panel white's units.
+    added = np.zeros((height, width), np.float32)
+    for reflection in scene.reflections:
+        if reflection[0] == "window":
+            _, x0, y0, w_mm, h_mm, peak = reflection
+            soft = 1.5
+            added += peak * (np.clip((x - x0) / soft, 0, 1) * np.clip((x0 + w_mm - x) / soft, 0, 1)
+                             * np.clip((y - y0) / soft, 0, 1) * np.clip((y0 + h_mm - y) / soft, 0, 1))
+        elif reflection[0] == "blob":
+            _, x0, y0, sigma, peak = reflection
+            added += peak * np.exp(-((x - x0) ** 2 + (y - y0) ** 2) / (2 * sigma * sigma))
+        elif reflection[0] == "grad":
+            _, kx, ky = reflection
+            added += np.maximum(0, kx * x / ow + ky * y / oh)
+    under_glass = glass & (np.bool_(scene.on_screen) | ~on)
+    light += (added * under_glass)[..., None] * np.array([1.0, 0.98, 0.93], np.float32)
+    return light
 
 
-def _photographed(scene: Scene) -> np.ndarray:
-    light = wall_light(scene)
-    canvas = (light.shape[1], light.shape[0])
-    view = cv2.warpPerspective(light, _projection(scene, canvas), PHOTO_SIZE, flags=cv2.INTER_AREA,
-                               borderMode=cv2.BORDER_CONSTANT, borderValue=(0.05, 0.05, 0.05))
-    return view
+def _whites_covered(sheet: np.ndarray, row: int, column: int) -> np.ndarray:
+    """The paper's bare white squares (odd rows, white parity, no marker) painted as ink."""
+    out = sheet.copy()
+    for r in range(sheet.shape[0] // SQUARE_PX):
+        for c in range(sheet.shape[1] // SQUARE_PX):
+            board_row, board_column = row + r, column + c
+            if board_row % 2 == 1 and (board_row + board_column) % 2 == 1:
+                out[r * SQUARE_PX:(r + 1) * SQUARE_PX, c * SQUARE_PX:(c + 1) * SQUARE_PX] = 0.0
+    return out
 
 
-def _shading(strength: float) -> np.ndarray:
+def _lens(scene: Scene) -> np.ndarray:
     width, height = PHOTO_SIZE
     yy, xx = np.mgrid[0:height, 0:width].astype(np.float32)
     r2 = ((xx - width / 2) ** 2 + (yy - height / 2) ** 2) / (width / 2) ** 2
-    return (1 - strength * r2)[..., None]
+    return (1 - scene.vignette * r2)[..., None]
 
 
+@functools.cache
 def raw_photo(scene: Scene, name: str = "scene.dng") -> Photo:
-    """What a ProRAW DNG decodes to (photos.load_photo's RAW): linear, the clip at 1.0."""
+    """What a ProRAW DNG decodes to (photos.load_photo's RAW): linear, the clip at 1.0, focal_px None
+    (the file's EXIF is the edge's: tests put focal_px(scene) on it)."""
     rng = np.random.default_rng(scene.seed)
-    camera = _photographed(scene) * _shading(RAW_SHADING)
-    camera *= scene.exposure / float(np.max(scene.display.light(np.ones(3))))
-    camera = cv2.GaussianBlur(camera, (0, 0), 1.0)
-    noise = rng.standard_normal(camera.shape).astype(np.float32)
-    # The prototype's noise per 12 MP pixel (shot over a 4000-electron white, read 0.0003); a pixel
-    # here stands for about four of the phone's (PHOTO_SIZE against 4032 x 3024), so half of it.
-    camera = camera + noise * 0.5 * np.sqrt(np.maximum(camera, 0) / 4000 + 0.0003 ** 2)
-    clipped = np.any(camera >= 1.0, axis=2)
-    return Photo(name=name, kind=PhotoKind.RAW, pixels=np.clip(camera, 0, 1).astype(np.float32), clipped=clipped)
+    light = radiance(scene) * _lens(scene)
+    light *= scene.exposure / float(np.max(scene.display.light(np.ones(3))))
+    light = cv2.GaussianBlur(light, (0, 0), 0.9)
+    noise = rng.standard_normal(light.shape).astype(np.float32)
+    # About a quarter of a 12 MP phone pixel's noise is left in a pixel standing for four of them.
+    light = light + noise * 0.5 * np.sqrt(np.maximum(light, 0) / 4000 + 0.0003 ** 2)
+    clipped = np.any(light >= 1.0, axis=2)
+    return Photo(name=name, kind=PhotoKind.RAW, pixels=np.clip(light, 0, 1).astype(np.float32), clipped=clipped,
+                 focal_px=None)
 
 
 def raw_bytes(photo: Photo) -> np.ndarray:
@@ -430,14 +408,16 @@ def raw_bytes(photo: Photo) -> np.ndarray:
 def jpeg_photo(scene: Scene) -> bytes:
     """A normal phone photo as a JPEG file's bytes (the prototype's phone pipeline)."""
     rng = np.random.default_rng(scene.seed)
-    camera = _photographed(scene) * _shading(0.08)
+    light = radiance(scene) * _lens(scene)
     width, height = PHOTO_SIZE
-    lum = camera.mean(axis=2)
-    bright = camera[lum >= np.percentile(lum, 98)]
-    camera = camera / (bright.mean(axis=0) / bright.mean())
-    centre = camera[height // 4:3 * height // 4, width // 4:3 * width // 4].mean(axis=2)
-    camera = np.clip(camera * (0.8 / np.percentile(centre, 97)) * 0.5, 0, 1)
-    encoded = np.where(camera <= .0031308, 12.92 * camera, 1.055 * camera ** (1 / 2.4) - .055)
+    level = light.mean(axis=2)
+    bright = light[level >= np.percentile(level, 98)]
+    light = light / (bright.mean(axis=0) / bright.mean())
+    light = light * (0.85 / np.percentile(light.mean(axis=2), 99.7)) * 0.6 * scene.jpeg_exposure
+    level = np.maximum(light.mean(axis=2), 1e-4)
+    local = cv2.GaussianBlur(np.log(level), (0, 0), width / 12)
+    light = np.clip(light * np.exp(-0.3 * (local - np.log(level).mean()))[..., None], 0, 1)
+    encoded = np.where(light <= .0031308, 12.92 * light, 1.055 * light ** (1 / 2.4) - .055)
     encoded = 0.75 * encoded + 0.25 * encoded * encoded * (3 - 2 * encoded)
     encoded = cv2.GaussianBlur(encoded.astype(np.float32), (0, 0), 1.0)
     encoded = encoded + rng.normal(0, 0.004, encoded.shape).astype(np.float32)
@@ -447,29 +427,17 @@ def jpeg_photo(scene: Scene) -> bytes:
     return data.tobytes()
 
 
-# -- The truth and the entry ----------------------------------------------------------------------
-
-
-def _at(light: np.ndarray, x_mm: float, y_mm: float, radius_mm: float = 2.0) -> np.ndarray:
-    x0, x1 = int((x_mm - radius_mm + MARGIN_MM) * PX_PER_MM), int((x_mm + radius_mm + MARGIN_MM) * PX_PER_MM)
-    y0, y1 = int((y_mm - radius_mm + MARGIN_MM) * PX_PER_MM), int((y_mm + radius_mm + MARGIN_MM) * PX_PER_MM)
-    return np.median(light[y0:y1, x0:x1].reshape(-1, 3), axis=0)
+# -- The truth and the entry --------------------------------------------------------------------------
 
 
 def truth(scene: Scene) -> Truth:
-    light = wall_light(scene, clean=True)
-    whites, tone = [], {}
-    for index in paired_groups():
-        def at(surface: Surface, role: Role) -> np.ndarray:
-            return _at(light, *wall_point(scene, group_patch(index, surface, role)))
-        screen_black = at(Surface.SCREEN, Role.BLACK)
-        screen_white = at(Surface.SCREEN, Role.WHITE) - screen_black
-        whites.append(screen_white / (at(Surface.PAPER, Role.WHITE) - at(Surface.PAPER, Role.BLACK)))
-        grey = group_patch(index, Surface.SCREEN, Role.GREY)
-        tone.setdefault(grey.signal, []).append((at(Surface.SCREEN, Role.GREY) - screen_black) / screen_white)
-    return Truth(white=np.median(whites, axis=0),
-                 tone={s: np.median(v, axis=0) for s, v in tone.items()},
-                 lowest_distinct=scene.display.crush + 1)
+    """Screen white above black over bare paper white at the paper's middle: no reflection, no angle
+    falloff, no camera."""
+    t = GLASS_T if scene.glass else 1.0
+    screen = scene.display.white * np.array(kelvin_white(scene.display.kelvin)) * (1 - scene.display.black) * t
+    paper_t = t * t if scene.on_screen else 1.0
+    paper = scene.paper_white * float(_room(scene, *paper_middle(scene))) * np.array(kelvin_white(scene.room_kelvin))
+    return Truth(white=screen / (paper * paper_t))
 
 
 def entry(scene: Scene, *, test_pattern: TestPattern | None = None, lut_name: str = "Hahnemuhle") -> PictureEntryView:
@@ -491,12 +459,6 @@ def entry(scene: Scene, *, test_pattern: TestPattern | None = None, lut_name: st
         test_pattern=test_pattern or scene.stage)
 
 
-def codes(share: np.ndarray) -> np.ndarray:
-    """A linear share as 8-bit sRGB codes (the greys' tolerance unit)."""
-    v = np.clip(share, 0, 1)
-    return 255 * np.where(v <= .0031308, 12.92 * v, 1.055 * np.maximum(v, 1e-12) ** (1 / 2.4) - .055)
-
-
-__all__ = ["CODE", "Display", "Scene", "Truth", "band", "blob", "codes", "entry", "grey_groups", "group_patch",
-           "jpeg_photo", "paired_groups", "paper_to_wall", "raw_bytes", "raw_photo", "replace", "screen_canvas",
-           "truth", "uniform", "wall_point"]
+__all__ = ["CODE", "FIVE_INCH", "PAPER_SQUARE_MM", "PHOTO_SIZE", "TV43", "Display", "Scene", "Truth", "board_draw",
+           "camera", "entry", "focal_px", "jpeg_photo", "paper_matched", "paper_middle", "paper_to_wall", "radiance",
+           "raw_bytes", "raw_photo", "replace", "screen_to_wall", "true_angle", "truth"]

@@ -1,5 +1,5 @@
-"""The calibration target reader's core does no I/O (decision 0026; scripts/calibration_target/
-__init__.py's table): `model`, `locate`, `read` and `suggest`, with every module of the package they
+"""The calibration target reader's core does no I/O (decisions 0026, 0027; scripts/calibration_target/
+__init__.py's table): `model`, `boards`, `locate`, `read` and `suggest`, with every module of the package they
 import, import neither the package's edges nor an I/O library. Read by ast, so nothing is imported
 to check it; import-linter cannot hold it (its root packages are the first-party packages only)."""
 from __future__ import annotations
@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 PACKAGE = Path(__file__).resolve().parents[1] / "scripts" / "calibration_target"
-CORE = ("model", "locate", "read", "suggest")
+CORE = ("model", "boards", "locate", "read", "suggest")
 EDGES = ("photos", "central_reads", "__main__")
 FORBIDDEN = ("httpx", "psycopg", "psycopg_pool", "rawpy", "pillow_heif", "PIL", "central.infra",
              "central.db", "central.app", "media", "nodeapi")
