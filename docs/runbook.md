@@ -1165,7 +1165,7 @@ Two targets read together from one phone photo, so the agent can say what to cha
 
 Dropped squares in a reading (`reflection-edge`, `covered`, `clipped`, `copy-unlike-the-rest`, …) are not refusals: each has its place, so the light can be moved next time.
 
-**Regenerating the boards and the sheets.** The rasters and the printable sheets (one PDF per paper size and the README's PNG preview, in `central/displays/calibration_sheets/`) are drawn at build time, the same bytes for the same layout; after changing the boards' constants or a sheet, rewrite them and commit the result. A test regenerates them all and compares the bytes, so CI never rewrites them:
+**Regenerating the boards and the sheets.** The rasters and the printable sheets (one PDF per paper size and the README's PNG preview, in `central/displays/calibration_sheets/`) are drawn at build time, the same for the same layout; after changing the boards' constants or a sheet, rewrite them and commit the result. A test regenerates them all and compares the bytes, so CI never rewrites them:
 
 ```sh
 .venv/bin/python -m scripts.calibration_boards          # rewrite contracts/calibration_boards.py and the sheets

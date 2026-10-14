@@ -7,12 +7,14 @@ board agrees with contracts/calibration_target.py's squares, and each raster pai
 the layout leaves out as `square` says."""
 from __future__ import annotations
 
+import io
 import itertools
 import math
 
 import cv2
 import numpy as np
 import pytest
+from PIL import Image
 
 from central.displays.calibration_paper import PREVIEW_NAME, SHEETS_DIR, sheet_path
 from contracts.calibration_target import (
@@ -41,6 +43,7 @@ from scripts.calibration_boards import (
     outputs,
     paper_raster,
     screen_raster,
+    unchanged,
 )
 from scripts.calibration_target.boards import charuco_board, marker_squares
 
@@ -68,14 +71,27 @@ def test_the_generated_rasters_are_a_fresh_draw():
 
 
 def test_the_committed_sheets_are_a_fresh_draw():
-    """Every PaperSize's PDF and the preview are committed and the same bytes as a fresh draw, so a
-    CI run that draws them again changes nothing. Probe S1-date: a creationDate passed to the PDF
-    writer -> the check fails (its bytes change with the time)."""
+    """Every PaperSize's PDF (byte for byte) and the preview (its pixels) are committed and the same
+    as a fresh draw, so a CI run that draws them again changes nothing. Probe S1-date: a
+    creationDate passed to the PDF writer -> the check fails (its bytes change with the time)."""
     files = outputs()
     assert {path for path in files if path.parent == SHEETS_DIR} == {
         *(sheet_path(paper) for paper in PaperSize), SHEETS_DIR / PREVIEW_NAME}
     for path, data in files.items():
-        assert path.read_bytes() == data, path.name
+        assert unchanged(path, data), path.name
+    for paper in PaperSize:
+        assert sheet_path(paper).read_bytes() == files[sheet_path(paper)], paper
+
+
+def test_a_preview_differing_only_in_its_zlib_bytes_is_unchanged_and_never_rewritten(tmp_path):
+    """Another platform's zlib writes other PNG bytes for the same pixels: the check passes and the
+    write leaves the file alone. Probe S2-bytes: `unchanged` comparing a PNG's bytes -> fails."""
+    data = outputs()[SHEETS_DIR / PREVIEW_NAME]
+    other = tmp_path / PREVIEW_NAME
+    with Image.open(io.BytesIO(data)) as image:
+        image.save(other, "PNG", compress_level=1)
+    assert other.read_bytes() != data and unchanged(other, data)
+    assert not unchanged(tmp_path / "missing.png", data)
 
 
 @pytest.mark.parametrize("stale_name", ["calibration_boards.py", "photo-wall-calibration-target-4x6.pdf"])

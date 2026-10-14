@@ -13,9 +13,10 @@ base85 text). The sheets: one PDF per contracts.calibration_target PaperSize (`s
 paper board's `sheet_squares` piece at PAPER_SQUARE_MM a square, centred, one bit a dot at
 PAPER_DPI, Pillow's PDF writer with fixed metadata) and one PNG preview (`preview_png`), written
 into central/displays/calibration_paper.py's SHEETS_DIR, which Central's print route answers and
-the README links. Every output is the same bytes for the same layout, and
-tests/test_calibration_boards.py regenerates them all and compares the bytes, so CI never rewrites
-them and only a layout change does.
+the README links. Every output is the same for the same layout (the module and the PDFs byte for
+byte; the PNG by its pixels, since zlib's bytes differ between platforms), a file already the same
+is never rewritten, and tests/test_calibration_boards.py regenerates them all and compares them, so
+CI never rewrites them and only a layout change does.
 
     python -m scripts.calibration_boards            # rewrite the rasters' module and the sheets
     python -m scripts.calibration_boards --check    # exit 1 when any file differs from a fresh draw
@@ -162,20 +163,32 @@ def outputs() -> dict[Path, bytes]:
     return files
 
 
+def unchanged(path: Path, data: bytes) -> bool:
+    """Whether the file at `path` already holds `data`'s content: a PNG's mode, size and pixels (its
+    zlib stream differs between platforms' zlib builds), any other file's bytes. False when missing."""
+    if not path.exists():
+        return False
+    if path.suffix != ".png":
+        return path.read_bytes() == data
+    with Image.open(path) as old, Image.open(io.BytesIO(data)) as new:
+        return (old.mode, old.size, old.tobytes()) == (new.mode, new.size, new.tobytes())
+
+
 def main(argv: Sequence[str] | None = None) -> int:
-    """Write every `outputs` file and return 0; with `--check`, write nothing and return 1 when any
-    file is missing or differs from its fresh draw (naming them and the command that rewrites them
-    on stderr), else 0."""
+    """Write every `outputs` file not `unchanged` and return 0; with `--check`, write nothing and
+    return 1 when any file is missing or not `unchanged` (naming them and the command that rewrites
+    them on stderr), else 0."""
     parser = argparse.ArgumentParser(prog=_COMMAND, description="Draw both calibration boards and the sheets.")
     parser.add_argument("--check", action="store_true", help="exit 1 when a file is stale")
     check = parser.parse_args(argv).check
     files = outputs()
     if not check:
         for path, data in files.items():
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(data)
+            if not unchanged(path, data):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(data)
         return 0
-    stale = [path.name for path, data in files.items() if not path.exists() or path.read_bytes() != data]
+    stale = [path.name for path, data in files.items() if not unchanged(path, data)]
     if stale:
         print(f"{', '.join(stale)} differ from a fresh draw; rewrite them with: {_COMMAND}", file=sys.stderr)
         return 1
