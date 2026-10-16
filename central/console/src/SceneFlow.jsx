@@ -24,6 +24,7 @@ import { useFlowInstance, useFlowRefs } from "./flow/useFlowInstance.js";
 import { NOT_CONFIRMED, useFlowWrite } from "./flow/useFlowWrite.js";
 import {
   changedSceneFields,
+  earlierVersionNames,
   SCENE_ADVANCED_FIELDS,
   SCENE_FIELD_STEP,
   SCENE_KEYS,
@@ -31,6 +32,7 @@ import {
   seedScene,
 } from "./sceneFlowModel.js";
 import { SceneList } from "./SceneList.jsx";
+import { SaveBar } from "./patterns/save-bar.tsx";
 import { SCENE, SCHEDULE, scene as sceneWords } from "./showWords.js";
 import { FramesStep, KindStep, MediaStep, PhotosStep, PlaybackStep, ReviewStep } from "./SceneSteps.jsx";
 import { useCandidates } from "./useCandidates.js";
@@ -39,6 +41,8 @@ import { raiseAction, useFitRead } from "./domain/photo-fit-board.tsx";
 import { useSourceCheck } from "./useSourceCheck.js";
 
 const EMPTY = {};
+// The button's words, as Schedules have it (ProgramsRegion.jsx).
+const SAVE_AND_APPLY_NOW = "Save and apply now";
 
 // Each step's heading: the one question it asks.
 const HEADINGS = {
@@ -104,6 +108,13 @@ const HEADINGS = {
  * (`finish`), remembers the Scene for the next flows (`rememberScene`, the shell's
  * `recentScene`) and offers "Show now" and "Schedule it".
  *
+ * SAVE AND APPLY NOW (an edit's Review, beside Replace, as Schedules have it): the same body
+ * `POST …/apply-now`, confirmed like Replace; what plays the Scene changes to the saved version
+ * at once. A plain Replace applies from the Scene's next start (requirements › live media); when
+ * Central's answer (`SceneOnWall.earlier_version`) says a Schedule or Show now still plays the
+ * earlier version, the list names them (`earlierVersionNames`) and offers Save and apply now for
+ * the saved body (an unchanged Scene: Central replaces only what is earlier).
+ *
  * @param {{snapshot: object|null, route: import("./routes.js").Route|null,
  *          navigate: (route: import("./routes.js").Route, options?: {replace?: boolean}) => void,
  *          rememberScene: (sceneId: string) => void,
@@ -128,6 +139,11 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft,
   const [reloaded, setReloaded] = useState(/** @type {string|null} */ (null));
   // The Scene just saved, for the next actions (Show now, Schedule it).
   const [saved, setSaved] = useState(/** @type {string|null} */ (null));
+  // After a plain Replace: what still plays the earlier version, and the save that applies it.
+  const [earlier, setEarlier] = useState(
+    /** @type {{sceneId: string, names: string[], save: {path: string, body: object}}|null} */ (null),
+  );
+  const applyNowRef = useRef(/** @type {HTMLButtonElement|null} */ (null));
   // Check now on a chosen Source: its receipts belong to this draft.
   const sourceCheck = useSourceCheck(JSON.stringify([draft.id]));
   const saveRef = useRef(/** @type {HTMLButtonElement|null} */ (null));
@@ -200,7 +216,7 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft,
   // replacing and Replace is withheld (a newer revision), focus moves on to Reload.
   const confirm = useConfirm(
     () => (reloadRef.current ?? saveRef.current)?.focus(),
-    (_result, request) => request.after?.(),
+    (result, request) => request.after?.(result),
   );
 
   const write = useFlowWrite({ draft, confirm, failure: "Could not save Scene" });
@@ -263,6 +279,7 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft,
       setVanished(null);
       setReloaded(null);
       setSaved(null);
+      setEarlier(null);
     },
   });
   const { place, step, focus } = flow;
@@ -389,7 +406,14 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft,
     setVanished(null);
     setReloaded(null);
     setSaved(sceneId);
+    setEarlier(null);
     rememberScene(sceneId);
+  };
+
+  /** After a plain Replace: name what still plays the earlier version (none: nothing said). */
+  const sayEarlier = (sceneId, save, data) => {
+    const names = earlierVersionNames(data?.earlier_version, snapshot?.runtime);
+    setEarlier(names.length === 0 ? null : { sceneId, names, save });
   };
 
   const buildSceneSave = (sceneId) =>
@@ -400,6 +424,7 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft,
       cycleSeconds: Number(value.cycleSeconds),
       loop: value.loop,
       selections: value.selections,
+      transitionStyle: value.transitionStyle,
       fadeSeconds: value.fadeSeconds,
       ending: value.ending,
       endingSeconds: value.endingSeconds,
@@ -411,23 +436,46 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft,
       revision: editingId === null ? 1 : draft.baseRevision + 1,
     });
 
+  // An edit: Replace (from the Scene's next start), or Save and apply now (at once).
+  const replace = (applyNow, opener) => {
+    if (stale || !flow.checkAll()) {
+      return;
+    }
+    const save = buildSceneSave(editingId);
+    confirm.open(
+      { currentTarget: opener },
+      replaceRequest(
+        editingId,
+        draft.baseRevision,
+        save,
+        candidates.reload,
+        write.bind((result) => {
+          finish(editingId);
+          if (!applyNow) {
+            sayEarlier(editingId, save, result?.data);
+          }
+        }),
+        applyNow,
+      ),
+    );
+  };
+
+  // The notice's Save and apply now: the save Replace just stored, applied now.
+  const applySavedNow = (event) => {
+    if (earlier === null) {
+      return;
+    }
+    const { sceneId, save } = earlier;
+    confirm.open(event, replaceRequest(sceneId, save.body.scene?.revision ?? save.body.revision, save,
+      candidates.reload, () => setEarlier(null), true));
+  };
+
   const onSave = () => {
     if (stale) {
       return;
     }
     if (editingId !== null) {
-      if (flow.checkAll()) {
-        confirm.open(
-          { currentTarget: saveRef.current },
-          replaceRequest(
-            editingId,
-            draft.baseRevision,
-            buildSceneSave(editingId),
-            candidates.reload,
-            write.bind(() => finish(editingId)),
-          ),
-        );
-      }
+      replace(false, saveRef.current);
       return;
     }
     write.send(flow, async (sent) => {
@@ -490,6 +538,14 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft,
           onChange={flow.openField}
           fit={fit}
         />
+        {editingId !== null && (
+          <SaveBar label={SCENE.applyNowBar} message={SCENE.applyNowNote}>
+            <button ref={applyNowRef} type="button" disabled={write.busy || stale}
+              onClick={() => replace(true, applyNowRef.current)}>
+              {SAVE_AND_APPLY_NOW}
+            </button>
+          </SaveBar>
+        )}
       </>
     ),
   };
@@ -511,14 +567,25 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft,
         place === "list" &&
         saved !== null &&
         !draft.dirty && (
-          <div className="record__actions flow__said" role="group" aria-label={sceneWords("next", { id: saved })}>
-            <button type="button" onClick={() => showNow(saved)}>
-              {SCENE.showNow}
-            </button>
-            <button type="button" onClick={() => schedule(saved)}>
-              {SCENE.scheduleIt}
-            </button>
-          </div>
+          <>
+            {earlier !== null && earlier.sceneId === saved && (
+              <div className="notice notice--warn flow__said" role="group"
+                aria-label={sceneWords("earlierGroup", { id: saved })}>
+                <p role="status">{sceneWords("earlier", { id: saved, names: earlier.names.join(", ") })}</p>
+                <button type="button" onClick={applySavedNow}>
+                  {SAVE_AND_APPLY_NOW}
+                </button>
+              </div>
+            )}
+            <div className="record__actions flow__said" role="group" aria-label={sceneWords("next", { id: saved })}>
+              <button type="button" onClick={() => showNow(saved)}>
+                {SCENE.showNow}
+              </button>
+              <button type="button" onClick={() => schedule(saved)}>
+                {SCENE.scheduleIt}
+              </button>
+            </div>
+          </>
         )
       }
       newLabel="New Scene"
@@ -580,12 +647,18 @@ const REPLACE_CHANGED =
   "This Scene was changed since you opened it; nothing was replaced. Review now offers Reload.";
 
 // Refusals in plain words (slice 3 §13): media_repository.py `author_candidates_in`
-// answers the first (authored route) with 409; runtime.py `set_scene` the last
-// (both routes) when another save of this id landed first.
+// answers the first (authored route) with 409; runtime.py `set_scene` the others (both
+// routes): another save of this id landed first, or the Transition leaves less than 5 s of each
+// photo free (`Scene.check_transition`, which the editor checks first).
 const SAVE_REFUSALS = {
   authored_asset_not_member: "That item is no longer in the Source; choose again.",
   scene_revision_conflict: "A Scene with this id was saved meanwhile; nothing was replaced.",
+  changed: "A Scene with this id was saved meanwhile; nothing was replaced.",
+  transition_too_long: "Fade between photos must leave 5 s of each photo without a fade.",
 };
+
+// Central's answers that another save of this Scene landed first.
+const CHANGED = new Set(["scene_revision_conflict", "changed"]);
 
 /**
  * A refused save in words: a known refusal as its sentence (and, when an item left
@@ -606,24 +679,32 @@ function refusal(lead, result, reload) {
  * Replace a stored Scene (slice 3 §13), captured when the dialog opens: the body and
  * the revision the draft was based on. Central refuses it with 409
  * `scene_revision_conflict` when the stored Scene moved past that revision between
- * polls, which ends in the terminal "changed". `after` runs once it is done.
+ * polls, which ends in the terminal "changed". `after` runs once it is done, with the result
+ * (its `data` Central's answer, a `SceneOnWall`). `applyNow`: Save and apply now, the same body
+ * posted to `…/apply-now`.
  */
-function replaceRequest(sceneId, revision, { path, body }, reload, after) {
+function replaceRequest(sceneId, revision, { path, body }, reload, after, applyNow = false) {
   return {
-    key: `replace:${sceneId}:${revision}`,
-    title: `Replace Scene ${sceneId}?`,
-    confirmLabel: "Confirm replace",
+    key: `${applyNow ? "apply-now" : "replace"}:${sceneId}:${revision}`,
+    title: applyNow ? sceneWords("applyNowTitle", { id: sceneId }) : `Replace Scene ${sceneId}?`,
+    confirmLabel: applyNow ? SCENE.applyNowConfirm : "Confirm replace",
     body: (
       <p>
-        {SCHEDULE.replaceNote}
+        {applyNow ? SCENE.applyNowBody : SCHEDULE.replaceNote}
       </p>
     ),
     run: async () => {
-      const result = await apiWrite(path, { method: "PUT", body });
+      const result = applyNow
+        ? await apiWrite(`${path}/apply-now`, { method: "POST", body })
+        : await apiWrite(path, { method: "PUT", body });
       if (result.ok) {
-        return { state: "done", message: `Scene ${sceneId} saved.` };
+        return {
+          state: "done",
+          message: applyNow ? sceneWords("savedNow", { id: sceneId }) : `Scene ${sceneId} saved.`,
+          data: result.data,
+        };
       }
-      if (result.error === "scene_revision_conflict") {
+      if (CHANGED.has(result.error)) {
         return { state: "changed", message: REPLACE_CHANGED };
       }
       if (result.status >= 500) {

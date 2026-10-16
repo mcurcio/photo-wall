@@ -1297,7 +1297,7 @@ def _definition(page, origin, scene_id):
 
 
 def test_each_built_scene_setting_is_set_saved_and_shown_again(page, registry):
-    """Roadmap 1x: Fade between photos (#41), How it ends and its length (#62, #63), Keep
+    """Roadmap 1x: the Transition (#40, Cross-fade or Fade out and in), Fade between photos (#41), How it ends and its length (#62, #63), Keep
     the last photo up (#64) and Keep these Frames together (#65) each show their catalogue
     default, are set on Playback, are saved into the Scene Central stores, and show again
     when the Scene is opened after a reload. The plan a Player gets from each value is
@@ -1315,6 +1315,11 @@ def test_each_built_scene_setting_is_set_saved_and_shown_again(page, registry):
         scene_continue(page, "Playback")
 
         # Each row shows its default; a value at its default offers no Reset.
+        transition = _row(form, "Transition")
+        expect(transition).to_contain_text("Default: Cross-fade")
+        expect(transition.get_by_role("radio", name="Cross-fade", exact=True)).to_be_checked()
+        transition.get_by_role("radio", name="Fade out and in", exact=True).check()
+        expect(transition.get_by_role("button", name="Reset Transition (Default: Cross-fade)")).to_be_visible()
         fade = _row(form, "Fade between photos")
         expect(fade).to_contain_text("Default: 1.5 s")
         expect(fade.get_by_role("button", name=re.compile("^Reset"))).to_have_count(0)
@@ -1340,7 +1345,7 @@ def test_each_built_scene_setting_is_set_saved_and_shown_again(page, registry):
         form.get_by_role("switch", name="Keep these Frames together", exact=True).click()
 
         scene_continue(page, "Review")
-        for answer in ("Fade between photos3 s", "How it endsFades out for 4.5 s",
+        for answer in ("Fade between photosFade out and in, 3 s", "How it endsFades out for 4.5 s",
                        "Keep the last photo upOff", "Keep these Frames togetherOn"):
             expect(form).to_contain_text(answer)
         form.get_by_label("Scene name", exact=True).fill("evening-fade")
@@ -1349,10 +1354,10 @@ def test_each_built_scene_setting_is_set_saved_and_shown_again(page, registry):
             form.get_by_role("button", name="Save Scene", exact=True).click()
         assert info.value.status == 200
         stored = _definition(page, origin, "evening-fade")
-        assert stored["transition"] == {"style": "cross_fade", "seconds": 3}
+        assert stored["transition"] == {"style": "fade_out_and_in", "seconds": 3}
         assert stored["contributions"][0]["after_end"] == "leave_as_is"
         assert (stored["outro_seconds"], stored["protect_frames"]) == (4.5, True)
-        # Fades out: one more photo, which enters by the 3 s fade and then fades out.
+        # Fades out: one more photo, which enters by the transition and then fades out.
         assert [(c["kind"], c["after_end"])
                 for c in stored["outro_contributions"]] == [("media", "keep_nothing")]
 
@@ -1363,31 +1368,104 @@ def test_each_built_scene_setting_is_set_saved_and_shown_again(page, registry):
         page.reload()
         go(page, "scenes")
         _scenes(page).get_by_role("button", name="Edit Scene evening-fade", exact=True).click()
-        for answer in ("Fade between photos3 s", "How it endsFades out for 4.5 s",
+        for answer in ("Fade between photosFade out and in, 3 s", "How it endsFades out for 4.5 s",
                        "Keep the last photo upOff", "Keep these Frames togetherOn"):
             expect(form).to_contain_text(answer)
         form.get_by_role("button", name="Change Playback", exact=True).click()
         expect(_row(form, "How it ends").get_by_role("radio", name="Fades out", exact=True)).to_be_checked()
         expect(form.get_by_label("Ending length", exact=True)).to_have_value("4.5")
         expect(form.get_by_label("Fade between photos", exact=True)).to_have_value("3")
+        expect(_row(form, "Transition").get_by_role("radio", name="Fade out and in", exact=True)).to_be_checked()
         form.get_by_role("button", name="Advanced", exact=True).click()
         expect(form.get_by_role("switch", name="Keep the last photo up", exact=True)).not_to_be_checked()
         expect(form.get_by_role("switch", name="Keep these Frames together", exact=True)).to_be_checked()
 
 
 def test_a_fade_longer_than_the_cycle_is_the_fades_problem(page, registry):
-    """The planner refuses fades longer than a cycle, so the console says so on the fade."""
+    """Central refuses a fade that leaves less than 5 s of each photo free
+    (`Scene.check_transition`), so the console says so on the fade."""
     _seed(registry)
     queue = _seed_source(registry)
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         connect(page, origin, "scenes")
-        form = author_scene(page, "quick", SOURCE, (VALID_FRAME,), seconds=2, submit=False)
+        form = author_scene(page, "quick", SOURCE, (VALID_FRAME,), seconds=7, submit=False)
         form.get_by_role("button", name="Change Playback", exact=True).click()
         form.get_by_label("Fade between photos", exact=True).fill("3")
         scene_continue(page)
         expect(_row(form, "Fade between photos").locator("xpath=..")).to_contain_text(
-            "Fade between photos must be no longer than each photo shows for.")
+            "Fade between photos must leave 5 s of each photo without a fade: at most 2 s.")
         expect(form.get_by_label("Fade between photos", exact=True)).to_be_focused()
+
+
+def _playing_revision(page, origin, scene_id):
+    """The Scene revision each root Run of `scene_id` still playing shows, read through the
+    public contract."""
+    response = page.request.get(origin + "/v1/operator/runtime",
+                                headers={"Authorization": "Bearer " + ADMIN})
+    return sorted(run["scene_revision"] for run in response.json()["current"]["runs"]
+                  if run["scene_id"] == scene_id and run["parent_id"] is None
+                  and run["ended_at"] is None and run["finish_requested_at"] is None)
+
+
+def test_save_and_apply_now_changes_what_plays_the_scene(page, registry):
+    """Cross-fade delivery: a plain Replace of a playing Scene keeps what plays it on the earlier
+    version (requirements: an edit applies from the next start), and the list names it (Show
+    now) with Save and apply now, which plays the saved version at once; Review's Save and apply
+    now does the same in one step. Mutation probes: send the notice's or Review's button as a
+    PUT (the Run stays on the earlier revision); drop `earlier_version` from the notice (it is
+    not said)."""
+    _seed(registry)
+    queue = _seed_source(registry)
+    _runtime(registry).command("set_scene", _console_scene("evening", cycle_seconds=20))
+    _runtime(registry).command_current("activate", "evening", "show-evening")
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        connect(page, origin, "scenes")
+        assert _playing_revision(page, origin, "evening") == [1]
+
+        # A plain Replace: stored, and the Show now still plays revision 1.
+        _scenes(page).get_by_role("button", name="Edit Scene evening", exact=True).click()
+        form = scene_form(page)
+        form.get_by_role("button", name="Change Playback", exact=True).click()
+        _row(form, "Transition").get_by_role("radio", name="Fade out and in", exact=True).check()
+        scene_continue(page, "Review")
+        form.get_by_role("button", name="Replace Scene", exact=True).click()
+        page.get_by_role("dialog").get_by_role("button", name="Confirm replace").click()
+        earlier = _scenes(page).get_by_role("group", name=scene_words("earlierGroup", id="evening"))
+        expect(earlier).to_contain_text(
+            scene_words("earlier", id="evening", names=SCENE["earlierShowNow"]))
+        assert _definition(page, origin, "evening")["transition"]["style"] == "fade_out_and_in"
+        assert _playing_revision(page, origin, "evening") == [1]
+
+        # The notice's Save and apply now: the saved revision plays at once.
+        with page.expect_response(lambda r: r.url.endswith("/v1/operator/scenes/evening/apply-now")
+                                  and r.request.method == "POST") as info:
+            earlier.get_by_role("button", name="Save and apply now", exact=True).click()
+            page.get_by_role("dialog").get_by_role(
+                "button", name=SCENE["applyNowConfirm"], exact=True).click()
+        assert info.value.status == 200
+        expect(_scenes(page).get_by_role("status").filter(
+            has_text=scene_words("savedNow", id="evening"))).to_be_visible()
+        expect(earlier).to_have_count(0)
+        assert _playing_revision(page, origin, "evening") == [2]
+
+        # Review's Save and apply now: one step, revision 3 at once, nothing left to name.
+        _scenes(page).get_by_role("button", name="Edit Scene evening", exact=True).click()
+        form = scene_form(page)
+        form.get_by_role("button", name="Change Playback", exact=True).click()
+        _row(form, "Transition").get_by_role("radio", name="Cross-fade", exact=True).check()
+        scene_continue(page, "Review")
+        bar = form.get_by_role("group", name=SCENE["applyNowBar"], exact=True)
+        expect(bar).to_contain_text(SCENE["applyNowNote"])
+        with page.expect_response(lambda r: r.url.endswith("/v1/operator/scenes/evening/apply-now")
+                                  and r.request.method == "POST") as info:
+            bar.get_by_role("button", name="Save and apply now", exact=True).click()
+            page.get_by_role("dialog").get_by_role(
+                "button", name=SCENE["applyNowConfirm"], exact=True).click()
+        assert info.value.status == 200
+        assert _definition(page, origin, "evening")["transition"]["style"] == "cross_fade"
+        assert _playing_revision(page, origin, "evening") == [3]
+        expect(_scenes(page).get_by_role("group", name=scene_words("earlierGroup", id="evening"))
+               ).to_have_count(0)
 
 
 # --- Roadmap 5a: how a Scene's Frames pick from its photos.

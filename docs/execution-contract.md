@@ -100,6 +100,23 @@ Central plans what each Frame keeps after a layer, and the plan says it: the Pla
 - **Stored data.** Migration `071_layer_after_end.sql` moved stored Scenes, Runs, offers and locks from the flag (yes is `keep_this_photo`, no is `leave_as_is`) and gave each stored Scene's ending `keep_nothing`. The previous Central build cannot read the migrated runtime state; the [runbook](runbook.md#upgrading-to-content-keyed-os-images-migration-028) has the reverse SQL ("Rolling Central back past the after-state").
 - **Display power is not an after-state.** Whether a Frame's display is on or off is operational state ([requirements › Operations](requirements.md#operations-and-scope)), kept outside the plan: no `Layer`, after-state or Run carries it, and the Player never sees it. Central writes it per HDMI port as the Output document on the Node bus's `display` line, and the Pi's display controller carries it out ([Player architecture](player-architecture.md#display-identity-and-power-1b)). A display turned off by a test changes no layer, after-state or Run: Central plans the Frame as if it were on. How the Player's surface and the shell's lease fare while Weston has the Output's signal stopped has not been run on a live Weston ([gap G16](player-architecture.md#observed-gaps)).
 
+## A Scene's Transition: when a photo starts to show
+
+How one photo gives way to the next is the Scene's, one value for all its Frames: `Scene.transition`, a style and seconds F ([central/runtime.py](../central/runtime.py) `Transition`). The styles are **cross-fade** (owner, 2026-10-15: "Let's make cross fade an option"), where the next photo dissolves in over the current one, which stays at full until the cut, and **fade out and in**, through black (or what plays beneath), half the seconds each way. Central plans either; the Player only draws the alphas the plan carries (owner, 2026-10-10: the Player makes no content decision). Runtime alone turns the Transition into each photo's fades and start (`_transition_at`); no Contribution carries a fade.
+
+| On a Frame | Cross-fade, F s | Fade out and in, F s |
+|---|---|---|
+| Between two photos of one Run | the next **shows from** F s before the cut and fades in over the current one | the current fades out over its last F/2; the next fades up over F/2 |
+| A Run's first photo | fades in over F over whatever plays beneath (nothing: from black) | fades up over F/2 |
+| A Run's last photo | kept with nothing after it: stays; otherwise fades out over its last F (an ending dissolves in over it) | as between photos |
+| 0 s | a cut | a cut |
+
+- **A turn begins when its photo starts to show.** A photo's layer starts at its `shows_from` (`Intent.shows_from`) and ends at its cut, so the plan tells the truth about the screen: the wall plan's on-screen extent, the no-photo-on-two-Frames rule and coordination's cue all start there with no rule of their own. A stop that lands strictly inside a dissolve lets that photo play its turn, so nothing snaps back; a stop at or before the next photo's `shows_from`, or exactly at the cut, ends the Run after the current turn.
+- **The bound.** A save is refused (`transition_too_long`, HTTP 422 with `max_seconds`) unless F is 0 or at most each photo's seconds less `PREPARE_SECONDS` (5 s, [contracts/models.py](../contracts/models.py)), so a Player never holds more than two photos per screen while it gets the next one ready. The console checks the same bound first.
+- **Stacking.** Two photos of one Run overlap during a cross-fade, so the order a Frame's layers are drawn in is a contract: `stack_order` (contracts/models.py), bottom to top by priority, root order, admission order, then start, so the later photo is drawn over the earlier. Central's Planner orders a plan by it and the Player's executor draws by it.
+- **Not covered.** One Schedule that starts as another ends on the same Frames still fades out and in: nothing of the first is beneath the second when it starts (owner, 2026-10-15, on cross-fading those hand-overs: "Not right now"). During a dissolve a screen draws two photos; two videos dissolving decode two at once, which has no bench evidence on a Pi yet.
+- **Stored data.** Migration `098_scene_transition.sql` gave every stored Scene a cross-fade at its old seconds at the next revision (owner, 2026-10-15: "Yes"), so the Default Scene restarts on it; Runs and queued activations that captured a Scene were given fade out and in with the same seconds, so their offered layers did not change.
+
 ## What a Frame shows: its crop, and when a photo is on screen
 
 Delivery [5a](roadmap.md#5a-photo-fit-and-order) adds two things to a media layer's meaning. Central decides both and the Player only carries them out.
