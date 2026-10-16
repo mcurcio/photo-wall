@@ -17,7 +17,7 @@ One home each for:
   already caches.
 - **What a paper profile is** (`checked_profile`): an ICC file LittleCMS opens, of the output
   (printer) device class with RGB or CMYK device values, that the recipe bakes; its name is its
-  own description. A profile that passes always bakes, so a listed LUT always works.
+  own description. A profile that passes always bakes, so a listed profile always works.
 
 Pure: bytes in, bytes or a refusal out; no I/O.
 """
@@ -34,8 +34,8 @@ from PIL import Image, ImageCms, features
 from contracts.lut import LUT_BYTES, LUT_GRID
 
 LUT_RECIPE_ID: Final = f"lut33-perceptual-relcol-bpc-1-lcms{features.version('littlecms2')}"
-LUT_PROFILE_MAX_BYTES: Final = 8 * 1024 * 1024
-LUT_NAME_MAX: Final = 128
+PAPER_PROFILE_MAX_BYTES: Final = 8 * 1024 * 1024
+PAPER_PROFILE_NAME_MAX: Final = 128
 
 _ICC_HEADER_BYTES: Final = 128
 _SIGNATURE: Final = slice(36, 40)        # 'acsp' in every ICC profile
@@ -50,7 +50,7 @@ class PaperProfileRefusal(StrEnum):
     """Why a paper profile was refused: a file that is not one, or a list change that may not be made."""
     NOT_A_COLOUR_PROFILE = "not_a_colour_profile"    # not an ICC file LittleCMS opens ('acsp' at 36..40)
     NOT_A_PRINTER_PROFILE = "not_a_printer_profile"  # not an RGB or CMYK output profile, or it does not bake
-    TOO_LARGE = "too_large"                          # past LUT_PROFILE_MAX_BYTES
+    TOO_LARGE = "too_large"                          # past PAPER_PROFILE_MAX_BYTES
     UNKNOWN_PAPER_PROFILE = "unknown_paper_profile"  # not on the list (or not under today's recipe)
     NAMED_BY_A_FRAME = "named_by_a_frame"            # a Frame's paper names it
 
@@ -73,7 +73,7 @@ class PaperProfileRefused(Exception):
 @dataclass(frozen=True)
 class PaperProfile:
     """A checked paper profile: its SHA-256 (lower-case hex, the LUT's name) and its name: the
-    profile's own description, printable, cut to LUT_NAME_MAX, else "Paper profile <first 8 hex>"."""
+    profile's own description, printable, cut to PAPER_PROFILE_NAME_MAX, else "Paper profile <first 8 hex>"."""
     sha256: str
     name: str
 
@@ -109,7 +109,7 @@ def baked_lut(profile: bytes) -> bytes:
 def _opened(profile: bytes) -> tuple[ImageCms.ImageCmsProfile, str] | PaperProfileRefusal:
     """The profile LittleCMS opens and its device values' image mode, after the size, signature,
     device-class and device-values checks."""
-    if len(profile) > LUT_PROFILE_MAX_BYTES:
+    if len(profile) > PAPER_PROFILE_MAX_BYTES:
         return PaperProfileRefusal.TOO_LARGE
     if len(profile) < _ICC_HEADER_BYTES or profile[_SIGNATURE] != b"acsp":
         return PaperProfileRefusal.NOT_A_COLOUR_PROFILE
@@ -153,15 +153,14 @@ _GRID: Final = _grid()
 
 
 def _name(paper: ImageCms.ImageCmsProfile) -> str:
-    """The profile's description, printable characters only, spaces folded, cut to LUT_NAME_MAX."""
+    """The profile's description, printable characters only, spaces folded, cut to PAPER_PROFILE_NAME_MAX."""
     try:
         description = ImageCms.getProfileDescription(paper)
     except _CMS_ERRORS:
         return ""
     printable = "".join(character for character in description if character.isprintable())
-    return " ".join(printable.split())[:LUT_NAME_MAX].strip()
+    return " ".join(printable.split())[:PAPER_PROFILE_NAME_MAX].strip()
 
 
-__all__ = ["LUT_NAME_MAX", "LUT_PROFILE_MAX_BYTES", "LUT_RECIPE_ID", "PaperProfile", "PaperProfileRefusal",
-           "PaperProfileRefused", "baked_lut",
-           "checked_profile"]
+__all__ = ["LUT_RECIPE_ID", "PAPER_PROFILE_MAX_BYTES", "PAPER_PROFILE_NAME_MAX", "PaperProfile",
+           "PaperProfileRefusal", "PaperProfileRefused", "baked_lut", "checked_profile"]

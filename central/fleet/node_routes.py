@@ -20,7 +20,7 @@ from central.content_wiring import ContentServices
 from central.coordination import Coordinator
 from central.db import Database
 from central.fleet.bytes import OfferByteReader
-from central.fleet.models import FleetError
+from central.fleet.models import FleetError, TrialRefusal
 from central.fleet.node_acceptance import NodeAcceptance
 from central.fleet.node_app_links import NodeAppLinks
 from central.fleet.node_boot import NodeBootService
@@ -79,13 +79,13 @@ _OPERATION: TypeAdapter[TrialOperation] = TypeAdapter(TrialOperation)
 
 def _trial_body[T](adapter: TypeAdapter[T], raw: bytes) -> T:
     """A trial body, strict JSON (contracts.strict_json's rules, then pydantic's strict validation);
-    NodeControlError("node_trial_operation_invalid", 422) for anything else."""
+    NodeControlError(TrialRefusal.OPERATION_INVALID, 422) for anything else."""
     if loads_object(raw, max_bytes=4096) is None:
-        raise NodeControlError("node_trial_operation_invalid", 422)
+        raise NodeControlError(TrialRefusal.OPERATION_INVALID, 422)
     try:
         return adapter.validate_json(raw, strict=True)
     except ValidationError as exc:
-        raise NodeControlError("node_trial_operation_invalid", 422) from exc
+        raise NodeControlError(TrialRefusal.OPERATION_INVALID, 422) from exc
 
 
 def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
@@ -304,7 +304,7 @@ def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
         try:
             restore = PositionRestore.model_validate(value)
         except ValidationError as exc:
-            raise NodeControlError("node_trial_operation_invalid", 422) from exc
+            raise NodeControlError(TrialRefusal.OPERATION_INVALID, 422) from exc
         return await invoke(lambda: trials.restore(frame_id, trial_id, entry_id=restore.entry_id,
                                                    expected_sequence=restore.expected_sequence))
 

@@ -66,6 +66,7 @@ export interface DrawnView {
 export interface EntityView {
   entity: string;
   heard_at: number | null;
+  kind: "light" | "illuminance";
   reports_light: RoomLightId | null;
   reports_sensor: SensorId | null;
 }
@@ -118,6 +119,8 @@ export interface LightView {
   matched_lux: number;
 }
 
+export type LightWord = Dimmer | ColourDimmer | Unavailable;
+
 export interface LinkHealthView {
   since: number | null;
   state: "not-configured" | "connecting" | "connected" | "away" | "never-run";
@@ -128,6 +131,8 @@ export interface LutRef {
   recipe_id: string;
 }
 
+export type Lux = number;
+
 export type LuxOnFrame = number;
 
 export interface MadeForView {
@@ -137,7 +142,7 @@ export interface MadeForView {
 
 export interface Measured {
   kind: "measured";
-  lux: number;
+  lux: Lux;
 }
 
 export interface MeasuredEntry {
@@ -172,7 +177,7 @@ export interface PaperProfileView {
 }
 
 export interface PaperProfilesView {
-  luts: PaperProfileView[];
+  paper_profiles: PaperProfileView[];
 }
 
 export interface PlayerDrawnView {
@@ -214,6 +219,8 @@ export interface ProfilePxView {
   height: number;
   width: number;
 }
+
+export type Reading = Measured | Unavailable;
 
 export interface RefusedReportView {
   address: string;
@@ -277,7 +284,7 @@ export interface SensorRef {
 export interface SensorView {
   heard_at: number | null;
   id: SensorId;
-  reading: (Measured | Unavailable) | null;
+  reading: Reading | null;
   reports: RoomLightId | null;
   sensor: Sensor;
 }
@@ -451,6 +458,12 @@ export const LIMITS = {
     matched_lux: {
       maximum: 20000,
       minimum: 10,
+    },
+  },
+  Lux: {
+    value: {
+      maximum: 200000,
+      minimum: 0,
     },
   },
   LuxOnFrame: {
@@ -635,6 +648,10 @@ export const CONSTANTS = {
 } as const;
 
 export const REFUSALS = {
+  drawn_report: [
+    "room_lights_drawn_too_large",
+    "room_lights_drawn_invalid",
+  ],
   frame_lighting: [
     "unknown_room_light",
     "reference_mismatch",
@@ -647,6 +664,11 @@ export const REFUSALS = {
     "too_large",
     "unknown_paper_profile",
     "named_by_a_frame",
+  ],
+  position_restore: [
+    "other_frame",
+    "made_for_other_profile",
+    "made_for_other_display",
   ],
   reports: [
     "unknown_address",
@@ -662,8 +684,28 @@ export const REFUSALS = {
     "named_by_a_frame",
     "too_many",
   ],
+  trial: [
+    "trial_already_active",
+    "trial_baseline_revision_changed",
+    "trial_unknown",
+    "trial_ended",
+    "trial_sequence_conflict",
+    "trial_sequence_invalid",
+    "trial_latest_not_presented",
+    "trial_frame_unbound",
+    "trial_display_unavailable",
+    "trial_current_output_required",
+    "trial_admitted_surface_required",
+    "unknown_entry",
+    "node_trial_operation_invalid",
+    "node_body_too_large",
+    "calibration_revision_conflict",
+    "calibration_trial_baseline_changed",
+  ],
 } as const;
+export type DrawnReportRefusal = (typeof REFUSALS)["drawn_report"][number];
 export type FrameLightingRefusal = (typeof REFUSALS)["frame_lighting"][number];
 export type PaperProfilesRefusal = (typeof REFUSALS)["paper_profiles"][number];
 export type ReportsRefusal = (typeof REFUSALS)["reports"][number];
 export type RoomLightRefusal = (typeof REFUSALS)["room_light"][number];
+export type TrialRefusal = (typeof REFUSALS)["trial"][number];

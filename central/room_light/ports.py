@@ -9,6 +9,7 @@ every Pi without waiting.
 """
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Protocol
 
 from central.kernel.transactions import Transaction
@@ -74,6 +75,18 @@ class RoomLightReports(Protocol):
         ...
 
 
+class NamedReferences(Protocol):
+    """Injected into a reporting source's adapter that can be asked again (the worker's Home Assistant
+    link): each reference a room light or Sensor was just saved with, in any process, so the source
+    re-reads it at once rather than at its next change."""
+
+    async def follow(self, named: Callable[[ReporterRef | SensorRef], None]) -> None:
+        """Until cancelled: `named(reference)` for each room light saved with a reporter and each
+        Sensor saved, from now on. One saved while nothing follows is not handed again: its source's
+        next word still arrives."""
+        ...
+
+
 class RoomLightSetup(Protocol):
     """Injected into the House › Lights routes. The four writers raise RoomLightRefused."""
 
@@ -82,7 +95,8 @@ class RoomLightSetup(Protocol):
         ...
 
     def save_room_light(self, light_id: RoomLightId, light: RoomLight) -> RoomLightView:
-        """Create or replace room light `light_id` (policy.check_room_light)."""
+        """Create or replace room light `light_id` (policy.check_room_light); a reported light's
+        reporter is handed to NamedReferences' followers at commit."""
         ...
 
     def remove_room_light(self, light_id: RoomLightId) -> None:
@@ -90,7 +104,8 @@ class RoomLightSetup(Protocol):
         ...
 
     def save_sensor(self, sensor_id: SensorId, sensor: Sensor) -> SensorView:
-        """Create or replace Sensor `sensor_id` (policy.check_sensor)."""
+        """Create or replace Sensor `sensor_id` (policy.check_sensor); its reference is handed to
+        NamedReferences' followers at commit."""
         ...
 
     def remove_sensor(self, sensor_id: SensorId) -> None:
@@ -133,4 +148,4 @@ class RoomLightsDocuments(Protocol):
         ...
 
 
-__all__ = ["DrawnReports", "ReportSources", "RoomLightReports", "RoomLightSetup", "RoomLightsDocuments"]
+__all__ = ["DrawnReports", "NamedReferences", "ReportSources", "RoomLightReports", "RoomLightSetup", "RoomLightsDocuments"]

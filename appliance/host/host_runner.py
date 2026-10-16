@@ -10,7 +10,7 @@ import argparse
 import http.client
 import json
 import time
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from uuid import UUID
 
@@ -20,7 +20,7 @@ from appliance.host.bus import host_session
 from appliance.host.host import HostCore
 from appliance.host.host_linux import LinuxHostSampler, SystemdRebootDriver, boot_id, boottime_ms
 from appliance.host.host_storage import FileRebootJournal, RebootDelivery
-from appliance.host.light_sensor import start_light_meter
+from appliance.host.light_sensor import IIO_ROOT, LightMeter, start_light_meter
 from appliance.kernel.boot_stage import DIRECTORY as BOOT_STAGE_DIRECTORY
 from appliance.kernel.boot_stage import read_boot_report
 from appliance.kernel.boot_store import BootStore
@@ -33,6 +33,7 @@ from contracts.node_host_facts import (
     fact_values_document,
     valid_fact,
 )
+from contracts.node_link import NODE_BUS_URL
 from contracts.node_observation import (
     HOST_OBSERVATION_INTERVAL_SECONDS,
     HostObservationV2,
@@ -41,6 +42,7 @@ from contracts.node_observation import (
 )
 from contracts.node_protocol import encode_node_message
 from contracts.strict_json import loads_object
+from nodeapi.node import NodeSession as BusSession
 
 
 class HostRunner:
@@ -198,6 +200,26 @@ class HostRunner:
 
 
 
+@dataclass(frozen=True)
+class HostBus:
+    """HostCore on the Node's bus: its host-line session and the wired light meter feeding it."""
+    session: BusSession
+    meter: LightMeter
+
+    def stop(self) -> None:
+        self.meter.stop()
+        self.session.stop()
+
+
+def start_host_bus(base_tag: str, *, url: str = NODE_BUS_URL, iio_root: Path = IIO_ROOT) -> HostBus:
+    """The host component on the Node's bus (appliance/host/bus.py), on its own thread and never waited
+    on, and a wired light meter, if any, on its own thread onto the host line's state; both started
+    (it returns at once)."""
+    session = host_session(base_tag, url=url)
+    session.start()
+    return HostBus(session, start_light_meter(session.state.put, root=iio_root))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=Path("/run/photo-wall-node/host.json"))
@@ -217,11 +239,7 @@ def main() -> None:
                         base_tag=value["base_tag"])
     recovery = runner.recovery
     server = RecoveryServer(recovery)
-    # The host component on the Node's bus: its own thread, never waited on (appliance/host/bus.py).
-    session = host_session(value["base_tag"])
-    session.start()
-    # A wired light meter, if any: its own thread, onto the host line's state.
-    meter = start_light_meter(session.state.put)
+    bus = start_host_bus(value["base_tag"])
     last_tick = 0.0
     try:
         while True:
@@ -238,8 +256,7 @@ def main() -> None:
                 # Fixed bounded cadence; no credential or packet logging.
             time.sleep(0.05)
     finally:
-        meter.stop()
-        session.stop()
+        bus.stop()
         server.close()
         store.close()
 

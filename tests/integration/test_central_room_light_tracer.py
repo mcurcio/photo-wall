@@ -5,9 +5,9 @@ The pieces are each side's own: Central's app for House > Lights and the Player'
 worker as `media.worker` composes and runs it (`build_bus_and_link`, `_run_workers`), with its Home
 Assistant link on the pinned nats-server's MQTT listener (the house's broker) and its Node bus on a
 hub on free ports (bus_servers.py, configured by Fleet's generator as the worker configures it); a
-Node on the shipped configuration; the Pi's host session with the light sensor HostCore starts
-(`start_light_meter`); and the Player's `follow_room_lights`, whose callback records every document
-it is handed.
+Node on the shipped configuration; HostCore's bus as its `main()` starts it (`start_host_bus`: the
+host session and the wired light sensor); and the Player as its `main()` starts it
+(`PlayerService.start`, which follows the room lights), drawing on a recording renderer.
 
 E1. A retained light state published before the worker starts reaches the callback.
 E2. Ten switches reach the callback, and the Player's control State delivery does not move.
@@ -26,14 +26,13 @@ from integration.bus_servers import hub_server, node_server, until
 from integration.room_light_rig import (
     RESTART_SECONDS,
     Broker,
-    Followed,
+    Player,
     Worker,
     light_sensor_root,
 )
 from test_registry import ADMIN, enroll, frame, hello
 
-from appliance.host.bus import host_session
-from appliance.host.light_sensor import start_light_meter
+from appliance.host.host_runner import start_host_bus
 from central.app import create_app
 from central.content_catalog.catalog import device_id_for_serial
 from central.infra.home_assistant.link import MQTT_URL_ENV
@@ -54,7 +53,6 @@ from contracts.room_light import (
 )
 from contracts.wire_model import Model
 from nodeapi.buffers import state_prefix, state_stream
-from player.room_lights import follow_room_lights
 
 SERIAL = "serial-room-light"
 ENTITY = "light.bookshelf_spot"
@@ -87,8 +85,7 @@ def test_room_light_reaches_the_player_through_the_real_composition(registry, tm
     broker = Broker(tmp_path)
     hub = hub_server(tmp_path, [SERIAL])
     node = node_server(tmp_path, SERIAL, hub)
-    host = host_session("base-room-light", url=node.client_url)
-    followed = Followed()
+    host = None
     stoppers: list = []
     env = {HUB_URL_ENV: hub.client_url, HUB_CONFIG_ENV: str(tmp_path / "worker-hub.json"), MQTT_URL_ENV: broker.url}
 
@@ -107,9 +104,9 @@ def test_room_light_reaches_the_player_through_the_real_composition(registry, tm
                 "result": "applied"})
             return state
 
-        def latest(check):
+        def latest(check, player):
             async def poll():
-                document = followed.latest()
+                document = player.latest()
                 return document is not None and check(document)
             return poll
 
@@ -123,21 +120,22 @@ def test_room_light_reaches_the_player_through_the_real_composition(registry, tm
             worker = Worker(database.dsn, env)
             worker.start()
             stoppers.append(worker.stop)
-            host.start()
-            meter = start_light_meter(host.state.put, root=light_sensor_root(tmp_path, LUX))
-            stoppers.append(lambda: asyncio.to_thread(meter.stop))
-            reader, _ = follow_room_lights(node.client_url, followed)
-            stoppers.append(lambda: asyncio.to_thread(reader.stop))
+            nonlocal host
+            host = start_host_bus("base-room-light", url=node.client_url, iio_root=light_sensor_root(tmp_path, LUX))
+            followed = Player(tmp_path / "player", node.client_url)
+            followed.start()
+            stoppers.append(followed.stop)
 
             # E1: the retained state reaches the Player.
-            await until(latest(lambda d: _spot(d) == FULL), FIRST_SECONDS, "the Player sees the spot on at full")
+            await until(latest(lambda d: _spot(d) == FULL, followed), FIRST_SECONDS,
+                        "the Player sees the spot on at full")
 
             # E2: ten switches reach the Player; its control State delivery does not move.
             before = await asyncio.to_thread(control_state)
             for index in range(10):
                 on = index % 2 == 1
                 await broker.publish(TOPIC, ON if on else OFF)
-                await until(latest(lambda d, on=on: _spot(d) is not None and _spot(d).on is on), SECONDS,
+                await until(latest(lambda d, on=on: _spot(d) is not None and _spot(d).on is on, followed), SECONDS,
                             f"switch {index + 1} reaches the Player")
             assert _spot(followed.latest()) == FULL
             assert await asyncio.to_thread(control_state) == before
@@ -152,13 +150,13 @@ def test_room_light_reaches_the_player_through_the_real_composition(registry, tm
                         ).fetchone() is not None
                 return await asyncio.to_thread(read)
             await until(reading_recorded, SECONDS, "Central records the Pi's light reading")
-            await asyncio.to_thread(meter.stop)   # no new reading from here on
+            await asyncio.to_thread(host.meter.stop)   # no new reading from here on
             await asyncio.to_thread(call, "PUT", f"{HOUSE_SENSORS}/hall-meter", json=Sensor(
                 name="Hall meter", at=SensorRef(source=PI_SOURCE, address=player["player_id"])))
             await asyncio.to_thread(call, "PUT", f"{HOUSE_LIGHTS}/window", json=MeasuredLight(
                 name="Window", sensor="hall-meter", colour=FixedColour(kelvin=6500)))
             window = MeasuredEntry(colour=FixedColour(kelvin=6500), state=Measured(lux=LUX))
-            await until(latest(lambda d: d.lights.get("window") == window), SECONDS,
+            await until(latest(lambda d: d.lights.get("window") == window, followed), SECONDS,
                         "the Player sees the window at the Pi's reading")
 
             # E4a: a change while the hub is away (its WALL put fails) reaches the Player once it is back.
@@ -171,7 +169,7 @@ def test_room_light_reaches_the_player_through_the_real_composition(registry, tm
                 return isinstance(spot, WhiteEntry) and isinstance(spot.state, Dimmer) and not spot.state.on
             await until(recorded_off, SECONDS, "Central records the spot off while the hub is away")
             await asyncio.to_thread(hub.start)
-            await until(latest(lambda d: _spot(d) is not None and not _spot(d).on), RESTART_SECONDS,
+            await until(latest(lambda d: _spot(d) is not None and not _spot(d).on, followed), RESTART_SECONDS,
                         "the Player sees the change made while the hub was away")
             current = followed.latest()
 
@@ -181,9 +179,9 @@ def test_room_light_reaches_the_player_through_the_real_composition(registry, tm
             await asyncio.to_thread(hub.start)
             await asyncio.to_thread(node.stop)
             await asyncio.to_thread(node.start)
-            fresh = Followed()
-            again, _ = follow_room_lights(node.client_url, fresh)
-            stoppers.append(lambda: asyncio.to_thread(again.stop))
+            fresh = Player(tmp_path / "fresh-player", node.client_url)
+            fresh.start()
+            stoppers.append(fresh.stop)
 
             async def fresh_current():
                 return fresh.latest() is not None and fresh.latest().lights == current.lights
@@ -201,7 +199,8 @@ def test_room_light_reaches_the_player_through_the_real_composition(registry, tm
             broker.start()
             asyncio.run(main())
         finally:
-            host.stop()
+            if host is not None:
+                host.stop()
             node.stop()
             hub.stop()
             broker.stop()

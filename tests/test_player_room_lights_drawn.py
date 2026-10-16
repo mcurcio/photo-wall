@@ -3,9 +3,7 @@ the running PlayerService's test rig (tests/test_player_service.py) with Central
 the report loop PUTs ROOM_LIGHTS_DRAWN_PATH on a change and at least every repeat period."""
 from __future__ import annotations
 
-import ast
 import asyncio
-import inspect
 import json
 
 import httpx
@@ -182,14 +180,3 @@ def test_a_running_session_sends_the_report(tmp_path, quick, monkeypatch):
             await asyncio.wait_for(task, 3)
             await close(service)
     asyncio.run(check())
-
-
-def test_main_wires_the_room_lights_through_start_room_lights():
-    """main() cannot run off a Pi (GTK, GLib, the Node's bus), so its one wiring call is read from its
-    source: the service is the room lights' sink, so the reader's health is reported. Mutation
-    probe: main() calls follow_room_lights -> this fails."""
-    tree = ast.parse(inspect.getsource(service_module.main))
-    called = {node.func.id: [ast.unparse(argument) for argument in node.args]
-              for node in ast.walk(tree) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)}
-    assert called.get("start_room_lights") == ["service", "NODE_BUS_URL"]
-    assert "follow_room_lights" not in called

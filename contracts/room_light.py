@@ -22,7 +22,8 @@ Three wire shapes:
   following WALL. Central judges it against the document it wrote.
 
 Rules this module owns (one home each): the room light id (RoomLightId), the lux reading's range
-(Lux, LUX_MAX), the colour, state and entry vocabularies with their ranges, the shapes above, their
+(Lux, LUX_MAX), a light's word and a reading (LightWord, Reading), the colour, state and entry
+vocabularies with their ranges, the shapes above, their
 caps, keys, codecs and the document's digest. A state is total: absent, `NotReported` and
 `Unavailable` all add no light, so arrival order needs no invariant.
 
@@ -122,6 +123,12 @@ class NotReported(Model):
     kind: Literal["not-reported"] = "not-reported"
 
 
+# What a reporter last said, by kind: a light's word (a white or colour light's state, or that it cannot
+# tell) and a reading (a sensor's lux, or that it cannot tell).
+LightWord = Annotated[Dimmer | ColourDimmer | Unavailable, Field(discriminator="kind", title="LightWord")]
+Reading = Annotated[Measured | Unavailable, Field(discriminator="kind", title="Reading")]
+
+
 # ---- Entries: one per reporter kind, so mismatched colour and state pairs cannot be built ----
 
 class FixedEntry(Model):
@@ -164,7 +171,7 @@ class RoomLightsDocument(Model):
 
 class LightSensorReading(Model):
     """What the Pi's one wired light sensor reads (HostCore -> Central)."""
-    reading: Annotated[Measured | Unavailable, Field(discriminator="kind")]
+    reading: Reading
 
 
 class RoomLightsDrawn(Model):
@@ -221,8 +228,8 @@ __all__ = [
     "LIGHT_SENSOR_BYTES", "LIGHT_SENSOR_KEY", "LUX_MAX", "ROOM_LIGHTS_BYTES", "ROOM_LIGHTS_DRAWN_BYTES",
     "ROOM_LIGHTS_DRAWN_LEASE_SECONDS", "ROOM_LIGHTS_DRAWN_REPEAT_SECONDS",
     "ROOM_LIGHTS_DRAWN_PATH", "ROOM_LIGHTS_KEY", "ROOM_LIGHTS_MAX", "ROOM_LIGHT_ID_PATTERN", "ColourDimmer",
-    "ColourEntry", "Dimmer", "DocumentDigest", "FixedColour", "FixedEntry", "LightSensorReading", "Lux",
-    "Measured", "MeasuredEntry", "NotReported", "ReportedColour", "Rgb", "RoomLightEntry", "RoomLightId",
+    "ColourEntry", "Dimmer", "DocumentDigest", "FixedColour", "FixedEntry", "LightSensorReading", "LightWord", "Lux",
+    "Measured", "MeasuredEntry", "NotReported", "Reading", "ReportedColour", "Rgb", "RoomLightEntry", "RoomLightId",
     "RoomLightsDocument", "RoomLightsDrawn", "Share", "Unavailable", "WhiteEntry", "decode_light_sensor",
     "decode_room_lights", "encode_light_sensor", "encode_room_lights", "room_lights_digest",
 ]

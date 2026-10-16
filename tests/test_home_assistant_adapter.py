@@ -10,6 +10,7 @@ import threading
 from pathlib import Path
 
 import pytest
+from runtime_fakes import NoNames
 
 from central.infra.home_assistant import health, messages, topics
 from central.infra.home_assistant.link import HomeAssistantLink, build_home_assistant_link
@@ -111,7 +112,7 @@ class Health:
 
 def test_each_message_is_recorded_or_refused():
     reports = Reports()
-    link = HomeAssistantLink(None, reports, Health(), close=lambda: None)
+    link = HomeAssistantLink(None, reports, Health(), NoNames(), close=lambda: None)
     link.record("photowall/light/light.spot", b'{"state": "on", "brightness": 255}')
     link.record("photowall/illuminance/sensor.lux", b'{"lux": 12}')
     link.record("photowall/light/light.spot", b'{"state": "dim"}')
@@ -125,7 +126,7 @@ def test_each_message_is_recorded_or_refused():
 
 def test_without_a_broker_the_link_beats_not_configured_until_stopped():
     beats = Health()
-    link = build_home_assistant_link({}, Reports(), beats, close=lambda: None)   # type: ignore[arg-type]
+    link = build_home_assistant_link({}, Reports(), beats, NoNames(), close=lambda: None)   # type: ignore[arg-type]
 
     async def run() -> None:
         stop = asyncio.Event()

@@ -19,6 +19,7 @@ from central.db import Database
 from central.displays.model import Readiness
 from central.fleet.acceptance_evidence import applied_is_latest
 from central.fleet.device_fence import fence_in, retire_in
+from central.fleet.models import TrialRefusal
 from central.fleet.position_history import (
     created_record,
     position_values,
@@ -771,10 +772,10 @@ class Registry:
             row["player_id"], row["authority_epoch"], row["output_id"], row["generation"],
             row["configuration_revision"]
         ) != (player_id, authority_epoch, output_id, binding_generation, config_revision):
-            raise RegistryError("calibration_trial_baseline_changed")
+            raise RegistryError(TrialRefusal.CALIBRATION_BASELINE_CHANGED)
         current = Calibration.model_validate(row["calibration"])
         if current.revision != calibration_revision:
-            raise RegistryError("calibration_revision_conflict")
+            raise RegistryError(TrialRefusal.CALIBRATION_REVISION_CONFLICT)
         committed = Calibration.model_validate(calibration.model_dump()).model_copy(
             update={"revision": current.revision + 1})
         write_position_in(conn, frame_id, saved_record(position_values(committed, lighting), session_id=session_id,

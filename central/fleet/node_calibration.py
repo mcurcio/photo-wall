@@ -42,6 +42,7 @@ from uuid import UUID, uuid4
 from psycopg.types.json import Jsonb
 from pydantic import Field
 
+from central.fleet.models import TrialRefusal
 from central.fleet.node_sessions import NodeControlError
 from central.fleet.position_history import (
     TrialHanded,
@@ -137,7 +138,7 @@ class NodeCalibration:
                 "SELECT 1 FROM node_calibration_trials WHERE frame_id=%s AND state='active'",
                 (frame_id,),
             ).fetchone():
-                raise NodeControlError("trial_already_active", 409)
+                raise NodeControlError(TrialRefusal.ALREADY_ACTIVE, 409)
             return self._open(conn, frame_id, context, draft, draft_lighting, now, session_id=None,
                               restored_from=None)
 
@@ -150,7 +151,7 @@ class NodeCalibration:
         last restored from."""
         saved = context.binding.calibration
         if draft is not None and draft.revision != saved.revision:
-            raise NodeControlError("trial_baseline_revision_changed", 409)
+            raise NodeControlError(TrialRefusal.BASELINE_REVISION_CHANGED, 409)
         calibration = saved if draft is None else draft
         lighting = context.binding.lighting if draft_lighting is None else draft_lighting
         generation = conn.execute(
@@ -219,7 +220,7 @@ class NodeCalibration:
                 (trial_id, frame_id),
             ).fetchone()
             if row is None:
-                raise NodeControlError("trial_unknown", 404)
+                raise NodeControlError(TrialRefusal.UNKNOWN, 404)
             now = self.sessions.clock.utc()
             terminal = None
             if row["state"] == "active":
@@ -247,12 +248,12 @@ class NodeCalibration:
             try:
                 sequence = next_sequence(row["sequence"], expected_sequence)
             except StaleSequence:
-                raise NodeControlError("trial_sequence_conflict", 409) from None
+                raise NodeControlError(TrialRefusal.SEQUENCE_CONFLICT, 409) from None
             if operation == "renew":
                 # The handover: this trial ends and the next generation begins at the draft, in
                 # this one transaction (the module docstring).
                 if proposed.revision != row["calibration_revision"]:
-                    raise NodeControlError("trial_baseline_revision_changed", 409)
+                    raise NodeControlError(TrialRefusal.BASELINE_REVISION_CHANGED, 409)
                 conn.execute(
                     "UPDATE node_calibration_trials SET state='ended' WHERE trial_id=%s", (trial_id,)
                 )
@@ -265,7 +266,7 @@ class NodeCalibration:
                 ).fetchone()
             elif operation == "edit":
                 if proposed.revision != row["calibration_revision"]:
-                    raise NodeControlError("trial_baseline_revision_changed", 409)
+                    raise NodeControlError(TrialRefusal.BASELINE_REVISION_CHANGED, 409)
                 row = self._edited_in(conn, row, sequence, proposed, proposed_lighting, now,
                                       restored_from=row["restored_from"])
             elif operation == "save":
@@ -276,7 +277,7 @@ class NodeCalibration:
                     or receipt.frame_tag != "trial-" + row["candidate_sha256"]
                     or now - row["presented_at"] >= self.inactivity_seconds
                 ):
-                    raise NodeControlError("trial_latest_not_presented", 409)
+                    raise NodeControlError(TrialRefusal.LATEST_NOT_PRESENTED, 409)
                 baseline = surface_from(row["baseline"])
                 committed = self.registry.commit_calibration_trial_in(
                     conn,
@@ -312,7 +313,7 @@ class NodeCalibration:
         made_for_other_profile, made_for_other_display, each 409), then trial_sequence_conflict 409,
         then the entry's lighting against the house as an edit's (FrameLightingRefused)."""
         if type(expected_sequence) is not int or expected_sequence < 1:
-            raise NodeControlError("trial_sequence_invalid", 422)
+            raise NodeControlError(TrialRefusal.SEQUENCE_INVALID, 422)
         with self.sessions.db.transaction() as conn:
             acquire_runtime_locks(conn)
             # Find and lock the current operational scope before the Trial row, as `operate` does.
@@ -324,17 +325,17 @@ class NodeCalibration:
                 (trial_id, frame_id),
             ).fetchone()
             if row is None:
-                raise NodeControlError("trial_unknown", 404)
+                raise NodeControlError(TrialRefusal.UNKNOWN, 404)
             now = self.sessions.clock.utc()
             if (row["state"] != "active" or not _lease(row).live(now) or context is None
                     or not self._same(row, context.producer_id, context.request.admitted)):
-                raise NodeControlError("trial_ended", 410)
+                raise NodeControlError(TrialRefusal.ENDED, 410)
             entry = position_entry_in(conn, entry_id)
             if entry is None:
-                raise NodeControlError("unknown_entry", 404)
+                raise NodeControlError(TrialRefusal.UNKNOWN_ENTRY, 404)
             made_for = frame_made_for_in(conn, frame_id)
             if made_for is None:
-                raise NodeControlError("trial_unknown", 404)
+                raise NodeControlError(TrialRefusal.UNKNOWN, 404)
             refusal = restore_refusal(entry, frame_id=frame_id, profile_px=made_for.profile_px,
                                       seen_display_id=made_for.display_id)
             if refusal is not None:
@@ -342,7 +343,7 @@ class NodeCalibration:
             try:
                 sequence = next_sequence(row["sequence"], expected_sequence)
             except StaleSequence:
-                raise NodeControlError("trial_sequence_conflict", 409) from None
+                raise NodeControlError(TrialRefusal.SEQUENCE_CONFLICT, 409) from None
             calibration, lighting = restored_draft(entry, base_revision=row["calibration_revision"])
             # An entry's lighting may name a room light removed or re-reported since: it goes
             # through the same check as an edit's, so Save never keeps lighting that adds nothing.

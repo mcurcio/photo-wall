@@ -61,6 +61,7 @@ from contracts.room_light import (
     room_lights_digest,
 )
 from contracts.time import Clock, SystemClock, TimeMapping
+from nodeapi.node import WallReader
 from player.cache import Cache, CacheError
 from player.central_link import CentralLink, Session, read_refusal
 from player.executor import AuthorityError, Executor
@@ -341,7 +342,8 @@ class PlayerService:
                  websocket_connect=None, cache_factory=Cache, executor_factory=Executor,
                  node_link_client: NodeAppLinkClient | None = None,
                  boot_id_path: Path = Path("/proc/sys/kernel/random/boot_id"),
-                 boot_context: BootContext, luts: LutWants, room_lights_dispatch: Callable | None = None):
+                 boot_context: BootContext, luts: LutWants, room_lights_dispatch: Callable | None = None,
+                 node_bus_url: str = NODE_BUS_URL):
         self.config, self.identity, self.outputs = config, identity, outputs
         # The LUTs the renderer asks for (print look): fetched here, held there. The same
         # PlayerLuts the renderer was built with (`main`).
@@ -356,6 +358,9 @@ class PlayerService:
         self._room_lights_drawn: str | None = None
         self._room_lights_following: Callable[[], bool] | None = None
         self._room_lights_wake: tuple[asyncio.AbstractEventLoop, asyncio.Event] | None = None
+        # The Node's bus, where the room lights are followed from `start` (`node_bus_url`).
+        self._node_bus_url = node_bus_url
+        self._room_lights_reader: WallReader | None = None
         self.clock = clock or SystemClock()
         self.mapping = TimeMapping(self.clock)
         self.link = CentralLink(trust, unauthorized=Unauthorized, client=client,
@@ -1378,12 +1383,15 @@ class PlayerService:
             self._session, self._located = None, False
 
     def start(self):
+        """The network thread, and the room lights followed from the Node's WALL mirror on their own
+        thread, never blocking the Player (the bus away keeps the last document: the mirror)."""
         self._main()
         if self._thread is not None:
             raise RuntimeError("service already started")
         self._thread = threading.Thread(target=lambda: asyncio.run(self.run()),
                                         name="player-network", daemon=False)
         self._thread.start()
+        self._room_lights_reader = start_room_lights(self, self._node_bus_url)
 
     def request_relink(self):
         """Thread-safe: the proof loop forgets its recorded app link and proves it again now."""
@@ -1401,6 +1409,9 @@ class PlayerService:
         self._stop.set()
         if self._loop is not None and self._task is not None:
             self._loop.call_soon_threadsafe(self._task.cancel)
+        if (reader := self._room_lights_reader) is not None:   # asked to stop, never waited on here
+            self._room_lights_reader = None
+            reader.stop(0)
 
     @property
     def stopped(self):
@@ -1544,9 +1555,6 @@ def main():
     signal.signal(signal.SIGINT, finish)
     Tick(GLib, 33, tick)
     service.start()
-    # The room lights from the Node's WALL mirror: their own thread, never blocking the Player; the
-    # bus away keeps the last document (the mirror) and the Player draws on.
-    start_room_lights(service, NODE_BUS_URL)
     # Probes are answered at control dispatch's priority (own one-slot lane), never here.
     ProbeResponder(dispatcher, on_relink=service.request_relink,
                    gl_renderer=lambda: renderer.gl_renderer).start()

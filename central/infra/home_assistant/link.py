@@ -7,7 +7,9 @@ link subscribes to `topics.SUBSCRIPTION` at QoS 1 with a clean session, so every
 handed every retained state again; a repeat records nothing new (`RoomLightReports.record_*`
 answers "unchanged"). Each message goes topic -> entity (`topics.topic_of`) -> state or reading
 (`messages`) -> record (a recorded change wakes the WALL writer through the store's NOTIFY at
-commit, as every writer's does); a refused one goes to the one refusal log.
+commit, as every writer's does); a refused one goes to the one refusal log. A room light or Sensor
+saved with an entity of SOURCE (in the API process, `NamedReferences`) is re-read at once: the link
+subscribes to that entity's topic, so the broker hands its retained state again, and unsubscribes.
 
 The link beats its health every HEARTBEAT_SECONDS ("not-configured" without a broker, "connecting"
 at start and between attempts, "connected" while subscribed); a reader judges the beat by its age
@@ -36,14 +38,17 @@ import aiomqtt
 from central.infra.home_assistant.health import HEARTBEAT_SECONDS, Beat, PgLinkHealth
 from central.infra.home_assistant.messages import MessageRefused, illuminance, light_state
 from central.infra.home_assistant.topics import (
+    ILLUMINANCE_TOPIC_PREFIX,
+    LIGHT_TOPIC_PREFIX,
     SOURCE,
     SUBSCRIPTION,
     illuminance_sensor,
+    is_entity,
     light_reporter,
     topic_of,
 )
-from central.room_light.model import ReportRefusal
-from central.room_light.ports import RoomLightReports
+from central.room_light.model import ReporterRef, ReportRefusal, SensorRef
+from central.room_light.ports import NamedReferences, RoomLightReports
 
 log = logging.getLogger(__name__)
 
@@ -78,12 +83,14 @@ def broker_from(url: str) -> Broker:
 class HomeAssistantLink:
     """The worker's one subscriber of the house's broker (None: no broker configured)."""
 
-    def __init__(self, broker: Broker | None, reports: RoomLightReports, health: PgLinkHealth, *,
-                 close: Callable[[], None]) -> None:
+    def __init__(self, broker: Broker | None, reports: RoomLightReports, health: PgLinkHealth,
+                 named: NamedReferences, *, close: Callable[[], None]) -> None:
         self._broker = broker
         self._reports = reports
         self._health = health
+        self._named = named
         self._close = close
+        self._rereads: asyncio.Queue[str] = asyncio.Queue()
         self._beat: Beat = "not-configured" if broker is None else "connecting"
         # A clean session needs no stable id; a fixed one would make two Centrals on one broker (a
         # deploy's overlapping workers, a local launch) evict each other in a takeover loop.
@@ -93,16 +100,26 @@ class HomeAssistantLink:
         """Until `stop`: beat every HEARTBEAT_SECONDS and, with a broker, connect, subscribe and record
         every message, reconnecting with backoff after any failure; then close the link's pool."""
         beating = asyncio.create_task(self._beating(stop), name="home assistant heartbeat")
+        following = asyncio.create_task(self._named.follow(self.reread), name="home assistant named entities")
         try:
             if self._broker is None:
                 await stop.wait()
             else:
                 await self._connecting(stop)
         finally:
-            beating.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await beating
+            for task in (beating, following):
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
             await asyncio.to_thread(self._close)
+
+    def reread(self, reference: ReporterRef | SensorRef) -> None:
+        """A room light or Sensor was just saved with `reference`: one of SOURCE is read again from the
+        broker on the current connection (the next connection reads every one anyway)."""
+        if reference.source != SOURCE or not is_entity(reference.address):
+            return
+        prefix = LIGHT_TOPIC_PREFIX if isinstance(reference, ReporterRef) else ILLUMINANCE_TOPIC_PREFIX
+        self._rereads.put_nowait(prefix + reference.address)
 
     async def _beating(self, stop: asyncio.Event) -> None:
         while not stop.is_set():
@@ -125,6 +142,8 @@ class HomeAssistantLink:
             try:
                 async with self._client() as client:
                     await client.subscribe(SUBSCRIPTION, qos=1)
+                    while not self._rereads.empty():   # this subscription reads them all
+                        self._rereads.get_nowait()
                     await self._say("connected")
                     delay = RECONNECT_FIRST_SECONDS
                     await self._receive(client, stop)
@@ -149,18 +168,28 @@ class HomeAssistantLink:
     async def _receive(self, client: aiomqtt.Client, stop: asyncio.Event) -> None:
         messages = client.messages.__aiter__()
         stopping = asyncio.ensure_future(stop.wait())
+        nxt = asyncio.ensure_future(messages.__anext__())
+        reread = asyncio.ensure_future(self._rereads.get())
         try:
             while True:
-                nxt = asyncio.ensure_future(messages.__anext__())
-                done, _ = await asyncio.wait((nxt, stopping), return_when=asyncio.FIRST_COMPLETED)
-                if nxt not in done:
-                    nxt.cancel()
+                done, _ = await asyncio.wait((nxt, reread, stopping), return_when=asyncio.FIRST_COMPLETED)
+                if stopping in done:
                     return
-                message = nxt.result()
-                payload = message.payload if isinstance(message.payload, bytes | bytearray) else b""
-                await asyncio.to_thread(self.record, message.topic.value, bytes(payload))
+                if reread in done:
+                    # A new subscription is handed the topic's retained state; the one-topic
+                    # subscription goes at once, so later messages arrive once, by SUBSCRIPTION.
+                    topic = reread.result()
+                    await client.subscribe(topic, qos=1)
+                    await client.unsubscribe(topic)
+                    reread = asyncio.ensure_future(self._rereads.get())
+                if nxt in done:
+                    message = nxt.result()
+                    nxt = asyncio.ensure_future(messages.__anext__())
+                    payload = message.payload if isinstance(message.payload, bytes | bytearray) else b""
+                    await asyncio.to_thread(self.record, message.topic.value, bytes(payload))
         finally:
-            stopping.cancel()
+            for waiting in (nxt, reread, stopping):
+                waiting.cancel()
 
     def record(self, topic: str, payload: bytes) -> None:
         """One message: record it; a topic or payload this adapter cannot read goes to the refusal
@@ -178,11 +207,11 @@ class HomeAssistantLink:
             self._reports.record_refused(SOURCE, topic, refused.reason)
 
 
-def build_home_assistant_link(env: Mapping[str, str], reports: RoomLightReports, health: PgLinkHealth, *,
-                              close: Callable[[], None]) -> HomeAssistantLink:
+def build_home_assistant_link(env: Mapping[str, str], reports: RoomLightReports, health: PgLinkHealth,
+                              named: NamedReferences, *, close: Callable[[], None]) -> HomeAssistantLink:
     """The worker's link, always: without MQTT_URL_ENV its run only beats "not-configured"."""
     url = env.get(MQTT_URL_ENV)
-    return HomeAssistantLink(broker_from(url) if url else None, reports, health, close=close)
+    return HomeAssistantLink(broker_from(url) if url else None, reports, health, named, close=close)
 
 
 __all__ = ["CLIENT_ID_PREFIX", "MQTT_URL_ENV", "RECONNECT_FIRST_SECONDS", "RECONNECT_MAX_SECONDS", "Broker",

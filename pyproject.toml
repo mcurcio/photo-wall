@@ -263,7 +263,7 @@ allowed_importers = ["media.worker", "central.app", "central.home_assistant_rout
 name = "Fleet and the registry reach the house's lighting only through its port"
 type = "forbidden"
 source_modules = ["central.fleet", "central.registry"]
-forbidden_modules = ["central.infra.room_light_store", "central.infra.lut_rows", "central.infra.lut_store"]
+forbidden_modules = ["central.infra.room_light_store", "central.infra.paper_profile_store"]
 
 [[tool.importlinter.contracts]]
 # Power and the week: sun times and the IANA zone database are Central's house-time calculator's;

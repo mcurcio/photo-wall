@@ -1,5 +1,5 @@
 """The room-light tracer's rig: the house's broker, the worker as `media.worker` composes it, the
-Player's room-lights follower and a Pi's light sensor on disk.
+Player as its `main()` starts it (`PlayerService.start`) and a Pi's light sensor on disk.
 
 Everything Node-bus (servers, ports, `until`) is bus_servers.py's; this module adds only what the
 room-light tracer needs beside it.
@@ -10,18 +10,25 @@ import asyncio
 import os
 import signal
 import subprocess
-import threading
 from collections.abc import Mapping
 from pathlib import Path
 
 import aiomqtt
+import httpx
 from integration.bus_servers import _free_port, nats_server_binary, until
 from integration.test_central_hub import RESTART_SECONDS
 from integration.test_central_worker_hub import _IdleRuntime
+from test_player_service import TRUST, Server, boot_context, close, immediate
+from uplink_fakes import finding
 
 from contracts.room_light import RoomLightsDocument
+from contracts.time import ManualClock
+from player.identity import load_identity
+from player.luts import PlayerLuts
+from player.rendering import RecordingRenderer
+from player.service import PlayerConfig, PlayerService
 
-__all__ = ["RESTART_SECONDS", "Broker", "Followed", "Worker", "light_sensor_root"]
+__all__ = ["RESTART_SECONDS", "Broker", "Player", "Worker", "light_sensor_root"]
 
 
 class Broker:
@@ -92,20 +99,39 @@ class Worker:
         await asyncio.wait_for(self._task, 30)
 
 
-class Followed:
-    """The Player's `follow_room_lights` callback: every document it was handed, in order."""
+class Player:
+    """A PlayerService started as the Player's `main()` starts it (`start`, which also follows the room
+    lights from the Node's bus at `node_url`), drawing on a RecordingRenderer; its Central is the
+    Player tests' fake (test_player_service.py), since the room lights never cross Central's link.
+    Built and started on the calling thread, as `main()` does on the GLib thread."""
 
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._documents: list[RoomLightsDocument] = []
+    def __init__(self, tmp: Path, node_url: str) -> None:
+        cache = tmp / "cache"
+        cache.mkdir(mode=0o700, parents=True)
+        clock = ManualClock(100)
+        self._client = httpx.AsyncClient(transport=httpx.MockTransport(Server(clock)), trust_env=False)
+        self.renderer = RecordingRenderer()
+        self.service = PlayerService(
+            PlayerConfig(central_origin="http://central", cache_dir=str(cache), cache_bytes=1024**2),
+            load_identity(), (), self.renderer, immediate, find_central=finding("http://central"), trust=TRUST,
+            clock=clock, client=self._client, time_client=self._client, websocket_connect=False,
+            boot_context=boot_context(), luts=PlayerLuts(), node_bus_url=node_url)
 
-    def __call__(self, document: RoomLightsDocument) -> None:
-        with self._lock:
-            self._documents.append(document)
+    def start(self) -> None:
+        self.service.start()
 
     def latest(self) -> RoomLightsDocument | None:
-        with self._lock:
-            return self._documents[-1] if self._documents else None
+        """The last room-lights document the Player drew its Frames with."""
+        drawn = list(self.renderer.room_lights)
+        return drawn[-1] if drawn else None
+
+    async def stop(self) -> None:
+        self.service.stop()
+
+        async def stopped():
+            return self.service.stopped
+        await until(stopped, 10, "the Player stops")
+        await close(self.service)
 
 
 def light_sensor_root(tmp: Path, lux: float) -> Path:

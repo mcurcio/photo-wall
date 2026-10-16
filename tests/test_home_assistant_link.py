@@ -5,6 +5,7 @@ session needs no stable one, and two Centrals on one broker would evict each oth
 from __future__ import annotations
 
 import pytest
+from runtime_fakes import NoNames
 
 from central.infra.home_assistant.link import (
     CLIENT_ID_PREFIX,
@@ -41,8 +42,8 @@ def test_any_other_url_is_refused(url):
 def test_no_url_is_a_link_with_no_broker_and_two_links_never_share_a_client_id():
     """Mutation probe: a fixed identifier -> the two links' ids are equal."""
     for env in ({}, {MQTT_URL_ENV: ""}):
-        assert build_home_assistant_link(env, Reports(), Health(), close=lambda: None)._broker is None  # type: ignore[arg-type]
-    first, second = (build_home_assistant_link({MQTT_URL_ENV: "mqtt://broker.lan"}, Reports(), Health(),  # type: ignore[arg-type]
+        assert build_home_assistant_link(env, Reports(), Health(), NoNames(), close=lambda: None)._broker is None  # type: ignore[arg-type]
+    first, second = (build_home_assistant_link({MQTT_URL_ENV: "mqtt://broker.lan"}, Reports(), Health(), NoNames(),  # type: ignore[arg-type]
                                                close=lambda: None) for _ in range(2))
     assert first.client_id != second.client_id
     assert first.client_id.startswith(CLIENT_ID_PREFIX + "-")

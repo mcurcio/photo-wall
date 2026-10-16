@@ -10,7 +10,9 @@ import asyncio
 from test_registry import enroll
 
 from central.content_catalog.catalog import device_id_for_serial
+from central.frame_lighting.paper_profiles import LUT_RECIPE_ID
 from central.infra import room_light_store
+from central.infra.frame_lighting_store import PgFrameLighting
 from central.infra.home_assistant.health import LEASE_SECONDS, PgLinkHealth
 from central.infra.light_sensor_judge import HOST_STATE_STREAM, PI_SOURCE, LightSensorJudge
 from central.infra.node_link_store import PgLinkStores, PgWallMarks
@@ -54,7 +56,7 @@ def _sql(registry, sql: str, params=()) -> list[dict]:
 
 def test_a_word_heard_before_its_light_exists_shows_at_once(registry):
     """A2. Mutation probe M1: entry_of ignoring the word -> the light reads not reported."""
-    lights = PgRoomLights(registry.db)
+    lights = PgRoomLights(registry.db, PgFrameLighting(LUT_RECIPE_ID))
     change = lights.current().change
     assert lights.record_light_state(X, Dimmer(on=True, brightness=0.5)) == "unchanged"     # no light names it yet
     assert lights.current().change == change
@@ -69,9 +71,9 @@ def test_a_word_heard_before_its_light_exists_shows_at_once(registry):
 def test_a_pi_reading_heard_before_its_sensor_exists_shows_at_once(registry):
     """A2, the Pi's half, through the host line's judge as the link store calls it."""
     player = _pi(registry)
-    _record_host_line(registry, LightSensorJudge(PgRoomLights(registry.db)), encode_light_sensor(
+    _record_host_line(registry, LightSensorJudge(PgRoomLights(registry.db, PgFrameLighting(LUT_RECIPE_ID))), encode_light_sensor(
         LightSensorReading(reading=Measured(lux=180.0))))
-    lights = PgRoomLights(registry.db)
+    lights = PgRoomLights(registry.db, PgFrameLighting(LUT_RECIPE_ID))
     sensor = lights.save_sensor("pi-meter", Sensor(name="Pi meter", at=SensorRef(source=PI_SOURCE,
                                                                                 address=player["player_id"])))
     assert sensor.reading == Measured(lux=180.0) and sensor.heard_at is not None and sensor.reports is None
@@ -82,7 +84,7 @@ def test_a_pi_reading_heard_before_its_sensor_exists_shows_at_once(registry):
 
 def test_a_changed_reporter_reads_its_new_references_last_word(registry):
     """A3: no reset; the light takes whatever its new reference last said."""
-    lights = PgRoomLights(registry.db)
+    lights = PgRoomLights(registry.db, PgFrameLighting(LUT_RECIPE_ID))
     lights.record_light_state(Y, Dimmer(on=True, brightness=0.25))
     lights.save_room_light("x", ReportedLight(name="X", reporter=X, colour=WHITE))
     assert lights.current().lights["x"].state == NotReported()
@@ -92,7 +94,7 @@ def test_a_changed_reporter_reads_its_new_references_last_word(registry):
 
 def test_refused_reports_are_one_log_cut_and_kept_per_source(registry, monkeypatch):
     monkeypatch.setattr(room_light_store, "REFUSALS_KEPT", 2)
-    lights = PgRoomLights(registry.db)
+    lights = PgRoomLights(registry.db, PgFrameLighting(LUT_RECIPE_ID))
     for index in range(3):
         lights.record_refused("home-assistant", f"photowall/x/{index}", ReportRefusal.UNREADABLE)
     lights.record_refused("pi", "p" * (ADDRESS_MAX + 10), ReportRefusal.OUT_OF_RANGE)
@@ -125,12 +127,12 @@ def test_a_reading_that_fails_never_rolls_back_the_host_lines_record(registry, m
         conn.execute("SELECT 1/0")
 
     monkeypatch.setattr(room_light_store, "_word_in", failing)
-    _record_host_line(registry, LightSensorJudge(PgRoomLights(registry.db)),
+    _record_host_line(registry, LightSensorJudge(PgRoomLights(registry.db, PgFrameLighting(LUT_RECIPE_ID))),
                       encode_light_sensor(LightSensorReading(reading=Measured(lux=5.0))))
     assert _sql(registry, "SELECT seq FROM node_link_records WHERE stream=%s", (HOST_STATE_STREAM,)) == [{"seq": 1}]
     monkeypatch.undo()
     assert _sql(registry, "SELECT word FROM reading_words WHERE source=%s", (PI_SOURCE,)) == []
-    lights = PgRoomLights(registry.db)
+    lights = PgRoomLights(registry.db, PgFrameLighting(LUT_RECIPE_ID))
     lights.current()
     assert _sql(registry, "SELECT address, word FROM reading_words WHERE source=%s", (PI_SOURCE,)) == [
         {"address": player["player_id"], "word": {"kind": "measured", "lux": 5.0}}]
@@ -150,7 +152,7 @@ def test_a_refusal_that_fails_never_rolls_back_the_host_lines_record(registry, m
         conn.execute("SELECT 1/0")
 
     monkeypatch.setattr(room_light_store, "_refusal_in", failing)
-    _record_host_line(registry, LightSensorJudge(PgRoomLights(registry.db)), b"not a reading")
+    _record_host_line(registry, LightSensorJudge(PgRoomLights(registry.db, PgFrameLighting(LUT_RECIPE_ID))), b"not a reading")
     assert _sql(registry, "SELECT seq FROM node_link_records WHERE stream=%s", (HOST_STATE_STREAM,)) == [{"seq": 1}]
 
 
@@ -178,7 +180,7 @@ def test_ensuring_wall_only_wakes_the_room_lights_writer():
 
 def test_words_are_kept_per_source_newest_first(registry, monkeypatch):
     monkeypatch.setattr(room_light_store, "WORDS_KEPT_PER_SOURCE", 2)
-    lights = PgRoomLights(registry.db)
+    lights = PgRoomLights(registry.db, PgFrameLighting(LUT_RECIPE_ID))
     for name in ("a", "b", "c"):
         lights.record_light_state(ReporterRef(source="home-assistant", address=f"light.{name}"), Dimmer(on=True, brightness=1.0))
     lights.record_light_state(ReporterRef(source="other", address="light.a"), Dimmer(on=True, brightness=1.0))

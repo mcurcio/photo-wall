@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from uuid import UUID, uuid4
 
 from central.fleet.device_fence import fence_in
+from central.fleet.models import TrialRefusal
 from central.fleet.node_app_links import (
     load_current_node_app_link_for_player_in,
     load_current_node_app_link_in,
@@ -319,7 +320,7 @@ class NodeDisplay:
             (frame_id,),
         ).fetchone()
         if row is None:
-            raise NodeControlError("trial_frame_unbound", 409)
+            raise NodeControlError(TrialRefusal.FRAME_UNBOUND, 409)
         generation = fence_in(conn, row["device_id"], "act").generation()
         now = self.sessions.clock.utc()
         session = conn.execute(
@@ -330,7 +331,7 @@ class NodeDisplay:
             (row["device_id"], generation, now),
         ).fetchone()
         if session is None:
-            raise NodeControlError("trial_display_unavailable", 409)
+            raise NodeControlError(TrialRefusal.DISPLAY_UNAVAILABLE, 409)
         grant = parse_session_grant(bytes(session["grant_payload"]))
         link = load_current_node_app_link_for_player_in(
             conn, row["player_id"], row["authority_epoch"], now
@@ -354,7 +355,7 @@ class NodeDisplay:
             or observed is None
             or now - observed["received_at"] >= 10
         ):
-            raise NodeControlError("trial_current_output_required", 409)
+            raise NodeControlError(TrialRefusal.CURRENT_OUTPUT_REQUIRED, 409)
         request = parse_display_exchange(bytes(observed["request"]))
         expected = Surface(
             request.output,
@@ -372,7 +373,7 @@ class NodeDisplay:
             or request.receipt.surface != expected
             or not 0 <= request.sampled_boottime_ms - request.receipt.sampled_boottime_ms < self.receipt_ms
         ):
-            raise NodeControlError("trial_admitted_surface_required", 409)
+            raise NodeControlError(TrialRefusal.ADMITTED_SURFACE_REQUIRED, 409)
         admission = self.runtime.display_admission_in(
             conn,
             player_id=link.player_id,

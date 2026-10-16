@@ -1,4 +1,5 @@
-"""The paper profiles list's operator API shapes (GET /v1/operator/luts; central/lut_routes.py)."""
+"""The paper profiles list's operator API shapes (GET /v1/operator/paper-profiles;
+central/paper_profile_routes.py)."""
 from __future__ import annotations
 
 from contracts.models import Digest, Instant, Model
@@ -17,8 +18,8 @@ class PaperProfileView(Model):
 
 
 class PaperProfilesView(Model):
-    """GET /v1/operator/luts."""
-    luts: tuple[PaperProfileView, ...]
+    """GET /v1/operator/paper-profiles."""
+    paper_profiles: tuple[PaperProfileView, ...]
 
 
 __all__ = ["PaperProfileView", "PaperProfilesView"]

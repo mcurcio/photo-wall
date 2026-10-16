@@ -6,6 +6,7 @@ central/console/src/generated/ at build time; its --check test fails when they d
 
     {"schemas": {<name>: <JSON Schema>, ...},      # pydantic's, mode "validation" for a body the
                                                     # console sends, "serialization" for a view it reads
+                                                    # and for a named alias (CONSOLE_ALIASES)
      "constants": {<NAME>: <number | string>, ...}, # values the console shows or steps by
      "refusals": {<context>: [<code>, ...], ...}}   # each context's closed refusal vocabulary
 
@@ -23,7 +24,9 @@ from typing import Final
 from pydantic import BaseModel, TypeAdapter
 
 from central.displays.views import LightView
+from central.fleet.models import TrialRefusal
 from central.fleet.node_calibration import TrialBegin, TrialEdit, TrialStep
+from central.fleet.position_history import PositionRestoreRefusal
 from central.fleet.position_views import PositionHistoryView, PositionRestore
 from central.frame_lighting.model import FrameLightingRefusal
 from central.frame_lighting.paper_profiles import PaperProfileRefusal
@@ -34,6 +37,7 @@ from central.infra.light_sensor_judge import PI_SOURCE
 from central.room_light.model import (
     ROOM_LIGHT_NAME_MAX,
     SENSORS_MAX,
+    DrawnReportRefusal,
     ReportRefusal,
     RoomLight,
     RoomLightRefusal,
@@ -60,13 +64,22 @@ from contracts.node_picture import (
     PANEL_BLACK_MAX,
     PANEL_BLACK_MIN,
 )
-from contracts.room_light import LUX_MAX, ROOM_LIGHT_ID_PATTERN, ROOM_LIGHTS_MAX
+from contracts.room_light import (
+    LUX_MAX,
+    ROOM_LIGHT_ID_PATTERN,
+    ROOM_LIGHTS_MAX,
+    LightWord,
+    Lux,
+    Reading,
+)
 
 CONSOLE_BODIES: Final[tuple[type[BaseModel], ...]] = (   # bodies the console sends (and RoomLight, a union)
     Sensor, TrialBegin, TrialEdit, TrialStep, FrameLighting, PositionRestore)
 CONSOLE_VIEWS: Final[tuple[type[BaseModel], ...]] = (    # answers the console reads
     RoomLightsView, DrawnView, RefusedReportsView, HomeAssistantView, PaperProfileView, PaperProfilesView,
     PositionHistoryView, LightView)
+CONSOLE_ALIASES: Final[Mapping[str, object]] = {     # named types a view's fields take, by their name
+    "Lux": Lux, "LightWord": LightWord, "Reading": Reading}
 CONSOLE_CONSTANTS: Final[Mapping[str, float | int | str]] = {
     "FRAME_LIGHTS_MAX": FRAME_LIGHTS_MAX, "MAT_DEPTH_MM_MAX": MAT_DEPTH_MM_MAX, "CLOSE_REACH_MM": CLOSE_REACH_MM,
     "BEAM_DEGREES_MAX": BEAM_DEGREES_MAX, "WHITENESS_MIN": WHITENESS_MIN, "INK_DENSITY_MIN": INK_DENSITY_MIN,
@@ -78,9 +91,10 @@ CONSOLE_CONSTANTS: Final[Mapping[str, float | int | str]] = {
     "MATCHED_LUX_MIN": MATCHED_LUX_MIN, "MATCHED_LUX_MAX": MATCHED_LUX_MAX, "PANEL_BLACK_MIN": PANEL_BLACK_MIN,
     "PANEL_BLACK_MAX": PANEL_BLACK_MAX,
 }
-CONSOLE_REFUSALS: Final[Mapping[str, type[StrEnum]]] = {   # context name -> its refusal enum
+CONSOLE_REFUSALS: Final[Mapping[str, type[StrEnum]]] = {   # context name -> its closed refusal enum
     "room_light": RoomLightRefusal, "frame_lighting": FrameLightingRefusal, "paper_profiles": PaperProfileRefusal,
-    "reports": ReportRefusal,
+    "reports": ReportRefusal, "drawn_report": DrawnReportRefusal, "trial": TrialRefusal,
+    "position_restore": PositionRestoreRefusal,
 }
 
 
@@ -89,10 +103,12 @@ def console_contract() -> dict[str, object]:
     schemas: dict[str, object] = {model.__name__: model.model_json_schema(mode="validation")
                                   for model in CONSOLE_BODIES}
     schemas["RoomLight"] = TypeAdapter(RoomLight).json_schema(mode="validation")
+    schemas.update({name: TypeAdapter(alias).json_schema(mode="serialization")
+                    for name, alias in CONSOLE_ALIASES.items()})
     schemas.update({model.__name__: model.model_json_schema(mode="serialization") for model in CONSOLE_VIEWS})
     contract = {"schemas": schemas, "constants": dict(CONSOLE_CONSTANTS),
                 "refusals": {context: [code.value for code in refusal] for context, refusal in CONSOLE_REFUSALS.items()}}
     return json.loads(json.dumps(contract, sort_keys=True))
 
 
-__all__ = ["CONSOLE_BODIES", "CONSOLE_CONSTANTS", "CONSOLE_REFUSALS", "CONSOLE_VIEWS", "console_contract"]
+__all__ = ["CONSOLE_ALIASES", "CONSOLE_BODIES", "CONSOLE_CONSTANTS", "CONSOLE_REFUSALS", "CONSOLE_VIEWS", "console_contract"]

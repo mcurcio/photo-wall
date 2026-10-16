@@ -1,5 +1,5 @@
-"""What Frame lighting's writers depend on: one port, called inside the writer's own transaction.
-central/infra/frame_lighting_store.py `PgFrameLighting` implements it over PostgreSQL."""
+"""What Frame lighting's writers, and the house's, depend on: one port, called inside the writer's own
+transaction. central/infra/frame_lighting_store.py `PgFrameLighting` implements it over PostgreSQL."""
 from __future__ import annotations
 
 from typing import Protocol
@@ -11,23 +11,32 @@ from contracts.node_picture import DisplayLight
 
 
 class FrameLightingCheck(Protocol):
-    """Injected into every writer of a Frame's lighting (Position's trial begin and edit, Restore,
-    the Registry's new Frame) and every remover of what a lighting names (House › Lights, the paper
-    profiles list). Each method first takes the room-lights lock in `tx` (the row every room-light
-    writer locks first), so no removal commits between a check and its write."""
+    """The house's one lock and the one "which Frames name it" query, injected into every writer of a
+    Frame's lighting (Position's trial begin and edit, Restore, the Registry's new Frame) and every
+    writer or remover of what a lighting names (House › Lights' room lights and Sensors, the words
+    their reporters send, the paper profiles list). A check shares the lock; a change takes it
+    exclusive, first; so no removal commits between a check and its write, and two checks never wait
+    for each other."""
 
     def fitted_within(self, tx: Transaction, lighting: FrameLighting) -> FrameLighting:
         """`lighting` checked against the house now (`policy.check`) and stamped with today's
-        recipe (`policy.stamped`); FrameLightingRefused(code) when it does not fit."""
+        recipe (`policy.stamped`), under the lock shared; FrameLightingRefused(code) when it does not
+        fit."""
         ...
 
     def new_frame_within(self, tx: Transaction, display: DisplayLight) -> FrameLighting:
-        """The lighting a new Frame starts with (`policy.new_frame_lighting` over the house now)."""
+        """The lighting a new Frame starts with (`policy.new_frame_lighting` over the house now),
+        under the lock shared."""
+        ...
+
+    def changing_within(self, tx: Transaction) -> None:
+        """Take the lock exclusive for `tx`: the first step of every change to the house (a room
+        light, a Sensor, a reporter's word, a paper profile)."""
         ...
 
     def naming_within(self, tx: Transaction) -> FramesNaming:
-        """Which Frames' saved lighting or open trial names each room light and paper profile: the
-        one query a removal asks before it removes."""
+        """Which Frames' saved lighting or open trial names each room light and paper profile, under
+        the lock shared (a remover has taken it exclusive first, `changing_within`)."""
         ...
 
 

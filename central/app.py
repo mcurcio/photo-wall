@@ -54,7 +54,7 @@ from central.infra.home_assistant.health import PgLinkHealth
 from central.infra.home_assistant.settings import PgHomeAssistantSettings
 from central.infra.house_store import PgHouse, seed_house
 from central.infra.light_sensor_judge import PI_SOURCE, is_player
-from central.infra.lut_store import PgLuts
+from central.infra.paper_profile_store import PgPaperProfiles
 from central.infra.photo_library_store import PgPhotoLibrary
 from central.infra.power_store import PgPower
 from central.infra.room_light_store import PgRoomLights
@@ -62,13 +62,13 @@ from central.infra.tuning_history_store import PgTuningHistory
 from central.infra.why_store import PgWhy
 from central.installation_models import FrameName, InstallationInventory, WallInventory, WallNaming
 from central.library_routes import mount_library_routes
-from central.lut_routes import mount_lut_routes
 from central.media_ports import MediaApplication
 from central.media_queue import MediaTaskQueue, ProcrastinateMediaQueue
 from central.media_repository import MediaRepository
 from central.node_runtime_reconciliation import NodeRuntimeReconciler
 from central.operator_auth import OperatorAuth
 from central.operator_snapshot import OperatorSnapshot, OperatorSnapshotReader, runtime_document
+from central.paper_profile_routes import mount_paper_profile_routes
 from central.photo_fit_routes import mount_photo_fit_routes
 from central.photo_library.provisioning import apply_setting, read_setting
 from central.photo_library_routes import mount_photo_library_routes, mount_photo_source_routes
@@ -203,7 +203,8 @@ def create_app(
     admin_token = admin_token or os.environ["PHOTO_WALL_ADMIN_TOKEN"]
     if len(admin_token) < 32:
         raise ValueError("PHOTO_WALL_ADMIN_TOKEN must contain at least 32 characters")
-    registry = Registry(db, clock, lighting=PgFrameLighting(LUT_RECIPE_ID))
+    house_lighting = PgFrameLighting(LUT_RECIPE_ID)   # the house's lock and "which Frames name it"
+    registry = Registry(db, clock, lighting=house_lighting)
     media_queue = media_queue or (
         ProcrastinateMediaQueue(db.dsn) if isinstance(db, Database) else None
     )
@@ -846,7 +847,7 @@ def create_app(
     mount_why_routes(app, admin=admin, queries=PgWhy(db, times=media_times))
     house = PgHouse(db, times=media_times)
     mount_house_routes(app, admin=admin, queries=house, commands=house)
-    room_lights = PgRoomLights(db)
+    room_lights = PgRoomLights(db, house_lighting)
     mount_room_light_routes(app, admin=admin, player=player, lights=room_lights, sources=REPORT_SOURCES,
                             drawn=room_lights)
     mount_home_assistant_routes(app, admin=admin, settings=PgHomeAssistantSettings(db, PgLinkHealth(db)))
@@ -854,7 +855,8 @@ def create_app(
     mount_picture_routes(app, admin=admin, queries=pictures, commands=pictures)
     mount_tuning_history_routes(app, admin=admin, queries=PgTuningHistory(db))
     mount_calibration_target_routes(app, admin=admin)
-    mount_lut_routes(app, admin=admin, player=player, luts=PgLuts(db, clock))
+    mount_paper_profile_routes(app, admin=admin, player=player,
+                               profiles=PgPaperProfiles(db, clock, house_lighting))
     if content is not None:
         mount_content_routes(app, content)
     mount_node_routes(app, db=db, clock=clock, admin=admin, coordinator=coordinator, config=node_control,

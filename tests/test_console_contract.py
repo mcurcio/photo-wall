@@ -34,3 +34,22 @@ def test_the_contract_carries_centrals_own_values():
     kinds = {each["properties"]["kind"]["const"] for each in contract["schemas"]["RoomLight"]["$defs"].values()
              if "kind" in each.get("properties", {}) and each.get("title") in ("ReportedLight", "MeasuredLight", "FixedLight")}
     assert kinds == {"reported", "measured", "fixed"}
+
+
+def test_the_generated_contract_names_the_trials_refusals_and_the_room_light_aliases():
+    """The Frame trial's refusals are a closed vocabulary in the generated TypeScript, and a reading's
+    lux, a light's word and a reading are named types there, not inline shapes. Mutation probes: drop
+    "trial" from CONSOLE_REFUSALS, or Lux from CONSOLE_ALIASES -> this fails."""
+    from central.fleet.models import TrialRefusal
+    from central.fleet.position_history import PositionRestoreRefusal
+    from scripts.console_types import contract_text
+
+    contract = console_contract()
+    assert contract["refusals"]["trial"] == [code.value for code in TrialRefusal]
+    assert contract["refusals"]["position_restore"] == [code.value for code in PositionRestoreRefusal]
+    text = contract_text(contract)
+    assert 'export type TrialRefusal = (typeof REFUSALS)["trial"][number];' in text
+    for declared in ("export type Lux = number;", "export type LightWord = Dimmer | ColourDimmer | Unavailable;",
+                     "export type Reading = Measured | Unavailable;", "  lux: Lux;", "  reading: Reading | null;",
+                     '  kind: "light" | "illuminance";', "  paper_profiles: PaperProfileView[];"):
+        assert declared in text, declared

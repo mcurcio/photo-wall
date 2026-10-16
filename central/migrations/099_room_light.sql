@@ -88,7 +88,7 @@ CREATE TEMP TABLE upgrade_wash ON COMMIT DROP AS
 
 -- The Display's light (contracts/node_picture.py DisplayLight); the print look's sliders and the
 -- Display's LUT go (the paper profile moves to the Frame's paper; a paper profile a Frame's paper
--- names cannot be removed: central/infra/lut_store.py). New Displays get UPGRADE_DISPLAY_LIGHT from app code.
+-- names cannot be removed: central/infra/paper_profile_store.py). New Displays get UPGRADE_DISPLAY_LIGHT from app code.
 ALTER TABLE displays
     ADD COLUMN matched_lux DOUBLE PRECISION NULL,   -- ranges: contracts/node_picture.py, never SQL
     ADD COLUMN panel_black DOUBLE PRECISION NULL;
@@ -102,6 +102,9 @@ ALTER TABLE displays
     DROP COLUMN software_black_floor_tenths,
     DROP COLUMN software_lut_profile,
     DROP COLUMN software_lut_amount_percent;
+
+-- The list of paper profiles keeps its rows under its own name (central/infra/paper_profile_store.py).
+ALTER TABLE luts RENAME TO paper_profiles;
 
 -- A picture session's draft is a DisplayPicture under the displays columns' names
 -- (central/infra/picture_columns.py): the sliders leave it and the Display's light joins it; the

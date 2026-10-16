@@ -5,9 +5,10 @@ from __future__ import annotations
 
 from central.db import Database
 from central.infra.home_assistant.health import PgLinkHealth
-from central.infra.home_assistant.topics import SOURCE
+from central.infra.home_assistant.topics import SOURCE, kind_of
 from central.infra.home_assistant.views import EntityView, HomeAssistantView
 from central.infra.room_light_store import references_in, refused_in
+from central.room_light.model import ReporterRef, SensorRef
 
 
 class PgHomeAssistantSettings:
@@ -23,9 +24,14 @@ class PgHomeAssistantSettings:
             refused = refused_in(conn, SOURCE)
         return HomeAssistantView(
             link=self._health.health(),
-            entities=tuple(EntityView(entity=entity, reports_light=light, reports_sensor=sensor, heard_at=heard_at)
-                           for entity, (light, sensor, heard_at) in entities.items()),
+            entities=tuple(_entity(reference, named, heard_at) for reference, (named, heard_at) in entities.items()),
             refused=refused)
+
+
+def _entity(reference: ReporterRef | SensorRef, named: str | None, heard_at: float | None) -> EntityView:
+    kind = kind_of(reference)
+    return EntityView(entity=reference.address, kind=kind, reports_light=named if kind == "light" else None,
+                      reports_sensor=named if kind == "illuminance" else None, heard_at=heard_at)
 
 
 __all__ = ["PgHomeAssistantSettings"]

@@ -20,13 +20,11 @@ from pydantic import Field
 from contracts.models import Model
 from contracts.room_light import (
     ROOM_LIGHT_ID_PATTERN,
-    ColourDimmer,
-    Dimmer,
     FixedColour,
-    Measured,
+    LightWord,
+    Reading,
     ReportedColour,
     RoomLightId,
-    Unavailable,
 )
 
 ROOM_LIGHT_NAME_MAX: Final = 64
@@ -92,15 +90,13 @@ class Sensor(Model):
 
 # ---- What reporters last said, by reference ----
 
-LightWord = Dimmer | ColourDimmer | Unavailable
-ReadingWord = Measured | Unavailable
 
 
 @dataclass(frozen=True)
 class Words:
     """Every reference's last word, whether or not a room light or Sensor names it."""
     lights: Mapping[ReporterRef, LightWord]
-    readings: Mapping[SensorRef, ReadingWord]
+    readings: Mapping[SensorRef, Reading]
 
 
 # ---- Answers ----
@@ -141,7 +137,7 @@ class RoomLightRefused(Exception):
 
 
 __all__ = [
-    "ADDRESS_MAX", "ROOM_LIGHT_NAME_MAX", "SENSORS_MAX", "SOURCE_PATTERN", "Address", "FixedLight", "LightWord",
-    "MeasuredLight", "Name", "ReadingWord", "Recorded", "ReportRefusal", "ReportedLight", "ReporterRef", "RoomLight",
+    "ADDRESS_MAX", "ROOM_LIGHT_NAME_MAX", "SENSORS_MAX", "SOURCE_PATTERN", "Address", "FixedLight",
+    "MeasuredLight", "Name", "Recorded", "ReportRefusal", "ReportedLight", "ReporterRef", "RoomLight",
     "DrawnReportRefusal", "RoomLightId", "RoomLightRefusal", "RoomLightRefused", "Sensor", "SensorId", "SensorRef", "Source", "Words",
 ]

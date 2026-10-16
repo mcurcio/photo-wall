@@ -23,11 +23,13 @@ ENTITY_PATTERN: Final = r"[a-z0-9_]+\.[a-z0-9_]+"
 ENTITY_MAX: Final = 255
 _ENTITY: Final = re.compile(ENTITY_PATTERN)
 
+EntityKind = Literal["light", "illuminance"]                # what an entity reports: a light's state, a reading
+
 
 @dataclass(frozen=True)
 class Topic:
     """What a topic names: a light's state or an illuminance sensor's reading, of `entity`."""
-    kind: Literal["light", "illuminance"]
+    kind: EntityKind
     entity: str
 
 
@@ -57,5 +59,12 @@ def illuminance_sensor(entity: str) -> SensorRef:
     return SensorRef(source=SOURCE, address=entity)
 
 
+def kind_of(reference: ReporterRef | SensorRef) -> EntityKind:
+    """What an entity referenced so reports: a light's state (a room light's reporter) or an
+    illuminance reading (a Sensor's). Pure."""
+    return "light" if isinstance(reference, ReporterRef) else "illuminance"
+
+
 __all__ = ["ENTITY_MAX", "ENTITY_PATTERN", "ILLUMINANCE_TOPIC_PREFIX", "LIGHT_TOPIC_PREFIX", "MESSAGE_BYTES",
-           "SOURCE", "SUBSCRIPTION", "Topic", "illuminance_sensor", "is_entity", "light_reporter", "topic_of"]
+           "SOURCE", "SUBSCRIPTION", "EntityKind", "Topic", "illuminance_sensor", "is_entity", "kind_of",
+           "light_reporter", "topic_of"]

@@ -26,12 +26,14 @@ from typing import Final, Protocol
 
 from central.db import Database, DatabaseTransactionClock
 from central.fleet.node_bus_hub import HUB_LISTENERS, FleetHub
+from central.frame_lighting.paper_profiles import LUT_RECIPE_ID
 from central.infra.display_store import (
     REPORT_STREAM,
     DisplayDocuments,
     DisplayWakes,
     OutputReportJudge,
 )
+from central.infra.frame_lighting_store import PgFrameLighting
 from central.infra.light_sensor_judge import HOST_STATE_STREAM, LightSensorJudge
 from central.infra.listen import listen
 from central.infra.node_link_store import LINK_STORE_CONCURRENCY, PgLinkStores, PgWallMarks
@@ -175,7 +177,7 @@ def build_node_bus(dsn: str, env: Mapping[str, str]) -> NodeBus | None:
         return None
     db = Database(dsn, pool_size=LINK_STORE_CONCURRENCY + 2)
     wakes = DisplayWakes()
-    room_lights = PgRoomLights(db)
+    room_lights = PgRoomLights(db, PgFrameLighting(LUT_RECIPE_ID))
     stores = PgLinkStores(db, {REPORT_STREAM: OutputReportJudge(wakes),
                                HOST_STATE_STREAM: LightSensorJudge(room_lights)})
     documents = DisplayDocuments(stores, wakes, times=DatabaseTransactionClock())

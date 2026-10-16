@@ -1,5 +1,6 @@
 """The paper profiles list, the bake and serving, and a Frame's paper profile holding its LUT
-(central/frame_lighting/paper_profiles.py, central/infra/lut_store.py, central/lut_routes.py).
+(central/frame_lighting/paper_profiles.py, central/infra/paper_profile_store.py,
+central/paper_profile_routes.py).
 
 Fixtures are built in the test from LittleCMS's own sRGB profile (never a real paper profile or a
 private file): the sRGB profile with its device class made 'prtr' is a paper that prints every
@@ -26,15 +27,15 @@ from test_display_picture_settings import (
 )
 
 from central.frame_lighting.paper_profiles import (
-    LUT_PROFILE_MAX_BYTES,
     LUT_RECIPE_ID,
+    PAPER_PROFILE_MAX_BYTES,
     PaperProfileRefusal,
     baked_lut,
     checked_profile,
 )
 from contracts.lut import LUT_BYTES, LUT_GRID, LutRef, lut_offset
 
-LUTS = "/v1/operator/luts"
+PROFILES = "/v1/operator/paper-profiles"
 PLAYER_TOKEN = "player-token-" + "p" * 40
 LEVELS = [round(index * 255 / (LUT_GRID - 1)) for index in range(LUT_GRID)]
 
@@ -95,7 +96,7 @@ def test_a_paper_profile_is_checked_by_class_signature_and_size():
     assert checked_profile(_monitor()) is PaperProfileRefusal.NOT_A_PRINTER_PROFILE
     assert checked_profile(os.urandom(4096)) is PaperProfileRefusal.NOT_A_COLOUR_PROFILE
     assert checked_profile(bytes(127)) is PaperProfileRefusal.NOT_A_COLOUR_PROFILE
-    assert checked_profile(printer + bytes(LUT_PROFILE_MAX_BYTES + 1 - len(printer))) is PaperProfileRefusal.TOO_LARGE
+    assert checked_profile(printer + bytes(PAPER_PROFILE_MAX_BYTES + 1 - len(printer))) is PaperProfileRefusal.TOO_LARGE
 
 
 def test_the_recipe_bakes_a_paper_that_prints_everything_to_identity():
@@ -157,7 +158,7 @@ def test_the_layout_puts_red_fastest():
 # --- The list, through the app ---------------------------------------------------------------------
 
 def _add(client, profile: bytes):
-    return client.post(LUTS, headers={**AUTH, "Content-Type": "application/vnd.iccprofile"}, content=profile)
+    return client.post(PROFILES, headers={**AUTH, "Content-Type": "application/vnd.iccprofile"}, content=profile)
 
 
 def test_an_upload_is_checked_listed_once_and_refused_with_nothing_stored(registry):
@@ -168,19 +169,19 @@ def test_an_upload_is_checked_listed_once_and_refused_with_nothing_stored(regist
     with _client(registry) as client:
         for profile, status, code in ((_monitor(), 422, "not_a_printer_profile"),
                                       (os.urandom(4096), 422, "not_a_colour_profile"),
-                                      (bytes(LUT_PROFILE_MAX_BYTES + 1), 413, "too_large")):
+                                      (bytes(PAPER_PROFILE_MAX_BYTES + 1), 413, "too_large")):
             answer = _add(client, profile)
             assert (answer.status_code, answer.json()) == (status, {"error": code})
-        assert client.get(LUTS, headers=AUTH).json() == {"luts": []}
+        assert client.get(PROFILES, headers=AUTH).json() == {"paper_profiles": []}
         first = _add(client, printer)
         assert first.status_code == 201, first.text
         assert first.json() == {"profile_sha256": _sha(printer), "recipe_id": LUT_RECIPE_ID, "name": "sRGB built-in", "added_at": 1000.0,
                                 "used_by": []}
         again = _add(client, printer)
         assert (again.status_code, again.json()) == (200, first.json())
-        assert client.get(LUTS, headers=AUTH).json() == {"luts": [first.json()]}
-        assert client.get(LUTS).status_code == 401
-    assert len(_sql(registry, "SELECT profile_sha256 FROM luts")) == 1
+        assert client.get(PROFILES, headers=AUTH).json() == {"paper_profiles": [first.json()]}
+        assert client.get(PROFILES).status_code == 401
+    assert len(_sql(registry, "SELECT profile_sha256 FROM paper_profiles")) == 1
 
 
 def _player_token(registry, player_id: str) -> dict:
@@ -238,13 +239,13 @@ def test_a_frames_paper_profile_holds_its_lut_on_the_list(registry):
         assert (unlisted.status_code, unlisted.json()["error"]) == (422, "unknown_paper_profile")
         begun = client.post(trials, headers=AUTH, json={"lighting": lighting(_sha(printer))})
         assert begun.status_code == 200, begun.text
-        listed = client.get(LUTS, headers=AUTH).json()["luts"][0]
+        listed = client.get(PROFILES, headers=AUTH).json()["paper_profiles"][0]
         assert (listed["used_by"], listed["recipe_id"]) == ([name], LUT_RECIPE_ID)
-        refused = client.delete(f"{LUTS}/{_sha(printer)}", headers=AUTH)
+        refused = client.delete(f"{PROFILES}/{_sha(printer)}", headers=AUTH)
         assert (refused.status_code, refused.json()) == (409, {"error": "named_by_a_frame", "frames": [name]})
         ended = client.post(f"{trials}/{begun.json()['trial_id']}", headers=AUTH,
                             json={"operation": "end", "expected_sequence": 1})
         assert ended.status_code == 200, ended.text
-        assert client.delete(f"{LUTS}/{_sha(printer)}", headers=AUTH).status_code == 204
-        gone = client.delete(f"{LUTS}/{_sha(printer)}", headers=AUTH)
+        assert client.delete(f"{PROFILES}/{_sha(printer)}", headers=AUTH).status_code == 204
+        gone = client.delete(f"{PROFILES}/{_sha(printer)}", headers=AUTH)
         assert (gone.status_code, gone.json()) == (404, {"error": "unknown_paper_profile"})

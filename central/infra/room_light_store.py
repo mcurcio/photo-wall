@@ -7,31 +7,32 @@ Sensor names it, and is resolved only when the document is built (policy.room_li
 source keeps its newest WORDS_KEPT_PER_SOURCE references and REFUSALS_KEPT refusals.
 
 Every write that changes the room-lights document raises `room_lights_change.change` in its own
-transaction, under that row's lock (the house's lock, central/infra/frame_lighting_store.py, taken
-first), and sends `NOTIFY ROOM_LIGHTS_CHANNEL`, delivered at commit: the worker's WALL writer listens
+transaction, under that row's lock (the house's lock, taken first through the FrameLightingCheck
+the store is handed, central/infra/frame_lighting_store.py), and sends `NOTIFY ROOM_LIGHTS_CHANNEL`, delivered at commit: the worker's WALL writer listens
 and puts the document again. Every instant is PostgreSQL's `clock_timestamp()` (Central's one clock).
 No trigger, no stored procedure, no range in SQL: the rules are central/room_light/policy.py's and
 the ranges pydantic's.
 """
 from __future__ import annotations
 
+import json
+from collections.abc import Callable
 from typing import Any, Final
 
 from psycopg.types.json import Jsonb
 from pydantic import TypeAdapter
 
 from central.db import Database
-from central.infra.frame_lighting_store import naming_in, take_house_lock
+from central.frame_lighting.ports import FrameLightingCheck
 from central.infra.light_sensor_judge import PI_SOURCE, missed_readings_in
+from central.infra.listen import listen
 from central.infra.room_light_rows import ROOM_LIGHT, lights_in
-from central.infra.transactions import pg_connection
+from central.infra.transactions import PgTransaction, pg_connection
 from central.kernel.transactions import Transaction
 from central.room_light.model import (
     ADDRESS_MAX,
     FixedLight,
-    LightWord,
     MeasuredLight,
-    ReadingWord,
     Recorded,
     ReportedLight,
     ReporterRef,
@@ -66,7 +67,9 @@ from central.room_light.views import (
 from contracts.room_light import (
     ColourDimmer,
     Dimmer,
+    LightWord,
     Measured,
+    Reading,
     RoomLightsDocument,
     RoomLightsDrawn,
     Unavailable,
@@ -74,11 +77,12 @@ from contracts.room_light import (
 )
 
 ROOM_LIGHTS_CHANNEL: Final = "room_lights"     # NOTIFY payload: empty; the WALL writer re-reads the document
+NAMED_CHANNEL: Final = "room_light_named"      # NOTIFY payload: named_payload(a reference just saved)
 REFUSALS_KEPT: Final = 20                      # the newest refused reports kept per source
 WORDS_KEPT_PER_SOURCE: Final = 256             # the newest references' words kept per source
 
 _LIGHT_WORD: Final = TypeAdapter(LightWord)
-_READING_WORD: Final = TypeAdapter(ReadingWord)
+_READING: Final = TypeAdapter(Reading)
 _WORD_TABLES: Final = ("light_words", "reading_words")
 
 
@@ -93,7 +97,7 @@ def _words_in(conn: Any) -> Words:
     return Words(
         lights={ReporterRef(source=row["source"], address=row["address"]): _LIGHT_WORD.validate_python(row["word"])
                 for row in lights},
-        readings={SensorRef(source=row["source"], address=row["address"]): _READING_WORD.validate_python(row["word"])
+        readings={SensorRef(source=row["source"], address=row["address"]): _READING.validate_python(row["word"])
                   for row in readings})
 
 
@@ -123,10 +127,11 @@ def _changed_in(conn: Any, before: RoomLightsDocument) -> bool:
     return True
 
 
-def _word_in(conn: Any, table: str, source: str, address: str, word: dict[str, Any]) -> Recorded:
+def _word_in(conn: Any, house: FrameLightingCheck, table: str, source: str, address: str,
+             word: dict[str, Any]) -> Recorded:
     """Keep `word` as (source, address)'s last in `table`, heard now, and the newest
     WORDS_KEPT_PER_SOURCE of that source; "recorded" when the document changed."""
-    take_house_lock(conn)
+    house.changing_within(PgTransaction(conn))
     before = document_in(conn)
     conn.execute(f"INSERT INTO {table}(source, address, word, heard_at) VALUES (%s, %s, %s, clock_timestamp()) "  # noqa: S608
                  "ON CONFLICT (source, address) DO UPDATE SET word=EXCLUDED.word, heard_at=EXCLUDED.heard_at",
@@ -150,23 +155,26 @@ def _refusal_in(conn: Any, source: Source, address: str, reason: ReportRefusal) 
 class PgRoomLights:
     """Room lights' ports over one Database."""
 
-    def __init__(self, db: Database) -> None:
+    def __init__(self, db: Database, house: FrameLightingCheck) -> None:
+        """`house` is the house's lock and its "which Frames name it" query (every change here takes
+        the lock first)."""
         self._db = db
+        self._house = house
 
     # ---- RoomLightReports ----
 
     def record_light_state(self, reporter: ReporterRef, state: Dimmer | ColourDimmer | Unavailable) -> Recorded:
         with self._db.transaction() as conn:
-            return _word_in(conn, "light_words", reporter.source, reporter.address, state.model_dump(mode="json"))
+            return _word_in(conn, self._house, "light_words", reporter.source, reporter.address, state.model_dump(mode="json"))
 
     def record_reading(self, sensor: SensorRef, reading: Measured | Unavailable) -> Recorded:
         with self._db.transaction() as conn:
-            return _word_in(conn, "reading_words", sensor.source, sensor.address, reading.model_dump(mode="json"))
+            return _word_in(conn, self._house, "reading_words", sensor.source, sensor.address, reading.model_dump(mode="json"))
 
     def record_reading_within(self, tx: Transaction, sensor: SensorRef, reading: Measured | Unavailable) -> Recorded:
         conn = pg_connection(tx)
         with conn.transaction():
-            return _word_in(conn, "reading_words", sensor.source, sensor.address, reading.model_dump(mode="json"))
+            return _word_in(conn, self._house, "reading_words", sensor.source, sensor.address, reading.model_dump(mode="json"))
 
     def record_refused(self, source: Source, address: str, reason: ReportRefusal) -> None:
         with self._db.transaction() as conn:
@@ -184,7 +192,7 @@ class PgRoomLights:
         savepoint failed), so the host line's record, not reading_words, decides a Pi's reading."""
         with self._db.transaction() as conn:
             for player_id, reading in missed_readings_in(conn):
-                _word_in(conn, "reading_words", PI_SOURCE, player_id, reading.model_dump(mode="json"))
+                _word_in(conn, self._house, "reading_words", PI_SOURCE, player_id, reading.model_dump(mode="json"))
             return document_in(conn)
 
     # ---- DrawnReports ----
@@ -200,7 +208,7 @@ class PgRoomLights:
 
     def lights(self) -> RoomLightsView:
         with self._db.transaction() as conn:
-            return _view_in(conn)
+            return _view_in(conn, self._house)
 
     def drawn(self) -> DrawnView:
         with self._db.transaction() as conn:
@@ -219,10 +227,11 @@ class PgRoomLights:
 
     def save_room_light(self, light_id: RoomLightId, light: RoomLight) -> RoomLightView:
         with self._db.transaction() as conn:
-            take_house_lock(conn)
+            tx = PgTransaction(conn)
+            self._house.changing_within(tx)
             lights = lights_in(conn)
             refused = check_room_light(light_id, light, lights, _sensors_in(conn),
-                                       naming_in(conn).lights.get(light_id, ()))
+                                       self._house.naming_within(tx).lights.get(light_id, ()))
             if refused is not None:
                 raise refused
             before = document_in(conn)
@@ -231,12 +240,16 @@ class PgRoomLights:
                          "ON CONFLICT (id) DO UPDATE SET light=EXCLUDED.light",
                          (light_id, Jsonb(ROOM_LIGHT.dump_python(light, mode="json"))))
             _changed_in(conn, before)
-            return next(view for view in _view_in(conn).lights if view.id == light_id)
+            if isinstance(light, ReportedLight):
+                _named_in(conn, light.reporter)
+            return next(view for view in _view_in(conn, self._house).lights if view.id == light_id)
 
     def remove_room_light(self, light_id: RoomLightId) -> None:
         with self._db.transaction() as conn:
-            take_house_lock(conn)
-            refused = check_room_light_removal(light_id, lights_in(conn), naming_in(conn).lights.get(light_id, ()))
+            tx = PgTransaction(conn)
+            self._house.changing_within(tx)
+            refused = check_room_light_removal(light_id, lights_in(conn),
+                                               self._house.naming_within(tx).lights.get(light_id, ()))
             if refused is not None:
                 raise refused
             before = document_in(conn)
@@ -245,7 +258,7 @@ class PgRoomLights:
 
     def save_sensor(self, sensor_id: SensorId, sensor: Sensor) -> SensorView:
         with self._db.transaction() as conn:
-            take_house_lock(conn)
+            self._house.changing_within(PgTransaction(conn))
             refused = check_sensor(sensor_id, sensor, _sensors_in(conn), lights_in(conn))
             if refused is not None:
                 raise refused
@@ -254,21 +267,61 @@ class PgRoomLights:
                          "ON CONFLICT (id) DO UPDATE SET sensor=EXCLUDED.sensor",
                          (sensor_id, Jsonb(sensor.model_dump(mode="json"))))
             _changed_in(conn, before)
-            return next(view for view in _view_in(conn).sensors if view.id == sensor_id)
+            _named_in(conn, sensor.at)
+            return next(view for view in _view_in(conn, self._house).sensors if view.id == sensor_id)
 
     def remove_sensor(self, sensor_id: SensorId) -> None:
         with self._db.transaction() as conn:
-            take_house_lock(conn)
+            self._house.changing_within(PgTransaction(conn))
             refused = check_sensor_removal(sensor_id, _sensors_in(conn), lights_in(conn))
             if refused is not None:
                 raise refused
             conn.execute("DELETE FROM sensors WHERE id=%s", (sensor_id,))
 
 
-def _view_in(conn: Any) -> RoomLightsView:
+def named_payload(reference: ReporterRef | SensorRef) -> str:
+    """NAMED_CHANNEL's payload for `reference`: {"reporter" | "sensor": {"source", "address"}}."""
+    kind = "reporter" if isinstance(reference, ReporterRef) else "sensor"
+    return json.dumps({kind: reference.model_dump(mode="json")}, sort_keys=True)
+
+
+def named_reference(payload: str) -> ReporterRef | SensorRef | None:
+    """The reference `named_payload` wrote; None for any other payload."""
+    try:
+        [(kind, reference)] = json.loads(payload).items()
+        return {"reporter": ReporterRef, "sensor": SensorRef}[kind].model_validate(reference)
+    except (ValueError, TypeError, KeyError, AttributeError):
+        return None
+
+
+def _named_in(conn: Any, reference: ReporterRef | SensorRef) -> None:
+    """Hand `reference` to NamedReferences' followers when the caller's transaction commits."""
+    conn.execute("SELECT pg_notify(%s, %s)", (NAMED_CHANNEL, named_payload(reference)))
+
+
+_NAMED_APPLICATION: Final = "photo-wall-named-references"
+_NAMED_RETRY_SECONDS: Final = 1.0
+
+
+class PgNamedReferences:
+    """NamedReferences over PostgreSQL: one supervised LISTEN NAMED_CHANNEL (central/infra/listen.py)."""
+
+    def __init__(self, dsn: str) -> None:
+        self._dsn = dsn
+
+    async def follow(self, named: Callable[[ReporterRef | SensorRef], None]) -> None:
+        def notified(payload: str) -> None:
+            reference = named_reference(payload)
+            if reference is not None:
+                named(reference)
+        await listen(self._dsn, NAMED_CHANNEL, application=_NAMED_APPLICATION, connected=lambda: None,
+                     notified=notified, retry_seconds=_NAMED_RETRY_SECONDS)
+
+
+def _view_in(conn: Any, house: FrameLightingCheck) -> RoomLightsView:
     lights, sensors, words = lights_in(conn), _sensors_in(conn), _words_in(conn)
     heard = _heard_in(conn)
-    named = naming_in(conn).lights
+    named = house.naming_within(PgTransaction(conn)).lights
 
     def light_heard(light: RoomLight) -> float | None:
         if isinstance(light, FixedLight):
@@ -297,20 +350,30 @@ def refused_in(conn: Any, source: Source | None) -> tuple[RefusedReportView, ...
                                    at=float(row["at"])) for row in rows)
 
 
-def references_in(conn: Any, source: Source) -> dict[str, tuple[RoomLightId | None, SensorId | None, float | None]]:
-    """Every address of `source` heard or named by a room light or Sensor: (the room light it
-    reports, the Sensor it is, when Central last heard it)."""
-    heard: dict[str, float] = {}
-    for (_, word_source, address), at in _heard_in(conn).items():
+def references_in(conn: Any, source: Source) -> dict[ReporterRef | SensorRef, tuple[str | None, float | None]]:
+    """Every reference of `source` heard or named, a reporter's (ReporterRef) apart from a Sensor's
+    (SensorRef) even at one address: (the room light it reports or the Sensor it is, when Central last
+    heard it), in address order, reporters first."""
+    heard = _heard_in(conn)
+    named: dict[ReporterRef | SensorRef, str | None] = {}
+    for (table, word_source, address) in heard:
         if word_source == source:
-            heard[address] = max(at, heard.get(address, at))
-    reports = {light.reporter.address: light_id for light_id, light in lights_in(conn).items()
-               if isinstance(light, ReportedLight) and light.reporter.source == source}
-    sensors = {sensor.at.address: sensor_id for sensor_id, sensor in _sensors_in(conn).items()
-               if sensor.at.source == source}
-    return {address: (reports.get(address), sensors.get(address), heard.get(address))
-            for address in sorted(heard.keys() | reports.keys() | sensors.keys())}
+            named[ReporterRef(source=source, address=address) if table == "light_words"
+                  else SensorRef(source=source, address=address)] = None
+    for light_id, light in lights_in(conn).items():
+        if isinstance(light, ReportedLight) and light.reporter.source == source:
+            named[light.reporter] = light_id
+    for sensor_id, sensor in _sensors_in(conn).items():
+        if sensor.at.source == source:
+            named[sensor.at] = sensor_id
+
+    def table(reference: ReporterRef | SensorRef) -> str:
+        return "light_words" if isinstance(reference, ReporterRef) else "reading_words"
+
+    return {reference: (named[reference], heard.get((table(reference), source, reference.address)))
+            for reference in sorted(named, key=lambda ref: (table(ref), ref.address))}
 
 
-__all__ = ["REFUSALS_KEPT", "ROOM_LIGHTS_CHANNEL", "WORDS_KEPT_PER_SOURCE", "PgRoomLights", "document_in",
-           "references_in", "refused_in"]
+__all__ = ["NAMED_CHANNEL", "REFUSALS_KEPT", "ROOM_LIGHTS_CHANNEL", "WORDS_KEPT_PER_SOURCE",
+           "PgNamedReferences", "PgRoomLights", "document_in", "named_payload", "named_reference", "references_in",
+           "refused_in"]
