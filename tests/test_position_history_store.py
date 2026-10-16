@@ -414,3 +414,29 @@ def test_a_failed_append_fails_the_save(registry, monkeypatch):
     with pytest.raises(RuntimeError, match="history write failed"):
         save_position(registry, "node-f0", Calibration(fit=SKEWED), lighting=DEEP)
     assert _sql(registry, "SELECT calibration, lighting FROM frames WHERE id='node-f0'") == before
+
+
+def test_restore_refuses_an_entry_whose_lighting_names_a_room_light_gone_since(registry):
+    """An entry keeps the lighting it recorded, and a room light it names may be removed later (a
+    history entry does not hold it): Restore checks the entry's lighting as an edit's, so Save never
+    keeps a light that adds nothing. Mutation probe: no `_fitting_in` in `restore` -> the gone light is
+    loaded into the draft."""
+    from central.infra.room_light_store import PgRoomLights
+    from central.room_light.model import FixedReporter, RoomLight
+    from contracts.frame_lighting import DIMMER_AT_FULL, WashLight
+    from contracts.room_light import FixedColour
+
+    lights = PgRoomLights(registry.db)
+    assert lights.save_room_light(RoomLight(id="spot", name="Spot", colour=FixedColour(kelvin=2700),
+                                            reporter=FixedReporter())) is None
+    spotlit = LIGHTING.model_copy(update={"lights": (WashLight(light="spot", lux=500.0, reference=DIMMER_AT_FULL),)})
+    node = Node(registry)
+    trial = node.edit(node.begin(), SKEWED, spotlit)
+    node.exchange()
+    tried = _history(registry)["entries"][0]
+    assert tried["kind"] == "sent-draft"
+    node.end(trial)
+    assert lights.remove_room_light("spot") is None
+    with pytest.raises(NodeControlError) as refused:
+        node.restore(node.begin(), tried["entry_id"])
+    assert (refused.value.code, refused.value.status) == ("trial_lighting_unknown_room_light", 422)

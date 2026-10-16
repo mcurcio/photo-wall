@@ -68,7 +68,16 @@ from contracts.node_link import (
     Pipe,
     central_user,
 )
-from nodeapi.buffers import BIRTH_KEY, PIPE_KEY, KeyTable, Role, declare, role_of, wall_config
+from nodeapi.buffers import (
+    BIRTH_KEY,
+    PIPE_KEY,
+    KeyTable,
+    Role,
+    declare,
+    role_of,
+    table_of,
+    wall_config,
+)
 from nodeapi.documents import ABSENT, Absent, Conflict, DocumentRefused, DocumentWriter
 from nodeapi.envelope import caller_headers
 from nodeapi.epoch import Token, epoch_of
@@ -540,13 +549,25 @@ class WallWriter:
 
     async def ensure(self) -> bool:
         """Create WALL at mark + 1 + WALL_MARGIN if it is absent and put every wall document again;
-        True when this call created it. Create-if-absent is race-safe with another Central."""
+        True when this call created it. Create-if-absent is race-safe with another Central. A WALL
+        whose key table is not this writer's (a hub that outlived a Central upgrade adding a key) is
+        deleted and created again the same way, past the mark, so the Nodes' mirrors carry on and no
+        key the table gained is refused forever."""
         jetstream = self._client.jetstream()
         with _answered():
             try:
-                await jetstream.stream_info(WALL_STREAM)
+                info = await jetstream.stream_info(WALL_STREAM)
                 absent = False
             except NotFoundError:
+                absent = True
+        if not absent:
+            found = table_of(info.config)
+            if found is None or found.encoded() != self._table.encoded():
+                log.warning("WALL's key table %s is not Central's %s: WALL is created again past the mark",
+                            None if found is None else found.encoded(), self._table.encoded())
+                with _answered():
+                    with contextlib.suppress(NotFoundError):   # another Central deleted it first
+                        await jetstream.delete_stream(WALL_STREAM)
                 absent = True
         created = False
         if absent:

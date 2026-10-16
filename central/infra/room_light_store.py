@@ -50,6 +50,7 @@ from central.room_light.policy import (
 )
 from central.room_light.views import (
     HomeAssistantLinkView,
+    RefusedMessageView,
     RoomLightsView,
     RoomLightView,
     SensorView,
@@ -238,6 +239,8 @@ class PgRoomLights:
             named = named_by_frames_in(conn)
             link = conn.execute("SELECT state, EXTRACT(EPOCH FROM since) AS since FROM home_assistant_link "
                                 "WHERE one").fetchone()
+            refused = conn.execute("SELECT topic, reason, EXTRACT(EPOCH FROM at) AS at FROM home_assistant_refusals "
+                                   "ORDER BY id DESC").fetchall()
         return RoomLightsView(
             lights=tuple(RoomLightView(
                 id=row["id"], name=row["name"], reporter=lights[row["id"]].reporter, colour=lights[row["id"]].colour,
@@ -254,13 +257,15 @@ class PgRoomLights:
                 for row in sensor_rows),
             home_assistant=HomeAssistantLinkView(state="not-configured", since=None) if link is None
             else HomeAssistantLinkView(state=link["state"],
-                                       since=None if link["since"] is None else float(link["since"])))
+                                       since=None if link["since"] is None else float(link["since"])),
+            refused=tuple(RefusedMessageView(topic=row["topic"], reason=row["reason"], at=float(row["at"]))
+                          for row in refused))
 
     def save_room_light(self, light: RoomLight) -> SetupRefusal | None:
         with self._db.transaction() as conn:
             _locked_change_in(conn)
             lights = room_lights_in(conn)
-            refusal = check_room_light(light, lights, _sensors_in(conn))
+            refusal = check_room_light(light, lights, _sensors_in(conn), named_by_frames_in(conn).get(light.id, ()))
             if refusal is not None:
                 return refusal
             before = document_in(conn)

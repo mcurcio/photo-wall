@@ -27,6 +27,7 @@ from central.room_light.model import (
     IlluminanceMessage,
     LightStateMessage,
     OnPlayer,
+    Reporter,
     RoomLight,
     Sensor,
     SensorReporter,
@@ -160,14 +161,28 @@ def light_measured_by(lights: Collection[RoomLight], sensor_id: str) -> RoomLigh
                  and light.reporter.sensor == sensor_id), None)
 
 
-def check_room_light(light: RoomLight, lights: Mapping[str, RoomLight],
-                     sensors: Mapping[str, Sensor]) -> SetupRefusal | None:
+def measured_by_a_sensor(reporter: Reporter) -> bool:
+    """Whether a room light reported by `reporter` is a reading in lux (a SensorReporter), so a Frame
+    light of it takes a lux reference; else it is a dimmer and takes DIMMER_AT_FULL. The one home of
+    which reference fits which reporter."""
+    return isinstance(reporter, SensorReporter)
+
+
+def check_room_light(light: RoomLight, lights: Mapping[str, RoomLight], sensors: Mapping[str, Sensor],
+                     named_by_frames: Collection[str]) -> SetupRefusal | None:
     """Whether saving `light` (new, or replacing lights[light.id]) is refused: a ReportedColour on
     anything but a HomeAssistantLight; a SensorReporter naming no Sensor, or a Sensor another room
     light already reports; a HomeAssistantLight entity another room light or a HomeAssistantSensor
-    already names; a new light past ROOM_LIGHTS_MAX. None when it may be saved."""
+    already names; a new light past ROOM_LIGHTS_MAX; a reporter that changes which reference a Frame
+    light of it takes (`measured_by_a_sensor`) while any Frame names it (`named_by_frames`: the Frames
+    whose saved lighting or open trial names it), NAMED_BY_A_FRAME, as removing it would be: their
+    references would no longer fit and their lights would add nothing. None when it may be saved."""
     others = [other for key, other in lights.items() if key != light.id]
     reporter = light.reporter
+    previous = lights.get(light.id)
+    if (previous is not None and named_by_frames
+            and measured_by_a_sensor(previous.reporter) != measured_by_a_sensor(reporter)):
+        return SetupRefusal.NAMED_BY_A_FRAME
     if isinstance(light.colour, ReportedColour) and not isinstance(reporter, HomeAssistantLight):
         return SetupRefusal.REPORTED_COLOUR_NEEDS_HOME_ASSISTANT
     if isinstance(reporter, SensorReporter):
@@ -231,8 +246,7 @@ def check_frame_lighting(lighting: FrameLighting, lights: Mapping[str, RoomLight
         room_light = lights.get(frame_light.light)
         if room_light is None:
             return FrameLightingRefusal.UNKNOWN_ROOM_LIGHT
-        measured = isinstance(room_light.reporter, SensorReporter)
-        if measured == (frame_light.reference == DIMMER_AT_FULL):
+        if measured_by_a_sensor(room_light.reporter) == (frame_light.reference == DIMMER_AT_FULL):
             return FrameLightingRefusal.REFERENCE_MISMATCH
     return None
 
@@ -261,9 +275,24 @@ def upgrade_lighting(display: DisplayLight, mat_depth_mm: float) -> FrameLightin
         paper=Paper(whiteness=SHEET_WHITENESS, ink_density=-math.log10(display.black), profile=None))
 
 
+def new_frame_lighting(display: DisplayLight, lights: Mapping[str, RoomLight]) -> FrameLighting:
+    """A new Frame's lighting, so it shows what an upgraded Frame shows and passes
+    `check_frame_lighting`: `upgrade_lighting(display, 0)` with its wash viewing the first fixed
+    (always-on) room light in `lights`' order (the seeded "room" while it is there), never a light that
+    may be gone; with no fixed room light, no light (the Frame shows the panel's black until its
+    lighting is set on its Position tab). Pure."""
+    upgraded = upgrade_lighting(display, 0.0)
+    fixed = next((light_id for light_id, light in lights.items() if isinstance(light.reporter, FixedReporter)), None)
+    if fixed is None:
+        return upgraded.model_copy(update={"lights": ()})
+    return upgraded.model_copy(update={"lights": tuple(
+        light.model_copy(update={"light": fixed}) for light in upgraded.lights)})
+
+
 __all__ = [
     "UPGRADE_ROOM_LIGHT_ID", "UPGRADE_ROOM_LIGHT_NAME", "check_frame_lighting", "check_room_light",
     "check_room_light_removal", "check_sensor", "check_sensor_removal", "illuminance_state", "light_measured_by",
+    "measured_by_a_sensor", "new_frame_lighting",
     "light_reported_by_entity", "light_state", "parse_illuminance_message", "parse_light_message",
     "room_lights_document", "sensor_at_entity", "sensor_on_player", "topic_entity", "upgrade_lighting",
 ]

@@ -23,12 +23,25 @@ const WHOLE = ["full-page"];
 export const House: Story = { tags: WHOLE };
 /** Nothing set up yet, and no Home Assistant broker address. */
 export const Empty: Story = {
-  args: { view: { lights: [], sensors: [], home_assistant: { state: "not-configured", since: null } } },
+  args: { view: { lights: [], sensors: [], home_assistant: { state: "not-configured", since: null }, refused: [] } },
 };
 /** The broker went away: every light keeps its last state, and the link says since when. */
 export const HomeAssistantAway: Story = {
   tags: WHOLE,
   args: { view: { ...ROOMS, home_assistant: { state: "away", since: 1_791_000_000 } } },
+};
+/** Messages the link did not read, kept with the reason: an entity no light names yet, a payload out of shape. */
+export const MessagesNotRead: Story = {
+  tags: WHOLE,
+  args: {
+    view: {
+      ...ROOMS,
+      refused: [
+        { topic: "photowall/light/light.kitchen", reason: "unknown-entity", at: 1_791_000_000 },
+        { topic: "photowall/illuminance/sensor.porch", reason: "out-of-range", at: 1_790_999_400 },
+      ],
+    },
+  },
 };
 /** A remove Central refused, said in words. */
 export const RemoveRefused: Story = {

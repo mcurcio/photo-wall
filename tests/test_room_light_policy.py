@@ -90,17 +90,17 @@ def test_illuminance_messages():
 
 
 def test_one_reporter_per_light_and_per_entity():
-    assert check_room_light(SPOT, LIGHTS, SENSORS) is None          # replacing itself
+    assert check_room_light(SPOT, LIGHTS, SENSORS, ()) is None          # replacing itself
     rgb_fixed = RoomLight(id="lamp", name="Lamp", reporter=FixedReporter(), colour=ReportedColour(channel_shares=(1, 1, 1)))
-    assert check_room_light(rgb_fixed, LIGHTS, SENSORS) is SetupRefusal.REPORTED_COLOUR_NEEDS_HOME_ASSISTANT
+    assert check_room_light(rgb_fixed, LIGHTS, SENSORS, ()) is SetupRefusal.REPORTED_COLOUR_NEEDS_HOME_ASSISTANT
     twin = RoomLight(id="twin", name="Twin", reporter=HomeAssistantLight(entity="light.spot"), colour=WHITE)
-    assert check_room_light(twin, LIGHTS, SENSORS) is SetupRefusal.ENTITY_REPORTS_ANOTHER
+    assert check_room_light(twin, LIGHTS, SENSORS, ()) is SetupRefusal.ENTITY_REPORTS_ANOTHER
     by_meter = RoomLight(id="lamp", name="Lamp", reporter=SensorReporter(sensor="meter"), colour=WHITE)
-    assert check_room_light(by_meter, LIGHTS, SENSORS) is SetupRefusal.SENSOR_REPORTS_A_LIGHT
+    assert check_room_light(by_meter, LIGHTS, SENSORS, ()) is SetupRefusal.SENSOR_REPORTS_A_LIGHT
     no_sensor = RoomLight(id="lamp", name="Lamp", reporter=SensorReporter(sensor="gone"), colour=WHITE)
-    assert check_room_light(no_sensor, LIGHTS, SENSORS) is SetupRefusal.UNKNOWN_SENSOR
+    assert check_room_light(no_sensor, LIGHTS, SENSORS, ()) is SetupRefusal.UNKNOWN_SENSOR
     full = {f"l{index}": ROOM.model_copy(update={"id": f"l{index}"}) for index in range(32)}
-    assert check_room_light(ROOM.model_copy(update={"id": "one-more"}), full, {}) is SetupRefusal.TOO_MANY
+    assert check_room_light(ROOM.model_copy(update={"id": "one-more"}), full, {}, ()) is SetupRefusal.TOO_MANY
     assert check_room_light_removal("room", LIGHTS, ("hall",)) is SetupRefusal.NAMED_BY_A_FRAME
     assert check_room_light_removal("nope", LIGHTS, ()) is SetupRefusal.UNKNOWN_ROOM_LIGHT
     assert check_room_light_removal("room", LIGHTS, ()) is None

@@ -40,6 +40,7 @@ export const ROOMS: RoomLightsView = {
     },
   ],
   home_assistant: { state: "connected", since: HEARD - 3600 },
+  refused: [],
 };
 
 export const PIS = [{ id: "player-1", name: "Player …1a2b3c" }];

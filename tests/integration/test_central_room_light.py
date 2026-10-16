@@ -14,6 +14,12 @@ Node's `display` session reads WALL. A room light `bookshelf-spot` (Home Assista
    configuration revision, the Player's stored configurations and its plan offers do not move (the
    control State never carries a light). The same state again changes nothing.
 3. `{"state":"unavailable"}` gives Unavailable().
+4. A light saved through another database connection reaches WALL by NOTIFY, inside half the writer's
+   recheck.
+
+The hub's WALL was first created with the table before room light (a hub that outlived the worker's
+upgrade): the writer's `ensure` creates it again with today's table, or every put of the document is
+refused.
 """
 from __future__ import annotations
 
@@ -31,13 +37,14 @@ from integration.bus_servers import (
     node_server,
     until,
 )
-from test_registry import frame
+from psycopg.types.json import Jsonb
+from test_registry import enroll, frame
 
 from central.infra.home_assistant import Broker, HomeAssistantLink
 from central.infra.node_link_store import PgWallMarks
 from central.infra.room_light_store import PgRoomLights
-from central.node_bus_wiring import WALL_TABLE, RoomLightsWall
-from central.room_light.model import HomeAssistantLight, RoomLight
+from central.node_bus_wiring import WALL_RECHECK_SECONDS, WALL_TABLE, RoomLightsWall
+from central.room_light.model import FixedReporter, HomeAssistantLight, RoomLight
 from contracts.frame_lighting import CloseLight
 from contracts.room_light import (
     FULL_ON,
@@ -48,6 +55,7 @@ from contracts.room_light import (
     Unavailable,
     decode_room_lights,
 )
+from nodeapi.buffers import KeyTable
 from nodeapi.hub import WallWriter
 from nodeapi.node import NodeSession, Release
 
@@ -93,13 +101,22 @@ class _Broker:
         await until(connected, 10, f"the broker takes {topic}")
 
 
+class _NoDocuments:
+    """The wall documents of a Central before room light: none it puts on a WALL it creates."""
+
+    async def wall_documents(self) -> dict[str, bytes]:
+        return {}
+
+
 def _control(database) -> list:
     """What the control State is built from: each Frame's binding revisions, every stored Player
-    configuration and every plan offer."""
+    configuration and every plan offer (none of them empty: the test seeds each)."""
     with database.transaction() as conn:
-        return [conn.execute("SELECT id, generation, configuration_revision FROM frames ORDER BY id").fetchall(),
-                conn.execute("SELECT * FROM player_configurations ORDER BY 1").fetchall(),
-                conn.execute("SELECT * FROM plan_offers ORDER BY 1").fetchall()]
+        control = [conn.execute("SELECT id, generation, configuration_revision FROM frames ORDER BY id").fetchall(),
+                   conn.execute("SELECT * FROM player_configurations ORDER BY 1").fetchall(),
+                   conn.execute("SELECT * FROM plan_offers ORDER BY 1").fetchall()]
+    assert all(control), control
+    return control
 
 
 def test_a_retained_home_assistant_state_reaches_the_node_without_moving_the_control_state(registry, tmp_path):
@@ -115,6 +132,15 @@ def test_a_retained_home_assistant_state_reaches_the_node_without_moving_the_con
     with database.transaction() as conn:
         conn.execute("UPDATE frames SET lighting = jsonb_set(lighting, '{lights}', lighting->'lights' || %s::jsonb) "
                      "WHERE id='hall'", (f"[{spot.model_dump_json()}]",))
+    # An enrolled Player with a stored configuration and an offered plan, so the control State's check
+    # below compares rows that exist.
+    player, _, _ = enroll(registry)
+    with database.transaction() as conn:
+        conn.execute("INSERT INTO player_configurations(player_id, authority_epoch, revision, configuration) "
+                     "VALUES (%s, 1, 1, %s)", (player["player_id"], Jsonb({"bindings": []})))
+        conn.execute("INSERT INTO plan_offers(player_id, authority_epoch, revision, plan_id, manifest, groups, "
+                     "created_at, valid_until) VALUES (%s, 1, 1, 'plan', %s, '[]', 1000, 1200)",
+                     (player["player_id"], Jsonb({"layers": [], "bindings": []})))
     broker, hub = _Broker(tmp_path), hub_server(tmp_path, [SERIAL])
     node = node_server(tmp_path, SERIAL, hub)
     session = NodeSession("display", line_slices()["display"], RELEASE, url=node.client_url, reads_wall=True)
@@ -133,12 +159,18 @@ def test_a_retained_home_assistant_state_reaches_the_node_without_moving_the_con
         stop = asyncio.Event()
         writers: list[WallWriter] = []
         wall = RoomLightsWall(lights, lambda: writers[0] if writers else None)
+        # A hub that outlived a Central upgrade: its WALL was created with the table before room light.
+        older = await WallWriter.connect(hub.client_url, KeyTable({"timing": 4096}),
+                                         PgWallMarks(database, _NoDocuments()))
+        assert await older.ensure()
+        await older.close()
         writer = await WallWriter.connect(hub.client_url, WALL_TABLE, PgWallMarks(database, wall))
         writers.append(writer)
-        await writer.ensure()
+        assert await writer.ensure()          # created again with today's table, past the mark
         await broker.publish(TOPIC, b'{"state":"on","brightness":255}')   # retained before the link starts
         link = HomeAssistantLink(Broker("127.0.0.1", broker.port, None, None, False), lights, wall.wake)
         running = [asyncio.create_task(wall.run(stop)), asyncio.create_task(link.run(stop))]
+        listening = asyncio.create_task(wall.listen(database.dsn))
         try:
             # 1. The retained state reaches the Node's WALL mirror.
             await until(seen(lambda d: d.lights["bookshelf-spot"].state == Dimmer(on=True, brightness=1.0)),
@@ -162,7 +194,14 @@ def test_a_retained_home_assistant_state_reaches_the_node_without_moving_the_con
             # 3. Home Assistant cannot tell: no light from the spot.
             await broker.publish(TOPIC, b'{"state":"unavailable"}')
             await until(seen(lambda d: d.lights["bookshelf-spot"].state == Unavailable()), 2, "the spot unavailable")
+
+            # 4. A House > Lights edit in another process (here, another connection) wakes the writer by
+            # its NOTIFY, well inside the writer's own recheck (WALL_RECHECK_SECONDS).
+            await asyncio.to_thread(lights.save_room_light, RoomLight(
+                id="lamp", name="Lamp", reporter=FixedReporter(), colour=FixedColour(kelvin=3000)))
+            await until(seen(lambda d: "lamp" in d.lights), WALL_RECHECK_SECONDS / 2, "the new lamp on WALL")
         finally:
+            listening.cancel()
             stop.set()
             await asyncio.wait_for(asyncio.gather(*running), 10)
             await writer.close()

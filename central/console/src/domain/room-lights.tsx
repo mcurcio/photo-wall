@@ -3,10 +3,11 @@ import { useState } from "react";
 import { EntityList } from "../patterns/entity-list";
 import { FactRow, Note } from "../patterns/fact-row";
 import type {
-  Colour, Reporter, RoomLightSave, RoomLightView, RoomLightsView, SensorPlace, SensorSave, SensorView,
+  Colour, RefusedMessageView, Reporter, RoomLightSave, RoomLightView, RoomLightsView, SensorPlace, SensorSave,
+  SensorView,
 } from "../roomLightsApi";
 import {
-  colourWords, ID_PATTERN, idFromName, placeWords, readingWords, reporterWords, stateWords,
+  colourWords, ID_PATTERN, idFromName, messageRefusalWords, placeWords, readingWords, reporterWords, stateWords,
 } from "../roomLightWords.js";
 import { sinceTime } from "../timeWords.js";
 import { Button } from "../ui/button";
@@ -317,6 +318,7 @@ function RemoveDialog({ removing, onClose, onRemove }: {
 
 type LightRow = RoomLightView & { key: string; severity: null };
 type SensorRow = SensorView & { key: string; severity: null };
+type RefusedRow = RefusedMessageView & { key: string; severity: null };
 type Editing = { kind: "light"; light: RoomLightView | null } | { kind: "sensor"; sensor: SensorView | null } | null;
 
 /**
@@ -335,6 +337,7 @@ export function RoomLights({ view, pis, note, onSaveLight, onRemoveLight, onSave
   const piName = (id: string) => pis.find((pi) => pi.id === id)?.name ?? id;
   const lights: LightRow[] = view.lights.map((light) => ({ ...light, key: light.id, severity: null }));
   const sensors: SensorRow[] = view.sensors.map((sensor) => ({ ...sensor, key: sensor.id, severity: null }));
+  const refused: RefusedRow[] = view.refused.map((message, index) => ({ ...message, key: `${index}`, severity: null }));
   return (
     <Stack>
       <Note>
@@ -395,6 +398,18 @@ export function RoomLights({ view, pis, note, onSaveLight, onRemoveLight, onSave
           <Button onClick={() => setEditing({ kind: "sensor", sensor: null })}>Add a Sensor</Button>
         </Inline>
       </Stack>
+      {refused.length > 0 && (
+        <EntityList<RefusedRow>
+          label="Messages not read"
+          columns={[
+            { id: "topic", header: "Topic", rowHeader: true, cell: (row) => row.topic },
+            { id: "reason", header: "Why", cell: (row) => messageRefusalWords(row.reason) },
+            { id: "at", header: "When", cell: (row) => sinceTime(row.at) },
+          ]}
+          groups={[{ title: "From Home Assistant, newest first", rows: refused }]}
+          empty=""
+        />
+      )}
       {note !== null && <Note live>{note}</Note>}
       {editing?.kind === "light" && (
         <LightDialog light={editing.light} view={view} onClose={() => setEditing(null)} onSave={onSaveLight} />

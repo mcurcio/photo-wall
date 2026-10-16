@@ -129,3 +129,20 @@ const REFUSALS = {
 export function refusalWords(done, code) {
   return `${done}: ${REFUSALS[code] ?? `Central refused it (${code}).`}`;
 }
+
+/** Why the Home Assistant link did not record a message (central/room_light/model.py `Refusal`). */
+const MESSAGE_REFUSALS = {
+  "unknown-entity": "No room light or Sensor here names this entity yet. Add it, or leave it out of the automation.",
+  "not-its-reporter": "This entity does not report that light or Sensor.",
+  "out-of-range": "Not a message Photo Wall reads: check the automation's topic and payload.",
+};
+
+/**
+ * A refused message's reason in words; a reason Central gives without words is shown as it is.
+ *
+ * @param {string} reason
+ * @returns {string}
+ */
+export function messageRefusalWords(reason) {
+  return MESSAGE_REFUSALS[reason] ?? `Not read: ${reason}.`;
+}

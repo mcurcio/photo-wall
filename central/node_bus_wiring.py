@@ -121,7 +121,7 @@ class RoomLightsWall:
                     await writer.put(ROOM_LIGHTS_KEY, encode_room_lights(document))
                     last = (id(writer), document.change)
                 except Exception as error:   # the hub or the database away: the recheck tries again
-                    log.info("room lights: not put on WALL yet: %s", error)
+                    log.warning("room lights: not put on WALL yet: %s", error)
         finally:
             stopping.cancel()
             self._loop = self._event = None

@@ -83,15 +83,55 @@ def test_house_lights_round_trip(registry):
         assert lights["room"]["state"]["kind"] == "dimmer" and lights["room"]["heard_at"] is None
         assert view["sensors"][0]["reading"] == 240.0 and view["sensors"][0]["reports"] == "window"
         assert view["home_assistant"] == {"state": "not-configured", "since": None}
+        assert view["refused"] == []
+        PgRoomLights(registry.db).record_refusal("photowall/light/light.cellar", "unknown-entity")
+        [refused] = client.get(LIGHTS, headers=HEADERS).json()["refused"]
+        assert (refused["topic"], refused["reason"]) == ("photowall/light/light.cellar", "unknown-entity")
+        assert refused["at"] > 0
 
-        # A light a Frame's lighting names stays until that Frame stops naming it.
+        # A Sensor moved to another entity: nothing is heard from its new place yet, so its reading
+        # and the light it reports read not reported (mutation probe: `elif False:` for the move).
+        moved = client.put(f"{SENSORS}/hall-meter", headers=HEADERS, json={
+            "name": "Hall meter", "at": {"kind": "home-assistant", "entity": "sensor.hall_lux_2"}})
+        assert moved.status_code == 200, moved.text
+        view = client.get(LIGHTS, headers=HEADERS).json()
+        assert {light["id"]: light for light in view["lights"]}["window"]["state"] == {"kind": "not-reported"}
+        assert view["sensors"][0]["reading"] is None and view["sensors"][0]["heard_at"] is None
+        PgRoomLights(registry.db).record_illuminance("sensor.hall_lux_2", _lux(300.0))
+        assert _light(client, "window")["state"] == {"kind": "measured", "lux": 300.0}
+
+        # Another reporter for the same light: kept, and its state starts again from nobody's word
+        # (mutation probe: `elif False:` for the reporter -> the reporter edit is dropped).
+        rereported = client.put(f"{LIGHTS}/window", headers=HEADERS, json={
+            "name": "Window", "reporter": {"kind": "home-assistant-light", "entity": "light.window_blind"},
+            "colour": {"kind": "fixed", "kelvin": 6500}})
+        assert rereported.status_code == 200, rereported.text
+        window = _light(client, "window")
+        assert window["reporter"] == {"kind": "home-assistant-light", "entity": "light.window_blind"}
+        assert window["state"] == {"kind": "not-reported"} and window["heard_at"] is None
+
+        # A light a Frame's lighting names stays until that Frame stops naming it, and keeps a
+        # reporter its Frame lights' references fit: a fixed light may become a Home Assistant light
+        # (both are read on at 100 %), never a Sensor's reading.
         frame_registry(registry)
         named = client.delete(f"{LIGHTS}/room", headers=HEADERS)
         assert (named.status_code, named.json()) == (409, {"error": "named-by-a-frame"})
-        assert {light["id"]: light for light in client.get(LIGHTS, headers=HEADERS).json()["lights"]}[
-            "room"]["named_by"] == ["hall"]
+        assert _light(client, "room")["named_by"] == ["hall"]
+        measured = client.put(f"{LIGHTS}/room", headers=HEADERS, json={
+            "name": "Room", "reporter": {"kind": "sensor", "sensor": "hall-meter"},
+            "colour": {"kind": "fixed", "kelvin": 6500}})
+        assert (measured.status_code, measured.json()) == (409, {"error": "named-by-a-frame"})
+        assert _light(client, "room")["reporter"] == {"kind": "fixed"}
+        dimmer = client.put(f"{LIGHTS}/room", headers=HEADERS, json={
+            "name": "Room", "reporter": {"kind": "home-assistant-light", "entity": "light.room"},
+            "colour": {"kind": "fixed", "kelvin": 6500}})
+        assert dimmer.status_code == 200, dimmer.text
         assert client.delete(f"{LIGHTS}/window", headers=HEADERS).status_code == 204
         assert client.delete(f"{SENSORS}/hall-meter", headers=HEADERS).status_code == 204
+
+
+def _light(client, light_id: str) -> dict:
+    return {light["id"]: light for light in client.get(LIGHTS, headers=HEADERS).json()["lights"]}[light_id]
 
 
 def frame_registry(registry) -> None:
@@ -160,3 +200,74 @@ def test_more_frame_lights_than_the_cap_are_refused(registry, lights):
         wash = {"kind": "wash", "light": "room", "lux": 100.0, "reference": "dimmer-at-full"}
         refused = client.post(TRIALS, headers=HEADERS, json={"lighting": _lighting(*([wash] * lights))})
         assert (refused.status_code, refused.json()["error"]) == (422, "trial_lighting_invalid")
+
+
+def test_a_pis_light_meter_on_the_host_line_becomes_its_sensors_lights_state(registry):
+    """R8 "A light sensor connected to a player", Central's half: a LIGHT_SENSOR_KEY reading recorded
+    on a Pi's host line (LightSensorJudge, as the link store calls it in the recording commit) becomes
+    Measured(lux) for the room light its Sensor reports, and the document's change rises; a Node with
+    no player and a Pi with no Sensor record nothing. Mutation probe: `judge_in` returning at once ->
+    the window stays not reported."""
+    from test_registry import enroll
+
+    from central.infra.room_light_store import HOST_STATE_STREAM, LightSensorJudge, document_in
+    from central.room_light.model import OnPlayer, RoomLight, Sensor, SensorReporter
+    from contracts.room_light import (
+        LIGHT_SENSOR_KEY,
+        FixedColour,
+        LightSensorReading,
+        Measured,
+        NotReported,
+    )
+    from contracts.room_light import encode_light_sensor as encoded
+    from nodeapi.epoch import Token
+    from nodeapi.pull import Read
+
+    player, _, request = enroll(registry)
+    other, _, other_request = enroll(registry)
+    lights = PgRoomLights(registry.db)
+    assert lights.save_sensor(Sensor(id="pi-meter", name="Pi meter", at=OnPlayer(player_id=player["player_id"]))) is None
+    assert lights.save_room_light(RoomLight(id="window", name="Window", colour=FixedColour(kelvin=6500),
+                                            reporter=SensorReporter(sensor="pi-meter"))) is None
+    judge = LightSensorJudge(lights)
+    subject = "$KV.state_host." + LIGHT_SENSOR_KEY
+
+    def judged(device_id: str, lux: float | None, seq: int, stream: str = HOST_STATE_STREAM):
+        with registry.db.transaction() as conn:
+            judge.judge_in(conn, device_id, stream, (Read(Token("epoch", seq), subject, {},
+                                                          encoded(LightSensorReading(lux))),))
+            return document_in(conn)
+
+    before = lights.current()
+    assert before.lights["window"].state == NotReported()
+    assert judged("device-unknown", 50.0, 1).change == before.change           # no player
+    assert judged(other_request.device_id, 50.0, 2).change == before.change    # a Pi with no Sensor
+    assert judged(request.device_id, 50.0, 3, stream="KV_state_display").change == before.change
+    after = judged(request.device_id, 180.0, 4)
+    assert after.lights["window"].state == Measured(lux=180.0) and after.change == before.change + 1
+    sensor = next(each for each in lights.lights().sensors if each.id == "pi-meter")
+    assert sensor.reading == 180.0 and sensor.heard_at is not None
+
+
+def test_a_new_frame_names_a_fixed_room_light_that_is_there(registry):
+    """A new Frame never names a room light that may be gone: the first fixed light in the House ›
+    Lights order, or none. Mutation probe: insert the upgrade's lighting (naming "room") -> the bare
+    Frame names a light the house no longer has."""
+    from test_registry import frame
+
+    from central.room_light.model import FixedReporter, RoomLight
+    from central.room_light.policy import check_frame_lighting
+    from contracts.room_light import FixedColour
+
+    lights = PgRoomLights(registry.db)
+    assert lights.remove_room_light("room") is None
+    frame(registry, "bare")
+    assert lights.save_room_light(RoomLight(id="lamp", name="Lamp", colour=FixedColour(kelvin=3000),
+                                            reporter=FixedReporter())) is None
+    frame(registry, "lit")
+    frames = {each.id: each for each in registry.inventory().frames}
+    assert frames["bare"].lighting.lights == ()
+    assert [light.light for light in frames["lit"].lighting.lights] == ["lamp"]
+    with registry.db.transaction() as conn:
+        from central.infra.room_light_store import room_lights_in
+        assert check_frame_lighting(frames["lit"].lighting, room_lights_in(conn)) is None

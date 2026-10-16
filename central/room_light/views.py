@@ -66,12 +66,22 @@ class HomeAssistantLinkView(Model):
     since: Instant | None
 
 
+class RefusedMessageView(Model):
+    """A message the Home Assistant link did not record, kept with the reason (central/room_light/
+    model.py `Refusal`'s values, or the parse's reason): its topic, why, and when Central refused it."""
+    topic: str
+    reason: str
+    at: Instant
+
+
 class RoomLightsView(Model):
-    """GET /v1/operator/house/lights: every room light and Sensor, and the Home Assistant link."""
+    """GET /v1/operator/house/lights: every room light and Sensor, the Home Assistant link, and its
+    newest refused messages (at most REFUSALS_KEPT, newest first)."""
     lights: tuple[RoomLightView, ...]
     sensors: tuple[SensorView, ...]
     home_assistant: HomeAssistantLinkView
+    refused: tuple[RefusedMessageView, ...]
 
 
-__all__ = ["HomeAssistantLinkView", "RoomLightSave", "RoomLightView", "RoomLightsView", "SensorSave", "SensorView",
+__all__ = ["HomeAssistantLinkView", "RefusedMessageView", "RoomLightSave", "RoomLightView", "RoomLightsView", "SensorSave", "SensorView",
            "StateView"]

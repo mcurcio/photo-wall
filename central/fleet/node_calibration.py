@@ -311,7 +311,9 @@ class NodeCalibration:
         trial_ended 410 (the trial is not active, or its lease ran out or was invalidated here),
         unknown_entry 404 (no such entry, or trimmed), then `position_history.restore_refusal`
         against the Frame's profile and the Display seen on its port now (other_frame,
-        made_for_other_profile, made_for_other_display, each 409), then trial_sequence_conflict 409."""
+        made_for_other_profile, made_for_other_display, each 409), then trial_sequence_conflict 409,
+        then the entry's lighting against the house as an edit's (`_fitting_in`: 422
+        trial_lighting_unknown_room_light, trial_lighting_reference_mismatch, trial_lighting_invalid)."""
         if type(expected_sequence) is not int or expected_sequence < 1:
             raise NodeControlError("trial_sequence_invalid", 422)
         with self.sessions.db.transaction() as conn:
@@ -345,6 +347,9 @@ class NodeCalibration:
             except StaleSequence:
                 raise NodeControlError("trial_sequence_conflict", 409) from None
             calibration, lighting = restored_draft(entry, base_revision=row["calibration_revision"])
+            # An entry's lighting may name a room light removed or re-reported since: it goes
+            # through the same check as an edit's, so Save never keeps lighting that adds nothing.
+            lighting = _fitting_in(conn, lighting)
             return self._view(self._edited_in(conn, row, sequence, calibration, lighting, now,
                                               restored_from=entry_id))
 

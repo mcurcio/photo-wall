@@ -20,7 +20,6 @@ from central.displays.model import Readiness
 from central.fleet.acceptance_evidence import applied_is_latest
 from central.fleet.device_fence import fence_in, retire_in
 from central.fleet.position_history import (
-    DEFAULT_POSITION,
     position_values,
     profile_changed_record,
     saved_record,
@@ -36,6 +35,7 @@ from central.infra.display_store import (
 )
 from central.infra.position_history_store import write_position_in
 from central.infra.power_store import forget_frame_in
+from central.infra.room_light_store import room_lights_in
 from central.installation_models import (
     FrameInventory,
     InstallationInventory,
@@ -45,6 +45,7 @@ from central.installation_models import (
     WallInventory,
     WallNaming,
 )
+from central.room_light.policy import new_frame_lighting
 from central.transaction_locks import acquire_runtime_locks, holds_runtime_locks_in
 from contracts.enrollment import Enrollment as Enrollment
 from contracts.enrollment import OutputReport as OutputReport
@@ -59,6 +60,7 @@ from contracts.models import (
     OutputBinding,
     TargetIdentifier,
 )
+from contracts.node_picture import UPGRADE_DISPLAY_LIGHT
 from contracts.player_control import (
     SCHEMA,
     ControlAck,
@@ -490,7 +492,8 @@ class Registry:
                              (frame.id, name, frame.surface_id, frame.x_mm, frame.y_mm,
                               frame.width_mm, frame.height_mm, Jsonb(frame.profile.model_dump()),
                               Jsonb(Calibration(fit=CoverFit()).model_dump(mode="json")),
-                              Jsonb(DEFAULT_POSITION.lighting.model_dump(mode="json"))))
+                              Jsonb(new_frame_lighting(UPGRADE_DISPLAY_LIGHT, room_lights_in(conn))
+                                    .model_dump(mode="json"))))
                 _ensure_wall(conn, frame.surface_id)
                 self._audit(conn, "frame_created", frame.id)
         except UniqueViolation as exc:

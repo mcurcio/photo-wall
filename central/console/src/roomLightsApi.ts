@@ -59,10 +59,19 @@ export interface HomeAssistantLinkView {
   since: number | null;
 }
 
+/** A message the Home Assistant link did not record, kept with the reason (newest first). */
+export interface RefusedMessageView {
+  topic: string;
+  /** `unknown-entity`, `not-its-reporter`, `out-of-range`, or the message's parse reason. */
+  reason: string;
+  at: number;
+}
+
 export interface RoomLightsView {
   lights: RoomLightView[];
   sensors: SensorView[];
   home_assistant: HomeAssistantLinkView;
+  refused: RefusedMessageView[];
 }
 
 export interface RoomLightSave {
