@@ -1,0 +1,93 @@
+import { CONSTANTS, type FrameLighting, type RoomLightsView } from "../../generated/contract";
+
+/*
+ * One house's lights for the stories: daylight a window Sensor measures, the colour overheads that
+ * report themselves, the bookshelf spotlight not heard yet, and a lamp nobody reports. Instants are
+ * fixed, so the screenshots never move.
+ */
+
+export const HEARD = 1_791_000_000;
+const MINUTE = 60;
+const RECIPE = "lut33-perceptual-relcol-bpc-1-lcms2.16";
+
+export const ROOMS: RoomLightsView = {
+  lights: [
+    {
+      id: "daylight",
+      light: { kind: "measured", name: "Daylight", sensor: "window-meter", colour: { kind: "fixed", kelvin: 6500 } },
+      entry: { kind: "measured", colour: { kind: "fixed", kelvin: 6500 }, state: { kind: "measured", lux: 320 } },
+      heard_at: HEARD, named_by: ["lobby"],
+    },
+    {
+      id: "overheads",
+      light: {
+        kind: "reported", name: "Overheads", reporter: { source: CONSTANTS.HOME_ASSISTANT_SOURCE, address: "light.living_room" },
+        colour: { kind: "reported", channel_shares: [0.42, 0.36, 0.22] },
+      },
+      entry: {
+        kind: "colour", colour: { kind: "reported", channel_shares: [0.42, 0.36, 0.22] },
+        state: { kind: "colour-dimmer", on: true, brightness: 0.6, rgb: [1, 0.8, 0.6] },
+      },
+      heard_at: HEARD - MINUTE, named_by: ["lobby"],
+    },
+    {
+      id: "bookshelf-spot",
+      light: {
+        kind: "reported", name: "Bookshelf spot", reporter: { source: CONSTANTS.HOME_ASSISTANT_SOURCE, address: "light.bookshelf" },
+        colour: { kind: "fixed", kelvin: 2700 },
+      },
+      entry: { kind: "white", colour: { kind: "fixed", kelvin: 2700 }, state: { kind: "not-reported" } },
+      heard_at: null, named_by: [],
+    },
+    {
+      id: "lamp",
+      light: { kind: "fixed", name: "Reading lamp", colour: { kind: "fixed", kelvin: 3000 } },
+      entry: { kind: "fixed", colour: { kind: "fixed", kelvin: 3000 } },
+      heard_at: null, named_by: [],
+    },
+  ],
+  sensors: [
+    {
+      id: "window-meter",
+      sensor: { name: "Window meter", at: { source: CONSTANTS.HOME_ASSISTANT_SOURCE, address: "sensor.window_illuminance" } },
+      reading: { kind: "measured", lux: 320 }, heard_at: HEARD, reports: "daylight",
+    },
+    {
+      id: "hall-pi",
+      sensor: { name: "Hall Pi meter", at: { source: CONSTANTS.PI_SOURCE, address: "player-1" } },
+      reading: null, heard_at: null, reports: null,
+    },
+  ],
+};
+
+export const PI_NAMES: Readonly<Record<string, string>> = { "player-1": "Player …1a2b3c" };
+
+/** The paper profiles on the list. */
+export const PROFILES = [
+  { profile_sha256: "a".repeat(64), recipe_id: RECIPE, name: "Hahnemühle Photo Rag 308 (matte)" },
+  { profile_sha256: "b".repeat(64), recipe_id: RECIPE, name: "Canson Baryta Photographique II" },
+];
+
+/** As a Frame starts: one wash of the lamp at the Display's matched lux, a paper that matches the Display. */
+export const UPGRADED: FrameLighting = {
+  mat_depth_mm: 0,
+  lights: [{ kind: "wash", light: "lamp", lux: 1000, reference: { kind: "at-full" } }],
+  paper: { whiteness: 0.9, ink_density: 3.5, profile: null },
+};
+
+/** The owner's Frame: daylight from the window as a far light, the overheads' wash and the spotlight's cone. */
+export const LIVING_ROOM: FrameLighting = {
+  mat_depth_mm: 2.5,
+  lights: [
+    {
+      kind: "far", light: "daylight", lux: 400, reference: { kind: "at-reading", lux: 320 }, from_degrees: 90,
+      steep_degrees: 30, softness_degrees: 25,
+    },
+    { kind: "wash", light: "overheads", lux: 150, reference: { kind: "at-full" } },
+    {
+      kind: "close", light: "bookshelf-spot", lux: 800, reference: { kind: "at-full" }, across_mm: -300, up_mm: 900,
+      out_mm: 400, inner_beam_degrees: 20, outer_beam_degrees: 40,
+    },
+  ],
+  paper: { whiteness: 0.9, ink_density: 2.3, profile: { profile_sha256: "a".repeat(64), recipe_id: RECIPE } },
+};

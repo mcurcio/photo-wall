@@ -4,8 +4,9 @@ import { readPositionHistory, useHistoryPages } from "../historyApi.js";
 import type { PositionEntryKind, PositionEntryView, PositionHistoryView } from "../historyApi.js";
 import { refusalWords } from "../liveAdjustment.js";
 import { changedSummary, type HistoryDay, HistoryList, type HistoryRow } from "../patterns/history-list";
+import { unitWords } from "../patterns/units";
 import { pixelSize } from "../timeWords.js";
-import { depthWords, inkWords, lightDetails } from "./frame-lighting";
+import { inkWords, lightDetails, type PaperProfileChoice, profileWords } from "./frame-lighting/model";
 import type { PixelSize } from "./frame-position";
 import type { Adjustment } from "./live-adjustment";
 import { daysOf, historyProblem, shownEntries } from "./picture-history";
@@ -21,6 +22,8 @@ export interface PositionHistoryProps {
   size: PixelSize | null;
   /** The room lights' names by id, for the lighting's rows (an id not here shows as itself). */
   roomNames?: Readonly<Record<string, string>>;
+  /** The paper profiles on the list, for the paper's name. */
+  profiles?: readonly PaperProfileChoice[];
 }
 
 const TITLE = "History";
@@ -37,6 +40,7 @@ const LIVE = new Set(["sending", "shown"]);
 
 /** Each kind of entry in the glossary's words (Done, Revert), never "snapshot", "draft" or "trial". */
 export const WHAT: Record<PositionEntryKind, string> = {
+  "kept-created": "Created",
   "kept-saved": "Kept (Done)",
   "kept-profile-changed": "Kept (screen size changed)",
   "kept-unrecorded": "Changed outside Photo Wall",
@@ -57,9 +61,10 @@ export function positionSummary(details: readonly { label: string; value: string
 
 /** Every value of an entry: each corner as a share of the output (with its pixels when the output's
  * size is known), the rotation, the lighting (the mat's depth, each light's values, the paper), and
- * the screen size it was made for. `names`: the room lights' names by id. */
+ * the screen size it was made for. `names`: the room lights' names by id; `profiles`: the paper
+ * profiles on the list. */
 export function positionDetails(entry: PositionEntryView, size: PixelSize | null,
-  names: Readonly<Record<string, string>> = {}): { label: string; value: string }[] {
+  names: Readonly<Record<string, string>> = {}, profiles: readonly PaperProfileChoice[] = []): { label: string; value: string }[] {
   const { lighting } = entry;
   const { width, height } = entry.made_for.profile_px;
   return [
@@ -70,13 +75,12 @@ export function positionDetails(entry: PositionEntryView, size: PixelSize | null
         + (size === null ? "" : ` (${Math.round(x * size.width)}, ${Math.round(y * size.height)} px)`),
     })),
     { label: "Rotation", value: `${entry.fit.rotation}°` },
-    { label: "Mat depth", value: depthWords(lighting.mat_depth_mm) },
+    { label: "Mat depth", value: unitWords(lighting.mat_depth_mm, "mm") },
     { label: "Lights", value: String(lighting.lights.length) },
     ...lighting.lights.flatMap((light, index) => lightDetails(light, index + 1, names)),
     { label: "Paper whiteness", value: lighting.paper.whiteness.toFixed(2) },
     { label: "Ink density", value: inkWords(lighting.paper.ink_density) },
-    { label: "Paper profile", value: lighting.paper.profile === null ? "None"
-      : `Paper profile ${lighting.paper.profile.profile_sha256.slice(0, 8)}` },
+    { label: "Paper profile", value: profileWords(lighting.paper.profile, profiles) },
     { label: "Made for", value: `${pixelSize(width, height)} px` },
   ];
 }
@@ -99,8 +103,9 @@ export function restoreState(entry: PositionEntryView, adjustment: Adjustment): 
 
 /** The entries as the list's days (`daysOf`), each summary against the entry below it. */
 export function positionDays(entries: readonly PositionEntryView[], adjustment: Adjustment,
-  size: PixelSize | null, names: Readonly<Record<string, string>> = {}): HistoryDay[] {
-  const details = entries.map((entry) => positionDetails(entry, size, names));
+  size: PixelSize | null, names: Readonly<Record<string, string>> = {},
+  profiles: readonly PaperProfileChoice[] = []): HistoryDay[] {
+  const details = entries.map((entry) => positionDetails(entry, size, names, profiles));
   return daysOf(entries, (entry, index) => ({
     what: WHAT[entry.kind],
     notKept: NOT_KEPT.has(entry.kind),
@@ -120,6 +125,8 @@ export interface PositionHistoryListProps {
   size: PixelSize | null;
   /** The room lights' names by id. */
   roomNames?: Readonly<Record<string, string>>;
+  /** The paper profiles on the list. */
+  profiles?: readonly PaperProfileChoice[];
   busy: boolean;
   /** The read failed: its code. */
   readError?: string | null;
@@ -134,13 +141,13 @@ export interface PositionHistoryListProps {
 /** The list as read: its words, the unrecorded change's Note, a Restore's refusal and the read's
  * problem. Plain props, so its stories need no server. */
 export function PositionHistoryList({
-  history, older = [], adjustment, size, roomNames = {}, busy, readError = null, refused = null, restoring, onRestore,
-  onRetry, onOlder,
+  history, older = [], adjustment, size, roomNames = {}, profiles = [], busy, readError = null, refused = null, restoring,
+  onRestore, onRetry, onOlder,
 }: PositionHistoryListProps) {
   const entries = shownEntries(history?.entries ?? [], older);
   return (
     <HistoryList title={TITLE} intro={INTRO} notice={history?.unrecorded_change ? UNRECORDED : undefined}
-      days={positionDays(entries, adjustment, size, roomNames)} empty={EMPTY} busy={busy}
+      days={positionDays(entries, adjustment, size, roomNames, profiles)} empty={EMPTY} busy={busy}
       problem={historyProblem({ readError, refused, what: "this Frame's history", words: refusalWords, onRetry })}
       restoring={restoring} onRestore={onRestore} onOlder={onOlder} />
   );
@@ -155,7 +162,7 @@ export function PositionHistoryList({
  * live session shows it, Done keeps it and Revert returns to the kept Position. An entry made for
  * another screen size or display cannot be restored, and says so.
  */
-export function PositionHistory({ frameId, adjustment, size, roomNames }: PositionHistoryProps) {
+export function PositionHistory({ frameId, adjustment, size, roomNames, profiles }: PositionHistoryProps) {
   const read = useCallback((page: { before?: string; limit: number }) => readPositionHistory(frameId, page) as
     Promise<{ ok: true; history: PositionHistoryView } | { ok: false; error: string }>, [frameId]);
   const pages = useHistoryPages(read);
@@ -178,7 +185,7 @@ export function PositionHistory({ frameId, adjustment, size, roomNames }: Positi
 
   return (
     <PositionHistoryList history={pages.history} older={pages.olderEntries} adjustment={adjustment} size={size}
-      roomNames={roomNames}
+      roomNames={roomNames} profiles={profiles}
       busy={pages.loading} readError={pages.error} refused={refused} restoring={restoring}
       onRestore={(id) => { void restore(id); }} onRetry={() => { void refresh(); }}
       onOlder={pages.more ? () => { void pages.older(); } : undefined} />

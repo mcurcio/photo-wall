@@ -377,7 +377,7 @@ def test_the_removed_sliders_are_gone_and_matched_light_is_edited_live(page, reg
     """Decision 0028 (owner, 2026-10-15, Q2 B: "the paper replaces them"): the Photo Wall group has no
     brightness, saturation, soft highlights, black floor or LUT; Matched light typed as 600 lx is sent
     to light-edits with the Display black in force, reaches the Pi's picture document live, is shown,
-    and Done keeps it; the line says White is the TV's own white for the paper match.
+    and Done keeps it; the line says White is the Display's own white for the paper match.
 
     Mutation: send `matched` instead of `matched_lux` -> Central's 422, the document keeps 1,000 lx."""
     _seen(registry)
@@ -390,7 +390,7 @@ def test_the_removed_sliders_are_gone_and_matched_light_is_edited_live(page, reg
         for label in REMOVED:
             expect(group.get_by_role("slider", name=label, exact=True)).to_have_count(0)
         expect(group.get_by_role("combobox", name="LUT", exact=True)).to_have_count(0)
-        expect(group).to_contain_text("The White pattern is the TV's own white")
+        expect(group).to_contain_text("The White pattern is the Display's own white")
         before = _off_thread(_picture, registry).light
         expect(_typed(page, "Matched light")).to_have_value(f"{before.matched_lux:g}")
 
@@ -427,7 +427,7 @@ def test_display_black_is_typed_as_a_percent_and_sent_as_a_share_and_revert_puts
         edits = _edits(page, "light-edits")
         black = _typed(page, "Display black")
         black.fill("9")
-        expect(_group(page, PHOTO_WALL)).to_contain_text("From 0.001 to 5 %")
+        expect(_group(page, PHOTO_WALL)).to_contain_text("From 0.001 % to 5 %")
         black.fill("0.05")
         expect(bar.get_by_role("status")).to_have_text(PRESENTED)
         page.wait_for_timeout(600)

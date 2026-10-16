@@ -1,5 +1,6 @@
 import { useState } from "react";
 
+import type { PaperProfilesRefusal, PaperProfileView } from "../generated/contract";
 import { EntityList } from "../patterns/entity-list";
 import { Note } from "../patterns/fact-row";
 import { captureDay } from "../timeWords.js";
@@ -8,15 +9,9 @@ import { Dialog, DialogClose } from "../ui/dialog";
 import { FileChooser } from "../ui/file-chooser";
 import { Inline, Stack } from "../ui/stack";
 
-/** One LUT on the list (central/displays/views.py `LutView`, read through lutsApi.js): `used_by`
- * names the Frames whose paper uses it (decision 0028). */
-export interface LutView {
-  profile_sha256: string;
-  recipe_id: string;
-  name: string;
-  added_at: number;
-  used_by: string[];
-}
+/** One paper profile on the list (Central's `PaperProfileView`): `used_by` names the Frames whose
+ * paper uses it. */
+export type LutView = PaperProfileView;
 
 /** Central's answer to an add (lutsApi.js `addLut`). */
 export type AddAnswer = { ok: true; lut: LutView; added: boolean } | { ok: false; error: string };
@@ -29,42 +24,39 @@ function namesWords(names: readonly string[]): string {
   return names.length <= 1 ? names.join("") : `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`;
 }
 
+/** Each refusal of a paper profile change, in words: every code Central has (a code without words
+ * fails the typecheck). */
+export const PAPER_PROFILE_REFUSALS: Record<PaperProfilesRefusal, string> = {
+  not_a_colour_profile: "it is not a colour profile (an ICC file). Download the .icc profile for your paper from its maker.",
+  not_a_printer_profile: "it is a colour profile, but not one for a printer and paper. Choose the profile your paper's "
+    + "maker publishes for your printer.",
+  too_large: "it is too large for a paper profile.",
+  unknown_paper_profile: "it is no longer on the list.",
+  named_by_a_frame: "a Frame's paper uses it. Choose another paper profile on that Frame's Lighting tab first.",
+};
+const UNREACHABLE = "Central did not answer. Try again.";
+
+/** A refusal's words: Central's code in words, or the code itself in a sentence when it has none. */
+function refusalWords(code: string): string {
+  if (code in PAPER_PROFILE_REFUSALS) return PAPER_PROFILE_REFUSALS[code as PaperProfilesRefusal];
+  return code === "unreachable" ? UNREACHABLE : `Central refused it (${code}).`;
+}
+
 /** What an add came to, in plain words: `file` is the name of the file chosen. */
 export function addWords(file: string, answer: AddAnswer): string {
   if (answer.ok) {
     return answer.added
-      ? `Added ${answer.lut.name}. Choose it as a Frame's paper profile, under Lighting on its Position tab.`
+      ? `Added ${answer.lut.name}. Choose it as a Frame's paper profile, on its Lighting tab.`
       : `${answer.lut.name} is already on the list.`;
   }
-  switch (answer.error) {
-    case "not_a_colour_profile":
-      return `Not added: ${file} is not a colour profile (an ICC file). Download the .icc profile for your paper from its maker.`;
-    case "not_a_printer_profile":
-      return `Not added: ${file} is a colour profile, but not one for a printer and paper. `
-        + "Choose the profile your paper's maker publishes for your printer.";
-    case "too_large":
-      return `Not added: ${file} is larger than 8 MB, too large for a paper profile.`;
-    case "unreachable":
-      return "Not added: Central did not answer. Try again.";
-    default:
-      return `Not added: Central refused it (${answer.error}).`;
-  }
+  return `Not added (${file}): ${refusalWords(answer.error)}`;
 }
 
-/** What a remove came to, in plain words. */
+/** What a remove came to, in plain words, naming the Frames whose paper uses it. */
 export function removeWords(lut: LutView, answer: RemoveAnswer): string {
   if (answer.ok) return `Removed ${lut.name}.`;
-  switch (answer.error) {
-    case "lut_in_use":
-      return `Not removed: ${namesWords(answer.frames)} ${answer.frames.length === 1 ? "uses" : "use"} ${lut.name}. `
-        + "Choose another paper profile under Lighting on their Position tab first.";
-    case "lut_unknown":
-      return `${lut.name} was already removed.`;
-    case "unreachable":
-      return "Not removed: Central did not answer. Try again.";
-    default:
-      return `Not removed: Central refused it (${answer.error}).`;
-  }
+  const frames = answer.frames.length === 0 ? "" : ` (${namesWords(answer.frames)})`;
+  return `Not removed (${lut.name}): ${refusalWords(answer.error)}${frames}`;
 }
 
 type Row = LutView & { key: string; severity: null };

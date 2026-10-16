@@ -1,4 +1,4 @@
-import { callApi } from "./weekApi.js";
+import { callApi } from "./apiWrite.js";
 
 /**
  * Settings › House's read and write (Power and the week; central/house_routes.py, the one home of

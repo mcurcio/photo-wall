@@ -33,13 +33,13 @@ import { usePolledRead } from "./polledRead.js";
  * @typedef {{display: DisplayRefView, unrecorded_change: boolean, entries: PictureEntryView[]}} PictureHistoryView
  *   Newest first by `at`, then number. `unrecorded_change`: the display's stored values differ from
  *   its newest kept entry.
- * @typedef {"kept-saved"|"kept-profile-changed"|"kept-unrecorded"|"sent-draft"|"sent-back"} PositionEntryKind
- *   Why a Position entry was written: kept by Done, kept when the Frame's screen size changed, found
+ * @typedef {"kept-created"|"kept-saved"|"kept-profile-changed"|"kept-unrecorded"|"sent-draft"|"sent-back"} PositionEntryKind
+ *   Why a Position entry was written: kept when the Frame was created, kept by Done, kept when the Frame's screen size changed, found
  *   changed outside Photo Wall; a trial's draft handed to the Pi (not kept), or the kept values handed
  *   back once a draft went.
  * @typedef {"other_frame"|"made_for_other_profile"|"made_for_other_display"} PositionRestoreRefusal
  * @typedef {import("./useDraft.js").Fit} Fit
- * @typedef {import("./useDraft.js").Lighting} Lighting
+ * @typedef {import("./generated/contract").FrameLighting} Lighting
  * @typedef {{profile_px: {width: number, height: number}, display_id: string|null}} MadeForView
  *   The profile an entry's corners are in, and the Display seen on the Frame's port then.
  * @typedef {{entry_id: string, frame: FrameRefView, kind: PositionEntryKind, number: number, at: string,

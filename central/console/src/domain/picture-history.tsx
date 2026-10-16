@@ -10,7 +10,8 @@ import { Note } from "../patterns/fact-row";
 import { changedSummary, type HistoryDay, HistoryList, type HistoryRow } from "../patterns/history-list";
 import { ProblemCard } from "../patterns/problem-card";
 import { dayLabel, timeOfDay } from "../timeWords.js";
-import { hardwareWords, matchedWords, panelBlackWords, PATTERN_NAMES, type PictureSession } from "./frame-picture";
+import { unitWords } from "../patterns/units";
+import { hardwareWords, panelBlackWords, PATTERN_NAMES, type PictureSession } from "./frame-picture";
 
 /** The read's shapes (historyApi.js, mirroring central/displays/views.py), for this module's users. */
 export type { PictureEntryView, PictureHistoryView, SoftwarePictureView };
@@ -87,7 +88,7 @@ export function entryDetails(entry: PictureEntryView, rows: Rows): { label: stri
     { label: "Contrast", value: `${software.contrast_percent} %` },
     { label: "Colour temperature", value: `${software.colour_temperature_kelvin} K` },
     { label: "Gamma", value: (software.gamma_tenths / 10).toFixed(1) },
-    { label: "Matched light", value: matchedWords(picture.light.matched_lux) },
+    { label: "Matched light", value: unitWords(picture.light.matched_lux, "lx") },
     { label: "Display black", value: panelBlackWords(picture.light.black) },
     { label: "Signal range", value: RANGES[picture.signal_range] },
     ...(entry.test_pattern === null ? [] : [{ label: "Test pattern", value: PATTERN_NAMES[entry.test_pattern] }]),

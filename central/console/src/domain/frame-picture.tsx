@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 
 import { formatAge } from "../health.js";
 import { levelWords } from "../levelWords.js";
@@ -7,13 +7,16 @@ import type {
   HardwareSettingView, PaperSize, PictureCopyResult, SignalRange, SignalView, SoftwareSetting, TestPattern, TestPatternView,
 } from "../pictureApi.js";
 import type { usePictureSession } from "../pictureSession.js";
+import { CONSTANTS } from "../generated/contract";
 import { FactGroup, FactRow, Note } from "../patterns/fact-row";
 import { LivePreviewEditor } from "../patterns/live-preview-editor";
 import { ProblemCard } from "../patterns/problem-card";
+import { TypedNumber } from "../patterns/typed-number";
+import { unitWords } from "../patterns/units";
 import { timeOfDay } from "../timeWords.js";
 import { Button } from "../ui/button";
 import { Disclosure } from "../ui/disclosure";
-import { Field, NumberInput } from "../ui/field";
+import { Field } from "../ui/field";
 import { Link } from "../ui/link";
 import { Section } from "../ui/section";
 import { SegmentedControl } from "../ui/segmented-control";
@@ -42,17 +45,17 @@ export const PHOTO_WALL_GROUP = "Photo Wall (software)";
 const AS_IT_HAS_IT = "As the display has it";
 const NOT_CONNECTED = "Applies when the display is connected";
 const NO_CHANGE = "100 % changes nothing";
-/** The Display's light's ranges, as contracts/node_picture.py holds them (MATCHED_LUX_MIN..MAX,
- * PANEL_BLACK_MIN..MAX; tests/test_console_print_look_ranges.py holds them equal): the matched lux,
- * and the panel's black as a percent of its white (the wire's share times 100). */
-export const MATCHED_LUX = [10, 20000] as const;
-export const PANEL_BLACK_PERCENT = [0.001, 5] as const;
+/** A share as a percent: the panel's black is typed as a percent of its white. */
+const PERCENT = 100;
+/** The panel's black's significant digits as typed, and its step in percent. */
+const BLACK_DIGITS = 6;
+const BLACK_STEP = 0.001;
 const MATCHED_HELP = "The light at the Frame, from a phone light meter, when the White pattern matched a sheet of "
   + "white paper held beside it";
-const BLACK_HELP = "How bright the display's black is, as a percent of its white (a glossy TV about 0.03 %)";
-// The paper match's one line: White is the TV's own white (decision 0028), so the sheet is matched
-// against the display itself.
-const WHITE_FOR_THE_MATCH = "The White pattern is the TV's own white, through none of a Frame's lighting: match "
+const BLACK_HELP = "How bright the display's black is, as a percent of its white (a glossy Display about 0.03 %)";
+// The paper match's one line: White is the Display's own white, so the sheet is matched against the
+// Display itself.
+const WHITE_FOR_THE_MATCH = "The White pattern is the Display's own white, through none of a Frame's lighting: match "
   + "the sheet against it, then type the lux the meter reads at the Frame.";
 const CHECKING = "Checking what this display offers…";
 const CHECKED_WHEN_CONNECTED = "Photo Wall checks what this display offers when it is connected";
@@ -336,41 +339,9 @@ function DisplaySettings({ view, session, ready }: { view: View; session: Pictur
   );
 }
 
-/** Display black's words: a share of white as a percent, up to three decimals ("0.03 %"). */
+/** Display black's words: a share of white as a percent ("0.03 %"). */
 export function panelBlackWords(black: number): string {
-  return `${Number((black * 100).toFixed(3))} %`;
-}
-
-/** Matched light's words: whole lux ("1000 lx"). */
-export function matchedWords(lux: number): string {
-  return `${Number(lux.toFixed(1))} lx`;
-}
-
-/**
- * A number typed in a Field, applied once it is a number in [min, max]; otherwise the Field says
- * so and the draft keeps its value. The Picture tab's typed values (a light meter's lux, a percent
- * too small for a slider).
- */
-function TypedValue({ label, help, value, min, max, unit, ready, onChange }: {
-  label: string; help: string; value: number; min: number; max: number; unit: string; ready: boolean;
-  onChange: (value: number) => void;
-}) {
-  const [text, setText] = useState<string | null>(null);
-  // A value that changed elsewhere (a Restore, a Revert) replaces what was typed.
-  useEffect(() => { setText((typed) => (typed !== null && Number(typed) === value ? typed : null)); }, [value]);
-  const shown = text ?? String(value);
-  const number = Number(shown);
-  const valid = shown.trim() !== "" && Number.isFinite(number) && number >= min && number <= max;
-  return (
-    <Field label={label} help={help} notes={[`${min} to ${max} ${unit}`]} error={valid ? undefined : `From ${min} to ${max} ${unit}`}>
-      <NumberInput value={shown} min={min} max={max} step="any" disabled={!ready}
-        onChange={(raw) => {
-          setText(raw);
-          const next = Number(raw);
-          if (raw.trim() !== "" && Number.isFinite(next) && next >= min && next <= max) onChange(next);
-        }} />
-    </Field>
-  );
+  return unitWords(black * PERCENT, "%");
 }
 
 /** Photo Wall (software): contrast 0–150 % (100 % changes nothing), colour temperature and gamma,
@@ -405,11 +376,12 @@ export function PhotoWallSettings({ view, session, ready }: { view: View; sessio
             onCommit={(next) => session.changeSoftware("gamma", Math.round(next * 10))} />
         </Field>
         <Note>{WHITE_FOR_THE_MATCH}</Note>
-        <TypedValue label="Matched light" help={MATCHED_HELP} value={light.matched_lux} min={MATCHED_LUX[0]}
-          max={MATCHED_LUX[1]} unit="lx" ready={ready} onChange={(matched) => session.changeLight({ matched_lux: matched })} />
-        <TypedValue label="Display black" help={BLACK_HELP} value={Number((light.black * 100).toPrecision(6))}
-          min={PANEL_BLACK_PERCENT[0]} max={PANEL_BLACK_PERCENT[1]} unit="%" ready={ready}
-          onChange={(percent) => session.changeLight({ black: percent / 100 })} />
+        <TypedNumber label="Matched light" help={MATCHED_HELP} value={light.matched_lux} min={CONSTANTS.MATCHED_LUX_MIN}
+          max={CONSTANTS.MATCHED_LUX_MAX} step={1} unit="lx" disabled={!ready}
+          onChange={(matched) => session.changeLight({ matched_lux: matched })} />
+        <TypedNumber label="Display black" help={BLACK_HELP} value={Number((light.black * PERCENT).toPrecision(BLACK_DIGITS))}
+          min={CONSTANTS.PANEL_BLACK_MIN * PERCENT} max={CONSTANTS.PANEL_BLACK_MAX * PERCENT} step={BLACK_STEP} unit="%"
+          disabled={!ready} onChange={(percent) => session.changeLight({ black: percent / PERCENT })} />
       </Stack>
     </FactGroup>
   );

@@ -72,3 +72,21 @@ export async function apiWrite(path, { method, body, contentType } = {}) {
     data,
   };
 }
+
+/**
+ * One operator call folded into `{ok: true, [key]: data}` or `{ok: false, error}` (the refusal's
+ * code, else `http_<status>`; `unreachable` for a lost request). Every module whose answer is one
+ * value reads it through this one fold.
+ *
+ * @param {string} key
+ * @param {string} path
+ * @param {{method: string, body?: any}} options
+ */
+export async function callApi(key, path, options) {
+  try {
+    const result = await apiWrite(path, options);
+    return result.ok ? { ok: true, [key]: result.data } : { ok: false, error: result.error ?? `http_${result.status}` };
+  } catch {
+    return { ok: false, error: "unreachable" };
+  }
+}

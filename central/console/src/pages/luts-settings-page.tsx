@@ -50,7 +50,7 @@ export function LutsSettingsPage() {
   const remove = async (lut: LutView) => {
     setNote(null);
     const answer = await removeLut(lut.profile_sha256) as RemoveAnswer;
-    if (answer.ok || answer.error === "lut_unknown" || answer.error === "lut_in_use") await load();
+    if (answer.ok || answer.error === "unknown_paper_profile" || answer.error === "named_by_a_frame") await load();
     setNote(removeWords(lut, answer));
   };
   return <LutsSettings luts={read.luts} note={note} adding={adding} onAdd={(file) => void add(file)} onRemove={remove} />;

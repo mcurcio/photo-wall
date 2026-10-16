@@ -2,12 +2,12 @@ import type { Meta, StoryObj } from "@storybook/react-vite";
 
 import type { Adjustment } from "./live-adjustment";
 import { type PositionEntryView, type PositionHistoryView, PositionHistoryList } from "./position-history";
-import { LIVING_ROOM, ROOMS } from "./room-lights.fixtures";
+import { LIVING_ROOM, PROFILES, ROOMS } from "./room-lights/room-lights.fixtures";
 
 const FRAME = { id: "lobby", name: "Lobby" };
 const OPENING: [number, number][] = [[0.1, 0.08], [0.9, 0.05], [0.92, 0.95], [0.08, 0.92]];
 const FULL: [number, number][] = [[0, 0], [1, 0], [1, 1], [0, 1]];
-const NAMES = Object.fromEntries(ROOMS.lights.map((light) => [light.id, light.name]));
+const NAMES = Object.fromEntries(ROOMS.lights.map((light) => [light.id, light.light.name]));
 
 const ADJUSTMENT: Adjustment = {
   draft: { fit: { mode: "cover", corners: OPENING, rotation: 0 }, lighting: LIVING_ROOM },
@@ -48,6 +48,7 @@ const KEPT: PositionHistoryView = {
   entries: [
     entry("k2", "kept-saved", "2026-10-13T19:58:31Z"),
     entry("k1", "kept-saved", "2026-10-12T21:10:02Z", { corners: FULL, depth: 0, lights: [] }),
+    entry("k0", "kept-created", "2026-10-12T21:02:40Z", { corners: FULL, depth: 0, lights: LIVING_ROOM.lights.slice(1, 2) }),
   ],
 };
 
@@ -55,7 +56,7 @@ const meta = {
   title: "Domain/PositionHistory",
   component: PositionHistoryList,
   args: {
-    history: KEPT, adjustment: ADJUSTMENT, size: { width: 1920, height: 1080 }, roomNames: NAMES, busy: false, restoring: null,
+    history: KEPT, adjustment: ADJUSTMENT, size: { width: 1920, height: 1080 }, roomNames: NAMES, profiles: PROFILES, busy: false, restoring: null,
     onRestore: () => {}, onRetry: () => {},
   },
 } satisfies Meta<typeof PositionHistoryList>;
@@ -63,7 +64,8 @@ const meta = {
 export default meta;
 type Story = StoryObj<typeof meta>;
 
-/** Kept Positions over two days: Cover in an opening with a 2.5 mm mat, daylight and the overheads, and the full screen before. */
+/** Kept Positions over two days: Cover in an opening with a 2.5 mm mat, daylight and the overheads, the full screen
+ * before, and the Frame as it was created. */
 export const Kept: Story = {};
 /** A visit: corners moved and the mat deepened, tried and not kept (dashed), then put back by Revert. */
 export const NotKept: Story = {

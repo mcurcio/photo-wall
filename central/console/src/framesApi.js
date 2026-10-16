@@ -1,7 +1,6 @@
-import { apiWrite } from "./apiWrite.js";
+import { apiWrite, callApi } from "./apiWrite.js";
 import { dragToPlacement, orientationCoherent } from "./projection.js";
 import { FRAME_ID_PATTERN } from "./frameIds.js";
-import { callApi } from "./weekApi.js";
 
 export { FRAME_ID_PATTERN } from "./frameIds.js";
 

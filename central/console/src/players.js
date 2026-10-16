@@ -49,6 +49,19 @@ export function playerName(deviceId, serial) {
 }
 
 /**
+ * A Registry Player's name by its id (`playerName` of its box), or its id when the snapshot
+ * holds no such Player.
+ *
+ * @param {object|null} snapshot
+ * @param {string} playerId
+ * @returns {string}
+ */
+export function playerNameById(snapshot, playerId) {
+  const player = (snapshot?.inventory?.players ?? []).find((candidate) => candidate.id === playerId);
+  return typeof player?.device_id === "string" ? playerName(player.device_id, player.serial ?? null) : playerId;
+}
+
+/**
  * The address of a Registry Player's home, its box's Player page (`#/players/<device-id>`),
  * or null when the Player is not in the snapshot. A link only: it reads nothing.
  *

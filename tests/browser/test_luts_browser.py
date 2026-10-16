@@ -80,7 +80,7 @@ def test_an_added_profile_is_listed_chosen_as_a_frames_paper_and_kept_while_a_fr
         expect(_rows(page).first).to_contain_text("No Frame")
 
         room_lights(page, origin)
-        open_frame(page, FRAME, "position")
+        open_frame(page, FRAME, "lighting")
         bar = _bar(page)
         expect(bar.get_by_role("status")).to_have_text(PRESENTED)
         picker = lighting_group(page).get_by_role("combobox", name="Paper profile", exact=True)
@@ -104,7 +104,7 @@ def test_an_added_profile_is_listed_chosen_as_a_frames_paper_and_kept_while_a_fr
             page.get_by_role("dialog", name=f"Remove {NAME}?", exact=True).get_by_role(
                 "button", name="Confirm remove", exact=True).click()
         assert sent.value.status == 409
-        expect(page.get_by_text(f"Not removed: {frame} uses {NAME}.", exact=False)).to_be_visible()
+        expect(page.get_by_text(f"Not removed ({NAME}): a Frame's paper uses it.", exact=False)).to_contain_text(frame)
         expect(_rows(page)).to_have_count(2)
 
         _rows(page).filter(has_text="No Frame").get_by_role("button", name=f"Remove {NAME}", exact=True).click()

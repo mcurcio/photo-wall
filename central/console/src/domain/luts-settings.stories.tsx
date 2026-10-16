@@ -39,7 +39,7 @@ export const AddRefused: Story = {
 };
 /** Remove refused: Frames use the LUT, named. */
 export const RemoveRefused: Story = {
-  args: { note: removeWords(BARYTA, { ok: false, error: "lut_in_use", frames: ["Living room left", "Hall"] }) },
+  args: { note: removeWords(BARYTA, { ok: false, error: "named_by_a_frame", frames: ["Living room left", "Hall"] }) },
 };
 /** At phone width. */
 export const Phone: Story = { parameters: { phone: true } };

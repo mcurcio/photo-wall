@@ -104,10 +104,15 @@ SHARED_WITH_SHOW = {
     # The LUTs list's routes (print look): Settings › LUTs lists, adds and removes; the Frame
     # page's Picture tab reads the list for its LUT picker (pictureSession.js).
     "lutsApi.js",
-    # Room lights (decision 0028): Settings › Lights reads and writes them; a Frame's lighting
-    # (Position tab) reads them for its room light picker and says their states the same way.
-    "roomLightsApi.ts",
-    "roomLightWords.js",
+    # The house's lights: House › Lights and a Pi's Hardware page read and write them; a Frame's
+    # Lighting tab reads them for its room light picker and what its Pi draws with, and says them
+    # the same way (domain/room-lights/: its requests, its words and the drawn line).
+    "api.ts",
+    "model.ts",
+    "drawn-line.tsx",
+    # Central's types, limits and refusal codes (generated), and the one answer a request folds to.
+    "contract.ts",
+    "answer.ts",
     # (Power and the week's houseApi.js and weekApi.js are the shell's own: its house clock,
     # houseClock.js, reads Settings › House for every time the console shows.)
 }
@@ -632,7 +637,7 @@ def test_every_section_is_in_exactly_one_route_table():
     sections = [section for group in SAMPLES.values() for section in group]
     assert sorted(sections) == sorted(
         ["now", "scenes", "schedule", "sources", "wall", "hardware", "players", "releases",
-         "photo-library", "photo-fit", "house", "lights", "luts", "attention"])
+         "photo-library", "photo-fit", "house", "lights", "home-assistant", "luts", "attention"])
 
 
 ROUND_TRIP = r"""
@@ -672,7 +677,7 @@ console.log(JSON.stringify(out));
 ROUTES = [
     {"section": section} for section in
     ("now", "scenes", "schedule", "sources", "wall", "hardware", "releases", "photo-library",
-     "photo-fit", "lights", "luts", "attention")
+     "photo-fit", "lights", "home-assistant", "luts", "attention")
 ] + [
     {"section": "hardware", "id": "device-" + "a" * 64},
     {"section": "hardware", "id": "a/b ç?#%"},
@@ -770,7 +775,7 @@ def test_routes_parse_format_and_round_trip():
     assert out["oldFacets"] == [None] * 5
     # A Frame route with no tab opens Overview; it is never formatted.
     assert out["noTab"] == {"section": "wall", "id": "x", "tab": "overview"}
-    assert out["tabs"] == ["overview", "position", "picture", "power", "hardware"]
+    assert out["tabs"] == ["overview", "position", "lighting", "picture", "power", "hardware"]
     assert out["layout"] == {"hash": "#/wall/layout", "route": {"section": "wall", "mode": "layout"}}
     assert out["targetRoute"] == "#/scenes/new/kind?target=frame_one"
     assert out["badTargetRoute"] == "refused"
@@ -783,10 +788,12 @@ LAYERS = ("pages", "domain", "patterns", "ui", "design")
 # Layers that know no Photo Wall concept: they import no console module outside the layers.
 MODEL_FREE = {"patterns", "ui", "design"}
 MODELS = {"facts.js", "health.js", "hostHealth.js", "join.js", "players.js", "routes.js"}
-# What a page or a domain component may import from outside the catalog: the models, and the
-# node read (a hook, no markup), the one time formatter and the copy homes (no markup). Anything else that
-# renders markup is a legacy module.
-PAGE_IMPORTS = MODELS | {"nodeRead.js", "timeWords.js", "showWords.js", "powerWords.js"}
+# What a page or a domain component may import from outside the catalog: the models, the node
+# read and the one polled read (hooks, no markup), the one request function, Central's generated
+# contract, the one time formatter and the copy homes (no markup). Anything else that renders markup
+# is a legacy module.
+PAGE_IMPORTS = MODELS | {"nodeRead.js", "polledRead.js", "apiWrite.js", "contract.ts", "timeWords.js", "showWords.js",
+                         "powerWords.js"}
 # Legacy modules that render markup the Hardware Pi page still composes: the confirmation
 # dialog (ConfirmAction.jsx, whose typed handle, terminal phases and page-hidden suspension the
 # Dialog primitive does not carry yet) and the Reboot section. Declared in .claude/errata.md
@@ -799,20 +806,22 @@ LEGACY_MARKUP = {"ConfirmAction.jsx", "PlayerCommands.jsx"}
 # Frame id rule; the Frame profile its write and refresh-after-write; the live adjustment's
 # view the hook's type. No other page or domain module may import any of them.
 FRAME_PAGE_IMPORTS = {
-    "frame-page.tsx": {"BindingFacet.jsx", "liveAdjustment.js", "pictureSession.js", "framesApi.js", "useMutate.js"},
+    # The paper profiles list (lutsApi.js) for the Lighting tab's paper and the Position history.
+    "frame-page.tsx": {"BindingFacet.jsx", "liveAdjustment.js", "lutsApi.js", "pictureSession.js", "framesApi.js",
+                       "useMutate.js"},
     # The Picture tab (1c K1): its routes, the session hook's type and a display level's words
     # (0022 R11); Position (1c K2): the quarter turns its draft takes.
     "frame-picture.tsx": {"pictureApi.js", "pictureSession.js", "levelWords.js"},
-    "frame-position.tsx": {"useDraft.js", "roomLightsApi.ts"},
+    "frame-position.tsx": {"useDraft.js"},
     "frame-overview.tsx": {"PrecedenceExplanation.jsx", "ReadinessNotice.jsx", "readinessRecovery.js",
                            "frameIds.js"},
     "frame-profile.tsx": {"framesApi.js", "useMutate.js"},
     # The Hardware tab's Display (1b K1, E-1B-K1-1): its read and polling, the profile write the
     # display-changed card confirms, and the route change to Position.
-    "frame-display.tsx": {"displayApi.js", "framesApi.js", "polledRead.js", "projection.js", "useMutate.js",
-                          "useRoute.js", "useSnapshot.js"},
+    "frame-display.tsx": {"displayApi.js", "framesApi.js", "projection.js", "useMutate.js", "useRoute.js",
+                          "useSnapshot.js"},
     "live-adjustment.tsx": {"liveAdjustment.js"},
-    "frame-power.tsx": {"polledRead.js", "powerApi.js"},
+    "frame-power.tsx": {"powerApi.js"},
     # The Picture and Position tabs' Histories (configuration snapshots K1, K2): their reads (with
     # their polling), the picture routes' types (a Restore's answer) and the live adjustment's
     # refusal words.
@@ -841,26 +850,16 @@ PHOTO_PAGE_IMPORTS = {
 # Power and the week's pages, each with the legacy modules it alone may import: their routes and
 # the one polled read. The Frame's Why reads its power result (powerApi.js) and the house's zone.
 POWER_WEEK_IMPORTS = {
-    "week-page.tsx": {"houseApi.js", "polledRead.js", "powerScheduleApi.js", "weekApi.js"},
+    "week-page.tsx": {"houseApi.js", "powerScheduleApi.js", "weekApi.js"},
     # A save tells the shell's house clock to read again (houseClock.js).
     "house-settings-page.tsx": {"houseApi.js", "houseClock.js"},
-    "frame-why.tsx": {"houseApi.js", "polledRead.js", "whyApi.js"},
+    "frame-why.tsx": {"houseApi.js", "whyApi.js"},
 }
 # The print look's Settings › LUTs: the LUTs list's routes.
 PRINT_LOOK_IMPORTS = {
     "luts-settings-page.tsx": {"lutsApi.js"},
 }
-# Room light (decision 0028): Settings › Lights (its routes, its polled read, the words) and a
-# Frame's lighting (the room lights and the LUTs list it picks from, read while shown).
-ROOM_LIGHT_IMPORTS = {
-    "house-lights-page.tsx": {"polledRead.js", "roomLightsApi.ts", "roomLightWords.js"},
-    "room-lights.tsx": {"roomLightsApi.ts", "roomLightWords.js"},
-    "room-lights.stories.tsx": {"roomLightWords.js"},
-    "room-lights.fixtures.ts": {"roomLightsApi.ts"},
-    "frame-lighting.tsx": {"lutsApi.js", "polledRead.js", "roomLightsApi.ts", "roomLightWords.js"},
-}
-DECLARED_IMPORTS = {**FRAME_PAGE_IMPORTS, **PHOTO_PAGE_IMPORTS, **POWER_WEEK_IMPORTS, **PRINT_LOOK_IMPORTS,
-                    **ROOM_LIGHT_IMPORTS}
+DECLARED_IMPORTS = {**FRAME_PAGE_IMPORTS, **PHOTO_PAGE_IMPORTS, **POWER_WEEK_IMPORTS, **PRINT_LOOK_IMPORTS}
 
 
 def _layer(module, src=SRC):
@@ -940,6 +939,54 @@ def test_a_layer_rule_break_is_found(tmp_path):
         ("ui/chip.tsx", "pages/Page.tsx"),
         ("ui/fact.tsx", "facts.js"),
     ]
+
+
+def _context(module, src=SRC):
+    """The domain context folder `module` sits in (src/domain/<context>/), or None."""
+    try:
+        parts = module.resolve().relative_to((src / "domain").resolve()).parts
+    except ValueError:
+        return None
+    return parts[0] if len(parts) > 1 else None
+
+
+def context_violations(graph, src=SRC):
+    """Every (module, import) edge where a module in one domain context's folder imports a module
+    in another's: S1's one domain per component. A story composes fixtures and is not held to it."""
+    found = []
+    for module, imports in graph.items():
+        own = _context(module, src)
+        if own is None or module.name.endswith(".stories.tsx"):
+            continue
+        for imported in imports:
+            other = _context(imported, src)
+            if other is not None and other != own:
+                found.append((str(module.resolve().relative_to(src.resolve())),
+                              str(imported.resolve().relative_to(src.resolve()))))
+    return sorted(found)
+
+
+def test_a_domain_context_imports_no_other_context(layer_graph):
+    assert {"room-lights", "frame-lighting", "home-assistant"} <= {
+        _context(module) for module in layer_graph}  # the walk reached the contexts
+    assert context_violations(layer_graph) == []
+
+
+def test_a_cross_context_import_is_found(tmp_path):
+    # Guards the check: a context's module importing another context's is a violation; a flat
+    # domain module, a story and a module of the same context are not.
+    _require_esbuild()
+    _write(tmp_path, {
+        "tsconfig.json": '{"compilerOptions": {"paths": {"@/*": ["./src/*"]}}}',
+        "src/domain/shared.ts": "export const s = 1;\n",
+        "src/domain/a/model.ts": 'import { s } from "../shared";\nexport const a = s;\n',
+        "src/domain/a/view.tsx": 'import { a } from "./model";\nimport { b } from "../b/model";\nexport const v = a + b;\n',
+        "src/domain/a/view.stories.tsx": 'import { b } from "../b/model";\nexport const st = b;\n',
+        "src/domain/b/model.ts": "export const b = 2;\n",
+    })
+    src = tmp_path / "src"
+    graph = module_graph(_layer_modules(src), tmp_path, tmp_path)
+    assert context_violations(graph, src) == [("domain/a/view.tsx", "domain/b/model.ts")]
 
 
 def test_the_truth_kinds_token_list_is_the_fact_models():

@@ -1,26 +1,21 @@
-"""A Frame's lighting on the Position tab (decision 0028; owner, 2026-10-15: "each frame. the whole
-wall might share a trigger, but each configuration will be unique"; "live on the wall"): its mat
-depth, its lights (each one Frame's view of a room light, in lux with its reference) and its paper,
-live through Position's session: every edit carries the whole lighting with the position, Done
-saves both and Revert returns both.
+"""A Frame's Lighting tab: its mat depth, its lights (each one Frame's view of a room light, in lux
+with its reference) and its paper, live through the Frame's session, which the Position tab shares:
+every edit carries the whole lighting with the position, Done saves both and Revert returns both.
 
-The room lights are the real ones: the test sets them up through Settings › Lights' routes
-(central/room_light_routes.py, PUT /v1/operator/house/lights and /sensors) on the production app,
-and the editor's room light picker reads them back. As in test_console_frame_page_browser.py, a
-real session needs a Node presenting it, so a fake Central answers the session routes with
-Central's rules (`LightingSessions`); this one adds Central's lighting rules
-(central/fleet/node_calibration.py): an `edit` or `renew` without `lighting` is refused (422
-`trial_lighting_required`), one the contract refuses (contracts.frame_lighting.FrameLighting) is
-refused (`trial_lighting_invalid`), a light naming no room light is refused
-(`trial_lighting_unknown_room_light`) and one whose reference does not match its room light's
-reporter (`trial_lighting_reference_mismatch`: a Sensor's light takes a lux reference, any other
-DIMMER_AT_FULL); Save writes the lighting with the calibration through the real Registry's Save
-CAS, and the reload reads the Frame's lighting from the real inventory.
+The room lights are the real ones: the test sets them up through House › Lights' routes on the
+production app (PUT /v1/operator/house/lights and /sensors), and a Sensor's reading through Central's
+reporting port, so the editor's picker and references read them back. As in
+test_console_frame_page_browser.py, a real session needs a Node presenting it, so a fake Central
+answers the session routes (`LightingSessions`): an `edit` or `renew` without `lighting` is
+refused (422 `trial_lighting_required`), one the contract refuses (contracts.frame_lighting
+.FrameLighting) is refused (`trial_lighting_invalid`); Save writes the lighting with the
+calibration through the real Registry's Save CAS, and the reload reads the Frame's lighting from the
+real inventory.
 
-Mutation probes: send `mat` instead of `lighting` (liveAdjustment.js `payload()`) ->
-trial_lighting_required, and the tracer case never reaches Done; keep DIMMER_AT_FULL when a Sensor's
-light is chosen (frame-lighting.tsx `referenceFor`) -> the mismatch case's refusal never clears;
-replace instead of append on Add -> the two-lights case saves one light.
+Mutation probes: send `mat` instead of `lighting` (trialBodies.ts `draftBody`) ->
+trial_lighting_required, and the tracer case never reaches Done; give every light AtFull
+(frame-lighting/model.ts `referenceFor`) -> the Sensor's light's reference case fails; replace
+instead of append on Add -> the two-lights case saves one light.
 """
 
 import os
@@ -32,13 +27,15 @@ from operator_harness import operator_server, sign_in
 from playwright.sync_api import expect
 from pydantic import ValidationError
 from test_console_frame_page_browser import FRAME, PRESENTED, FakeSessions, _bar, _seed
+from test_frame_picture_browser import _off_thread
 
-from central.infra.room_light_store import room_lights_in
+from central.infra.room_light_store import PgRoomLights
 from central.registry import RegistryError
-from central.room_light.policy import check_frame_lighting
+from central.room_light.model import SensorRef
 from central.transaction_locks import acquire_runtime_locks
 from contracts.frame_lighting import FrameLighting
 from contracts.models import Calibration
+from contracts.room_light import Measured
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("PHOTO_WALL_BROWSER_TESTS") != "1",
@@ -46,31 +43,36 @@ pytestmark = pytest.mark.skipif(
 )
 
 CONSOLE = {"X-Photo-Wall-Console": "1"}
-SPOT = {"name": "Bookshelf spot", "reporter": {"kind": "home-assistant-light", "entity": "light.bookshelf"},
-        "colour": {"kind": "fixed", "kelvin": 2700}}
-WINDOW_METER = {"name": "Window meter", "at": {"kind": "home-assistant", "entity": "sensor.window_illuminance"}}
-DAYLIGHT = {"name": "Daylight", "reporter": {"kind": "sensor", "sensor": "window-meter"},
-            "colour": {"kind": "fixed", "kelvin": 6500}}
-MISMATCH = "A light's reference does not match how its room light reports"
+PI = "pi"
+SPOT = {"kind": "reported", "name": "Bookshelf spot",
+        "reporter": {"source": "home-assistant", "address": "light.bookshelf"}, "colour": {"kind": "fixed", "kelvin": 2700}}
+DAYLIGHT = {"kind": "measured", "name": "Daylight", "sensor": "window-meter", "colour": {"kind": "fixed", "kelvin": 6500}}
+READING = 320.0
 
 
 def put(page, origin, path, body):
-    """One Settings › Lights write through the production app, as the signed-in console sends it."""
+    """One House › Lights write through the production app, as the signed-in console sends it."""
     response = page.request.put(origin + path, data=body, headers={**CONSOLE, "Origin": origin})
     assert response.ok, (path, response.status, response.text())
     return response.json()
 
 
-def room_lights(page, origin, *, daylight=False):
-    """The bookshelf spotlight (a Home Assistant light), and with `daylight` a window Sensor and the
-    daylight it reports. Waits for the signed-in shell first: the writes ride its session cookie."""
+def room_lights(page, origin, *, daylight_on=None):
+    """The bookshelf spotlight (a light that reports itself), and with `daylight_on` (a Player id) a
+    Sensor wired to that Pi reading READING lux and the daylight it measures. Waits for the
+    signed-in shell first: the writes ride its session cookie."""
     expect(page.get_by_role("navigation", name="Sections", exact=True)).to_be_visible()
     put(page, origin, "/v1/operator/house/lights/bookshelf-spot", SPOT)
-    if daylight:
-        put(page, origin, "/v1/operator/house/sensors/window-meter", WINDOW_METER)
+    if daylight_on is not None:
+        put(page, origin, "/v1/operator/house/sensors/window-meter",
+            {"name": "Window meter", "at": {"source": PI, "address": daylight_on}})
         put(page, origin, "/v1/operator/house/lights/daylight", DAYLIGHT)
-    listed = page.request.get(origin + "/v1/operator/house/lights", headers=CONSOLE)
-    assert listed.ok, listed.text()
+
+
+def record_reading(registry, player_id, lux):
+    """The Pi's wired Sensor reads `lux`, through Central's reporting port."""
+    lights = PgRoomLights(registry.db)
+    _off_thread(lambda: lights.record_reading(SensorRef(source=PI, address=player_id), Measured(lux=lux)))
 
 
 def saved_lighting(registry):
@@ -92,9 +94,7 @@ def _save(registry, calibration, lighting, expected_revision):
 
 
 class LightingSessions(FakeSessions):
-    """FakeSessions with Central's lighting rules (see the module docstring): the contract, then
-    central/room_light/policy.py `check_frame_lighting` against the room lights stored now (the seeded
-    fixed "room" and whatever the test put through Settings › Lights); `lightings` lists every
+    """FakeSessions with the lighting: the contract's shape checked; `lightings` lists every
     lighting the page sent, in order."""
 
     def __init__(self, page, registry):
@@ -112,15 +112,6 @@ class LightingSessions(FakeSessions):
         self.bodies.append(body)
         route.fulfill(status=422, json={"error": code})
 
-    def _refusal(self, lighting):
-        try:
-            draft = FrameLighting.model_validate(lighting)
-        except ValidationError:
-            return "trial_lighting_invalid"
-        with self.registry.db.transaction() as conn:
-            refusal = check_frame_lighting(draft, room_lights_in(conn))
-        return None if refusal is None else refusal.value
-
     def _answer(self, route):
         body = route.request.post_data_json or {}
         operation = body.get("operation", "begin")
@@ -129,14 +120,15 @@ class LightingSessions(FakeSessions):
             return
         if "lighting" in body:
             self.lightings.append(body["lighting"])
-            refusal = self._refusal(body["lighting"])
-            if refusal is not None:
-                self._refuse(route, operation, body, refusal)
+            try:
+                FrameLighting.model_validate(body["lighting"])
+            except ValidationError:
+                self._refuse(route, operation, body, "trial_lighting_invalid")
                 return
         if operation == "save" and self.row is not None and self.row["state"] == "active":
             self._save(route)
             return
-        self._draft = body.get("lighting")
+        self._draft = body.get("lighting", self._draft)
         super()._answer(route)
 
     def _save(self, route):
@@ -162,7 +154,8 @@ def sessions(page, registry):
 
 
 def lighting_group(page):
-    return page.get_by_role("region", name="Position", exact=True).get_by_role("group", name="Lighting", exact=True)
+    """The Lighting tab's region."""
+    return page.get_by_role("region", name="Lighting", exact=True)
 
 
 def light_group(page, number):
@@ -198,17 +191,18 @@ def add_close_light(page, room_light="Bookshelf spot"):
 
 
 def test_a_close_lights_lux_rides_the_session_done_keeps_it_and_revert_puts_it_back(page, registry, sessions):
-    """Acceptance 1 tracer: add a close light of the bookshelf spot and type its lux, 800: the
-    session's next edit carries `lighting` (with the position) holding that lux, and the trial view
-    Central answers holds it; Done saves it, and after a reload the tab shows it. A later lux of 1200,
-    reverted, puts the saved 800 back and saves nothing.
+    """Acceptance C2 tracer: on the Lighting tab, add a close light of the bookshelf spot and type its
+    lux, 800: the session's next edit carries `lighting` (with the position) holding that lux, read
+    at full ({"kind": "at-full"}); Done saves it, and after a reload the tab shows it. A later lux of
+    1200, reverted, puts the saved 800 back and saves nothing. Moving to Position and back keeps the
+    session.
 
-    Mutation: send `mat` instead of `lighting` -> Central's 422 trial_lighting_required, Done never comes."""
+    Mutation: send `mat` instead of `lighting` -> trial_lighting_required, Done never comes."""
     _seed(registry)
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
         room_lights(page, origin)
-        open_frame(page, FRAME, "position")
+        open_frame(page, FRAME, "lighting")
         expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
         light = add_close_light(page)
         number = lighting_group(page).get_by_role("group", name=re.compile(r"^Light \d$")).count()
@@ -220,12 +214,16 @@ def test_a_close_lights_lux_rides_the_session_done_keeps_it_and_revert_puts_it_b
         edit = sessions.bodies[sessions.sent.index("edit")]
         assert set(edit) == {"operation", "expected_sequence", "calibration", "lighting"}, edit
         assert any(each["lux"] == 800 for each in sessions.row["lighting"]["lights"])  # the trial view
+        began = sessions.count("begin")
+        open_frame(page, FRAME, "position")
+        open_frame(page, FRAME, "lighting")
+        assert sessions.count("begin") == began            # one session for both tabs
         done(page)
         saved = saved_lighting(registry)
         assert [(each.kind, each.light, each.lux) for each in saved.lights][-1] == ("close", "bookshelf-spot", 800)
 
         page.reload()
-        open_frame(page, FRAME, "position")
+        open_frame(page, FRAME, "lighting")
         expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
         lux = light_group(page, number).get_by_role("spinbutton", name="Lux at the Frame", exact=True)
         expect(lux).to_have_value("800")
@@ -238,43 +236,44 @@ def test_a_close_lights_lux_rides_the_session_done_keeps_it_and_revert_puts_it_b
         assert saved_lighting(registry) == saved
 
 
-def test_a_reference_mismatch_is_said_in_words_and_choosing_the_sensors_reading_clears_it(page, registry, sessions):
-    """A close light first of the bookshelf spot (read at full), then of daylight, which the window
-    Sensor reports: the editor gives it the Sensor's reading as its reference only once the Sensor
-    has one; while it has none, Central's trial_lighting_reference_mismatch is said in words, and
-    typing what the Sensor read clears it.
+def test_a_light_a_sensor_measures_is_read_at_the_sensors_reading(page, registry, sessions):
+    """Acceptance C2: a close light of daylight, which a Pi's Sensor measures and which reads 320 lx,
+    is sent with the reference {"kind": "at-reading", "lux": 320}; typing what the Sensor read when
+    measuring, 250, sends that instead, and Done keeps it.
 
-    Mutation: keep DIMMER_AT_FULL after a typed reading -> the refusal never clears."""
-    _seed(registry)
+    Mutation: AtFull for every light -> the first reference is at-full."""
+    player_id = _seed(registry)
+    record_reading(registry, player_id, READING)
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
-        room_lights(page, origin, daylight=True)
-        open_frame(page, FRAME, "position")
+        room_lights(page, origin, daylight_on=player_id)
+        open_frame(page, FRAME, "lighting")
         expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
         light = add_close_light(page, "Daylight")
-        expect(light).to_contain_text("Its Sensor has no reading")
-        position = page.get_by_role("region", name="Position", exact=True)
-        expect(position).to_contain_text(MISMATCH)
-        assert any(each["light"] == "daylight" and each["reference"] == {"kind": "at-full"}
-                   for lighting in sessions.lightings for each in lighting["lights"]), sessions.lightings
+        expect(light.get_by_role("button", name="Use its reading now (320 lx)", exact=True)).to_be_visible()
+        wait_for_lighting(page, sessions, lambda lighting: any(
+            each["light"] == "daylight" and each["reference"] == {"kind": "at-reading", "lux": READING}
+            for each in lighting["lights"]))
 
-        light.get_by_role("spinbutton", name="Its Sensor read", exact=True).fill("320")
-        wait_for_lighting(page, sessions, lambda lighting: any(each["reference"] == 320 for each in lighting["lights"]))
-        expect(position).not_to_contain_text(MISMATCH)
+        light.get_by_role("spinbutton", name="Its Sensor read", exact=True).fill("250")
+        wait_for_lighting(page, sessions, lambda lighting: any(
+            each["light"] == "daylight" and each["reference"] == {"kind": "at-reading", "lux": 250}
+            for each in lighting["lights"]))
         done(page)
-        assert [each.reference for each in saved_lighting(registry).lights][-1] == 320
+        reference = [each.reference for each in saved_lighting(registry).lights][-1]
+        assert reference.model_dump(mode="json") == {"kind": "at-reading", "lux": 250}
 
 
 def test_two_lights_keep_their_order_and_the_paper_rides_with_them(page, registry, sessions):
     """Two close lights of the spot and the Matte preset: kept in order and saved with the paper; Add
-    stops at four lights.
+    stops at the Frame's most lights.
 
     Mutation: replace instead of append on Add -> one light saved."""
     _seed(registry)
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
         room_lights(page, origin)
-        open_frame(page, FRAME, "position")
+        open_frame(page, FRAME, "lighting")
         expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
         before = len(saved_lighting(registry).lights)
         add_close_light(page).get_by_role("spinbutton", name="Lux at the Frame", exact=True).fill("500")

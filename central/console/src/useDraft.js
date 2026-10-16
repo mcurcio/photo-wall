@@ -1,7 +1,6 @@
 import { useCallback, useRef, useState } from "react";
 
 import { isConvex } from "./convex.js";
-import { PRESETS, SHEET_WHITENESS } from "./domain/frame-lighting";
 
 /**
  * A Frame fit (contracts/models.py `CornersFit` | `CoverFit`, roadmap 1c): how the Frame's picture
@@ -11,13 +10,14 @@ import { PRESETS, SHEET_WHITENESS } from "./domain/frame-lighting";
  * explicit opt-in): the picture is stretched exactly onto the corners, a quarter turn picking its
  * top.
  *
- * A Frame's lighting (contracts/frame_lighting.py `FrameLighting`, decision 0028): its mat depth,
- * lights and paper, saved with the Position through the same trial.
+ * A Frame's lighting (src/generated/contract.ts `FrameLighting`): its mat depth, lights and paper,
+ * saved with the Position through the same trial. Central serves every Frame's; the draft holds a
+ * copy of it, never a lighting of its own making.
  *
  * @typedef {[number, number]} Point
  * @typedef {{mode: "cover"|"corners", corners: Point[], rotation: number}} Fit
- * @typedef {import("./domain/frame-lighting").FrameLightingDraft} Lighting
- * @typedef {{fit: Fit, lighting: Lighting}} Trying   the operator's draft; its base revision is `base`
+ * @typedef {import("./generated/contract").FrameLighting} Lighting
+ * @typedef {{fit: Fit, lighting: Lighting|null}} Trying   the operator's draft (lighting null: Central served none yet); its base revision is `base`
  * @typedef {{calibration: object|null, lighting: Lighting|null}} Saved   a saved Position and lighting
  */
 
@@ -54,24 +54,13 @@ export function fitOf(committed) {
 }
 
 /**
- * The lighting a Frame holds, as a fresh copy. Central gives every Frame one (decision 0028's
- * upgrade data); with none read (a session's answer that carries none), no mat, no lights and the
- * matching sheet's paper with Gloss ink, which Central never stores unless the operator edits it.
+ * The lighting Central serves for a Frame, as a fresh copy (so a later edit never mutates the
+ * snapshot); null while none is served.
  *
  * @param {Lighting|null|undefined} lighting
- * @returns {Lighting}
+ * @returns {Lighting|null}
  */
-export function lightingOf(lighting) {
-  return {
-    mat_depth_mm: lighting?.mat_depth_mm ?? 0,
-    lights: (lighting?.lights ?? []).map((light) => ({ ...light })),
-    paper: {
-      whiteness: lighting?.paper?.whiteness ?? SHEET_WHITENESS,
-      ink_density: lighting?.paper?.ink_density ?? PRESETS.gloss,
-      profile: lighting?.paper?.profile == null ? null : { ...lighting.paper.profile },
-    },
-  };
-}
+const lightingOf = (lighting) => (lighting == null ? null : structuredClone(lighting));
 
 /** @returns {Trying} */
 const seed = (saved) => ({ fit: fitOf(saved?.calibration), lighting: lightingOf(saved?.lighting) });

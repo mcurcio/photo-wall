@@ -25,6 +25,7 @@
       "#/wall/layout",
       "#/wall/frames/sample-frame/overview",
       "#/wall/frames/sample-frame/position",
+      "#/wall/frames/sample-frame/lighting",
       "#/wall/frames/sample-frame/picture",
       "#/wall/frames/sample-frame/hardware"
     ]
@@ -46,6 +47,7 @@
     "photo-fit": ["#/photo-fit"],
     "house": ["#/house"],
     "lights": ["#/lights"],
+    "home-assistant": ["#/home-assistant"],
     "luts": ["#/luts"]
   },
   "neutral": {

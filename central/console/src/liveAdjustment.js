@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { apiWrite } from "./apiWrite.js";
 import { isBound } from "./join.js";
+import { LIGHTING_REFUSAL_WORDS } from "./domain/frame-lighting/model";
+import { beginBody, draftBody } from "./trialBodies";
 import { draftKey, fitOf, useDraft } from "./useDraft.js";
 import { useMutate } from "./useMutate.js";
 
@@ -82,14 +84,10 @@ const REFUSALS = {
   made_for_other_profile: "Made for another screen size.",
   made_for_other_display: "Made on another display.",
   other_frame: "That change was another Frame's.",
-  // A Frame's lighting (decision 0028): a draft Central cannot take passes; the next edit fixes it.
+  // A Frame's lighting: a draft Central cannot take passes; the next edit fixes it.
   trial_lighting_required: "Photo Wall did not send this Frame's lighting with the change. Reload the page.",
   trial_lighting_invalid: "Photo Wall refused this lighting: a value is outside what a Frame takes.",
-  trial_lighting_unknown_room_light:
-    "A light names a room light that is no longer in the house. Choose another, or add it in Settings › Lights.",
-  trial_lighting_reference_mismatch:
-    "A light's reference does not match how its room light reports: a Sensor's light needs the Sensor's "
-    + "reading, any other light is read with it on at 100 %. Choose its room light again.",
+  ...LIGHTING_REFUSAL_WORDS,
 };
 
 /** A refusal's words (REFUSALS), or Central's code in a sentence when it has none. */
@@ -212,10 +210,7 @@ export function useFrameAdjustment({ frameId, frame, open }) {
 
   /** The draft as Central takes it: its fit with its base, the saved revision it was made from,
    * and its whole lighting. */
-  const payload = () => ({
-    calibration: { revision: state.current.base, fit: state.current.draft.fit },
-    lighting: state.current.draft.lighting,
-  });
+  const payload = () => draftBody({ revision: state.current.base, fit: state.current.draft.fit }, state.current.draft.lighting);
 
   /** One request; null when it failed (the problem is set) or the page went away. `candidate`
    * is the draft (`payload()`), or none for the saved values (begin) or none to send (keepalive, save). */
@@ -223,7 +218,7 @@ export function useFrameAdjustment({ frameId, frame, open }) {
     const current = state.current;
     const before = current.row;
     const begin = operation === "begin";
-    const body = begin ? (candidate ?? {}) : {
+    const body = begin ? beginBody(candidate) : {
       operation, expected_sequence: before.sequence, ...(candidate ?? {}),
     };
     const request = () => apiWrite(begin ? path : `${path}/${before.trial_id}`, { method: "POST", body });

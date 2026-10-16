@@ -1,7 +1,7 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
 
 import {
-  FramePicture, matchedWords, panelBlackWords, type PATTERN_NAMES, PhotoWallSettings, type PictureSession, SignalSettings, signalWords,
+  FramePicture, panelBlackWords, type PATTERN_NAMES, PhotoWallSettings, type PictureSession, SignalSettings, signalWords,
   TestPatternSettings, testPatternWords,
 } from "./frame-picture";
 
@@ -194,7 +194,6 @@ export const PhotoWallNoSession: Story = {
 /** The words are the view's: a pure check the catalogue runs before any story renders (the minutes
  * come from `test_pattern_seconds`, the range the Pi still sends from its answer). */
 const checks: [string, string][] = [
-  [matchedWords(1000), "1000 lx"],
   [panelBlackWords(0.0003), "0.03 %"],
   [panelBlackWords(0.00001), "0.001 %"],
   [testPatternWords({ pattern: "white", state: "ended" }, 600), "Taken off after 10 min. Choose it again to show it."],

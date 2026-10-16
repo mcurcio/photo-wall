@@ -2,7 +2,7 @@ import type { Meta, StoryObj } from "@storybook/react-vite";
 
 import { FramePosition } from "./frame-position";
 import type { Adjustment } from "./live-adjustment";
-import { LIVING_ROOM, PROFILES, ROOMS, UPGRADED } from "./room-lights.fixtures";
+import { UPGRADED } from "./room-lights/room-lights.fixtures";
 
 const OPENING: [number, number][] = [[0.1, 0.08], [0.9, 0.05], [0.92, 0.95], [0.08, 0.92]];
 
@@ -27,7 +27,7 @@ const ADJUSTMENT: Adjustment = {
 const meta = {
   title: "Domain/FramePosition",
   component: FramePosition,
-  args: { adjustment: ADJUSTMENT, size: { width: 1920, height: 1080 }, piHref: "#/players/device-a", rooms: ROOMS, profiles: PROFILES },
+  args: { adjustment: ADJUSTMENT, size: { width: 1920, height: 1080 }, piHref: "#/players/device-a" },
 } satisfies Meta<typeof FramePosition>;
 
 export default meta;
@@ -47,19 +47,4 @@ export const CoverTurned: Story = {
 /** Corners, the explicit choice: stretched exactly onto the corners, quarter turns only. */
 export const Corners: Story = {
   args: { adjustment: { ...ADJUSTMENT, draft: { fit: { mode: "corners", corners: OPENING, rotation: 90 }, lighting: UPGRADED } } },
-};
-/** The owner's room: a mat 2.5 mm deep, daylight from the right, the overheads' wash and the bookshelf
- * spotlight's cone, on Photo Rag, a change the Pi has shown; screenshot whole (tag "full-page"), since
- * the Lighting sits below the corners' exact values. */
-export const WithLighting: Story = {
-  tags: ["full-page"],
-  args: {
-    adjustment: {
-      ...ADJUSTMENT, dirty: true, latest: 2, ack: { revision: 2, at: 1_791_000_000 },
-      draft: {
-        fit: { mode: "cover", corners: OPENING, rotation: 0 },
-        lighting: LIVING_ROOM,
-      },
-    },
-  },
 };
