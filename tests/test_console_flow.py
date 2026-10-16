@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import get_args
 
 import pytest
-from support.console_words import SCENE, schedule
+from support.console_words import SCENE, scene_words, schedule
 
 from central.runtime import Transition, TransitionStyle
 from central.wall_plan.fit_settings import FIT_SETTING_RANGES
@@ -259,6 +259,12 @@ out.earlier = [
   scene.earlierVersionNames({ playing: [], waiting: [] }, runtime),
   scene.earlierVersionNames(undefined, null),
 ];
+// The notice after a save: a plain Save offers Save and apply now; after Save and apply now what
+// is left is what Central could not replace.
+const keptOn = { playing: [{ run_id: "r-2", scene_revision: 1, started_by: "show_now" }], waiting: [] };
+out.notices = [scene.earlierNotice("evening", keptOn, runtime, false),
+               scene.earlierNotice("evening", keptOn, runtime, true),
+               scene.earlierNotice("evening", { playing: [], waiting: [] }, runtime, true)];
 out.transitionStyles = authoring.TRANSITION_STYLES;
 // Values the sliders cannot show exactly are not the console's either (no silent snapping).
 const stretched = (fade, ending) => authoring.buildSave("live", { sceneId: "evening",
@@ -453,6 +459,12 @@ def test_flow_kit_and_scene_flow_shape():
     assert out["earlier"] == [
         [schedule("named", name="Evenings"), SCENE["earlierShowNow"], SCENE["earlierSchedule"],
          SCENE["earlierWaiting"]], [], []]
+    # After Save and apply now, a Run Central could not replace is still named, and why.
+    names = [SCENE["earlierShowNow"]]
+    assert out["notices"] == [
+        {"names": names, "message": scene_words("earlier", id="evening", names=names[0])},
+        {"names": names, "message": scene_words("earlierKept", id="evening", names=names[0])},
+        None]
     assert out["freeProblems"] == [[], [["fade", free.format(5)]], [], [["fade", free.format(0)]]]
     # A 12 s ending, a 1.3 s fade or a 6 s fade would be snapped by the sliders: not editable.
     assert out["outOfRange"] == [False, False, False, True]

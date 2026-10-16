@@ -24,7 +24,7 @@ import { useFlowInstance, useFlowRefs } from "./flow/useFlowInstance.js";
 import { NOT_CONFIRMED, useFlowWrite } from "./flow/useFlowWrite.js";
 import {
   changedSceneFields,
-  earlierVersionNames,
+  earlierNotice,
   SCENE_ADVANCED_FIELDS,
   SCENE_FIELD_STEP,
   SCENE_KEYS,
@@ -139,9 +139,9 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft,
   const [reloaded, setReloaded] = useState(/** @type {string|null} */ (null));
   // The Scene just saved, for the next actions (Show now, Schedule it).
   const [saved, setSaved] = useState(/** @type {string|null} */ (null));
-  // After a plain Replace: what still plays the earlier version, and the save that applies it.
+  // After a save: what still plays the earlier version, and the save that applies it.
   const [earlier, setEarlier] = useState(
-    /** @type {{sceneId: string, names: string[], save: {path: string, body: object}}|null} */ (null),
+    /** @type {{sceneId: string, message: string, save: {path: string, body: object}}|null} */ (null),
   );
   const applyNowRef = useRef(/** @type {HTMLButtonElement|null} */ (null));
   // Check now on a chosen Source: its receipts belong to this draft.
@@ -410,10 +410,11 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft,
     rememberScene(sceneId);
   };
 
-  /** After a plain Replace: name what still plays the earlier version (none: nothing said). */
-  const sayEarlier = (sceneId, save, data) => {
-    const names = earlierVersionNames(data?.earlier_version, snapshot?.runtime);
-    setEarlier(names.length === 0 ? null : { sceneId, names, save });
+  /** After a save (`applied`: Save and apply now): name what still plays the earlier version
+   * (none: nothing said). */
+  const sayEarlier = (sceneId, save, data, applied) => {
+    const notice = earlierNotice(sceneId, data?.earlier_version, snapshot?.runtime, applied);
+    setEarlier(notice === null ? null : { sceneId, message: notice.message, save });
   };
 
   const buildSceneSave = (sceneId) =>
@@ -451,9 +452,7 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft,
         candidates.reload,
         write.bind((result) => {
           finish(editingId);
-          if (!applyNow) {
-            sayEarlier(editingId, save, result?.data);
-          }
+          sayEarlier(editingId, save, result?.data, applyNow);
         }),
         applyNow,
       ),
@@ -467,7 +466,7 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft,
     }
     const { sceneId, save } = earlier;
     confirm.open(event, replaceRequest(sceneId, save.body.scene?.revision ?? save.body.revision, save,
-      candidates.reload, () => setEarlier(null), true));
+      candidates.reload, (result) => sayEarlier(sceneId, save, result?.data, true), true));
   };
 
   const onSave = () => {
@@ -571,7 +570,7 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft,
             {earlier !== null && earlier.sceneId === saved && (
               <div className="notice notice--warn flow__said" role="group"
                 aria-label={sceneWords("earlierGroup", { id: saved })}>
-                <p role="status">{sceneWords("earlier", { id: saved, names: earlier.names.join(", ") })}</p>
+                <p role="status">{earlier.message}</p>
                 <button type="button" onClick={applySavedNow}>
                   {SAVE_AND_APPLY_NOW}
                 </button>
@@ -698,9 +697,11 @@ function replaceRequest(sceneId, revision, { path, body }, reload, after, applyN
         ? await apiWrite(`${path}/apply-now`, { method: "POST", body })
         : await apiWrite(path, { method: "PUT", body });
       if (result.ok) {
+        const kept = (result.data?.earlier_version?.playing ?? []).length > 0;
         return {
           state: "done",
-          message: applyNow ? sceneWords("savedNow", { id: sceneId }) : `Scene ${sceneId} saved.`,
+          message: !applyNow ? `Scene ${sceneId} saved.`
+            : sceneWords(kept ? "savedNowKept" : "savedNow", { id: sceneId }),
           data: result.data,
         };
       }

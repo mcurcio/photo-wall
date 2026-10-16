@@ -13,7 +13,7 @@ import { sameValue } from "./flow/draftState.js";
 import { editedId, flowKeys } from "./flow/instance.js";
 import { FRAME_ID_PATTERN } from "./frameIds.js";
 import { routeIdName } from "./routes.js";
-import { SCENE, schedule, scheduleName } from "./showWords.js";
+import { SCENE, scene as sceneWords, schedule, scheduleName } from "./showWords.js";
 
 /** @typedef {import("./flow/steps.js").Step} Step */
 
@@ -177,4 +177,24 @@ export function earlierVersionNames(earlier, runtime) {
     ...((earlier?.waiting ?? []).length > 0 ? [SCENE.earlierWaiting] : []),
   ];
   return [...new Set(names)];
+}
+
+/**
+ * The notice after a Scene save whose answer says something still plays an earlier version
+ * (`earlierVersionNames`), or null when nothing does. After a plain Save it offers Save and
+ * apply now; after Save and apply now, what is left is what Central could not replace (a Scene
+ * keeping its Frames refused the new version: central/runtime.py `_replace`).
+ *
+ * @param {string} sceneId
+ * @param {Parameters<typeof earlierVersionNames>[0]} earlier
+ * @param {object|null|undefined} runtime
+ * @param {boolean} applied whether the save was Save and apply now
+ * @returns {{names: string[], message: string}|null}
+ */
+export function earlierNotice(sceneId, earlier, runtime, applied) {
+  const names = earlierVersionNames(earlier, runtime);
+  if (names.length === 0) {
+    return null;
+  }
+  return { names, message: sceneWords(applied ? "earlierKept" : "earlier", { id: sceneId, names: names.join(", ") }) };
 }
