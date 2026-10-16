@@ -347,6 +347,9 @@ NOT_SHIPPED: Final = (
     # The owner's Home Assistant automation that publishes room lights to the broker (decision
     # 0028): pasted into Home Assistant, never part of a Photo Wall build.
     "integrations/home-assistant/**",
+    # Galleria, the Home Assistant integration: HACS installs it from this repository at a release
+    # tag; no Photo Wall package or image build reads it.
+    "custom_components/**", "hacs.json",
 )
 
 

@@ -53,6 +53,10 @@ dev = [
     # the sRGB transfer function and colour profiles' maths (the reader and its tests only).
     "scipy==1.18.1",
     "colour-science==0.4.7",
+    # nats-py's WebSocket transport, for the tests that reach a door as Home Assistant does: Central's
+    # door through its origin and a Pi's read-only door (the Home Assistant system design, 2026-10-16).
+    # Home Assistant ships its own aiohttp; nothing of Photo Wall's runs it.
+    "aiohttp==3.12.15",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -110,7 +114,8 @@ select = ["E4", "E7", "E9", "F", "I", "TID251"]
 "scripts/uplink_device_harness.py" = ["TID251"]
 
 [tool.importlinter]
-root_packages = ["central", "contracts", "media", "player", "appliance", "uplink", "nodeapi"]
+root_packages = ["central", "contracts", "media", "player", "appliance", "uplink", "nodeapi",
+                 "custom_components.galleria"]
 include_external_packages = true
 
 [[tool.importlinter.contracts]]
@@ -388,6 +393,17 @@ name = "The base never imports the guest"
 type = "forbidden"
 source_modules = ["appliance"]
 forbidden_modules = ["player"]
+
+[[tool.importlinter.contracts]]
+# Galleria, the Home Assistant integration (custom_components/galleria), ships through HACS on its own:
+# it imports no package of this repository at runtime and takes every name, key and shape from its
+# generated copy (custom_components/galleria/contract.py, held by a check test). It is the one NATS
+# client outside nodeapi, because it cannot import nodeapi; the contract below binds the repo's own
+# programs, which it does not list.
+name = "Galleria imports no package of this repository"
+type = "forbidden"
+source_modules = ["custom_components.galleria"]
+forbidden_modules = ["central", "contracts", "media", "player", "appliance", "uplink", "nodeapi"]
 
 [[tool.importlinter.contracts]]
 # The Node API library (nodeapi, created by E3) is the one NATS client (node redesign r3 §3.3.4).

@@ -55,6 +55,20 @@ from nats.js.api import (
 )
 from nats.js.errors import APIError, NotFoundError
 
+from contracts import node_state
+from contracts.central_api import (
+    CENTRAL_STATE_BUCKET,
+    CENTRAL_STATE_PREFIX,
+    CENTRAL_STATE_STREAM,
+    HOME_ASSISTANT_STATES_BUCKET,
+    HOME_ASSISTANT_STATES_PREFIX,
+    HOME_ASSISTANT_STATES_STREAM,
+)
+from contracts.home_assistant import (
+    ENTITY_ID_MAX,
+    HOME_ASSISTANT_ENTITIES_MAX,
+    HOME_ASSISTANT_STATE_BYTES,
+)
 from contracts.node_link import (
     MAX_STORED_MESSAGE,
     NODE_MAX_CONTROL_LINE,
@@ -175,7 +189,7 @@ TABLE_KEY: Final = "photo_wall_table"
 # The most a key table's encoding may take in metadata: a stream description stays far under the
 # leaf's largest reply (L, contracts.node_link.NODE_MAX_PAYLOAD) whatever the table.
 MAX_TABLE_METADATA: Final = 16 * 1024
-BIRTH_KEY: Final = "birth"               # every state bucket: the session's birth (§7.2 node)
+BIRTH_KEY: Final = node_state.BIRTH_KEY  # every state bucket: the session's birth (§7.2 node)
 OUTBOX_KEY: Final = "outbox"             # every state bucket: the outbox's drop count (written from S6)
 RESERVED_STATE_BYTES: Final = 4096       # each reserved key's largest value
 _LOWER = re.compile(r"[a-z]+")
@@ -187,6 +201,7 @@ class Role(StrEnum):
     STATE = "state"       # sticky by its state table
     DESIRED = "desired"   # sticky by its document table (built from S2)
     WALL = "wall"         # sticky: the hub's WALL and every Node mirror
+    STATES = "states"     # sticky by count: Home Assistant's states on the hub, an open key set
 
 
 @dataclass(frozen=True)
@@ -336,6 +351,37 @@ def wall_mirror_config() -> StreamConfig:
         max_msgs_per_subject=1, max_msgs=-1, mirror=StreamSource(
             name=WALL_STREAM, external=ExternalStream(api=WALL_API_PREFIX, deliver=WALL_DELIVER_PREFIX))),
                   {ROLE_KEY: Role.WALL.value})
+
+
+# Central on its hub (contracts/central_api.py): its state bucket and the bucket Home Assistant writes
+# its states into, both in the hub's CENTRAL account and declared by Central's hub session
+# (nodeapi.hub `run_hub_session`). Their names are the contract's; NATS key-value naming binds them.
+if ((_kv_stream(CENTRAL_STATE_BUCKET), _kv_prefix(CENTRAL_STATE_BUCKET))
+        != (CENTRAL_STATE_STREAM, CENTRAL_STATE_PREFIX)
+        or (_kv_stream(HOME_ASSISTANT_STATES_BUCKET), _kv_prefix(HOME_ASSISTANT_STATES_BUCKET))
+        != (HOME_ASSISTANT_STATES_STREAM, HOME_ASSISTANT_STATES_PREFIX)):
+    raise RuntimeError("central_api_bucket_names")
+
+
+def central_state_bucket(table: KeyTable) -> StreamConfig:
+    """Central's state on its hub, `KV_state_central`: sticky by `table` (contracts.central_api
+    CENTRAL_STATE_TABLE), which rides in its metadata, as a Node's state bucket's does."""
+    return _keyed(CENTRAL_STATE_BUCKET, table, {ROLE_KEY: Role.STATE.value})
+
+
+def home_assistant_states_bucket() -> StreamConfig:
+    """Home Assistant's states on the hub, `KV_home_assistant`: one value per entity id (history 1),
+    the keys open (an entity id is the key), at most HOME_ASSISTANT_ENTITIES_MAX values of at most
+    HOME_ASSISTANT_STATE_BYTES each. Full, the server drops the oldest message: the state of the
+    entity written longest ago, which its next change or the publisher's next republish writes again.
+    Its byte cap is that count at the longest entity id's charge, so bytes never evict before the
+    count does."""
+    largest = HOME_ASSISTANT_STATE_BYTES + HEADER_ALLOWANCE
+    charge = message_charge(HOME_ASSISTANT_STATES_PREFIX + "x" * ENTITY_ID_MAX, HOME_ASSISTANT_STATE_BYTES,
+                            HEADER_ALLOWANCE)
+    fields = {**_kv_fields(HOME_ASSISTANT_STATES_BUCKET, 1, largest), "max_msgs": HOME_ASSISTANT_ENTITIES_MAX}
+    return _build(STICKY, HOME_ASSISTANT_STATES_STREAM, HOME_ASSISTANT_ENTITIES_MAX * charge, fields,
+                  {ROLE_KEY: Role.STATES.value})
 
 
 def role_of(config: StreamConfig) -> Role | None:

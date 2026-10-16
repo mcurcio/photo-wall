@@ -64,20 +64,10 @@ from nodeapi.buffers import (
     wall_mirror_config,
 )
 from nodeapi.documents import Document, header_bytes
-from nodeapi.envelope import event_headers, writer_of
+from nodeapi.envelope import MethodCall, MethodHandler, event_headers, writer_of
 from nodeapi.pull import CursorReader, Read, StartAt
 
 log = logging.getLogger(__name__)
-
-
-@dataclass(frozen=True)
-class MethodCall:
-    method: str
-    payload: bytes
-    caller: str                         # the request's writer header; "unknown" when absent
-
-
-MethodHandler = Callable[[MethodCall], Awaitable[bytes]]
 
 
 @dataclass(frozen=True)

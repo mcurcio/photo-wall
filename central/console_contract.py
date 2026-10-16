@@ -24,6 +24,7 @@ from typing import Final
 
 from pydantic import BaseModel, TypeAdapter
 
+from central.content_catalog.views import ReleasesView, VersionChoice
 from central.displays.views import LightView
 from central.fleet.models import TrialRefusal
 from central.fleet.node_calibration import TrialBegin, TrialEdit, TrialStep
@@ -33,7 +34,7 @@ from central.frame_lighting.model import FrameLightingRefusal
 from central.frame_lighting.paper_profiles import PaperProfileRefusal
 from central.frame_lighting.views import PaperProfilesView, PaperProfileView
 from central.infra.home_assistant import topics
-from central.infra.home_assistant.views import HomeAssistantView
+from central.infra.home_assistant.views import HomeAssistantStatesView, HomeAssistantView
 from central.infra.light_sensor_judge import PI_SOURCE
 from central.room_light.model import (
     ROOM_LIGHT_NAME_MAX,
@@ -45,6 +46,7 @@ from central.room_light.model import (
     Sensor,
 )
 from central.room_light.views import DrawnView, RefusedReportsView, RoomLightsView
+from contracts.central_api import InstallRefusal, InstallStarted
 from contracts.frame_lighting import (
     BEAM_DEGREES_MAX,
     CLOSE_REACH_MM,
@@ -75,10 +77,10 @@ from contracts.room_light import (
 )
 
 CONSOLE_BODIES: Final[tuple[type[BaseModel], ...]] = (   # bodies the console sends (and RoomLight, a union)
-    Sensor, TrialBegin, TrialEdit, TrialStep, FrameLighting, PositionRestore)
+    Sensor, TrialBegin, TrialEdit, TrialStep, FrameLighting, PositionRestore, VersionChoice)
 CONSOLE_VIEWS: Final[tuple[type[BaseModel], ...]] = (    # answers the console reads
     RoomLightsView, DrawnView, RefusedReportsView, HomeAssistantView, PaperProfileView, PaperProfilesView,
-    PositionHistoryView, LightView)
+    PositionHistoryView, LightView, HomeAssistantStatesView, ReleasesView, InstallStarted)
 CONSOLE_ALIASES: Final[Mapping[str, object]] = {     # named types a view's fields take, by their name
     "Lux": Lux, "LightWord": LightWord, "Reading": Reading}
 CONSOLE_CONSTANTS: Final[Mapping[str, float | int | str]] = {
@@ -94,7 +96,7 @@ CONSOLE_CONSTANTS: Final[Mapping[str, float | int | str]] = {
 }
 CONSOLE_REFUSALS: Final[tuple[type[StrEnum], ...]] = (   # each context's closed refusal enum
     RoomLightRefusal, FrameLightingRefusal, PaperProfileRefusal, ReportRefusal, DrawnReportRefusal, TrialRefusal,
-    PositionRestoreRefusal,
+    PositionRestoreRefusal, InstallRefusal,
 )
 
 

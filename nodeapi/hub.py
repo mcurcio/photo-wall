@@ -49,7 +49,8 @@ import hashlib
 import json
 import logging
 import time
-from collections.abc import Collection, Iterator, Mapping
+from collections.abc import Collection, Iterator, Mapping, Sequence
+from dataclasses import dataclass
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Final, Protocol
 
@@ -79,7 +80,7 @@ from nodeapi.buffers import (
     wall_config,
 )
 from nodeapi.documents import ABSENT, Absent, Conflict, DocumentRefused, DocumentWriter
-from nodeapi.envelope import caller_headers
+from nodeapi.envelope import MethodHandler, caller_headers
 from nodeapi.epoch import Token, epoch_of
 from nodeapi.pull import Batch, CursorReader, Gap, Read, StreamAbsent
 
@@ -601,3 +602,54 @@ class WallWriter:
                     continue
         await self._marks.record_mark(token.seq)
         return token.seq
+
+
+# ---- Central on its own hub (contracts/central_api.py; the Home Assistant system design) ----
+
+
+@dataclass(frozen=True)
+class Heard:
+    """One newest value of Home Assistant's states bucket: the entity id (the subject past
+    HOME_ASSISTANT_STATES_PREFIX) and its raw value (None: the key was deleted or purged, a value
+    with the KV-Operation header). The value is undecoded: its reader judges it."""
+    entity: str
+    value: bytes | None
+
+
+class CentralState(Protocol):
+    """Central's state on its hub, as Central's own services compute it now (one source of truth:
+    Central's database; the bucket is a copy any reader may trust only while Central runs)."""
+
+    async def values(self) -> Mapping[str, bytes]: ...
+        # every key of CENTRAL_STATE_TABLE but BIRTH_KEY and STATES_EPOCH_KEY -> its encoded value now
+
+    async def changed(self) -> None: ...
+        # returns when any value may have changed since the previous return (or at once the first time)
+
+
+class ListenedStates(Protocol):
+    """Where Central's hub session hands Home Assistant's states (Central's Home Assistant adapter)."""
+
+    async def heard(self, epoch: str, items: Sequence[Heard]) -> None: ...
+        # the newest value of each key in one read, in stream order, from the bucket's epoch `epoch`;
+        # raising re-reads the same items after a backoff (a database away loses nothing)
+
+
+async def run_hub_session(url: str, *, version: str, state: CentralState, listened: ListenedStates,
+                          methods: Mapping[str, MethodHandler], stop: asyncio.Event) -> None:
+    """Central as a component on its hub, until `stop`: the one way Central serves Home Assistant's
+    door, owning its client (Central imports no NATS type).
+
+    Connects as CENTRAL_USER (HubUnavailable at once when the hub does not answer the first time;
+    reconnects forever once connected). At every connect, and whenever either bucket is found absent
+    (a hub restart starts empty), it declares `central_state_bucket(KeyTable(CENTRAL_STATE_TABLE))` and
+    `home_assistant_states_bucket()` (create-if-absent), puts BIRTH_KEY (`CentralBirth(version)`),
+    STATES_EPOCH_KEY (the states bucket's epoch) and every key of `state.values()`, and registers one
+    `nats.micro` service named CENTRAL_COMPONENT whose endpoints are `methods` on subjects
+    `central.method.<name>` (a handler's exception answers an error reply; each call answers once).
+    Then, until `stop`: each return of `state.changed()` puts every key whose value differs from what
+    this session last put in this epoch (content-keyed: an equal value is not put again); and Home
+    Assistant's states are read from the latest value per entity (at every connect and every new
+    epoch: all of them again) and followed, each batch handed to `listened.heard` before the reader's
+    position moves past it. A value past its table size is refused before sending and logged."""
+    raise NotImplementedError("central lane: nodeapi.hub run_hub_session")

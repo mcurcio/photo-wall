@@ -63,6 +63,8 @@ export interface DrawnView {
   players: PlayerDrawnView[];
 }
 
+export type EntityId = string;
+
 export type EntityView = LightEntityView | SensorEntityView;
 
 export interface FarLight {
@@ -102,10 +104,41 @@ export interface FrameRefView {
   name: string;
 }
 
+export type HeardEntityView = HeardLightView | HeardSensorView;
+
+export interface HeardLightView {
+  entity: EntityId;
+  heard_at: number | null;
+  kind: "light";
+  name: string | null;
+  reports: RoomLightId | null;
+}
+
+export interface HeardSensorView {
+  entity: EntityId;
+  heard_at: number | null;
+  kind: "illuminance";
+  name: string | null;
+  reports: SensorId | null;
+}
+
+export interface HomeAssistantStatesView {
+  entities: HeardEntityView[];
+  heard_at: number | null;
+  refused: RefusedReportView[];
+}
+
 export interface HomeAssistantView {
   entities: EntityView[];
   link: LinkHealthView;
   refused: RefusedReportView[];
+}
+
+export interface InstallStarted {
+  install: "downloading" | "restarting";
+  kind: "started";
+  serial: string;
+  version: ReleaseTag;
 }
 
 export interface LightEntityView {
@@ -187,6 +220,17 @@ export interface PlayerDrawnView {
   state: "drawn" | "behind" | "not-following" | "not-reported";
 }
 
+export interface PlayerVersionView {
+  chosen: boolean;
+  install: ("downloading" | "restarting") | null;
+  name: string;
+  player_id: string | null;
+  previous: ReleaseTag | null;
+  running: string | null;
+  serial: string;
+  version: ReleaseTag | null;
+}
+
 export type PositionEntryKind = "kept-created" | "kept-saved" | "kept-profile-changed" | "kept-unrecorded" | "sent-draft" | "sent-back";
 
 export interface PositionEntryView {
@@ -232,6 +276,28 @@ export interface RefusedReportView {
 
 export interface RefusedReportsView {
   refused: RefusedReportView[];
+}
+
+export type ReleaseTag = string;
+
+export interface ReleaseView {
+  app_environment_sha256: string | null;
+  base_tag: string | null;
+  discovered_at: number | null;
+  in_window: boolean;
+  missing_bytes: number;
+  problem: string | null;
+  readiness: ("ready" | "downloading" | "not_downloaded" | "failed") | null;
+  readiness_reason: string | null;
+  stable: boolean;
+  version: ReleaseTag;
+}
+
+export interface ReleasesView {
+  default: ReleaseTag | null;
+  players: PlayerVersionView[];
+  read_at: number;
+  releases: ReleaseView[];
 }
 
 export type ReportRefusal = "unknown_address" | "unreadable" | "out_of_range";
@@ -316,6 +382,10 @@ export interface TrialStep {
 
 export interface Unavailable {
   kind: "unavailable";
+}
+
+export interface VersionChoice {
+  version: ReleaseTag;
 }
 
 export interface WashLight {
@@ -405,6 +475,12 @@ export const LIMITS = {
       minimum: 0,
     },
   },
+  EntityId: {
+    value: {
+      maxLength: 255,
+      pattern: "^[a-z0-9_]+\\.[a-z0-9_]+$",
+    },
+  },
   FarLight: {
     from_degrees: {
       integer: true,
@@ -456,6 +532,27 @@ export const LIMITS = {
   FrameRefView: {
     id: {
       pattern: "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+    },
+  },
+  HeardLightView: {
+    entity: {
+      maxLength: 255,
+      pattern: "^[a-z0-9_]+\\.[a-z0-9_]+$",
+    },
+  },
+  HeardSensorView: {
+    entity: {
+      maxLength: 255,
+      pattern: "^[a-z0-9_]+\\.[a-z0-9_]+$",
+    },
+  },
+  InstallStarted: {
+    serial: {
+      pattern: "^[A-Za-z0-9:_.-]{1,128}$",
+    },
+    version: {
+      maxLength: 128,
+      pattern: "^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$",
     },
   },
   LightView: {
@@ -515,6 +612,15 @@ export const LIMITS = {
       pattern: "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
     },
   },
+  PlayerVersionView: {
+    name: {
+      maxLength: 128,
+      minLength: 1,
+    },
+    serial: {
+      pattern: "^[A-Za-z0-9:_.-]{1,128}$",
+    },
+  },
   PositionEntryView: {
     number: {
       integer: true,
@@ -542,6 +648,22 @@ export const LIMITS = {
   RefusedReportView: {
     source: {
       pattern: "^[a-z][a-z0-9-]{0,31}$",
+    },
+  },
+  ReleaseTag: {
+    value: {
+      maxLength: 128,
+      pattern: "^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$",
+    },
+  },
+  ReleaseView: {
+    missing_bytes: {
+      integer: true,
+      minimum: 0,
+    },
+    version: {
+      maxLength: 128,
+      pattern: "^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$",
     },
   },
   ReportedColour: {
@@ -612,6 +734,12 @@ export const LIMITS = {
       minimum: 1,
     },
   },
+  VersionChoice: {
+    version: {
+      maxLength: 128,
+      pattern: "^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$",
+    },
+  },
   WashLight: {
     light: {
       pattern: "^[a-z0-9][a-z0-9-]{0,31}$",
@@ -624,6 +752,8 @@ export const LIMITS = {
 } as const;
 
 export const PATTERNS = {
+  EntityId: "^[a-z0-9_]+\\.[a-z0-9_]+$",
+  ReleaseTag: "^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$",
   RoomLightId: "^[a-z0-9][a-z0-9-]{0,31}$",
   SensorId: "^[a-z0-9][a-z0-9-]{0,31}$",
 } as const;
@@ -665,6 +795,11 @@ export const REFUSALS = {
     "reference_mismatch",
     "unknown_paper_profile",
     "lighting_too_large",
+  ],
+  InstallRefusal: [
+    "unknown_player",
+    "unknown_version",
+    "not_deployable",
   ],
   PaperProfileRefusal: [
     "not_a_colour_profile",
@@ -714,6 +849,7 @@ export const REFUSALS = {
 } as const;
 export type DrawnReportRefusal = (typeof REFUSALS)["DrawnReportRefusal"][number];
 export type FrameLightingRefusal = (typeof REFUSALS)["FrameLightingRefusal"][number];
+export type InstallRefusal = (typeof REFUSALS)["InstallRefusal"][number];
 export type PaperProfileRefusal = (typeof REFUSALS)["PaperProfileRefusal"][number];
 export type RoomLightRefusal = (typeof REFUSALS)["RoomLightRefusal"][number];
 export type TrialRefusal = (typeof REFUSALS)["TrialRefusal"][number];

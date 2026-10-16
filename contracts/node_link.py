@@ -49,6 +49,30 @@ LEAF_PATH: Final = "photo-wall/bus"
 NODE_BUS_PORT: Final = 4222                                # the bus's client port on 127.0.0.1, on every Node
 NODE_BUS_URL: Final = f"nats://127.0.0.1:{NODE_BUS_PORT}"  # what every Node component and the local UI dial
 
+# The Node's read-only door (the Home Assistant system design, 2026-10-16; 0017 C3 amended): the bus's
+# WebSocket listener on the home network, `ws://<the Pi's address>:NODE_DOOR_PORT`. A client there
+# lands, with no credentials, in NODE_READER_USER, whose permissions the Node's server holds: it may
+# only ask for one stored message at a time (NODE_READER_PUBLISH) and hear the replies
+# (NODE_READER_SUBSCRIBE), so any other publish, a write or a JetStream change included, is refused
+# by the server, never by the client's restraint. Local programs keep the loopback client port, and
+# the local user is admitted only there (LOCAL_CONNECTIONS); the reader only at the door
+# (DOOR_CONNECTIONS). node-bus.conf repeats these literally and its config test binds the two; the
+# door's port arrives as $PHOTO_WALL_BUS_DOOR_PORT (appliance/boot/bus_environment.py), so tests run
+# several Nodes on one machine. A reader checks it reached the Pi it meant by the server name the
+# door's INFO carries (`bus_server_name`): an address that moved reads unavailable, never another
+# Pi's values.
+NODE_DOOR_PORT: Final = 4280
+NODE_READER_USER: Final = "reader"
+NODE_READER_PUBLISH: Final = ("$JS.API.STREAM.MSG.GET.*",)
+NODE_READER_SUBSCRIBE: Final = ("_INBOX.>",)
+# nats-server's `allowed_connection_types` values the Node's and the hub's users are confined to: a
+# user admitted on one listener cannot log in on another (the doors' permissions are the server's).
+STANDARD_CONNECTION: Final = "STANDARD"        # a plain TCP client: local programs, Central inside the deployment
+WEBSOCKET_CONNECTION: Final = "WEBSOCKET"      # a door's client: a Pi's reader, Home Assistant on the hub
+LEAF_WEBSOCKET_CONNECTION: Final = "LEAFNODE_WS"   # a Node's leaf through Central's origin relay
+LOCAL_CONNECTIONS: Final = (STANDARD_CONNECTION,)
+DOOR_CONNECTIONS: Final = (WEBSOCKET_CONNECTION,)
+
 # L, the largest message (headers + payload) on either end of a leaf: node-bus.conf's max_payload AND
 # the hub's (the config test binds both). A message past a Node's max_payload that reached its leaf
 # would close the leaf, so the hub refuses it first, at its own client (E-W1-BUF-3).
@@ -210,7 +234,8 @@ if (sum(line.max_bytes for line in STORE_LINES.values()) + WALL_STREAM_BYTES > N
 # The enrolment serial's charset (central/content_catalog/catalog.py). A `:` would break a leaf
 # URL's user:password@ and a `.` would split $SYS.ACCOUNT.<name> subjects, so the account name
 # is a hash of the serial, never the serial itself.
-_SERIAL = re.compile(r"[A-Za-z0-9:_.-]{1,128}")
+SERIAL_PATTERN: Final = r"[A-Za-z0-9:_.-]{1,128}"
+_SERIAL = re.compile(SERIAL_PATTERN)
 
 
 def account_id(serial: str) -> str:
@@ -229,3 +254,9 @@ def central_user(serial: str) -> str:
     """Central's client user inside the Node's account; a selector, not a secret."""
     return "central-" + account_id(serial)
 
+
+
+def bus_server_name(serial: str) -> str:
+    """The Node bus's server name (node-bus.conf `server_name`, written by the handoff stage), which
+    every client's INFO carries: a read through a Pi's door checks it before it trusts a value."""
+    return node_user(serial)

@@ -15,6 +15,7 @@ from central.kernel.job_types import AssetJob
 from central.kernel.ports import PublishedRelease
 from central.kernel.transactions import Transaction
 from central.kernel.types import require_reason
+from contracts.central_api import InstallRefusal, InstallStarted, Versions
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,3 +100,45 @@ class ReleaseRecords(Protocol):
         ...
 
     def store_etag(self, tx: Transaction, etag: str | None, *, now: float) -> None: ...
+
+
+class VersionRefused(Exception):
+    """A version Central would not set: why (contracts/central_api.py InstallRefusal)."""
+
+    def __init__(self, refusal: InstallRefusal) -> None:
+        super().__init__(refusal.value)
+        self.refusal = refusal
+
+
+class PlayerVersions(Protocol):
+    """A version per Pi (Q2 A, 2026-10-16: "No stored wall-wide release; Central keeps only a version
+    per Pi"). The one writer and reader of each Pi's version; the boot offer, the console's Releases
+    routes and Central's hub method all call it. `central/infra/player_versions.py` implements it.
+
+    A Pi's version is a release tag naming one deployment. A Pi with none boots the newest ready
+    stable release (`boot_policy.newest_ready_stable`); once set, a version changes only by these
+    writers ("upgrades are always your choice"). Central keeps downloaded the newest WINDOW_SIZE
+    stable releases plus every Pi's version and previous version (`boot_policy.kept`)."""
+
+    def versions(self) -> Versions:
+        """What each enrolled Pi is to boot now, whether Central keeps one for it, and an install's
+        progress."""
+        ...
+
+    def install(self, serial: str, version: str) -> InstallStarted:
+        """Set the Pi `serial`'s version to `version` (its old one becomes its previous), download the
+        release if it is not ready (a Prefetch in the same transaction), then restart that Pi onto it
+        once it is ready (a reboot command to its current host session); answers once the version is
+        set. VersionRefused(UNKNOWN_PLAYER | UNKNOWN_VERSION | NOT_DEPLOYABLE) before any write."""
+        ...
+
+    def set_wall_version(self, version: str) -> Versions:
+        """Update the wall: set every enrolled Pi's version to `version` in one transaction (each old
+        one becomes its previous) and download it; restarts no Pi (the console's rollout does).
+        VersionRefused(UNKNOWN_VERSION | NOT_DEPLOYABLE) before any write."""
+        ...
+
+    def boot_deployment_in(self, tx: Transaction, serial: str) -> str | None:
+        """Inside the boot offer's transaction: the deployment id the Pi `serial` boots now (its
+        version's, else the newest ready stable release's); None when no release is ready."""
+        ...

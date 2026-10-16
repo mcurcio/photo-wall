@@ -41,12 +41,11 @@ from __future__ import annotations
 import hashlib
 from typing import Annotated, Final, Literal
 
-from pydantic import Field, ValidationError, model_validator
+from pydantic import Field, model_validator
 
 from contracts.kelvin import KELVIN_TABLE_MAX, KELVIN_TABLE_MIN, KELVIN_TABLE_STEP
-from contracts.strict_json import loads_object
 from contracts.wire_codec import encode
-from contracts.wire_model import Model
+from contracts.wire_model import Model, decoded
 
 ROOM_LIGHT_ID_PATTERN: Final = r"[a-z0-9][a-z0-9-]{0,31}"   # "bookshelf-spot", "overheads", "daylight"
 ROOM_LIGHTS_MAX: Final = 32                     # room lights in one house
@@ -193,7 +192,7 @@ def encode_room_lights(document: RoomLightsDocument) -> bytes:
 
 def decode_room_lights(raw: bytes) -> RoomLightsDocument:
     """The document `raw` encodes; ValueError("room_lights_document") for anything else."""
-    return _decoded(RoomLightsDocument, raw, ROOM_LIGHTS_BYTES, "room_lights_document")
+    return decoded(RoomLightsDocument, raw, ROOM_LIGHTS_BYTES, "room_lights_document")
 
 
 def room_lights_digest(document: RoomLightsDocument) -> str:
@@ -210,18 +209,7 @@ def encode_light_sensor(reading: LightSensorReading) -> bytes:
 
 def decode_light_sensor(raw: bytes) -> LightSensorReading:
     """The reading `raw` encodes; ValueError("light_sensor_reading") for anything else."""
-    return _decoded(LightSensorReading, raw, LIGHT_SENSOR_BYTES, "light_sensor_reading")
-
-
-def _decoded[M: Model](cls: type[M], raw: bytes, limit: int, code: str) -> M:
-    """`cls` from `raw`: contracts.strict_json's rules within `limit` bytes, then pydantic's strict
-    JSON validation; ValueError(code) for anything else."""
-    if not isinstance(raw, bytes) or loads_object(raw, max_bytes=limit) is None:
-        raise ValueError(code)
-    try:
-        return cls.model_validate_json(raw, strict=True)
-    except ValidationError as error:
-        raise ValueError(code) from error
+    return decoded(LightSensorReading, raw, LIGHT_SENSOR_BYTES, "light_sensor_reading")
 
 
 __all__ = [
