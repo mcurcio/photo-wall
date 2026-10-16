@@ -301,7 +301,7 @@ The owner's first ask: "Central needs another UI pass to make sure that all of t
 
 - **Outcome:** Home Assistant shows one device per Frame with a power switch, status and Skip, and a shipped motion Blueprint wakes a room's displays.
 - **In scope:** F7. Settings #69, #87 and #88 (the Home Assistant power guards, with their controls on the Power lane), #141–#144; the device and entity map, the request topic and Blueprints ([design §8](operator-console-design.md#8-home-assistant)).
-- **Out of scope:** a dedicated Home Assistant integration; native sensors.
+- **Out of scope:** a dedicated Home Assistant integration. **Pulled forward (2026-10-15, [#106](https://github.com/mcurcio/photo-wall/pull/106), [0028](decisions/0028-room-light.md)):** the broker link for room lights (Home Assistant's retained light and illuminance states, read by Central's worker) and a light meter wired to a Pi are built; discovery, the device and entity map above, the request topic and Blueprints stay here.
 - **Acceptance:** CI test `tests/integration/test_home_assistant_mqtt.py` against a Mosquitto container (discovery announcements kept by the broker with stable ids; a switch becomes a power request under the hold rule; Remove clears them; a broker restart re-announces). Bench step: an agent points a throwaway Home Assistant container at the broker and checks the devices appear.
 - **Depends on:** 2a (power requests), 2b (Frame names and room label), 3b-i (status words, Show now with an end time).
 - **Risks and unknowns:** broker credentials stored on the server; guard defaults untested in a real home; Scene power waits on the owner.
@@ -377,7 +377,7 @@ Requirements and needs that are not journey steps, and where each goes:
 | Household and guest roles | Everyone who signs in can change everything; a guest cannot be given Skip and Pause alone |
 | Notification channels beyond the basics | Alerts reach only the channels 7 builds |
 | Change history | Only the 10-second Undo after a change; no record of who changed what. A Display's picture and a Frame's Position, mat and lights keep their own history with Restore ([0025](decisions/0025-configuration-snapshots.md)); everything else has no Revert later |
-| Native sensors and auto-dim | Room-light brightness and motion need Home Assistant |
+| Auto-dim and motion | Room light no longer waits on this: a light meter wired to a Pi and Home Assistant's light and illuminance states are built ([0028](decisions/0028-room-light.md)); the display's own backlight is still never driven, and motion needs Home Assistant (step 3) |
 | Lights and other non-display controls | Scenes cannot drive lights or relays |
 | Burn-in protection (#68) | The owner has OLED panels; a static element shown for hours (captions from 5b, a paused photo) can burn in. Until it lands, keep captions on auto-hide (#59) and Pause short |
 | Per-Pi software pins ([console DDD Part E](operator-console-ddd.md#part-e-v2-only-console-and-node-release-workflows-feature-layer)) | The whole wall runs one selected release |

@@ -1236,6 +1236,18 @@ In Home Assistant, install the blueprint [`integrations/home-assistant/photo-wal
 
 **Check it.** With the link connected, switch the light in Home Assistant: `GET /v1/operator/house/lights` shows its state and `heard_at`, and the WALL key `room-lights` on any Node changes (its `change` rises once per real change; a repeated state changes nothing). The Player's control State never moves for a light. Bench steps (a real Home Assistant and the bookshelf spot on the wall) are NOT RUN in the delivery that built this.
 
+**A light meter wired to a Pi.** HostCore reads the first Linux IIO device on the Pi that answers `in_illuminance_input` (or `in_illuminance_raw` with `in_illuminance_scale`), every 5 seconds, and reports it on the host line as `light-sensor` (lux, or `"unavailable"` when a read fails) only when it moved by more than 5 % (1 lux below 20). A Pi with no meter reports nothing. In House > Lights, make a Sensor that is that Pi's meter and give it to a room light as its reporter. Put the meter where its light dominates and facing away from the wall: it reads every light at its point. Check it on the Pi with `cat /sys/bus/iio/devices/iio:device*/in_illuminance_*`; Central shows the Sensor's last reading and when it was heard.
+
+**Set up a Frame's light with a phone light meter.** The numbers are typed in, then matched by eye (owner, 2026-10-15: "A is probably the simplest option to start").
+
+1. On the Frame page, open Lighting: the wall changes live, Done keeps it and Revert drops it.
+2. Switch only one room light on (the others off). With a phone light-meter app held flat against the Frame's glass and facing the room, read its lux. Type it as that light's lux, as a wash for an overhead, a far light or a close light (a spotlight's cone: read at the Frame's centre). Its reference is "on at full" for a dimmer, or the Sensor's current lux when a Sensor reports that light. Repeat for each light, then for daylight.
+3. Set the mat's depth in millimetres and the paper (whiteness, ink density; an optional paper profile, picked here and no longer on the Display).
+4. Set the Display's light once, on its Picture tab: show the White pattern, hold a sheet of white paper at the Frame under the room light you used, and set Matched light to the lux at which the screen's white looks the same as the sheet. Panel black is the Black level pattern's reading as a share of white.
+5. Compare the wall with a real print held beside it; adjust the lux, depth and ink density until they match, then Done. Calibration photos help only with the display's own raw settings.
+
+Bench steps (the light meter on a real Pi, a phone reading against the Samsung QN43Q8F) are NOT RUN in the delivery that built this.
+
 ## Night off and the week
 
 Roadmap 2a and 2b ([#86](https://github.com/mcurcio/photo-wall/pull/86), [0021](decisions/0021-power-timetable-and-repeating-schedules.md)): Central works out each HDMI port's next 7 days of off and on set times from Night off and holds and writes them in the port's Output document; the Pi switches at those times on its own clock. Schedules repeat by the week, and a Default Scene plays where none does. The console's side is the [operator console design §7](operator-console-design.md#7-power); the Pi's is the [Player architecture](player-architecture.md#display-identity-and-power-1b).
