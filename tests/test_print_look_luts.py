@@ -242,7 +242,7 @@ def test_a_frames_paper_profile_holds_its_lut_on_the_list(registry):
         listed = client.get(LUTS, headers=AUTH).json()["luts"][0]
         assert (listed["used_by"], listed["recipe_id"]) == ([name], LUT_RECIPE_ID)
         refused = client.delete(f"{LUTS}/{_sha(printer)}", headers=AUTH)
-        assert (refused.status_code, refused.json()) == (409, {"error": "lut_in_use", "displays": [name]})
+        assert (refused.status_code, refused.json()) == (409, {"error": "lut_in_use", "frames": [name]})
         ended = client.post(f"{trials}/{begun.json()['trial_id']}", headers=AUTH,
                             json={"operation": "end", "expected_sequence": 1})
         assert ended.status_code == 200, ended.text

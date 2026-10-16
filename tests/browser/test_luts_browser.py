@@ -6,7 +6,7 @@ Mutation probes, one per acceptance line: (1) send the file JSON-encoded (apiWri
 `contentType`) -> Central refuses it as not a colour profile, the add case fails; (2) show the
 list without re-reading it after an add -> the new LUT is missing, the add case fails; (3) say
 "Added" for any answer (luts-settings.tsx `addWords`) -> the refusal case's words fail; (4) drop
-`displays` from the refusal (lutsApi.js `removeLut`) -> the in-use case's Frame name fails.
+`frames` from the refusal (lutsApi.js `removeLut`) -> the in-use case's Frame name fails.
 """
 
 import os
@@ -79,7 +79,7 @@ def test_an_added_profile_is_listed_chosen_as_a_frames_paper_and_kept_while_a_fr
         expect(_rows(page).first).to_contain_text(NAME)
         expect(_rows(page).first).to_contain_text("No Frame")
 
-        room_lights(page, origin, sessions)
+        room_lights(page, origin)
         open_frame(page, FRAME, "position")
         bar = _bar(page)
         expect(bar.get_by_role("status")).to_have_text(PRESENTED)

@@ -22,7 +22,7 @@ export interface LutView {
 export type AddAnswer = { ok: true; lut: LutView; added: boolean } | { ok: false; error: string };
 
 /** Central's answer to a remove (lutsApi.js `removeLut`). */
-export type RemoveAnswer = { ok: true } | { ok: false; error: string; displays: string[] };
+export type RemoveAnswer = { ok: true } | { ok: false; error: string; frames: string[] };
 
 /** "MNN", "MNN and Hall", "MNN, Hall and Kitchen". */
 function namesWords(names: readonly string[]): string {
@@ -56,7 +56,7 @@ export function removeWords(lut: LutView, answer: RemoveAnswer): string {
   if (answer.ok) return `Removed ${lut.name}.`;
   switch (answer.error) {
     case "lut_in_use":
-      return `Not removed: ${namesWords(answer.displays)} ${answer.displays.length === 1 ? "uses" : "use"} ${lut.name}. `
+      return `Not removed: ${namesWords(answer.frames)} ${answer.frames.length === 1 ? "uses" : "use"} ${lut.name}. `
         + "Choose another paper profile under Lighting on their Position tab first.";
     case "lut_unknown":
       return `${lut.name} was already removed.`;

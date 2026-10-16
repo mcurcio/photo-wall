@@ -192,7 +192,7 @@ def test_the_sidebar_groups_wall_show_fleet_settings_and_needs_attention_in_a_fi
         for group, labels in (("Wall", ["Wall"]),
                               ("Show", [LABELS[s] for s in ("now", "scenes", "schedule", "sources")]),
                               ("Fleet", ["Hardware", "Releases"]),
-                              ("Settings", ["Photo library", "Photo fit", "House", "LUTs"]),
+                              ("Settings", ["Photo library", "Photo fit", "House", "Lights", "LUTs"]),
                               ("Needs attention", ["Needs attention"])):
             expect(nav.get_by_role("list", name=group, exact=True).get_by_role("link")
                    ).to_have_text(labels)
@@ -480,7 +480,7 @@ def test_the_drawer_traps_focus_closes_on_escape_and_a_link_focuses_the_page_hea
             ? document.activeElement.textContent || document.activeElement.ariaLabel
             : document.activeElement === document.body ? '(browser)' : '(page)'"""
         reached = set()
-        for key in ["Tab"] * 12 + ["Shift+Tab"] * 12:
+        for key in ["Tab"] * 14 + ["Shift+Tab"] * 14:
             page.keyboard.press(key)
             reached.add(page.evaluate(focused))
         assert "(page)" not in reached, reached

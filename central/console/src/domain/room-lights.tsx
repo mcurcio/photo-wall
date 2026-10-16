@@ -12,7 +12,6 @@ import { sinceTime } from "../timeWords.js";
 import { Button } from "../ui/button";
 import { Dialog, DialogClose } from "../ui/dialog";
 import { Field, NumberInput, TextInput } from "../ui/field";
-import { Section } from "../ui/section";
 import { SegmentedControl } from "../ui/segmented-control";
 import { Select } from "../ui/select";
 import { Inline, Stack } from "../ui/stack";
@@ -343,7 +342,7 @@ export function RoomLights({ view, pis, note, onSaveLight, onRemoveLight, onSave
         fall on a print in its place.
       </Note>
       <FactRow label="Home Assistant" tone="reported">{linkWords(view.home_assistant)}</FactRow>
-      <Section title="Room lights">
+      <Stack>
         <EntityList<LightRow>
           label="Room lights"
           columns={[
@@ -368,8 +367,8 @@ export function RoomLights({ view, pis, note, onSaveLight, onRemoveLight, onSave
         <Inline label="Room light actions">
           <Button onClick={() => setEditing({ kind: "light", light: null })}>Add a room light</Button>
         </Inline>
-      </Section>
-      <Section title="Sensors">
+      </Stack>
+      <Stack>
         <EntityList<SensorRow>
           label="Sensors"
           columns={[
@@ -395,7 +394,7 @@ export function RoomLights({ view, pis, note, onSaveLight, onRemoveLight, onSave
         <Inline label="Sensor actions">
           <Button onClick={() => setEditing({ kind: "sensor", sensor: null })}>Add a Sensor</Button>
         </Inline>
-      </Section>
+      </Stack>
       {note !== null && <Note live>{note}</Note>}
       {editing?.kind === "light" && (
         <LightDialog light={editing.light} view={view} onClose={() => setEditing(null)} onSave={onSaveLight} />

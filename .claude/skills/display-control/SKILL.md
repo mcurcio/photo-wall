@@ -128,9 +128,12 @@ lux and the panel's black, [0028](../../../docs/decisions/0028-room-light.md)), 
 applies. The print look's sliders and Photo Wall's brightness are gone: the room's light on the
 Frame's paper dims the picture. **The paper match types the matched lux**: with the White pattern up
 (the TV's own white, through white balance, contrast and gamma only), hold a sheet of white paper
-beside the screen, change the light at the Frame until the two read the same, measure that light at
-the Frame with a light meter (a phone app will do) and type it as the Display's matched light; the
-panel's black comes from the calibration reader. Nothing nobody set is ever written.
+beside the screen lit by daylight or a 6500 K lamp only, set the colour temperature until the two
+whites are the same colour (it makes the TV's white neutral; a warm room is its room lights'
+kelvin, never the Display's colour temperature, or the warmth counts twice), then change the light
+at the Frame until the two read equally bright, measure that light at the Frame with a light meter
+(a phone app will do) and type it as the Display's matched light; the panel's black comes from the
+calibration reader. Nothing nobody set is ever written.
 
 **Asking the picture list.** On a display's first appearance (per EDID identity, kept across
 controller restarts) the controller asks every code on the picture list, a few codes per

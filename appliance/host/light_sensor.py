@@ -4,7 +4,8 @@ player"), read through Linux IIO and reported on the host line's state as LIGHT_
 HostCore samples it every SAMPLE_SECONDS on its own thread (`LightMeter`), never waiting on the bus:
 the first iio device (by name) that reads illuminance (`find_meter`), its lux (`read_lux`; None
 when the read fails or is out of range), put as contracts/room_light.py `LightSensorReading` when
-`worth_reporting`. A Pi with no meter writes no key. Central turns a reading into the state of the
+`worth_reporting`. A Pi with no meter writes no key; a meter that reported and then went away
+reports unavailable. Central turns a reading into the state of the
 room light the Sensor reports (central/room_light/); nothing here knows which.
 """
 from __future__ import annotations
@@ -25,34 +26,55 @@ SAMPLE_SECONDS: Final = 5.0
 CHANGE_SHARE: Final = 0.05          # a reading is reported when it moves by more than this share...
 CHANGE_LUX_LOW: Final = 1.0         # ...or, below LOW_LUX, by more than this many lux
 LOW_LUX: Final = 20.0
-_INPUT: Final = "in_illuminance_input"
-_RAW: Final = "in_illuminance_raw"
-_SCALE: Final = "in_illuminance_scale"
+# IIO's illuminance channel, unindexed or as channel 0 (tsl2563, isl29018): a processed `_input`,
+# or `_raw` with an optional `_offset` and `_scale` (IIO: lux = (raw + offset) x scale), each of
+# which may also be shared, without the index.
+_CHANNELS: Final = ("in_illuminance", "in_illuminance0")
+
+
+def _channel(device: Path) -> str | None:
+    """The device's illuminance channel prefix, `_input` before `_raw`; None: it reads none."""
+    for suffix in ("_input", "_raw"):
+        for channel in _CHANNELS:
+            if (device / (channel + suffix)).is_file():
+                return channel + suffix
+    return None
 
 
 def find_meter(root: Path = IIO_ROOT) -> Path | None:
-    """The first iio device (by name) with in_illuminance_input, or in_illuminance_raw (+
-    in_illuminance_scale, default 1); None: no meter (or no iio at all)."""
+    """The first iio device (by name) with an illuminance channel (`_CHANNELS`, processed or raw);
+    None: no meter (or no iio at all)."""
     try:
         devices = sorted(root.iterdir(), key=lambda path: path.name)
     except OSError:
         return None
-    return next((device for device in devices
-                 if (device / _INPUT).is_file() or (device / _RAW).is_file()), None)
+    return next((device for device in devices if _channel(device) is not None), None)
 
 
 def _number(path: Path) -> float:
     return float(path.read_text().strip())
 
 
+def _attribute(device: Path, channel: str, name: str, default: float) -> float:
+    """A raw channel's `_offset` or `_scale`: its own, else the shared one, else `default`."""
+    for prefix in (channel, "in_illuminance"):
+        if (device / f"{prefix}_{name}").is_file():
+            return _number(device / f"{prefix}_{name}")
+    return default
+
+
 def read_lux(device: Path) -> float | None:
     """lux, or None when the read fails or is outside 0..LUX_MAX."""
     try:
-        if (device / _INPUT).is_file():
-            lux = _number(device / _INPUT)
+        found = _channel(device)
+        if found is None:
+            return None
+        if found.endswith("_input"):
+            lux = _number(device / found)
         else:
-            scale = _number(device / _SCALE) if (device / _SCALE).is_file() else 1.0
-            lux = _number(device / _RAW) * scale
+            channel = found.removesuffix("_raw")
+            lux = ((_number(device / found) + _attribute(device, channel, "offset", 0.0))
+                   * _attribute(device, channel, "scale", 1.0))
     except (OSError, ValueError):
         return None
     return lux if math.isfinite(lux) and 0 <= lux <= LUX_MAX else None
@@ -79,11 +101,13 @@ class LightMeter:
         self._thread: threading.Thread | None = None
 
     def sample(self) -> LightSensorReading | None:
-        """One sample: the reading (None: no meter, and no key put), put when worth reporting."""
+        """One sample: the reading, put when worth reporting. None, and no key put, while no meter
+        has been seen this boot; a meter seen and then gone (unplugged, its driver gone) reads
+        unavailable, so Central never keeps a stale reading as the light's."""
         device = find_meter(self._root)
-        if device is None:
+        if device is None and self._last is None:
             return None
-        reading = LightSensorReading(read_lux(device))
+        reading = LightSensorReading(None if device is None else read_lux(device))
         if worth_reporting(self._last, reading):
             self._put(LIGHT_SENSOR_KEY, encode_light_sensor(reading))
             self._last = reading

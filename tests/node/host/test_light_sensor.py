@@ -72,3 +72,26 @@ def test_only_a_change_worth_reporting_is_put_again(tmp_path):
     assert worth_reporting(LightSensorReading(10.0), LightSensorReading(11.1)) is True
     assert worth_reporting(LightSensorReading(None), LightSensorReading(None)) is False
     assert worth_reporting(LightSensorReading(5.0), LightSensorReading(None)) is True
+
+
+def test_an_indexed_raw_channel_adds_its_offset_before_its_scale(tmp_path):
+    """tsl2563 and isl29018 expose channel 0; IIO's processed value is (raw + offset) x scale.
+    Mutation probes: drop the indexed names -> no meter; drop the offset -> 100.0."""
+    path = device(tmp_path, "iio:device0", in_illuminance0_raw="200\n", in_illuminance0_offset="-40\n",
+                  in_illuminance_scale="0.625\n")
+    assert find_meter(tmp_path) == path and read_lux(path) == 100.0
+    indexed = device(tmp_path, "iio:device1", in_illuminance0_input="12.5\n")
+    assert read_lux(indexed) == 12.5
+
+
+def test_a_meter_that_reported_and_went_away_reports_unavailable(tmp_path):
+    """Central must not keep the last lux of an unplugged meter. Mutation probe: return None with no
+    device whatever was read before -> nothing is put and the stale 80 lx stands."""
+    path = device(tmp_path, "iio:device0", in_illuminance_input="80\n")
+    light, puts = meter(tmp_path)
+    light.sample()
+    for child in path.iterdir():
+        child.unlink()
+    path.rmdir()
+    assert light.sample() == LightSensorReading(None)
+    assert [decode_light_sensor(value) for _, value in puts] == [LightSensorReading(80.0), LightSensorReading(None)]

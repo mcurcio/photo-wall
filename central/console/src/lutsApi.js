@@ -50,17 +50,17 @@ export async function addLut(profile) {
 
 /**
  * Remove a LUT nothing uses (DELETE /v1/operator/luts/{profile_sha256}). Central refuses
- * lut_in_use with the Displays that use it, or lut_unknown when it is not on the list.
+ * lut_in_use with the Frames whose paper uses it, or lut_unknown when it is not on the list.
  *
  * @param {string} profileSha256
- * @returns {Promise<{ok: true}|{ok: false, error: string, displays: string[]}>}
+ * @returns {Promise<{ok: true}|{ok: false, error: string, frames: string[]}>}
  */
 export async function removeLut(profileSha256) {
   try {
     const result = await apiWrite(`${LUTS}/${encodeURIComponent(profileSha256)}`, { method: "DELETE" });
     return result.ok ? { ok: true }
-      : { ok: false, error: result.error ?? `http_${result.status}`, displays: result.data?.displays ?? [] };
+      : { ok: false, error: result.error ?? `http_${result.status}`, frames: result.data?.frames ?? [] };
   } catch {
-    return { ok: false, error: "unreachable", displays: [] };
+    return { ok: false, error: "unreachable", frames: [] };
   }
 }

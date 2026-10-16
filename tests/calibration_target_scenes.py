@@ -37,6 +37,7 @@ from appliance.display_host.picture import operations_for
 from central.displays.picture_history import PictureEntryKind
 from central.displays.views import (
     DisplayRefView,
+    LightView,
     PictureEntryView,
     PictureValuesView,
     SoftwarePictureView,
@@ -454,30 +455,15 @@ def truth(scene: Scene) -> Truth:
     return Truth(white=screen / (paper * paper_t))
 
 
-# TRANSIT (decision 0028): the print look's view fields at their neutral values, for the view as it is
-# until lane central deletes them; `_declared` drops them once it has. The end review deletes this.
-_TRANSIT_SOFTWARE: Final = dict(zip(("brightness_percent", "saturation_percent", "highlight_rolloff_percent",
-                                     "black_floor_tenths", "lut", "lut_amount_percent"),
-                                    (100, 100, 0, 0, None, 100), strict=True))
-
-
-def _declared(model: type, values: dict[str, object]) -> dict[str, object]:
-    """`values` the view model declares. Central's picture view and these scenes change in one
-    delivery (decision 0028: the view's software group is contrast, colour temperature and gamma,
-    beside the Display's light); built from its declared fields, a scene's entry is the view's
-    whichever lane's commit it meets."""
-    return {name: value for name, value in values.items() if name in model.model_fields}
-
-
 def entry(scene: Scene, *, test_pattern: TestPattern | None = None) -> PictureEntryView:
     """The sent entry the scene's code names, its software the scene's, at the upgrade's light."""
     software = scene.software
-    view = SoftwarePictureView(**_declared(SoftwarePictureView, {
-        "contrast_percent": software.contrast_percent, "colour_temperature_kelvin": software.colour_temperature_kelvin,
-        "gamma_tenths": software.gamma_tenths, **_TRANSIT_SOFTWARE}))
-    picture = PictureValuesView(**_declared(PictureValuesView, {
-        "hardware": {}, "software": view, "signal_range": SignalRange.FULL, "lut_recipe_id": None,
-        "light": {"matched_lux": UPGRADE_DISPLAY_LIGHT.matched_lux, "black": UPGRADE_DISPLAY_LIGHT.black}}))
+    view = SoftwarePictureView(
+        contrast_percent=software.contrast_percent, colour_temperature_kelvin=software.colour_temperature_kelvin,
+        gamma_tenths=software.gamma_tenths)
+    picture = PictureValuesView(
+        hardware={}, software=view, signal_range=SignalRange.FULL,
+        light=LightView(matched_lux=UPGRADE_DISPLAY_LIGHT.matched_lux, black=UPGRADE_DISPLAY_LIGHT.black))
     return PictureEntryView(
         entry_id=uuid.UUID(int=scene.code.picture_change), display=DisplayRefView(id=uuid.UUID(int=7), name="Samsung"),
         kind=PictureEntryKind.SENT_DRAFT, number=scene.code.picture_change, at=datetime(2026, 10, 13, 20, tzinfo=UTC),

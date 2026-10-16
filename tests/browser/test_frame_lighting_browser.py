@@ -33,7 +33,9 @@ from playwright.sync_api import expect
 from pydantic import ValidationError
 from test_console_frame_page_browser import FRAME, PRESENTED, FakeSessions, _bar, _seed
 
+from central.infra.room_light_store import room_lights_in
 from central.registry import RegistryError
+from central.room_light.policy import check_frame_lighting
 from central.transaction_locks import acquire_runtime_locks
 from contracts.frame_lighting import DIMMER_AT_FULL, FrameLighting
 from contracts.models import Calibration
@@ -59,16 +61,16 @@ def put(page, origin, path, body):
     return response.json()
 
 
-def room_lights(page, origin, sessions, *, daylight=False):
+def room_lights(page, origin, *, daylight=False):
     """The bookshelf spotlight (a Home Assistant light), and with `daylight` a window Sensor and the
-    daylight it reports; the fake's rule then reads every room light's reporter as Central lists it."""
+    daylight it reports. Waits for the signed-in shell first: the writes ride its session cookie."""
+    expect(page.get_by_role("navigation", name="Sections", exact=True)).to_be_visible()
     put(page, origin, "/v1/operator/house/lights/bookshelf-spot", SPOT)
     if daylight:
         put(page, origin, "/v1/operator/house/sensors/window-meter", WINDOW_METER)
         put(page, origin, "/v1/operator/house/lights/daylight", DAYLIGHT)
     listed = page.request.get(origin + "/v1/operator/house/lights", headers=CONSOLE)
     assert listed.ok, listed.text()
-    sessions.reporters = {light["id"]: light["reporter"]["kind"] for light in listed.json()["lights"]}
 
 
 def saved_lighting(registry):
@@ -90,13 +92,13 @@ def _save(registry, calibration, lighting, expected_revision):
 
 
 class LightingSessions(FakeSessions):
-    """FakeSessions with Central's lighting rules (see the module docstring); `lightings` lists every
-    lighting the page sent, in order; `reporters` is each room light's reporter kind, as the test set
-    it up (the rule Central checks the reference against)."""
+    """FakeSessions with Central's lighting rules (see the module docstring): the contract, then
+    central/room_light/policy.py `check_frame_lighting` against the room lights stored now (the seeded
+    fixed "room" and whatever the test put through Settings › Lights); `lightings` lists every
+    lighting the page sent, in order."""
 
     def __init__(self, page, registry):
         self.lightings = []
-        self.reporters = {}
         self._draft = None
         super().__init__(page, registry)
 
@@ -112,16 +114,12 @@ class LightingSessions(FakeSessions):
 
     def _refusal(self, lighting):
         try:
-            FrameLighting.model_validate(lighting)
+            draft = FrameLighting.model_validate(lighting)
         except ValidationError:
             return "trial_lighting_invalid"
-        for light in lighting["lights"]:
-            reporter = self.reporters.get(light["light"])
-            if reporter is None:
-                return "trial_lighting_unknown_room_light"
-            if (reporter == "sensor") == (light["reference"] == DIMMER_AT_FULL):
-                return "trial_lighting_reference_mismatch"
-        return None
+        with self.registry.db.transaction() as conn:
+            refusal = check_frame_lighting(draft, room_lights_in(conn))
+        return None if refusal is None else refusal.value
 
     def _answer(self, route):
         body = route.request.post_data_json or {}
@@ -209,7 +207,7 @@ def test_a_close_lights_lux_rides_the_session_done_keeps_it_and_revert_puts_it_b
     _seed(registry)
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
-        room_lights(page, origin, sessions)
+        room_lights(page, origin)
         open_frame(page, FRAME, "position")
         expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
         light = add_close_light(page)
@@ -250,7 +248,7 @@ def test_a_reference_mismatch_is_said_in_words_and_choosing_the_sensors_reading_
     _seed(registry)
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
-        room_lights(page, origin, sessions, daylight=True)
+        room_lights(page, origin, daylight=True)
         open_frame(page, FRAME, "position")
         expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
         light = add_close_light(page, "Daylight")
@@ -275,7 +273,7 @@ def test_two_lights_keep_their_order_and_the_paper_rides_with_them(page, registr
     _seed(registry)
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
-        room_lights(page, origin, sessions)
+        room_lights(page, origin)
         open_frame(page, FRAME, "position")
         expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
         before = len(saved_lighting(registry).lights)

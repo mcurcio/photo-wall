@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import ssl
+import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Final
@@ -35,7 +36,7 @@ from central.room_light.ports import RoomLightReports
 log = logging.getLogger(__name__)
 
 MQTT_URL_ENV: Final = "PHOTO_WALL_MQTT_URL"
-CLIENT_ID: Final = "photo-wall-central"
+CLIENT_ID_PREFIX: Final = "photo-wall-central"   # + a per-link suffix: two Centrals never evict each other
 RECONNECT_FIRST_SECONDS: Final = 1.0
 RECONNECT_MAX_SECONDS: Final = 30.0
 _OUT_OF_RANGE: Final = "out-of-range"
@@ -70,6 +71,9 @@ class HomeAssistantLink:
         self._broker = broker
         self._reports = reports
         self._on_recorded = on_recorded
+        # A clean session needs no stable id; a fixed one would make two Centrals on one broker (a
+        # deploy's overlapping workers, a local launch) evict each other in a takeover loop.
+        self.client_id = f"{CLIENT_ID_PREFIX}-{uuid.uuid4().hex[:12]}"
 
     async def run(self, stop: asyncio.Event) -> None:
         """Until `stop`: connect, subscribe, record every message; reconnect with backoff on any
@@ -98,7 +102,7 @@ class HomeAssistantLink:
     def _client(self) -> aiomqtt.Client:
         broker = self._broker
         return aiomqtt.Client(broker.host, broker.port, username=broker.username, password=broker.password,
-                              identifier=CLIENT_ID, clean_session=True,
+                              identifier=self.client_id, clean_session=True,
                               tls_context=ssl.create_default_context() if broker.tls else None)
 
     async def _receive(self, client: aiomqtt.Client, stop: asyncio.Event) -> None:
@@ -145,5 +149,5 @@ def build_home_assistant_link(env: Mapping[str, str], reports: RoomLightReports,
     return HomeAssistantLink(broker_from(url), reports, on_recorded)
 
 
-__all__ = ["CLIENT_ID", "MQTT_URL_ENV", "RECONNECT_FIRST_SECONDS", "RECONNECT_MAX_SECONDS", "Broker",
+__all__ = ["CLIENT_ID_PREFIX", "MQTT_URL_ENV", "RECONNECT_FIRST_SECONDS", "RECONNECT_MAX_SECONDS", "Broker",
            "HomeAssistantLink", "broker_from", "build_home_assistant_link"]

@@ -3,9 +3,11 @@ stream, read from the Node's WALL mirror through nodeapi's read-only `WallReader
 
 It never rides the Player's control State (design rule 2): a light switching ten times redraws the
 Frames ten times and moves no configuration, plan, executor revision, delivery, Readiness or Commit.
-The latest good document stays: a value the codec refuses is logged and dropped, and one whose
-`change` is not above the held one is ignored (WALL is sticky and its mirror replays the last value
-at every connect). Until the first document arrives every Frame light adds none (rule 2; 0028's
+The latest good document stays: a value the codec refuses is logged and dropped, and one equal to
+the held one is not drawn again (WALL is sticky and its mirror replays the last value at every
+connect). Whatever WALL delivers last wins, `change` included: WALL keeps one value per key, so an
+older value cannot arrive after a newer one, and a restored Central whose `change` restarted lower
+is still followed. Until the first document arrives every Frame light adds none (rule 2; 0028's
 costs). The bus away never blocks or stops the Player: the reader connects forever on its own
 thread, and the Node's mirror keeps the last document while Central is away.
 """
@@ -35,8 +37,8 @@ class RoomLights:
 
     def offer(self, key: str, value: bytes) -> None:
         """WallView callback: ROOM_LIGHTS_KEY only; a value decode_room_lights refuses is logged and
-        dropped (last good stays); a change <= the held one is ignored; otherwise held and `changed`
-        called."""
+        dropped (last good stays); one equal to the held one is not drawn again; otherwise held and
+        `changed` called."""
         if key != ROOM_LIGHTS_KEY:
             return
         try:
@@ -45,7 +47,7 @@ class RoomLights:
             log.warning("player: a room-lights document the codec refuses is dropped; the last stays")
             return
         with self._lock:
-            if self._held is not None and document.change <= self._held.change:
+            if document == self._held:
                 return
             self._held = document
         self._changed(document)

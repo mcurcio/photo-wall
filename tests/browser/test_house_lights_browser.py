@@ -11,6 +11,7 @@ leaves the list; the id not derived from the name -> Central's 422 and the light
 import os
 
 import pytest
+from console_tasks import go
 from operator_harness import operator_server, sign_in
 from playwright.sync_api import expect
 
@@ -21,17 +22,9 @@ pytestmark = pytest.mark.skipif(
 
 
 def open_lights(page, origin):
-    """Sign in and open Settings › Lights by its sidebar link (console_tasks.go's way, for a section
-    its table does not list yet)."""
+    """Sign in and open Settings › Lights by its sidebar link."""
     sign_in(page, origin)
-    sidebar = page.get_by_role("navigation", name="Sections", exact=True)
-    menu = page.get_by_role("button", name="Menu", exact=True)
-    expect(sidebar.or_(menu)).to_be_visible()
-    if menu.is_visible():
-        menu.click()
-        sidebar = page.get_by_role("dialog", name="Menu", exact=True).get_by_role("navigation", name="Sections", exact=True)
-    sidebar.get_by_role("link", name="Lights", exact=True).click()
-    expect(page.get_by_role("heading", level=1, name="Lights", exact=True)).to_be_visible()
+    go(page, "lights")
 
 
 def _table(page, name):

@@ -48,16 +48,21 @@ def test_ten_switches_redraw_ten_times_and_leave_the_delivery_alone(tmp_path):
     asyncio.run(check())
 
 
-def test_the_last_good_document_stays():
+def test_the_last_good_document_stays_and_whatever_wall_delivers_last_wins():
+    """A refused value and a replay of the held one draw nothing; a lower `change` (a Central whose
+    database was restored) is still followed. Mutation probe: ignore a change <= the held one ->
+    the restored Central's document is never drawn."""
     drawn = []
     lights = RoomLights(drawn.append)
     lights.offer(ROOM_LIGHTS_KEY, encode_room_lights(document(5, True)))
     lights.offer(ROOM_LIGHTS_KEY, b'{"change":6,"lights":{"Bad Id":{}}}')     # refused: dropped
-    lights.offer(ROOM_LIGHTS_KEY, encode_room_lights(document(5, False)))     # not newer: ignored
-    lights.offer(ROOM_LIGHTS_KEY, encode_room_lights(document(4, False)))
+    lights.offer(ROOM_LIGHTS_KEY, encode_room_lights(document(5, True)))      # the mirror's replay
     lights.offer("timing", encode_room_lights(document(9, False)))           # another WALL key
     assert [document_.change for document_ in drawn] == [5]
     assert lights.current() == document(5, True)
+    lights.offer(ROOM_LIGHTS_KEY, encode_room_lights(document(1, False)))     # a restored Central
+    assert [document_.change for document_ in drawn] == [5, 1]
+    assert lights.current() == document(1, False)
 
 
 def test_several_documents_before_the_loop_runs_draw_once_newest(tmp_path):
