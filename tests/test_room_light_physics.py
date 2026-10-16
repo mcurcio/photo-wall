@@ -168,8 +168,8 @@ def test_the_close_light_falls_off_as_the_inverse_square_on_a_slant_and_feathers
 
     def expected(above_mm: float) -> float:
         point = (width / 2, height / 2 - above_mm, 0.0)
-        aim = [c - l for c, l in zip((width / 2, height / 2, 0.0), light, strict=True)]
-        ray = [p - l for p, l in zip(point, light, strict=True)]
+        aim = [c - at for c, at in zip((width / 2, height / 2, 0.0), light, strict=True)]
+        ray = [p - at for p, at in zip(point, light, strict=True)]
         d0, d = math.hypot(*aim), math.hypot(*ray)
         phi = math.degrees(math.acos(sum(a * r for a, r in zip(aim, ray, strict=True)) / (d0 * d)))
         t = min(1.0, max(0.0, (20.0 - phi) / (20.0 - 10.0)))
