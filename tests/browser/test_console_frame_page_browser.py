@@ -25,7 +25,8 @@ from playwright.sync_api import expect
 from support.position import save_position
 from test_registry import enroll
 
-from central.registry import FrameCreate, RegistryError
+from central.fleet.models import TrialRefused
+from central.registry import FrameCreate
 from contracts.models import Calibration, CornersFit, CoverFit, FrameProfile
 
 pytestmark = pytest.mark.skipif(
@@ -214,7 +215,7 @@ class FakeSessions:
             try:  # Central's Save is a compare-and-set on the draft's base revision
                 save_position(self.registry, FRAME, calibration,
                               expected_revision=self.row["calibration_revision"])
-            except RegistryError as error:
+            except TrialRefused as error:
                 route.fulfill(status=409, json={"error": error.code})
                 return
             self.row.update(state="saved", saved_calibration=self._saved())

@@ -29,11 +29,11 @@ from playwright.sync_api import expect
 from test_console_frame_page_browser import FRAME, PRESENTED, FakeSessions, _bar, _seed
 from test_frame_picture_browser import _off_thread
 
+from central.fleet.models import TrialRefused
 from central.fleet.node_routes import _OPERATION, _trial_body
 from central.fleet.node_sessions import NodeControlError
 from central.infra.frame_lighting_store import PgHouseLock
 from central.infra.room_light_store import PgRoomLights
-from central.registry import RegistryError
 from central.room_light.model import SensorRef
 from central.transaction_locks import acquire_runtime_locks
 from contracts.frame_lighting import FrameLighting
@@ -141,7 +141,7 @@ class LightingSessions(FakeSessions):
         try:
             _save(self.registry, Calibration.model_validate(self.row["calibration"]),
                   FrameLighting.model_validate(self.row["lighting"]), self.row["calibration_revision"])
-        except RegistryError as error:
+        except TrialRefused as error:
             route.fulfill(status=409, json={"error": error.code})
             return
         self.row.update(state="saved", saved_calibration=self._saved(), saved_lighting=self.row["lighting"])

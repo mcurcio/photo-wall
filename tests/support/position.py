@@ -25,7 +25,7 @@ def save_position(registry, frame_id: str, calibration: Calibration | None = Non
     """Commit `calibration` (default: Corners on the whole output) and `lighting` (default: a new Frame's)
     as the bound Frame's Position,
     against its current binding, generation and configuration, and the calibration revision the
-    draft was made from (`expected_revision`; default the saved one). RegistryError as Save's."""
+    draft was made from (`expected_revision`; default the saved one). TrialRefused as Save's."""
     with registry.db.transaction() as conn:
         acquire_runtime_locks(conn)
         row = conn.execute("SELECT f.calibration, f.generation, f.configuration_revision, b.player_id, b.output_id, "
