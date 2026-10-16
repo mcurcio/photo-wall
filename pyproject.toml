@@ -228,12 +228,13 @@ forbidden_modules = ["media", "httpx", "nodeapi", "aiomqtt", "paho", "central.in
 
 [[tool.importlinter.contracts]]
 # A Frame's lighting rules are pure; the house is read through its port, under the room-lights lock.
+# They read room lights' vocabulary; room lights never import them ("Room lights are pure").
 name = "Frame lighting is pure"
 type = "forbidden"
 source_modules = ["central.frame_lighting"]
 forbidden_modules = ["media", "httpx", "nodeapi", "aiomqtt", "paho", "central.infra", "central.db",
                      "central.registry", "central.app", "central.coordination", "central.planner",
-                     "central.displays", "central.fleet", "central.room_light"]
+                     "central.displays", "central.fleet"]
 
 [[tool.importlinter.contracts]]
 # Everything Home Assistant and MQTT is one adapter package: only its link imports the MQTT client.

@@ -5,20 +5,16 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Literal
 
+from central.room_light.model import RoomLight
 from contracts.room_light import RoomLightId
-
-ReferenceKind = Literal["at-full", "at-reading"]     # contracts/frame_lighting.py AtFull, AtReading
 
 
 @dataclass(frozen=True)
 class LightingHouse:
-    """What a Frame's lighting may name: each room light with the reference kind its reporter needs
-    (a Sensor's light "at-reading", every other "at-full"), which lights nobody reports, and the
-    paper profiles known (by their profile's sha256)."""
-    lights: Mapping[RoomLightId, ReferenceKind]
-    fixed: tuple[RoomLightId, ...]                 # the lights nobody reports, in the house's order
+    """What a Frame's lighting may name: every room light, in the house's order, and the paper
+    profiles known (by their profile's sha256)."""
+    lights: Mapping[RoomLightId, RoomLight]
     paper_profiles: frozenset[str]
 
 
@@ -49,4 +45,4 @@ class FrameLightingRefused(Exception):
         self.status = status
 
 
-__all__ = ["FrameLightingRefusal", "FrameLightingRefused", "FramesNaming", "LightingHouse", "ReferenceKind"]
+__all__ = ["FrameLightingRefusal", "FrameLightingRefused", "FramesNaming", "LightingHouse"]

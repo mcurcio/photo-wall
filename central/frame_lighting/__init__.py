@@ -8,5 +8,6 @@ Frame) calls the one port, `ports.FrameLightingCheck`, inside its own transactio
 implementation (central/infra/frame_lighting_store.py) reads the house under the room-lights lock, so
 a room light or paper profile cannot be removed between the check and the write.
 
-Pure: no psycopg, FastAPI, nodeapi or central.infra (pyproject's import-linter).
+Pure: no psycopg, FastAPI, nodeapi or central.infra (pyproject's import-linter). It reads room lights'
+vocabulary (central.room_light.model); room lights never import it.
 """

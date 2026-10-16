@@ -10,7 +10,8 @@ from contracts.node_picture import DisplayLight
 
 def check(lighting: FrameLighting, house: LightingHouse) -> FrameLightingRefusal | None:
     """Whether `lighting` fits `house`: every Frame light names one of its room lights
-    (UNKNOWN_ROOM_LIGHT) with the reference kind that light needs (REFERENCE_MISMATCH), its paper
+    (UNKNOWN_ROOM_LIGHT) with the reference its room light needs (REFERENCE_MISMATCH: AtReading for
+    a light a Sensor measures, AtFull for every other; the one home of that pairing), its paper
     profile, if any, is known (UNKNOWN_PAPER_PROFILE), and it fits the trial envelope
     (LIGHTING_TOO_LARGE). The first refusal in that order; None when it fits."""
     ...
@@ -33,8 +34,8 @@ def upgrade_lighting(display: DisplayLight, mat_depth_mm: float, brightness_shar
 
 def new_frame_lighting(display: DisplayLight, house: LightingHouse) -> FrameLighting:
     """The one lighting a new Frame starts with, which always passes `check` against `house`:
-    `upgrade_lighting(display, 0, 1)` with its wash viewing the first room light of `house` in
-    `fixed` order (a light nobody reports), or no light when there is none."""
+    `upgrade_lighting(display, 0, 1)` with its wash viewing the first light of `house` that nobody
+    reports (a fixed light), in the house's order, or no light when there is none."""
     ...
 
 
