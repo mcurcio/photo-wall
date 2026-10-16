@@ -129,7 +129,7 @@ Delivery [5a](roadmap.md#5a-photo-fit-and-order) adds two things to a media laye
 
 ## Control-channel semantics
 
-Start with a typed application protocol over a persistent Player-originated WebSocket connection and separate HTTPS file retrieval from the central show system. MQTT remains an external integration boundary. Transport selection does not replace these obligations:
+Start with a typed application protocol over a persistent Player-originated WebSocket connection and separate HTTPS file retrieval from the central show system. Home Assistant is an external integration boundary, spoken to over NATS ([0028](decisions/0028-room-light.md#home-assistant-on-centrals-hub-2026-10-16)). Transport selection does not replace these obligations:
 
 - Support trusted provisioning observation, fresh process-key enrollment and initial equipment reporting according to [automatic Player provisioning](requirements.md#player-provisioning); represent unknown equipment as unbound before issuing Frame execution authority.
 - Authenticate the Player and negotiate protocol version/capabilities.

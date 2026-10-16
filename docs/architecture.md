@@ -144,7 +144,7 @@ Generate a fresh process key and credentials at startup, scoped to current confi
 
 Maintain desired configuration revisions separately from observed/applied state. A report must not overwrite operator intent. Enrollment, claim/retirement, credential rotation and replacement recovery need an explicit trust workflow. Bindings authorize Outputs to serve persistent Frames; a replaced Player must not regain control using an old instruction.
 
-Keep maintenance, blanking, Panel power, Player shutdown, reboot and updates distinct from authored Scene state. Respect power dependencies and graceful shutdown where required. [Home Assistant's WebSocket API](https://developers.home-assistant.io/docs/api/websocket/) and MQTT are integration options for selected controls and observations; they are not the source of truth. Scene definitions address logical Actuators rather than vendor commands.
+Keep maintenance, blanking, Panel power, Player shutdown, reboot and updates distinct from authored Scene state. Respect power dependencies and graceful shutdown where required. [Home Assistant's WebSocket API](https://developers.home-assistant.io/docs/api/websocket/) and NATS (the Galleria integration, [0028](decisions/0028-room-light.md#home-assistant-on-centrals-hub-2026-10-16)) are integration options for selected controls and observations; they are not the source of truth. Scene definitions address logical Actuators rather than vendor commands.
 
 ## Appliance operation
 
