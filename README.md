@@ -131,7 +131,7 @@ Galleria is the integration for Home Assistant (its future name for this project
 
 Install it with [HACS](https://hacs.xyz):
 
-1. In HACS, open the menu › **Custom repositories**, add `https://github.com/mcurcio/photo-wall` with the type **Integration**, then download **Galleria** and restart Home Assistant.
+1. In HACS, open the menu › **Custom repositories**, add `https://github.com/mcurcio/photo-wall` with the type **Integration**, then download **Galleria** and restart Home Assistant. Every release carries `galleria.zip`, built automatically with the release and versioned from its tag; HACS installs that file and offers each new release as an update.
 2. In **Settings › Devices & services**, press **Add integration** and pick **Galleria**.
 3. Enter Central's address, as you open its console (for example `http://photo-wall.local` or `http://192.168.1.10:8000`). Galleria checks it by reading Central's version; one entry per Central.
 

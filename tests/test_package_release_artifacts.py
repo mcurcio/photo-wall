@@ -15,7 +15,9 @@ import json
 import os
 import tarfile
 import time
+import zipfile
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 from support.release_build import (
@@ -43,22 +45,25 @@ from contracts.release import (
     CMDLINE_MEMORY_CONTROLLER,
     CMDLINE_PLACEHOLDER,
     FILES,
+    GALLERIA,
+    GALLERIA_ZIP,
     IMAGES,
     MANIFEST,
     base_member,
     boot_member,
     tarball_name,
 )
+from scripts import galleria_zip
 from scripts.package_release_artifacts import PackagingError, verify
 from scripts.package_release_artifacts import package as _package
 
 
 def package(bundle, destination, *, revision, images=IMAGE_REFERENCES, source_date_epoch=EPOCH,
-            components=None):
+            components=None, tag=TAG):
     """The real packager, with a stamped component set beside `destination` unless given."""
     if components is None:
         components = node_components(destination.parent / f"{destination.name}-components")
-    return _package(bundle, components, destination, revision=revision, tag=TAG, images=images,
+    return _package(bundle, components, destination, revision=revision, tag=tag, images=images,
                     source_date_epoch=source_date_epoch)
 
 
@@ -255,9 +260,9 @@ def test_packaging_the_same_build_twice_yields_the_same_bytes(tmp_path, monkeypa
 
 
 def test_verify_admits_exactly_the_packaged_release(tmp_path):
-    """The attached files are exactly manifest.json, SHA256SUMS, the base and boot tarballs, the
-    node release and the node component files: no V1 file, and one boot tree, the node
-    release's base and boot records being manifest.json's."""
+    """The attached files are exactly manifest.json, SHA256SUMS, the base and boot tarballs,
+    galleria.zip, the node release and the node component files: no V1 file, and one boot tree,
+    the node release's base and boot records being manifest.json's."""
     destination, manifest = _packaged(tmp_path)
     packaged = verify(destination, revision=REVISION)
     components = destination.parent / f"{destination.name}-components" / "components"
@@ -265,11 +270,12 @@ def test_verify_admits_exactly_the_packaged_release(tmp_path):
                              if path.name not in ("components.json", "revision.json"))
     attached = {asset.name for asset in packaged.assets}
     assert attached == {path.name for path in destination.iterdir()}
-    assert attached == {MANIFEST, CHECKSUMS, NODE_RELEASE_MANIFEST,
+    assert attached == {MANIFEST, CHECKSUMS, NODE_RELEASE_MANIFEST, GALLERIA_ZIP,
                         tarball_name(BASE_ROOT, REVISION), tarball_name(BOOT_ROOT, REVISION),
                         *(f"photo-wall-node-{REVISION}-{name}" for name in component_files)}
-    assert set(manifest) == {"schema", "revision", "base_image", "boot_image", "images"}
-    assert FILES == ("base_image", "boot_image")
+    assert set(manifest) == {"schema", "revision", "base_image", "boot_image", "galleria",
+                             "images"}
+    assert FILES == ("base_image", "boot_image", "galleria")
     node = parse_node_release((destination / NODE_RELEASE_MANIFEST).read_bytes())
     assert {asset.role: {"filename": asset.filename, "sha256": asset.sha256,
                          "size": asset.size_bytes}
@@ -324,6 +330,8 @@ def _rewrite_sum(destination, name):
     (lambda d, m: _rewrite_manifest(d, lambda x: x.update(player_deb=x["base_image"])),
      "manifest_keys_invalid"),
     (lambda d, m: _rewrite_manifest(d, _drop("boot_image")), "manifest_keys_invalid"),
+    (lambda d, m: (d / GALLERIA_ZIP).unlink(), f"missing:{GALLERIA_ZIP}"),
+    (lambda d, m: _rewrite_manifest(d, _drop(GALLERIA)), "manifest_keys_invalid"),
     (lambda d, m: _rewrite_manifest(d, lambda x: x.update(extra=1)), "manifest_keys_invalid"),
     (lambda d, m: _rewrite_manifest(d, lambda x: x.update(schema=2)), "schema"),
     (lambda d, m: _rewrite_manifest(d, lambda x: x.update(revision="b" * 40)), "revision"),
@@ -336,6 +344,7 @@ def _rewrite_sum(destination, name):
         d, lambda x: x["boot_image"].update(sha256="0" * 64)), "digest_mismatch"),
 ], ids=["missing-component", "missing-node-release", "missing-boot", "missing-checksums",
         "stray-file", "changed-base", "checksums", "no-images", "v1-player-deb", "no-boot-image",
+        "no-galleria-zip", "no-galleria-record",
         "unknown-key", "schema",
         "revision", "image-missing", "image-digest", "path-escape", "recorded-sha"])
 def test_verify_refuses_any_difference_from_the_declared_release(tmp_path, damage, reason):
@@ -494,3 +503,81 @@ def test_the_packaged_tarball_is_the_declared_layout_central_reads(tmp_path):
     assert (_SQUASHFS_MEMBER, _SUMS_MEMBER) == (base_member(BASE_SQUASHFS),
                                                 base_member(BASE_CHECKSUMS))
 
+
+
+# --- Galleria's zip: the Home Assistant integration as HACS installs it -------------------------
+
+FAKE_TAG = "v7.8.9-rc.1"
+
+
+def _zipped(path):
+    """Each member of the zip at `path`, by name, as bytes."""
+    with zipfile.ZipFile(path) as archive:
+        return {name: archive.read(name) for name in archive.namelist()}
+
+
+def test_every_release_carries_galleria_zipped_for_its_tag(tmp_path):
+    """The release's zip holds the integration's files at its root (HACS extracts it into
+    custom_components/galleria/), manifest.json versioned from the tag, byte for byte the same on
+    a second run, recorded in manifest.json and listed in SHA256SUMS."""
+    destination, manifest = _packaged(tmp_path, tag=FAKE_TAG)
+    again, _ = _packaged(tmp_path, "again", tag=FAKE_TAG)
+    zipped = destination / GALLERIA_ZIP
+    assert zipped.read_bytes() == (again / GALLERIA_ZIP).read_bytes()
+
+    members = _zipped(zipped)
+    source = galleria_zip.SOURCE
+    shipped = {path.relative_to(source).as_posix() for path in source.rglob("*")
+               if path.is_file() and "__pycache__" not in path.parts}
+    assert set(members) == shipped and "translations/en.json" in members
+    stamped = json.loads(members["manifest.json"])
+    assert stamped["version"] == "7.8.9-rc.1" and stamped["domain"] == "galleria"
+    checked_in = json.loads((source / "manifest.json").read_bytes())
+    assert stamped == {**checked_in, "version": "7.8.9-rc.1"}
+    assert members["__init__.py"] == (source / "__init__.py").read_bytes()
+
+    sha = hashlib.sha256(zipped.read_bytes()).hexdigest()
+    assert manifest["galleria"] == {"filename": GALLERIA_ZIP, "sha256": sha,
+                                    "size": zipped.stat().st_size}
+    assert f"{sha}  {GALLERIA_ZIP}" in (destination / CHECKSUMS).read_text().splitlines()
+    assert GALLERIA_ZIP in {asset.name for asset in verify(destination, revision=REVISION).assets}
+
+
+def test_hacs_installs_the_release_zip_by_its_one_name():
+    """hacs.json (plain JSON, so it cannot import the name) asks HACS for the zip every release
+    attaches; with zip_release set and no such asset, HACS cannot install."""
+    hacs = json.loads((Path(galleria_zip.__file__).parents[1] / "hacs.json").read_text())
+    assert hacs["zip_release"] is True and hacs["filename"] == GALLERIA_ZIP
+
+
+def _rezip(destination, tag, name=GALLERIA_ZIP):
+    """Replace the release's zip with one versioned for `tag`, attached as `name`, and record it
+    in manifest.json and SHA256SUMS: only the zip is wrong."""
+    (destination / GALLERIA_ZIP).unlink()
+    data = galleria_zip.build(galleria_zip.SOURCE, tag, destination / name).read_bytes()
+    record = {"filename": name, "sha256": hashlib.sha256(data).hexdigest(), "size": len(data)}
+    _rewrite_manifest(destination, lambda manifest: manifest[GALLERIA].update(record))
+    sums = [line for line in (destination / CHECKSUMS).read_text().splitlines()
+            if not line.endswith(f"  {GALLERIA_ZIP}")]
+    (destination / CHECKSUMS).write_text("\n".join(sums) + "\n")
+    _rewrite_sum(destination, name)
+
+
+@pytest.mark.parametrize("damage, reason", [
+    (lambda d: _rezip(d, "v0.0.1"), "galleria_zip_version_mismatch:0.0.1"),
+    (lambda d: _rezip(d, TAG, name="galleria-2.zip"), "galleria_filename_invalid"),
+], ids=["another-tags-zip", "another-name"])
+def test_verify_refuses_a_galleria_zip_that_is_not_this_releases(tmp_path, damage, reason):
+    destination, _ = _packaged(tmp_path)
+    verify(destination, revision=REVISION)
+    damage(destination)
+    with pytest.raises(PackagingError, match=reason):
+        verify(destination, revision=REVISION)
+
+
+def test_packaging_refuses_an_integration_without_its_manifest(tmp_path):
+    with pytest.raises(PackagingError, match="galleria_manifest_missing"):
+        _package(_synthetic_base_bundle(tmp_path / "inputs"),
+                 node_components(tmp_path / "components"), tmp_path / "release",
+                 revision=REVISION, tag=TAG, images=IMAGE_REFERENCES, source_date_epoch=EPOCH,
+                 galleria=tmp_path / "empty")
