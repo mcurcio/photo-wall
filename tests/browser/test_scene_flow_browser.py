@@ -1472,8 +1472,11 @@ def test_save_and_apply_now_changes_what_plays_the_scene(page, registry):
 def test_save_and_apply_now_names_what_it_could_not_replace(page, registry):
     """Save and apply now never stops a Scene (cross-fade design rule 3): a Scene keeping the
     Frame (protect_frames) refuses the new version's Run, so the Show now plays the earlier one
-    on. The editor says so after Save and apply now, rather than that it applied. Mutation probe:
-    say nothing after Save and apply now (`sayEarlier` for a plain save only) -> no notice."""
+    on. The editor says so after Save and apply now, rather than that it applied, and says it
+    once: the status line says it was not applied everywhere, the notice what and why. Its
+    confirm is the primary tone, not delete's red: it destroys nothing. Mutation probes: say
+    nothing after Save and apply now (`sayEarlier` for a plain save only) -> no notice; open
+    `earlierKept` with `savedNowKept` again -> said twice; drop the request's `tone` -> red."""
     _seed(registry)
     queue = _seed_source(registry)
     _runtime(registry).command("set_scene", _console_scene("evening", cycle_seconds=20))
@@ -1490,13 +1493,28 @@ def test_save_and_apply_now_names_what_it_could_not_replace(page, registry):
         scene_continue(page, "Review")
         bar = form.get_by_role("group", name=SCENE["applyNowBar"], exact=True)
         bar.get_by_role("button", name="Save and apply now", exact=True).click()
-        page.get_by_role("dialog").get_by_role(
-            "button", name=SCENE["applyNowConfirm"], exact=True).click()
-        expect(_scenes(page).get_by_role("status").filter(
-            has_text=scene_words("savedNowKept", id="evening"))).to_be_visible()
+        confirm = page.get_by_role("dialog").get_by_role(
+            "button", name=SCENE["applyNowConfirm"], exact=True)
+        tones = confirm.evaluate("""(button) => {
+          const probe = (colour) => {
+            const el = document.createElement("span");
+            el.style.backgroundColor = `var(${colour})`;
+            document.body.append(el);
+            const value = getComputedStyle(el).backgroundColor;
+            el.remove();
+            return value;
+          };
+          return [getComputedStyle(button).backgroundColor,
+                  probe("--color-accent"), probe("--color-alarm")];
+        }""")
+        assert tones[0] == tones[1] and tones[0] != tones[2], tones
+        confirm.click()
+        said = scene_words("savedNowKept", id="evening")
+        expect(_scenes(page).get_by_role("status").filter(has_text=said)).to_be_visible()
         earlier = _scenes(page).get_by_role("group", name=scene_words("earlierGroup", id="evening"))
         expect(earlier).to_contain_text(
             scene_words("earlierKept", id="evening", names=SCENE["earlierShowNow"]))
+        assert _scenes(page).inner_text().count(said.rstrip(".")) == 1
         assert _definition(page, origin, "evening")["transition"]["style"] == "fade_out_and_in"
         assert _playing_revision(page, origin, "evening") == [1]
 

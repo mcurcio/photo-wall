@@ -687,6 +687,8 @@ function replaceRequest(sceneId, revision, { path, body }, reload, after, applyN
     key: `${applyNow ? "apply-now" : "replace"}:${sceneId}:${revision}`,
     title: applyNow ? sceneWords("applyNowTitle", { id: sceneId }) : `Replace Scene ${sceneId}?`,
     confirmLabel: applyNow ? SCENE.applyNowConfirm : "Confirm replace",
+    // Save and apply now destroys nothing (what plays changes with a fade): the primary tone.
+    tone: applyNow ? "primary" : "danger",
     body: (
       <p>
         {applyNow ? SCENE.applyNowBody : SCHEDULE.replaceNote}

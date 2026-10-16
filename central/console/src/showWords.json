@@ -66,7 +66,7 @@
     "applyNowConfirm": "Confirm save and apply now",
     "savedNow": "Scene {id} saved and applied now.",
     "earlier": "Still playing the earlier version of Scene {id}: {names}. Save and apply now changes it at once.",
-    "earlierKept": "Scene {id} saved, but not applied everywhere: {names} still plays the earlier version, because another Scene keeps its Frames. Save and apply now again once that Scene ends.",
+    "earlierKept": "{names} still plays the earlier version of Scene {id}, because another Scene keeps its Frames. Save and apply now again once that Scene ends.",
     "savedNowKept": "Scene {id} saved, but not applied everywhere.",
     "earlierGroup": "Earlier version of Scene {id}",
     "earlierShowNow": "Show now",

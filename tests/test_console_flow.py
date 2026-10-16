@@ -465,6 +465,8 @@ def test_flow_kit_and_scene_flow_shape():
         {"names": names, "message": scene_words("earlier", id="evening", names=names[0])},
         {"names": names, "message": scene_words("earlierKept", id="evening", names=names[0])},
         None]
+    # The status line says it was not applied everywhere; the notice under it does not say it again.
+    assert scene_words("savedNowKept", id="evening").rstrip(".") not in out["notices"][1]["message"]
     assert out["freeProblems"] == [[], [["fade", free.format(5)]], [], [["fade", free.format(0)]]]
     # A 12 s ending, a 1.3 s fade or a 6 s fade would be snapped by the sliders: not editable.
     assert out["outOfRange"] == [False, False, False, True]
