@@ -36,6 +36,7 @@ from contracts.enrollment import Enrollment, OutputReport, enrollment_message
 from contracts.models import Commit, Plan, PlayerConfiguration, Revocation
 from contracts.player_control import ControlSelection
 from contracts.time import ManualClock, TimeMapping
+from player.executor import AcquisitionStopped
 from player.identity import load_identity
 from player.luts import PlayerLuts
 from player.mainloop import CONTROL, DispatchRefused, LoopLate, MainLoopDispatcher
@@ -1048,9 +1049,9 @@ def test_queue_backpressure_cancellation_unblocks_producer_and_consumer():
         await asyncio.sleep(.02)
         assert not pending.done() and bridge.queue.qsize() == 4
         bridge.stopped.set()
-        with pytest.raises(ServiceError):
+        with pytest.raises(AcquisitionStopped):
             await asyncio.wait_for(pending, .2)
-        with pytest.raises(ServiceError):
+        with pytest.raises(AcquisitionStopped):
             next(bridge.chunks())
     asyncio.run(check())
 
@@ -1073,6 +1074,39 @@ def test_cancel_during_http_response_releases_download_worker(tmp_path):
                 await asyncio.wait_for(task, 2)
             assert await asyncio.get_running_loop().run_in_executor(service._worker, lambda: "free") == "free"
             assert not service._feedback()[0].secured
+        finally:
+            await close(service)
+    asyncio.run(check())
+
+
+def test_a_download_stopped_midway_is_no_failure(tmp_path):
+    """A session that ends (or a stop) while the bytes are streaming cancels the download: the
+    cache worker's chunks stop, and the assignment is simply not secured, never reported as a
+    `download` failure, so the next readiness after the loop runs again is clean. Mutation
+    probe: record "download" for AcquisitionStopped in Executor._acquire again."""
+    async def check():
+        service, server = await rig(tmp_path)
+        try:
+            service._feedback()
+            data = b"picture" * 4
+            streaming = asyncio.Event()
+
+            async def body():
+                yield data[:7]
+                streaming.set()
+                await asyncio.Event().wait()
+
+            async def stalled(request):
+                return httpx.Response(200, content=body(), headers=media_headers(data))
+            await service.link.client.aclose()
+            service.link.client = httpx.AsyncClient(transport=httpx.MockTransport(stalled))
+            task = asyncio.create_task(service.download(service._jobs[0]))
+            await asyncio.wait_for(streaming.wait(), 2)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, 2)
+            readiness = service._feedback()[0]
+            assert not readiness.secured and readiness.failures == ()
         finally:
             await close(service)
     asyncio.run(check())

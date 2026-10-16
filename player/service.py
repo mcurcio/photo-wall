@@ -65,7 +65,7 @@ from contracts.time import Clock, SystemClock, TimeMapping
 from nodeapi.node import WallReader
 from player.cache import Cache, CacheError
 from player.central_link import CentralLink, Session, read_refusal
-from player.executor import AuthorityError, Executor
+from player.executor import AcquisitionStopped, AuthorityError, Executor
 from player.geometry import light_lux_on_frame
 from player.identity import Identity, load_identity
 from player.luts import LutWants, PlayerLuts
@@ -316,7 +316,7 @@ class _ChunkBridge:
                 return
             except queue.Full:
                 await asyncio.sleep(.005)
-        raise ServiceError("download_cancelled")
+        raise AcquisitionStopped("download_cancelled")
 
     def chunks(self):
         while not self.stopped.is_set() and self.authorized():
@@ -329,7 +329,7 @@ class _ChunkBridge:
             if not self.authorized() or self.stopped.is_set():
                 break
             yield chunk
-        raise ServiceError("download_cancelled")
+        raise AcquisitionStopped("download_cancelled")
 
 
 class PlayerService:
@@ -1068,6 +1068,8 @@ class PlayerService:
                 raise           # ends the cycle: run() locates again (0014)
             success = False
             self._uplink_fault(fault, error)
+        except AcquisitionStopped:
+            success = False     # stopped, not failed: no fault (its authority is checked again)
         except (httpx.HTTPError, ServiceError, TimeoutError, OSError, AuthorityError):
             success = False
             self.fault(fault)

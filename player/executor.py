@@ -40,6 +40,12 @@ class AuthorityError(ValueError):
     """A message cannot establish current execution authority."""
 
 
+class AcquisitionStopped(Exception):
+    """The bytes stopped arriving because the download was stopped (its session ended, the Player
+    stopped, or the assignment lost its authority), not because they failed: the assignment stays
+    unsecured and no failure is recorded, so a cancelled download is never reported as one."""
+
+
 @dataclass
 class _Assignment:
     layer: Layer
@@ -345,7 +351,8 @@ class Executor:
                 if self._assignments.get(assignment_id) is assignment:
                     assignment.secured = False
                     self._lose_preparation(assignment)
-                    assignment.failure = "capacity" if isinstance(error, CacheCapacityError) else "download"
+                    if not isinstance(error, AcquisitionStopped):
+                        assignment.failure = "capacity" if isinstance(error, CacheCapacityError) else "download"
             return False
         return self._accept_acquired_path(assignment_id, assignment, path)
 
