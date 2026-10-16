@@ -589,6 +589,20 @@ def light_on_frame(light: WashLight | FarLight | CloseLight, entry: RoomLightEnt
     return tuple(light.lux * state.rgb[index] * state.brightness * shares[index] / LUMA[index] for index in range(3))
 
 
+def light_lux_on_frame(lighting: FrameLighting, document: RoomLightsDocument | None) -> float | None:
+    """The light on the Frame at its centre, lux: the luminance (LUMA weights) of the sum of
+    `light_on_frame` over `lighting`'s lights against `document` (a close light at the centre, the
+    mat's shadow aside). None for no document yet (nothing drawn). What the Player reports as a
+    Frame's `light_lux` (contracts/node_state.py `FrameReport`). Pure."""
+    if document is None:
+        return None
+    total = 0.0
+    for light in lighting.lights:
+        rgb = light_on_frame(light, document.lights.get(light.light))
+        total += sum(weight * channel for weight, channel in zip(LUMA, rgb, strict=True))
+    return total
+
+
 def _white(lux: float, kelvin: int) -> Linear:
     """`lux` of a white light of `kelvin`, at luminance 1 per lux."""
     return tuple(lux * channel for channel in light_colour(kelvin))

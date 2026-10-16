@@ -1,12 +1,12 @@
 """A component's way to use its Node's bus: the Node-role session, and a read-only WALL follower.
 
 Both run on one lifecycle (`_Lifecycle`): their own thread and event loop, a connect that runs
-forever, **attach** at every connect, and stop. A session's attach applies every line this component
-declares (`contracts.node_link.STORE_LINES`: its own slice's line and any line handed to `apply_line`,
-such as apps' Player line from the held Player releases), or, for a slice whose line another
-component declares, waits with backoff until every stream of the slice exists; then re-puts the state
-it holds plus `birth`, registers its methods once as a `nats.micro` service named the component
-(subjects `<component>.method.<name>`), and marks attached. A session that reads the wall, and every
+forever, **attach** at every connect, and stop. Every store line's declarer is its own component
+(`contracts.node_link.STORE_LINES`; 0017 C4, the Player its own line since 2026-10-16), so a session
+is built only for the line its component declares, and its attach applies its slice; then re-puts
+the state it holds plus `birth` (contracts/node_state.py `Birth`, the one home of its shape),
+registers its methods once as a `nats.micro` service named the component (subjects
+`<component>.method.<name>`), and marks attached. A session that reads the wall, and every
 WallReader, also creates the Node's WALL mirror at attach when it is absent. Attach runs again on
 every reconnect and whenever a publish finds a stream of the slice absent, so `birth` is written in
 every epoch in any start order, and a bus that started empty is refilled by the writer that owns the
@@ -44,10 +44,11 @@ import nats
 import nats.errors
 import nats.micro
 from nats.aio.client import Client
-from nats.js.errors import NoStreamResponseError, NotFoundError
+from nats.js.errors import NoStreamResponseError
 from nats.micro.service import ServiceConfig
 
 from contracts.node_link import METHOD_TOKEN, WALL_STREAM
+from contracts.node_state import Birth, encode_birth
 from nodeapi.buffers import (
     BIRTH_KEY,
     OUTBOX_KEY,
@@ -81,7 +82,6 @@ OUTBOX_MESSAGES: Final = 4096
 SESSION_SCHEMA_MAJOR: Final = 1         # the major of the session's own events and birth
 _UNKNOWN_CALLER: Final = "unknown"
 _BACKOFF: Final = (0.1, 2.0)            # first and largest wait between attempts
-ATTACH_BACKOFF_SECONDS: Final = (0.1, 2.0)   # first and largest wait while a declarer has not applied
 _PUBLISH_SECONDS: Final = 2.0
 _WATCH_BATCH: Final = 64
 _WATCH_SECONDS: Final = 1.0
@@ -250,13 +250,16 @@ def _wall_value(item: Read) -> bytes:
 
 
 class NodeSession:
-    """One component's session on its Node's bus: its line's declarer, or a session that waits for it."""
+    """One component's session on its Node's bus: the declarer of its slice's line."""
 
     def __init__(self, component: str, slice_: Slice, release: Release, *, url: str,
                  methods: Mapping[str, MethodHandler] | None = None, reads_wall: bool = False) -> None:
+        """ValueError("session_component") unless component matches [a-z]+;
+        ValueError("session_does_not_declare_line") unless the slice's line is the component's."""
         if type(component) is not str or not _COMPONENT.fullmatch(component):
             raise ValueError("session_component")
-        self._declares = slice_.store_line.declarer == component
+        if slice_.store_line.declarer != component:
+            raise ValueError("session_does_not_declare_line")
         self._methods = dict(methods or {})
         self._configs = {config.name: config for config in slice_.buffers}
         line = slice_.line
@@ -273,10 +276,10 @@ class NodeSession:
         self._reads_wall = bool(reads_wall)
         self._state_table = table_of(state)
         self._state_prefix = state_prefix(line)
-        self._birth = json.dumps({
-            "component": component, "version": release.version, "pipe": slice_.store_line.pipe.value,
-            "release_digest": release.digest, "schema_majors": dict(release.schema_majors),
-            "slice_digest": slice_.digest}, sort_keys=True, separators=(",", ":")).encode()
+        self._birth = encode_birth(Birth(
+            component=component, version=release.version, pipe=slice_.store_line.pipe.value,
+            release_digest=release.digest, schema_majors=dict(release.schema_majors),
+            slice_digest=slice_.digest))
         if len(self._birth) > self._state_table.sizes[BIRTH_KEY]:
             raise ValueError("state_value_too_large")
         self._component, self._slice, self._url = component, slice_, url
@@ -284,10 +287,9 @@ class NodeSession:
         self._outbox: deque[tuple[str, bytes, dict[str, str]]] = deque(maxlen=OUTBOX_MESSAGES)
         self._dropped = 0                   # events the full outbox dropped, never published
         self._held: dict[str, bytes] = {}
-        self._lines: dict[str, Slice] = {}  # line -> the slice `apply_line` handed over, applied at every attach
         self._dirty: dict[str, None] = {}   # state keys put and not yet acknowledged, in put order
         self._count_dropped(0)
-        self._life = _Lifecycle(component, url, attach=self._attach_or_refresh, run=self._tasks)
+        self._life = _Lifecycle(component, url, attach=self._attach, run=self._tasks)
         self._wake = asyncio.Event()
         self._service = None
         self._events = Events(self)
@@ -323,16 +325,6 @@ class NodeSession:
     def wait_attached(self, timeout: float) -> bool:
         return self._life.attached.wait(timeout)
 
-    def apply_line(self, slice_: Slice) -> None:
-        """Hold `slice_` as the slice of a line this component declares (not its own slice's line) and
-        apply it now and at every later attach; thread-safe, never blocks. apps hands over the union of
-        the held Player releases' slices during a hot-swap, then the new slice alone."""
-        if slice_.store_line.declarer != self._component or slice_.line == self._slice.line:
-            raise ValueError("session_does_not_declare_line")
-        with self._lock:
-            self._lines[slice_.line] = slice_
-        self._life.request_attach()
-
     # The session's own loop.
 
     def _tasks(self, client: Client) -> list[Coroutine[object, object, None]]:
@@ -348,25 +340,14 @@ class NodeSession:
                                 life=self._life, name=self._component))
         return tasks
 
-    async def _attach_or_refresh(self, client: Client, refresh: bool) -> None:
-        if refresh:   # attached: `apply_line` handed over a line
-            await self._apply_lines()
-        else:
-            await self._attach()
-
-    async def _attach(self) -> None:
-        """Apply every line this component declares, or wait until its slice's declarer has; create
-        the WALL mirror if this session reads it, re-put every held state key and birth, register the
-        methods once."""
-        await self._apply_lines()
-        if self._declares:
-            await apply(self._jetstream, self._slice)
-        else:
-            delay = ATTACH_BACKOFF_SECONDS[0]
-            while missing := await self._missing():
-                log.debug("%s: waiting for %s's declarer: %s absent", self._component, self._slice.line, missing)
-                await self._life.pause(delay)
-                delay = min(delay * 2, ATTACH_BACKOFF_SECONDS[1])
+    async def _attach(self, client: Client, refresh: bool) -> None:
+        """Apply the slice; create the WALL mirror if this session reads it, re-put every held state
+        key and birth, register the methods once. An attach asked for while already attached on this
+        connection (a reconnect noticed twice) does nothing: putting the state again would only
+        supersede values Central has not read yet."""
+        if refresh:
+            return
+        await apply(self._jetstream, self._slice)
         if self._reads_wall:
             await declare(self._jetstream, wall_mirror_config())   # create only, never updated
         with self._lock:
@@ -385,21 +366,6 @@ class NodeSession:
                     await service.stop()
                 raise
             self._service = service
-
-    async def _apply_lines(self) -> None:
-        with self._lock:
-            lines = list(self._lines.values())
-        for slice_ in lines:
-            await apply(self._jetstream, slice_)
-
-    async def _missing(self) -> str | None:
-        """The first stream of the slice the bus does not hold (STREAM.INFO, no options), or None."""
-        for config in self._slice.buffers:
-            try:
-                await self._jetstream.stream_info(config.name)
-            except NotFoundError:
-                return config.name
-        return None
 
     def _endpoint(self, name: str, handler: MethodHandler):
         async def answer(request) -> None:
@@ -509,8 +475,8 @@ class NodeSession:
 
 
 class WallReader:
-    """A read-only follower of the Node's WALL mirror for a component that holds no store line and
-    writes nothing to the bus (the Player reads the room-lights document through one). No slice,
+    """A read-only follower of the Node's WALL mirror, apart from any session (the Player reads the
+    room-lights document through one, beside its own line's session). No slice,
     state, birth or methods. It runs on the session's lifecycle: at every connect it creates the WALL
     mirror when absent (create only, `wall_mirror_config`, as a session with reads_wall does), then
     follows WALL into `wall` from each key's latest value through the session's own watch. The view

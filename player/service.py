@@ -45,6 +45,7 @@ from contracts.models import (
     Revocation,
 )
 from contracts.node_link import NODE_BUS_URL
+from contracts.node_state import FrameReport, FrameReports
 from contracts.player_control import (
     CAPABILITIES,
     ControlAck,
@@ -54,7 +55,7 @@ from contracts.player_control import (
     ControlSelection,
 )
 from contracts.room_light import (
-    ROOM_LIGHTS_DRAWN_PATH,
+    LUX_MAX,
     ROOM_LIGHTS_DRAWN_REPEAT_SECONDS,
     RoomLightsDocument,
     RoomLightsDrawn,
@@ -65,11 +66,13 @@ from nodeapi.node import WallReader
 from player.cache import Cache, CacheError
 from player.central_link import CentralLink, Session, read_refusal
 from player.executor import AuthorityError, Executor
+from player.geometry import light_lux_on_frame
 from player.identity import Identity, load_identity
 from player.luts import LutWants, PlayerLuts
 from player.mainloop import DispatchRefused, LatePosts, LoopLate, MainLoopDispatcher, Tick
 from player.node_app_link import NodeAppLinkClient
 from player.output_discovery import discover_outputs, output_app_id
+from player.player_line import PlayerLine
 from player.probe_responder import ProbeResponder
 from player.rendering import CapacityResult, PrepareResult, PresentationResult, Renderer
 from player.room_lights import start_room_lights
@@ -117,9 +120,6 @@ APP_LINK_RETRY = 5.0
 # main_loop_late fault instead of waiting on a starved loop in silence (G8). Readiness
 # is left as last sent: a late loop never withdraws prepared playback (E-G8-8 decision).
 DISPATCH_DEADLINE = 2 * REPORT_INTERVAL
-# How often the room-lights report looks for a change (and retries a failed PUT); it is sent on a
-# change and at least every ROOM_LIGHTS_DRAWN_REPEAT_SECONDS.
-ROOM_LIGHTS_DRAWN_TURN = REPORT_INTERVAL
 LOG = logging.getLogger("photo_wall.player")
 
 
@@ -343,7 +343,7 @@ class PlayerService:
                  node_link_client: NodeAppLinkClient | None = None,
                  boot_id_path: Path = Path("/proc/sys/kernel/random/boot_id"),
                  boot_context: BootContext, luts: LutWants, room_lights_dispatch: Callable | None = None,
-                 node_bus_url: str = NODE_BUS_URL):
+                 node_bus_url: str = NODE_BUS_URL, release_digest: str = "unknown"):
         self.config, self.identity, self.outputs = config, identity, outputs
         # The LUTs the renderer asks for (print look): fetched here, held there. The same
         # PlayerLuts the renderer was built with (`main`).
@@ -354,13 +354,21 @@ class PlayerService:
         # (`room_lights_changed`).
         self._room_lights_dispatch = room_lights_dispatch or dispatcher
         self._room_lights_pending: RoomLightsDocument | None = None
-        # What the renderer last drew with, and the reader's health: reported to Central.
+        # What the renderer last drew with (the document and its digest), and the reader's health:
+        # reported on the Player's line.
+        self._room_lights_document: RoomLightsDocument | None = None
         self._room_lights_drawn: str | None = None
         self._room_lights_following: Callable[[], bool] | None = None
-        self._room_lights_wake: tuple[asyncio.AbstractEventLoop, asyncio.Event] | None = None
-        # The Node's bus, where the room lights are followed from `start` (`node_bus_url`).
+        # The Node's bus, where the room lights are followed and the Player's own line is written
+        # from `start` (`node_bus_url`; player/player_line.py). `release_digest`: its birth's.
         self._node_bus_url = node_bus_url
         self._room_lights_reader: WallReader | None = None
+        self.line = PlayerLine(release_digest, url=node_bus_url)
+        self._line_started = False
+        # What the line was last given, and when the drawn report is due again (`_report_on_line`).
+        self._frames_reported: tuple | None = None
+        self._drawn_reported: RoomLightsDrawn | None = None
+        self._drawn_due = -math.inf
         self.clock = clock or SystemClock()
         self.mapping = TimeMapping(self.clock)
         self.link = CentralLink(trust, unauthorized=Unauthorized, client=client,
@@ -436,8 +444,8 @@ class PlayerService:
     def room_lights_changed(self, document: RoomLightsDocument) -> None:
         """A newer room-lights document (player/room_lights.py, on the WallReader's thread): handed to
         the renderer on the GLib thread, which draws every Frame again with it. It never touches the
-        executor, the plan, the configuration or the control State's delivery; Central hears of it
-        only through `room_lights_drawn`. Several arriving before the loop runs the hop draw once,
+        executor, the plan, the configuration or the control State's delivery; it is heard of only
+        through the Player's line (`room_lights_drawn`, each Frame's light). Several arriving before the loop runs the hop draw once,
         newest."""
         with self._lock:
             idle = self._room_lights_pending is None
@@ -452,14 +460,13 @@ class PlayerService:
             return
         self.renderer.set_room_lights(document)
         with self._lock:
+            self._room_lights_document = document
             self._room_lights_drawn = room_lights_digest(document)
-        self._wake_room_lights_report()
 
     def watch_room_lights_reader(self, following: Callable[[], bool]) -> None:
         """The room-lights reader's health, asked at every report (thread-safe, never blocks)."""
         with self._lock:
             self._room_lights_following = following
-        self._wake_room_lights_report()
 
     def room_lights_drawn(self) -> RoomLightsDrawn:
         """What the Frames were last drawn with (None before the first document) and whether the
@@ -468,42 +475,39 @@ class PlayerService:
             drawn, following = self._room_lights_drawn, self._room_lights_following
         return RoomLightsDrawn(drawn=drawn, following=following is not None and bool(following()))
 
-    def _wake_room_lights_report(self) -> None:
-        """Thread-safe: the room-lights report takes its next turn now."""
-        if (report_wake := self._room_lights_wake) is not None:
-            loop, wake = report_wake
-            with contextlib.suppress(RuntimeError):  # the loop has closed: nothing to wake
-                loop.call_soon_threadsafe(wake.set)
+    def frame_reports(self) -> FrameReports:
+        """Every Frame the Player draws now (its control State's bindings): the binding generation,
+        its Output, whether its picture is on screen, and the light on it at its centre for the
+        room-lights document last drawn (None before the first; `light_lux_on_frame`, capped at
+        LUX_MAX). On the GLib thread."""
+        self._main()
+        with self._lock:
+            configuration, document, executor = self._configuration, self._room_lights_document, self.executor
+        reports = []
+        for binding in configuration.bindings if configuration is not None else ():
+            lux = light_lux_on_frame(binding.lighting, document)
+            try:
+                reports.append(FrameReport(
+                    frame_id=binding.frame_id, generation=binding.generation, output_id=binding.output_id,
+                    showing=executor is not None and executor.showing(binding),
+                    light_lux=None if lux is None else min(lux, LUX_MAX)))
+            except ValidationError:   # an id the report's contract refuses: left out, never a fault
+                LOG.debug("player: no Frame report for %s", binding.frame_id)
+        return FrameReports(frames=tuple(reports))
 
-    async def _room_lights_drawn_loop(self) -> None:
-        """While linked: PUT `room_lights_drawn()` whenever it differs from the last one Central
-        accepted, and at least every ROOM_LIGHTS_DRAWN_REPEAT_SECONDS. A failed PUT is tried again
-        after a wait that doubles from one turn up to the repeat period (a refusal that persists is
-        not a request every turn); it never ends the session or touches the control State."""
-        wake = asyncio.Event()
-        self._room_lights_wake = (asyncio.get_running_loop(), wake)
-        accepted: RoomLightsDrawn | None = None
-        due = retry_at = 0.0
-        backoff = ROOM_LIGHTS_DRAWN_TURN
-        while not self._stop.is_set():
-            wake.clear()
-            report = self.room_lights_drawn()
-            now = asyncio.get_running_loop().time()
-            if (report != accepted or now >= due) and now >= retry_at:
-                try:
-                    await self._put_no_content(ROOM_LIGHTS_DRAWN_PATH, report.model_dump(mode="json"))
-                    accepted, due, backoff = report, now + ROOM_LIGHTS_DRAWN_REPEAT_SECONDS, ROOM_LIGHTS_DRAWN_TURN
-                except Exception as error:
-                    LOG.debug("player: room-lights report not accepted: %s", type(error).__name__)
-                    retry_at, backoff = now + backoff, min(2 * backoff, ROOM_LIGHTS_DRAWN_REPEAT_SECONDS)
-            with contextlib.suppress(TimeoutError):
-                await asyncio.wait_for(wake.wait(), ROOM_LIGHTS_DRAWN_TURN)
-
-    async def _put_no_content(self, path: str, body: dict) -> None:
-        """One PUT Central answers 204; any other answer is its refusal."""
-        async with self.link.stream(self.session, "PUT", path, body=body) as response:
-            if response.status_code != 204:
-                raise await read_refusal(response, self.central.origin.url(path))
+    def _report_on_line(self) -> None:
+        """On the GLib thread, every main-loop turn: the Player's line gets `frames` whenever a Frame's
+        report changes, and `room-lights-drawn` whenever it changes and at least every
+        ROOM_LIGHTS_DRAWN_REPEAT_SECONDS, unchanged too (Central judges it by age). The line holds
+        each and publishes it when attached; nothing here waits on the bus."""
+        frames = self.frame_reports()
+        if frames.frames != self._frames_reported:
+            self.line.put_frames(frames)
+            self._frames_reported = frames.frames
+        drawn, now = self.room_lights_drawn(), self.clock.monotonic()
+        if drawn != self._drawn_reported or now >= self._drawn_due:
+            self.line.put_drawn(drawn)
+            self._drawn_reported, self._drawn_due = drawn, now + ROOM_LIGHTS_DRAWN_REPEAT_SECONDS
 
     def _render_unbound_diagnostic(self) -> None:
         """Publish Central-link context only on known unbound outputs."""
@@ -921,6 +925,7 @@ class PlayerService:
                     if len(self._observations) == self._observations.maxlen:
                         self.fault("observation_capacity")
                     self._observations.append(observation)
+        self._report_on_line()
 
     def _feedback(self):
         self._main()
@@ -1318,8 +1323,7 @@ class PlayerService:
                     tasks = [asyncio.create_task(self._control_loop()),
                              asyncio.create_task(self._time_loop()),
                              asyncio.create_task(self._media_loop()),
-                             asyncio.create_task(self._observation_loop()),
-                             asyncio.create_task(self._room_lights_drawn_loop())]
+                             asyncio.create_task(self._observation_loop())]
                     if self.link.websocket_connect is not False:
                         tasks.append(asyncio.create_task(self._websocket_loop()))
                     done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
@@ -1383,14 +1387,24 @@ class PlayerService:
             self._session, self._located = None, False
 
     def start(self):
-        """The network thread, and the room lights followed from the Node's WALL mirror on their own
-        thread, never blocking the Player (the bus away keeps the last document: the mirror)."""
+        """The network thread, and the Node's bus (`start_node_bus`)."""
         self._main()
         if self._thread is not None:
             raise RuntimeError("service already started")
         self._thread = threading.Thread(target=lambda: asyncio.run(self.run()),
                                         name="player-network", daemon=False)
         self._thread.start()
+        self.start_node_bus()
+
+    def start_node_bus(self):
+        """The room lights followed from the Node's WALL mirror, and the Player's own line written,
+        each on its own thread, never blocking the Player (the bus away keeps the last document: the
+        mirror; the line holds its reports until it attaches). `start` calls it; on the GLib thread."""
+        self._main()
+        if self._line_started:
+            raise RuntimeError("node bus already started")
+        self._line_started = True
+        self.line.start()
         self._room_lights_reader = start_room_lights(self, self._node_bus_url)
 
     def request_relink(self):
@@ -1412,6 +1426,8 @@ class PlayerService:
         if (reader := self._room_lights_reader) is not None:   # asked to stop, never waited on here
             self._room_lights_reader = None
             reader.stop(0)
+        if self._line_started:
+            self.line.stop(0)
 
     @property
     def stopped(self):

@@ -1,22 +1,30 @@
-"""The Player reports what it drew its Frames with and whether its room-lights reader follows: through
-the running PlayerService's test rig (tests/test_player_service.py) with Central's answers recorded,
-the report loop PUTs ROOM_LIGHTS_DRAWN_PATH on a change and at least every repeat period."""
+"""The Player reports on its own line (player/player_line.py): through the running PlayerService's test
+rig (tests/test_player_service.py) with the line recorded, every main-loop turn (`tick_main`) gives the
+line `frames` when a Frame's report changes (its binding generation, its Output, whether its picture is
+on screen, the light on it as last drawn) and `room-lights-drawn` on a change and at least every
+ROOM_LIGHTS_DRAWN_REPEAT_SECONDS. The report never rides the control link: no HTTP request carries it.
+The same reports on a real Node's bus, read through its door, are
+tests/integration/test_node_bus_wall_reader.py's."""
 from __future__ import annotations
 
 import asyncio
-import json
 
 import httpx
-import pytest
+from test_executor import binding
 from test_player_service import TRUST, Server, boot_context, close, immediate, rig
 from uplink_fakes import finding
 
 import player.service as service_module
+from contracts.frame_lighting import AT_FULL, FrameLighting, Paper, WashLight
+from contracts.models import Commit
+from contracts.node_state import FrameReport, FrameReports
 from contracts.room_light import (
     ROOM_LIGHTS_DRAWN_PATH,
+    ROOM_LIGHTS_DRAWN_REPEAT_SECONDS,
     Dimmer,
     FixedColour,
     RoomLightsDocument,
+    RoomLightsDrawn,
     WhiteEntry,
     room_lights_digest,
 )
@@ -26,138 +34,140 @@ from player.luts import PlayerLuts
 from player.rendering import RecordingRenderer
 from player.service import PlayerConfig, PlayerService
 
-TURN = 0.02
+LIGHT ="bookshelf-spot"
+WASHED = FrameLighting(mat_depth_mm=0, lights=(WashLight(light=LIGHT, lux=150, reference=AT_FULL),),
+                       paper=Paper(whiteness=.9, ink_density=2))
 
 
-class DrawnServer(Server):
-    """Central answering the report 204, or `refusals` 503s first."""
-
-    def __init__(self, clock, refusals: int = 0):
-        super().__init__(clock)
-        self.reports: list[dict] = []
-        self.refusals = refusals
-
-    def __call__(self, request):
-        if request.url.path != ROOM_LIGHTS_DRAWN_PATH:
-            return super().__call__(request)
-        self.requests.append(request)
-        assert request.method == "PUT"
-        if self.refusals:
-            self.refusals -= 1
-            return httpx.Response(503, json={"error": "fixture_outage"})
-        self.reports.append(json.loads(request.content))
-        return httpx.Response(204)
+def document(change: int, on: bool) -> RoomLightsDocument:
+    return RoomLightsDocument(change=change, lights={
+        LIGHT: WhiteEntry(colour=FixedColour(kelvin=2700), state=Dimmer(on=on, brightness=1.0))})
 
 
-def document(on: bool) -> RoomLightsDocument:
-    return RoomLightsDocument(change=1, lights={
-        "bookshelf-spot": WhiteEntry(colour=FixedColour(kelvin=2700), state=Dimmer(on=on, brightness=1.0))})
+class RecordedLine:
+    """The Player's line as the service drives it: every put, in order."""
+
+    def __init__(self) -> None:
+        self.frames: list[FrameReports] = []
+        self.drawn: list[RoomLightsDrawn] = []
+
+    def put_frames(self, reports: FrameReports) -> None:
+        self.frames.append(reports)
+
+    def put_drawn(self, drawn: RoomLightsDrawn) -> None:
+        self.drawn.append(drawn)
 
 
-async def _until(check, what: str, seconds: float = 3.0) -> None:
-    async def wait():
-        while not check():
-            await asyncio.sleep(TURN / 2)
-    try:
-        await asyncio.wait_for(wait(), seconds)
-    except TimeoutError:
-        raise AssertionError(what) from None
+async def _recorded(tmp_path):
+    service, server = await rig(tmp_path)
+    service.line = RecordedLine()
+    hops = []
+    service._room_lights_dispatch = hops.append
+    return service, server, hops
 
 
-@pytest.fixture
-def quick(monkeypatch):
-    monkeypatch.setattr(service_module, "ROOM_LIGHTS_DRAWN_TURN", TURN)
-
-
-def test_the_player_reports_the_document_it_drew_and_its_readers_health(tmp_path, quick):
-    """A document drawn through the GLib hop is reported once with its digest and following; the same
-    document drawn again sends nothing before the repeat period; the reader no longer following is
-    reported. Mutation probe: `_draw_room_lights` stops recording the digest -> drawn stays None."""
+def test_frames_carry_each_bindings_generation_and_the_light_drawn_on_it(tmp_path):
+    """Mutation probes: report the generation as 1 always -> the rebound Frame reads 1; skip the new
+    document's light -> light_lux stays at its dark value."""
     async def check():
-        server = DrawnServer(ManualClock(100))
-        service, _ = await rig(tmp_path, server=server)
-        hops = []
-        service._room_lights_dispatch = hops.append
-        following = [True]
-        service.watch_room_lights_reader(lambda: following[0])
-        task = asyncio.create_task(service._room_lights_drawn_loop())
+        service, server, hops = await _recorded(tmp_path)
+        line = service.line
         try:
-            await _until(lambda: server.reports, "the first report")
-            assert server.reports == [{"drawn": None, "following": True}]
+            # The rig's first state was reported on its turn already; unchanged, it is not put again.
+            assert service.frame_reports() == FrameReports(frames=(FrameReport(
+                frame_id="frame1", generation=1, output_id="hdmi1", showing=False, light_lux=None),))
+            service.tick_main()
+            assert line.frames == []
 
-            lit = document(True)
+            # Bound again: a new generation and the Frame's lights.
+            server.offer(bindings=(binding().model_copy(update={"generation": 2, "lighting": WASHED}),),
+                         configuration_revision=2, revision=2, layers=())
+            await service.poll_state()
+            assert [report.generation for report in line.frames[-1].frames] == [2]
+            assert line.frames[-1].frames[0].light_lux is None           # nothing drawn yet
+
+            service.room_lights_changed(document(1, False))
+            hops.pop()()
+            service.tick_main()
+            assert line.frames[-1].frames[0].light_lux == 0.0            # the light is off
+            service.room_lights_changed(document(2, True))
+            hops.pop()()
+            service.tick_main()
+            assert abs(line.frames[-1].frames[0].light_lux - 150) < 1e-6  # a wash at full: its lux
+        finally:
+            await close(service)
+    asyncio.run(check())
+
+
+def test_a_frame_reads_showing_once_its_picture_is_drawn(tmp_path):
+    async def check():
+        service, server, _ = await _recorded(tmp_path)
+        try:
+            assert service.frame_reports().frames[0].showing is False
+            readiness, _ = service._feedback()
+            assert await service.download(service._jobs[0])
+            service.tick_main()
+            readiness, _ = service._feedback()
+            server.offer(commits=(Commit(plan_id="offered", revision=1, authority_epoch=1,
+                                         readiness_sequence=readiness.sequence, assignment_ids=("picture",),
+                                         committed_at=100),))
+            await service.poll_state()
+            assert service.line.frames[-1].frames[0].showing is True
+        finally:
+            await close(service)
+    asyncio.run(check())
+
+
+def test_the_drawn_report_is_put_on_a_change_and_again_every_repeat_period(tmp_path):
+    """Mutation probe: stop re-putting an unchanged report -> no second put after the period."""
+    async def check():
+        service, _, hops = await _recorded(tmp_path)
+        line = service.line
+        following = [True]
+        try:
+            # Put on the rig's first turn already (no reader watched yet: not following); unchanged,
+            # it is not put again before the period.
+            assert service.room_lights_drawn() == RoomLightsDrawn(drawn=None, following=False)
+            service.tick_main()
+            assert line.drawn == []
+            service.watch_room_lights_reader(lambda: following[0])
+            service.tick_main()
+            assert line.drawn[-1] == RoomLightsDrawn(drawn=None, following=True)
+
+            lit = document(1, True)
             service.room_lights_changed(lit)
-            assert service.room_lights_drawn().drawn is None          # not drawn until the hop runs
+            service.tick_main()
+            assert line.drawn[-1].drawn is None                     # not drawn until the hop runs
             hops.pop()()
-            digest = room_lights_digest(lit)
-            await _until(lambda: len(server.reports) == 2, "the drawn document's report")
-            assert server.reports[1] == {"drawn": digest, "following": True}
+            service.tick_main()
+            assert line.drawn[-1] == RoomLightsDrawn(drawn=room_lights_digest(lit), following=True)
 
-            service.room_lights_changed(lit)                            # drawn again, the same
-            hops.pop()()
-            await asyncio.sleep(10 * TURN)
-            assert len(server.reports) == 2
+            count = len(line.drawn)
+            service.clock.advance(ROOM_LIGHTS_DRAWN_REPEAT_SECONDS - 1)
+            service.tick_main()
+            assert len(line.drawn) == count                         # unchanged, not yet due
+            service.clock.advance(1)
+            service.tick_main()
+            assert len(line.drawn) == count + 1 and line.drawn[-1] == line.drawn[-2]   # due: put again
 
             following[0] = False
-            await _until(lambda: len(server.reports) == 3, "the reader's health")
-            assert server.reports[2] == {"drawn": digest, "following": False}
-            assert service.renderer.room_lights == [lit, lit]
+            service.tick_main()
+            assert line.drawn[-1] == RoomLightsDrawn(drawn=room_lights_digest(lit), following=False)
+            assert service.renderer.room_lights == [lit]
         finally:
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
             await close(service)
     asyncio.run(check())
 
 
-def test_a_refused_report_is_tried_again_and_the_report_repeats(tmp_path, quick, monkeypatch):
-    """A report Central refuses is tried at the next turn; one Central accepted is sent again every
-    repeat period. Before a reader is watched the report reads not following."""
-    monkeypatch.setattr(service_module, "ROOM_LIGHTS_DRAWN_REPEAT_SECONDS", 5 * TURN)
-
-    async def check():
-        server = DrawnServer(ManualClock(100), refusals=2)
-        service, _ = await rig(tmp_path, server=server)
-        task = asyncio.create_task(service._room_lights_drawn_loop())
-        try:
-            await _until(lambda: len(server.reports) >= 3, "the refused report, then its repeats")
-            assert server.refusals == 0
-            assert all(report == {"drawn": None, "following": False} for report in server.reports)
-        finally:
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
-            await close(service)
-    asyncio.run(check())
-
-
-def test_a_refusal_that_persists_is_tried_ever_less_often(tmp_path, quick, monkeypatch):
-    """Each failed PUT doubles the wait before the next, up to the repeat period. Mutation probe: no
-    wait after a failure -> a request every turn, about 30 here."""
-    monkeypatch.setattr(service_module, "ROOM_LIGHTS_DRAWN_REPEAT_SECONDS", 8 * TURN)
-
-    async def check():
-        server = DrawnServer(ManualClock(100), refusals=1000)
-        service, _ = await rig(tmp_path, server=server)
-        task = asyncio.create_task(service._room_lights_drawn_loop())
-        try:
-            await asyncio.sleep(30 * TURN)
-            tried = 1000 - server.refusals
-            assert 2 <= tried <= 9, tried
-        finally:
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
-            await close(service)
-    asyncio.run(check())
-
-
-def test_a_running_session_sends_the_report(tmp_path, quick, monkeypatch):
-    """run() starts the report with the session's other loops. Mutation probe: leave it out of the
-    session's tasks -> Central never hears it."""
+def test_a_running_session_sends_no_drawn_report_over_http(tmp_path, monkeypatch):
+    """The report left the control link (P4): a running session polls its state, and no request it
+    makes carries the drawn report."""
     monkeypatch.setattr(service_module, "BACKOFF", (.001,) * 4)
 
     async def check():
         directory = tmp_path / "cache"
         directory.mkdir(mode=0o700)
-        server = DrawnServer(ManualClock(100))
+        server = Server(ManualClock(100))
 
         def handle(request):
             answer = server(request)
@@ -173,8 +183,11 @@ def test_a_running_session_sends_the_report(tmp_path, quick, monkeypatch):
             boot_context=boot_context(), luts=PlayerLuts())
         task = asyncio.create_task(service.run())
         try:
-            await _until(lambda: server.reports, "the running session's report")
-            assert server.reports[0] == {"drawn": None, "following": False}
+            async def polled():
+                while sum(request.url.path == "/v1/player/state" for request in server.requests) < 3:
+                    await asyncio.sleep(.01)
+            await asyncio.wait_for(polled(), 5)
+            assert ROOM_LIGHTS_DRAWN_PATH not in {request.url.path for request in server.requests}
         finally:
             service.stop()
             await asyncio.wait_for(task, 3)

@@ -662,6 +662,16 @@ class Executor:
                         self._lose_preparation(assignment)
             self._clock_gate()
 
+    def showing(self, binding: OutputBinding) -> bool:
+        """Whether `binding`'s Frame has a picture on screen: the composition its Output last
+        acknowledged drawing is this binding's (Frame and generation) and some layer of it can be
+        seen (a retained picture included); black, nothing drawn yet or another binding's is not."""
+        with self._lock:
+            current = self._current.get(binding.output_id)
+            return (current is not None
+                    and (current.binding.frame_id, current.binding.generation) == (binding.frame_id, binding.generation)
+                    and bool(visible_now(current.layers)))
+
     @property
     def failures(self) -> tuple[Failure, ...]:
         with self._lock:

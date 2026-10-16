@@ -1,38 +1,62 @@
-"""The Player's read-only WALL follower on real servers (nodeapi.node.WallReader, player/room_lights.py).
+"""The Player on its Node's bus, on real servers: its read-only WALL follower (nodeapi.node.WallReader,
+player/room_lights.py) and its own line (player/player_line.py).
 
 A hub and a Node on the shipped configurations, Central's room-lights document on the hub's WALL: a
-WallReader on the Node sees it through the Node's mirror (which it creates itself, as the Player holds
-no store line) and reads following; the hub stops and the reader's view still holds it; a new
+WallReader on the Node sees it through the Node's mirror (which it creates itself) and reads following; the hub stops and the reader's view still holds it; a new
 WallReader started with the hub down gets it from the Node's mirror; the Node's bus stopping reads
 not following, and restarting empty (its memory store) while the hub is still down leaves the first
 reader's view holding the last good document and following again once the new mirror is read. A
 reader on a bus where no mirror can be created never reads following. The Player's wiring
 (`start_room_lights`) hands its sink each document and the reader's health.
+
+The Player's line: a PlayerService started on the Node (`start_node_bus`, as `start` does) declares
+its line and writes `birth`, `frames` (one report per bound Frame with its binding generation, the
+light on it rising when a wash comes on) and `room-lights-drawn` (the drawn document's digest, put
+again unchanged once the repeat period passes), each read through the Node's read-only door; after a
+bus crash all three are back with no help from Central.
 """
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 import threading
 from collections.abc import Callable
 
 from integration.bus_servers import (
     declare_wall,
+    door,
+    door_get,
+    door_message,
     hub_server,
     node_server,
     plain_server,
     until,
     wall_writer,
 )
+from test_executor import binding
+from test_player_service import close, rig
 
+from contracts.frame_lighting import AT_FULL, FrameLighting, Paper, WashLight
+from contracts.node_state import (
+    PLAYER_SCHEMA_MAJOR,
+    FrameReports,
+    decode_birth,
+    decode_frame_reports,
+)
 from contracts.room_light import (
     ROOM_LIGHTS_BYTES,
+    ROOM_LIGHTS_DRAWN_REPEAT_SECONDS,
     ROOM_LIGHTS_KEY,
+    Dimmer,
     FixedColour,
     FixedEntry,
     RoomLightsDocument,
+    RoomLightsDrawn,
+    WhiteEntry,
     decode_room_lights,
     encode_room_lights,
+    room_lights_digest,
 )
 from nodeapi.buffers import WALL_PREFIX, KeyTable
 from nodeapi.node import WallReader
@@ -182,5 +206,120 @@ def test_start_room_lights_hands_the_sink_each_wall_change_and_the_readers_healt
     finally:
         for reader in readers:
             reader.stop(5)
+        node.stop()
+        hub.stop()
+
+
+PLAYER_STATE = "KV_state_player"
+PLAYER_KEYS = "$KV.state_player."
+LIGHT = "bookshelf-spot"
+WASHED = FrameLighting(mat_depth_mm=0, lights=(WashLight(light=LIGHT, lux=150, reference=AT_FULL),),
+                       paper=Paper(whiteness=.9, ink_density=2))
+
+
+def _wash(change: int, on: bool) -> RoomLightsDocument:
+    return RoomLightsDocument(change=change, lights={
+        LIGHT: WhiteEntry(colour=FixedColour(kelvin=2700), state=Dimmer(on=on, brightness=1.0))})
+
+
+async def _line(node) -> dict:
+    """The Player line's three keys as a home-network reader gets them through the door: birth, frames
+    and room-lights-drawn decoded (absent: not written), and room-lights-drawn's sequence."""
+    reader = await door(node)
+    try:
+        held: dict = {}
+        if (birth := await door_get(reader, PLAYER_STATE, PLAYER_KEYS + "birth")) is not None:
+            held["birth"] = decode_birth(birth)
+        if (frames := await door_get(reader, PLAYER_STATE, PLAYER_KEYS + "frames")) is not None:
+            held["frames"] = decode_frame_reports(frames)
+        if (drawn := await door_message(reader, PLAYER_STATE, PLAYER_KEYS + "room-lights-drawn")) is not None:
+            held["drawn"] = RoomLightsDrawn.model_validate_json(base64.b64decode(drawn["data"]))
+            held["drawn_seq"] = drawn["seq"]
+        return held
+    finally:
+        await reader.close()
+
+
+def _frame(held: dict):
+    reports: FrameReports | None = held.get("frames")
+    return reports.frames[0] if reports is not None and reports.frames else None
+
+
+def test_a_started_player_writes_its_own_line_and_refills_it_after_a_bus_crash(tmp_path):
+    """Mutation probes: report the Frame's generation as 1 always -> the rebound Frame reads 1; skip
+    the new document's light -> light_lux never rises; stop re-putting an unchanged drawn report ->
+    its sequence never moves."""
+    hub = hub_server(tmp_path, [SERIAL])
+    node = node_server(tmp_path, SERIAL, hub)
+    hub.start()
+    node.start()
+
+    async def run():
+        await _publish(hub, _wash(1, False))
+        service, server = await rig(tmp_path, node_bus_url=node.client_url)
+        hops: list[Callable[[], None]] = []
+        service._room_lights_dispatch = hops.append   # the GLib hop, run here on the "main loop"
+
+        def turn() -> None:
+            while hops:
+                hops.pop(0)()
+            service.tick_main()
+
+        def reads(wanted: Callable[[dict], bool]):
+            async def check():
+                turn()
+                held = await _line(node)
+                return held if wanted(held) else None
+            return check
+
+        try:
+            # Bound twice: the report carries the binding generation of the second.
+            server.offer(bindings=(binding().model_copy(update={"generation": 2, "lighting": WASHED}),),
+                         configuration_revision=2, revision=2, layers=())
+            await service.poll_state()
+            service.start_node_bus()
+
+            dark = await until(reads(lambda held: "birth" in held and "drawn" in held and _frame(held) is not None
+                                     and _frame(held).light_lux is not None), 15,
+                               "the Player's birth, its Frame drawn dark and its drawn report, through the door")
+            birth = dark["birth"]
+            assert (birth.component, birth.pipe, birth.schema_majors) == (
+                "player", "show", {"player": PLAYER_SCHEMA_MAJOR})
+            assert (_frame(dark).frame_id, _frame(dark).generation, _frame(dark).output_id) == ("frame1", 2, "hdmi1")
+            assert _frame(dark).light_lux == 0.0
+
+            lit = _wash(2, True)
+            await _publish(hub, lit)
+            held = await until(reads(lambda held: (_frame(held).light_lux or 0) > 0
+                                     and held["drawn"].drawn == room_lights_digest(lit)), 15,
+                               "the wash raising the light on the Frame, and the drawn report naming it")
+            assert abs(_frame(held).light_lux - 150) < 1e-6 and held["drawn"].following is True
+
+            # Unchanged, the drawn report is put again once the repeat period passes.
+            service.clock.advance(ROOM_LIGHTS_DRAWN_REPEAT_SECONDS)
+            repeated = await until(reads(lambda again: again.get("drawn_seq", 0) > held["drawn_seq"]), 15,
+                                   "the unchanged drawn report put again")
+            assert repeated["drawn"] == held["drawn"]
+
+            # The bus crashes and starts empty: the line refills itself, Central never asked.
+            node.crash()
+            node.start()
+
+            async def refilled():
+                try:
+                    again = await _line(node)
+                except Exception:   # the door is still coming back
+                    return None
+                return again if {"birth", "frames", "drawn"} <= again.keys() else None
+            again = await until(refilled, 15, "birth, frames and the drawn report back after the crash")
+            assert again["birth"] == birth and again["frames"] == held["frames"]
+            assert again["drawn"] == held["drawn"]
+        finally:
+            service.stop()
+            await close(service)
+
+    try:
+        asyncio.run(run())
+    finally:
         node.stop()
         hub.stop()

@@ -20,13 +20,16 @@ import pytest
 from integration.bus_servers import WALL_TABLE, line_slices
 from nats.js.api import DiscardPolicy, RetentionPolicy, StorageType
 
+from appliance.boot.bus_environment import bus_environment
 from central.fleet.node_bus_accounts import FLEET_SYSTEM_USER, HubListeners, hub_configuration
 from contracts.node_link import (
     CENTRAL_SUBSCRIPTIONS,
     CONSUMER_HEAP,
+    DOOR_CONNECTIONS,
     HUB_DOMAIN,
     LEAF_EXPORTS,
     LEAF_IMPORTS,
+    LOCAL_CONNECTIONS,
     MAX_STORED_MESSAGE,
     MEMORY_STORE_FACTOR,
     NODE_BUS_BASELINE,
@@ -34,20 +37,27 @@ from contracts.node_link import (
     NODE_BUS_HEADROOM,
     NODE_BUS_MEMORY_MAX,
     NODE_DOMAIN,
+    NODE_DOOR_PORT,
     NODE_MAX_CONSUMERS,
     NODE_MAX_CONTROL_LINE,
     NODE_MAX_PAYLOAD,
     NODE_MAX_PENDING,
     NODE_MAX_STREAMS,
+    NODE_READER_PUBLISH,
+    NODE_READER_SUBSCRIBE,
+    NODE_READER_USER,
     NODE_STORE_BYTES,
     REPLY_ENVELOPE,
+    STANDARD_CONNECTION,
     STORE_LINES,
     WALL_ACCOUNT,
     WALL_API_PREFIX,
     WALL_STREAM_BYTES,
     WALL_WRITER_USER,
+    WEBSOCKET_CONNECTION,
     Pipe,
     account_id,
+    bus_server_name,
     central_user,
     node_user,
 )
@@ -165,16 +175,36 @@ def test_the_shipped_node_config_is_loopback_domain_node_and_caps_every_stream()
     assert int(account["jetstream"]["max_streams"]) == NODE_MAX_STREAMS
     # And the 13th consumer on a stream, per stream: the fit's consumer count (E-W1-CONS-2).
     assert int(account["jetstream"]["max_consumers"]) == NODE_MAX_CONSUMERS
-    # One local user with no permissions: the local deny list is gone (E3b design §12); the hub's
-    # allow-lists on the leaf user hold the leaf's subject contract (E-W1-LEAF-1).
-    assert account["users"] == [{"user": "local", "password": "local"}]
+    # The local user has no permissions: the local deny list is gone (E3b design §12); the hub's
+    # allow-lists on the leaf user hold the leaf's subject contract (E-W1-LEAF-1). It is admitted only
+    # on the loopback client port; the door's reader only at the door, and may only ask for one stored
+    # message and hear the reply (0017 C3): the server holds the door read-only.
+    assert account["users"] == [
+        {"user": "local", "password": "local", "allowed_connection_types": list(LOCAL_CONNECTIONS)},
+        {"user": NODE_READER_USER, "password": NODE_READER_USER, "allowed_connection_types": list(DOOR_CONNECTIONS),
+         "permissions": {"publish": {"allow": list(NODE_READER_PUBLISH)},
+                         "subscribe": {"allow": list(NODE_READER_SUBSCRIBE)}}}]
+    assert LOCAL_CONNECTIONS == (STANDARD_CONNECTION,) and DOOR_CONNECTIONS == (WEBSOCKET_CONNECTION,)
     assert config["no_auth_user"] == "local"
+    # The door: every address, its port from the environment, no TLS, its clients landing in reader.
+    assert config["websocket"] == {"host": "0.0.0.0", "port": "$PHOTO_WALL_BUS_DOOR_PORT", "no_tls": True,
+                                   "no_auth_user": NODE_READER_USER}
     assert [remote["account"] for remote in config["leafnodes"]["remotes"]] == ["API"]
     assert config["leafnodes"]["remotes"][0]["urls"] == ["$PHOTO_WALL_BUS_LEAF_URL"]
     assert "deny_" not in text
     # Every per-Node value is the unit's environment, so the base ships one file for every Node.
     assert set(re.findall(r"\$(PHOTO_WALL_[A-Z_]+)", text)) == {
-        "PHOTO_WALL_BUS_NAME", "PHOTO_WALL_BUS_PORT", "PHOTO_WALL_BUS_LEAF_URL"}
+        "PHOTO_WALL_BUS_NAME", "PHOTO_WALL_BUS_PORT", "PHOTO_WALL_BUS_DOOR_PORT", "PHOTO_WALL_BUS_LEAF_URL"}
+
+
+def test_the_handoff_writes_every_variable_the_shipped_conf_reads():
+    """The bus environment names exactly the conf's variables (and Go's GOMEMLIMIT): the door's port
+    is NODE_DOOR_PORT and the server's name `bus_server_name`, which a door reader checks."""
+    environment = bus_environment("http://central.example:8080", "serial-c")
+    wanted = set(re.findall(r"\$(PHOTO_WALL_[A-Z_]+)", NODE_BUS_CONF.read_text()))
+    assert environment.keys() == wanted | {"GOMEMLIMIT"}
+    assert environment["PHOTO_WALL_BUS_DOOR_PORT"] == str(NODE_DOOR_PORT)
+    assert environment["PHOTO_WALL_BUS_NAME"] == f'"{bus_server_name("serial-c")}"'
 
 
 def test_centrals_websocket_frame_cap_carries_a_nodes_largest_frame():

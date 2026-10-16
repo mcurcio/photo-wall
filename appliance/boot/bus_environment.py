@@ -16,7 +16,14 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Final
 
-from contracts.node_link import LEAF_PATH, NODE_BUS_GOMEMLIMIT, NODE_BUS_PORT, node_user
+from contracts.node_link import (
+    LEAF_PATH,
+    NODE_BUS_GOMEMLIMIT,
+    NODE_BUS_PORT,
+    NODE_DOOR_PORT,
+    bus_server_name,
+    node_user,
+)
 from uplink.causes import UplinkError
 from uplink.files import write_atomically
 from uplink.origin import Origin
@@ -57,10 +64,12 @@ def config_string(value: str) -> str:
 
 def bus_environment(central: str, serial: str) -> dict[str, str]:
     """Exactly the variables node-bus.conf and the Go runtime read, as the process sees them:
-    the conf's strings as quoted config strings, its port a bare number, GOMEMLIMIT Go's text."""
+    the conf's strings as quoted config strings, its ports bare numbers (the loopback client port
+    and the read-only door's), GOMEMLIMIT Go's text."""
     return {
-        "PHOTO_WALL_BUS_NAME": config_string(node_user(serial)),
+        "PHOTO_WALL_BUS_NAME": config_string(bus_server_name(serial)),
         "PHOTO_WALL_BUS_PORT": str(NODE_BUS_PORT),
+        "PHOTO_WALL_BUS_DOOR_PORT": str(NODE_DOOR_PORT),
         "PHOTO_WALL_BUS_LEAF_URL": config_string(leaf_url(central, serial)),
         "GOMEMLIMIT": f"{NODE_BUS_GOMEMLIMIT // MIB}MiB",
     }
