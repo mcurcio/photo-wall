@@ -16,6 +16,7 @@ from nats.js.errors import NotFoundError
 
 from .const import CENTRAL_TIMEOUT, INSTALL_TIMEOUT
 from .contract import (
+    CENTRAL_DOOR_API_PREFIX,
     CENTRAL_STATE_PREFIX,
     CENTRAL_STATE_STREAM,
     DOOR_PATH,
@@ -69,7 +70,8 @@ class CentralDoor:
 
     def __init__(self, client: Client) -> None:
         self._client = client
-        self._jetstream = client.jetstream(timeout=CENTRAL_TIMEOUT)
+        # Central's state read is imported into the door's own account under its own API prefix.
+        self._jetstream = client.jetstream(prefix=CENTRAL_DOOR_API_PREFIX, timeout=CENTRAL_TIMEOUT)
 
     @classmethod
     async def connect(cls, origin: str) -> CentralDoor:

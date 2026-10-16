@@ -54,7 +54,12 @@ NODE_BUS_URL: Final = f"nats://127.0.0.1:{NODE_BUS_PORT}"  # what every Node com
 # lands, with no credentials, in NODE_READER_USER, whose permissions the Node's server holds: it may
 # only ask for one stored message at a time (NODE_READER_PUBLISH) and hear the replies
 # (NODE_READER_SUBSCRIBE), so any other publish, a write or a JetStream change included, is refused
-# by the server, never by the client's restraint. Local programs keep the loopback client port, and
+# by the server, never by the client's restraint. The reader has an account of its own,
+# NODE_DOOR_ACCOUNT, which imports API's one request as a service (NODE_READER_IMPORTS: API's subject
+# -> the reader's, under NODE_DOOR_API_PREFIX, as WALL's consumer API is imported under
+# WALL_API_PREFIX): every reply lands in the reader's account, so a reply subject the reader names can
+# never make JetStream or a local program publish into API (a confused deputy). A reader asks through
+# nats-py's JetStream context with prefix NODE_DOOR_API_PREFIX. Local programs keep the loopback client port, and
 # the local user is admitted only there (LOCAL_CONNECTIONS); the reader only at the door
 # (DOOR_CONNECTIONS). node-bus.conf repeats these literally and its config test binds the two; the
 # door's port arrives as $PHOTO_WALL_BUS_DOOR_PORT (appliance/boot/bus_environment.py), so tests run
@@ -63,7 +68,13 @@ NODE_BUS_URL: Final = f"nats://127.0.0.1:{NODE_BUS_PORT}"  # what every Node com
 # Pi's values.
 NODE_DOOR_PORT: Final = 4280
 NODE_READER_USER: Final = "reader"
-NODE_READER_PUBLISH: Final = ("$JS.API.STREAM.MSG.GET.*",)
+NODE_DOOR_ACCOUNT: Final = "DOOR"            # the reader's own account
+NODE_DOOR_API_PREFIX: Final = "ACC.NODE.API"  # the reader's JetStream API prefix for API's imported request
+# API's subject -> the reader's: one stored message at a time, nothing else.
+NODE_READER_IMPORTS: Final = MappingProxyType({
+    "$JS.API.STREAM.MSG.GET.*": f"{NODE_DOOR_API_PREFIX}.STREAM.MSG.GET.*",
+})
+NODE_READER_PUBLISH: Final = tuple(NODE_READER_IMPORTS.values())
 NODE_READER_SUBSCRIBE: Final = ("_INBOX.>",)
 # nats-server's `allowed_connection_types` values the Node's and the hub's users are confined to: a
 # user admitted on one listener cannot log in on another (the doors' permissions are the server's).

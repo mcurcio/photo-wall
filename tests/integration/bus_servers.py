@@ -44,6 +44,7 @@ from appliance.boot.bus_environment import write_bus_environment
 from central.fleet.node_bus_accounts import FLEET_SYSTEM_USER, HubListeners, hub_configuration
 from contracts.node_link import (
     CENTRAL_INBOX_PREFIX,
+    NODE_DOOR_API_PREFIX,
     STORE_LINES,
     WALL_STREAM,
     WALL_WRITER_USER,
@@ -419,9 +420,9 @@ async def door(node: BusServer, **options) -> Client:
 
 async def door_message(client: Client, stream: str, subject: str) -> dict | None:
     """The latest stored message on `subject` in `stream`, as a door reader asks for it: one
-    $JS.API.STREAM.MSG.GET with `last_by_subj`; the reply's message ("seq", "data" in base64, ...),
+    STREAM.MSG.GET (under NODE_DOOR_API_PREFIX) with `last_by_subj`; the reply's message ("seq", "data" in base64, ...),
     None when the stream holds none (or does not exist yet: a fresh bus epoch)."""
-    reply = json.loads((await client.request(f"$JS.API.STREAM.MSG.GET.{stream}",
+    reply = json.loads((await client.request(f"{NODE_DOOR_API_PREFIX}.STREAM.MSG.GET.{stream}",
                                              json.dumps({"last_by_subj": subject}).encode(), timeout=2)).data)
     if "error" in reply:
         if reply["error"].get("err_code") in (10037, 10059):   # no message; no stream

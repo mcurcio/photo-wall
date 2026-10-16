@@ -9,7 +9,13 @@ account through Central's origin at "/" + DOOR_PATH, which Central's app relays,
 the hub's WebSocket listener (as it relays the Pis' leaves, central/fleet/leaf_bridge.py). The door
 admits one user, HOME_ASSISTANT_USER, and only over WebSocket; its permissions are the hub's
 (HOME_ASSISTANT_PUBLISH, HOME_ASSISTANT_SUBSCRIBE): publish Home Assistant's states, read Central's
-state one key at a time, call Central's methods, nothing else. Central's own client, CENTRAL_USER, is
+state one key at a time, call Central's methods, nothing else. The user has an account of its own,
+HOME_ASSISTANT_ACCOUNT, which imports exactly those from CENTRAL_ACCOUNT as services
+(HOME_ASSISTANT_IMPORTS: Central's subject -> Home Assistant's; Central's state is read through
+nats-py's JetStream context with prefix CENTRAL_DOOR_API_PREFIX), so every reply (an
+acknowledgement, a stored message, a method's answer) lands in Home Assistant's account: a reply
+subject it names can never make JetStream or Central publish into CENTRAL_ACCOUNT (a confused
+deputy). Central's own client, CENTRAL_USER, is
 admitted only on the hub's plain client port, inside the deployment. Both user names are selectors
 on the trusted network, not secrets (a secret is deferred; the design's costs).
 
@@ -57,6 +63,7 @@ from contracts.wire_model import Model, decoded
 # ---- The door ----
 
 CENTRAL_ACCOUNT: Final = "CENTRAL"              # the hub account: Central's state and methods, Home Assistant's states
+HOME_ASSISTANT_ACCOUNT: Final = "HOME_ASSISTANT"   # the door's account: imports HOME_ASSISTANT_PUBLISH from CENTRAL
 CENTRAL_COMPONENT: Final = "central"            # Central as a component: its micro service and method subjects
 CENTRAL_USER: Final = "central-api"             # Central's client in CENTRAL_ACCOUNT (plain client port only)
 HOME_ASSISTANT_USER: Final = "home-assistant"   # the door's one user (WebSocket only); password = user name
@@ -71,13 +78,18 @@ CENTRAL_STATE_PREFIX: Final = f"$KV.{CENTRAL_STATE_BUCKET}."
 HOME_ASSISTANT_STATES_BUCKET: Final = "home_assistant"
 HOME_ASSISTANT_STATES_STREAM: Final = f"KV_{HOME_ASSISTANT_STATES_BUCKET}"
 HOME_ASSISTANT_STATES_PREFIX: Final = f"$KV.{HOME_ASSISTANT_STATES_BUCKET}."   # + entity id
-# Home Assistant's permissions, held by the hub: its states (a JetStream publish, acknowledged to its
-# inbox), Central's state one key at a time (a STREAM.MSG.GET by last subject), Central's methods.
-HOME_ASSISTANT_PUBLISH: Final = (
-    HOME_ASSISTANT_STATES_PREFIX + ">",
-    f"$JS.API.STREAM.MSG.GET.{CENTRAL_STATE_STREAM}",
-    f"{CENTRAL_COMPONENT}.{METHOD_TOKEN}.>",
-)
+# Home Assistant's JetStream API prefix for Central's imported state read (as WALL's is ACC.WALL.API).
+CENTRAL_DOOR_API_PREFIX: Final = "ACC.CENTRAL.API"
+# What Home Assistant's account imports from CENTRAL_ACCOUNT, Central's subject -> Home Assistant's:
+# its states (a JetStream publish, acknowledged to its inbox), Central's state one key at a time (a
+# STREAM.MSG.GET by last subject), Central's methods. These are also its only publish permissions.
+HOME_ASSISTANT_IMPORTS: Final = MappingProxyType({
+    HOME_ASSISTANT_STATES_PREFIX + ">": HOME_ASSISTANT_STATES_PREFIX + ">",
+    f"$JS.API.STREAM.MSG.GET.{CENTRAL_STATE_STREAM}":
+        f"{CENTRAL_DOOR_API_PREFIX}.STREAM.MSG.GET.{CENTRAL_STATE_STREAM}",
+    f"{CENTRAL_COMPONENT}.{METHOD_TOKEN}.>": f"{CENTRAL_COMPONENT}.{METHOD_TOKEN}.>",
+})
+HOME_ASSISTANT_PUBLISH: Final = tuple(HOME_ASSISTANT_IMPORTS.values())
 HOME_ASSISTANT_SUBSCRIBE: Final = ("_INBOX.>",)
 
 # ---- Central's state keys ----

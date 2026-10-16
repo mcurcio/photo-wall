@@ -15,6 +15,8 @@ from contracts.central_api import (
     CENTRAL_STATE_TABLE,
     CENTRAL_USER,
     DOOR_PATH,
+    HOME_ASSISTANT_ACCOUNT,
+    HOME_ASSISTANT_IMPORTS,
     HOME_ASSISTANT_PUBLISH,
     HOME_ASSISTANT_SUBSCRIBE,
     HOME_ASSISTANT_USER,
@@ -23,16 +25,22 @@ from contracts.node_link import DOOR_CONNECTIONS, LOCAL_CONNECTIONS, WALL_STREAM
 from nodeapi.buffers import KeyTable, central_state_bucket, home_assistant_states_bucket
 
 
-def test_centrals_account_holds_its_client_and_home_assistants_door():
-    account = json.loads(hub_configuration(["serial-a"], HUB_LISTENERS))["accounts"][CENTRAL_ACCOUNT]
-    assert account == {
+def test_centrals_account_holds_its_client_and_exports_only_the_doors_services():
+    accounts = json.loads(hub_configuration(["serial-a"], HUB_LISTENERS))["accounts"]
+    assert accounts[CENTRAL_ACCOUNT] == {
         "jetstream": {"max_bytes_required": True},
         "users": [
-            {"user": CENTRAL_USER, "password": CENTRAL_USER, "allowed_connection_types": list(LOCAL_CONNECTIONS)},
-            {"user": HOME_ASSISTANT_USER, "password": HOME_ASSISTANT_USER,
-             "allowed_connection_types": list(DOOR_CONNECTIONS),
-             "permissions": {"publish": {"allow": list(HOME_ASSISTANT_PUBLISH)},
-                             "subscribe": {"allow": list(HOME_ASSISTANT_SUBSCRIBE)}}}]}
+            {"user": CENTRAL_USER, "password": CENTRAL_USER, "allowed_connection_types": list(LOCAL_CONNECTIONS)}],
+        "exports": [{"service": subject} for subject in HOME_ASSISTANT_IMPORTS]}
+    # The door's user has an account of its own that imports exactly those services, so every reply
+    # to it lands in its own account (no confused deputy into CENTRAL_ACCOUNT).
+    assert accounts[HOME_ASSISTANT_ACCOUNT] == {
+        "users": [{"user": HOME_ASSISTANT_USER, "password": HOME_ASSISTANT_USER,
+                   "allowed_connection_types": list(DOOR_CONNECTIONS),
+                   "permissions": {"publish": {"allow": list(HOME_ASSISTANT_PUBLISH)},
+                                   "subscribe": {"allow": list(HOME_ASSISTANT_SUBSCRIBE)}}}],
+        "imports": [{"service": {"account": CENTRAL_ACCOUNT, "subject": subject}, "to": to}
+                    for subject, to in HOME_ASSISTANT_IMPORTS.items()]}
 
 
 def test_every_hub_user_logs_in_on_one_connection_type():

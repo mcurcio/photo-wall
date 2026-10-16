@@ -12,6 +12,7 @@ WebSocket at the leaf's route. Home Assistant's door is the same relay at "/" + 
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 import time
 
@@ -211,17 +212,23 @@ def test_home_assistants_door_through_centrals_origin(registry, tmp_path, monkey
     from central.infra.player_versions import PgPlayerVersions
     from central.infra.room_light_store import PgRoomLights
     from contracts.central_api import (
+        BIRTH_KEY,
+        CENTRAL_COMPONENT,
+        CENTRAL_DOOR_API_PREFIX,
         CENTRAL_STATE_PREFIX,
         CENTRAL_STATE_STREAM,
         CENTRAL_USER,
         DOOR_PATH,
+        INSTALL_PLAYER,
         INSTALLATION_KEY,
+        InstallPlayer,
         InstallRefused,
         InstallStarted,
         decode_central_state,
+        encode_install_player,
     )
     from contracts.home_assistant import HomeAssistantLight
-    from contracts.node_link import WALL_WRITER_USER, central_user, node_user
+    from contracts.node_link import METHOD_TOKEN, WALL_WRITER_USER, central_user, node_user
     from nodeapi.hub import run_hub_session
 
     monkeypatch.setenv("PHOTO_WALL_CACHE_ROOT", str(tmp_path))
@@ -288,6 +295,18 @@ def test_home_assistants_door_through_centrals_origin(registry, tmp_path, monkey
                 async def refused():
                     return sum("permissions violation" in each.lower() for each in house.violations) >= 3
                 await until(refused, SECONDS, "the hub refuses Home Assistant's three")
+                assert await house.central(INSTALLATION_KEY) == before
+                # A confused deputy: an allowed request whose reply names Central's state. Every reply
+                # lands in Home Assistant's own account, so JetStream and Central write nothing there.
+                ask = json.dumps({"last_by_subj": CENTRAL_STATE_PREFIX + BIRTH_KEY}).encode()
+                await house.client.publish(f"{CENTRAL_DOOR_API_PREFIX}.STREAM.MSG.GET.{CENTRAL_STATE_STREAM}", ask,
+                                           reply=CENTRAL_STATE_PREFIX + INSTALLATION_KEY)
+                await house.client.publish(f"{CENTRAL_COMPONENT}.{METHOD_TOKEN}.{INSTALL_PLAYER}",
+                                           encode_install_player(InstallPlayer(serial="pi-x", version="v2.0.0")),
+                                           reply=CENTRAL_STATE_PREFIX + INSTALLATION_KEY)
+                await house.client.flush()
+                # Both answered by now: the method answers within one more method round trip.
+                assert isinstance(await house.install("pi-unknown", "v2.0.0"), InstallRefused)
                 assert await house.central(INSTALLATION_KEY) == before
             for user in (FLEET_SYSTEM_USER, CENTRAL_USER, WALL_WRITER_USER, central_user("pi-a"), node_user("pi-a")):
                 with pytest.raises((nats.errors.Error, OSError)):

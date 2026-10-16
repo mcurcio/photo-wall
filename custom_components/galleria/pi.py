@@ -26,6 +26,7 @@ from .contract import (
     HOST_STATE_STREAM,
     KV_OPERATION_HEADER,
     LIGHT_SENSOR_KEY,
+    NODE_DOOR_API_PREFIX,
     NODE_DOOR_PORT,
     PLAYER_COMPONENT,
     PLAYER_SCHEMA_MAJOR,
@@ -96,7 +97,8 @@ async def read_pi(serial: str, address: str, *,
         # address still is this Pi.
         if client._server_info.get("server_name") != bus_server_name(serial):
             return "pi_unreachable"
-        jetstream = client.jetstream(timeout=PI_TIMEOUT)
+        # The door's one request is imported into the reader's own account under its own API prefix.
+        jetstream = client.jetstream(prefix=NODE_DOOR_API_PREFIX, timeout=PI_TIMEOUT)
         base = await _get(jetstream, HOST_STATE_STREAM, HOST_STATE_PREFIX + HOST_BASE_KEY, decode_host_base)
         meter = await _get(jetstream, HOST_STATE_STREAM, HOST_STATE_PREFIX + LIGHT_SENSOR_KEY,
                            decode_light_sensor)

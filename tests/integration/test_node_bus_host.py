@@ -14,6 +14,7 @@ there.
 from __future__ import annotations
 
 import asyncio
+import json
 
 import nats.errors
 import pytest
@@ -22,7 +23,7 @@ from nats.js.errors import NotFoundError
 from node_pid1_bus_probe import host_state
 
 from appliance.host.bus import HOST_SLICE, host_session
-from contracts.node_link import bus_server_name
+from contracts.node_link import NODE_DOOR_API_PREFIX, bus_server_name
 from contracts.node_state import HostBase, decode_host_base
 
 SERIAL = "serial-h"
@@ -119,6 +120,25 @@ def test_the_door_reads_the_pis_values_and_refuses_every_write(tmp_path):
             assert sorted(next(subject for subject, _ in writes if subject.lower() in str(error)) for error in refused) == \
                 sorted(subject for subject, _ in writes)
             assert decode_host_base(await door_get(reader, STATE, BASE_SUBJECT)) == HostBase(base_tag=BASE_TAG)
+
+            # A confused deputy: the one allowed request, its reply named as a stored key or a local
+            # program's subject. The reply lands in the reader's own account, never in API.
+            program = await local(node)
+            heard = []
+
+            async def hear(message):
+                heard.append(message.subject)
+            await program.subscribe("probe.heard", cb=hear)
+            await program.flush()
+            ask = json.dumps({"last_by_subj": BASE_SUBJECT}).encode()
+            for reply in (BASE_SUBJECT, "probe.heard"):
+                await reader.publish(f"{NODE_DOOR_API_PREFIX}.STREAM.MSG.GET.{STATE}", ask, reply=reply)
+            await reader.flush()
+            # One more round trip on the same connection: the server has answered both by now.
+            assert decode_host_base(await door_get(reader, STATE, BASE_SUBJECT)) == HostBase(base_tag=BASE_TAG)
+            await program.flush()
+            assert heard == []
+            await program.close()
         finally:
             await reader.close()
         held = await _held(node)

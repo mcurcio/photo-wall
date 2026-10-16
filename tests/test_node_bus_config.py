@@ -22,7 +22,7 @@ from nats.js.api import DiscardPolicy, RetentionPolicy, StorageType
 
 from appliance.boot.bus_environment import bus_environment
 from central.fleet.node_bus_accounts import FLEET_SYSTEM_USER, HubListeners, hub_configuration
-from contracts.central_api import CENTRAL_ACCOUNT
+from contracts.central_api import CENTRAL_ACCOUNT, HOME_ASSISTANT_ACCOUNT
 from contracts.node_link import (
     CENTRAL_SUBSCRIPTIONS,
     CONSUMER_HEAP,
@@ -39,12 +39,14 @@ from contracts.node_link import (
     NODE_BUS_HEADROOM,
     NODE_BUS_MEMORY_MAX,
     NODE_DOMAIN,
+    NODE_DOOR_ACCOUNT,
     NODE_DOOR_PORT,
     NODE_MAX_CONSUMERS,
     NODE_MAX_CONTROL_LINE,
     NODE_MAX_PAYLOAD,
     NODE_MAX_PENDING,
     NODE_MAX_STREAMS,
+    NODE_READER_IMPORTS,
     NODE_READER_PUBLISH,
     NODE_READER_SUBSCRIBE,
     NODE_READER_USER,
@@ -179,13 +181,20 @@ def test_the_shipped_node_config_is_loopback_domain_node_and_caps_every_stream()
     assert int(account["jetstream"]["max_consumers"]) == NODE_MAX_CONSUMERS
     # The local user has no permissions: the local deny list is gone (E3b design §12); the hub's
     # allow-lists on the leaf user hold the leaf's subject contract (E-W1-LEAF-1). It is admitted only
-    # on the loopback client port; the door's reader only at the door, and may only ask for one stored
-    # message and hear the reply (0017 C3): the server holds the door read-only.
+    # on the loopback client port; the door's reader only at the door, in its own account, and may only
+    # ask for one stored message and hear the reply (0017 C3): the server holds the door read-only, and
+    # the request is a service DOOR imports from API, so every reply lands in DOOR.
     assert account["users"] == [
-        {"user": "local", "password": "local", "allowed_connection_types": list(LOCAL_CONNECTIONS)},
-        {"user": NODE_READER_USER, "password": NODE_READER_USER, "allowed_connection_types": list(DOOR_CONNECTIONS),
-         "permissions": {"publish": {"allow": list(NODE_READER_PUBLISH)},
-                         "subscribe": {"allow": list(NODE_READER_SUBSCRIBE)}}}]
+        {"user": "local", "password": "local", "allowed_connection_types": list(LOCAL_CONNECTIONS)}]
+    assert account["exports"] == [{"service": subject} for subject in NODE_READER_IMPORTS]
+    assert set(config["accounts"]) == {"API", NODE_DOOR_ACCOUNT}
+    assert config["accounts"][NODE_DOOR_ACCOUNT] == {
+        "users": [{"user": NODE_READER_USER, "password": NODE_READER_USER,
+                   "allowed_connection_types": list(DOOR_CONNECTIONS),
+                   "permissions": {"publish": {"allow": list(NODE_READER_PUBLISH)},
+                                   "subscribe": {"allow": list(NODE_READER_SUBSCRIBE)}}}],
+        "imports": [{"service": {"account": "API", "subject": subject}, "to": to}
+                    for subject, to in NODE_READER_IMPORTS.items()]}
     assert LOCAL_CONNECTIONS == (STANDARD_CONNECTION,) and DOOR_CONNECTIONS == (WEBSOCKET_CONNECTION,)
     assert config["no_auth_user"] == "local"
     # The door: every address, its port from the environment, no TLS, its clients landing in reader.
@@ -224,7 +233,8 @@ def test_node_accounts_import_only_the_wall_set_and_export_nothing():
     config = json.loads(hub_configuration(["serial-a", "serial-b"], LISTENERS))
     accounts = config["accounts"]
     # CENTRAL_ACCOUNT, Central's own with Home Assistant's door, is tests/test_hub_accounts.py's.
-    assert set(accounts) == {WALL_ACCOUNT, "SYS", CENTRAL_ACCOUNT, account_id("serial-a"), account_id("serial-b")}
+    assert set(accounts) == {WALL_ACCOUNT, "SYS", CENTRAL_ACCOUNT, HOME_ASSISTANT_ACCOUNT, account_id("serial-a"),
+                             account_id("serial-b")}
     for serial in ("serial-a", "serial-b"):
         account = accounts[account_id(serial)]
         assert set(account) == {"users", "imports"}  # no jetstream, no exports

@@ -26,6 +26,7 @@ from uplink_fakes import finding
 
 from contracts.central_api import (
     CENTRAL_COMPONENT,
+    CENTRAL_DOOR_API_PREFIX,
     CENTRAL_STATE_PREFIX,
     CENTRAL_STATE_STREAM,
     HOME_ASSISTANT_STATES_PREFIX,
@@ -95,7 +96,7 @@ class HomeAssistant:
 
     async def central(self, key: str) -> bytes | None:
         """Central's state `key`: one STREAM.MSG.GET by last subject (None: not written)."""
-        reply = await self.client.request(f"$JS.API.STREAM.MSG.GET.{CENTRAL_STATE_STREAM}",
+        reply = await self.client.request(f"{CENTRAL_DOOR_API_PREFIX}.STREAM.MSG.GET.{CENTRAL_STATE_STREAM}",
                                           json.dumps({"last_by_subj": CENTRAL_STATE_PREFIX + key}).encode(), timeout=2)
         message = json.loads(reply.data).get("message")
         return None if message is None else base64.b64decode(message["data"])

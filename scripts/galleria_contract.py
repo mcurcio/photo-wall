@@ -74,6 +74,7 @@ def constants() -> dict[str, object]:
         "DOOR_PATH": central_api.DOOR_PATH,
         "CENTRAL_ACCOUNT": central_api.CENTRAL_ACCOUNT,
         "HOME_ASSISTANT_USER": central_api.HOME_ASSISTANT_USER,
+        "CENTRAL_DOOR_API_PREFIX": central_api.CENTRAL_DOOR_API_PREFIX,
         "CENTRAL_STATE_STREAM": central_api.CENTRAL_STATE_STREAM,
         "CENTRAL_STATE_PREFIX": central_api.CENTRAL_STATE_PREFIX,
         "CENTRAL_BIRTH_KEY": central_api.BIRTH_KEY,
@@ -99,6 +100,7 @@ def constants() -> dict[str, object]:
         "KELVIN_MAX": home_assistant.KELVIN_MAX,
         # A Pi's read-only door and the lines read there (contracts/node_link.py, node_state.py)
         "NODE_DOOR_PORT": node_link.NODE_DOOR_PORT,
+        "NODE_DOOR_API_PREFIX": node_link.NODE_DOOR_API_PREFIX,
         "SERIAL_PATTERN": node_link.SERIAL_PATTERN,
         "KV_OPERATION_HEADER": KV_OPERATION_HEADER,
         "HOST_STATE_STREAM": state_stream(node_state.HOST_LINE),

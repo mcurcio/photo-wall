@@ -1,9 +1,9 @@
 """Galleria's two transports against a real nats-server ($PHOTO_WALL_NATS_SERVER, the repository's pinned
-binary: `python3 scripts/nats_server.py fetch --dest DIR`), each started with an inline configuration
-equal to its door's permissions: a Pi's read-only door (contracts/node_link.py NODE_READER_*,
-DOOR_CONNECTIONS) and Home Assistant's door on Central's hub (contracts/central_api.py
-HOME_ASSISTANT_PUBLISH/SUBSCRIBE). The repository's own config tests bind those lists to the shipped
-configurations; these prove Galleria reads and writes as those permissions allow."""
+binary: `python3 scripts/nats_server.py fetch --dest DIR`), each on the configuration the repository
+ships, never a copy: a Pi's bus on appliance/bus/node-bus.conf (its read-only door), and Central's hub
+on the configuration Fleet generates (central/fleet/node_bus_accounts.py `hub_configuration`, pure),
+with Home Assistant's door. These prove Galleria reads and writes as those doors allow, and nothing
+else."""
 from __future__ import annotations
 
 import asyncio
@@ -12,7 +12,7 @@ import os
 import socket
 import subprocess
 import time
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -20,6 +20,7 @@ import nats
 import pytest
 from nats.errors import Error as NatsError
 
+from central.fleet.node_bus_accounts import HubListeners, hub_configuration
 from custom_components.galleria import contract
 from custom_components.galleria.door import CentralDoor, DoorUnavailable
 from custom_components.galleria.pi import PiReading, read_pi
@@ -28,7 +29,8 @@ SERVER = os.environ.get("PHOTO_WALL_NATS_SERVER")
 pytestmark = pytest.mark.skipif(not SERVER, reason="PHOTO_WALL_NATS_SERVER names no nats-server binary")
 
 SERIAL = "75628d0c"
-LOCAL = "local"
+NODE_BUS_CONF = Path(__file__).resolve().parents[1] / "appliance" / "bus" / "node-bus.conf"
+STORE_BYTES = 64 * 1024   # every stream carries its own cap on both servers (max_bytes_required)
 
 
 @pytest.fixture(autouse=True)
@@ -49,13 +51,10 @@ class Server:
     door_port: int
 
 
-def _serve(config: dict, directory: Path) -> Iterator[Server]:
-    client_port, door_port = _free_port(), _free_port()
-    config = {**config, "host": "127.0.0.1", "port": client_port,
-              "websocket": {**config.get("websocket", {}), "host": "127.0.0.1", "port": door_port, "no_tls": True}}
-    path = directory / "server.conf"
-    path.write_text(json.dumps(config))
-    process = subprocess.Popen([SERVER, "-c", str(path)], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+def _serve(path: Path, server: Server, environment: Mapping[str, str] | None = None) -> Iterator[Server]:
+    process = subprocess.Popen([SERVER, "-c", str(path)], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                               env={**os.environ, **(environment or {})})
+    door_port = server.door_port
     try:
         deadline = time.monotonic() + 10
         while True:
@@ -66,58 +65,57 @@ def _serve(config: dict, directory: Path) -> Iterator[Server]:
                 if process.poll() is not None or time.monotonic() > deadline:
                     raise RuntimeError(f"nats-server did not start: {process.stderr.read().decode()}") from None
                 time.sleep(0.02)
-        yield Server(client_port, door_port)
+        yield server
     finally:
         process.terminate()
         process.wait(timeout=10)
 
 
 @pytest.fixture
-def pi_bus(tmp_path: Path) -> Iterator[Server]:
-    """A Pi's bus: local programs in account API over the client port; the door's anonymous WebSocket
-    clients land in `reader`, which may only ask for one stored message at a time."""
-    yield from _serve({
-        "server_name": contract.bus_server_name(SERIAL),
-        "jetstream": {"store_dir": str(tmp_path / "js"), "max_memory_store": 12 * 1024 * 1024},
-        "accounts": {"API": {"jetstream": "enabled", "users": [
-            {"user": LOCAL, "password": LOCAL, "allowed_connection_types": ["STANDARD"]},
-            {"user": "reader", "password": "", "allowed_connection_types": ["WEBSOCKET"],
-             "permissions": {"publish": {"allow": ["$JS.API.STREAM.MSG.GET.*"]},
-                             "subscribe": {"allow": ["_INBOX.>"]}}}]}},
-        "websocket": {"no_auth_user": "reader"},
-    }, tmp_path)
+def pi_bus() -> Iterator[Server]:
+    """A Pi's bus on the shipped node-bus.conf, its per-Node values from the environment as the unit
+    gives them (appliance/boot/bus_environment.py): local programs in account API over the loopback
+    client port; the door's anonymous WebSocket clients land in `reader`. Its leaf dials nobody."""
+    server = Server(_free_port(), _free_port())
+    yield from _serve(NODE_BUS_CONF, server, {
+        "PHOTO_WALL_BUS_NAME": json.dumps(contract.bus_server_name(SERIAL)),
+        "PHOTO_WALL_BUS_PORT": str(server.client_port),
+        "PHOTO_WALL_BUS_DOOR_PORT": str(server.door_port),
+        "PHOTO_WALL_BUS_LEAF_URL": json.dumps(f"ws://nobody:nobody@127.0.0.1:{_free_port()}"),
+    })
 
 
 @pytest.fixture
 def hub(tmp_path: Path) -> Iterator[Server]:
-    """Central's hub: Central's client on the client port; Home Assistant only over WebSocket, allowed
-    its states, Central's state one key at a time, and Central's methods."""
-    yield from _serve({
-        "server_name": "hub",
-        "jetstream": {"store_dir": str(tmp_path / "js"), "max_memory_store": 12 * 1024 * 1024},
-        "accounts": {contract.CENTRAL_ACCOUNT: {"jetstream": "enabled", "users": [
-            {"user": "central-api", "password": "central-api", "allowed_connection_types": ["STANDARD"]},
-            {"user": contract.HOME_ASSISTANT_USER, "password": contract.HOME_ASSISTANT_USER,
-             "allowed_connection_types": ["WEBSOCKET"],
-             "permissions": {"publish": {"allow": [contract.HOME_ASSISTANT_STATES_PREFIX + ">",
-                                                   f"$JS.API.STREAM.MSG.GET.{contract.CENTRAL_STATE_STREAM}",
-                                                   "central.method.>"]},
-                             "subscribe": {"allow": ["_INBOX.>"]}}}]}},
-    }, tmp_path)
+    """Central's hub on the configuration Fleet generates, with no Pi enrolled: Central's client on
+    the client port, Home Assistant's door on the WebSocket listener."""
+    server = Server(_free_port(), _free_port())
+    path = tmp_path / "hub.json"
+    path.write_text(hub_configuration([], HubListeners(
+        server_name="hub", client_host="127.0.0.1", client_port=server.client_port, websocket_host="127.0.0.1",
+        websocket_port=server.door_port, leaf_host="127.0.0.1", leaf_port=_free_port(), monitor_port=None,
+        max_memory_store_bytes=4 * 1024 * 1024)))
+    yield from _serve(path, server)
 
 
 async def _client(url: str, user: str) -> nats.NATS:
     return await nats.connect(url, user=user, password=user, allow_reconnect=False)
 
 
+async def _local(server: Server) -> nats.NATS:
+    """A local program on a Pi's bus (no credentials: the loopback port's user)."""
+    return await nats.connect(f"nats://127.0.0.1:{server.client_port}", allow_reconnect=False)
+
+
 async def _bucket(client: nats.NATS, name: str) -> object:
-    return await client.jetstream().create_key_value(bucket=name, history=1, storage="memory")
+    return await client.jetstream().create_key_value(bucket=name, history=1, storage="memory",
+                                                     max_bytes=STORE_BYTES)
 
 
 @pytest.fixture
 async def written_pi(pi_bus: Server) -> AsyncIterator[Server]:
     """The Pi's host and Player lines as their writers put them."""
-    local = await _client(f"nats://127.0.0.1:{pi_bus.client_port}", LOCAL)
+    local = await _local(pi_bus)
     host, player = await _bucket(local, "state_host"), await _bucket(local, "state_player")
     await host.put(contract.HOST_BASE_KEY, b'{"base_tag":"v0.35.0"}')
     await host.put(contract.LIGHT_SENSOR_KEY, b'{"reading":{"kind":"measured","lux":120.0}}')
@@ -166,8 +164,15 @@ async def test_the_pi_door_refuses_a_write(written_pi: Server) -> None:
     try:
         with pytest.raises((NatsError, asyncio.TimeoutError)):
             await reader.jetstream(timeout=1).publish(contract.HOST_STATE_PREFIX + contract.HOST_BASE_KEY, b"{}")
+        # Its one request with a reply naming a stored key: the reply lands in the reader's own account.
+        await reader.publish(f"{contract.NODE_DOOR_API_PREFIX}.STREAM.MSG.GET.{contract.HOST_STATE_STREAM}",
+                             json.dumps({"last_by_subj": contract.HOST_STATE_PREFIX + contract.HOST_BASE_KEY}).encode(),
+                             reply=contract.HOST_STATE_PREFIX + contract.HOST_BASE_KEY)
+        await reader.flush()
     finally:
         await reader.close()
+    reading = await read_pi(SERIAL, "127.0.0.1", port=written_pi.door_port)
+    assert isinstance(reading, PiReading) and reading.base_tag == "v0.35.0"
 
 
 async def test_central_s_door_reads_publishes_and_installs(hub: Server) -> None:
@@ -213,13 +218,22 @@ async def test_central_s_door_reads_publishes_and_installs(hub: Server) -> None:
 
 async def test_central_s_door_refuses_home_assistant_writing_central_s_state(hub: Server) -> None:
     central = await _client(f"nats://127.0.0.1:{hub.client_port}", "central-api")
-    await _bucket(central, "state_central")
+    state = await _bucket(central, "state_central")
+    birth = b'{"component":"central","version":"0.35.0"}'
+    await state.put(contract.CENTRAL_BIRTH_KEY, birth)
     client = await nats.connect(f"ws://127.0.0.1:{hub.door_port}/{contract.DOOR_PATH}",
                                 user=contract.HOME_ASSISTANT_USER, password=contract.HOME_ASSISTANT_USER,
                                 allow_reconnect=False)
+    target = contract.CENTRAL_STATE_PREFIX + contract.CENTRAL_BIRTH_KEY
     try:
         with pytest.raises((NatsError, asyncio.TimeoutError)):
-            await client.jetstream(timeout=1).publish(contract.CENTRAL_STATE_PREFIX + contract.CENTRAL_BIRTH_KEY, b"{}")
+            await client.jetstream(timeout=1).publish(target, b"{}")
+        # Its allowed read with a reply naming Central's state: the reply lands in its own account.
+        await client.publish(f"{contract.CENTRAL_DOOR_API_PREFIX}.STREAM.MSG.GET.{contract.CENTRAL_STATE_STREAM}",
+                             json.dumps({"last_by_subj": target}).encode(), reply=target)
+        await client.flush()
+        assert (await client.jetstream(prefix=contract.CENTRAL_DOOR_API_PREFIX, timeout=1).get_last_msg(
+            contract.CENTRAL_STATE_STREAM, target)).data == birth
     finally:
         await client.close()
         await central.close()

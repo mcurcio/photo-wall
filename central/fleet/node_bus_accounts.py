@@ -14,8 +14,11 @@ LEAF_IMPORTS and subscribe only to its wildcard inboxes, so nothing a Node progr
 leaf except what Central asked for.
 
 CENTRAL_ACCOUNT (contracts/central_api.py) holds Central's state, its methods and Home Assistant's
-states: Central's own client (CENTRAL_USER, unrestricted inside its account) and the door's one user
-(HOME_ASSISTANT_USER), whose permissions the hub holds (HOME_ASSISTANT_PUBLISH, HOME_ASSISTANT_SUBSCRIBE).
+states, and its one user, Central's own client (CENTRAL_USER, unrestricted inside its account). It
+exports the services HOME_ASSISTANT_IMPORTS names, and only HOME_ASSISTANT_ACCOUNT imports them: the
+door's one user (HOME_ASSISTANT_USER) lives there, publishing only those (HOME_ASSISTANT_PUBLISH) and
+hearing only its inboxes (HOME_ASSISTANT_SUBSCRIBE). Every reply to it is routed back into its own account, so no reply subject
+it names makes JetStream or Central write into CENTRAL_ACCOUNT.
 
 Every user is confined to the one connection type it arrives on (`allowed_connection_types`), so a
 user of one listener cannot log in on another: a Node's leaf user only as a WebSocket leaf (through
@@ -32,6 +35,8 @@ from typing import Final
 from contracts.central_api import (
     CENTRAL_ACCOUNT,
     CENTRAL_USER,
+    HOME_ASSISTANT_ACCOUNT,
+    HOME_ASSISTANT_IMPORTS,
     HOME_ASSISTANT_PUBLISH,
     HOME_ASSISTANT_SUBSCRIBE,
     HOME_ASSISTANT_USER,
@@ -88,6 +93,7 @@ def hub_configuration(serials: Iterable[str], listeners: HubListeners) -> str:
         WALL_ACCOUNT: _wall_account(),
         SYSTEM_ACCOUNT: {"users": [_local(FLEET_SYSTEM_USER)]},
         CENTRAL_ACCOUNT: _central_account(),
+        HOME_ASSISTANT_ACCOUNT: _home_assistant_account(),
     }
     for name, serial in node_accounts.items():
         accounts[name] = _node_account(serial)
@@ -173,14 +179,22 @@ def _node_account(serial: str) -> dict[str, object]:
 
 def _central_account() -> dict[str, object]:
     """Central on its hub: its state bucket, its methods and Home Assistant's states bucket (each
-    stream has its own byte cap, as WALL's do), Central's own client on the plain port, and the door's
-    one user, which may only publish Home Assistant's states, read Central's state one key at a time
-    and call Central's methods, and only over WebSocket."""
+    stream has its own byte cap, as WALL's do), Central's own client on the plain port, and the
+    services Home Assistant's door imports: publish Home Assistant's states, read Central's state one
+    key at a time, call Central's methods."""
     return {
         "jetstream": {"max_bytes_required": True},
-        "users": [
-            _local(CENTRAL_USER),
-            {**_user(HOME_ASSISTANT_USER, DOOR_CONNECTIONS),
-             "permissions": _permissions(HOME_ASSISTANT_PUBLISH, HOME_ASSISTANT_SUBSCRIBE)},
-        ],
+        "users": [_local(CENTRAL_USER)],
+        "exports": [{"service": subject} for subject in HOME_ASSISTANT_IMPORTS],
+    }
+
+
+def _home_assistant_account() -> dict[str, object]:
+    """Home Assistant's door: its one user, only over WebSocket, publishing only the services it
+    imports from CENTRAL_ACCOUNT and hearing only its inboxes. No JetStream of its own."""
+    return {
+        "users": [{**_user(HOME_ASSISTANT_USER, DOOR_CONNECTIONS),
+                   "permissions": _permissions(HOME_ASSISTANT_PUBLISH, HOME_ASSISTANT_SUBSCRIBE)}],
+        "imports": [{"service": {"account": CENTRAL_ACCOUNT, "subject": subject}, "to": to}
+                    for subject, to in HOME_ASSISTANT_IMPORTS.items()],
     }

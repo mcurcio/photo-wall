@@ -14,6 +14,7 @@ from typing import Any, Final, Literal, TypedDict
 DOOR_PATH: Final = 'photo-wall/bus/door'
 CENTRAL_ACCOUNT: Final = 'CENTRAL'
 HOME_ASSISTANT_USER: Final = 'home-assistant'
+CENTRAL_DOOR_API_PREFIX: Final = 'ACC.CENTRAL.API'
 CENTRAL_STATE_STREAM: Final = 'KV_state_central'
 CENTRAL_STATE_PREFIX: Final = '$KV.state_central.'
 CENTRAL_BIRTH_KEY: Final = 'birth'
@@ -42,6 +43,7 @@ LEVEL_MAX: Final = 255
 KELVIN_MIN: Final = 1000
 KELVIN_MAX: Final = 40000
 NODE_DOOR_PORT: Final = 4280
+NODE_DOOR_API_PREFIX: Final = 'ACC.NODE.API'
 SERIAL_PATTERN: Final = '[A-Za-z0-9:_.-]{1,128}'
 KV_OPERATION_HEADER: Final = 'KV-Operation'
 HOST_STATE_STREAM: Final = 'KV_state_host'
