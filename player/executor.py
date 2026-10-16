@@ -33,6 +33,7 @@ from player.rendering import (
     PresentationResult,
     Renderer,
 )
+from player.visibility import beneath_shown, shed, shown_within, visible_now
 
 
 class AuthorityError(ValueError):
@@ -46,6 +47,9 @@ class _Assignment:
     secured: bool = False
     path: Path | None = None
     prepared: bool = False
+    # Covered by an opaque layer above it from now through the prepare lead (player/visibility.py):
+    # it holds no decoder, and counts as ready for its reveal, prepared within the lead before it.
+    deferred: bool = False
     committed: bool = False
     started: bool = False
     acquiring: bool = False
@@ -140,6 +144,9 @@ class Executor:
         self._capacity_ok = False
         self._renderer_releases: set[str] = set()
         self._renderer_residents: set[str] = set()
+        # The last prepare pass's decoder budget: what to keep resident, what to give up.
+        self._wanted: set[str] = set()
+        self._unwanted: set[str] = set()
         self._retired_outputs: dict[str, OutputBinding] = {}
 
     def _now(self) -> float:
@@ -527,22 +534,80 @@ class Executor:
     @classmethod
     def _lose_preparation(cls, assignment: _Assignment) -> None:
         assignment.prepared = False
+        assignment.deferred = False
         cls._end_grant(assignment)
         assignment.execution_layer = None
         assignment.readiness_generation += 1
 
+    @staticmethod
+    def _frames(items: Iterable[_Assignment]) -> dict[str, list[_Assignment]]:
+        frames: dict[str, list[_Assignment]] = {}
+        for assignment in items:
+            frames.setdefault(assignment.layer.output_id, []).append(assignment)
+        return frames
+
+    @staticmethod
+    def _covering(items: Iterable[_Assignment]) -> list[Layer]:
+        """The layers that will be drawn and so may cover others: secured, and not failed (one
+        given up for slots still stands above what it covered, itself not drawn)."""
+        return [a.layer for a in items if a.secured and a.failure in (None, "capacity")]
+
+    def _horizon(self, now: float) -> float:
+        return self._plan.valid_until if self._plan else now
+
     def prepare_imminent(self) -> None:
-        """Renderer-thread preroll. No filesystem or network access occurs here."""
+        """Renderer-thread preroll. No filesystem or network access occurs here.
+
+        Decoder slots go only to layers seen from now through the prepare lead
+        (player/visibility.py): a layer covered throughout is deferred, its decoder released, and
+        stays ready for its reveal. If slots still run short, a Frame gives up its bottom-most
+        layer (failure `capacity`) instead of the whole screen failing."""
         with self._lock:
             self._drain_renderer_releases()
             now = self._now()
             imminent = self._imminent(now)
-            self._release_unused_renderer(now)
-            for assignment in imminent:
+            until, horizon = now + self.prepare_lead, self._horizon(now)
+            frames = self._frames(imminent)
+            wanted: dict[str, list[_Assignment]] = {}
+            deferred: list[_Assignment] = []
+            for output_id, items in frames.items():
+                shown = shown_within((a.layer for a in items), self._covering(items), now, until,
+                                     horizon=horizon)
+                wanted[output_id] = [a for a in items if a.layer.assignment_id in shown]
+                deferred += [a for a in items if a.secured and a.layer.assignment_id not in shown]
+            given_up: list[_Assignment] = []
+            while True:
+                kept = [a for items in wanted.values() for a in items]
+                self._wanted = {a.layer.assignment_id for a in kept}
+                self._unwanted = {a.layer.assignment_id for a in (*deferred, *given_up)}
+                self._release_unused_renderer(now)
+                self._capacity_ok = self.renderer.capacity(self._compositions(kept, now)).available
+                victim = None if self._capacity_ok else shed(
+                    {output_id: [a.layer for a in items] for output_id, items in wanted.items()})
+                if victim is None:
+                    break
+                items = wanted[victim.output_id]
+                given = next(a for a in items if a.layer.assignment_id == victim.assignment_id)
+                items.remove(given)
+                given_up.append(given)
+            for assignment in given_up:
+                self._lose_preparation(assignment)
+                assignment.failure = "capacity"
+            for assignment in deferred:
+                assignment.prepared, assignment.deferred = False, True
+                if assignment.failure == "capacity":
+                    assignment.failure = None
+            for assignment in kept:
                 if not assignment.secured:
                     continue
                 result = self.renderer.prepare(self._local(assignment, max(now, assignment.layer.start)))
                 self._renderer_residents.add(assignment.layer.assignment_id)
+                if result.status == "pending" and assignment.deferred and self._covered_at_start(
+                        assignment, frames[assignment.layer.output_id], now, horizon):
+                    # Its decode for the reveal is in flight while it is still covered: still ready.
+                    assignment.failure = None
+                    continue
+                assignment.deferred = False
                 if result.status != "prepared" and (assignment.prepared or assignment.committed):
                     self._lose_preparation(assignment)
                 assignment.prepared = result.status == "prepared"
@@ -556,12 +621,18 @@ class Executor:
                         self._end_grant(assignment)
                 else:
                     assignment.failure = None
-            self._capacity_ok = self.renderer.capacity(self._compositions(imminent, now)).available
             if not self._capacity_ok:
                 for assignment in imminent:
                     if not assignment.started:
                         self._lose_preparation(assignment)
             self._clock_gate()
+
+    def _covered_at_start(self, assignment: _Assignment, items: list[_Assignment], now: float,
+                          horizon: float) -> bool:
+        """Whether `assignment` is covered at its first instant from now."""
+        first = max(now, assignment.layer.start)
+        return assignment.layer.assignment_id not in shown_within(
+            (assignment.layer,), self._covering(items), first, first, horizon=horizon)
 
     @property
     def failures(self) -> tuple[Failure, ...]:
@@ -592,7 +663,7 @@ class Executor:
             if not math.isfinite(uncertainty):
                 uncertainty = 86400.0
             prepared = tuple(sorted(a.layer.assignment_id for a in imminent
-                                    if a.prepared and a.secured
+                                    if (a.prepared or a.deferred) and a.secured
                                     and a.layer.assignment_id not in failures))
             # Level state: every report says which grants this Player saw and no longer holds.
             lost = tuple(LostGrant(assignment_id=key,
@@ -641,7 +712,8 @@ class Executor:
             for key in commit.assignment_ids:
                 assignment = self._assignments.get(key)
                 if (not assignment or not self._current_authority(assignment)
-                        or not assignment.secured or not assignment.prepared or assignment.failure
+                        or not assignment.secured or not (assignment.prepared or assignment.deferred)
+                        or assignment.failure
                         or now >= min(assignment.layer.end, self._plan.valid_until)
                         or max(assignment.layer.start, self._plan.valid_from) > now + self.prepare_lead):
                     raise AuthorityError("commit assignment is not ready")
@@ -712,23 +784,29 @@ class Executor:
             self._renderer_releases.discard(key)
 
     def _release_unused_renderer(self, now: float) -> None:
-        needed = {a.layer.assignment_id for a in self._imminent(now) if a.secured}
+        """Keep resident what the last prepare pass wanted and what is drawn, less what it deferred
+        or gave up; and a Frame's kept photo only while it may be seen within the prepare lead."""
+        imminent = self._imminent(now)
+        needed = self._wanted & {a.layer.assignment_id for a in imminent}
         needed.update(local.layer.assignment_id for composition in self._current.values()
                       for local in composition.layers)
-        needed.update(item.local.layer.assignment_id for item in self._retained.values())
+        needed -= self._unwanted
+        frames = self._frames(imminent)
+        for output_id, item in self._retained.items():
+            if beneath_shown(self._covering(frames.get(output_id, ())), now, now + self.prepare_lead,
+                             horizon=self._horizon(now)):
+                needed.add(item.local.layer.assignment_id)
         for key in self._renderer_residents - needed:
             self.renderer.release(key)
         self._renderer_residents.intersection_update(needed)
 
-    @staticmethod
-    def _visible(layers: tuple[LocalLayer, ...]) -> tuple[LocalLayer, ...]:
-        visible = []
-        for local in reversed(layers):
-            if local.alpha > 0:
-                visible.append(local)
-            if local.alpha >= 1:
-                break
-        return tuple(reversed(visible))
+    def _drawable(self, composition: OutputComposition) -> OutputComposition:
+        """`composition` less its deferred layers that are covered now."""
+        visible = {local.layer.assignment_id for local in visible_now(composition.layers)}
+        return replace(composition, layers=tuple(
+            local for local in composition.layers
+            if local.layer.assignment_id in visible
+            or not self._assignments[local.layer.assignment_id].deferred))
 
     def _valid_current(self, local: LocalLayer, composition: OutputComposition, now: float) -> bool:
         binding = self._binding(composition.binding.output_id)
@@ -832,8 +910,8 @@ class Executor:
                     del self._retired_outputs[output_id]
             active = []
             for assignment in self._assignments.values():
-                if (not assignment.secured or not assignment.prepared or assignment.failure
-                        or not self._current_authority(assignment)):
+                if (not assignment.secured or not (assignment.prepared or assignment.deferred)
+                        or assignment.failure or not self._current_authority(assignment)):
                     continue
                 granted = assignment.granted_layer
                 if (granted is not None and self.mapping.healthy()
@@ -847,7 +925,11 @@ class Executor:
                     # Revisions renew offers, not old execution leases. Until a
                     # fresh commit, use the original authorized ordering/effects.
                     active.append(replace(assignment, layer=executing))
-            candidates = {c.binding.output_id: c for c in self._compositions(active, now)}
+            # Every playing layer, a covered one included; what is drawn leaves out a deferred one
+            # while it is covered (it holds no decoder).
+            playing = {c.binding.output_id: c for c in self._compositions(active, now)}
+            candidates = {output_id: self._drawable(composition)
+                          for output_id, composition in playing.items()}
             observations = []
             for binding in self._config.bindings:
                 if binding.output_id not in self._config.enabled_outputs:
@@ -860,24 +942,42 @@ class Executor:
                 failed = False
                 if candidate:
                     formerly_visible = {
-                        local.layer.assignment_id for local in self._visible(previous.layers)
+                        local.layer.assignment_id for local in visible_now(previous.layers)
                     } if previous and not previous.fallback else set()
-                    for local in self._visible(candidate.layers):
+                    for local in visible_now(candidate.layers):
                         if local.layer.assignment_id not in formerly_visible:
                             # A covered pipeline may have paused. Seek to logical now
                             # before reveal instead of using its historical preroll.
                             prepared = self.renderer.prepare(local)
                             self._renderer_residents.add(local.layer.assignment_id)
-                            if prepared.status != "prepared":
-                                assignment = self._assignments[local.layer.assignment_id]
+                            assignment = self._assignments[local.layer.assignment_id]
+                            if prepared.status == "prepared":
+                                assignment.prepared, assignment.deferred = True, False
+                            else:
                                 self._lose_preparation(assignment)
                                 assignment.failure = "decode" if prepared.status == "failed" else None
                                 failed = True
                                 if prepared.status == "failed":
                                     observations.append(self._observation(local, now, "failed", "decode"))
+                    given_up: set[str] = set()
                     if not failed:
-                        capacity = self.renderer.capacity(tuple(candidates.values()))
-                        if not capacity.available:
+                        fits = self.renderer.capacity(tuple(candidates.values())).available
+                        while not fits and (victim := shed(
+                                {binding.output_id: [local.layer for local in candidate.layers]}
+                        )) is not None:
+                            # Slots short: this screen gives up its bottom-most layer, not itself.
+                            local = next(local for local in candidate.layers
+                                         if local.layer.assignment_id == victim.assignment_id)
+                            candidate = replace(candidate, layers=tuple(
+                                item for item in candidate.layers if item is not local))
+                            candidates[binding.output_id] = candidate
+                            given_up.add(victim.assignment_id)
+                            assignment = self._assignments[victim.assignment_id]
+                            self._lose_preparation(assignment)
+                            assignment.failure = "capacity"
+                            observations.append(self._observation(local, now, "failed", "capacity"))
+                            fits = self.renderer.capacity(tuple(candidates.values())).available
+                        if not fits:
                             self._capacity_ok = False
                             failed = True
                             for local in candidate.layers:
@@ -896,15 +996,16 @@ class Executor:
                                     self._assignments[local.layer.assignment_id].execution_until
                                     for local in candidate.layers
                                 )
-                                for local in self._visible(drawn.layers):
+                                for local in visible_now(drawn.layers):
                                     assignment = self._assignments[local.layer.assignment_id]
                                     assignment.started = True
                                     observations.append(self._observation(local, observed_at, "presented"))
-                                # Every drawn layer, covered ones included (a Scene beneath keeps
+                                # Every playing layer, covered ones included (a Scene beneath keeps
                                 # its photo while a Scene on top shows), bottom to top, so the
                                 # topmost layer's after-state holds.
-                                for local in drawn.layers:
-                                    self._apply_after_end(binding, local, now)
+                                for local in playing[binding.output_id].layers:
+                                    if local.layer.assignment_id not in given_up:
+                                        self._apply_after_end(binding, local, now)
                                 continue
                             if presented.status == "pending":
                                 # Native GL presentation acknowledges on a later main-loop turn.
@@ -913,7 +1014,7 @@ class Executor:
                                 if self._awaiting_draw(candidate):
                                     continue
                             failed = True
-                            for local in self._visible(candidate.layers):
+                            for local in visible_now(candidate.layers):
                                 assignment = self._assignments[local.layer.assignment_id]
                                 self._lose_preparation(assignment)
                                 assignment.failure = "decode"
