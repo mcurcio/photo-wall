@@ -16,22 +16,29 @@ pass, each stated once here and mirrored by player/native.py's shaders:
   owner q3). It is the one crop in either fit: in Cover the drawn rectangle has that same aspect,
   so the photo is never cropped twice or squeezed.
 
-The print look (design /print-look, 2026-10-12) adds a LUT, saturation, the highlight rolloff
-(which replaces the clamp after brightness, before white balance), the black floor and the Frame's
-mat shadow to the final pass, in one order (`final_pixel`), each skipped at its neutral value.
+Room light (decision 0028) replaces the print look's sliders, the Display's LUT and the mat's
+relative lights with one physics path in real units, every Frame always through it (design rule
+3): the Frame's paper (`paper_reflectance`, its profile's LUT first) under E(x), the room's light
+summed over the Frame's lights (`frame_lights`, `irradiance`: a wash, a far light's mat shadow, a
+close light's inverse square, cone and shadow), as a signal fitted between the panel's black and
+its white at the Display's matched lux (`paper_signal`), the one fixed highlight rolloff
+(`highlight_rolled`), then the Display's white balance, contrast and gamma, the dither
+(`dithered`) and the per-Output mask (`final_pixel`).
 
-Display tuning (decision 0024) adds the test patterns (`pattern_signal`): a look pattern (White,
-Grey ramp) replaces the photos inside the opening and passes through every step and the mat; the
-Black level is the raw signal, through no step and no mat; the per-Output mask stays last.
+Display tuning (decision 0024) adds the test patterns (`pattern_signal`): since decision 0028 a
+look pattern (White, Grey ramp) replaces the photos inside the opening and goes through white
+balance, contrast and gamma only, never the room's light, the paper or the mat (White is the TV's
+own white for the paper match); the Black level is the raw signal, through no step; the per-Output
+mask stays last.
 
 The calibration targets v2 (decision 0027) draw the screen board (contracts/calibration_target.py
 "v2", OpenCV's ChArUco board drawn at build time as `board_raster`): SCREEN_ROWS squares across the
 opening's short side, as many columns as fit (`screen_columns`), centred along its long side,
 turned a quarter clockwise in a portrait opening (`board_draw`, `board_point`); each point the
 raster's pixel, or a QR copy's module (`board_signal`; player/calibration_target.py
-`target_modules`). The opening's size has one home, `opening_size_mm`, which the mat shadow uses
+`target_modules`). The opening's size has one home, `opening_size_mm`, which the physics uses
 too. Pre-software is the board's signal raw everywhere in the opening; post-software runs it
-through every step but the mat shadow, with no raw region (v1's dark box is gone).
+through the Display's white balance, contrast and gamma, as the look patterns.
 """
 
 from __future__ import annotations
@@ -40,7 +47,7 @@ import itertools
 import math
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from typing import Final
+from typing import Final, Literal
 
 from contracts.calibration_target import (
     QR_QUIET_MODULES,
@@ -54,14 +61,22 @@ from contracts.calibration_target import (
     screen_columns,
 )
 from contracts.frame_fit import Corners, OutputSize, cover_rectangle
-from contracts.frame_lighting import CloseLight, FarLight, FrameLighting, Paper, WashLight
+from contracts.frame_lighting import (
+    DIMMER_AT_FULL,
+    SHEET_WHITENESS,
+    CloseLight,
+    FarLight,
+    FrameLighting,
+    Paper,
+    WashLight,
+)
 from contracts.kelvin import kelvin_white
 from contracts.lut import LUT_GRID, lut_offset
-from contracts.models import CornersFit, CoverFit, FrameProfile, Mat, PhotoCrop
+from contracts.models import CornersFit, CoverFit, FrameProfile, PhotoCrop
 from contracts.node_frame import PictureOperations, srgb_to_linear
 from contracts.node_picture import DisplayLight
 from contracts.photo_crop import CENTRED, crop_window
-from contracts.room_light import RoomLightEntry, RoomLightsDocument
+from contracts.room_light import Dimmer, FixedColour, Measured, RoomLightEntry, RoomLightsDocument
 from contracts.tuning import SIGNAL_LEVELS, TARGET_PATTERNS, TestPattern
 
 Matrix = tuple[float, float, float, float, float, float, float, float, float]
@@ -218,127 +233,40 @@ def picture_source_uv(x: float, y: float, fit: CornersFit | CoverFit, output: Ou
     return left + u*(right-left), top + v*(bottom-top)
 
 
-# -- The print look (design /print-look, 2026-10-12, "The order"): steps 2, 4, 6 and 7 -------------
-# Each step is stated once here and mirrored by player/native.py's final pass; a step at its
-# neutral value is skipped, never computed, so neutral operations draw exactly the v4 pixels.
+# -- The physics' shared rules (decision 0028): luminance, a light's colour, the rolloff's curve, the mat's
+# edge and the paper profile's LUT. Each is stated once here and mirrored by player/native.py's final pass.
 
-LUMA: Final[Linear] = (0.2126, 0.7152, 0.0722)    # Rec. 709 linear luminance, saturation's axis (Haeberli / CSS saturate())
-ROLLOFF_FADE_POWER: Final = 2.0                     # fade toward white = g ** 2
-LIGHT_ELEVATION_MIN_DEGREES: Final = 1.0            # a soft light's lower edge never reaches the wall plane
+LUMA: Final[Linear] = (0.2126, 0.7152, 0.0722)    # Rec. 709 linear luminance: a light's colour at luminance 1
+LIGHT_ELEVATION_MIN_DEGREES: Final = 1.0            # a soft far light's lower edge never reaches the wall plane
 
 
-def saturated(linear: Linear, saturation: float) -> Linear:
-    """Step 2, linear light: each channel L + saturation * (c - L), L = sum(LUMA_i * c_i). No clamp. Pure."""
-    luminance = sum(weight * value for weight, value in zip(LUMA, linear, strict=True))
-    return tuple(luminance + saturation * (value - luminance) for value in linear)
-
-
-def peak(operations: PictureOperations) -> float:
-    """M, white's level after brightness (design: the largest gain x brightness; the white-balance
-    multipliers' largest is 1 and they act after the rolloff): light_factor. Pure."""
-    return operations.light_factor
-
-
-def rolloff_skipped(operations: PictureOperations) -> bool:
-    """highlight_knee >= 1 or peak(operations) <= 1 (nothing white passes white): step 4 is then
-    v4's clamp to 0..1 after white balance x brightness. The one home of when the rolloff acts:
-    Central's picture view reports it (central/displays/views.py) through Display Host's
-    operations."""
-    return operations.highlight_knee >= 1 or peak(operations) <= 1
-
-
-def rolled_off(linear: Linear, knee: float, peak: float) -> Linear:
-    """Step 4 when not skipped, on brightness-scaled channels (max(0, c * light_factor)), before
-    white balance. x = max channel; x <= knee: unchanged. Else t = (min(x, peak)-k)/(1-k),
-    w = (peak-k)/(1-k), g = t*(1 + t/w**2)/(1 + t), y = k + (1-k)*g, fade = g ** ROLLOFF_FADE_POWER,
-    each channel c*y/x*(1-fade) + y*fade. peak -> exactly 1, slope 1 at the knee.
-
-    Extended Reinhard on the brightest channel with `peak` as its white, every channel scaled
-    alike (hue kept) and faded toward white as it nears the top (the path to white of darktable's
-    filmic and AgX). A channel saturation pushed past `peak` is held there (x capped), so it ends
-    at white too, never above it. Pure.
-
-    Worked through the shortfall 1 - g = (w - t)(w + t) / (w**2 (1 + t)) (the same g, rearranged),
-    so at x >= peak, where t == w, it is exactly 0 and the pixel exactly white. White balance comes
-    after, so that white is the Display's white (the colour temperature's tint kept)."""
-    x = max(linear)
-    if x <= knee:
-        return linear
-    t = (min(x, peak) - knee) / (1 - knee)
+def rolled_off(value: float, knee: float, peak: float) -> float:
+    """The highlight rolloff's curve on one channel (knee < 1 < peak): value <= knee unchanged. Else
+    t = (min(value, peak) - k)/(1 - k), w = (peak - k)/(1 - k), g = t (1 + t/w**2)/(1 + t), and the
+    result k + (1 - k) g: extended Reinhard with `peak` as its white, so peak -> exactly 1, slope 1
+    at the knee, and at peak -> 1 the identity (w = 1 gives g = t). Worked through the shortfall
+    1 - g = (w - t)(w + t)/(w**2 (1 + t)) (the same g, rearranged), so at value >= peak, where
+    t == w, it is exactly 0 and the result exactly 1. Pure."""
+    if value <= knee:
+        return value
+    t = (min(value, peak) - knee) / (1 - knee)
     w = (peak - knee) / (1 - knee)
-    short = (w - t) * (w + t) / (w * w * (1 + t))
-    g = 1 - short
-    y = 1 - (1 - knee) * short
-    fade = g ** ROLLOFF_FADE_POWER
-    return tuple(value * y / x * (1 - fade) + y * fade for value in linear)
-
-
-def floor_lifted(light: float, share: float) -> float:
-    """Step 6, in the panel's light: share + (1 - share) * light (black point compensation: black
-    becomes `share` of white light, white stays white). Pure."""
-    return share + (1 - share) * light
+    return 1 - (1 - knee) * (w - t) * (w + t) / (w * w * (1 + t))
 
 
 def light_colour(kelvin: int) -> Linear:
-    """A mat light's colour at `kelvin`, as light of luminance 1 (sum of LUMA_c * c = 1): the
-    kelvin table's white (contracts/kelvin.py `kelvin_white`, whose largest channel is 1 for the
-    Display's white balance) scaled so a light's strength alone says how bright it is and its
-    kelvin only its colour. Pure."""
+    """A light's colour at `kelvin`, as light of luminance 1 (sum of LUMA_c * c = 1): the kelvin
+    table's white (contracts/kelvin.py `kelvin_white`, whose largest channel is 1 for the Display's
+    white balance) scaled so a light's lux alone says how bright it is and its kelvin only its
+    colour. Pure."""
     white = kelvin_white(kelvin)
     luminance = sum(weight * channel for weight, channel in zip(LUMA, white, strict=True))
     return tuple(channel / luminance for channel in white)
 
 
-@dataclass(frozen=True)
-class MatLight:
-    """One light of a Frame's mat, as the final pass uses it."""
-    toward: tuple[float, float]   # unit vector from the opening toward the light (output axes, x right, y down)
-    dark_until_mm: float          # s0 = depth * cot(min(90, steep + softness/2)): nearer the edge than this, fully shadowed
-    lit_from_mm: float            # s1 = depth * cot(max(LIGHT_ELEVATION_MIN_DEGREES, steep - softness/2)): fully lit from here
-    weight: Linear                # strength_tenths/10 * light_colour(colour_kelvin)
-
-
-@dataclass(frozen=True)
-class MatShadow:
-    """A Frame's mat shadow (step 7): its opening in mat space and the lights that shade it."""
-    to_opening: Matrix            # output fractions -> the opening's unit square: inverse(homography(fit.corners))
-    size_mm: tuple[float, float]  # the square's physical extent along u, v
-    lights: tuple[MatLight, ...]  # only lights with strength_tenths > 0; 1..MAT_LIGHTS_MAX
-
-
 def _cot(degrees: float) -> float:
     """cot of an angle in degrees; cot(90) is exactly 0."""
     return 0.0 if degrees == 90 else 1 / math.tan(math.radians(degrees))
-
-
-def mat_shadow(fit: CornersFit | CoverFit, profile: FrameProfile, mat: Mat) -> MatShadow | None:
-    """None when not mat.shades (step 7 skipped). quarter = the nearest quarter turn of fit.rotation
-    (round(rotation / 90) * 90). size_mm = `opening_size_mm` (the one home of the opening's size).
-    toward: alpha = radians(from_degrees + quarter), (sin alpha, -cos alpha). cot(90)
-    is exactly 0.
-
-    Everything is in mat space, the opening's own rectangle at its physical size, whose axes
-    follow the opening's edges: so a skewed Corners opening still gets an even band, and the
-    light's direction turns by the same quarter turn as the rectangle's size. The rest of a Cover
-    rotation is the opening's own tilt on the output, already in its edges: an opening drawn level
-    on the wall is lit from the wall's up whatever its tilt on the panel. Pure."""
-    if not mat.shades:
-        return None
-    size = opening_size_mm(fit, profile)
-    quarter = round(fit.rotation / 90) * 90
-    lights = []
-    for light in mat.lights:
-        if light.strength_tenths <= 0:
-            continue
-        turn = math.radians(light.from_degrees + quarter)
-        half = light.softness_degrees / 2
-        strength = light.strength_tenths / 10
-        lights.append(MatLight(
-            toward=(math.sin(turn), -math.cos(turn)),
-            dark_until_mm=mat.depth_mm * _cot(min(90, light.steep_degrees + half)),
-            lit_from_mm=mat.depth_mm * _cot(max(LIGHT_ELEVATION_MIN_DEGREES, light.steep_degrees - half)),
-            weight=tuple(strength * channel for channel in light_colour(light.colour_kelvin))))
-    return MatShadow(inverse(homography(fit.corners)), size, tuple(lights))
 
 
 def _edge_distance(point: tuple[float, float], toward: tuple[float, float],
@@ -352,29 +280,6 @@ def _edge_distance(point: tuple[float, float], toward: tuple[float, float],
         elif direction < 0:
             reach = min(reach, position / -direction)
     return max(reach, 0.0)
-
-
-def mat_shade(shadow: MatShadow, x: float, y: float) -> Linear:
-    """At output point (x, y): m = transform(to_opening) * size_mm; per light s = the distance along `toward`
-    from m to the square's boundary (min over the two axes it heads to; >= 0); v = 1 if s >= s1, 0 if s < s0,
-    else smoothstep (t*t*(3-2t)), with s0 == s1 a hard step (s >= s0 -> 1);
-    shade_c = (1 + sum_j weight_jc * v_j) / (1 + sum_j weight_jc). Fully lit is exactly (1, 1, 1)."""
-    u, v = transform(shadow.to_opening, x, y)
-    point = (u * shadow.size_mm[0], v * shadow.size_mm[1])
-    lit, total = [1.0, 1.0, 1.0], [1.0, 1.0, 1.0]
-    for light in shadow.lights:
-        s = _edge_distance(point, light.toward, shadow.size_mm)
-        if s >= light.lit_from_mm:
-            reached = 1.0
-        elif s < light.dark_until_mm:
-            reached = 0.0
-        else:
-            t = (s - light.dark_until_mm) / (light.lit_from_mm - light.dark_until_mm)
-            reached = t * t * (3 - 2 * t)
-        for channel in range(3):
-            lit[channel] += light.weight[channel] * reached
-            total[channel] += light.weight[channel]
-    return tuple(lit[channel] / total[channel] for channel in range(3))
 
 
 def lut_sampled(table: bytes, encoded: Linear) -> Linear:
@@ -398,13 +303,10 @@ def lut_sampled(table: bytes, encoded: Linear) -> Linear:
     return tuple(result)
 
 
-def lut_applied(linear: Linear, table: bytes, amount: float) -> Linear:
-    """Step 1: encode for the screen, look the colour up (`lut_sampled`), mix the table's colour in
-    by `amount` (e (1 - amount) + s amount, as GLSL's mix), decode back to linear light. Pure."""
-    encoded = tuple(encode_srgb(value) for value in linear)
-    sampled = lut_sampled(table, encoded)
-    return tuple(decode_channel(e * (1 - amount) + s * amount)
-                 for e, s in zip(encoded, sampled, strict=True))
+def lut_applied(linear: Linear, table: bytes) -> Linear:
+    """The paper profile's LUT, fully: encode for the screen, look the colour up (`lut_sampled`),
+    decode back to linear light. Pure."""
+    return tuple(decode_channel(value) for value in lut_sampled(table, tuple(encode_srgb(value) for value in linear)))
 
 
 # -- Display tuning's test patterns (decision 0024): what a Frame shows while its Display is tuned --
@@ -520,110 +422,133 @@ def opening_size_mm(fit: CornersFit | CoverFit, profile: FrameProfile) -> tuple[
     return (width, height) if quarter % 180 == 0 else (height, width)
 
 
-def final_pixel(linear: Linear, operations: PictureOperations, *, inside: bool,
-                shade: Linear | None = None, lut: bytes | None = None,
-                opening_uv: tuple[float, float] | None = None,
-                board: BoardDraw | None = None) -> tuple[float, float, float, float]:
-    """One output pixel's final pass, in the print look's order (design "The order"):
-    step 0 (display tuning): operations.test_pattern WHITE or GREY_RAMP replaces `linear` with
-    srgb_to_linear of `pattern_signal` at `opening_uv` (the opening's unit square), and every step
-    below runs as for a photo; BLACK_LEVEL is `pattern_signal` itself, every step below and the
-    shade skipped. A pattern without `opening_uv` is ValueError("opening_uv"). A calibration
-    target (contracts/tuning.py TARGET_PATTERNS) needs `board` (ValueError("board") when None;
-    other patterns ignore it); its signal is s = board_signal(*board_point(*opening_uv, board),
-    board): TARGET_PRE_SOFTWARE is (s, s, s, 1) inside, every step below and the shade skipped,
-    as the Black level; TARGET_POST_SOFTWARE replaces `linear` with srgb_to_linear(s) and runs
-    every step below with the shade skipped (the mat shadow is a place effect, not a setting the
-    target judges), no region raw ->
-    step 1 (`lut_applied`, the LUT `operations.lut` names mixed in by its amount) unless
-    operations.lut is None or its bytes (`lut`) are not held -> step 2 (`saturated`) unless
-    saturation == 1 -> steps 3-4: when `rolloff_skipped`, v4's white balance x light_factor
-    clamped to 0..1; else max(0, c * light_factor), `rolled_off`, then x white balance (the
-    rolloff's white is the Display's white) -> sRGB encode, contrast about 0.5, gamma exponent,
-    clamp (v4) -> steps 6-7 in the panel's light, unless black_floor == 0 and `shade` is None:
-    decode (sRGB, the panel the encode is for), `floor_lifted` unless black_floor == 0, x shade_c
-    unless `shade` is None, encode -> the per-Output mask LAST: (0, 0, 0, 1) when not `inside`
-    any Frame's opening, whatever the floor and the shadow. Pure.
+def final_pixel(photo: Linear, operations: PictureOperations, *, inside: bool, lights: FrameLights | None,
+                x: float, y: float, lut: bytes | None = None, opening_uv: tuple[float, float] | None = None,
+                board: BoardDraw | None = None,
+                dither_at: tuple[int, int] | None = None) -> tuple[float, float, float, float]:
+    """One output pixel's final pass (decision 0028), at output point (x, y) (output fractions) of a
+    Frame lit by `lights` (`frame_lights`; required when `inside`: ValueError("lights")):
+    the paper profile's LUT (`lut_applied`, the bytes of the Frame's `lighting.paper.profile`,
+    fully, when held) -> `paper_reflectance` -> `irradiance` -> `paper_signal` (the Display's light:
+    DisplayLight(operations.matched_lux, operations.panel_black)) -> `highlight_rolled` at
+    lights.peak -> x rgb_multipliers -> sRGB encode -> contrast about 0.5 -> gamma exponent -> clamp
+    -> `dithered` at `dither_at` (an output pixel; None: no dither, for an oracle) -> the per-Output
+    mask LAST: (0, 0, 0, 1) when not `inside` any Frame's opening.
+
+    Test patterns: WHITE and GREY_RAMP (`pattern_signal` at `opening_uv`, the opening's unit square)
+    and TARGET_POST_SOFTWARE (s = board_signal(*board_point(*opening_uv, board), board)) replace
+    the photo's signal with srgb_to_linear of theirs and go through white balance, contrast, gamma,
+    the clamp and the dither only, never the room's light, the paper or the mat. BLACK_LEVEL and
+    TARGET_PRE_SOFTWARE are the raw signal, through no step. A pattern without `opening_uv` is
+    ValueError("opening_uv"); a calibration target without `board` ValueError("board").
 
     A contrast result below 0 meets the exponent as 0 (a power of a negative number is undefined,
-    in GLSL too); with the clamp after, this equals clamping before the exponent."""
+    in GLSL too); with the clamp after, this equals clamping before the exponent. Pure."""
+    if inside and lights is None:
+        raise ValueError("lights")
     pattern = operations.test_pattern
     if pattern in TARGET_PATTERNS:
         if opening_uv is None:
             raise ValueError("opening_uv")
         if board is None:
             raise ValueError("board")
-        signal = board_signal(*board_point(*opening_uv, board), board)
+        value = board_signal(*board_point(*opening_uv, board), board)
         if pattern is TestPattern.TARGET_PRE_SOFTWARE:
-            return (signal, signal, signal, 1.0) if inside else (0.0, 0.0, 0.0, 1.0)
-        linear = (srgb_to_linear(signal),) * 3
-        shade = None
+            return (value, value, value, 1.0) if inside else (0.0, 0.0, 0.0, 1.0)
+        signal = (srgb_to_linear(value),) * 3
     elif pattern is not None:
         if opening_uv is None:
             raise ValueError("opening_uv")
-        signal = pattern_signal(pattern, *opening_uv)
+        encoded = pattern_signal(pattern, *opening_uv)
         if pattern is TestPattern.BLACK_LEVEL:
-            return (*signal, 1.0) if inside else (0.0, 0.0, 0.0, 1.0)
-        linear = tuple(srgb_to_linear(value) for value in signal)
-    if operations.lut is not None and lut is not None:
-        linear = lut_applied(linear, lut, operations.lut.amount)
-    if operations.saturation != 1.0:
-        linear = saturated(linear, operations.saturation)
-    if rolloff_skipped(operations):
-        gained = tuple(min(1.0, max(0.0, value*multiplier*operations.light_factor))
-                       for value, multiplier in zip(linear, operations.rgb_multipliers, strict=True))
+            return (*encoded, 1.0) if inside else (0.0, 0.0, 0.0, 1.0)
+        signal = tuple(srgb_to_linear(value) for value in encoded)
+    elif lights is None:
+        return (0.0, 0.0, 0.0, 1.0)     # not inside (checked above): the mask's black
     else:
-        rolled = rolled_off(tuple(max(0.0, value*operations.light_factor) for value in linear),
-                            operations.highlight_knee, peak(operations))
-        gained = tuple(value*multiplier for value, multiplier in zip(rolled, operations.rgb_multipliers, strict=True))
-    pixel = []
-    for value in gained:
-        value = (encode_srgb(value) - .5)*operations.contrast_slope + .5
-        pixel.append(min(1.0, max(0.0, value) ** operations.gamma_exponent))
-    if operations.black_floor != 0 or shade is not None:
-        light = [srgb_to_linear(value) for value in pixel]
-        if operations.black_floor != 0:
-            light = [floor_lifted(value, operations.black_floor) for value in light]
-        if shade is not None:
-            light = [value * factor for value, factor in zip(light, shade, strict=True)]
-        pixel = [encode_srgb(value) for value in light]
+        if lut is not None:
+            photo = lut_applied(photo, lut)
+        display = DisplayLight(operations.matched_lux, operations.panel_black)
+        reflectance = paper_reflectance(photo, lights.paper)
+        signal = highlight_rolled(paper_signal(reflectance, irradiance(lights, x, y), display), lights.peak)
+    pixel = display_steps(signal, operations)
+    if dither_at is not None:
+        pixel = tuple(min(1.0, max(0.0, dithered(value, *dither_at))) for value in pixel)
     if not inside:
         return (0.0, 0.0, 0.0, 1.0)
     return (*pixel, 1.0)
 
 
+def display_steps(signal: Linear, operations: PictureOperations) -> Linear:
+    """The Display's own steps on a linear signal (a share of the TV's white): x rgb_multipliers,
+    sRGB encode, contrast about 0.5, gamma exponent, clamp; the encoded result. The one home of the
+    tail every pixel and every look pattern shares (`final_pixel`); the calibration reader predicts
+    a post-software target with it. Pure."""
+    pixel = []
+    for value, multiplier in zip(signal, operations.rgb_multipliers, strict=True):
+        value = (encode_srgb(value * multiplier) - .5) * operations.contrast_slope + .5
+        pixel.append(min(1.0, max(0.0, value) ** operations.gamma_exponent))
+    return tuple(pixel)
+
+
 def output_pixel(x: float, y: float,
-                 frames: Sequence[tuple[CornersFit | CoverFit, float, Linear, MatShadow | None]],
+                 frames: Sequence[tuple[CornersFit | CoverFit, float, Linear, FrameLights | None]],
                  operations: PictureOperations, output: OutputSize) -> tuple[float, float, float, float]:
     """The reference for one Output carrying several Frames, each a fit, its profile's aspect, one
-    flat linear colour and its mat shadow (None: no shadow): the colour of the last Frame whose
-    opening holds (x, y), black where none does, through `final_pixel` with `inside` = some
-    opening holds it and the shade of that covering Frame's shadow. Pure; the two-Frames test's
-    oracle, for operations without a test pattern (`final_pixel` needs the opening's uv for one). Each Frame's coverage is where it samples its picture (`picture_source_uv`), so the
-    per-Frame mask decides what a Frame paints; the per-Output mask is the union of the openings."""
+    flat linear colour and its lights (`frame_lights`): the colour of the last Frame whose opening
+    holds (x, y), black where none does, through `final_pixel` with `inside` = some opening holds it
+    and that covering Frame's lights. Pure; the two-Frames test's oracle, for operations without a
+    test pattern (`final_pixel` needs the opening's uv for one). Each Frame's coverage is where it
+    samples its picture (`picture_source_uv`), so the per-Frame mask decides what a Frame paints;
+    the per-Output mask is the union of the openings."""
     colour: Linear = (0.0, 0.0, 0.0)
-    shadow: MatShadow | None = None
-    for fit, aspect, flat, frame_shadow in frames:
+    lights: FrameLights | None = None
+    for fit, aspect, flat, frame_lit in frames:
         if picture_source_uv(x, y, fit, output, aspect, 1, 1, CENTRED) is not None:
-            colour, shadow = flat, frame_shadow
+            colour, lights = flat, frame_lit
     inside = any(inside_opening(fit.corners, x, y) for fit, _, _, _ in frames)
-    shade = None if shadow is None else mat_shade(shadow, x, y)
-    return final_pixel(colour, operations, inside=inside, shade=shade)
+    return final_pixel(colour, operations, inside=inside, lights=lights, x=x, y=y)
 
 
 # ---- Room light (decision 0028): one physics path, the scalar reference player/native.py mirrors ----
-# Signatures frozen by the milestone's interface commit; the pi lane implements them and replaces
-# `final_pixel`'s print-look steps with them (its frozen page). Nothing calls them yet.
 
 HIGHLIGHT_KNEE: Final = 0.8         # the fixed rolloff's knee, in signal (a share of the TV's white)
+NO_LIGHT: Final[Linear] = (0.0, 0.0, 0.0)
+# The 4 x 4 ordered dither (Bayer): the threshold rank at row y % 4, column x % 4. The shader's copy
+# is written in from here (player/native.py `_FINAL_CONSTANTS`).
+BAYER_4: Final = (0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5)
+# The shader's light kind codes (player/native.py writes them in).
+LIGHT_KINDS: Final = ("wash", "far", "close")
+LightKind = Literal["wash", "far", "close"]
+
+
+@dataclass(frozen=True)
+class LitLight:
+    """One Frame light as the final pass draws it (the shader's uniform arrays), in mat space: the
+    opening's own rectangle at its physical size, mm, x along its unit square's u, y along v (down
+    for an opening drawn level)."""
+    kind: LightKind
+    rgb: Linear                                 # `light_on_frame`: rgb lux on the Frame (at its centre, close)
+    toward: tuple[float, float] = (0.0, 0.0)    # far: unit vector toward the light (mat axes)
+    band_mm: tuple[float, float] = (0.0, 0.0)   # far: (dark until, lit from), the mat shadow's band
+    position_mm: tuple[float, float, float] = (0.0, 0.0, 1.0)   # close: (x, y) in mat space, out from the wall
+    beam: tuple[float, float] = (0.0, 0.0)      # close: half the inner and outer beam angles, radians
 
 
 @dataclass(frozen=True)
 class FrameLights:
     """One Frame's lights resolved against one room-lights document, as the final pass uses them
-    (the shader's uniforms): each light's rgb lux at the Frame, its shape in the opening's mat space,
-    its mat shadow, and the Frame's `peak` (an upper bound of its paper white's signal, the same for
-    every pixel of the Frame, so the rolloff keeps the cone's shape). Fields are the pi lane's."""
+    (the shader's uniforms): `to_opening` (output fractions -> the opening's unit square,
+    inverse(homography(fit.corners))), the opening's physical `size_mm` (`opening_size_mm`), the
+    mat's `depth_mm`, the `paper`, each light that adds light (`lights`, at most FRAME_LIGHTS_MAX;
+    one adding none is left out) and the Frame's `peak`: an upper bound of its paper white's signal,
+    the same for every pixel of the Frame, so the rolloff keeps the cone's shape."""
+    to_opening: Matrix
+    size_mm: tuple[float, float]
+    depth_mm: float
+    paper: Paper
+    lights: tuple[LitLight, ...]
+    peak: float
 
 
 def light_on_frame(light: WashLight | FarLight | CloseLight, entry: RoomLightEntry | None) -> Linear:
@@ -634,49 +559,177 @@ def light_on_frame(light: WashLight | FarLight | CloseLight, entry: RoomLightEnt
     `light_colour(kelvin)`; ReportedColour: drive_c = rgb_c x brightness (rgb None: 1) and
     E_c = lux x drive_c x share_c / LUMA_c, so luminance is lux x sum_c drive_c x share_c).
     Measured: lux x reading / reference, coloured as a Dimmer at full. Pure."""
-    raise NotImplementedError
+    if entry is None:
+        return NO_LIGHT
+    state = entry.state
+    if isinstance(state, Dimmer) and state.on and light.reference == DIMMER_AT_FULL:
+        lux, brightness, drive = light.lux, state.brightness, state.rgb
+    elif isinstance(state, Measured) and not isinstance(light.reference, str):
+        lux, brightness, drive = light.lux * state.lux / light.reference, 1.0, None
+    else:
+        return NO_LIGHT
+    colour = entry.colour
+    if isinstance(colour, FixedColour):
+        return tuple(lux * brightness * channel for channel in light_colour(colour.kelvin))
+    return tuple(lux * (1.0 if drive is None else drive[index]) * brightness * colour.channel_shares[index]
+                 / LUMA[index] for index in range(3))
+
+
+def _to_mat(across: float, up: float, quarter: int) -> tuple[float, float]:
+    """A wall offset (across: + right, up: + up) as a mat-space offset: the wall's up is mat space's
+    -y for an opening at quarter 0, turned clockwise by the Frame's quarter turn (as a far light's
+    `toward`)."""
+    turn = math.radians(quarter)
+    x, y = across, -up
+    return (x * math.cos(turn) - y * math.sin(turn), x * math.sin(turn) + y * math.cos(turn))
+
+
+def _lit(light: WashLight | FarLight | CloseLight, rgb: Linear, depth: float, quarter: int,
+         size: tuple[float, float]) -> LitLight:
+    """`light` in mat space."""
+    if isinstance(light, WashLight):
+        return LitLight("wash", rgb)
+    if isinstance(light, FarLight):
+        turn = math.radians(light.from_degrees + quarter)
+        half = light.softness_degrees / 2
+        return LitLight("far", rgb, toward=(math.sin(turn), -math.cos(turn)), band_mm=(
+            depth * _cot(min(90, light.steep_degrees + half)),
+            depth * _cot(max(LIGHT_ELEVATION_MIN_DEGREES, light.steep_degrees - half))))
+    dx, dy = _to_mat(light.across_mm, light.up_mm, quarter)
+    return LitLight("close", rgb, position_mm=(size[0] / 2 + dx, size[1] / 2 + dy, light.out_mm),
+                    beam=(math.radians(light.inner_beam_degrees) / 2, math.radians(light.outer_beam_degrees) / 2))
+
+
+def _close_reach(lit: LitLight, size: tuple[float, float]) -> float:
+    """The largest inverse-square factor (d0 / d)**3 a close light gives anywhere on the opening:
+    at the opening's point nearest the light along the wall."""
+    lx, ly, out = lit.position_mm
+    near = (min(max(lx, 0.0), size[0]), min(max(ly, 0.0), size[1]), 0.0)
+    centre = math.dist((lx, ly, out), (size[0] / 2, size[1] / 2, 0.0))
+    return (centre / math.dist((lx, ly, out), near)) ** 3
 
 
 def frame_lights(lighting: FrameLighting, document: RoomLightsDocument | None,
                  fit: CornersFit | CoverFit, profile: FrameProfile, display: DisplayLight) -> FrameLights:
     """`lighting`'s lights against `document` (None: none received yet, so every light adds none),
-    in the opening's mat space at its physical size (`opening_size_mm`), with the Frame's peak.
-    Pure."""
-    raise NotImplementedError
+    in the opening's mat space at its physical size (`opening_size_mm`), with the Frame's peak: the
+    paper white's `paper_signal` under the sum of every light at its brightest on the opening (a
+    close light's `_close_reach`; a cone never adds), largest channel. quarter = the nearest quarter
+    turn of fit.rotation; a far light's `toward` = (sin a, -cos a), a = from_degrees + quarter, its
+    band (depth cot(min(90, steep + softness/2)), depth cot(max(LIGHT_ELEVATION_MIN_DEGREES, steep -
+    softness/2))); a close light's place `_to_mat` from the opening's centre. Pure."""
+    size = opening_size_mm(fit, profile)
+    quarter = round(fit.rotation / 90) * 90
+    lights = []
+    for light in lighting.lights:
+        entry = None if document is None else document.lights.get(light.light)
+        rgb = light_on_frame(light, entry)
+        if max(rgb) > 0:
+            lights.append(_lit(light, rgb, lighting.mat_depth_mm, quarter, size))
+    brightest = [0.0, 0.0, 0.0]
+    for lit in lights:
+        reach = _close_reach(lit, size) if lit.kind == "close" else 1.0
+        for channel in range(3):
+            brightest[channel] += lit.rgb[channel] * reach
+    white = paper_signal((lighting.paper.whiteness,) * 3, tuple(brightest), display)
+    return FrameLights(inverse(homography(fit.corners)), size, lighting.mat_depth_mm, lighting.paper,
+                       tuple(lights), max(white))
+
+
+def _smoothstep(t: float) -> float:
+    return t * t * (3 - 2 * t)
+
+
+def _reached(lit: LitLight, point: tuple[float, float], size: tuple[float, float], depth: float) -> float:
+    """The share of `lit` the mat lets reach `point` (mat space): wash 1; far, the band rule (s the
+    distance along `toward` to the opening's edge: 1 from lit-from, 0 nearer than dark-until,
+    smoothstep between, a hard step when they are equal); close, a point light's shadow: along the
+    wall toward the light's foot, s the distance to the opening's edge, lit when s >= depth x h /
+    out (h the distance along the wall to the light's foot; h == 0 is always lit)."""
+    if lit.kind == "wash":
+        return 1.0
+    if lit.kind == "far":
+        s = _edge_distance(point, lit.toward, size)
+        dark, full = lit.band_mm
+        if s >= full:
+            return 1.0
+        if s < dark:
+            return 0.0
+        return _smoothstep((s - dark) / (full - dark))
+    lx, ly, out = lit.position_mm
+    h = math.hypot(lx - point[0], ly - point[1])
+    if h == 0:
+        return 1.0
+    s = _edge_distance(point, ((lx - point[0]) / h, (ly - point[1]) / h), size)
+    return 1.0 if s >= depth * h / out else 0.0
+
+
+def _close_shape(lit: LitLight, point: tuple[float, float], size: tuple[float, float]) -> float:
+    """A close light's shape at `point` (mat space), relative to the Frame's centre: the inverse
+    square with the angle onto the wall, (d0 / d)**3, times the cone: phi the angle between the
+    light's aim (the Frame's centre) and the point, 1 within half the inner beam, 0 from half the
+    outer beam, smoothstep of (outer - phi) / (outer - inner) between."""
+    lx, ly, out = lit.position_mm
+    aim = (size[0] / 2 - lx, size[1] / 2 - ly, -out)
+    ray = (point[0] - lx, point[1] - ly, -out)
+    d0, d = math.hypot(*aim), math.hypot(*ray)
+    phi = math.acos(min(1.0, max(-1.0, sum(a * b for a, b in zip(aim, ray, strict=True)) / (d0 * d))))
+    inner, outer = lit.beam
+    if phi <= inner:
+        cone = 1.0
+    elif phi >= outer:
+        cone = 0.0
+    else:
+        cone = _smoothstep((outer - phi) / (outer - inner))
+    return (d0 / d) ** 3 * cone
 
 
 def irradiance(lights: FrameLights, x: float, y: float) -> Linear:
     """E at output point (x, y), rgb lux: the sum over the Frame's lights of light_on_frame x shape x
-    reaches. Shape: 1 for wash and far; for close, the inverse square and the angle onto the wall
-    relative to the Frame's centre, times the cone (1 inside inner_beam_degrees, smoothly to 0 at
-    outer_beam_degrees). Reaches: the mat shadow, 0..1 (far: today's band rule with lux for
-    strength; close: a point light's shadow; wash: 1). No floor (owner, 2026-10-15, Q1 B: the
+    reaches, at m = transform(to_opening, x, y) x size_mm. Shape: 1 for wash and far; for close,
+    `_close_shape`. Reaches: `_reached` (the mat shadow). No floor (owner, 2026-10-15, Q1 B: the
     brightness follows the room down). Pure."""
-    raise NotImplementedError
+    u, v = transform(lights.to_opening, x, y)
+    point = (u * lights.size_mm[0], v * lights.size_mm[1])
+    total = [0.0, 0.0, 0.0]
+    for lit in lights.lights:
+        shape = _close_shape(lit, point, lights.size_mm) if lit.kind == "close" else 1.0
+        if shape == 0:
+            continue
+        share = shape * _reached(lit, point, lights.size_mm, lights.depth_mm)
+        for channel in range(3):
+            total[channel] += lit.rgb[channel] * share
+    return tuple(total)
 
 
 def paper_reflectance(photo: Linear, paper: Paper) -> Linear:
     """rho = whiteness x (10^-ink + (1 - 10^-ink) x photo_c), the photo already through the paper
     profile's LUT when it has one (the only source of saturation, Q2 B). Pure."""
-    raise NotImplementedError
+    black = 10 ** -paper.ink_density
+    return tuple(paper.whiteness * (black + (1 - black) * value) for value in photo)
 
 
 def paper_signal(reflectance: Linear, light: Linear, display: DisplayLight) -> Linear:
     """The panel's linear signal for paper of `reflectance` under `light` (rgb lux): (rho_c x E_c /
     (SHEET_WHITENESS x matched_lux) - black) / (1 - black), at least 0 (below the panel's glow it
     shows the glow). May pass 1: `highlight_rolled` brings it back. Pure."""
-    raise NotImplementedError
+    white = SHEET_WHITENESS * display.matched_lux
+    return tuple(max(0.0, (rho * lux / white - display.black) / (1 - display.black))
+                 for rho, lux in zip(reflectance, light, strict=True))
 
 
 def highlight_rolled(signal: Linear, peak: float) -> Linear:
     """The one fixed rolloff above the TV's white (Q2 B): identity when peak <= 1; otherwise each
     channel at or below HIGHLIGHT_KNEE unchanged and [HIGHLIGHT_KNEE, peak] mapped onto
     [HIGHLIGHT_KNEE, 1] by `rolled_off`'s curve, monotone and continuous in signal and peak. Pure."""
-    raise NotImplementedError
+    if peak <= 1:
+        return signal
+    return tuple(rolled_off(value, HIGHLIGHT_KNEE, peak) for value in signal)
 
 
 def dithered(encoded: float, x: int, y: int) -> float:
     """`encoded` (0..1, screen-encoded) plus an ordered dither of at most half an 8-bit step at
     output pixel (x, y), before quantisation (required: the room may dim the picture to a few dozen
-    steps). Its mean over any 4 x 4 tile is `encoded`; the shader uses the same pattern. Pure."""
-    raise NotImplementedError
+    steps): ((BAYER_4[(y % 4) * 4 + x % 4] + 0.5) / 16 - 0.5) / 255. Its mean over any 4 x 4 tile is
+    `encoded`; the shader uses the same pattern. Pure."""
+    return encoded + ((BAYER_4[(y % 4) * 4 + x % 4] + .5) / 16 - .5) / 255

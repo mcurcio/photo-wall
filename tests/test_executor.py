@@ -8,6 +8,7 @@ from threading import Event
 
 import pytest
 
+from contracts.frame_lighting import FrameLighting, Paper
 from contracts.models import (
     Calibration,
     Commit,
@@ -15,7 +16,6 @@ from contracts.models import (
     FrameProfile,
     Layer,
     LostGrant,
-    Mat,
     OutputBinding,
     Plan,
     PlayerConfiguration,
@@ -211,10 +211,13 @@ def cached(variant: Variant) -> str:
     return hashlib.sha256(variant.key.encode()).hexdigest()
 
 
+LIGHTING = FrameLighting(mat_depth_mm=0, lights=(), paper=Paper(whiteness=.9, ink_density=2))
+
+
 def binding(output: str = "hdmi1", frame: str = "frame1", **kwargs) -> OutputBinding:
     return OutputBinding(output_id=output, frame_id=frame, generation=1,
                          profile=FrameProfile(width_px=1920, height_px=1080, diagonal_inches=32),
-                         **{"mat": Mat(), **kwargs})
+                         **{"lighting": LIGHTING, **kwargs})
 
 
 def layer(key: str = "picture", *, output: str = "hdmi1", frame: str = "frame1",

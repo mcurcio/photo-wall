@@ -14,31 +14,26 @@ appliance/display_host/native/photo-wall-frame-v1.xml) adds the picture:
   was drawn with; the shell echoes it in its `presented` event, so the controller reports the
   newest picture change the Player presented. Its wire text is `picture_change_text`'s.
 
-Picture operations v5 (the print look, 2026-10-12) add the print look's steps: `saturation`,
-`highlight_knee` (the highlight rolloff, which replaces the clamp after white balance x
-brightness), `black_floor` (the last tone step) and `lut` (`LutMix`: a LUT by name and how much of
-it is mixed in). Each at its neutral value (1, 1, 0, None) is skipped by the Player, never
-computed, so neutral operations draw exactly the v4 pixels. The Wayland messages are unchanged
-(the interface stays version 4); the `picture` event's operations text grows to
-PICTURE_OPERATIONS_BYTES, and a Player and a display host from different releases refuse each
-other's text (the strict codec below), as a Pi's release ships whole.
+Picture operations v5 to v7 (the print look, display tuning, calibration targets) added the print
+look's steps, `test_pattern` (contracts/tuning.py `TestPattern`) and the calibration targets'
+patterns. The Wayland messages are unchanged (the interface stays version 4); a Player and a display
+host from different releases refuse each other's text (the strict codec below), as a Pi's release
+ships whole.
 
-Picture operations v6 (display tuning, decision 0024) add `test_pattern` (contracts/tuning.py
-`TestPattern`): None draws the Frame's photos as before; WHITE and GREY_RAMP replace the photos
-inside every Frame's opening on the Output, Position's grid included, and pass through every step
-above and the mat; BLACK_LEVEL draws raw signal values through no step and no mat. Outside every
-opening stays black for all three. The Wayland messages are unchanged.
+Picture operations v8 (room light, decision 0028; owner, 2026-10-15, Q2 "the paper replaces them")
+delete the print look's sliders (light factor, saturation, highlight knee, black floor) and the
+Display's LUT: the paper on each Frame's lighting replaces them. They add the Display's light,
+`matched_lux` and `panel_black` (contracts/node_picture.py `DisplayLight`, whose ranges have their
+one home there: this module may not import it, as node_picture -> kelvin -> node_frame would cycle,
+so here they are only finite and positive, and the display host builds operations only from a valid
+DisplayLight). The test patterns: WHITE, GREY_RAMP and TARGET_POST_SOFTWARE go through white balance,
+contrast and gamma only, never the room's light, the paper or the mat (with the sliders gone, White
+is the TV's own white for the paper match); BLACK_LEVEL and TARGET_PRE_SOFTWARE are raw. Outside
+every opening stays black.
 
-Picture operations v7 (calibration targets, decisions 0026 and 0027) add two `test_pattern` values,
-TARGET_PRE_SOFTWARE and TARGET_POST_SOFTWARE: the screen board (contracts/calibration_target.py)
-drawn in every opening to its size, raw or through Photo Wall's steps (contracts/tuning.py).
-Nothing else changes: the Player names the board's QR copies from its own player id and these
-operations' `output_id` and `picture_change`, so the wire carries no QR.
-
-One home each here: the operations' shape, ranges and codec; the picture change's wire text; the
-knee's and the floor's bounds. How settings become operations is Display Host's
-(appliance/display_host/picture.py `operations_for`); what each operation does, in which order,
-is the Player's (player/geometry.py, the scalar reference, mirrored by player/native.py).
+One home each here: the operations' shape, ranges and codec; the picture change's wire text. How
+settings become operations is Display Host's (appliance/display_host/picture.py `operations_for`);
+what each operation does, in which order, is the Player's (player/geometry.py, the scalar reference, mirrored by player/native.py).
 """
 from __future__ import annotations
 
@@ -49,23 +44,15 @@ from dataclasses import dataclass, fields
 from hashlib import sha256
 from typing import Final
 
-from contracts.lut import LutRef
 from contracts.node_protocol import counter, digest, token
 from contracts.strict_json import loads_object
 from contracts.tuning import TestPattern
 
-PICTURE_OPERATIONS_BYTES: Final = 1024    # one `picture` event's operations, encoded (v5 and v6; 512 in v4)
-LIGHT_FACTOR_MAX: Final = 2.0             # light_factor in 0..2 (Photo Wall's brightness 0..150 % is 0..1.5)
+PICTURE_OPERATIONS_BYTES: Final = 1024    # one `picture` event's operations, encoded (v5 to v8; 512 in v4)
 CONTRAST_SLOPE_MAX: Final = 2.0           # contrast_slope in 0..2
 GAMMA_EXPONENT_MIN: Final = 0.5           # gamma_exponent in 0.5..2
 GAMMA_EXPONENT_MAX: Final = 2.0
 NO_PICTURE_CHANGE: Final = "0"            # tag_picture's text before any picture event reached the Player
-SATURATION_MAX: Final = 1.5               # saturation in 0..1.5 (Photo Wall's 0..150 %); 1 is skipped
-HIGHLIGHT_KNEE_MIN: Final = 0.18          # highlight_knee in 0.18..1, linear light (0.18: mid-grey); 1 is skipped.
-                                          # The rolloff slider's 100 % (a placeholder, tuned on the bench)
-BLACK_FLOOR_MAX: Final = 0.1              # black_floor in 0..0.1, a share of white light (Photo Wall's
-                                          # 0..10 % of white); 0 is skipped. The Player lifts in the panel's
-                                          # light (sRGB, the panel its encode is for), never in output values
 
 
 def srgb_to_linear(value: float) -> float:
@@ -76,55 +63,31 @@ def srgb_to_linear(value: float) -> float:
 
 
 @dataclass(frozen=True)
-class LutMix:
-    """A LUT the Player applies (step 1 of the print look's order), by name (`ref`, fetched from
-    Central), mixed in by `amount` (0 < amount <= 1: a LUT at amount 0 is no LutMix at all)."""
-    ref: LutRef
-    amount: float
-
-    def __post_init__(self) -> None:
-        """ValueError("picture_operations") unless ref is a LutRef and amount a finite float (or an
-        int, never a bool) with 0 < amount <= 1."""
-        if not (isinstance(self.ref, LutRef) and _number(self.amount, 0, 1) and self.amount > 0):
-            raise ValueError("picture_operations")
-
-
-@dataclass(frozen=True)
 class PictureOperations:
-    """What the Player's final pass does to one Output's picture (v5). The order, each step's
-    formula and its skip rule are the Player's (player/geometry.py `final_pixel`); in brief: mix in
-    the LUT (`lut`), `saturation` about luminance, multiply linear light by `rgb_multipliers` (white
-    balance; the largest is 1) and `light_factor`, roll the highlights off above `highlight_knee`
-    (or clamp, as v4, when skipped), encode for the screen, apply `contrast_slope` about mid-grey
-    (0.5), raise to `gamma_exponent`, clamp, lift black to `black_floor` of white light, then the Frame's mat shadow
-    (from its binding, never from here) and black outside the Output's Frame openings. Every value
-    at its neutral (multipliers and factors 1, knee 1, floor 0, no LUT) changes nothing.
-    `picture_change` is the picture document's change these came from, echoed by the Player's tag.
-    `test_pattern` (v6): drawn instead of the Frame's photos (the module's v6 rule; the pattern's
-    layout is player/geometry.py `pattern_signal`); None: the photos.
-
-    The print look's and display tuning's fields default to their neutral values in Python; the
-    wire never defaults them (`decode_picture_operations` needs every field)."""
+    """What the Player's final pass does to one Output's picture (v8). The order and each step's
+    formula are the Player's (player/geometry.py `final_pixel`); in brief: the Frame's paper under
+    the room's light (from the Frame's binding and the room-lights document, never from here) as a
+    signal between the panel's black (`panel_black`) and its white at `matched_lux`, the fixed
+    highlight rolloff, white balance (`rgb_multipliers`, the largest 1), encode for the screen,
+    `contrast_slope` about mid-grey (0.5), `gamma_exponent`, clamp, dither, then black outside the
+    Output's Frame openings. `picture_change` is the picture document's change these came from,
+    echoed by the Player's tag. `test_pattern`: drawn instead of the Frame's photos (the module's
+    rule; the pattern's layout is player/geometry.py `pattern_signal`); None: the photos."""
     output_id: str
     picture_change: int
     rgb_multipliers: tuple[float, float, float]
-    light_factor: float
     contrast_slope: float
     gamma_exponent: float
-    saturation: float = 1.0
-    highlight_knee: float = 1.0
-    black_floor: float = 0.0
-    lut: LutMix | None = None
+    matched_lux: float
+    panel_black: float
     test_pattern: TestPattern | None = None
 
     def __post_init__(self) -> None:
         """ValueError("picture_operations") unless output_id is a node token, picture_change >= 1,
         every number is a finite float (an int is accepted and kept as given, never a bool), each
-        multiplier is in (0, 1] with the largest exactly 1.0, 0 <= light_factor <=
-        LIGHT_FACTOR_MAX, 0 <= contrast_slope <= CONTRAST_SLOPE_MAX, GAMMA_EXPONENT_MIN <=
-        gamma_exponent <= GAMMA_EXPONENT_MAX, 0 <= saturation <= SATURATION_MAX, HIGHLIGHT_KNEE_MIN
-        <= highlight_knee <= 1, 0 <= black_floor <= BLACK_FLOOR_MAX, lut is None or a LutMix, and
-        test_pattern is None or a TestPattern."""
+        multiplier is in (0, 1] with the largest exactly 1.0, 0 <= contrast_slope <=
+        CONTRAST_SLOPE_MAX, GAMMA_EXPONENT_MIN <= gamma_exponent <= GAMMA_EXPONENT_MAX,
+        matched_lux > 0, 0 < panel_black < 1, and test_pattern is None or a TestPattern."""
         multipliers = self.rgb_multipliers
         try:
             token(self.output_id)
@@ -134,36 +97,30 @@ class PictureOperations:
         valid = (isinstance(multipliers, tuple) and len(multipliers) == 3
                  and all(_number(value, 0, 1) and value > 0 for value in multipliers)
                  and max(multipliers) == 1.0
-                 and _number(self.light_factor, 0, LIGHT_FACTOR_MAX)
                  and _number(self.contrast_slope, 0, CONTRAST_SLOPE_MAX)
                  and _number(self.gamma_exponent, GAMMA_EXPONENT_MIN, GAMMA_EXPONENT_MAX)
-                 and _number(self.saturation, 0, SATURATION_MAX)
-                 and _number(self.highlight_knee, HIGHLIGHT_KNEE_MIN, 1)
-                 and _number(self.black_floor, 0, BLACK_FLOOR_MAX)
-                 and (self.lut is None or isinstance(self.lut, LutMix))
+                 and _number(self.matched_lux, 0, math.inf) and self.matched_lux > 0
+                 and _number(self.panel_black, 0, 1) and 0 < self.panel_black < 1
                  and (self.test_pattern is None or isinstance(self.test_pattern, TestPattern)))
         if not valid:
             raise ValueError("picture_operations")
 
 
-def neutral_operations(output_id: str, picture_change: int) -> PictureOperations:
-    """Operations that change nothing: multipliers (1, 1, 1), every factor 1, knee 1, floor 0, no
-    LUT, no test pattern."""
+def neutral_operations(output_id: str, picture_change: int, matched_lux: float,
+                       panel_black: float) -> PictureOperations:
+    """Operations that change nothing of the Display's own: multipliers (1, 1, 1), slope 1, exponent
+    1, no test pattern, with the Display's light as given."""
     return PictureOperations(output_id=output_id, picture_change=picture_change, rgb_multipliers=(1.0, 1.0, 1.0),
-                             light_factor=1.0, contrast_slope=1.0, gamma_exponent=1.0, saturation=1.0,
-                             highlight_knee=1.0, black_floor=0.0, lut=None, test_pattern=None)
+                             contrast_slope=1.0, gamma_exponent=1.0, matched_lux=matched_lux,
+                             panel_black=panel_black, test_pattern=None)
 
 
 def encode_picture_operations(operations: PictureOperations) -> str:
-    """Canonical JSON (sorted keys, no spaces, tuples as lists, a LutMix and its LutRef as objects of
-    their fields, a test pattern as its value, floats as Python's repr) of at most PICTURE_OPERATIONS_BYTES;
-    ValueError("picture_operations_too_large") past it (never for valid operations: every field at
-    its longest fits)."""
+    """Canonical JSON (sorted keys, no spaces, tuples as lists, a test pattern as its value, floats
+    as Python's repr) of at most PICTURE_OPERATIONS_BYTES; ValueError("picture_operations_too_large")
+    past it (never for valid operations: every field at its longest fits)."""
     value = {field.name: getattr(operations, field.name) for field in fields(PictureOperations)}
     value["rgb_multipliers"] = list(operations.rgb_multipliers)
-    mix = operations.lut
-    value["lut"] = None if mix is None else {"amount": mix.amount, "ref": {
-        "profile_sha256": mix.ref.profile_sha256, "recipe_id": mix.ref.recipe_id}}
     value["test_pattern"] = None if operations.test_pattern is None else operations.test_pattern.value
     raw = json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
     if len(raw.encode()) > PICTURE_OPERATIONS_BYTES:
@@ -172,31 +129,22 @@ def encode_picture_operations(operations: PictureOperations) -> str:
 
 
 def decode_picture_operations(raw: str) -> PictureOperations:
-    """The operations `raw` encodes (contracts.strict_json rules; exactly the eleven fields, a lut
-    exactly {amount, ref} and its ref exactly {profile_sha256, recipe_id}, a test pattern null or
-    one of TestPattern's values);
-    ValueError("picture_operations") for anything else."""
+    """The operations `raw` encodes (contracts.strict_json rules; exactly the eight fields, a test
+    pattern null or one of TestPattern's values); ValueError("picture_operations") for anything
+    else."""
     value = loads_object(raw.encode(), max_bytes=PICTURE_OPERATIONS_BYTES) if isinstance(raw, str) else None
     if value is None or set(value) != {field.name for field in fields(PictureOperations)}:
         raise ValueError("picture_operations")
-    multipliers, mix = value["rgb_multipliers"], value["lut"]
+    multipliers = value["rgb_multipliers"]
     if not isinstance(multipliers, list):
         raise ValueError("picture_operations")
-    if mix is not None:
-        if not (isinstance(mix, dict) and set(mix) == {"amount", "ref"} and isinstance(mix["ref"], dict)
-                and set(mix["ref"]) == {"profile_sha256", "recipe_id"}):
-            raise ValueError("picture_operations")
-        try:
-            mix = LutMix(LutRef(**mix["ref"]), mix["amount"])
-        except ValueError as error:
-            raise ValueError("picture_operations") from error
     pattern = value["test_pattern"]
     if pattern is not None:
         try:
             pattern = TestPattern(pattern)
         except (ValueError, TypeError) as error:
             raise ValueError("picture_operations") from error
-    return PictureOperations(**{**value, "rgb_multipliers": tuple(multipliers), "lut": mix, "test_pattern": pattern})
+    return PictureOperations(**{**value, "rgb_multipliers": tuple(multipliers), "test_pattern": pattern})
 
 
 def picture_change_text(change: int | None) -> str:

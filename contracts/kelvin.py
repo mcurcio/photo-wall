@@ -5,13 +5,13 @@ Two consumers, one table:
 - the Display's Photo Wall (software) colour temperature, KELVIN_MIN..KELVIN_MAX of
   contracts/node_picture.py, which the Pi's picture controller turns into the Player's white
   balance (appliance/display_host/picture.py `operations_for`);
-- a Frame's mat light, KELVIN_TABLE_MIN..KELVIN_TABLE_MAX (contracts/models.py `Light`), which
-  the Player turns into the light's colour at luminance 1 (player/geometry.py `light_colour`, the
-  mat shadow's own normalisation: the white balance's largest channel is 1, a light's luminance is
-  1, so the two vary apart).
+- a room light's fixed colour, KELVIN_TABLE_MIN..KELVIN_TABLE_MAX (contracts/room_light.py
+  `FixedColour`, decision 0028), which the Player turns into the light's colour at luminance 1
+  (player/geometry.py `light_colour`, the physics' own normalisation: the white balance's largest
+  channel is 1, a light's luminance is 1, so the two vary apart).
 
 Moved here from appliance/display_host/picture.py (`kelvin_multipliers`, `_CHARITY`) when the
-mat's lights needed it on the Player too, and widened from 3000..9300 to 2000..10000 for a warm
+print look's mat lights needed it on the Player too, and widened from 3000..9300 to 2000..10000 for a warm
 white bulb (2700 K) and a cool window. The rows 3000..9300 are the ones the picture split
 shipped, unchanged (4900 K's blue stays 0.5796 where the source now reads 0.5797).
 """

@@ -1,13 +1,15 @@
 """Applying owner for operational trial transforms; uses the canonical calibration path.
 
-Position's trial also carries the Frame's draft mat (print look, 2026-10-12): drawn while the
-trial is, the binding's again once it ends."""
+Position's trial also carries the Frame's draft lighting (decision 0028: its lights, mat depth and
+paper, `lighting_json` parsed as contracts.frame_lighting.FrameLighting): drawn while the trial is,
+the binding's again once it ends. A draft FrameLighting refuses is refused with the trial."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from contracts.models import Calibration, Mat
+from contracts.frame_lighting import FrameLighting
+from contracts.models import Calibration
 from contracts.node_calibration import TrialCandidate, parse_trial
 from player.rendering import OutputComposition
 
@@ -17,7 +19,7 @@ class AppliedTrial:
     candidate: TrialCandidate
     calibration: Calibration
     primitives: tuple[tuple[float, float], ...]
-    mat: Mat
+    lighting: FrameLighting
 
 
 class TrialState:
@@ -83,7 +85,7 @@ class TrialState:
         ):
             raise ValueError("trial_sequence_hash_changed")
         calibration = Calibration.model_validate_json(candidate.calibration_json)
-        mat = Mat.model_validate_json(candidate.lighting_json)
+        lighting = FrameLighting.model_validate_json(candidate.lighting_json)
         if calibration.revision != composition.binding.calibration.revision:
             raise ValueError("trial_calibration_baseline")
         # The overlay's primitives are the drawn fit's corners (the opening, both modes); the base
@@ -97,5 +99,5 @@ class TrialState:
             candidate.sequence,
         )
         self.hard_cap, self.terminal = candidate.hard_expires_boottime_ms, False
-        self.active = AppliedTrial(candidate, calibration, points, mat)
+        self.active = AppliedTrial(candidate, calibration, points, lighting)
         return self.active

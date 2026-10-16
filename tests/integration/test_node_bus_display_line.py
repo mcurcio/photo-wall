@@ -11,9 +11,9 @@ report is recorded by Central on the display line's state bucket. (5) A key the 
 not list is never sent and is logged as `document_refused`. (6) Picture on its own keys (decision
 0022): a picture document Central puts on `picture-HDMI-A-1` reaches the picture controller through
 the runner's document feed, and the picture report the controller puts appears on Central's
-`picture-HDMI-A-1`. (7) The print look ships together (picture operations v5): a picture document
-with saturation, highlight rolloff, black floor and a LUT reaches the real picture controller, whose
-`picture` op gives the shell v5 operations text that `decode_picture_operations` accepts.
+`picture-HDMI-A-1`. (7) The Display's light ships together (picture operations v8, decision 0028): a
+picture document with a new matched lux and panel black reaches the real picture controller, whose
+`picture` op gives the shell v8 operations text that `decode_picture_operations` accepts.
 """
 from __future__ import annotations
 
@@ -50,8 +50,7 @@ from appliance.display_host.picture_list import FileOfferedCache
 from appliance.display_host.runner import document_feed
 from appliance.display_host.signal_range import DrmConnectorRanges, FileRangeRequests
 from appliance.host.bus import HOST_SLICE, host_session
-from contracts.lut import LutRef
-from contracts.node_frame import LutMix, decode_picture_operations, encode_picture_operations
+from contracts.node_frame import decode_picture_operations, encode_picture_operations
 from contracts.node_link import CENTRAL_WRITER, NODE_MAX_STREAMS, Pipe, account_id
 from contracts.node_output import (
     BEST_DETECTED,
@@ -74,6 +73,7 @@ from contracts.node_output import (
 )
 from contracts.node_picture import (
     UPGRADE_DISPLAY_LIGHT,
+    DisplayLight,
     HardwareRange,
     HardwareResult,
     HardwareSetting,
@@ -101,12 +101,14 @@ FIRST = OutputDocument("HDMI-A-1", 1, ALWAYS_ON, BEST_DETECTED, True, True)
 TEST_OFF = OutputDocument("HDMI-A-1", 2, replace(ALWAYS_ON, test=PowerRequest("req-1", Power.OFF, 300)),
                           BEST_DETECTED, True, True)
 PICTURE_KEY = picture_document_key("HDMI-A-1")
-PICTURE_DOCUMENT = PictureDocument("HDMI-A-1", 8, {"10": 46}, SoftwarePicture(brightness_percent=114, contrast_percent=100, colour_temperature_kelvin=6500, gamma_tenths=22), light=UPGRADE_DISPLAY_LIGHT)
+PICTURE_DOCUMENT = PictureDocument("HDMI-A-1", 8, {"10": 46}, SoftwarePicture(contrast_percent=114, colour_temperature_kelvin=6500, gamma_tenths=22),
+                                  light=UPGRADE_DISPLAY_LIGHT)
 PICTURE_REPORT = PictureReport("HDMI-A-1", DisplayIdentity("XYM", 5475, "MNN", None),
                                (HardwareSetting("10", HardwareRange(RangeKind.LEVEL, 100, ()), 46),), 8,
                                {"10": HardwareResult(WriteResult.TAKEN, 60, 46)}, 8)
-PAPER = LutRef("ab" * 32, "lut33-perceptual-relcol-bpc-1")
-PRINT_LOOK = PictureDocument("HDMI-A-1", 9, {"10": 46}, SoftwarePicture(brightness_percent=114, contrast_percent=100, colour_temperature_kelvin=6500, gamma_tenths=22, saturation_percent=85, highlight_rolloff_percent=40, black_floor_tenths=20, lut=PAPER, lut_amount_percent=80), light=UPGRADE_DISPLAY_LIGHT)
+# The paper match moved the Display's light (decision 0028): v8 operations carry it to the shell.
+MATCHED = PictureDocument("HDMI-A-1", 9, {"10": 46}, PICTURE_DOCUMENT.software,
+                          light=DisplayLight(matched_lux=400.0, black=0.001))
 REPORT = OutputReport("HDMI-A-1", True, DisplayIdentity("XYM", 5475, "MNN", None),
                       (DisplayMode(1920, 1080, 60000, preferred=True),), (PowerMethod.DDC_CI, PowerMethod.SIGNAL_OFF),
                       PowerMethod.DDC_CI, 2, None, None)
@@ -267,16 +269,15 @@ def test_the_display_line_carries_centrals_output_document(tmp_path):
             assert recorded == encode_picture_report(PICTURE_REPORT)
             assert decode_picture_report(recorded) == PICTURE_REPORT
 
-            # (7) The print look ships together: v5 operations text at the shell's `picture` op.
-            projection.set(DESIRED, PICTURE_KEY, encode_picture_document(PRINT_LOOK))
+            # (7) The Display's light ships together: v8 operations text at the shell's `picture` op.
+            projection.set(DESIRED, PICTURE_KEY, encode_picture_document(MATCHED))
 
             async def drawn():
                 return [operations for operations in map(decode_picture_operations, shell.texts)
                         if operations.picture_change == 9]
-            [operations] = (await until(drawn, 15, "the print look's operations at the shell"))[:1]
-            assert operations == operations_for("HDMI-A-1", 9, PRINT_LOOK.software, None)
-            assert (operations.saturation, operations.lut) == (0.85, LutMix(PAPER, 0.8))
-            assert operations.highlight_knee < 1 and operations.black_floor > 0
+            [operations] = (await until(drawn, 15, "the Display's light at the shell"))[:1]
+            assert operations == operations_for("HDMI-A-1", 9, MATCHED.software, MATCHED.light, None)
+            assert (operations.matched_lux, operations.panel_black) == (400.0, 0.001)
         finally:
             picture.stop()
             stop.set()

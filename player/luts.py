@@ -1,12 +1,13 @@
-"""The Player's LUTs (print look, 2026-10-12, design rule 3: "Nothing waits on a LUT").
+"""The Player's LUTs: each Frame's paper profile (decision 0028: the paper lives on the Frame,
+`lighting.paper.profile`; "Nothing waits on a LUT", the print look's rule 3, stands).
 
-The renderer asks for the LUT a picture names (`LutSource.lut`) on every draw; a LUT not yet held
-answers None, and the draw goes on with the sliders alone. The first ask records the LUT as
-wanted; the service fetches it from Central only (R11: `PlayerService.fetch_lut`, checked against
-the served `Repr-Digest` and kept through the media cache) and holds its bytes here. Each hold
-raises `generation`, part of what a surface shows, so the next draw mixes the LUT in and only then
-names the picture change (player/native.py `_Surface._tagged_change`): Done waits for the LUT,
-nothing else does.
+Every bound Frame's LUT is wanted as its configuration arrives (`LutWants.want`, from
+player/service.py), and the renderer asks for the LUT of the Frame it draws (`LutSource.lut`) on
+every draw; a LUT not yet held answers None, and the draw goes on without it. The service fetches a
+wanted LUT from Central only (R11: `PlayerService.fetch_lut`, `GET /v1/luts/{profile_sha256}/
+{recipe_id}`, checked against the served `Repr-Digest` and kept through the media cache) and holds
+its bytes here. Each hold raises `generation`, part of what a surface shows, so the next draw puts
+the LUT in.
 
 No GL and no HTTP here: the bytes are contracts/lut.py's layout, held as served.
 """
@@ -33,6 +34,10 @@ class LutSource(Protocol):
 
 class LutWants(Protocol):
     """What the service fetches and where it puts it (the service's side of PlayerLuts)."""
+
+    def want(self, refs: tuple[LutRef, ...]) -> None:
+        """Want every LUT of `refs` not held (the bound Frames' paper profiles)."""
+        ...
 
     def wanted(self) -> tuple[LutRef, ...]:
         """Every LUT asked for and not held."""
@@ -63,6 +68,13 @@ class PlayerLuts:
             if body is None:
                 self._wanted.setdefault(ref, None)
             return body
+
+    def want(self, refs: tuple[LutRef, ...]) -> None:
+        """Want every LUT of `refs` not held, as a first ask would."""
+        with self._lock:
+            for ref in refs:
+                if ref not in self._held:
+                    self._wanted.setdefault(ref, None)
 
     def wanted(self) -> tuple[LutRef, ...]:
         """Every LUT asked for and not held."""

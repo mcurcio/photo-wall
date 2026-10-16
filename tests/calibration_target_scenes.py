@@ -5,9 +5,9 @@ The wall plane is millimetres, its origin at the Frame opening's top-left, x rig
 back to front: the wall, the Frame's border, the screen board (emissive), a black card, the paper
 piece. The screen board is what the Player draws (player/geometry.py `board_point` places it in the
 opening, `board_signal` gives each point, with the QR of player/calibration_target.py
-`target_modules`); pre-software every point is raw, post-software every point passes the chain
-(appliance/display_host/picture.py `operations_for` of the entry's software, player/geometry.py
-`final_pixel`). The paper is a piece of contracts.calibration_target `board_raster(PAPER)` (rows and
+`target_modules`); pre-software every point is raw, post-software every point passes the Display's
+steps (appliance/display_host/picture.py `operations_for` of the entry's software, player/geometry.py
+`display_steps`; decision 0028: never the room's light, the paper or the mat). The paper is a piece of contracts.calibration_target `board_raster(PAPER)` (rows and
 columns of the sheet) at any scale and turn, its ink of any reflectance. The glass passes the
 screen's light once and a paper's under it twice, and adds reflections (sharp windows, soft blobs,
 a gradient); the room light falls across the wall. Optional: the panel's light falling with the
@@ -37,7 +37,6 @@ from appliance.display_host.picture import operations_for
 from central.displays.picture_history import PictureEntryKind
 from central.displays.views import (
     DisplayRefView,
-    LutChoiceView,
     PictureEntryView,
     PictureValuesView,
     SoftwarePictureView,
@@ -57,10 +56,15 @@ from contracts.calibration_target import (
 )
 from contracts.kelvin import kelvin_white
 from contracts.node_frame import srgb_to_linear
-from contracts.node_picture import NEUTRAL_SOFTWARE, SignalRange, SoftwarePicture
+from contracts.node_picture import (
+    NEUTRAL_SOFTWARE,
+    UPGRADE_DISPLAY_LIGHT,
+    SignalRange,
+    SoftwarePicture,
+)
 from contracts.tuning import SIGNAL_LEVELS, TestPattern
 from player.calibration_target import target_modules
-from player.geometry import BoardDraw, board_point, board_signal, final_pixel
+from player.geometry import BoardDraw, board_point, board_signal, display_steps
 from scripts.calibration_target.model import Photo, PhotoKind
 
 with warnings.catch_warnings():
@@ -106,7 +110,6 @@ class Scene:
     display: Display = field(default_factory=Display)
     stage: TestPattern = TestPattern.TARGET_PRE_SOFTWARE
     software: SoftwarePicture = NEUTRAL_SOFTWARE
-    lut: bytes | None = None
     code: TargetCode = CODE
     code_drawn: bool = True                 # False: the Player has no code (BoardDraw.modules None)
     screen_shown: bool = True               # False: the screen shows nothing (black)
@@ -264,11 +267,11 @@ def _screen_signal(columns: int, aspect: float, modules: tuple | None) -> np.nda
 
 
 def _chain(scene: Scene, signal: np.ndarray) -> np.ndarray:
-    """Post-software: each encoded value through the chain (one call per distinct value)."""
-    operations = operations_for(scene.code.output_id, scene.code.picture_change, scene.software, None)
+    """Post-software: each encoded value through the Display's steps (one call per distinct value)."""
+    operations = operations_for(scene.code.output_id, scene.code.picture_change, scene.software,
+                                UPGRADE_DISPLAY_LIGHT, None)
     values, inverse = np.unique(signal, return_inverse=True)
-    mapped = np.array([final_pixel((srgb_to_linear(float(v)),) * 3, operations, inside=True, lut=scene.lut)[:3]
-                       for v in values], np.float32)
+    mapped = np.array([display_steps((srgb_to_linear(float(v)),) * 3, operations) for v in values], np.float32)
     return mapped[inverse.reshape(signal.shape)]
 
 
@@ -451,22 +454,34 @@ def truth(scene: Scene) -> Truth:
     return Truth(white=screen / (paper * paper_t))
 
 
-def entry(scene: Scene, *, test_pattern: TestPattern | None = None, lut_name: str = "Hahnemuhle") -> PictureEntryView:
-    """The sent entry the scene's code names, its software the scene's."""
+# TRANSIT (decision 0028): the print look's view fields at their neutral values, for the view as it is
+# until lane central deletes them; `_declared` drops them once it has. The end review deletes this.
+_TRANSIT_SOFTWARE: Final = dict(zip(("brightness_percent", "saturation_percent", "highlight_rolloff_percent",
+                                     "black_floor_tenths", "lut", "lut_amount_percent"),
+                                    (100, 100, 0, 0, None, 100), strict=True))
+
+
+def _declared(model: type, values: dict[str, object]) -> dict[str, object]:
+    """`values` the view model declares. Central's picture view and these scenes change in one
+    delivery (decision 0028: the view's software group is contrast, colour temperature and gamma,
+    beside the Display's light); built from its declared fields, a scene's entry is the view's
+    whichever lane's commit it meets."""
+    return {name: value for name, value in values.items() if name in model.model_fields}
+
+
+def entry(scene: Scene, *, test_pattern: TestPattern | None = None) -> PictureEntryView:
+    """The sent entry the scene's code names, its software the scene's, at the upgrade's light."""
     software = scene.software
-    lut = None if software.lut is None else LutChoiceView(profile_sha256=software.lut.profile_sha256, name=lut_name)
-    view = SoftwarePictureView(
-        brightness_percent=software.brightness_percent, contrast_percent=software.contrast_percent,
-        colour_temperature_kelvin=software.colour_temperature_kelvin, gamma_tenths=software.gamma_tenths,
-        saturation_percent=software.saturation_percent,
-        highlight_rolloff_percent=software.highlight_rolloff_percent,
-        black_floor_tenths=software.black_floor_tenths, lut=lut, lut_amount_percent=software.lut_amount_percent)
+    view = SoftwarePictureView(**_declared(SoftwarePictureView, {
+        "contrast_percent": software.contrast_percent, "colour_temperature_kelvin": software.colour_temperature_kelvin,
+        "gamma_tenths": software.gamma_tenths, **_TRANSIT_SOFTWARE}))
+    picture = PictureValuesView(**_declared(PictureValuesView, {
+        "hardware": {}, "software": view, "signal_range": SignalRange.FULL, "lut_recipe_id": None,
+        "light": {"matched_lux": UPGRADE_DISPLAY_LIGHT.matched_lux, "black": UPGRADE_DISPLAY_LIGHT.black}}))
     return PictureEntryView(
         entry_id=uuid.UUID(int=scene.code.picture_change), display=DisplayRefView(id=uuid.UUID(int=7), name="Samsung"),
         kind=PictureEntryKind.SENT_DRAFT, number=scene.code.picture_change, at=datetime(2026, 10, 13, 20, tzinfo=UTC),
-        frame=None, session_id=uuid.UUID(int=9), restored_from=None,
-        picture=PictureValuesView(hardware={}, software=view, signal_range=SignalRange.FULL,
-                                  lut_recipe_id=None if software.lut is None else software.lut.recipe_id),
+        frame=None, session_id=uuid.UUID(int=9), restored_from=None, picture=picture,
         test_pattern=test_pattern or scene.stage)
 
 

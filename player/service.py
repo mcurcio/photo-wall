@@ -44,6 +44,7 @@ from contracts.models import (
     PlayerTime,
     Revocation,
 )
+from contracts.node_link import NODE_BUS_URL
 from contracts.player_control import (
     CAPABILITIES,
     ControlAck,
@@ -52,6 +53,7 @@ from contracts.player_control import (
     ControlHello,
     ControlSelection,
 )
+from contracts.room_light import RoomLightsDocument
 from contracts.time import Clock, SystemClock, TimeMapping
 from player.cache import Cache, CacheError
 from player.central_link import CentralLink, Session, read_refusal
@@ -63,6 +65,7 @@ from player.node_app_link import NodeAppLinkClient
 from player.output_discovery import discover_outputs, output_app_id
 from player.probe_responder import ProbeResponder
 from player.rendering import CapacityResult, PrepareResult, PresentationResult, Renderer
+from player.room_lights import follow_room_lights
 from uplink.causes import Cause, UplinkError
 from uplink.clock import RunClockRecord
 from uplink.diagnosis import failure_text
@@ -329,12 +332,17 @@ class PlayerService:
                  websocket_connect=None, cache_factory=Cache, executor_factory=Executor,
                  node_link_client: NodeAppLinkClient | None = None,
                  boot_id_path: Path = Path("/proc/sys/kernel/random/boot_id"),
-                 boot_context: BootContext, luts: LutWants):
+                 boot_context: BootContext, luts: LutWants, room_lights_dispatch: Callable | None = None):
         self.config, self.identity, self.outputs = config, identity, outputs
         # The LUTs the renderer asks for (print look): fetched here, held there. The same
         # PlayerLuts the renderer was built with (`main`).
         self.luts = luts
         self.renderer, self.dispatcher = renderer, dispatcher
+        # The room-lights document's hop onto the GLib thread (decision 0028): its own lane (`main`),
+        # so a light switching never takes a control dispatch's slot; the newest pending document
+        # wins (`room_lights_changed`).
+        self._room_lights_dispatch = room_lights_dispatch or dispatcher
+        self._room_lights_pending: RoomLightsDocument | None = None
         self.clock = clock or SystemClock()
         self.mapping = TimeMapping(self.clock)
         self.link = CentralLink(trust, unauthorized=Unauthorized, client=client,
@@ -406,6 +414,23 @@ class PlayerService:
         stall reads as player-silent, as before G8 (E-G8-8 decision: a late loop must not
         withdraw prepared playback)."""
         self.fault("main_loop_late")
+
+    def room_lights_changed(self, document: RoomLightsDocument) -> None:
+        """A newer room-lights document (player/room_lights.py, on the WallReader's thread): handed to
+        the renderer on the GLib thread, which draws every Frame again with it. It never touches the
+        executor, the plan, the configuration or the control State's delivery, and sends nothing to
+        Central (design rule 2). Several arriving before the loop runs the hop draw once, newest."""
+        with self._lock:
+            idle = self._room_lights_pending is None
+            self._room_lights_pending = document
+        if idle:
+            self._room_lights_dispatch(self._draw_room_lights)
+
+    def _draw_room_lights(self) -> None:
+        with self._lock:
+            document, self._room_lights_pending = self._room_lights_pending, None
+        if document is not None:
+            self.renderer.set_room_lights(document)
 
     def _render_unbound_diagnostic(self) -> None:
         """Publish Central-link context only on known unbound outputs."""
@@ -713,6 +738,9 @@ class PlayerService:
                     rejected = True
                 self._seen_commits.append(commit)
             bound = {binding.output_id for binding in configuration.bindings}
+            # Every bound Frame's paper profile LUT is fetched before its first draw (decision 0028).
+            self.luts.want(tuple(binding.lighting.paper.profile for binding in configuration.bindings
+                                 if binding.lighting is not None and binding.lighting.paper.profile is not None))
             self._unbound_outputs = tuple(output.output_id for output in self.outputs
                                           if output.connected and output.output_id not in bound)
             self._configuration_received = True
@@ -1328,6 +1356,9 @@ class UnavailableRenderer:
     def set_player(self, player_id):
         pass
 
+    def set_room_lights(self, document):
+        pass
+
     def capacity(self, compositions):
         return CapacityResult(False)
 
@@ -1413,6 +1444,7 @@ def main():
         find_central=find,
         trust=trust,
         luts=luts,
+        room_lights_dispatch=dispatcher.lane(2),    # one hop queued and one running, at most
     )
     for fault in (discovery.fault, native_fault):
         if fault:
@@ -1443,6 +1475,9 @@ def main():
     signal.signal(signal.SIGINT, finish)
     Tick(GLib, 33, tick)
     service.start()
+    # The room lights from the Node's WALL mirror (decision 0028): their own thread, never blocking
+    # the Player; the bus away keeps the last document (the mirror) and the Player draws on.
+    follow_room_lights(NODE_BUS_URL, service.room_lights_changed)
     # Probes are answered at control dispatch's priority (own one-slot lane), never here.
     ProbeResponder(dispatcher, on_relink=service.request_relink,
                    gl_renderer=lambda: renderer.gl_renderer).start()

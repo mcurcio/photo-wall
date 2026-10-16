@@ -11,14 +11,24 @@ import pytest
 
 import player.native as native_module
 from contracts.frame_fit import cover_rectangle
-from contracts.models import Calibration, CornersFit, CoverFit, PhotoCrop
+from contracts.frame_lighting import (
+    DIMMER_AT_FULL,
+    SHEET_WHITENESS,
+    FrameLighting,
+    Paper,
+    WashLight,
+)
+from contracts.models import Calibration, CornersFit, CoverFit, FrameProfile, PhotoCrop
 from contracts.node_frame import PictureOperations
+from contracts.node_picture import DisplayLight
 from contracts.photo_crop import CENTRED
+from contracts.room_light import FULL_ON, FixedColour, RoomLightEntry, RoomLightsDocument
 from player.geometry import (
     compose_pixel,
     decode_channel,
     encode_srgb,
     final_pixel,
+    frame_lights,
     homography,
     inverse,
     output_pixel,
@@ -158,8 +168,19 @@ CORNER_SETS = (
 OPENING = ((.1, .12), (.85, .08), (.9, .9), (.12, .82))
 
 
-def _operations(rgb=(1.0, 1.0, 1.0), light=1.0, slope=1.0, exponent=1.0):
-    return PictureOperations("HDMI-A-1", 1, rgb, light, slope, exponent)
+def _operations(rgb=(1.0, 1.0, 1.0), slope=1.0, exponent=1.0, *, output_id="HDMI-A-1", change=1):
+    return PictureOperations(output_id, change, rgb, slope, exponent, MATCHED, BLACK)
+
+
+MATCHED, BLACK = 1000.0, 0.0003
+# The upgrade's light (decision 0028): one wash of a fixed white room light, full on, at the matched
+# lux, on paper of whiteness 0.9 and ink -log10(black): the photo's signal is the photo itself.
+UPGRADE = FrameLighting(mat_depth_mm=0, lights=(WashLight(light="room", lux=MATCHED, reference=DIMMER_AT_FULL),),
+                        paper=Paper(whiteness=SHEET_WHITENESS, ink_density=-math.log10(BLACK)))
+ROOM = RoomLightsDocument(change=1, lights={"room": RoomLightEntry(FixedColour(6500), FULL_ON)})
+UPGRADE_LIGHTS = frame_lights(UPGRADE, ROOM, CoverFit(), FrameProfile(width_px=1920, height_px=1080,
+                                                                      diagonal_inches=27),
+                              DisplayLight(MATCHED, BLACK))
 
 
 # Where a clockwise quarter turn puts picture point (s, t) on the unit square the corners span.
@@ -262,8 +283,8 @@ def test_two_frames_on_one_output_keep_to_their_openings():
     reaches over A's opening and only the per-Frame mask keeps it out."""
     a = ((.04, .1), (.46, .1), (.46, .9), (.04, .9))
     b = ((.54, .15), (.95, .1), (.92, .9), (.58, .85))
-    frames = ((CoverFit(corners=a), 9 / 16, (1.0, 0.0, 0.0), None),
-              (CoverFit(corners=b, rotation=30), 9 / 16, (0.0, 1.0, 0.0), None))
+    frames = ((CoverFit(corners=a), 9 / 16, (1.0, 0.0, 0.0), UPGRADE_LIGHTS),
+              (CoverFit(corners=b, rotation=30), 9 / 16, (0.0, 1.0, 0.0), UPGRADE_LIGHTS))
     operations = _operations(slope=.5)
     red, green, black = (.75, .25, .25, 1), (.25, .75, .25, 1), (0, 0, 0, 1)   # worked by hand
     seen = set()
@@ -275,41 +296,48 @@ def test_two_frames_on_one_output_keep_to_their_openings():
             in_b = transform(output_to_picture(CornersFit(corners=b), HD, 1), x, y)
             in_b = 0 < in_b[0] < 1 and 0 < in_b[1] < 1
             expected = red if in_a else green if in_b else black
-            assert pixel == pytest.approx(expected, abs=1e-12), (x, y)
+            assert pixel == pytest.approx(expected, abs=1e-9), (x, y)
             seen.add(expected)
     assert seen == {red, green, black}
 
 
-# Linear grey inputs through operations (0.9, 0.95, 1), light 1.2, slope 0.8, exponent 24/22,
-# worked by hand from the sRGB encoding (IEC 61966-2-1): a = min(1, L*m*1.2); e = sRGB(a);
-# c = (e - 0.5)*0.8 + 0.5; out = c^(24/22). E.g. L = 0.5, m = 0.9: a = 0.54, e = 0.76111,
-# c = 0.70889, out = 0.68706.
+# Linear grey inputs under the upgrade's light (the signal is the grey) through operations (0.9, 0.95,
+# 1), slope 0.8, exponent 24/22, worked by hand from the sRGB encoding (IEC 61966-2-1): a = L*m;
+# e = sRGB(a); c = (e - 0.5)*0.8 + 0.5; out = c^(24/22). E.g. L = 0.5, m = 0.9: a = 0.45,
+# e = 0.70152, c = 0.66122, out = 0.63672.
 FINAL_PASS_TABLE = (
     (0.0, (0.0811131, 0.0811131, 0.0811131)),
-    (0.18, (0.4516162, 0.4615475, 0.4711953)),
-    (0.5, (0.6870604, 0.7028032, 0.7180977)),
-    (1.0, (0.8914207, 0.8914207, 0.8914207)),
+    (0.18, (0.4198536, 0.4290025, 0.4378902)),
+    (0.5, (0.6367197, 0.6512185, 0.6653044)),
+    (1.0, (0.8523246, 0.8721546, 0.8914207)),
 )
 
 
 @pytest.mark.parametrize("grey, expected", FINAL_PASS_TABLE)
 def test_final_pass_order_matches_the_hand_worked_table(grey, expected):
-    """R1 case 5: white balance, light, clamp, encode, contrast, gamma, clamp, in that order."""
-    operations = _operations((.9, .95, 1.0), 1.2, .8, 24/22)
-    assert final_pixel((grey,)*3, operations, inside=True) == pytest.approx((*expected, 1), abs=1e-6)
+    """R1 case 5: the light on the paper, white balance, encode, contrast, gamma, clamp, in that order."""
+    operations = _operations((.9, .95, 1.0), .8, 24/22)
+    assert final_pixel((grey,)*3, operations, inside=True, lights=UPGRADE_LIGHTS, x=.5, y=.5) == pytest.approx(
+        (*expected, 1), abs=1e-6)
 
 
 def test_the_output_mask_comes_after_the_contrast_lift():
     """Black outside every opening stays black at low contrast: the mask is the last step."""
-    assert final_pixel((0, 0, 0), _operations(slope=.5), inside=False) == (0, 0, 0, 1)
-    assert final_pixel((0, 0, 0), _operations(slope=.5), inside=True)[:3] == pytest.approx((.25,)*3)
+    assert final_pixel((0, 0, 0), _operations(slope=.5), inside=False, lights=UPGRADE_LIGHTS, x=.5, y=.5) == (
+        0, 0, 0, 1)
+    assert final_pixel((0, 0, 0), _operations(slope=.5), inside=False, lights=None, x=.5, y=.5) == (0, 0, 0, 1)
+    assert final_pixel((0, 0, 0), _operations(slope=.5), inside=True, lights=UPGRADE_LIGHTS, x=.5,
+                       y=.5)[:3] == pytest.approx((.25,)*3)
+    with pytest.raises(ValueError, match="lights"):
+        final_pixel((0, 0, 0), _operations(), inside=True, lights=None, x=.5, y=.5)
 
 
 @pytest.mark.parametrize("encoded", ((0, 0, 0), (.2, .5, .9), (1, 1, 1), (.04, .7, .3)))
 def test_neutral_operations_change_nothing(encoded):
+    """Under the upgrade's light, neutral operations draw today's picture at neutral sliders."""
     linear = tuple(decode_channel(v) for v in encoded)
-    assert final_pixel(linear, _operations(), inside=True) == pytest.approx(
-        compose_pixel([((*encoded, 1), 1, False)]), abs=1e-12)
+    assert final_pixel(linear, _operations(), inside=True, lights=UPGRADE_LIGHTS, x=.3, y=.7) == pytest.approx(
+        compose_pixel([((*encoded, 1), 1, False)]), abs=1e-9)
 
 
 def test_photo_rect_is_centred_cover_without_trim():
@@ -595,9 +623,9 @@ def test_a_crossfade_step_a_trial_edit_or_a_picture_change_is_a_change_to_redraw
     assert shown(frames=Frames(trial(2))) != shown(frames=Frames(trial(1)))
     unreadable = Frames("unreadable")
     assert shown(frames=unreadable) != shown(frames=unreadable)
-    dimmer = _operations(light=.5)
+    dimmer = _operations(slope=.5)
     assert shown(frames=Frames(None, dimmer)) != shown(frames=Frames(None))
-    assert shown(frames=Frames(None, dimmer)) == shown(frames=Frames(None, _operations(light=.5)))
+    assert shown(frames=Frames(None, dimmer)) == shown(frames=Frames(None, _operations(slope=.5)))
     lost = Frames(None, "unreadable")
     assert shown(frames=lost) != shown(frames=lost)
 
@@ -713,15 +741,15 @@ def test_the_player_reads_the_outputs_newest_picture_operations_and_keeps_the_la
 
     frames = _wayland_frames()
     assert frames.picture("HDMI-A-1") is None
-    first = _operations(light=.5)
+    first = _operations(slope=.5)
     frames.lib.texts[b"HDMI-A-1"] = encode_picture_operations(first).encode()
     assert frames.picture("HDMI-A-1") == first
     frames.lib.texts[b"HDMI-A-1"] = b'{"not":"operations"}'
     assert frames.picture("HDMI-A-1") == first
-    other = PictureOperations("HDMI-A-2", 3, (1.0, 1.0, 1.0), 1.0, 1.0, 1.0)
+    other = _operations(output_id="HDMI-A-2", change=3)
     frames.lib.texts[b"HDMI-A-1"] = encode_picture_operations(other).encode()
     assert frames.picture("HDMI-A-1") == first
-    second = PictureOperations("HDMI-A-1", 7, (.9, .95, 1.0), 1.2, .8, 1.1)
+    second = _operations((.9, .95, 1.0), .8, 1.1, change=7)
     frames.lib.texts[b"HDMI-A-1"] = encode_picture_operations(second).encode()
     assert frames.picture("HDMI-A-1") == second
     with pytest.raises(RuntimeError, match="display_picture_protocol_lost"):
@@ -765,14 +793,13 @@ def test_a_new_picture_change_is_drawn_again_at_once():
     assert renderer.present(photo).status == "pending" and surface.area.renders == 1
     _acknowledge(surface)
     assert renderer.present(photo).status == "presented" and surface.area.renders == 1
-    frames.operations = PictureOperations("hdmi1", 7, (1.0, 1.0, 1.0), .5, 1.0, 1.0)
+    frames.operations = _operations(slope=.5, output_id="hdmi1", change=7)
     assert renderer.present(photo).status == "presented" and surface.area.renders == 2
     _acknowledge(surface)
     assert renderer.present(photo).status == "presented" and surface.area.renders == 2
 
 
-# -- The print look (design /print-look, 2026-10-12): the final pass's switches, the drawn mat and
-# the Done rule ------------------------------------------------------------------------------------
+# -- Room light (decision 0028): the final pass's uniforms, the drawn lighting and the Done rule ----
 
 class _UniformGL:
     """The GL calls _final_uniforms makes, by uniform name."""
@@ -789,77 +816,75 @@ class _UniformGL:
         raise AttributeError(call)
 
 
-_SWITCHES = ("saturation_on", "rolloff_on", "floor_on", "mat_on")
-
-
-def test_neutral_operations_and_no_mat_switch_every_print_step_off():
-    """Rule 2: each step's switch is geometry.py's skip rule, so neutral v5 operations and Mat()
-    run v4's shader path. Mutation probe: switch saturation on whenever operations arrive ->
-    saturation_on is 1 here."""
-    from contracts.models import Mat
-    from player.geometry import mat_shadow
-
-    for operations in (None, _operations(), _operations(light=1.5)):
-        gl = _UniformGL()
-        native_module._final_uniforms(gl, 1, operations, native_module._NO_OPENING,
-                                      mat_shadow(CoverFit(), _PROFILE, Mat()), lut_drawn=False)
-        assert {name: gl.values[name] for name in _SWITCHES} == {name: (0,) for name in _SWITCHES}
-
-
-def test_print_operations_and_a_shading_mat_switch_their_steps_on():
-    from contracts.models import Light, Mat
-    from player.geometry import mat_shadow, peak
-
-    operations = PictureOperations("HDMI-A-1", 2, (1.0, 1.0, 1.0), 1.4, 1.0, 1.0, saturation=.8,
-                                   highlight_knee=.6, black_floor=.07)
-    shadow = mat_shadow(CoverFit(rotation=90), _PROFILE, Mat(depth_mm=2, lights=(Light(
-        from_degrees=0, steep_degrees=45, softness_degrees=0, strength_tenths=10, colour_kelvin=2700),)))
-    gl = _UniformGL()
-    native_module._final_uniforms(gl, 1, operations, CoverFit().corners, shadow, lut_drawn=False)
-    assert {name: gl.values[name] for name in _SWITCHES} == {name: (1,) for name in _SWITCHES}
-    assert gl.values["saturation"] == (.8,) and gl.values["highlight_knee"] == (.6,)
-    assert gl.values["peak"] == (peak(operations),) and gl.values["black_floor"] == (.07,)
-    assert gl.values["light_count"] == (1,) and gl.values["mat_size"] == shadow.size_mm
-    count, toward = gl.values["light_toward"]
-    assert count == 4 and toward[:2] == list(shadow.lights[0].toward) and toward[2:] == [0.0] * 6
-    assert gl.values["light_band"][1][:2] == [shadow.lights[0].dark_until_mm, shadow.lights[0].lit_from_mm]
-    assert gl.values["light_weight"][1][:3] == list(shadow.lights[0].weight)
-    # The same column-major upload as output_to_picture's.
-    columns = gl.values["to_opening"][2]
-    assert [columns[column*3 + row] for row in range(3) for column in range(3)] == list(shadow.to_opening)
-
-
 _PROFILE = SimpleNamespace(width_px=1920, height_px=1080, diagonal_inches=27)
 
 
-def test_a_draw_shows_its_trials_mat_while_the_trial_is_drawn_and_the_bindings_after():
-    """Position's trial carries the draft mat: a draw with an applied (trial) mat shows it; with
-    none, the binding's."""
-    from contracts.models import Light, Mat
+def test_no_frame_drawn_has_no_light():
+    gl = _UniformGL()
+    native_module._final_uniforms(gl, 1, _operations(), native_module._NO_OPENING, None, lut_drawn=False,
+                                  output_height=1080)
+    assert gl.values["light_count"] == (0,) and gl.values["lut_on"] == (0,)
+    assert gl.values["matched_lux"] == (MATCHED,) and gl.values["panel_black"] == (BLACK,)
 
-    binding_mat = Mat(depth_mm=1, lights=(Light(from_degrees=0, steep_degrees=45, softness_degrees=0,
-                                                strength_tenths=10, colour_kelvin=6500),))
-    trial_mat = Mat(depth_mm=3, lights=binding_mat.lights)
-    composition = SimpleNamespace(binding=SimpleNamespace(mat=binding_mat))
+
+def test_the_frames_lights_reach_the_shader_as_the_reference_holds_them():
+    """Every LitLight field the reference reads is the uniform the shader reads, padded to
+    FRAME_LIGHTS_MAX, the kinds as geometry.LIGHT_KINDS' codes, to_opening column-major."""
+    from contracts.frame_lighting import CloseLight, FarLight
+    from player.geometry import LIGHT_KINDS
+
+    lighting = FrameLighting(mat_depth_mm=4, paper=Paper(whiteness=.85, ink_density=2.3), lights=(
+        WashLight(light="room", lux=80, reference=DIMMER_AT_FULL),
+        FarLight(light="room", lux=200, reference=DIMMER_AT_FULL, from_degrees=30, steep_degrees=40,
+                 softness_degrees=10),
+        CloseLight(light="room", lux=400, reference=DIMMER_AT_FULL, across_mm=0, up_mm=350, out_mm=250,
+                   inner_beam_degrees=20, outer_beam_degrees=40)))
+    lights = frame_lights(lighting, ROOM, CoverFit(rotation=90), _PROFILE, DisplayLight(MATCHED, BLACK))
+    gl = _UniformGL()
+    native_module._final_uniforms(gl, 1, _operations(), CoverFit().corners, lights, lut_drawn=True,
+                                  output_height=1080)
+    assert gl.values["light_count"] == (3,) and gl.values["lut_on"] == (1,)
+    assert gl.values["light_kind"] == (4, [LIGHT_KINDS.index(kind) for kind in ("wash", "far", "close")] + [0])
+    count, rgb = gl.values["light_rgb"]
+    assert count == 4 and rgb[:9] == [v for light in lights.lights for v in light.rgb] and rgb[9:] == [0.0] * 3
+    assert gl.values["light_toward"][1][2:4] == list(lights.lights[1].toward)
+    assert gl.values["light_band"][1][2:4] == list(lights.lights[1].band_mm)
+    assert gl.values["light_position"][1][6:9] == list(lights.lights[2].position_mm)
+    assert gl.values["light_beam"][1][4:6] == list(lights.lights[2].beam)
+    assert gl.values["mat_size"] == lights.size_mm and gl.values["mat_depth"] == (4,)
+    assert gl.values["paper_white"] == (.85,) and gl.values["paper_black"] == (10 ** -2.3,)
+    assert gl.values["peak"] == (lights.peak,) and gl.values["output_height"] == (1080,)
+    columns = gl.values["to_opening"][2]
+    assert [columns[column*3 + row] for row in range(3) for column in range(3)] == list(lights.to_opening)
+
+
+def test_a_draw_shows_its_trials_lighting_while_the_trial_is_drawn_and_the_bindings_after():
+    """Position's trial carries the draft lighting: a draw with an applied (trial) lighting shows
+    it; with none, the binding's."""
+    trial = UPGRADE.model_copy(update={"mat_depth_mm": 3.0})
+    composition = SimpleNamespace(binding=SimpleNamespace(lighting=UPGRADE))
     draw = native_module._Draw(1, composition, ())
-    assert native_module._drawn_mat(draw) == binding_mat
-    draw.applied_mat = trial_mat
-    assert native_module._drawn_mat(draw) == trial_mat
+    assert native_module._drawn_lighting(draw) == UPGRADE
+    draw.applied_lighting = trial
+    assert native_module._drawn_lighting(draw) == trial
+    with pytest.raises(ValueError, match="frame_lighting"):
+        native_module._drawn_lighting(native_module._Draw(1, SimpleNamespace(binding=SimpleNamespace(lighting=None)), ()))
 
 
-def test_the_tag_never_claims_a_change_whose_lut_is_not_drawn():
-    """Rule 3 (only Done waits for a LUT): the tag names a change only when its draw was complete;
-    while its LUT is loading, the newest complete change ("0" before any). Mutation probe: tag
-    operations.picture_change unconditionally -> 4 is named before its LUT is drawn."""
-    from contracts.lut import LutRef
-    from contracts.node_frame import LutMix, picture_change_text
-
-    mix = LutMix(LutRef("ab" * 32, "lut33-perceptual-relcol-bpc-1"), .8)
+def test_the_tag_names_the_change_drawn():
+    """Nothing waits on a Frame's paper profile LUT (decision 0028): the tag names the drawn
+    operations' change, else the newest drawn (None before any)."""
     surface = native_module._Surface(output=None, window=None, area=None)
-    with_lut = PictureOperations("HDMI-A-1", 2, (1.0, 1.0, 1.0), 1.0, 1.0, 1.0, lut=mix)
-    assert picture_change_text(surface._tagged_change(with_lut, False)) == "0"
-    assert surface._tagged_change(None, False) is None
-    assert surface._tagged_change(PictureOperations("HDMI-A-1", 3, (1.0, 1.0, 1.0), 1.0, 1.0, 1.0), False) == 3
-    later = PictureOperations("HDMI-A-1", 4, (1.0, 1.0, 1.0), 1.0, 1.0, 1.0, lut=mix)
-    assert surface._tagged_change(later, False) == 3
-    assert surface._tagged_change(later, True) == 4
+    assert surface._tagged_change(None) is None
+    assert surface._tagged_change(_operations(change=3)) == 3
+    assert surface._tagged_change(None) == 3
+
+
+def test_a_room_lights_document_redraws_every_output_and_touches_no_draw():
+    """Design rule 2: a newer room-lights document queues a render of every Output, leaving each
+    surface's pending and acknowledged draw as they were."""
+    renderer, surface = _presenting_renderer()
+    pending, acknowledged = surface.pending, surface.acknowledged
+    renderer.set_room_lights(ROOM)
+    assert renderer._room_lights == ROOM and surface.area.renders == 1
+    assert (surface.pending, surface.acknowledged) == (pending, acknowledged)

@@ -28,8 +28,8 @@ from appliance.display_host.overlay.render import (
 from appliance.display_host.picture import DisplayBrightness, brightness_line
 
 # The base page's lines as the picture controller words them (picture.py `brightness_line`, their one home).
-BOTH = brightness_line(114, DisplayBrightness(46, True, True))          # "Brightness: display 46 % · Photo Wall 114 %"
-AS_IT_HAS_IT = brightness_line(100, DisplayBrightness(None, False, True))
+BOTH = brightness_line(DisplayBrightness(46, True, True))               # "Brightness: display 46 %"
+AS_IT_HAS_IT = brightness_line(DisplayBrightness(None, False, True))
 
 WHITE = (0.94, 0.96, 1.0, 1.0)
 YELLOW = (1.0, 1.0, 0.0, 1.0)

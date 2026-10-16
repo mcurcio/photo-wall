@@ -27,7 +27,7 @@ from contracts.node_picture import (
 from contracts.tuning import TestPattern
 
 WHITE = TestPatternAsk(TestPattern.WHITE, 4)
-SOFTER = SoftwarePicture(brightness_percent=80, contrast_percent=100, colour_temperature_kelvin=6500, gamma_tenths=22)
+SOFTER = SoftwarePicture(contrast_percent=80, colour_temperature_kelvin=6500, gamma_tenths=22)
 
 
 def document(change: int, pattern: TestPatternAsk | None, wanted: SoftwarePicture = NEUTRAL_SOFTWARE,
@@ -59,7 +59,7 @@ def test_white_reaches_the_player_and_the_report_names_it_once_presented(run):
     ask. Mutation probe: `operations_for` drops test_pattern -> the shell never gets WHITE."""
     run.controller.document(OUTPUT, document(5, WHITE))
     sent_with(run, 5, TestPattern.WHITE)
-    assert run.shell.last()[0] == operations_for(OUTPUT, 5, NEUTRAL_SOFTWARE, TestPattern.WHITE)
+    assert run.shell.last()[0] == operations_for(OUTPUT, 5, NEUTRAL_SOFTWARE, UPGRADE_DISPLAY_LIGHT, TestPattern.WHITE)
     run.reported(5)
     assert shown(run) is None                            # not on screen until the shell echoes it
     run.controller.presented(OUTPUT, 5)
@@ -80,7 +80,7 @@ def test_the_pi_takes_the_pattern_off_at_its_bound_under_the_same_change(run):
     assert run.shell.last()[0].test_pattern is TestPattern.WHITE      # not before the bound
     run.clock.now += 1
     sent_with(run, 5, None)
-    assert run.shell.last()[0] == operations_for(OUTPUT, 5, NEUTRAL_SOFTWARE, None)
+    assert run.shell.last()[0] == operations_for(OUTPUT, 5, NEUTRAL_SOFTWARE, UPGRADE_DISPLAY_LIGHT, None)
     until(lambda: shown(run) is None)
     run.controller.presented(OUTPUT, 5)
     assert shown(run) is None and run.reports.latest().presented_change == 5

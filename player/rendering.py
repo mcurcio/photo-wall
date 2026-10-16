@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Literal, Protocol
 
 from contracts.models import AppliedCalibration, Calibration, Layer, OutputBinding
+from contracts.room_light import RoomLightsDocument
 
 REDRAW_RENEWAL = 1.0
 """Seconds after which a native renderer redraws an unchanged composition (render on change)."""
@@ -71,6 +72,8 @@ class Renderer(Protocol):
 
     def set_player(self, player_id: str | None) -> None: ...   # the Player's registered id; None: none yet
 
+    def set_room_lights(self, document: RoomLightsDocument) -> None: ...   # every Output draws with it (0028)
+
     def prepare(self, layer: LocalLayer) -> PrepareResult: ...
 
     def capacity(self, compositions: tuple[OutputComposition, ...]) -> CapacityResult: ...
@@ -109,6 +112,7 @@ class RecordingRenderer:
         self.central_link_history: list[str] = ["connecting"]
         self.identify_output: str | None = None
         self.player_id: str | None = None
+        self.room_lights: list[RoomLightsDocument] = []     # every document drawn with, in order
 
     def set_unbound_outputs(self, output_ids: tuple[str, ...], player_id: str | None,
                             central_link_state: Literal["connecting", "reachable", "retrying"] = "reachable",
@@ -124,6 +128,9 @@ class RecordingRenderer:
 
     def set_player(self, player_id: str | None) -> None:
         self.player_id = player_id
+
+    def set_room_lights(self, document: RoomLightsDocument) -> None:
+        self.room_lights.append(document)
 
     def prepare(self, layer: LocalLayer) -> PrepareResult:
         self.preparations.append(layer)

@@ -51,26 +51,21 @@ Rules this module owns (one home each):
   replaces the one waiting, so a dragged slider's writes never queue.
 - **The shell never waits on the display:** each Output's operations and line go to the shell from
   their own worker, at once on each new change, never queued behind an ask, a re-read or a write.
-- **Operations from the software group** (`operations_for`): white balance from colour
-  temperature (contracts/kelvin.py `kelvin_white`, in linear light, normalised so KELVIN_NEUTRAL is
-  exactly (1, 1, 1) and the largest is 1); light factor = brightness / SOFTWARE_PERCENT_NEUTRAL; contrast
-  slope = contrast / SOFTWARE_PERCENT_NEUTRAL; gamma exponent = gamma_tenths / GAMMA_TENTHS_NEUTRAL;
-  saturation = saturation_percent / SATURATION_PERCENT_NEUTRAL; highlight knee = 1 - r * (1 -
-  HIGHLIGHT_KNEE_MIN) with r = highlight_rolloff_percent / ROLLOFF_PERCENT_MAX, worked as (1 - r) +
-  r * HIGHLIGHT_KNEE_MIN so 0 % is exactly 1 (skipped) and 100 % exactly HIGHLIGHT_KNEE_MIN (the
-  form 1 - r * (1 - HIGHLIGHT_KNEE_MIN) rounds to just below it, which the contract refuses);
-  black floor = black_floor_tenths / 1000, the floor's share of white light (the Player lifts in
-  the panel's light, player/geometry.py `floor_lifted`); the LUT mix is none when there is no LUT or lut_amount_percent is 0, else the LUT at lut_amount_percent / 100.
-  Each at its neutral value is exactly the neutral operation. Sent to the shell at once on each new
-  change, by the shell worker.
+- **Operations from the software group and the Display's light** (`operations_for`): white balance
+  from colour temperature (contracts/kelvin.py `kelvin_white`, in linear light, normalised so
+  KELVIN_NEUTRAL is exactly (1, 1, 1) and the largest is 1); contrast slope = contrast /
+  SOFTWARE_PERCENT_NEUTRAL; gamma exponent = gamma_tenths / GAMMA_TENTHS_NEUTRAL; the document's
+  DisplayLight (decision 0028) as `matched_lux` and `panel_black`, as given. Each at its neutral
+  value is exactly the neutral operation. Sent to the shell at once on each new change, by the
+  shell worker.
 - **Re-sent at start:** the controller restarts with Weston, and sends every Output's operations
   to the shell when it starts and whenever the shell reports an Output (re)created.
 - **Presented:** `presented_change` is the newest picture change the shell's `presented` events
   echoed for the Output (frame protocol v4 `tag_picture`), or the new change when its operations
   equal the ones last presented, every operation compared (`_values`), the print look's too: a
   change that moves only a print-look field waits for the shell's echo.
-- **The base page's line** (`brightness_line`): the display's own brightness and Photo Wall's,
-  each named; it rides the shell's `picture` op beside the operations, and the shell forwards it to
+- **The base page's line** (`brightness_line`): the display's own brightness (Photo Wall has no
+  brightness of its own since decision 0028: the room's light dims the picture); it rides the shell's `picture` op beside the operations, and the shell forwards it to
   the overlay client (frame protocol v4 `brightness`).
 - **The signal step first** (display tuning, decision 0024, design rule 3): `_carry_out` runs it
   before any hardware write and before the change is recorded as applied, so a change already
@@ -121,15 +116,14 @@ from pathlib import Path
 from typing import Final, Protocol
 
 from contracts.kelvin import kelvin_white
-from contracts.node_frame import HIGHLIGHT_KNEE_MIN, LutMix, PictureOperations
+from contracts.node_frame import PictureOperations
 from contracts.node_output import OUTPUT_IDS, DisplayIdentity
 from contracts.node_picture import (
     GAMMA_TENTHS_NEUTRAL,
     PICTURE_LIST,
-    ROLLOFF_PERCENT_MAX,
-    SATURATION_PERCENT_NEUTRAL,
     SOFTWARE_PERCENT_NEUTRAL,
     TEST_PATTERN_SECONDS,
+    DisplayLight,
     HardwareResult,
     HardwareSetting,
     PictureDocument,
@@ -167,21 +161,16 @@ _HISTORY: Final = 16                # picture changes remembered per Output for 
 
 log = logging.getLogger(__name__)
 
-def operations_for(output_id: str, picture_change: int, software: SoftwarePicture,
+def operations_for(output_id: str, picture_change: int, software: SoftwarePicture, light: DisplayLight,
                    test_pattern: TestPattern | None) -> PictureOperations:
-    """The Player's operations for one Output's software group (the module's rule); `test_pattern`
-    rides as given; the bound is the controller's (`pattern_in_force`). Pure."""
-    rolloff = software.highlight_rolloff_percent / ROLLOFF_PERCENT_MAX
+    """The Player's operations for one Output's software group and the Display's light (the
+    module's rule); `test_pattern` rides as given; the bound is the controller's
+    (`pattern_in_force`). Pure."""
     return PictureOperations(output_id=output_id, picture_change=picture_change,
                              rgb_multipliers=kelvin_white(software.colour_temperature_kelvin),
-                             light_factor=software.brightness_percent / SOFTWARE_PERCENT_NEUTRAL,
                              contrast_slope=software.contrast_percent / SOFTWARE_PERCENT_NEUTRAL,
                              gamma_exponent=software.gamma_tenths / GAMMA_TENTHS_NEUTRAL,
-                             saturation=software.saturation_percent / SATURATION_PERCENT_NEUTRAL,
-                             highlight_knee=(1 - rolloff) + rolloff * HIGHLIGHT_KNEE_MIN,
-                             black_floor=software.black_floor_tenths / 1000,
-                             lut=None if software.lut is None or software.lut_amount_percent == 0
-                             else LutMix(software.lut, software.lut_amount_percent / 100),
+                             matched_lux=light.matched_lux, panel_black=light.black,
                              test_pattern=test_pattern)
 
 
@@ -220,17 +209,15 @@ class DisplayBrightness:
     took: bool               # the latest write for 10 was taken, or nothing needed writing
 
 
-def brightness_line(software_percent: int, display: DisplayBrightness) -> str:
-    """The base page's brightness line: the display's own brightness and Photo Wall's, each named,
-    so a software value is never shown as a panel value (U9): "Brightness: display 46 % · Photo Wall
-    114 %"; when the display did not take the brightness set in Photo Wall, "the display did not take
-    it" in the display's place; when its brightness is not known, "as the display has it". Pure."""
-    software = f"Photo Wall {software_percent} %"
+def brightness_line(display: DisplayBrightness) -> str:
+    """The base page's brightness line: the display's own brightness, named as the display's (U9):
+    "Brightness: display 46 %"; when the display did not take the brightness set in Photo Wall, "the
+    display did not take it"; when its brightness is not known, "as the display has it". Pure."""
     if display.set_here and not display.took:
-        return f"Brightness: the display did not take it · {software}"
+        return "Brightness: the display did not take it"
     if display.percent is not None:
-        return f"Brightness: display {display.percent} % · {software}"
-    return f"Brightness: as the display has it · {software}"
+        return f"Brightness: display {display.percent} %"
+    return "Brightness: as the display has it"
 
 
 class PictureDdc(Protocol):
@@ -571,7 +558,8 @@ class PictureController:
 
     def _operations(self, output_id: str, port: _Port, document: PictureDocument) -> PictureOperations:
         """Under the lock: the Player's operations for `document` now, the pattern within its bound."""
-        return operations_for(output_id, document.picture_change, document.software, self._pattern(port))
+        return operations_for(output_id, document.picture_change, document.software, document.light,
+                              self._pattern(port))
 
     def _pattern_ended(self, port: _Port) -> bool:
         """Under the lock: the shell last took a pattern the bound has since ended."""
@@ -777,7 +765,7 @@ class PictureController:
         if setting is not None and setting.range.kind is RangeKind.LEVEL and setting.current is not None:
             percent = setting.range.percent(setting.current)
         display = DisplayBrightness(percent, BRIGHTNESS_CODE in document.hardware, port.brightness_took)
-        return brightness_line(document.software.brightness_percent, display)
+        return brightness_line(display)
 
     def _send(self, output_id: str, port: _Port, *, force: bool) -> bool:
         """The Output's operations and base page line to the shell, when either differs from what

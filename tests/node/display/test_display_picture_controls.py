@@ -39,11 +39,10 @@ from appliance.display_host.picture_list import (
     PictureListAsker,
 )
 from appliance.display_host.signal_range import RangeUnknown
+from contracts.frame_lighting import FrameLighting, Paper
 from contracts.kelvin import kelvin_white
-from contracts.lut import LutRef
+from contracts.models import CoverFit, FrameProfile
 from contracts.node_frame import (
-    HIGHLIGHT_KNEE_MIN,
-    LutMix,
     PictureOperations,
     decode_picture_operations,
     neutral_operations,
@@ -52,6 +51,7 @@ from contracts.node_output import DisplayIdentity
 from contracts.node_picture import (
     NEUTRAL_SOFTWARE,
     UPGRADE_DISPLAY_LIGHT,
+    DisplayLight,
     HardwareRange,
     HardwareResult,
     HardwareSetting,
@@ -61,7 +61,8 @@ from contracts.node_picture import (
     SoftwarePicture,
     WriteResult,
 )
-from player.geometry import final_pixel
+from contracts.tuning import TestPattern
+from player.geometry import final_pixel, frame_lights
 
 IDENTITY = DisplayIdentity("XYM", 5475, "MNN", None)   # the spike's monitor
 LEVEL_100 = HardwareRange(RangeKind.LEVEL, 100, ())
@@ -116,13 +117,17 @@ def until(condition: Callable[[], bool], timeout: float = 15.0) -> None:
         time.sleep(0.02)
 
 
-def software(brightness: int = 100, contrast: int = 100, kelvin: int = 6500, gamma: int = 22) -> SoftwarePicture:
-    return SoftwarePicture(brightness_percent=brightness, contrast_percent=contrast, colour_temperature_kelvin=kelvin, gamma_tenths=gamma)
+def software(contrast: int = 100, kelvin: int = 6500, gamma: int = 22) -> SoftwarePicture:
+    return SoftwarePicture(contrast_percent=contrast, colour_temperature_kelvin=kelvin, gamma_tenths=gamma)
+
+
+LIGHT = UPGRADE_DISPLAY_LIGHT
+LIGHT_ARGS = (LIGHT.matched_lux, LIGHT.black)
 
 
 def document(picture_change: int, hardware: dict[str, int] | None = None, wanted: SoftwarePicture = NEUTRAL_SOFTWARE,
-             *, output_id: str = OUTPUT) -> PictureDocument:
-    return PictureDocument(output_id, picture_change, hardware or {}, wanted, light=UPGRADE_DISPLAY_LIGHT)
+             *, output_id: str = OUTPUT, light: DisplayLight = LIGHT) -> PictureDocument:
+    return PictureDocument(output_id, picture_change, hardware or {}, wanted, light=light)
 
 
 class NoRange:
@@ -193,20 +198,20 @@ def picture_reads(display: Display) -> list[list[str]]:
 
 def test_hardware_46_and_software_114_each_land_on_their_own(display, running):
     """Acceptance 3: the display reads 10 as 60 of 100; a document sets hardware 10 to 46 and
-    software brightness to 114. The ask offers 10 as a level of 100 at 60; the Pi reads 10, writes
-    46, reads it back; the shell gets light factor 1.14; the report names the change with 10 taken
-    60 -> 46, and the change once the shell presented it. Mutation probe: `operations_for` divides
-    by 50 -> the light factor is 2.28."""
+    software contrast to 114. The ask offers 10 as a level of 100 at 60; the Pi reads 10, writes
+    46, reads it back; the shell gets contrast slope 1.14 with the Display's light; the report names
+    the change with 10 taken 60 -> 46, and the change once the shell presented it. Mutation probe:
+    `operations_for` divides by 50 -> the slope is 2.28."""
     run = running()
     assert run.offered() == (HardwareSetting("10", LEVEL_100, 60), HardwareSetting("12", LEVEL_100, 50))
-    run.controller.document(OUTPUT, document(8, {"10": 46}, software(brightness=114)))
+    run.controller.document(OUTPUT, document(8, {"10": 46}, software(contrast=114)))
     report = run.reported(8)
     assert picture_reads(display) == [["getvcp", "10"], ["setvcp", "10", "46"], ["getvcp", "10"]]
     assert report.results == {"10": HardwareResult(WriteResult.TAKEN, 60, 46)}
     assert report.identity == IDENTITY and report.presented_change is None
-    until(lambda: run.shell.last()[1] == "Brightness: display 46 % · Photo Wall 114 %")
+    until(lambda: run.shell.last()[1] == "Brightness: display 46 %")
     operations, _line = run.shell.last()
-    assert operations == PictureOperations(OUTPUT, 8, (1.0, 1.0, 1.0), 1.14, 1.0, 1.0)
+    assert operations == PictureOperations(OUTPUT, 8, (1.0, 1.0, 1.0), 1.14, 1.0, *LIGHT_ARGS)
     run.controller.presented(OUTPUT, 8)
     assert run.reports.latest().presented_change == 8
 
@@ -227,12 +232,12 @@ def test_the_operations_go_to_the_shell_before_any_hardware_write(display, runni
 def test_a_display_that_reads_back_another_value_did_not_take_it(display, running):
     display.script(take=False)
     run = running()
-    run.controller.document(OUTPUT, document(1, {"10": 46}, software(brightness=90)))
+    run.controller.document(OUTPUT, document(1, {"10": 46}, software(contrast=90)))
     report = run.reported(1)
     assert display.writes() == [["10", "46"]]
     assert report.results == {"10": HardwareResult(WriteResult.NOT_TAKEN, 60, 60)}
-    until(lambda: run.shell.last()[1] == "Brightness: the display did not take it · Photo Wall 90 %")
-    assert run.shell.last()[0].light_factor == 0.9      # the software group never leans on the hardware
+    until(lambda: run.shell.last()[1] == "Brightness: the display did not take it")
+    assert run.shell.last()[0].contrast_slope == 0.9    # the software group never leans on the hardware
 
 
 def test_a_write_with_no_read_back_is_no_answer(display, running):
@@ -259,12 +264,12 @@ def test_only_the_codes_set_and_offered_are_written(display, running):
 def test_empty_hardware_is_carried_out_at_once_even_with_no_display(display, running):
     run = running(connect=False)
     run.controller.output(OUTPUT, connected=False, identity=None)
-    run.controller.document(OUTPUT, document(1, {}, software(brightness=40)))
+    run.controller.document(OUTPUT, document(1, {}, software(contrast=40)))
     report = run.reported(1)
     assert report.results == {} and report.identity is None and report.offered is None
     assert display.calls() == []
-    until(lambda: run.shell.sent and run.shell.last() == (operations_for(OUTPUT, 1, software(brightness=40), None),
-                                                           "Brightness: as the display has it · Photo Wall 40 %"))
+    until(lambda: run.shell.sent and run.shell.last() == (operations_for(OUTPUT, 1, software(contrast=40), LIGHT, None),
+                                                           "Brightness: as the display has it"))
 
 
 def test_a_value_the_display_already_has_or_past_its_range_is_not_written(display, running):
@@ -359,17 +364,20 @@ def test_colour_temperature_shows_white_as_charitys_table(kelvin):
     multipliers = kelvin_white(kelvin)
     assert multipliers == pytest.approx(expected, abs=1e-3)
     assert max(multipliers) == 1.0
-    operations = operations_for(OUTPUT, 1, software(kelvin=kelvin), None)
+    operations = operations_for(OUTPUT, 1, software(kelvin=kelvin), LIGHT, None)
     assert operations.rgb_multipliers == multipliers
-    white = final_pixel((1.0, 1.0, 1.0), operations, inside=True)[:3]
+    lights = frame_lights(FrameLighting(mat_depth_mm=0, lights=(), paper=Paper(whiteness=.9, ink_density=2)), None,
+                          CoverFit(), FrameProfile(width_px=1920, height_px=1080, diagonal_inches=27), LIGHT)
+    pattern = PictureOperations(**{**operations.__dict__, "test_pattern": TestPattern.WHITE})
+    white = final_pixel((0.0, 0.0, 0.0), pattern, inside=True, lights=lights, x=.5, y=.5, opening_uv=(.5, .5))[:3]
     assert white == pytest.approx([_encoded(value) for value in expected], abs=2e-3)
 
 
 def test_the_neutral_values_change_nothing_and_the_ranges_hold():
     assert kelvin_white(6500) == (1.0, 1.0, 1.0)
-    assert operations_for(OUTPUT, 3, NEUTRAL_SOFTWARE, None) == neutral_operations(OUTPUT, 3)
-    widest = operations_for(OUTPUT, 3, software(150, 0, 6500, 18), None)
-    assert (widest.light_factor, widest.contrast_slope, widest.gamma_exponent) == (1.5, 0.0, 18 / 22)
+    assert operations_for(OUTPUT, 3, NEUTRAL_SOFTWARE, LIGHT, None) == neutral_operations(OUTPUT, 3, *LIGHT_ARGS)
+    widest = operations_for(OUTPUT, 3, software(0, 6500, 18), LIGHT, None)
+    assert (widest.contrast_slope, widest.gamma_exponent) == (0.0, 18 / 22)
     for kelvin in range(3000, 9301, 100):
         assert max(kelvin_white(kelvin)) == 1.0
     for kelvin in (1900, 6550, 10100, 6500.0, True):
@@ -377,52 +385,21 @@ def test_the_neutral_values_change_nothing_and_the_ranges_hold():
             kelvin_white(kelvin)
 
 
-PAPER = LutRef("ab" * 32, "lut33-perceptual-relcol-bpc-1")
+def test_the_displays_light_rides_the_operations_as_given():
+    """Decision 0028: the document's DisplayLight is the operations' matched lux and panel black,
+    and nothing else of the operations moves with it."""
+    dim = DisplayLight(matched_lux=250.0, black=0.01)
+    operations = operations_for(OUTPUT, 4, software(contrast=90), dim, None)
+    assert (operations.matched_lux, operations.panel_black) == (250.0, 0.01)
+    assert operations_for(OUTPUT, 4, software(contrast=90), LIGHT, None).contrast_slope == operations.contrast_slope
 
 
-def print_look(saturation: int = 100, rolloff: int = 0, floor: int = 0, lut: LutRef | None = None,
-               amount: int = 100, gamma: int = 22) -> SoftwarePicture:
-    return SoftwarePicture(brightness_percent=100, contrast_percent=100, colour_temperature_kelvin=6500, gamma_tenths=gamma, saturation_percent=saturation, highlight_rolloff_percent=rolloff, black_floor_tenths=floor, lut=lut, lut_amount_percent=amount)
-
-
-def test_the_print_look_becomes_operations_and_each_neutral_is_exactly_skipped():
-    """Each print-look field at its neutral is the neutral operation exactly (so the Player skips
-    the step); the ends of each range hold in the contract. Mutation probe: knee = 1 - rolloff / 100
-    (no HIGHLIGHT_KNEE_MIN) -> rolloff 100 gives knee 0, which the contract refuses."""
-    assert operations_for(OUTPUT, 3, print_look(), None) == neutral_operations(OUTPUT, 3)
-    assert operations_for(OUTPUT, 3, print_look(lut=PAPER, amount=0), None) == neutral_operations(OUTPUT, 3)
-    most = operations_for(OUTPUT, 3, print_look(saturation=150, rolloff=100, floor=100), None)
-    assert (most.saturation, most.highlight_knee) == (1.5, HIGHLIGHT_KNEE_MIN)
-    assert most.black_floor == 0.1
-    grey = operations_for(OUTPUT, 3, print_look(saturation=0, rolloff=40), None)
-    assert grey.saturation == 0.0
-    assert grey.highlight_knee == pytest.approx(1 - 0.4 * (1 - HIGHLIGHT_KNEE_MIN), abs=1e-12)
-    for rolloff in range(101):                                     # every step stays inside the contract
-        assert HIGHLIGHT_KNEE_MIN <= operations_for(OUTPUT, 3, print_look(rolloff=rolloff), None).highlight_knee <= 1
-
-
-@pytest.mark.parametrize("gamma", [18, 26])
-def test_the_black_floor_is_a_share_of_white_light_whatever_photo_walls_gamma(gamma):
-    """2.0 % of white light is the share 0.02 at any gamma look: the Player lifts in the panel's
-    light (player/geometry.py `floor_lifted`). Mutation probe: scale by gamma_tenths -> 18 and 26
-    differ."""
-    assert operations_for(OUTPUT, 1, print_look(floor=20, gamma=gamma), None).black_floor == 0.02
-
-
-def test_the_lut_is_mixed_in_by_its_amount_and_none_at_zero_or_without_a_lut():
-    """Mutation probe: emit LutMix at amount 0 -> the contract's ValueError."""
-    assert operations_for(OUTPUT, 1, print_look(lut=PAPER, amount=0), None).lut is None
-    assert operations_for(OUTPUT, 1, print_look(lut=PAPER, amount=80), None).lut == LutMix(PAPER, 0.8)
-    assert operations_for(OUTPUT, 1, print_look(lut=PAPER), None).lut == LutMix(PAPER, 1.0)
-    assert operations_for(OUTPUT, 1, print_look(amount=100), None).lut is None
-
-
-def test_the_base_page_names_each_brightness_and_never_the_software_as_the_panels():
-    assert brightness_line(114, DisplayBrightness(46, True, True)) == "Brightness: display 46 % · Photo Wall 114 %"
-    assert brightness_line(100, DisplayBrightness(60, False, True)) == "Brightness: display 60 % · Photo Wall 100 %"
-    assert brightness_line(114, DisplayBrightness(60, True, False)) == (
-        "Brightness: the display did not take it · Photo Wall 114 %")
-    assert brightness_line(40, DisplayBrightness(None, False, True)) == "Brightness: as the display has it · Photo Wall 40 %"
+def test_the_base_page_names_the_displays_brightness_only():
+    """Photo Wall has no brightness of its own since decision 0028: the line names the display's."""
+    assert brightness_line(DisplayBrightness(46, True, True)) == "Brightness: display 46 %"
+    assert brightness_line(DisplayBrightness(60, False, True)) == "Brightness: display 60 %"
+    assert brightness_line(DisplayBrightness(60, True, False)) == "Brightness: the display did not take it"
+    assert brightness_line(DisplayBrightness(None, False, True)) == "Brightness: as the display has it"
 
 
 # Newest wins, re-sends, presented -------------------------------------------------------------------
@@ -447,7 +424,7 @@ def test_start_and_a_recreated_shell_output_re_send_operations_and_repeat_no_wri
     run.connect()
     run.connect(OTHER)
     run.controller.document(OUTPUT, document(4, {"10": 46}, software(contrast=50)))
-    run.controller.document(OTHER, document(2, {}, software(brightness=80), output_id=OTHER))
+    run.controller.document(OTHER, document(2, {}, software(contrast=80), output_id=OTHER))
     assert run.shell.sent == []                         # nothing before start
     run.controller.start()
     try:
@@ -455,14 +432,14 @@ def test_start_and_a_recreated_shell_output_re_send_operations_and_repeat_no_wri
         run.reported(2, OTHER)
         until(lambda: {operations.output_id for operations, _ in run.shell.sent} == {OUTPUT, OTHER})
         assert display.writes() == [["10", "46"]]
-        until(lambda: (OUTPUT, "Brightness: display 46 % · Photo Wall 100 %")
+        until(lambda: (OUTPUT, "Brightness: display 46 %")
               in [(operations.output_id, line) for operations, line in run.shell.sent])
         sent = len(run.shell.sent)
         run.controller.shell_output(OUTPUT)
         until(lambda: len(run.shell.sent) == sent + 1)
         operations, line = run.shell.last()
-        assert operations == PictureOperations(OUTPUT, 4, (1.0, 1.0, 1.0), 1.0, 0.5, 1.0)
-        assert line == "Brightness: display 46 % · Photo Wall 100 %"
+        assert operations == PictureOperations(OUTPUT, 4, (1.0, 1.0, 1.0), 0.5, 1.0, *LIGHT_ARGS)
+        assert line == "Brightness: display 46 %"
         time.sleep(0.3)
         assert display.writes() == [["10", "46"]]       # the re-send repeats no DDC/CI write
     finally:
@@ -471,34 +448,33 @@ def test_start_and_a_recreated_shell_output_re_send_operations_and_repeat_no_wri
 
 def test_presented_follows_the_shells_echo_and_equal_operations_count_at_once(display, running):
     run = running()
-    run.controller.document(OUTPUT, document(6, {"10": 46}, software(brightness=40)))
+    run.controller.document(OUTPUT, document(6, {"10": 46}, software(contrast=40)))
     assert run.reported(6).presented_change is None
     run.controller.presented(OUTPUT, None)               # a v3 tag: nothing
     run.controller.presented(OUTPUT, 6)
     assert run.reports.latest().presented_change == 6
-    run.controller.document(OUTPUT, document(7, {"10": 70}, software(brightness=40)))   # same operations
+    run.controller.document(OUTPUT, document(7, {"10": 70}, software(contrast=40)))   # same operations
     until(lambda: run.reports.latest().presented_change == 7)
-    run.controller.document(OUTPUT, document(8, {"10": 70}, software(brightness=30)))   # new operations
+    run.controller.document(OUTPUT, document(8, {"10": 70}, software(contrast=30)))   # new operations
     report = run.reported(8)
     assert report.presented_change == 7
     run.controller.presented(OUTPUT, 8)
     assert run.reports.latest().presented_change == 8
 
 
-@pytest.mark.parametrize("look", [print_look(saturation=85), print_look(rolloff=40), print_look(floor=20),
-                                  print_look(lut=PAPER, amount=80)])
-def test_a_change_to_the_print_look_only_waits_for_the_shell_to_present_it(display, running, look):
-    """A document that moves only a print-look field sends new operations to the shell, and Done
+def test_a_change_to_the_displays_light_only_waits_for_the_shell_to_present_it(display, running):
+    """A document that moves only the Display's light sends new operations to the shell, and Done
     waits: presented_change reaches it only when the shell echoes it. Mutation probe: compare only
-    the four v4 fields in `_values` -> presented_change advances at once."""
+    the Display's own steps in `_values` -> presented_change advances at once."""
     run = running()
     run.controller.document(OUTPUT, document(6, {}, NEUTRAL_SOFTWARE))
     run.reported(6)
     run.controller.presented(OUTPUT, 6)
     assert run.reports.latest().presented_change == 6
-    run.controller.document(OUTPUT, document(7, {}, look))
+    matched = DisplayLight(matched_lux=400.0, black=LIGHT.black)
+    run.controller.document(OUTPUT, document(7, {}, NEUTRAL_SOFTWARE, light=matched))
     until(lambda: run.shell.sent and run.shell.last()[0].picture_change == 7)
-    assert run.shell.last()[0] == operations_for(OUTPUT, 7, look, None) != neutral_operations(OUTPUT, 7)
+    assert run.shell.last()[0] == operations_for(OUTPUT, 7, NEUTRAL_SOFTWARE, matched, None)
     time.sleep(0.2)
     assert run.reported(7).presented_change == 6
     run.controller.presented(OUTPUT, 7)
@@ -515,11 +491,11 @@ def test_an_older_or_equal_picture_change_writes_nothing(display, running):
     run = running()
     run.controller.document(OUTPUT, document(3, {"10": 46}))
     run.reported(3)
-    settled = (operations_for(OUTPUT, 3, NEUTRAL_SOFTWARE, None), "Brightness: display 46 % · Photo Wall 100 %")
+    settled = (operations_for(OUTPUT, 3, NEUTRAL_SOFTWARE, LIGHT, None), "Brightness: display 46 %")
     until(lambda: bool(run.shell.sent) and run.shell.last() == settled)
     sent = len(run.shell.sent)
     display.vcp("10", 35, 100)                          # someone on the display's buttons
-    run.controller.document(OUTPUT, document(3, {"10": 46}, software(brightness=50)))
+    run.controller.document(OUTPUT, document(3, {"10": 46}, software(contrast=50)))
     run.controller.document(OUTPUT, document(2, {"10": 10}))
     run.controller.shell_output(OUTPUT)                 # the re-send: what the controller holds now
     until(lambda: len(run.shell.sent) == sent + 1)
@@ -619,14 +595,14 @@ def test_the_backend_sends_the_picture_op_and_hands_the_shells_events_on():
         assert heard == [("output", OUTPUT)]
         playing = threading.Thread(target=play_shell)
         playing.start()
-        operations = PictureOperations(OUTPUT, 6, (1.0, 0.5, 0.25), 0.8, 1.0, 1.0)
+        operations = PictureOperations(OUTPUT, 6, (1.0, 0.5, 0.25), 0.8, 1.0, *LIGHT_ARGS)
         assert backend.picture(operations, timeout=2, brightness="Brightness: as the display has it")
         playing.join(5)
         request = asked[0]
         assert (request["op"], request["output_id"], request["output"]) == ("picture", OUTPUT, output)
         assert decode_picture_operations(request["operations"]) == operations
         assert request["brightness"] == "Brightness: as the display has it"
-        assert not backend.picture(neutral_operations("HDMI-A-2", 1), timeout=1, brightness="")   # no such Output
+        assert not backend.picture(neutral_operations("HDMI-A-2", 1, *LIGHT_ARGS), timeout=1, brightness="")   # no such Output
 
 
 # List settings, the list kept, the re-read (slice S3) ---------------------------------------------
@@ -689,7 +665,7 @@ def test_the_display_is_read_again_and_a_change_on_its_buttons_is_reported_not_u
     assert {setting.code: setting.current for setting in run.reports.latest().offered}["10"] == 46   # not yet due
     run.clock.now += REREAD_SECONDS
     until(lambda: {setting.code: setting.current for setting in run.reports.latest().offered}["10"] == 30)
-    until(lambda: run.shell.last()[1] == "Brightness: display 30 % · Photo Wall 100 %")
+    until(lambda: run.shell.last()[1] == "Brightness: display 30 %")
     assert display.writes() == [["10", "46"]] and run.reports.latest().for_change == 1
     reads = len(display.started())
     time.sleep(1.2)
@@ -709,7 +685,7 @@ def test_photo_walls_change_reaches_the_shell_while_a_display_write_is_running(d
     run.offered()
     run.controller.document(OUTPUT, document(1, {"10": 46}))
     until(lambda: display.writes() == [["10", "46"]], timeout=5)
-    run.controller.document(OUTPUT, document(2, {"10": 46}, software(brightness=50)))
+    run.controller.document(OUTPUT, document(2, {"10": 46}, software(contrast=50)))
     until(lambda: any(operations.picture_change == 2 for operations, _ in run.shell.sent), timeout=0.5)
     assert [call["at"] for call in display.calls() if call["args"][0] == "setvcp"] == ["start"]   # still writing
     run.reported(2)
@@ -724,7 +700,7 @@ def test_a_change_to_photo_walls_group_only_touches_no_ddc(display, running):
     run.controller.document(OUTPUT, document(1, {"10": 46, "12": 40}))
     first = run.reported(1).results
     commands = len(display.started())
-    run.controller.document(OUTPUT, document(2, {"10": 46, "12": 40}, software(brightness=120)))
+    run.controller.document(OUTPUT, document(2, {"10": 46, "12": 40}, software(contrast=120)))
     assert run.reported(2).results == first
     assert len(display.started()) == commands
     run.controller.document(OUTPUT, document(3, {"10": 46, "12": 45}))

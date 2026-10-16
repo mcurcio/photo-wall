@@ -18,21 +18,23 @@ order.
   display's black (its Brightness) while it is above 1. Each other step is judged by model.py
   `judged`: KEEP only when the reading proves the gap within MATCH_TOLERANCE, RETAKE when its
   spread is too wide to tell. A NORMAL photo yields the two white steps only.
-- **Post-software** (TARGET_POST_SOFTWARE, through Photo Wall's steps but the mat shadow): the
-  residual, as a software picture. The display's response is taken from this reading (each grey's
-  measured light against the chain's output for it now: player/geometry.py `final_pixel` over
-  appliance/display_host/picture.py `operations_for` of the entry's software picture, with the
-  entry's LUT table); the aim is screen white = paper white (as read) and the greys at
-  sRGB(final_pixel(x; neutral brightness, contrast, colour temperature and gamma, the look as
-  set)). Only those four move, each away from neutral only when that improves the fit by more than KEEP_SPREADS of the
-  readings' spread (a penalty per step from neutral, so a display right on its own yields "no
-  change"); saturation, the highlight rolloff, the black floor and the LUT (the print look) never
-  move. The black is not judged here. Without a grey read (a NORMAL photo, or every grey dropped)
-  the display's response is unknown: SuggestionRefused TONE_UNREAD, never a fit on an assumed one.
-  A brightness raise for a shortfall within `angle_dimming` is not made: brightness stays at the
-  entry's and `unsure` names WHITE_LEVEL. "No change" is said only when the white level, white
-  colour and tone, measured as pre-software but against the aim, are each proven matched
-  (`judged`); a property whose spread is too wide to tell is named in `retake`.
+- **Post-software** (TARGET_POST_SOFTWARE, through the Display's own steps: white balance,
+  contrast and gamma, never the room's light, the paper or the mat; decision 0028): the residual,
+  as a software picture. The display's response is taken from this reading (each grey's measured
+  light against the chain's output for it now: player/geometry.py `display_steps` over
+  appliance/display_host/picture.py `operations_for` of the entry's software picture); the aim is
+  screen white = paper white (as read) and the greys at sRGB(display_steps(x; neutral contrast,
+  colour temperature and gamma)). Only those three move (KNOBS; the print look's sliders and the
+  Display's LUT are gone, decision 0028), each away from neutral only when that improves the fit by
+  more than KEEP_SPREADS of the readings' spread (a penalty per step from neutral, so a display
+  right on its own yields "no change"). The black is not judged here. Without a grey read (a
+  NORMAL photo, or every grey dropped) the display's response is unknown: SuggestionRefused
+  TONE_UNREAD, never a fit on an assumed one. A white raise for a shortfall within `angle_dimming`
+  is not made (it may be the panel's off-axis dimming): contrast, the knob that raises the white,
+  stays at the entry's and `unsure` names WHITE_LEVEL (take the photo squarer). "No
+  change" is said only when the white level, white colour and tone, measured as pre-software but
+  against the aim, are each proven matched (`judged`); a property whose spread is too wide to tell
+  is named in `retake`.
 
 Library steps (owner, 2026-10-14: "Make sure that you are using standard libraries and not building
 the algorithm"): the sRGB transfer function is colour-science's; both exponent fits are
@@ -53,11 +55,9 @@ As built (.claude/errata.md, calibration targets reader R2):
 - The post-software display is k (decode(signal) ** p) per channel above its black, its one p
   fitted to the greys' shares and k to the white. A knob away from neutral costs KEEP_SPREADS
   squared in the fit's units (residuals over their spreads), plus a tie-break per step, so it moves
-  only when it improves the fit by about KEEP_SPREADS spreads; the four are searched one at a time
+  only when it improves the fit by about KEEP_SPREADS spreads; the three are searched one at a time
   in their own steps from neutral. The aim's white is paper white times the chain's white with
-  the four neutral and the look as set, so a look that tints or dims white is never undone.
-- The LUT is "named" when it acts (`operations_for` gives the operations a LUT: one named with an
-  amount above 0); a LUT at amount 0 needs no table.
+  the three neutral.
 """
 from __future__ import annotations
 
@@ -79,7 +79,6 @@ from contracts.kelvin import (
     KELVIN_WHITE,
     kelvin_white,
 )
-from contracts.lut import LutRef
 from contracts.node_frame import PictureOperations, srgb_to_linear
 from contracts.node_output import OUTPUT_IDS
 from contracts.node_picture import (
@@ -93,10 +92,11 @@ from contracts.node_picture import (
     SOFTWARE_PERCENT_MAX,
     SOFTWARE_PERCENT_MIN,
     SOFTWARE_PERCENT_NEUTRAL,
+    UPGRADE_DISPLAY_LIGHT,
     SoftwarePicture,
 )
 from contracts.tuning import TestPattern
-from player.geometry import final_pixel
+from player.geometry import display_steps
 
 from .model import (
     KEEP_SPREADS,
@@ -127,51 +127,37 @@ LUMINANCE: Final = np.array([0.2126, 0.7152, 0.0722])      # Rec. 709 / sRGB Y o
 KELVIN_FINE: Final = 10                     # the kelvin fit's grid between the table's rows
 _SMALLEST_SPREAD: Final = 1e-4              # a spread reported as 0 (two identical copies) is this
 _TIE_BREAK: Final = 1e-6                    # per knob step from neutral: the nearest of equal fits
-# The four knobs the residual moves (design rule 3: the look never moves), each over its own range.
+# The three knobs the residual moves (the Display's software group, decision 0028), each over its
+# own range.
 KNOBS: Final[dict[str, tuple[int, int, int, int]]] = {   # name -> (neutral, min, max, step)
-    "brightness_percent": (SOFTWARE_PERCENT_NEUTRAL, SOFTWARE_PERCENT_MIN, SOFTWARE_PERCENT_MAX, 1),
     "contrast_percent": (SOFTWARE_PERCENT_NEUTRAL, SOFTWARE_PERCENT_MIN, SOFTWARE_PERCENT_MAX, 1),
     "colour_temperature_kelvin": (KELVIN_NEUTRAL, KELVIN_MIN, KELVIN_MAX, KELVIN_STEP),
     "gamma_tenths": (GAMMA_TENTHS_NEUTRAL, GAMMA_TENTHS_MIN, GAMMA_TENTHS_MAX, 1),
 }
+WHITE_KNOB: Final = "contrast_percent"      # the one knob that raises the white sent (below neutral)
 _ROUNDS: Final = 6
 GAMMA_FIT: Final = (1.0, 4.0)               # the display gamma the tone fit searches (Photo Wall's units)
 EXPONENT_FIT: Final = (0.5, 2.0)            # the post-software display's exponent over sRGB
 
 
-def suggest(reading: Reading, lut: bytes | None) -> Suggestion:
-    """The suggestion for `reading` by its stage. `lut`: the table (contracts/lut.py LUT_BYTES) of
-    the LUT the entry's software picture names, None when it names none or it could not be read;
-    post-software with a LUT named and `lut` None is SuggestionRefused LUT_UNREAD (never a
-    prediction without the look), and with no grey read TONE_UNREAD. Pure."""
+def suggest(reading: Reading) -> Suggestion:
+    """The suggestion for `reading` by its stage; post-software with no grey read is
+    SuggestionRefused TONE_UNREAD. Pure."""
     if reading.stage is TestPattern.TARGET_PRE_SOFTWARE:
         return _pre(reading)
-    return _post(reading, lut)
+    return _post(reading)
 
 
 def software_of(entry: PictureEntryView) -> SoftwarePicture:
-    """The entry's software picture as the Pi gets it (its LUT named by profile and recipe). Pure."""
+    """The entry's software picture as the Pi gets it: contrast, colour temperature and gamma. Pure."""
     view = entry.picture.software
-    lut = None
-    if view.lut is not None:
-        if entry.picture.lut_recipe_id is None:
-            raise ValueError("entry_lut_recipe")
-        lut = LutRef(view.lut.profile_sha256, entry.picture.lut_recipe_id)
-    return SoftwarePicture(
-        brightness_percent=view.brightness_percent, contrast_percent=view.contrast_percent,
-        colour_temperature_kelvin=view.colour_temperature_kelvin, gamma_tenths=view.gamma_tenths,
-        saturation_percent=view.saturation_percent, highlight_rolloff_percent=view.highlight_rolloff_percent,
-        black_floor_tenths=view.black_floor_tenths, lut=lut, lut_amount_percent=view.lut_amount_percent)
-
-
-def lut_acts(software: SoftwarePicture) -> LutRef | None:
-    """The LUT the software picture's operations apply (named, amount above 0), or None. Pure."""
-    return software.lut if _operations(software).lut is not None else None
+    return SoftwarePicture(contrast_percent=view.contrast_percent,
+                           colour_temperature_kelvin=view.colour_temperature_kelvin, gamma_tenths=view.gamma_tenths)
 
 
 def _operations(software: SoftwarePicture) -> PictureOperations:
-    # The port and the change do not enter the pixel's arithmetic.
-    return operations_for(OUTPUT_IDS[0], 1, software, None)
+    # The port, the change and the Display's light do not enter the Display's steps' arithmetic.
+    return operations_for(OUTPUT_IDS[0], 1, software, UPGRADE_DISPLAY_LIGHT, None)
 
 
 # -- What each property measures (both stages) ---------------------------------------------------------
@@ -301,33 +287,29 @@ def _gamma_fit(signals: np.ndarray, shares: np.ndarray) -> float:
 # -- Post-software ---------------------------------------------------------------------------------
 
 
-def _post(reading: Reading, lut: bytes | None) -> PostSoftwareSuggestion | SuggestionRefused:
+def _post(reading: Reading) -> PostSoftwareSuggestion | SuggestionRefused:
     if not reading.tone:
         return SuggestionRefused(SuggestionRefusal.TONE_UNREAD,
                                  "no grey was read (a normal photo, or every grey dropped): send a "
                                  "ProRAW photo, with what reflects moved if reflections dropped the greys")
     now = software_of(reading.entry)
-    if lut_acts(now) is not None and lut is None:
-        return SuggestionRefused(SuggestionRefusal.LUT_UNREAD,
-                                 "the LUT in force could not be read: give the reader the database "
-                                 "address (PHOTO_WALL_READ_DATABASE_URL), or try without the LUT")
     signals = (0.0, 1.0, *(step.signal for step in reading.tone))
 
     def outputs(software: SoftwarePicture) -> np.ndarray:
         operations = _operations(software)
-        return np.array([final_pixel((srgb_to_linear(s),) * 3, operations, inside=True, lut=lut)[:3]
-                         for s in signals])
+        return np.array([display_steps((srgb_to_linear(s),) * 3, operations) for s in signals])
 
     display = _Display.fitted(outputs(now), reading)
-    aim = _above_black(_decoded(outputs(_neutral_four(now))))
+    aim = _above_black(_decoded(outputs(_neutral(now))))
     cost = _cost(reading, display, aim, outputs)
-    best = _searched(_neutral_four(now), cost, KNOBS)
+    best = _searched(_neutral(now), cost, KNOBS)
     unsure: tuple[PreProperty, ...] = ()
     level = 100 * (float(LUMINANCE @ np.array(reading.white.value)) - 1)
-    if best.brightness_percent > now.brightness_percent and _within_angle(level, reading):
-        # The shortfall may be the panel's off-axis dimming: brightness is never raised for it.
-        held = {knob: limits for knob, limits in KNOBS.items() if knob != "brightness_percent"}
-        best = _searched(replace(_neutral_four(now), brightness_percent=now.brightness_percent), cost, held)
+    if _white(best) > _white(now) and _within_angle(level, reading):
+        # The shortfall may be the panel's off-axis dimming: the white is never raised for it, so
+        # the knob that raises it (contrast, up to white) stays at the entry's.
+        held = {knob: limits for knob, limits in KNOBS.items() if knob != WHITE_KNOB}
+        best = _searched(replace(_neutral(now), **{WHITE_KNOB: getattr(now, WHITE_KNOB)}), cost, held)
         unsure = (PreProperty.WHITE_LEVEL,)
     verdicts = _verdicts(_against_aim(reading, aim))
     retake = tuple(prop for prop, verdict in verdicts.items() if verdict is Verdict.UNDECIDED)
@@ -364,7 +346,12 @@ def _searched(start: SoftwarePicture, cost: Callable[[SoftwarePicture], float],
     return best
 
 
-def _neutral_four(software: SoftwarePicture) -> SoftwarePicture:
+def _white(software: SoftwarePicture) -> float:
+    """The luminance of the light the Display's steps send for full white."""
+    return float(LUMINANCE @ _decoded(np.array(display_steps((1.0, 1.0, 1.0), _operations(software)))))
+
+
+def _neutral(software: SoftwarePicture) -> SoftwarePicture:
     return replace(software, **{knob: neutral for knob, (neutral, _, _, _) in KNOBS.items()})
 
 
@@ -431,4 +418,4 @@ def _cost(reading: Reading, display: _Display, aim: np.ndarray,
     return cost
 
 
-__all__ = ["lut_acts", "software_of", "suggest"]
+__all__ = ["software_of", "suggest"]

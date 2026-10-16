@@ -1,7 +1,9 @@
 """The host component on its Node's bus (E3b design §7.2 node, §7.3, §9.5; erratum E-E3C-CUT-2).
 
 HostCore declares the host store line: a circular record buffer and its state bucket, which holds
-`birth`, `outbox` and one key of its own, `base` (the base this boot runs). The session connects
+`birth`, `outbox` and two keys of its own: `base` (the base this boot runs) and, on a Pi with a wired
+light meter, LIGHT_SENSOR_KEY (contracts/room_light.py `LightSensorReading`, decision 0028; put by
+appliance/host/light_sensor.py `LightMeter`). The session connects
 forever on its own thread and attaches at every connect, so after a bus restart (which starts empty)
 the line, `birth` and `base` are back in the new epoch with no help from Central. HostCore never
 waits on the bus: `start` returns at once.
@@ -12,13 +14,15 @@ from typing import Final
 
 from contracts.node_link import NODE_BUS_URL, STORE_LINES
 from contracts.node_rollout import canonical
+from contracts.room_light import LIGHT_SENSOR_BYTES, LIGHT_SENSOR_KEY
 from nodeapi.buffers import KeyTable, Slice, event_buffer, state_bucket
 from nodeapi.node import NodeSession, Release
 
 _COMPONENT: Final = "host"
 _BASE_KEY: Final = "base"
 HOST_VERSION: Final = "1.0.0"                     # the host component's release version (birth)
-HOST_STATE: Final = KeyTable({_BASE_KEY: 256})    # the host line's state table beside birth and outbox
+# The host line's state table beside birth and outbox.
+HOST_STATE: Final = KeyTable({_BASE_KEY: 256, LIGHT_SENSOR_KEY: LIGHT_SENSOR_BYTES})
 
 
 def _host_slice() -> Slice:

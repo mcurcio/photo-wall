@@ -20,6 +20,7 @@ from appliance.host.bus import host_session
 from appliance.host.host import HostCore
 from appliance.host.host_linux import LinuxHostSampler, SystemdRebootDriver, boot_id, boottime_ms
 from appliance.host.host_storage import FileRebootJournal, RebootDelivery
+from appliance.host.light_sensor import LightMeter
 from appliance.kernel.boot_stage import DIRECTORY as BOOT_STAGE_DIRECTORY
 from appliance.kernel.boot_stage import read_boot_report
 from appliance.kernel.boot_store import BootStore
@@ -219,6 +220,9 @@ def main() -> None:
     # The host component on the Node's bus: its own thread, never waited on (appliance/host/bus.py).
     session = host_session(value["base_tag"])
     session.start()
+    # A wired light meter, if any (decision 0028): its own thread, onto the host line's state.
+    meter = LightMeter(session.state.put)
+    meter.start()
     last_tick = 0.0
     try:
         while True:
@@ -235,6 +239,7 @@ def main() -> None:
                 # Fixed bounded cadence; no credential or packet logging.
             time.sleep(0.05)
     finally:
+        meter.stop()
         session.stop()
         server.close()
         store.close()
