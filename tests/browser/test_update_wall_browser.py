@@ -67,13 +67,13 @@ class Fleet:
         self.base, self.old_base = "v1.0.0", "v1.0.0"
         self.players = {device: {"version": OLD, "previous": None} for device in devices}
         self.walls, self.installs, self.wall_answer = [], [], None
+        self.deployments = {}  # version -> the deployment Central's real Releases read says it became
         self.boxes = {device: {"boot": f"boot-{next(self._ids)}", "linked": OLD_APP,
                                "acceptances": [OLD_APP] if accepted else [], "commands": [], "operations": []}
                       for device in devices}
         self.reboots, self.stages, self.begins, self.samples = [], [], [], []
         page.route(re.compile(r".*/v1/operator/node/devices/[^/]+(/[a-z-]+)?$"), self._device)
         page.route("**/v1/operator/node/app-qualifications/*/sample", self._sample)
-        page.route("**/v1/operator/node/releases", self._releases)
         page.route("**/v1/operator/releases", self._view)
         page.route("**/v1/operator/releases/wall", self._wall)
         page.route("**/v1/operator/players/*/install", self._install)
@@ -81,7 +81,8 @@ class Fleet:
     def view(self):
         """Central's ReleasesView: the target, the release every Player booted before, each Player's version."""
         release = lambda version, base, app, extra: {  # noqa: E731
-            "version": version, "stable": True, "problem": None, "base_tag": base, "app_environment_sha256": app,
+            "version": version, "stable": True, "problem": None, "deployment_id": self.deployments.get(version),
+            "base_tag": base, "app_environment_sha256": app,
             "in_window": True, "discovered_at": 1_759_363_000, "readiness": "ready", "readiness_reason": None,
             "missing_bytes": 0, **extra}
         return {"read_at": 1_759_363_300, "default": "v9.0.0",
@@ -98,6 +99,10 @@ class Fleet:
                 entry["previous"], entry["version"] = entry["version"], version
 
     def _view(self, route):
+        """Central's real Releases read names the deployment each release became (Try stages it);
+        the Players' versions and the target's readiness are this test's."""
+        real = route.fetch().json()
+        self.deployments.update({row["version"]: row["deployment_id"] for row in real["releases"]})
         self._json(route, self.view())
 
     def _wall(self, route):
@@ -113,15 +118,6 @@ class Fleet:
     def _install(self, route):
         self.installs.append(route.request.url)
         self._json(route, {"error": "unknown_player"}, 404)
-
-    def _releases(self, route):
-        """Central's real release read, with the download readiness this test sets."""
-        response = route.fetch()
-        body = response.json()
-        for row in body["releases"]:
-            if row["deployment_id"] is not None:
-                row.update(self.readiness)
-        route.fulfill(response=response, json=body)
 
     @staticmethod
     def _json(route, body, status=200):

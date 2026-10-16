@@ -65,8 +65,6 @@ export interface DrawnView {
 
 export type EntityId = string;
 
-export type EntityView = LightEntityView | SensorEntityView;
-
 export interface FarLight {
   from_degrees: number;
   kind: "far";
@@ -128,24 +126,11 @@ export interface HomeAssistantStatesView {
   refused: RefusedReportView[];
 }
 
-export interface HomeAssistantView {
-  entities: EntityView[];
-  link: LinkHealthView;
-  refused: RefusedReportView[];
-}
-
 export interface InstallStarted {
   install: "downloading" | "restarting";
   kind: "started";
   serial: string;
   version: ReleaseTag;
-}
-
-export interface LightEntityView {
-  entity: string;
-  heard_at: number | null;
-  kind: "light";
-  reports: RoomLightId | null;
 }
 
 export interface LightView {
@@ -154,11 +139,6 @@ export interface LightView {
 }
 
 export type LightWord = Dimmer | ColourDimmer | Unavailable;
-
-export interface LinkHealthView {
-  since: number | null;
-  state: "not-configured" | "connecting" | "connected" | "away" | "never-run";
-}
 
 export interface LutRef {
   profile_sha256: string;
@@ -283,6 +263,7 @@ export type ReleaseTag = string;
 export interface ReleaseView {
   app_environment_sha256: string | null;
   base_tag: string | null;
+  deployment_id: string | null;
   discovered_at: number | null;
   in_window: boolean;
   missing_bytes: number;
@@ -339,13 +320,6 @@ export interface RoomLightsView {
 export interface Sensor {
   at: SensorRef;
   name: string;
-}
-
-export interface SensorEntityView {
-  entity: string;
-  heard_at: number | null;
-  kind: "illuminance";
-  reports: SensorId | null;
 }
 
 export type SensorId = string;

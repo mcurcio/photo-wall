@@ -143,7 +143,7 @@ def test_070_drops_the_v1_fleet_and_node_boot_keeps_its_quota(before_070, tmp_pa
         fresh_id = device_id_for_serial(fresh)
         assert _one(registry, "SELECT 1 FROM devices WHERE device_id=%s", fresh_id) is None
         first = _offer(client, fresh)
-        assert (first.status_code, first.json()) == (503, {"error": "node_boot_no_ready_release"})
+        assert (first.status_code, first.json()) == (503, {"error": "node_boot_policy_unconfigured"})
         assert _one(registry, "SELECT serial FROM devices WHERE device_id=%s",
                     fresh_id) == {"serial": fresh}
         assert _quota(registry, fresh_id) == 1

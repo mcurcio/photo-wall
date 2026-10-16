@@ -221,7 +221,7 @@ def test_refusal_is_frozen_and_never_retargeted(registry):
     service = boot_service(sessions)   # no version kept and no release ready
     request = NodeBootRequestV2(SERIAL, BOOT_ID, "a" * 64)
     for _ in range(2):
-        with pytest.raises(NodeControlError, match="node_boot_no_ready_release"):
+        with pytest.raises(NodeControlError, match="node_boot_policy_unconfigured"):
             service.offer(request)
     with registry.db.transaction() as conn:
         assert conn.execute("SELECT count(*) AS n FROM node_boot_offers").fetchone()["n"] == 1

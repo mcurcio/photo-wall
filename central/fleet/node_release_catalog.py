@@ -10,6 +10,7 @@ valid one is already a deployment. Readiness is derived on read by the one readi
 from __future__ import annotations
 
 from typing import Any
+from uuid import UUID
 
 from central.content_catalog.boot_policy import newest_first
 from central.content_catalog.deployment import deployment_id_for
@@ -51,7 +52,7 @@ class NodeReleaseCatalog:
             for row, deployment in rows:
                 readiness = None if deployment is None else self.readiness.readiness(
                     tx, jobs.get(deployment, frozenset()), wanted=deployment in wanted.deployments)
-                releases.append(_release(row, deployment in window, readiness))
+                releases.append(_release(row, deployment, deployment in window, readiness))
             versions = pi_versions_in(conn, self.sessions.clock, self.readiness)
             players = {row["device_id"]: row["id"] for row in conn.execute(
                 "SELECT id, device_id FROM players WHERE retired_at IS NULL").fetchall()}
@@ -74,14 +75,16 @@ def _deployment(row: Any):
     return deployment_id_for(row["manifest_sha256"], release.app_environment is not None)
 
 
-def _release(row: Any, in_window: bool, readiness) -> ReleaseView:
+def _release(row: Any, deployment: UUID | None, in_window: bool, readiness) -> ReleaseView:
     base_tag = app = None
     if row["manifest_sha256"] is not None:
         release = parse_node_release(bytes(row["document"]))
         base_tag = release.base.tag
         app = release.app_environment.environment_sha256 if release.app_environment else None
     return ReleaseView(
-        version=row["tag"], stable=not row["is_prerelease"], problem=row["problem"], base_tag=base_tag,
+        version=row["tag"], stable=not row["is_prerelease"], problem=row["problem"],
+        deployment_id=None if deployment is None else str(deployment),
+        base_tag=base_tag,
         app_environment_sha256=app, in_window=in_window,
         readiness=None if readiness is None else readiness.state,
         readiness_reason=None if readiness is None else readiness.reason,

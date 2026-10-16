@@ -29,7 +29,7 @@ def test_the_contract_carries_centrals_own_values():
     assert contract["refusals"]["RoomLightRefusal"] == [code.value for code in RoomLightRefusal]
     assert contract["refusals"]["FrameLightingRefusal"] == [code.value for code in FrameLightingRefusal]
     assert {"RoomLight", "Sensor", "TrialBegin", "TrialEdit", "TrialStep", "FrameLighting", "RoomLightsView",
-            "DrawnView", "RefusedReportsView", "HomeAssistantView", "PaperProfileView",
+            "DrawnView", "RefusedReportsView", "HomeAssistantStatesView", "PaperProfileView",
             "PositionHistoryView"} <= set(contract["schemas"])
     kinds = {each["properties"]["kind"]["const"] for each in contract["schemas"]["RoomLight"]["$defs"].values()
              if "kind" in each.get("properties", {}) and each.get("title") in ("ReportedLight", "MeasuredLight", "FixedLight")}
@@ -51,5 +51,5 @@ def test_the_generated_contract_names_the_trials_refusals_and_the_room_light_ali
     assert 'export type TrialRefusal = (typeof REFUSALS)["TrialRefusal"][number];' in text
     for declared in ("export type Lux = number;", "export type LightWord = Dimmer | ColourDimmer | Unavailable;",
                      "export type Reading = Measured | Unavailable;", "  lux: Lux;", "  reading: Reading | null;",
-                     "export type EntityView = LightEntityView | SensorEntityView;", "  paper_profiles: PaperProfileView[];"):
+                     "export type HeardEntityView = HeardLightView | HeardSensorView;", "  paper_profiles: PaperProfileView[];"):
         assert declared in text, declared

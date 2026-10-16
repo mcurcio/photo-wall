@@ -129,7 +129,7 @@ class NodeBootService:
                         request=request, device_id=device_id, generation=generation,
                         revision=OFFER_POLICY_REVISION, now=now)
                 else:
-                    refusal = "node_boot_no_ready_release"
+                    refusal = "node_boot_policy_unconfigured"
                 conn.execute("INSERT INTO node_boot_offers(offer_id,device_id,device_generation,kernel_boot_id,"
                              "boot_nonce,request_payload,offer_payload,refusal,created_at) "
                              "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s)",

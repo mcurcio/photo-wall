@@ -238,13 +238,13 @@ def _sources():
 
 def test_no_console_code_names_the_boot_selection_or_publishes_a_deployment():
     """Q2 A removed the stored wall-wide selection: no console source names its route or its
-    shape, and none publishes a deployment. The old release read is named only by Stage's
-    deployment read (.claude/errata.md, console lane 2026-10-16)."""
+    shape, and none publishes a deployment or reads the old release route: Stage names the
+    deployment the Releases read gives each release."""
     for name, source in _sources().items():
         assert "/boot-policy" not in source, name
         assert re.search(r"read\??\.selection\b|previous_deployment_id|sendSelection|[Bb]oot selection", source) is None, name
         assert re.search(r"/releases/[^\s`'\"]*/deployments|/deployments[`'\"]", source) is None, name
-    assert [name for name, source in _sources().items() if "/v1/operator/node/releases" in source] == ["stage.js"]
+    assert [name for name, source in _sources().items() if "/v1/operator/node/releases" in source] == []
 
 
 def test_update_the_wall_has_one_send_function_and_install_is_sent_only_from_the_releases_page():

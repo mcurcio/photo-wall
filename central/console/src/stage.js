@@ -1,11 +1,10 @@
-import { useCallback, useMemo } from "react";
+import { useMemo } from "react";
 
 import { apiWrite } from "./apiWrite.js";
 import { appHandle, LAYER_NAMES } from "./facts.js";
 import { auditRef, frozen } from "./frozenRequest.js";
 import { outputStates } from "./health.js";
-import { nodeUnknown, readError } from "./nodeRead.js";
-import { usePolledRead } from "./polledRead.js";
+import { nodeUnknown } from "./nodeRead.js";
 import { answerOutcome, useHeldRequests } from "./sendOutcome.js";
 
 /**
@@ -100,51 +99,33 @@ export function stageBlocker(device, operations, player) {
   return null;
 }
 
-// The deployments a stage may name. ReleasesView (GET /v1/operator/releases) names no deployment,
-// and app-stages takes one, so Stage keeps its own read of the release route that serves them
-// until the contract gives a release its deployment (.claude/errata.md, console lane 2026-10-16).
-const DEPLOYMENT_READ = "/v1/operator/node/releases";
-const NO_DEPLOYMENTS = Object.freeze({ read: null, error: null });
-
 /**
- * The deployments Central recorded, while a Stage surface is open: `{read, error}`.
+ * The deployments a stage may name: the releases on the Releases read (ReleasesView) whose
+ * deployment carries an app, each with its contents and its release. No verdict: whether one fits
+ * this Player's boot is Central's judgement at send.
  *
- * @returns {{read: object|null, error: {code: string}|null}}
- */
-export function useDeploymentRead() {
-  const load = useCallback(async (current) => {
-    const result = await apiWrite(DEPLOYMENT_READ, { method: "GET" }).catch(() => null);
-    return result?.ok ? { read: result.data, error: null } : { ...current, error: readError(result) };
-  }, []);
-  return usePolledRead(load, { cadenceMs: 30000, initial: NO_DEPLOYMENTS }).value;
-}
-
-/**
- * The deployments a stage may name: those carrying an app, each with its contents and the
- * release it came from. No verdict: whether one fits this Player's boot is Central's judgement
- * at send.
- *
- * @param {object|null} read the deployment read
- * @returns {Array<{deploymentId: string, contents: string, tag: string|null}>}
+ * @param {import("./generated/contract").ReleasesView|null} read the Releases read
+ * @returns {Array<{deploymentId: string, contents: string, tag: string}>}
  */
 export function stageTargets(read) {
   if (read == null) return [];
-  return (read.deployments ?? []).filter((row) => row.app_environment_sha256 != null).map((row) => ({
-    deploymentId: row.deployment_id,
-    contents: `Base ${row.base_tag} · app ${appHandle(row.app_environment_sha256)}`,
-    tag: (read.releases ?? []).find((release) => release.deployment_id === row.deployment_id)?.tag ?? null,
-  }));
+  return (read.releases ?? []).filter((row) => row.deployment_id != null && row.app_environment_sha256 != null)
+    .map((row) => ({
+      deploymentId: row.deployment_id,
+      contents: `Base ${row.base_tag} · app ${appHandle(row.app_environment_sha256)}`,
+      tag: row.version,
+    }));
 }
 
 /**
- * The deployment a release (by tag) became on the deployment read, or null.
+ * The deployment a release (by version) became on the Releases read, or null.
  *
- * @param {object|null} read the deployment read
+ * @param {import("./generated/contract").ReleasesView|null} read the Releases read
  * @param {string} tag
  * @returns {string|null}
  */
 export function deploymentOf(read, tag) {
-  return (read?.releases ?? []).find((row) => row.tag === tag)?.deployment_id ?? null;
+  return (read?.releases ?? []).find((row) => row.version === tag)?.deployment_id ?? null;
 }
 
 /** The Frames this Player drives, from the snapshot (the bound rule applies when any). */

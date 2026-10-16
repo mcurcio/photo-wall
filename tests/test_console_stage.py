@@ -44,11 +44,13 @@ out.blockers = {
 };
 
 // --- stageTargets: deployments carrying an app, no verdict.
-const releaseRead = { read_at: 1000,
-  releases: [{ tag: "v0.15.0", deployment_id: "d-app-1" }, { tag: "v0.13.0", deployment_id: null }], deployments: [
-    { deployment_id: "d-app-1", published_at: 800, base_tag: "v0.15.0", app_environment_sha256: "9f8e7d".padEnd(64, "0") },
-    { deployment_id: "d-noapp", published_at: 700, base_tag: "v0.15.0", app_environment_sha256: null },
-    { deployment_id: "d-app-2", published_at: 600, base_tag: "v0.14.0", app_environment_sha256: "aa".repeat(32) }] };
+const release = (version, deployment_id, base_tag, app_environment_sha256) => ({ version, deployment_id, base_tag,
+  app_environment_sha256 });
+const releaseRead = { read_at: 1000, releases: [
+  release("v0.15.0", "d-app-1", "v0.15.0", "9f8e7d".padEnd(64, "0")),
+  release("v0.14.1", "d-noapp", "v0.15.0", null),
+  release("v0.14.0", "d-app-2", "v0.14.0", "aa".repeat(32)),
+  release("v0.13.0", null, null, null)] };
 out.targets = stage.stageTargets(releaseRead).map((row) => ({ id: row.deploymentId, contents: row.contents, tag: row.tag }));
 out.noTargets = stage.stageTargets(null);
 out.scope = stage.STAGE_SCOPE;
@@ -153,7 +155,7 @@ def test_stage_targets_are_the_deployments_carrying_an_app_and_the_scope_names_t
     out = _run()
     assert out["targets"] == [
         {"id": "d-app-1", "contents": "Base v0.15.0 · app 9f8e7d…", "tag": "v0.15.0"},
-        {"id": "d-app-2", "contents": "Base v0.14.0 · app aaaaaa…", "tag": None}]
+        {"id": "d-app-2", "contents": "Base v0.14.0 · app aaaaaa…", "tag": "v0.14.0"}]
     assert out["noTargets"] == []
     assert out["deploymentOf"] == ["d-app-1", None, None]
     assert out["scope"] == ("Applies to this boot only. Any later boot, including an unplanned one, is offered this "

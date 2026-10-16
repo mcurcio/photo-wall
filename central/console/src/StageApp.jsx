@@ -1,6 +1,7 @@
 import React, { useId, useRef, useState } from "react";
 
 import { formatRoute } from "./routes.js";
+import { useReleaseRead } from "./releases.js";
 import { RESEND_LABEL } from "./sendOutcome.js";
 import {
   boundFrames,
@@ -13,7 +14,6 @@ import {
   stageRequest,
   STAGE_SCOPE,
   stageTargets,
-  useDeploymentRead,
   useHeldStage,
 } from "./stage.js";
 import { useSendDialog } from "./useSendDialog.js";
@@ -50,7 +50,7 @@ export function BoundRule() {
 function StageDialog({ deviceId, name, opened, held, node, onSent, onClose }) {
   const titleId = useId();
   const { dialogRef, cancelRef, phase, result, run, close } = useSendDialog(onClose);
-  const releases = useDeploymentRead();
+  const releases = useReleaseRead();
   const sentRef = useRef(opened.request ?? null);
   const [chosen, setChosen] = useState(opened.request?.body.deployment_id ?? "");
   const targets = stageTargets(releases.read);
@@ -82,7 +82,7 @@ function StageDialog({ deviceId, name, opened, held, node, onSent, onClose }) {
         <fieldset className="confirm__choices" disabled={again || phase === "in-flight"}>
           <legend>Deployment</legend>
           {releases.read == null ? (
-            <p>{releases.error ? `Deployments could not be read (${releases.error.code}).` : "Reading deployments…"}</p>
+            <p>{releases.error ? `Releases could not be read (${releases.error.code}).` : "Reading releases…"}</p>
           ) : targets.length === 0 ? (
             <p>
               {"No deployment carries an app yet; Central records one for each valid release with an app. See "}

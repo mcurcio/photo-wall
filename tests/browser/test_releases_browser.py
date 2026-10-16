@@ -53,7 +53,8 @@ def _catalog(registry, monkeypatch):
 
 
 def _release(version, **extra):
-    return {"version": version, "stable": True, "problem": None, "base_tag": version, "app_environment_sha256": APP,
+    return {"version": version, "stable": True, "problem": None, "deployment_id": f"d-{version}", "base_tag": version,
+            "app_environment_sha256": APP,
             "in_window": True, "readiness": "ready", "readiness_reason": None, "missing_bytes": 0,
             "discovered_at": PAUSED_AT - 600, **extra}
 
@@ -74,7 +75,7 @@ class Releases:
                 _release("v9.0.0"),
                 _release("v8.0.0", readiness="downloading", missing_bytes=2_500_000_000),
                 _release("v7.5.0", readiness="failed", readiness_reason="cache_disk_full"),
-                _release("v7.0.0", problem="node_release_identity_conflict", base_tag=None,
+                _release("v7.0.0", problem="node_release_identity_conflict", deployment_id=None, base_tag=None,
                          app_environment_sha256=None, readiness=None, in_window=False)],
             "players": [_player("SER-HALL", "Hall"),
                         _player("SER-LOBBY", "Lobby", version="v9.0.0", chosen=False, previous=None, running=None),

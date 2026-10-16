@@ -177,7 +177,7 @@ def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
         except ValueError as exc:
             raise NodeControlError("invalid_node_boot_request", 422) from exc
         if boots is None:   # no cache: no release is ready
-            raise NodeControlError("node_boot_no_ready_release", 503)
+            raise NodeControlError("node_boot_policy_unconfigured", 503)
         offer = await invoke(boots.offer, parsed)
         return Response(encode_node_boot_offer(offer), media_type="application/json")
 

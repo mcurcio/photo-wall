@@ -403,7 +403,7 @@ def test_with_no_version_and_nothing_ready_no_boot_is_offered(registry, sync_wor
     upstream.put(upload)
     world = sync_world(upstream)
     sync(world)
-    with pytest.raises(NodeControlError, match="node_boot_no_ready_release") as refused:
+    with pytest.raises(NodeControlError, match="node_boot_policy_unconfigured") as refused:
         offer_for(registry, world)
     assert refused.value.status == 503
     assert read(registry, world)["default"] is None

@@ -29,7 +29,6 @@ import {
   stageBlocker,
   stageReplaces,
   stageRequest,
-  useDeploymentRead,
   useHeldStage,
 } from "./stage.js";
 import {
@@ -143,7 +142,6 @@ function KeepProbe({ entry, active, register, onRead }) {
  */
 function Journey({ tag, tried, skippedIds, snapshot, bootFacts, navigate, say, message, withdrawnBy, withdraw }) {
   const releases = useReleaseRead();
-  const deployments = useDeploymentRead();
   const heldStage = useHeldStage();
   const { open, confirmation } = useConfirm(null);
   const read = releases.read;
@@ -391,9 +389,9 @@ function Journey({ tag, tried, skippedIds, snapshot, bootFacts, navigate, say, m
   const onStage = async () => {
     const pending = pendingStage(heldStage.get(), triedNode.operations);
     stageIds.current ??= { operationId: crypto.randomUUID(), commandId: crypto.randomUUID() };
-    const deploymentId = deploymentOf(deployments.read, tag);
+    const deploymentId = deploymentOf(read, tag);
     if (pending?.state !== "unknown" && deploymentId === null) {
-      setStageWords(`Stage unavailable: Central's deployment read does not list release ${tag}.`);
+      setStageWords(`Stage unavailable: Central's Releases read lists no deployment for release ${tag}.`);
       return;
     }
     const request = pending?.state === "unknown" ? pending.request

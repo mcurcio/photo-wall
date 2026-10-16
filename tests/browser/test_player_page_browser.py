@@ -44,11 +44,11 @@ from operator_harness import (
 from playwright.sync_api import expect
 from test_fleet_attempts import BOOT_ID, DEVICE_ID, SERIAL
 from test_node_acceptance import Witnesses
-from test_node_boot import claim_for, cold_setup, environment, publish_deployment
+from test_node_boot import boot_service, claim_for, cold_setup, environment, publish_deployment
 from test_node_lifecycle import Rig
 from test_registry import enroll
 
-from central.fleet.node_boot import NodeBootService, parse_node_deployment
+from central.fleet.node_boot import parse_node_deployment
 from central.fleet.node_commands import NodeCommands, OperatorReboot
 from central.fleet.node_ingest import NodeIngest
 from central.fleet.node_observations import NodeObservations
@@ -715,6 +715,36 @@ THIS_BOOT = ("Applies to this boot only. Any later boot, including an unplanned 
 RECORDED = "Stage recorded; App Effect Broker has not responded yet."
 
 
+@pytest.fixture(autouse=True)
+def _rig_releases(page, registry):
+    """Stage names the deployment each release became, from Central's real Releases read. The Rig
+    publishes its deployments directly (no release observed), so the read Central answers gains one
+    release per published deployment it does not list yet, with that deployment's real id, base and
+    app; Central's real stage owner judges every stage sent."""
+    def releases(route):
+        if route.request.method != "GET":
+            return route.fallback()
+        response = route.fetch()
+        body = response.json()
+        listed = {row["deployment_id"] for row in body["releases"]}
+        with registry.db.transaction() as conn:
+            documents = conn.execute("SELECT document FROM node_deployments ORDER BY published_at").fetchall()
+        for index, row in enumerate(documents):
+            deployment = parse_node_deployment(bytes(row["document"]))
+            if str(deployment.deployment_id) in listed:
+                continue
+            body["releases"].append({
+                "version": f"v0.0.{index + 1}", "stable": True, "problem": None,
+                "deployment_id": str(deployment.deployment_id), "base_tag": deployment.base.tag,
+                "app_environment_sha256": None if deployment.app_environment is None
+                else deployment.app_environment.environment_sha256,
+                "in_window": False, "readiness": "ready", "readiness_reason": None, "missing_bytes": 0,
+                "discovered_at": None})
+        route.fulfill(response=response, json=body)
+
+    page.route("**/v1/operator/releases", releases)
+
+
 def _stage_posts(page):
     """The body of every stage request the page sends, in order."""
     sent = []
@@ -777,7 +807,7 @@ def test_a_bound_player_stages_with_the_bound_rule_and_renders_every_served_stat
             fixture.report(command, phase, sequence)
         expect(operations).to_contain_text("App Effect Broker reported the staged app running", timeout=10_000)
         expect(stage_button).to_be_enabled()
-        offer = NodeBootService(fixture.sessions).offer(NodeBootRequestV2(SERIAL, uuid4(), "b" * 64))
+        offer = boot_service(fixture.sessions).offer(NodeBootRequestV2(SERIAL, uuid4(), "b" * 64))
         fixture.sessions.enroll(claim_for(offer, owner="app_effect_broker"))
         expect(operations).to_contain_text("Ended by a later boot", timeout=10_000)
         expect(operations).to_contain_text("a later boot was admitted; Central offers each boot its Player's own version")

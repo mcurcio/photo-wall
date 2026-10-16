@@ -23,12 +23,14 @@ from contracts.models import Digest, Identifier, Instant, Model
 
 class ReleaseView(Model):
     """One release Central observed, newest first: `problem` says why it cannot be deployed (None:
-    deployable); `base_tag` and `app_environment_sha256` are its deployment's (None while rejected,
+    deployable); `deployment_id` is the deployment it became, the id a Stage names (None while
+    rejected); `base_tag` and `app_environment_sha256` are its deployment's (None while rejected,
     or a release with no app); `in_window` when it is among the newest stable releases Central keeps
     downloaded; its readiness now (None: not deployable)."""
     version: ReleaseTag
     stable: bool
     problem: str | None
+    deployment_id: Identifier | None
     base_tag: Annotated[str, Field(max_length=128)] | None
     app_environment_sha256: Digest | None
     in_window: bool
