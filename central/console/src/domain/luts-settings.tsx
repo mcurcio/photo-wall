@@ -8,9 +8,11 @@ import { Dialog, DialogClose } from "../ui/dialog";
 import { FileChooser } from "../ui/file-chooser";
 import { Inline, Stack } from "../ui/stack";
 
-/** One LUT on the list (central/displays/views.py `LutView`, read through lutsApi.js). */
+/** One LUT on the list (central/displays/views.py `LutView`, read through lutsApi.js): `used_by`
+ * names the Frames whose paper uses it (decision 0028). */
 export interface LutView {
   profile_sha256: string;
+  recipe_id: string;
   name: string;
   added_at: number;
   used_by: string[];
@@ -31,7 +33,7 @@ function namesWords(names: readonly string[]): string {
 export function addWords(file: string, answer: AddAnswer): string {
   if (answer.ok) {
     return answer.added
-      ? `Added ${answer.lut.name}. Choose it on a Frame's Picture tab, under Photo Wall (software).`
+      ? `Added ${answer.lut.name}. Choose it as a Frame's paper profile, under Lighting on its Position tab.`
       : `${answer.lut.name} is already on the list.`;
   }
   switch (answer.error) {
@@ -55,7 +57,7 @@ export function removeWords(lut: LutView, answer: RemoveAnswer): string {
   switch (answer.error) {
     case "lut_in_use":
       return `Not removed: ${namesWords(answer.displays)} ${answer.displays.length === 1 ? "uses" : "use"} ${lut.name}. `
-        + "Choose another LUT on their Frame's Picture tab first.";
+        + "Choose another paper profile under Lighting on their Position tab first.";
     case "lut_unknown":
       return `${lut.name} was already removed.`;
     case "unreachable":
@@ -80,9 +82,9 @@ export interface LutsSettingsProps {
 
 /**
  * Settings › LUTs' list (print look, design "The LUT"; design-language §8 row B5, T8): each LUT by
- * its paper profile's name, when it was added and the Displays that use it; Add a paper profile
- * (a file from the paper's maker, checked by Central, a refusal in plain words) and Remove,
- * confirmed, which Central refuses while a Display uses the LUT. The page reads and writes; this
+ * its paper profile's name, when it was added and the Frames whose paper uses it (decision 0028);
+ * Add a paper profile (a file from the paper's maker, checked by Central, a refusal in plain words)
+ * and Remove, confirmed, which Central refuses while a Frame uses the LUT. The page reads and writes; this
  * is what a story draws.
  */
 export function LutsSettings({ luts, note, adding, onAdd, onRemove }: LutsSettingsProps) {
@@ -100,14 +102,15 @@ export function LutsSettings({ luts, note, adding, onAdd, onRemove }: LutsSettin
     <Stack>
       <Note>
         A LUT makes photos look printed on one paper. It is made from the colour profile (an ICC file) your
-        paper&apos;s maker publishes for each paper and printer. Choose it for a Display on a Frame&apos;s Picture tab.
+        paper&apos;s maker publishes for each paper and printer. Choose it as a Frame&apos;s paper profile, under
+        Lighting on its Position tab.
       </Note>
       <EntityList<Row>
         label="LUTs"
         columns={[
           { id: "name", header: "Name", rowHeader: true, cell: (row) => row.name },
           { id: "added", header: "Added", cell: (row) => captureDay(row.added_at) },
-          { id: "used", header: "Used by", cell: (row) => (row.used_by.length === 0 ? "No Display" : namesWords(row.used_by)) },
+          { id: "used", header: "Used by", cell: (row) => (row.used_by.length === 0 ? "No Frame" : namesWords(row.used_by)) },
           {
             id: "actions", header: "Actions",
             cell: (row) => (

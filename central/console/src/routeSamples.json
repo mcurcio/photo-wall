@@ -45,6 +45,7 @@
     "photo-library": ["#/photo-library"],
     "photo-fit": ["#/photo-fit"],
     "house": ["#/house"],
+    "lights": ["#/lights"],
     "luts": ["#/luts"]
   },
   "neutral": {

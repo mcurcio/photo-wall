@@ -2,21 +2,18 @@ import { apiWrite } from "./apiWrite.js";
 
 /**
  * The Picture tab's read and writes (roadmap 1c's Live model; decision 0022, the picture split,
- * slices S2 and S5; the print look's LUT choice; display tuning's signal range and test pattern): the
+ * slices S2 and S5; display tuning's signal range and test pattern; decision 0028's light): the
  * routes of central/display_routes.py `mount_picture_routes`, answered with the shapes of
  * central/displays/views.py (their one home). Each returns `{ok: true, …}` or `{ok: false, error}`:
  * a refusal answers its code (`unknown_frame`, `frame_unbound`, `no_display`, `session_open`,
  * `unknown_session`, `session_ended`, `stale_sequence`, `not_offered`, `out_of_range`,
- * `not_presented_yet`, `unknown_lut`, and a Restore's `unknown_entry`, `other_display`); a lost request
+ * `not_presented_yet`, and a Restore's `unknown_entry`, `other_display`); a lost request
  * answers `unreachable`.
  *
  * @typedef {string} VcpCode   An MCCS code, two upper-case hex digits ("10" brightness).
- * @typedef {"brightness"|"contrast"|"colour-temperature"|"gamma"|"saturation"|"highlight-rolloff"
- *            |"black-floor"|"lut-amount"} SoftwareSetting
- *   Brightness and contrast are percents 0..150 (100 changes nothing), colour temperature whole
- *   kelvin (3000..9300 in 100), gamma in tenths (18..26); the print look's: saturation a percent
- *   0..150 (100 changes nothing), highlight rolloff a percent 0..100 (0 changes nothing), black
- *   floor in tenths of a percent of white 0..100 (0 changes nothing), LUT amount a percent 0..100.
+ * @typedef {"contrast"|"colour-temperature"|"gamma"} SoftwareSetting
+ *   Contrast is a percent 0..150 (100 changes nothing), colour temperature whole kelvin (3000..9300
+ *   in 100), gamma in tenths (18..26).
  * @typedef {"taken"|"not-taken"|"no-answer"} WriteResult
  * @typedef {"level"|"choice"|"read-only-choice"} RangeKind
  * @typedef {{value: number, name: string}} ChoiceView
@@ -29,11 +26,10 @@ import { apiWrite } from "./apiWrite.js";
  *   here, not offered at the last check; `value` null: as the display has it; `result` only for the
  *   latest picture change; `changed_on_buttons`: the display's latest read differs from the value
  *   set here (someone used its own buttons).
- * @typedef {{profile_sha256: string, name: string}} LutChoiceView   The LUT in force: its paper
- *   profile's digest and name.
- * @typedef {{brightness_percent: number, contrast_percent: number, colour_temperature_kelvin: number,
- *            gamma_tenths: number, saturation_percent: number, highlight_rolloff_percent: number,
- *            black_floor_tenths: number, lut_amount_percent: number, lut: LutChoiceView|null}} SoftwarePictureView
+ * @typedef {{contrast_percent: number, colour_temperature_kelvin: number, gamma_tenths: number}} SoftwarePictureView
+ * @typedef {{matched_lux: number, black: number}} DisplayLightView   The Display's light (decision
+ *   0028, contracts/node_picture.py `DisplayLight`): the lux at the Frame when the TV's full white
+ *   matched a sheet of paper, and the panel's black as a share of its white.
  * @typedef {{session_id: string, sequence: number, idle_until: number}} PictureSessionView
  * @typedef {"auto"|"full"|"limited"} SignalRange   Which numbers the Pi's HDMI signal uses for black
  *   and white (display tuning): Auto the Pi's choice, Full 0-255, Limited 16-235.
@@ -51,7 +47,7 @@ import { apiWrite } from "./apiWrite.js";
  *   test pattern: waiting for the Pi, shown, or ended (the Pi took it off at its bound).
  * @typedef {{frame_id: string, status: "no-display"|"waiting"|"shown", display_id: string|null,
  *            connected: boolean|null, offered_known: boolean, hardware: HardwareSettingView[],
- *            software: SoftwarePictureView, session: PictureSessionView|null,
+ *            software: SoftwarePictureView, light: DisplayLightView, session: PictureSessionView|null,
  *            signal_range: SignalRange, signal: SignalView|null, test_pattern: TestPatternView|null,
  *            test_pattern_seconds: number}} FramePictureView
  *   `signal_range` is the session's while one is live, else the stored one; `signal` null: no answer
@@ -62,11 +58,9 @@ import { apiWrite } from "./apiWrite.js";
  * @typedef {{frame_id: string, outcome: CopyOutcome, hardware_skipped: VcpCode[]}} PictureCopyResult
  * @typedef {{entry_id: string, expected_sequence: number}} PictureRestore   A picture history entry
  *   (historyApi.js) to load into the session's draft.
- * @typedef {{sequence: number, hardware_skipped: VcpCode[], lut_skipped: boolean,
- *            lut_recipe_changed: boolean}} PictureRestoreResult
+ * @typedef {{sequence: number, hardware_skipped: VcpCode[]}} PictureRestoreResult
  *   An accepted Restore: the sequence the next edit names; the entry's display settings this display
- *   does not offer now (not in the draft); whether its LUT is no longer on the list (the draft keeps
- *   its own); whether today's LUT recipe makes it.
+ *   does not offer now (not in the draft).
  */
 
 /**
@@ -131,15 +125,15 @@ export function editSoftware(sessionId, edit) {
 }
 
 /**
- * The LUT choice: a listed paper profile's digest, or null for no LUT (POST …/lut-edits). Refused
- * `unknown_lut` for a profile no longer on the LUTs list.
+ * The Display's light, both values at once (POST …/light-edits; decision 0028): the matched lux
+ * (MATCHED_LUX_MIN..MAX) and the panel's black (a share of white, PANEL_BLACK_MIN..MAX).
  *
  * @param {string} sessionId
- * @param {{profile_sha256: string|null, expected_sequence: number}} edit
+ * @param {{matched_lux: number, black: number, expected_sequence: number}} edit
  * @returns {Promise<{ok: true, sequence: PictureSequence}|{ok: false, error: string}>}
  */
-export function editLut(sessionId, edit) {
-  return call("sequence", `${session(sessionId)}/lut-edits`, { method: "POST", body: edit });
+export function editLight(sessionId, edit) {
+  return call("sequence", `${session(sessionId)}/light-edits`, { method: "POST", body: edit });
 }
 
 /**

@@ -104,6 +104,10 @@ SHARED_WITH_SHOW = {
     # The LUTs list's routes (print look): Settings › LUTs lists, adds and removes; the Frame
     # page's Picture tab reads the list for its LUT picker (pictureSession.js).
     "lutsApi.js",
+    # Room lights (decision 0028): Settings › Lights reads and writes them; a Frame's lighting
+    # (Position tab) reads them for its room light picker and says their states the same way.
+    "roomLightsApi.ts",
+    "roomLightWords.js",
     # (Power and the week's houseApi.js and weekApi.js are the shell's own: its house clock,
     # houseClock.js, reads Settings › House for every time the console shows.)
 }
@@ -628,7 +632,7 @@ def test_every_section_is_in_exactly_one_route_table():
     sections = [section for group in SAMPLES.values() for section in group]
     assert sorted(sections) == sorted(
         ["now", "scenes", "schedule", "sources", "wall", "hardware", "players", "releases",
-         "photo-library", "photo-fit", "house", "luts", "attention"])
+         "photo-library", "photo-fit", "house", "lights", "luts", "attention"])
 
 
 ROUND_TRIP = r"""
@@ -668,7 +672,7 @@ console.log(JSON.stringify(out));
 ROUTES = [
     {"section": section} for section in
     ("now", "scenes", "schedule", "sources", "wall", "hardware", "releases", "photo-library",
-     "photo-fit", "luts", "attention")
+     "photo-fit", "lights", "luts", "attention")
 ] + [
     {"section": "hardware", "id": "device-" + "a" * 64},
     {"section": "hardware", "id": "a/b ç?#%"},
@@ -799,7 +803,7 @@ FRAME_PAGE_IMPORTS = {
     # The Picture tab (1c K1): its routes, the session hook's type and a display level's words
     # (0022 R11); Position (1c K2): the quarter turns its draft takes.
     "frame-picture.tsx": {"pictureApi.js", "pictureSession.js", "levelWords.js"},
-    "frame-position.tsx": {"useDraft.js"},
+    "frame-position.tsx": {"useDraft.js", "roomLightsApi.ts"},
     "frame-overview.tsx": {"PrecedenceExplanation.jsx", "ReadinessNotice.jsx", "readinessRecovery.js",
                            "frameIds.js"},
     "frame-profile.tsx": {"framesApi.js", "useMutate.js"},
@@ -846,7 +850,17 @@ POWER_WEEK_IMPORTS = {
 PRINT_LOOK_IMPORTS = {
     "luts-settings-page.tsx": {"lutsApi.js"},
 }
-DECLARED_IMPORTS = {**FRAME_PAGE_IMPORTS, **PHOTO_PAGE_IMPORTS, **POWER_WEEK_IMPORTS, **PRINT_LOOK_IMPORTS}
+# Room light (decision 0028): Settings › Lights (its routes, its polled read, the words) and a
+# Frame's lighting (the room lights and the LUTs list it picks from, read while shown).
+ROOM_LIGHT_IMPORTS = {
+    "house-lights-page.tsx": {"polledRead.js", "roomLightsApi.ts", "roomLightWords.js"},
+    "room-lights.tsx": {"roomLightsApi.ts", "roomLightWords.js"},
+    "room-lights.stories.tsx": {"roomLightWords.js"},
+    "room-lights.fixtures.ts": {"roomLightsApi.ts"},
+    "frame-lighting.tsx": {"lutsApi.js", "polledRead.js", "roomLightsApi.ts", "roomLightWords.js"},
+}
+DECLARED_IMPORTS = {**FRAME_PAGE_IMPORTS, **PHOTO_PAGE_IMPORTS, **POWER_WEEK_IMPORTS, **PRINT_LOOK_IMPORTS,
+                    **ROOM_LIGHT_IMPORTS}
 
 
 def _layer(module, src=SRC):

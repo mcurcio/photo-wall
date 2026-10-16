@@ -5,6 +5,7 @@ import { FrameDisplay } from "../domain/frame-display";
 import { frameChip, type FrameHealth } from "../domain/frame-health-chip";
 import { FrameOverview } from "../domain/frame-overview";
 import { FrameDraftFit, FramePhotos } from "../domain/frame-photos";
+import { useLightingChoices } from "../domain/frame-lighting";
 import { FramePicture } from "../domain/frame-picture";
 import { PictureHistory } from "../domain/picture-history";
 import { PositionHistory } from "../domain/position-history";
@@ -90,9 +91,9 @@ function outputSize(snapshot: object | null, frame: Frame): PixelSize | null {
  * tab each. The header names the Frame, its way back to the Wall and its health (health.js,
  * the plan tile's words). Overview is what Central puts on it and why, and its Photos: one Fit board
  * row per Scene that shows photos here (follow-ups C1); Position is where the
- * picture sits on the Display (its fit, corners, nudges, rotation), with the Frame's Position
- * History; Picture is the brightness,
- * contrast, colour temperature and gamma of the display that feeds it, with that display's History
+ * picture sits on the Display (its fit, corners, nudges, rotation) and its lighting (its mat, the
+ * room lights on it and its paper, decision 0028), with the Frame's Position History; Picture is
+ * the contrast, colour temperature, gamma and matched light of the display that feeds it, with that display's History
  * (every kept and tried change, and Restore into the editor); Power is how the Pi turns
  * its display off and on, with Test: turn off and Turn on; Hardware is which Pi and HDMI output
  * feed it (bind, unbind, Identify), the Display the Pi reports there (with the display-changed
@@ -109,6 +110,8 @@ export function FramePage({ snapshot, bootFacts, hosts, frameId, tab, onTab, foc
   const frames = ((snapshot as { inventory?: { frames?: Frame[] } } | null)?.inventory?.frames ?? []);
   const frame = frames.find((candidate) => candidate.id === frameId);
   const adjustment = useFrameAdjustment({ frameId, frame, open: tab === "position" });
+  // The Frame's lighting chooses among the house's room lights and paper profiles (Position tab).
+  const { rooms, profiles } = useLightingChoices(tab === "position" && frame !== undefined);
   // The Frame's Why, read once for the page: the header's Resting, Overview's sentence, Power's line.
   const { read: why, refresh: rereadWhy } = useFrameWhy(frameId);
   // A tab shown reads Why again: what it says is as of now, not the last poll's.
@@ -180,14 +183,15 @@ export function FramePage({ snapshot, bootFacts, hosts, frameId, tab, onTab, foc
         {tab === "position" && (
           <>
             <FramePosition adjustment={adjustment} size={outputSize(snapshot, frame)} piHref={piHref}
-              readiness={frame.readiness}
+              readiness={frame.readiness} rooms={rooms} profiles={profiles}
               whatFits={(
                 <FrameDraftFit snapshot={snapshot} frameId={frameId} profile={wholeProfile(frame.profile)}
                   calibration={{ revision: frame.calibration?.revision ?? 1, fit: adjustment.draft.fit }} />
               )} />
             {/* The Frame's Position history, with Restore into the draft (configuration snapshots). */}
             <PositionHistory key={`${frameId}:position-history`} frameId={frameId} adjustment={adjustment}
-              size={outputSize(snapshot, frame)} />
+              size={outputSize(snapshot, frame)}
+              roomNames={Object.fromEntries((rooms?.lights ?? []).map((light) => [light.id, light.name]))} />
           </>
         )}
         {tab === "picture" && (

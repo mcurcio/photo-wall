@@ -12,8 +12,8 @@ Central's real status, never from the console alone.
 Mutation probes: enable Done before the phase is `shown` -> the Done case fails; send every drag
 event -> the rate case fails; one edit route for both groups -> the two-groups case fails; render a
 READ_ONLY_CHOICE row with a select -> the list-settings case's "no control" assertion fails; drop
-FrameInput from the Picture tab (pages/frame-page.tsx) -> the input case fails. The print look's
-rows (design R2, R4) carry their own probes below.
+FrameInput from the Picture tab (pages/frame-page.tsx) -> the input case fails. The Display's light
+(decision 0028) carries its own probes below.
 """
 
 import os
@@ -29,9 +29,7 @@ from operator_harness import operator_server
 from playwright.sync_api import expect
 from test_display_identity import NO_SERIAL, _bind, _frame, _report, _sql, enroll_pi
 from test_display_picture_settings import OFFERED, _picture, _picture_report
-from test_print_look_luts import _as_printer, _monitor, _reduced_gamut
 
-from central.infra.lut_store import PgLuts
 from contracts.node_picture import (
     Choice,
     HardwareRange,
@@ -192,7 +190,7 @@ def _edits(page, route):
 
 def test_the_tab_shows_both_groups_and_each_slider_sends_its_own_edit(page, registry):
     """Acceptance 6: Display (hardware) and Photo Wall (software); moving the display's brightness
-    and Photo Wall's brightness sends one edit each, to its own route, and both reach the documents."""
+    and Photo Wall's contrast sends one edit each, to its own route, and both reach the documents."""
     _seen(registry)
     with FakePi(registry), operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall")
@@ -200,8 +198,8 @@ def test_the_tab_shows_both_groups_and_each_slider_sends_its_own_edit(page, regi
         expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
         expect(_row(page, DISPLAY, "Brightness")).to_contain_text("As the display has it")
         expect(_row(page, DISPLAY, "Contrast")).to_contain_text("As the display has it")
-        expect(_row(page, PHOTO_WALL, "Brightness")).to_contain_text("100 % changes nothing")
-        expect(_slider(page, PHOTO_WALL, "Brightness")).to_have_attribute("aria-valuetext", "100 %")
+        expect(_row(page, PHOTO_WALL, "Contrast")).to_contain_text("100 % changes nothing")
+        expect(_slider(page, PHOTO_WALL, "Contrast")).to_have_attribute("aria-valuetext", "100 %")
         for label in ("Contrast", "Colour temperature", "Gamma"):
             expect(_slider(page, PHOTO_WALL, label)).to_be_visible()
         expect(_picture_tab(page)).not_to_contain_text(re.compile(
@@ -211,14 +209,14 @@ def test_the_tab_shows_both_groups_and_each_slider_sends_its_own_edit(page, regi
         hardware, software = _edits(page, "hardware-edits"), _edits(page, "software-edits")
         _press(page, DISPLAY, "Brightness", "ArrowRight")
         expect(_row(page, DISPLAY, "Brightness")).to_contain_text("61 % (61 of 100)")
-        _press(page, PHOTO_WALL, "Brightness", "ArrowRight")
-        expect(_row(page, PHOTO_WALL, "Brightness")).to_contain_text("101 %")
+        _press(page, PHOTO_WALL, "Contrast", "ArrowRight")
+        expect(_row(page, PHOTO_WALL, "Contrast")).to_contain_text("101 %")
         expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
         page.wait_for_timeout(600)
         assert [body["code"] for _at, body in hardware] == ["10"], hardware
-        assert [(body["setting"], body["value"]) for _at, body in software] == [("brightness", 101)], software
+        assert [(body["setting"], body["value"]) for _at, body in software] == [("contrast", 101)], software
         document = _off_thread(_picture, registry)
-        assert (set(document.hardware), document.software.brightness_percent) == ({"10"}, 101)
+        assert (set(document.hardware), document.software.contrast_percent) == ({"10"}, 101)
 
 
 def test_dragging_sends_at_most_two_edits_a_second_and_the_last_where_it_stops(page, registry):
@@ -259,7 +257,7 @@ def test_done_waits_until_the_pi_shows_the_latest_change_then_keeps_both_groups(
 
         pi.presenting = False
         _press(page, DISPLAY, "Brightness", "ArrowRight", 3)
-        _press(page, PHOTO_WALL, "Brightness", "ArrowRight", 14)
+        _press(page, PHOTO_WALL, "Contrast", "ArrowRight", 14)
         expect(bar.get_by_role("status")).to_have_text(WAITING)
         page.wait_for_timeout(1500)
         expect(done).to_be_disabled()
@@ -272,7 +270,7 @@ def test_done_waits_until_the_pi_shows_the_latest_change_then_keeps_both_groups(
         expect(_picture_tab(page).get_by_role("status").filter(has_text="Saved at")).to_have_text(
             re.compile(r"^Saved at \d\d:\d\d:\d\d\.$"))
         stored = _display(registry)
-        assert (stored["hardware_picture"], stored["software_brightness_percent"]) == ({"10": 53}, 114)
+        assert (stored["hardware_picture"], stored["software_contrast_percent"]) == ({"10": 53}, 114)
         expect(_slider(page, DISPLAY, "Brightness")).to_have_value("53")
         expect(_row(page, DISPLAY, "Brightness")).to_contain_text("53 % (53 of 100)")
 
@@ -367,158 +365,78 @@ def test_a_value_changed_on_the_displays_buttons_is_shown_not_fought(page, regis
         assert _display(registry)["hardware_picture"] == {"10": 40}
 
 
-ACTS_ABOVE = "acts only above 100 % brightness"
+REMOVED = ("Brightness", "Saturation", "Soft highlights", "Black floor", "LUT amount")
 
 
-def test_black_floor_is_sent_in_tenths_and_reads_as_a_percent_once_kept(page, registry):
-    """Print look R2 tracer: Black floor 2.0 % of white is sent as 20 tenths, presented, kept by Done,
-    and the row reads 2.0 % from Central's stored value.
+def _typed(page, label):
+    """A typed value of the Photo Wall group (Matched light, Display black)."""
+    return _group(page, PHOTO_WALL).get_by_role("spinbutton", name=label, exact=True)
 
-    Mutation: send the percent (2) instead of tenths -> the body assertion fails."""
+
+def test_the_removed_sliders_are_gone_and_matched_light_is_edited_live(page, registry):
+    """Decision 0028 (owner, 2026-10-15, Q2 B: "the paper replaces them"): the Photo Wall group has no
+    brightness, saturation, soft highlights, black floor or LUT; Matched light typed as 600 lx is sent
+    to light-edits with the Display black in force, reaches the Pi's picture document live, is shown,
+    and Done keeps it; the line says White is the TV's own white for the paper match.
+
+    Mutation: send `matched` instead of `matched_lux` -> Central's 422, the document keeps 1,000 lx."""
     _seen(registry)
     with FakePi(registry), operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall")
         open_frame(page, FRAME, "picture")
         bar = _bar(page)
         expect(bar.get_by_role("status")).to_have_text(PRESENTED)
-        expect(_row(page, PHOTO_WALL, "Black floor")).to_contain_text("0.0 % changes nothing")
-        floor = _slider(page, PHOTO_WALL, "Black floor")
-        expect(floor).to_have_accessible_description(re.compile("share of white light"))
-        software = _edits(page, "software-edits")
-        floor.fill("2")
-        expect(floor).to_have_attribute("aria-valuetext", "2.0 %")
-        expect(bar.get_by_role("status")).to_have_text(PRESENTED)
+        group = _group(page, PHOTO_WALL)
+        for label in REMOVED:
+            expect(group.get_by_role("slider", name=label, exact=True)).to_have_count(0)
+        expect(group.get_by_role("combobox", name="LUT", exact=True)).to_have_count(0)
+        expect(group).to_contain_text("The White pattern is the TV's own white")
+        before = _off_thread(_picture, registry).light
+        expect(_typed(page, "Matched light")).to_have_value(f"{before.matched_lux:g}")
+
+        edits = _edits(page, "light-edits")
+        _typed(page, "Matched light").fill("600")
+        expect(bar.get_by_role("button", name="Done", exact=True)).to_be_enabled()
+        assert _off_thread(_picture, registry).light.matched_lux == 600
         page.wait_for_timeout(600)
-        assert [(body["setting"], body["value"]) for _at, body in software] == [("black-floor", 20)], software
+        bodies = [body for _at, body in edits]
+        assert bodies and {key: bodies[-1][key] for key in ("matched_lux", "black")} == {
+            "matched_lux": 600, "black": before.black}, bodies
+        assert set(bodies[-1]) == {"matched_lux", "black", "expected_sequence"}, bodies
         bar.get_by_role("button", name="Done", exact=True).click()
         expect(_picture_tab(page).get_by_role("status").filter(has_text="Saved at")).to_be_visible()
-        assert _display(registry)["software_black_floor_tenths"] == 20
-        # Leaving the tab ends this page's session; a reload alone leaves it open until Central's
-        # idle lease lapses, and the reloaded page would wait that long behind it.
-        open_frame(page, FRAME, "overview")
-        for _ in range(50):
-            if not _sql(registry, "SELECT 1 FROM picture_sessions"):
-                break
-            page.wait_for_timeout(100)
-        else:
-            raise AssertionError("the Picture tab's session did not end when the tab was left")
+
         page.reload()
         open_frame(page, FRAME, "picture")
         expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
-        expect(_slider(page, PHOTO_WALL, "Black floor")).to_have_attribute("aria-valuetext", "2.0 %")
+        expect(_typed(page, "Matched light")).to_have_value("600")
 
 
-def test_saturation_drags_at_most_two_edits_a_second_and_revert_puts_back_the_stored_values(page, registry):
-    """Live model on the print look: twenty steps of Saturation over about two seconds send at most
-    two edits a second, the last where it stopped; Revert puts back the stored saturation and
-    soft highlights.
+def test_display_black_is_typed_as_a_percent_and_sent_as_a_share_and_revert_puts_it_back(page, registry):
+    """Display black 0.05 % of white is sent as 0.0005 with the matched lux in force; a value outside
+    the range is said in the field and never sent; Revert puts the kept light back.
 
-    Mutation: drop the send on release (onCommit) -> the last value (80) never arrives."""
+    Mutation: send the percent as typed (0.05) -> the share assertion fails."""
     _seen(registry)
-    _store(registry, software_saturation_percent=100, software_highlight_rolloff_percent=30)
     with FakePi(registry), operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall")
         open_frame(page, FRAME, "picture")
         bar = _bar(page)
         expect(bar.get_by_role("status")).to_have_text(PRESENTED)
-        edits = _edits(page, "software-edits")
-        started = time.monotonic()
-        saturation = _press(page, PHOTO_WALL, "Saturation", "ArrowLeft", 20, pause_ms=100)
-        took = time.monotonic() - started
-        expect(saturation).to_have_value("80")
-        rolloff = _press(page, PHOTO_WALL, "Soft highlights", "ArrowRight", 5)
-        expect(rolloff).to_have_value("35")
+        kept = _off_thread(_picture, registry).light
+        edits = _edits(page, "light-edits")
+        black = _typed(page, "Display black")
+        black.fill("9")
+        expect(_group(page, PHOTO_WALL)).to_contain_text("From 0.001 to 5 %")
+        black.fill("0.05")
         expect(bar.get_by_role("status")).to_have_text(PRESENTED)
         page.wait_for_timeout(600)
-        sent = [body for _at, body in edits if body["setting"] == "saturation"]
-        times = [at for at, _body in edits]
-        assert sent and sent[-1]["value"] == 80, edits
-        assert len(edits) <= 2 * took + 4, (len(edits), took)
-        assert all(later - earlier >= 0.45 for earlier, later in zip(times, times[1:])), times
-        assert _off_thread(_picture, registry).software.saturation_percent == 80
-
+        assert [(body["matched_lux"], body["black"]) for _at, body in edits] == [(kept.matched_lux, 0.0005)], edits
+        assert _off_thread(_picture, registry).light.black == 0.0005
         bar.get_by_role("button", name="Revert", exact=True).click()
-        expect(saturation).to_have_value("100")
-        expect(rolloff).to_have_value("30")
-        expect(bar.get_by_role("button", name="Revert", exact=True)).to_be_disabled()
-        stored = _display(registry)
-        assert (stored["software_saturation_percent"], stored["software_highlight_rolloff_percent"]) == (100, 30)
-
-
-def test_soft_highlights_states_where_it_acts_and_decides_nothing(page, registry):
-    """Soft highlights acts only above 100 % brightness, the Pi's rule (player/geometry.py
-    `rolloff_skipped`): its row states the condition whatever the values, so the console keeps no
-    second copy of the rule that could disagree with the Pi. The notes never repeat a slider's value.
-
-    Mutation: hide the words at brightness 120 % -> the second assertion fails."""
-    _seen(registry)
-    with FakePi(registry), operator_server(registry.db, registry.clock) as origin:
-        connect(page, origin, "wall")
-        open_frame(page, FRAME, "picture")
-        expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
-        expect(_row(page, PHOTO_WALL, "Soft highlights")).to_contain_text(ACTS_ABOVE)
-        _slider(page, PHOTO_WALL, "Brightness").fill("120")
-        expect(_row(page, PHOTO_WALL, "Soft highlights")).to_contain_text(ACTS_ABOVE)
-        expect(_row(page, PHOTO_WALL, "Saturation")).to_contain_text("100 % changes nothing")
-        expect(_row(page, PHOTO_WALL, "Saturation")).not_to_contain_text("100 % · 100 %")
-
-
-def test_the_lut_picker_sends_the_profiles_digest_and_done_waits_until_the_pi_shows_it(page, registry):
-    """Print look R3: the Photo Wall section lists None and each LUT on the list; choosing one sends
-    its paper profile's digest to lut-edits, LUT amount appears only with a LUT, the tab says it is
-    waiting for the Pi until the Pi presents it, and Done keeps it.
-
-    Mutation: send the LUT's name instead of its digest -> Central's 422, the choice is dropped."""
-    luts = PgLuts(registry.db, registry.clock)
-    paper, _ = luts.add_lut(_as_printer(_monitor()))
-    reduced, _ = luts.add_lut(_reduced_gamut())
-    # Both fixtures are LittleCMS's sRGB under its own name: the list orders by name, then digest.
-    listed = [lut.name for lut in sorted((paper, reduced), key=lambda lut: (lut.name, lut.profile_sha256))]
-    _seen(registry)
-    with FakePi(registry) as pi, operator_server(registry.db, registry.clock) as origin:
-        connect(page, origin, "wall")
-        open_frame(page, FRAME, "picture")
-        bar = _bar(page)
+        expect(black).to_have_value(f"{kept.black * 100:g}")
         expect(bar.get_by_role("status")).to_have_text(PRESENTED)
-        picker = _group(page, PHOTO_WALL).get_by_role("combobox", name="LUT", exact=True)
-        expect(picker.locator("option")).to_have_text(["None", *listed])
-        expect(picker).to_have_value("none")
-        expect(_slider(page, PHOTO_WALL, "LUT amount")).to_have_count(0)
-
-        sent = _edits(page, "lut-edits")
-        pi.presenting = False
-        picker.select_option(value=paper.profile_sha256)
-        expect(bar.get_by_role("status")).to_have_text(WAITING)
-        expect(_slider(page, PHOTO_WALL, "LUT amount")).to_have_value("100")
-        expect(_group(page, PHOTO_WALL)).to_contain_text("Done waits for it")
-        page.wait_for_timeout(1200)
-        expect(bar.get_by_role("button", name="Done", exact=True)).to_be_disabled()
-        assert [body["profile_sha256"] for _at, body in sent] == [paper.profile_sha256], sent
-        assert _off_thread(_picture, registry).software.lut.profile_sha256 == paper.profile_sha256
-
-        pi.presenting = True
-        expect(bar.get_by_role("status")).to_have_text(PRESENTED)
-        bar.get_by_role("button", name="Done", exact=True).click()
-        expect(_picture_tab(page).get_by_role("status").filter(has_text="Saved at")).to_be_visible()
-        assert _display(registry)["software_lut_profile"] == paper.profile_sha256
-        expect(picker).to_have_value(paper.profile_sha256)
-
-
-def test_an_empty_lut_list_says_what_a_lut_is_and_leads_to_settings_luts(page, registry):
-    """The LUT picker with no LUT on the list is not a dead end: its help says what a LUT is, and a
-    link leads to the list's home, Settings › LUTs (design language P1, the empty state).
-
-    Mutation: drop the link -> it is not found."""
-    _seen(registry)
-    with FakePi(registry), operator_server(registry.db, registry.clock) as origin:
-        connect(page, origin, "wall")
-        open_frame(page, FRAME, "picture")
-        expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
-        picker = _group(page, PHOTO_WALL).get_by_role("combobox", name="LUT", exact=True)
-        expect(picker).to_have_accessible_description(re.compile("Makes photos look printed on one paper"))
-        expect(_group(page, PHOTO_WALL)).to_contain_text("No LUTs on the list yet")
-        _group(page, PHOTO_WALL).get_by_role("link", name="Add a paper profile in Settings › LUTs").click()
-        expect(page).to_have_url(re.compile(r"#/luts$"))
+        assert _off_thread(_picture, registry).light == kept
 
 
 def _positions(registry):
@@ -527,14 +445,14 @@ def _positions(registry):
 
 
 def test_copy_to_two_frames_copies_photo_walls_values_and_never_position(page, registry):
-    """Copy (#119): Photo Wall's four of this Frame's display go to two other Frames' displays, and
+    """Copy (#119): Photo Wall's three of this Frame's display go to two other Frames' displays, and
     each display setting set here where the target offers it the same way (hall: brightness, a level
     of 100 on both); stairs' Pi has not said what its display offers, so brightness is skipped there
     and named. Both Frames' position (fit, corners, readiness) stays as it was."""
     player = _seen(registry)
     _seen(registry, "hall", output_id="HDMI-A-2", player=player)
     _seen(registry, "stairs", serial="pi-stairs", offered=None)
-    _store(registry, software_brightness_percent=120, software_contrast_percent=30, colour_temperature_kelvin=5000,
+    _store(registry, software_contrast_percent=30, colour_temperature_kelvin=5000,
            gamma_tenths=24, hardware_picture='{"10": 70}')
     _store(registry, "hall", hardware_picture='{"12": 10}')
     before = _positions(registry)
@@ -557,8 +475,8 @@ def test_copy_to_two_frames_copies_photo_walls_values_and_never_position(page, r
     assert sent == [{"to_frames": ["hall", "stairs"]}]
     for frame, hardware in (("hall", {"10": 70, "12": 10}), ("stairs", {})):
         display = _display(registry, frame)
-        assert (display["software_brightness_percent"], display["software_contrast_percent"],
-                display["colour_temperature_kelvin"], display["gamma_tenths"]) == (120, 30, 5000, 24)
+        assert (display["software_contrast_percent"], display["colour_temperature_kelvin"],
+                display["gamma_tenths"]) == (30, 5000, 24)
         assert display["hardware_picture"] == hardware
     assert _positions(registry) == before
 
@@ -604,7 +522,8 @@ TEST_PATTERN = "Test pattern"
 SIGNAL = "Signal range"
 RESTARTING = "Waiting for the Pi: a change restarts the picture on every display of this Pi."
 SHOWN = "The Pi reports it shown on every Frame of this display."
-PAPER = "Tape a sheet of white paper beside the Frame and match its white."
+PAPER = ("Tape a sheet of white paper beside the Frame and match its white, then type the lux the meter reads as "
+         "Matched light.")
 READING = ("Switch Signal range between Full and Limited. Black darker on Full with every step visible: keep Full. "
            "Steps vanish into black on Full: choose Limited. No change: the display follows the Pi, the glow is its "
            "backlight; keep Full, it keeps all 256 steps.")

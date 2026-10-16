@@ -2,17 +2,17 @@ import type { Meta, StoryObj } from "@storybook/react-vite";
 
 import type { Adjustment } from "./live-adjustment";
 import { type PositionEntryView, type PositionHistoryView, PositionHistoryList } from "./position-history";
+import { LIVING_ROOM, ROOMS } from "./room-lights.fixtures";
 
 const FRAME = { id: "lobby", name: "Lobby" };
 const OPENING: [number, number][] = [[0.1, 0.08], [0.9, 0.05], [0.92, 0.95], [0.08, 0.92]];
 const FULL: [number, number][] = [[0, 0], [1, 0], [1, 1], [0, 1]];
-const WARM = { from_degrees: 0, steep_degrees: 45, softness_degrees: 10, strength_tenths: 10, colour_kelvin: 3000 };
-const COOL = { from_degrees: 90, steep_degrees: 30, softness_degrees: 25, strength_tenths: 6, colour_kelvin: 6500 };
+const NAMES = Object.fromEntries(ROOMS.lights.map((light) => [light.id, light.name]));
 
 const ADJUSTMENT: Adjustment = {
-  draft: { fit: { mode: "cover", corners: OPENING, rotation: 0 }, mat: { depth_mm: 2.5, lights: [WARM, COOL] } },
+  draft: { fit: { mode: "cover", corners: OPENING, rotation: 0 }, lighting: LIVING_ROOM },
   change: () => ({ valid: true }),
-  changeMat: () => {},
+  changeLighting: () => {},
   dirty: false,
   phase: "shown",
   error: null,
@@ -30,13 +30,13 @@ const ADJUSTMENT: Adjustment = {
 // Times in UTC: the story's times show in the browser's zone (no house clock here).
 function entry(id: string, kind: PositionEntryView["kind"], at: string, values: {
   corners?: [number, number][]; rotation?: number; mode?: "cover" | "corners"; depth?: number;
-  lights?: PositionEntryView["mat"]["lights"]; profile?: { width: number; height: number };
+  lights?: PositionEntryView["lighting"]["lights"]; profile?: { width: number; height: number };
   refusal?: PositionEntryView["restore_refusal"];
 } = {}): PositionEntryView {
   return {
     entry_id: id, frame: FRAME, kind, number: 1, at, session_id: null, restored_from: null,
     fit: { mode: values.mode ?? "cover", corners: values.corners ?? OPENING, rotation: values.rotation ?? 0 },
-    mat: { depth_mm: values.depth ?? 2.5, lights: values.lights ?? [WARM, COOL] },
+    lighting: { ...LIVING_ROOM, mat_depth_mm: values.depth ?? 2.5, lights: values.lights ?? LIVING_ROOM.lights.slice(0, 2) },
     made_for: { profile_px: values.profile ?? { width: 1920, height: 1080 }, display_id: null },
     restore_refusal: values.refusal ?? null,
   };
@@ -55,7 +55,7 @@ const meta = {
   title: "Domain/PositionHistory",
   component: PositionHistoryList,
   args: {
-    history: KEPT, adjustment: ADJUSTMENT, size: { width: 1920, height: 1080 }, busy: false, restoring: null,
+    history: KEPT, adjustment: ADJUSTMENT, size: { width: 1920, height: 1080 }, roomNames: NAMES, busy: false, restoring: null,
     onRestore: () => {}, onRetry: () => {},
   },
 } satisfies Meta<typeof PositionHistoryList>;
@@ -63,7 +63,7 @@ const meta = {
 export default meta;
 type Story = StoryObj<typeof meta>;
 
-/** Kept Positions over two days: Cover in an opening with a 2.5 mm mat and two lights, and the full screen before. */
+/** Kept Positions over two days: Cover in an opening with a 2.5 mm mat, daylight and the overheads, and the full screen before. */
 export const Kept: Story = {};
 /** A visit: corners moved and the mat deepened, tried and not kept (dashed), then put back by Revert. */
 export const NotKept: Story = {

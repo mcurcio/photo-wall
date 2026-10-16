@@ -3,11 +3,12 @@ import { apiWrite } from "./apiWrite.js";
 /**
  * The LUTs list's routes (print look, design "The LUT"): central/lut_routes.py, answered with the
  * shapes of central/displays/views.py (their one home). Settings › LUTs lists, adds and removes;
- * the Picture tab's LUT picker lists them.
+ * a Frame's lighting picks its paper profile from them (decision 0028).
  *
- * @typedef {{profile_sha256: string, name: string, added_at: number, used_by: string[]}} LutView
- *   One LUT: its paper profile's digest (its name on the wire), the profile's own name, when it
- *   was added (Central's clock) and the Displays that use it, by name.
+ * @typedef {{profile_sha256: string, recipe_id: string, name: string, added_at: number, used_by: string[]}} LutView
+ *   One LUT: its paper profile's digest (its name on the wire), the recipe Central bakes it with
+ *   (a Frame's paper names both, contracts/lut.py `LutRef`), the profile's own name, when it was
+ *   added (Central's clock) and the Frames whose paper uses it, by name.
  */
 
 const LUTS = "/v1/operator/luts";

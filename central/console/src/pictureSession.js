@@ -1,9 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { TICK_MS, useVisible } from "./liveAdjustment.js";
-import { listLuts } from "./lutsApi.js";
 import {
-  beginPicture, editHardware, editLut, editSignalRange, editSoftware, editTestPattern, keepPictureAlive, pictureDone,
+  beginPicture, editHardware, editLight, editSignalRange, editSoftware, editTestPattern, keepPictureAlive, pictureDone,
   readFramePicture, restorePicture, revertPicture,
 } from "./pictureApi.js";
 
@@ -16,8 +15,8 @@ import {
  * (pictureApi.js).
  *
  * THE DRAFT IS THE OPERATOR'S. A draft holds only what the operator changed in this visit: a value
- * per display setting (null hands it back: as the display has it), per Photo Wall setting, and the
- * LUT choice (`lut.lut`: a paper profile's digest, or null for no LUT; print look), the signal range
+ * per display setting (null hands it back: as the display has it), per Photo Wall setting, the
+ * Display's light (`light.light`: its matched lux and panel black, sent together; decision 0028), the signal range
  * (`signal.range`) and the test pattern (`pattern.pattern`, null for none; display tuning). The test
  * pattern is never kept: it is no change to keep (`dirty` leaves it out), and Done and Revert take
  * it off as they end the session. Every
@@ -53,8 +52,6 @@ import {
  * holds, read back from Central (`restoredDraft`), so nothing of the old draft is sent over it and the
  * sliders show the restored values. The test pattern is never restored: the draft keeps its own.
  *
- * THE LUTS. While the tab is open the LUTs list is read once (lutsApi.js), for the picker.
- *
  * SHOWN. The latest change counts as shown only when nothing is waiting to be sent, a read begun
  * after the last accepted change says `shown`, and that read carries the draft's values (the signal
  * range and the test pattern among them). Central's `shown` waits for the Pi's signal answer too.
@@ -66,9 +63,7 @@ export const EDIT_GAP_MS = 500;
 const RETRY_MS = 2000;
 
 /** Photo Wall's settings, as Central names them (central/displays/picture.py `SoftwareSetting`). */
-export const SOFTWARE_SETTINGS = /** @type {const} */ ([
-  "brightness", "contrast", "colour-temperature", "gamma", "saturation", "highlight-rolloff", "black-floor", "lut-amount",
-]);
+export const SOFTWARE_SETTINGS = /** @type {const} */ (["contrast", "colour-temperature", "gamma"]);
 
 /** Central's refusals, in the operator's words; `stops`: the session waits for the operator. */
 const REFUSALS = {
@@ -79,7 +74,6 @@ const REFUSALS = {
   not_offered: "This display does not offer that setting, so Photo Wall cannot set it.",
   out_of_range: "Photo Wall refused this value.",
   not_presented_yet: "The Pi has not shown the latest change yet. Wait a moment, then press Done again.",
-  unknown_lut: "That LUT is no longer on the LUTs list, so Photo Wall cannot use it.",
   unreachable: "Photo Wall's server did not answer.",
 };
 // Begin refusals that leave the tab without a session until something changes on the Pi's side.
@@ -87,7 +81,7 @@ const UNAVAILABLE = new Set(["frame_unbound", "no_display", "unknown_frame"]);
 // The session is gone: begin again (with the draft).
 const GONE = new Set(["session_ended", "unknown_session"]);
 // Refused values the draft drops (the slider goes back to what Central has).
-const DROPPED = new Set(["out_of_range", "not_offered", "unknown_lut"]);
+const DROPPED = new Set(["out_of_range", "not_offered"]);
 
 // The pages left with changes not kept, by Frame, and when (this browser's clock, epoch seconds,
 // only ever shown): the next visit says the display went back then.
@@ -98,14 +92,9 @@ const ending = new Map();
 
 /** The field of SoftwarePictureView each Photo Wall setting is read from. */
 const SOFTWARE_FIELDS = {
-  brightness: "brightness_percent",
   contrast: "contrast_percent",
   "colour-temperature": "colour_temperature_kelvin",
   gamma: "gamma_tenths",
-  saturation: "saturation_percent",
-  "highlight-rolloff": "highlight_rolloff_percent",
-  "black-floor": "black_floor_tenths",
-  "lut-amount": "lut_amount_percent",
 };
 
 /** A Photo Wall setting's value as a read shows it: a percent, kelvin or tenths. */
@@ -113,10 +102,13 @@ export function softwareValue(view, setting) {
   return view.software[SOFTWARE_FIELDS[setting]];
 }
 
-/** The LUT a read shows in force: its paper profile's digest, or null for none. */
-export function lutValue(view) {
-  return view.software.lut?.profile_sha256 ?? null;
+/** The Display's light a read shows: its matched lux and panel black. */
+export function lightValue(view) {
+  return { matched_lux: view.light.matched_lux, black: view.light.black };
 }
+
+/** Whether two lights are the same values. */
+const sameLight = (one, other) => one.matched_lux === other.matched_lux && one.black === other.black;
 
 /** The test pattern a read shows asked for (whatever its state); null: none. */
 export function patternValue(view) {
@@ -134,19 +126,19 @@ export function hardwareValue(view, code) {
  * @typedef {import("./pictureApi.js").VcpCode} VcpCode
  * @typedef {import("./pictureApi.js").SignalRange} SignalRange
  * @typedef {import("./pictureApi.js").TestPattern} TestPattern
+ * @typedef {import("./pictureApi.js").DisplayLightView} DisplayLight
  * @typedef {{hardware: Record<VcpCode, number|null>, software: Partial<Record<SoftwareSetting, number>>,
- *            lut: {lut?: string|null}, signal: {range?: SignalRange}, pattern: {pattern?: TestPattern|null}}} Draft
- * @typedef {{profile_sha256: string, name: string}} LutChoice   a LUT the picker offers
+ *            light: {light?: DisplayLight}, signal: {range?: SignalRange}, pattern: {pattern?: TestPattern|null}}} Draft
  * @typedef {"idle"|"live"|"waiting"|"shown"} Phase
  *   `idle`: no session (not open, no display, or someone else's session); `live`: a session and
  *   no change to judge; `waiting`: the Pi has not shown the latest change; `shown`: it has.
  * @typedef {{words: string, code: string}} Problem   `code` is Central's, for Details only.
  */
 
-const EMPTY = /** @type {Draft} */ ({ hardware: {}, software: {}, lut: {}, signal: {}, pattern: {} });
+const EMPTY = /** @type {Draft} */ ({ hardware: {}, software: {}, light: {}, signal: {}, pattern: {} });
 // The draft's parts in the order they are sent: the choices first, each at once (`CHOICES`), then
 // the paced ones.
-const PARTS = /** @type {const} */ (["signal", "pattern", "hardware", "software", "lut"]);
+const PARTS = /** @type {const} */ (["signal", "pattern", "hardware", "software", "light"]);
 const CHOICES = new Set(["signal", "pattern"]);
 // The parts Done keeps: every one but the test pattern.
 const KEPT = PARTS.filter((part) => part !== "pattern");
@@ -154,7 +146,7 @@ const isEmpty = (draft) => KEPT.every((part) => Object.keys(draft[part]).length 
 
 /**
  * The draft's next request against what this session already took; null when it has taken it all.
- * @returns {{kind: "signal"|"pattern"|"hardware"|"software"|"lut", key: string, value: number|string|null}|null}
+ * @returns {{kind: "signal"|"pattern"|"hardware"|"software"|"light", key: string, value: any}|null}
  */
 function nextWrite(draft, taken) {
   for (const kind of PARTS) {
@@ -166,7 +158,7 @@ function nextWrite(draft, taken) {
 }
 
 /**
- * The draft after a Restore, from the first read that follows it: every Photo Wall value, the LUT and
+ * The draft after a Restore, from the first read that follows it: every Photo Wall value, the light and
  * the signal range as the session holds them, each display setting set there or in `before` (one
  * handed back reads null), and `before`'s test pattern (never restored).
  * @param {FramePictureView} view
@@ -179,14 +171,14 @@ export function restoredDraft(view, before) {
     .map((row) => [row.code, row.value]));
   for (const code of Object.keys(before.hardware)) if (!(code in hardware)) hardware[code] = null;
   const software = Object.fromEntries(SOFTWARE_SETTINGS.map((setting) => [setting, softwareValue(view, setting)]));
-  return { hardware, software, lut: { lut: lutValue(view) }, signal: { range: view.signal_range }, pattern: before.pattern };
+  return { hardware, software, light: { light: lightValue(view) }, signal: { range: view.signal_range }, pattern: before.pattern };
 }
 
 /** Whether a read carries every part of the draft. */
 function carries(view, draft) {
   return Object.entries(draft.hardware).every(([code, value]) => hardwareValue(view, code) === value)
     && Object.entries(draft.software).every(([setting, value]) => softwareValue(view, setting) === value)
-    && (!("lut" in draft.lut) || lutValue(view) === draft.lut.lut)
+    && (!("light" in draft.light) || sameLight(lightValue(view), draft.light.light))
     && (!("range" in draft.signal) || view.signal_range === draft.signal.range)
     && (!("pattern" in draft.pattern) || patternValue(view) === draft.pattern.pattern);
 }
@@ -196,17 +188,15 @@ function carries(view, draft) {
  * @returns {{view: FramePictureView|null, phase: Phase, draft: Draft, dirty: boolean,
  *            changeHardware: (code: VcpCode, value: number|null) => void,
  *            changeSoftware: (setting: SoftwareSetting, value: number) => void,
- *            changeLut: (profileSha256: string|null) => void,
+ *            changeLight: (light: Partial<DisplayLight>) => void,
  *            changeSignalRange: (range: SignalRange) => void, changeTestPattern: (pattern: TestPattern|null) => void,
- *            luts: LutChoice[]|null,
  *            done: () => Promise<boolean>, revert: () => Promise<void>,
  *            restore: (entryId: string) => Promise<{ok: true, result: import("./pictureApi.js").PictureRestoreResult}|{ok: false, error: string}>,
  *            busy: boolean,
  *            error: Problem|null, unavailable: Problem|null, waitingFor: string|null,
  *            latest: number|null, savedAt: number|null, leftAt: number|null}}
  *   `unavailable`: why no session can begin (no Pi, no display); `waitingFor`: someone else's
- *   session, in words; `latest` counts this session's changes, for the bar (null: no session);
- *   `luts` the LUTs list (null until read).
+ *   session, in words; `latest` counts this session's changes, for the bar (null: no session).
  */
 export function usePictureSession({ frameId, open }) {
   const visible = useVisible();
@@ -223,7 +213,6 @@ export function usePictureSession({ frameId, open }) {
   const [busy, setBusy] = useState(false);
   const [savedAt, setSavedAt] = useState(/** @type {number|null} */ (null));
   const [leftAt, setLeftAt] = useState(/** @type {number|null} */ (null));
-  const [luts, setLuts] = useState(/** @type {LutChoice[]|null} */ (null));
   // Read by the loop between renders. `taken`: what this session has accepted; `wrote` counts
   // accepted writes and `readFor` is the count a read began after, so a read older than the last
   // write never says shown. `flight` is the request in flight; `acting` holds the loop.
@@ -294,7 +283,7 @@ export function usePictureSession({ frameId, open }) {
     const sent = {
       hardware: () => editHardware(open_.session_id, { ...expected, code: next.key }),
       software: () => editSoftware(open_.session_id, { ...expected, setting: next.key }),
-      lut: () => editLut(open_.session_id, { ...sequence, profile_sha256: next.value }),
+      light: () => editLight(open_.session_id, { ...sequence, ...next.value }),
       signal: () => editSignalRange(open_.session_id, { ...sequence, signal_range: next.value }),
       pattern: () => editTestPattern(open_.session_id, { ...sequence, test_pattern: next.value }),
     }[next.kind];
@@ -399,16 +388,6 @@ export function usePictureSession({ frameId, open }) {
     return () => clearInterval(timer);
   }, [live, step]);
 
-  // The LUTs list, read once each time the tab is opened.
-  useEffect(() => {
-    if (!open) return undefined;
-    let current = true;
-    void listLuts().then((result) => {
-      if (current && result.ok) setLuts(result.luts.map(({ profile_sha256, name }) => ({ profile_sha256, name })));
-    });
-    return () => { current = false; };
-  }, [open]);
-
   // Leaving the tab, hiding the browser tab or leaving the page ends the session now (Revert);
   // hidden with a test pattern taken, it is left to Central's idle window (THE SESSION RUNS above).
   const patternTaken = (taken.pattern.pattern ?? null) !== null;
@@ -467,7 +446,16 @@ export function usePictureSession({ frameId, open }) {
   }, [setDraft, step]);
   const changeHardware = useCallback((code, value) => change("hardware", code, value), [change]);
   const changeSoftware = useCallback((setting, value) => change("software", setting, value), [change]);
-  const changeLut = useCallback((profileSha256) => change("lut", "lut", profileSha256), [change]);
+  /** One or both of the Display's light values; the other is the draft's, else the read's. Both are
+   * sent together (`light-edits` takes the pair). */
+  const changeLight = useCallback((patch) => {
+    const current = state.current;
+    const base = current.draft.light.light ?? (current.view === null ? null : lightValue(current.view));
+    if (base === null) return;
+    const next = { ...base, ...patch };
+    if (sameLight(base, next) && "light" in current.draft.light) return;
+    change("light", "light", next);
+  }, [change]);
   const changeSignalRange = useCallback((range) => change("signal", "range", range), [change]);
   /** A test pattern, or null for none. Choosing the one the Pi took off at its bound (`ended`) asks
    * for it again: a new edit, which restarts the Pi's bound. */
@@ -556,7 +544,7 @@ export function usePictureSession({ frameId, open }) {
   /** @type {Phase} */
   const phase = session === null ? "idle" : shown ? "shown" : dirty ? "waiting" : "live";
   return {
-    view, phase, draft, dirty, changeHardware, changeSoftware, changeLut, changeSignalRange, changeTestPattern, luts, done,
+    view, phase, draft, dirty, changeHardware, changeSoftware, changeLight, changeSignalRange, changeTestPattern, done,
     revert, restore, busy, error, unavailable, waitingFor,
     latest: session === null ? null : changes, savedAt, leftAt,
   };
