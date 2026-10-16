@@ -277,6 +277,7 @@ _DOCKER_STEP = re.compile(r'\bdocker\b|\bcompose\b|buildx|build-push-action'
 # runs it before its first Docker step, so a new job is red until it does or is listed here.
 WITHOUT_DOCKER_HUB = {
     'checks.yml': {'static', 'unit', 'node-bus',
+                   'galleria',                     # Galleria's own venv and the pinned nats-server
                    'console-catalog'},             # the Playwright image, from mcr.microsoft.com
     'pipeline.yml': {'plan', 'tested', 'gate',
                      'seal'},                      # reads and tags ghcr.io images only
