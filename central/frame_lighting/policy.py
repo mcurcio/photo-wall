@@ -22,18 +22,19 @@ def stamped(lighting: FrameLighting, recipe_id: str) -> FrameLighting:
     ...
 
 
-def upgrade_lighting(display: DisplayLight, mat_depth_mm: float) -> FrameLighting:
-    """The lighting that shows today's picture: one WashLight of the upgrade's fixed room light at
-    `display.matched_lux`, AtFull, the mat's depth kept, and a paper matching the panel
-    (whiteness SHEET_WHITENESS, ink density -log10(display.black), no profile). Migration 099's data
-    is held to it by a test."""
+def upgrade_lighting(display: DisplayLight, mat_depth_mm: float, brightness_share: float) -> FrameLighting:
+    """The lighting that shows the picture a Frame showed before room light: one WashLight of the
+    upgrade's fixed room light at `display.matched_lux` x `brightness_share` (its Display's old
+    software brightness, which multiplied the linear picture), AtFull, the mat's depth kept, and a
+    paper matching the panel (whiteness SHEET_WHITENESS, ink density -log10(display.black), no
+    profile). The one home of the upgrade's rule: migration 099's data is held to it by a test."""
     ...
 
 
 def new_frame_lighting(display: DisplayLight, house: LightingHouse) -> FrameLighting:
     """The one lighting a new Frame starts with, which always passes `check` against `house`:
-    `upgrade_lighting(display, 0)` with its wash viewing the first "at-full" room light of `house`
-    in its order that nobody reports (a fixed light), or no light when there is none."""
+    `upgrade_lighting(display, 0, 1)` with its wash viewing the first room light of `house` in
+    `fixed` order (a light nobody reports), or no light when there is none."""
     ...
 
 

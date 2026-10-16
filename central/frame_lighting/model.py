@@ -15,9 +15,10 @@ ReferenceKind = Literal["at-full", "at-reading"]     # contracts/frame_lighting.
 @dataclass(frozen=True)
 class LightingHouse:
     """What a Frame's lighting may name: each room light with the reference kind its reporter needs
-    (a Sensor's light "at-reading", every other "at-full"), and the paper profiles known (by their
-    profile's sha256)."""
+    (a Sensor's light "at-reading", every other "at-full"), which lights nobody reports, and the
+    paper profiles known (by their profile's sha256)."""
     lights: Mapping[RoomLightId, ReferenceKind]
+    fixed: tuple[RoomLightId, ...]                 # the lights nobody reports, in the house's order
     paper_profiles: frozenset[str]
 
 
