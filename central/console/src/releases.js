@@ -2,9 +2,9 @@ import { useCallback, useMemo, useRef } from "react";
 
 import { apiWrite } from "./apiWrite.js";
 import { readReleases, setWallVersion } from "./domain/releases/api";
-import { answerLost, deployable, refusalWords, wallOn } from "./domain/releases/model";
+import { deployable, refusalWords, wallOn } from "./domain/releases/model";
 import { usePolledRead } from "./polledRead.js";
-import { answerOutcome, UNKNOWN_MESSAGE } from "./sendOutcome.js";
+import { answerOutcome, answerUnknown, UNKNOWN_MESSAGE } from "./sendOutcome.js";
 
 /**
  * Fleet › Releases: the releases Central observed and a version per Player (Q2 A, 2026-10-16),
@@ -51,6 +51,20 @@ export function useReleaseRead() {
   const { value, busy, refresh, latest } = usePolledRead(load, { cadenceMs: CADENCE_MS, initial: NOT_READ });
   const startedReads = useCallback(() => started.current, []);
   return useMemo(() => ({ ...value, busy, refresh, latest, startedReads }), [value, busy, refresh, latest, startedReads]);
+}
+
+/**
+ * Whether a release write's answer was lost (Update the wall, Install): no answer, or a 5xx that
+ * carries no code of Central's (a gateway). The rule is sendOutcome.js `answerUnknown`'s, read on the
+ * domains' Answer (`unreachable`, or `http_<status>` for a body outside its shape).
+ *
+ * @param {string} error
+ * @returns {boolean}
+ */
+export function answerLost(error) {
+  if (error === "unreachable") return true;
+  const status = /^http_(\d{3})$/.exec(error);
+  return status !== null && answerUnknown({ ok: false, status: Number(status[1]), error: null });
 }
 
 // --- Update the wall's one write.

@@ -4,12 +4,13 @@ import { useConfirm } from "./ConfirmAction.jsx";
 import { installOnPlayer } from "./domain/releases/api";
 import { FactLine } from "./domain/fact-line.tsx";
 import {
-  answerLost, deployable, installWords, playerRows, readinessLine, refusalWords, releaseRows, updateTarget,
+  deployable, installWords, playerRows, readinessLine, refusalWords, releaseRows, updateTarget,
 } from "./domain/releases/model";
 import { clock, fact } from "./facts.js";
-import { sendCatalogCheck, useReleaseRead } from "./releases.js";
+import { answerLost, sendCatalogCheck, useReleaseRead } from "./releases.js";
 import { formatRoute } from "./routes.js";
 import { SectionBoundary } from "./SectionBoundary.jsx";
+import { UNKNOWN_MESSAGE } from "./sendOutcome.js";
 
 /** "Release read as of <time>", whether its last refresh failed, or why it has no answer. */
 function ReadLine({ releases }) {
@@ -151,7 +152,8 @@ function ReleaseRecords() {
         const answer = await installOnPlayer(row.serial, { version });
         void releases.refresh();
         if (answer.ok) return { state: "done", message: `${row.name}: ${installWords(answer.started.install, version)}.` };
-        return { state: answerLost(answer.error) ? "unknown" : "refused", message: refusalWords(answer.error) };
+        return answerLost(answer.error) ? { state: "unknown", message: UNKNOWN_MESSAGE }
+          : { state: "refused", message: refusalWords(answer.error) };
       },
     });
   };
