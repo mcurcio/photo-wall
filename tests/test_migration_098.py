@@ -1,8 +1,11 @@
-"""098 (room light, decision 0028): on a database at 097 with a Display, a Frame with a mat, a Position
-trial, a Position history entry and a stored Player configuration whose binding carries the mat, 098
-gives the Display UPGRADE_DISPLAY_LIGHT, every mat exactly `upgrade_lighting(UPGRADE_DISPLAY_LIGHT,
-depth)` (the old mat lights are not carried), the stored binding the same lighting and no mat, and
-creates the fixed room light "room" at change 1; the sliders and the Display's LUT are gone.
+"""098 (room light, decision 0028): on a database at 097 with a Display at 50 % software brightness, a
+Frame with a mat whose Position names that Display, a Position history entry, a stored Player
+configuration and an offered plan whose bindings carry the mat (one of them for a Frame gone since),
+098 gives the Display UPGRADE_DISPLAY_LIGHT, the Frame `upgrade_lighting(UPGRADE_DISPLAY_LIGHT, depth)`
+with its wash at 500 lx (the brightness multiplied the linear picture, so the picture is today's),
+every stored and offered binding its Frame's lighting and no mat (a gone Frame's: its mat's upgrade),
+the history entry the upgrade at 1,000 lx (the old mat lights are not carried), and creates the fixed
+room light "room" at change 1; the sliders and the Display's LUT are gone.
 """
 from __future__ import annotations
 
@@ -38,19 +41,23 @@ def _at_097(db: Database) -> None:
 
 
 def test_098_upgrades_every_display_and_frame_to_todays_picture(database_provisioner):
-    """Mutation probe: write the paper's ink as 3.0 instead of -log10(0.0003) in a scratch copy of
-    098 -> the Frame's lighting differs from upgrade_lighting and this fails."""
+    """Mutation probes: write the paper's ink as 3.0 instead of -log10(0.0003) in a scratch copy of
+    098 -> the Frame's lighting differs from upgrade_lighting and this fails; the wash at 1000 lx
+    whatever the brightness -> the Frame's 500 lx fails; the offered plan's bindings at the mat's
+    upgrade instead of the Frame's lighting -> its 500 lx fails."""
     with database_provisioner.empty() as conninfo:
         db = Database(conninfo)
         try:
             _at_097(db)
             with db.transaction() as conn:
-                conn.execute("INSERT INTO displays(id, maker, product, name, serial, first_seen_at, "
-                             "software_saturation_percent, software_lut_amount_percent) "
-                             "VALUES (gen_random_uuid(), 'SAM', 1, 'Samsung', 's1', 0, 120, 50)")
+                display = conn.execute(
+                    "INSERT INTO displays(id, maker, product, name, serial, first_seen_at, software_brightness_percent, "
+                    "software_saturation_percent, software_lut_amount_percent) "
+                    "VALUES (gen_random_uuid(), 'SAM', 1, 'Samsung', 's1', 0, 50, 120, 50) RETURNING id").fetchone()["id"]
                 conn.execute("INSERT INTO frames(id, name, surface_id, x_mm, y_mm, width_mm, height_mm, profile, "
-                             "calibration, mat) VALUES ('hall', 'Hall', 'wall', 0, 0, 600, 340, %s, '{}', %s)",
-                             (json.dumps(PROFILE), json.dumps(OLD_MAT)))
+                             "calibration, mat, position_display_id) "
+                             "VALUES ('hall', 'Hall', 'wall', 0, 0, 600, 340, %s, '{}', %s, %s)",
+                             (json.dumps(PROFILE), json.dumps(OLD_MAT), display))
                 conn.execute("INSERT INTO position_entries(id, frame_id, number, kind, at, fit, mat, "
                              "profile_width_px, profile_height_px) VALUES (gen_random_uuid(), 'hall', 1, "
                              "'kept-saved', now(), '{\"mode\": \"cover\"}', %s, 1920, 1080)", (json.dumps(OLD_MAT),))
@@ -61,8 +68,14 @@ def test_098_upgrades_every_display_and_frame_to_todays_picture(database_provisi
                 conn.execute("INSERT INTO player_configurations(player_id, authority_epoch, revision, configuration) VALUES ('p1', 1, 1, %s)",
                              (json.dumps({"player_id": "p1", "authority_epoch": 1, "configuration_revision": 1,
                                          "bindings": [binding]}),))
+                gone = {**binding, "output_id": "HDMI-A-2", "frame_id": "gone"}
+                conn.execute("INSERT INTO plan_offers(player_id, authority_epoch, revision, plan_id, manifest, groups, "
+                             "created_at, valid_until) VALUES ('p1', 1, 1, 'plan', %s, '[]', 1000, 1200)",
+                             (json.dumps({"layers": [], "bindings": [binding, gone]}),))
             db.migrate()
-            expected = upgrade_lighting(UPGRADE_DISPLAY_LIGHT, 2.5)
+            upgraded = upgrade_lighting(UPGRADE_DISPLAY_LIGHT, 2.5)
+            expected = upgraded.model_copy(update={"lights": tuple(
+                light.model_copy(update={"lux": 500.0}) for light in upgraded.lights)})
             with db.transaction() as conn:
                 display = conn.execute("SELECT * FROM displays").fetchone()
                 assert (display["matched_lux"], display["panel_black"]) == (1000.0, 0.0003)
@@ -70,10 +83,13 @@ def test_098_upgrades_every_display_and_frame_to_todays_picture(database_provisi
                 assert FrameLighting.model_validate(conn.execute(
                     "SELECT lighting FROM frames WHERE id='hall'").fetchone()["lighting"]) == expected
                 assert FrameLighting.model_validate(conn.execute(
-                    "SELECT lighting FROM position_entries").fetchone()["lighting"]) == expected
+                    "SELECT lighting FROM position_entries").fetchone()["lighting"]) == upgraded
                 stored = conn.execute("SELECT configuration FROM player_configurations").fetchone()["configuration"]
                 assert "mat" not in stored["bindings"][0]
                 assert PlayerConfiguration.model_validate(stored).bindings[0].lighting == expected
+                offered = conn.execute("SELECT manifest FROM plan_offers").fetchone()["manifest"]["bindings"]
+                assert all("mat" not in each for each in offered)
+                assert [FrameLighting.model_validate(each["lighting"]) for each in offered] == [expected, upgraded]
                 document = document_in(conn)
                 assert document.change == 1 and document.lights["room"].state == FULL_ON
                 assert conn.execute("SELECT reporter FROM room_lights WHERE id='room'").fetchone()["reporter"] == {

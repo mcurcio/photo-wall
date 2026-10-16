@@ -11,7 +11,11 @@
 -- white); one fixed room light "room" exists; each Frame's lighting is
 -- central/room_light/policy.py upgrade_lighting(UPGRADE_DISPLAY_LIGHT, its mat's depth): one wash of
 -- "room" at 1000 lx, dimmer-at-full, and paper of whiteness 0.9 and ink -log10(0.0003). The old mat
--- lights' relative strengths have no lux, so they are not carried (0028).
+-- lights' relative strengths have no lux, so they are not carried (0028). The Display's software
+-- brightness multiplied the linear picture, so a Frame keeps it as its wash's lux: 1000 x brightness
+-- / 100 lx (0 % becomes 0.1 lx: a light is never 0 lx), from the Display its Position names, else the
+-- one last seen on its bound Output; with neither, 1000 lx. The Display's LUT is not carried: its
+-- name needs the recipe Central bakes with, which is app code's (0028's costs).
 
 -- Room lights: each one's single reporter and colour (central/room_light/model.py RoomLight, as JSON),
 -- its last state (contracts/room_light.py's states) and when Central recorded it; `position` keeps
@@ -57,6 +61,14 @@ INSERT INTO room_lights (id, name, reporter, colour, state, heard_at, position) 
     ('room', 'Room', '{"kind": "fixed"}'::jsonb, '{"kind": "fixed", "kelvin": 6500}'::jsonb,
      '{"kind": "dimmer", "on": true, "brightness": 1.0, "rgb": null}'::jsonb, NULL, 0);
 INSERT INTO room_lights_change (one, change) VALUES (true, 1);
+
+-- Each Frame's wash, from its Display's software brightness, before the column goes.
+CREATE TEMP TABLE upgrade_wash ON COMMIT DROP AS
+    SELECT f.id AS frame_id, GREATEST(0.1, 10.0 * d.software_brightness_percent)::double precision AS lux
+    FROM frames f
+    LEFT JOIN bindings b ON b.frame_id = f.id
+    LEFT JOIN output_displays seen ON seen.player_id = b.player_id AND seen.output_id = b.output_id
+    JOIN displays d ON d.id = COALESCE(f.position_display_id, seen.display_id);
 
 -- The Display's light (contracts/node_picture.py DisplayLight); the print look's sliders and the
 -- Display's LUT go (the paper profile moves to the Frame's paper; a LUT a Frame's paper names cannot
@@ -115,7 +127,9 @@ UPDATE picture_documents SET
 ALTER TABLE frames ADD COLUMN lighting JSONB NULL CHECK (jsonb_typeof(lighting) = 'object');
 UPDATE frames SET lighting = jsonb_build_object(
     'mat_depth_mm', COALESCE((mat->>'depth_mm')::double precision, 0.0),
-    'lights', '[{"kind": "wash", "light": "room", "lux": 1000.0, "reference": "dimmer-at-full"}]'::jsonb,
+    'lights', jsonb_build_array(jsonb_build_object(
+        'kind', 'wash', 'light', 'room', 'reference', 'dimmer-at-full',
+        'lux', COALESCE((SELECT w.lux FROM upgrade_wash w WHERE w.frame_id = frames.id), 1000.0))),
     'paper', '{"whiteness": 0.9, "ink_density": 3.5228787452803374, "profile": null}'::jsonb);
 ALTER TABLE frames ALTER COLUMN lighting SET NOT NULL, DROP COLUMN mat;
 
@@ -149,13 +163,16 @@ ALTER TABLE position_entries ALTER COLUMN lighting SET NOT NULL, DROP COLUMN mat
 
 -- A binding carries its Frame's lighting (contracts/models.py OutputBinding, `lighting` required, no
 -- `mat`): a Player's last configuration and each offered plan's bindings stored before this release
--- read as the current contract (as 093 did for the mat).
+-- read as the current contract (as 093 did for the mat): the Frame's upgraded lighting, or for a
+-- Frame gone since, its mat's upgrade.
 UPDATE player_configurations SET configuration = jsonb_set(configuration, '{bindings}', (
     SELECT jsonb_agg(CASE WHEN jsonb_typeof(e.binding) = 'object'
-                          THEN (e.binding - 'mat' - 'lighting') || jsonb_build_object('lighting', jsonb_build_object(
+                          THEN (e.binding - 'mat' - 'lighting') || jsonb_build_object('lighting', COALESCE(
+                              (SELECT f.lighting FROM frames f WHERE f.id = e.binding->>'frame_id'),
+                              jsonb_build_object(
                               'mat_depth_mm', COALESCE((e.binding->'mat'->>'depth_mm')::double precision, 0.0),
                               'lights', '[{"kind": "wash", "light": "room", "lux": 1000.0, "reference": "dimmer-at-full"}]'::jsonb,
-                              'paper', '{"whiteness": 0.9, "ink_density": 3.5228787452803374, "profile": null}'::jsonb))
+                              'paper', '{"whiteness": 0.9, "ink_density": 3.5228787452803374, "profile": null}'::jsonb)))
                           ELSE e.binding END
                      ORDER BY e.ordinal)
     FROM jsonb_array_elements(configuration->'bindings') WITH ORDINALITY AS e(binding, ordinal)))
@@ -164,10 +181,12 @@ WHERE jsonb_typeof(configuration->'bindings') = 'array'
 
 UPDATE plan_offers SET manifest = jsonb_set(manifest, '{bindings}', (
     SELECT jsonb_agg(CASE WHEN jsonb_typeof(e.binding) = 'object'
-                          THEN (e.binding - 'mat' - 'lighting') || jsonb_build_object('lighting', jsonb_build_object(
+                          THEN (e.binding - 'mat' - 'lighting') || jsonb_build_object('lighting', COALESCE(
+                              (SELECT f.lighting FROM frames f WHERE f.id = e.binding->>'frame_id'),
+                              jsonb_build_object(
                               'mat_depth_mm', COALESCE((e.binding->'mat'->>'depth_mm')::double precision, 0.0),
                               'lights', '[{"kind": "wash", "light": "room", "lux": 1000.0, "reference": "dimmer-at-full"}]'::jsonb,
-                              'paper', '{"whiteness": 0.9, "ink_density": 3.5228787452803374, "profile": null}'::jsonb))
+                              'paper', '{"whiteness": 0.9, "ink_density": 3.5228787452803374, "profile": null}'::jsonb)))
                           ELSE e.binding END
                      ORDER BY e.ordinal)
     FROM jsonb_array_elements(manifest->'bindings') WITH ORDINALITY AS e(binding, ordinal)))
