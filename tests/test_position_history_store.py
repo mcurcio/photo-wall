@@ -423,13 +423,13 @@ def test_restore_refuses_an_entry_whose_lighting_names_a_room_light_gone_since(r
     loaded into the draft."""
     from central.infra.room_light_store import PgRoomLights
     from central.room_light.model import FixedReporter, RoomLight
-    from contracts.frame_lighting import DIMMER_AT_FULL, WashLight
+    from contracts.frame_lighting import AT_FULL, WashLight
     from contracts.room_light import FixedColour
 
     lights = PgRoomLights(registry.db)
     assert lights.save_room_light(RoomLight(id="spot", name="Spot", colour=FixedColour(kelvin=2700),
                                             reporter=FixedReporter())) is None
-    spotlit = LIGHTING.model_copy(update={"lights": (WashLight(light="spot", lux=500.0, reference=DIMMER_AT_FULL),)})
+    spotlit = LIGHTING.model_copy(update={"lights": (WashLight(light="spot", lux=500.0, reference=AT_FULL),)})
     node = Node(registry)
     trial = node.edit(node.begin(), SKEWED, spotlit)
     node.exchange()

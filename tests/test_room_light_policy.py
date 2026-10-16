@@ -33,12 +33,13 @@ from central.room_light.policy import (
     topic_entity,
     upgrade_lighting,
 )
-from contracts.frame_lighting import FrameLighting, Paper, WashLight
+from contracts.frame_lighting import AT_FULL, AtReading, FrameLighting, Paper, WashLight
 from contracts.node_picture import UPGRADE_DISPLAY_LIGHT
 from contracts.room_light import (
-    FULL_ON,
+    ColourDimmer,
     Dimmer,
     FixedColour,
+    FixedEntry,
     Measured,
     NotReported,
     ReportedColour,
@@ -75,9 +76,9 @@ def test_home_assistant_light_messages():
                 b'{"state":"on","rgb":[1,2]}', b'[1]', b'{"state":"on","state":"off"}', b"x" * 1025):
         with pytest.raises(ValueError, match="out-of-range"):
             parse_light_message(raw)
-    assert light_state(LightStateMessage("on", None, None)) == FULL_ON
+    assert light_state(LightStateMessage("on", None, None)) == Dimmer(on=True, brightness=1.0)
     assert light_state(LightStateMessage("off", None, None)) == Dimmer(on=False, brightness=0.0)
-    assert light_state(LightStateMessage("on", 51, (255, 0, 51))) == Dimmer(on=True, brightness=0.2, rgb=(1.0, 0.0, 0.2))
+    assert light_state(LightStateMessage("on", 51, (255, 0, 51))) == ColourDimmer(on=True, brightness=0.2, rgb=(1.0, 0.0, 0.2))
     assert light_state(LightStateMessage("unavailable", None, None)) == Unavailable()
 
 
@@ -120,18 +121,18 @@ def test_sensors():
 
 def test_a_frames_lighting_names_room_lights_with_their_reference():
     """Mutation probe: check_frame_lighting passes a reference mismatch -> the second assert fails."""
-    assert check_frame_lighting(wash("bookshelf-spot", "dimmer-at-full"), LIGHTS) is None
-    assert check_frame_lighting(wash("window", "dimmer-at-full"), LIGHTS) is FrameLightingRefusal.REFERENCE_MISMATCH
-    assert check_frame_lighting(wash("room", 300.0), LIGHTS) is FrameLightingRefusal.REFERENCE_MISMATCH
-    assert check_frame_lighting(wash("window", 300.0), LIGHTS) is None
-    assert check_frame_lighting(wash("cellar", "dimmer-at-full"), LIGHTS) is FrameLightingRefusal.UNKNOWN_ROOM_LIGHT
+    assert check_frame_lighting(wash("bookshelf-spot", AT_FULL), LIGHTS) is None
+    assert check_frame_lighting(wash("window", AT_FULL), LIGHTS) is FrameLightingRefusal.REFERENCE_MISMATCH
+    assert check_frame_lighting(wash("room", AtReading(lux=300.0)), LIGHTS) is FrameLightingRefusal.REFERENCE_MISMATCH
+    assert check_frame_lighting(wash("window", AtReading(lux=300.0)), LIGHTS) is None
+    assert check_frame_lighting(wash("cellar", AT_FULL), LIGHTS) is FrameLightingRefusal.UNKNOWN_ROOM_LIGHT
 
 
 def test_the_document_every_pi_draws_with():
-    """Mutation probe: room_lights_document stops mapping FixedReporter to FULL_ON -> `room` reads
-    the stored state (not reported here) and the first assert fails."""
+    """Mutation probe: room_lights_document stops mapping FixedReporter to a FixedEntry -> `room`
+    reads the stored state (not reported here) and the first assert fails."""
     document = room_lights_document(LIGHTS, {"room": NotReported(), "window": Measured(lux=40.0)}, 7)
-    assert document.lights["room"].state == FULL_ON
+    assert document.lights["room"] == FixedEntry(colour=FixedColour(kelvin=6500))
     assert document.lights["bookshelf-spot"].state == NotReported()
     assert document.lights["window"].state == Measured(lux=40.0) and document.change == 7
     assert document.lights["bookshelf-spot"].colour == WHITE
@@ -140,6 +141,6 @@ def test_the_document_every_pi_draws_with():
 def test_upgrade_lighting_matches_the_panel():
     lighting = upgrade_lighting(UPGRADE_DISPLAY_LIGHT, 2.5)
     assert lighting.mat_depth_mm == 2.5
-    assert lighting.lights == (WashLight(light="room", lux=1000.0, reference="dimmer-at-full"),)
+    assert lighting.lights == (WashLight(light="room", lux=1000.0, reference={"kind": "at-full"}),)
     assert lighting.paper.whiteness == 0.9 and lighting.paper.profile is None
     assert math.isclose(lighting.paper.ink_density, -math.log10(0.0003))

@@ -10,8 +10,8 @@ Output:
   changes and never with the Output document's `change`; `hardware`, the display settings someone
   set in Photo Wall, by MCCS code (an absent code is "as the display has it": nothing is written);
   `software`, Photo Wall's group (contrast, colour temperature and gamma), always all present;
-  `light`, the Display's light (`DisplayLight`, decision 0028: the matched lux and the panel's black,
-  the fixed point the Player's physics dims from).
+  `light`, the Display's light (`DisplayLight`: the matched lux and the panel's black, the fixed
+  point the Player's physics dims from).
 - The **picture report** (Pi -> Central, the state bucket, key `picture_report_key(output_id)`):
   the identity of the display `offered` describes; `offered`, the settings on the picture list the
   display answered when the Pi asked (None: not known yet; (): asked, it offers none); `results`,
@@ -42,10 +42,8 @@ Rules this module owns (one home each):
 - **a level as a percent** (`HardwareRange.percent`): a whole percent of the display's maximum,
   half up, which the base page and the console show first, the display's own count second;
 - the software ranges (contrast SOFTWARE_PERCENT_MIN..SOFTWARE_PERCENT_MAX, 100 changes nothing;
-  colour temperature and gamma) and the Display's light's (MATCHED_LUX_*, PANEL_BLACK_*). Room light
-  (decision 0028; owner, 2026-10-15, Q2 "the paper replaces them") removed the print look's
-  brightness, saturation, highlight rolloff, black floor and LUT: the Frame's paper replaces them
-  (contracts/frame_lighting.py), schema major 8;
+  colour temperature and gamma) and the Display's light's (MATCHED_LUX_*, PANEL_BLACK_*), schema
+  major 8;
 - the wire shapes, their size caps (which the bounds below make every valid value fit, so no
   valid report is ever refused for size) and the two keys;
 - the signal range's vocabulary (`SignalRange`, `SignalResult`), a test pattern's ask
@@ -93,7 +91,7 @@ GAMMA_TENTHS_MIN: Final = 18                    # gamma (#114) in tenths: 18..26
 GAMMA_TENTHS_MAX: Final = 26
 GAMMA_TENTHS_NEUTRAL: Final = 22                # 2.2: changes nothing
 
-# The Display's light (decision 0028): the TV as a fixed instrument at its tuned raw settings.
+# The Display's light: the TV as a fixed instrument at its tuned raw settings.
 MATCHED_LUX_MIN: Final = 10.0                   # the paper match's lux at the Frame, MATCHED_LUX_MIN..MATCHED_LUX_MAX
 MATCHED_LUX_MAX: Final = 20000.0
 PANEL_BLACK_MIN: Final = 0.00001                # the panel's black as a share of its white (an OLED reads near 0)
@@ -281,9 +279,8 @@ def _finite(value: object, minimum: float, maximum: float) -> bool:
 
 @dataclass(frozen=True)
 class DisplayLight:
-    """The Display's light (decision 0028; owner, 2026-10-15: the TV is configured "for the
-    _maximum lighting_ scenario so that the software can artificially dim later", its backlight never
-    assumed controllable): `matched_lux`, the light at the Frame (lux) when the TV's full white
+    """The Display's light (the TV set for the brightest room, its backlight never assumed
+    controllable): `matched_lux`, the light at the Frame (lux) when the TV's full white
     matched a sheet of paper (the paper match, contracts/frame_lighting.py SHEET_WHITENESS); `black`,
     the panel's black as a share of its white (its glow; the calibration reader measures it). The one
     fixed point the Player's physics dims from."""
@@ -330,7 +327,7 @@ class PictureDocument:
     software: SoftwarePicture
     signal_range: SignalRange = SignalRange.AUTO
     test_pattern: TestPatternAsk | None = None
-    light: DisplayLight = field(kw_only=True)      # decision 0028: always present, never defaulted
+    light: DisplayLight = field(kw_only=True)      # always present, never defaulted
 
     def __post_init__(self) -> None:
         """ValueError("picture_document") unless output_id is in OUTPUT_IDS, picture_change >= 1,

@@ -14,6 +14,7 @@ from test_player_service import close, rig
 
 from contracts.calibration_target import Surface, TargetCode, board_raster
 from contracts.node_frame import PictureOperations
+from contracts.node_picture import UPGRADE_DISPLAY_LIGHT
 from contracts.tuning import TestPattern
 from player.calibration_target import target_modules
 from player.native import NativeOutput, NativeRenderer, _Surface
@@ -89,7 +90,7 @@ def spy_renderer() -> NativeRenderer:
 
 
 def target_operations(change: int) -> PictureOperations:
-    return PictureOperations("HDMI-A-1", change, (1.0, 1.0, 1.0), 1.0, 1.0, 1000.0, 0.0003,
+    return PictureOperations("HDMI-A-1", change, (1.0, 1.0, 1.0), 1.0, 1.0, UPGRADE_DISPLAY_LIGHT,
                              test_pattern=TestPattern.TARGET_PRE_SOFTWARE)
 
 
@@ -135,7 +136,7 @@ def test_the_post_software_qr_never_waits():
     renderer._player_id = PLAYER
     surface = _Surface(NativeOutput("HDMI-A-1", "photo-wall-hdmi-a-1"), None, None)
     modules = len(target_modules(TargetCode(PLAYER, "HDMI-A-1", 5)))
-    post = PictureOperations("HDMI-A-1", 5, (1.0, 1.0, 1.0), 1.0, 1.0, 1000.0, 0.0003,
+    post = PictureOperations("HDMI-A-1", 5, (1.0, 1.0, 1.0), 1.0, 1.0, UPGRADE_DISPLAY_LIGHT,
                              test_pattern=TestPattern.TARGET_POST_SOFTWARE)
     assert renderer._bind_target(surface, post) == modules
 

@@ -12,7 +12,7 @@ import pytest
 import player.native as native_module
 from contracts.frame_fit import cover_rectangle
 from contracts.frame_lighting import (
-    DIMMER_AT_FULL,
+    AT_FULL,
     SHEET_WHITENESS,
     FrameLighting,
     Paper,
@@ -22,7 +22,11 @@ from contracts.models import Calibration, CornersFit, CoverFit, FrameProfile, Ph
 from contracts.node_frame import PictureOperations
 from contracts.node_picture import DisplayLight
 from contracts.photo_crop import CENTRED
-from contracts.room_light import FULL_ON, FixedColour, RoomLightEntry, RoomLightsDocument
+from contracts.room_light import (
+    FixedColour,
+    FixedEntry,
+    RoomLightsDocument,
+)
 from player.geometry import (
     compose_pixel,
     decode_channel,
@@ -169,15 +173,15 @@ OPENING = ((.1, .12), (.85, .08), (.9, .9), (.12, .82))
 
 
 def _operations(rgb=(1.0, 1.0, 1.0), slope=1.0, exponent=1.0, *, output_id="HDMI-A-1", change=1):
-    return PictureOperations(output_id, change, rgb, slope, exponent, MATCHED, BLACK)
+    return PictureOperations(output_id, change, rgb, slope, exponent, DisplayLight(MATCHED, BLACK))
 
 
 MATCHED, BLACK = 1000.0, 0.0003
 # The upgrade's light (decision 0028): one wash of a fixed white room light, full on, at the matched
 # lux, on paper of whiteness 0.9 and ink -log10(black): the photo's signal is the photo itself.
-UPGRADE = FrameLighting(mat_depth_mm=0, lights=(WashLight(light="room", lux=MATCHED, reference=DIMMER_AT_FULL),),
+UPGRADE = FrameLighting(mat_depth_mm=0, lights=(WashLight(light="room", lux=MATCHED, reference=AT_FULL),),
                         paper=Paper(whiteness=SHEET_WHITENESS, ink_density=-math.log10(BLACK)))
-ROOM = RoomLightsDocument(change=1, lights={"room": RoomLightEntry(FixedColour(6500), FULL_ON)})
+ROOM = RoomLightsDocument(change=1, lights={"room": FixedEntry(colour=FixedColour(kelvin=6500))})
 UPGRADE_LIGHTS = frame_lights(UPGRADE, ROOM, CoverFit(), FrameProfile(width_px=1920, height_px=1080,
                                                                       diagonal_inches=27),
                               DisplayLight(MATCHED, BLACK))
@@ -834,10 +838,10 @@ def test_the_frames_lights_reach_the_shader_as_the_reference_holds_them():
     from player.geometry import LIGHT_KINDS
 
     lighting = FrameLighting(mat_depth_mm=4, paper=Paper(whiteness=.85, ink_density=2.3), lights=(
-        WashLight(light="room", lux=80, reference=DIMMER_AT_FULL),
-        FarLight(light="room", lux=200, reference=DIMMER_AT_FULL, from_degrees=30, steep_degrees=40,
+        WashLight(light="room", lux=80, reference=AT_FULL),
+        FarLight(light="room", lux=200, reference=AT_FULL, from_degrees=30, steep_degrees=40,
                  softness_degrees=10),
-        CloseLight(light="room", lux=400, reference=DIMMER_AT_FULL, across_mm=0, up_mm=350, out_mm=250,
+        CloseLight(light="room", lux=400, reference=AT_FULL, across_mm=0, up_mm=350, out_mm=250,
                    inner_beam_degrees=20, outer_beam_degrees=40)))
     lights = frame_lights(lighting, ROOM, CoverFit(rotation=90), _PROFILE, DisplayLight(MATCHED, BLACK))
     gl = _UniformGL()

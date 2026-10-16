@@ -29,30 +29,36 @@ from central.room_light.model import (
     OnPlayer,
     Reporter,
     RoomLight,
+    RoomLightState,
     Sensor,
     SensorReporter,
     SetupRefusal,
 )
 from contracts.frame_lighting import (
-    DIMMER_AT_FULL,
+    AT_FULL,
     SHEET_WHITENESS,
+    AtFull,
     FrameLighting,
     Paper,
     WashLight,
 )
 from contracts.node_picture import DisplayLight
 from contracts.room_light import (
-    FULL_ON,
     LUX_MAX,
     ROOM_LIGHTS_MAX,
+    ColourDimmer,
+    ColourEntry,
     Dimmer,
+    FixedColour,
+    FixedEntry,
     Measured,
+    MeasuredEntry,
     NotReported,
     ReportedColour,
     RoomLightEntry,
     RoomLightsDocument,
-    RoomLightState,
     Unavailable,
+    WhiteEntry,
 )
 from contracts.strict_json import loads_object
 
@@ -119,16 +125,18 @@ def parse_illuminance_message(raw: bytes) -> IlluminanceMessage:
     raise ValueError(_OUT_OF_RANGE)
 
 
-def light_state(message: LightStateMessage) -> Dimmer | Unavailable:
-    """Home Assistant's light as a room light state: unavailable -> Unavailable(); off ->
-    Dimmer(on=False, brightness=0.0 when none was sent, else brightness/255); on -> Dimmer(on=True,
-    brightness = brightness/255, or 1.0 when none was sent; rgb = each/255, or None)."""
+def light_state(message: LightStateMessage) -> Dimmer | ColourDimmer | Unavailable:
+    """Home Assistant's light as a room light state: unavailable -> Unavailable(); off -> on False,
+    brightness 0.0 when none was sent, else brightness/255; on -> on True, brightness/255, or 1.0
+    when none was sent; with rgb, a ColourDimmer of each/255, else a Dimmer."""
     if message.state == "unavailable":
         return Unavailable()
-    rgb = None if message.rgb is None else (message.rgb[0] / 255, message.rgb[1] / 255, message.rgb[2] / 255)
-    if message.state == "off":
-        return Dimmer(on=False, brightness=0.0 if message.brightness is None else message.brightness / 255, rgb=rgb)
-    return Dimmer(on=True, brightness=1.0 if message.brightness is None else message.brightness / 255, rgb=rgb)
+    on = message.state == "on"
+    brightness = (1.0 if on else 0.0) if message.brightness is None else message.brightness / 255
+    if message.rgb is None:
+        return Dimmer(on=on, brightness=brightness)
+    return ColourDimmer(on=on, brightness=brightness,
+                        rgb=(message.rgb[0] / 255, message.rgb[1] / 255, message.rgb[2] / 255))
 
 
 def illuminance_state(message: IlluminanceMessage) -> Measured | Unavailable:
@@ -163,7 +171,7 @@ def light_measured_by(lights: Collection[RoomLight], sensor_id: str) -> RoomLigh
 
 def measured_by_a_sensor(reporter: Reporter) -> bool:
     """Whether a room light reported by `reporter` is a reading in lux (a SensorReporter), so a Frame
-    light of it takes a lux reference; else it is a dimmer and takes DIMMER_AT_FULL. The one home of
+    light of it takes AtReading; else it takes AtFull. The one home of
     which reference fits which reporter."""
     return isinstance(reporter, SensorReporter)
 
@@ -241,37 +249,54 @@ def check_sensor_removal(sensor_id: str, sensors: Mapping[str, Sensor],
 def check_frame_lighting(lighting: FrameLighting, lights: Mapping[str, RoomLight]) -> FrameLightingRefusal | None:
     """Whether a Frame's lighting fits the room lights: every Frame light names a room light
     (UNKNOWN_ROOM_LIGHT), and its reference matches its room light's reporter (REFERENCE_MISMATCH):
-    DIMMER_AT_FULL for a HomeAssistantLight or FixedReporter, a lux for a SensorReporter."""
+    AtFull for a HomeAssistantLight or FixedReporter, AtReading for a SensorReporter."""
     for frame_light in lighting.lights:
         room_light = lights.get(frame_light.light)
         if room_light is None:
             return FrameLightingRefusal.UNKNOWN_ROOM_LIGHT
-        if measured_by_a_sensor(room_light.reporter) == (frame_light.reference == DIMMER_AT_FULL):
+        if measured_by_a_sensor(room_light.reporter) == isinstance(frame_light.reference, AtFull):
             return FrameLightingRefusal.REFERENCE_MISMATCH
     return None
 
 
 def room_lights_document(lights: Mapping[str, RoomLight], states: Mapping[str, RoomLightState],
                          change: int) -> RoomLightsDocument:
-    """The document every Pi draws with: every room light with its colour and state. A
-    FixedReporter's state is FULL_ON whatever `states` holds; a light `states` lacks is
-    NotReported(). Pure; the same for every Pi."""
+    """The document every Pi draws with: every room light as the entry of its reporter's kind,
+    with its state (a light `states` lacks is NotReported()). Pure; the same for every Pi."""
     return RoomLightsDocument(change=change, lights={
-        light_id: RoomLightEntry(
-            colour=light.colour,
-            state=FULL_ON if isinstance(light.reporter, FixedReporter) else states.get(light_id, NotReported()))
-        for light_id, light in sorted(lights.items())})
+        light_id: entry_of(light, states.get(light_id, NotReported())) for light_id, light in sorted(lights.items())})
+
+
+def entry_of(light: RoomLight, state: RoomLightState) -> RoomLightEntry:
+    """`light` and its last `state` as the document's entry of its reporter's kind: a fixed light's
+    state is ignored (always on, at full); a white light takes a ColourDimmer's on and brightness (its
+    colour is configured); a colour light takes a Dimmer as driven white (1, 1, 1); a state of
+    another reporter's kind is NotReported. Pure."""
+    reporter, colour = light.reporter, light.colour
+    if isinstance(reporter, FixedReporter):
+        assert isinstance(colour, FixedColour)
+        return FixedEntry(colour=colour)
+    if isinstance(reporter, SensorReporter):
+        assert isinstance(colour, FixedColour)
+        return MeasuredEntry(colour=colour, state=state if isinstance(state, Measured | Unavailable) else NotReported())
+    if isinstance(colour, ReportedColour):
+        if isinstance(state, Dimmer):
+            state = ColourDimmer(on=state.on, brightness=state.brightness, rgb=(1.0, 1.0, 1.0))
+        return ColourEntry(colour=colour, state=state if isinstance(state, ColourDimmer | Unavailable) else NotReported())
+    if isinstance(state, ColourDimmer):
+        state = Dimmer(on=state.on, brightness=state.brightness)
+    return WhiteEntry(colour=colour, state=state if isinstance(state, Dimmer | Unavailable) else NotReported())
 
 
 def upgrade_lighting(display: DisplayLight, mat_depth_mm: float) -> FrameLighting:
     """A Frame's lighting on upgrade, so today's picture is unchanged (decision 0028; with the
     sliders gone, "unchanged" is today's picture at neutral sliders): one WashLight of
-    UPGRADE_ROOM_LIGHT_ID at display.matched_lux with reference DIMMER_AT_FULL, the mat's depth
+    UPGRADE_ROOM_LIGHT_ID at display.matched_lux with reference AT_FULL, the mat's depth
     kept, and Paper(whiteness=SHEET_WHITENESS, ink_density=-log10(display.black), profile None), so
     the paper's black lands exactly on the panel's black and its white on the TV's white."""
     return FrameLighting(
         mat_depth_mm=mat_depth_mm,
-        lights=(WashLight(light=UPGRADE_ROOM_LIGHT_ID, lux=display.matched_lux, reference=DIMMER_AT_FULL),),
+        lights=(WashLight(light=UPGRADE_ROOM_LIGHT_ID, lux=display.matched_lux, reference=AT_FULL),),
         paper=Paper(whiteness=SHEET_WHITENESS, ink_density=-math.log10(display.black), profile=None))
 
 
@@ -292,7 +317,7 @@ def new_frame_lighting(display: DisplayLight, lights: Mapping[str, RoomLight]) -
 __all__ = [
     "UPGRADE_ROOM_LIGHT_ID", "UPGRADE_ROOM_LIGHT_NAME", "check_frame_lighting", "check_room_light",
     "check_room_light_removal", "check_sensor", "check_sensor_removal", "illuminance_state", "light_measured_by",
-    "measured_by_a_sensor", "new_frame_lighting",
+    "entry_of", "measured_by_a_sensor", "new_frame_lighting",
     "light_reported_by_entity", "light_state", "parse_illuminance_message", "parse_light_message",
     "room_lights_document", "sensor_at_entity", "sensor_on_player", "topic_entity", "upgrade_lighting",
 ]

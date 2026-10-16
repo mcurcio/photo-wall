@@ -231,7 +231,7 @@ def test_a_frames_paper_profile_holds_its_lut_on_the_list(registry):
     def lighting(sha: str) -> dict:
         return {"mat_depth_mm": 0.0, "paper": {"whiteness": 0.9, "ink_density": 2.3,
                                               "profile": {"profile_sha256": sha, "recipe_id": LUT_RECIPE_ID}},
-                "lights": [{"kind": "wash", "light": "room", "lux": 1000.0, "reference": "dimmer-at-full"}]}
+                "lights": [{"kind": "wash", "light": "room", "lux": 1000.0, "reference": {"kind": "at-full"}}]}
 
     with _client(registry) as client:
         assert _add(client, printer).status_code == 201

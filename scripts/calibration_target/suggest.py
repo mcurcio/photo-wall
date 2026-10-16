@@ -72,6 +72,7 @@ from scipy.optimize import minimize_scalar
 from appliance.display_host.picture import operations_for
 from central.displays.views import PictureEntryView
 from contracts.calibration_target import NEAR_BLACK_STEPS
+from contracts.colour import srgb_to_linear
 from contracts.kelvin import (
     KELVIN_TABLE_MAX,
     KELVIN_TABLE_MIN,
@@ -79,7 +80,7 @@ from contracts.kelvin import (
     KELVIN_WHITE,
     kelvin_white,
 )
-from contracts.node_frame import PictureOperations, srgb_to_linear
+from contracts.node_frame import PictureOperations
 from contracts.node_output import OUTPUT_IDS
 from contracts.node_picture import (
     GAMMA_TENTHS_MAX,

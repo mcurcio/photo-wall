@@ -70,6 +70,7 @@ from contracts.node_calibration import (
     candidate_hash,
     canonical,
     encode_trial,
+    lighting_text,
 )
 from contracts.node_display import document, surface_from
 
@@ -143,7 +144,7 @@ class NodeCalibration:
         session_id = trial_id if session_id is None else session_id
         baseline = context.request.admitted
         payload = canonical(calibration.model_dump(mode="json"))
-        sha = candidate_hash(trial_id, generation, 1, baseline, payload, _lighting_json(lighting))
+        sha = candidate_hash(trial_id, generation, 1, baseline, payload, lighting)
         _fits_envelope(trial_id, generation, baseline, payload, sha, lighting)
         row = conn.execute(
             "INSERT INTO node_calibration_trials(trial_id,frame_id,generation,player_id,"
@@ -365,7 +366,7 @@ class NodeCalibration:
             sequence,
             surface_from(row["baseline"]),
             canonical(calibration.model_dump(mode="json")),
-            _lighting_json(lighting),
+            lighting,
         )
         _fits_envelope(row["trial_id"], row["generation"], surface_from(row["baseline"]),
                        canonical(calibration.model_dump(mode="json")), sha, lighting, sequence=sequence)
@@ -448,7 +449,7 @@ class NodeCalibration:
             row["candidate_sha256"],
             request.sampled_boottime_ms + max(1, int((row["expires_at"] - now) * 1000)),
             request.sampled_boottime_ms + max(1, int((row["hard_expires_at"] - now) * 1000)),
-            lighting_json=canonical(row["lighting"]),
+            lighting=FrameLighting.model_validate(row["lighting"]),
         )
         handed = TrialHanded(
             position_values(Calibration.model_validate(row["calibration"]),
@@ -465,7 +466,7 @@ def _lighting(value: object) -> FrameLighting:
         lighting = FrameLighting.model_validate(value)
     except ValidationError:
         raise NodeControlError("trial_lighting_invalid", 422) from None
-    if len(_lighting_json(lighting).encode()) > MAX_LIGHTING_BYTES:
+    if len(lighting_text(lighting).encode()) > MAX_LIGHTING_BYTES:
         raise NodeControlError("trial_lighting_invalid", 422)
     return lighting
 
@@ -492,17 +493,12 @@ def _fits_envelope(trial_id: UUID, generation: int, baseline, calibration_json: 
     """NodeControlError("trial_lighting_invalid", 422) when the trial's envelope carrying `lighting`
     would pass MAX_TRIAL_BYTES (the display host's C buffers), with the widest deadlines."""
     candidate = TrialCandidate(trial_id, generation, sequence, baseline, calibration_json, sha,
-                               2**53, 2**53, lighting_json=_lighting_json(lighting))
+                               2**53, 2**53, lighting=lighting)
     try:
         if len(encode_trial(candidate).encode()) > MAX_TRIAL_BYTES:
             raise ValueError("trial_envelope_bound")
     except ValueError:
         raise NodeControlError("trial_lighting_invalid", 422) from None
-
-
-def _lighting_json(lighting: FrameLighting) -> str:
-    """The lighting as the trial carries and hashes it (contracts.node_calibration `lighting_json`)."""
-    return canonical(lighting.model_dump(mode="json"))
 
 
 def _lease(row) -> Lease:

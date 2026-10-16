@@ -12,7 +12,7 @@ import math
 import pytest
 
 from contracts.frame_lighting import (
-    DIMMER_AT_FULL,
+    AT_FULL,
     CloseLight,
     FarLight,
     FrameLighting,
@@ -23,7 +23,11 @@ from contracts.lut import LUT_BYTES, LUT_GRID, lut_offset
 from contracts.models import CornersFit, CoverFit, FrameProfile
 from contracts.node_frame import PictureOperations
 from contracts.node_picture import DisplayLight
-from contracts.room_light import FULL_ON, FixedColour, RoomLightEntry, RoomLightsDocument
+from contracts.room_light import (
+    FixedColour,
+    FixedEntry,
+    RoomLightsDocument,
+)
 from player.geometry import (
     HIGHLIGHT_KNEE,
     LUMA,
@@ -44,20 +48,20 @@ SCREEN = FrameProfile(width_px=1920, height_px=1080, diagonal_inches=27)     # 2
 WIDTH_MM = 27 * 25.4 * (16 / 9) / math.hypot(16 / 9, 1)
 HEIGHT_MM = 27 * 25.4 / math.hypot(16 / 9, 1)
 DISPLAY = DisplayLight(1000.0, 0.0003)
-ROOM = RoomLightsDocument(change=1, lights={"room": RoomLightEntry(FixedColour(6500), FULL_ON)})
+ROOM = RoomLightsDocument(change=1, lights={"room": FixedEntry(colour=FixedColour(kelvin=6500))})
 PAPER = Paper(whiteness=.9, ink_density=-math.log10(DISPLAY.black))
 WASH = 100.0                       # the room's even light, lux
 FAR = 300.0                        # the far light's lux
 
 
 def far(from_degrees=0, steep=45, softness=0) -> FarLight:
-    return FarLight(light="room", lux=FAR, reference=DIMMER_AT_FULL, from_degrees=from_degrees,
+    return FarLight(light="room", lux=FAR, reference=AT_FULL, from_degrees=from_degrees,
                     steep_degrees=steep, softness_degrees=softness)
 
 
 def lit(*lights, depth=2.0, fit=CoverFit(), paper=PAPER):
     lighting = FrameLighting(mat_depth_mm=depth, paper=paper,
-                             lights=(WashLight(light="room", lux=WASH, reference=DIMMER_AT_FULL), *lights))
+                             lights=(WashLight(light="room", lux=WASH, reference=AT_FULL), *lights))
     return frame_lights(lighting, ROOM, fit, SCREEN, DISPLAY)
 
 
@@ -67,7 +71,7 @@ def reached(lights, x, y) -> float:
 
 
 def operations() -> PictureOperations:
-    return PictureOperations("HDMI-A-1", 1, (1.0, 1.0, 1.0), 1.0, 1.0, DISPLAY.matched_lux, DISPLAY.black)
+    return PictureOperations("HDMI-A-1", 1, (1.0, 1.0, 1.0), 1.0, 1.0, DISPLAY)
 
 
 # -- A far light's mat shadow ------------------------------------------------------------------------
@@ -170,7 +174,7 @@ def test_a_lights_lux_is_its_brightness_and_its_kelvin_only_its_colour(kelvin):
 # -- A close light: its place from the wall's up, its cone, its point shadow -------------------------
 
 def spot(**place) -> CloseLight:
-    return CloseLight(**{"light": "room", "lux": 400, "reference": DIMMER_AT_FULL, "across_mm": 0, "up_mm": 350,
+    return CloseLight(**{"light": "room", "lux": 400, "reference": AT_FULL, "across_mm": 0, "up_mm": 350,
                          "out_mm": 250, "inner_beam_degrees": 20, "outer_beam_degrees": 40, **place})
 
 
@@ -235,7 +239,7 @@ def test_the_paper_profile_comes_before_the_paper_and_a_lut_not_held_draws_witho
     inverting table is the paper's white. A LUT not held (None) draws exactly the photo's paper."""
     upgrade = lit(depth=0)
     upgrade_wash_only = frame_lights(FrameLighting(mat_depth_mm=0, paper=PAPER, lights=(
-        WashLight(light="room", lux=DISPLAY.matched_lux, reference=DIMMER_AT_FULL),)), ROOM, CoverFit(), SCREEN, DISPLAY)
+        WashLight(light="room", lux=DISPLAY.matched_lux, reference=AT_FULL),)), ROOM, CoverFit(), SCREEN, DISPLAY)
     white = final_pixel((0.0, 0.0, 0.0), operations(), inside=True, lights=upgrade_wash_only, x=.5, y=.5,
                         lut=INVERTING)
     assert white[:3] == pytest.approx((1.0, 1.0, 1.0), abs=2 / 255)

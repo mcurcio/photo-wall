@@ -17,9 +17,9 @@ from pydantic import Field
 
 from central.room_light.model import Colour, Name, Reporter, RoomLightId, SensorId, SensorPlace
 from contracts.models import Identifier, Instant, Model
-from contracts.room_light import Dimmer, Measured, NotReported, Unavailable
+from contracts.room_light import ColourDimmer, Dimmer, Measured, NotReported, Unavailable
 
-StateView = Annotated[Dimmer | Measured | Unavailable | NotReported, Field(discriminator="kind")]
+StateView = Annotated[Dimmer | ColourDimmer | Measured | Unavailable | NotReported, Field(discriminator="kind")]
 
 
 class RoomLightSave(Model):

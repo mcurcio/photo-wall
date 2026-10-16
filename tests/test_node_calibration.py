@@ -122,7 +122,7 @@ def test_local_terminal_expiry_rejects_delayed_trial_and_canonical_output_primit
         calibration_json=raw,
         candidate_sha256=candidate_hash(
             candidate.trial_id, candidate.generation, candidate.sequence, candidate.baseline, raw,
-            candidate.lighting_json,
+            candidate.lighting,
         ),
     )
     from contracts.node_calibration import encode_trial

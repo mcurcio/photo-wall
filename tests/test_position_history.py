@@ -33,7 +33,7 @@ from contracts.models import Calibration, CornersFit, CoverFit
 
 SKEWED = PositionValues(CornersFit(corners=((0.1, 0), (1, 0), (1, 1), (0, 1))), LIGHTING)
 MATTED = PositionValues(CoverFit(), FrameLighting(
-    mat_depth_mm=2.0, lights=(FarLight(light="room", lux=400.0, reference="dimmer-at-full", from_degrees=90,
+    mat_depth_mm=2.0, lights=(FarLight(light="room", lux=400.0, reference={"kind": "at-full"}, from_degrees=90,
                                        steep_degrees=30, softness_degrees=5),),
     paper=Paper(whiteness=0.9, ink_density=2.3)))
 PORTRAIT, LANDSCAPE = (1080, 1920), (1920, 1080)

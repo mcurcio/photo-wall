@@ -9,7 +9,7 @@ Node's `display` session reads WALL. A room light `bookshelf-spot` (Home Assista
 
 1. A retained `{"state":"on","brightness":255}` is published BEFORE the worker's link starts; the
    link starts and the Node's WALL mirror decodes a document whose `bookshelf-spot` is on at full and
-   whose fixed `room` is FULL_ON.
+   whose fixed `room` is always on.
 2. Ten alternating off/on messages raise the document's change ten times while the Frame's
    configuration revision, the Player's stored configurations and its plan offers do not move (the
    control State never carries a light). The same state again changes nothing.
@@ -40,17 +40,17 @@ from integration.bus_servers import (
 from psycopg.types.json import Jsonb
 from test_registry import enroll, frame
 
-from central.infra.home_assistant import Broker, HomeAssistantLink
+from central.infra.home_assistant.link import Broker, HomeAssistantLink
 from central.infra.node_link_store import PgWallMarks
 from central.infra.room_light_store import PgRoomLights
 from central.node_bus_wiring import WALL_RECHECK_SECONDS, WALL_TABLE, RoomLightsWall
 from central.room_light.model import FixedReporter, HomeAssistantLight, RoomLight
 from contracts.frame_lighting import CloseLight
 from contracts.room_light import (
-    FULL_ON,
     ROOM_LIGHTS_KEY,
     Dimmer,
     FixedColour,
+    FixedEntry,
     RoomLightsDocument,
     Unavailable,
     decode_room_lights,
@@ -127,7 +127,7 @@ def test_a_retained_home_assistant_state_reaches_the_node_without_moving_the_con
                                             reporter=HomeAssistantLight(entity="light.bookshelf_spot"),
                                             colour=FixedColour(kelvin=4000))) is None
     frame(registry, "hall")
-    spot = CloseLight(light="bookshelf-spot", lux=800.0, reference="dimmer-at-full", across_mm=0, up_mm=600,
+    spot = CloseLight(light="bookshelf-spot", lux=800.0, reference={"kind": "at-full"}, across_mm=0, up_mm=600,
                       out_mm=900, inner_beam_degrees=20, outer_beam_degrees=40)
     with database.transaction() as conn:
         conn.execute("UPDATE frames SET lighting = jsonb_set(lighting, '{lights}', lighting->'lights' || %s::jsonb) "
@@ -176,7 +176,7 @@ def test_a_retained_home_assistant_state_reaches_the_node_without_moving_the_con
             await until(seen(lambda d: d.lights["bookshelf-spot"].state == Dimmer(on=True, brightness=1.0)),
                         SECONDS, "the Node sees the spot on at full")
             first = document()
-            assert first.lights["room"].state == FULL_ON
+            assert isinstance(first.lights["room"], FixedEntry)
             assert lights.lights().home_assistant.state == "connected"
             control = _control(database)
 

@@ -22,7 +22,7 @@ from central.assets.maintenance import CacheSettings, MediaCacheBudget
 from central.assets.store import CacheStore
 from central.content_wiring import build_job_runtime
 from central.db import Database, DatabaseTransactionClock
-from central.infra.home_assistant import HomeAssistantLink, build_home_assistant_link
+from central.infra.home_assistant.link import HomeAssistantLink, build_home_assistant_link
 from central.infra.house_store import seed_house
 from central.infra.key_content_store import PgKeyContent
 from central.infra.media_cache_records import PgMediaVariantUse

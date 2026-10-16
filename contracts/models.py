@@ -87,7 +87,7 @@ class OutputBinding(Model):
     configuration_revision: int = Field(default=1, ge=1)
     profile: FrameProfile
     calibration: Calibration = Field(default_factory=Calibration)
-    lighting: FrameLighting                             # the Frame's lights, mat and paper (decision 0028)
+    lighting: FrameLighting                             # the Frame's lights, mat and paper
 
 
 def frame_output(profile: FrameProfile, calibration: Calibration,

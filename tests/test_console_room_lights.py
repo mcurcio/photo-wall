@@ -9,12 +9,13 @@ refusal case fails.
 """
 
 import json
+import re
 import subprocess
 from pathlib import Path
 
 from test_console_flow import _require_node
 
-from contracts.room_light import room_light_id
+from contracts.room_light import ROOM_LIGHT_ID_PATTERN
 
 MODULE = Path(__file__).parents[1] / "central/console/src/roomLightWords.js"
 NAMES = ["Bookshelf spot", "  Overheads (RGB) ", "Café lamp", "Daylight — window", "a" * 40, "Spot-", "!!!"]
@@ -70,7 +71,7 @@ def test_a_name_gives_an_id_the_contract_takes():
     ids = _run()["ids"]
     assert ids[:4] == ["bookshelf-spot", "overheads-rgb", "cafe-lamp", "daylight-window"]
     assert ids[5] == "spot" and ids[6] == ""
-    assert all(room_light_id(each) for each in ids[:6]), ids
+    assert all(re.fullmatch(ROOM_LIGHT_ID_PATTERN, each) for each in ids[:6]), ids
     assert len(ids[4]) == 32
 
 

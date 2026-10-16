@@ -25,10 +25,10 @@ from contracts.node_display import Surface
 from contracts.node_picture import KELVIN_MAX, KELVIN_MIN
 from contracts.node_protocol import NodeProcessIdentity, OutputKey
 
-LIGHTING = FrameLighting(mat_depth_mm=0.0, lights=(WashLight(light="room", lux=1000.0, reference="dimmer-at-full"),),
+LIGHTING = FrameLighting(mat_depth_mm=0.0, lights=(WashLight(light="room", lux=1000.0, reference={"kind": "at-full"}),),
                          paper=Paper(whiteness=0.9, ink_density=2.3))
 SPOT_LIGHTING = LIGHTING.model_copy(update={"mat_depth_mm": 2.5, "lights": (
-    CloseLight(light="bookshelf-spot", lux=800.0, reference="dimmer-at-full", across_mm=0, up_mm=600, out_mm=900,
+    CloseLight(light="bookshelf-spot", lux=800.0, reference={"kind": "at-full"}, across_mm=0, up_mm=600, out_mm=900,
                inner_beam_degrees=20, outer_beam_degrees=40),)})
 
 
@@ -77,24 +77,24 @@ def test_the_trial_candidate_hash_covers_the_lighting():
     trial_id = uuid4()
     calibration = '{"fit":{"corners":[[0,0],[1,0],[1,1],[0,1]],"mode":"cover","rotation":0},"revision":1}'
     baseline = _surface()
-    assert candidate_hash(trial_id, 1, 1, baseline, calibration, _json(SPOT_LIGHTING)) != candidate_hash(
-        trial_id, 1, 1, baseline, calibration, _json(LIGHTING))
+    assert candidate_hash(trial_id, 1, 1, baseline, calibration, SPOT_LIGHTING) != candidate_hash(
+        trial_id, 1, 1, baseline, calibration, LIGHTING)
 
 
 def test_the_frames_wires_refuse_a_message_without_its_lighting():
-    """No backwards compatibility: a trial envelope without `lighting_json`, and a binding without
+    """No backwards compatibility: a trial envelope without `lighting`, and a binding without
     `lighting` (or with the print look's `mat`), are refused, never read as a default (decision 0028).
 
-    Mutation probes: let parse_trial take a missing lighting_json (a default on TrialCandidate) ->
+    Mutation probes: let parse_trial take a missing lighting (a default on TrialCandidate) ->
     the envelope is read; default OutputBinding.lighting -> the binding without it is read."""
     trial_id, baseline = uuid4(), _surface()
     calibration = '{"fit":{"corners":[[0,0],[1,0],[1,1],[0,1]],"mode":"cover","rotation":0},"revision":1}'
-    lighting = _json(LIGHTING)
+    lighting = LIGHTING
     envelope = json.loads(encode_trial(TrialCandidate(
         trial_id, 1, 1, baseline, calibration, candidate_hash(trial_id, 1, 1, baseline, calibration, lighting),
         5000, 9000, lighting)))
-    assert parse_trial(canonical(envelope)).lighting_json == lighting
-    del envelope["lighting_json"]
+    assert parse_trial(canonical(envelope)).lighting == lighting
+    del envelope["lighting"]
     with pytest.raises(ValueError, match="trial_envelope_invalid"):
         parse_trial(canonical(envelope))
     binding = {"output_id": "HDMI-A-1", "frame_id": "f", "generation": 1,

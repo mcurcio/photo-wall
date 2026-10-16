@@ -60,10 +60,12 @@ from contracts.calibration_target import (
     qr_copies,
     screen_columns,
 )
+from contracts.colour import srgb_to_linear
 from contracts.frame_fit import Corners, OutputSize, cover_rectangle
 from contracts.frame_lighting import (
-    DIMMER_AT_FULL,
     SHEET_WHITENESS,
+    AtFull,
+    AtReading,
     CloseLight,
     FarLight,
     FrameLighting,
@@ -73,10 +75,20 @@ from contracts.frame_lighting import (
 from contracts.kelvin import kelvin_white
 from contracts.lut import LUT_GRID, lut_offset
 from contracts.models import CornersFit, CoverFit, FrameProfile, PhotoCrop
-from contracts.node_frame import PictureOperations, srgb_to_linear
+from contracts.node_frame import PictureOperations
 from contracts.node_picture import DisplayLight
 from contracts.photo_crop import CENTRED, crop_window
-from contracts.room_light import Dimmer, FixedColour, Measured, RoomLightEntry, RoomLightsDocument
+from contracts.room_light import (
+    ColourDimmer,
+    ColourEntry,
+    Dimmer,
+    FixedEntry,
+    Measured,
+    MeasuredEntry,
+    RoomLightEntry,
+    RoomLightsDocument,
+    WhiteEntry,
+)
 from contracts.tuning import SIGNAL_LEVELS, TARGET_PATTERNS, TestPattern
 
 Matrix = tuple[float, float, float, float, float, float, float, float, float]
@@ -430,7 +442,7 @@ def final_pixel(photo: Linear, operations: PictureOperations, *, inside: bool, l
     Frame lit by `lights` (`frame_lights`; required when `inside`: ValueError("lights")):
     the paper profile's LUT (`lut_applied`, the bytes of the Frame's `lighting.paper.profile`,
     fully, when held) -> `paper_reflectance` -> `irradiance` -> `paper_signal` (the Display's light:
-    DisplayLight(operations.matched_lux, operations.panel_black)) -> `highlight_rolled` at
+    operations.light) -> `highlight_rolled` at
     lights.peak -> x rgb_multipliers -> sRGB encode -> contrast about 0.5 -> gamma exponent -> clamp
     -> `dithered` at `dither_at` (an output pixel; None: no dither, for an oracle) -> the per-Output
     mask LAST: (0, 0, 0, 1) when not `inside` any Frame's opening.
@@ -468,9 +480,8 @@ def final_pixel(photo: Linear, operations: PictureOperations, *, inside: bool, l
     else:
         if lut is not None:
             photo = lut_applied(photo, lut)
-        display = DisplayLight(operations.matched_lux, operations.panel_black)
         reflectance = paper_reflectance(photo, lights.paper)
-        signal = highlight_rolled(paper_signal(reflectance, irradiance(lights, x, y), display), lights.peak)
+        signal = highlight_rolled(paper_signal(reflectance, irradiance(lights, x, y), operations.light), lights.peak)
     pixel = display_steps(signal, operations)
     if dither_at is not None:
         pixel = tuple(min(1.0, max(0.0, dithered(value, *dither_at))) for value in pixel)
@@ -554,26 +565,38 @@ class FrameLights:
 
 def light_on_frame(light: WashLight | FarLight | CloseLight, entry: RoomLightEntry | None) -> Linear:
     """The rgb lux `light` puts on the Frame (at its centre, for a close light), its shape aside.
-    No light (0, 0, 0) for an absent entry, NotReported, Unavailable, an off Dimmer, or a reference
-    that does not fit the state (DIMMER_AT_FULL with Measured, a lux with Dimmer): design rule 2.
-    A Dimmer on: lux x brightness, coloured by the entry's colour at luminance 1 (FixedColour:
-    `light_colour(kelvin)`; ReportedColour: drive_c = rgb_c x brightness (rgb None: 1) and
-    E_c = lux x drive_c x share_c / LUMA_c, so luminance is lux x sum_c drive_c x share_c).
-    Measured: lux x reading / reference, coloured as a Dimmer at full. Pure."""
+    No light (0, 0, 0) for an absent entry, NotReported, Unavailable, an off dimmer, or a reference
+    that does not fit the entry (AtFull on a measured light, AtReading on any other): a total rule.
+    A fixed light: lux, coloured by its kelvin at luminance 1 (`light_colour`). A dimmer on: lux x
+    brightness, coloured the same way. A colour dimmer on: drive_c = rgb_c x brightness and
+    E_c = lux x drive_c x share_c / LUMA_c, so luminance is lux x sum_c drive_c x share_c. A
+    measured light: lux x reading / the reference's reading, coloured as a fixed light. Pure."""
     if entry is None:
         return NO_LIGHT
-    state = entry.state
-    if isinstance(state, Dimmer) and state.on and light.reference == DIMMER_AT_FULL:
-        lux, brightness, drive = light.lux, state.brightness, state.rgb
-    elif isinstance(state, Measured) and not isinstance(light.reference, str):
-        lux, brightness, drive = light.lux * state.lux / light.reference, 1.0, None
-    else:
+    reference = light.reference
+    if isinstance(entry, MeasuredEntry):
+        if not (isinstance(entry.state, Measured) and isinstance(reference, AtReading)):
+            return NO_LIGHT
+        return _white(light.lux * entry.state.lux / reference.lux, entry.colour.kelvin)
+    if not isinstance(reference, AtFull):
         return NO_LIGHT
-    colour = entry.colour
-    if isinstance(colour, FixedColour):
-        return tuple(lux * brightness * channel for channel in light_colour(colour.kelvin))
-    return tuple(lux * (1.0 if drive is None else drive[index]) * brightness * colour.channel_shares[index]
-                 / LUMA[index] for index in range(3))
+    if isinstance(entry, FixedEntry):
+        return _white(light.lux, entry.colour.kelvin)
+    if isinstance(entry, WhiteEntry):
+        state = entry.state
+        return _white(light.lux * state.brightness, entry.colour.kelvin) if isinstance(state, Dimmer) and state.on \
+            else NO_LIGHT
+    assert isinstance(entry, ColourEntry)
+    state = entry.state
+    if not (isinstance(state, ColourDimmer) and state.on):
+        return NO_LIGHT
+    shares = entry.colour.channel_shares
+    return tuple(light.lux * state.rgb[index] * state.brightness * shares[index] / LUMA[index] for index in range(3))
+
+
+def _white(lux: float, kelvin: int) -> Linear:
+    """`lux` of a white light of `kelvin`, at luminance 1 per lux."""
+    return tuple(lux * channel for channel in light_colour(kelvin))
 
 
 def _to_mat(across: float, up: float, quarter: int) -> tuple[float, float]:

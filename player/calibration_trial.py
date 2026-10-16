@@ -1,7 +1,7 @@
 """Applying owner for operational trial transforms; uses the canonical calibration path.
 
-Position's trial also carries the Frame's draft lighting (decision 0028: its lights, mat depth and
-paper, `lighting_json` parsed as contracts.frame_lighting.FrameLighting): drawn while the trial is,
+Position's trial also carries the Frame's draft lighting (its lights, mat depth and
+paper, the envelope's contracts.frame_lighting.FrameLighting): drawn while the trial is,
 the binding's again once it ends. A draft FrameLighting refuses is refused with the trial."""
 
 from __future__ import annotations
@@ -85,7 +85,7 @@ class TrialState:
         ):
             raise ValueError("trial_sequence_hash_changed")
         calibration = Calibration.model_validate_json(candidate.calibration_json)
-        lighting = FrameLighting.model_validate_json(candidate.lighting_json)
+        lighting = candidate.lighting
         if calibration.revision != composition.binding.calibration.revision:
             raise ValueError("trial_calibration_baseline")
         # The overlay's primitives are the drawn fit's corners (the opening, both modes); the base

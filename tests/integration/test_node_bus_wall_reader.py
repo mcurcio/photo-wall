@@ -14,11 +14,10 @@ import asyncio
 from integration.bus_servers import declare_wall, hub_server, node_server, until, wall_writer
 
 from contracts.room_light import (
-    FULL_ON,
     ROOM_LIGHTS_BYTES,
     ROOM_LIGHTS_KEY,
     FixedColour,
-    RoomLightEntry,
+    FixedEntry,
     RoomLightsDocument,
     decode_room_lights,
     encode_room_lights,
@@ -27,7 +26,7 @@ from nodeapi.buffers import WALL_PREFIX, KeyTable
 from nodeapi.node import WallReader
 
 SERIAL = "serial-w"
-DOCUMENT = RoomLightsDocument(change=3, lights={"room": RoomLightEntry(FixedColour(6500), FULL_ON)})
+DOCUMENT = RoomLightsDocument(change=3, lights={"room": FixedEntry(colour=FixedColour(kelvin=6500))})
 
 
 async def _holds(reader: WallReader, what: str) -> None:

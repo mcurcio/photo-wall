@@ -189,7 +189,7 @@ def _stand_in(output_id: str) -> PictureOperations:
     """The operations drawn before the display host's first `picture` event (or with none): neutral,
     at the upgrade's placeholder light (contracts/node_picture.py UPGRADE_DISPLAY_LIGHT). Never
     tagged: the tag names only a change the display host sent."""
-    return neutral_operations(output_id, 1, UPGRADE_DISPLAY_LIGHT.matched_lux, UPGRADE_DISPLAY_LIGHT.black)
+    return neutral_operations(output_id, 1, UPGRADE_DISPLAY_LIGHT)
 
 
 def _final_uniforms(gl, program: int, operations: PictureOperations, opening, lights: FrameLights | None, *,
@@ -210,8 +210,8 @@ def _final_uniforms(gl, program: int, operations: PictureOperations, opening, li
     gl.glUniform3f(uniform("rgb_multipliers"), *operations.rgb_multipliers)
     gl.glUniform1f(uniform("contrast_slope"), operations.contrast_slope)
     gl.glUniform1f(uniform("gamma_exponent"), operations.gamma_exponent)
-    gl.glUniform1f(uniform("matched_lux"), operations.matched_lux)
-    gl.glUniform1f(uniform("panel_black"), operations.panel_black)
+    gl.glUniform1f(uniform("matched_lux"), operations.light.matched_lux)
+    gl.glUniform1f(uniform("panel_black"), operations.light.black)
     gl.glUniform1i(uniform("output_height"), output_height)
     gl.glUniform1i(uniform("lut_on"), int(lut_drawn))
     gl.glUniform1i(uniform("lut"), _LUT_UNIT)       # never unit 0: two sampler types may not share one
@@ -1561,7 +1561,7 @@ class NativeRenderer:
                 lighting = _drawn_lighting(shown)
                 lights = surface.lights_for(lighting, self._room_lights, _drawn_fit(shown),
                                             shown.composition.binding.profile,
-                                            DisplayLight(operations.matched_lux, operations.panel_black))
+                                            operations.light)
                 lut_drawn = self._bind_lut(surface, lighting.paper.profile)
             target = None
             if operations.test_pattern in TARGET_PATTERNS:

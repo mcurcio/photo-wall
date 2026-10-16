@@ -94,7 +94,7 @@ from contracts.calibration_target import (  # noqa: E402
     qr_copies,
 )
 from contracts.frame_lighting import (  # noqa: E402
-    DIMMER_AT_FULL,
+    AT_FULL,
     CloseLight,
     FarLight,
     FrameLighting,
@@ -116,11 +116,11 @@ from contracts.node_frame import PictureOperations, neutral_operations  # noqa: 
 from contracts.node_picture import UPGRADE_DISPLAY_LIGHT, DisplayLight  # noqa: E402
 from contracts.photo_crop import CENTRED  # noqa: E402
 from contracts.room_light import (  # noqa: E402
-    FULL_ON,
     Dimmer,
     FixedColour,
-    RoomLightEntry,
+    FixedEntry,
     RoomLightsDocument,
+    WhiteEntry,
 )
 from contracts.tuning import TARGET_PATTERNS, TestPattern  # noqa: E402
 from player.calibration_target import target_modules  # noqa: E402
@@ -155,22 +155,22 @@ MATCHED, BLACK = UPGRADE_DISPLAY_LIGHT.matched_lux, UPGRADE_DISPLAY_LIGHT.black
 # matches the TV, so the picture is the photo.
 UPGRADE_PAPER = Paper(whiteness=0.9, ink_density=-math.log10(BLACK))
 UPGRADE = FrameLighting(mat_depth_mm=0, paper=UPGRADE_PAPER,
-                        lights=(WashLight(light="room", lux=MATCHED, reference=DIMMER_AT_FULL),))
+                        lights=(WashLight(light="room", lux=MATCHED, reference=AT_FULL),))
 ROOM = RoomLightsDocument(change=1, lights={
-    "room": RoomLightEntry(FixedColour(6500), FULL_ON), "bookshelf-spot": RoomLightEntry(FixedColour(6500), FULL_ON),
-    "lamp": RoomLightEntry(FixedColour(3000), FULL_ON), "window": RoomLightEntry(FixedColour(7500), FULL_ON)})
+    "room": FixedEntry(colour=FixedColour(kelvin=6500)), "bookshelf-spot": FixedEntry(colour=FixedColour(kelvin=6500)),
+    "lamp": FixedEntry(colour=FixedColour(kelvin=3000)), "window": FixedEntry(colour=FixedColour(kelvin=7500))})
 ROOM_SPOT_OFF = RoomLightsDocument(change=2, lights={
-    **ROOM.lights, "bookshelf-spot": RoomLightEntry(FixedColour(6500), Dimmer(on=False, brightness=1.0))})
+    **ROOM.lights, "bookshelf-spot": WhiteEntry(colour=FixedColour(kelvin=6500), state=Dimmer(on=False, brightness=1.0))})
 BINDING = OutputBinding(output_id="headless", frame_id="frame", generation=1, profile=PROFILE, lighting=UPGRADE)
 OPENING = ((.1, .12), (.85, .08), (.9, .9), (.12, .82))
 SMALL_OPENING = ((.2, .2), (.8, .25), (.75, .8), (.25, .75))
 SKEWED = ((.1, .1), (.9, .2), (.8, .9), (.2, .8))
-OPERATIONS = PictureOperations("headless", 3, (.9, .95, 1.0), .8, 24 / 22, MATCHED, BLACK)
-STAND_IN = neutral_operations("headless", 1, MATCHED, BLACK)    # the renderer's before any operations
+OPERATIONS = PictureOperations("headless", 3, (.9, .95, 1.0), .8, 24 / 22, DisplayLight(MATCHED, BLACK))
+STAND_IN = neutral_operations("headless", 1, DisplayLight(MATCHED, BLACK))    # the renderer's before any operations
 
 
 def display_of(operations: PictureOperations) -> DisplayLight:
-    return DisplayLight(operations.matched_lux, operations.panel_black)
+    return operations.light
 
 
 def quadrant(x: int, y: int, palette=QUADRANTS) -> tuple[int, int, int, int]:
@@ -375,7 +375,7 @@ def cover_matches_the_reference(angle: float):
 
 
 def outside_the_opening_stays_black_at_low_contrast(native, frames, variant) -> None:
-    low = PictureOperations("headless", 4, (1.0, 1.0, 1.0), .5, 1.0, MATCHED, BLACK)
+    low = PictureOperations("headless", 4, (1.0, 1.0, 1.0), .5, 1.0, DisplayLight(MATCHED, BLACK))
     frames.operations = low
     fit = CoverFit(corners=SMALL_OPENING, rotation=7)
     show(native, composition(variant, Calibration(fit=fit)))
@@ -422,7 +422,7 @@ def operations_change_the_picture_and_the_tag(native, frames, variant) -> None:
     show(native, shown)
     assert frames.tags and frames.tags[-1][1] is None, ("tag_before_operations", frames.tags[-3:])
     check_fit(native, fit, None)
-    changed = PictureOperations("headless", 7, (1.0, .9, .8), .5, 1.0, MATCHED, BLACK)
+    changed = PictureOperations("headless", 7, (1.0, .9, .8), .5, 1.0, DisplayLight(MATCHED, BLACK))
     frames.operations = changed
     native.present(shown)
     assert until(lambda: frames.tags and frames.tags[-1][1] == 7), ("tag_after", frames.tags[-3:])
@@ -525,24 +525,24 @@ def crop_offset_keeps_the_left_edge(native, frames, variant) -> None:
 
 # -- Room light (decision 0028): the physics, the Frame's paper profile and the trial's lighting -------
 
-SPOT = CloseLight(light="bookshelf-spot", lux=1500, reference=DIMMER_AT_FULL, across_mm=0, up_mm=350, out_mm=250,
+SPOT = CloseLight(light="bookshelf-spot", lux=1500, reference=AT_FULL, across_mm=0, up_mm=350, out_mm=250,
                   inner_beam_degrees=20, outer_beam_degrees=40)
 SPOT_LIGHTING = FrameLighting(mat_depth_mm=0, paper=UPGRADE_PAPER,
-                              lights=(SPOT, WashLight(light="room", lux=40, reference=DIMMER_AT_FULL)))
+                              lights=(SPOT, WashLight(light="room", lux=40, reference=AT_FULL)))
 WASH_ONLY = FrameLighting(mat_depth_mm=0, paper=UPGRADE_PAPER,
-                          lights=(WashLight(light="room", lux=40, reference=DIMMER_AT_FULL),))
-TOP_LIGHT = FarLight(light="lamp", lux=600, reference=DIMMER_AT_FULL, from_degrees=0, steep_degrees=30,
+                          lights=(WashLight(light="room", lux=40, reference=AT_FULL),))
+TOP_LIGHT = FarLight(light="lamp", lux=600, reference=AT_FULL, from_degrees=0, steep_degrees=30,
                      softness_degrees=20)
-COOL_SIDE = FarLight(light="window", lux=600, reference=DIMMER_AT_FULL, from_degrees=90, steep_degrees=30,
+COOL_SIDE = FarLight(light="window", lux=600, reference=AT_FULL, from_degrees=90, steep_degrees=30,
                      softness_degrees=20)
-ROOM_WASH = WashLight(light="room", lux=300, reference=DIMMER_AT_FULL)
+ROOM_WASH = WashLight(light="room", lux=300, reference=AT_FULL)
 DEEP_LIGHTING = FrameLighting(mat_depth_mm=8, paper=UPGRADE_PAPER, lights=(ROOM_WASH, TOP_LIGHT))  # ~10..22 mm band
 WINDOW_LIGHTING = FrameLighting(mat_depth_mm=8, paper=UPGRADE_PAPER, lights=(ROOM_WASH, COOL_SIDE, TOP_LIGHT))
 TRIAL_SHA = "a" * 64
 # Q1 B, the room followed down: a 10 lx wash on the upgrade paper, where the photo spans a few dozen
 # 8-bit codes and only the dither keeps a ramp from banding.
 DIM_LIGHTING = FrameLighting(mat_depth_mm=0, paper=UPGRADE_PAPER,
-                             lights=(WashLight(light="room", lux=10, reference=DIMMER_AT_FULL),))
+                             lights=(WashLight(light="room", lux=10, reference=AT_FULL),))
 # A 27" Frame: the cone's core, its feather and the wash beyond all fall inside the opening, and the
 # spot's peak passes the TV's white, so the fixed rolloff is drawn too.
 SPOT_PROFILE = FrameProfile(width_px=1600, height_px=900, diagonal_inches=27)
@@ -794,7 +794,7 @@ def pattern_matches_the_reference(pattern: TestPattern, lighting: FrameLighting 
     def case(native: CapturingRenderer, frames: Frames, variant: Variant) -> None:
         fit = CoverFit(corners=OPENING, rotation=30)
         trial = TrialFrames(fit, lighting)
-        trial.operations = PictureOperations("headless", 9, (1.0, .95, .9), .8, 1.0, MATCHED, BLACK,
+        trial.operations = PictureOperations("headless", 9, (1.0, .95, .9), .8, 1.0, DisplayLight(MATCHED, BLACK),
                                              test_pattern=pattern)
         native._frames = trial
         show(native, OutputComposition(BINDING, Calibration(fit=fit), (), True))    # the grid's canvas
@@ -842,7 +842,7 @@ def show_target(native: CapturingRenderer, pattern: TestPattern, fit, lighting: 
     """The target drawn over Position's trial grid on a binding of `profile`, contrast 80 % and a
     warm white."""
     trial = TrialFrames(fit, lighting)
-    trial.operations = PictureOperations("headless", 9, (1.0, .95, .9), .8, 1.1, MATCHED, BLACK,
+    trial.operations = PictureOperations("headless", 9, (1.0, .95, .9), .8, 1.1, DisplayLight(MATCHED, BLACK),
                                          test_pattern=pattern)
     native._frames = trial
     binding = BINDING.model_copy(update={"profile": profile})

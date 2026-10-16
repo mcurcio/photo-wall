@@ -22,6 +22,7 @@ import player.native as native_module
 from contracts.lut import LUT_BYTES, LUT_MEDIA_TYPE, LutRef
 from contracts.models import Calibration
 from contracts.node_frame import PictureOperations
+from contracts.node_picture import UPGRADE_DISPLAY_LIGHT
 from contracts.time import ManualClock
 from player.cache import Cache
 from player.luts import PlayerLuts
@@ -204,7 +205,7 @@ def test_the_frames_lut_arrival_redraws_and_nothing_waits_for_it():
     the LUT is bound. Mutation probe: leave the generation out of the shown key -> no redraw after
     hold."""
     luts = PlayerLuts()
-    operations = PictureOperations("hdmi1", 9, (1.0, 1.0, 1.0), 1.0, 1.0, 1000.0, 0.0003)
+    operations = PictureOperations("hdmi1", 9, (1.0, 1.0, 1.0), 1.0, 1.0, UPGRADE_DISPLAY_LIGHT)
 
     class Area:
         renders = 0

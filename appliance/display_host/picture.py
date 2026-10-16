@@ -55,7 +55,7 @@ Rules this module owns (one home each):
   from colour temperature (contracts/kelvin.py `kelvin_white`, in linear light, normalised so
   KELVIN_NEUTRAL is exactly (1, 1, 1) and the largest is 1); contrast slope = contrast /
   SOFTWARE_PERCENT_NEUTRAL; gamma exponent = gamma_tenths / GAMMA_TENTHS_NEUTRAL; the document's
-  DisplayLight (decision 0028) as `matched_lux` and `panel_black`, as given. Each at its neutral
+  DisplayLight as `light`, as given. Each at its neutral
   value is exactly the neutral operation. Sent to the shell at once on each new change, by the
   shell worker.
 - **Re-sent at start:** the controller restarts with Weston, and sends every Output's operations
@@ -170,7 +170,7 @@ def operations_for(output_id: str, picture_change: int, software: SoftwarePictur
                              rgb_multipliers=kelvin_white(software.colour_temperature_kelvin),
                              contrast_slope=software.contrast_percent / SOFTWARE_PERCENT_NEUTRAL,
                              gamma_exponent=software.gamma_tenths / GAMMA_TENTHS_NEUTRAL,
-                             matched_lux=light.matched_lux, panel_black=light.black,
+                             light=light,
                              test_pattern=test_pattern)
 
 

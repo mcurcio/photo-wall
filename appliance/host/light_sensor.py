@@ -1,5 +1,5 @@
-"""A light meter wired to the Pi (decision 0028; owner, 2026-10-15: "A light sensor connected to a
-player"), read through Linux IIO and reported on the host line's state as LIGHT_SENSOR_KEY.
+"""A light sensor wired to the Pi, read through Linux IIO and reported on the host line's state as
+LIGHT_SENSOR_KEY.
 
 HostCore samples it every SAMPLE_SECONDS on its own thread (`LightMeter`), never waiting on the bus:
 the first iio device (by name) that reads illuminance (`find_meter`), its lux (`read_lux`; None
@@ -17,7 +17,14 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Final
 
-from contracts.room_light import LIGHT_SENSOR_KEY, LUX_MAX, LightSensorReading, encode_light_sensor
+from contracts.room_light import (
+    LIGHT_SENSOR_KEY,
+    LUX_MAX,
+    LightSensorReading,
+    Measured,
+    Unavailable,
+    encode_light_sensor,
+)
 
 log = logging.getLogger(__name__)
 
@@ -80,14 +87,20 @@ def read_lux(device: Path) -> float | None:
     return lux if math.isfinite(lux) and 0 <= lux <= LUX_MAX else None
 
 
+def reading_of(lux: float | None) -> LightSensorReading:
+    """Measured(lux), or Unavailable for None."""
+    return LightSensorReading(reading=Unavailable() if lux is None else Measured(lux=lux))
+
+
 def worth_reporting(last: LightSensorReading | None, now: LightSensorReading) -> bool:
-    """The first reading; None <-> number; or a change of more than 5 % (1 lx below 20 lx)."""
-    if last is None or (last.lux is None) != (now.lux is None):
+    """The first reading; Unavailable <-> Measured; or a change of more than 5 % (1 lx below 20 lx)."""
+    if last is None or type(last.reading) is not type(now.reading):
         return True
-    if last.lux is None or now.lux is None:
+    if not (isinstance(last.reading, Measured) and isinstance(now.reading, Measured)):
         return False
-    step = CHANGE_LUX_LOW if last.lux < LOW_LUX else CHANGE_SHARE * last.lux
-    return abs(now.lux - last.lux) > step
+    before, after = last.reading.lux, now.reading.lux
+    step = CHANGE_LUX_LOW if before < LOW_LUX else CHANGE_SHARE * before
+    return abs(after - before) > step
 
 
 class LightMeter:
@@ -107,7 +120,7 @@ class LightMeter:
         device = find_meter(self._root)
         if device is None and self._last is None:
             return None
-        reading = LightSensorReading(None if device is None else read_lux(device))
+        reading = reading_of(None if device is None else read_lux(device))
         if worth_reporting(self._last, reading):
             self._put(LIGHT_SENSOR_KEY, encode_light_sensor(reading))
             self._last = reading
@@ -131,4 +144,4 @@ class LightMeter:
             self._stop.wait(SAMPLE_SECONDS)
 
 
-__all__ = ["IIO_ROOT", "SAMPLE_SECONDS", "LightMeter", "find_meter", "read_lux", "worth_reporting"]
+__all__ = ["IIO_ROOT", "SAMPLE_SECONDS", "LightMeter", "find_meter", "read_lux", "reading_of", "worth_reporting"]

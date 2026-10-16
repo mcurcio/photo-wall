@@ -32,7 +32,7 @@ HEADERS = {"Authorization": "Bearer " + ADMIN}
 LIGHTS = "/v1/operator/house/lights"
 SENSORS = "/v1/operator/house/sensors"
 TRIALS = f"/v1/operator/frames/{FRAME}/calibration-trials"
-SPOT = {"kind": "close", "light": "bookshelf-spot", "lux": 800.0, "reference": "dimmer-at-full",
+SPOT = {"kind": "close", "light": "bookshelf-spot", "lux": 800.0, "reference": {"kind": "at-full"},
         "across_mm": 0.0, "up_mm": 600.0, "out_mm": 900.0, "inner_beam_degrees": 20.0, "outer_beam_degrees": 40.0}
 PAPER = {"whiteness": 0.9, "ink_density": 2.3, "profile": None}
 
@@ -173,15 +173,15 @@ def test_a_frames_lighting_through_positions_trial(registry):
         missing = client.post(path, headers=HEADERS, json={
             "operation": "edit", "expected_sequence": 1, "calibration": trial["calibration"]})
         assert (missing.status_code, missing.json()["error"]) == (422, "trial_lighting_required")
-        draft = _lighting(SPOT, {"kind": "wash", "light": "window", "lux": 120.0, "reference": 240.0}, depth=3.0)
+        draft = _lighting(SPOT, {"kind": "wash", "light": "window", "lux": 120.0, "reference": {"kind": "at-reading", "lux": 240.0}}, depth=3.0)
         edited = client.post(path, headers=HEADERS, json={
             "operation": "edit", "expected_sequence": 1, "calibration": trial["calibration"], "lighting": draft})
         assert edited.status_code == 200, edited.text
 
         candidate = _present(request, exchange, 1500)
-        assert FrameLighting.model_validate_json(candidate.lighting_json) == FrameLighting.model_validate(draft)
+        assert candidate.lighting == FrameLighting.model_validate(draft)
         other = candidate_hash(candidate.trial_id, candidate.generation, candidate.sequence, candidate.baseline,
-                               candidate.calibration_json, FrameLighting.model_validate(_lighting(SPOT)).model_dump_json())
+                               candidate.calibration_json, FrameLighting.model_validate(_lighting(SPOT)))
         assert other != candidate.candidate_sha256          # the hash covers the lighting
         saved = client.post(path, headers=HEADERS, json={"operation": "save", "expected_sequence": 2})
         assert saved.status_code == 200, saved.text
@@ -197,7 +197,7 @@ def test_a_frames_lighting_through_positions_trial(registry):
 def test_more_frame_lights_than_the_cap_are_refused(registry, lights):
     setup_trial(registry)
     with _client(registry) as client:
-        wash = {"kind": "wash", "light": "room", "lux": 100.0, "reference": "dimmer-at-full"}
+        wash = {"kind": "wash", "light": "room", "lux": 100.0, "reference": {"kind": "at-full"}}
         refused = client.post(TRIALS, headers=HEADERS, json={"lighting": _lighting(*([wash] * lights))})
         assert (refused.status_code, refused.json()["error"]) == (422, "trial_lighting_invalid")
 
@@ -218,6 +218,7 @@ def test_a_pis_light_meter_on_the_host_line_becomes_its_sensors_lights_state(reg
         LightSensorReading,
         Measured,
         NotReported,
+        Unavailable,
     )
     from contracts.room_light import encode_light_sensor as encoded
     from nodeapi.epoch import Token
@@ -235,7 +236,7 @@ def test_a_pis_light_meter_on_the_host_line_becomes_its_sensors_lights_state(reg
     def judged(device_id: str, lux: float | None, seq: int, stream: str = HOST_STATE_STREAM):
         with registry.db.transaction() as conn:
             judge.judge_in(conn, device_id, stream, (Read(Token("epoch", seq), subject, {},
-                                                          encoded(LightSensorReading(lux))),))
+                                                          encoded(LightSensorReading(reading=Unavailable() if lux is None else Measured(lux=lux)))),))
             return document_in(conn)
 
     before = lights.current()

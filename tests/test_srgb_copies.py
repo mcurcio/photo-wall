@@ -1,5 +1,5 @@
 """The Pi's own copies of the sRGB transfer function equal colour-science's (decision 0027, "Before #101,
-and kept"): contracts.node_frame.srgb_to_linear and player.geometry.encode_srgb (the shader's curve is
+and kept"): contracts.colour.srgb_to_linear and player.geometry.encode_srgb (the shader's curve is
 held to them by the pixel harness) cannot import a library on the Pi, so this test holds them to
 the reference the reader uses."""
 from __future__ import annotations
@@ -8,7 +8,7 @@ import warnings
 
 import numpy as np
 
-from contracts.node_frame import srgb_to_linear
+from contracts.colour import srgb_to_linear
 from player.geometry import encode_srgb
 
 with warnings.catch_warnings():

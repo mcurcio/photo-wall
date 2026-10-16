@@ -114,7 +114,7 @@ def _build(kind: str, name: str, max_bytes: int, fields: dict,
 def _kv_fields(bucket_name: str, history: int, max_value_size: int | None) -> dict:
     # A KV bucket's stream as nats-py's create_key_value builds it (nats/js/client.py:1447), less its
     # hard-coded discard NEW, which refuses every put once the bucket is full.
-    return dict(subjects=[f"$KV.{bucket_name}.>"], allow_rollup_hdrs=True, allow_msg_ttl=True,
+    return dict(subjects=[_kv_prefix(bucket_name) + ">"], allow_rollup_hdrs=True, allow_msg_ttl=True,
                 deny_delete=True, duplicate_window=120, max_consumers=-1, max_msgs=-1,
                 max_msg_size=max_value_size, max_msgs_per_subject=history)
 
@@ -253,11 +253,42 @@ def event_buffer(line: str, topic: str, max_bytes: int, *, max_age: float | None
     return _build(CIRCULAR, f"{topic.upper()}_{line}", max_bytes, fields, _line_metadata(line, Role.EVENTS))
 
 
+KV_OPERATION_HEADER: Final = "KV-Operation"   # a KV delete or purge marker's header: it carries no value
+
+
+def _kv_stream(name: str) -> str:
+    return f"KV_{name}"
+
+
+def _kv_prefix(name: str) -> str:
+    return f"$KV.{name}."
+
+
+def state_stream(line: str) -> str:
+    """The stream of `line`'s state bucket (`state_bucket`): what Central's link store records it as."""
+    return _kv_stream(f"state_{line}")
+
+
+def state_prefix(line: str) -> str:
+    """The subject prefix of `line`'s state keys: a key's subject is state_prefix(line) + key."""
+    return _kv_prefix(f"state_{line}")
+
+
+def desired_stream(line: str) -> str:
+    """The stream of `line`'s desired bucket (`desired_bucket`)."""
+    return _kv_stream(f"desired_{line}")
+
+
+def desired_prefix(line: str) -> str:
+    """The subject prefix of `line`'s desired keys."""
+    return _kv_prefix(f"desired_{line}")
+
+
 def _keyed(name: str, table: KeyTable, metadata: Mapping[str, str]) -> StreamConfig:
     """A sticky KV bucket `KV_<name>` sized by `table`, which rides in its metadata."""
-    _check_subjects(f"$KV.{name}.", table)
-    return _build(STICKY, f"KV_{name}", table.budget(f"$KV.{name}."), _kv_fields(name, table.history, table.largest),
-                  {**metadata, TABLE_KEY: table.encoded()})
+    _check_subjects(_kv_prefix(name), table)
+    return _build(STICKY, _kv_stream(name), table.budget(_kv_prefix(name)),
+                  _kv_fields(name, table.history, table.largest), {**metadata, TABLE_KEY: table.encoded()})
 
 
 def _check_subjects(prefix: str, table: KeyTable) -> None:

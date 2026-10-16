@@ -22,6 +22,7 @@ from pydantic import TypeAdapter
 
 from central.db import Database
 from central.room_light.model import (
+    FULL_ON,
     Colour,
     FixedReporter,
     IlluminanceMessage,
@@ -31,6 +32,7 @@ from central.room_light.model import (
     Refused,
     Reporter,
     RoomLight,
+    RoomLightState,
     Sensor,
     SensorPlace,
     SetupRefusal,
@@ -58,11 +60,10 @@ from central.room_light.views import (
 )
 from contracts.frame_lighting import FrameLighting
 from contracts.room_light import (
-    FULL_ON,
     LIGHT_SENSOR_KEY,
+    Measured,
     NotReported,
     RoomLightsDocument,
-    RoomLightState,
     decode_light_sensor,
 )
 from nodeapi.pull import Read
@@ -244,7 +245,8 @@ class PgRoomLights:
         return RoomLightsView(
             lights=tuple(RoomLightView(
                 id=row["id"], name=row["name"], reporter=lights[row["id"]].reporter, colour=lights[row["id"]].colour,
-                state=document.lights[row["id"]].state,
+                state=FULL_ON if isinstance(lights[row["id"]].reporter, FixedReporter)
+                else document.lights[row["id"]].state,
                 heard_at=None if isinstance(lights[row["id"]].reporter, FixedReporter) or row["heard_at"] is None
                 else float(row["heard_at"]),
                 named_by=named.get(row["id"], ())) for row in rows),
@@ -359,7 +361,8 @@ class LightSensorJudge:
             except ValueError as refused:
                 log.warning("light sensor reading refused: device=%s seq=%s: %s", device_id, item.token.seq, refused)
                 continue
-            self._lights.record_sensor_reading_in(conn, row["id"], reading.lux)
+            self._lights.record_sensor_reading_in(
+                conn, row["id"], reading.reading.lux if isinstance(reading.reading, Measured) else None)
 
 
 __all__ = ["HOST_STATE_STREAM", "REFUSALS_KEPT", "ROOM_LIGHTS_CHANNEL", "LightSensorJudge", "PgRoomLights",

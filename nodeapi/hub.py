@@ -583,7 +583,10 @@ class WallWriter:
 
     async def put(self, key: str, value: bytes) -> int:
         """Write one wall document, admitted by the table; the mark is recorded after the ack. WALL
-        has one writer, Central, so a conflict (another Central instance) re-reads and writes again."""
+        has one writer, Central, so a conflict (another Central instance) re-reads and writes again.
+        Content-keyed: when the key already holds exactly `value`, nothing is written and the held
+        value's sequence is answered, so a writer may put whenever it is unsure (safe to repeat) and
+        a put never depends on what any process remembers having written."""
         if self._writer is None:
             raise RuntimeError("wall_writer_not_ensured")
         while True:

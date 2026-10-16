@@ -13,7 +13,17 @@ from typing import Annotated, Final, Literal
 from pydantic import Field
 
 from contracts.models import Identifier, Model
-from contracts.room_light import ROOM_LIGHT_ID_PATTERN, FixedColour, ReportedColour, RoomLightState
+from contracts.room_light import (
+    ROOM_LIGHT_ID_PATTERN,
+    ColourDimmer,
+    Dimmer,
+    FixedColour,
+    Measured,
+    NotReported,
+    ReportedColour,
+    RoomLightId,
+    Unavailable,
+)
 
 # Home Assistant's entity id: <domain>.<object_id> (https://developers.home-assistant.io, entity
 # ids are lower-case ASCII letters, digits and underscores).
@@ -27,8 +37,39 @@ ILLUMINANCE_TOPIC_PREFIX: Final = "photowall/illuminance/"  # + entity id: an Il
 SUBSCRIPTION: Final = "photowall/#"                         # the worker's one subscription
 HOME_ASSISTANT_MESSAGE_BYTES: Final = 1024                  # a larger payload is refused unread
 
-RoomLightId = Annotated[str, Field(pattern=rf"^{ROOM_LIGHT_ID_PATTERN}$")]
-SensorId = Annotated[str, Field(pattern=rf"^{ROOM_LIGHT_ID_PATTERN}$")]
+SensorId = Annotated[str, Field(pattern=rf"^{ROOM_LIGHT_ID_PATTERN}$", title="SensorId")]
+RoomLightState = Dimmer | ColourDimmer | Measured | Unavailable | NotReported   # a light's last stored state
+FULL_ON: Final = Dimmer(on=True, brightness=1.0)    # a fixed room light's state: always on, at full
+
+SOURCE_PATTERN: Final = r"[a-z][a-z0-9-]{0,31}"     # a reporting source's name: "home-assistant", "pi"
+ADDRESS_MAX: Final = 255
+Source = Annotated[str, Field(pattern=rf"^{SOURCE_PATTERN}$", title="Source")]
+Address = Annotated[str, Field(min_length=1, max_length=ADDRESS_MAX, title="Address")]
+
+
+# ---- Who reports: opaque references. The domain compares them whole and never reads an address;
+# each source's adapter owns its address's form (central/infra/home_assistant/, the Pi's judge). ----
+
+class ReporterRef(Model):
+    """Who reports a room light's state: a source and that source's own name for the light."""
+    source: Source
+    address: Address
+
+
+class SensorRef(Model):
+    """Where a Sensor's readings come from: a source and that source's own name for the sensor."""
+    source: Source
+    address: Address
+
+
+class ReportRefusal(StrEnum):
+    """Why a source's report was not recorded (the one refusal log, `RoomLightReports.record_refused`)."""
+    UNKNOWN_ADDRESS = "unknown_address"     # not a light or sensor address the source names
+    UNREADABLE = "unreadable"               # not the report's shape
+    OUT_OF_RANGE = "out_of_range"           # a value outside its range
+
+
+Recorded = Literal["recorded", "unchanged"]     # the document changed, or it did not (kept all the same)
 EntityId = Annotated[str, Field(pattern=rf"^{HOME_ASSISTANT_ENTITY_PATTERN}$", max_length=255)]
 Name = Annotated[str, Field(min_length=1, max_length=ROOM_LIGHT_NAME_MAX)]
 
@@ -121,7 +162,6 @@ class Refused:
     reason: Refusal
 
 
-Recorded = Literal["recorded", "unchanged"] | Refused
 
 
 class SetupRefusal(StrEnum):
@@ -149,9 +189,10 @@ class Heard:
 
 
 __all__ = [
-    "HOME_ASSISTANT_ENTITY_PATTERN", "HOME_ASSISTANT_MESSAGE_BYTES", "ILLUMINANCE_TOPIC_PREFIX", "LIGHT_TOPIC_PREFIX",
-    "ROOM_LIGHT_NAME_MAX", "SENSORS_MAX", "SUBSCRIPTION", "Colour", "EntityId", "FixedReporter",
+    "FULL_ON", "HOME_ASSISTANT_ENTITY_PATTERN", "HOME_ASSISTANT_MESSAGE_BYTES", "ILLUMINANCE_TOPIC_PREFIX", "LIGHT_TOPIC_PREFIX",
+    "ADDRESS_MAX", "ROOM_LIGHT_NAME_MAX", "SENSORS_MAX", "SOURCE_PATTERN", "SUBSCRIPTION", "Address", "ReportRefusal",
+    "ReporterRef", "SensorRef", "Source", "Colour", "EntityId", "FixedReporter",
     "FrameLightingRefusal", "Heard", "HomeAssistantLight", "HomeAssistantSensor", "IlluminanceMessage",
     "LightStateMessage", "Name", "OnPlayer", "Recorded", "Refusal", "Refused", "Reporter", "RoomLight",
-    "RoomLightId", "Sensor", "SensorId", "SensorPlace", "SensorReporter", "SetupRefusal",
+    "RoomLightId", "RoomLightState", "Sensor", "SensorId", "SensorPlace", "SensorReporter", "SetupRefusal",
 ]

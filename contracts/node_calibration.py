@@ -3,12 +3,11 @@
 No geometry or homography implementation belongs in the base contract. Calibration
 JSON is normalized by contracts.models.Calibration at its applying/authoring owner.
 
-Room light (decision 0028) carries the Frame's lighting in Position's trial: `lighting_json` is the
-canonical JSON of the draft's contracts.frame_lighting.FrameLighting (its lights, mat depth and
-paper), carried and hashed beside the calibration, so a presented trial proves both and its Save
-writes both; the console edits a Frame's lights live on the wall this way. The envelope's cap
-(MAX_TRIAL_BYTES) is the display host's C buffers' (appliance/display_host/native), so a draft
-whose envelope would pass it is refused before it is sent (`encode_trial`).
+Position's trial carries the Frame's lighting (contracts.frame_lighting.FrameLighting: its lights,
+mat depth and paper) beside the calibration, hashed with it, so a presented trial proves both and
+its Save writes both. On the wire the envelope's `lighting` is the lighting's JSON object. The
+envelope's cap (MAX_TRIAL_BYTES) is the display host's C buffers', so a draft whose envelope would
+pass it is refused before it is sent (`encode_trial`).
 """
 
 from __future__ import annotations
@@ -18,6 +17,9 @@ import json
 from dataclasses import dataclass, fields
 from uuid import UUID
 
+from pydantic import ValidationError
+
+from contracts.frame_lighting import FrameLighting
 from contracts.node_display import Surface, document, surface_from
 from contracts.node_protocol import counter, digest, identifier
 from contracts.strict_json import loads_object
@@ -41,7 +43,7 @@ class TrialCandidate:
     candidate_sha256: str
     expires_boottime_ms: int
     hard_expires_boottime_ms: int
-    lighting_json: str
+    lighting: FrameLighting
 
     def __post_init__(self) -> None:
         identifier(self.trial_id)
@@ -58,13 +60,11 @@ class TrialCandidate:
         value = loads_object(self.calibration_json.encode(), max_bytes=MAX_CALIBRATION_BYTES)
         if value is None or canonical(value) != self.calibration_json:
             raise ValueError("trial_calibration_not_canonical")
-        lighting = (loads_object(self.lighting_json.encode(), max_bytes=MAX_LIGHTING_BYTES)
-                    if isinstance(self.lighting_json, str) else None)
-        if lighting is None or canonical(lighting) != self.lighting_json:
-            raise ValueError("trial_lighting_not_canonical")
+        if type(self.lighting) is not FrameLighting or len(lighting_text(self.lighting).encode()) > MAX_LIGHTING_BYTES:
+            raise ValueError("trial_lighting_invalid")
         if self.candidate_sha256 != candidate_hash(
             self.trial_id, self.generation, self.sequence, self.baseline, self.calibration_json,
-            self.lighting_json,
+            self.lighting,
         ):
             raise ValueError("trial_candidate_hash_mismatch")
 
@@ -73,9 +73,15 @@ class TrialCandidate:
         return "trial-" + self.candidate_sha256
 
 
+def lighting_text(lighting: FrameLighting) -> str:
+    """The lighting's canonical JSON: what the envelope carries and the hash covers, at most
+    MAX_LIGHTING_BYTES for a valid trial."""
+    return canonical(lighting.model_dump(mode="json"))
+
+
 def candidate_hash(
     trial_id: UUID, generation: int, sequence: int, baseline: Surface, calibration_json: str,
-    lighting_json: str,
+    lighting: FrameLighting,
 ) -> str:
     """The candidate's SHA-256 over its identity, baseline, calibration and lighting (the trial's frame
     tag is "trial-" + it): Central computes it at each begin and edit, the Player checks it."""
@@ -87,14 +93,17 @@ def candidate_hash(
                 "sequence": sequence,
                 "baseline": document(baseline),
                 "calibration": json.loads(calibration_json),
-                "lighting": json.loads(lighting_json),
+                "lighting": lighting.model_dump(mode="json"),
             }
         ).encode()
     ).hexdigest()
 
 
 def encode_trial(candidate: TrialCandidate) -> str:
-    result = canonical(document(candidate))
+    """The envelope's canonical JSON; ValueError("trial_envelope_bound") past MAX_TRIAL_BYTES."""
+    value = document(candidate)
+    value["lighting"] = candidate.lighting.model_dump(mode="json")
+    result = canonical(value)
     if len(result.encode()) > MAX_TRIAL_BYTES:
         raise ValueError("trial_envelope_bound")
     return result
@@ -110,9 +119,10 @@ def parse_trial(raw: str) -> TrialCandidate:
                 **value,
                 "trial_id": UUID(value["trial_id"]),
                 "baseline": surface_from(value["baseline"]),
+                "lighting": FrameLighting.model_validate(value["lighting"]),
             }
         )
-    except (KeyError, TypeError, AttributeError) as exc:
+    except (KeyError, TypeError, AttributeError, ValidationError) as exc:
         raise ValueError("trial_envelope_invalid") from exc
 
 

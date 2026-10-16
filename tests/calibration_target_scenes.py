@@ -55,8 +55,8 @@ from contracts.calibration_target import (
     board_raster,
     qr_copies,
 )
+from contracts.colour import srgb_to_linear
 from contracts.kelvin import kelvin_white
-from contracts.node_frame import srgb_to_linear
 from contracts.node_picture import (
     NEUTRAL_SOFTWARE,
     UPGRADE_DISPLAY_LIGHT,

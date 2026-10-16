@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import pytest
 
-from central.infra.home_assistant import (
+from central.infra.home_assistant.link import (
     CLIENT_ID_PREFIX,
     MQTT_URL_ENV,
     Broker,

@@ -11,12 +11,16 @@ import math
 import pytest
 
 from contracts.calibration_target import TargetCode
-from contracts.frame_lighting import DIMMER_AT_FULL, FarLight, FrameLighting, Paper, WashLight
+from contracts.frame_lighting import AT_FULL, FarLight, FrameLighting, Paper, WashLight
 from contracts.lut import LUT_BYTES
 from contracts.models import CoverFit, FrameProfile
 from contracts.node_frame import PictureOperations
 from contracts.node_picture import DisplayLight
-from contracts.room_light import FULL_ON, FixedColour, RoomLightEntry, RoomLightsDocument
+from contracts.room_light import (
+    FixedColour,
+    FixedEntry,
+    RoomLightsDocument,
+)
 from contracts.tuning import TestPattern
 from player.calibration_target import target_modules
 from player.geometry import (
@@ -38,11 +42,11 @@ from player.native import _FINAL, _PATTERN_CODES
 PROFILE = FrameProfile(width_px=1920, height_px=1080, diagonal_inches=27)
 SMALL_PROFILE = FrameProfile(width_px=1920, height_px=1080, diagonal_inches=24)
 GLOWING_TABLE = bytes([200]) * LUT_BYTES        # every colour to a bright grey: a LUT nobody misses
-ROOM = RoomLightsDocument(change=1, lights={"room": RoomLightEntry(FixedColour(3000), FULL_ON)})
+ROOM = RoomLightsDocument(change=1, lights={"room": FixedEntry(colour=FixedColour(kelvin=3000))})
 # A dim warm room with a deep mat and a dark paper: what a photo gets, and a pattern never does.
 DIM_ROOM = FrameLighting(mat_depth_mm=8, paper=Paper(whiteness=.6, ink_density=1.2), lights=(
-    WashLight(light="room", lux=40, reference=DIMMER_AT_FULL),
-    FarLight(light="room", lux=200, reference=DIMMER_AT_FULL, from_degrees=0, steep_degrees=30,
+    WashLight(light="room", lux=40, reference=AT_FULL),
+    FarLight(light="room", lux=200, reference=AT_FULL, from_degrees=0, steep_degrees=30,
              softness_degrees=20)))
 DISPLAY = DisplayLight(1000.0, 0.0003)
 
@@ -52,7 +56,7 @@ def lights(fit=CoverFit()):
 
 
 def operations(slope=1.0, *, rgb=(1.0, 1.0, 1.0), pattern=None) -> PictureOperations:
-    return PictureOperations("HDMI-A-1", 1, rgb, slope, 1.0, DISPLAY.matched_lux, DISPLAY.black, test_pattern=pattern)
+    return PictureOperations("HDMI-A-1", 1, rgb, slope, 1.0, DISPLAY, test_pattern=pattern)
 
 
 def tilted_opening(degrees: float) -> tuple[tuple[float, float], ...]:

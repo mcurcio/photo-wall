@@ -14,12 +14,17 @@ import pytest
 
 import player.geometry as geometry
 from contracts.calibration_target import SCREEN_ROWS, Square, Surface, TargetCode, square
-from contracts.frame_lighting import DIMMER_AT_FULL, FarLight, FrameLighting, Paper, WashLight
+from contracts.colour import srgb_to_linear
+from contracts.frame_lighting import AT_FULL, FarLight, FrameLighting, Paper, WashLight
 from contracts.lut import LUT_BYTES
 from contracts.models import CoverFit, FrameProfile
-from contracts.node_frame import PictureOperations, srgb_to_linear
+from contracts.node_frame import PictureOperations
 from contracts.node_picture import DisplayLight
-from contracts.room_light import FULL_ON, FixedColour, RoomLightEntry, RoomLightsDocument
+from contracts.room_light import (
+    FixedColour,
+    FixedEntry,
+    RoomLightsDocument,
+)
 from contracts.tuning import TestPattern
 from player.calibration_target import target_modules
 from player.geometry import (
@@ -38,10 +43,10 @@ PROFILE = FrameProfile(width_px=1920, height_px=1080, diagonal_inches=27)
 DISPLAY = DisplayLight(1000.0, 0.0003)
 LIT = frame_lights(
     FrameLighting(mat_depth_mm=8, paper=Paper(whiteness=.6, ink_density=1.2), lights=(
-        WashLight(light="room", lux=40, reference=DIMMER_AT_FULL),
-        FarLight(light="room", lux=200, reference=DIMMER_AT_FULL, from_degrees=0, steep_degrees=30,
+        WashLight(light="room", lux=40, reference=AT_FULL),
+        FarLight(light="room", lux=200, reference=AT_FULL, from_degrees=0, steep_degrees=30,
                  softness_degrees=20))),
-    RoomLightsDocument(change=1, lights={"room": RoomLightEntry(FixedColour(3000), FULL_ON)}),
+    RoomLightsDocument(change=1, lights={"room": FixedEntry(colour=FixedColour(kelvin=3000))}),
     CoverFit(), PROFILE, DISPLAY)
 GLOWING_TABLE = bytes([200]) * LUT_BYTES
 DRAW = board_draw(CoverFit(), PROFILE, target_modules(TargetCode("p-" + "ab" * 16, "HDMI-A-1", 9)))
@@ -49,7 +54,7 @@ MULTIPLIERS, SLOPE, EXPONENT = (1.0, .9, .8), .8, 1.1
 
 
 def operations(pattern, slope=SLOPE) -> PictureOperations:
-    return PictureOperations("HDMI-A-1", 9, MULTIPLIERS, slope, EXPONENT, DISPLAY.matched_lux, DISPLAY.black,
+    return PictureOperations("HDMI-A-1", 9, MULTIPLIERS, slope, EXPONENT, DISPLAY,
                              test_pattern=pattern)
 
 

@@ -20,16 +20,11 @@ patterns. The Wayland messages are unchanged (the interface stays version 4); a 
 host from different releases refuse each other's text (the strict codec below), as a Pi's release
 ships whole.
 
-Picture operations v8 (room light, decision 0028; owner, 2026-10-15, Q2 "the paper replaces them")
-delete the print look's sliders (light factor, saturation, highlight knee, black floor) and the
-Display's LUT: the paper on each Frame's lighting replaces them. They add the Display's light,
-`matched_lux` and `panel_black` (contracts/node_picture.py `DisplayLight`, whose ranges have their
-one home there: this module may not import it, as node_picture -> kelvin -> node_frame would cycle,
-so here they are only finite and positive, and the display host builds operations only from a valid
-DisplayLight). The test patterns: WHITE, GREY_RAMP and TARGET_POST_SOFTWARE go through white balance,
-contrast and gamma only, never the room's light, the paper or the mat (with the sliders gone, White
-is the TV's own white for the paper match); BLACK_LEVEL and TARGET_PRE_SOFTWARE are raw. Outside
-every opening stays black.
+Picture operations v8 carry the Display's light (`light`, contracts/node_picture.py `DisplayLight`,
+the one home of its ranges) in place of the print look's sliders. The test patterns: WHITE,
+GREY_RAMP and TARGET_POST_SOFTWARE go through white balance, contrast and gamma only, never the
+room's light, the paper or the mat; BLACK_LEVEL and TARGET_PRE_SOFTWARE are raw. Outside every
+opening stays black.
 
 One home each here: the operations' shape, ranges and codec; the picture change's wire text. How
 settings become operations is Display Host's (appliance/display_host/picture.py `operations_for`);
@@ -44,6 +39,7 @@ from dataclasses import dataclass, fields
 from hashlib import sha256
 from typing import Final
 
+from contracts.node_picture import DisplayLight
 from contracts.node_protocol import counter, digest, token
 from contracts.strict_json import loads_object
 from contracts.tuning import TestPattern
@@ -55,19 +51,12 @@ GAMMA_EXPONENT_MAX: Final = 2.0
 NO_PICTURE_CHANGE: Final = "0"            # tag_picture's text before any picture event reached the Player
 
 
-def srgb_to_linear(value: float) -> float:
-    """An sRGB-encoded channel (0..1, clamped) in linear light (IEC 61966-2-1): the one home of the
-    curve the Player's final pass decodes with and the Pi's white balance is worked in. Pure."""
-    value = min(1.0, max(0.0, value))
-    return value / 12.92 if value <= .04045 else ((value + .055) / 1.055) ** 2.4
-
-
 @dataclass(frozen=True)
 class PictureOperations:
     """What the Player's final pass does to one Output's picture (v8). The order and each step's
     formula are the Player's (player/geometry.py `final_pixel`); in brief: the Frame's paper under
     the room's light (from the Frame's binding and the room-lights document, never from here) as a
-    signal between the panel's black (`panel_black`) and its white at `matched_lux`, the fixed
+    signal between the panel's black and its white at the Display's matched lux (`light`), the fixed
     highlight rolloff, white balance (`rgb_multipliers`, the largest 1), encode for the screen,
     `contrast_slope` about mid-grey (0.5), `gamma_exponent`, clamp, dither, then black outside the
     Output's Frame openings. `picture_change` is the picture document's change these came from,
@@ -78,16 +67,15 @@ class PictureOperations:
     rgb_multipliers: tuple[float, float, float]
     contrast_slope: float
     gamma_exponent: float
-    matched_lux: float
-    panel_black: float
+    light: DisplayLight
     test_pattern: TestPattern | None = None
 
     def __post_init__(self) -> None:
         """ValueError("picture_operations") unless output_id is a node token, picture_change >= 1,
         every number is a finite float (an int is accepted and kept as given, never a bool), each
         multiplier is in (0, 1] with the largest exactly 1.0, 0 <= contrast_slope <=
-        CONTRAST_SLOPE_MAX, GAMMA_EXPONENT_MIN <= gamma_exponent <= GAMMA_EXPONENT_MAX,
-        matched_lux > 0, 0 < panel_black < 1, and test_pattern is None or a TestPattern."""
+        CONTRAST_SLOPE_MAX, GAMMA_EXPONENT_MIN <= gamma_exponent <= GAMMA_EXPONENT_MAX, light is a
+        DisplayLight (its ranges are its own), and test_pattern is None or a TestPattern."""
         multipliers = self.rgb_multipliers
         try:
             token(self.output_id)
@@ -99,28 +87,27 @@ class PictureOperations:
                  and max(multipliers) == 1.0
                  and _number(self.contrast_slope, 0, CONTRAST_SLOPE_MAX)
                  and _number(self.gamma_exponent, GAMMA_EXPONENT_MIN, GAMMA_EXPONENT_MAX)
-                 and _number(self.matched_lux, 0, math.inf) and self.matched_lux > 0
-                 and _number(self.panel_black, 0, 1) and 0 < self.panel_black < 1
+                 and isinstance(self.light, DisplayLight)
                  and (self.test_pattern is None or isinstance(self.test_pattern, TestPattern)))
         if not valid:
             raise ValueError("picture_operations")
 
 
-def neutral_operations(output_id: str, picture_change: int, matched_lux: float,
-                       panel_black: float) -> PictureOperations:
+def neutral_operations(output_id: str, picture_change: int, light: DisplayLight) -> PictureOperations:
     """Operations that change nothing of the Display's own: multipliers (1, 1, 1), slope 1, exponent
     1, no test pattern, with the Display's light as given."""
     return PictureOperations(output_id=output_id, picture_change=picture_change, rgb_multipliers=(1.0, 1.0, 1.0),
-                             contrast_slope=1.0, gamma_exponent=1.0, matched_lux=matched_lux,
-                             panel_black=panel_black, test_pattern=None)
+                             contrast_slope=1.0, gamma_exponent=1.0, light=light, test_pattern=None)
 
 
 def encode_picture_operations(operations: PictureOperations) -> str:
-    """Canonical JSON (sorted keys, no spaces, tuples as lists, a test pattern as its value, floats
-    as Python's repr) of at most PICTURE_OPERATIONS_BYTES; ValueError("picture_operations_too_large")
-    past it (never for valid operations: every field at its longest fits)."""
+    """Canonical JSON (sorted keys, no spaces, tuples as lists, the light as an object of its two
+    fields, a test pattern as its value, floats as Python's repr) of at most
+    PICTURE_OPERATIONS_BYTES; ValueError("picture_operations_too_large") past it (never for valid
+    operations: every field at its longest fits)."""
     value = {field.name: getattr(operations, field.name) for field in fields(PictureOperations)}
     value["rgb_multipliers"] = list(operations.rgb_multipliers)
+    value["light"] = {"matched_lux": operations.light.matched_lux, "black": operations.light.black}
     value["test_pattern"] = None if operations.test_pattern is None else operations.test_pattern.value
     raw = json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
     if len(raw.encode()) > PICTURE_OPERATIONS_BYTES:
@@ -129,22 +116,24 @@ def encode_picture_operations(operations: PictureOperations) -> str:
 
 
 def decode_picture_operations(raw: str) -> PictureOperations:
-    """The operations `raw` encodes (contracts.strict_json rules; exactly the eight fields, a test
-    pattern null or one of TestPattern's values); ValueError("picture_operations") for anything
-    else."""
+    """The operations `raw` encodes (contracts.strict_json rules; exactly the seven fields, the light
+    exactly its two, a test pattern null or one of TestPattern's values); ValueError("picture_operations")
+    for anything else."""
     value = loads_object(raw.encode(), max_bytes=PICTURE_OPERATIONS_BYTES) if isinstance(raw, str) else None
     if value is None or set(value) != {field.name for field in fields(PictureOperations)}:
         raise ValueError("picture_operations")
-    multipliers = value["rgb_multipliers"]
-    if not isinstance(multipliers, list):
+    multipliers, light = value["rgb_multipliers"], value["light"]
+    if not isinstance(multipliers, list) or not isinstance(light, dict) or set(light) != {"matched_lux", "black"}:
         raise ValueError("picture_operations")
     pattern = value["test_pattern"]
-    if pattern is not None:
-        try:
+    try:
+        display = DisplayLight(matched_lux=light["matched_lux"], black=light["black"])
+        if pattern is not None:
             pattern = TestPattern(pattern)
-        except (ValueError, TypeError) as error:
-            raise ValueError("picture_operations") from error
-    return PictureOperations(**{**value, "rgb_multipliers": tuple(multipliers), "test_pattern": pattern})
+    except (ValueError, TypeError) as error:
+        raise ValueError("picture_operations") from error
+    return PictureOperations(**{**value, "rgb_multipliers": tuple(multipliers), "light": display,
+                                "test_pattern": pattern})
 
 
 def picture_change_text(change: int | None) -> str:

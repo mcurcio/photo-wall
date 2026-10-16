@@ -81,18 +81,22 @@ def upgrade_lighting():
     that matches the TV."""
     import math
 
-    from contracts.frame_lighting import DIMMER_AT_FULL, FrameLighting, Paper, WashLight
+    from contracts.frame_lighting import AT_FULL, FrameLighting, Paper, WashLight
     from contracts.node_picture import UPGRADE_DISPLAY_LIGHT
 
     return FrameLighting(mat_depth_mm=0, paper=Paper(whiteness=.9, ink_density=-math.log10(UPGRADE_DISPLAY_LIGHT.black)),
                          lights=(WashLight(light="room", lux=UPGRADE_DISPLAY_LIGHT.matched_lux,
-                                           reference=DIMMER_AT_FULL),))
+                                           reference=AT_FULL),))
 
 
 def room():
-    from contracts.room_light import FULL_ON, FixedColour, RoomLightEntry, RoomLightsDocument
+    from contracts.room_light import (
+        FixedColour,
+        FixedEntry,
+        RoomLightsDocument,
+    )
 
-    return RoomLightsDocument(change=1, lights={"room": RoomLightEntry(FixedColour(6500), FULL_ON)})
+    return RoomLightsDocument(change=1, lights={"room": FixedEntry(colour=FixedColour(kelvin=6500))})
 
 
 def grey_png(path: pathlib.Path) -> bytes:
@@ -243,11 +247,10 @@ def grey_linear() -> tuple[float, float, float]:
 def lights_of(operations, lighting=None):
     """The Frame's lights (`frame_lights`) as the Player draws them with `operations`."""
     from contracts.models import CoverFit, FrameProfile
-    from contracts.node_picture import DisplayLight
     from player.geometry import frame_lights
 
     return frame_lights(lighting or upgrade_lighting(), room(), CoverFit(corners=OPENING, rotation=ROTATION),
-                        FrameProfile(**PROFILE), DisplayLight(operations.matched_lux, operations.panel_black))
+                        FrameProfile(**PROFILE), operations.light)
 
 
 def compare(operations, *, reference=None) -> tuple[int, int]:
@@ -437,7 +440,7 @@ def main() -> None:
         pump(lambda seen: isinstance(seen, DiagnosticRelease))
         print("PASS the_player_is_handed_the_output", flush=True)
 
-        stand_in = neutral_operations(OUTPUT, 1, UPGRADE_DISPLAY_LIGHT.matched_lux, UPGRADE_DISPLAY_LIGHT.black)
+        stand_in = neutral_operations(OUTPUT, 1, UPGRADE_DISPLAY_LIGHT)
         inside, outside = await_compare(stand_in, drain)
         print(f"NEUTRAL inside={inside} outside={outside}", flush=True)
         assert inside > 300 and outside > 1000, (inside, outside)
@@ -548,7 +551,7 @@ def write_lighting(lighting) -> None:
 
 
 def room_light_cases(send, presented, drain, SoftwarePicture) -> None:
-    from contracts.frame_lighting import DIMMER_AT_FULL, FarLight, WashLight
+    from contracts.frame_lighting import AT_FULL, FarLight, WashLight
     from contracts.lut import LutRef
     from contracts.node_frame import PictureOperations
     from contracts.node_picture import UPGRADE_DISPLAY_LIGHT, DisplayLight
@@ -561,7 +564,7 @@ def room_light_cases(send, presented, drain, SoftwarePicture) -> None:
     LIGHTING_FILE.unlink(missing_ok=True)
     send(4, neutral)
     presented(4)
-    operations = PictureOperations(OUTPUT, 4, (1.0, 1.0, 1.0), 1.0, 1.0, matched, black)
+    operations = PictureOperations(OUTPUT, 4, (1.0, 1.0, 1.0), 1.0, 1.0, DisplayLight(matched, black))
     today = today_pixel(grey_linear(), operations)
     inside, outside = await_compare(operations, drain, reference=lambda _x, _y: today)
     print(f"NEUTRAL_TODAY inside={inside} outside={outside}", flush=True)
@@ -570,14 +573,14 @@ def room_light_cases(send, presented, drain, SoftwarePicture) -> None:
 
     # 3. tracer_matched_light_and_one_far_light
     lighting = upgrade_lighting().model_copy(update={"mat_depth_mm": 2.0, "lights": (
-        WashLight(light="room", lux=500, reference=DIMMER_AT_FULL),
-        FarLight(light="room", lux=500, reference=DIMMER_AT_FULL, from_degrees=0, steep_degrees=45,
+        WashLight(light="room", lux=500, reference=AT_FULL),
+        FarLight(light="room", lux=500, reference=AT_FULL, from_degrees=0, steep_degrees=45,
                  softness_degrees=0))})
     write_lighting(lighting)
     light = DisplayLight(matched_lux=800.0, black=black)
     send(5, neutral, light)
     report = presented(5)
-    expected = PictureOperations(OUTPUT, 5, (1.0, 1.0, 1.0), 1.0, 1.0, 800.0, black)
+    expected = PictureOperations(OUTPUT, 5, (1.0, 1.0, 1.0), 1.0, 1.0, DisplayLight(800.0, black))
     lights = lights_of(expected, lighting)
 
     def lit(x: float, y: float) -> tuple[float, float, float]:
@@ -610,7 +613,7 @@ def room_light_cases(send, presented, drain, SoftwarePicture) -> None:
     write_lighting(profiled)
     send(6, neutral)
     presented(6)                            # nothing waits on the Frame's LUT
-    operations = PictureOperations(OUTPUT, 6, (1.0, 1.0, 1.0), 1.0, 1.0, matched, black)
+    operations = PictureOperations(OUTPUT, 6, (1.0, 1.0, 1.0), 1.0, 1.0, DisplayLight(matched, black))
     inside, _ = await_compare(operations, drain)
     LUT_RELEASE.touch()
     LUT_RELEASE.chmod(0o644)

@@ -149,7 +149,7 @@ type = "forbidden"
 source_modules = ["central.kernel", "central.origins", "central.content_catalog",
                   "central.assets", "central.health", "central.displays", "central.photo_library",
                   "central.wall_plan", "central.house_time", "central.power", "central.why",
-                  "central.room_light"]
+                  "central.room_light", "central.frame_lighting"]
 forbidden_modules = ["procrastinate", "psycopg", "psycopg_pool", "fastapi", "starlette"]
 
 [[tool.importlinter.contracts]]
@@ -217,21 +217,44 @@ forbidden_modules = ["media", "httpx", "nodeapi", "central.infra", "central.db",
                      "central.app", "central.coordination", "central.planner"]
 
 [[tool.importlinter.contracts]]
-# Room light (decision 0028): which room lights and Sensors exist, who reports each and the
-# room-lights document are pure; the broker, the bus and PostgreSQL are reached through central/infra.
+# Which room lights and Sensors exist, who reports each and the room-lights document are pure, and
+# know no reporting source: the broker, the bus and PostgreSQL are reached through central/infra.
 name = "Room lights are pure"
 type = "forbidden"
 source_modules = ["central.room_light"]
 forbidden_modules = ["media", "httpx", "nodeapi", "aiomqtt", "paho", "central.infra", "central.db",
                      "central.registry", "central.app", "central.coordination", "central.planner",
-                     "central.displays", "central.fleet"]
+                     "central.displays", "central.fleet", "central.frame_lighting"]
 
 [[tool.importlinter.contracts]]
-# Room light (decision 0028): only Central's worker talks to Home Assistant; a Pi never does.
-name = "Only Central talks MQTT"
+# A Frame's lighting rules are pure; the house is read through its port, under the room-lights lock.
+name = "Frame lighting is pure"
 type = "forbidden"
-source_modules = ["contracts", "appliance", "player", "uplink", "nodeapi"]
-forbidden_modules = ["aiomqtt", "paho"]
+source_modules = ["central.frame_lighting"]
+forbidden_modules = ["media", "httpx", "nodeapi", "aiomqtt", "paho", "central.infra", "central.db",
+                     "central.registry", "central.app", "central.coordination", "central.planner",
+                     "central.displays", "central.fleet", "central.room_light"]
+
+[[tool.importlinter.contracts]]
+# Everything Home Assistant and MQTT is one adapter package: only its link imports the MQTT client.
+name = "Only the Home Assistant adapter talks MQTT"
+type = "protected"
+protected_modules = ["aiomqtt"]
+allowed_importers = ["central.infra.home_assistant.link"]
+
+[[tool.importlinter.contracts]]
+name = "Nothing else imports an MQTT client"
+type = "forbidden"
+source_modules = ["central", "media", "contracts", "appliance", "player", "uplink", "nodeapi"]
+forbidden_modules = ["paho"]
+
+[[tool.importlinter.contracts]]
+# The adapter is reached only from the worker's wiring (and, once it lands, the Home Assistant
+# settings page's routes and the API's composition root, added here by name).
+name = "Only the worker's wiring reaches the Home Assistant adapter"
+type = "protected"
+protected_modules = ["central.infra.home_assistant"]
+allowed_importers = ["media.worker"]
 
 [[tool.importlinter.contracts]]
 # Power and the week: sun times and the IANA zone database are Central's house-time calculator's;

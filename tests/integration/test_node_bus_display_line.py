@@ -277,7 +277,7 @@ def test_the_display_line_carries_centrals_output_document(tmp_path):
                         if operations.picture_change == 9]
             [operations] = (await until(drawn, 15, "the Display's light at the shell"))[:1]
             assert operations == operations_for("HDMI-A-1", 9, MATCHED.software, MATCHED.light, None)
-            assert (operations.matched_lux, operations.panel_black) == (400.0, 0.001)
+            assert operations.light == DisplayLight(matched_lux=400.0, black=0.001)
         finally:
             picture.stop()
             stop.set()

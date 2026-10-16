@@ -37,7 +37,7 @@ from central.infra.room_light_store import room_lights_in
 from central.registry import RegistryError
 from central.room_light.policy import check_frame_lighting
 from central.transaction_locks import acquire_runtime_locks
-from contracts.frame_lighting import DIMMER_AT_FULL, FrameLighting
+from contracts.frame_lighting import FrameLighting
 from contracts.models import Calibration
 
 pytestmark = pytest.mark.skipif(
@@ -216,7 +216,7 @@ def test_a_close_lights_lux_rides_the_session_done_keeps_it_and_revert_puts_it_b
         sent = wait_for_lighting(page, sessions, lambda lighting: any(
             each["kind"] == "close" and each["lux"] == 800 for each in lighting["lights"]))
         close = next(each for each in sent["lights"] if each["kind"] == "close")
-        assert (close["light"], close["reference"]) == ("bookshelf-spot", DIMMER_AT_FULL), close
+        assert (close["light"], close["reference"]) == ("bookshelf-spot", {"kind": "at-full"}), close
         edit = sessions.bodies[sessions.sent.index("edit")]
         assert set(edit) == {"operation", "expected_sequence", "calibration", "lighting"}, edit
         assert any(each["lux"] == 800 for each in sessions.row["lighting"]["lights"])  # the trial view
@@ -255,7 +255,7 @@ def test_a_reference_mismatch_is_said_in_words_and_choosing_the_sensors_reading_
         expect(light).to_contain_text("Its Sensor has no reading")
         position = page.get_by_role("region", name="Position", exact=True)
         expect(position).to_contain_text(MISMATCH)
-        assert any(each["light"] == "daylight" and each["reference"] == DIMMER_AT_FULL
+        assert any(each["light"] == "daylight" and each["reference"] == {"kind": "at-full"}
                    for lighting in sessions.lightings for each in lighting["lights"]), sessions.lightings
 
         light.get_by_role("spinbutton", name="Its Sensor read", exact=True).fill("320")

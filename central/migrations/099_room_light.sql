@@ -10,7 +10,7 @@
 -- placeholder contracts/node_picture.py UPGRADE_DISPLAY_LIGHT (1000 lx matched, black 0.0003 of
 -- white); one fixed room light "room" exists; each Frame's lighting is
 -- central/room_light/policy.py upgrade_lighting(UPGRADE_DISPLAY_LIGHT, its mat's depth): one wash of
--- "room" at 1000 lx, dimmer-at-full, and paper of whiteness 0.9 and ink -log10(0.0003). The old mat
+-- "room" at 1000 lx, at full, and paper of whiteness 0.9 and ink -log10(0.0003). The old mat
 -- lights' relative strengths have no lux, so they are not carried (0028). The Display's software
 -- brightness multiplied the linear picture, so a Frame keeps it as its wash's lux: 1000 x brightness
 -- / 100 lx (0 % becomes 0.1 lx: a light is never 0 lx), from the Display its Position names, else the
@@ -59,7 +59,7 @@ CREATE TABLE home_assistant_refusals (
 
 INSERT INTO room_lights (id, name, reporter, colour, state, heard_at, position) VALUES
     ('room', 'Room', '{"kind": "fixed"}'::jsonb, '{"kind": "fixed", "kelvin": 6500}'::jsonb,
-     '{"kind": "dimmer", "on": true, "brightness": 1.0, "rgb": null}'::jsonb, NULL, 0);
+     '{"kind": "dimmer", "on": true, "brightness": 1.0}'::jsonb, NULL, 0);
 INSERT INTO room_lights_change (one, change) VALUES (true, 1);
 
 -- Each Frame's wash, from its Display's software brightness, before the column goes.
@@ -128,7 +128,7 @@ ALTER TABLE frames ADD COLUMN lighting JSONB NULL CHECK (jsonb_typeof(lighting) 
 UPDATE frames SET lighting = jsonb_build_object(
     'mat_depth_mm', COALESCE((mat->>'depth_mm')::double precision, 0.0),
     'lights', jsonb_build_array(jsonb_build_object(
-        'kind', 'wash', 'light', 'room', 'reference', 'dimmer-at-full',
+        'kind', 'wash', 'light', 'room', 'reference', jsonb_build_object('kind', 'at-full'),
         'lux', COALESCE((SELECT w.lux FROM upgrade_wash w WHERE w.frame_id = frames.id), 1000.0))),
     'paper', '{"whiteness": 0.9, "ink_density": 3.5228787452803374, "profile": null}'::jsonb);
 ALTER TABLE frames ALTER COLUMN lighting SET NOT NULL, DROP COLUMN mat;
@@ -142,11 +142,11 @@ ALTER TABLE node_calibration_trials
 UPDATE node_calibration_trials SET
     lighting = jsonb_build_object(
         'mat_depth_mm', COALESCE((mat->>'depth_mm')::double precision, 0.0),
-        'lights', '[{"kind": "wash", "light": "room", "lux": 1000.0, "reference": "dimmer-at-full"}]'::jsonb,
+        'lights', '[{"kind": "wash", "light": "room", "lux": 1000.0, "reference": {"kind": "at-full"}}]'::jsonb,
         'paper', '{"whiteness": 0.9, "ink_density": 3.5228787452803374, "profile": null}'::jsonb),
     saved_lighting = CASE WHEN saved_mat IS NULL THEN NULL ELSE jsonb_build_object(
         'mat_depth_mm', COALESCE((saved_mat->>'depth_mm')::double precision, 0.0),
-        'lights', '[{"kind": "wash", "light": "room", "lux": 1000.0, "reference": "dimmer-at-full"}]'::jsonb,
+        'lights', '[{"kind": "wash", "light": "room", "lux": 1000.0, "reference": {"kind": "at-full"}}]'::jsonb,
         'paper', '{"whiteness": 0.9, "ink_density": 3.5228787452803374, "profile": null}'::jsonb) END;
 ALTER TABLE node_calibration_trials
     ALTER COLUMN lighting SET NOT NULL,
@@ -157,7 +157,7 @@ ALTER TABLE node_calibration_trials
 ALTER TABLE position_entries ADD COLUMN lighting JSONB NULL CHECK (jsonb_typeof(lighting) = 'object');
 UPDATE position_entries SET lighting = jsonb_build_object(
     'mat_depth_mm', COALESCE((mat->>'depth_mm')::double precision, 0.0),
-    'lights', '[{"kind": "wash", "light": "room", "lux": 1000.0, "reference": "dimmer-at-full"}]'::jsonb,
+    'lights', '[{"kind": "wash", "light": "room", "lux": 1000.0, "reference": {"kind": "at-full"}}]'::jsonb,
     'paper', '{"whiteness": 0.9, "ink_density": 3.5228787452803374, "profile": null}'::jsonb);
 ALTER TABLE position_entries ALTER COLUMN lighting SET NOT NULL, DROP COLUMN mat;
 
@@ -171,7 +171,7 @@ UPDATE player_configurations SET configuration = jsonb_set(configuration, '{bind
                               (SELECT f.lighting FROM frames f WHERE f.id = e.binding->>'frame_id'),
                               jsonb_build_object(
                               'mat_depth_mm', COALESCE((e.binding->'mat'->>'depth_mm')::double precision, 0.0),
-                              'lights', '[{"kind": "wash", "light": "room", "lux": 1000.0, "reference": "dimmer-at-full"}]'::jsonb,
+                              'lights', '[{"kind": "wash", "light": "room", "lux": 1000.0, "reference": {"kind": "at-full"}}]'::jsonb,
                               'paper', '{"whiteness": 0.9, "ink_density": 3.5228787452803374, "profile": null}'::jsonb)))
                           ELSE e.binding END
                      ORDER BY e.ordinal)
@@ -185,7 +185,7 @@ UPDATE plan_offers SET manifest = jsonb_set(manifest, '{bindings}', (
                               (SELECT f.lighting FROM frames f WHERE f.id = e.binding->>'frame_id'),
                               jsonb_build_object(
                               'mat_depth_mm', COALESCE((e.binding->'mat'->>'depth_mm')::double precision, 0.0),
-                              'lights', '[{"kind": "wash", "light": "room", "lux": 1000.0, "reference": "dimmer-at-full"}]'::jsonb,
+                              'lights', '[{"kind": "wash", "light": "room", "lux": 1000.0, "reference": {"kind": "at-full"}}]'::jsonb,
                               'paper', '{"whiteness": 0.9, "ink_density": 3.5228787452803374, "profile": null}'::jsonb)))
                           ELSE e.binding END
                      ORDER BY e.ordinal)

@@ -122,7 +122,6 @@ def software(contrast: int = 100, kelvin: int = 6500, gamma: int = 22) -> Softwa
 
 
 LIGHT = UPGRADE_DISPLAY_LIGHT
-LIGHT_ARGS = (LIGHT.matched_lux, LIGHT.black)
 
 
 def document(picture_change: int, hardware: dict[str, int] | None = None, wanted: SoftwarePicture = NEUTRAL_SOFTWARE,
@@ -211,7 +210,7 @@ def test_hardware_46_and_software_114_each_land_on_their_own(display, running):
     assert report.identity == IDENTITY and report.presented_change is None
     until(lambda: run.shell.last()[1] == "Brightness: display 46 %")
     operations, _line = run.shell.last()
-    assert operations == PictureOperations(OUTPUT, 8, (1.0, 1.0, 1.0), 1.14, 1.0, *LIGHT_ARGS)
+    assert operations == PictureOperations(OUTPUT, 8, (1.0, 1.0, 1.0), 1.14, 1.0, LIGHT)
     run.controller.presented(OUTPUT, 8)
     assert run.reports.latest().presented_change == 8
 
@@ -375,7 +374,7 @@ def test_colour_temperature_shows_white_as_charitys_table(kelvin):
 
 def test_the_neutral_values_change_nothing_and_the_ranges_hold():
     assert kelvin_white(6500) == (1.0, 1.0, 1.0)
-    assert operations_for(OUTPUT, 3, NEUTRAL_SOFTWARE, LIGHT, None) == neutral_operations(OUTPUT, 3, *LIGHT_ARGS)
+    assert operations_for(OUTPUT, 3, NEUTRAL_SOFTWARE, LIGHT, None) == neutral_operations(OUTPUT, 3, LIGHT)
     widest = operations_for(OUTPUT, 3, software(0, 6500, 18), LIGHT, None)
     assert (widest.contrast_slope, widest.gamma_exponent) == (0.0, 18 / 22)
     for kelvin in range(3000, 9301, 100):
@@ -386,11 +385,11 @@ def test_the_neutral_values_change_nothing_and_the_ranges_hold():
 
 
 def test_the_displays_light_rides_the_operations_as_given():
-    """Decision 0028: the document's DisplayLight is the operations' matched lux and panel black,
-    and nothing else of the operations moves with it."""
+    """The document's DisplayLight is the operations' light, and nothing else of the operations moves
+    with it."""
     dim = DisplayLight(matched_lux=250.0, black=0.01)
     operations = operations_for(OUTPUT, 4, software(contrast=90), dim, None)
-    assert (operations.matched_lux, operations.panel_black) == (250.0, 0.01)
+    assert operations.light == dim
     assert operations_for(OUTPUT, 4, software(contrast=90), LIGHT, None).contrast_slope == operations.contrast_slope
 
 
@@ -438,7 +437,7 @@ def test_start_and_a_recreated_shell_output_re_send_operations_and_repeat_no_wri
         run.controller.shell_output(OUTPUT)
         until(lambda: len(run.shell.sent) == sent + 1)
         operations, line = run.shell.last()
-        assert operations == PictureOperations(OUTPUT, 4, (1.0, 1.0, 1.0), 0.5, 1.0, *LIGHT_ARGS)
+        assert operations == PictureOperations(OUTPUT, 4, (1.0, 1.0, 1.0), 0.5, 1.0, LIGHT)
         assert line == "Brightness: display 46 %"
         time.sleep(0.3)
         assert display.writes() == [["10", "46"]]       # the re-send repeats no DDC/CI write
@@ -595,14 +594,14 @@ def test_the_backend_sends_the_picture_op_and_hands_the_shells_events_on():
         assert heard == [("output", OUTPUT)]
         playing = threading.Thread(target=play_shell)
         playing.start()
-        operations = PictureOperations(OUTPUT, 6, (1.0, 0.5, 0.25), 0.8, 1.0, *LIGHT_ARGS)
+        operations = PictureOperations(OUTPUT, 6, (1.0, 0.5, 0.25), 0.8, 1.0, LIGHT)
         assert backend.picture(operations, timeout=2, brightness="Brightness: as the display has it")
         playing.join(5)
         request = asked[0]
         assert (request["op"], request["output_id"], request["output"]) == ("picture", OUTPUT, output)
         assert decode_picture_operations(request["operations"]) == operations
         assert request["brightness"] == "Brightness: as the display has it"
-        assert not backend.picture(neutral_operations("HDMI-A-2", 1, *LIGHT_ARGS), timeout=1, brightness="")   # no such Output
+        assert not backend.picture(neutral_operations("HDMI-A-2", 1, LIGHT), timeout=1, brightness="")   # no such Output
 
 
 # List settings, the list kept, the re-read (slice S3) ---------------------------------------------

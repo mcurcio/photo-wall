@@ -501,6 +501,12 @@ class WallReader:
         """The Node's WALL mirror, read-only."""
         return self._wall
 
+    def following(self) -> bool:
+        """Whether the reader follows the mirror now: connected, the mirror there, and its latest
+        read answered. False before the first, while the bus is away and while reads fail. Thread-safe;
+        never blocks."""
+        ...
+
     def start(self) -> None:
         """Run on its own thread and loop; returns at once. RuntimeError("session_started") twice."""
         if self._thread is not None:

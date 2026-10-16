@@ -19,7 +19,7 @@ from central.room_light.policy import upgrade_lighting
 from contracts.frame_lighting import FrameLighting
 from contracts.models import PlayerConfiguration
 from contracts.node_picture import UPGRADE_DISPLAY_LIGHT
-from contracts.room_light import FULL_ON
+from contracts.room_light import FixedColour, FixedEntry
 
 MIGRATIONS = Path(__file__).parents[1] / "central/migrations"
 OLD_MAT = {"depth_mm": 2.5, "lights": [{"from_degrees": 0, "steep_degrees": 30, "softness_degrees": 10,
@@ -91,7 +91,7 @@ def test_099_upgrades_every_display_and_frame_to_todays_picture(database_provisi
                 assert all("mat" not in each for each in offered)
                 assert [FrameLighting.model_validate(each["lighting"]) for each in offered] == [expected, upgraded]
                 document = document_in(conn)
-                assert document.change == 1 and document.lights["room"].state == FULL_ON
+                assert document.change == 1 and document.lights["room"] == FixedEntry(colour=FixedColour(kelvin=6500))
                 assert conn.execute("SELECT reporter FROM room_lights WHERE id='room'").fetchone()["reporter"] == {
                     "kind": "fixed"}
         finally:
