@@ -144,8 +144,12 @@ def test_a_power_probe_answers_within_one_hold_while_the_list_is_asked_back_to_b
     asking = [threading.Thread(target=ask_forever) for _ in range(2)]   # a picture waiter always queued
     for thread in asking:
         thread.start()
+    port = display.channel._port(OUTPUT)
     try:
-        until(lambda: sum(call["at"] == "end" for call in display.calls()) >= 2)
+        # The asker holds the port with a picture command and another waits: the state the probe
+        # must cut ahead of. Waiting for batches to finish instead would assume a fake ddcutil starts
+        # within the hold's slack beside read_seconds, which a loaded CI runner does not keep.
+        until(lambda: port._held is Urgency.PICTURE and len(port._waiting[Urgency.PICTURE]) >= 1)
         power = DdcCiAdapter(display.channel)
         took = []
         for _ in range(2):
