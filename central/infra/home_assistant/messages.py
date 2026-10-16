@@ -9,12 +9,13 @@ illuminance payload: {"lux": <number 0..LUX_MAX>} or {"state": "unavailable" | "
 """
 from __future__ import annotations
 
-import math
 from typing import Final
+
+from pydantic import ValidationError
 
 from central.infra.home_assistant.topics import MESSAGE_BYTES
 from central.room_light.model import ReportRefusal
-from contracts.room_light import LUX_MAX, ColourDimmer, Dimmer, Measured, Rgb, Unavailable
+from contracts.room_light import ColourDimmer, Dimmer, Measured, Rgb, Unavailable
 from contracts.strict_json import loads_object
 
 LEVEL_MAX: Final = 255      # Home Assistant's brightness and each rgb channel: 0..LEVEL_MAX
@@ -58,18 +59,19 @@ def illuminance(raw: bytes) -> Measured | Unavailable:
         lux = value["lux"]
         if type(lux) not in (int, float):
             raise MessageRefused(ReportRefusal.UNREADABLE)
-        if not math.isfinite(lux) or not 0 <= lux <= LUX_MAX:
-            raise MessageRefused(ReportRefusal.OUT_OF_RANGE)
-        return Measured(lux=float(lux))
+        try:   # the reading's range is Lux's own (contracts/room_light.py)
+            return Measured(lux=float(lux))
+        except ValidationError:
+            raise MessageRefused(ReportRefusal.OUT_OF_RANGE) from None
     if value.get("state") in ("unavailable", "unknown"):
         return Unavailable()
     raise MessageRefused(ReportRefusal.UNREADABLE)
 
 
 def brightness_share(level: int) -> float:
-    """Home Assistant's brightness level as the share of the light's full output: level / LEVEL_MAX
-    (read as linear output, as the delivery shipped; see the run's notes on whether it is
-    perceptual). Pure."""
+    """Home Assistant's brightness level as the share of the light's full output: level / LEVEL_MAX,
+    read as linear output (whether a bulb's level is perceptual instead is an open question in
+    docs/decisions/0028-room-light.md). Pure."""
     return level / LEVEL_MAX
 
 

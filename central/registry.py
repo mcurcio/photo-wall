@@ -25,7 +25,6 @@ from central.fleet.position_history import (
     profile_changed_record,
     saved_record,
 )
-from central.frame_lighting.paper_profiles import LUT_RECIPE_ID
 from central.frame_lighting.ports import FrameLightingCheck
 from central.infra.display_store import (
     POSITION_COLUMNS,
@@ -36,7 +35,6 @@ from central.infra.display_store import (
     frame_readiness_in,
     resolve_output,
 )
-from central.infra.frame_lighting_store import PgFrameLighting
 from central.infra.position_history_store import record_created_in, write_position_in
 from central.infra.power_store import forget_frame_in
 from central.infra.transactions import PgTransaction
@@ -151,11 +149,11 @@ def _name_or(exc: UniqueViolation, code: str) -> str:
 class Registry:
     IDENTIFY_OUTPUT_TTL_SECONDS = 15
 
-    def __init__(self, db: Database, clock: Clock, *, lighting: FrameLightingCheck | None = None):
-        """`lighting`: the Frame-lighting check a new Frame's lighting comes from (PostgreSQL's under
-        today's paper-profile recipe when None)."""
+    def __init__(self, db: Database, clock: Clock, *, lighting: FrameLightingCheck):
+        """`lighting`: the Frame-lighting check every lighting write goes through (the composition
+        root's one PgFrameLighting)."""
         self.db, self.clock = db, clock
-        self.lighting: FrameLightingCheck = PgFrameLighting(LUT_RECIPE_ID) if lighting is None else lighting
+        self.lighting = lighting
 
     @contextmanager
     def _equipment_write(self):

@@ -81,18 +81,18 @@ def test_the_document_carries_every_light_by_id():
     assert document.change == 7 and sorted(document.lights) == sorted(LIGHTS)
 
 
-@pytest.mark.parametrize("light_id, light, named_by, code, status", [
-    ("window", SPOT, ("hall",), RoomLightRefusal.NAMED_BY_A_FRAME, 409),           # measured -> reported while named
-    ("room", WINDOW.model_copy(update={"sensor": "meter"}), ("hall",), RoomLightRefusal.NAMED_BY_A_FRAME, 409),
-    ("lamp", MeasuredLight(name="Lamp", sensor="nope", colour=WHITE), (), RoomLightRefusal.UNKNOWN_SENSOR, 422),
-    ("lamp", MeasuredLight(name="Lamp", sensor="meter", colour=WHITE), (), RoomLightRefusal.SENSOR_REPORTS_A_LIGHT, 409),
-    ("lamp", SPOT.model_copy(update={"name": "Lamp"}), (), RoomLightRefusal.REFERENCE_TAKEN, 409),
+@pytest.mark.parametrize("light_id, light, named_by, code", [
+    ("window", SPOT, ("hall",), RoomLightRefusal.NAMED_BY_A_FRAME),           # measured -> reported while named
+    ("room", WINDOW.model_copy(update={"sensor": "meter"}), ("hall",), RoomLightRefusal.NAMED_BY_A_FRAME),
+    ("lamp", MeasuredLight(name="Lamp", sensor="nope", colour=WHITE), (), RoomLightRefusal.UNKNOWN_SENSOR),
+    ("lamp", MeasuredLight(name="Lamp", sensor="meter", colour=WHITE), (), RoomLightRefusal.SENSOR_REPORTS_A_LIGHT),
+    ("lamp", SPOT.model_copy(update={"name": "Lamp"}), (), RoomLightRefusal.REFERENCE_TAKEN),
     ("lamp", ReportedLight(name="Lamp", reporter=ReporterRef(source="pi", address="p1"), colour=WHITE), (),
-     RoomLightRefusal.REFERENCE_TAKEN, 409),                                          # a Sensor's reference
+     RoomLightRefusal.REFERENCE_TAKEN),                                          # a Sensor's reference
 ])
-def test_a_room_light_refused(light_id, light, named_by, code, status):
+def test_a_room_light_refused(light_id, light, named_by, code):
     refused = check_room_light(light_id, light, LIGHTS, SENSORS, named_by)
-    assert refused is not None and (refused.code, refused.status) == (code, status)
+    assert refused is not None and refused.code is code
 
 
 def test_a_room_light_saved():
@@ -107,20 +107,20 @@ def test_a_room_light_saved():
 
 def test_removals_and_sensors():
     unknown = check_room_light_removal("nope", LIGHTS, ())
-    assert unknown is not None and (unknown.code, unknown.status) == (RoomLightRefusal.UNKNOWN_ROOM_LIGHT, 404)
+    assert unknown is not None and unknown.code is RoomLightRefusal.UNKNOWN_ROOM_LIGHT
     named = check_room_light_removal("spot", LIGHTS, ("hall",))
-    assert named is not None and (named.code, named.status) == (RoomLightRefusal.NAMED_BY_A_FRAME, 409)
+    assert named is not None and named.code is RoomLightRefusal.NAMED_BY_A_FRAME
     assert check_room_light_removal("spot", LIGHTS, ()) is None
     second = check_sensor("other", Sensor(name="Other", at=METER_REF), SENSORS, LIGHTS)    # a second Sensor on one Pi
-    assert second is not None and (second.code, second.status) == (RoomLightRefusal.REFERENCE_TAKEN, 409)
+    assert second is not None and second.code is RoomLightRefusal.REFERENCE_TAKEN
     taken = check_sensor("other", Sensor(name="Other", at=SensorRef(source="home-assistant", address="light.spot")),
                          SENSORS, LIGHTS)
     assert taken is not None and taken.code is RoomLightRefusal.REFERENCE_TAKEN
     assert check_sensor("meter", METER.model_copy(update={"name": "Hall"}), SENSORS, LIGHTS) is None
     measured = check_sensor_removal("meter", SENSORS, LIGHTS)
-    assert measured is not None and (measured.code, measured.status) == (RoomLightRefusal.SENSOR_REPORTS_A_LIGHT, 409)
+    assert measured is not None and measured.code is RoomLightRefusal.SENSOR_REPORTS_A_LIGHT
     gone = check_sensor_removal("nope", SENSORS, LIGHTS)
-    assert gone is not None and (gone.code, gone.status) == (RoomLightRefusal.UNKNOWN_SENSOR, 404)
+    assert gone is not None and gone.code is RoomLightRefusal.UNKNOWN_SENSOR
     assert check_sensor_removal("meter", SENSORS, {"spot": SPOT}) is None
 
 

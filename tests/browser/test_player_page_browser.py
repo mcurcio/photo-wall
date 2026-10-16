@@ -321,8 +321,8 @@ def test_a_reboot_render_error_leaves_the_header_and_health_standing(page, regis
 
 
 def test_health_follows_reboot_from_the_fleet_host_read_and_link_keeps_only_the_receipt(page, registry):
-    """The Pi's Hardware page: Reboot, Health (from Central's real fleet host read), then Link
-    and sessions; Health's raw disclosure holds the sample's lines; Link and sessions keeps
+    """The Pi's Hardware page: Reboot, Health (from Central's real fleet host read), Light (the
+    Pi's light sensor), then Link and sessions; Health's raw disclosure holds the sample's lines; Link and sessions keeps
     Host Management's "Last reported" and its session line."""
     box = Box(registry)
     box.host_sample()
@@ -331,7 +331,7 @@ def test_health_follows_reboot_from_the_fleet_host_read_and_link_keeps_only_the_
         connect(page, origin)
         pi = open_pi(page, NAME)
         sections = pi.locator("section[aria-label]").evaluate_all("(all) => all.map((s) => s.ariaLabel)")
-        assert sections == ["Reboot", "Health", "Link and sessions", "Danger zone"], sections
+        assert sections == ["Reboot", "Health", "Light", "Link and sessions", "Danger zone"], sections
         health = page.get_by_role("region", name="Health", exact=True)
         expect(health).to_contain_text("Host Management: Host Management last reported 2 s ago")
         health.get_by_role("button", name="Every reported metric", exact=True).click()

@@ -6,7 +6,7 @@ from __future__ import annotations
 from central.db import Database
 from central.infra.home_assistant.health import PgLinkHealth
 from central.infra.home_assistant.topics import SOURCE
-from central.infra.home_assistant.views import EntityView, HomeAssistantView, RefusedMessageView
+from central.infra.home_assistant.views import EntityView, HomeAssistantView
 from central.infra.room_light_store import references_in, refused_in
 
 
@@ -25,7 +25,7 @@ class PgHomeAssistantSettings:
             link=self._health.health(),
             entities=tuple(EntityView(entity=entity, reports_light=light, reports_sensor=sensor, heard_at=heard_at)
                            for entity, (light, sensor, heard_at) in entities.items()),
-            refused=tuple(RefusedMessageView(topic=each.address, reason=each.reason, at=each.at) for each in refused))
+            refused=refused)
 
 
 __all__ = ["PgHomeAssistantSettings"]

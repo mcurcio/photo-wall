@@ -5,7 +5,8 @@ messages the link refused. Every entity here is an address of SOURCE; House › 
 from __future__ import annotations
 
 from central.infra.home_assistant.health import LinkHealthView
-from central.room_light.model import ReportRefusal, RoomLightId, SensorId
+from central.room_light.model import RoomLightId, SensorId
+from central.room_light.views import RefusedReportView
 from contracts.models import Instant, Model
 
 
@@ -18,18 +19,12 @@ class EntityView(Model):
     heard_at: Instant | None
 
 
-class RefusedMessageView(Model):
-    """A message the link refused: its topic, why (the one refusal vocabulary) and when."""
-    topic: str
-    reason: ReportRefusal
-    at: Instant
-
-
 class HomeAssistantView(Model):
-    """The settings page: the link, every entity, the newest refused messages (newest first)."""
+    """The settings page: the link, every entity, and this source's entries in the one refusal log
+    (newest first; each address is the message's topic)."""
     link: LinkHealthView
     entities: tuple[EntityView, ...]
-    refused: tuple[RefusedMessageView, ...]
+    refused: tuple[RefusedReportView, ...]
 
 
-__all__ = ["EntityView", "HomeAssistantView", "RefusedMessageView"]
+__all__ = ["EntityView", "HomeAssistantView"]

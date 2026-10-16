@@ -2,9 +2,11 @@
 Pi's wired light sensor (contracts/room_light.py LIGHT_SENSOR_KEY) as it is recorded and hands it to
 room lights as a reading of the reference (PI_SOURCE, the Pi's player id).
 
-Each reading is recorded in a savepoint of its own (`RoomLightReports.record_reading_within`), so a
-failure rolls back only that reading and is logged: the host line's record always commits. A value
-that is not a reading is kept in the one refusal log.
+Each reading, and each value that is not a reading (kept in the one refusal log), is recorded in a
+savepoint of its own (`RoomLightReports.record_reading_within`, `record_refused_within`), so a
+failure rolls back only that word and is logged: the host line's record always commits. The record
+stays the source: `missed_readings_in` names each Pi whose newest recorded reading its word has not
+taken, and the room-lights document takes them before it is built.
 """
 from __future__ import annotations
 
@@ -16,7 +18,7 @@ from central.infra.transactions import PgTransaction
 from central.room_light.model import ReportRefusal, SensorRef
 from central.room_light.ports import RoomLightReports
 from contracts.models import IDENTIFIER_PATTERN
-from contracts.room_light import LIGHT_SENSOR_KEY, decode_light_sensor
+from contracts.room_light import LIGHT_SENSOR_KEY, Measured, Unavailable, decode_light_sensor
 from nodeapi.buffers import KV_OPERATION_HEADER, state_prefix, state_stream
 from nodeapi.pull import Read
 
@@ -53,17 +55,40 @@ class LightSensorJudge:
         if row is None:
             return
         player_id = row["id"]
+        tx = PgTransaction(conn)
         for item in values:
             try:
-                reading = decode_light_sensor(item.data)
-            except ValueError:
-                self._reports.record_refused(PI_SOURCE, player_id, ReportRefusal.UNREADABLE)
-                continue
-            try:
-                self._reports.record_reading_within(PgTransaction(conn), SensorRef(source=PI_SOURCE, address=player_id),
+                try:
+                    reading = decode_light_sensor(item.data)
+                except ValueError:
+                    self._reports.record_refused_within(tx, PI_SOURCE, player_id, ReportRefusal.UNREADABLE)
+                    continue
+                self._reports.record_reading_within(tx, SensorRef(source=PI_SOURCE, address=player_id),
                                                     reading.reading)
-            except Exception:   # only this reading rolled back; the host line's record still commits
-                log.exception("light sensor reading not recorded: device=%s seq=%s", device_id, item.token.seq)
+            except Exception:   # only this word rolled back; the host line's record still commits
+                log.exception("light sensor value not recorded: device=%s seq=%s", device_id, item.token.seq)
 
 
-__all__ = ["HOST_STATE_STREAM", "PI_SOURCE", "LightSensorJudge", "is_player"]
+def missed_readings_in(conn: Any) -> tuple[tuple[str, Measured | Unavailable], ...]:
+    """(player id, reading) for each enrolled Pi whose newest recorded light-sensor value is a reading
+    its word (reading_words, PI_SOURCE) was not taken from: heard before that record, or never. A
+    value that is not a reading, or a removed key, takes nothing (the judge logged the refusal)."""
+    rows = conn.execute(
+        "SELECT latest.player_id, latest.data, latest.headers FROM ("
+        " SELECT DISTINCT ON (r.device_id) p.id AS player_id, r.data, r.headers, r.recorded_at"
+        " FROM node_link_records r JOIN players p ON p.device_id = r.device_id AND p.retired_at IS NULL"
+        " WHERE r.stream=%s AND r.subject=%s ORDER BY r.device_id, r.recorded_at DESC, r.seq DESC) latest"
+        " LEFT JOIN reading_words w ON w.source=%s AND w.address=latest.player_id"
+        " WHERE w.heard_at IS NULL OR EXTRACT(EPOCH FROM w.heard_at) < latest.recorded_at",
+        (HOST_STATE_STREAM, _SUBJECT, PI_SOURCE)).fetchall()
+    missed: list[tuple[str, Measured | Unavailable]] = []
+    for row in rows:
+        if (row["headers"] or {}).get(KV_OPERATION_HEADER):
+            continue
+        try:
+            missed.append((row["player_id"], decode_light_sensor(bytes(row["data"])).reading))
+        except ValueError:
+            continue
+    return tuple(missed)
+
+__all__ = ["HOST_STATE_STREAM", "PI_SOURCE", "LightSensorJudge", "is_player", "missed_readings_in"]

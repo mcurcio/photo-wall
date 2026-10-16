@@ -34,7 +34,16 @@ import pytest
 from console_tasks import open_frame
 from operator_harness import operator_server, sign_in
 from playwright.sync_api import expect
-from test_console_frame_page_browser import FRAME, OVERTAKEN, PRESENTED, SAVED_X, _bar, _move, _seed
+from test_console_frame_page_browser import (
+    FRAME,
+    OVERTAKEN,
+    PRESENTED,
+    SAVED_X,
+    _bar,
+    _move,
+    _seed,
+    _top_left_field,
+)
 from test_display_identity import _sql
 from test_frame_lighting_browser import LightingSessions, lighting_group, saved_lighting
 
@@ -193,13 +202,16 @@ def test_a_tried_and_a_kept_position_are_listed_and_restore_puts_the_kept_one_ba
         [done] = seen["done"]
         assert any(done <= at <= done + 0.25 for at in seen["reads"]), (done, seen["reads"])
 
+        open_frame(page, FRAME, "lighting")  # the mat is the Lighting tab's; the session and History stay
         _depth(page).fill("6")
-        expect(lighting_group(page)).to_contain_text("6.0 mm")
-        expect(_rows(page, TRIED).first).to_contain_text("Mat depth 6.0 mm")
+        expect(lighting_group(page)).to_contain_text("6 mm")
+        expect(_rows(page, TRIED).first).to_contain_text("Mat depth 6 mm")
         expect(_rows(page, TRIED).first).not_to_contain_text("Top-left")
 
         _rows(page, KEPT).last.get_by_role("button", name="Restore", exact=True).click()
         expect(_depth(page)).to_have_value("0")
+        open_frame(page, FRAME, "position")
+        field = _top_left_field(page)   # the tab was left: Exact values opens again
         expect(field).to_have_value(str(SAVED_X))
         page.wait_for_timeout(600)  # the loop's next exchanges: the restored draft stays what the Pi is handed
         assert (_top_left(sessions.row["calibration"]), sessions.row["lighting"]["mat_depth_mm"]) == (SAVED_X, 0)
@@ -237,8 +249,9 @@ def test_a_restored_draft_keeps_its_base_so_a_save_made_elsewhere_still_stops_it
         expect(_rows(page, TRIED)).to_have_count(1)
         _save_elsewhere(registry)
 
+        open_frame(page, FRAME, "lighting")
         _depth(page).fill("4")
-        expect(_rows(page, TRIED).first).to_contain_text("Mat depth 4.0 mm")
+        expect(_rows(page, TRIED).first).to_contain_text("Mat depth 4 mm")
         _rows(page, TRIED).last.get_by_role("button", name="Restore", exact=True).click()
         expect(_depth(page)).to_have_value("0")
         bar = _bar(page)
@@ -272,8 +285,9 @@ def test_one_sessions_tries_show_as_one_run_whose_earlier_tries_open_on_request(
         expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
         _move(page, 3)
         expect(_rows(page, TRIED)).to_have_count(1)
+        open_frame(page, FRAME, "lighting")
         _depth(page).fill("4")
-        expect(_rows(page, TRIED).first).to_contain_text("Mat depth 4.0 mm")
+        expect(_rows(page, TRIED).first).to_contain_text("Mat depth 4 mm")
         expect(_rows(page, TRIED)).to_have_count(1)
         earlier = _history(page).get_by_role("button", name="Show 1 earlier try from this session")
         expect(earlier).to_have_attribute("aria-expanded", "false")

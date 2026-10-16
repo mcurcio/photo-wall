@@ -75,8 +75,8 @@ function hardwareLabel(rows: Rows, code: string): string {
 
 /**
  * Every value of one entry, in the Picture tab's order and units: each display setting set in
- * Photo Wall (by its picture-list name), the three Photo Wall values, the Display's light (decision
- * 0028), the signal range, and the test pattern when one was up.
+ * Photo Wall (by its picture-list name), the three Photo Wall values, the Display's light, the
+ * signal range, and the test pattern when one was up.
  */
 export function entryDetails(entry: PictureEntryView, rows: Rows): { label: string; value: string }[] {
   const { picture } = entry;

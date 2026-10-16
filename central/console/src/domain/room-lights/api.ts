@@ -1,5 +1,7 @@
 import { callApi } from "../../apiWrite.js";
-import type { DrawnView, RoomLight, RoomLightsView, RoomLightView, Sensor, SensorView } from "../../generated/contract";
+import type {
+  DrawnView, RefusedReportsView, RoomLight, RoomLightsView, RoomLightView, Sensor, SensorView,
+} from "../../generated/contract";
 import type { Answer } from "../answer";
 
 /* The house's lights' reads and writes on Central (the House › Lights routes); a refusal is a
@@ -8,6 +10,7 @@ import type { Answer } from "../answer";
 const LIGHTS = "/v1/operator/house/lights";
 const SENSORS = "/v1/operator/house/sensors";
 const DRAWN = `${LIGHTS}/drawn`;
+const REFUSED = "/v1/operator/house/refused-reports";
 
 /** Every room light and Sensor, with their last states (GET …/house/lights). */
 export function readRoomLights(): Promise<Answer<"view", RoomLightsView>> {
@@ -41,4 +44,9 @@ export function removeSensor(id: string): Promise<Answer<"removed", null>> {
 /** Which house's lights each Pi draws with, judged by Central (GET …/house/lights/drawn). */
 export function readDrawn(): Promise<Answer<"drawn", DrawnView>> {
   return callApi("drawn", DRAWN, { method: "GET" }) as Promise<Answer<"drawn", DrawnView>>;
+}
+
+/** The one refusal log: the newest reports each source could not record (GET …/house/refused-reports). */
+export function readRefusedReports(): Promise<Answer<"refused", RefusedReportsView>> {
+  return callApi("refused", REFUSED, { method: "GET" }) as Promise<Answer<"refused", RefusedReportsView>>;
 }

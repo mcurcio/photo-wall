@@ -84,9 +84,8 @@ const REFUSALS = {
   made_for_other_profile: "Made for another screen size.",
   made_for_other_display: "Made on another display.",
   other_frame: "That change was another Frame's.",
-  // A Frame's lighting: a draft Central cannot take passes; the next edit fixes it.
-  trial_lighting_required: "Photo Wall did not send this Frame's lighting with the change. Reload the page.",
-  trial_lighting_invalid: "Photo Wall refused this lighting: a value is outside what a Frame takes.",
+  // A draft Central cannot read (a value outside what a Frame takes): the next edit fixes it.
+  node_trial_operation_invalid: "Photo Wall refused this change: a value is outside what a Frame takes.",
   ...LIGHTING_REFUSAL_WORDS,
 };
 

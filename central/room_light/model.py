@@ -126,17 +126,22 @@ class RoomLightRefusal(StrEnum):
     TOO_MANY = "too_many"                               # past ROOM_LIGHTS_MAX or SENSORS_MAX
 
 
-class RoomLightRefused(Exception):
-    """A refusal the routes answer as {"error": code} at `status`."""
+class DrawnReportRefusal(StrEnum):
+    """Why the Player's drawn report was refused."""
+    TOO_LARGE = "room_lights_drawn_too_large"
+    INVALID = "room_lights_drawn_invalid"
 
-    def __init__(self, code: RoomLightRefusal, status: int) -> None:
+
+class RoomLightRefused(Exception):
+    """A refusal the routes answer as {"error": code}, at the status the routes give that code."""
+
+    def __init__(self, code: RoomLightRefusal) -> None:
         super().__init__(code)
         self.code = code
-        self.status = status
 
 
 __all__ = [
     "ADDRESS_MAX", "ROOM_LIGHT_NAME_MAX", "SENSORS_MAX", "SOURCE_PATTERN", "Address", "FixedLight", "LightWord",
     "MeasuredLight", "Name", "ReadingWord", "Recorded", "ReportRefusal", "ReportedLight", "ReporterRef", "RoomLight",
-    "RoomLightId", "RoomLightRefusal", "RoomLightRefused", "Sensor", "SensorId", "SensorRef", "Source", "Words",
+    "DrawnReportRefusal", "RoomLightId", "RoomLightRefusal", "RoomLightRefused", "Sensor", "SensorId", "SensorRef", "Source", "Words",
 ]

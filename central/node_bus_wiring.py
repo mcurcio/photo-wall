@@ -1,5 +1,4 @@
-"""The worker's side of every Node's bus, composed from the environment (E3b design §7.2 rows "Hub
-runner and Fleet generator", "NodeLink supervisors", §9.6; errata E-E3D-CUT-7, E-E3D-CC1-1).
+"""The worker's side of every Node's bus, composed from the environment.
 
 With `PHOTO_WALL_HUB_URL` set, the worker runs one `NodeBus` beside its media loop and job runtime:
 Fleet's keeper of the hub and the fleet and show NodeLink supervisors, long-lived tasks in the one
@@ -7,13 +6,14 @@ worker process (never a worker per Node or job kind). Without it no hub is deplo
 runs as before.
 
 The room-lights document rides WALL (`ROOM_LIGHTS_KEY`), the same for every Pi and never a link's
-desired bucket or the control State: `RoomLightsWall` is that key's one writer, woken by the Home
-Assistant link's `on_recorded` in this process, by another process's `NOTIFY room_lights` (a House ›
-Lights edit, a Pi's sensor), and when WALL is ensured; WallWriter itself never writes it.
+desired bucket or the control State: `RoomLightsWall` is that key's one writer, woken by
+`NOTIFY room_lights` (every recorded change, from any process: the Home Assistant link, a House ›
+Lights edit, a Pi's sensor), when WALL is ensured, and every WALL_RECHECK_SECONDS, which heals a
+put that failed; WallWriter itself never writes it.
 
 Stop order: FleetHub first, then the supervisors. Every look points the supervisors at the enrolled
 set and starts any link not running, so a look still in flight after the supervisors stopped would
-start links no supervisor stops (E-E3D-CC1-1).
+start links no supervisor stops.
 """
 from __future__ import annotations
 
@@ -48,7 +48,7 @@ log = logging.getLogger(__name__)
 HUB_URL_ENV: Final = "PHOTO_WALL_HUB_URL"          # the worker's client URL of the hub, e.g. nats://photo-wall-hub:4222
 HUB_CONFIG_ENV: Final = "PHOTO_WALL_HUB_CONFIG"    # the shared configuration file
 DEFAULT_HUB_CONFIG: Final = Path("/var/lib/photo-wall/hub/hub.json")
-# "timing" is a placeholder until E8 freezes the wall table in contracts (§10; E-E3D-CUT-7).
+# "timing" is a placeholder until the wall table is frozen in contracts.
 WALL_TABLE: Final = KeyTable({"timing": 4096, ROOM_LIGHTS_KEY: ROOM_LIGHTS_BYTES})
 WALL_RECHECK_SECONDS: Final = 5.0     # how often the writer looks again for a wall it could not put to yet
 _LISTEN_RETRY_SECONDS: Final = 1.0
@@ -64,7 +64,7 @@ class WallSource(Protocol):
 
 class RoomLightsWall:
     """The room-lights key's one writer: puts the current document on WALL at every wake (`wake`,
-    from any thread: this process's Home Assistant link, other processes' NOTIFY, WALL ensured) and
+    from any thread: NOTIFY room_lights, WALL ensured) and
     every WALL_RECHECK_SECONDS. WallWriter.put is content-keyed, so a put of the document WALL
     already holds writes nothing; a put that fails is tried again at the next wake or recheck."""
 

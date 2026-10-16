@@ -68,6 +68,11 @@ class RoomLightReports(Protocol):
         own text, cut to ADDRESS_MAX) and why, in the one refusal log; the newest REFUSALS_KEPT stay."""
         ...
 
+    def record_refused_within(self, tx: Transaction, source: Source, address: str, reason: ReportRefusal) -> None:
+        """`record_refused` inside the caller's open transaction, under a savepoint of its own: any
+        failure here rolls back only this refusal and is raised, never the caller's work."""
+        ...
+
 
 class RoomLightSetup(Protocol):
     """Injected into the House › Lights routes. The four writers raise RoomLightRefused."""
@@ -123,7 +128,8 @@ class RoomLightsDocuments(Protocol):
 
     def current(self) -> RoomLightsDocument:
         """The document now (policy.room_lights_document over the stored lights, words and change);
-        the same for every Pi."""
+        the same for every Pi. A reading a source recorded and its word did not take (a failed
+        savepoint) is taken first, so a failed derivation never outlives the next build."""
         ...
 
 

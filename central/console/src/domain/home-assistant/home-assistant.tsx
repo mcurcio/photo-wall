@@ -1,6 +1,6 @@
 import { useState } from "react";
 
-import type { EntityView, HomeAssistantView, RefusedMessageView, RoomLightsView } from "../../generated/contract";
+import type { EntityView, HomeAssistantView, RefusedReportView, RoomLightsView } from "../../generated/contract";
 import { EntityList } from "../../patterns/entity-list";
 import { FactRow, Note } from "../../patterns/fact-row";
 import { Button } from "../../ui/button";
@@ -27,7 +27,7 @@ export interface HomeAssistantProps {
 }
 
 type EntityRow = EntityView & { key: string; severity: null };
-type RefusedRow = RefusedMessageView & { key: string; severity: null };
+type RefusedRow = RefusedReportView & { key: string; severity: null };
 const NEW_SENSOR = "new";
 
 function LinkDialog({ entity, house, onClose, onLink }: {
@@ -134,7 +134,7 @@ export function HomeAssistant({ view, house, since, note, onLink }: HomeAssistan
       <EntityList<RefusedRow>
         label="Messages not recorded"
         columns={[
-          { id: "topic", header: "Topic", rowHeader: true, cell: (row) => row.topic },
+          { id: "topic", header: "Topic", rowHeader: true, cell: (row) => row.address },
           { id: "reason", header: "Why", cell: (row) => REFUSED_WORDS[row.reason] },
           { id: "at", header: "When", cell: (row) => since(row.at) },
         ]}

@@ -22,6 +22,7 @@ from typing import Final
 
 from pydantic import BaseModel, TypeAdapter
 
+from central.displays.views import LightView
 from central.fleet.node_calibration import TrialBegin, TrialEdit, TrialStep
 from central.fleet.position_views import PositionHistoryView, PositionRestore
 from central.frame_lighting.model import FrameLightingRefusal
@@ -65,7 +66,7 @@ CONSOLE_BODIES: Final[tuple[type[BaseModel], ...]] = (   # bodies the console se
     Sensor, TrialBegin, TrialEdit, TrialStep, FrameLighting, PositionRestore)
 CONSOLE_VIEWS: Final[tuple[type[BaseModel], ...]] = (    # answers the console reads
     RoomLightsView, DrawnView, RefusedReportsView, HomeAssistantView, PaperProfileView, PaperProfilesView,
-    PositionHistoryView)
+    PositionHistoryView, LightView)
 CONSOLE_CONSTANTS: Final[Mapping[str, float | int | str]] = {
     "FRAME_LIGHTS_MAX": FRAME_LIGHTS_MAX, "MAT_DEPTH_MM_MAX": MAT_DEPTH_MM_MAX, "CLOSE_REACH_MM": CLOSE_REACH_MM,
     "BEAM_DEGREES_MAX": BEAM_DEGREES_MAX, "WHITENESS_MIN": WHITENESS_MIN, "INK_DENSITY_MIN": INK_DENSITY_MIN,

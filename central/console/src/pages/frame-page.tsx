@@ -102,8 +102,9 @@ const SESSION_TABS: readonly Tab[] = ["position", "lighting"];
 
 /**
  * What the Frame's lighting chooses from and its history names, while `open`: the house's room
- * lights and Sensors and what each Pi draws with, read every HOUSE_CADENCE_MS (a failed read keeps
- * the last), and the paper profiles on the list, read once each time it opens. Null: not read yet.
+ * lights and Sensors, read every HOUSE_CADENCE_MS (a failed read keeps the last); what each Pi draws
+ * with, read as often (a failed read shows nothing: an old "Up to date" would hide an outage); and
+ * the paper profiles on the list, read once each time it opens. Null: not read yet.
  */
 function useHouseLights(open: boolean): { rooms: RoomLightsView | null; drawn: DrawnView | null;
   profiles: PaperProfileChoice[] | null } {
@@ -111,9 +112,9 @@ function useHouseLights(open: boolean): { rooms: RoomLightsView | null; drawn: D
     const answer = await readRoomLights();
     return answer.ok ? answer.view : previous;
   }, []);
-  const loadDrawn = useCallback(async (previous: DrawnView | null) => {
+  const loadDrawn = useCallback(async () => {
     const answer = await readDrawn();
-    return answer.ok ? answer.drawn : previous;
+    return answer.ok ? answer.drawn : null;
   }, []);
   const { value: rooms } = usePolledRead(loadRooms, { cadenceMs: HOUSE_CADENCE_MS, skip: !open, initial: null as RoomLightsView | null });
   const { value: drawn } = usePolledRead(loadDrawn, { cadenceMs: HOUSE_CADENCE_MS, skip: !open, initial: null as DrawnView | null });

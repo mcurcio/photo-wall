@@ -6,14 +6,15 @@ chosen light's and illuminance sensor's full state, retained, under the topics `
 link subscribes to `topics.SUBSCRIPTION` at QoS 1 with a clean session, so every (re)connect is
 handed every retained state again; a repeat records nothing new (`RoomLightReports.record_*`
 answers "unchanged"). Each message goes topic -> entity (`topics.topic_of`) -> state or reading
-(`messages`) -> record; a "recorded" answer wakes the WALL writer at once (`on_recorded`), a refused
-one goes to the one refusal log.
+(`messages`) -> record (a recorded change wakes the WALL writer through the store's NOTIFY at
+commit, as every writer's does); a refused one goes to the one refusal log.
 
 The link beats its health every HEARTBEAT_SECONDS ("not-configured" without a broker, "connecting"
 at start and between attempts, "connected" while subscribed); a reader judges the beat by its age
 (`health`). It reconnects forever with backoff RECONNECT_FIRST_SECONDS doubling to
 RECONNECT_MAX_SECONDS, after a broker error or a database failure while recording (the retained
-states replay on the next connection); neither ends the task.
+states replay on the next connection); neither ends the task. When it ends, it closes its database
+pool (`close`).
 
 The broker comes from `PHOTO_WALL_MQTT_URL` (`mqtt://user:password@host:1883` or `mqtts://...`), set
 in the deployment from the secret store.
@@ -77,12 +78,12 @@ def broker_from(url: str) -> Broker:
 class HomeAssistantLink:
     """The worker's one subscriber of the house's broker (None: no broker configured)."""
 
-    def __init__(self, broker: Broker | None, reports: RoomLightReports, health: PgLinkHealth,
-                 on_recorded: Callable[[], None]) -> None:
+    def __init__(self, broker: Broker | None, reports: RoomLightReports, health: PgLinkHealth, *,
+                 close: Callable[[], None]) -> None:
         self._broker = broker
         self._reports = reports
         self._health = health
-        self._on_recorded = on_recorded
+        self._close = close
         self._beat: Beat = "not-configured" if broker is None else "connecting"
         # A clean session needs no stable id; a fixed one would make two Centrals on one broker (a
         # deploy's overlapping workers, a local launch) evict each other in a takeover loop.
@@ -90,7 +91,7 @@ class HomeAssistantLink:
 
     async def run(self, stop: asyncio.Event) -> None:
         """Until `stop`: beat every HEARTBEAT_SECONDS and, with a broker, connect, subscribe and record
-        every message, reconnecting with backoff after any failure."""
+        every message, reconnecting with backoff after any failure; then close the link's pool."""
         beating = asyncio.create_task(self._beating(stop), name="home assistant heartbeat")
         try:
             if self._broker is None:
@@ -101,6 +102,7 @@ class HomeAssistantLink:
             beating.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await beating
+            await asyncio.to_thread(self._close)
 
     async def _beating(self, stop: asyncio.Event) -> None:
         while not stop.is_set():
@@ -161,28 +163,26 @@ class HomeAssistantLink:
             stopping.cancel()
 
     def record(self, topic: str, payload: bytes) -> None:
-        """One message: record it and wake the WALL writer when it changed the document; a topic or
-        payload this adapter cannot read goes to the refusal log. A database failure is raised."""
+        """One message: record it; a topic or payload this adapter cannot read goes to the refusal
+        log. A database failure is raised."""
         named = topic_of(topic)
         if named is None:
             self._reports.record_refused(SOURCE, topic, ReportRefusal.UNKNOWN_ADDRESS)
             return
         try:
-            answer = (self._reports.record_light_state(light_reporter(named.entity), light_state(payload))
-                      if named.kind == "light"
-                      else self._reports.record_reading(illuminance_sensor(named.entity), illuminance(payload)))
+            if named.kind == "light":
+                self._reports.record_light_state(light_reporter(named.entity), light_state(payload))
+            else:
+                self._reports.record_reading(illuminance_sensor(named.entity), illuminance(payload))
         except MessageRefused as refused:   # only the payload's reading raises it
             self._reports.record_refused(SOURCE, topic, refused.reason)
-            return
-        if answer == "recorded":
-            self._on_recorded()
 
 
-def build_home_assistant_link(env: Mapping[str, str], reports: RoomLightReports, health: PgLinkHealth,
-                              on_recorded: Callable[[], None]) -> HomeAssistantLink:
+def build_home_assistant_link(env: Mapping[str, str], reports: RoomLightReports, health: PgLinkHealth, *,
+                              close: Callable[[], None]) -> HomeAssistantLink:
     """The worker's link, always: without MQTT_URL_ENV its run only beats "not-configured"."""
     url = env.get(MQTT_URL_ENV)
-    return HomeAssistantLink(broker_from(url) if url else None, reports, health, on_recorded)
+    return HomeAssistantLink(broker_from(url) if url else None, reports, health, close=close)
 
 
 __all__ = ["CLIENT_ID_PREFIX", "MQTT_URL_ENV", "RECONNECT_FIRST_SECONDS", "RECONNECT_MAX_SECONDS", "Broker",

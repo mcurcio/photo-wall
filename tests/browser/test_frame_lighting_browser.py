@@ -6,14 +6,15 @@ The room lights are the real ones: the test sets them up through House › Light
 production app (PUT /v1/operator/house/lights and /sensors), and a Sensor's reading through Central's
 reporting port, so the editor's picker and references read them back. As in
 test_console_frame_page_browser.py, a real session needs a Node presenting it, so a fake Central
-answers the session routes (`LightingSessions`): an `edit` or `renew` without `lighting` is
-refused (422 `trial_lighting_required`), one the contract refuses (contracts.frame_lighting
-.FrameLighting) is refused (`trial_lighting_invalid`); Save writes the lighting with the
+answers the session routes (`LightingSessions`): an `edit` or `renew` body is read by Central's own
+trial body reader (central/fleet/node_routes.py), so one without `lighting`, or whose lighting the
+contract refuses, answers what Central answers (422 `node_trial_operation_invalid`); Save writes the
+lighting with the
 calibration through the real Registry's Save CAS, and the reload reads the Frame's lighting from the
 real inventory.
 
 Mutation probes: send `mat` instead of `lighting` (trialBodies.ts `draftBody`) ->
-trial_lighting_required, and the tracer case never reaches Done; give every light AtFull
+node_trial_operation_invalid, and the tracer case never reaches Done; give every light AtFull
 (frame-lighting/model.ts `referenceFor`) -> the Sensor's light's reference case fails; replace
 instead of append on Add -> the two-lights case saves one light.
 """
@@ -25,10 +26,11 @@ import pytest
 from console_tasks import open_frame
 from operator_harness import operator_server, sign_in
 from playwright.sync_api import expect
-from pydantic import ValidationError
 from test_console_frame_page_browser import FRAME, PRESENTED, FakeSessions, _bar, _seed
 from test_frame_picture_browser import _off_thread
 
+from central.fleet.node_routes import _OPERATION, _trial_body
+from central.fleet.node_sessions import NodeControlError
 from central.infra.room_light_store import PgRoomLights
 from central.registry import RegistryError
 from central.room_light.model import SensorRef
@@ -107,23 +109,21 @@ class LightingSessions(FakeSessions):
         saved = saved_lighting(self.registry).model_dump(mode="json")
         self.row["lighting"] = saved if self._draft is None else self._draft
 
-    def _refuse(self, route, operation, body, code):
+    def _refuse(self, route, operation, body, refused: NodeControlError):
         self.sent.append(operation)
         self.bodies.append(body)
-        route.fulfill(status=422, json={"error": code})
+        route.fulfill(status=refused.status, json={"error": refused.code})
 
     def _answer(self, route):
         body = route.request.post_data_json or {}
         operation = body.get("operation", "begin")
-        if operation in ("edit", "renew") and "lighting" not in body:
-            self._refuse(route, operation, body, "trial_lighting_required")
-            return
         if "lighting" in body:
             self.lightings.append(body["lighting"])
-            try:
-                FrameLighting.model_validate(body["lighting"])
-            except ValidationError:
-                self._refuse(route, operation, body, "trial_lighting_invalid")
+        if operation in ("edit", "renew"):
+            try:   # Central's own reader of the body: its refusal, at its status
+                _trial_body(_OPERATION, route.request.post_data_buffer or b"")
+            except NodeControlError as refused:
+                self._refuse(route, operation, body, refused)
                 return
         if operation == "save" and self.row is not None and self.row["state"] == "active":
             self._save(route)
@@ -197,7 +197,7 @@ def test_a_close_lights_lux_rides_the_session_done_keeps_it_and_revert_puts_it_b
     1200, reverted, puts the saved 800 back and saves nothing. Moving to Position and back keeps the
     session.
 
-    Mutation: send `mat` instead of `lighting` -> trial_lighting_required, Done never comes."""
+    Mutation: send `mat` instead of `lighting` -> node_trial_operation_invalid, Done never comes."""
     _seed(registry)
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)

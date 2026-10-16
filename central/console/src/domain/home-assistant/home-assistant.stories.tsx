@@ -41,8 +41,8 @@ export const MessagesNotRecorded: Story = {
     view: {
       ...LINKED,
       refused: [
-        { topic: "photowall/light/light.kitchen", reason: "unknown_address", at: HEARD },
-        { topic: "photowall/illuminance/sensor.porch", reason: "out_of_range", at: HEARD - 600 },
+        { source: "home-assistant", address: "photowall/light/light.kitchen", reason: "unknown_address", at: HEARD },
+        { source: "home-assistant", address: "photowall/illuminance/sensor.porch", reason: "out_of_range", at: HEARD - 600 },
       ],
     },
   },

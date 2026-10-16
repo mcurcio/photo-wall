@@ -19,6 +19,8 @@ from test_registry import ADMIN, enroll, frame
 
 from central.app import create_app
 from central.db import Database
+from central.frame_lighting.paper_profiles import LUT_RECIPE_ID
+from central.infra.frame_lighting_store import PgFrameLighting
 from central.registry import Registry
 from contracts.models import Layer
 from contracts.photo_crop import CENTRED
@@ -40,7 +42,7 @@ def test_087_names_a_secured_locks_variant_and_keeps_serving_its_bytes(empty_dat
         # today's code reads and writes.
         migrate_before(db, "087", also=("089_", "090_", "091_", "092_", "093_", "094_", "096_",
                                         "097_", "099_"))
-        registry = Registry(db, ManualClock(1000))
+        registry = Registry(db, ManualClock(1000), lighting=PgFrameLighting(LUT_RECIPE_ID))
         frame(registry, "portrait")
         picture = photo("photo-1", taken_at=900)
         seed_pool(registry, "source:1", (picture,))

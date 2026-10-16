@@ -39,7 +39,7 @@ def test_house_lights_refuse_with_one_vocabulary_at_its_status(registry):
                 (f"{LIGHTS}/y", _reported("light.x"), 409, "reference_taken"),
                 (f"{LIGHTS}/y", _reported("Not An Entity"), 422, "unknown_address"),
                 (f"{LIGHTS}/y", _reported("light.y", source="zigbee"), 422, "unknown_address"),
-                (f"{LIGHTS}/y", {"kind": "measured", "name": "Y", "sensor": "nope", "colour": WHITE}, 422,
+                (f"{LIGHTS}/y", {"kind": "measured", "name": "Y", "sensor": "nope", "colour": WHITE}, 404,
                  "unknown_sensor"),
                 (f"{SENSORS}/m", {"name": "M", "at": {"source": "pi", "address": "not a player"}}, 422, "unknown_address")):
             answer = client.put(path, headers=AUTH, json=body)
@@ -82,8 +82,8 @@ def test_refused_reports_and_the_home_assistant_page(registry):
         entities = {each["entity"]: each for each in page["entities"]}
         assert entities["light.x"]["reports_light"] == "x" and entities["light.x"]["heard_at"] is None
         assert entities["light.heard"]["reports_light"] is None and entities["light.heard"]["heard_at"] is not None
-        assert [(each["topic"], each["reason"]) for each in page["refused"]] == [
-            ("photowall/light/light.cellar", "unknown_address")]
+        assert [(each["source"], each["address"], each["reason"]) for each in page["refused"]] == [
+            ("home-assistant", "photowall/light/light.cellar", "unknown_address")]   # one view shape, its source only
 
 
 def test_a_players_drawn_report_is_judged_against_the_document_now(registry):

@@ -22,6 +22,7 @@ from pydantic import TypeAdapter
 
 from central.db import Database
 from central.infra.frame_lighting_store import naming_in, take_house_lock
+from central.infra.light_sensor_judge import PI_SOURCE, missed_readings_in
 from central.infra.room_light_rows import ROOM_LIGHT, lights_in
 from central.infra.transactions import pg_connection
 from central.kernel.transactions import Transaction
@@ -136,6 +137,16 @@ def _word_in(conn: Any, table: str, source: str, address: str, word: dict[str, A
     return "recorded" if _changed_in(conn, before) else "unchanged"
 
 
+def _refusal_in(conn: Any, source: Source, address: str, reason: ReportRefusal) -> None:
+    """Keep one refused report and the newest REFUSALS_KEPT of `source`. The address is cut to
+    ADDRESS_MAX here and only here: a refused report's text is the source's own and may be anything."""
+    conn.execute("INSERT INTO report_refusals(source, address, reason, at) "
+                 "VALUES (%s, %s, %s, clock_timestamp())", (source, address[:ADDRESS_MAX], reason.value))
+    conn.execute("DELETE FROM report_refusals WHERE source=%(source)s AND id NOT IN (SELECT id FROM "
+                 "report_refusals WHERE source=%(source)s ORDER BY id DESC LIMIT %(keep)s)",
+                 {"source": source, "keep": REFUSALS_KEPT})
+
+
 class PgRoomLights:
     """Room lights' ports over one Database."""
 
@@ -158,19 +169,22 @@ class PgRoomLights:
             return _word_in(conn, "reading_words", sensor.source, sensor.address, reading.model_dump(mode="json"))
 
     def record_refused(self, source: Source, address: str, reason: ReportRefusal) -> None:
-        """The address is cut to ADDRESS_MAX here and only here: a refused report's text is the
-        source's own and may be anything."""
         with self._db.transaction() as conn:
-            conn.execute("INSERT INTO report_refusals(source, address, reason, at) "
-                         "VALUES (%s, %s, %s, clock_timestamp())", (source, address[:ADDRESS_MAX], reason.value))
-            conn.execute("DELETE FROM report_refusals WHERE source=%(source)s AND id NOT IN (SELECT id FROM "
-                         "report_refusals WHERE source=%(source)s ORDER BY id DESC LIMIT %(keep)s)",
-                         {"source": source, "keep": REFUSALS_KEPT})
+            _refusal_in(conn, source, address, reason)
+
+    def record_refused_within(self, tx: Transaction, source: Source, address: str, reason: ReportRefusal) -> None:
+        conn = pg_connection(tx)
+        with conn.transaction():
+            _refusal_in(conn, source, address, reason)
 
     # ---- RoomLightsDocuments ----
 
     def current(self) -> RoomLightsDocument:
+        """First takes every Pi reading the host line recorded and its judge did not keep (its
+        savepoint failed), so the host line's record, not reading_words, decides a Pi's reading."""
         with self._db.transaction() as conn:
+            for player_id, reading in missed_readings_in(conn):
+                _word_in(conn, "reading_words", PI_SOURCE, player_id, reading.model_dump(mode="json"))
             return document_in(conn)
 
     # ---- DrawnReports ----

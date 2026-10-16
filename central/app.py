@@ -37,6 +37,7 @@ from central.display_routes import mount_display_routes, mount_picture_routes
 from central.fleet.leaf_bridge import mount_leaf_bridge
 from central.fleet.node_routes import mount_node_routes
 from central.fleet.node_sessions import NodeControlConfig
+from central.frame_lighting.paper_profiles import LUT_RECIPE_ID
 from central.home_assistant_routes import mount_home_assistant_routes
 from central.house_routes import mount_house_routes
 from central.infra.display_store import (
@@ -47,6 +48,7 @@ from central.infra.display_store import (
 )
 from central.infra.fit_analysis_store import PgFitAnalysisReader
 from central.infra.fit_settings_store import PgFitSettings
+from central.infra.frame_lighting_store import PgFrameLighting
 from central.infra.home_assistant import topics as home_assistant_topics
 from central.infra.home_assistant.health import PgLinkHealth
 from central.infra.home_assistant.settings import PgHomeAssistantSettings
@@ -201,7 +203,7 @@ def create_app(
     admin_token = admin_token or os.environ["PHOTO_WALL_ADMIN_TOKEN"]
     if len(admin_token) < 32:
         raise ValueError("PHOTO_WALL_ADMIN_TOKEN must contain at least 32 characters")
-    registry = Registry(db, clock)
+    registry = Registry(db, clock, lighting=PgFrameLighting(LUT_RECIPE_ID))
     media_queue = media_queue or (
         ProcrastinateMediaQueue(db.dsn) if isinstance(db, Database) else None
     )

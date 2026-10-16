@@ -38,10 +38,6 @@ from contracts.room_light import (
     WhiteEntry,
 )
 
-_NOT_FOUND = 404
-_INVALID = 422
-_CONFLICT = 409
-
 
 def entry_of(light: RoomLight, words: Words, sensors: Mapping[SensorId, Sensor]) -> RoomLightEntry:
     """`light` as the document's entry of its kind, with its reference's last word in `words`: a
@@ -89,35 +85,35 @@ def check_room_light(light_id: RoomLightId, light: RoomLight, lights: Mapping[Ro
     """Whether saving `light` as `light_id` (new, or replacing lights[light_id]) is refused, in this
     order: a change between MeasuredLight and any other kind while a Frame names it (`named_by`: its
     Frame lights' references would no longer fit), NAMED_BY_A_FRAME; a MeasuredLight naming no Sensor
-    (UNKNOWN_SENSOR, 422) or a Sensor another light measures (SENSOR_REPORTS_A_LIGHT); a reporter
+    (UNKNOWN_SENSOR) or a Sensor another light measures (SENSOR_REPORTS_A_LIGHT); a reporter
     another light or a Sensor already names (REFERENCE_TAKEN); a new light past ROOM_LIGHTS_MAX
     (TOO_MANY). None when it may be saved."""
     previous = lights.get(light_id)
     others = {key: other for key, other in lights.items() if key != light_id}
     if (previous is not None and named_by
             and isinstance(previous, MeasuredLight) != isinstance(light, MeasuredLight)):
-        return RoomLightRefused(RoomLightRefusal.NAMED_BY_A_FRAME, _CONFLICT)
+        return RoomLightRefused(RoomLightRefusal.NAMED_BY_A_FRAME)
     if isinstance(light, MeasuredLight):
         if light.sensor not in sensors:
-            return RoomLightRefused(RoomLightRefusal.UNKNOWN_SENSOR, _INVALID)
+            return RoomLightRefused(RoomLightRefusal.UNKNOWN_SENSOR)
         if measured_by(others, light.sensor) is not None:
-            return RoomLightRefused(RoomLightRefusal.SENSOR_REPORTS_A_LIGHT, _CONFLICT)
+            return RoomLightRefused(RoomLightRefusal.SENSOR_REPORTS_A_LIGHT)
     if isinstance(light, ReportedLight) and (
             (light.reporter.source, light.reporter.address) in _references(others, sensors)):
-        return RoomLightRefused(RoomLightRefusal.REFERENCE_TAKEN, _CONFLICT)
+        return RoomLightRefused(RoomLightRefusal.REFERENCE_TAKEN)
     if previous is None and len(lights) >= ROOM_LIGHTS_MAX:
-        return RoomLightRefused(RoomLightRefusal.TOO_MANY, _CONFLICT)
+        return RoomLightRefused(RoomLightRefusal.TOO_MANY)
     return None
 
 
 def check_room_light_removal(light_id: RoomLightId, lights: Mapping[RoomLightId, RoomLight],
                              named_by: tuple[str, ...]) -> RoomLightRefused | None:
-    """UNKNOWN_ROOM_LIGHT (404) when there is no such light; NAMED_BY_A_FRAME while a Frame's lighting
+    """UNKNOWN_ROOM_LIGHT when there is no such light; NAMED_BY_A_FRAME while a Frame's lighting
     names it; else None."""
     if light_id not in lights:
-        return RoomLightRefused(RoomLightRefusal.UNKNOWN_ROOM_LIGHT, _NOT_FOUND)
+        return RoomLightRefused(RoomLightRefusal.UNKNOWN_ROOM_LIGHT)
     if named_by:
-        return RoomLightRefused(RoomLightRefusal.NAMED_BY_A_FRAME, _CONFLICT)
+        return RoomLightRefused(RoomLightRefusal.NAMED_BY_A_FRAME)
     return None
 
 
@@ -128,20 +124,20 @@ def check_sensor(sensor_id: SensorId, sensor: Sensor, sensors: Mapping[SensorId,
     SENSORS_MAX (TOO_MANY). None when it may be saved."""
     others = {key: other for key, other in sensors.items() if key != sensor_id}
     if (sensor.at.source, sensor.at.address) in _references(lights, others):
-        return RoomLightRefused(RoomLightRefusal.REFERENCE_TAKEN, _CONFLICT)
+        return RoomLightRefused(RoomLightRefusal.REFERENCE_TAKEN)
     if sensor_id not in sensors and len(sensors) >= SENSORS_MAX:
-        return RoomLightRefused(RoomLightRefusal.TOO_MANY, _CONFLICT)
+        return RoomLightRefused(RoomLightRefusal.TOO_MANY)
     return None
 
 
 def check_sensor_removal(sensor_id: SensorId, sensors: Mapping[SensorId, Sensor],
                          lights: Mapping[RoomLightId, RoomLight]) -> RoomLightRefused | None:
-    """UNKNOWN_SENSOR (404) when there is no such Sensor; SENSOR_REPORTS_A_LIGHT while a room light
+    """UNKNOWN_SENSOR when there is no such Sensor; SENSOR_REPORTS_A_LIGHT while a room light
     is measured by it; else None."""
     if sensor_id not in sensors:
-        return RoomLightRefused(RoomLightRefusal.UNKNOWN_SENSOR, _NOT_FOUND)
+        return RoomLightRefused(RoomLightRefusal.UNKNOWN_SENSOR)
     if measured_by(lights, sensor_id) is not None:
-        return RoomLightRefused(RoomLightRefusal.SENSOR_REPORTS_A_LIGHT, _CONFLICT)
+        return RoomLightRefused(RoomLightRefusal.SENSOR_REPORTS_A_LIGHT)
     return None
 
 

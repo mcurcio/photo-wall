@@ -1,6 +1,7 @@
 import {
-  CONSTANTS, type FixedColour, type Measured, PATTERNS, type PlayerDrawnView, type ReportedColour, type RoomLight,
-  type RoomLightRefusal, type RoomLightsView, type RoomLightView, type Sensor, type SensorView, type Unavailable,
+  CONSTANTS, type FixedColour, type Measured, PATTERNS, type PlayerDrawnView, type RefusedReportView,
+  type ReportedColour, type ReportRefusal, type RoomLight, type RoomLightRefusal, type RoomLightsView,
+  type RoomLightView, type Sensor, type SensorView, type Unavailable,
 } from "../../generated/contract";
 import { unitWords } from "../../patterns/units";
 
@@ -86,6 +87,24 @@ export function whereWords(sensor: Sensor, piName: (playerId: string) => string)
 export function sensorOfPi(sensors: readonly SensorView[], playerId: string): SensorView | undefined {
   return sensors.find((sensor) => piOf(sensor.sensor) === playerId);
 }
+
+/** A Sensor named `name`, wired to Pi `playerId`: the one place the console builds a Pi's reference. */
+export function piSensor(name: string, playerId: string): Sensor {
+  return { name, at: { source: CONSTANTS.PI_SOURCE, address: playerId } };
+}
+
+/** The one refusal log's entries about Pi `playerId`'s Sensor, newest first as Central lists them. */
+export function refusedOfPi(refused: readonly RefusedReportView[], playerId: string): RefusedReportView[] {
+  return refused.filter((each) => each.source === CONSTANTS.PI_SOURCE && each.address === playerId);
+}
+
+/** Why a Pi's reading was not recorded, in words: every code Central has (a code without words fails
+ * the typecheck). */
+export const REFUSED_READING_WORDS: Record<ReportRefusal, string> = {
+  unknown_address: "Photo Wall does not know this Pi.",
+  unreadable: "Not a reading Photo Wall reads: the Sensor's driver may be wrong.",
+  out_of_range: "A reading outside what a light Sensor measures: the Sensor may be faulty.",
+};
 
 /** The id a new light or Sensor gets from its name: lower case, each run of other characters one
  * hyphen, shortened until it is an id ("Bookshelf spot" is "bookshelf-spot"); "" for a name with

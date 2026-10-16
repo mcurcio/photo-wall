@@ -27,9 +27,8 @@ import { apiWrite } from "./apiWrite.js";
  *   latest picture change; `changed_on_buttons`: the display's latest read differs from the value
  *   set here (someone used its own buttons).
  * @typedef {{contrast_percent: number, colour_temperature_kelvin: number, gamma_tenths: number}} SoftwarePictureView
- * @typedef {{matched_lux: number, black: number}} DisplayLightView   The Display's light (decision
- *   0028, contracts/node_picture.py `DisplayLight`): the lux at the Frame when the TV's full white
- *   matched a sheet of paper, and the panel's black as a share of its white.
+ * @typedef {import("./generated/contract").LightView} DisplayLightView   The Display's light,
+ *   Central's shape (central/displays/views.py `LightView`).
  * @typedef {{session_id: string, sequence: number, idle_until: number}} PictureSessionView
  * @typedef {"auto"|"full"|"limited"} SignalRange   Which numbers the Pi's HDMI signal uses for black
  *   and white (display tuning): Auto the Pi's choice, Full 0-255, Limited 16-235.

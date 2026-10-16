@@ -20,6 +20,7 @@ import urllib.request
 
 import nats
 from integration.bus_servers import BusServer, line_slices, node_server, until
+from runtime_fakes import unconfigured_link
 
 from central.content_catalog.catalog import device_id_for_serial
 from central.db import Database
@@ -113,7 +114,7 @@ def test_the_worker_keeps_the_hub_and_records_a_node(database, tmp_path):
     session = NodeSession("display", line_slices()["display"], RELEASE, url=node.client_url)
 
     async def run() -> None:
-        worker = asyncio.create_task(_run_workers(asyncio.Event().wait(), _IdleRuntime(), bus))
+        worker = asyncio.create_task(_run_workers(asyncio.Event().wait(), _IdleRuntime(), bus, unconfigured_link()))
         try:
             async def written():
                 return config_path.exists()

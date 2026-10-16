@@ -11,6 +11,8 @@ from support.database import TestDatabases, server_dsn
 from support.shards import select_shard, shard
 
 from central.db import Database
+from central.frame_lighting.paper_profiles import LUT_RECIPE_ID
+from central.infra.frame_lighting_store import PgFrameLighting
 from central.registry import Registry
 from contracts.time import ManualClock
 
@@ -162,7 +164,7 @@ def database(database_provisioner):
 
 @pytest.fixture
 def registry(database):
-    return Registry(database, ManualClock(1000))
+    return Registry(database, ManualClock(1000), lighting=PgFrameLighting(LUT_RECIPE_ID))
 
 
 @pytest.fixture(scope="module")
@@ -172,7 +174,7 @@ def module_registry(database_provisioner):
     with database_provisioner.migrated() as conninfo:
         db = Database(conninfo)
         try:
-            yield Registry(db, ManualClock(1000))
+            yield Registry(db, ManualClock(1000), lighting=PgFrameLighting(LUT_RECIPE_ID))
         finally:
             db.close()
 

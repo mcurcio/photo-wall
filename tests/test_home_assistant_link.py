@@ -41,8 +41,8 @@ def test_any_other_url_is_refused(url):
 def test_no_url_is_a_link_with_no_broker_and_two_links_never_share_a_client_id():
     """Mutation probe: a fixed identifier -> the two links' ids are equal."""
     for env in ({}, {MQTT_URL_ENV: ""}):
-        assert build_home_assistant_link(env, Reports(), Health(), lambda: None)._broker is None  # type: ignore[arg-type]
+        assert build_home_assistant_link(env, Reports(), Health(), close=lambda: None)._broker is None  # type: ignore[arg-type]
     first, second = (build_home_assistant_link({MQTT_URL_ENV: "mqtt://broker.lan"}, Reports(), Health(),  # type: ignore[arg-type]
-                                               lambda: None) for _ in range(2))
+                                               close=lambda: None) for _ in range(2))
     assert first.client_id != second.client_id
     assert first.client_id.startswith(CLIENT_ID_PREFIX + "-")

@@ -345,12 +345,11 @@ export function panelBlackWords(black: number): string {
 }
 
 /** Photo Wall (software): contrast 0–150 % (100 % changes nothing), colour temperature and gamma,
- * then the Display's light (decision 0028): Matched light, the lux at the Frame when the White
- * pattern matched a sheet of paper, and Display black, the display's black as a percent of its white,
- * both typed and sent together, live. Each slider shows its own value; the notes say only what
- * changes nothing. The picture Photo Wall sends, never the display's own brightness. Brightness,
- * saturation, soft highlights, the black floor and the LUT left with decision 0028: the room's light
- * and a Frame's paper set them. */
+ * then the Display's light: Matched light, the lux at the Frame when the White pattern matched a
+ * sheet of paper, and Display black, the display's black as a percent of its white, both typed and
+ * sent together, live. Each slider shows its own value; the notes say only what changes nothing.
+ * The picture Photo Wall sends, never the display's own brightness; the room's light and a Frame's
+ * paper set the rest. */
 export function PhotoWallSettings({ view, session, ready }: { view: View; session: PictureSession; ready: boolean }) {
   const { software } = session.draft;
   const send = (setting: SoftwareSetting) => (next: number) => session.changeSoftware(setting, next);

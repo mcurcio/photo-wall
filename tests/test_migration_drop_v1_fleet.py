@@ -30,6 +30,8 @@ from test_registry import ADMIN
 from central.app import create_app
 from central.content_catalog.catalog import device_id_for_serial
 from central.fleet.node_sessions import NodeControlConfig
+from central.frame_lighting.paper_profiles import LUT_RECIPE_ID
+from central.infra.frame_lighting_store import PgFrameLighting
 from central.kernel.job_types import SyncReleases
 from central.kernel.ports import ReleaseListing
 from central.registry import Registry
@@ -65,7 +67,7 @@ OFFER_DEVICE_DAILY = 128  # node_boot's per-device offer quota
 @pytest.fixture
 def before_070(empty_database):
     with schema_before(empty_database, "070") as db:
-        yield Registry(db, ManualClock(1000))
+        yield Registry(db, ManualClock(1000), lighting=PgFrameLighting(LUT_RECIPE_ID))
 
 
 def _seed_v1(conn) -> None:

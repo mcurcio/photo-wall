@@ -165,7 +165,7 @@ def _central_fixture(
     components_dir, workdir = Path(components_dir), Path(workdir)
     workdir.mkdir(parents=True, exist_ok=True)
     clock = SystemClock()
-    registry = Registry(registry.db, clock)
+    registry = Registry(registry.db, clock, lighting=registry.lighting)
     components = json.loads((components_dir / "components.json").read_text())
     manager = AppEnvironmentRefV2(**components["manager_primary"])
     original = AppEnvironmentRefV2(**components["app_environment"])

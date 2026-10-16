@@ -116,7 +116,9 @@ def _record_host_line(registry, judge, value: bytes, seq: int = 1) -> None:
 
 
 def test_a_reading_that_fails_never_rolls_back_the_host_lines_record(registry, monkeypatch):
-    """A8. Mutation probe M4: no savepoint in record_reading_within -> the batch's commit fails."""
+    """A8. Mutation probe M4: no savepoint in record_reading_within -> the batch's commit fails. The
+    record stays the source: the next build of the document takes the reading the failed savepoint
+    lost (mutation: `current` without `missed_readings_in` -> the Pi's reading is never kept)."""
     player = _pi(registry)
 
     def failing(conn, *_):
@@ -127,9 +129,29 @@ def test_a_reading_that_fails_never_rolls_back_the_host_lines_record(registry, m
                       encode_light_sensor(LightSensorReading(reading=Measured(lux=5.0))))
     assert _sql(registry, "SELECT seq FROM node_link_records WHERE stream=%s", (HOST_STATE_STREAM,)) == [{"seq": 1}]
     monkeypatch.undo()
-    _record_host_line(registry, LightSensorJudge(PgRoomLights(registry.db)), b"not a reading", seq=2)
-    [refused] = PgRoomLights(registry.db).refused().refused
+    assert _sql(registry, "SELECT word FROM reading_words WHERE source=%s", (PI_SOURCE,)) == []
+    lights = PgRoomLights(registry.db)
+    lights.current()
+    assert _sql(registry, "SELECT address, word FROM reading_words WHERE source=%s", (PI_SOURCE,)) == [
+        {"address": player["player_id"], "word": {"kind": "measured", "lux": 5.0}}]
+    change = lights.current().change
+    assert lights.current().change == change           # taken once: the word is now newer than the record
+    _record_host_line(registry, LightSensorJudge(lights), b"not a reading", seq=2)
+    [refused] = lights.refused().refused
     assert (refused.source, refused.address, refused.reason) == (PI_SOURCE, player["player_id"], ReportRefusal.UNREADABLE)
+
+
+def test_a_refusal_that_fails_never_rolls_back_the_host_lines_record(registry, monkeypatch):
+    """Mutation: record_refused_within outside the judge's try, or without its savepoint -> the
+    batch's commit fails."""
+    _pi(registry)
+
+    def failing(conn, *_):
+        conn.execute("SELECT 1/0")
+
+    monkeypatch.setattr(room_light_store, "_refusal_in", failing)
+    _record_host_line(registry, LightSensorJudge(PgRoomLights(registry.db)), b"not a reading")
+    assert _sql(registry, "SELECT seq FROM node_link_records WHERE stream=%s", (HOST_STATE_STREAM,)) == [{"seq": 1}]
 
 
 def test_the_links_health_is_judged_by_its_beats_age_on_the_databases_clock(registry):

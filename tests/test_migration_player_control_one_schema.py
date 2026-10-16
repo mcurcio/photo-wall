@@ -14,6 +14,8 @@ from content_db import schema_before
 from psycopg.types.json import Jsonb
 from test_registry import enroll
 
+from central.frame_lighting.paper_profiles import LUT_RECIPE_ID
+from central.infra.frame_lighting_store import PgFrameLighting
 from central.registry import Registry
 from contracts.time import ManualClock
 
@@ -23,7 +25,7 @@ NONCE = "d" * 64
 @pytest.fixture
 def before_076(empty_database):
     with schema_before(empty_database, "076") as db:
-        yield Registry(db, ManualClock(1000))
+        yield Registry(db, ManualClock(1000), lighting=PgFrameLighting(LUT_RECIPE_ID))
 
 
 def test_076_reopens_legacy_and_schema_1_rows_and_keeps_schema_2(before_076):

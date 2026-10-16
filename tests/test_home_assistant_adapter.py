@@ -109,9 +109,9 @@ class Health:
         self.first.set()
 
 
-def test_each_message_is_recorded_or_refused_and_a_change_wakes_the_writer():
-    reports, woken = Reports(), []
-    link = HomeAssistantLink(None, reports, Health(), lambda: woken.append(1))
+def test_each_message_is_recorded_or_refused():
+    reports = Reports()
+    link = HomeAssistantLink(None, reports, Health(), close=lambda: None)
     link.record("photowall/light/light.spot", b'{"state": "on", "brightness": 255}')
     link.record("photowall/illuminance/sensor.lux", b'{"lux": 12}')
     link.record("photowall/light/light.spot", b'{"state": "dim"}')
@@ -121,15 +121,11 @@ def test_each_message_is_recorded_or_refused_and_a_change_wakes_the_writer():
         ("reading", SensorRef(source="home-assistant", address="sensor.lux"), Measured(lux=12.0)),
         ("refused", "home-assistant", "photowall/light/light.spot", ReportRefusal.UNREADABLE),
         ("refused", "home-assistant", "photowall/other/x", ReportRefusal.UNKNOWN_ADDRESS)]
-    assert woken == [1, 1]
-    quiet = Reports("unchanged")
-    HomeAssistantLink(None, quiet, Health(), lambda: woken.append(2)).record("photowall/light/light.a", b'{"state": "off"}')
-    assert woken == [1, 1]
 
 
 def test_without_a_broker_the_link_beats_not_configured_until_stopped():
     beats = Health()
-    link = build_home_assistant_link({}, Reports(), beats, lambda: None)   # type: ignore[arg-type]
+    link = build_home_assistant_link({}, Reports(), beats, close=lambda: None)   # type: ignore[arg-type]
 
     async def run() -> None:
         stop = asyncio.Event()

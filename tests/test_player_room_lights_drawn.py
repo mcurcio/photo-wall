@@ -131,6 +131,26 @@ def test_a_refused_report_is_tried_again_and_the_report_repeats(tmp_path, quick,
     asyncio.run(check())
 
 
+def test_a_refusal_that_persists_is_tried_ever_less_often(tmp_path, quick, monkeypatch):
+    """Each failed PUT doubles the wait before the next, up to the repeat period. Mutation probe: no
+    wait after a failure -> a request every turn, about 30 here."""
+    monkeypatch.setattr(service_module, "ROOM_LIGHTS_DRAWN_REPEAT_SECONDS", 8 * TURN)
+
+    async def check():
+        server = DrawnServer(ManualClock(100), refusals=1000)
+        service, _ = await rig(tmp_path, server=server)
+        task = asyncio.create_task(service._room_lights_drawn_loop())
+        try:
+            await asyncio.sleep(30 * TURN)
+            tried = 1000 - server.refusals
+            assert 2 <= tried <= 9, tried
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            await close(service)
+    asyncio.run(check())
+
+
 def test_a_running_session_sends_the_report(tmp_path, quick, monkeypatch):
     """run() starts the report with the session's other loops. Mutation probe: leave it out of the
     session's tasks -> Central never hears it."""

@@ -273,7 +273,7 @@ async def _media_loop(worker: MediaWorker, run_queue: Callable[[], Awaitable[Non
 
 
 async def _run_workers(media: Awaitable[None], runtime: JobRuntime,
-                       bus: NodeBus | None = None, link: HomeAssistantLink | None = None) -> None:
+                       bus: NodeBus | None, link: HomeAssistantLink) -> None:
     """The legacy media loop, the job runtime, the Home Assistant link and, with a hub deployed, the
     Node bus side by side, under ONE signal handler.
 
@@ -294,8 +294,7 @@ async def _run_workers(media: Awaitable[None], runtime: JobRuntime,
             group.create_task(until_stopped(runtime.run(), stopped), name="worker jobs")
             if bus is not None:
                 group.create_task(until_stopped(bus.run(bus_stop), stopped), name="worker node bus")
-            if link is not None:
-                group.create_task(until_stopped(link.run(bus_stop), stopped), name="worker home assistant link")
+            group.create_task(until_stopped(link.run(bus_stop), stopped), name="worker home assistant link")
 
             def stop() -> None:
                 nonlocal stopping
@@ -312,13 +311,12 @@ async def _run_workers(media: Awaitable[None], runtime: JobRuntime,
 
 
 def build_bus_and_link(dsn: str, env: Mapping[str, str]) -> tuple[NodeBus | None, HomeAssistantLink]:
-    """The worker's Node bus (None without a hub) and its Home Assistant link, which wakes the bus's
-    room-lights writer whenever a message changes the room-lights document. The link has a database
-    pool of its own."""
+    """The worker's Node bus (None without a hub) and its Home Assistant link. The link has a database
+    pool of its own and closes it when it ends; a recorded change wakes the bus's room-lights writer
+    through the store's NOTIFY."""
     bus = build_node_bus(dsn, env)
     db = Database(dsn, pool_size=2)
-    link = build_home_assistant_link(env, PgRoomLights(db), PgLinkHealth(db),
-                                     (lambda: None) if bus is None else bus.room_lights.wake)
+    link = build_home_assistant_link(env, PgRoomLights(db), PgLinkHealth(db), close=db.close)
     return bus, link
 
 

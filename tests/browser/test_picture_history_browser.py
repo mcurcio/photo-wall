@@ -122,7 +122,7 @@ def test_a_kept_and_a_tried_change_are_listed_and_restore_puts_the_kept_one_back
         expect(kept.first).to_have_attribute("aria-label", re.compile(TIME.pattern + re.escape(KEPT)))
         expect(_values(kept.first)).to_contain_text(re.compile(r"Contrast\s*103 %"))
         # The Display's light (decision 0028) is in every entry: the upgrade's 1,000 lx and 0.03 %.
-        expect(kept.first).to_contain_text(re.compile(r"Matched light\s*1000 lx"))
+        expect(kept.first).to_contain_text(re.compile(r"Matched light\s*1,000 lx"))
         expect(kept.first).to_contain_text(re.compile(r"Display black\s*0.03 %"))
         # Read again as Done is answered, not at the next poll (CADENCE_MS 2000).
         [done] = seen["done"]

@@ -90,8 +90,8 @@ CREATE TEMP TABLE upgrade_wash ON COMMIT DROP AS
 -- Display's LUT go (the paper profile moves to the Frame's paper; a paper profile a Frame's paper
 -- names cannot be removed: central/infra/lut_store.py). New Displays get UPGRADE_DISPLAY_LIGHT from app code.
 ALTER TABLE displays
-    ADD COLUMN matched_lux DOUBLE PRECISION NULL CHECK (matched_lux BETWEEN 10.0 AND 20000.0),
-    ADD COLUMN panel_black DOUBLE PRECISION NULL CHECK (panel_black BETWEEN 0.00001 AND 0.05);
+    ADD COLUMN matched_lux DOUBLE PRECISION NULL,   -- ranges: contracts/node_picture.py, never SQL
+    ADD COLUMN panel_black DOUBLE PRECISION NULL;
 UPDATE displays SET matched_lux = 1000.0, panel_black = 0.0003;
 ALTER TABLE displays
     ALTER COLUMN matched_lux SET NOT NULL,

@@ -5,10 +5,10 @@ import { frameLinks } from "../domain/frame-links";
 import { HostHealthPanel, type HostsRead } from "../domain/host-health";
 import { PiHeader } from "../domain/pi-header";
 import { PiLink } from "../domain/pi-link";
-import { readDrawn, readRoomLights, removeSensor, saveSensor } from "../domain/room-lights/api";
-import { drawnOf, newId, refusalWords, sensorOfPi } from "../domain/room-lights/model";
+import { readDrawn, readRefusedReports, readRoomLights, removeSensor, saveSensor } from "../domain/room-lights/api";
+import { drawnOf, newId, piSensor, refusalWords, refusedOfPi, sensorOfPi } from "../domain/room-lights/model";
 import { PiLight } from "../domain/room-lights/pi-light";
-import { CONSTANTS, type DrawnView, type RoomLightsView, type SensorView } from "../generated/contract";
+import type { DrawnView, RefusedReportsView, RoomLightsView, SensorView } from "../generated/contract";
 import { useNodeDevice } from "../nodeRead.js";
 import { EmptyState, EntityPage } from "../patterns/entity-page";
 import { Note } from "../patterns/fact-row";
@@ -17,27 +17,31 @@ import { RebootSection } from "../PlayerCommands.jsx";
 import { BOOT_FACTS_UNAVAILABLE, playersByDevice } from "../players.js";
 import { usePolledRead } from "../polledRead.js";
 import { formatRoute, routeIdName } from "../routes.js";
+import { sinceTime } from "../timeWords.js";
 import { Button } from "../ui/button";
 import { Section } from "../ui/section";
 
 /** How often the Pi's light is read again while the page is shown. */
 const LIGHT_CADENCE_MS = 5000;
 
-type LightRead = { rooms: RoomLightsView | null; drawn: DrawnView | null; failed: boolean };
+type LightRead = {
+  rooms: RoomLightsView | null; drawn: DrawnView | null; refused: RefusedReportsView | null; failed: boolean;
+};
 
-/** The house's lights and what each Pi draws with, read every LIGHT_CADENCE_MS while `open` (a
- * failed read keeps the last and says so). */
+/** The house's lights, what each Pi draws with and the one refusal log, read every LIGHT_CADENCE_MS
+ * while `open` (a failed read keeps the last and says so). */
 function useLightRead(open: boolean) {
   const load = useCallback(async (previous: LightRead): Promise<LightRead> => {
-    const [rooms, drawn] = await Promise.all([readRoomLights(), readDrawn()]);
+    const [rooms, drawn, refused] = await Promise.all([readRoomLights(), readDrawn(), readRefusedReports()]);
     return {
       rooms: rooms.ok ? rooms.view : previous.rooms,
       drawn: drawn.ok ? drawn.drawn : previous.drawn,
-      failed: !rooms.ok || !drawn.ok,
+      refused: refused.ok ? refused.refused : previous.refused,
+      failed: !rooms.ok || !drawn.ok || !refused.ok,
     };
   }, []);
   return usePolledRead(load, { cadenceMs: LIGHT_CADENCE_MS, skip: !open,
-    initial: { rooms: null, drawn: null, failed: false } as LightRead });
+    initial: { rooms: null, drawn: null, refused: null, failed: false } as LightRead });
 }
 
 export interface HardwarePiPageProps {
@@ -102,14 +106,16 @@ export function HardwarePiPage({ deviceId, snapshot, bootFacts, hosts }: Hardwar
       {enrolled && player !== null && (
         <Section title="Light">
           <PiLight key={player.id} sensor={light.rooms === null ? undefined : sensorOfPi(light.rooms.sensors, player.id)}
-            drawn={light.drawn === null ? undefined : drawnOf(light.drawn.players, player.id)} unread={light.failed}
+            drawn={light.drawn === null ? undefined : drawnOf(light.drawn.players, player.id)}
+            refused={light.refused === null ? [] : refusedOfPi(light.refused.refused, player.id)}
+            since={(at) => sinceTime(at)} unread={light.failed}
             note={lightNote}
             onSaveSensor={async (name) => {
               const sensors = light.rooms?.sensors ?? [];
               const known = sensorOfPi(sensors, player.id);
               const target = known !== undefined ? { id: known.id } : newId(name, sensors.map((each) => each.id));
               if ("problem" in target) return target.problem;
-              const answer = await saveSensor(target.id, { name, at: { source: CONSTANTS.PI_SOURCE, address: player.id } });
+              const answer = await saveSensor(target.id, piSensor(name, player.id));
               void rereadLight();
               if (!answer.ok) return refusalWords("Not saved", answer.error);
               setLightNote(`Saved ${name}.`);

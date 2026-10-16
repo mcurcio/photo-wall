@@ -49,8 +49,8 @@ export async function addLut(profile) {
 }
 
 /**
- * Remove a LUT nothing uses (DELETE /v1/operator/luts/{profile_sha256}). Central refuses
- * lut_in_use with the Frames whose paper uses it, or lut_unknown when it is not on the list.
+ * Remove a paper profile nothing uses (DELETE /v1/operator/luts/{profile_sha256}). Central refuses
+ * it with a PaperProfileRefusal code (with the Frames whose paper uses it, when one does).
  *
  * @param {string} profileSha256
  * @returns {Promise<{ok: true}|{ok: false, error: string, frames: string[]}>}

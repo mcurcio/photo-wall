@@ -73,8 +73,8 @@ export interface LutsSettingsProps {
 }
 
 /**
- * Settings › LUTs' list (print look, design "The LUT"; design-language §8 row B5, T8): each LUT by
- * its paper profile's name, when it was added and the Frames whose paper uses it (decision 0028);
+ * Settings › LUTs' list: each LUT by its paper profile's name, when it was added and the Frames
+ * whose paper uses it;
  * Add a paper profile (a file from the paper's maker, checked by Central, a refusal in plain words)
  * and Remove, confirmed, which Central refuses while a Frame uses the LUT. The page reads and writes; this
  * is what a story draws.

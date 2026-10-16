@@ -283,7 +283,7 @@ def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
 
     @app.get("/v1/operator/frames/{frame_id}/calibration-capability", dependencies=[Depends(admin)])
     async def calibration_capability(frame_id: str):
-        return await invoke(Registry(db, clock).calibration_capability, frame_id)
+        return await invoke(Registry(db, clock, lighting=lighting).calibration_capability, frame_id)
 
     @app.post("/v1/operator/frames/{frame_id}/calibration-trials", dependencies=[Depends(admin)])
     async def calibration_begin(frame_id: str, request: Request):

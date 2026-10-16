@@ -110,7 +110,12 @@ export interface FrameRefView {
 export interface HomeAssistantView {
   entities: EntityView[];
   link: LinkHealthView;
-  refused: RefusedMessageView[];
+  refused: RefusedReportView[];
+}
+
+export interface LightView {
+  black: number;
+  matched_lux: number;
 }
 
 export interface LinkHealthView {
@@ -208,12 +213,6 @@ export type PositionRestoreRefusal = "other_frame" | "made_for_other_profile" | 
 export interface ProfilePxView {
   height: number;
   width: number;
-}
-
-export interface RefusedMessageView {
-  at: number;
-  reason: ReportRefusal;
-  topic: string;
 }
 
 export interface RefusedReportView {
@@ -442,6 +441,16 @@ export const LIMITS = {
   FrameRefView: {
     id: {
       pattern: "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+    },
+  },
+  LightView: {
+    black: {
+      maximum: 0.05,
+      minimum: 1e-05,
+    },
+    matched_lux: {
+      maximum: 20000,
+      minimum: 10,
     },
   },
   LuxOnFrame: {

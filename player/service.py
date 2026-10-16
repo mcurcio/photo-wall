@@ -472,22 +472,25 @@ class PlayerService:
 
     async def _room_lights_drawn_loop(self) -> None:
         """While linked: PUT `room_lights_drawn()` whenever it differs from the last one Central
-        accepted, and at least every ROOM_LIGHTS_DRAWN_REPEAT_SECONDS. A failed PUT is tried at the
-        next turn; it never ends the session or touches the control State."""
+        accepted, and at least every ROOM_LIGHTS_DRAWN_REPEAT_SECONDS. A failed PUT is tried again
+        after a wait that doubles from one turn up to the repeat period (a refusal that persists is
+        not a request every turn); it never ends the session or touches the control State."""
         wake = asyncio.Event()
         self._room_lights_wake = (asyncio.get_running_loop(), wake)
         accepted: RoomLightsDrawn | None = None
-        due = 0.0
+        due = retry_at = 0.0
+        backoff = ROOM_LIGHTS_DRAWN_TURN
         while not self._stop.is_set():
             wake.clear()
             report = self.room_lights_drawn()
             now = asyncio.get_running_loop().time()
-            if report != accepted or now >= due:
+            if (report != accepted or now >= due) and now >= retry_at:
                 try:
                     await self._put_no_content(ROOM_LIGHTS_DRAWN_PATH, report.model_dump(mode="json"))
-                    accepted, due = report, now + ROOM_LIGHTS_DRAWN_REPEAT_SECONDS
+                    accepted, due, backoff = report, now + ROOM_LIGHTS_DRAWN_REPEAT_SECONDS, ROOM_LIGHTS_DRAWN_TURN
                 except Exception as error:
                     LOG.debug("player: room-lights report not accepted: %s", type(error).__name__)
+                    retry_at, backoff = now + backoff, min(2 * backoff, ROOM_LIGHTS_DRAWN_REPEAT_SECONDS)
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(wake.wait(), ROOM_LIGHTS_DRAWN_TURN)
 

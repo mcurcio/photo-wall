@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { readPositionHistory, useHistoryPages } from "../historyApi.js";
-import type { PositionEntryKind, PositionEntryView, PositionHistoryView } from "../historyApi.js";
+import type { PositionEntryKind, PositionEntryView, PositionHistoryView } from "../generated/contract";
 import { refusalWords } from "../liveAdjustment.js";
 import { changedSummary, type HistoryDay, HistoryList, type HistoryRow } from "../patterns/history-list";
 import { unitWords } from "../patterns/units";
@@ -69,7 +69,7 @@ export function positionDetails(entry: PositionEntryView, size: PixelSize | null
   const { width, height } = entry.made_for.profile_px;
   return [
     { label: "Fit", value: FITS[entry.fit.mode] },
-    ...entry.fit.corners.map(([x, y], index) => ({
+    ...(entry.fit.corners ?? []).map(([x, y], index) => ({
       label: CORNERS[index] ?? `Corner ${index + 1}`,
       value: `${percent(x)} across, ${percent(y)} down`
         + (size === null ? "" : ` (${Math.round(x * size.width)}, ${Math.round(y * size.height)} px)`),

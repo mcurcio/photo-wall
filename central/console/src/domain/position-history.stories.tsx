@@ -5,8 +5,9 @@ import { type PositionEntryView, type PositionHistoryView, PositionHistoryList }
 import { LIVING_ROOM, PROFILES, ROOMS } from "./room-lights/room-lights.fixtures";
 
 const FRAME = { id: "lobby", name: "Lobby" };
-const OPENING: [number, number][] = [[0.1, 0.08], [0.9, 0.05], [0.92, 0.95], [0.08, 0.92]];
-const FULL: [number, number][] = [[0, 0], [1, 0], [1, 1], [0, 1]];
+type Corners = [[number, number], [number, number], [number, number], [number, number]];
+const OPENING: Corners = [[0.1, 0.08], [0.9, 0.05], [0.92, 0.95], [0.08, 0.92]];
+const FULL: Corners = [[0, 0], [1, 0], [1, 1], [0, 1]];
 const NAMES = Object.fromEntries(ROOMS.lights.map((light) => [light.id, light.light.name]));
 
 const ADJUSTMENT: Adjustment = {
@@ -29,13 +30,16 @@ const ADJUSTMENT: Adjustment = {
 
 // Times in UTC: the story's times show in the browser's zone (no house clock here).
 function entry(id: string, kind: PositionEntryView["kind"], at: string, values: {
-  corners?: [number, number][]; rotation?: number; mode?: "cover" | "corners"; depth?: number;
+  corners?: Corners; rotation?: number; mode?: "cover" | "corners"; depth?: number;
   lights?: PositionEntryView["lighting"]["lights"]; profile?: { width: number; height: number };
   refusal?: PositionEntryView["restore_refusal"];
 } = {}): PositionEntryView {
+  const corners = values.corners ?? OPENING;
+  const fit: PositionEntryView["fit"] = values.mode === "corners"
+    ? { mode: "corners", corners, rotation: (values.rotation ?? 0) as 0 | 90 | 180 | 270 }
+    : { mode: "cover", corners, rotation: values.rotation ?? 0 };
   return {
-    entry_id: id, frame: FRAME, kind, number: 1, at, session_id: null, restored_from: null,
-    fit: { mode: values.mode ?? "cover", corners: values.corners ?? OPENING, rotation: values.rotation ?? 0 },
+    entry_id: id, frame: FRAME, kind, number: 1, at, session_id: null, restored_from: null, fit,
     lighting: { ...LIVING_ROOM, mat_depth_mm: values.depth ?? 2.5, lights: values.lights ?? LIVING_ROOM.lights.slice(0, 2) },
     made_for: { profile_px: values.profile ?? { width: 1920, height: 1080 }, display_id: null },
     restore_refusal: values.refusal ?? null,

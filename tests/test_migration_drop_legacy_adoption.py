@@ -18,6 +18,8 @@ from test_fleet_attempts import SERIAL
 from test_node_boot import claim_for, cold_setup
 
 from central.fleet.node_ingest import NodeIngest
+from central.frame_lighting.paper_profiles import LUT_RECIPE_ID
+from central.infra.frame_lighting_store import PgFrameLighting
 from central.registry import Registry
 from contracts.node_boot import NodeBootRequestV2
 from contracts.node_protocol import NodeEventV2, RebootFact, encode_node_message
@@ -32,7 +34,7 @@ BY_PRODUCER = ("node_sessions", "node_evidence", "node_host_observations",
 @pytest.fixture
 def before_077(empty_database):
     with schema_before(empty_database, "077") as db:
-        yield Registry(db, ManualClock(1000))
+        yield Registry(db, ManualClock(1000), lighting=PgFrameLighting(LUT_RECIPE_ID))
 
 
 def _boot(boots, sessions, serial):
