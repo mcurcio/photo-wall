@@ -18,7 +18,7 @@ const TIMEOUT_MS = 15000;
  * When `body` is supplied it is JSON-encoded and a `Content-Type` header is set;
  * when it is omitted (e.g. DELETE frame) neither is sent, matching the requests
  * the endpoints issued before this extraction. A body that is not JSON (a file the
- * operator chose, as Settings › LUTs' paper profile) names its `contentType`: the
+ * operator chose, as Settings › Paper profiles' ICC file) names its `contentType`: the
  * body (a Blob, File or bytes) is then sent as it is, under that type. The
  * response body is parsed as JSON best-effort on BOTH paths — an empty/non-JSON body yields `data: null`
  * and, on failure, `error: null` — so a caller reads one shape regardless.

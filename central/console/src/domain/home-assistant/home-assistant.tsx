@@ -3,13 +3,13 @@ import { useState } from "react";
 import type { EntityView, HomeAssistantView, RefusedReportView, RoomLightsView } from "../../generated/contract";
 import { EntityList } from "../../patterns/entity-list";
 import { FactRow, Note } from "../../patterns/fact-row";
+import { type Outcome, SaveDialog } from "../../patterns/save-dialog";
 import { Button } from "../../ui/button";
-import { Dialog, DialogClose } from "../../ui/dialog";
 import { Field, TextInput } from "../../ui/field";
 import { SegmentedControl } from "../../ui/segmented-control";
 import { Select } from "../../ui/select";
 import { Stack } from "../../ui/stack";
-import { entitiesInOrder, isLightEntity, linkWords, REFUSED_WORDS, reportsWords } from "./model";
+import { entitiesInOrder, linkWords, REFUSED_WORDS, reportsWords } from "./model";
 
 /** What an entity is linked to: one room light, an existing Sensor, or a new Sensor by name. */
 export type Link = { kind: "light"; id: string } | { kind: "sensor"; id: string } | { kind: "new-sensor"; name: string };
@@ -23,7 +23,7 @@ export interface HomeAssistantProps {
   /** The last change's words, until the next. */
   note: string | null;
   /** Link `entity` to a room light or Sensor: null when Central took it, else its words. */
-  onLink: (entity: string, link: Link) => Promise<string | null>;
+  onLink: (entity: string, link: Link) => Outcome;
 }
 
 type EntityRow = EntityView & { key: string; severity: null };
@@ -33,68 +33,47 @@ const NEW_SENSOR = "new";
 function LinkDialog({ entity, house, onClose, onLink }: {
   entity: EntityView; house: RoomLightsView; onClose: () => void; onLink: HomeAssistantProps["onLink"];
 }) {
-  const light = isLightEntity(entity.entity);
+  const light = entity.kind === "light";
   const [target, setTarget] = useState(light ? entity.reports_light ?? house.lights[0]?.id ?? ""
     : entity.reports_sensor ?? house.sensors[0]?.id ?? NEW_SENSOR);
   const [name, setName] = useState("");
-  const [problem, setProblem] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
   const save = async () => {
     let link: Link;
     if (light) {
-      if (target === "") {
-        setProblem("Add the room light on House › Lights first, then link it here.");
-        return;
-      }
+      if (target === "") return "Add the room light on House › Lights first, then link it here.";
       link = { kind: "light", id: target };
     } else if (target === NEW_SENSOR) {
-      if (name.trim() === "") {
-        setProblem("Give the Sensor a name, as Window Sensor.");
-        return;
-      }
+      if (name.trim() === "") return "Give the Sensor a name, as Window Sensor.";
       link = { kind: "new-sensor", name: name.trim() };
     } else {
       link = { kind: "sensor", id: target };
     }
-    setBusy(true);
-    const refused = await onLink(entity.entity, link);
-    setBusy(false);
-    if (refused === null) onClose();
-    else setProblem(refused);
+    return onLink(entity.entity, link);
   };
   return (
-    <Dialog open onOpenChange={(open) => { if (!open) onClose(); }} busy={busy} title={`Link ${entity.entity}`}
-      actions={(
+    <SaveDialog title={`Link ${entity.entity}`} action="Link" onSave={save} onClose={onClose}>
+      {({ busy, edited }) => (light ? (
+        <Field label="Room light" help="This light reports itself through this entity from now on">
+          <Select value={target === "" ? null : target} disabled={busy}
+            options={house.lights.map((each) => ({ value: each.id, label: each.light.name }))}
+            onChange={(next) => { setTarget(next); edited(); }} />
+        </Field>
+      ) : (
         <>
-          <DialogClose>Cancel</DialogClose>
-          <Button variant="primary" disabled={busy} onClick={() => void save()}>Link</Button>
-        </>
-      )}>
-      <Stack>
-        {light ? (
-          <Field label="Room light" help="This light reports itself through this entity from now on">
-            <Select value={target === "" ? null : target} disabled={busy}
-              options={house.lights.map((each) => ({ value: each.id, label: each.light.name }))}
-              onChange={(next) => { setTarget(next); setProblem(null); }} />
+          <Field label="Sensor" help="This Sensor's readings come from this entity from now on">
+            <SegmentedControl label="Sensor" value={target} disabled={busy}
+              options={[...house.sensors.map((each) => ({ value: each.id, label: each.sensor.name })),
+                { value: NEW_SENSOR, label: "A new Sensor" }]}
+              onChange={(next) => { setTarget(next); edited(); }} />
           </Field>
-        ) : (
-          <>
-            <Field label="Sensor" help="This Sensor's readings come from this entity from now on">
-              <SegmentedControl label="Sensor" value={target} disabled={busy}
-                options={[...house.sensors.map((each) => ({ value: each.id, label: each.sensor.name })),
-                  { value: NEW_SENSOR, label: "A new Sensor" }]}
-                onChange={(next) => { setTarget(next); setProblem(null); }} />
+          {target === NEW_SENSOR && (
+            <Field label="Name">
+              <TextInput value={name} onChange={(next) => { setName(next); edited(); }} disabled={busy} />
             </Field>
-            {target === NEW_SENSOR && (
-              <Field label="Name">
-                <TextInput value={name} onChange={(next) => { setName(next); setProblem(null); }} disabled={busy} />
-              </Field>
-            )}
-          </>
-        )}
-        {problem !== null && <Note live>{problem}</Note>}
-      </Stack>
-    </Dialog>
+          )}
+        </>
+      ))}
+    </SaveDialog>
   );
 }
 

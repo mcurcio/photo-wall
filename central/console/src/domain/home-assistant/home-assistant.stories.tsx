@@ -7,10 +7,10 @@ import { HomeAssistant } from "./home-assistant";
 const LINKED: HomeAssistantView = {
   link: { state: "connected", since: HEARD - 3600 },
   entities: [
-    { entity: "light.living_room", reports_light: "overheads", reports_sensor: null, heard_at: HEARD - 60 },
-    { entity: "light.bookshelf", reports_light: "bookshelf-spot", reports_sensor: null, heard_at: null },
-    { entity: "sensor.window_illuminance", reports_light: null, reports_sensor: "window-meter", heard_at: HEARD },
-    { entity: "light.kitchen", reports_light: null, reports_sensor: null, heard_at: HEARD - 120 },
+    { entity: "light.living_room", kind: "light", reports_light: "overheads", reports_sensor: null, heard_at: HEARD - 60 },
+    { entity: "light.bookshelf", kind: "light", reports_light: "bookshelf-spot", reports_sensor: null, heard_at: null },
+    { entity: "sensor.window_illuminance", kind: "illuminance", reports_light: null, reports_sensor: "window-meter", heard_at: HEARD },
+    { entity: "light.kitchen", kind: "light", reports_light: null, reports_sensor: null, heard_at: HEARD - 120 },
   ],
   refused: [],
 };

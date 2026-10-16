@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useRef } from "react";
 
 import { retireRequest, useConfirm } from "../ConfirmAction.jsx";
 import { frameLinks } from "../domain/frame-links";
@@ -13,6 +13,7 @@ import { useNodeDevice } from "../nodeRead.js";
 import { EmptyState, EntityPage } from "../patterns/entity-page";
 import { Note } from "../patterns/fact-row";
 import { OwnerLinks } from "../patterns/link-to-owner";
+import { useSaveNote } from "../patterns/save-dialog";
 import { RebootSection } from "../PlayerCommands.jsx";
 import { BOOT_FACTS_UNAVAILABLE, playersByDevice } from "../players.js";
 import { usePolledRead } from "../polledRead.js";
@@ -70,7 +71,7 @@ export function HardwarePiPage({ deviceId, snapshot, bootFacts, hosts }: Hardwar
   const { open, confirmation } = useConfirm(focusName, focusName);
   const enrolled = row !== null && !retired && row.player !== null;
   const { value: light, refresh: rereadLight } = useLightRead(enrolled);
-  const [lightNote, setLightNote] = useState<string | null>(null);
+  const { note: lightNote, settle } = useSaveNote(rereadLight);
 
   if (row === null) {
     return (
@@ -115,19 +116,11 @@ export function HardwarePiPage({ deviceId, snapshot, bootFacts, hosts }: Hardwar
               const known = sensorOfPi(sensors, player.id);
               const target = known !== undefined ? { id: known.id } : newId(name, sensors.map((each) => each.id));
               if ("problem" in target) return target.problem;
-              const answer = await saveSensor(target.id, piSensor(name, player.id));
-              void rereadLight();
-              if (!answer.ok) return refusalWords("Not saved", answer.error);
-              setLightNote(`Saved ${name}.`);
-              return null;
+              return settle(saveSensor(target.id, piSensor(name, player.id)), `Saved ${name}.`,
+                (answer) => refusalWords("Not saved", answer.error));
             }}
-            onRemoveSensor={async (sensor: SensorView) => {
-              const answer = await removeSensor(sensor.id);
-              void rereadLight();
-              if (!answer.ok) return refusalWords("Not removed", answer.error);
-              setLightNote(`Removed ${sensor.sensor.name}.`);
-              return null;
-            }} />
+            onRemoveSensor={(sensor: SensorView) => settle(removeSensor(sensor.id), `Removed ${sensor.sensor.name}.`,
+              (answer) => refusalWords("Not removed", answer.error))} />
         </Section>
       )}
       <Section title="Link and sessions" resetKey={node.readAt}>

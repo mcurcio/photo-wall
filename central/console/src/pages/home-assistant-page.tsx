@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback } from "react";
 
 import { readHomeAssistant } from "../domain/home-assistant/api";
 import { HomeAssistant, type Link } from "../domain/home-assistant/home-assistant";
@@ -6,16 +6,15 @@ import { reportedBy, sensorAt } from "../domain/home-assistant/model";
 import { readRoomLights, saveRoomLight, saveSensor } from "../domain/room-lights/api";
 import { newId, refusalWords } from "../domain/room-lights/model";
 import type { HomeAssistantView, RoomLightsView } from "../generated/contract";
-import { Note } from "../patterns/fact-row";
-import { ProblemCard } from "../patterns/problem-card";
+import { NOT_READ, nextRead, type PageRead, PolledPage } from "../patterns/polled-page";
+import { type Outcome, useSaveNote } from "../patterns/save-dialog";
 import { usePolledRead } from "../polledRead.js";
 import { sinceTime } from "../timeWords.js";
 
 /** How often the page reads again while shown: an entity's word shows within this. */
 const CADENCE_MS = 3000;
 
-type Read = { status: "loading" } | { status: "failed" }
-  | { status: "read"; view: HomeAssistantView; house: RoomLightsView; failed: boolean };
+type Read = PageRead<{ view: HomeAssistantView; house: RoomLightsView }>;
 
 /**
  * Settings › Home Assistant (`#/home-assistant`): the link's health, every entity with the room
@@ -26,49 +25,34 @@ type Read = { status: "loading" } | { status: "failed" }
 export function HomeAssistantPage() {
   const load = useCallback(async (previous: Read): Promise<Read> => {
     const [view, house] = await Promise.all([readHomeAssistant(), readRoomLights()]);
-    if (view.ok && house.ok) return { status: "read", view: view.view, house: house.view, failed: false };
-    return previous.status === "read" ? { ...previous, failed: true } : { status: "failed" };
+    return nextRead(previous, view.ok && house.ok ? { view: view.view, house: house.view } : null);
   }, []);
-  const { value: read, refresh } = usePolledRead(load, { cadenceMs: CADENCE_MS, initial: { status: "loading" } as Read });
-  const [note, setNote] = useState<string | null>(null);
+  const { value: read, refresh } = usePolledRead(load, { cadenceMs: CADENCE_MS, initial: NOT_READ as Read });
+  const { note, settle } = useSaveNote(refresh);
+  const notLinked = (answer: { error: string }) => refusalWords("Not linked", answer.error);
 
-  if (read.status === "loading") return <Note>Loading…</Note>;
-  if (read.status === "failed") {
-    return (
-      <ProblemCard scope="central" verdict={{ severity: "unknown", label: "Can't tell", receipt: null }}
-        what="Central did not answer with the Home Assistant link." doing={null}
-        action={{ label: "Try again", onAction: () => void refresh() }} />
-    );
-  }
-  const { house } = read;
-  const link = async (entity: string, to: Link): Promise<string | null> => {
-    let answer: { ok: true } | { ok: false; error: string };
-    let name: string;
+  const link = (house: RoomLightsView) => (entity: string, to: Link): Outcome => {
     if (to.kind === "light") {
       const light = house.lights.find((each) => each.id === to.id);
-      if (light === undefined) return refusalWords("Not linked", "unknown_room_light");
-      name = light.light.name;
-      answer = await saveRoomLight(light.id, reportedBy(light, entity));
-    } else if (to.kind === "sensor") {
-      const sensor = house.sensors.find((each) => each.id === to.id);
-      if (sensor === undefined) return refusalWords("Not linked", "unknown_sensor");
-      name = sensor.sensor.name;
-      answer = await saveSensor(sensor.id, sensorAt(name, entity));
-    } else {
-      const id = newId(to.name, house.sensors.map((each) => each.id));
-      if ("problem" in id) return id.problem;
-      name = to.name;
-      answer = await saveSensor(id.id, sensorAt(name, entity));
+      if (light === undefined) return Promise.resolve(refusalWords("Not linked", "unknown_room_light"));
+      return settle(saveRoomLight(light.id, reportedBy(light, entity)), `${entity} now reports ${light.light.name}.`, notLinked);
     }
-    void refresh();
-    if (!answer.ok) return refusalWords("Not linked", answer.error);
-    setNote(`${entity} now reports ${name}.`);
-    return null;
+    if (to.kind === "sensor") {
+      const sensor = house.sensors.find((each) => each.id === to.id);
+      if (sensor === undefined) return Promise.resolve(refusalWords("Not linked", "unknown_sensor"));
+      const name = sensor.sensor.name;
+      return settle(saveSensor(sensor.id, sensorAt(name, entity)), `${entity} now reports ${name}.`, notLinked);
+    }
+    const id = newId(to.name, house.sensors.map((each) => each.id));
+    if ("problem" in id) return Promise.resolve(id.problem);
+    return settle(saveSensor(id.id, sensorAt(to.name, entity)), `${entity} now reports ${to.name}.`, notLinked);
   };
   return (
-    <>
-      {read.failed && <Note>Central did not answer the last read: this is the link as last read.</Note>}
-      <HomeAssistant view={read.view} house={house} since={(at) => sinceTime(at)} note={note} onLink={link} />
-    </>
+    <PolledPage read={read} onRetry={() => void refresh()} what="Central did not answer with the Home Assistant link."
+      stale="Central did not answer the last read: this is the link as last read.">
+      {({ view, house }) => (
+        <HomeAssistant view={view} house={house} since={(at) => sinceTime(at)} note={note} onLink={link(house)} />
+      )}
+    </PolledPage>
   );
 }

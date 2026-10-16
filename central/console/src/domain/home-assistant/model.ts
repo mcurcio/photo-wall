@@ -49,11 +49,6 @@ export function reportsWords(entity: EntityView, house: RoomLightsView): string 
   return "Nothing yet";
 }
 
-/** Whether `entity` is a light (Home Assistant's light domain) or reads illuminance (any other). */
-export function isLightEntity(entity: string): boolean {
-  return entity.startsWith("light.");
-}
-
 /** `view`'s room light, reported by `entity` from now on: its name kept, its colour kept (a colour
  * light keeps its own colour). */
 export function reportedBy(view: RoomLightView, entity: string): RoomLight {

@@ -7,6 +7,7 @@ import { FrameOverview } from "../domain/frame-overview";
 import { FrameLightingTab } from "../domain/frame-lighting/frame-lighting-tab";
 import type { PaperProfileChoice } from "../domain/frame-lighting/model";
 import { FrameDraftFit, FramePhotos } from "../domain/frame-photos";
+import { listPaperProfiles } from "../domain/paper-profiles/api";
 import { FramePicture } from "../domain/frame-picture";
 import { PictureHistory } from "../domain/picture-history";
 import { PositionHistory } from "../domain/position-history";
@@ -22,7 +23,6 @@ import type { DrawnView, RoomLightsView } from "../generated/contract";
 import { frameHealth } from "../health.js";
 import { boundOutput, isBound } from "../join.js";
 import { useFrameAdjustment } from "../liveAdjustment.js";
-import { listLuts } from "../lutsApi.js";
 import { renameFrame } from "../framesApi.js";
 import { EntityHeader } from "../patterns/entity-header";
 import { EmptyState, EntityPage } from "../patterns/entity-page";
@@ -122,9 +122,9 @@ function useHouseLights(open: boolean): { rooms: RoomLightsView | null; drawn: D
   useEffect(() => {
     if (!open) return undefined;
     let current = true;
-    void listLuts().then((result: { ok: boolean; luts?: PaperProfileChoice[] }) => {
+    void listPaperProfiles().then((result) => {
       if (current && result.ok) {
-        setProfiles((result.luts ?? []).map(({ profile_sha256, recipe_id, name }) => ({ profile_sha256, recipe_id, name })));
+        setProfiles(result.view.paper_profiles.map(({ profile_sha256, recipe_id, name }) => ({ profile_sha256, recipe_id, name })));
       }
     });
     return () => { current = false; };

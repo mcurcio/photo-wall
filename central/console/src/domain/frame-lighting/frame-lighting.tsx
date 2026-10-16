@@ -159,7 +159,7 @@ function PaperRows({ paper, profiles, disabled, onChange }: {
                 : { profile_sha256: next.profile_sha256, recipe_id: next.recipe_id } });
             }} />
         </Field>
-        {listed.length === 0 && <OwnerLinks links={[{ text: "Add a paper profile in Settings › LUTs", href: formatRoute({ section: "luts" }) }]} />}
+        {listed.length === 0 && <OwnerLinks links={[{ text: "Add a paper profile in Settings › Paper profiles", href: formatRoute({ section: "paper-profiles" }) }]} />}
       </Stack>
     </FactGroup>
   );

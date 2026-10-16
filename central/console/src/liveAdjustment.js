@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { apiWrite } from "./apiWrite.js";
 import { isBound } from "./join.js";
 import { LIGHTING_REFUSAL_WORDS } from "./domain/frame-lighting/model";
+import { POSITION_RESTORE_WORDS, TRIAL_REFUSAL_WORDS } from "./domain/trial-refusals";
 import { beginBody, draftBody } from "./trialBodies";
 import { draftKey, fitOf, useDraft } from "./useDraft.js";
 import { useMutate } from "./useMutate.js";
@@ -47,7 +48,7 @@ import { useMutate } from "./useMutate.js";
  * loop request in flight like Done, names the session's sequence (tried once more after a
  * `trial_sequence_conflict`, once a keepalive has read the session again), and on success the draft's
  * fit and lighting become the answer's while the draft keeps its own base revision, so a save made
- * elsewhere meanwhile still stops it (OVERTAKEN). The operator still presses Done.
+ * elsewhere meanwhile still stops it (a stopping refusal). The operator still presses Done.
  *
  * DONE (`save`) is offered only once the Pi has shown the latest change (Central refuses it
  * otherwise); REVERT ends the session and returns the draft to the saved calibration and lighting. Both are
@@ -61,35 +62,14 @@ const EDIT_DELAY_MS = 180;
 const RENEW_BEFORE_S = 15;
 const RETRY_MS = 2000;
 
-// Someone saved this Frame's calibration after the draft was made (Central's compare-and-set).
-const OVERTAKEN =
-  "Someone saved a different position for this Frame meanwhile. Press Revert to load it, then adjust again.";
+/**
+ * Central's refusals, in the operator's words: the trial's, a Restore's entry's and a draft
+ * lighting's, each table over its generated union (domain/trial-refusals.ts, frame-lighting).
+ */
+const REFUSALS = { ...TRIAL_REFUSAL_WORDS, ...POSITION_RESTORE_WORDS, ...LIGHTING_REFUSAL_WORDS };
 
-/** Central's refusals, in the operator's words. */
-const REFUSALS = {
-  trial_display_unavailable: "This Frame's Pi is not connected to Photo Wall. Check that it is on.",
-  trial_current_output_required:
-    "The Pi has not reported this Display in the last few seconds. Check that the Display is on and plugged in.",
-  trial_admitted_surface_required: "The Pi is still starting its picture. Wait a moment.",
-  trial_latest_not_presented: "The Pi has not presented the latest change yet. Wait a moment, then press Done again.",
-  trial_sequence_conflict: "Another window changed this Frame at the same moment.",
-  trial_frame_unbound: "Choose which Pi and HDMI output feed this Frame first (Hardware tab).",
-  trial_baseline_revision_changed: OVERTAKEN,
-  calibration_revision_conflict: OVERTAKEN,
-  calibration_trial_baseline_changed: OVERTAKEN,
-  // A Restore's (configuration snapshots K2).
-  trial_ended: "The editor closed. It starts again in a moment; then restore.",
-  trial_unknown: "The editor closed. It starts again in a moment; then restore.",
-  unknown_entry: "That change is no longer in the history.",
-  made_for_other_profile: "Made for another screen size.",
-  made_for_other_display: "Made on another display.",
-  other_frame: "That change was another Frame's.",
-  // A draft Central cannot read (a value outside what a Frame takes): the next edit fixes it.
-  node_trial_operation_invalid: "Photo Wall refused this change: a value is outside what a Frame takes.",
-  ...LIGHTING_REFUSAL_WORDS,
-};
-
-/** A refusal's words (REFUSALS), or Central's code in a sentence when it has none. */
+/** A refusal's words (REFUSALS); a code outside Central's vocabularies (a lost request, an answer
+ * outside its shape) in a general sentence. */
 export function refusalWords(code) {
   return code === NO_ANSWER ? NO_ANSWER_WORDS : REFUSALS[code] ?? "Photo Wall refused the change.";
 }

@@ -3,7 +3,7 @@ import React from "react";
 import { HomeAssistantPage } from "./pages/home-assistant-page.tsx";
 import { HouseLightsPage } from "./pages/house-lights-page.tsx";
 import { HouseSettingsPage } from "./pages/house-settings-page.tsx";
-import { LutsSettingsPage } from "./pages/luts-settings-page.tsx";
+import { PaperProfilesPage } from "./pages/paper-profiles-page.tsx";
 import { PhotoFitSettingsPage } from "./pages/photo-fit-settings-page.tsx";
 import { PhotoLibraryPage } from "./pages/photo-library-page.tsx";
 import SAMPLES from "./routeSamples.json";
@@ -16,7 +16,7 @@ import SAMPLES from "./routeSamples.json";
  * House (`#/house`): the house's timezone, location, units and clock; room light adds House › Lights
  * (`#/lights`): the house's room lights and Sensors, and Home Assistant (`#/home-assistant`): its
  * link, which entity reports which light or Sensor, and the messages it could not record; the
- * print look adds LUTs (`#/luts`): the paper profiles a Frame's paper is made from. Like the fleet
+ * print look adds Paper profiles (`#/paper-profiles`): the ICC profiles a Frame's paper is made from. Like the fleet
  * and neutral sections, the shell mounts a Settings section only while it is current, so its
  * read stops when the operator leaves it; it never reaches the Frame page (R4).
  *
@@ -55,10 +55,10 @@ export const settingsRoutes = Object.freeze(
       samplePaths: SAMPLES.settings["home-assistant"],
     },
     {
-      section: "luts",
-      label: "LUTs",
-      render: () => <LutsSettingsPage />,
-      samplePaths: SAMPLES.settings.luts,
+      section: "paper-profiles",
+      label: "Paper profiles",
+      render: () => <PaperProfilesPage />,
+      samplePaths: SAMPLES.settings["paper-profiles"],
     },
   ].map(Object.freeze),
 );

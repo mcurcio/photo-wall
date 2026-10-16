@@ -48,7 +48,7 @@
     "house": ["#/house"],
     "lights": ["#/lights"],
     "home-assistant": ["#/home-assistant"],
-    "luts": ["#/luts"]
+    "paper-profiles": ["#/paper-profiles"]
   },
   "neutral": {
     "attention": ["#/attention"]

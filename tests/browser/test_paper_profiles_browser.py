@@ -1,12 +1,13 @@
-"""Settings › LUTs (print look, design "The LUT"; design-language §8 row B5): the owner adds a
-paper maker's .icc profile, sees the LUTs list (name, when added, the Frames whose paper uses it,
-decision 0028) and removes one no Frame uses, through GET, POST and DELETE /v1/operator/luts on the production app.
+"""Settings › Paper profiles (decision 0028; design-language §8 row B5): the owner adds a paper
+maker's .icc profile, sees the list (name, when added, the Frames whose paper uses it) and removes
+one no Frame uses, through GET, POST and DELETE /v1/operator/paper-profiles on the production app.
 
 Mutation probes, one per acceptance line: (1) send the file JSON-encoded (apiWrite.js without
 `contentType`) -> Central refuses it as not a colour profile, the add case fails; (2) show the
-list without re-reading it after an add -> the new LUT is missing, the add case fails; (3) say
-"Added" for any answer (luts-settings.tsx `addWords`) -> the refusal case's words fail; (4) drop
-`frames` from the refusal (lutsApi.js `removeLut`) -> the in-use case's Frame name fails.
+list without re-reading it after an add -> the new profile is missing, the add case fails; (3) say
+"Added" for any answer (domain/paper-profiles/model.ts `addWords`) -> the refusal case's words
+fail; (4) drop `frames` from the refusal (domain/paper-profiles/api.ts `removePaperProfile`) -> the
+in-use case's Frame name fails.
 """
 
 import os
@@ -26,16 +27,18 @@ from test_frame_lighting_browser import (
     wait_for_lighting,
 )
 from test_frame_picture_browser import _off_thread
-from test_print_look_luts import _as_printer, _monitor, _reduced_gamut
+from test_paper_profiles import _as_printer, _monitor, _reduced_gamut
 
-from central.infra.lut_store import PgLuts
+from central.frame_lighting.paper_profiles import LUT_RECIPE_ID
+from central.infra.frame_lighting_store import PgFrameLighting
+from central.infra.paper_profile_store import PgPaperProfiles
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("PHOTO_WALL_BROWSER_TESTS") != "1",
     reason="set PHOTO_WALL_BROWSER_TESTS=1 and install Playwright Chromium",
 )
 
-LUTS = "/v1/operator/luts"
+PAPER_PROFILES = "/v1/operator/paper-profiles"
 NAME = "sRGB built-in"  # both fixtures are LittleCMS's sRGB under its own description
 
 
@@ -49,14 +52,18 @@ def _rows(page):
 
 def _add(page, name, profile):
     """Choose `profile` as the file `name` in Add a paper profile; returns Central's answer."""
-    with page.expect_response(lambda r: r.url.endswith(LUTS) and r.request.method == "POST") as sent:
+    with page.expect_response(lambda r: r.url.endswith(PAPER_PROFILES) and r.request.method == "POST") as sent:
         page.get_by_label("Add a paper profile", exact=True).set_input_files(
             files=[{"name": name, "mimeType": "application/vnd.iccprofile", "buffer": profile}])
     return sent.value
 
 
+def _profiles(registry):
+    return PgPaperProfiles(registry.db, registry.clock, PgFrameLighting(LUT_RECIPE_ID))
+
+
 def _stored(registry):
-    return sorted(row["profile_sha256"] for row in _off_thread(_sql, registry, "SELECT profile_sha256 FROM luts"))
+    return sorted(row["profile_sha256"] for row in _off_thread(_sql, registry, "SELECT profile_sha256 FROM paper_profiles"))
 
 
 def test_an_added_profile_is_listed_chosen_as_a_frames_paper_and_kept_while_a_frame_uses_it(page, registry):
@@ -68,7 +75,7 @@ def test_an_added_profile_is_listed_chosen_as_a_frames_paper_and_kept_while_a_fr
     sessions = LightingSessions(page, registry)
     paper, spare = _as_printer(_monitor()), _reduced_gamut()
     with operator_server(registry.db, registry.clock) as origin:
-        connect(page, origin, "luts")
+        connect(page, origin, "paper-profiles")
         expect(page.get_by_text("Add a paper profile from your paper's maker.", exact=True)).to_be_visible()
 
         answer = _add(page, "Baryta.icc", paper)
@@ -92,23 +99,26 @@ def test_an_added_profile_is_listed_chosen_as_a_frames_paper_and_kept_while_a_fr
         done(page)
         assert saved_lighting(registry).paper.profile.profile_sha256 == digest
 
-        [frame] = _off_thread(lambda: PgLuts(registry.db, registry.clock).list_luts()).luts[0].used_by
-        go(page, "luts")
+        [frame] = _off_thread(lambda: _profiles(registry).list_paper_profiles()).paper_profiles[0].used_by
+        go(page, "paper-profiles")
         expect(_rows(page).first).to_contain_text(frame)
         assert _add(page, "Spare.icc", spare).status == 201
         expect(_rows(page)).to_have_count(2)
 
         used = _rows(page).filter(has_text=frame)
         used.get_by_role("button", name=f"Remove {NAME}", exact=True).click()
-        with page.expect_response(lambda r: LUTS + "/" in r.url and r.request.method == "DELETE") as sent:
+        with page.expect_response(lambda r: PAPER_PROFILES + "/" in r.url and r.request.method == "DELETE") as sent:
             page.get_by_role("dialog", name=f"Remove {NAME}?", exact=True).get_by_role(
                 "button", name="Confirm remove", exact=True).click()
         assert sent.value.status == 409
-        expect(page.get_by_text(f"Not removed ({NAME}): a Frame's paper uses it.", exact=False)).to_contain_text(frame)
+        refused = page.get_by_role("dialog", name=f"Remove {NAME}?", exact=True)
+        expect(refused.get_by_text(f"Not removed ({NAME}): a Frame's paper uses it.", exact=False)).to_contain_text(frame)
+        refused.get_by_role("button", name="Cancel", exact=True).click()
+        expect(refused).to_have_count(0)
         expect(_rows(page)).to_have_count(2)
 
         _rows(page).filter(has_text="No Frame").get_by_role("button", name=f"Remove {NAME}", exact=True).click()
-        with page.expect_response(lambda r: LUTS + "/" in r.url and r.request.method == "DELETE") as sent:
+        with page.expect_response(lambda r: PAPER_PROFILES + "/" in r.url and r.request.method == "DELETE") as sent:
             page.get_by_role("dialog", name=f"Remove {NAME}?", exact=True).get_by_role(
                 "button", name="Confirm remove", exact=True).click()
         assert sent.value.status == 204
@@ -121,10 +131,10 @@ def test_an_added_profile_is_listed_chosen_as_a_frames_paper_and_kept_while_a_fr
 
 def test_a_file_that_is_not_a_paper_profile_is_refused_in_plain_words_and_nothing_changes(page, registry):
     """A monitor's profile and a file that is no colour profile are each refused with the reason;
-    the list and Central's LUTs stay as they were."""
-    kept, _ = PgLuts(registry.db, registry.clock).add_lut(_as_printer(_monitor()))
+    the list and Central's paper profiles stay as they were."""
+    kept, _ = _profiles(registry).add_paper_profile(_as_printer(_monitor()))
     with operator_server(registry.db, registry.clock) as origin:
-        connect(page, origin, "luts")
+        connect(page, origin, "paper-profiles")
         expect(_rows(page)).to_have_count(1)
 
         answer = _add(page, "Display P3.icc", _monitor())

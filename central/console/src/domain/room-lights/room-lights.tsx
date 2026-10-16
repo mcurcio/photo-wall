@@ -7,10 +7,10 @@ import {
 import { EntityList } from "../../patterns/entity-list";
 import { Note } from "../../patterns/fact-row";
 import { OwnerLinks } from "../../patterns/link-to-owner";
+import { type Outcome, RemoveDialog, SaveDialog } from "../../patterns/save-dialog";
 import { TypedNumber } from "../../patterns/typed-number";
 import { formatRoute } from "../../routes.js";
 import { Button } from "../../ui/button";
-import { Dialog, DialogClose } from "../../ui/dialog";
 import { Field, NumberInput, TextInput } from "../../ui/field";
 import { SegmentedControl } from "../../ui/segmented-control";
 import { Select } from "../../ui/select";
@@ -18,9 +18,6 @@ import { Inline, Stack } from "../../ui/stack";
 import {
   colourWords, entryWords, heardWords, lightNames, NEW_KELVIN, newId, readingWords, reporterWords, whereWords,
 } from "./model";
-
-/** What a save or a remove came to: null when Central took it, else its words. */
-export type Outcome = Promise<string | null>;
 
 export interface RoomLightsProps {
   view: RoomLightsView;
@@ -100,77 +97,64 @@ function LightDialog({ view, house, onClose, onSave }: {
   view: RoomLightView | null; house: RoomLightsView; onClose: () => void; onSave: RoomLightsProps["onSaveLight"];
 }) {
   const [draft, setDraft] = useState(() => lightDraft(view, house.sensors));
-  const [problem, setProblem] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const change = (patch: Partial<LightDraft>) => { setDraft({ ...draft, ...patch }); setProblem(null); };
   const before = view?.light ?? null;
   const kinds = (before?.kind === "reported" ? ["reported", "measured", "fixed"] as const : ["measured", "fixed"] as const)
     .map((kind) => ({ value: kind, label: KIND_LABELS[kind] }));
   const reported = draft.kind === "reported";
   const save = async () => {
     const built = lightOf(draft, before);
+    if ("problem" in built) return built.problem;
     const named = view === null ? newId(draft.name, house.lights.map((each) => each.id)) : { id: view.id };
-    if ("problem" in built || "problem" in named) {
-      setProblem("problem" in built ? built.problem : "problem" in named ? named.problem : null);
-      return;
-    }
-    setBusy(true);
-    const refused = await onSave(named.id, built.light);
-    setBusy(false);
-    if (refused === null) onClose();
-    else setProblem(refused);
+    if ("problem" in named) return named.problem;
+    return onSave(named.id, built.light);
   };
   return (
-    <Dialog open onOpenChange={(open) => { if (!open) onClose(); }} busy={busy}
-      title={view === null ? "Add a room light" : `Change ${view.light.name}`}
-      actions={(
-        <>
-          <DialogClose>Cancel</DialogClose>
-          <Button variant="primary" disabled={busy} onClick={() => void save()}>
-            {view === null ? "Add light" : "Save light"}
-          </Button>
-        </>
-      )}>
-      <Stack>
-        <Field label="Name">
-          <TextInput value={draft.name} onChange={(name) => change({ name })} disabled={busy} />
-        </Field>
-        <Field label="How Photo Wall knows it is on" help={KIND_HELP[draft.kind]}>
-          <SegmentedControl label="How Photo Wall knows it is on" value={draft.kind} options={kinds} disabled={busy}
-            onChange={(kind) => change({ kind, colour: kind === "reported" ? draft.colour : "fixed" })} />
-        </Field>
-        {before?.kind !== "reported" && <Note>{LINK_A_SMART_LIGHT}</Note>}
-        {draft.kind === "measured" && (house.sensors.length === 0 ? <Note>Add a Sensor first, then choose it here.</Note> : (
-          <Field label="Sensor">
-            <Select value={draft.sensor === "" ? null : draft.sensor} disabled={busy}
-              options={house.sensors.map((sensor) => ({ value: sensor.id, label: sensor.sensor.name }))}
-              onChange={(sensor) => change({ sensor })} />
-          </Field>
-        ))}
-        {reported && (
-          <Field label="Colour">
-            <SegmentedControl label="Colour" value={draft.colour} disabled={busy}
-              options={[{ value: "fixed", label: "White, in kelvin" }, { value: "reported", label: "Its own colour" }]}
-              onChange={(colour) => change({ colour })} />
-          </Field>
-        )}
-        {reported && draft.colour === "reported" ? (
-          <Inline label="Each screen colour's share of the light's white">
-            {(["Red", "Green", "Blue"] as const).map((name, index) => (
-              <Field key={name} label={`${name} share`} help="%">
-                <NumberInput min={0} max={PERCENT} step={1} value={draft.shares[index]} disabled={busy}
-                  onChange={(raw) => change({ shares: draft.shares.map((share, at) => (at === index ? raw : share)) as unknown as LightDraft["shares"] })} />
+    <SaveDialog title={view === null ? "Add a room light" : `Change ${view.light.name}`}
+      action={view === null ? "Add light" : "Save light"} onSave={save} onClose={onClose}>
+      {({ busy, edited }) => {
+        const change = (patch: Partial<LightDraft>) => { setDraft({ ...draft, ...patch }); edited(); };
+        return (
+          <>
+            <Field label="Name">
+              <TextInput value={draft.name} onChange={(name) => change({ name })} disabled={busy} />
+            </Field>
+            <Field label="How Photo Wall knows it is on" help={KIND_HELP[draft.kind]}>
+              <SegmentedControl label="How Photo Wall knows it is on" value={draft.kind} options={kinds} disabled={busy}
+                onChange={(kind) => change({ kind, colour: kind === "reported" ? draft.colour : "fixed" })} />
+            </Field>
+            {before?.kind !== "reported" && <Note>{LINK_A_SMART_LIGHT}</Note>}
+            {draft.kind === "measured" && (house.sensors.length === 0 ? <Note>Add a Sensor first, then choose it here.</Note> : (
+              <Field label="Sensor">
+                <Select value={draft.sensor === "" ? null : draft.sensor} disabled={busy}
+                  options={house.sensors.map((sensor) => ({ value: sensor.id, label: sensor.sensor.name }))}
+                  onChange={(sensor) => change({ sensor })} />
               </Field>
             ))}
-          </Inline>
-        ) : (
-          <TypedNumber label="Colour temperature" help="2700 K is a warm bulb, 6500 K daylight" value={draft.kelvin}
-            min={KELVIN.minimum} max={KELVIN.maximum} step={KELVIN.multipleOf} unit="K" disabled={busy}
-            onChange={(kelvin) => change({ kelvin })} />
-        )}
-        {problem !== null && <Note live>{problem}</Note>}
-      </Stack>
-    </Dialog>
+            {reported && (
+              <Field label="Colour">
+                <SegmentedControl label="Colour" value={draft.colour} disabled={busy}
+                  options={[{ value: "fixed", label: "White, in kelvin" }, { value: "reported", label: "Its own colour" }]}
+                  onChange={(colour) => change({ colour })} />
+              </Field>
+            )}
+            {reported && draft.colour === "reported" ? (
+              <Inline label="Each screen colour's share of the light's white">
+                {(["Red", "Green", "Blue"] as const).map((name, index) => (
+                  <Field key={name} label={`${name} share`} help="%">
+                    <NumberInput min={0} max={PERCENT} step={1} value={draft.shares[index]} disabled={busy}
+                      onChange={(raw) => change({ shares: draft.shares.map((share, at) => (at === index ? raw : share)) as unknown as LightDraft["shares"] })} />
+                  </Field>
+                ))}
+              </Inline>
+            ) : (
+              <TypedNumber label="Colour temperature" help="2700 K is a warm bulb, 6500 K daylight" value={draft.kelvin}
+                min={KELVIN.minimum} max={KELVIN.maximum} step={KELVIN.multipleOf} unit="K" disabled={busy}
+                onChange={(kelvin) => change({ kelvin })} />
+            )}
+          </>
+        );
+      }}
+    </SaveDialog>
   );
 }
 
@@ -178,63 +162,18 @@ function SensorDialog({ view, onClose, onSave }: {
   view: SensorView; onClose: () => void; onSave: RoomLightsProps["onSaveSensor"];
 }) {
   const [name, setName] = useState(view.sensor.name);
-  const [problem, setProblem] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
   const save = async () => {
-    if (name.trim() === "") {
-      setProblem("Give the Sensor a name, as Window Sensor.");
-      return;
-    }
-    setBusy(true);
-    const refused = await onSave(view.id, { ...view.sensor, name: name.trim() });
-    setBusy(false);
-    if (refused === null) onClose();
-    else setProblem(refused);
+    if (name.trim() === "") return "Give the Sensor a name, as Window Sensor.";
+    return onSave(view.id, { ...view.sensor, name: name.trim() });
   };
   return (
-    <Dialog open onOpenChange={(open) => { if (!open) onClose(); }} busy={busy} title={`Change ${view.sensor.name}`}
-      actions={(
-        <>
-          <DialogClose>Cancel</DialogClose>
-          <Button variant="primary" disabled={busy} onClick={() => void save()}>Save Sensor</Button>
-        </>
-      )}>
-      <Stack>
+    <SaveDialog title={`Change ${view.sensor.name}`} action="Save Sensor" onSave={save} onClose={onClose}>
+      {({ busy, edited }) => (
         <Field label="Name">
-          <TextInput value={name} onChange={(next) => { setName(next); setProblem(null); }} disabled={busy} />
+          <TextInput value={name} onChange={(next) => { setName(next); edited(); }} disabled={busy} />
         </Field>
-        {problem !== null && <Note live>{problem}</Note>}
-      </Stack>
-    </Dialog>
-  );
-}
-
-/** The confirmation every remove of a light or Sensor asks, with Central's refusal in words. */
-export function RemoveDialog({ name, what, onClose, onRemove }: {
-  name: string; what: string; onClose: () => void; onRemove: () => Outcome;
-}) {
-  const [busy, setBusy] = useState(false);
-  const [problem, setProblem] = useState<string | null>(null);
-  const remove = async () => {
-    setBusy(true);
-    const refused = await onRemove();
-    setBusy(false);
-    if (refused === null) onClose();
-    else setProblem(refused);
-  };
-  return (
-    <Dialog open onOpenChange={(open) => { if (!open) onClose(); }} busy={busy} title={`Remove ${name}?`}
-      actions={(
-        <>
-          <DialogClose>Cancel</DialogClose>
-          <Button variant="danger" disabled={busy} onClick={() => void remove()}>Confirm remove</Button>
-        </>
-      )}>
-      <Stack>
-        <p>{what}</p>
-        {problem !== null && <Note live>{problem}</Note>}
-      </Stack>
-    </Dialog>
+      )}
+    </SaveDialog>
   );
 }
 

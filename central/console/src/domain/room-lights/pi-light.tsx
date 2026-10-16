@@ -2,12 +2,12 @@ import { useEffect, useState } from "react";
 
 import type { PlayerDrawnView, RefusedReportView, SensorView } from "../../generated/contract";
 import { FactRow, Note } from "../../patterns/fact-row";
+import { type Outcome, RemoveDialog } from "../../patterns/save-dialog";
 import { Button } from "../../ui/button";
 import { Field, TextInput } from "../../ui/field";
 import { Inline, Stack } from "../../ui/stack";
 import { DrawnLine } from "./drawn-line";
 import { readingWords, REFUSED_READING_WORDS } from "./model";
-import { type Outcome, RemoveDialog } from "./room-lights";
 
 export interface PiLightProps {
   /** The Sensor wired to this Pi (undefined: none set up). */

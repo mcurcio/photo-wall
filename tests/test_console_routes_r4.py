@@ -101,12 +101,11 @@ SHARED_WITH_SHOW = {
     # the Frame page's Why, Power tab and status chip. Words only.
     "powerWords.js",
     "powerWords.json",
-    # The LUTs list's routes (print look): Settings › LUTs lists, adds and removes; the Frame
-    # page's Picture tab reads the list for its LUT picker (pictureSession.js).
-    "lutsApi.js",
     # The house's lights: House › Lights and a Pi's Hardware page read and write them; a Frame's
     # Lighting tab reads them for its room light picker and what its Pi draws with, and says them
-    # the same way (domain/room-lights/: its requests, its words and the drawn line).
+    # the same way (domain/room-lights/: its requests, its words and the drawn line). The paper
+    # profiles: Settings › Paper profiles lists, adds and removes them; a Frame's Lighting tab reads
+    # the list for its paper's profile (domain/paper-profiles/api.ts).
     "api.ts",
     "model.ts",
     "drawn-line.tsx",
@@ -637,7 +636,7 @@ def test_every_section_is_in_exactly_one_route_table():
     sections = [section for group in SAMPLES.values() for section in group]
     assert sorted(sections) == sorted(
         ["now", "scenes", "schedule", "sources", "wall", "hardware", "players", "releases",
-         "photo-library", "photo-fit", "house", "lights", "home-assistant", "luts", "attention"])
+         "photo-library", "photo-fit", "house", "lights", "home-assistant", "paper-profiles", "attention"])
 
 
 ROUND_TRIP = r"""
@@ -677,7 +676,7 @@ console.log(JSON.stringify(out));
 ROUTES = [
     {"section": section} for section in
     ("now", "scenes", "schedule", "sources", "wall", "hardware", "releases", "photo-library",
-     "photo-fit", "lights", "home-assistant", "luts", "attention")
+     "photo-fit", "lights", "home-assistant", "paper-profiles", "attention")
 ] + [
     {"section": "hardware", "id": "device-" + "a" * 64},
     {"section": "hardware", "id": "a/b ç?#%"},
@@ -806,9 +805,7 @@ LEGACY_MARKUP = {"ConfirmAction.jsx", "PlayerCommands.jsx"}
 # Frame id rule; the Frame profile its write and refresh-after-write; the live adjustment's
 # view the hook's type. No other page or domain module may import any of them.
 FRAME_PAGE_IMPORTS = {
-    # The paper profiles list (lutsApi.js) for the Lighting tab's paper and the Position history.
-    "frame-page.tsx": {"BindingFacet.jsx", "liveAdjustment.js", "lutsApi.js", "pictureSession.js", "framesApi.js",
-                       "useMutate.js"},
+    "frame-page.tsx": {"BindingFacet.jsx", "liveAdjustment.js", "pictureSession.js", "framesApi.js", "useMutate.js"},
     # The Picture tab (1c K1): its routes, the session hook's type and a display level's words
     # (0022 R11); Position (1c K2): the quarter turns its draft takes.
     "frame-picture.tsx": {"pictureApi.js", "pictureSession.js", "levelWords.js"},
@@ -855,11 +852,7 @@ POWER_WEEK_IMPORTS = {
     "house-settings-page.tsx": {"houseApi.js", "houseClock.js"},
     "frame-why.tsx": {"houseApi.js", "whyApi.js"},
 }
-# The print look's Settings › LUTs: the LUTs list's routes.
-PRINT_LOOK_IMPORTS = {
-    "luts-settings-page.tsx": {"lutsApi.js"},
-}
-DECLARED_IMPORTS = {**FRAME_PAGE_IMPORTS, **PHOTO_PAGE_IMPORTS, **POWER_WEEK_IMPORTS, **PRINT_LOOK_IMPORTS}
+DECLARED_IMPORTS = {**FRAME_PAGE_IMPORTS, **PHOTO_PAGE_IMPORTS, **POWER_WEEK_IMPORTS}
 
 
 def _layer(module, src=SRC):

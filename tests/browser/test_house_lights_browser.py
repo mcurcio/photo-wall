@@ -20,6 +20,8 @@ from operator_harness import operator_server
 from playwright.sync_api import expect
 from test_frame_picture_browser import _off_thread
 
+from central.frame_lighting.paper_profiles import LUT_RECIPE_ID
+from central.infra.frame_lighting_store import PgFrameLighting
 from central.infra.room_light_store import PgRoomLights
 from central.room_light.model import ReporterRef, ReportRefusal
 from contracts.room_light import Dimmer
@@ -117,7 +119,7 @@ def test_home_assistant_shows_its_link_entities_and_refused_messages_and_links_a
     the house names and the one Home Assistant reported that nothing names yet, and the message it
     could not record with why; linking the kitchen entity to the always-on Kitchen light makes that
     light report itself on House › Lights."""
-    lights = PgRoomLights(registry.db)
+    lights = PgRoomLights(registry.db, PgFrameLighting(LUT_RECIPE_ID))
     _off_thread(lambda: lights.record_light_state(ReporterRef(source=HOME_ASSISTANT, address="light.kitchen"),
                                                   Dimmer(on=True, brightness=0.5)))
     _off_thread(lambda: lights.record_refused(HOME_ASSISTANT, "photowall/light/light.porch", ReportRefusal.UNKNOWN_ADDRESS))
