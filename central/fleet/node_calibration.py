@@ -54,7 +54,7 @@ from central.live_session import Lease, StaleSequence, next_sequence, touched
 from central.transaction_locks import acquire_runtime_locks
 from contracts.models import Calibration, Mat
 from contracts.node_calibration import (
-    MAX_MAT_BYTES,
+    MAX_LIGHTING_BYTES,
     TrialCandidate,
     candidate_hash,
     canonical,
@@ -129,7 +129,7 @@ class NodeCalibration:
         session_id = trial_id if session_id is None else session_id
         baseline = context.request.admitted
         payload = canonical(calibration.model_dump(mode="json"))
-        sha = candidate_hash(trial_id, generation, 1, baseline, payload, _mat_json(mat))
+        sha = candidate_hash(trial_id, generation, 1, baseline, payload, _lighting_json(mat))
         row = conn.execute(
             "INSERT INTO node_calibration_trials(trial_id,frame_id,generation,player_id,"
             "authority_epoch,producer_id,baseline,calibration_revision,sequence,calibration,mat,candidate_sha256,"
@@ -341,7 +341,7 @@ class NodeCalibration:
             sequence,
             surface_from(row["baseline"]),
             canonical(calibration.model_dump(mode="json")),
-            _mat_json(mat),
+            _lighting_json(mat),
         )
         return conn.execute(
             "UPDATE node_calibration_trials SET sequence=%s,calibration=%s,mat=%s,candidate_sha256=%s,"
@@ -422,7 +422,7 @@ class NodeCalibration:
             row["candidate_sha256"],
             request.sampled_boottime_ms + max(1, int((row["expires_at"] - now) * 1000)),
             request.sampled_boottime_ms + max(1, int((row["hard_expires_at"] - now) * 1000)),
-            mat_json=canonical(row["mat"]),
+            lighting_json=canonical(row["mat"]),
         )
         handed = TrialHanded(
             position_values(Calibration.model_validate(row["calibration"]), Mat.model_validate(row["mat"])),
@@ -433,18 +433,18 @@ class NodeCalibration:
 
 def _mat(value: object) -> Mat:
     """The operator's draft mat; NodeControlError("trial_mat_invalid", 422) for one the contract
-    refuses (contracts.models.Mat's ranges, or past the trial's MAX_MAT_BYTES)."""
+    refuses (contracts.models.Mat's ranges, or past the trial's MAX_LIGHTING_BYTES)."""
     try:
         mat = Mat.model_validate(value)
     except ValidationError:
         raise NodeControlError("trial_mat_invalid", 422) from None
-    if len(_mat_json(mat).encode()) > MAX_MAT_BYTES:
+    if len(_lighting_json(mat).encode()) > MAX_LIGHTING_BYTES:
         raise NodeControlError("trial_mat_invalid", 422)
     return mat
 
 
-def _mat_json(mat: Mat) -> str:
-    """The mat as the trial carries and hashes it (contracts.node_calibration `mat_json`)."""
+def _lighting_json(mat: Mat) -> str:
+    """The mat as the trial carries and hashes it (contracts.node_calibration `lighting_json`)."""
     return canonical(mat.model_dump(mode="json"))
 
 

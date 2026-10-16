@@ -29,12 +29,12 @@ def stored_picture(row: Mapping[str, Any]) -> DisplayPicture:
     hardware = {code: int(value) for code, value in row["hardware_picture"].items()}
     lut = row["software_lut_profile"]
     return DisplayPicture({code: hardware[code] for code in PICTURE_LIST if code in hardware},
-                          SoftwarePicture(row["software_brightness_percent"], row["software_contrast_percent"],
-                                          row["colour_temperature_kelvin"], row["gamma_tenths"],
-                                          row["software_saturation_percent"], row["software_highlight_rolloff_percent"],
-                                          row["software_black_floor_tenths"],
-                                          None if lut is None else LutRef(lut, LUT_RECIPE_ID),
-                                          row["software_lut_amount_percent"]),
+                          SoftwarePicture(brightness_percent=row["software_brightness_percent"], contrast_percent=row["software_contrast_percent"],
+                                          colour_temperature_kelvin=row["colour_temperature_kelvin"], gamma_tenths=row["gamma_tenths"],
+                                          saturation_percent=row["software_saturation_percent"], highlight_rolloff_percent=row["software_highlight_rolloff_percent"],
+                                          black_floor_tenths=row["software_black_floor_tenths"],
+                                          lut=None if lut is None else LutRef(lut, LUT_RECIPE_ID),
+                                          lut_amount_percent=row["software_lut_amount_percent"]),
                           SignalRange(row["signal_range"]))
 
 

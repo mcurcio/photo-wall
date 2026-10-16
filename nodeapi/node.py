@@ -459,6 +459,37 @@ class NodeSession:
             return self._held.get(key)
 
 
+class WallReader:
+    """A read-only follower of the Node's WALL mirror for a component that holds no store line (the
+    Player, decision 0028: it reads the room-lights document and writes nothing to the bus). No
+    slice, state, birth or methods. It runs its own thread and loop and connects forever; at every
+    connect it creates the WALL mirror when absent (create only, `wall_mirror_config`, as a session
+    with reads_wall does) and follows WALL into `wall` from each key's latest value
+    (`pull.StartAt.LAST_PER_SUBJECT`). The view keeps each key's last value across a bus restart
+    until the key is written again (last good stays) and calls its callbacks on the reader's
+    thread. `start` returns at once; nothing here blocks its caller.
+
+    Signature frozen by the milestone's interface commit; the pi lane implements it, sharing
+    NodeSession's watch rather than copying it."""
+
+    def __init__(self, component: str, *, url: str) -> None:
+        """ValueError("session_component") unless component matches [a-z]+."""
+        raise NotImplementedError
+
+    @property
+    def wall(self) -> WallView:
+        """The Node's WALL mirror, read-only."""
+        raise NotImplementedError
+
+    def start(self) -> None:
+        """Run on its own thread and loop; returns at once. RuntimeError("session_started") twice."""
+        raise NotImplementedError
+
+    def stop(self, timeout: float = 5.0) -> None:
+        """Stop and join the thread, at most `timeout` seconds."""
+        raise NotImplementedError
+
+
 class Events:
     def __init__(self, session: NodeSession) -> None:
         self._session = session

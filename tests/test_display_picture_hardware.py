@@ -34,6 +34,7 @@ from central.live_session import Lease
 from contracts.node_output import DisplayIdentity
 from contracts.node_picture import (
     NEUTRAL_SOFTWARE,
+    UPGRADE_DISPLAY_LIGHT,
     Choice,
     HardwareRange,
     HardwareResult,
@@ -95,7 +96,7 @@ def test_copy_skips_every_hardware_code_when_either_list_is_unknown_or_the_kinds
 
 
 def test_copy_carries_all_software_and_leaves_the_targets_other_hardware_values():
-    source = DisplayPicture({"10": 46, "14": 5}, SoftwarePicture(114, 90, 5000, 24), AUTO)
+    source = DisplayPicture({"10": 46, "14": 5}, SoftwarePicture(brightness_percent=114, contrast_percent=90, colour_temperature_kelvin=5000, gamma_tenths=24), AUTO)
     target = DisplayPicture({"12": 30, "14": 4}, NEUTRAL_SOFTWARE, AUTO)
     result, skipped = copied(source, target, source_offered=(_level("10", 100), _choices("14", (5, "6500 K"))),
                              target_offered=(_level("10", 255), _choices("14", (4, "x"), (5, "sRGB"))))
@@ -182,7 +183,7 @@ def test_the_range_rule_has_one_home_the_contract():
 
 
 def _document(change: int, hardware: dict, software=NEUTRAL_SOFTWARE) -> PictureDocument:
-    return PictureDocument("HDMI-A-1", change, hardware, software)
+    return PictureDocument("HDMI-A-1", change, hardware, software, light=UPGRADE_DISPLAY_LIGHT)
 
 
 def test_a_rows_result_waits_for_the_report_on_the_document_that_carries_the_hardware():
@@ -191,7 +192,7 @@ def test_a_rows_result_waits_for_the_report_on_the_document_that_carries_the_har
     comparison -> a draft not projected yet reads change 8's result."""
     report = _report(HERE, None, for_change=8)
     assert hardware_answered({"10": 46}, _document(8, {"10": 46}), report)
-    assert hardware_answered({"10": 46}, _document(8, {"10": 46}, SoftwarePicture(50, 100, 6500, 22)), report)
+    assert hardware_answered({"10": 46}, _document(8, {"10": 46}, SoftwarePicture(brightness_percent=50, contrast_percent=100, colour_temperature_kelvin=6500, gamma_tenths=22)), report)
     assert not hardware_answered({"10": 50}, _document(8, {"10": 46}), report)   # the edit is not projected yet
     assert not hardware_answered({"10": 46}, _document(9, {"10": 46}), report)
 

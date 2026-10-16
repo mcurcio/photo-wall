@@ -83,7 +83,7 @@ class TrialState:
         ):
             raise ValueError("trial_sequence_hash_changed")
         calibration = Calibration.model_validate_json(candidate.calibration_json)
-        mat = Mat.model_validate_json(candidate.mat_json)
+        mat = Mat.model_validate_json(candidate.lighting_json)
         if calibration.revision != composition.binding.calibration.revision:
             raise ValueError("trial_calibration_baseline")
         # The overlay's primitives are the drawn fit's corners (the opening, both modes); the base

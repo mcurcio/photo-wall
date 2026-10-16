@@ -70,6 +70,7 @@ from contracts.node_output import (
 )
 from contracts.node_picture import (
     NEUTRAL_SOFTWARE,
+    UPGRADE_DISPLAY_LIGHT,
     Choice,
     HardwareRange,
     HardwareResult,
@@ -822,6 +823,6 @@ def test_done_never_counts_a_report_for_a_document_whose_print_look_differs():
                            SignalReport(3, SignalRange.AUTO, SignalResult.APPLIED))
     for software in (NEUTRAL_SOFTWARE, replace(draft.software, black_floor_tenths=5),
                      replace(draft.software, highlight_rolloff_percent=5), replace(draft.software, lut_amount_percent=5)):
-        document = PictureDocument("HDMI-A-1", 3, {}, software)
+        document = PictureDocument("HDMI-A-1", 3, {}, software, light=UPGRADE_DISPLAY_LIGHT)
         assert not presented(draft, document, report)
-    assert presented(draft, PictureDocument("HDMI-A-1", 3, {}, draft.software), report)
+    assert presented(draft, PictureDocument("HDMI-A-1", 3, {}, draft.software, light=UPGRADE_DISPLAY_LIGHT), report)

@@ -17,6 +17,7 @@ from appliance.display_host.picture import TICK_SECONDS, operations_for, pattern
 from contracts.node_picture import (
     NEUTRAL_SOFTWARE,
     TEST_PATTERN_SECONDS,
+    UPGRADE_DISPLAY_LIGHT,
     HardwareResult,
     PictureDocument,
     SoftwarePicture,
@@ -26,12 +27,12 @@ from contracts.node_picture import (
 from contracts.tuning import TestPattern
 
 WHITE = TestPatternAsk(TestPattern.WHITE, 4)
-SOFTER = SoftwarePicture(80, 100, 6500, 22)
+SOFTER = SoftwarePicture(brightness_percent=80, contrast_percent=100, colour_temperature_kelvin=6500, gamma_tenths=22)
 
 
 def document(change: int, pattern: TestPatternAsk | None, wanted: SoftwarePicture = NEUTRAL_SOFTWARE,
              hardware: dict[str, int] | None = None) -> PictureDocument:
-    return PictureDocument(OUTPUT, change, hardware or {}, wanted, test_pattern=pattern)
+    return PictureDocument(OUTPUT, change, hardware or {}, wanted, test_pattern=pattern, light=UPGRADE_DISPLAY_LIGHT)
 
 
 @pytest.fixture

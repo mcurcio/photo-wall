@@ -62,7 +62,7 @@ def test_a_mat_edited_in_the_trial_is_presented_and_saved_to_the_binding(registr
                             calibration=row["calibration"], mat=DRAFT_MAT)
     assert edited["mat"] == DRAFT_MAT
     candidate = _present(request, exchange, 1500)
-    assert candidate.mat_json == canonical(DRAFT_MAT) and candidate.sequence == 2
+    assert candidate.lighting_json == canonical(DRAFT_MAT) and candidate.sequence == 2
     saved = trials.operate(FRAME, trial_id, operation="save", expected_sequence=2)
     assert saved["state"] == "saved" and saved["saved_mat"] == DRAFT_MAT
     assert saved["saved_calibration"]["revision"] == revision + 1
@@ -91,7 +91,7 @@ def test_a_mat_only_edit_changes_the_candidate_so_save_waits_for_its_tag(registr
     with pytest.raises(NodeControlError, match="trial_latest_not_presented"):
         trials.operate(FRAME, trial_id, operation="save", expected_sequence=2)
     candidate = _present(request, exchange, 1700)
-    assert (candidate.candidate_sha256, candidate.mat_json) == (edited["candidate_sha256"], canonical(DRAFT_MAT))
+    assert (candidate.candidate_sha256, candidate.lighting_json) == (edited["candidate_sha256"], canonical(DRAFT_MAT))
     assert trials.operate(FRAME, trial_id, operation="save", expected_sequence=2)["state"] == "saved"
 
 
@@ -102,7 +102,7 @@ def test_a_trial_begins_at_the_saved_mat(registry):
     _sql(registry, "UPDATE frames SET mat=%s WHERE id=%s", (Jsonb(DRAFT_MAT), FRAME))
     row = trials.begin(FRAME)
     assert row["mat"] == DRAFT_MAT
-    assert parse_trial(exchange(replace(request, request_id=uuid4(), sampled_boottime_ms=1500)).trial).mat_json == (
+    assert parse_trial(exchange(replace(request, request_id=uuid4(), sampled_boottime_ms=1500)).trial).lighting_json == (
         canonical(DRAFT_MAT))
     trials.operate(FRAME, UUID(row["trial_id"]), operation="end", expected_sequence=1)
     other = {"depth_mm": 0.5, "lights": []}

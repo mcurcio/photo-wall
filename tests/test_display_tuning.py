@@ -63,6 +63,7 @@ from central.live_session import Lease
 from contracts.node_picture import (
     NEUTRAL_SOFTWARE,
     TEST_PATTERN_SECONDS,
+    UPGRADE_DISPLAY_LIGHT,
     PictureDocument,
     PictureReport,
     SignalRange,
@@ -140,7 +141,7 @@ def test_any_change_of_range_or_pattern_raises_the_digest():
 def test_done_waits_for_any_signal_answer_to_the_change():
     """(3, pure) Mutation probes: A, drop signal_answered from presented -> the None and older
     cases are presented; B, require APPLIED -> the failed and unsupported cases are not."""
-    document = PictureDocument("HDMI-A-1", 5, {}, NEUTRAL_SOFTWARE, FULL)
+    document = PictureDocument("HDMI-A-1", 5, {}, NEUTRAL_SOFTWARE, FULL, light=UPGRADE_DISPLAY_LIGHT)
     draft = replace(STORED, signal_range=FULL)
     assert not presented(draft, document, _answer(5, presented_change=5))                     # no signal answer
     older = SignalReport(4, AUTO, SignalResult.APPLIED)
@@ -190,7 +191,7 @@ def test_a_shown_pattern_outlives_a_minute_of_console_silence_and_a_session_with
 def test_the_tab_says_waiting_shown_or_ended():
     """(6) Mutation probe: ENDED without the presented check -> the WAITING case fails."""
     ask = TestPatternAsk(WHITE, 4)
-    document = PictureDocument("HDMI-A-1", 7, {}, NEUTRAL_SOFTWARE, AUTO, ask)
+    document = PictureDocument("HDMI-A-1", 7, {}, NEUTRAL_SOFTWARE, AUTO, ask, light=UPGRADE_DISPLAY_LIGHT)
     assert test_pattern_state(ask, document, None) is TestPatternState.WAITING
     assert test_pattern_state(ask, document, _answer(7, presented_change=6)) is TestPatternState.WAITING
     assert test_pattern_state(ask, document, _answer(6, presented_change=6)) is TestPatternState.WAITING

@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from typing import Annotated, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, model_serializer, model_validator
+from pydantic import Field, model_serializer, model_validator
 
 from contracts.frame_fit import FULL_SCREEN, OutputSize, PictureSize, convex_clockwise, picture_size
+from contracts.frame_lighting import MAT_DEPTH_MM_MAX, FrameLighting
 from contracts.kelvin import KELVIN_TABLE_MAX, KELVIN_TABLE_MIN, KELVIN_TABLE_STEP
+from contracts.wire_model import Model
 
 # The API identifier rule (path parameters, Scene/Program/Source ids). The console's
 # IDENTIFIER_PATTERN (authoring.js) is pinned equal to it by a test.
@@ -22,10 +24,6 @@ TargetIdentifier = Annotated[str, Field(pattern=rf"^{TARGET_ID_PATTERN}$")]
 Digest = Annotated[str, Field(pattern=r"^[a-f0-9]{64}$")]
 Instant = Annotated[float, Field(allow_inf_nan=False)]
 Positive = Annotated[float, Field(gt=0, allow_inf_nan=False)]
-
-
-class Model(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
 
 
 class FrameProfile(Model):
@@ -83,8 +81,10 @@ class Calibration(Model):
     fit: FrameFit = Field(default_factory=CoverFit)
 
 
+# TRANSIT (decision 0028): `Light`, `Mat`, MAT_LIGHTS_MAX and `OutputBinding.mat` are replaced by
+# contracts/frame_lighting.py `FrameLighting` on `OutputBinding.lighting`. The central lane deletes
+# them and makes `lighting` required once no consumer reads them; nothing new may use them.
 MAT_LIGHTS_MAX = 4          # a cap on the final pass's per-pixel cost (print look design)
-MAT_DEPTH_MM_MAX = 20.0     # allows exaggeration: a real flush 45-degree bevel casts millimetres
 
 
 class Light(Model):
@@ -127,7 +127,8 @@ class OutputBinding(Model):
     configuration_revision: int = Field(default=1, ge=1)
     profile: FrameProfile
     calibration: Calibration = Field(default_factory=Calibration)
-    mat: Mat
+    mat: Mat = Field(default_factory=Mat)               # TRANSIT: deleted by the central lane (decision 0028)
+    lighting: FrameLighting | None = None               # TRANSIT: required once `mat` is gone (decision 0028)
 
 
 def frame_output(profile: FrameProfile, calibration: Calibration,

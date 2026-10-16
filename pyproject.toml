@@ -26,6 +26,10 @@ dependencies = [
   # reads (the slim image has none). Central only; the Pi never imports them.
   "astral==3.2",
   "tzdata==2026.3",
+  # Room light (decision 0028): the media worker's Home Assistant link, an MQTT client of the
+  # house's broker (retained light and illuminance messages). Central's worker only; the Pi never
+  # imports it.
+  "aiomqtt==2.5.1",
 ]
 
 [dependency-groups]
@@ -144,7 +148,8 @@ name = "Kernel, origins and domains have no persistence, queue or HTTP-framework
 type = "forbidden"
 source_modules = ["central.kernel", "central.origins", "central.content_catalog",
                   "central.assets", "central.health", "central.displays", "central.photo_library",
-                  "central.wall_plan", "central.house_time", "central.power", "central.why"]
+                  "central.wall_plan", "central.house_time", "central.power", "central.why",
+                  "central.room_light"]
 forbidden_modules = ["procrastinate", "psycopg", "psycopg_pool", "fastapi", "starlette"]
 
 [[tool.importlinter.contracts]]
@@ -210,6 +215,23 @@ type = "forbidden"
 source_modules = ["central.why"]
 forbidden_modules = ["media", "httpx", "nodeapi", "central.infra", "central.db", "central.registry",
                      "central.app", "central.coordination", "central.planner"]
+
+[[tool.importlinter.contracts]]
+# Room light (decision 0028): which room lights and Sensors exist, who reports each and the
+# room-lights document are pure; the broker, the bus and PostgreSQL are reached through central/infra.
+name = "Room lights are pure"
+type = "forbidden"
+source_modules = ["central.room_light"]
+forbidden_modules = ["media", "httpx", "nodeapi", "aiomqtt", "paho", "central.infra", "central.db",
+                     "central.registry", "central.app", "central.coordination", "central.planner",
+                     "central.displays", "central.fleet"]
+
+[[tool.importlinter.contracts]]
+# Room light (decision 0028): only Central's worker talks to Home Assistant; a Pi never does.
+name = "Only Central talks MQTT"
+type = "forbidden"
+source_modules = ["contracts", "appliance", "player", "uplink", "nodeapi"]
+forbidden_modules = ["aiomqtt", "paho"]
 
 [[tool.importlinter.contracts]]
 # Power and the week: sun times and the IANA zone database are Central's house-time calculator's;

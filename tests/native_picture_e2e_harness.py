@@ -327,6 +327,7 @@ def main() -> None:
     from contracts.node_display import Surface
     from contracts.node_frame import neutral_operations
     from contracts.node_picture import (
+    UPGRADE_DISPLAY_LIGHT,
         PictureDocument,
         SoftwarePicture,
         decode_picture_document,
@@ -424,10 +425,10 @@ def main() -> None:
         backend.picture_events = controller
         controller.output(OUTPUT, connected=True, identity=None)
         controller.start()
-        wanted = SoftwarePicture(30, 25, 6500, 22)
+        wanted = SoftwarePicture(brightness_percent=30, contrast_percent=25, colour_temperature_kelvin=6500, gamma_tenths=22)
         # The document as it crosses the wire for HDMI-A-1, then retargeted at the headless Output.
         document = replace(decode_picture_document(encode_picture_document(
-            PictureDocument("HDMI-A-1", PICTURE_CHANGE, {}, wanted))), output_id=OUTPUT)
+            PictureDocument("HDMI-A-1", PICTURE_CHANGE, {}, wanted, light=UPGRADE_DISPLAY_LIGHT))), output_id=OUTPUT)
         controller.document(OUTPUT, document)
         end = time.monotonic() + 15
         while True:
@@ -449,7 +450,7 @@ def main() -> None:
         def send(change: int, software) -> None:
             """The document as it crosses the wire for HDMI-A-1, retargeted at the headless Output."""
             controller.document(OUTPUT, replace(decode_picture_document(encode_picture_document(
-                PictureDocument("HDMI-A-1", change, {}, software))), output_id=OUTPUT))
+                PictureDocument("HDMI-A-1", change, {}, software, light=UPGRADE_DISPLAY_LIGHT))), output_id=OUTPUT))
 
         def presented(change: int, seconds: float = 15.0):
             end = time.monotonic() + seconds
@@ -518,7 +519,7 @@ def print_look_cases(send, presented, drain, reports, SoftwarePicture) -> None:
 
     fit = CoverFit(corners=OPENING, rotation=ROTATION)
     profile = FrameProfile(**PROFILE)
-    neutral = SoftwarePicture(100, 100, 6500, 22)
+    neutral = SoftwarePicture(brightness_percent=100, contrast_percent=100, colour_temperature_kelvin=6500, gamma_tenths=22)
 
     # 2. neutral_is_v4
     MAT_FILE.unlink(missing_ok=True)
@@ -536,7 +537,7 @@ def print_look_cases(send, presented, drain, reports, SoftwarePicture) -> None:
                                         strength_tenths=10, colour_kelvin=6500),))
     MAT_FILE.write_text(mat.model_dump_json())
     MAT_FILE.chmod(0o644)
-    floored = SoftwarePicture(100, 100, 6500, 22, black_floor_tenths=20)
+    floored = SoftwarePicture(brightness_percent=100, contrast_percent=100, colour_temperature_kelvin=6500, gamma_tenths=22, black_floor_tenths=20)
     send(5, floored)
     report = presented(5)
     expected = PictureOperations(OUTPUT, 5, (1.0, 1.0, 1.0), 1.0, 1.0, 1.0,
@@ -572,7 +573,7 @@ def print_look_cases(send, presented, drain, reports, SoftwarePicture) -> None:
     LUT_FILE.chmod(0o644)
     LUT_RELEASE.unlink(missing_ok=True)
     ref = LutRef(LUT_PROFILE_SHA256, LUT_RECIPE)
-    looked = SoftwarePicture(100, 100, 6500, 22, black_floor_tenths=20, lut=ref, lut_amount_percent=80)
+    looked = SoftwarePicture(brightness_percent=100, contrast_percent=100, colour_temperature_kelvin=6500, gamma_tenths=22, black_floor_tenths=20, lut=ref, lut_amount_percent=80)
     send(6, looked)
     sliders = PictureOperations(OUTPUT, 6, (1.0, 1.0, 1.0), 1.0, 1.0, 1.0,
                                 black_floor=20 / 1000)

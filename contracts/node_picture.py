@@ -61,8 +61,9 @@ central/displays/picture.py and hardware.py); how the Player draws a test patter
 """
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from types import MappingProxyType
 from typing import Any, Final
@@ -102,6 +103,12 @@ BLACK_FLOOR_TENTHS_MAX: Final = 100             # 10.0 % of white light (~0.5 % 
 BLACK_FLOOR_TENTHS_NEUTRAL: Final = 0
 LUT_AMOUNT_PERCENT_MAX: Final = 100             # how much of the LUT is mixed in
 LUT_AMOUNT_PERCENT_DEFAULT: Final = 100         # a LUT, once chosen, acts fully
+
+# The Display's light (decision 0028): the TV as a fixed instrument at its tuned raw settings.
+MATCHED_LUX_MIN: Final = 10.0                   # the paper match's lux at the Frame, MATCHED_LUX_MIN..MATCHED_LUX_MAX
+MATCHED_LUX_MAX: Final = 20000.0
+PANEL_BLACK_MIN: Final = 0.00001                # the panel's black as a share of its white (an OLED reads near 0)
+PANEL_BLACK_MAX: Final = 0.05
 
 TEST_PATTERN_SECONDS: Final = 600               # the Pi takes a test pattern off this long after it first
                                                 # received its ask (design rule 1; a placeholder, bench-tuned)
@@ -278,6 +285,29 @@ class HardwareSetting:
         require(self.current is None or whole(self.current, 0, top or 0), "hardware_setting")
 
 
+def _finite(value: object, minimum: float, maximum: float) -> bool:
+    """A finite float or int (never a bool) in minimum..maximum."""
+    return type(value) in (int, float) and math.isfinite(value) and minimum <= value <= maximum
+
+
+@dataclass(frozen=True)
+class DisplayLight:
+    """The Display's light (decision 0028; owner, 2026-10-15: the TV is configured "for the
+    _maximum lighting_ scenario so that the software can artificially dim later", its backlight never
+    assumed controllable): `matched_lux`, the light at the Frame (lux) when the TV's full white
+    matched a sheet of paper (the paper match, contracts/frame_lighting.py SHEET_WHITENESS); `black`,
+    the panel's black as a share of its white (its glow; the calibration reader measures it). The one
+    fixed point the Player's physics dims from."""
+    matched_lux: float
+    black: float
+
+    def __post_init__(self) -> None:
+        """ValueError("display_light") unless matched_lux is a finite number (an int is accepted,
+        never a bool) in MATCHED_LUX_MIN..MATCHED_LUX_MAX and black one in PANEL_BLACK_MIN..PANEL_BLACK_MAX."""
+        require(_finite(self.matched_lux, MATCHED_LUX_MIN, MATCHED_LUX_MAX)
+                and _finite(self.black, PANEL_BLACK_MIN, PANEL_BLACK_MAX), "display_light")
+
+
 @dataclass(frozen=True)
 class SoftwarePicture:
     """Photo Wall's picture settings (the Display's software group), always all present: the
@@ -286,16 +316,21 @@ class SoftwarePicture:
     (NEUTRAL_SOFTWARE); with no LUT, `lut_amount_percent` is kept but acts on nothing.
 
     The print look's fields default to their neutral values (the print look off) in Python; the
-    wire never defaults them (`decode_picture_document` needs every field)."""
-    brightness_percent: int
+    wire never defaults them (`decode_picture_document` needs every field).
+
+    TRANSIT (decision 0028, owner 2026-10-15 Q2 "the paper replaces them"): brightness, saturation,
+    highlight rolloff, black floor, the LUT and its amount are keyword-only with their neutral
+    defaults; the central lane deletes them (and their constants), leaving contrast, colour
+    temperature and gamma. Nothing new may read or pass them."""
     contrast_percent: int
     colour_temperature_kelvin: int
     gamma_tenths: int
-    saturation_percent: int = SATURATION_PERCENT_NEUTRAL
-    highlight_rolloff_percent: int = ROLLOFF_PERCENT_NEUTRAL
-    black_floor_tenths: int = BLACK_FLOOR_TENTHS_NEUTRAL
-    lut: LutRef | None = None
-    lut_amount_percent: int = LUT_AMOUNT_PERCENT_DEFAULT
+    brightness_percent: int = field(default=SOFTWARE_PERCENT_NEUTRAL, kw_only=True)
+    saturation_percent: int = field(default=SATURATION_PERCENT_NEUTRAL, kw_only=True)
+    highlight_rolloff_percent: int = field(default=ROLLOFF_PERCENT_NEUTRAL, kw_only=True)
+    black_floor_tenths: int = field(default=BLACK_FLOOR_TENTHS_NEUTRAL, kw_only=True)
+    lut: LutRef | None = field(default=None, kw_only=True)
+    lut_amount_percent: int = field(default=LUT_AMOUNT_PERCENT_DEFAULT, kw_only=True)
 
     def __post_init__(self) -> None:
         """ValueError("software_picture") unless both percents are ints in
@@ -331,17 +366,20 @@ class PictureDocument:
     software: SoftwarePicture
     signal_range: SignalRange = SignalRange.AUTO
     test_pattern: TestPatternAsk | None = None
+    light: DisplayLight = field(kw_only=True)      # decision 0028: always present, never defaulted
 
     def __post_init__(self) -> None:
         """ValueError("picture_document") unless output_id is in OUTPUT_IDS, picture_change >= 1,
         every hardware code is on PICTURE_LIST with an int value in 0..LEVEL_MAX, software is a
-        SoftwarePicture, signal_range a SignalRange and test_pattern None or a TestPatternAsk."""
+        SoftwarePicture, signal_range a SignalRange, test_pattern None or a TestPatternAsk and light a
+        DisplayLight."""
         require(self.output_id in OUTPUT_IDS and whole(self.picture_change, 1)
                 and isinstance(self.hardware, Mapping)
                 and all(code in PICTURE_LIST and whole(value, 0, LEVEL_MAX) for code, value in self.hardware.items())
                 and isinstance(self.software, SoftwarePicture)
                 and isinstance(self.signal_range, SignalRange)
-                and (self.test_pattern is None or isinstance(self.test_pattern, TestPatternAsk)), "picture_document")
+                and (self.test_pattern is None or isinstance(self.test_pattern, TestPatternAsk))
+                and isinstance(self.light, DisplayLight), "picture_document")
 
 
 @dataclass(frozen=True)
@@ -437,7 +475,8 @@ def decode_picture_document(raw: bytes) -> PictureDocument:
                                   "software": SoftwarePicture(**{
                                       **software, "lut": None if lut is None else LutRef(**fields_of(LutRef, lut))}),
                                   "signal_range": SignalRange(value["signal_range"]),
-                                  "test_pattern": _test_pattern_ask(value["test_pattern"])})
+                                  "test_pattern": _test_pattern_ask(value["test_pattern"]),
+                                  "light": DisplayLight(**fields_of(DisplayLight, value["light"]))})
 
     return decode(raw, PICTURE_DOCUMENT_BYTES, PictureDocument, build, "picture_document")
 
@@ -463,9 +502,13 @@ def decode_picture_report(raw: bytes) -> PictureReport:
     return decode(raw, PICTURE_REPORT_BYTES, PictureReport, build, "picture_report")
 
 
-NEUTRAL_SOFTWARE: Final = SoftwarePicture(SOFTWARE_PERCENT_NEUTRAL, SOFTWARE_PERCENT_NEUTRAL, KELVIN_NEUTRAL,
-                                          GAMMA_TENTHS_NEUTRAL, SATURATION_PERCENT_NEUTRAL, ROLLOFF_PERCENT_NEUTRAL,
-                                          BLACK_FLOOR_TENTHS_NEUTRAL, None, LUT_AMOUNT_PERCENT_DEFAULT)
+NEUTRAL_SOFTWARE: Final = SoftwarePicture(contrast_percent=SOFTWARE_PERCENT_NEUTRAL,
+                                          colour_temperature_kelvin=KELVIN_NEUTRAL,
+                                          gamma_tenths=GAMMA_TENTHS_NEUTRAL)
+
+# Every Display's light on upgrade, until the owner types the paper match and the reader measures the
+# black (placeholders for the Samsung QN43Q8F: white about 290 nits at 1,000 lx, black 0.03 % of white).
+UPGRADE_DISPLAY_LIGHT: Final = DisplayLight(matched_lux=1000.0, black=0.0003)
 
 _KEY_PREFIX: Final = "picture-"                 # both buckets: picture-<output_id>
 _LIST_ORDER: Final[Mapping[VcpCode, int]] = MappingProxyType({code: index for index, code in enumerate(PICTURE_LIST)})
@@ -523,6 +566,7 @@ __all__ = [
     "BLACK_FLOOR_TENTHS_MAX", "BLACK_FLOOR_TENTHS_NEUTRAL", "LUT_AMOUNT_PERCENT_DEFAULT", "LUT_AMOUNT_PERCENT_MAX",
     "ROLLOFF_PERCENT_MAX", "ROLLOFF_PERCENT_NEUTRAL", "SATURATION_PERCENT_MAX", "SATURATION_PERCENT_MIN",
     "SATURATION_PERCENT_NEUTRAL",
+    "MATCHED_LUX_MAX", "MATCHED_LUX_MIN", "PANEL_BLACK_MAX", "PANEL_BLACK_MIN", "UPGRADE_DISPLAY_LIGHT", "DisplayLight",
     "CHOICE_NAME_MAX", "CHOICE_VALUE_MAX", "GAMMA_TENTHS_MAX", "GAMMA_TENTHS_MIN", "GAMMA_TENTHS_NEUTRAL",
     "KELVIN_MAX", "KELVIN_MIN", "KELVIN_NEUTRAL", "KELVIN_STEP", "LEVEL_MAX", "MAX_CHOICES",
     "NEUTRAL_SOFTWARE", "PICTURE_DOCUMENT_BYTES", "PICTURE_LIST", "PICTURE_REPORT_BYTES", "SOFTWARE_PERCENT_MAX",

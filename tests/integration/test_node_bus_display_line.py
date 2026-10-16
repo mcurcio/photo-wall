@@ -73,6 +73,7 @@ from contracts.node_output import (
     output_report_key,
 )
 from contracts.node_picture import (
+    UPGRADE_DISPLAY_LIGHT,
     HardwareRange,
     HardwareResult,
     HardwareSetting,
@@ -100,12 +101,12 @@ FIRST = OutputDocument("HDMI-A-1", 1, ALWAYS_ON, BEST_DETECTED, True, True)
 TEST_OFF = OutputDocument("HDMI-A-1", 2, replace(ALWAYS_ON, test=PowerRequest("req-1", Power.OFF, 300)),
                           BEST_DETECTED, True, True)
 PICTURE_KEY = picture_document_key("HDMI-A-1")
-PICTURE_DOCUMENT = PictureDocument("HDMI-A-1", 8, {"10": 46}, SoftwarePicture(114, 100, 6500, 22))
+PICTURE_DOCUMENT = PictureDocument("HDMI-A-1", 8, {"10": 46}, SoftwarePicture(brightness_percent=114, contrast_percent=100, colour_temperature_kelvin=6500, gamma_tenths=22), light=UPGRADE_DISPLAY_LIGHT)
 PICTURE_REPORT = PictureReport("HDMI-A-1", DisplayIdentity("XYM", 5475, "MNN", None),
                                (HardwareSetting("10", HardwareRange(RangeKind.LEVEL, 100, ()), 46),), 8,
                                {"10": HardwareResult(WriteResult.TAKEN, 60, 46)}, 8)
 PAPER = LutRef("ab" * 32, "lut33-perceptual-relcol-bpc-1")
-PRINT_LOOK = PictureDocument("HDMI-A-1", 9, {"10": 46}, SoftwarePicture(114, 100, 6500, 22, 85, 40, 20, PAPER, 80))
+PRINT_LOOK = PictureDocument("HDMI-A-1", 9, {"10": 46}, SoftwarePicture(brightness_percent=114, contrast_percent=100, colour_temperature_kelvin=6500, gamma_tenths=22, saturation_percent=85, highlight_rolloff_percent=40, black_floor_tenths=20, lut=PAPER, lut_amount_percent=80), light=UPGRADE_DISPLAY_LIGHT)
 REPORT = OutputReport("HDMI-A-1", True, DisplayIdentity("XYM", 5475, "MNN", None),
                       (DisplayMode(1920, 1080, 60000, preferred=True),), (PowerMethod.DDC_CI, PowerMethod.SIGNAL_OFF),
                       PowerMethod.DDC_CI, 2, None, None)

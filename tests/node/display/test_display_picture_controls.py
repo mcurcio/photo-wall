@@ -51,6 +51,7 @@ from contracts.node_frame import (
 from contracts.node_output import DisplayIdentity
 from contracts.node_picture import (
     NEUTRAL_SOFTWARE,
+    UPGRADE_DISPLAY_LIGHT,
     HardwareRange,
     HardwareResult,
     HardwareSetting,
@@ -116,12 +117,12 @@ def until(condition: Callable[[], bool], timeout: float = 15.0) -> None:
 
 
 def software(brightness: int = 100, contrast: int = 100, kelvin: int = 6500, gamma: int = 22) -> SoftwarePicture:
-    return SoftwarePicture(brightness, contrast, kelvin, gamma)
+    return SoftwarePicture(brightness_percent=brightness, contrast_percent=contrast, colour_temperature_kelvin=kelvin, gamma_tenths=gamma)
 
 
 def document(picture_change: int, hardware: dict[str, int] | None = None, wanted: SoftwarePicture = NEUTRAL_SOFTWARE,
              *, output_id: str = OUTPUT) -> PictureDocument:
-    return PictureDocument(output_id, picture_change, hardware or {}, wanted)
+    return PictureDocument(output_id, picture_change, hardware or {}, wanted, light=UPGRADE_DISPLAY_LIGHT)
 
 
 class NoRange:
@@ -381,7 +382,7 @@ PAPER = LutRef("ab" * 32, "lut33-perceptual-relcol-bpc-1")
 
 def print_look(saturation: int = 100, rolloff: int = 0, floor: int = 0, lut: LutRef | None = None,
                amount: int = 100, gamma: int = 22) -> SoftwarePicture:
-    return SoftwarePicture(100, 100, 6500, gamma, saturation, rolloff, floor, lut, amount)
+    return SoftwarePicture(brightness_percent=100, contrast_percent=100, colour_temperature_kelvin=6500, gamma_tenths=gamma, saturation_percent=saturation, highlight_rolloff_percent=rolloff, black_floor_tenths=floor, lut=lut, lut_amount_percent=amount)
 
 
 def test_the_print_look_becomes_operations_and_each_neutral_is_exactly_skipped():

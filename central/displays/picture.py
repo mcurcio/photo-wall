@@ -69,6 +69,7 @@ from contracts.node_picture import (
     NEUTRAL_SOFTWARE,
     PICTURE_LIST,
     TEST_PATTERN_SECONDS,
+    UPGRADE_DISPLAY_LIGHT,
     HardwareSetting,
     PictureDocument,
     PictureReport,
@@ -296,7 +297,7 @@ def picture_document(output_id: str, picture_change: int, picture: DisplayPictur
     """The Output's picture document at `picture_change`: `picture`'s three groups and the live
     session's `test_pattern` (`session_test_pattern`)."""
     return PictureDocument(output_id, picture_change, dict(picture.hardware), picture.software,
-                           picture.signal_range, test_pattern)
+                           picture.signal_range, test_pattern, light=UPGRADE_DISPLAY_LIGHT)
 
 
 def picture_digest(picture: DisplayPicture, test_pattern: TestPatternAsk | None) -> str:

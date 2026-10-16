@@ -54,11 +54,14 @@ from contracts.calibration_target import (
     screen_columns,
 )
 from contracts.frame_fit import Corners, OutputSize, cover_rectangle
+from contracts.frame_lighting import CloseLight, FarLight, FrameLighting, Paper, WashLight
 from contracts.kelvin import kelvin_white
 from contracts.lut import LUT_GRID, lut_offset
 from contracts.models import CornersFit, CoverFit, FrameProfile, Mat, PhotoCrop
 from contracts.node_frame import PictureOperations, srgb_to_linear
+from contracts.node_picture import DisplayLight
 from contracts.photo_crop import CENTRED, crop_window
+from contracts.room_light import RoomLightEntry, RoomLightsDocument
 from contracts.tuning import SIGNAL_LEVELS, TARGET_PATTERNS, TestPattern
 
 Matrix = tuple[float, float, float, float, float, float, float, float, float]
@@ -606,3 +609,74 @@ def output_pixel(x: float, y: float,
     inside = any(inside_opening(fit.corners, x, y) for fit, _, _, _ in frames)
     shade = None if shadow is None else mat_shade(shadow, x, y)
     return final_pixel(colour, operations, inside=inside, shade=shade)
+
+
+# ---- Room light (decision 0028): one physics path, the scalar reference player/native.py mirrors ----
+# Signatures frozen by the milestone's interface commit; the pi lane implements them and replaces
+# `final_pixel`'s print-look steps with them (its frozen page). Nothing calls them yet.
+
+HIGHLIGHT_KNEE: Final = 0.8         # the fixed rolloff's knee, in signal (a share of the TV's white)
+
+
+@dataclass(frozen=True)
+class FrameLights:
+    """One Frame's lights resolved against one room-lights document, as the final pass uses them
+    (the shader's uniforms): each light's rgb lux at the Frame, its shape in the opening's mat space,
+    its mat shadow, and the Frame's `peak` (an upper bound of its paper white's signal, the same for
+    every pixel of the Frame, so the rolloff keeps the cone's shape). Fields are the pi lane's."""
+
+
+def light_on_frame(light: WashLight | FarLight | CloseLight, entry: RoomLightEntry | None) -> Linear:
+    """The rgb lux `light` puts on the Frame (at its centre, for a close light), its shape aside.
+    No light (0, 0, 0) for an absent entry, NotReported, Unavailable, an off Dimmer, or a reference
+    that does not fit the state (DIMMER_AT_FULL with Measured, a lux with Dimmer): design rule 2.
+    A Dimmer on: lux x brightness, coloured by the entry's colour at luminance 1 (FixedColour:
+    `light_colour(kelvin)`; ReportedColour: drive_c = rgb_c x brightness (rgb None: 1) and
+    E_c = lux x drive_c x share_c / LUMA_c, so luminance is lux x sum_c drive_c x share_c).
+    Measured: lux x reading / reference, coloured as a Dimmer at full. Pure."""
+    raise NotImplementedError
+
+
+def frame_lights(lighting: FrameLighting, document: RoomLightsDocument | None,
+                 fit: CornersFit | CoverFit, profile: FrameProfile, display: DisplayLight) -> FrameLights:
+    """`lighting`'s lights against `document` (None: none received yet, so every light adds none),
+    in the opening's mat space at its physical size (`opening_size_mm`), with the Frame's peak.
+    Pure."""
+    raise NotImplementedError
+
+
+def irradiance(lights: FrameLights, x: float, y: float) -> Linear:
+    """E at output point (x, y), rgb lux: the sum over the Frame's lights of light_on_frame x shape x
+    reaches. Shape: 1 for wash and far; for close, the inverse square and the angle onto the wall
+    relative to the Frame's centre, times the cone (1 inside inner_beam_degrees, smoothly to 0 at
+    outer_beam_degrees). Reaches: the mat shadow, 0..1 (far: today's band rule with lux for
+    strength; close: a point light's shadow; wash: 1). No floor (owner, 2026-10-15, Q1 B: the
+    brightness follows the room down). Pure."""
+    raise NotImplementedError
+
+
+def paper_reflectance(photo: Linear, paper: Paper) -> Linear:
+    """rho = whiteness x (10^-ink + (1 - 10^-ink) x photo_c), the photo already through the paper
+    profile's LUT when it has one (the only source of saturation, Q2 B). Pure."""
+    raise NotImplementedError
+
+
+def paper_signal(reflectance: Linear, light: Linear, display: DisplayLight) -> Linear:
+    """The panel's linear signal for paper of `reflectance` under `light` (rgb lux): (rho_c x E_c /
+    (SHEET_WHITENESS x matched_lux) - black) / (1 - black), at least 0 (below the panel's glow it
+    shows the glow). May pass 1: `highlight_rolled` brings it back. Pure."""
+    raise NotImplementedError
+
+
+def highlight_rolled(signal: Linear, peak: float) -> Linear:
+    """The one fixed rolloff above the TV's white (Q2 B): identity when peak <= 1; otherwise each
+    channel at or below HIGHLIGHT_KNEE unchanged and [HIGHLIGHT_KNEE, peak] mapped onto
+    [HIGHLIGHT_KNEE, 1] by `rolled_off`'s curve, monotone and continuous in signal and peak. Pure."""
+    raise NotImplementedError
+
+
+def dithered(encoded: float, x: int, y: int) -> float:
+    """`encoded` (0..1, screen-encoded) plus an ordered dither of at most half an 8-bit step at
+    output pixel (x, y), before quantisation (required: the room may dim the picture to a few dozen
+    steps). Its mean over any 4 x 4 tile is `encoded`; the shader uses the same pattern. Pure."""
+    raise NotImplementedError

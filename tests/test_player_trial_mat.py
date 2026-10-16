@@ -28,14 +28,14 @@ BASELINE = Surface(OutputKey(uuid4(), uuid4(), "HDMI-A-1", 1, 1), NodeProcessIde
 TOP_LIGHT = Light(from_degrees=0, steep_degrees=45, softness_degrees=0, strength_tenths=10, colour_kelvin=6500)
 
 
-def envelope(mat_json: str, sequence: int = 1, trial_id=None) -> str:
+def envelope(lighting_json: str, sequence: int = 1, trial_id=None) -> str:
     trial_id = trial_id or uuid4()
     calibration = canonical(Calibration(fit=CoverFit(rotation=7)).model_dump(mode="json"))
     return encode_trial(TrialCandidate(
         trial_id=trial_id, generation=1, sequence=sequence, baseline=BASELINE,
         calibration_json=calibration,
-        candidate_sha256=candidate_hash(trial_id, 1, sequence, BASELINE, calibration, mat_json),
-        expires_boottime_ms=5000, hard_expires_boottime_ms=9000, mat_json=mat_json))
+        candidate_sha256=candidate_hash(trial_id, 1, sequence, BASELINE, calibration, lighting_json),
+        expires_boottime_ms=5000, hard_expires_boottime_ms=9000, lighting_json=lighting_json))
 
 
 def test_the_applied_trial_holds_the_drafts_mat():
