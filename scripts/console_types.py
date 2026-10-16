@@ -4,10 +4,12 @@ constants and refusal codes have one home, in Python.
 
 What the file holds, for a contract of {"schemas", "constants", "refusals"}:
 
-- one exported type per schema and per `$defs` entry: an object is an interface (a `const` field,
-  a discriminator such as `kind` or `operation`, is always present), a union is a TS union, an enum
-  a union of its values, a non-object schema (a titled alias, as RoomLightId or Lux) a named
-  string or number type. An inline schema equal to a named alias is written as that alias;
+- one exported type per schema and per `$defs` entry, with no description (a model's docstring
+  stays in Central's source): an object is an interface (a `const` field, a discriminator such as
+  `kind` or `operation`, is always present), a union is a TS union, an enum a union of its values,
+  a non-object schema a named type: a table entry (as RoomLight), or an alias pydantic titles
+  itself (`Field(title="RoomLightId")`, a title its field would not have). An inline schema equal
+  to a named alias is written as that alias;
 - `LIMITS`: every bound a field or alias carries (minimum, maximum, exclusive bounds, multipleOf,
   item and length caps, pattern), by type then field, so a form steps and checks by Central's own;
 - `PATTERNS`: each named alias's pattern;
@@ -165,12 +167,11 @@ class _Writer:
         self._aliases = aliases
 
     def declaration(self, name: str, schema: Schema) -> list[str]:
-        lines = _doc(schema.get("description"), "")
+        lines: list[str] = []
         if _is_object(schema):
             lines.append(f"export interface {name} {{")
             required = set(schema.get("required", ()))
             for field, inner in schema["properties"].items():
-                lines.extend(_doc(inner.get("description"), "  "))
                 optional = field not in required and "const" not in inner
                 key = field if _IDENTIFIER.match(field) else json.dumps(field)
                 lines.append(f"  {key}{'?' if optional else ''}: {self.type(inner, field)};")
@@ -281,13 +282,6 @@ def _bounds(schema: Schema) -> dict[str, Any]:
 
 def _grouped(text: str) -> str:
     return f"({text})" if " | " in text else text
-
-
-def _doc(text: Any, indent: str) -> list[str]:
-    if not isinstance(text, str) or not text.strip():
-        return []
-    words = " ".join(text.split()).replace("*/", "* /")
-    return [f"{indent}/** {words} */"]
 
 
 def _literal(value: Any, depth: int) -> str:

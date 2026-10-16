@@ -2,70 +2,61 @@
 // Central's types, limits, patterns, constants and refusal codes for the console (one home, in Python).
 /* eslint-disable */
 
-/** `lux` was read with the room light on at 100 % (a dimmer, or a fixed light). */
 export interface AtFull {
   kind: "at-full";
 }
 
-/** `lux` was read while the room light's Sensor read `lux` (a measured light). */
 export interface AtReading {
   kind: "at-reading";
   lux: LuxOnFrame;
 }
 
-/** A Frame's Position (the console's word): how its picture sits on the output, as its Frame fit (roadmap 1c; Cover by default, Corners an explicit opt-in, owner 2026-10-10 q1). `revision` rises with every saved Position. */
 export interface Calibration {
-  revision?: number;
   fit?: CornersFit | CoverFit;
+  revision?: number;
 }
 
-/** From a point near the Frame, aimed at its centre, in a cone: `lux` is at the Frame's centre. */
 export interface CloseLight {
+  across_mm: number;
+  inner_beam_degrees: number;
   kind: "close";
   light: RoomLightId;
   lux: LuxOnFrame;
-  reference: AtFull | AtReading;
-  across_mm: number;
-  up_mm: number;
   out_mm: number;
-  inner_beam_degrees: number;
   outer_beam_degrees: number;
+  reference: AtFull | AtReading;
+  up_mm: number;
 }
 
-/** A colour light: on or off, its brightness, and its drive per channel (each 0..1, linear). */
 export interface ColourDimmer {
+  brightness: number;
   kind: "colour-dimmer";
   on: boolean;
-  brightness: number;
   rgb: [number, number, number];
 }
 
-/** A colour light an integration reports with its drive; its colour is the light's own. */
 export interface ColourEntry {
-  kind: "colour";
   colour: ReportedColour;
+  kind: "colour";
   state: ColourDimmer | Unavailable | NotReported;
 }
 
-/** Frame fit Corners (roadmap 1c; an explicit opt-in, owner 2026-10-10 q1): the picture is stretched exactly onto the four corners (a perspective transform), and a quarter turn picks which corner edge is the picture's top. */
 export interface CornersFit {
-  mode: "corners";
   corners?: [[number, number], [number, number], [number, number], [number, number]];
+  mode: "corners";
   rotation?: 0 | 90 | 180 | 270;
 }
 
-/** Frame fit Cover (roadmap 1c; the default, owner 2026-10-10 q1): the four corners are the opening; the picture is the unskewed rectangle turned `rotation` degrees clockwise that holds every corner (contracts/frame_fit.py `cover_rectangle`), and nothing is drawn outside the opening (owner q2: "Black/nothing"). */
 export interface CoverFit {
-  mode: "cover";
   corners?: [[number, number], [number, number], [number, number], [number, number]];
+  mode: "cover";
   rotation?: number;
 }
 
-/** A white dimmable light: on or off and its brightness, the share of its full light output (linear light; an integration's own scale is its adapter's to convert). */
 export interface Dimmer {
+  brightness: number;
   kind: "dimmer";
   on: boolean;
-  brightness: number;
 }
 
 export interface DrawnView {
@@ -74,56 +65,57 @@ export interface DrawnView {
 
 export interface EntityView {
   entity: string;
+  heard_at: number | null;
   reports_light: RoomLightId | null;
   reports_sensor: SensorId | null;
-  heard_at: number | null;
 }
 
-/** From far away at one angle, falling on the whole Frame at once; casts the mat's shadow. */
 export interface FarLight {
+  from_degrees: number;
   kind: "far";
   light: RoomLightId;
   lux: LuxOnFrame;
   reference: AtFull | AtReading;
-  from_degrees: number;
-  steep_degrees: number;
   softness_degrees: number;
+  steep_degrees: number;
 }
 
-/** A white light of one colour temperature (a white bulb, daylight): contracts/kelvin.py's row. */
 export interface FixedColour {
-  kind: "fixed";
   kelvin: number;
+  kind: "fixed";
 }
 
-/** A light nobody reports: always on, at full. */
 export interface FixedEntry {
-  kind: "fixed";
   colour: FixedColour;
+  kind: "fixed";
 }
 
 export interface FixedLight {
+  colour: FixedColour;
   kind: "fixed";
   name: string;
-  colour: FixedColour;
 }
 
-/** A Frame's lights, mat and paper. A Frame light whose room light the room-lights document does not carry, or carries as unavailable or not reported, adds no light. */
 export interface FrameLighting {
-  mat_depth_mm: number;
   lights: (WashLight | FarLight | CloseLight)[];
+  mat_depth_mm: number;
   paper: Paper;
 }
 
+export interface FrameRefView {
+  id: string;
+  name: string;
+}
+
 export interface HomeAssistantView {
-  link: LinkHealthView;
   entities: EntityView[];
+  link: LinkHealthView;
   refused: RefusedMessageView[];
 }
 
 export interface LinkHealthView {
-  state: "not-configured" | "connecting" | "connected" | "away" | "never-run";
   since: number | null;
+  state: "not-configured" | "connecting" | "connected" | "away" | "never-run";
 }
 
 export interface LutRef {
@@ -133,43 +125,44 @@ export interface LutRef {
 
 export type LuxOnFrame = number;
 
-/** A Sensor's reading, in lux at its own place. */
+export interface MadeForView {
+  display_id: string | null;
+  profile_px: ProfilePxView;
+}
+
 export interface Measured {
   kind: "measured";
   lux: number;
 }
 
-/** A light one Sensor reports: its state is that Sensor's reading. */
 export interface MeasuredEntry {
-  kind: "measured";
   colour: FixedColour;
+  kind: "measured";
   state: Measured | Unavailable | NotReported;
 }
 
 export interface MeasuredLight {
+  colour: FixedColour;
   kind: "measured";
   name: string;
   sensor: SensorId;
-  colour: FixedColour;
 }
 
-/** Nothing heard from its reporter yet. Adds no light. */
 export interface NotReported {
   kind: "not-reported";
 }
 
-/** The virtual print. Black is whiteness x 10^-ink_density of the light falling on it. */
 export interface Paper {
-  whiteness: number;
   ink_density: number;
   profile?: LutRef | null;
+  whiteness: number;
 }
 
 export interface PaperProfileView {
+  added_at: number;
+  name: string;
   profile_sha256: string;
   recipe_id: string;
-  name: string;
-  added_at: number;
   used_by: string[];
 }
 
@@ -179,34 +172,78 @@ export interface PaperProfilesView {
 
 export interface PlayerDrawnView {
   player_id: string;
-  state: "drawn" | "behind" | "not-following" | "not-reported";
   reported_at: number | null;
+  state: "drawn" | "behind" | "not-following" | "not-reported";
+}
+
+export type PositionEntryKind = "kept-created" | "kept-saved" | "kept-profile-changed" | "kept-unrecorded" | "sent-draft" | "sent-back";
+
+export interface PositionEntryView {
+  at: string;
+  entry_id: string;
+  fit: CornersFit | CoverFit;
+  frame: FrameRefView;
+  kind: PositionEntryKind;
+  lighting: FrameLighting;
+  made_for: MadeForView;
+  number: number;
+  restore_refusal: PositionRestoreRefusal | null;
+  restored_from: string | null;
+  session_id: string | null;
+}
+
+export interface PositionHistoryView {
+  entries: PositionEntryView[];
+  frame: FrameRefView;
+  unrecorded_change: boolean;
+}
+
+export interface PositionRestore {
+  entry_id: string;
+  expected_sequence: number;
+}
+
+export type PositionRestoreRefusal = "other_frame" | "made_for_other_profile" | "made_for_other_display";
+
+export interface ProfilePxView {
+  height: number;
+  width: number;
 }
 
 export interface RefusedMessageView {
-  topic: string;
-  reason: ReportRefusal;
   at: number;
+  reason: ReportRefusal;
+  topic: string;
+}
+
+export interface RefusedReportView {
+  address: string;
+  at: number;
+  reason: ReportRefusal;
+  source: string;
+}
+
+export interface RefusedReportsView {
+  refused: RefusedReportView[];
 }
 
 export type ReportRefusal = "unknown_address" | "unreadable" | "out_of_range";
 
-/** A light that reports its colour: each screen channel's share of its white lux, read once. */
 export interface ReportedColour {
-  kind: "reported";
   channel_shares: [number, number, number];
+  kind: "reported";
 }
 
 export interface ReportedLight {
+  colour: FixedColour | ReportedColour;
   kind: "reported";
   name: string;
   reporter: ReporterRef;
-  colour: FixedColour | ReportedColour;
 }
 
 export interface ReporterRef {
-  source: string;
   address: string;
+  source: string;
 }
 
 export type RoomLight = ReportedLight | MeasuredLight | FixedLight;
@@ -214,10 +251,10 @@ export type RoomLight = ReportedLight | MeasuredLight | FixedLight;
 export type RoomLightId = string;
 
 export interface RoomLightView {
-  id: RoomLightId;
-  light: RoomLight;
   entry: FixedEntry | WhiteEntry | ColourEntry | MeasuredEntry;
   heard_at: number | null;
+  id: RoomLightId;
+  light: RoomLight;
   named_by: string[];
 }
 
@@ -227,23 +264,23 @@ export interface RoomLightsView {
 }
 
 export interface Sensor {
-  name: string;
   at: SensorRef;
+  name: string;
 }
 
 export type SensorId = string;
 
 export interface SensorRef {
-  source: string;
   address: string;
+  source: string;
 }
 
 export interface SensorView {
-  id: SensorId;
-  sensor: Sensor;
-  reading: (Measured | Unavailable) | null;
   heard_at: number | null;
+  id: SensorId;
+  reading: (Measured | Unavailable) | null;
   reports: RoomLightId | null;
+  sensor: Sensor;
 }
 
 export interface TrialBegin {
@@ -252,18 +289,21 @@ export interface TrialBegin {
 }
 
 export interface TrialEdit {
-  operation: "edit" | "renew";
-  expected_sequence: number;
   calibration: Calibration;
+  expected_sequence: number;
   lighting: FrameLighting;
+  operation: "edit" | "renew";
 }
 
-/** Its reporter said it cannot tell (an integration's unavailable, a failing sensor). Adds no light. */
+export interface TrialStep {
+  expected_sequence: number;
+  operation: "save" | "end" | "status" | "keepalive";
+}
+
 export interface Unavailable {
   kind: "unavailable";
 }
 
-/** Even over the Frame; no mat shadow. */
 export interface WashLight {
   kind: "wash";
   light: RoomLightId;
@@ -271,10 +311,9 @@ export interface WashLight {
   reference: AtFull | AtReading;
 }
 
-/** A white light an integration reports as a dimmer. */
 export interface WhiteEntry {
-  kind: "white";
   colour: FixedColour;
+  kind: "white";
   state: Dimmer | Unavailable | NotReported;
 }
 
@@ -400,6 +439,11 @@ export const LIMITS = {
       multipleOf: 0.5,
     },
   },
+  FrameRefView: {
+    id: {
+      pattern: "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+    },
+  },
   LuxOnFrame: {
     value: {
       exclusiveMinimum: 0,
@@ -431,9 +475,43 @@ export const LIMITS = {
       minimum: 0.5,
     },
   },
+  PaperProfileView: {
+    profile_sha256: {
+      pattern: "^[a-f0-9]{64}$",
+    },
+  },
   PlayerDrawnView: {
     player_id: {
       pattern: "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+    },
+  },
+  PositionEntryView: {
+    number: {
+      integer: true,
+      minimum: 1,
+    },
+  },
+  PositionRestore: {
+    expected_sequence: {
+      integer: true,
+      minimum: 1,
+    },
+  },
+  ProfilePxView: {
+    height: {
+      integer: true,
+      maximum: 16384,
+      minimum: 1,
+    },
+    width: {
+      integer: true,
+      maximum: 16384,
+      minimum: 1,
+    },
+  },
+  RefusedReportView: {
+    source: {
+      pattern: "^[a-z][a-z0-9-]{0,31}$",
     },
   },
   ReportedColour: {
@@ -492,6 +570,18 @@ export const LIMITS = {
       pattern: "^[a-z0-9][a-z0-9-]{0,31}$",
     },
   },
+  TrialEdit: {
+    expected_sequence: {
+      integer: true,
+      minimum: 1,
+    },
+  },
+  TrialStep: {
+    expected_sequence: {
+      integer: true,
+      minimum: 1,
+    },
+  },
   WashLight: {
     light: {
       pattern: "^[a-z0-9][a-z0-9-]{0,31}$",
@@ -509,17 +599,30 @@ export const PATTERNS = {
 } as const;
 
 export const CONSTANTS = {
+  BEAM_DEGREES_MAX: 170,
+  CLOSE_REACH_MM: 5000,
   FRAME_LIGHTS_MAX: 4,
   GLOSS_INK: 2.3,
   HOME_ASSISTANT_SOURCE: "home-assistant",
+  INK_DENSITY_MAX: 5,
+  INK_DENSITY_MIN: 0.5,
+  KELVIN_TABLE_MAX: 10000,
+  KELVIN_TABLE_MIN: 2000,
+  KELVIN_TABLE_STEP: 100,
   LUX_MAX: 200000,
   MATCHED_LUX_MAX: 20000,
   MATCHED_LUX_MIN: 10,
   MATTE_INK: 1.6,
+  MAT_DEPTH_MM_MAX: 20,
   PANEL_BLACK_MAX: 0.05,
   PANEL_BLACK_MIN: 1e-05,
   PI_SOURCE: "pi",
+  ROOM_LIGHTS_MAX: 32,
+  ROOM_LIGHT_ID_PATTERN: "[a-z0-9][a-z0-9-]{0,31}",
+  ROOM_LIGHT_NAME_MAX: 64,
+  SENSORS_MAX: 32,
   SHEET_WHITENESS: 0.9,
+  WHITENESS_MIN: 0.5,
 } as const;
 
 export const REFUSALS = {

@@ -129,12 +129,12 @@ def test_a_file_that_is_not_a_paper_profile_is_refused_in_plain_words_and_nothin
 
         answer = _add(page, "Display P3.icc", _monitor())
         assert (answer.status, answer.json()) == (422, {"error": "not_a_printer_profile"})
-        expect(page.get_by_text("Not added: Display P3.icc is a colour profile, but not one for a printer and paper.",
+        expect(page.get_by_text("Not added (Display P3.icc): it is a colour profile, but not one for a printer and paper.",
                                 exact=False)).to_be_visible()
 
         answer = _add(page, "holiday.jpg", b"\xff\xd8\xff\xe0" + bytes(4092))
         assert (answer.status, answer.json()) == (422, {"error": "not_a_colour_profile"})
-        expect(page.get_by_text("Not added: holiday.jpg is not a colour profile (an ICC file).",
+        expect(page.get_by_text("Not added (holiday.jpg): it is not a colour profile (an ICC file).",
                                 exact=False)).to_be_visible()
         expect(_rows(page)).to_have_count(1)
     assert _stored(registry) == [kept.profile_sha256]

@@ -87,7 +87,7 @@ def test_types_limits_constants_and_refusals_are_written_as_typescript():
     assert "  id: ThingId;\n  state: On | Off;\n" in text                         # the union on `kind`
     assert "  parts: [number, number];\n" in text
     assert "  note?: string | null;\n" in text
-    assert "/** A thing. */\nexport interface Thing {" in text
+    assert "export interface Thing {" in text and "A thing." not in text           # no description
     assert "    steps: {\n      integer: true,\n      maximum: 9,\n      minimum: 1,\n      multipleOf: 2,\n    }," in text
     assert 'ThingId: "^[a-z]+$",' in text
     assert "export const CONSTANTS = {\n  A_MAX: 4,\n  B_SOURCE: \"pi\",\n} as const;" in text
