@@ -756,7 +756,7 @@ def test_a_finish_inside_a_dissolve_lets_that_photo_play_its_turn(registry, tmp_
 
 def test_a_transition_too_long_for_its_photos_is_refused(registry):
     """A 10 s photo leaves at most 5 s for its Transition: a 6 s cross-fade is refused with the
-    most it may be, and nothing is stored; Save and apply now is declared and not built yet."""
+    most it may be, and nothing is stored, by Save and apply now too."""
     _player, app, coordinator = _rig(registry)
     with TestClient(app) as client:
         body = {**_scene("long", fade=6, style="cross_fade"), "cycle_seconds": 10}
@@ -765,4 +765,6 @@ def test_a_transition_too_long_for_its_photos_is_refused(registry):
             422, {"error": "transition_too_long", "max_seconds": 5})
         assert "long" not in coordinator.runtime.read().export_state()["scenes"]
         later = client.post("/v1/operator/scenes/long/apply-now", json=body, headers=AUTH)
-        assert later.status_code == 501
+        assert (later.status_code, later.json()) == (
+            422, {"error": "transition_too_long", "max_seconds": 5})
+        assert "long" not in coordinator.runtime.read().export_state()["scenes"]

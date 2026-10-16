@@ -12,6 +12,7 @@ import logging
 import math
 from contextlib import contextmanager
 from dataclasses import dataclass
+from typing import Literal
 
 from psycopg.types.json import Jsonb
 from pydantic import Field, ValidationError
@@ -186,7 +187,21 @@ class Coordinator:
     def configure_authored_scene(
         self, scene: Scene, source_ref: str, asset_ids: tuple[str, ...]
     ) -> dict:
-        """Atomically author media refs and adopt their Scene definition."""
+        """Atomically author media refs and save their Scene definition (`Runtime.save_scene`):
+        the answer is the `SceneOnWall` with the authored refs (`asset_refs`, `created`)."""
+        return self._author_scene("save_scene", scene, source_ref, asset_ids)
+
+    def configure_authored_scene_and_apply_now(
+        self, scene: Scene, source_ref: str, asset_ids: tuple[str, ...]
+    ) -> dict:
+        """As `configure_authored_scene`, saved and applied at once in the same transaction
+        (`Runtime.save_scene_and_apply_now`)."""
+        return self._author_scene("save_scene_and_apply_now", scene, source_ref, asset_ids)
+
+    def _author_scene(
+        self, command: Literal["save_scene", "save_scene_and_apply_now"], scene: Scene,
+        source_ref: str, asset_ids: tuple[str, ...],
+    ) -> dict:
         try:
             requested = tuple(asset_ids)
             requested_set = set(requested)
@@ -205,13 +220,10 @@ class Coordinator:
             profiles = self._authored_scene_profiles(conn, scene)
             authored = self.media.author_candidates_in(conn, source_ref, requested)
             self._validate_authored_scene(conn, scene, requested, profiles)
-            runtime.set_scene(scene)
-            return {
-                "status": "configured",
-                "scene_id": scene.scene_id,
-                "revision": scene.revision,
-                **authored,
-            }
+            # One Runtime command, at the post-lock cut on Central's clock (as
+            # RuntimeStore.command_current).
+            on_wall = getattr(runtime, command)(scene, self.clock.utc())
+            return {**on_wall.model_dump(mode="json"), **authored}
 
     @contextmanager
     def _transaction(self):

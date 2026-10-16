@@ -306,8 +306,9 @@ def test_a_scene_save_must_move_past_the_stored_revision():
     runtime.set_scene(stored)
     for stale in (stored.model_copy(update={"cycle_seconds": 45}),
                   stored.model_copy(update={"revision": 1})):
-        with pytest.raises(RuntimeConflict, match="scene_revision_conflict"):
+        with pytest.raises(SceneWriteRefused, match="changed") as raised:
             runtime.set_scene(stale)
+        assert raised.value.current == stored
         assert runtime.export_state()["scenes"]["scene"]["cycle_seconds"] == 10
     runtime.set_scene(Scene.model_validate(stored.model_dump(mode="json")))  # a retry
     runtime.set_scene(stored.model_copy(update={"revision": 3, "cycle_seconds": 45}))
@@ -538,9 +539,12 @@ def test_save_and_apply_now_replaces_its_own_protecting_run():
 
 def test_save_and_apply_now_is_refused_by_another_protecting_run():
     """Another live Run that protects the Frames refuses the covering window (recorded, with
-    the Run that refused it); the Program's own Run still finishes.
+    the Run that refused it); the Program's own Run keeps playing (design rule 3 of the
+    cross-fade delivery: Save and apply now never stops a Scene; it finishes only once its
+    successor is admitted).
 
-    Mutation probe: never refuse in `save_program_and_apply_now` -> the window is admitted."""
+    Mutation probes: never refuse in `save_program_and_apply_now` -> the window is admitted;
+    finish before admitting -> the Program's own Run finishes."""
     runtime = Runtime(house=UTC_HOUSE)
     runtime.set_scene(Scene(scene_id="bg", cycle_seconds=600, loop=True, contributions=(media(),)))
     runtime.set_scene(Scene(scene_id="guard", cycle_seconds=600, loop=True, protect_frames=True,
@@ -554,6 +558,8 @@ def test_save_and_apply_now_is_refused_by_another_protecting_run():
     assert (refused.status, refused.reason, refused.blocking_run_id) == (
         "rejected", "protected_frames", guard)
     assert runtime.advance(400).for_target("frame:left").run_id == guard
+    (own,) = [run for run in runtime._state.runs.values() if run.program_id == "schedule"]
+    assert own.active and own.finish_requested_at is None and own.scheduled_finish_at is None
 
 
 def test_programs_refuse_without_storing_and_compare_the_expected_program():

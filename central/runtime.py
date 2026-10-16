@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import re
 from collections.abc import Mapping
 from datetime import timedelta
 from functools import lru_cache
@@ -400,6 +401,9 @@ class _Run(_MutableModel):
     program_ends_at: FiniteFloat | None = None
     activation_id: str | None = None
     scheduled_finish_at: FiniteFloat | None = None
+    # When the Scene's duration counts from: the start of the Run this one replaced (Save and
+    # apply now, `Runtime._replace`), so a Show now keeps its original start; None: `started_at`.
+    duration_from: FiniteFloat | None = None
     phase: Literal["body", "outro", "completed", "cancelled"] = "body"
     cycle_index: int = 0
     launched_children: set[int] = Field(default_factory=set)
@@ -426,7 +430,8 @@ class _Run(_MutableModel):
     def stop_at(self) -> float | None:
         times = [self.program_ends_at, self.scheduled_finish_at, self.finish_requested_at]
         if self.scene.duration_seconds is not None:
-            times.append(self.started_at + self.scene.duration_seconds)
+            origin = self.started_at if self.duration_from is None else self.duration_from
+            times.append(origin + self.scene.duration_seconds)
         return min((t for t in times if t is not None), default=None)
 
 
@@ -557,6 +562,20 @@ def _run_id(identity: str) -> str:
     return "run-" + hashlib.sha256(identity.encode()).hexdigest()[:32]
 
 
+_SCENE_MARK: Final = re.compile(r":scene-\d+$")
+
+
+def _successor_identity(identity: str, scene_revision: int) -> str:
+    """The activation identity of the Run replacing the one admitted under `identity`, on
+    `scene_revision` of its Scene (Save and apply now): deterministic and distinct per revision.
+    A Schedule window's keeps the window's start last (`Runtime._playing_window` reads it); an
+    operator identity never holds ':' (contracts Identifier), so the mark cannot collide."""
+    if identity.startswith(PROGRAM_PREFIX):
+        head, start = identity.rsplit(":", 1)
+        return f"{_SCENE_MARK.sub('', head)}:scene-{scene_revision}:{start}"
+    return f"{_SCENE_MARK.sub('', identity)}:scene-{scene_revision}"
+
+
 def _refusal(activation_id: str, denial: tuple[str, str]) -> Admission:
     reason, blocking_run_id = denial
     return Admission(
@@ -620,16 +639,95 @@ class Runtime:
     def set_scene(self, scene: Scene) -> None:
         """Store a Scene; a save must move its revision past the stored one.
 
-        A revision at or below the stored one is refused (`scene_revision_conflict`)
-        so a save built from an older copy never silently replaces a newer one,
-        unless it is the stored Scene exactly (an idempotent retry). A Transition too long
+        A revision at or below the stored one is refused (SceneWriteRefused "changed", with
+        the stored Scene) so a save built from an older copy never silently replaces a newer
+        one, unless it is the stored Scene exactly (an idempotent retry). A Transition too long
         for its photos is refused (SceneWriteRefused "transition_too_long").
         """
         stored = self._state.scenes.get(scene.scene_id)
         if stored is not None and scene.revision <= stored.revision and scene != stored:
-            raise RuntimeConflict("scene_revision_conflict")
+            raise SceneWriteRefused("changed", current=stored)
         scene.check_transition()
         self._state.scenes[scene.scene_id] = scene
+
+    def save_scene(self, scene: Scene, now: float) -> SceneOnWall:
+        """Save (R4: "Authored configuration edits default to the next Run"): store `scene`
+        (`set_scene`'s refusals) at `now` and answer what still plays an earlier version of it.
+        Only a Default Scene Run restarts on it (`_stale_defaults`)."""
+        self.advance(now)
+        self.set_scene(scene)
+        self.advance(now)
+        return self.scene_on_wall(scene.scene_id)
+
+    def save_scene_and_apply_now(self, scene: Scene, now: float) -> SceneOnWall:
+        """Save and apply now: store `scene` as `save_scene` does, then replace each root Run
+        playing an earlier version of it at once (`_replace`: its successor, on the stored
+        revision, is admitted over it before it finishes gracefully beneath it; a refused one
+        leaves it playing, and it is still answered). A Schedule's successor keeps the window's
+        end; a Show now's keeps its original start, so it ends there plus the new duration.
+        Queued Show now activations take the new copy. An identical retry replaces nothing."""
+        self.advance(now)
+        self.set_scene(scene)
+        stored = self._state.scenes[scene.scene_id]
+        earlier = self._earlier_runs(stored)
+        replaced = {run.run_id for run in earlier}
+        for run in earlier:
+            identity = _successor_identity(run.activation_id or run.run_id, stored.revision)
+            admission = self._replace(
+                [run], stored, identity, run.priority, replaced,
+                program_id=run.program_id, program_end=run.program_ends_at,
+                duration_from=run.started_at if run.duration_from is None else run.duration_from)
+            if admission.status == "admitted":
+                self._state.admissions[identity] = admission
+                replaced.add(admission.run_id)
+        for item in self._earlier_queued(stored):
+            item.scene = stored
+        self.advance(now)
+        return self.scene_on_wall(scene.scene_id)
+
+    def scene_on_wall(self, scene_id: str) -> SceneOnWall:
+        """The stored Scene and what on the wall still plays an earlier version of it, at the
+        processed instant: root Runs showing an older revision and not already finishing, and
+        queued Show now activations holding an older copy. A Default Scene Run is never listed:
+        it restarts itself on a save (`_stale_defaults`)."""
+        stored = self._state.scenes[scene_id]
+        return SceneOnWall(scene=stored, earlier_version=EarlierVersion(
+            playing=tuple(RunRef(run_id=run.run_id, scene_revision=run.scene.revision,
+                                 started_by="schedule" if run.program_id is not None else "show_now")
+                          for run in self._earlier_runs(stored)),
+            waiting=tuple(item.activation_id for item in self._earlier_queued(stored))))
+
+    def _earlier_runs(self, scene: Scene) -> list[_Run]:
+        """The root Runs playing an earlier revision of `scene`, in admission order: not a Default
+        Scene's, and not finishing."""
+        return sorted((run for run in self._state.runs.values()
+                       if run.parent_id is None and run.phase == "body" and run.finish_requested_at is None
+                       and run.scene.scene_id == scene.scene_id and run.scene.revision < scene.revision
+                       and not (run.activation_id or "").startswith(DEFAULT_PREFIX)),
+                      key=lambda run: run.order)
+
+    def _earlier_queued(self, scene: Scene) -> list[_Queued]:
+        return [item for item in self._state.queue
+                if item.scene.scene_id == scene.scene_id and item.scene.revision < scene.revision]
+
+    def _replace(self, predecessors: list[_Run], scene: Scene, identity: str, priority: int,
+                 excluded: set[str], *, program_id: str | None = None,
+                 program_end: float | None = None, duration_from: float | None = None) -> Admission:
+        """The one replace step of Save and apply now, a Scene's and a Schedule's (design rule 3:
+        it never stops a Scene): admit `scene` under `identity` at the processed instant, over
+        `predecessors`, and only then ask them to finish gracefully beneath it. A protection
+        refusal (the Runs in `excluded` left out of the check, as `activate`'s restart leaves out
+        the Runs it replaces) leaves them playing. Answers the admission or the refusal."""
+        now = self._state.now
+        denial = self._protected_conflict(scene, priority, False, excluded)
+        if denial:
+            return _refusal(identity, denial)
+        admission = self._admit(scene, identity, now, priority, program_id=program_id,
+                                program_end=program_end)
+        self._state.runs[admission.run_id].duration_from = duration_from
+        for run in predecessors:
+            run.scheduled_finish_at = min(run.scheduled_finish_at or now, now)
+        return admission
 
     @staticmethod
     def _scene_ids(scene: Scene) -> set[str]:
@@ -801,7 +899,7 @@ class Runtime:
             raise ProgramRefused("changed", stored)
         self._check_program(program)
         self._state.programs[program.program_id] = program
-        self._admit_covering(program, set())
+        self._admit_covering(program, [])
         self._state.program_from[program.program_id] = self._state.now
         self.advance(now)
         return program
@@ -817,37 +915,34 @@ class Runtime:
         return saved
 
     def save_program_and_apply_now(self, expected: Program, draft: ProgramDraft, now: float) -> Program:
-        """As `save_program`, but applied at once: the Program's playing Runs finish gracefully at
-        `now`, and the new rule's window covering `now`, if any, is admitted at once (from `now`
-        to its end, under its own identity), the finishing Runs left out of the protection check
-        (as `activate`'s restart leaves out the Runs it replaces). Later windows follow the new
-        rule from `now`."""
+        """As `save_program`, but applied at once: the new rule's window covering `now`, if any,
+        is admitted at once (from `now` to its end, under its own identity) over the Program's
+        playing Runs, which then finish gracefully at `now` (`_replace`; a refused window leaves
+        them playing). With no window covering `now` under the new rule they finish. Later
+        windows follow the new rule from `now`."""
         saved, playing = self._replace_program(expected, draft, now)
         if playing is None:
             return saved
-        for run in playing:
-            run.scheduled_finish_at = min(run.scheduled_finish_at or now, now)
-        self._admit_covering(saved, {run.run_id for run in playing})
+        self._admit_covering(saved, playing)
         self._state.program_from[saved.program_id] = self._state.now
         self.advance(now)
         return saved
 
-    def _admit_covering(self, program: Program, finishing: set[str]) -> None:
+    def _admit_covering(self, program: Program, playing: list[_Run]) -> None:
         """Admit `program`'s window covering the processed instant, if any, at once: from that
-        instant to the window's end, under the window's own identity, or record its refusal. The
-        Runs in `finishing` are left out of the protection check (as `activate`'s restart leaves
-        out the Runs it replaces). Creation and Save and apply now share it."""
+        instant to the window's end, under the window's own identity, over the `playing` Runs it
+        replaces (`_replace`), or record its refusal. With no covering window the `playing` Runs
+        finish gracefully. Creation and Save and apply now share it."""
         now = self._state.now
         window = calculator.window_at(program.when, self._house, now)
         if window is None:
+            for run in playing:
+                run.scheduled_finish_at = min(run.scheduled_finish_at or now, now)
             return
         identity = program.window_id(window.start)
-        scene = self._state.scenes[program.scene_id]
-        rank = PRIORITY_RANK[program.priority]
-        denial = self._protected_conflict(scene, rank, False, finishing)
-        self._state.admissions[identity] = (
-            _refusal(identity, denial) if denial else self._admit(
-                scene, identity, now, rank, program_id=program.program_id, program_end=window.end))
+        self._state.admissions[identity] = self._replace(
+            playing, self._state.scenes[program.scene_id], identity, PRIORITY_RANK[program.priority],
+            {run.run_id for run in playing}, program_id=program.program_id, program_end=window.end)
 
     def _replace_program(self, expected: Program, draft: ProgramDraft,
                          now: float) -> tuple[Program, list[_Run] | None]:

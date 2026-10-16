@@ -13,7 +13,7 @@ from central.app import create_app
 from central.db import ProcessTransactionClock
 from central.media_repository import MediaRepository
 from central.photo_library.model import SourceQuery
-from central.runtime import Child, Contribution, RuntimeConflict, Scene
+from central.runtime import Child, Contribution, Scene, SceneWriteRefused
 from central.runtime_store import RuntimeStore
 from central.source_names import SourceInUse, SourceNameService
 
@@ -75,7 +75,7 @@ def test_named_edit_revises_future_scenes_but_keeps_admitted_run(names):
     assert saved["scenes"]["show"]["contributions"][0]["source_refs"] == ["all-photos:2"]
     assert saved["scenes"]["show"]["children"][0]["scene"]["contributions"][0]["source_refs"] == ["all-photos:2"]
     assert saved["runs"][admission.run_id]["scene"]["contributions"][0]["source_refs"] == ["all-photos:1"]
-    with pytest.raises(RuntimeConflict, match="scene_revision_conflict"):
+    with pytest.raises(SceneWriteRefused, match="changed"):
         runtime.command("set_scene", scene.model_copy(update={"revision": 2, "loop": False}))
     runtime.command("cancel", admission.run_id, 1001)
     saved = runtime.read().export_state()
