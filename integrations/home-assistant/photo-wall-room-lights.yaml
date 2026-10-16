@@ -1,0 +1,100 @@
+# Photo Wall: room lights (decision 0028, docs/decisions/0028-room-light.md).
+#
+# A Home Assistant automation blueprint. It publishes the full state of each chosen light and
+# illuminance sensor, retained, to the house's MQTT broker, where Photo Wall Central's worker reads it
+# (central/infra/home_assistant.py):
+#   photowall/light/<entity_id>        {"state": "on"|"off"|"unavailable", "brightness": 0..255|null, "rgb": [r, g, b]|null}
+#   photowall/illuminance/<entity_id>  {"lux": <number>}  or  {"state": "unavailable"}
+# on every state change of a chosen entity, and all of them again when Home Assistant starts or
+# its automations reload (the broker keeps the retained messages, so Central reads them whenever it
+# connects). Photo Wall never controls a light.
+#
+# Install: copy this file to <config>/blueprints/automation/photo-wall/photo-wall-room-lights.yaml,
+# reload automations, then Settings > Automations & scenes > Blueprints > "Photo Wall room lights"
+# > Create automation, and choose the lights and illuminance sensors Photo Wall should follow. The
+# MQTT integration must be set up against the broker named by Central's PHOTO_WALL_MQTT_URL
+# (docs/runbook.md, "Room lights and Home Assistant").
+blueprint:
+  name: Photo Wall room lights
+  description: >-
+    Publish the chosen lights' and illuminance sensors' states, retained, for Photo Wall's room
+    lights (photowall/light/<entity> and photowall/illuminance/<entity>).
+  domain: automation
+  source_url: https://github.com/mcurcio/photo-wall/blob/main/integrations/home-assistant/photo-wall-room-lights.yaml
+  input:
+    lights:
+      name: Lights
+      description: The lights Photo Wall's room lights follow (one House > Lights entry each).
+      default: []
+      selector:
+        entity:
+          domain: light
+          multiple: true
+    illuminance_sensors:
+      name: Illuminance sensors
+      description: The light meters Photo Wall's Sensors follow (lux).
+      default: []
+      selector:
+        entity:
+          domain: sensor
+          device_class: illuminance
+          multiple: true
+
+mode: queued
+max: 100
+
+triggers:
+  - trigger: state
+    entity_id: !input lights
+    id: light
+  - trigger: state
+    entity_id: !input illuminance_sensors
+    id: illuminance
+  - trigger: homeassistant
+    event: start
+    id: all
+  - trigger: event
+    event_type: automation_reloaded
+    id: all
+
+variables:
+  chosen_lights: !input lights
+  chosen_sensors: !input illuminance_sensors
+  send_lights: >-
+    {{ chosen_lights if trigger.id == 'all' else ([trigger.entity_id] if trigger.id == 'light' else []) }}
+  send_sensors: >-
+    {{ chosen_sensors if trigger.id == 'all' else ([trigger.entity_id] if trigger.id == 'illuminance' else []) }}
+
+actions:
+  - repeat:
+      for_each: "{{ send_lights }}"
+      sequence:
+        - action: mqtt.publish
+          data:
+            topic: "photowall/light/{{ repeat.item }}"
+            qos: 1
+            retain: true
+            payload: >-
+              {% set state = states(repeat.item) %}
+              {% if state in ['on', 'off'] %}
+              {% set rgb = state_attr(repeat.item, 'rgb_color') %}
+              {{ {'state': state, 'brightness': state_attr(repeat.item, 'brightness'),
+                  'rgb': (rgb | list) if rgb else none} | to_json }}
+              {% else %}
+              {"state": "unavailable"}
+              {% endif %}
+  - repeat:
+      for_each: "{{ send_sensors }}"
+      sequence:
+        - action: mqtt.publish
+          data:
+            topic: "photowall/illuminance/{{ repeat.item }}"
+            qos: 1
+            retain: true
+            payload: >-
+              {% set lux = states(repeat.item) %}
+              {% if is_number(lux) %}
+              {{ {'lux': lux | float} | to_json }}
+              {% else %}
+              {"state": "unavailable"}
+              {% endif %}

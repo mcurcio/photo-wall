@@ -1,5 +1,6 @@
-"""The LUTs list, the bake and serving, and the LUT choice in the picture session (print look, slice
-C2; design "The LUT"; owner, 2026-10-12: "a LUT is an enhancement", "build it all").
+"""The LUTs list, the bake and serving, and a Frame's paper profile holding its LUT (print look, slice
+C2; design "The LUT"; owner, 2026-10-12: "a LUT is an enhancement", "build it all"); since room light
+(decision 0028) a paper profile is on a Frame's paper, not on the Display.
 
 Fixtures are built in the test from LittleCMS's own sRGB profile (never a real paper profile or a
 private file): the sRGB profile with its device class made 'prtr' is a paper that prints every
@@ -18,24 +19,11 @@ from PIL import ImageCms
 from support.icc_paper import lut_paper
 from test_display_identity import (
     AUTH,
-    NO_SERIAL,
-    SERIAL_DISPLAY,
-    _bind,
-    _frame,
-    _report,
     _sql,
     enroll_pi,
 )
 from test_display_picture_settings import (
-    _begin,
-    _bound,
     _client,
-    _display,
-    _done,
-    _picture,
-    _picture_report,
-    _revert,
-    _view,
 )
 
 from central.displays.lut import (
@@ -225,86 +213,38 @@ def test_a_lut_is_served_to_a_player_by_name_with_its_digest(registry):
             assert (missing.status_code, missing.json()) == (404, {"error": "lut_unknown"})
 
 
-# --- The LUT choice in the picture session ---------------------------------------------------------
+# --- A Frame's paper profile (decision 0028: the LUT picker moved from the Display to the Frame) ---
 
-def _lut_edit(client, session: dict, sha: str | None, expected: int):
-    return client.post(f"/v1/operator/picture-sessions/{session['session_id']}/lut-edits", headers=AUTH,
-                       json={"profile_sha256": sha, "expected_sequence": expected})
+def test_a_frames_paper_profile_holds_its_lut_on_the_list(registry):
+    """(5) A listed profile on a Frame's paper (drafted in its Position trial, then saved) is the
+    LUT's use: the list names the Frame, Remove answers 409 lut_in_use naming it; an unlisted
+    profile is refused 422 trial_lighting_invalid. Mutation probe: `_users_in` reads only saved
+    lighting -> the drafted profile is deleted while its trial is open."""
+    from test_node_calibration import setup_trial
 
-
-def test_the_lut_choice_reaches_the_document_and_done_waits_for_the_pi(registry):
-    """(5) A listed profile -> the draft's and the document's software.lut is LutRef(sha, recipe),
-    the view names it; an unlisted digest 422 unknown_lut; Done waits until the report's
-    presented_change reaches the change; null -> no LUT. Mutation probe: skip the known check -> the
-    unlisted digest is taken."""
     printer = _as_printer(_monitor())
-    player = _bound(registry)
+    setup_trial(registry)
+    frame = "node-f0"
+    name = next(row.name for row in registry.inventory().frames if row.id == frame)
+    trials = f"/v1/operator/frames/{frame}/calibration-trials"
+
+    def lighting(sha: str) -> dict:
+        return {"mat_depth_mm": 0.0, "paper": {"whiteness": 0.9, "ink_density": 2.3,
+                                              "profile": {"profile_sha256": sha, "recipe_id": LUT_RECIPE_ID}},
+                "lights": [{"kind": "wash", "light": "room", "lux": 1000.0, "reference": "dimmer-at-full"}]}
+
     with _client(registry) as client:
         assert _add(client, printer).status_code == 201
-        session = _begin(client)
-        unknown = _lut_edit(client, session, "ab" * 32, 1)
-        assert (unknown.status_code, unknown.json()) == (422, {"error": "unknown_lut"})
-        # The LUT choice is its own question: the numeric software edit does not take it.
-        numeric = client.post(f"/v1/operator/picture-sessions/{session['session_id']}/software-edits",
-                              headers=AUTH, json={"setting": "lut", "value": 1, "expected_sequence": 1})
-        assert (numeric.status_code, numeric.json()) == (422, {"error": "invalid_request"})
-        assert _lut_edit(client, session, _sha(printer), 1).json() == {"sequence": 2}
-        document = _picture(registry)
-        assert document.software.lut == LutRef(_sha(printer), LUT_RECIPE_ID)
-        assert _view(client)["software"]["lut"] == {"profile_sha256": _sha(printer), "name": "sRGB built-in"}
-        stale = _lut_edit(client, session, None, 1)
-        assert (stale.status_code, stale.json()) == (409, {"error": "stale_sequence"})
-        _picture_report(registry, for_change=document.picture_change, presented=None)
-        early = _done(client, session)
-        assert (early.status_code, early.json()) == (409, {"error": "not_presented_yet"})
-        _picture_report(registry, for_change=document.picture_change, presented=document.picture_change)
-        assert _done(client, session).status_code == 204
-        assert _display(registry, player)["software_lut_profile"] == _sha(printer)
-        assert client.get(LUTS, headers=AUTH).json()["luts"][0]["used_by"] == ["MNN"]
-
-        again = _begin(client)
-        assert _lut_edit(client, again, None, 1).json() == {"sequence": 2}
-        assert _picture(registry).software.lut is None
-        assert _view(client)["software"]["lut"] is None
-        _revert(client, again)
-    assert _picture(registry).software.lut == LutRef(_sha(printer), LUT_RECIPE_ID)    # Revert: the stored LUT
-
-
-def test_a_lut_in_use_cannot_be_removed(registry):
-    """(6) A LUT stored on a Display, or chosen in an open session's draft, answers 409 lut_in_use
-    naming the Displays; otherwise 204 and it leaves the list; an unknown one 404. Mutation probe:
-    check the stored Displays only -> the open session's LUT is deleted."""
-    stored, drafted = _as_printer(_monitor()), _reduced_gamut()
-    _bound(registry)
-    with _client(registry) as client:
-        assert _add(client, stored).status_code == 201 and _add(client, drafted).status_code == 201
-        _sql(registry, "UPDATE displays SET software_lut_profile=%s", (_sha(stored),))
-        session = _begin(client)
-        assert _lut_edit(client, session, _sha(drafted), 1).status_code == 200
-        for sha in (_sha(stored), _sha(drafted)):
-            refused = client.delete(f"{LUTS}/{sha}", headers=AUTH)
-            assert (refused.status_code, refused.json()) == (409, {"error": "lut_in_use", "displays": ["MNN"]})
-        _revert(client, session)
-        assert client.delete(f"{LUTS}/{_sha(drafted)}", headers=AUTH).status_code == 204
-        assert [lut["profile_sha256"] for lut in client.get(LUTS, headers=AUTH).json()["luts"]] == [_sha(stored)]
-        gone = client.delete(f"{LUTS}/{_sha(drafted)}", headers=AUTH)
+        unlisted = client.post(trials, headers=AUTH, json={"lighting": lighting("ab" * 32)})
+        assert (unlisted.status_code, unlisted.json()["error"]) == (422, "trial_lighting_invalid")
+        begun = client.post(trials, headers=AUTH, json={"lighting": lighting(_sha(printer))})
+        assert begun.status_code == 200, begun.text
+        assert client.get(LUTS, headers=AUTH).json()["luts"][0]["used_by"] == [name]
+        refused = client.delete(f"{LUTS}/{_sha(printer)}", headers=AUTH)
+        assert (refused.status_code, refused.json()) == (409, {"error": "lut_in_use", "frames": [name]})
+        ended = client.post(f"{trials}/{begun.json()['trial_id']}", headers=AUTH,
+                            json={"operation": "end", "expected_sequence": 1})
+        assert ended.status_code == 200, ended.text
+        assert client.delete(f"{LUTS}/{_sha(printer)}", headers=AUTH).status_code == 204
+        gone = client.delete(f"{LUTS}/{_sha(printer)}", headers=AUTH)
         assert (gone.status_code, gone.json()) == (404, {"error": "lut_unknown"})
-
-
-def test_copy_carries_the_lut_choice(registry):
-    """(7) Mutation probe: `copied` drops the LUT -> the target keeps none."""
-    printer = _as_printer(_monitor())
-    pi_a, pi_b = enroll_pi(registry, "pi-a"), enroll_pi(registry, "pi-b")
-    _bind(registry, _frame(registry, "a"), pi_a, "HDMI-A-1")
-    _bind(registry, _frame(registry, "b"), pi_b, "HDMI-A-1")
-    _report(registry, "pi-a", "HDMI-A-1", SERIAL_DISPLAY)
-    _report(registry, "pi-b", "HDMI-A-1", NO_SERIAL)
-    with _client(registry) as client:
-        assert _add(client, printer).status_code == 201
-        _sql(registry, "UPDATE displays SET software_lut_profile=%s, software_lut_amount_percent=60 "
-                       "WHERE serial IS NOT NULL", (_sha(printer),))
-        copied = client.post("/v1/operator/frames/a/picture-copies", headers=AUTH, json={"to_frames": ["b"]})
-        assert copied.json() == [{"frame_id": "b", "outcome": "copied", "hardware_skipped": []}]
-    target = _display(registry, pi_b)
-    assert (target["software_lut_profile"], target["software_lut_amount_percent"]) == (_sha(printer), 60)
-    assert _picture(registry, "pi-b").software.lut == LutRef(_sha(printer), LUT_RECIPE_ID)

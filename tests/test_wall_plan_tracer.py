@@ -24,7 +24,7 @@ from support.house_time import UTC_HOUSE
 from support.key_content_builders import face, measured
 from support.measured_photos import measure
 from support.photo_pools import photo, seed_pool
-from support.position import save_position
+from support.position import LIGHTING, save_position
 from test_media_worker import FakeFaces, _grey_jpeg, worker, worker_storage  # noqa: F401
 from test_planner_wall_assignment import FrameSetup, assert_never_on_two_frames, layers
 from test_registry import enroll
@@ -47,7 +47,6 @@ from contracts.models import (
     CornersFit,
     CoverFit,
     FrameProfile,
-    Mat,
     Observation,
     OutputBinding,
     Variant,
@@ -100,7 +99,7 @@ def an_hour(instance: Runtime, photos, *, frames=FRAMES, outputs=None) -> Projec
         instance, 0,
         bindings_by_player={"player": tuple(
             OutputBinding(output_id=f"out-{frame}", frame_id=frame, generation=1,
-                          profile=PROFILES[frame], mat=Mat()) for frame in frames)},
+                          profile=PROFILES[frame], lighting=LIGHTING) for frame in frames)},
         lines=PoolLines({POOL: SourcePool(source_ref=POOL, ready=True,
                                           candidates=tuple(photos.values()))}),
         authored_candidates={}, locked_assignments={}, history=WallHistory(),

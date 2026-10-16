@@ -14,6 +14,7 @@ from psycopg.types.json import Jsonb
 from support.house_time import UTC_HOUSE
 from support.key_content_builders import key_content
 from support.photo_pools import library_of, photo, seed_pool
+from support.position import LIGHTING
 from test_planner_pool_reads import CountingLines
 
 from central.db import ProcessTransactionClock
@@ -26,7 +27,7 @@ from central.wall_plan.fit_settings import FitSettings
 from central.wall_plan.key_content import ANALYSIS_VERSION
 from central.wall_plan.order import WallHistory
 from central.wall_plan.selection import SceneSelection
-from contracts.models import FrameProfile, Mat, OutputBinding
+from contracts.models import FrameProfile, OutputBinding
 
 PHOTOS = 50_000
 STEP = 1_000
@@ -62,7 +63,7 @@ def test_a_pass_over_fifty_thousand_photos_reads_only_the_top_of_its_line(regist
                             for n in range(FRAMES))))
     runtime.activate("scene", "run", 0)
     bindings = {"player": tuple(OutputBinding(output_id=f"out-{n}", frame_id=f"f{n}",
-                                              generation=1, profile=WIDE, mat=Mat())
+                                              generation=1, profile=WIDE, lighting=LIGHTING)
                                 for n in range(FRAMES))}
 
     def one_pass():

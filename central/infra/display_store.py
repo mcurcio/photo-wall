@@ -70,7 +70,6 @@ from psycopg.types.json import Jsonb
 from central.content_catalog.catalog import device_id_for_serial
 from central.db import Database, DatabaseTransactionClock, TransactionClock
 from central.displays.hardware import HardwareRow, hardware_rows, kept_report, offered_for
-from central.displays.lut import LUT_RECIPE_ID
 from central.displays.model import (
     DEFAULT_SETTINGS,
     TEST_SECONDS,
@@ -97,7 +96,7 @@ from central.displays.picture import (
     copied,
     default_picture,
     edited_hardware,
-    edited_lut,
+    edited_light,
     edited_signal_range,
     edited_software,
     edited_test_pattern,
@@ -141,7 +140,7 @@ from central.displays.views import (
     HardwareRangeView,
     HardwareResultView,
     HardwareSettingView,
-    LutEdit,
+    LightEdit,
     ModeView,
     OfferedView,
     PictureCopyRequest,
@@ -158,12 +157,12 @@ from central.displays.views import (
     TestPatternEdit,
     TestPatternView,
     in_force_view,
+    light_view,
     software_view,
 )
 from central.fleet.node_bus_presence import bus_links_in
 from central.house_time.calculator import day_start, house_date
 from central.infra.house_store import house_time_in
-from central.infra.lut_rows import lut_known_in, lut_name_in
 from central.infra.node_link_store import PgLinkStores
 from central.infra.output_wakes import OUTPUT_DOCUMENTS_CHANNEL, notify_nodes_in
 from central.infra.picture_columns import (
@@ -183,7 +182,6 @@ from central.infra.power_store import power_policy_in
 from central.installation_models import FrameOutput
 from central.live_session import Lease, begin_lease
 from central.power.timetable import frame_timetable, unbound_timetable
-from contracts.lut import LutRef
 from contracts.models import Calibration, FrameProfile, frame_output
 from contracts.node_link import Pipe
 from contracts.node_output import (
@@ -204,6 +202,7 @@ from contracts.node_output import (
 from contracts.node_picture import (
     PICTURE_LIST,
     TEST_PATTERN_SECONDS,
+    DisplayLight,
     HardwareSetting,
     PictureDocument,
     PictureReport,
@@ -385,10 +384,11 @@ def _display_for(conn: Any, key: DisplayKey, identity: DisplayIdentity, modes: t
     select = f"SELECT id FROM displays WHERE maker=%s AND product=%s AND {where}=%s"   # noqa: S608 (a column name)
     row = conn.execute(select, (key.maker, key.product, value)).fetchone()
     if row is None:
-        conn.execute("INSERT INTO displays(id, maker, product, name, serial, frame_id, modes, first_seen_at) "
-                     "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING",
+        light = default_picture().light   # a new Display's light: the placeholder until the paper match
+        conn.execute("INSERT INTO displays(id, maker, product, name, serial, frame_id, modes, first_seen_at, "
+                     "matched_lux, panel_black) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING",
                      (uuid.uuid4(), key.maker, key.product, identity.name, key.serial, key.frame_id,
-                      _modes_json(modes), now))
+                      _modes_json(modes), now, light.matched_lux, light.black))
         row = conn.execute(select, (key.maker, key.product, value)).fetchone()
     elif modes:
         conn.execute("UPDATE displays SET modes=%s WHERE id=%s", (_modes_json(modes), row["id"]))
@@ -495,16 +495,6 @@ def _test_pattern_ask(row: Mapping[str, Any]) -> TestPatternAsk | None:
     """The session's test pattern ask of a row selected with `_SESSION_COLUMNS` (None: off)."""
     pattern = row["session_test_pattern"]
     return None if pattern is None else TestPatternAsk(TestPattern(pattern), row["session_test_pattern_ask"])
-
-
-def live_drafts_in(conn: Any, now: float) -> dict[UUID, DisplayPicture]:
-    """The draft of each Display whose picture session is live at `now` (its lease's rule,
-    central/live_session.py `Lease.live`), by Display id: the one read of what an open session has
-    in force, for rules outside the session (the LUTs list's "in use")."""
-    rows = conn.execute(f"SELECT {_SESSION_COLUMNS} FROM picture_sessions ps").fetchall()  # noqa: S608
-    sessions = (picture_session(row) for row in rows)
-    return {session.display_id: session.draft for session in sessions
-            if session is not None and session.lease.live(now)}
 
 
 def record_picture_report(conn: Any, player_id: str, report: PictureReport, now: float) -> None:
@@ -1128,8 +1118,6 @@ class PgPictureSessions:
             now = _CLOCK.now_in(conn)
             session = picture_session(row)
             picture = default_picture() if row["d_id"] is None else kept_picture(stored_picture(row), session, now)
-            lut = picture.software.lut
-            lut_name = None if lut is None else lut_name_in(conn, lut.profile_sha256)
         document, report = _stored_picture_document(row), _stored_picture_report(row)
         offered = _offered(row)
         answered = report is not None and hardware_answered(picture.hardware, document, report)
@@ -1146,7 +1134,7 @@ class PgPictureSessions:
             hardware=tuple(_hardware_view(hardware) for hardware in hardware_rows(
                 picture.hardware, offered, report.results if answered and report is not None else None,
                 connected=row["connected"] is True)),
-            software=software_view(picture.software, lut_name),
+            software=software_view(picture.software), light=light_view(picture.light),
             signal_range=picture.signal_range, signal=signal,
             test_pattern=None if ask is None else TestPatternView(
                 pattern=ask.pattern, state=test_pattern_state(ask, document, report)),
@@ -1194,15 +1182,12 @@ class PgPictureSessions:
             self._write_session_in(conn, changed)
         return PictureSequence(sequence=changed.sequence)
 
-    def edit_lut(self, session_id: UUID, edit: LutEdit) -> PictureSequence:
-        """The LUT choice, live on the Display: a listed paper profile's LUT under the current
-        recipe, or none. unknown_session, session_ended, stale_sequence, unknown_lut."""
+    def edit_light(self, session_id: UUID, edit: LightEdit) -> PictureSequence:
+        """The Display's light, live on the Display. unknown_session, session_ended, stale_sequence."""
         with self._db.transaction() as conn:
             _row, session, now = self._session_in(conn, session_id)
-            sha = edit.profile_sha256
-            changed = edited_lut(session, None if sha is None else LutRef(sha, LUT_RECIPE_ID),
-                                 known=sha is None or lut_known_in(conn, sha),
-                                 expected_sequence=edit.expected_sequence, now=now)
+            changed = edited_light(session, DisplayLight(matched_lux=edit.matched_lux, black=edit.black),
+                                   expected_sequence=edit.expected_sequence, now=now)
             self._write_session_in(conn, changed)
         return PictureSequence(sequence=changed.sequence)
 
@@ -1249,22 +1234,20 @@ class PgPictureSessions:
 
     def restore_picture(self, session_id: UUID, request: PictureRestore) -> PictureRestoreResult:
         """`PictureCommands.restore_picture`: the entry through picture_history_store
-        `picture_entry_in`, the rule `picture.restored` (offered: `_offered(row)`; lut_listed:
-        `lut_known_in`), the session written as an edit's (`_write_session_in`, with
+        `picture_entry_in`, the rule `picture.restored` (offered: `_offered(row)`; light_recorded:
+        the entry's), the session written as an edit's (`_write_session_in`, with
         `restored_from`)."""
         with self._db.transaction() as conn:
             row, session, now = self._session_in(conn, session_id)
             entry = picture_entry_in(conn, request.entry_id)
             if entry is None:
                 raise DisplayRefused("unknown_entry", 404)
-            lut = entry.record.picture.software.lut
             result = restored(session, entry_id=entry.entry_id, entry_display_id=entry.display_id,
-                              picture=entry.record.picture, offered=_offered(row),
-                              lut_listed=lut is None or lut_known_in(conn, lut.profile_sha256),
-                              expected_sequence=request.expected_sequence, now=now)
+                              picture=entry.record.picture, light_recorded=entry.record.light_recorded,
+                              offered=_offered(row), expected_sequence=request.expected_sequence, now=now)
             self._write_session_in(conn, result.session)
         return PictureRestoreResult(sequence=result.session.sequence, hardware_skipped=result.hardware_skipped,
-                                    lut_skipped=result.lut_skipped, lut_recipe_changed=result.lut_recipe_changed)
+                                    light_kept=result.light_kept)
 
     def copy_picture(self, frame_id: str, request: PictureCopyRequest) -> tuple[PictureCopyResult, ...]:
         with self._db.transaction() as conn:
@@ -1365,6 +1348,6 @@ def _session_view(session: PictureSession) -> PictureSessionView:
 __all__ = ["DOCUMENT_STREAM", "OUTPUT_DOCUMENTS_CHANNEL", "POSITION_COLUMNS", "POSITION_FACTS", "REPORT_STREAM", "SEEN_DISPLAY_JOIN",
            "DisplayDocuments", "DisplayWakes", "FramePowerFacts", "OutputReportJudge", "PgDisplayCommands", "PgDisplayQueries",
            "PgPictureSessions",
-           "commit_position", "frame_position", "frame_readiness", "frame_readiness_in", "live_drafts_in",
+           "commit_position", "frame_position", "frame_readiness", "frame_readiness_in",
            "output_documents",
            "power_facts_in", "record_picture_report", "record_report", "resolve_output", "write_picture"]

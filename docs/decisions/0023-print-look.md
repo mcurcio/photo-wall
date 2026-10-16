@@ -1,5 +1,7 @@
 # 0023 — The print look: photos that read as prints behind glass
 
+**Superseded in part by [0028](0028-room-light.md) (2026-10-15):** Saturation, Soft highlights, Black floor and the Display's LUT are gone (the Frame's paper replaces them); the Frame's Mat becomes its lighting; "relighting: not planned" is replaced by room light.
+
 **Date:** 2026-10-12 · **Layer:** system (what the Display's Photo Wall (software) picture group holds, what a Frame's binding carries, the Player's final pass, and where a LUT comes from) · **Status:** accepted design, built on the branch `feat/print-look` (one pull request, after [#94](https://github.com/mcurcio/photo-wall/pull/94)). **Decision owner:** the owner, in chat on 2026-10-12 (his words below). Everything not quoted from him is a design choice he may reopen, not his ruling.
 
 **Builds on:** [0022](0022-picture-hardware-and-software-apart.md) (the Display's two picture groups). It fixes 0022's cost "brightness above 100 % clips" with the highlight rolloff.

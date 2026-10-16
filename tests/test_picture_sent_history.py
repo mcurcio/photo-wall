@@ -76,16 +76,16 @@ def test_each_edit_of_a_live_session_is_a_sent_draft_entry(registry):
         first = _picture(registry)                                   # the Display newly seen: its kept values
         session = _begin(client)
         assert _picture(registry) == first                           # beginning sends nothing new
-        _software(client, session, "brightness", 90, 1)
+        _software(client, session, "contrast", 90, 1)
         assert _picture(registry).picture_change == 2
-        _software(client, session, "brightness", 100, 2)            # back to the stored value, still a draft
+        _software(client, session, "contrast", 100, 2)            # back to the stored value, still a draft
         assert _picture(registry).picture_change == 3
     sid = session["session_id"]
     assert _kinds(registry) == [(1, "sent-kept", None, None), (2, "sent-draft", sid, None),
                                 (3, "sent-draft", sid, None)]
     rows = _sent_rows(registry)
     assert {(row["display_id"], row["frame_id"], row["player_id"]) for row in rows} == {(display_id, "kitchen", player)}
-    assert [row["picture"]["software_brightness_percent"] for row in rows] == [100, 90, 100]
+    assert [row["picture"]["software_contrast_percent"] for row in rows] == [100, 90, 100]
 
 
 def test_the_test_pattern_rides_sent_drafts_and_done_sends_the_kept_values(registry):
@@ -127,7 +127,7 @@ def test_revert_sends_the_wall_back_with_the_displays_own_value(registry):
     assert dict(back.hardware) == {"10": 60}
     assert _kinds(registry)[-1] == (3, "sent-back", session["session_id"], None)
     last = _sent_rows(registry)[-1]
-    assert (last["picture"]["hardware_picture"], last["picture"]["software_brightness_percent"]) == ({"10": 60}, 100)
+    assert (last["picture"]["hardware_picture"], last["picture"]["software_contrast_percent"]) == ({"10": 60}, 100)
 
 
 def test_a_lapsed_session_is_a_back_entry_on_time(registry):
@@ -139,7 +139,7 @@ def test_a_lapsed_session_is_a_back_entry_on_time(registry):
     with _client(registry) as client:
         _picture(registry)
         session = _begin(client)
-        _software(client, session, "brightness", 90, 1)
+        _software(client, session, "contrast", 90, 1)
         _picture(registry)
     [lease] = _sql(registry, "SELECT idle_until FROM picture_sessions")
     with registry.db.transaction() as conn:
@@ -147,7 +147,7 @@ def test_a_lapsed_session_is_a_back_entry_on_time(registry):
         assert _until_next_deadline(conn, device_id, now) <= lease["idle_until"] - now
         output_documents(conn, device_id, lease["idle_until"] + 1)
     assert _kinds(registry)[-1] == (3, "sent-back", session["session_id"], None)
-    assert _sent_rows(registry)[-1]["picture"]["software_brightness_percent"] == 100
+    assert _sent_rows(registry)[-1]["picture"]["software_contrast_percent"] == 100
 
 
 def test_one_entry_per_picture_change(registry):
@@ -185,14 +185,14 @@ def test_copy_onto_a_seen_display_is_sent_as_its_kept_values(registry):
     _bind(registry, _frame(registry, "b"), pi_b, "HDMI-A-1")
     _report(registry, "pi-a", "HDMI-A-1", SERIAL_DISPLAY)
     _report(registry, "pi-b", "HDMI-A-1", NO_SERIAL)
-    _sql(registry, "UPDATE displays SET software_brightness_percent=130 WHERE serial IS NOT NULL")
+    _sql(registry, "UPDATE displays SET software_contrast_percent=130 WHERE serial IS NOT NULL")
     _picture(registry, "pi-b")
     with _client(registry) as client:
         assert client.post("/v1/operator/frames/a/picture-copies", headers=AUTH,
                            json={"to_frames": ["b"]}).json()[0]["outcome"] == "copied"
     _picture(registry, "pi-b")
     rows = _sql(registry, "SELECT * FROM picture_sent_entries WHERE player_id=%s ORDER BY picture_change", (pi_b,))
-    assert [(row["picture_change"], row["kind"], row["frame_id"], row["picture"]["software_brightness_percent"])
+    assert [(row["picture_change"], row["kind"], row["frame_id"], row["picture"]["software_contrast_percent"])
             for row in rows] == [(1, "sent-kept", "b", 100), (2, "sent-kept", "b", 130)]
 
 
@@ -226,7 +226,7 @@ def test_a_port_keeps_its_newest_sent_entries(registry, monkeypatch):
         _picture(registry)
         session = _begin(client)
         for sequence, brightness in enumerate((91, 92, 93, 94, 95), start=1):
-            _software(client, session, "brightness", brightness, sequence)
+            _software(client, session, "contrast", brightness, sequence)
             _picture(registry)
-    assert [(row["picture_change"], row["picture"]["software_brightness_percent"]) for row in _sent_rows(registry)] == [
+    assert [(row["picture_change"], row["picture"]["software_contrast_percent"]) for row in _sent_rows(registry)] == [
         (4, 93), (5, 94), (6, 95)]

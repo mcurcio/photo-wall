@@ -7,16 +7,20 @@ crosses the same CAS: the same writes, the same readiness, the same refusals.
 """
 from __future__ import annotations
 
+from central.fleet.position_history import DEFAULT_POSITION
 from central.transaction_locks import acquire_runtime_locks
-from contracts.models import Calibration, CornersFit, Mat
+from contracts.frame_lighting import FrameLighting
+from contracts.models import Calibration, CornersFit
 
 # Corners on the whole output: a Save that needs no reported output size (Cover's profile does).
 FULL_SCREEN_CORNERS = Calibration(fit=CornersFit())
+# A new Frame's lighting (decision 0028): one wash of the fixed room light "room", paper matching the panel.
+LIGHTING: FrameLighting = DEFAULT_POSITION.lighting
 
 
 def save_position(registry, frame_id: str, calibration: Calibration | None = None, *,
-                  expected_revision: int | None = None, mat: Mat = Mat()) -> Calibration:
-    """Commit `calibration` (default: Corners on the whole output) and `mat` (default: no shadow)
+                  expected_revision: int | None = None, lighting: FrameLighting = LIGHTING) -> Calibration:
+    """Commit `calibration` (default: Corners on the whole output) and `lighting` (default: a new Frame's)
     as the bound Frame's Position,
     against its current binding, generation and configuration, and the calibration revision the
     draft was made from (`expected_revision`; default the saved one). RegistryError as Save's."""
@@ -33,5 +37,5 @@ def save_position(registry, frame_id: str, calibration: Calibration | None = Non
             config_revision=row["configuration_revision"],
             calibration_revision=(Calibration.model_validate(row["calibration"]).revision
                                   if expected_revision is None else expected_revision),
-            calibration=FULL_SCREEN_CORNERS if calibration is None else calibration, mat=mat,
+            calibration=FULL_SCREEN_CORNERS if calibration is None else calibration, lighting=lighting,
             session_id=None, restored_from=None)

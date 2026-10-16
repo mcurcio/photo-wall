@@ -9,9 +9,6 @@ paper), carried and hashed beside the calibration, so a presented trial proves b
 writes both; the console edits a Frame's lights live on the wall this way. The envelope's cap
 (MAX_TRIAL_BYTES) is the display host's C buffers' (appliance/display_host/native), so a draft
 whose envelope would pass it is refused before it is sent (`encode_trial`).
-
-TRANSIT: until the central and pi lanes switch, `lighting_json` may still carry a print-look Mat's
-JSON (NO_MAT_JSON); the central lane deletes NO_MAT_JSON.
 """
 
 from __future__ import annotations
@@ -28,7 +25,6 @@ from contracts.strict_json import loads_object
 MAX_TRIAL_BYTES = 4096
 MAX_CALIBRATION_BYTES = 2048
 MAX_LIGHTING_BYTES = 1536                       # FRAME_LIGHTS_MAX lights at their longest fit
-NO_MAT_JSON = '{"depth_mm":0.0,"lights":[]}'   # canonical(contracts.models.Mat().model_dump(mode="json"))
 
 
 def canonical(value) -> str:
@@ -62,9 +58,9 @@ class TrialCandidate:
         value = loads_object(self.calibration_json.encode(), max_bytes=MAX_CALIBRATION_BYTES)
         if value is None or canonical(value) != self.calibration_json:
             raise ValueError("trial_calibration_not_canonical")
-        mat = (loads_object(self.lighting_json.encode(), max_bytes=MAX_LIGHTING_BYTES)
-               if isinstance(self.lighting_json, str) else None)
-        if mat is None or canonical(mat) != self.lighting_json:
+        lighting = (loads_object(self.lighting_json.encode(), max_bytes=MAX_LIGHTING_BYTES)
+                    if isinstance(self.lighting_json, str) else None)
+        if lighting is None or canonical(lighting) != self.lighting_json:
             raise ValueError("trial_lighting_not_canonical")
         if self.candidate_sha256 != candidate_hash(
             self.trial_id, self.generation, self.sequence, self.baseline, self.calibration_json,

@@ -22,10 +22,12 @@ from central.assets.maintenance import CacheSettings, MediaCacheBudget
 from central.assets.store import CacheStore
 from central.content_wiring import build_job_runtime
 from central.db import Database, DatabaseTransactionClock
+from central.infra.home_assistant import HomeAssistantLink, build_home_assistant_link
 from central.infra.house_store import seed_house
 from central.infra.key_content_store import PgKeyContent
 from central.infra.media_cache_records import PgMediaVariantUse
 from central.infra.photo_library_store import PgPhotoLibrary
+from central.infra.room_light_store import PgRoomLights
 from central.infra.runtime import (
     COMPLETION_NOT_RECORDED,
     WORKER_EXITED,
@@ -270,9 +272,9 @@ async def _media_loop(worker: MediaWorker, run_queue: Callable[[], Awaitable[Non
 
 
 async def _run_workers(media: Awaitable[None], runtime: JobRuntime,
-                       bus: NodeBus | None = None) -> None:
+                       bus: NodeBus | None = None, link: HomeAssistantLink | None = None) -> None:
     """The legacy media loop, the job runtime and, with a hub deployed, the Node bus side by side,
-    under ONE signal handler.
+    and with a broker configured the Home Assistant link (decision 0028), under ONE signal handler.
 
     SIGTERM/SIGINT stops each gracefully (running jobs finish), then `_entry` returns and the
     process exits 0. None installs its own handlers. A loop that fails, or ends without being
@@ -291,6 +293,8 @@ async def _run_workers(media: Awaitable[None], runtime: JobRuntime,
             group.create_task(until_stopped(runtime.run(), stopped), name="worker jobs")
             if bus is not None:
                 group.create_task(until_stopped(bus.run(bus_stop), stopped), name="worker node bus")
+            if link is not None:
+                group.create_task(until_stopped(link.run(bus_stop), stopped), name="worker home assistant link")
 
             def stop() -> None:
                 nonlocal stopping
@@ -360,11 +364,16 @@ async def _entry():
         library, lambda secret: ImmichClient.for_connection(secret, clock=clock), clock,
         queue=ProcrastinateCheckQueue(app))
     additional_context = {"media_worker": worker, "library_checks": checks}
+    bus = build_node_bus(dsn, os.environ)
+    room_lights = PgRoomLights(db)
+    link = build_home_assistant_link(os.environ, room_lights,
+                                     (lambda: None) if bus is None else bus.room_lights.wake)
+    if link is None:
+        await _blocking(room_lights.record_link, "not-configured")
     try:
         async with app.open_async():
             await _run_workers(_media_loop(worker, lambda: _media_queue(app, additional_context)),
-                               runtime,
-                               build_node_bus(dsn, os.environ))
+                               runtime, bus, link)
     finally:
         await worker._close_clients()
         await checks.close()

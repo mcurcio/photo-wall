@@ -41,7 +41,7 @@ def before_092(registry) -> None:
                    "ADD COLUMN before_contrast INTEGER NULL CHECK (before_contrast BETWEEN 0 AND 100), "
                    "ADD COLUMN touched TEXT[] NOT NULL DEFAULT '{}'")
     _sql(registry, "ALTER TABLE displays DROP COLUMN hardware_picture, DROP COLUMN hardware_restore, "
-                   "DROP COLUMN software_brightness_percent, "
+                   "DROP COLUMN IF EXISTS software_brightness_percent, "
                    "DROP COLUMN software_contrast_percent, "
                    "ADD COLUMN brightness_acts_on TEXT NULL CHECK (brightness_acts_on IN ('display', 'picture-adjustment')), "
                    "ADD COLUMN brightness INTEGER NULL CHECK (brightness BETWEEN 0 AND 100), "

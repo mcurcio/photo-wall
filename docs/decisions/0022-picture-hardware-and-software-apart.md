@@ -1,5 +1,7 @@
 # 0022 — Picture settings: the display's own and Photo Wall's, each on its own
 
+**Superseded in part by [0028](0028-room-light.md) (2026-10-15):** the software group loses Brightness; the Display gains its light (matched lux, panel black).
+
 **Date:** 2026-10-12 · **Layer:** system (what the Picture tab offers, what crosses the wire to a Pi for picture, and how a display's own settings are found) · **Status:** accepted design, being built on the branch `feat/picture-hardware-and-software` (one pull request, after [#86](https://github.com/mcurcio/photo-wall/pull/86)). **Decision owner:** the owner, in chat on 2026-10-12 (his words below). Everything not quoted from him is a design choice he may reopen, not his ruling.
 
 **Supersedes:** roadmap 1c's rule "each setting acts in exactly one place" (brightness and contrast placed on the display or as Photo Wall picture adjustment at the display's first report, and only there), and the part of [0019](0019-first-principles-console.md) decision 4 that reads "brightness and contrast through DDC/CI, Photo Wall picture adjustment otherwise". 0019's "software gain is never called measured panel brightness" stands.

@@ -13,7 +13,7 @@ from central.displays.views import (
     FramePictureView,
     FramePowerView,
     HardwareEdit,
-    LutEdit,
+    LightEdit,
     PictureCopyRequest,
     PictureCopyResult,
     PictureRestore,
@@ -96,9 +96,9 @@ class PictureCommands(Protocol):
         out_of_range."""
         ...
 
-    def edit_lut(self, session_id: UUID, edit: LutEdit) -> PictureSequence:
-        """The LUT choice, live on the Display: a listed paper profile's LUT under the current
-        recipe, or none. unknown_session, session_ended, stale_sequence, unknown_lut."""
+    def edit_light(self, session_id: UUID, edit: LightEdit) -> PictureSequence:
+        """The Display's light (decision 0028), live on the Display: kept by Done, put back by
+        Revert. unknown_session, session_ended, stale_sequence."""
         ...
 
     def edit_signal_range(self, session_id: UUID, edit: SignalRangeEdit) -> PictureSequence:

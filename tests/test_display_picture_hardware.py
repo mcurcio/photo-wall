@@ -96,8 +96,8 @@ def test_copy_skips_every_hardware_code_when_either_list_is_unknown_or_the_kinds
 
 
 def test_copy_carries_all_software_and_leaves_the_targets_other_hardware_values():
-    source = DisplayPicture({"10": 46, "14": 5}, SoftwarePicture(brightness_percent=114, contrast_percent=90, colour_temperature_kelvin=5000, gamma_tenths=24), AUTO)
-    target = DisplayPicture({"12": 30, "14": 4}, NEUTRAL_SOFTWARE, AUTO)
+    source = DisplayPicture({"10": 46, "14": 5}, SoftwarePicture(contrast_percent=90, colour_temperature_kelvin=5000, gamma_tenths=24), AUTO, UPGRADE_DISPLAY_LIGHT)
+    target = DisplayPicture({"12": 30, "14": 4}, NEUTRAL_SOFTWARE, AUTO, UPGRADE_DISPLAY_LIGHT)
     result, skipped = copied(source, target, source_offered=(_level("10", 100), _choices("14", (5, "6500 K"))),
                              target_offered=(_level("10", 255), _choices("14", (4, "x"), (5, "sRGB"))))
     assert dict(result.hardware) == {"10": 117, "12": 30, "14": 4} and list(result.hardware) == ["10", "12", "14"]
@@ -120,7 +120,7 @@ def test_a_report_that_does_not_know_the_list_yet_keeps_the_known_list_of_the_sa
 
 
 def _session(began_at_change: int, befores: dict | None = None) -> PictureSession:
-    return PictureSession(uuid4(), uuid4(), 1, DisplayPicture({}, NEUTRAL_SOFTWARE, AUTO), began_at_change,
+    return PictureSession(uuid4(), uuid4(), 1, DisplayPicture({}, NEUTRAL_SOFTWARE, AUTO, UPGRADE_DISPLAY_LIGHT), began_at_change,
                           befores or {}, frozenset({"10"}), frozenset(), Lease(10.0, None), None, None)
 
 
@@ -192,7 +192,7 @@ def test_a_rows_result_waits_for_the_report_on_the_document_that_carries_the_har
     comparison -> a draft not projected yet reads change 8's result."""
     report = _report(HERE, None, for_change=8)
     assert hardware_answered({"10": 46}, _document(8, {"10": 46}), report)
-    assert hardware_answered({"10": 46}, _document(8, {"10": 46}, SoftwarePicture(brightness_percent=50, contrast_percent=100, colour_temperature_kelvin=6500, gamma_tenths=22)), report)
+    assert hardware_answered({"10": 46}, _document(8, {"10": 46}, SoftwarePicture(contrast_percent=50, colour_temperature_kelvin=6500, gamma_tenths=22)), report)
     assert not hardware_answered({"10": 50}, _document(8, {"10": 46}), report)   # the edit is not projected yet
     assert not hardware_answered({"10": 46}, _document(9, {"10": 46}), report)
 
@@ -203,13 +203,13 @@ def test_revert_is_a_one_time_instruction_never_a_stored_value():
     rides the document beside the values in force (`with_restore`, in force wins) until the Pi
     answers a document that carries it. Mutation probes: `restore_answered` ignores the document's
     hardware -> an older document clears it; `with_restore` lets the instruction win -> 46 is lost."""
-    stored = DisplayPicture({}, NEUTRAL_SOFTWARE, AUTO)
+    stored = DisplayPicture({}, NEUTRAL_SOFTWARE, AUTO, UPGRADE_DISPLAY_LIGHT)
     ended = _session(3, {"10": 60})                                           # lease ended at 10.0
     assert restore_of(stored, ended) == {"10": 60}
-    assert restore_of(DisplayPicture({"10": 46}, NEUTRAL_SOFTWARE, AUTO), ended) == {}   # stored: nothing to put back
+    assert restore_of(DisplayPicture({"10": 46}, NEUTRAL_SOFTWARE, AUTO, UPGRADE_DISPLAY_LIGHT), ended) == {}   # stored: nothing to put back
     assert dict(kept_picture(stored, ended, 11.0).hardware) == {}             # the tab: as the display has it
     assert dict(with_restore(stored, {"10": 60}).hardware) == {"10": 60}
-    set_here = DisplayPicture({"10": 46}, NEUTRAL_SOFTWARE, AUTO)
+    set_here = DisplayPicture({"10": 46}, NEUTRAL_SOFTWARE, AUTO, UPGRADE_DISPLAY_LIGHT)
     assert dict(with_restore(set_here, {"10": 60}).hardware) == {"10": 46}
     answered = _report(HERE, None, for_change=9)
     assert restore_answered({"10": 60}, stored, _document(9, {"10": 60}), answered)

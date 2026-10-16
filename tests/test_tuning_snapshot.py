@@ -74,7 +74,7 @@ def test_the_tracer_a_picture_edit_and_a_position_edit_read_back_by_time(registr
     display = _see_display(registry)
     pictures = PgPictureSessions(registry.db)
     session = pictures.begin_picture("node-f0")
-    pictures.edit_software(session.session_id, SoftwareEdit(setting="brightness", value=114, expected_sequence=1))
+    pictures.edit_software(session.session_id, SoftwareEdit(setting="contrast", value=114, expected_sequence=1))
     _project(registry)
     between = _now(registry)
     node.edit(node.begin(), SKEWED)
@@ -84,7 +84,7 @@ def test_the_tracer_a_picture_edit_and_a_position_edit_read_back_by_time(registr
     both = _read(registry, after_both)
     assert (both["frame"]["id"], both["position"]["kind"], both["picture"]["kind"]) == (
         "node-f0", "sent-draft", "sent-draft")
-    assert both["picture"]["picture"]["software"]["brightness_percent"] == 114
+    assert both["picture"]["picture"]["software"]["contrast_percent"] == 114
     assert both["picture"]["display"]["id"] == str(display) and both["picture"]["frame"]["id"] == "node-f0"
     assert UUID(both["picture"]["session_id"]) == session.session_id
     assert both["position"]["fit"]["corners"] == [list(corner) for corner in SKEWED.corners]

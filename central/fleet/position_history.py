@@ -1,6 +1,7 @@
 """A Frame's Position history, pure (configuration snapshots; owner, 2026-10-13: "configuration
 snapshots" that keep "a history of what has been done in the past", scope "Everything per
-Display+Frame"; migration 096): the Frame fit (mode, corners, rotation), the mat and its lights.
+Display+Frame"; migration 096): the Frame fit (mode, corners, rotation) and the Frame's lighting
+(decision 0028: its lights, mat depth and paper; migration 098 replaced the mat).
 
 One numbering per Frame, in commit order under the Frame's row lock, for two kinds of entry, each
 written where its state converges and never by an editor:
@@ -16,7 +17,7 @@ written where its state converges and never by an editor:
 Each entry says what it was made for (`MadeFor`: the profile its corners are in and the Display seen
 on the Frame's port), which is what Restore checks (`restore_refusal`): a Position made for another
 profile or another Display is refused, never adapted. An entry is a record of what was, never a
-second source of current state (frames.calibration and frames.mat stay the truth). Every `at` is
+second source of current state (frames.calibration and frames.lighting stay the truth). Every `at` is
 PostgreSQL's clock at the append.
 """
 from __future__ import annotations
@@ -27,13 +28,16 @@ from enum import StrEnum
 from typing import Final
 from uuid import UUID
 
-from contracts.models import Calibration, CornersFit, CoverFit, Mat
+from central.room_light.policy import upgrade_lighting
+from contracts.frame_lighting import FrameLighting
+from contracts.models import Calibration, CornersFit, CoverFit
+from contracts.node_picture import UPGRADE_DISPLAY_LIGHT
 
 
 class PositionEntryKind(StrEnum):
     """Why an entry was written (the stored `kind`)."""
     KEPT_SAVED = "kept-saved"                       # Done (Save) kept a trial's draft
-    KEPT_PROFILE_CHANGED = "kept-profile-changed"   # the Frame's profile changed; its fit and mat are as they were
+    KEPT_PROFILE_CHANGED = "kept-profile-changed"   # the Frame's profile changed; its fit and lighting are as they were
     KEPT_UNRECORDED = "kept-unrecorded"             # the stored values differed from the newest kept entry when a
                                                     # kept write came: changed outside Photo Wall before `at`
     SENT_DRAFT = "sent-draft"                       # a trial's draft handed to the Node: not kept
@@ -47,13 +51,16 @@ SENT_KINDS: Final = frozenset({PositionEntryKind.SENT_DRAFT, PositionEntryKind.S
 
 @dataclass(frozen=True)
 class PositionValues:
-    """What a Position entry records: the Frame fit and the mat with its lights (the calibration's
+    """What a Position entry records: the Frame fit and the Frame's lighting (the calibration's
     revision is not a value: it only orders saves)."""
     fit: CornersFit | CoverFit
-    mat: Mat
+    lighting: FrameLighting
 
 
-DEFAULT_POSITION: Final = PositionValues(CoverFit(), Mat())   # a new Frame's (contracts.models defaults)
+# A new Frame's: the cover fit, and the lighting an upgraded Frame with no mat depth has (one wash of
+# the fixed room light "room" at the placeholder Display's matched lux, paper matching the panel), so a
+# new Frame shows what an upgraded one shows until its lighting is set.
+DEFAULT_POSITION: Final = PositionValues(CoverFit(), upgrade_lighting(UPGRADE_DISPLAY_LIGHT, 0.0))
 
 
 @dataclass(frozen=True)
@@ -104,9 +111,9 @@ class PositionRestoreRefusal(StrEnum):
     MADE_FOR_OTHER_DISPLAY = "made_for_other_display"   # made against another Display than the one seen now
 
 
-def position_values(calibration: Calibration, mat: Mat) -> PositionValues:
-    """The values a stored or drafted Position records: its fit and its mat."""
-    return PositionValues(calibration.fit, mat)
+def position_values(calibration: Calibration, lighting: FrameLighting) -> PositionValues:
+    """The values a stored or drafted Position records: its fit and its lighting."""
+    return PositionValues(calibration.fit, lighting)
 
 
 def unrecorded_record(latest_kept: PositionEntry | None, stored: PositionValues) -> PositionRecord | None:
@@ -125,7 +132,7 @@ def saved_record(values: PositionValues, *, session_id: UUID | None, restored_fr
 
 
 def profile_changed_record(values: PositionValues) -> PositionRecord:
-    """The KEPT_PROFILE_CHANGED record of a profile change: the Frame's fit and mat, unchanged."""
+    """The KEPT_PROFILE_CHANGED record of a profile change: the Frame's fit and lighting, unchanged."""
     return PositionRecord(PositionEntryKind.KEPT_PROFILE_CHANGED, values, None, None)
 
 
@@ -163,10 +170,10 @@ def restore_refusal(entry: PositionEntry, *, frame_id: str, profile_px: tuple[in
     return None
 
 
-def restored_draft(entry: PositionEntry, *, base_revision: int) -> tuple[Calibration, Mat]:
+def restored_draft(entry: PositionEntry, *, base_revision: int) -> tuple[Calibration, FrameLighting]:
     """The trial draft a Restore loads: `entry`'s fit at `base_revision` (the trial's base, so a save
-    made elsewhere is still refused) and its mat."""
-    return Calibration(revision=base_revision, fit=entry.record.values.fit), entry.record.values.mat
+    made elsewhere is still refused) and its lighting."""
+    return Calibration(revision=base_revision, fit=entry.record.values.fit), entry.record.values.lighting
 
 
 __all__ = ["DEFAULT_POSITION", "KEPT_KINDS", "SENT_KINDS", "MadeFor", "PositionEntry", "PositionEntryKind",

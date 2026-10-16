@@ -76,7 +76,7 @@ from contracts.tuning import TestPattern
 
 FULL, LIMITED, AUTO = SignalRange.FULL, SignalRange.LIMITED, SignalRange.AUTO
 WHITE = TestPattern.WHITE
-STORED = DisplayPicture({}, NEUTRAL_SOFTWARE, AUTO)
+STORED = DisplayPicture({}, NEUTRAL_SOFTWARE, AUTO, UPGRADE_DISPLAY_LIGHT)
 
 
 def _session(draft: DisplayPicture = STORED, *, idle_until: float = 10.0,
@@ -182,7 +182,7 @@ def test_a_shown_pattern_outlives_a_minute_of_console_silence_and_a_session_with
     assert session_test_pattern(kept, 94.0) == TestPatternAsk(WHITE, 2)
     off = edited_test_pattern(asked, None, expected_sequence=2, now=6.0)
     assert off.lease.live(10.9) and not off.lease.live(11.0)                       # no pattern: 5 s
-    plain = edited_software(_session(), SoftwareSetting.BRIGHTNESS, 90, expected_sequence=1, now=5.0)
+    plain = edited_software(_session(), SoftwareSetting.CONTRAST, 90, expected_sequence=1, now=5.0)
     assert not plain.lease.live(10.0) and not kept_alive(plain, 9.0).lease.live(14.0)
     with pytest.raises(PictureRefused, match="session_ended"):
         kept_alive(plain, 10.0)
@@ -205,8 +205,8 @@ def test_the_tab_says_waiting_shown_or_ended():
 
 def test_copy_keeps_the_targets_signal_range():
     """(7, pure) Mutation probe: copied() uses source.signal_range -> fails."""
-    source = DisplayPicture({}, replace(NEUTRAL_SOFTWARE, saturation_percent=80), FULL)
-    result, _skipped = copied(source, DisplayPicture({}, NEUTRAL_SOFTWARE, LIMITED), source_offered=None,
+    source = DisplayPicture({}, replace(NEUTRAL_SOFTWARE, contrast_percent=80), FULL, UPGRADE_DISPLAY_LIGHT)
+    result, _skipped = copied(source, DisplayPicture({}, NEUTRAL_SOFTWARE, LIMITED, UPGRADE_DISPLAY_LIGHT), source_offered=None,
                               target_offered=None)
     assert (result.signal_range, result.software) == (LIMITED, source.software)
 
@@ -286,7 +286,7 @@ def test_done_waits_for_the_signal_answer_to_the_latest_change(registry):
         before = _picture(registry)
         _signal(registry, before.picture_change)                              # answers the previous change
         _range(client, session, "full", 1)
-        _software(client, session, "brightness", 90, 2)
+        _software(client, session, "contrast", 90, 2)
         document = _picture(registry)
         _picture_report(registry, for_change=document.picture_change, presented=document.picture_change, signal=None)
         assert _view(client)["status"] == "waiting"
@@ -352,7 +352,7 @@ def test_a_pattern_survives_30_s_without_a_keepalive_and_a_session_without_one_e
         _silent(registry, 6)
         assert _picture(registry).test_pattern is None                              # a minute of silence
         plain = _begin(client)
-        assert _software(client, plain, "brightness", 90, 1).status_code == 200
+        assert _software(client, plain, "contrast", 90, 1).status_code == 200
         _silent(registry, 4)
         assert _view(client)["session"] is not None
         _silent(registry, 1.5)
@@ -389,13 +389,13 @@ def test_copy_never_carries_the_signal_range(registry):
     _bind(registry, _frame(registry, "b"), pi_b, "HDMI-A-1")
     _report(registry, "pi-a", "HDMI-A-1", SERIAL_DISPLAY)
     _report(registry, "pi-b", "HDMI-A-1", NO_SERIAL)
-    _sql(registry, "UPDATE displays SET signal_range='full', software_saturation_percent=80 WHERE serial IS NOT NULL")
+    _sql(registry, "UPDATE displays SET signal_range='full', software_contrast_percent=80 WHERE serial IS NOT NULL")
     _sql(registry, "UPDATE displays SET signal_range='limited' WHERE serial IS NULL")
     with _client(registry) as client:
         copied_answer = client.post("/v1/operator/frames/a/picture-copies", headers=AUTH, json={"to_frames": ["b"]})
         assert copied_answer.json() == [{"frame_id": "b", "outcome": "copied", "hardware_skipped": []}]
     target = _display(registry, pi_b)
-    assert (target["signal_range"], target["software_saturation_percent"]) == ("limited", 80)
+    assert (target["signal_range"], target["software_contrast_percent"]) == ("limited", 80)
 
 
 def test_the_edits_refuse_through_the_routes(registry):
@@ -429,7 +429,7 @@ def test_the_view_shows_the_drafts_range_the_signal_and_the_pattern(registry):
         assert (view["signal_range"], view["signal"], view["test_pattern"], view["test_pattern_seconds"]) == (
             "full", {"in_force": "limited", "result": "applied", "answered": True},
             {"pattern": "black-level", "state": "shown"}, TEST_PATTERN_SECONDS)
-        _software(client, session, "brightness", 90, 3)                      # a newer change, unanswered
+        _software(client, session, "contrast", 90, 3)                      # a newer change, unanswered
         assert _picture(registry).picture_change > document.picture_change
         assert _view(client)["signal"] == {"in_force": "limited", "result": "applied", "answered": False}
         _revert(client, session)

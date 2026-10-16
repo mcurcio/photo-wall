@@ -56,7 +56,7 @@ def _snapshot_bindings(frames: tuple[FrameInventory, ...], player_id: str):
             configuration_revision=frame.configuration_revision,
             profile=FrameProfile.model_validate(frame.profile),
             calibration=frame.calibration,
-            mat=frame.mat,
+            lighting=frame.lighting,
         )
         for frame in owned
     )

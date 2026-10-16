@@ -1,34 +1,87 @@
 """Room lights' rules, each with one home (decision 0028). Pure: no I/O, no clock (callers pass
 Central's time where a rule records it).
 
-Implemented by the central lane; signatures frozen by the milestone's interface commit.
+What a Home Assistant message says (`topic_entity`, `parse_*`, `light_state`, `illuminance_state`),
+who reports what (`light_reported_by_entity`, `sensor_at_entity`, `sensor_on_player`,
+`light_measured_by`), which House > Lights changes are refused (`check_*`), whether a Frame's
+lighting fits the room lights (`check_frame_lighting`), the document every Pi draws with
+(`room_lights_document`) and a Frame's lighting on upgrade (`upgrade_lighting`).
 """
 from __future__ import annotations
 
+import math
+import re
 from collections.abc import Collection, Mapping
-from typing import Literal
+from typing import Final, Literal
 
 from central.room_light.model import (
+    HOME_ASSISTANT_ENTITY_PATTERN,
+    HOME_ASSISTANT_MESSAGE_BYTES,
+    ILLUMINANCE_TOPIC_PREFIX,
+    LIGHT_TOPIC_PREFIX,
+    SENSORS_MAX,
+    FixedReporter,
     FrameLightingRefusal,
+    HomeAssistantLight,
+    HomeAssistantSensor,
     IlluminanceMessage,
     LightStateMessage,
+    OnPlayer,
     RoomLight,
     Sensor,
+    SensorReporter,
     SetupRefusal,
 )
-from contracts.frame_lighting import FrameLighting
+from contracts.frame_lighting import (
+    DIMMER_AT_FULL,
+    SHEET_WHITENESS,
+    FrameLighting,
+    Paper,
+    WashLight,
+)
 from contracts.node_picture import DisplayLight
-from contracts.room_light import Dimmer, Measured, RoomLightsDocument, RoomLightState, Unavailable
+from contracts.room_light import (
+    FULL_ON,
+    LUX_MAX,
+    ROOM_LIGHTS_MAX,
+    Dimmer,
+    Measured,
+    NotReported,
+    ReportedColour,
+    RoomLightEntry,
+    RoomLightsDocument,
+    RoomLightState,
+    Unavailable,
+)
+from contracts.strict_json import loads_object
 
 UPGRADE_ROOM_LIGHT_ID = "room"          # the one fixed room light every Frame's upgrade wash views
 UPGRADE_ROOM_LIGHT_NAME = "Room"
+
+_ENTITY: Final = re.compile(HOME_ASSISTANT_ENTITY_PATTERN)
+_OUT_OF_RANGE: Final = "out-of-range"
 
 
 def topic_entity(topic: str) -> tuple[Literal["light", "illuminance"], str] | None:
     """("light", entity) for LIGHT_TOPIC_PREFIX + entity, ("illuminance", entity) for
     ILLUMINANCE_TOPIC_PREFIX + entity, where entity matches HOME_ASSISTANT_ENTITY_PATTERN whole;
     None for any other topic."""
-    raise NotImplementedError
+    for kind, prefix in (("light", LIGHT_TOPIC_PREFIX), ("illuminance", ILLUMINANCE_TOPIC_PREFIX)):
+        if topic.startswith(prefix):
+            entity = topic[len(prefix):]
+            return (kind, entity) if len(entity) <= 255 and _ENTITY.fullmatch(entity) else None
+    return None
+
+
+def _message(raw: bytes) -> dict[str, object]:
+    value = loads_object(raw, max_bytes=HOME_ASSISTANT_MESSAGE_BYTES)
+    if value is None:
+        raise ValueError(_OUT_OF_RANGE)
+    return value
+
+
+def _byte(value: object) -> bool:
+    return type(value) is int and 0 <= value <= 255
 
 
 def parse_light_message(raw: bytes) -> LightStateMessage:
@@ -36,47 +89,75 @@ def parse_light_message(raw: bytes) -> LightStateMessage:
     HOME_ASSISTANT_MESSAGE_BYTES, an object with "state" ("on", "off", "unavailable" or "unknown";
     unknown becomes "unavailable") and optional "brightness" (0..255 int) and "rgb" ([r, g, b], each
     0..255 int); other keys are ignored (Home Assistant may add attributes). ValueError("out-of-range")
-    for anything else."""
-    raise NotImplementedError
+    for anything else. A null brightness or rgb is none sent (Home Assistant's off light)."""
+    value = _message(raw)
+    state = value.get("state")
+    if state not in ("on", "off", "unavailable", "unknown"):
+        raise ValueError(_OUT_OF_RANGE)
+    brightness = value.get("brightness")
+    if brightness is not None and not _byte(brightness):
+        raise ValueError(_OUT_OF_RANGE)
+    rgb = value.get("rgb")
+    if rgb is not None and not (isinstance(rgb, list) and len(rgb) == 3 and all(_byte(item) for item in rgb)):
+        raise ValueError(_OUT_OF_RANGE)
+    return LightStateMessage("unavailable" if state == "unknown" else state, brightness,
+                             None if rgb is None else (rgb[0], rgb[1], rgb[2]))
 
 
 def parse_illuminance_message(raw: bytes) -> IlluminanceMessage:
     """{"lux": <number 0..LUX_MAX>} or {"state": "unavailable" | "unknown"} (lux None); strict JSON
     of at most HOME_ASSISTANT_MESSAGE_BYTES. ValueError("out-of-range") for anything else."""
-    raise NotImplementedError
+    value = _message(raw)
+    if "lux" in value:
+        lux = value["lux"]
+        if type(lux) not in (int, float) or not math.isfinite(lux) or not 0 <= lux <= LUX_MAX:
+            raise ValueError(_OUT_OF_RANGE)
+        return IlluminanceMessage(float(lux))
+    if value.get("state") in ("unavailable", "unknown"):
+        return IlluminanceMessage(None)
+    raise ValueError(_OUT_OF_RANGE)
 
 
 def light_state(message: LightStateMessage) -> Dimmer | Unavailable:
     """Home Assistant's light as a room light state: unavailable -> Unavailable(); off ->
     Dimmer(on=False, brightness=0.0 when none was sent, else brightness/255); on -> Dimmer(on=True,
     brightness = brightness/255, or 1.0 when none was sent; rgb = each/255, or None)."""
-    raise NotImplementedError
+    if message.state == "unavailable":
+        return Unavailable()
+    rgb = None if message.rgb is None else (message.rgb[0] / 255, message.rgb[1] / 255, message.rgb[2] / 255)
+    if message.state == "off":
+        return Dimmer(on=False, brightness=0.0 if message.brightness is None else message.brightness / 255, rgb=rgb)
+    return Dimmer(on=True, brightness=1.0 if message.brightness is None else message.brightness / 255, rgb=rgb)
 
 
 def illuminance_state(message: IlluminanceMessage) -> Measured | Unavailable:
     """Measured(lux) or Unavailable() for lux None."""
-    raise NotImplementedError
+    return Unavailable() if message.lux is None else Measured(lux=message.lux)
 
 
 def light_reported_by_entity(lights: Collection[RoomLight], entity: str) -> RoomLight | None:
     """The room light whose reporter is HomeAssistantLight(entity), or None."""
-    raise NotImplementedError
+    return next((light for light in lights if isinstance(light.reporter, HomeAssistantLight)
+                 and light.reporter.entity == entity), None)
 
 
 def sensor_at_entity(sensors: Collection[Sensor], entity: str) -> Sensor | None:
     """The Sensor at HomeAssistantSensor(entity), or None."""
-    raise NotImplementedError
+    return next((sensor for sensor in sensors if isinstance(sensor.at, HomeAssistantSensor)
+                 and sensor.at.entity == entity), None)
 
 
 def sensor_on_player(sensors: Collection[Sensor], player_id: str) -> Sensor | None:
     """The Sensor at OnPlayer(player_id), or None (at most one per Pi)."""
-    raise NotImplementedError
+    return next((sensor for sensor in sensors if isinstance(sensor.at, OnPlayer)
+                 and sensor.at.player_id == player_id), None)
 
 
 def light_measured_by(lights: Collection[RoomLight], sensor_id: str) -> RoomLight | None:
     """The room light whose reporter is SensorReporter(sensor_id), or None (a Sensor reports at most
     one room light)."""
-    raise NotImplementedError
+    return next((light for light in lights if isinstance(light.reporter, SensorReporter)
+                 and light.reporter.sensor == sensor_id), None)
 
 
 def check_room_light(light: RoomLight, lights: Mapping[str, RoomLight],
@@ -85,14 +166,33 @@ def check_room_light(light: RoomLight, lights: Mapping[str, RoomLight],
     anything but a HomeAssistantLight; a SensorReporter naming no Sensor, or a Sensor another room
     light already reports; a HomeAssistantLight entity another room light or a HomeAssistantSensor
     already names; a new light past ROOM_LIGHTS_MAX. None when it may be saved."""
-    raise NotImplementedError
+    others = [other for key, other in lights.items() if key != light.id]
+    reporter = light.reporter
+    if isinstance(light.colour, ReportedColour) and not isinstance(reporter, HomeAssistantLight):
+        return SetupRefusal.REPORTED_COLOUR_NEEDS_HOME_ASSISTANT
+    if isinstance(reporter, SensorReporter):
+        if reporter.sensor not in sensors:
+            return SetupRefusal.UNKNOWN_SENSOR
+        if light_measured_by(others, reporter.sensor) is not None:
+            return SetupRefusal.SENSOR_REPORTS_A_LIGHT
+    if isinstance(reporter, HomeAssistantLight) and (
+            light_reported_by_entity(others, reporter.entity) is not None
+            or sensor_at_entity(sensors.values(), reporter.entity) is not None):
+        return SetupRefusal.ENTITY_REPORTS_ANOTHER
+    if light.id not in lights and len(lights) >= ROOM_LIGHTS_MAX:
+        return SetupRefusal.TOO_MANY
+    return None
 
 
 def check_room_light_removal(light_id: str, lights: Mapping[str, RoomLight],
                              named_by_frames: Collection[str]) -> SetupRefusal | None:
     """UNKNOWN_ROOM_LIGHT when lights has no light_id; NAMED_BY_A_FRAME when any Frame's lighting
     names it (`named_by_frames`: the Frames whose saved lighting or open trial names it); else None."""
-    raise NotImplementedError
+    if light_id not in lights:
+        return SetupRefusal.UNKNOWN_ROOM_LIGHT
+    if named_by_frames:
+        return SetupRefusal.NAMED_BY_A_FRAME
+    return None
 
 
 def check_sensor(sensor: Sensor, sensors: Mapping[str, Sensor],
@@ -100,21 +200,41 @@ def check_sensor(sensor: Sensor, sensors: Mapping[str, Sensor],
     """Whether saving `sensor` is refused: its HomeAssistantSensor entity already names another
     Sensor or a room light; an OnPlayer Pi that already has another Sensor; a new Sensor past
     SENSORS_MAX. None when it may be saved."""
-    raise NotImplementedError
+    others = [other for key, other in sensors.items() if key != sensor.id]
+    if isinstance(sensor.at, HomeAssistantSensor) and (
+            sensor_at_entity(others, sensor.at.entity) is not None
+            or light_reported_by_entity(lights.values(), sensor.at.entity) is not None):
+        return SetupRefusal.ENTITY_REPORTS_ANOTHER
+    if isinstance(sensor.at, OnPlayer) and sensor_on_player(others, sensor.at.player_id) is not None:
+        return SetupRefusal.ENTITY_REPORTS_ANOTHER
+    if sensor.id not in sensors and len(sensors) >= SENSORS_MAX:
+        return SetupRefusal.TOO_MANY
+    return None
 
 
 def check_sensor_removal(sensor_id: str, sensors: Mapping[str, Sensor],
                          lights: Mapping[str, RoomLight]) -> SetupRefusal | None:
     """UNKNOWN_SENSOR when sensors has no sensor_id; SENSOR_REPORTS_A_LIGHT while a room light's
     reporter names it; else None."""
-    raise NotImplementedError
+    if sensor_id not in sensors:
+        return SetupRefusal.UNKNOWN_SENSOR
+    if light_measured_by(lights.values(), sensor_id) is not None:
+        return SetupRefusal.SENSOR_REPORTS_A_LIGHT
+    return None
 
 
 def check_frame_lighting(lighting: FrameLighting, lights: Mapping[str, RoomLight]) -> FrameLightingRefusal | None:
     """Whether a Frame's lighting fits the room lights: every Frame light names a room light
     (UNKNOWN_ROOM_LIGHT), and its reference matches its room light's reporter (REFERENCE_MISMATCH):
     DIMMER_AT_FULL for a HomeAssistantLight or FixedReporter, a lux for a SensorReporter."""
-    raise NotImplementedError
+    for frame_light in lighting.lights:
+        room_light = lights.get(frame_light.light)
+        if room_light is None:
+            return FrameLightingRefusal.UNKNOWN_ROOM_LIGHT
+        measured = isinstance(room_light.reporter, SensorReporter)
+        if measured == (frame_light.reference == DIMMER_AT_FULL):
+            return FrameLightingRefusal.REFERENCE_MISMATCH
+    return None
 
 
 def room_lights_document(lights: Mapping[str, RoomLight], states: Mapping[str, RoomLightState],
@@ -122,7 +242,11 @@ def room_lights_document(lights: Mapping[str, RoomLight], states: Mapping[str, R
     """The document every Pi draws with: every room light with its colour and state. A
     FixedReporter's state is FULL_ON whatever `states` holds; a light `states` lacks is
     NotReported(). Pure; the same for every Pi."""
-    raise NotImplementedError
+    return RoomLightsDocument(change=change, lights={
+        light_id: RoomLightEntry(
+            colour=light.colour,
+            state=FULL_ON if isinstance(light.reporter, FixedReporter) else states.get(light_id, NotReported()))
+        for light_id, light in sorted(lights.items())})
 
 
 def upgrade_lighting(display: DisplayLight, mat_depth_mm: float) -> FrameLighting:
@@ -131,7 +255,10 @@ def upgrade_lighting(display: DisplayLight, mat_depth_mm: float) -> FrameLightin
     UPGRADE_ROOM_LIGHT_ID at display.matched_lux with reference DIMMER_AT_FULL, the mat's depth
     kept, and Paper(whiteness=SHEET_WHITENESS, ink_density=-log10(display.black), profile None), so
     the paper's black lands exactly on the panel's black and its white on the TV's white."""
-    raise NotImplementedError
+    return FrameLighting(
+        mat_depth_mm=mat_depth_mm,
+        lights=(WashLight(light=UPGRADE_ROOM_LIGHT_ID, lux=display.matched_lux, reference=DIMMER_AT_FULL),),
+        paper=Paper(whiteness=SHEET_WHITENESS, ink_density=-math.log10(display.black), profile=None))
 
 
 __all__ = [

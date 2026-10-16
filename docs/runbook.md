@@ -1178,12 +1178,12 @@ The reader (`scripts/calibration_target/`) is the agent's tool and is never ship
 
 The print look's LUT ([0023](decisions/0023-print-look.md)) is made from a **paper profile**: the free ICC file a paper maker publishes for each paper and printer (search the maker's site for "ICC profiles", for example Hahnemühle, Canson or Ilford, and take the profile for your paper on any printer; the printer matters little here). Central keeps the profile (`luts`, migration 093) and bakes the LUT from it whenever a Player asks, so there is nothing else to keep or back up.
 
-**Add one.** In the console, Settings › LUTs › **Add a paper profile**, then choose it on a Frame's Picture tab (Photo Wall (software) › LUT); the page lists each LUT with the Displays that use it and removes one none uses. The same through the operator route:
+**Add one.** In the console, Settings › LUTs › **Add a paper profile**, then choose it as the paper profile of a Frame's paper (its lighting, [room light](#room-lights-and-home-assistant); since [0028](decisions/0028-room-light.md) the Display has no LUT); the page lists each LUT with the Frames whose paper names it and removes one none uses. The same through the operator route:
 
 ```sh
 curl --fail-with-body -X POST -H 'Authorization: Bearer <admin-token>' \
   --data-binary @'Hahnemuhle Photo Rag.icc' http://<central>/v1/operator/luts
-curl -H 'Authorization: Bearer <admin-token>' http://<central>/v1/operator/luts     # the list, with each LUT's Displays
+curl -H 'Authorization: Bearer <admin-token>' http://<central>/v1/operator/luts     # the list, with each LUT's Frames
 curl -X DELETE -H 'Authorization: Bearer <admin-token>' http://<central>/v1/operator/luts/<profile sha256>
 ```
 
@@ -1194,7 +1194,7 @@ Add answers 201 with the LUT (its name is the profile's own description), or 200
 | 413 `too_large` | The file is over 8 MiB | A paper profile is a few hundred KB: check it is the `.icc`/`.icm` file and not an archive |
 | 422 `not_a_colour_profile` | Not an ICC file | Unzip the maker's download and send the profile itself |
 | 422 `not_a_printer_profile` | An ICC file, but not an RGB or CMYK printer (output) profile, or it does not bake | A monitor or camera profile is not a paper; take the paper's printer profile |
-| 409 `lut_in_use` (with `displays`) | A Display uses it, stored or in an open Picture session | Choose None or another LUT on those Displays first |
+| 409 `lut_in_use` (with `frames`) | A Frame's paper names it, saved or drafted in an open Position trial | Choose no paper profile, or another, on those Frames first |
 | 404 `lut_unknown` | No LUT with that digest | Read the list for the digest |
 
 **On the Pi.** The Player fetches `GET /v1/luts/<profile sha256>/<recipe>` with its own bearer and checks it against the served `Repr-Digest`, then keeps it in its media cache. Until it has it, the Frame shows the sliders without the LUT and the Picture tab's Done waits ("The sliders show at once; the LUT joins when the Pi has it, and Done waits for it"). A Done that never unlocks with a LUT chosen: read the Player's journal for the fetch's fault (`lut_type`, `lut_length`, `lut_digest` or `media_digest` name the refusal; it is retried on the media backoff).
@@ -1205,6 +1205,36 @@ Add answers 201 with the LUT (its name is the profile's own description), or 200
 2. A paper profile added (above) and chosen at 100 %: the picture changes once the Pi has it, and Done waited for it.
 3. A 4K video with every step on and four lights: compare frame time with everything neutral (0023's per-step cost is not measured; if it is too slow, 0023's alternative, one baked LUT for the whole colour chain, is the fallback).
 4. Test pattern › Grey ramp with the LUT chosen ([Tune a display with no controls](#tune-a-display-with-no-controls)): look for banding from its 8-bit entries.
+
+## Room lights and Home Assistant
+
+Room light ([0028](decisions/0028-room-light.md)): the real lights of the house (daylight, the overheads, the bookshelf spotlight) are **room lights**, each with one reporter: its Home Assistant light, one **Sensor** (a light meter wired to a Pi, or a Home Assistant illuminance sensor), or nobody (fixed: always on at full). Photo Wall never drives a light. Central keeps them (`room_lights`, `sensors`, migration 098) and writes every light's colour and last state as one room-lights document on the hub's WALL stream, the same for every Pi; a Pi keeps the last one while Central is away. Upgrade data: one fixed room light `room` exists, and every Frame's lighting is one wash of it at its Display's matched lux, so today's picture is unchanged.
+
+**House › Lights** (operator routes, `central/room_light/views.py`):
+
+```sh
+curl -H 'Authorization: Bearer <admin-token>' http://<central>/v1/operator/house/lights        # lights, Sensors, the link
+curl -X PUT -H 'Authorization: Bearer <admin-token>' -H 'Content-Type: application/json' \
+  -d '{"name":"Bookshelf spot","reporter":{"kind":"home-assistant-light","entity":"light.bookshelf_spot"},"colour":{"kind":"fixed","kelvin":4000}}' \
+  http://<central>/v1/operator/house/lights/bookshelf-spot
+curl -X PUT -H 'Authorization: Bearer <admin-token>' -H 'Content-Type: application/json' \
+  -d '{"name":"Hall meter","at":{"kind":"home-assistant","entity":"sensor.hall_illuminance"}}' \
+  http://<central>/v1/operator/house/sensors/hall-meter
+```
+
+| Refusal (409) | Means | What to do |
+|---|---|---|
+| `named-by-a-frame` | A Frame's lighting (saved, or in an open Position trial) names the light | Remove the Frame lights that view it first |
+| `sensor-reports-a-light` | The Sensor reports a room light | Give that light another reporter, or remove it, first |
+| `reported-colour-needs-home-assistant` | Only a Home Assistant light reports its colour | Use a fixed kelvin |
+| `entity-reports-another` | That Home Assistant entity, or that Pi's meter, already reports another light or Sensor | One entity, one reporter |
+| `unknown-sensor`, `unknown-room-light`, `too-many` | As named (32 lights, 32 Sensors at most) | |
+
+**Connect Home Assistant.** Central's worker subscribes to the house's MQTT broker (the one Home Assistant's MQTT integration uses, usually Mosquitto) when `PHOTO_WALL_MQTT_URL` is set in the worker's environment: `mqtt://<user>:<password>@<host>:1883`, or `mqtts://...:8883`. Set it through an iac PR (the deployment's worker environment), with the user and password from the secret store (1Password), never in the repo. Unset, the link is "not configured" and nothing runs; House › Lights shows the link's state (connected or away since when).
+
+In Home Assistant, install the blueprint [`integrations/home-assistant/photo-wall-room-lights.yaml`](../integrations/home-assistant/photo-wall-room-lights.yaml): copy it to `<config>/blueprints/automation/photo-wall/`, reload automations, create an automation from "Photo Wall room lights" and choose the lights and illuminance sensors to follow. It publishes each one's full state, retained, to `photowall/light/<entity_id>` (`{"state","brightness","rgb"}`) and `photowall/illuminance/<entity_id>` (`{"lux"}` or `{"state":"unavailable"}`) on every change and again at Home Assistant's start. A message Central cannot use (an entity no room light or Sensor names, or a payload outside its shape) is kept as a refusal (`home_assistant_refusals`, the newest 20) and changes nothing.
+
+**Check it.** With the link connected, switch the light in Home Assistant: `GET /v1/operator/house/lights` shows its state and `heard_at`, and the WALL key `room-lights` on any Node changes (its `change` rises once per real change; a repeated state changes nothing). The Player's control State never moves for a light. Bench steps (a real Home Assistant and the bookshelf spot on the wall) are NOT RUN in the delivery that built this.
 
 ## Night off and the week
 

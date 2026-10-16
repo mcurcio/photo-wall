@@ -5,7 +5,7 @@ One route per question:
 |---|---|---|---|---|
 | GET | /v1/operator/luts | | LutsView | |
 | POST | /v1/operator/luts | the paper profile (.icc bytes) | 201 LutView; 200 LutView when already listed | 413 too_large, 422 not_a_colour_profile, not_a_printer_profile |
-| DELETE | /v1/operator/luts/{profile_sha256} | | 204 | 404 lut_unknown, 409 lut_in_use (+ "displays") |
+| DELETE | /v1/operator/luts/{profile_sha256} | | 204 | 404 lut_unknown, 409 lut_in_use (+ "frames") |
 | GET | /v1/luts/{profile_sha256}/{recipe_id} | | the baked LUT (contracts/lut.py) | 401 unauthorized, 404 lut_unknown |
 
 The operator routes take the `admin` dependency; the LUT itself the Player's bearer (`player`), as
@@ -35,13 +35,13 @@ LUTS: Final = OPERATOR_PREFIX + "luts"
 
 def mount_lut_routes(app: FastAPI, *, admin: Any, player: Any, luts: PgLuts) -> None:
     """Declare the routes above on `app`; LutRefused becomes {"error": code} at its status, with
-    the Displays that use the LUT for lut_in_use."""
+    the Frames whose paper uses the LUT for lut_in_use."""
 
     @app.exception_handler(LutRefused)
     async def refused(request: Request, exc: LutRefused) -> JSONResponse:
         body: dict[str, Any] = {"error": exc.code}
         if exc.code == "lut_in_use":
-            body["displays"] = list(exc.displays)
+            body["frames"] = list(exc.frames)
         return JSONResponse(body, status_code=exc.status)
 
     @app.get(LUTS, dependencies=[Depends(admin)], response_model=LutsView)

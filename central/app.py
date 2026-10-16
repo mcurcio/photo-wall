@@ -49,6 +49,7 @@ from central.infra.house_store import PgHouse, seed_house
 from central.infra.lut_store import PgLuts
 from central.infra.photo_library_store import PgPhotoLibrary
 from central.infra.power_store import PgPower
+from central.infra.room_light_store import PgRoomLights
 from central.infra.tuning_history_store import PgTuningHistory
 from central.infra.why_store import PgWhy
 from central.installation_models import FrameName, InstallationInventory, WallInventory, WallNaming
@@ -75,6 +76,7 @@ from central.registry import (
     Registry,
     RegistryError,
 )
+from central.room_light_routes import mount_room_light_routes
 from central.runtime import RuntimeConflict, Scene, SceneInUse
 from central.runtime_store import RuntimeStore
 from central.source_names import SourceInUse, SourceNameService
@@ -795,6 +797,7 @@ def create_app(
     mount_why_routes(app, admin=admin, queries=PgWhy(db, times=media_times))
     house = PgHouse(db, times=media_times)
     mount_house_routes(app, admin=admin, queries=house, commands=house)
+    mount_room_light_routes(app, admin=admin, lights=PgRoomLights(db))
     pictures = PgPictureSessions(db)
     mount_picture_routes(app, admin=admin, queries=pictures, commands=pictures)
     mount_tuning_history_routes(app, admin=admin, queries=PgTuningHistory(db))

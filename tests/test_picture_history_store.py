@@ -6,7 +6,7 @@ Every console write goes through the operator API the Picture tab calls; every P
 the link store and its report judge (tests/test_display_picture_settings.py `_picture_report`).
 (1) Done appends one kept-done entry and the route lists it; (2) Copy appends kept-copied on each
 copied target only; (3) a change made outside Photo Wall is recorded before the next kept write;
-(4) a kept entry names its LUT's recipe; (5) Restore loads an entry into the draft and Done names
+(4) an entry from before the Display's light restores today's light; (5) Restore loads an entry into the draft and Done names
 it; (6) Restore's refusals in order; (7) what Restore skips; (9) the page and Central's time;
 (10) retention; (11) one transaction; (12) every `at` is UTC.
 """
@@ -40,18 +40,18 @@ from test_display_picture_settings import (
     _view,
 )
 
-from central.displays.lut import LUT_RECIPE_ID
 from central.displays.picture import DisplayPicture
 from central.displays.picture_history import PictureEntryKind, PictureRecord
 from central.infra import display_store
 from central.infra.picture_history_store import append_kept_in
 from central.tuning_history import bounds as retention
-from contracts.lut import LutRef
-from contracts.node_picture import NEUTRAL_SOFTWARE, SignalRange
+from contracts.node_picture import (
+    NEUTRAL_SOFTWARE,
+    UPGRADE_DISPLAY_LIGHT,
+    DisplayLight,
+    SignalRange,
+)
 from contracts.tuning import TestPattern
-
-LISTED, UNLISTED = "c" * 64, "d" * 64
-OLD_RECIPE = "lut33-old-recipe"
 
 
 def _present(registry) -> None:
@@ -103,11 +103,6 @@ def _append(registry, display_id: UUID, picture: DisplayPicture) -> UUID:
                                                               None)).entry_id
 
 
-def _list_lut(registry, sha: str, name: str) -> None:
-    _sql(registry, "INSERT INTO luts(profile_sha256, name, profile, added_at) VALUES (%s, %s, %s, 1)",
-         (sha, name, b"\0" * 128))
-
-
 def _assert_utc(body: dict) -> None:
     """Acceptance 12: every `at` an answer carries is ISO 8601 with a zero UTC offset."""
     for entry in body["entries"]:
@@ -122,7 +117,7 @@ def test_done_appends_one_kept_entry_and_the_display_lists_it(registry):
     with _client(registry) as client:
         session = _begin(client)
         _hardware(client, session, "10", 46, 1)
-        _software(client, session, "brightness", 114, 2)
+        _software(client, session, "contrast", 114, 2)
         _present(registry)
         before = _now(registry)
         assert _done(client, session).status_code == 204
@@ -132,15 +127,15 @@ def test_done_appends_one_kept_entry_and_the_display_lists_it(registry):
     assert (row["kind"], row["number"], str(row["session_id"]), row["restored_from"]) == (
         "kept-done", 1, session["session_id"], None)
     assert before <= row["at"] <= after
-    assert (row["picture"]["hardware_picture"], row["picture"]["software_brightness_percent"],
-            row["picture"]["signal_range"], row["lut_recipe_id"]) == ({"10": 46}, 114, "auto", None)
+    assert (row["picture"]["hardware_picture"], row["picture"]["software_contrast_percent"],
+            row["picture"]["signal_range"]) == ({"10": 46}, 114, "auto")
     name = _display(registry, player)["name"]
     assert history["display"] == {"id": str(display_id), "name": name} and history["unrecorded_change"] is False
     [entry] = _kept(history)
     assert (entry["entry_id"], entry["kind"], entry["number"], entry["frame"], entry["test_pattern"]) == (
         str(row["id"]), "kept-done", 1, None, None)
     assert entry["display"] == {"id": str(display_id), "name": name}
-    assert entry["picture"]["hardware"] == {"10": 46} and entry["picture"]["software"]["brightness_percent"] == 114
+    assert entry["picture"]["hardware"] == {"10": 46} and entry["picture"]["software"]["contrast_percent"] == 114
     _assert_utc(history)
 
 
@@ -155,7 +150,7 @@ def test_copy_appends_a_kept_entry_on_each_copied_target_only(registry):
     _report(registry, "pi-a", "HDMI-A-1", SERIAL_DISPLAY)
     _report(registry, "pi-b", "HDMI-A-1", NO_SERIAL)
     _report(registry, "pi-b", "HDMI-A-2", replace(SERIAL_DISPLAY, serial="CN0F1X7Z"))   # a third Display
-    _sql(registry, "UPDATE displays SET software_brightness_percent=130 WHERE serial='CN0F1X7K'")
+    _sql(registry, "UPDATE displays SET software_contrast_percent=130 WHERE serial='CN0F1X7K'")
     with _client(registry) as client:
         _begin(client, "e")                                                # e's Display: session open
         copied = client.post("/v1/operator/frames/a/picture-copies", headers=AUTH,
@@ -165,7 +160,7 @@ def test_copy_appends_a_kept_entry_on_each_copied_target_only(registry):
     [row] = _kept_rows(registry)
     assert (row["display_id"], row["kind"], row["number"], row["session_id"]) == (
         _display_id(registry, pi_b), "kept-copied", 1, None)
-    assert row["picture"]["software_brightness_percent"] == 130
+    assert row["picture"]["software_contrast_percent"] == 130
 
 
 def test_a_change_made_outside_photo_wall_is_recorded_before_the_next_kept_write(registry):
@@ -173,7 +168,7 @@ def test_a_change_made_outside_photo_wall_is_recorded_before_the_next_kept_write
     P1-default-unrecorded (no default exception) fails the first test's single row."""
     player = _bound(registry)
     display_id = _display_id(registry, player)
-    _sql(registry, "UPDATE displays SET software_brightness_percent=120")
+    _sql(registry, "UPDATE displays SET matched_lux=700")
     with _client(registry) as client:
         flagged = _history(client, display_id)
         assert (flagged["unrecorded_change"], flagged["entries"]) == (True, [])
@@ -185,27 +180,33 @@ def test_a_change_made_outside_photo_wall_is_recorded_before_the_next_kept_write
     done, unrecorded = _kept(history)
     assert [(done["kind"], done["number"]), (unrecorded["kind"], unrecorded["number"])] == [
         ("kept-done", 2), ("kept-unrecorded", 1)]
-    assert (unrecorded["picture"]["software"]["brightness_percent"], unrecorded["picture"]["software"]["contrast_percent"],
-            unrecorded["session_id"]) == (120, 100, None)
-    assert (done["picture"]["software"]["brightness_percent"], done["picture"]["software"]["contrast_percent"]) == (
-        120, 130)
+    assert (unrecorded["picture"]["light"]["matched_lux"], unrecorded["picture"]["software"]["contrast_percent"],
+            unrecorded["session_id"]) == (700.0, 100, None)
+    assert (done["picture"]["light"]["matched_lux"], done["picture"]["software"]["contrast_percent"]) == (
+        700.0, 130)
 
 
-def test_a_kept_entry_names_its_luts_recipe(registry):
-    """(4) Acceptance 4: the LUT's recipe is stored beside the entry; the list names the LUT as the
-    LUTs list does today."""
+def test_an_entry_from_before_the_light_restores_with_todays_light(registry):
+    """(4) Decision 0028: a kept entry written before migration 098 has no light; the history shows
+    none and its Restore keeps the draft's light and says so. Mutation probe: read the stand-in light
+    as recorded -> the draft takes 1000 lx."""
     player = _bound(registry)
-    _list_lut(registry, LISTED, "Hahnemuhle Photo Rag")
+    display_id = _display_id(registry, player)
+    entry = _append(registry, display_id, DisplayPicture({}, replace(NEUTRAL_SOFTWARE, contrast_percent=80),
+                                                         SignalRange.AUTO, UPGRADE_DISPLAY_LIGHT))
+    _sql(registry, "UPDATE picture_kept_entries SET picture = picture - 'matched_lux' - 'panel_black' WHERE id=%s",
+         (entry,))
     with _client(registry) as client:
+        [listed] = _kept(_history(client, display_id))
+        assert listed["picture"]["light"] is None
         session = _begin(client)
-        assert client.post(f"/v1/operator/picture-sessions/{session['session_id']}/lut-edits", headers=AUTH,
-                           json={"profile_sha256": LISTED, "expected_sequence": 1}).status_code == 200
-        _keep(client, registry, session)
-        [entry] = _kept(_history(client, _display_id(registry, player)))
-    [row] = _kept_rows(registry)
-    assert (row["lut_recipe_id"], row["picture"]["software_lut_profile"]) == (LUT_RECIPE_ID, LISTED)
-    assert entry["picture"]["lut_recipe_id"] == LUT_RECIPE_ID
-    assert entry["picture"]["software"]["lut"] == {"profile_sha256": LISTED, "name": "Hahnemuhle Photo Rag"}
+        assert client.post(f"/v1/operator/picture-sessions/{session['session_id']}/light-edits", headers=AUTH,
+                           json={"matched_lux": 400, "black": 0.001, "expected_sequence": 1}).status_code == 200
+        answer = _restore(client, session, entry, 2)
+        assert answer.json() == {"sequence": 3, "hardware_skipped": [], "light_kept": True}
+    document = _picture(registry)
+    assert document.light == DisplayLight(matched_lux=400.0, black=0.001)
+    assert document.software.contrast_percent == 80
 
 
 def test_restore_loads_an_entry_into_the_draft_and_done_names_it(registry):
@@ -216,26 +217,25 @@ def test_restore_loads_an_entry_into_the_draft_and_done_names_it(registry):
     with _client(registry) as client:
         first = _begin(client)
         _hardware(client, first, "10", 46, 1)
-        _software(client, first, "brightness", 114, 2)
+        _software(client, first, "contrast", 114, 2)
         _keep(client, registry, first)
         [kept] = _kept(_history(client, display_id))
         session = _begin(client)
-        _software(client, session, "brightness", 80, 1)
-        assert _picture(registry).software.brightness_percent == 80
+        _software(client, session, "contrast", 80, 1)
+        assert _picture(registry).software.contrast_percent == 80
         answer = _restore(client, session, kept["entry_id"], 2)
         assert answer.status_code == 200, answer.text
-        assert answer.json() == {"sequence": 3, "hardware_skipped": [], "lut_skipped": False,
-                                 "lut_recipe_changed": False}
+        assert answer.json() == {"sequence": 3, "hardware_skipped": [], "light_kept": False}
         view = _view(client)
-        assert view["session"]["sequence"] == 3 and view["software"]["brightness_percent"] == 114
+        assert view["session"]["sequence"] == 3 and view["software"]["contrast_percent"] == 114
         assert next(row for row in view["hardware"] if row["code"] == "10")["value"] == 46
         document = _picture(registry)
-        assert (dict(document.hardware), document.software.brightness_percent) == ({"10": 46}, 114)
+        assert (dict(document.hardware), document.software.contrast_percent) == ({"10": 46}, 114)
         _keep(client, registry, session)
         newest = _kept(_history(client, display_id))[0]
     assert (newest["kind"], newest["restored_from"], newest["session_id"]) == (
         "kept-done", kept["entry_id"], session["session_id"])
-    assert _display(registry, player)["software_brightness_percent"] == 114
+    assert _display(registry, player)["software_contrast_percent"] == 114
 
 
 def test_restore_refusals_in_order(registry):
@@ -245,8 +245,8 @@ def test_restore_refusals_in_order(registry):
     other = enroll_pi(registry, "pi-other")
     _bind(registry, _frame(registry, "hall"), other, "HDMI-A-1")
     _report(registry, "pi-other", "HDMI-A-1", SERIAL_DISPLAY)
-    own = _append(registry, _display_id(registry, player), DisplayPicture({}, NEUTRAL_SOFTWARE, SignalRange.FULL))
-    foreign = _append(registry, _display_id(registry, other), DisplayPicture({}, NEUTRAL_SOFTWARE, SignalRange.FULL))
+    own = _append(registry, _display_id(registry, player), DisplayPicture({}, NEUTRAL_SOFTWARE, SignalRange.FULL, UPGRADE_DISPLAY_LIGHT))
+    foreign = _append(registry, _display_id(registry, other), DisplayPicture({}, NEUTRAL_SOFTWARE, SignalRange.FULL, UPGRADE_DISPLAY_LIGHT))
     with _client(registry) as client:
         unknown = client.post(f"/v1/operator/picture-sessions/{uuid4()}/restores", headers=AUTH,
                               json={"entry_id": str(own), "expected_sequence": 1})
@@ -264,32 +264,21 @@ def test_restore_refusals_in_order(registry):
 
 
 def test_restore_skips_what_is_no_longer_offered_or_listed_and_keeps_the_test_pattern(registry):
-    """(7) Acceptance 7. Mutation probes: P1-no-skip (keep every code) -> "16" reaches the document;
-    P1-lut-recipe-kept -> the draft's LUT names the old recipe."""
+    """(7) Acceptance 7. Mutation probe: P1-no-skip (keep every code) -> "16" reaches the document."""
     player = _bound(registry)
     display_id = _display_id(registry, player)
-    _list_lut(registry, LISTED, "Listed paper")
     withdrawn = _append(registry, display_id, DisplayPicture(            # "16" is not offered (OFFERED)
-        {"10": 46, "16": 3}, replace(NEUTRAL_SOFTWARE, lut=LutRef(UNLISTED, OLD_RECIPE), brightness_percent=90),
-        SignalRange.AUTO))
-    older = _append(registry, display_id, DisplayPicture(
-        {}, replace(NEUTRAL_SOFTWARE, lut=LutRef(LISTED, OLD_RECIPE)), SignalRange.AUTO))
+        {"10": 46, "16": 3}, replace(NEUTRAL_SOFTWARE, contrast_percent=90), SignalRange.AUTO,
+        DisplayLight(matched_lux=300.0, black=0.002)))
     with _client(registry) as client:
         session = _begin(client)
         assert client.post(f"/v1/operator/picture-sessions/{session['session_id']}/test-pattern-edits", headers=AUTH,
                            json={"test_pattern": "white", "expected_sequence": 1}).status_code == 200
         skipped = _restore(client, session, withdrawn, 2)
-        assert skipped.json() == {"sequence": 3, "hardware_skipped": ["16"], "lut_skipped": True,
-                                  "lut_recipe_changed": False}
+        assert skipped.json() == {"sequence": 3, "hardware_skipped": ["16"], "light_kept": False}
         document = _picture(registry)
-        assert (dict(document.hardware), document.software.brightness_percent, document.software.lut) == (
-            {"10": 46}, 90, None)                                          # the draft's own LUT: none
-        assert document.test_pattern is not None and document.test_pattern.pattern is TestPattern.WHITE
-        rendered = _restore(client, session, older, 3)
-        assert rendered.json() == {"sequence": 4, "hardware_skipped": [], "lut_skipped": False,
-                                   "lut_recipe_changed": True}
-        document = _picture(registry)
-        assert document.software.lut == LutRef(LISTED, LUT_RECIPE_ID)
+        assert (dict(document.hardware), document.software.contrast_percent, document.light) == (
+            {"10": 46}, 90, DisplayLight(matched_lux=300.0, black=0.002))
         assert document.test_pattern is not None and document.test_pattern.pattern is TestPattern.WHITE
 
 
@@ -298,8 +287,8 @@ def test_a_page_is_bounded_and_times_carry_their_zone(registry):
     player = _bound(registry)
     display_id = _display_id(registry, player)
     for brightness in (90, 95, 105):
-        _append(registry, display_id, DisplayPicture({}, replace(NEUTRAL_SOFTWARE, brightness_percent=brightness),
-                                                     SignalRange.AUTO))
+        _append(registry, display_id, DisplayPicture({}, replace(NEUTRAL_SOFTWARE, contrast_percent=brightness),
+                                                     SignalRange.AUTO, UPGRADE_DISPLAY_LIGHT))
     with _client(registry) as client:
         newest = _history(client, display_id, limit=2)["entries"]
         assert [entry["number"] for entry in newest] == [3, 2]
@@ -321,10 +310,10 @@ def test_a_display_keeps_its_newest_kept_entries(registry, monkeypatch):
     with _client(registry) as client:
         for brightness in (101, 102, 103, 104, 105):
             session = _begin(client)
-            _software(client, session, "brightness", brightness, 1)
+            _software(client, session, "contrast", brightness, 1)
             _keep(client, registry, session)
         entries = _kept(_history(client, _display_id(registry, player)))
-    assert [(entry["number"], entry["picture"]["software"]["brightness_percent"]) for entry in entries] == [
+    assert [(entry["number"], entry["picture"]["software"]["contrast_percent"]) for entry in entries] == [
         (5, 105), (4, 104), (3, 103)]
 
 
@@ -353,8 +342,8 @@ def test_the_kept_write_takes_only_done_or_copy(registry):
     P1-kind-check-dropped: drop write_picture's guard -> an unrecorded or sent record is stored."""
     player = _bound(registry)
     display_id = _display_id(registry, player)
-    louder = replace(DisplayPicture({}, NEUTRAL_SOFTWARE, SignalRange.AUTO).software, contrast_percent=130)
-    picture = DisplayPicture({}, louder, SignalRange.AUTO)
+    louder = replace(NEUTRAL_SOFTWARE, contrast_percent=130)
+    picture = DisplayPicture({}, louder, SignalRange.AUTO, UPGRADE_DISPLAY_LIGHT)
     for kind in (PictureEntryKind.KEPT_UNRECORDED, PictureEntryKind.SENT_DRAFT, PictureEntryKind.SENT_KEPT):
         with registry.db.transaction() as conn, pytest.raises(ValueError, match="picture_history_kind"):
             display_store.write_picture(conn, display_id, PictureRecord(kind, picture, None, None, None))

@@ -8,6 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 from starlette.websockets import WebSocketDisconnect
+from support.position import LIGHTING
 from test_registry import ADMIN, enroll, frame
 
 from central.app import create_app
@@ -15,7 +16,6 @@ from central.player_control_protocol import project_state, state_digest
 from contracts.models import (
     FrameProfile,
     Layer,
-    Mat,
     OutputBinding,
     Plan,
     PlayerConfiguration,
@@ -324,7 +324,7 @@ def after_end_plan() -> tuple[PlayerConfiguration, Plan]:
     """A kept photo, then a black ending that keeps nothing, then a plain overlay."""
     binding = OutputBinding(output_id="HDMI-A-1", frame_id="frame-0", generation=1,
                             profile=FrameProfile(width_px=1920, height_px=1080,
-                                                 diagonal_inches=24), mat=Mat())
+                                                 diagonal_inches=24), lighting=LIGHTING)
     configuration = PlayerConfiguration(player_id="p-" + "a" * 32, authority_epoch=1,
                                         configuration_revision=1, bindings=(binding,),
                                         enabled_outputs=("HDMI-A-1",))

@@ -17,8 +17,8 @@ from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
-from support.position import save_position
-from test_node_calibration import NO_MAT, SKEWED, TURNED, setup_trial
+from support.position import LIGHTING, save_position
+from test_node_calibration import LIGHTING_JSON, SKEWED, TURNED, setup_trial
 from test_registry import ADMIN, frame
 
 from central.app import create_app
@@ -34,11 +34,12 @@ from central.infra import position_history_store
 from central.infra.position_history_store import record_sent_in, write_position_in
 from central.transaction_locks import acquire_runtime_locks
 from central.tuning_history import bounds as retention
-from contracts.models import Calibration, CornersFit, FrameProfile, Mat
+from contracts.frame_lighting import FrameLighting
+from contracts.models import Calibration, CornersFit, FrameProfile
 from contracts.node_calibration import parse_trial
 
 AUTH = {"Authorization": "Bearer " + ADMIN}
-DEEP = Mat(depth_mm=3.0)
+DEEP = LIGHTING.model_copy(update={"mat_depth_mm": 3.0})
 PORTRAIT = {"width": 1080, "height": 1920}
 
 
@@ -64,11 +65,11 @@ class Node:
     def begin(self, frame_id: str = "node-f0") -> dict:
         return self.trials.begin(frame_id)
 
-    def edit(self, trial: dict, fit, mat: Mat = Mat()) -> dict:
+    def edit(self, trial: dict, fit, lighting: FrameLighting = LIGHTING) -> dict:
         draft = Calibration(revision=trial["calibration_revision"], fit=fit)
         return self.trials.operate("node-f0", UUID(trial["trial_id"]), operation="edit",
                                    expected_sequence=trial["sequence"], calibration=draft.model_dump(mode="json"),
-                                   mat=mat.model_dump(mode="json"))
+                                   lighting=lighting.model_dump(mode="json"))
 
     def save(self, trial: dict) -> dict:
         self.present()
@@ -109,8 +110,8 @@ def _sql(registry, sql: str, params=()) -> list[dict]:
 def _see_display(registry, frame_id: str = "node-f0") -> UUID:
     """A Display seen on the Frame's port and named by its Position, so the Frame stays ready."""
     display = uuid4()
-    _sql(registry, "INSERT INTO displays(id, maker, product, name, serial, first_seen_at) "
-                   "VALUES (%s, 'SAM', 1, 'Samsung QN43Q8F', %s, 0)", (display, display.hex))
+    _sql(registry, "INSERT INTO displays(id, maker, product, name, serial, first_seen_at, matched_lux, panel_black) "
+                   "VALUES (%s, 'SAM', 1, 'Samsung QN43Q8F', %s, 0, 1000.0, 0.0003)", (display, display.hex))
     _sql(registry, "INSERT INTO output_displays(player_id, output_id, connected, display_id, report, reported_at) "
                    "SELECT player_id, output_id, true, %s, '{}', 0 FROM bindings WHERE frame_id=%s "
                    "ON CONFLICT (player_id, output_id) DO UPDATE SET display_id=EXCLUDED.display_id",
@@ -123,10 +124,10 @@ def _entry(registry, *, frame_id: str = "node-f0", width: int = 1080, height: in
            display: UUID | None = None, fit=SKEWED) -> UUID:
     """An entry Photo Wall wrote at another time (another profile, another Display), as stored."""
     entry = uuid4()
-    _sql(registry, "INSERT INTO position_entries(id, frame_id, number, kind, at, fit, mat, profile_width_px, "
+    _sql(registry, "INSERT INTO position_entries(id, frame_id, number, kind, at, fit, lighting, profile_width_px, "
                    "profile_height_px, display_id) SELECT %s, %s, COALESCE(max(number), 0) + 1, 'kept-saved', "
-                   "clock_timestamp(), %s, '{}', %s, %s, %s FROM position_entries WHERE frame_id=%s",
-         (entry, frame_id, fit.model_dump_json(), width, height, display, frame_id))
+                   "clock_timestamp(), %s, %s, %s, %s, %s FROM position_entries WHERE frame_id=%s",
+         (entry, frame_id, fit.model_dump_json(), LIGHTING.model_dump_json(), width, height, display, frame_id))
     return entry
 
 
@@ -143,7 +144,7 @@ def test_save_appends_a_kept_entry_made_for_the_profile_and_the_display_seen(reg
     assert node.save(trial)["state"] == "saved"
     newest = _history(registry)["entries"][0]
     assert (newest["kind"], newest["session_id"], newest["restored_from"]) == ("kept-saved", trial["trial_id"], None)
-    assert CornersFit.model_validate(newest["fit"]) == SKEWED and Mat.model_validate(newest["mat"]) == DEEP
+    assert CornersFit.model_validate(newest["fit"]) == SKEWED and FrameLighting.model_validate(newest["lighting"]) == DEEP
     assert newest["made_for"] == {"profile_px": PORTRAIT, "display_id": str(display)}
     assert newest["restore_refusal"] is None
 
@@ -177,13 +178,13 @@ def test_a_change_made_outside_photo_wall_is_recorded_before_the_next_save(regis
     """(3) Design rule 3. Mutation probes: P3-no-unrecorded -> no kept-unrecorded;
     P3-default-unrecorded fails the first test's single entry."""
     node = Node(registry)
-    _sql(registry, "UPDATE frames SET mat=%s WHERE id='node-f0'", (DEEP.model_dump_json(),))
+    _sql(registry, "UPDATE frames SET lighting=%s WHERE id='node-f0'", (DEEP.model_dump_json(),))
     assert _history(registry)["unrecorded_change"] is True
     node.save(node.edit(node.begin(), TURNED))
     history = _history(registry)
     saved, unrecorded = history["entries"][:2]
     assert (saved["kind"], unrecorded["kind"], history["unrecorded_change"]) == ("kept-saved", "kept-unrecorded", False)
-    assert Mat.model_validate(unrecorded["mat"]) == DEEP and unrecorded["session_id"] is None
+    assert FrameLighting.model_validate(unrecorded["lighting"]) == DEEP and unrecorded["session_id"] is None
     assert CornersFit.model_validate(unrecorded["fit"]) == CornersFit()           # the rig's saved fit
     assert unrecorded["made_for"]["profile_px"] == PORTRAIT
 
@@ -192,21 +193,21 @@ def test_a_profile_change_records_a_change_made_outside_photo_wall_first(registr
     """(3) Design rule 3 on the other kept write. Mutation probe P3-no-unrecorded(profile): the
     profile change skips the unrecorded check -> no kept-unrecorded under kept-profile-changed."""
     frame(registry, "spare")
-    _sql(registry, "UPDATE frames SET mat=%s WHERE id='spare'", (DEEP.model_dump_json(),))
+    _sql(registry, "UPDATE frames SET lighting=%s WHERE id='spare'", (DEEP.model_dump_json(),))
     with registry.db.transaction() as conn:
         acquire_runtime_locks(conn)
         registry.replace_frame_profile("spare", FrameProfile(width_px=720, height_px=1280, diagonal_inches=24),
                                        expected_generation=0, conn=conn)
     changed, unrecorded = _history(registry, "spare")["entries"]
     assert (changed["kind"], unrecorded["kind"]) == ("kept-profile-changed", "kept-unrecorded")
-    assert Mat.model_validate(unrecorded["mat"]) == DEEP == Mat.model_validate(changed["mat"])
+    assert FrameLighting.model_validate(unrecorded["lighting"]) == DEEP == FrameLighting.model_validate(changed["lighting"])
 
 
 def test_the_kept_write_takes_only_a_kept_kind_and_its_own_values(registry):
     """The one kept Position write refuses what is not a Save or a profile change, a profile with
     the wrong kind, and values that are not the calibration it stores; the Frame is untouched."""
     Node(registry)
-    before = _sql(registry, "SELECT calibration, mat, generation FROM frames WHERE id='node-f0'")
+    before = _sql(registry, "SELECT calibration, lighting, generation FROM frames WHERE id='node-f0'")
     portrait = FrameProfile(width_px=1080, height_px=1920, diagonal_inches=24)
     saved = saved_record(PositionValues(SKEWED, DEEP), session_id=None, restored_from=None)
     sent = replace(saved, kind=PositionEntryKind.SENT_DRAFT)
@@ -218,7 +219,7 @@ def test_the_kept_write_takes_only_a_kept_kind_and_its_own_values(registry):
             (saved, Calibration(fit=TURNED), None, "position_history_values")):
         with registry.db.transaction() as conn, pytest.raises(ValueError, match=code):
             write_position_in(conn, "node-f0", record, calibration=calibration, profile=profile)
-    assert _sql(registry, "SELECT calibration, mat, generation FROM frames WHERE id='node-f0'") == before
+    assert _sql(registry, "SELECT calibration, lighting, generation FROM frames WHERE id='node-f0'") == before
 
 
 def test_what_each_exchange_hands_the_node_is_recorded_once(registry):
@@ -235,7 +236,7 @@ def test_what_each_exchange_hands_the_node_is_recorded_once(registry):
     assert _kinds(registry) == ["sent-draft", "kept-saved"]
     draft = Calibration(revision=trial["calibration_revision"], fit=TURNED).model_dump(mode="json")
     renewed = node.trials.operate("node-f0", UUID(trial["trial_id"]), operation="renew",
-                                  expected_sequence=trial["sequence"], calibration=draft, mat=NO_MAT)
+                                  expected_sequence=trial["sequence"], calibration=draft, lighting=LIGHTING_JSON)
     node.exchange()
     node.end(renewed)
     node.exchange()
@@ -270,7 +271,7 @@ def test_restore_loads_an_entry_at_the_trials_base_and_save_names_it(registry):
     assert restored["sequence"] == trial["sequence"] + 1
     assert restored["calibration"] == Calibration(revision=trial["calibration_revision"], fit=SKEWED).model_dump(
         mode="json")
-    assert Mat.model_validate(restored["mat"]) == DEEP and restored["restored_from"] == skewed["entry_id"]
+    assert FrameLighting.model_validate(restored["lighting"]) == DEEP and restored["restored_from"] == skewed["entry_id"]
     assert restored["candidate_sha256"] != trial["candidate_sha256"]
     assert (restored["presented_sequence"], restored["presented_sha256"]) == (None, None)
     with _client(registry) as client:
@@ -300,7 +301,7 @@ def test_an_edit_after_restore_keeps_what_it_was_restored_from(registry):
 
 def test_the_restore_route_answers_the_draft_at_the_trials_base(registry):
     """(5) The HTTP route the Position tab calls, on success: 200 with the entry's fit at the
-    trial's base revision, its mat, the next sequence and the entry it came from. Mutation probes
+    trial's base revision, its lighting, the next sequence and the entry it came from. Mutation probes
     P3-route-success-empty and P3-route-unvalidated-sequence fail here."""
     node = Node(registry)
     trial = node.edit(node.begin(), SKEWED, DEEP)
@@ -317,7 +318,7 @@ def test_the_restore_route_answers_the_draft_at_the_trials_base(registry):
     body = answer.json()
     assert body["calibration"] == Calibration(revision=trial["calibration_revision"], fit=SKEWED).model_dump(
         mode="json")
-    assert Mat.model_validate(body["mat"]) == DEEP
+    assert FrameLighting.model_validate(body["lighting"]) == DEEP
     assert (body["sequence"], body["restored_from"], body["trial_id"]) == (
         trial["sequence"] + 1, skewed["entry_id"], trial["trial_id"])
     assert (invalid.status_code, invalid.json()["error"]) == (422, "node_trial_operation_invalid")
@@ -331,8 +332,8 @@ def test_restore_refusals_in_order(registry):
     trial = node.begin()
     own = _history(registry)["entries"][0]["entry_id"]
     other_frame = _history(registry, "node-f1")["entries"][0]["entry_id"]
-    _sql(registry, "INSERT INTO displays(id, maker, product, name, serial, first_seen_at) "
-                   "VALUES (%s, 'DEL', 2, 'Dell', 'other', 0)", (dell := uuid4(),))
+    _sql(registry, "INSERT INTO displays(id, maker, product, name, serial, first_seen_at, matched_lux, panel_black) "
+                   "VALUES (%s, 'DEL', 2, 'Dell', 'other', 0, 1000.0, 0.0003)", (dell := uuid4(),))
     other_display = _entry(registry, display=dell)
     with pytest.raises(NodeControlError) as invalid:
         node.restore(trial, own, expected=0)
@@ -380,8 +381,8 @@ def test_kept_and_sent_entries_are_trimmed_apart(registry, monkeypatch):
     session = uuid4()
     with registry.db.transaction() as conn:
         for depth in (1.0, 2.0, 3.0):
-            record_sent_in(conn, "node-f0", trial=TrialHanded(PositionValues(SKEWED, Mat(depth_mm=depth)), session,
-                                                              None), saved=PositionValues(SKEWED, Mat()))
+            record_sent_in(conn, "node-f0", trial=TrialHanded(PositionValues(SKEWED, LIGHTING.model_copy(update={"mat_depth_mm": depth})), session,
+                                                              None), saved=PositionValues(SKEWED, LIGHTING))
     entries = _history(registry)["entries"]
     assert [(entry["kind"], entry["number"]) for entry in entries] == [
         ("sent-draft", 7), ("sent-draft", 6), ("kept-saved", 4), ("kept-saved", 3)]
@@ -404,12 +405,12 @@ def test_a_failed_append_fails_the_save(registry, monkeypatch):
     """(10) Acceptance 10: one transaction. Mutation probe P3-swallow: catch the error in Save ->
     the Save is taken."""
     Node(registry)
-    before = _sql(registry, "SELECT calibration, mat FROM frames WHERE id='node-f0'")
+    before = _sql(registry, "SELECT calibration, lighting FROM frames WHERE id='node-f0'")
 
     def refuse(conn, frame_id, record):
         raise RuntimeError("history write failed")
 
     monkeypatch.setattr(position_history_store, "_append_in", refuse)
     with pytest.raises(RuntimeError, match="history write failed"):
-        save_position(registry, "node-f0", Calibration(fit=SKEWED), mat=DEEP)
-    assert _sql(registry, "SELECT calibration, mat FROM frames WHERE id='node-f0'") == before
+        save_position(registry, "node-f0", Calibration(fit=SKEWED), lighting=DEEP)
+    assert _sql(registry, "SELECT calibration, lighting FROM frames WHERE id='node-f0'") == before

@@ -13,15 +13,15 @@ report for the recorded identity; (5) Revert; (6) an abandoned session reverts w
 (7) Copy; (8) the picture is never a Position commit; (9) a Display's picture follows it to another
 Pi; (10) migration 075's gain, carried through 092. Slice S4: (11) Copy by what each display
 offers; (12) a known list is kept; (13) Revert to the Pi's first `before`; (14) "Changed on the
-display's buttons". The print look (design /print-look, slice C1): (17) each new setting's
-bounds and round trip; (18) the tracer, black floor 20 from session to Display; (19) Revert and
-Copy cover the print look; (20) Done never early on a differing saturation.
+display's buttons". Room light (decision 0028; the print look's sliders and LUT are gone): (17)
+the Display's light's bounds; (18) a light edit is live, waits for the Pi, is kept by Done and
+recorded in the picture history; (19) Revert puts it back; (20) Done never early on a differing
+light.
 """
 from __future__ import annotations
 
 import asyncio
 import json
-from dataclasses import replace
 from pathlib import Path
 from typing import Final
 
@@ -72,6 +72,7 @@ from contracts.node_picture import (
     NEUTRAL_SOFTWARE,
     UPGRADE_DISPLAY_LIGHT,
     Choice,
+    DisplayLight,
     HardwareRange,
     HardwareResult,
     HardwareSetting,
@@ -195,12 +196,12 @@ def test_hardware_46_and_software_114_are_set_apart_end_to_end_and_never_cost_po
     player = _bound(registry)
     with _client(registry) as client:
         power_before, picture_before = _documents(registry)
-        assert (picture_before.hardware, picture_before.software.brightness_percent) == ({}, 100)
+        assert (picture_before.hardware, picture_before.software.contrast_percent) == ({}, 100)
         session = _begin(client)
         assert _hardware(client, session, "10", 46, 1).json() == {"sequence": 2}
-        assert _software(client, session, "brightness", 114, 2).json() == {"sequence": 3}
+        assert _software(client, session, "contrast", 114, 2).json() == {"sequence": 3}
         power, picture = _documents(registry)
-        assert dict(picture.hardware) == {"10": 46} and picture.software.brightness_percent == 114
+        assert dict(picture.hardware) == {"10": 46} and picture.software.contrast_percent == 114
         assert power.change == power_before.change                     # picture never costs power
         assert picture.picture_change > picture_before.picture_change
 
@@ -226,13 +227,11 @@ def test_hardware_46_and_software_114_are_set_apart_end_to_end_and_never_cost_po
                               "changed_on_buttons": False}
         contrast = next(row for row in view["hardware"] if row["code"] == "12")
         assert (contrast["value"], contrast["result"]) == (None, None)  # unset: as the display has it
-        assert view["software"] == {"brightness_percent": 114, "contrast_percent": 100,
-                                    "colour_temperature_kelvin": 6500, "gamma_tenths": 22, "saturation_percent": 100,
-                                    "highlight_rolloff_percent": 0, "black_floor_tenths": 0, "lut": None,
-                                    "lut_amount_percent": 100}
+        assert view["software"] == {"contrast_percent": 114, "colour_temperature_kelvin": 6500, "gamma_tenths": 22}
+        assert view["light"] == {"matched_lux": 1000.0, "black": 0.0003}
         assert _done(client, session).status_code == 204
     stored = _display(registry, player)
-    assert (stored["hardware_picture"], stored["software_brightness_percent"]) == ({"10": 46}, 114)
+    assert (stored["hardware_picture"], stored["software_contrast_percent"]) == ({"10": 46}, 114)
     assert _sql(registry, "SELECT id FROM picture_sessions") == []
 
 
@@ -261,7 +260,7 @@ def test_an_edit_is_refused_by_what_the_display_offers_and_photo_walls_ranges(re
             (_hardware(client, session, "D6", 1, 1), 409, "not_offered"),       # power: off the picture list
             (_hardware(client, session, "10", 101, 1), 422, "out_of_range"),    # past the display's 100
             (_hardware(client, session, "16", 40, 1), 409, "not_offered"),      # on the list, not offered
-            (_software(client, session, "brightness", 151, 1), 422, "out_of_range"),
+            (_software(client, session, "contrast", 151, 1), 422, "out_of_range"),
             (_software(client, session, "gamma", 27, 1), 422, "out_of_range"),
         ]
         for answer, status, code in refusals:
@@ -297,23 +296,23 @@ def test_revert_puts_back_the_stored_values(registry):
     """(5) Both groups go back to what is stored; a code set only in the session goes from the
     document."""
     player = _bound(registry)
-    _sql(registry, "UPDATE displays SET hardware_picture='{\"12\": 30}', software_brightness_percent=120")
+    _sql(registry, "UPDATE displays SET hardware_picture='{\"12\": 30}', software_contrast_percent=120")
     with _client(registry) as client:
         session = _begin(client)
         _hardware(client, session, "10", 46, 1)
         _hardware(client, session, "12", 70, 2)
-        _software(client, session, "brightness", 80, 3)
+        _software(client, session, "contrast", 80, 3)
         _software(client, session, "colour-temperature", 3200, 4)
         assert dict(_picture(registry).hardware) == {"10": 46, "12": 70}
         assert client.delete(f"/v1/operator/picture-sessions/{session['session_id']}",
                              headers=AUTH).status_code == 204
-        gone = _software(client, session, "brightness", 20, 5)
+        gone = _software(client, session, "contrast", 20, 5)
         assert (gone.status_code, gone.json()) == (404, {"error": "unknown_session"})
     stored = _display(registry, player)
-    assert (stored["hardware_picture"], stored["software_brightness_percent"],
+    assert (stored["hardware_picture"], stored["software_contrast_percent"],
             stored["colour_temperature_kelvin"]) == ({"12": 30}, 120, 6500)
     reverted = _picture(registry)
-    assert (dict(reverted.hardware), reverted.software.brightness_percent) == ({"12": 30}, 120)
+    assert (dict(reverted.hardware), reverted.software.contrast_percent) == ({"12": 30}, 120)
 
 
 def test_an_abandoned_session_reverts_with_no_request(registry):
@@ -323,14 +322,14 @@ def test_an_abandoned_session_reverts_with_no_request(registry):
     player = _bound(registry)
     with _client(registry) as client:
         session = _begin(client)
-        _software(client, session, "brightness", 90, 1)
-        assert _picture(registry).software.brightness_percent == 90
+        _software(client, session, "contrast", 90, 1)
+        assert _picture(registry).software.contrast_percent == 90
         _sql(registry, "UPDATE picture_sessions SET idle_until = EXTRACT(EPOCH FROM clock_timestamp()) - 1")
-        assert _picture(registry).software.brightness_percent == 100
+        assert _picture(registry).software.contrast_percent == 100
         ended = client.post(f"/v1/operator/picture-sessions/{session['session_id']}/keepalive", headers=AUTH)
         assert (ended.status_code, ended.json()) == (410, {"error": "session_ended"})
         _begin(client)
-    assert _display(registry, player)["software_brightness_percent"] == 100
+    assert _display(registry, player)["software_contrast_percent"] == 100
 
 
 def test_the_sources_wait_ends_at_a_sessions_idle_deadline(registry):
@@ -358,7 +357,7 @@ def test_copy_carries_the_software_values_names_the_hardware_skipped_and_never_p
     _report(registry, "pi-a", "HDMI-A-1", SERIAL_DISPLAY)
     _report(registry, "pi-b", "HDMI-A-1", NO_SERIAL)
     save_position(registry, "b")
-    _sql(registry, "UPDATE displays SET hardware_picture='{\"12\": 35, \"10\": 65}', software_brightness_percent=130, "
+    _sql(registry, "UPDATE displays SET hardware_picture='{\"12\": 35, \"10\": 65}', matched_lux=2500, "
                    "software_contrast_percent=70, colour_temperature_kelvin=5000, gamma_tenths=20 "
                    "WHERE serial IS NOT NULL")
     _sql(registry, "UPDATE displays SET hardware_picture='{\"10\": 20}' WHERE serial IS NULL")
@@ -375,8 +374,8 @@ def test_copy_carries_the_software_values_names_the_hardware_skipped_and_never_p
         unknown = client.post("/v1/operator/frames/a/picture-copies", headers=AUTH, json={"to_frames": ["zz"]})
         assert (unknown.status_code, unknown.json()) == (404, {"error": "unknown_frame"})
     target = _display(registry, pi_b, "HDMI-A-1")
-    assert (target["software_brightness_percent"], target["software_contrast_percent"],
-            target["colour_temperature_kelvin"], target["gamma_tenths"]) == (130, 70, 5000, 20)
+    assert (target["matched_lux"], target["software_contrast_percent"],
+            target["colour_temperature_kelvin"], target["gamma_tenths"]) == (2500.0, 70, 5000, 20)
     assert target["hardware_picture"] == {"10": 20}
     assert _sql(registry, "SELECT calibration, profile, position_generation FROM frames WHERE id='b'") == before
 
@@ -404,7 +403,7 @@ def test_a_displays_picture_follows_it_to_another_pis_output(registry):
     pi_a, pi_b = enroll_pi(registry, "pi-a"), enroll_pi(registry, "pi-b")
     _report(registry, "pi-a", "HDMI-A-1", SERIAL_DISPLAY)
     display_id = _seen(registry, pi_a, "HDMI-A-1")["display_id"]
-    _sql(registry, "UPDATE displays SET hardware_picture='{\"10\": 46}', software_brightness_percent=114, "
+    _sql(registry, "UPDATE displays SET hardware_picture='{\"10\": 46}', software_contrast_percent=114, "
                    "gamma_tenths=24 WHERE id=%s", (display_id,))
     _report(registry, "pi-a", "HDMI-A-1", None, connected=False)
     assert _picture(registry, "pi-b", "HDMI-A-2").software.gamma_tenths == 22     # nothing seen there yet
@@ -412,7 +411,7 @@ def test_a_displays_picture_follows_it_to_another_pis_output(registry):
 
     assert _seen(registry, pi_b, "HDMI-A-2")["display_id"] == display_id
     moved = _picture(registry, "pi-b", "HDMI-A-2")
-    assert (dict(moved.hardware), moved.software.brightness_percent, moved.software.gamma_tenths) == ({"10": 46}, 114, 24)
+    assert (dict(moved.hardware), moved.software.contrast_percent, moved.software.gamma_tenths) == ({"10": 46}, 114, 24)
 
 
 def test_a_picture_report_that_does_not_decode_or_names_another_output_is_skipped(registry):
@@ -461,14 +460,14 @@ def test_copy_carries_each_hardware_value_the_target_offers_the_same_way(registr
         HardwareSetting("10", HardwareRange(RangeKind.LEVEL, 255, ()), 0),
         HardwareSetting("12", HardwareRange(RangeKind.LEVEL, 100, ()), 30),
         HardwareSetting("14", HardwareRange(RangeKind.CHOICE, None, (Choice(5, "sRGB"),)), 5)))
-    _sql(registry, "UPDATE displays SET hardware_picture='{\"10\": 46, \"14\": 5}', software_brightness_percent=114 "
+    _sql(registry, "UPDATE displays SET hardware_picture='{\"10\": 46, \"14\": 5}', software_contrast_percent=114 "
                    "WHERE serial IS NOT NULL")
     _sql(registry, "UPDATE displays SET hardware_picture='{\"12\": 30}' WHERE serial IS NULL")
     with _client(registry) as client:
         copied = client.post("/v1/operator/frames/a/picture-copies", headers=AUTH, json={"to_frames": ["b"]})
         assert copied.json() == [{"frame_id": "b", "outcome": "copied", "hardware_skipped": ["14"]}]
     target = _display(registry, pi_b)
-    assert (target["hardware_picture"], target["software_brightness_percent"]) == ({"10": 117, "12": 30}, 114)
+    assert (target["hardware_picture"], target["software_contrast_percent"]) == ({"10": 117, "12": 30}, 114)
     assert dict(_picture(registry, "pi-b").hardware) == {"10": 117, "12": 30}
 
 
@@ -713,116 +712,77 @@ def test_a_display_that_offers_nothing_is_known_not_checking(registry):
         assert (_view(client)["offered_known"], _view(client)["hardware"]) == (True, [])
 
 
-# --- The print look (design /print-look, slice C1) --------------------------------------------------
+# --- The Display's light (decision 0028) ------------------------------------------------------------
 
-# Each print-look setting: (route name, SoftwarePicture field, lowest, highest).
-PRINT_LOOK = (("saturation", "saturation_percent", 0, 150),
-              ("highlight-rolloff", "highlight_rolloff_percent", 0, 100),
-              ("black-floor", "black_floor_tenths", 0, 100),
-              ("lut-amount", "lut_amount_percent", 0, 100))
+def _light(client, session: dict, matched_lux, black, expected: int):
+    return client.post(f"/v1/operator/picture-sessions/{session['session_id']}/light-edits", headers=AUTH,
+                       json={"matched_lux": matched_lux, "black": black, "expected_sequence": expected})
 
 
-def test_each_print_look_setting_is_taken_at_its_bounds_and_carried_by_its_own_field(registry):
-    """(17) R9: both bounds taken, one past either refused out_of_range, a stale sequence 409; the
-    value set reaches its own field of the picture document and the view, and no other. Mutation
-    probe: map BLACK_FLOOR to saturation_percent in _SOFTWARE_FIELDS -> the round trip fails."""
+def test_the_displays_light_is_taken_within_its_ranges(registry):
+    """(17) Both bounds taken, one past either refused 422, a stale sequence 409; the old sliders
+    and the LUT edit are gone."""
     _bound(registry)
     with _client(registry) as client:
         session = _begin(client)
-        sequence, expected = 1, NEUTRAL_SOFTWARE
-        for setting, field, lowest, highest in PRINT_LOOK:
-            for value in (lowest - 1, highest + 1):
-                refused = _software(client, session, setting, value, sequence)
-                assert (refused.status_code, refused.json()) == (422, {"error": "out_of_range"}), setting
-            for value in (highest, lowest, (lowest + highest) // 2 + 7):
-                assert _software(client, session, setting, value, sequence).json() == {"sequence": sequence + 1}
-                sequence, expected = sequence + 1, replace(expected, **{field: value})
-                assert _picture(registry).software == expected, setting
-                assert _view(client)["software"][field] == value
-        stale = _software(client, session, "black-floor", 5, sequence - 1)
+        for lux, black in ((9.9, 0.001), (20001, 0.001), (500, 0.06), (500, 0)):
+            assert _light(client, session, lux, black, 1).status_code == 422, (lux, black)
+        assert _light(client, session, 10, 0.00001, 1).json() == {"sequence": 2}
+        assert _light(client, session, 20000, 0.05, 2).json() == {"sequence": 3}
+        stale = _light(client, session, 800, 0.001, 2)
         assert (stale.status_code, stale.json()) == (409, {"error": "stale_sequence"})
+        for setting in ("brightness", "saturation", "highlight-rolloff", "black-floor", "lut-amount"):
+            assert _software(client, session, setting, 100, 3).status_code == 422, setting
+        assert client.post(f"/v1/operator/picture-sessions/{session['session_id']}/lut-edits", headers=AUTH,
+                           json={"profile_sha256": None, "expected_sequence": 3}).status_code in (404, 405)
 
 
-def test_a_black_floor_in_a_session_reaches_the_document_waits_for_the_pi_and_is_kept_on_done(registry):
-    """(18) The tracer: black floor 20 (2 % of white light) in a session -> the picture document's
-    software.black_floor_tenths is 20 at a higher picture change; WAITING until a picture report
-    answers it presented, then SHOWN; Done stores 20 on the Display and the view shows it after the
-    session. Mutation probe: leave software_black_floor_tenths out of write_picture -> after Done
-    the view shows 0."""
+def test_a_light_edit_is_live_waits_for_the_pi_and_is_kept_on_done(registry):
+    """(18) Acceptance 5: matched 400 lx, black 0.001 in a session -> the picture document carries
+    the light at a higher picture change; Done waits until a report answers it presented; Done
+    stores it on the Display and the picture history's kept entry records it. Mutation probe: leave
+    matched_lux out of picture_columns.picture_fields -> Done does not store it."""
     player = _bound(registry)
     before = _picture(registry)
+    assert before.light == UPGRADE_DISPLAY_LIGHT
     with _client(registry) as client:
         session = _begin(client)
-        assert _software(client, session, "black-floor", 20, 1).json() == {"sequence": 2}
+        assert _light(client, session, 400, 0.001, 1).json() == {"sequence": 2}
         document = _picture(registry)
-        assert document.software == replace(NEUTRAL_SOFTWARE, black_floor_tenths=20)
+        assert document.light == DisplayLight(matched_lux=400.0, black=0.001)
         assert document.picture_change > before.picture_change
-        assert _view(client)["status"] == "waiting"
-        _picture_report(registry, for_change=document.picture_change, presented=before.picture_change)
-        assert _view(client)["status"] == "waiting"                     # answered, not presented yet
+        assert _view(client)["light"] == {"matched_lux": 400.0, "black": 0.001}
         early = _done(client, session)
         assert (early.status_code, early.json()) == (409, {"error": "not_presented_yet"})
         _picture_report(registry, for_change=document.picture_change, presented=document.picture_change)
-        assert _view(client)["status"] == "shown"
         assert _done(client, session).status_code == 204
-        view = _view(client)
-        assert (view["session"], view["software"]["black_floor_tenths"]) == (None, 20)
-    assert _display(registry, player)["software_black_floor_tenths"] == 20
-    assert _picture(registry).software.black_floor_tenths == 20
+        display_id = _view(client)["display_id"]
+        history = client.get(f"/v1/operator/displays/{display_id}/picture-history", headers=AUTH).json()
+    row = _display(registry, player)
+    assert (row["matched_lux"], row["panel_black"]) == (400.0, 0.001)
+    kept = next(entry for entry in history["entries"] if entry["kind"] == "kept-done")
+    assert kept["picture"]["light"] == {"matched_lux": 400.0, "black": 0.001}
 
 
-def test_revert_puts_back_the_stored_print_look(registry):
-    """(19) 0022 R5: Revert puts every stored print-look value back."""
+def test_revert_puts_back_the_stored_light(registry):
+    """(19) Revert puts the stored light back."""
     player = _bound(registry)
-    _sql(registry, "UPDATE displays SET software_saturation_percent=80, software_black_floor_tenths=5")
+    _sql(registry, "UPDATE displays SET matched_lux=700, panel_black=0.002")
     with _client(registry) as client:
         session = _begin(client)
-        for sequence, (setting, value) in enumerate((("saturation", 130), ("highlight-rolloff", 60),
-                                                     ("black-floor", 25), ("lut-amount", 40)), start=1):
-            assert _software(client, session, setting, value, sequence).status_code == 200
-        assert _picture(registry).software == replace(NEUTRAL_SOFTWARE, saturation_percent=130,
-                                                      highlight_rolloff_percent=60, black_floor_tenths=25,
-                                                      lut_amount_percent=40)
+        assert _light(client, session, 300, 0.0005, 1).status_code == 200
+        assert _picture(registry).light == DisplayLight(matched_lux=300.0, black=0.0005)
         _revert(client, session)
-    stored = replace(NEUTRAL_SOFTWARE, saturation_percent=80, black_floor_tenths=5)
-    assert _picture(registry).software == stored
-    row = _display(registry, player)
-    assert (row["software_saturation_percent"], row["software_highlight_rolloff_percent"],
-            row["software_black_floor_tenths"], row["software_lut_amount_percent"]) == (80, 0, 5, 100)
+    assert _picture(registry).light == DisplayLight(matched_lux=700.0, black=0.002)
+    assert (_display(registry, player)["matched_lux"], _display(registry, player)["panel_black"]) == (700.0, 0.002)
 
 
-def test_copy_carries_the_print_look(registry):
-    """(19) 0022 R5: Copy carries every software value, the print look's included. Mutation probe:
-    `copied` keeps the target's saturation -> the target keeps 100."""
-    pi_a, pi_b = enroll_pi(registry, "pi-a"), enroll_pi(registry, "pi-b")
-    _bind(registry, _frame(registry, "a"), pi_a, "HDMI-A-1")
-    _bind(registry, _frame(registry, "b"), pi_b, "HDMI-A-1")
-    _report(registry, "pi-a", "HDMI-A-1", SERIAL_DISPLAY)
-    _report(registry, "pi-b", "HDMI-A-1", NO_SERIAL)
-    _sql(registry, "UPDATE displays SET software_saturation_percent=85, software_highlight_rolloff_percent=40, "
-                   "software_black_floor_tenths=15, software_lut_amount_percent=70 WHERE serial IS NOT NULL")
-    _sql(registry, "UPDATE displays SET software_black_floor_tenths=50 WHERE serial IS NULL")
-    with _client(registry) as client:
-        copied = client.post("/v1/operator/frames/a/picture-copies", headers=AUTH, json={"to_frames": ["b"]})
-        assert copied.json() == [{"frame_id": "b", "outcome": "copied", "hardware_skipped": []}]
-        assert _view(client, "b")["software"] == _view(client, "a")["software"]
-    target = _display(registry, pi_b)
-    assert (target["software_saturation_percent"], target["software_highlight_rolloff_percent"],
-            target["software_black_floor_tenths"], target["software_lut_amount_percent"]) == (85, 40, 15, 70)
-    assert _picture(registry, "pi-b").software == replace(
-        NEUTRAL_SOFTWARE, saturation_percent=85, highlight_rolloff_percent=40, black_floor_tenths=15,
-        lut_amount_percent=70)
-
-
-def test_done_never_counts_a_report_for_a_document_whose_print_look_differs():
-    """(20) Pure: a report answering a document whose saturation differs from the draft is not
-    `presented`, so Done waits. Mutation probe: `carries` compares the four picture-split fields
-    only -> presented."""
-    draft = DisplayPicture({}, replace(NEUTRAL_SOFTWARE, saturation_percent=80), SignalRange.AUTO)
+def test_done_never_counts_a_report_for_a_document_whose_light_differs():
+    """(20) Pure: a report answering a document whose light differs from the draft is not
+    `presented`, so Done waits. Mutation probe: `carries` leaves the light out -> presented."""
+    draft = DisplayPicture({}, NEUTRAL_SOFTWARE, SignalRange.AUTO, DisplayLight(matched_lux=400.0, black=0.001))
     report = PictureReport("HDMI-A-1", NO_SERIAL, OFFERED, 3, {}, 3,
                            SignalReport(3, SignalRange.AUTO, SignalResult.APPLIED))
-    for software in (NEUTRAL_SOFTWARE, replace(draft.software, black_floor_tenths=5),
-                     replace(draft.software, highlight_rolloff_percent=5), replace(draft.software, lut_amount_percent=5)):
-        document = PictureDocument("HDMI-A-1", 3, {}, software, light=UPGRADE_DISPLAY_LIGHT)
-        assert not presented(draft, document, report)
-    assert presented(draft, PictureDocument("HDMI-A-1", 3, {}, draft.software, light=UPGRADE_DISPLAY_LIGHT), report)
+    assert not presented(draft, PictureDocument("HDMI-A-1", 3, {}, NEUTRAL_SOFTWARE, light=UPGRADE_DISPLAY_LIGHT),
+                         report)
+    assert presented(draft, PictureDocument("HDMI-A-1", 3, {}, NEUTRAL_SOFTWARE, light=draft.light), report)
