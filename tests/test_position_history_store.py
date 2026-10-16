@@ -18,7 +18,7 @@ from uuid import UUID, uuid4
 import pytest
 from fastapi.testclient import TestClient
 from support.position import LIGHTING, save_position
-from test_node_calibration import LIGHTING_JSON, SKEWED, TURNED, setup_trial
+from test_node_calibration import LIGHTING_JSON, SKEWED, TURNED, begin, operate, setup_trial
 from test_registry import ADMIN, frame
 
 from central.app import create_app
@@ -63,21 +63,21 @@ class Node:
         self._exchange(self.request)
 
     def begin(self, frame_id: str = "node-f0") -> dict:
-        return self.trials.begin(frame_id)
+        return begin(self.trials, frame_id)
 
     def edit(self, trial: dict, fit, lighting: FrameLighting = LIGHTING) -> dict:
         draft = Calibration(revision=trial["calibration_revision"], fit=fit)
-        return self.trials.operate("node-f0", UUID(trial["trial_id"]), operation="edit",
+        return operate(self.trials, "node-f0", UUID(trial["trial_id"]), operation="edit",
                                    expected_sequence=trial["sequence"], calibration=draft.model_dump(mode="json"),
                                    lighting=lighting.model_dump(mode="json"))
 
     def save(self, trial: dict) -> dict:
         self.present()
-        return self.trials.operate("node-f0", UUID(trial["trial_id"]), operation="save",
+        return operate(self.trials, "node-f0", UUID(trial["trial_id"]), operation="save",
                                    expected_sequence=trial["sequence"])
 
     def end(self, trial: dict) -> dict:
-        return self.trials.operate("node-f0", UUID(trial["trial_id"]), operation="end",
+        return operate(self.trials, "node-f0", UUID(trial["trial_id"]), operation="end",
                                    expected_sequence=trial["sequence"])
 
     def restore(self, trial: dict, entry_id, expected: int | None = None) -> dict:
@@ -132,12 +132,12 @@ def _entry(registry, *, frame_id: str = "node-f0", width: int = 1080, height: in
 
 
 def test_save_appends_a_kept_entry_made_for_the_profile_and_the_display_seen(registry):
-    """(1) Acceptance 1, and 3's second half: the rig's first Save on a Frame at its defaults is one
+    """(1) A new Frame's creation is its first kept entry, and the rig's first Save on it is one
     kept-saved entry, no unrecorded one. Mutation probe P3-no-append: no kept append in
     `write_position_in` -> no new kept-saved."""
     node = Node(registry)
     first = _history(registry)
-    assert [(entry["kind"], entry["number"]) for entry in first["entries"]] == [("kept-saved", 1)]
+    assert [(entry["kind"], entry["number"]) for entry in first["entries"]] == [("kept-saved", 2), ("kept-created", 1)]
     assert first["unrecorded_change"] is False and first["frame"]["id"] == "node-f0"
     display = _see_display(registry)
     trial = node.edit(node.begin(), SKEWED, DEEP)
@@ -162,7 +162,8 @@ def test_a_profile_change_is_kept_and_older_entries_are_made_for_another_profile
             registry.replace_frame_profile("spare", FrameProfile(width_px=width, height_px=height,
                                                                  diagonal_inches=24),
                                            expected_generation=generation, conn=conn)
-    newer, older = _history(registry, "spare")["entries"]
+    newer, older, created = _history(registry, "spare")["entries"]
+    assert created["kind"] == "kept-created"
     assert (newer["kind"], newer["made_for"]["profile_px"], newer["restore_refusal"]) == (
         "kept-profile-changed", {"width": 1440, "height": 2560}, None)
     assert (older["kind"], older["made_for"]["profile_px"], older["restore_refusal"]) == (
@@ -198,9 +199,28 @@ def test_a_profile_change_records_a_change_made_outside_photo_wall_first(registr
         acquire_runtime_locks(conn)
         registry.replace_frame_profile("spare", FrameProfile(width_px=720, height_px=1280, diagonal_inches=24),
                                        expected_generation=0, conn=conn)
-    changed, unrecorded = _history(registry, "spare")["entries"]
-    assert (changed["kind"], unrecorded["kind"]) == ("kept-profile-changed", "kept-unrecorded")
+    changed, unrecorded, created = _history(registry, "spare")["entries"]
+    assert (changed["kind"], unrecorded["kind"], created["kind"]) == (
+        "kept-profile-changed", "kept-unrecorded", "kept-created")
     assert FrameLighting.model_validate(unrecorded["lighting"]) == DEEP == FrameLighting.model_validate(changed["lighting"])
+
+
+def test_a_new_frame_records_its_creation_so_no_change_reads_as_made_outside(registry):
+    """A Frame created while the house has no fixed room light starts with no light; its creation is
+    its first kept entry, so its first kept write records no change made outside Photo Wall.
+    Mutation probe: create_frame without its KEPT_CREATED entry and the old fixed default back in
+    `unrecorded_record` -> a kept-unrecorded entry appears."""
+    from central.infra.room_light_store import PgRoomLights
+    PgRoomLights(registry.db).remove_room_light("room")
+    frame(registry, "spare")
+    assert _history(registry, "spare")["unrecorded_change"] is False
+    with registry.db.transaction() as conn:
+        acquire_runtime_locks(conn)
+        registry.replace_frame_profile("spare", FrameProfile(width_px=720, height_px=1280, diagonal_inches=24),
+                                       expected_generation=0, conn=conn)
+    entries = _history(registry, "spare")["entries"]
+    assert [entry["kind"] for entry in entries] == ["kept-profile-changed", "kept-created"]
+    assert FrameLighting.model_validate(entries[1]["lighting"]).lights == ()
 
 
 def test_the_kept_write_takes_only_a_kept_kind_and_its_own_values(registry):
@@ -229,21 +249,21 @@ def test_what_each_exchange_hands_the_node_is_recorded_once(registry):
     node = Node(registry)
     trial = node.begin()
     node.exchange()                                                  # the draft is the saved Position
-    assert _kinds(registry) == ["kept-saved"]
+    assert _kinds(registry) == ["kept-saved", "kept-created"]
     trial = node.edit(trial, SKEWED)
     node.exchange()
     node.exchange()
-    assert _kinds(registry) == ["sent-draft", "kept-saved"]
+    assert _kinds(registry) == ["sent-draft", "kept-saved", "kept-created"]
     draft = Calibration(revision=trial["calibration_revision"], fit=TURNED).model_dump(mode="json")
-    renewed = node.trials.operate("node-f0", UUID(trial["trial_id"]), operation="renew",
-                                  expected_sequence=trial["sequence"], calibration=draft, lighting=LIGHTING_JSON)
+    renewed = operate(node.trials, "node-f0", UUID(trial["trial_id"]), operation="renew",
+                      expected_sequence=trial["sequence"], calibration=draft, lighting=LIGHTING_JSON)
     node.exchange()
     node.end(renewed)
     node.exchange()
     entries = _history(registry)["entries"]
     assert [(entry["kind"], entry["session_id"]) for entry in entries] == [
         ("sent-back", trial["trial_id"]), ("sent-draft", trial["trial_id"]), ("sent-draft", trial["trial_id"]),
-        ("kept-saved", None)]
+        ("kept-saved", None), ("kept-created", None)]
     assert CornersFit.model_validate(entries[0]["fit"]) == CornersFit()             # the saved values back
 
     lapsed = node.edit(node.begin(), TURNED)
@@ -360,8 +380,8 @@ def test_a_page_is_bounded_and_times_carry_their_zone(registry):
     Node(registry)
     save_position(registry, "node-f0", Calibration(fit=SKEWED))
     newest = _history(registry, limit=1)["entries"]
-    assert [entry["number"] for entry in newest] == [2]
-    assert [entry["number"] for entry in _history(registry, before=newest[0]["at"])["entries"]] == [1]
+    assert [entry["number"] for entry in newest] == [3]
+    assert [entry["number"] for entry in _history(registry, before=newest[0]["at"])["entries"]] == [2, 1]
     with _client(registry) as client:
         for params, status, code in (({"before": "2026-10-13T21:04:07"}, 422, "bad_time"),
                                      ({"limit": 0}, 422, "bad_range"), ({"limit": 501}, 422, "bad_range")):
@@ -385,7 +405,7 @@ def test_kept_and_sent_entries_are_trimmed_apart(registry, monkeypatch):
                                                               None), saved=PositionValues(SKEWED, LIGHTING))
     entries = _history(registry)["entries"]
     assert [(entry["kind"], entry["number"]) for entry in entries] == [
-        ("sent-draft", 7), ("sent-draft", 6), ("kept-saved", 4), ("kept-saved", 3)]
+        ("sent-draft", 8), ("sent-draft", 7), ("kept-saved", 5), ("kept-saved", 4)]
 
 
 def test_a_deleted_frame_takes_its_history(registry):
@@ -395,7 +415,7 @@ def test_a_deleted_frame_takes_its_history(registry):
         acquire_runtime_locks(conn)
         registry.replace_frame_profile("spare", FrameProfile(width_px=720, height_px=1280, diagonal_inches=24),
                                        expected_generation=0, conn=conn)
-    assert len(_sql(registry, "SELECT id FROM position_entries WHERE frame_id='spare'")) == 1
+    assert len(_sql(registry, "SELECT id FROM position_entries WHERE frame_id='spare'")) == 2
     with _client(registry) as client:
         assert client.delete("/v1/operator/frames/spare", headers=AUTH).status_code == 200
     assert _sql(registry, "SELECT id FROM position_entries WHERE frame_id='spare'") == []
@@ -419,16 +439,16 @@ def test_a_failed_append_fails_the_save(registry, monkeypatch):
 def test_restore_refuses_an_entry_whose_lighting_names_a_room_light_gone_since(registry):
     """An entry keeps the lighting it recorded, and a room light it names may be removed later (a
     history entry does not hold it): Restore checks the entry's lighting as an edit's, so Save never
-    keeps a light that adds nothing. Mutation probe: no `_fitting_in` in `restore` -> the gone light is
-    loaded into the draft."""
+    keeps a light that adds nothing. Mutation probe: no `fitted_within` in `restore` -> the gone light
+    is loaded into the draft."""
+    from central.frame_lighting.model import FrameLightingRefused
     from central.infra.room_light_store import PgRoomLights
-    from central.room_light.model import FixedReporter, RoomLight
+    from central.room_light.model import FixedLight
     from contracts.frame_lighting import AT_FULL, WashLight
     from contracts.room_light import FixedColour
 
     lights = PgRoomLights(registry.db)
-    assert lights.save_room_light(RoomLight(id="spot", name="Spot", colour=FixedColour(kelvin=2700),
-                                            reporter=FixedReporter())) is None
+    lights.save_room_light("spot", FixedLight(name="Spot", colour=FixedColour(kelvin=2700)))
     spotlit = LIGHTING.model_copy(update={"lights": (WashLight(light="spot", lux=500.0, reference=AT_FULL),)})
     node = Node(registry)
     trial = node.edit(node.begin(), SKEWED, spotlit)
@@ -436,7 +456,7 @@ def test_restore_refuses_an_entry_whose_lighting_names_a_room_light_gone_since(r
     tried = _history(registry)["entries"][0]
     assert tried["kind"] == "sent-draft"
     node.end(trial)
-    assert lights.remove_room_light("spot") is None
-    with pytest.raises(NodeControlError) as refused:
+    lights.remove_room_light("spot")
+    with pytest.raises(FrameLightingRefused) as refused:
         node.restore(node.begin(), tried["entry_id"])
-    assert (refused.value.code, refused.value.status) == ("trial_lighting_unknown_room_light", 422)
+    assert (refused.value.code, refused.value.status) == ("unknown_room_light", 422)

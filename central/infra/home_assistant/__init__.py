@@ -9,9 +9,10 @@ broker into them and back into the operator's Home Assistant page:
   unavailable), or the reason it is refused;
 - `health`: the link's health, judged from its heartbeat's age, never stored as a transition;
 - `link`: the worker's one MQTT client (aiomqtt), which records through `RoomLightReports`;
-- `views`: the Home Assistant settings page's answer.
+- `settings`, `views`: the Home Assistant settings page's read and answer.
 
-Only this package imports aiomqtt, and nothing outside the worker's wiring and the settings page's
-routes imports this package (pyproject's import-linter contracts). The package imports no module
+Only this package imports aiomqtt, and nothing outside the worker's wiring, the API's composition
+root, the settings page's routes and the console contract imports this package (pyproject's
+import-linter contracts). The package imports no module
 of its own here, so importing `topics` never loads the MQTT client.
 """

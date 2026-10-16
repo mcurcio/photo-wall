@@ -250,12 +250,20 @@ source_modules = ["central", "media", "contracts", "appliance", "player", "uplin
 forbidden_modules = ["paho"]
 
 [[tool.importlinter.contracts]]
-# The adapter is reached only from the worker's wiring (and, once it lands, the Home Assistant
-# settings page's routes and the API's composition root, added here by name).
+# The adapter is reached only from the worker's wiring, the API's composition root, the Home
+# Assistant settings page's routes, and the console contract's export of its source name.
 name = "Only the worker's wiring reaches the Home Assistant adapter"
 type = "protected"
 protected_modules = ["central.infra.home_assistant"]
-allowed_importers = ["media.worker"]
+allowed_importers = ["media.worker", "central.app", "central.home_assistant_routes", "central.console_contract"]
+
+[[tool.importlinter.contracts]]
+# Fleet and the registry write a Frame's lighting through central/frame_lighting's port, never the
+# house's tables.
+name = "Fleet and the registry reach the house's lighting only through its port"
+type = "forbidden"
+source_modules = ["central.fleet", "central.registry"]
+forbidden_modules = ["central.infra.room_light_store", "central.infra.lut_rows", "central.infra.lut_store"]
 
 [[tool.importlinter.contracts]]
 # Power and the week: sun times and the IANA zone database are Central's house-time calculator's;

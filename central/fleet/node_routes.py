@@ -8,7 +8,7 @@ from uuid import UUID
 
 from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse, Response
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 
 from central.content_routes import (
     ClientDisconnected,
@@ -24,7 +24,7 @@ from central.fleet.models import FleetError
 from central.fleet.node_acceptance import NodeAcceptance
 from central.fleet.node_app_links import NodeAppLinks
 from central.fleet.node_boot import NodeBootService
-from central.fleet.node_calibration import NodeCalibration
+from central.fleet.node_calibration import NodeCalibration, TrialBegin, TrialOperation
 from central.fleet.node_commands import NodeCommands, OperatorReboot
 from central.fleet.node_display import NodeDisplay
 from central.fleet.node_ingest import NodeIngest
@@ -34,6 +34,9 @@ from central.fleet.node_release_catalog import NodeReleaseCatalog
 from central.fleet.node_sessions import NodeControlConfig, NodeControlError, NodeSessions
 from central.fleet.position_views import PositionRestore
 from central.fleet.principal import PrincipalError
+from central.frame_lighting.model import FrameLightingRefused
+from central.frame_lighting.paper_profiles import LUT_RECIPE_ID
+from central.infra.frame_lighting_store import PgFrameLighting
 from central.registry import Registry
 from central.request_body import capped_body
 from contracts.node_app_link import MAX_NODE_LINK_BYTES
@@ -70,6 +73,21 @@ def _operator_reboot(raw: bytes) -> OperatorReboot:
         raise ValueError("invalid_operator_reboot") from exc
 
 
+_BEGIN: TypeAdapter[TrialBegin] = TypeAdapter(TrialBegin)
+_OPERATION: TypeAdapter[TrialOperation] = TypeAdapter(TrialOperation)
+
+
+def _trial_body[T](adapter: TypeAdapter[T], raw: bytes) -> T:
+    """A trial body, strict JSON (contracts.strict_json's rules, then pydantic's strict validation);
+    NodeControlError("node_trial_operation_invalid", 422) for anything else."""
+    if loads_object(raw, max_bytes=4096) is None:
+        raise NodeControlError("node_trial_operation_invalid", 422)
+    try:
+        return adapter.validate_json(raw, strict=True)
+    except ValidationError as exc:
+        raise NodeControlError("node_trial_operation_invalid", 422) from exc
+
+
 def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
                       admin: Callable[..., None], coordinator: Coordinator, config: NodeControlConfig,
                       content: ContentServices | None = None) -> None:
@@ -83,7 +101,9 @@ def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
     links = NodeAppLinks(sessions)
     acceptance = NodeAcceptance(sessions)
     publications = NodeReleaseCatalog(sessions, readiness=content.readiness if content else None)
-    trials = NodeCalibration(sessions, display=display, registry=Registry(db, clock))
+    lighting = PgFrameLighting(LUT_RECIPE_ID)
+    trials = NodeCalibration(sessions, display=display, registry=Registry(db, clock, lighting=lighting),
+                             lighting=lighting)
     display.trials = trials
     app.state.node_lifecycle = lifecycle
     app.state.node_app_links = links
@@ -107,6 +127,10 @@ def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
     @app.exception_handler(NodeControlError)
     async def node_error(_request: Request, error: NodeControlError):
         return JSONResponse({"error": error.code, **error.details}, status_code=error.status)
+
+    @app.exception_handler(FrameLightingRefused)
+    async def lighting_refused(_request: Request, error: FrameLightingRefused):
+        return JSONResponse({"error": error.code.value}, status_code=error.status)
 
     async def invoke(function, *args):
         try:
@@ -263,25 +287,14 @@ def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
 
     @app.post("/v1/operator/frames/{frame_id}/calibration-trials", dependencies=[Depends(admin)])
     async def calibration_begin(frame_id: str, request: Request):
-        # An empty body, or `{}`, begins at the saved calibration and lighting; `{"calibration": draft}`
-        # at the operator's draft, whose `revision` is the saved revision it was made from, and
-        # `{"lighting": draft}` at the operator's draft lighting (decision 0028).
+        # An empty body, or `{}`, begins at the saved calibration and lighting (TrialBegin).
         raw = await body(request, 4096)
-        value = loads_object(raw, max_bytes=4096) if raw.strip() else {}
-        if value is None or set(value) - {"calibration", "lighting"}:
-            raise NodeControlError("node_trial_operation_invalid", 422)
-        return await invoke(trials.begin, frame_id, value.get("calibration"), value.get("lighting"))
+        return await invoke(trials.begin, frame_id, _trial_body(_BEGIN, raw if raw.strip() else b"{}"))
 
     @app.post("/v1/operator/frames/{frame_id}/calibration-trials/{trial_id}", dependencies=[Depends(admin)])
     async def calibration_operate(frame_id: str, trial_id: UUID, request: Request):
-        value = loads_object(await body(request, 4096), max_bytes=4096)
-        try:
-            if value is None or set(value)-{"operation", "expected_sequence", "calibration", "lighting"} or not {
-                    "operation", "expected_sequence"} <= set(value):
-                raise ValueError("shape")
-        except (TypeError, ValueError) as exc:
-            raise NodeControlError("node_trial_operation_invalid", 422) from exc
-        return await invoke(lambda: trials.operate(frame_id, trial_id, **value))
+        operation = _trial_body(_OPERATION, await body(request, 4096))
+        return await invoke(trials.operate, frame_id, trial_id, operation)
 
     @app.post("/v1/operator/frames/{frame_id}/calibration-trials/{trial_id}/restores", dependencies=[Depends(admin)])
     async def calibration_restore(frame_id: str, trial_id: UUID, request: Request):

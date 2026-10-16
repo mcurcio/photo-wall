@@ -8,9 +8,10 @@ import logging
 import mimetypes
 import os
 import traceback
+from collections.abc import Callable, Mapping
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Final, Literal
 
 from fastapi import Depends, FastAPI, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.exceptions import RequestValidationError
@@ -36,6 +37,7 @@ from central.display_routes import mount_display_routes, mount_picture_routes
 from central.fleet.leaf_bridge import mount_leaf_bridge
 from central.fleet.node_routes import mount_node_routes
 from central.fleet.node_sessions import NodeControlConfig
+from central.home_assistant_routes import mount_home_assistant_routes
 from central.house_routes import mount_house_routes
 from central.infra.display_store import (
     PgDisplayCommands,
@@ -45,7 +47,11 @@ from central.infra.display_store import (
 )
 from central.infra.fit_analysis_store import PgFitAnalysisReader
 from central.infra.fit_settings_store import PgFitSettings
+from central.infra.home_assistant import topics as home_assistant_topics
+from central.infra.home_assistant.health import PgLinkHealth
+from central.infra.home_assistant.settings import PgHomeAssistantSettings
 from central.infra.house_store import PgHouse, seed_house
+from central.infra.light_sensor_judge import PI_SOURCE, is_player
 from central.infra.lut_store import PgLuts
 from central.infra.photo_library_store import PgPhotoLibrary
 from central.infra.power_store import PgPower
@@ -76,6 +82,7 @@ from central.registry import (
     Registry,
     RegistryError,
 )
+from central.room_light.model import RoomLightRefusal
 from central.room_light_routes import mount_room_light_routes
 from central.runtime import RuntimeConflict, Scene, SceneInUse, SceneOnWall, SceneWriteRefused
 from central.runtime_store import RuntimeStore
@@ -155,6 +162,22 @@ class AuthoredSceneRequest(AuthoredCandidatesRequest):
     scene: Scene
 
 
+
+
+class ReportSourceForms:
+    """room_light.ports.ReportSources over each source Central runs and its adapter's own check of an
+    address's form."""
+
+    def __init__(self, forms: Mapping[str, Callable[[str], bool]]) -> None:
+        self._forms = dict(forms)
+
+    def address_refusal(self, source: str, address: str) -> RoomLightRefusal | None:
+        form = self._forms.get(source)
+        return None if form is not None and form(address) else RoomLightRefusal.UNKNOWN_ADDRESS
+
+
+REPORT_SOURCES: Final = ReportSourceForms({home_assistant_topics.SOURCE: home_assistant_topics.is_entity,
+                                           PI_SOURCE: is_player})
 
 
 def create_app(
@@ -821,7 +844,10 @@ def create_app(
     mount_why_routes(app, admin=admin, queries=PgWhy(db, times=media_times))
     house = PgHouse(db, times=media_times)
     mount_house_routes(app, admin=admin, queries=house, commands=house)
-    mount_room_light_routes(app, admin=admin, lights=PgRoomLights(db))
+    room_lights = PgRoomLights(db)
+    mount_room_light_routes(app, admin=admin, player=player, lights=room_lights, sources=REPORT_SOURCES,
+                            drawn=room_lights)
+    mount_home_assistant_routes(app, admin=admin, settings=PgHomeAssistantSettings(db, PgLinkHealth(db)))
     pictures = PgPictureSessions(db)
     mount_picture_routes(app, admin=admin, queries=pictures, commands=pictures)
     mount_tuning_history_routes(app, admin=admin, queries=PgTuningHistory(db))

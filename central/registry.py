@@ -20,10 +20,13 @@ from central.displays.model import Readiness
 from central.fleet.acceptance_evidence import applied_is_latest
 from central.fleet.device_fence import fence_in, retire_in
 from central.fleet.position_history import (
+    created_record,
     position_values,
     profile_changed_record,
     saved_record,
 )
+from central.frame_lighting.paper_profiles import LUT_RECIPE_ID
+from central.frame_lighting.ports import FrameLightingCheck
 from central.infra.display_store import (
     POSITION_COLUMNS,
     POSITION_FACTS,
@@ -33,9 +36,10 @@ from central.infra.display_store import (
     frame_readiness_in,
     resolve_output,
 )
-from central.infra.position_history_store import write_position_in
+from central.infra.frame_lighting_store import PgFrameLighting
+from central.infra.position_history_store import record_created_in, write_position_in
 from central.infra.power_store import forget_frame_in
-from central.infra.room_light_store import room_lights_in
+from central.infra.transactions import PgTransaction
 from central.installation_models import (
     FrameInventory,
     InstallationInventory,
@@ -45,7 +49,6 @@ from central.installation_models import (
     WallInventory,
     WallNaming,
 )
-from central.room_light.policy import new_frame_lighting
 from central.transaction_locks import acquire_runtime_locks, holds_runtime_locks_in
 from contracts.enrollment import Enrollment as Enrollment
 from contracts.enrollment import OutputReport as OutputReport
@@ -148,8 +151,11 @@ def _name_or(exc: UniqueViolation, code: str) -> str:
 class Registry:
     IDENTIFY_OUTPUT_TTL_SECONDS = 15
 
-    def __init__(self, db: Database, clock: Clock):
+    def __init__(self, db: Database, clock: Clock, *, lighting: FrameLightingCheck | None = None):
+        """`lighting`: the Frame-lighting check a new Frame's lighting comes from (PostgreSQL's under
+        today's paper-profile recipe when None)."""
         self.db, self.clock = db, clock
+        self.lighting: FrameLightingCheck = PgFrameLighting(LUT_RECIPE_ID) if lighting is None else lighting
 
     @contextmanager
     def _equipment_write(self):
@@ -484,16 +490,20 @@ class Registry:
                 "expires_at": expires_at}
 
     def create_frame(self, frame: FrameCreate) -> dict:
+        """A new Frame at the cover fit and the lighting a new Frame starts with (a new Frame is bound
+        to no port yet, so no Display is seen: UPGRADE_DISPLAY_LIGHT), and its KEPT_CREATED Position
+        entry, in one transaction."""
         try:
             with self.db.transaction() as conn:
                 name = frame.name if frame.name is not None else _smallest_free(conn, "frames", "Frame")
+                calibration = Calibration(fit=CoverFit())
+                lighting = self.lighting.new_frame_within(PgTransaction(conn), UPGRADE_DISPLAY_LIGHT)
                 conn.execute("INSERT INTO frames(id,name,surface_id,x_mm,y_mm,width_mm,height_mm,"
                              "profile,calibration,lighting) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                              (frame.id, name, frame.surface_id, frame.x_mm, frame.y_mm,
                               frame.width_mm, frame.height_mm, Jsonb(frame.profile.model_dump()),
-                              Jsonb(Calibration(fit=CoverFit()).model_dump(mode="json")),
-                              Jsonb(new_frame_lighting(UPGRADE_DISPLAY_LIGHT, room_lights_in(conn))
-                                    .model_dump(mode="json"))))
+                              Jsonb(calibration.model_dump(mode="json")), Jsonb(lighting.model_dump(mode="json"))))
+                record_created_in(conn, frame.id, created_record(position_values(calibration, lighting)))
                 _ensure_wall(conn, frame.surface_id)
                 self._audit(conn, "frame_created", frame.id)
         except UniqueViolation as exc:
@@ -746,10 +756,10 @@ class Registry:
         """Registry-owned Save CAS inside the Trial owner's existing transaction.
 
         Caller holds Coordination→Runtime, then the device fence and session locks. This method
-        owns the persistent Frame calibration and lighting (decision 0028: the lighting rides the binding
-        beside the calibration and is saved with it; it never changes the Frame output). It never
-        interprets trial evidence. It is a kept Position write (configuration snapshots, migration
-        096): a change made outside Photo Wall is recorded first, then the Save's kept-saved entry
+        owns the persistent Frame calibration and lighting (the lighting rides the binding beside the
+        calibration and is saved with it; it never changes the Frame output). It never interprets
+        trial evidence. It is a kept Position write: a change made outside Photo Wall is recorded
+        first, then the Save's kept-saved entry
         (the trial's `session_id`, and `restored_from` when its draft came from a Restore), in this
         transaction.
         """

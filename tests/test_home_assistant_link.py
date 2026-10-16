@@ -1,7 +1,7 @@
-"""The Home Assistant link's broker address and identity (decision 0028; central/infra/home_assistant.py):
+"""The Home Assistant link's broker address and identity (central/infra/home_assistant/link.py):
 PHOTO_WALL_MQTT_URL names the broker (mqtt or mqtts, default ports, percent-encoded credentials), no URL
-runs no link, anything else is refused, and two links never share a client id (a clean session needs no
-stable one, and two Centrals on one broker would evict each other)."""
+is a link with no broker, anything else is refused, and two links never share a client id (a clean
+session needs no stable one, and two Centrals on one broker would evict each other)."""
 from __future__ import annotations
 
 import pytest
@@ -19,6 +19,10 @@ class Reports:
     """A RoomLightReports that records nothing (the link is only built here)."""
 
 
+class Health:
+    """A link health that records nothing."""
+
+
 @pytest.mark.parametrize("url, broker", [
     ("mqtt://broker.lan", Broker("broker.lan", 1883, None, None, False)),
     ("mqtts://broker.lan", Broker("broker.lan", 8883, None, None, True)),
@@ -34,12 +38,11 @@ def test_any_other_url_is_refused(url):
         broker_from(url)
 
 
-def test_no_url_runs_no_link_and_two_links_never_share_a_client_id():
+def test_no_url_is_a_link_with_no_broker_and_two_links_never_share_a_client_id():
     """Mutation probe: a fixed identifier -> the two links' ids are equal."""
-    assert build_home_assistant_link({}, Reports(), lambda: None) is None
-    assert build_home_assistant_link({MQTT_URL_ENV: ""}, Reports(), lambda: None) is None
-    first, second = (build_home_assistant_link({MQTT_URL_ENV: "mqtt://broker.lan"}, Reports(), lambda: None)
-                     for _ in range(2))
-    assert first is not None and second is not None
+    for env in ({}, {MQTT_URL_ENV: ""}):
+        assert build_home_assistant_link(env, Reports(), Health(), lambda: None)._broker is None  # type: ignore[arg-type]
+    first, second = (build_home_assistant_link({MQTT_URL_ENV: "mqtt://broker.lan"}, Reports(), Health(),  # type: ignore[arg-type]
+                                               lambda: None) for _ in range(2))
     assert first.client_id != second.client_id
     assert first.client_id.startswith(CLIENT_ID_PREFIX + "-")

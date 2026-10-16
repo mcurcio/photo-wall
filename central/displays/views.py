@@ -16,7 +16,7 @@ from central.displays.picture_history import PictureEntry, PictureEntryKind
 from central.house_time.calculator import local_date_time
 from central.house_time.model import HouseTime, LocalDateTime
 from central.installation_models import FrameRefView
-from contracts.models import Digest, Identifier, Instant, Model
+from contracts.models import Identifier, Instant, Model
 from contracts.node_output import (
     InForceKind,
     OutputReport,
@@ -290,26 +290,6 @@ class TestPatternView(Model):
 
     pattern: TestPattern
     state: TestPatternState
-
-
-# The LUTs list (print look, design "The LUT"): the paper profiles the house keeps, each the one
-# source of the LUT baked from it.
-
-class LutView(Model):
-    """One LUT on the list: its paper profile's digest, the recipe Central bakes it with today (a
-    Frame's paper names the LUT as {profile_sha256, recipe_id}, contracts/lut.py LutRef), the
-    profile's own name, when it was added (Central's clock), and the Frames whose paper names it
-    (saved, or drafted in an open Position trial), by name."""
-    profile_sha256: Digest
-    recipe_id: str
-    name: str
-    added_at: Instant
-    used_by: tuple[str, ...]
-
-
-class LutsView(Model):
-    """GET /v1/operator/luts."""
-    luts: tuple[LutView, ...]
 
 
 class FramePictureView(Model):

@@ -1,78 +1,94 @@
--- Room light on the wall (decision 0028; owner, 2026-10-15: "at all times, i want the display to
--- appear as a natural printed photo"). Room lights and Sensors, observed, never driven; the Home
--- Assistant link's state and its refused messages; the Display's light replaces the print look's
--- sliders and its LUT (Q2 "the paper replaces them"); a Frame's lighting replaces its mat (Q3 "on the
--- Frame"). The rules live in app code (central/room_light/, central/infra/room_light_store.py,
--- central/infra/home_assistant.py, central/displays/picture.py, central/fleet/node_calibration.py);
--- there is no trigger and no stored procedure here. No backwards compatibility in the data.
+-- Room light on the wall (decision 0028). Room lights and Sensors, observed, never driven; each
+-- reporting reference's last word; the one refusal log; the Home Assistant link's heartbeat; what
+-- each Player drew with; the Display's light replaces the picture's sliders and its LUT; a Frame's
+-- lighting replaces its mat. The rules live in app code (central/room_light/, central/frame_lighting/,
+-- central/infra/); there is no trigger and no stored procedure here, and every range is pydantic's:
+-- the only checks are each JSON column's type. No backwards compatibility in the data.
 --
--- Upgrade data, so every picture equals today's at neutral sliders: each Display's light is the
--- placeholder contracts/node_picture.py UPGRADE_DISPLAY_LIGHT (1000 lx matched, black 0.0003 of
--- white); one fixed room light "room" exists; each Frame's lighting is
--- central/room_light/policy.py upgrade_lighting(UPGRADE_DISPLAY_LIGHT, its mat's depth): one wash of
--- "room" at 1000 lx, at full, and paper of whiteness 0.9 and ink -log10(0.0003). The old mat
--- lights' relative strengths have no lux, so they are not carried (0028). The Display's software
--- brightness multiplied the linear picture, so a Frame keeps it as its wash's lux: 1000 x brightness
--- / 100 lx (0 % becomes 0.1 lx: a light is never 0 lx), from the Display its Position names, else the
--- one last seen on its bound Output; with neither, 1000 lx. The Display's LUT is not carried: its
--- name needs the recipe Central bakes with, which is app code's (0028's costs).
+-- Upgrade data, so every picture equals today's at neutral sliders: each Display's light is
+-- contracts/node_picture.py UPGRADE_DISPLAY_LIGHT (1000 lx matched, black 0.0003 of white); one fixed
+-- room light "room" exists; each Frame's lighting is central/frame_lighting/policy.py
+-- upgrade_lighting(UPGRADE_DISPLAY_LIGHT, its mat's depth, its Display's software brightness / 100)
+-- (tests/test_migration_099.py holds this data to it): one wash of "room" at 1000 x brightness / 100
+-- lx (at least 0.1), at full, and paper of whiteness 0.9 and ink -log10(0.0003). The Display is the one
+-- its Position names, else the one last seen on its bound Output; with neither, brightness 100 %. Its
+-- trials' and Position history's lighting take the same wash with their own mat's depth. The old mat
+-- lights' relative strengths have no lux, so they are not carried. The Display's LUT is not carried:
+-- its name needs the recipe Central bakes with, which is app code's.
 
--- Room lights: each one's single reporter and colour (central/room_light/model.py RoomLight, as JSON),
--- its last state (contracts/room_light.py's states) and when Central recorded it; `position` keeps
--- the House > Lights order.
+-- Room lights by id (central/room_light/model.py RoomLight, as JSON); `position` keeps the House ›
+-- Lights order.
 CREATE TABLE room_lights (
-    id TEXT PRIMARY KEY CHECK (id ~ '^[a-z0-9][a-z0-9-]{0,31}$'),
-    name TEXT NOT NULL CHECK (length(name) BETWEEN 1 AND 64),
-    reporter JSONB NOT NULL CHECK (jsonb_typeof(reporter) = 'object'),
-    colour JSONB NOT NULL CHECK (jsonb_typeof(colour) = 'object'),
-    state JSONB NOT NULL CHECK (jsonb_typeof(state) = 'object'),
-    heard_at TIMESTAMPTZ NULL,
+    id TEXT PRIMARY KEY,
+    light JSONB NOT NULL CHECK (jsonb_typeof(light) = 'object'),
     position INTEGER NOT NULL);
 
--- Sensors: a light meter at one point (a Pi's wired meter, or a Home Assistant illuminance entity)
--- and its last reading (`{"lux": n}` or `{"lux": null}` for unavailable; NULL: never heard).
+-- Sensors by id (central/room_light/model.py Sensor, as JSON).
 CREATE TABLE sensors (
-    id TEXT PRIMARY KEY CHECK (id ~ '^[a-z0-9][a-z0-9-]{0,31}$'),
-    name TEXT NOT NULL CHECK (length(name) BETWEEN 1 AND 64),
-    at JSONB NOT NULL CHECK (jsonb_typeof(at) = 'object'),
-    reading JSONB NULL CHECK (reading IS NULL OR jsonb_typeof(reading) = 'object'),
-    heard_at TIMESTAMPTZ NULL);
+    id TEXT PRIMARY KEY,
+    sensor JSONB NOT NULL CHECK (jsonb_typeof(sensor) = 'object'));
 
--- The room-lights document's `change`: raised in the same transaction as any change below it.
-CREATE TABLE room_lights_change (
-    one BOOLEAN PRIMARY KEY DEFAULT true CHECK (one),
-    change BIGINT NOT NULL CHECK (change >= 1));
+-- Each reference's last word and when Central heard it, kept whether or not a room light or Sensor
+-- names it (the newest of each source are kept: central/infra/room_light_store.py).
+CREATE TABLE light_words (
+    source TEXT NOT NULL,
+    address TEXT NOT NULL,
+    word JSONB NOT NULL CHECK (jsonb_typeof(word) = 'object'),
+    heard_at TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (source, address));
 
--- The worker's broker link: connected or away since when (no row: never heard; with no
--- PHOTO_WALL_MQTT_URL the worker writes no row and the page says not configured).
-CREATE TABLE home_assistant_link (
-    one BOOLEAN PRIMARY KEY DEFAULT true CHECK (one),
-    state TEXT NOT NULL CHECK (state IN ('not-configured', 'connected', 'away')),
-    since TIMESTAMPTZ NULL);
+CREATE TABLE reading_words (
+    source TEXT NOT NULL,
+    address TEXT NOT NULL,
+    word JSONB NOT NULL CHECK (jsonb_typeof(word) = 'object'),
+    heard_at TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (source, address));
 
--- The latest refused messages (the writer keeps the newest 20).
-CREATE TABLE home_assistant_refusals (
+-- The one refusal log of every source (the newest of each source are kept).
+CREATE TABLE report_refusals (
     id BIGSERIAL PRIMARY KEY,
-    topic TEXT NOT NULL,
+    source TEXT NOT NULL,
+    address TEXT NOT NULL,
     reason TEXT NOT NULL,
     at TIMESTAMPTZ NOT NULL);
 
-INSERT INTO room_lights (id, name, reporter, colour, state, heard_at, position) VALUES
-    ('room', 'Room', '{"kind": "fixed"}'::jsonb, '{"kind": "fixed", "kelvin": 6500}'::jsonb,
-     '{"kind": "dimmer", "on": true, "brightness": 1.0}'::jsonb, NULL, 0);
+-- The Home Assistant link's newest heartbeat: what it was doing, since when, and when it beat.
+CREATE TABLE home_assistant_link (
+    one BOOLEAN PRIMARY KEY DEFAULT true CHECK (one),
+    beat TEXT NOT NULL,
+    since TIMESTAMPTZ NOT NULL,
+    beat_at TIMESTAMPTZ NOT NULL);
+
+-- The room-lights document's `change`, raised in the same transaction as any change below it. Its
+-- row is also the house's lock (central/infra/frame_lighting_store.py).
+CREATE TABLE room_lights_change (
+    one BOOLEAN PRIMARY KEY DEFAULT true CHECK (one),
+    change BIGINT NOT NULL);
+
+-- What each Player last said it drew its Frames with (contracts/room_light.py RoomLightsDrawn).
+CREATE TABLE room_lights_drawn (
+    player_id TEXT PRIMARY KEY REFERENCES players(id) ON DELETE CASCADE,
+    drawn TEXT NULL,
+    following BOOLEAN NOT NULL,
+    reported_at TIMESTAMPTZ NOT NULL);
+
+INSERT INTO room_lights (id, light, position) VALUES
+    ('room', '{"kind": "fixed", "name": "Room", "colour": {"kind": "fixed", "kelvin": 6500}}'::jsonb, 0);
 INSERT INTO room_lights_change (one, change) VALUES (true, 1);
 
 -- Each Frame's wash, from its Display's software brightness, before the column goes.
 CREATE TEMP TABLE upgrade_wash ON COMMIT DROP AS
-    SELECT f.id AS frame_id, GREATEST(0.1, 10.0 * d.software_brightness_percent)::double precision AS lux
+    SELECT f.id AS frame_id,
+           GREATEST(0.1::double precision, 1000.0::double precision
+                    * (COALESCE(d.software_brightness_percent, 100)::double precision / 100.0::double precision)) AS lux
     FROM frames f
     LEFT JOIN bindings b ON b.frame_id = f.id
     LEFT JOIN output_displays seen ON seen.player_id = b.player_id AND seen.output_id = b.output_id
-    JOIN displays d ON d.id = COALESCE(f.position_display_id, seen.display_id);
+    LEFT JOIN displays d ON d.id = COALESCE(f.position_display_id, seen.display_id);
 
 -- The Display's light (contracts/node_picture.py DisplayLight); the print look's sliders and the
--- Display's LUT go (the paper profile moves to the Frame's paper; a LUT a Frame's paper names cannot
--- be removed: central/infra/lut_store.py). New Displays get UPGRADE_DISPLAY_LIGHT from app code.
+-- Display's LUT go (the paper profile moves to the Frame's paper; a paper profile a Frame's paper
+-- names cannot be removed: central/infra/lut_store.py). New Displays get UPGRADE_DISPLAY_LIGHT from app code.
 ALTER TABLE displays
     ADD COLUMN matched_lux DOUBLE PRECISION NULL CHECK (matched_lux BETWEEN 10.0 AND 20000.0),
     ADD COLUMN panel_black DOUBLE PRECISION NULL CHECK (panel_black BETWEEN 0.00001 AND 0.05);
@@ -142,24 +158,34 @@ ALTER TABLE node_calibration_trials
 UPDATE node_calibration_trials SET
     lighting = jsonb_build_object(
         'mat_depth_mm', COALESCE((mat->>'depth_mm')::double precision, 0.0),
-        'lights', '[{"kind": "wash", "light": "room", "lux": 1000.0, "reference": {"kind": "at-full"}}]'::jsonb,
+        'lights', jsonb_build_array(jsonb_build_object(
+            'kind', 'wash', 'light', 'room', 'reference', jsonb_build_object('kind', 'at-full'),
+            'lux', COALESCE((SELECT w.lux FROM upgrade_wash w WHERE w.frame_id = node_calibration_trials.frame_id), 1000.0))),
         'paper', '{"whiteness": 0.9, "ink_density": 3.5228787452803374, "profile": null}'::jsonb),
     saved_lighting = CASE WHEN saved_mat IS NULL THEN NULL ELSE jsonb_build_object(
         'mat_depth_mm', COALESCE((saved_mat->>'depth_mm')::double precision, 0.0),
-        'lights', '[{"kind": "wash", "light": "room", "lux": 1000.0, "reference": {"kind": "at-full"}}]'::jsonb,
+        'lights', jsonb_build_array(jsonb_build_object(
+            'kind', 'wash', 'light', 'room', 'reference', jsonb_build_object('kind', 'at-full'),
+            'lux', COALESCE((SELECT w.lux FROM upgrade_wash w WHERE w.frame_id = node_calibration_trials.frame_id), 1000.0))),
         'paper', '{"whiteness": 0.9, "ink_density": 3.5228787452803374, "profile": null}'::jsonb) END;
 ALTER TABLE node_calibration_trials
     ALTER COLUMN lighting SET NOT NULL,
     DROP COLUMN mat,
     DROP COLUMN saved_mat;
 
--- Position history: each entry's mat becomes the lighting it upgrades to.
+-- Position history: each entry's mat becomes the lighting it upgrades to, and a new Frame's first
+-- entry records its creation (central/fleet/position_history.py KEPT_CREATED).
 ALTER TABLE position_entries ADD COLUMN lighting JSONB NULL CHECK (jsonb_typeof(lighting) = 'object');
 UPDATE position_entries SET lighting = jsonb_build_object(
     'mat_depth_mm', COALESCE((mat->>'depth_mm')::double precision, 0.0),
-    'lights', '[{"kind": "wash", "light": "room", "lux": 1000.0, "reference": {"kind": "at-full"}}]'::jsonb,
+    'lights', jsonb_build_array(jsonb_build_object(
+            'kind', 'wash', 'light', 'room', 'reference', jsonb_build_object('kind', 'at-full'),
+            'lux', COALESCE((SELECT w.lux FROM upgrade_wash w WHERE w.frame_id = position_entries.frame_id), 1000.0))),
     'paper', '{"whiteness": 0.9, "ink_density": 3.5228787452803374, "profile": null}'::jsonb);
-ALTER TABLE position_entries ALTER COLUMN lighting SET NOT NULL, DROP COLUMN mat;
+ALTER TABLE position_entries ALTER COLUMN lighting SET NOT NULL, DROP COLUMN mat,
+    DROP CONSTRAINT position_entries_kind_check,
+    ADD CONSTRAINT position_entries_kind_check CHECK (kind IN ('kept-created', 'kept-saved', 'kept-profile-changed',
+                                                              'kept-unrecorded', 'sent-draft', 'sent-back'));
 
 -- A binding carries its Frame's lighting (contracts/models.py OutputBinding, `lighting` required, no
 -- `mat`): a Player's last configuration and each offered plan's bindings stored before this release

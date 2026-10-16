@@ -1,6 +1,5 @@
-"""The LUTs list, the bake and serving, and a Frame's paper profile holding its LUT (print look, slice
-C2; design "The LUT"; owner, 2026-10-12: "a LUT is an enhancement", "build it all"); since room light
-(decision 0028) a paper profile is on a Frame's paper, not on the Display.
+"""The paper profiles list, the bake and serving, and a Frame's paper profile holding its LUT
+(central/frame_lighting/paper_profiles.py, central/infra/lut_store.py, central/lut_routes.py).
 
 Fixtures are built in the test from LittleCMS's own sRGB profile (never a real paper profile or a
 private file): the sRGB profile with its device class made 'prtr' is a paper that prints every
@@ -26,10 +25,10 @@ from test_display_picture_settings import (
     _client,
 )
 
-from central.displays.lut import (
+from central.frame_lighting.paper_profiles import (
     LUT_PROFILE_MAX_BYTES,
     LUT_RECIPE_ID,
-    LutRefusal,
+    PaperProfileRefusal,
     baked_lut,
     checked_profile,
 )
@@ -91,12 +90,12 @@ def test_a_paper_profile_is_checked_by_class_signature_and_size():
     skip the device-class check -> the monitor profile passes."""
     printer = _as_printer(_monitor())
     checked = checked_profile(printer)
-    assert not isinstance(checked, LutRefusal)
+    assert not isinstance(checked, PaperProfileRefusal)
     assert (checked.sha256, checked.name) == (_sha(printer), "sRGB built-in")
-    assert checked_profile(_monitor()) is LutRefusal.NOT_A_PRINTER_PROFILE
-    assert checked_profile(os.urandom(4096)) is LutRefusal.NOT_A_COLOUR_PROFILE
-    assert checked_profile(bytes(127)) is LutRefusal.NOT_A_COLOUR_PROFILE
-    assert checked_profile(printer + bytes(LUT_PROFILE_MAX_BYTES + 1 - len(printer))) is LutRefusal.TOO_LARGE
+    assert checked_profile(_monitor()) is PaperProfileRefusal.NOT_A_PRINTER_PROFILE
+    assert checked_profile(os.urandom(4096)) is PaperProfileRefusal.NOT_A_COLOUR_PROFILE
+    assert checked_profile(bytes(127)) is PaperProfileRefusal.NOT_A_COLOUR_PROFILE
+    assert checked_profile(printer + bytes(LUT_PROFILE_MAX_BYTES + 1 - len(printer))) is PaperProfileRefusal.TOO_LARGE
 
 
 def test_the_recipe_bakes_a_paper_that_prints_everything_to_identity():
@@ -192,7 +191,7 @@ def _player_token(registry, player_id: str) -> dict:
 
 def test_a_lut_is_served_to_a_player_by_name_with_its_digest(registry):
     """(4) R11: without a Player bearer 401; with one 200, the baked bytes, Content-Length LUT_BYTES
-    and Repr-Digest of the body; an unknown profile or another recipe 404 lut_unknown. Mutation
+    and Repr-Digest of the body; an unknown profile or another recipe 404 unknown_paper_profile. Mutation
     probe: the digest of the profile instead of the body -> the header differs."""
     player = enroll_pi(registry, "pi-lut")
     bearer = _player_token(registry, player)
@@ -210,15 +209,15 @@ def test_a_lut_is_served_to_a_player_by_name_with_its_digest(registry):
             "sha-256=:" + base64.b64encode(hashlib.sha256(served.content).digest()).decode() + ":")
         for other in (LutRef("0" * 64, LUT_RECIPE_ID).path, LutRef(_sha(printer), "lut33-other-1").path):
             missing = client.get(other, headers=bearer)
-            assert (missing.status_code, missing.json()) == (404, {"error": "lut_unknown"})
+            assert (missing.status_code, missing.json()) == (404, {"error": "unknown_paper_profile"})
 
 
 # --- A Frame's paper profile (decision 0028: the LUT picker moved from the Display to the Frame) ---
 
 def test_a_frames_paper_profile_holds_its_lut_on_the_list(registry):
     """(5) A listed profile on a Frame's paper (drafted in its Position trial, then saved) is the
-    LUT's use: the list names the Frame, Remove answers 409 lut_in_use naming it; an unlisted
-    profile is refused 422 trial_lighting_invalid. Mutation probe: `_users_in` reads only saved
+    LUT's use: the list names the Frame, Remove answers 409 named_by_a_frame naming it; an unlisted
+    profile is refused 422 unknown_paper_profile. Mutation probe: the naming query reads only saved
     lighting -> the drafted profile is deleted while its trial is open."""
     from test_node_calibration import setup_trial
 
@@ -236,16 +235,16 @@ def test_a_frames_paper_profile_holds_its_lut_on_the_list(registry):
     with _client(registry) as client:
         assert _add(client, printer).status_code == 201
         unlisted = client.post(trials, headers=AUTH, json={"lighting": lighting("ab" * 32)})
-        assert (unlisted.status_code, unlisted.json()["error"]) == (422, "trial_lighting_invalid")
+        assert (unlisted.status_code, unlisted.json()["error"]) == (422, "unknown_paper_profile")
         begun = client.post(trials, headers=AUTH, json={"lighting": lighting(_sha(printer))})
         assert begun.status_code == 200, begun.text
         listed = client.get(LUTS, headers=AUTH).json()["luts"][0]
         assert (listed["used_by"], listed["recipe_id"]) == ([name], LUT_RECIPE_ID)
         refused = client.delete(f"{LUTS}/{_sha(printer)}", headers=AUTH)
-        assert (refused.status_code, refused.json()) == (409, {"error": "lut_in_use", "frames": [name]})
+        assert (refused.status_code, refused.json()) == (409, {"error": "named_by_a_frame", "frames": [name]})
         ended = client.post(f"{trials}/{begun.json()['trial_id']}", headers=AUTH,
                             json={"operation": "end", "expected_sequence": 1})
         assert ended.status_code == 200, ended.text
         assert client.delete(f"{LUTS}/{_sha(printer)}", headers=AUTH).status_code == 204
         gone = client.delete(f"{LUTS}/{_sha(printer)}", headers=AUTH)
-        assert (gone.status_code, gone.json()) == (404, {"error": "lut_unknown"})
+        assert (gone.status_code, gone.json()) == (404, {"error": "unknown_paper_profile"})

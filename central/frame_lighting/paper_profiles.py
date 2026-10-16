@@ -1,13 +1,12 @@
-"""The LUT's recipe and bake, pure (print look, design "The LUT"; the owner's word "LUT",
-2026-10-12: "i like the idea of the LUT but I probably cant generate it"): a paper maker's colour
-profile (an ICC file) is the one source, and a LUT is baked from it whenever asked, never stored.
+"""Paper profiles, pure: a paper maker's colour profile (an ICC file) is the one source of a Frame
+paper's LUT, which is baked from it whenever asked, never stored.
 
 One home each for:
 - **The recipe** (`LUT_RECIPE_ID`, `baked_lut`): a soft proof through the paper with LittleCMS
   (Pillow ImageCms): sRGB into the paper's device values the way a print is made (perceptual), then
   back to sRGB relative colorimetric, black point compensation both ways, so paper white lands on
   the screen's white and paper black on the screen's black (the Display's colour temperature,
-  brightness and black floor stay the one home of white, tint and black). The two steps meet at
+  light and the paper's whiteness and ink stay the one home of white and black). The two steps meet at
   the paper's own device values, held to their range as ink is, so a colour the paper cannot print
   comes back as the paper prints it (LittleCMS's one-step proof transform runs unbounded, and hands
   a matrix-shaper paper's out-of-gamut colours back unchanged). Applied to every point of the
@@ -47,11 +46,28 @@ _SRGB: Final = ImageCms.createProfile("sRGB")
 _CMS_ERRORS: Final = (ImageCms.PyCMSError, OSError, ValueError, TypeError)
 
 
-class LutRefusal(StrEnum):
-    """Why a file is not a paper profile."""
+class PaperProfileRefusal(StrEnum):
+    """Why a paper profile was refused: a file that is not one, or a list change that may not be made."""
     NOT_A_COLOUR_PROFILE = "not_a_colour_profile"    # not an ICC file LittleCMS opens ('acsp' at 36..40)
     NOT_A_PRINTER_PROFILE = "not_a_printer_profile"  # not an RGB or CMYK output profile, or it does not bake
     TOO_LARGE = "too_large"                          # past LUT_PROFILE_MAX_BYTES
+    UNKNOWN_PAPER_PROFILE = "unknown_paper_profile"  # not on the list (or not under today's recipe)
+    NAMED_BY_A_FRAME = "named_by_a_frame"            # a Frame's paper names it
+
+
+_STATUS: Final = {PaperProfileRefusal.TOO_LARGE: 413, PaperProfileRefusal.UNKNOWN_PAPER_PROFILE: 404,
+                  PaperProfileRefusal.NAMED_BY_A_FRAME: 409}
+
+
+class PaperProfileRefused(Exception):
+    """A refusal the routes answer as {"error": code} at `status` (413 too_large, 404
+    unknown_paper_profile, 409 named_by_a_frame with "frames": the Frames' names, else 422)."""
+
+    def __init__(self, code: PaperProfileRefusal, frames: tuple[str, ...] = ()) -> None:
+        super().__init__(code)
+        self.code = code
+        self.status = _STATUS.get(code, 422)
+        self.frames = frames
 
 
 @dataclass(frozen=True)
@@ -62,16 +78,16 @@ class PaperProfile:
     name: str
 
 
-def checked_profile(profile: bytes) -> PaperProfile | LutRefusal:
+def checked_profile(profile: bytes) -> PaperProfile | PaperProfileRefusal:
     """The paper profile `profile` is, or why it is not one. It bakes once here, so one that
     passes always bakes (`baked_lut`)."""
     opened = _opened(profile)
-    if isinstance(opened, LutRefusal):
+    if isinstance(opened, PaperProfileRefusal):
         return opened
     try:
         _bake(*opened)
     except _CMS_ERRORS:
-        return LutRefusal.NOT_A_PRINTER_PROFILE
+        return PaperProfileRefusal.NOT_A_PRINTER_PROFILE
     sha256 = hashlib.sha256(profile).hexdigest()
     return PaperProfile(sha256, _name(opened[0]) or f"Paper profile {sha256[:8]}")
 
@@ -82,28 +98,28 @@ def baked_lut(profile: bytes) -> bytes:
     `lut_offset` (red fastest); exactly LUT_BYTES. ValueError(refusal) for a profile
     `checked_profile` refuses."""
     opened = _opened(profile)
-    if isinstance(opened, LutRefusal):
+    if isinstance(opened, PaperProfileRefusal):
         raise ValueError(opened.value)
     try:
         return _bake(*opened)
     except _CMS_ERRORS:
-        raise ValueError(LutRefusal.NOT_A_PRINTER_PROFILE.value) from None
+        raise ValueError(PaperProfileRefusal.NOT_A_PRINTER_PROFILE.value) from None
 
 
-def _opened(profile: bytes) -> tuple[ImageCms.ImageCmsProfile, str] | LutRefusal:
+def _opened(profile: bytes) -> tuple[ImageCms.ImageCmsProfile, str] | PaperProfileRefusal:
     """The profile LittleCMS opens and its device values' image mode, after the size, signature,
     device-class and device-values checks."""
     if len(profile) > LUT_PROFILE_MAX_BYTES:
-        return LutRefusal.TOO_LARGE
+        return PaperProfileRefusal.TOO_LARGE
     if len(profile) < _ICC_HEADER_BYTES or profile[_SIGNATURE] != b"acsp":
-        return LutRefusal.NOT_A_COLOUR_PROFILE
+        return PaperProfileRefusal.NOT_A_COLOUR_PROFILE
     try:
         opened = ImageCms.ImageCmsProfile(io.BytesIO(profile))
     except _CMS_ERRORS:
-        return LutRefusal.NOT_A_COLOUR_PROFILE
+        return PaperProfileRefusal.NOT_A_COLOUR_PROFILE
     mode = _DEVICE_MODES.get(bytes(profile[_COLOUR_SPACE]))
     if profile[_DEVICE_CLASS] != b"prtr" or mode is None:
-        return LutRefusal.NOT_A_PRINTER_PROFILE
+        return PaperProfileRefusal.NOT_A_PRINTER_PROFILE
     return opened, mode
 
 
@@ -121,7 +137,7 @@ def _bake(paper: ImageCms.ImageCmsProfile, device_mode: str) -> bytes:
     assert baked is not None
     body = baked.tobytes()
     if len(body) != LUT_BYTES:
-        raise ValueError(LutRefusal.NOT_A_PRINTER_PROFILE.value)
+        raise ValueError(PaperProfileRefusal.NOT_A_PRINTER_PROFILE.value)
     return body
 
 
@@ -146,5 +162,6 @@ def _name(paper: ImageCms.ImageCmsProfile) -> str:
     return " ".join(printable.split())[:LUT_NAME_MAX].strip()
 
 
-__all__ = ["LUT_NAME_MAX", "LUT_PROFILE_MAX_BYTES", "LUT_RECIPE_ID", "LutRefusal", "PaperProfile", "baked_lut",
+__all__ = ["LUT_NAME_MAX", "LUT_PROFILE_MAX_BYTES", "LUT_RECIPE_ID", "PaperProfile", "PaperProfileRefusal",
+           "PaperProfileRefused", "baked_lut",
            "checked_profile"]

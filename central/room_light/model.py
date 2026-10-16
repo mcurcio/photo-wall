@@ -1,54 +1,46 @@
-"""Room lights' vocabulary (decision 0028): room lights and their one reporter, Sensors, what Home
-Assistant sends, and the answers of recording and setting up. Pure; frozen values only.
+"""Room lights' vocabulary: the real lights of the house and who reports each, Sensors, the words
+their reporters last said, and the answers of recording and setting up. Pure; frozen values only.
 
-A room light's colour and state are the wire's (contracts/room_light.py): the House > Lights page,
-the store and the room-lights document share one vocabulary.
+A room light's id is the key of its mapping, never a field of the light. Who reports a light or a
+Sensor is an opaque reference, `(source, address)`: this package compares references whole and never
+reads an address; each source's adapter owns its address's form.
+
+Colours, states and entries are the wire's (contracts/room_light.py): House › Lights, the store and
+the room-lights document share one vocabulary.
 """
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Annotated, Final, Literal
 
 from pydantic import Field
 
-from contracts.models import Identifier, Model
+from contracts.models import Model
 from contracts.room_light import (
     ROOM_LIGHT_ID_PATTERN,
     ColourDimmer,
     Dimmer,
     FixedColour,
     Measured,
-    NotReported,
     ReportedColour,
     RoomLightId,
     Unavailable,
 )
 
-# Home Assistant's entity id: <domain>.<object_id> (https://developers.home-assistant.io, entity
-# ids are lower-case ASCII letters, digits and underscores).
-HOME_ASSISTANT_ENTITY_PATTERN: Final = r"[a-z0-9_]+\.[a-z0-9_]+"
 ROOM_LIGHT_NAME_MAX: Final = 64
 SENSORS_MAX: Final = 32
-
-# The Home Assistant link's topics (the shipped automation publishes each retained, full state).
-LIGHT_TOPIC_PREFIX: Final = "photowall/light/"              # + entity id: a LightStateMessage
-ILLUMINANCE_TOPIC_PREFIX: Final = "photowall/illuminance/"  # + entity id: an IlluminanceMessage
-SUBSCRIPTION: Final = "photowall/#"                         # the worker's one subscription
-HOME_ASSISTANT_MESSAGE_BYTES: Final = 1024                  # a larger payload is refused unread
+SOURCE_PATTERN: Final = r"[a-z][a-z0-9-]{0,31}"     # a reporting source's name
+ADDRESS_MAX: Final = 255
 
 SensorId = Annotated[str, Field(pattern=rf"^{ROOM_LIGHT_ID_PATTERN}$", title="SensorId")]
-RoomLightState = Dimmer | ColourDimmer | Measured | Unavailable | NotReported   # a light's last stored state
-FULL_ON: Final = Dimmer(on=True, brightness=1.0)    # a fixed room light's state: always on, at full
-
-SOURCE_PATTERN: Final = r"[a-z][a-z0-9-]{0,31}"     # a reporting source's name: "home-assistant", "pi"
-ADDRESS_MAX: Final = 255
+Name = Annotated[str, Field(min_length=1, max_length=ROOM_LIGHT_NAME_MAX)]
 Source = Annotated[str, Field(pattern=rf"^{SOURCE_PATTERN}$", title="Source")]
 Address = Annotated[str, Field(min_length=1, max_length=ADDRESS_MAX, title="Address")]
 
 
-# ---- Who reports: opaque references. The domain compares them whole and never reads an address;
-# each source's adapter owns its address's form (central/infra/home_assistant/, the Pi's judge). ----
+# ---- Who reports: opaque references ----
 
 class ReporterRef(Model):
     """Who reports a room light's state: a source and that source's own name for the light."""
@@ -62,137 +54,89 @@ class SensorRef(Model):
     address: Address
 
 
+# ---- Room lights: one kind per reporter, so a colour and a reporter that do not belong together
+# cannot be built ----
+
+class ReportedLight(Model):
+    """A light its reporter reports as a dimmer: a white light of a configured colour, or a colour
+    light whose drive its reporter sends."""
+    kind: Literal["reported"] = "reported"
+    name: Name
+    reporter: ReporterRef
+    colour: Annotated[FixedColour | ReportedColour, Field(discriminator="kind")]
+
+
+class MeasuredLight(Model):
+    """A light one Sensor measures: its state is that Sensor's reading."""
+    kind: Literal["measured"] = "measured"
+    name: Name
+    sensor: SensorId
+    colour: FixedColour
+
+
+class FixedLight(Model):
+    """A light nobody reports: always on, at full."""
+    kind: Literal["fixed"] = "fixed"
+    name: Name
+    colour: FixedColour
+
+
+RoomLight = Annotated[ReportedLight | MeasuredLight | FixedLight, Field(discriminator="kind")]
+
+
+class Sensor(Model):
+    """A light meter at one point; it reads the sum of every light there."""
+    name: Name
+    at: SensorRef
+
+
+# ---- What reporters last said, by reference ----
+
+LightWord = Dimmer | ColourDimmer | Unavailable
+ReadingWord = Measured | Unavailable
+
+
+@dataclass(frozen=True)
+class Words:
+    """Every reference's last word, whether or not a room light or Sensor names it."""
+    lights: Mapping[ReporterRef, LightWord]
+    readings: Mapping[SensorRef, ReadingWord]
+
+
+# ---- Answers ----
+
 class ReportRefusal(StrEnum):
-    """Why a source's report was not recorded (the one refusal log, `RoomLightReports.record_refused`)."""
+    """Why a source's report was not recorded (the one refusal log)."""
     UNKNOWN_ADDRESS = "unknown_address"     # not a light or sensor address the source names
     UNREADABLE = "unreadable"               # not the report's shape
     OUT_OF_RANGE = "out_of_range"           # a value outside its range
 
 
 Recorded = Literal["recorded", "unchanged"]     # the document changed, or it did not (kept all the same)
-EntityId = Annotated[str, Field(pattern=rf"^{HOME_ASSISTANT_ENTITY_PATTERN}$", max_length=255)]
-Name = Annotated[str, Field(min_length=1, max_length=ROOM_LIGHT_NAME_MAX)]
 
 
-# ---- Who writes a room light's state: exactly one reporter (design rule 1) ----
-
-class HomeAssistantLight(Model):
-    """Its Home Assistant light entity reports it: on, brightness and (for a bulb with reported
-    colour) rgb."""
-    kind: Literal["home-assistant-light"] = "home-assistant-light"
-    entity: EntityId
-
-
-class SensorReporter(Model):
-    """One Sensor reports it: its state is that Sensor's lux reading."""
-    kind: Literal["sensor"] = "sensor"
-    sensor: SensorId
+class RoomLightRefusal(StrEnum):
+    """Why a House › Lights change was refused."""
+    UNKNOWN_ROOM_LIGHT = "unknown_room_light"
+    UNKNOWN_SENSOR = "unknown_sensor"
+    UNKNOWN_ADDRESS = "unknown_address"                 # a reference no source Central runs names
+    REFERENCE_TAKEN = "reference_taken"                 # one reference reports one room light or one Sensor
+    SENSOR_REPORTS_A_LIGHT = "sensor_reports_a_light"   # a Sensor measures at most one room light, and stays while it does
+    NAMED_BY_A_FRAME = "named_by_a_frame"               # a Frame's lighting names it
+    TOO_MANY = "too_many"                               # past ROOM_LIGHTS_MAX or SENSORS_MAX
 
 
-class FixedReporter(Model):
-    """Nobody reports it: always on, at full (contracts/room_light.py FULL_ON)."""
-    kind: Literal["fixed"] = "fixed"
+class RoomLightRefused(Exception):
+    """A refusal the routes answer as {"error": code} at `status`."""
 
-
-Reporter = Annotated[HomeAssistantLight | SensorReporter | FixedReporter, Field(discriminator="kind")]
-Colour = Annotated[FixedColour | ReportedColour, Field(discriminator="kind")]
-
-
-class RoomLight(Model):
-    """A real light in the house: its name, its one reporter and its colour (configured: a fixed
-    kelvin; or reported: an RGB bulb's channel shares, only for a Home Assistant light)."""
-    id: RoomLightId
-    name: Name
-    reporter: Reporter
-    colour: Colour
-
-
-# ---- Sensors (requirements' Sensor): a light meter at one point; it reads the SUM there ----
-
-class OnPlayer(Model):
-    """The one meter wired to a Pi; HostCore reads it (contracts/room_light.py LIGHT_SENSOR_KEY)."""
-    kind: Literal["pi"] = "pi"
-    player_id: Identifier
-
-
-class HomeAssistantSensor(Model):
-    """An illuminance entity Home Assistant publishes."""
-    kind: Literal["home-assistant"] = "home-assistant"
-    entity: EntityId
-
-
-SensorPlace = Annotated[OnPlayer | HomeAssistantSensor, Field(discriminator="kind")]
-
-
-class Sensor(Model):
-    id: SensorId
-    name: Name
-    at: SensorPlace
-
-
-# ---- What Home Assistant sends (retained, full state: a repeat changes nothing) ----
-
-@dataclass(frozen=True)
-class LightStateMessage:
-    """topic LIGHT_TOPIC_PREFIX + entity. `state`: Home Assistant's on/off; its unavailable and
-    unknown both arrive as "unavailable". `brightness` 0..255 (None: Home Assistant sent none, as
-    for an off light); `rgb` Home Assistant's rgb_color, 0..255 each (None: none sent)."""
-    state: Literal["on", "off", "unavailable"]
-    brightness: int | None
-    rgb: tuple[int, int, int] | None
-
-
-@dataclass(frozen=True)
-class IlluminanceMessage:
-    """topic ILLUMINANCE_TOPIC_PREFIX + entity: the entity's lux, or None for unavailable/unknown."""
-    lux: float | None
-
-
-# ---- Answers ----
-
-class Refusal(StrEnum):
-    """Why a report was not recorded (kept with the reason, never applied)."""
-    UNKNOWN_ENTITY = "unknown-entity"           # no room light or Sensor names this entity
-    NOT_ITS_REPORTER = "not-its-reporter"       # e.g. a Pi's reading for a Sensor on another Pi, or none configured
-    OUT_OF_RANGE = "out-of-range"               # a payload outside its shape (contracts' ranges, the topic's form)
-
-
-@dataclass(frozen=True)
-class Refused:
-    reason: Refusal
-
-
-
-
-class SetupRefusal(StrEnum):
-    """Why a House > Lights change was refused (the route answers 409 {"error": <value>})."""
-    NAMED_BY_A_FRAME = "named-by-a-frame"                      # remove the Frame lights first
-    SENSOR_REPORTS_A_LIGHT = "sensor-reports-a-light"          # a Sensor reports at most one room light, and stays while it does
-    REPORTED_COLOUR_NEEDS_HOME_ASSISTANT = "reported-colour-needs-home-assistant"   # only a Home Assistant light reports a colour
-    ENTITY_REPORTS_ANOTHER = "entity-reports-another"          # one entity reports one room light or Sensor
-    UNKNOWN_SENSOR = "unknown-sensor"
-    UNKNOWN_ROOM_LIGHT = "unknown-room-light"
-    TOO_MANY = "too-many"                                      # past ROOM_LIGHTS_MAX or SENSORS_MAX
-
-
-class FrameLightingRefusal(StrEnum):
-    """Why a Frame's lighting was refused against the room lights (the trial answers 422)."""
-    UNKNOWN_ROOM_LIGHT = "trial_lighting_unknown_room_light"   # a Frame light names no room light
-    REFERENCE_MISMATCH = "trial_lighting_reference_mismatch"   # dimmer-at-full on a measured light, or lux on a dimmer
-
-
-@dataclass(frozen=True)
-class Heard:
-    """A room light's last state and when Central recorded it (Central's clock; None: never)."""
-    state: RoomLightState
-    heard_at: float | None
+    def __init__(self, code: RoomLightRefusal, status: int) -> None:
+        super().__init__(code)
+        self.code = code
+        self.status = status
 
 
 __all__ = [
-    "FULL_ON", "HOME_ASSISTANT_ENTITY_PATTERN", "HOME_ASSISTANT_MESSAGE_BYTES", "ILLUMINANCE_TOPIC_PREFIX", "LIGHT_TOPIC_PREFIX",
-    "ADDRESS_MAX", "ROOM_LIGHT_NAME_MAX", "SENSORS_MAX", "SOURCE_PATTERN", "SUBSCRIPTION", "Address", "ReportRefusal",
-    "ReporterRef", "SensorRef", "Source", "Colour", "EntityId", "FixedReporter",
-    "FrameLightingRefusal", "Heard", "HomeAssistantLight", "HomeAssistantSensor", "IlluminanceMessage",
-    "LightStateMessage", "Name", "OnPlayer", "Recorded", "Refusal", "Refused", "Reporter", "RoomLight",
-    "RoomLightId", "RoomLightState", "Sensor", "SensorId", "SensorPlace", "SensorReporter", "SetupRefusal",
+    "ADDRESS_MAX", "ROOM_LIGHT_NAME_MAX", "SENSORS_MAX", "SOURCE_PATTERN", "Address", "FixedLight", "LightWord",
+    "MeasuredLight", "Name", "ReadingWord", "Recorded", "ReportRefusal", "ReportedLight", "ReporterRef", "RoomLight",
+    "RoomLightId", "RoomLightRefusal", "RoomLightRefused", "Sensor", "SensorId", "SensorRef", "Source", "Words",
 ]

@@ -15,7 +15,8 @@ loop, never in the pool's bounded queue, whose overflow would end the worker in 
 
 `PgWallMarks` is `nodeapi.hub.WallMarks` over migration 067: the highest WALL sequence Central
 recorded, which only ever rises, so WALL re-created after an empty hub start begins past every Node
-mirror (mark + 1 + WALL_MARGIN); Central's wall documents come from the injected source (E5/E8).
+mirror (mark + 1 + WALL_MARGIN). It hands WallWriter no document: each wall key has one writer of its
+own (the room-lights document's is the worker's `RoomLightsWall`), which `wall_documents` wakes.
 """
 from __future__ import annotations
 
@@ -165,16 +166,13 @@ class PgLinkStore:
         await self._stores.run(body)
 
 
-class WallDocuments(Protocol):
-    async def wall_documents(self) -> Mapping[str, bytes]: ...   # Central's wall documents (E5/E8); none until then
-
-
 class PgWallMarks:
-    """nodeapi.hub.WallMarks over node_bus_wall; wall documents from the injected source."""
+    """nodeapi.hub.WallMarks over node_bus_wall; `wake` is called whenever WALL is ensured, so each
+    wall key's own writer puts its document again."""
 
-    def __init__(self, db: Database, documents: WallDocuments) -> None:
+    def __init__(self, db: Database, wake: Callable[[], None]) -> None:
         self._db = db
-        self._documents = documents
+        self._wake = wake
 
     async def mark(self) -> int:
         """The highest WALL sequence recorded; 0 with no row."""
@@ -193,4 +191,6 @@ class PgWallMarks:
         await asyncio.to_thread(body)
 
     async def wall_documents(self) -> Mapping[str, bytes]:
-        return await self._documents.wall_documents()
+        """None: every wall key's writer puts its own document; this only wakes them."""
+        self._wake()
+        return {}

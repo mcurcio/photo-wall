@@ -7,15 +7,17 @@ crosses the same CAS: the same writes, the same readiness, the same refusals.
 """
 from __future__ import annotations
 
-from central.fleet.position_history import DEFAULT_POSITION
+from central.frame_lighting.policy import upgrade_lighting
 from central.transaction_locks import acquire_runtime_locks
 from contracts.frame_lighting import FrameLighting
 from contracts.models import Calibration, CornersFit
+from contracts.node_picture import UPGRADE_DISPLAY_LIGHT
 
 # Corners on the whole output: a Save that needs no reported output size (Cover's profile does).
 FULL_SCREEN_CORNERS = Calibration(fit=CornersFit())
-# A new Frame's lighting (decision 0028): one wash of the fixed room light "room", paper matching the panel.
-LIGHTING: FrameLighting = DEFAULT_POSITION.lighting
+# A new Frame's lighting while the seeded fixed room light "room" is there: one wash of it, paper
+# matching the panel (frame_lighting.policy.new_frame_lighting).
+LIGHTING: FrameLighting = upgrade_lighting(UPGRADE_DISPLAY_LIGHT, 0.0, 1.0)
 
 
 def save_position(registry, frame_id: str, calibration: Calibration | None = None, *,

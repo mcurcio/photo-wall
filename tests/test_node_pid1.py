@@ -1186,18 +1186,11 @@ def ended(cursors):
         (gap["stream"], gap["epoch"]) for gap in rows["gaps"] if gap["lost"] is None}
 
 
-class _NoWallDocuments:
-    """Central's wall documents: none until E8 (central.node_bus_wiring)."""
-
-    async def wall_documents(self):
-        return {}
-
-
 def put_wall(db, value):
     """Central's wall write (nodeapi.hub.WallWriter over Central's recorded mark, as E5/E8 will
     call it): WALL_KEY = value in the hub's WALL; returns its sequence."""
     async def put():
-        writer = await WallWriter.connect(HUB_URL, WALL_TABLE, PgWallMarks(db, _NoWallDocuments()))
+        writer = await WallWriter.connect(HUB_URL, WALL_TABLE, PgWallMarks(db, lambda: None))
         try:
             await writer.ensure()
             return await writer.put(WALL_KEY, value.encode())

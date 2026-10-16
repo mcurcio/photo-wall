@@ -7,6 +7,7 @@ domain compares the reference whole and never reads the entity id.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Final, Literal
 
@@ -20,6 +21,7 @@ MESSAGE_BYTES: Final = 1024                                 # a larger payload i
 # Home Assistant's entity id: <domain>.<object_id>, lower-case ASCII letters, digits and underscores.
 ENTITY_PATTERN: Final = r"[a-z0-9_]+\.[a-z0-9_]+"
 ENTITY_MAX: Final = 255
+_ENTITY: Final = re.compile(ENTITY_PATTERN)
 
 
 @dataclass(frozen=True)
@@ -32,23 +34,27 @@ class Topic:
 def topic_of(topic: str) -> Topic | None:
     """The Topic LIGHT_TOPIC_PREFIX + entity or ILLUMINANCE_TOPIC_PREFIX + entity names, where entity
     matches ENTITY_PATTERN whole and is at most ENTITY_MAX characters; None for any other topic. Pure."""
-    ...
+    for kind, prefix in (("light", LIGHT_TOPIC_PREFIX), ("illuminance", ILLUMINANCE_TOPIC_PREFIX)):
+        if topic.startswith(prefix):
+            entity = topic[len(prefix):]
+            return Topic(kind, entity) if is_entity(entity) else None
+    return None
 
 
 def is_entity(address: str) -> bool:
     """Whether `address` is an entity id (ENTITY_PATTERN whole, at most ENTITY_MAX): the check a
     reference with SOURCE takes before it is saved on a room light or Sensor. Pure."""
-    ...
+    return len(address) <= ENTITY_MAX and _ENTITY.fullmatch(address) is not None
 
 
 def light_reporter(entity: str) -> ReporterRef:
     """ReporterRef(SOURCE, entity). Pure."""
-    ...
+    return ReporterRef(source=SOURCE, address=entity)
 
 
 def illuminance_sensor(entity: str) -> SensorRef:
     """SensorRef(SOURCE, entity). Pure."""
-    ...
+    return SensorRef(source=SOURCE, address=entity)
 
 
 __all__ = ["ENTITY_MAX", "ENTITY_PATTERN", "ILLUMINANCE_TOPIC_PREFIX", "LIGHT_TOPIC_PREFIX", "MESSAGE_BYTES",

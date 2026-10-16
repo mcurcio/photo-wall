@@ -1,8 +1,8 @@
-# Photo Wall: room lights (decision 0028, docs/decisions/0028-room-light.md).
+# Photo Wall: room lights (docs/decisions/0028-room-light.md).
 #
 # A Home Assistant automation blueprint. It publishes the full state of each chosen light and
 # illuminance sensor, retained, to the house's MQTT broker, where Photo Wall Central's worker reads it
-# (central/infra/home_assistant.py):
+# (central/infra/home_assistant/):
 #   photowall/light/<entity_id>        {"state": "on"|"off"|"unavailable", "brightness": 0..255|null, "rgb": [r, g, b]|null}
 #   photowall/illuminance/<entity_id>  {"lux": <number>}  or  {"state": "unavailable"}
 # on every state change of a chosen entity, and all of them again when Home Assistant starts or

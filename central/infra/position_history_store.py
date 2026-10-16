@@ -1,8 +1,9 @@
-"""A Frame's Position history in PostgreSQL (configuration snapshots; migration 096:
-position_entries). The rules are central/fleet/position_history.py's; this module appends, trims
+"""A Frame's Position history in PostgreSQL (migrations 096 and 099: position_entries). The rules are central/fleet/position_history.py's; this module appends, trims
 and reads, nothing else.
 
 Writers (each in its caller's transaction, so a history write fails only with its change):
+- `record_created_in`: Registry's new Frame (central/registry.py `create_frame`) appends its
+  KEPT_CREATED entry with the row it inserts.
 - `write_position_in`: the one kept Position write, called by Registry's Save
   (central/registry.py `commit_calibration_trial_in`) and profile change (`replace_frame_profile`):
   it records a change made outside Photo Wall, updates the Frame's calibration and lighting (and
@@ -70,7 +71,7 @@ def write_position_in(conn: Any, frame_id: str, record: PositionRecord, *, calib
     for a profile change) and append `record` as its kept entry, in the caller's transaction: the one
     kept Position write (Save: KEPT_SAVED, no `profile`; a profile change: KEPT_PROFILE_CHANGED with
     it). First, when the stored fit and lighting differ from the Frame's newest kept entry, the change made
-    outside Photo Wall is recorded (`position_history.unrecorded_record`, design rule 3). Answers the
+    outside Photo Wall is recorded (`position_history.unrecorded_record`). Answers the
     Frame's generation after the write. ValueError("position_history_kind") for another kind or a
     `profile` that does not match it; ValueError("position_history_values") when `record`'s fit is not
     `calibration`'s."""
@@ -95,6 +96,14 @@ def write_position_in(conn: Any, frame_id: str, record: PositionRecord, *, calib
                               (*params, frame_id)).fetchone()["generation"]
     _append_in(conn, frame_id, record)
     return generation
+
+
+def record_created_in(conn: Any, frame_id: str, record: PositionRecord) -> None:
+    """Append a new Frame's KEPT_CREATED `record`, in the caller's transaction that inserted the Frame.
+    ValueError("position_history_kind") for another kind."""
+    if record.kind is not PositionEntryKind.KEPT_CREATED:
+        raise ValueError("position_history_kind")
+    _append_in(conn, frame_id, record)
 
 
 def _append_in(conn: Any, frame_id: str, record: PositionRecord) -> PositionEntry:
@@ -183,4 +192,4 @@ def _entry(row: Mapping[str, Any]) -> PositionEntry:
 
 
 __all__ = ["frame_made_for_in", "latest_kept_position_in", "latest_position_at_in", "latest_position_in",
-           "position_entries_in", "position_entry_in", "record_sent_in", "write_position_in"]
+           "position_entries_in", "position_entry_in", "record_created_in", "record_sent_in", "write_position_in"]

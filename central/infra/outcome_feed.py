@@ -20,8 +20,7 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Final
 
-import psycopg
-
+from central.infra.listen import listen
 from central.infra.outcomes import OUTCOME_CHANNEL, JobOutcomes, OutcomeRow
 from central.kernel.transactions import Transactions
 
@@ -124,18 +123,9 @@ class OutcomeFeed:
             self._poke.set()
 
     async def _listen(self) -> None:
-        while True:
-            try:
-                async with await psycopg.AsyncConnection.connect(
-                    self._dsn, autocommit=True, application_name=APPLICATION_NAME,
-                ) as conn:
-                    await conn.execute(f"LISTEN {OUTCOME_CHANNEL}")
-                    self._full_recheck_now()  # whatever was missed while not listening
-                    async for notify in conn.notifies():
-                        self._notified(notify.payload)
-            except Exception as error:  # the recheck keeps waiters resolving meanwhile
-                logger.warning("outcome feed LISTEN connection lost: %s", error)
-            await asyncio.sleep(self._recheck)
+        # Every (re)connect rechecks in full: whatever was missed while not listening.
+        await listen(self._dsn, OUTCOME_CHANNEL, application=APPLICATION_NAME, connected=self._full_recheck_now,
+                     notified=self._notified, retry_seconds=self._recheck)
 
     async def _refresh(self) -> None:
         assert self._poke is not None

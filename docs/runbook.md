@@ -1200,8 +1200,8 @@ Add answers 201 with the LUT (its name is the profile's own description), or 200
 | 413 `too_large` | The file is over 8 MiB | A paper profile is a few hundred KB: check it is the `.icc`/`.icm` file and not an archive |
 | 422 `not_a_colour_profile` | Not an ICC file | Unzip the maker's download and send the profile itself |
 | 422 `not_a_printer_profile` | An ICC file, but not an RGB or CMYK printer (output) profile, or it does not bake | A monitor or camera profile is not a paper; take the paper's printer profile |
-| 409 `lut_in_use` (with `frames`, the Frames' names) | A Frame's paper names it, saved or drafted in an open Position trial | Choose no paper profile, or another, on those Frames first |
-| 404 `lut_unknown` | No LUT with that digest | Read the list for the digest |
+| 409 `named_by_a_frame` (with `frames`, the Frames' names) | A Frame's paper names it, saved or drafted in an open Position trial | Choose no paper profile, or another, on those Frames first |
+| 404 `unknown_paper_profile` | No paper profile with that digest | Read the list for the digest |
 
 **On the Pi.** The Player fetches `GET /v1/luts/<profile sha256>/<recipe>` with its own bearer and checks it against the served `Repr-Digest`, then keeps it in its media cache. Until it has it, the Frame shows the sliders without the LUT and the Picture tab's Done waits ("The sliders show at once; the LUT joins when the Pi has it, and Done waits for it"). A Done that never unlocks with a LUT chosen: read the Player's journal for the fetch's fault (`lut_type`, `lut_length`, `lut_digest` or `media_digest` name the refusal; it is retried on the media backoff).
 
@@ -1214,35 +1214,39 @@ Add answers 201 with the LUT (its name is the profile's own description), or 200
 
 ## Room lights and Home Assistant
 
-Room light ([0028](decisions/0028-room-light.md)): the real lights of the house (daylight, the overheads, the bookshelf spotlight) are **room lights**, each with one reporter: its Home Assistant light, one **Sensor** (a light meter wired to a Pi, or a Home Assistant illuminance sensor), or nobody (fixed: always on at full). Photo Wall never drives a light. Central keeps them (`room_lights`, `sensors`, migration 099) and writes every light's colour and last state as one room-lights document on the hub's WALL stream, the same for every Pi; a Pi keeps the last one while Central is away. Upgrade data: one fixed room light `room` exists, and every Frame's lighting is one wash of it at its Display's matched lux, so today's picture is unchanged.
+Room light ([0028](decisions/0028-room-light.md)): the real lights of the house (daylight, the overheads, the bookshelf spotlight) are **room lights**, one kind each: **reported** (a source reports it as a dimmer), **measured** (one **Sensor**, a light meter at one point, reads it) or **fixed** (always on at full). Photo Wall never drives a light. Who reports a light or a Sensor is a reference, `{"source", "address"}`: `home-assistant` with an entity id, or `pi` with a Player's id for the meter wired to that Pi. Central keeps every reference's last word (`light_words`, `reading_words`, migration 099) whether or not a light or Sensor names it yet, and builds the room-lights document from them: a light set up after its source last spoke shows that word at once, and a light given another reporter shows that reporter's last word. The worker's `RoomLightsWall` is the only writer of the document on the hub's WALL stream, the same for every Pi; a Pi keeps the last one while Central is away. Upgrade data: one fixed room light `room` exists, and every Frame's lighting is one wash of it at its Display's matched lux times its old software brightness, so today's picture is unchanged.
 
-**House › Lights** (operator routes, `central/room_light/views.py`):
+**House › Lights** (operator routes, `central/room_light_routes.py`):
 
 ```sh
-curl -H 'Authorization: Bearer <admin-token>' http://<central>/v1/operator/house/lights        # lights, Sensors, the link
+curl -H 'Authorization: Bearer <admin-token>' http://<central>/v1/operator/house/lights        # lights and Sensors
 curl -X PUT -H 'Authorization: Bearer <admin-token>' -H 'Content-Type: application/json' \
-  -d '{"name":"Bookshelf spot","reporter":{"kind":"home-assistant-light","entity":"light.bookshelf_spot"},"colour":{"kind":"fixed","kelvin":4000}}' \
+  -d '{"kind":"reported","name":"Bookshelf spot","reporter":{"source":"home-assistant","address":"light.bookshelf_spot"},"colour":{"kind":"fixed","kelvin":4000}}' \
   http://<central>/v1/operator/house/lights/bookshelf-spot
 curl -X PUT -H 'Authorization: Bearer <admin-token>' -H 'Content-Type: application/json' \
-  -d '{"name":"Hall meter","at":{"kind":"home-assistant","entity":"sensor.hall_illuminance"}}' \
+  -d '{"name":"Hall meter","at":{"source":"home-assistant","address":"sensor.hall_illuminance"}}' \
   http://<central>/v1/operator/house/sensors/hall-meter
+curl -H 'Authorization: Bearer <admin-token>' http://<central>/v1/operator/house/refused-reports   # every source's refusals
+curl -H 'Authorization: Bearer <admin-token>' http://<central>/v1/operator/house/lights/drawn      # what each Player drew with
 ```
 
-| Refusal (409) | Means | What to do |
+| Refusal | Means | What to do |
 |---|---|---|
-| `named-by-a-frame` | A Frame's lighting (saved, or in an open Position trial) names the light | Remove the Frame lights that view it first |
-| `sensor-reports-a-light` | The Sensor reports a room light | Give that light another reporter, or remove it, first |
-| `reported-colour-needs-home-assistant` | Only a Home Assistant light reports its colour | Use a fixed kelvin |
-| `entity-reports-another` | That Home Assistant entity, or that Pi's meter, already reports another light or Sensor | One entity, one reporter |
-| `unknown-sensor`, `unknown-room-light`, `too-many` | As named (32 lights, 32 Sensors at most) | |
+| 409 `named_by_a_frame` | A Frame's lighting (saved, or in an open Position trial) names the light, or the change would switch it between measured and another kind | Remove the Frame lights that view it first |
+| 409 `sensor_reports_a_light` | A room light is measured by that Sensor | Give that light another kind, or remove it, first |
+| 409 `reference_taken` | That reference already reports another light or Sensor (a second Sensor on one Pi is this) | One reference, one light or Sensor |
+| 409 `too_many` | 32 lights or 32 Sensors at most | |
+| 422 `unknown_address` | No source Central runs, or not that source's address form (an entity id; a Player id) | Check the reference |
+| 422 `unknown_sensor` | A measured light names no Sensor | Make the Sensor first |
+| 404 `unknown_room_light`, `unknown_sensor` | The light or Sensor in the path is not there | |
 
-**Connect Home Assistant.** Central's worker subscribes to the house's MQTT broker (the one Home Assistant's MQTT integration uses, usually Mosquitto) when `PHOTO_WALL_MQTT_URL` is set in the worker's environment: `mqtt://<user>:<password>@<host>:1883`, or `mqtts://...:8883`. Set it through an iac PR (the deployment's worker environment), with the user and password from the secret store (1Password), never in the repo. Unset, the link is "not configured" and nothing runs; House › Lights shows the link's state (connected or away since when).
+**Connect Home Assistant.** Central's worker subscribes to the house's MQTT broker (the one Home Assistant's MQTT integration uses, usually Mosquitto) when `PHOTO_WALL_MQTT_URL` is set in the worker's environment: `mqtt://<user>:<password>@<host>:1883`, or `mqtts://...:8883`. Set it through an iac PR (the deployment's worker environment), with the user and password from the secret store (1Password), never in the repo. The link beats its health every 5 seconds; `GET /v1/operator/integrations/home-assistant` judges the newest beat by its age: `not-configured` (no URL), `connecting`, `connected`, `away` (no beat for 15 seconds: the worker is gone or stuck) or `never-run`, with every entity Home Assistant reported or a light or Sensor names and the messages the link refused.
 
-In Home Assistant, install the blueprint [`integrations/home-assistant/photo-wall-room-lights.yaml`](../integrations/home-assistant/photo-wall-room-lights.yaml): copy it to `<config>/blueprints/automation/photo-wall/`, reload automations, create an automation from "Photo Wall room lights" and choose the lights and illuminance sensors to follow. It publishes each one's full state, retained, to `photowall/light/<entity_id>` (`{"state","brightness","rgb"}`) and `photowall/illuminance/<entity_id>` (`{"lux"}` or `{"state":"unavailable"}`) on every change and again at Home Assistant's start. A message Central cannot use (an entity no room light or Sensor names, or a payload outside its shape) is kept as a refusal (`home_assistant_refusals`, the newest 20) and changes nothing.
+In Home Assistant, install the blueprint [`integrations/home-assistant/photo-wall-room-lights.yaml`](../integrations/home-assistant/photo-wall-room-lights.yaml): copy it to `<config>/blueprints/automation/photo-wall/`, reload automations, create an automation from "Photo Wall room lights" and choose the lights and illuminance sensors to follow. It publishes each one's full state, retained, to `photowall/light/<entity_id>` (`{"state","brightness","rgb"}`) and `photowall/illuminance/<entity_id>` (`{"lux"}` or `{"state":"unavailable"}`) on every change and again at Home Assistant's start (a test holds these topics to `central/infra/home_assistant/topics.py`). A message Central cannot read (another topic, a payload outside its shape) is kept in the one refusal log (`report_refusals`, the newest 20 per source) and changes nothing; a database failure while recording drops the connection, and the retained states replay on the next one.
 
-**Check it.** With the link connected, switch the light in Home Assistant: `GET /v1/operator/house/lights` shows its state and `heard_at`, and the WALL key `room-lights` on any Node changes (its `change` rises once per real change; a repeated state changes nothing). The Player's control State never moves for a light. Bench steps (a real Home Assistant and the bookshelf spot on the wall) are NOT RUN in the delivery that built this.
+**Check it.** With the link connected, switch the light in Home Assistant: `GET /v1/operator/house/lights` shows its entry and `heard_at`, and the WALL key `room-lights` on any Node changes (its `change` rises once per real change; a repeated state changes nothing). The Player's control State never moves for a light. Each Player reports which document it drew with every 30 seconds; `GET /v1/operator/house/lights/drawn` reads `drawn`, `behind`, `not-following` (its WALL reader cannot follow) or `not-reported` (no report for 90 seconds). Bench steps (a real Home Assistant and the bookshelf spot on the wall) are NOT RUN in the delivery that built this.
 
-**A light meter wired to a Pi.** HostCore reads the first Linux IIO device on the Pi that answers `in_illuminance_input` (or `in_illuminance_raw` with `in_illuminance_scale`), every 5 seconds, and reports it on the host line as `light-sensor` (lux, or `"unavailable"` when a read fails) only when it moved by more than 5 % (1 lux below 20). A Pi with no meter reports nothing. In House > Lights, make a Sensor that is that Pi's meter and give it to a room light as its reporter. Put the meter where its light dominates and facing away from the wall: it reads every light at its point. Check it on the Pi with `cat /sys/bus/iio/devices/iio:device*/in_illuminance_*`; Central shows the Sensor's last reading and when it was heard.
+**A light meter wired to a Pi.** HostCore reads the first Linux IIO device on the Pi that answers `in_illuminance_input` (or `in_illuminance_raw` with `in_illuminance_scale`), every 5 seconds, and reports it on the host line as `light-sensor` (lux, or `"unavailable"` when reads fail) only when it moved by more than 5 % (1 lux below 20). A Pi with no meter reports nothing. Central keeps the Pi's last reading under `{"source":"pi","address":"<player id>"}` whether or not a Sensor is there, in a savepoint of its own so it never holds up the host line's record; an unreadable value is in the refusal log. In House › Lights, make a Sensor at that reference and a measured room light of it. Put the meter where its light dominates and facing away from the wall: it reads every light at its point. Check it on the Pi with `cat /sys/bus/iio/devices/iio:device*/in_illuminance_*`; Central shows the Sensor's last reading and when it was heard.
 
 **Set up a Frame's light with a phone light meter.** The numbers are typed in, then matched by eye (owner, 2026-10-15: "A is probably the simplest option to start").
 

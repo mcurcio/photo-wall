@@ -64,7 +64,6 @@ from datetime import timedelta
 from typing import Any, Final
 from uuid import UUID
 
-import psycopg
 from psycopg.types.json import Jsonb
 
 from central.content_catalog.catalog import device_id_for_serial
@@ -163,6 +162,7 @@ from central.displays.views import (
 from central.fleet.node_bus_presence import bus_links_in
 from central.house_time.calculator import day_start, house_date
 from central.infra.house_store import house_time_in
+from central.infra.listen import listen
 from central.infra.node_link_store import PgLinkStores
 from central.infra.output_wakes import OUTPUT_DOCUMENTS_CHANNEL, notify_nodes_in
 from central.infra.picture_columns import (
@@ -215,15 +215,15 @@ from contracts.node_picture import (
     picture_report_key,
 )
 from contracts.tuning import TestPattern
+from nodeapi.buffers import KV_OPERATION_HEADER, desired_stream, state_prefix, state_stream
 from nodeapi.hub import DocumentSource
 from nodeapi.pull import Read
 
 log = logging.getLogger(__name__)
 
-REPORT_STREAM: Final = "KV_state_display"       # the display line's state bucket: Output and picture reports
-DOCUMENT_STREAM: Final = "KV_desired_display"   # the display line's desired bucket: Output and picture documents
-_REPORT_SUBJECT: Final = "$KV.state_display."
-_KV_OPERATION: Final = "KV-Operation"            # a delete or purge marker carries no value
+REPORT_STREAM: Final = state_stream("display")       # the display line's state bucket: Output and picture reports
+DOCUMENT_STREAM: Final = desired_stream("display")   # the display line's desired bucket: Output and picture documents
+_REPORT_SUBJECT: Final = state_prefix("display")
 _CLOCK: Final = DatabaseTransactionClock()
 _LISTEN_RETRY_SECONDS: Final = 1.0
 _LISTEN_APPLICATION: Final = "photo-wall-output-documents"
@@ -453,7 +453,7 @@ def write_picture(conn: Any, display_id: UUID, record: PictureRecord) -> None:
     """Store `record.picture` on the Display and append `record` as its next kept picture history
     entry, in the caller's transaction (a failed append fails the Done or Copy): the one kept picture
     write. First, when the stored values differ from the Display's newest kept entry, the change
-    made outside Photo Wall is recorded (`picture_history.unrecorded_record`, design rule 3).
+    made outside Photo Wall is recorded (`picture_history.unrecorded_record`).
     ValueError("picture_history_kind") unless `record` is KEPT_DONE or KEPT_COPIED."""
     if record.kind not in (PictureEntryKind.KEPT_DONE, PictureEntryKind.KEPT_COPIED):
         raise ValueError("picture_history_kind")
@@ -565,7 +565,7 @@ class OutputReportJudge:
         judged = False
         for item in items:
             key = item.subject.removeprefix(_REPORT_SUBJECT)
-            if not key.startswith(("output-", "picture-")) or (item.headers or {}).get(_KV_OPERATION):
+            if not key.startswith(("output-", "picture-")) or (item.headers or {}).get(KV_OPERATION_HEADER):
                 continue
             try:
                 report = _decoded_report(key, item.data)
@@ -638,17 +638,8 @@ class DisplayWakes:
         """Until cancelled: `LISTEN OUTPUT_DOCUMENTS_CHANNEL` on one connection of its own and wake
         each notified Node. Every (re)connect wakes all, since notifications sent while no
         connection listened are lost; a lost connection is logged and retried."""
-        while True:
-            try:
-                async with await psycopg.AsyncConnection.connect(
-                        dsn, autocommit=True, application_name=_LISTEN_APPLICATION) as conn:
-                    await conn.execute(f"LISTEN {OUTPUT_DOCUMENTS_CHANNEL}")
-                    self.wake_all()
-                    async for notify in conn.notifies():
-                        self.wake(notify.payload)
-            except Exception as error:   # the bus keeps running; a reconcile still asserts
-                log.warning("output documents LISTEN connection lost: %s", error)
-            await asyncio.sleep(_LISTEN_RETRY_SECONDS)
+        await listen(dsn, OUTPUT_DOCUMENTS_CHANNEL, application=_LISTEN_APPLICATION, connected=self.wake_all,
+                     notified=self.wake, retry_seconds=_LISTEN_RETRY_SECONDS)
 
     async def after(self, device_id: str, seen: int) -> int:
         """The Node's count, once it differs from `seen`."""

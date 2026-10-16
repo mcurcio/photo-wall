@@ -1,369 +1,302 @@
-"""Room lights over PostgreSQL (decision 0028; migration 099): `PgRoomLights` implements every port
-of central/room_light/ports.py (the Home Assistant link's reports, a Pi's light meter, House >
-Lights' setup and the room-lights document), and `LightSensorJudge` reads a Pi's meter off the host
-line's state bucket as it is recorded.
+"""Room lights over PostgreSQL (migration 099): `PgRoomLights` implements central/room_light/ports.py's
+RoomLightReports (every reporting source's adapter), RoomLightSetup (House › Lights),
+RoomLightsDocuments (the worker's WALL writer) and DrawnReports (each Player's drawn report).
+
+Every word is kept by its reference (light_words, reading_words) whether or not a room light or
+Sensor names it, and is resolved only when the document is built (policy.room_lights_document). Each
+source keeps its newest WORDS_KEPT_PER_SOURCE references and REFUSALS_KEPT refusals.
 
 Every write that changes the room-lights document raises `room_lights_change.change` in its own
-transaction, under that row's lock (the one order every writer takes first), and sends
-`NOTIFY ROOM_LIGHTS_CHANNEL`, delivered at commit: the worker's WALL writer
-(central/node_bus_wiring.py `RoomLightsWall`) listens and puts the document again, so a House >
-Lights edit in the API process reaches every Pi without waiting. Every instant is PostgreSQL's
-`clock_timestamp()` (Central's one clock). No trigger, no stored procedure: the rules are
-central/room_light/policy.py's.
+transaction, under that row's lock (the house's lock, central/infra/frame_lighting_store.py, taken
+first), and sends `NOTIFY ROOM_LIGHTS_CHANNEL`, delivered at commit: the worker's WALL writer listens
+and puts the document again. Every instant is PostgreSQL's `clock_timestamp()` (Central's one clock).
+No trigger, no stored procedure, no range in SQL: the rules are central/room_light/policy.py's and
+the ranges pydantic's.
 """
 from __future__ import annotations
 
-import logging
-from collections.abc import Mapping
-from typing import Any, Final, Literal
+from typing import Any, Final
 
 from psycopg.types.json import Jsonb
 from pydantic import TypeAdapter
 
 from central.db import Database
+from central.infra.frame_lighting_store import naming_in, take_house_lock
+from central.infra.room_light_rows import ROOM_LIGHT, lights_in
+from central.infra.transactions import pg_connection
+from central.kernel.transactions import Transaction
 from central.room_light.model import (
-    FULL_ON,
-    Colour,
-    FixedReporter,
-    IlluminanceMessage,
-    LightStateMessage,
+    ADDRESS_MAX,
+    FixedLight,
+    LightWord,
+    MeasuredLight,
+    ReadingWord,
     Recorded,
-    Refusal,
-    Refused,
-    Reporter,
+    ReportedLight,
+    ReporterRef,
+    ReportRefusal,
     RoomLight,
-    RoomLightState,
+    RoomLightId,
     Sensor,
-    SensorPlace,
-    SetupRefusal,
+    SensorId,
+    SensorRef,
+    Source,
+    Words,
 )
 from central.room_light.policy import (
     check_room_light,
     check_room_light_removal,
     check_sensor,
     check_sensor_removal,
-    illuminance_state,
-    light_measured_by,
-    light_reported_by_entity,
-    light_state,
+    drawn_state,
+    entry_of,
+    measured_by,
     room_lights_document,
-    sensor_at_entity,
-    sensor_on_player,
 )
 from central.room_light.views import (
-    HomeAssistantLinkView,
-    RefusedMessageView,
+    DrawnView,
+    PlayerDrawnView,
+    RefusedReportsView,
+    RefusedReportView,
     RoomLightsView,
     RoomLightView,
     SensorView,
-    StateView,
 )
-from contracts.frame_lighting import FrameLighting
 from contracts.room_light import (
-    LIGHT_SENSOR_KEY,
+    ColourDimmer,
+    Dimmer,
     Measured,
-    NotReported,
     RoomLightsDocument,
-    decode_light_sensor,
+    RoomLightsDrawn,
+    Unavailable,
+    room_lights_digest,
 )
-from nodeapi.pull import Read
-
-log = logging.getLogger(__name__)
 
 ROOM_LIGHTS_CHANNEL: Final = "room_lights"     # NOTIFY payload: empty; the WALL writer re-reads the document
-REFUSALS_KEPT: Final = 20                      # the newest refused messages kept
-HOST_STATE_STREAM: Final = "KV_state_host"     # the host line's state bucket (contracts/node_link.py STORE_LINES)
-_HOST_STATE_SUBJECT: Final = "$KV.state_host."
+REFUSALS_KEPT: Final = 20                      # the newest refused reports kept per source
+WORDS_KEPT_PER_SOURCE: Final = 256             # the newest references' words kept per source
 
-_STATE: Final = TypeAdapter(StateView)
-_REPORTER: Final = TypeAdapter(Reporter)
-_COLOUR: Final = TypeAdapter(Colour)
-_PLACE: Final = TypeAdapter(SensorPlace)
-_KV_OPERATION: Final = "KV-Operation"
+_LIGHT_WORD: Final = TypeAdapter(LightWord)
+_READING_WORD: Final = TypeAdapter(ReadingWord)
+_WORD_TABLES: Final = ("light_words", "reading_words")
 
 
-def _state_json(state: RoomLightState) -> dict[str, Any]:
-    return _STATE.dump_python(state, mode="json")
+def _sensors_in(conn: Any) -> dict[SensorId, Sensor]:
+    rows = conn.execute("SELECT id, sensor FROM sensors ORDER BY id").fetchall()
+    return {row["id"]: Sensor.model_validate(row["sensor"]) for row in rows}
 
 
-def _room_light(row: Mapping[str, Any]) -> RoomLight:
-    return RoomLight(id=row["id"], name=row["name"], reporter=_REPORTER.validate_python(row["reporter"]),
-                     colour=_COLOUR.validate_python(row["colour"]))
+def _words_in(conn: Any) -> Words:
+    lights = conn.execute("SELECT source, address, word FROM light_words").fetchall()
+    readings = conn.execute("SELECT source, address, word FROM reading_words").fetchall()
+    return Words(
+        lights={ReporterRef(source=row["source"], address=row["address"]): _LIGHT_WORD.validate_python(row["word"])
+                for row in lights},
+        readings={SensorRef(source=row["source"], address=row["address"]): _READING_WORD.validate_python(row["word"])
+                  for row in readings})
 
 
-def _sensor(row: Mapping[str, Any]) -> Sensor:
-    return Sensor(id=row["id"], name=row["name"], at=_PLACE.validate_python(row["at"]))
-
-
-def _initial_state(reporter: Any) -> RoomLightState:
-    """A new (or re-reported) light's state: FULL_ON for a fixed light, else nothing heard yet."""
-    return FULL_ON if isinstance(reporter, FixedReporter) else NotReported()
-
-
-def room_lights_in(conn: Any) -> dict[str, RoomLight]:
-    rows = conn.execute("SELECT id, name, reporter, colour FROM room_lights ORDER BY position, id").fetchall()
-    return {row["id"]: _room_light(row) for row in rows}
-
-
-def _sensors_in(conn: Any) -> dict[str, Sensor]:
-    rows = conn.execute("SELECT id, name, at FROM sensors ORDER BY id").fetchall()
-    return {row["id"]: _sensor(row) for row in rows}
-
-
-def _locked_change_in(conn: Any) -> int:
-    """The document's change, its row locked: every writer takes this lock first."""
-    return int(conn.execute("SELECT change FROM room_lights_change WHERE one FOR UPDATE").fetchone()["change"])
+def _heard_in(conn: Any) -> dict[tuple[str, str, str], float]:
+    """(table, source, address) -> when Central heard that reference (epoch seconds)."""
+    heard: dict[tuple[str, str, str], float] = {}
+    for table in _WORD_TABLES:
+        rows = conn.execute(f"SELECT source, address, EXTRACT(EPOCH FROM heard_at) AS heard_at "  # noqa: S608
+                            f"FROM {table}").fetchall()
+        heard.update({(table, row["source"], row["address"]): float(row["heard_at"]) for row in rows})
+    return heard
 
 
 def document_in(conn: Any) -> RoomLightsDocument:
     """The room-lights document now (policy.room_lights_document over the stored rows)."""
     change = int(conn.execute("SELECT change FROM room_lights_change WHERE one").fetchone()["change"])
-    rows = conn.execute("SELECT id, name, reporter, colour, state FROM room_lights ORDER BY position, id").fetchall()
-    return room_lights_document({row["id"]: _room_light(row) for row in rows},
-                                {row["id"]: _STATE.validate_python(row["state"]) for row in rows}, change)
+    return room_lights_document(lights_in(conn), _sensors_in(conn), _words_in(conn), change)
 
 
 def _changed_in(conn: Any, before: RoomLightsDocument) -> bool:
     """When the document's lights differ from `before`'s: raise its change and wake the WALL writer
     (at commit). True when it did."""
-    after = document_in(conn)
-    if dict(after.lights) == dict(before.lights):
+    if dict(document_in(conn).lights) == dict(before.lights):
         return False
     conn.execute("UPDATE room_lights_change SET change = change + 1 WHERE one")
     conn.execute("SELECT pg_notify(%s, '')", (ROOM_LIGHTS_CHANNEL,))
     return True
 
 
-def named_by_frames_in(conn: Any) -> dict[str, tuple[str, ...]]:
-    """Room light id -> the Frames whose saved lighting or open Position trial names it, by Frame id."""
-    named: dict[str, set[str]] = {}
-    rows = conn.execute("SELECT id AS frame_id, lighting FROM frames UNION ALL "
-                        "SELECT frame_id, lighting FROM node_calibration_trials WHERE state='active'").fetchall()
-    for row in rows:
-        for light in FrameLighting.model_validate(row["lighting"]).lights:
-            named.setdefault(light.light, set()).add(row["frame_id"])
-    return {light: tuple(sorted(frames)) for light, frames in named.items()}
+def _word_in(conn: Any, table: str, source: str, address: str, word: dict[str, Any]) -> Recorded:
+    """Keep `word` as (source, address)'s last in `table`, heard now, and the newest
+    WORDS_KEPT_PER_SOURCE of that source; "recorded" when the document changed."""
+    take_house_lock(conn)
+    before = document_in(conn)
+    conn.execute(f"INSERT INTO {table}(source, address, word, heard_at) VALUES (%s, %s, %s, clock_timestamp()) "  # noqa: S608
+                 "ON CONFLICT (source, address) DO UPDATE SET word=EXCLUDED.word, heard_at=EXCLUDED.heard_at",
+                 (source, address, Jsonb(word)))
+    conn.execute(f"DELETE FROM {table} WHERE source=%(source)s AND address NOT IN "  # noqa: S608
+                 f"(SELECT address FROM {table} WHERE source=%(source)s ORDER BY heard_at DESC, address "
+                 "LIMIT %(keep)s)", {"source": source, "keep": WORDS_KEPT_PER_SOURCE})
+    return "recorded" if _changed_in(conn, before) else "unchanged"
 
 
 class PgRoomLights:
-    """Room lights' ports over one Database (RoomLightReports, SensorFacts, RoomLightSetup,
-    RoomLightsDocuments)."""
+    """Room lights' ports over one Database."""
 
     def __init__(self, db: Database) -> None:
         self._db = db
 
-    # ---- RoomLightReports (the worker's Home Assistant link) ----
+    # ---- RoomLightReports ----
 
-    def record_light_state(self, entity: str, message: LightStateMessage) -> Recorded:
+    def record_light_state(self, reporter: ReporterRef, state: Dimmer | ColourDimmer | Unavailable) -> Recorded:
         with self._db.transaction() as conn:
-            _locked_change_in(conn)
-            light = light_reported_by_entity(room_lights_in(conn).values(), entity)
-            if light is None:
-                return Refused(Refusal.UNKNOWN_ENTITY)
-            return self._recorded_in(conn, light.id, light_state(message))
+            return _word_in(conn, "light_words", reporter.source, reporter.address, state.model_dump(mode="json"))
 
-    def record_illuminance(self, entity: str, message: IlluminanceMessage) -> Recorded:
+    def record_reading(self, sensor: SensorRef, reading: Measured | Unavailable) -> Recorded:
         with self._db.transaction() as conn:
-            _locked_change_in(conn)
-            sensor = sensor_at_entity(_sensors_in(conn).values(), entity)
-            if sensor is None:
-                return Refused(Refusal.UNKNOWN_ENTITY)
-            return self._reading_in(conn, sensor, message.lux)
+            return _word_in(conn, "reading_words", sensor.source, sensor.address, reading.model_dump(mode="json"))
 
-    def record_refusal(self, topic: str, reason: str) -> None:
+    def record_reading_within(self, tx: Transaction, sensor: SensorRef, reading: Measured | Unavailable) -> Recorded:
+        conn = pg_connection(tx)
+        with conn.transaction():
+            return _word_in(conn, "reading_words", sensor.source, sensor.address, reading.model_dump(mode="json"))
+
+    def record_refused(self, source: Source, address: str, reason: ReportRefusal) -> None:
+        """The address is cut to ADDRESS_MAX here and only here: a refused report's text is the
+        source's own and may be anything."""
         with self._db.transaction() as conn:
-            conn.execute("INSERT INTO home_assistant_refusals(topic, reason, at) VALUES (%s, %s, clock_timestamp())",
-                         (topic[:512], reason[:128]))
-            conn.execute("DELETE FROM home_assistant_refusals WHERE id NOT IN "
-                         "(SELECT id FROM home_assistant_refusals ORDER BY id DESC LIMIT %s)", (REFUSALS_KEPT,))
+            conn.execute("INSERT INTO report_refusals(source, address, reason, at) "
+                         "VALUES (%s, %s, %s, clock_timestamp())", (source, address[:ADDRESS_MAX], reason.value))
+            conn.execute("DELETE FROM report_refusals WHERE source=%(source)s AND id NOT IN (SELECT id FROM "
+                         "report_refusals WHERE source=%(source)s ORDER BY id DESC LIMIT %(keep)s)",
+                         {"source": source, "keep": REFUSALS_KEPT})
 
-    def record_link(self, state: Literal["not-configured", "connected", "away"]) -> None:
-        """The link's state now, stamped with Central's time ("not-configured": the worker runs no
-        link, so its `since` is None)."""
-        with self._db.transaction() as conn:
-            conn.execute("INSERT INTO home_assistant_link(one, state, since) VALUES (true, %s, "
-                         "CASE WHEN %s = 'not-configured' THEN NULL ELSE clock_timestamp() END) "
-                         "ON CONFLICT (one) DO UPDATE SET state=EXCLUDED.state, since=EXCLUDED.since",
-                         (state, state))
-
-    def refusals(self) -> tuple[tuple[str, str], ...]:
-        """The newest refused messages' (topic, reason), newest first."""
-        with self._db.transaction() as conn:
-            rows = conn.execute("SELECT topic, reason FROM home_assistant_refusals ORDER BY id DESC").fetchall()
-        return tuple((row["topic"], row["reason"]) for row in rows)
-
-    # ---- SensorFacts (a Pi's wired meter, judged off the host line) ----
-
-    def record_sensor_reading(self, player_id: str, lux: float | None) -> Recorded:
-        with self._db.transaction() as conn:
-            return self.record_sensor_reading_in(conn, player_id, lux)
-
-    def record_sensor_reading_in(self, conn: Any, player_id: str, lux: float | None) -> Recorded:
-        """`record_sensor_reading` in the caller's transaction (the host line's judge)."""
-        _locked_change_in(conn)
-        sensor = sensor_on_player(_sensors_in(conn).values(), player_id)
-        if sensor is None:
-            return Refused(Refusal.NOT_ITS_REPORTER)
-        return self._reading_in(conn, sensor, lux)
-
-    def _reading_in(self, conn: Any, sensor: Sensor, lux: float | None) -> Recorded:
-        conn.execute("UPDATE sensors SET reading=%s, heard_at=clock_timestamp() WHERE id=%s",
-                     (Jsonb({"lux": lux}), sensor.id))
-        light = light_measured_by(room_lights_in(conn).values(), sensor.id)
-        if light is None:
-            return "unchanged"
-        return self._recorded_in(conn, light.id, illuminance_state(IlluminanceMessage(lux)))
-
-    def _recorded_in(self, conn: Any, light_id: str, state: RoomLightState) -> Recorded:
-        """Record `state` as the light's, heard now: "recorded" when it changed the document."""
-        before = document_in(conn)
-        conn.execute("UPDATE room_lights SET state=%s, heard_at=clock_timestamp() WHERE id=%s",
-                     (Jsonb(_state_json(state)), light_id))
-        return "recorded" if _changed_in(conn, before) else "unchanged"
-
-    # ---- RoomLightsDocuments (the worker's WALL writer) ----
+    # ---- RoomLightsDocuments ----
 
     def current(self) -> RoomLightsDocument:
         with self._db.transaction() as conn:
             return document_in(conn)
 
-    # ---- RoomLightSetup (House > Lights) ----
+    # ---- DrawnReports ----
+
+    def record_drawn(self, player_id: str, report: RoomLightsDrawn) -> None:
+        with self._db.transaction() as conn:
+            conn.execute("INSERT INTO room_lights_drawn(player_id, drawn, following, reported_at) "
+                         "VALUES (%s, %s, %s, clock_timestamp()) ON CONFLICT (player_id) DO UPDATE "
+                         "SET drawn=EXCLUDED.drawn, following=EXCLUDED.following, reported_at=EXCLUDED.reported_at",
+                         (player_id, report.drawn, report.following))
+
+    # ---- RoomLightSetup ----
 
     def lights(self) -> RoomLightsView:
         with self._db.transaction() as conn:
-            document = document_in(conn)
-            rows = conn.execute("SELECT id, name, reporter, colour, EXTRACT(EPOCH FROM heard_at) AS heard_at "
-                                "FROM room_lights ORDER BY position, id").fetchall()
-            lights = {row["id"]: _room_light(row) for row in rows}
-            sensor_rows = conn.execute("SELECT id, name, at, reading, EXTRACT(EPOCH FROM heard_at) AS heard_at "
-                                       "FROM sensors ORDER BY id").fetchall()
-            named = named_by_frames_in(conn)
-            link = conn.execute("SELECT state, EXTRACT(EPOCH FROM since) AS since FROM home_assistant_link "
-                                "WHERE one").fetchone()
-            refused = conn.execute("SELECT topic, reason, EXTRACT(EPOCH FROM at) AS at FROM home_assistant_refusals "
-                                   "ORDER BY id DESC").fetchall()
-        return RoomLightsView(
-            lights=tuple(RoomLightView(
-                id=row["id"], name=row["name"], reporter=lights[row["id"]].reporter, colour=lights[row["id"]].colour,
-                state=FULL_ON if isinstance(lights[row["id"]].reporter, FixedReporter)
-                else document.lights[row["id"]].state,
-                heard_at=None if isinstance(lights[row["id"]].reporter, FixedReporter) or row["heard_at"] is None
-                else float(row["heard_at"]),
-                named_by=named.get(row["id"], ())) for row in rows),
-            sensors=tuple(SensorView(
-                id=row["id"], name=row["name"], at=_PLACE.validate_python(row["at"]),
-                reading=None if row["reading"] is None else (
-                    "unavailable" if row["reading"].get("lux") is None else float(row["reading"]["lux"])),
-                heard_at=None if row["heard_at"] is None else float(row["heard_at"]),
-                reports=None if (light := light_measured_by(lights.values(), row["id"])) is None else light.id)
-                for row in sensor_rows),
-            home_assistant=HomeAssistantLinkView(state="not-configured", since=None) if link is None
-            else HomeAssistantLinkView(state=link["state"],
-                                       since=None if link["since"] is None else float(link["since"])),
-            refused=tuple(RefusedMessageView(topic=row["topic"], reason=row["reason"], at=float(row["at"]))
-                          for row in refused))
+            return _view_in(conn)
 
-    def save_room_light(self, light: RoomLight) -> SetupRefusal | None:
+    def drawn(self) -> DrawnView:
         with self._db.transaction() as conn:
-            _locked_change_in(conn)
-            lights = room_lights_in(conn)
-            refusal = check_room_light(light, lights, _sensors_in(conn), named_by_frames_in(conn).get(light.id, ()))
-            if refusal is not None:
-                return refusal
+            digest_now = room_lights_digest(document_in(conn))
+            rows = conn.execute("SELECT player_id, drawn, following, EXTRACT(EPOCH FROM reported_at) AS reported_at, "
+                                "EXTRACT(EPOCH FROM clock_timestamp() - reported_at) AS age "
+                                "FROM room_lights_drawn ORDER BY player_id").fetchall()
+        return DrawnView(players=tuple(PlayerDrawnView(
+            player_id=row["player_id"], reported_at=float(row["reported_at"]),
+            state=drawn_state(RoomLightsDrawn(drawn=row["drawn"], following=row["following"]), float(row["age"]),
+                              digest_now)) for row in rows))
+
+    def refused(self) -> RefusedReportsView:
+        with self._db.transaction() as conn:
+            return RefusedReportsView(refused=refused_in(conn, None))
+
+    def save_room_light(self, light_id: RoomLightId, light: RoomLight) -> RoomLightView:
+        with self._db.transaction() as conn:
+            take_house_lock(conn)
+            lights = lights_in(conn)
+            refused = check_room_light(light_id, light, lights, _sensors_in(conn),
+                                       naming_in(conn).lights.get(light_id, ()))
+            if refused is not None:
+                raise refused
             before = document_in(conn)
-            reporter, colour = Jsonb(light.reporter.model_dump(mode="json")), Jsonb(_COLOUR.dump_python(
-                light.colour, mode="json"))
-            previous = lights.get(light.id)
-            if previous is None:
-                conn.execute("INSERT INTO room_lights(id, name, reporter, colour, state, heard_at, position) "
-                             "SELECT %s, %s, %s, %s, %s, NULL, COALESCE(max(position), -1) + 1 FROM room_lights",
-                             (light.id, light.name, reporter, colour, Jsonb(_state_json(_initial_state(light.reporter)))))
-            elif previous.reporter != light.reporter:
-                conn.execute("UPDATE room_lights SET name=%s, reporter=%s, colour=%s, state=%s, heard_at=NULL "
-                             "WHERE id=%s", (light.name, reporter, colour,
-                                             Jsonb(_state_json(_initial_state(light.reporter))), light.id))
-            else:
-                conn.execute("UPDATE room_lights SET name=%s, colour=%s WHERE id=%s",
-                             (light.name, colour, light.id))
+            conn.execute("INSERT INTO room_lights(id, light, position) "
+                         "SELECT %s, %s, COALESCE(max(position), -1) + 1 FROM room_lights "
+                         "ON CONFLICT (id) DO UPDATE SET light=EXCLUDED.light",
+                         (light_id, Jsonb(ROOM_LIGHT.dump_python(light, mode="json"))))
             _changed_in(conn, before)
-        return None
+            return next(view for view in _view_in(conn).lights if view.id == light_id)
 
-    def remove_room_light(self, light_id: str) -> SetupRefusal | None:
+    def remove_room_light(self, light_id: RoomLightId) -> None:
         with self._db.transaction() as conn:
-            _locked_change_in(conn)
-            refusal = check_room_light_removal(light_id, room_lights_in(conn), named_by_frames_in(conn).get(light_id, ()))
-            if refusal is not None:
-                return refusal
+            take_house_lock(conn)
+            refused = check_room_light_removal(light_id, lights_in(conn), naming_in(conn).lights.get(light_id, ()))
+            if refused is not None:
+                raise refused
             before = document_in(conn)
             conn.execute("DELETE FROM room_lights WHERE id=%s", (light_id,))
             _changed_in(conn, before)
-        return None
 
-    def save_sensor(self, sensor: Sensor) -> SetupRefusal | None:
+    def save_sensor(self, sensor_id: SensorId, sensor: Sensor) -> SensorView:
         with self._db.transaction() as conn:
-            _locked_change_in(conn)
-            sensors, lights = _sensors_in(conn), room_lights_in(conn)
-            refusal = check_sensor(sensor, sensors, lights)
-            if refusal is not None:
-                return refusal
+            take_house_lock(conn)
+            refused = check_sensor(sensor_id, sensor, _sensors_in(conn), lights_in(conn))
+            if refused is not None:
+                raise refused
             before = document_in(conn)
-            at = Jsonb(sensor.at.model_dump(mode="json"))
-            previous = sensors.get(sensor.id)
-            if previous is None:
-                conn.execute("INSERT INTO sensors(id, name, at, reading, heard_at) VALUES (%s, %s, %s, NULL, NULL)",
-                             (sensor.id, sensor.name, at))
-            elif previous.at != sensor.at:
-                conn.execute("UPDATE sensors SET name=%s, at=%s, reading=NULL, heard_at=NULL WHERE id=%s",
-                             (sensor.name, at, sensor.id))
-                measured = light_measured_by(lights.values(), sensor.id)
-                if measured is not None:   # a new place: nothing heard from it yet
-                    conn.execute("UPDATE room_lights SET state=%s, heard_at=NULL WHERE id=%s",
-                                 (Jsonb(_state_json(NotReported())), measured.id))
-            else:
-                conn.execute("UPDATE sensors SET name=%s WHERE id=%s", (sensor.name, sensor.id))
+            conn.execute("INSERT INTO sensors(id, sensor) VALUES (%s, %s) "
+                         "ON CONFLICT (id) DO UPDATE SET sensor=EXCLUDED.sensor",
+                         (sensor_id, Jsonb(sensor.model_dump(mode="json"))))
             _changed_in(conn, before)
-        return None
+            return next(view for view in _view_in(conn).sensors if view.id == sensor_id)
 
-    def remove_sensor(self, sensor_id: str) -> SetupRefusal | None:
+    def remove_sensor(self, sensor_id: SensorId) -> None:
         with self._db.transaction() as conn:
-            _locked_change_in(conn)
-            refusal = check_sensor_removal(sensor_id, _sensors_in(conn), room_lights_in(conn))
-            if refusal is not None:
-                return refusal
+            take_house_lock(conn)
+            refused = check_sensor_removal(sensor_id, _sensors_in(conn), lights_in(conn))
+            if refused is not None:
+                raise refused
             conn.execute("DELETE FROM sensors WHERE id=%s", (sensor_id,))
-        return None
 
 
-class LightSensorJudge:
-    """`RecordJudge` for the host line's state bucket (HOST_STATE_STREAM): each newly recorded
-    LIGHT_SENSOR_KEY reading is recorded for the Sensor on that Node's Pi
-    (`PgRoomLights.record_sensor_reading_in`), in the commit that records it; a record that is not a
-    valid reading is logged and skipped; a Node with no player, or a Pi with no Sensor, is only
-    recorded. A changed document wakes the WALL writer by its NOTIFY, at commit."""
+def _view_in(conn: Any) -> RoomLightsView:
+    lights, sensors, words = lights_in(conn), _sensors_in(conn), _words_in(conn)
+    heard = _heard_in(conn)
+    named = naming_in(conn).lights
 
-    def __init__(self, lights: PgRoomLights) -> None:
-        self._lights = lights
+    def light_heard(light: RoomLight) -> float | None:
+        if isinstance(light, FixedLight):
+            return None
+        if isinstance(light, MeasuredLight):
+            sensor = sensors.get(light.sensor)
+            return None if sensor is None else heard.get(("reading_words", sensor.at.source, sensor.at.address))
+        return heard.get(("light_words", light.reporter.source, light.reporter.address))
 
-    def judge_in(self, conn: Any, device_id: str, stream: str, items: tuple[Read, ...]) -> None:
-        if stream != HOST_STATE_STREAM:
-            return
-        readings = [item for item in items if item.subject == _HOST_STATE_SUBJECT + LIGHT_SENSOR_KEY
-                    and not (item.headers or {}).get(_KV_OPERATION)]
-        if not readings:
-            return
-        row = conn.execute("SELECT id FROM players WHERE device_id=%s AND retired_at IS NULL",
-                           (device_id,)).fetchone()
-        if row is None:
-            return
-        for item in readings:
-            try:
-                reading = decode_light_sensor(item.data)
-            except ValueError as refused:
-                log.warning("light sensor reading refused: device=%s seq=%s: %s", device_id, item.token.seq, refused)
-                continue
-            self._lights.record_sensor_reading_in(
-                conn, row["id"], reading.reading.lux if isinstance(reading.reading, Measured) else None)
+    return RoomLightsView(
+        lights=tuple(RoomLightView(id=light_id, light=light, entry=entry_of(light, words, sensors),
+                                   heard_at=light_heard(light), named_by=named.get(light_id, ()))
+                     for light_id, light in lights.items()),
+        sensors=tuple(SensorView(id=sensor_id, sensor=sensor, reading=words.readings.get(sensor.at),
+                                 heard_at=heard.get(("reading_words", sensor.at.source, sensor.at.address)),
+                                 reports=measured_by(lights, sensor_id))
+                      for sensor_id, sensor in sensors.items()))
 
 
-__all__ = ["HOST_STATE_STREAM", "REFUSALS_KEPT", "ROOM_LIGHTS_CHANNEL", "LightSensorJudge", "PgRoomLights",
-           "document_in", "named_by_frames_in", "room_lights_in"]
+def refused_in(conn: Any, source: Source | None) -> tuple[RefusedReportView, ...]:
+    """The newest refused reports (of `source` only, when given), newest first."""
+    columns = "SELECT source, address, reason, EXTRACT(EPOCH FROM at) AS at FROM report_refusals"
+    rows = (conn.execute(f"{columns} ORDER BY id DESC") if source is None  # noqa: S608
+            else conn.execute(f"{columns} WHERE source=%s ORDER BY id DESC", (source,))).fetchall()  # noqa: S608
+    return tuple(RefusedReportView(source=row["source"], address=row["address"], reason=ReportRefusal(row["reason"]),
+                                   at=float(row["at"])) for row in rows)
+
+
+def references_in(conn: Any, source: Source) -> dict[str, tuple[RoomLightId | None, SensorId | None, float | None]]:
+    """Every address of `source` heard or named by a room light or Sensor: (the room light it
+    reports, the Sensor it is, when Central last heard it)."""
+    heard: dict[str, float] = {}
+    for (_, word_source, address), at in _heard_in(conn).items():
+        if word_source == source:
+            heard[address] = max(at, heard.get(address, at))
+    reports = {light.reporter.address: light_id for light_id, light in lights_in(conn).items()
+               if isinstance(light, ReportedLight) and light.reporter.source == source}
+    sensors = {sensor.at.address: sensor_id for sensor_id, sensor in _sensors_in(conn).items()
+               if sensor.at.source == source}
+    return {address: (reports.get(address), sensors.get(address), heard.get(address))
+            for address in sorted(heard.keys() | reports.keys() | sensors.keys())}
+
+
+__all__ = ["REFUSALS_KEPT", "ROOM_LIGHTS_CHANNEL", "WORDS_KEPT_PER_SOURCE", "PgRoomLights", "document_in",
+           "references_in", "refused_in"]
