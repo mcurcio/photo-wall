@@ -20,8 +20,7 @@ from operator_harness import operator_server
 from playwright.sync_api import expect
 from test_frame_picture_browser import _off_thread
 
-from central.frame_lighting.paper_profiles import LUT_RECIPE_ID
-from central.infra.frame_lighting_store import PgFrameLighting
+from central.infra.frame_lighting_store import PgHouseLock
 from central.infra.room_light_store import PgRoomLights
 from central.room_light.model import ReporterRef, ReportRefusal
 from contracts.room_light import Dimmer
@@ -38,6 +37,12 @@ SPOT = {"kind": "reported", "name": "Bookshelf spot", "reporter": {"source": HOM
         "colour": {"kind": "fixed", "kelvin": 2700}}
 # Words House › Lights never shows: the integration, its transport, its topics and its entities.
 INTEGRATION_WORDS = re.compile(r"home assistant|mqtt|topic|light\.bookshelf|sensor\.window_illuminance", re.I)
+
+
+def signed_in(page, origin):
+    """Sign in and wait for a section to show: the session cookie is set only once Central answered
+    the sign-in, and a write sent before then is refused (401)."""
+    connect(page, origin, "lights")
 
 
 def put(page, origin, path, body):
@@ -81,7 +86,7 @@ def test_house_lights_speaks_only_of_lights_sensors_and_readings(page, registry)
     entities; a Sensor and the light it measures are set up, a lamp nobody reports is always on, and
     removing the Sensor is refused in words while it measures a light."""
     with operator_server(registry.db, registry.clock) as origin:
-        connect(page, origin)
+        signed_in(page, origin)
         put(page, origin, "/v1/operator/house/sensors/window-meter", WINDOW_METER)
         put(page, origin, "/v1/operator/house/lights/bookshelf-spot", SPOT)
         go(page, "lights")
@@ -119,12 +124,12 @@ def test_home_assistant_shows_its_link_entities_and_refused_messages_and_links_a
     the house names and the one Home Assistant reported that nothing names yet, and the message it
     could not record with why; linking the kitchen entity to the always-on Kitchen light makes that
     light report itself on House › Lights."""
-    lights = PgRoomLights(registry.db, PgFrameLighting(LUT_RECIPE_ID))
+    lights = PgRoomLights(registry.db, PgHouseLock())
     _off_thread(lambda: lights.record_light_state(ReporterRef(source=HOME_ASSISTANT, address="light.kitchen"),
                                                   Dimmer(on=True, brightness=0.5)))
     _off_thread(lambda: lights.record_refused(HOME_ASSISTANT, "photowall/light/light.porch", ReportRefusal.UNKNOWN_ADDRESS))
     with operator_server(registry.db, registry.clock) as origin:
-        connect(page, origin)
+        signed_in(page, origin)
         put(page, origin, "/v1/operator/house/lights/bookshelf-spot", SPOT)
         put(page, origin, "/v1/operator/house/lights/kitchen",
             {"kind": "fixed", "name": "Kitchen", "colour": {"kind": "fixed", "kelvin": 3000}})

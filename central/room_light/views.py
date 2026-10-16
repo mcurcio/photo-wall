@@ -2,13 +2,11 @@
 (seconds since the epoch). The routes are central/room_light_routes.py's."""
 from __future__ import annotations
 
-from typing import Annotated, Literal
-
-from pydantic import Field
+from typing import Literal
 
 from central.room_light.model import ReportRefusal, RoomLight, Sensor, SensorId, Source
 from contracts.models import Identifier, Instant, Model
-from contracts.room_light import Measured, RoomLightEntry, RoomLightId, Unavailable
+from contracts.room_light import Reading, RoomLightEntry, RoomLightId
 
 DrawnState = Literal["drawn", "behind", "not-following", "not-reported"]
 
@@ -28,7 +26,7 @@ class SensorView(Model):
     and the room light it measures (None: none)."""
     id: SensorId
     sensor: Sensor
-    reading: Annotated[Measured | Unavailable, Field(discriminator="kind")] | None
+    reading: Reading | None
     heard_at: Instant | None
     reports: RoomLightId | None
 

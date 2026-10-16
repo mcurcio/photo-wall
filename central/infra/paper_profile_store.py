@@ -4,7 +4,7 @@ the one source of the LUT baked from it (central/frame_lighting/paper_profiles.p
 - **Add** checks and bakes the profile once (`checked_profile`), so a listed profile always bakes;
   the same bytes twice are one row.
 - **In use**: a Frame whose paper names the profile, saved or drafted in its active Position trial
-  (`FrameLightingCheck.naming_within`, the one query). The list shows them by name; Remove refuses
+  (`HouseLock.naming_within`, the one query). The list shows them by name; Remove refuses
   while there are any, under the house's lock (`changing_within`), so a Frame-lighting check never
   names a profile a Remove has taken.
 """
@@ -21,7 +21,7 @@ from central.frame_lighting.paper_profiles import (
     PaperProfileRefused,
     checked_profile,
 )
-from central.frame_lighting.ports import FrameLightingCheck
+from central.frame_lighting.ports import HouseLock
 from central.frame_lighting.views import PaperProfilesView, PaperProfileView
 from central.infra.transactions import PgTransaction
 from contracts.time import Clock
@@ -31,7 +31,7 @@ class PgPaperProfiles:
     """The paper profiles list: list, add, remove, and a profile's bytes for the bake. `house` is the
     house's lock and its "which Frames name it" query."""
 
-    def __init__(self, db: Database, clock: Clock, house: FrameLightingCheck) -> None:
+    def __init__(self, db: Database, clock: Clock, house: HouseLock) -> None:
         self._db = db
         self._clock = clock
         self._house = house

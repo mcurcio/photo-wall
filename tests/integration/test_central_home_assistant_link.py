@@ -16,9 +16,8 @@ import asyncio
 from integration.bus_servers import until
 from integration.room_light_rig import Broker
 
-from central.frame_lighting.paper_profiles import LUT_RECIPE_ID
 from central.infra import room_light_store
-from central.infra.frame_lighting_store import PgFrameLighting
+from central.infra.frame_lighting_store import PgHouseLock
 from central.infra.home_assistant.link import HomeAssistantLink, broker_from
 from central.infra.home_assistant.topics import (
     ILLUMINANCE_TOPIC_PREFIX,
@@ -85,7 +84,7 @@ def test_a_recording_that_fails_reconnects_and_the_retained_state_is_recorded(re
 
 
 def _lights(registry) -> PgRoomLights:
-    return PgRoomLights(registry.db, PgFrameLighting(LUT_RECIPE_ID))
+    return PgRoomLights(registry.db, PgHouseLock())
 
 
 def test_a_light_or_sensor_saved_has_its_entity_read_again(registry, tmp_path):
@@ -145,5 +144,6 @@ def test_a_light_or_sensor_saved_has_its_entity_read_again(registry, tmp_path):
 
 def _listening(registry) -> bool:
     with registry.db.transaction() as conn:
-        return conn.execute("SELECT 1 FROM pg_stat_activity WHERE application_name=%s AND state='idle'",
+        return conn.execute("SELECT 1 FROM pg_stat_activity WHERE datname = current_database() "
+                            "AND application_name=%s AND state='idle'",
                             (room_light_store._NAMED_APPLICATION,)).fetchone() is not None

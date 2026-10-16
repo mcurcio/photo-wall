@@ -5,8 +5,13 @@ from __future__ import annotations
 
 from central.db import Database
 from central.infra.home_assistant.health import PgLinkHealth
-from central.infra.home_assistant.topics import SOURCE, kind_of
-from central.infra.home_assistant.views import EntityView, HomeAssistantView
+from central.infra.home_assistant.topics import SOURCE
+from central.infra.home_assistant.views import (
+    EntityView,
+    HomeAssistantView,
+    LightEntityView,
+    SensorEntityView,
+)
 from central.infra.room_light_store import references_in, refused_in
 from central.room_light.model import ReporterRef, SensorRef
 
@@ -29,9 +34,9 @@ class PgHomeAssistantSettings:
 
 
 def _entity(reference: ReporterRef | SensorRef, named: str | None, heard_at: float | None) -> EntityView:
-    kind = kind_of(reference)
-    return EntityView(entity=reference.address, kind=kind, reports_light=named if kind == "light" else None,
-                      reports_sensor=named if kind == "illuminance" else None, heard_at=heard_at)
+    if isinstance(reference, ReporterRef):
+        return LightEntityView(entity=reference.address, reports=named, heard_at=heard_at)
+    return SensorEntityView(entity=reference.address, reports=named, heard_at=heard_at)
 
 
 __all__ = ["PgHomeAssistantSettings"]

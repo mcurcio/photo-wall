@@ -347,3 +347,31 @@ def test_the_operator_routes_begin_at_a_draft_and_renew(registry):
         plain = client.post(path, headers=headers)
         assert plain.status_code == 200, plain.text
         assert plain.json()["calibration"]["fit"] == saved["calibration"]["fit"]
+
+
+@pytest.mark.parametrize("reason", ["registry_output_changed", "app_process_link_changed"])
+def test_a_surface_the_runtime_no_longer_admits_is_answered_in_the_trials_words(registry, monkeypatch, reason):
+    """Through the real app: a Frame whose output or app the Runtime no longer admits (the display
+    admission's own reasons) is refused with a TrialRefusal code at its TRIAL_REFUSAL_STATUS, never
+    the Runtime's reason. Mutation probe: raise NodeControlError(admission.reason, 409) in
+    NodeDisplay.current_frame_in again -> this fails."""
+    from fastapi.testclient import TestClient
+    from test_registry import ADMIN
+
+    from central.app import create_app
+    from central.coordination import Coordinator, DisplayAdmission
+    from central.fleet.models import TRIAL_REFUSAL_STATUS, TrialRefusal
+    from central.fleet.node_sessions import NodeControlConfig
+
+    setup_trial(registry)
+    monkeypatch.setattr(Coordinator, "display_admission_in",
+                        lambda self, conn, **_: DisplayAdmission(False, "", reason))
+    app = create_app(registry.db, registry.clock, ADMIN, run_scheduler=False,
+                     node_control=NodeControlConfig("node-test"))
+    with TestClient(app) as client:
+        refused = client.post("/v1/operator/frames/node-f0/calibration-trials",
+                              headers={"Authorization": "Bearer " + ADMIN})
+    code = refused.json()["error"]
+    assert code in {each.value for each in TrialRefusal}, code
+    assert (code, refused.status_code) == (TrialRefusal.SURFACE_CHANGED,
+                                           TRIAL_REFUSAL_STATUS[TrialRefusal.SURFACE_CHANGED])

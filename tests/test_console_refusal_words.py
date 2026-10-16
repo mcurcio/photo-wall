@@ -23,16 +23,16 @@ from test_console_routes_r4 import ESBUILD, SRC, _require_esbuild
 # than one place, each with its own words (a Pi's reading refused on its Hardware page, a Home
 # Assistant message refused on that page).
 TABLES = {
-    "room_light": [("domain/room-lights/model.ts", "REFUSAL_WORDS")],
-    "frame_lighting": [("domain/frame-lighting/model.ts", "LIGHTING_REFUSAL_WORDS")],
-    "paper_profiles": [("domain/paper-profiles/model.ts", "PAPER_PROFILE_REFUSALS")],
-    "reports": [("domain/room-lights/model.ts", "REFUSED_READING_WORDS"),
-                ("domain/home-assistant/model.ts", "REFUSED_WORDS")],
-    "trial": [("domain/trial-refusals.ts", "TRIAL_REFUSAL_WORDS")],
-    "position_restore": [("domain/trial-refusals.ts", "POSITION_RESTORE_WORDS")],
+    "RoomLightRefusal": [("domain/room-lights/model.ts", "REFUSAL_WORDS")],
+    "FrameLightingRefusal": [("domain/frame-lighting/model.ts", "LIGHTING_REFUSAL_WORDS")],
+    "PaperProfileRefusal": [("domain/paper-profiles/model.ts", "PAPER_PROFILE_REFUSALS")],
+    "ReportRefusal": [("domain/room-lights/model.ts", "REFUSED_READING_WORDS"),
+                      ("domain/home-assistant/model.ts", "REFUSED_WORDS")],
+    "TrialRefusal": [("domain/trial-refusals.ts", "TRIAL_REFUSAL_WORDS")],
+    "PositionRestoreRefusal": [("domain/trial-refusals.ts", "POSITION_RESTORE_WORDS")],
 }
 # Contexts the console never receives: the drawn report is the Player's PUT, answered to its bearer.
-NOT_SHOWN = {"drawn_report"}
+NOT_SHOWN = {"DrawnReportRefusal"}
 # The general sentences a code outside the contract is said with (liveAdjustment.js, the pages).
 FALLBACKS = ("Photo Wall refused the change.", "Central refused it")
 

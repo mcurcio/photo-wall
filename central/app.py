@@ -48,7 +48,7 @@ from central.infra.display_store import (
 )
 from central.infra.fit_analysis_store import PgFitAnalysisReader
 from central.infra.fit_settings_store import PgFitSettings
-from central.infra.frame_lighting_store import PgFrameLighting
+from central.infra.frame_lighting_store import PgFrameLighting, PgHouseLock
 from central.infra.home_assistant import topics as home_assistant_topics
 from central.infra.home_assistant.health import PgLinkHealth
 from central.infra.home_assistant.settings import PgHomeAssistantSettings
@@ -203,8 +203,8 @@ def create_app(
     admin_token = admin_token or os.environ["PHOTO_WALL_ADMIN_TOKEN"]
     if len(admin_token) < 32:
         raise ValueError("PHOTO_WALL_ADMIN_TOKEN must contain at least 32 characters")
-    house_lighting = PgFrameLighting(LUT_RECIPE_ID)   # the house's lock and "which Frames name it"
-    registry = Registry(db, clock, lighting=house_lighting)
+    house_lock = PgHouseLock()   # the house's lock and "which Frames name it"
+    registry = Registry(db, clock, lighting=PgFrameLighting(LUT_RECIPE_ID))
     media_queue = media_queue or (
         ProcrastinateMediaQueue(db.dsn) if isinstance(db, Database) else None
     )
@@ -847,7 +847,7 @@ def create_app(
     mount_why_routes(app, admin=admin, queries=PgWhy(db, times=media_times))
     house = PgHouse(db, times=media_times)
     mount_house_routes(app, admin=admin, queries=house, commands=house)
-    room_lights = PgRoomLights(db, house_lighting)
+    room_lights = PgRoomLights(db, house_lock)
     mount_room_light_routes(app, admin=admin, player=player, lights=room_lights, sources=REPORT_SOURCES,
                             drawn=room_lights)
     mount_home_assistant_routes(app, admin=admin, settings=PgHomeAssistantSettings(db, PgLinkHealth(db)))
@@ -856,7 +856,7 @@ def create_app(
     mount_tuning_history_routes(app, admin=admin, queries=PgTuningHistory(db))
     mount_calibration_target_routes(app, admin=admin)
     mount_paper_profile_routes(app, admin=admin, player=player,
-                               profiles=PgPaperProfiles(db, clock, house_lighting))
+                               profiles=PgPaperProfiles(db, clock, house_lock))
     if content is not None:
         mount_content_routes(app, content)
     mount_node_routes(app, db=db, clock=clock, admin=admin, coordinator=coordinator, config=node_control,

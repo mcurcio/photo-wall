@@ -33,12 +33,10 @@ from central.room_light.views import (
     SensorView,
 )
 from contracts.room_light import (
-    ColourDimmer,
-    Dimmer,
-    Measured,
+    LightWord,
+    Reading,
     RoomLightsDocument,
     RoomLightsDrawn,
-    Unavailable,
 )
 
 
@@ -47,19 +45,19 @@ class RoomLightReports(Protocol):
     (central/infra/home_assistant/) and the Pi light sensor's judge of the host line. No source's
     names, scales or shapes cross it."""
 
-    def record_light_state(self, reporter: ReporterRef, state: Dimmer | ColourDimmer | Unavailable) -> Recorded:
+    def record_light_state(self, reporter: ReporterRef, state: LightWord) -> Recorded:
         """Keep `state` as `reporter`'s last word, and Central's time as when it was heard, whether or
         not a room light names `reporter` yet. "recorded" when the document changed (its change
         rises and the WALL writer wakes at commit), else "unchanged" (a repeat, or no light names it)."""
         ...
 
-    def record_reading(self, sensor: SensorRef, reading: Measured | Unavailable) -> Recorded:
+    def record_reading(self, sensor: SensorRef, reading: Reading) -> Recorded:
         """Keep `reading` as `sensor`'s last word, heard now, whether or not a Sensor is there yet;
         the room light that Sensor measures takes it when the document is built. "recorded" when the
         document changed, else "unchanged"."""
         ...
 
-    def record_reading_within(self, tx: Transaction, sensor: SensorRef, reading: Measured | Unavailable) -> Recorded:
+    def record_reading_within(self, tx: Transaction, sensor: SensorRef, reading: Reading) -> Recorded:
         """`record_reading` inside the caller's open transaction, under a savepoint of its own: any
         failure here rolls back only this reading and is raised, never the caller's work."""
         ...

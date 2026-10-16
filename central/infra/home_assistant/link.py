@@ -97,17 +97,19 @@ class HomeAssistantLink:
         self.client_id = f"{CLIENT_ID_PREFIX}-{uuid.uuid4().hex[:12]}"
 
     async def run(self, stop: asyncio.Event) -> None:
-        """Until `stop`: beat every HEARTBEAT_SECONDS and, with a broker, connect, subscribe and record
-        every message, reconnecting with backoff after any failure; then close the link's pool."""
-        beating = asyncio.create_task(self._beating(stop), name="home assistant heartbeat")
-        following = asyncio.create_task(self._named.follow(self.reread), name="home assistant named entities")
+        """Until `stop`: beat every HEARTBEAT_SECONDS and, with a broker, follow the saved references,
+        connect, subscribe and record every message, reconnecting with backoff after any failure; then
+        close the link's pool."""
+        tasks = [asyncio.create_task(self._beating(stop), name="home assistant heartbeat")]
+        if self._broker is not None:   # with no broker there is nothing to read again
+            tasks.append(asyncio.create_task(self._named.follow(self.reread), name="home assistant named entities"))
         try:
             if self._broker is None:
                 await stop.wait()
             else:
                 await self._connecting(stop)
         finally:
-            for task in (beating, following):
+            for task in tasks:
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await task

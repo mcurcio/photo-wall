@@ -4,23 +4,36 @@ messages the link refused. Every entity here is an address of SOURCE; House › 
 """
 from __future__ import annotations
 
+from typing import Annotated, Literal
+
+from pydantic import Field
+
 from central.infra.home_assistant.health import LinkHealthView
-from central.infra.home_assistant.topics import EntityKind
 from central.room_light.model import RoomLightId, SensorId
 from central.room_light.views import RefusedReportView
 from contracts.models import Instant, Model
 
 
-class EntityView(Model):
-    """One entity Home Assistant has reported or a room light or Sensor names: what it reports
-    (`kind`: a light's state or an illuminance reading), the room light or Sensor it reports (None:
-    none yet; only `reports_light` for a light, only `reports_sensor` for an illuminance sensor), and
-    when Central last heard it (None: never)."""
+class LightEntityView(Model):
+    """A light entity Home Assistant has reported or a room light names: the room light it reports
+    (None: none yet) and when Central last heard it (None: never)."""
+    kind: Literal["light"] = "light"
     entity: str
-    kind: EntityKind
-    reports_light: RoomLightId | None
-    reports_sensor: SensorId | None
+    reports: RoomLightId | None
     heard_at: Instant | None
+
+
+class SensorEntityView(Model):
+    """An illuminance entity Home Assistant has reported or a Sensor names: the Sensor whose readings
+    it reports (None: none yet) and when Central last heard it (None: never)."""
+    kind: Literal["illuminance"] = "illuminance"
+    entity: str
+    reports: SensorId | None
+    heard_at: Instant | None
+
+
+# One entity, by what it reports: a light entity can only report a room light, an illuminance one a Sensor.
+EntityView = Annotated[LightEntityView | SensorEntityView, Field(discriminator="kind", title="EntityView")]
 
 
 class HomeAssistantView(Model):
@@ -31,4 +44,4 @@ class HomeAssistantView(Model):
     refused: tuple[RefusedReportView, ...]
 
 
-__all__ = ["EntityView", "HomeAssistantView"]
+__all__ = ["EntityView", "HomeAssistantView", "LightEntityView", "SensorEntityView"]

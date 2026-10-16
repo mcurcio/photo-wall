@@ -27,6 +27,7 @@ export const TRIAL_REFUSAL_WORDS: Record<TrialRefusal, string> = {
   trial_current_output_required:
     "The Pi has not reported this Display in the last few seconds. Check that the Display is on and plugged in.",
   trial_admitted_surface_required: "The Pi is still starting its picture. Wait a moment.",
+  trial_surface_changed: "This Frame's Pi changed its picture while Photo Wall checked the change. It tries again in a moment.",
   unknown_entry: "That change is no longer in the history.",
   // A draft Central cannot read (a value outside what a Frame takes): the next edit fixes it.
   node_trial_operation_invalid: "Photo Wall refused this change: a value is outside what a Frame takes.",

@@ -14,8 +14,7 @@ from test_registry import ADMIN, frame
 
 from central.app import create_app
 from central.fleet.node_sessions import NodeControlConfig
-from central.frame_lighting.paper_profiles import LUT_RECIPE_ID
-from central.infra.frame_lighting_store import PgFrameLighting
+from central.infra.frame_lighting_store import PgHouseLock
 from central.infra.room_light_store import PgRoomLights
 from central.room_light.model import (
     FixedLight,
@@ -60,7 +59,7 @@ def _present(request, exchange, sampled: int):
 def test_a_frames_lighting_through_positions_trial(registry):
     """Mutation probe: the check accepting a reference mismatch -> the window at-full draft is begun."""
     _, request, exchange = setup_trial(registry)
-    lights = PgRoomLights(registry.db, PgFrameLighting(LUT_RECIPE_ID))
+    lights = PgRoomLights(registry.db, PgHouseLock())
     lights.save_room_light("bookshelf-spot", ReportedLight(
         name="Spot", colour=FixedColour(kelvin=4000), reporter=ReporterRef(source="home-assistant", address="light.spot")))
     lights.save_sensor("meter", Sensor(name="Meter", at=SensorRef(source="home-assistant", address="sensor.lux")))
@@ -112,7 +111,7 @@ def test_a_new_frame_names_a_fixed_room_light_that_is_there(registry):
     """A new Frame never names a room light that may be gone: the first fixed light in the house's
     order, or none. Mutation probe: insert the upgrade's lighting (naming "room") -> the bare Frame
     names a light the house no longer has."""
-    lights = PgRoomLights(registry.db, PgFrameLighting(LUT_RECIPE_ID))
+    lights = PgRoomLights(registry.db, PgHouseLock())
     lights.remove_room_light("room")
     frame(registry, "bare")
     lights.save_room_light("lamp", FixedLight(name="Lamp", colour=FixedColour(kelvin=3000)))

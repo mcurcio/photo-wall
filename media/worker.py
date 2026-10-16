@@ -22,8 +22,7 @@ from central.assets.maintenance import CacheSettings, MediaCacheBudget
 from central.assets.store import CacheStore
 from central.content_wiring import build_job_runtime
 from central.db import Database, DatabaseTransactionClock
-from central.frame_lighting.paper_profiles import LUT_RECIPE_ID
-from central.infra.frame_lighting_store import PgFrameLighting
+from central.infra.frame_lighting_store import PgHouseLock
 from central.infra.home_assistant.health import PgLinkHealth
 from central.infra.home_assistant.link import HomeAssistantLink, build_home_assistant_link
 from central.infra.house_store import seed_house
@@ -319,7 +318,7 @@ def build_bus_and_link(dsn: str, env: Mapping[str, str]) -> tuple[NodeBus | None
     re-read its entity (`PgNamedReferences`)."""
     bus = build_node_bus(dsn, env)
     db = Database(dsn, pool_size=2)
-    link = build_home_assistant_link(env, PgRoomLights(db, PgFrameLighting(LUT_RECIPE_ID)), PgLinkHealth(db),
+    link = build_home_assistant_link(env, PgRoomLights(db, PgHouseLock()), PgLinkHealth(db),
                                      PgNamedReferences(dsn), close=db.close)
     return bus, link
 

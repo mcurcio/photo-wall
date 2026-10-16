@@ -7,7 +7,7 @@ Sensor names it, and is resolved only when the document is built (policy.room_li
 source keeps its newest WORDS_KEPT_PER_SOURCE references and REFUSALS_KEPT refusals.
 
 Every write that changes the room-lights document raises `room_lights_change.change` in its own
-transaction, under that row's lock (the house's lock, taken first through the FrameLightingCheck
+transaction, under that row's lock (the house's lock, taken first through the HouseLock
 the store is handed, central/infra/frame_lighting_store.py), and sends `NOTIFY ROOM_LIGHTS_CHANNEL`, delivered at commit: the worker's WALL writer listens
 and puts the document again. Every instant is PostgreSQL's `clock_timestamp()` (Central's one clock).
 No trigger, no stored procedure, no range in SQL: the rules are central/room_light/policy.py's and
@@ -23,7 +23,7 @@ from psycopg.types.json import Jsonb
 from pydantic import TypeAdapter
 
 from central.db import Database
-from central.frame_lighting.ports import FrameLightingCheck
+from central.frame_lighting.ports import HouseLock
 from central.infra.light_sensor_judge import PI_SOURCE, missed_readings_in
 from central.infra.listen import listen
 from central.infra.room_light_rows import ROOM_LIGHT, lights_in
@@ -65,14 +65,10 @@ from central.room_light.views import (
     SensorView,
 )
 from contracts.room_light import (
-    ColourDimmer,
-    Dimmer,
     LightWord,
-    Measured,
     Reading,
     RoomLightsDocument,
     RoomLightsDrawn,
-    Unavailable,
     room_lights_digest,
 )
 
@@ -127,7 +123,7 @@ def _changed_in(conn: Any, before: RoomLightsDocument) -> bool:
     return True
 
 
-def _word_in(conn: Any, house: FrameLightingCheck, table: str, source: str, address: str,
+def _word_in(conn: Any, house: HouseLock, table: str, source: str, address: str,
              word: dict[str, Any]) -> Recorded:
     """Keep `word` as (source, address)'s last in `table`, heard now, and the newest
     WORDS_KEPT_PER_SOURCE of that source; "recorded" when the document changed."""
@@ -155,7 +151,7 @@ def _refusal_in(conn: Any, source: Source, address: str, reason: ReportRefusal) 
 class PgRoomLights:
     """Room lights' ports over one Database."""
 
-    def __init__(self, db: Database, house: FrameLightingCheck) -> None:
+    def __init__(self, db: Database, house: HouseLock) -> None:
         """`house` is the house's lock and its "which Frames name it" query (every change here takes
         the lock first)."""
         self._db = db
@@ -163,15 +159,15 @@ class PgRoomLights:
 
     # ---- RoomLightReports ----
 
-    def record_light_state(self, reporter: ReporterRef, state: Dimmer | ColourDimmer | Unavailable) -> Recorded:
+    def record_light_state(self, reporter: ReporterRef, state: LightWord) -> Recorded:
         with self._db.transaction() as conn:
             return _word_in(conn, self._house, "light_words", reporter.source, reporter.address, state.model_dump(mode="json"))
 
-    def record_reading(self, sensor: SensorRef, reading: Measured | Unavailable) -> Recorded:
+    def record_reading(self, sensor: SensorRef, reading: Reading) -> Recorded:
         with self._db.transaction() as conn:
             return _word_in(conn, self._house, "reading_words", sensor.source, sensor.address, reading.model_dump(mode="json"))
 
-    def record_reading_within(self, tx: Transaction, sensor: SensorRef, reading: Measured | Unavailable) -> Recorded:
+    def record_reading_within(self, tx: Transaction, sensor: SensorRef, reading: Reading) -> Recorded:
         conn = pg_connection(tx)
         with conn.transaction():
             return _word_in(conn, self._house, "reading_words", sensor.source, sensor.address, reading.model_dump(mode="json"))
@@ -318,7 +314,7 @@ class PgNamedReferences:
                      notified=notified, retry_seconds=_NAMED_RETRY_SECONDS)
 
 
-def _view_in(conn: Any, house: FrameLightingCheck) -> RoomLightsView:
+def _view_in(conn: Any, house: HouseLock) -> RoomLightsView:
     lights, sensors, words = lights_in(conn), _sensors_in(conn), _words_in(conn)
     heard = _heard_in(conn)
     named = house.naming_within(PgTransaction(conn)).lights

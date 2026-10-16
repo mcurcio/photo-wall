@@ -15,7 +15,15 @@ from pydantic import ValidationError
 
 from central.infra.home_assistant.topics import MESSAGE_BYTES
 from central.room_light.model import ReportRefusal
-from contracts.room_light import ColourDimmer, Dimmer, Measured, Rgb, Unavailable
+from contracts.room_light import (
+    ColourDimmer,
+    Dimmer,
+    LightWord,
+    Measured,
+    Reading,
+    Rgb,
+    Unavailable,
+)
 from contracts.strict_json import loads_object
 
 LEVEL_MAX: Final = 255      # Home Assistant's brightness and each rgb channel: 0..LEVEL_MAX
@@ -30,7 +38,7 @@ class MessageRefused(ValueError):
         self.reason = reason
 
 
-def light_state(raw: bytes) -> Dimmer | ColourDimmer | Unavailable:
+def light_state(raw: bytes) -> LightWord:
     """The state a light's payload reports: Unavailable for unavailable or unknown; on or off with
     `brightness_share` of its brightness (none sent: 1.0 on, 0.0 off); a ColourDimmer when rgb was
     sent (`rgb_drive`), else a Dimmer. MessageRefused otherwise."""
@@ -52,7 +60,7 @@ def light_state(raw: bytes) -> Dimmer | ColourDimmer | Unavailable:
     return ColourDimmer(on=on, brightness=share, rgb=rgb_drive((rgb[0], rgb[1], rgb[2])))
 
 
-def illuminance(raw: bytes) -> Measured | Unavailable:
+def illuminance(raw: bytes) -> Reading:
     """The reading an illuminance payload reports. MessageRefused otherwise."""
     value = _message(raw)
     if "lux" in value:

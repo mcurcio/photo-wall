@@ -1,4 +1,4 @@
-import type { PaperProfilesRefusal, PaperProfileView } from "../../generated/contract";
+import type { PaperProfileRefusal, PaperProfileView } from "../../generated/contract";
 import type { AddAnswer, RemoveAnswer } from "./api";
 
 /*
@@ -14,7 +14,7 @@ export function namesWords(names: readonly string[]): string {
 
 /** Each refusal of a paper profile change, in words: every code Central has (a code without words
  * fails the typecheck). */
-export const PAPER_PROFILE_REFUSALS: Record<PaperProfilesRefusal, string> = {
+export const PAPER_PROFILE_REFUSALS: Record<PaperProfileRefusal, string> = {
   not_a_colour_profile: "it is not a colour profile (an ICC file). Download the .icc profile for your paper from its maker.",
   not_a_printer_profile: "it is a colour profile, but not one for a printer and paper. Choose the profile your paper's "
     + "maker publishes for your printer.",
@@ -27,7 +27,7 @@ const UNREACHABLE = "Central did not answer. Try again.";
 /** A refusal's words: Central's code in words; a code outside the contract (a lost request, an
  * answer outside its shape) in a sentence. */
 function refusalWords(code: string): string {
-  if (code in PAPER_PROFILE_REFUSALS) return PAPER_PROFILE_REFUSALS[code as PaperProfilesRefusal];
+  if (code in PAPER_PROFILE_REFUSALS) return PAPER_PROFILE_REFUSALS[code as PaperProfileRefusal];
   return code === "unreachable" ? UNREACHABLE : `Central refused it (${code}).`;
 }
 

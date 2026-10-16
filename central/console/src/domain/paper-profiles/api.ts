@@ -3,7 +3,7 @@ import type { PaperProfilesView, PaperProfileView } from "../../generated/contra
 
 /* The paper profiles' reads and writes on Central (central/paper_profile_routes.py): Settings › Paper
  * profiles lists, adds and removes; a Frame's lighting picks its paper's profile from the list
- * (decision 0028). A refusal is a PaperProfilesRefusal code, `http_<status>` for a body outside its
+ * (decision 0028). A refusal is a PaperProfileRefusal code, `http_<status>` for a body outside its
  * shape, or `unreachable` for a lost request. */
 
 const PAPER_PROFILES = "/v1/operator/paper-profiles";

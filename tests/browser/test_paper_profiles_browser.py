@@ -29,8 +29,7 @@ from test_frame_lighting_browser import (
 from test_frame_picture_browser import _off_thread
 from test_paper_profiles import _as_printer, _monitor, _reduced_gamut
 
-from central.frame_lighting.paper_profiles import LUT_RECIPE_ID
-from central.infra.frame_lighting_store import PgFrameLighting
+from central.infra.frame_lighting_store import PgHouseLock
 from central.infra.paper_profile_store import PgPaperProfiles
 
 pytestmark = pytest.mark.skipif(
@@ -59,7 +58,7 @@ def _add(page, name, profile):
 
 
 def _profiles(registry):
-    return PgPaperProfiles(registry.db, registry.clock, PgFrameLighting(LUT_RECIPE_ID))
+    return PgPaperProfiles(registry.db, registry.clock, PgHouseLock())
 
 
 def _stored(registry):

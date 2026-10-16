@@ -34,8 +34,8 @@ function LinkDialog({ entity, house, onClose, onLink }: {
   entity: EntityView; house: RoomLightsView; onClose: () => void; onLink: HomeAssistantProps["onLink"];
 }) {
   const light = entity.kind === "light";
-  const [target, setTarget] = useState(light ? entity.reports_light ?? house.lights[0]?.id ?? ""
-    : entity.reports_sensor ?? house.sensors[0]?.id ?? NEW_SENSOR);
+  const [target, setTarget] = useState(entity.reports ?? (light ? house.lights[0]?.id ?? ""
+    : house.sensors[0]?.id ?? NEW_SENSOR));
   const [name, setName] = useState("");
   const save = async () => {
     let link: Link;
@@ -85,7 +85,7 @@ function LinkDialog({ entity, house, onClose, onLink }: {
  */
 export function HomeAssistant({ view, house, since, note, onLink }: HomeAssistantProps) {
   const [linking, setLinking] = useState<EntityView | null>(null);
-  const entities: EntityRow[] = entitiesInOrder(view).map((entity) => ({ ...entity, key: entity.entity, severity: null }));
+  const entities: EntityRow[] = entitiesInOrder(view).map((entity) => ({ ...entity, key: `${entity.kind}:${entity.entity}`, severity: null }));
   const refused: RefusedRow[] = view.refused.map((message, index) => ({ ...message, key: `${index}`, severity: null }));
   return (
     <Stack>

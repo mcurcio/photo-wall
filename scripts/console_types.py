@@ -14,8 +14,8 @@ What the file holds, for a contract of {"schemas", "constants", "refusals"}:
   item and length caps, pattern), by type then field, so a form steps and checks by Central's own;
 - `PATTERNS`: each named alias's pattern;
 - `CONSTANTS`, as the contract gives them;
-- `REFUSALS`, each context's closed refusal codes, with `<Context>Refusal` the union of one
-  context's codes.
+- `REFUSALS`, each context's closed refusal codes under its enum's name, and a type of that name
+  (the union of its codes) unless a schema already names it.
 
 The same contract always writes the same text (keys sorted, numbers in their shortest form).
 
@@ -74,13 +74,14 @@ def contract_text(contract: Mapping[str, Any]) -> str:
     lines.append("")
     refusals = {context: list(codes) for context, codes in sorted(contract.get("refusals", {}).items())}
     lines.append(f"export const REFUSALS = {_literal(refusals, 0)} as const;")
-    for context in refusals:
-        name = "".join(part.capitalize() for part in re.split(r"[_\-\s]+", context)) + "Refusal"
+    for name in refusals:
+        if not _TYPE_NAME.match(name):
+            raise ContractError(f"{name!r} is not a type name")
         if name in definitions:
-            if set(_enum_values(definitions[name])) != set(refusals[context]):
-                raise ContractError(f"{name}: the schema and the refusals of {context!r} differ")
+            if set(_enum_values(definitions[name])) != set(refusals[name]):
+                raise ContractError(f"{name}: the schema and its refusals differ")
             continue
-        lines.append(f'export type {name} = (typeof REFUSALS)["{context}"][number];')
+        lines.append(f'export type {name} = (typeof REFUSALS)["{name}"][number];')
     return "\n".join(lines) + "\n"
 
 

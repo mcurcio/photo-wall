@@ -1,7 +1,7 @@
-"""Frame lighting over PostgreSQL: `PgFrameLighting` implements central/frame_lighting/ports.py's
-FrameLightingCheck, the one home of the house's lock and of the "which Frames name it" query; every
-store that writes the house (central/infra/room_light_store.py, paper_profile_store.py) is handed one
-and reaches both only through it.
+"""Frame lighting over PostgreSQL: central/frame_lighting/ports.py's two ports, `PgFrameLighting`
+(FrameLightingCheck) and `PgHouseLock` (HouseLock: the one home of the house's lock and of the "which
+Frames name it" query; every store that writes the house, central/infra/room_light_store.py and
+paper_profile_store.py, is handed one and reaches both only through it).
 
 The house's lock is the `room_lights_change` row: every Frame-lighting check takes it shared, every
 writer and remover of a room light, a Sensor, a reporter's word or a paper profile takes it exclusive
@@ -53,6 +53,10 @@ class PgFrameLighting:
         _share_lock(conn)
         return new_frame_lighting(display, _house_in(conn))
 
+
+class PgHouseLock:
+    """HouseLock over the caller's transaction."""
+
     def changing_within(self, tx: Transaction) -> None:
         pg_connection(tx).execute("SELECT change FROM room_lights_change WHERE one FOR UPDATE")
 
@@ -63,4 +67,4 @@ class PgFrameLighting:
                       for row in conn.execute(_LIGHTINGS).fetchall())
 
 
-__all__ = ["PgFrameLighting"]
+__all__ = ["PgFrameLighting", "PgHouseLock"]

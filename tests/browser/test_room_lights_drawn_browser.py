@@ -20,8 +20,7 @@ from playwright.sync_api import expect
 from test_console_frame_page_browser import FRAME, _seed
 from test_frame_picture_browser import _off_thread
 
-from central.frame_lighting.paper_profiles import LUT_RECIPE_ID
-from central.infra.frame_lighting_store import PgFrameLighting
+from central.infra.frame_lighting_store import PgHouseLock
 from central.infra.light_sensor_judge import PI_SOURCE
 from central.infra.room_light_store import PgRoomLights
 from central.room_light.model import ReportRefusal
@@ -40,7 +39,7 @@ def test_a_pi_central_judges_behind_says_so_on_its_frames_lighting_tab_and_its_h
     """Acceptance C3: the Player reports it drew with an older document while following; Central
     judges it behind, and both the Frame's Lighting tab and its Pi's Hardware page say so."""
     player_id = _seed(registry)
-    lights = PgRoomLights(registry.db, PgFrameLighting(LUT_RECIPE_ID))
+    lights = PgRoomLights(registry.db, PgHouseLock())
     _off_thread(lambda: lights.record_drawn(player_id, RoomLightsDrawn(drawn=OLDER, following=True)))
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin)
@@ -57,7 +56,7 @@ def test_a_pis_refused_readings_show_on_its_hardware_page_and_no_other_pis(page,
     """Reliability: a Pi whose Sensor sends what Central cannot read is not invisible. Its refusal
     shows in its Light section with why; another Pi's and Home Assistant's do not."""
     player_id = _seed(registry)
-    lights = PgRoomLights(registry.db, PgFrameLighting(LUT_RECIPE_ID))
+    lights = PgRoomLights(registry.db, PgHouseLock())
     _off_thread(lambda: lights.record_refused(PI_SOURCE, player_id, ReportRefusal.UNREADABLE))
     _off_thread(lambda: lights.record_refused(PI_SOURCE, "another-pi", ReportRefusal.OUT_OF_RANGE))
     _off_thread(lambda: lights.record_refused("home-assistant", "photowall/light/x", ReportRefusal.OUT_OF_RANGE))

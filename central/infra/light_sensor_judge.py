@@ -18,7 +18,11 @@ from central.infra.transactions import PgTransaction
 from central.room_light.model import ReportRefusal, SensorRef
 from central.room_light.ports import RoomLightReports
 from contracts.models import IDENTIFIER_PATTERN
-from contracts.room_light import LIGHT_SENSOR_KEY, Measured, Unavailable, decode_light_sensor
+from contracts.room_light import (
+    LIGHT_SENSOR_KEY,
+    Reading,
+    decode_light_sensor,
+)
 from nodeapi.buffers import KV_OPERATION_HEADER, state_prefix, state_stream
 from nodeapi.pull import Read
 
@@ -69,7 +73,7 @@ class LightSensorJudge:
                 log.exception("light sensor value not recorded: device=%s seq=%s", device_id, item.token.seq)
 
 
-def missed_readings_in(conn: Any) -> tuple[tuple[str, Measured | Unavailable], ...]:
+def missed_readings_in(conn: Any) -> tuple[tuple[str, Reading], ...]:
     """(player id, reading) for each enrolled Pi whose newest recorded light-sensor value is a reading
     its word (reading_words, PI_SOURCE) was not taken from: heard before that record, or never. A
     value that is not a reading, or a removed key, takes nothing (the judge logged the refusal)."""
@@ -81,7 +85,7 @@ def missed_readings_in(conn: Any) -> tuple[tuple[str, Measured | Unavailable], .
         " LEFT JOIN reading_words w ON w.source=%s AND w.address=latest.player_id"
         " WHERE w.heard_at IS NULL OR EXTRACT(EPOCH FROM w.heard_at) < latest.recorded_at",
         (HOST_STATE_STREAM, _SUBJECT, PI_SOURCE)).fetchall()
-    missed: list[tuple[str, Measured | Unavailable]] = []
+    missed: list[tuple[str, Reading]] = []
     for row in rows:
         if (row["headers"] or {}).get(KV_OPERATION_HEADER):
             continue

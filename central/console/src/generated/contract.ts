@@ -63,13 +63,7 @@ export interface DrawnView {
   players: PlayerDrawnView[];
 }
 
-export interface EntityView {
-  entity: string;
-  heard_at: number | null;
-  kind: "light" | "illuminance";
-  reports_light: RoomLightId | null;
-  reports_sensor: SensorId | null;
-}
+export type EntityView = LightEntityView | SensorEntityView;
 
 export interface FarLight {
   from_degrees: number;
@@ -112,6 +106,13 @@ export interface HomeAssistantView {
   entities: EntityView[];
   link: LinkHealthView;
   refused: RefusedReportView[];
+}
+
+export interface LightEntityView {
+  entity: string;
+  heard_at: number | null;
+  kind: "light";
+  reports: RoomLightId | null;
 }
 
 export interface LightView {
@@ -272,6 +273,13 @@ export interface RoomLightsView {
 export interface Sensor {
   at: SensorRef;
   name: string;
+}
+
+export interface SensorEntityView {
+  entity: string;
+  heard_at: number | null;
+  kind: "illuminance";
+  reports: SensorId | null;
 }
 
 export type SensorId = string;
@@ -648,34 +656,34 @@ export const CONSTANTS = {
 } as const;
 
 export const REFUSALS = {
-  drawn_report: [
+  DrawnReportRefusal: [
     "room_lights_drawn_too_large",
     "room_lights_drawn_invalid",
   ],
-  frame_lighting: [
+  FrameLightingRefusal: [
     "unknown_room_light",
     "reference_mismatch",
     "unknown_paper_profile",
     "lighting_too_large",
   ],
-  paper_profiles: [
+  PaperProfileRefusal: [
     "not_a_colour_profile",
     "not_a_printer_profile",
     "too_large",
     "unknown_paper_profile",
     "named_by_a_frame",
   ],
-  position_restore: [
+  PositionRestoreRefusal: [
     "other_frame",
     "made_for_other_profile",
     "made_for_other_display",
   ],
-  reports: [
+  ReportRefusal: [
     "unknown_address",
     "unreadable",
     "out_of_range",
   ],
-  room_light: [
+  RoomLightRefusal: [
     "unknown_room_light",
     "unknown_sensor",
     "unknown_address",
@@ -684,7 +692,7 @@ export const REFUSALS = {
     "named_by_a_frame",
     "too_many",
   ],
-  trial: [
+  TrialRefusal: [
     "trial_already_active",
     "trial_baseline_revision_changed",
     "trial_unknown",
@@ -696,6 +704,7 @@ export const REFUSALS = {
     "trial_display_unavailable",
     "trial_current_output_required",
     "trial_admitted_surface_required",
+    "trial_surface_changed",
     "unknown_entry",
     "node_trial_operation_invalid",
     "node_body_too_large",
@@ -703,9 +712,8 @@ export const REFUSALS = {
     "calibration_trial_baseline_changed",
   ],
 } as const;
-export type DrawnReportRefusal = (typeof REFUSALS)["drawn_report"][number];
-export type FrameLightingRefusal = (typeof REFUSALS)["frame_lighting"][number];
-export type PaperProfilesRefusal = (typeof REFUSALS)["paper_profiles"][number];
-export type ReportsRefusal = (typeof REFUSALS)["reports"][number];
-export type RoomLightRefusal = (typeof REFUSALS)["room_light"][number];
-export type TrialRefusal = (typeof REFUSALS)["trial"][number];
+export type DrawnReportRefusal = (typeof REFUSALS)["DrawnReportRefusal"][number];
+export type FrameLightingRefusal = (typeof REFUSALS)["FrameLightingRefusal"][number];
+export type PaperProfileRefusal = (typeof REFUSALS)["PaperProfileRefusal"][number];
+export type RoomLightRefusal = (typeof REFUSALS)["RoomLightRefusal"][number];
+export type TrialRefusal = (typeof REFUSALS)["TrialRefusal"][number];

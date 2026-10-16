@@ -38,13 +38,13 @@ export const REFUSED_WORDS: Record<ReportRefusal, string> = {
 
 /** What an entity reports, in words: "Light: Bookshelf spot", "Sensor: Window meter", "Nothing yet". */
 export function reportsWords(entity: EntityView, house: RoomLightsView): string {
-  if (entity.reports_light !== null) {
-    const light = house.lights.find((each) => each.id === entity.reports_light);
-    return `Light: ${light?.light.name ?? entity.reports_light}`;
+  if (entity.reports !== null && entity.kind === "light") {
+    const light = house.lights.find((each) => each.id === entity.reports);
+    return `Light: ${light?.light.name ?? entity.reports}`;
   }
-  if (entity.reports_sensor !== null) {
-    const sensor = house.sensors.find((each) => each.id === entity.reports_sensor);
-    return `Sensor: ${sensor?.sensor.name ?? entity.reports_sensor}`;
+  if (entity.reports !== null) {
+    const sensor = house.sensors.find((each) => each.id === entity.reports);
+    return `Sensor: ${sensor?.sensor.name ?? entity.reports}`;
   }
   return "Nothing yet";
 }
@@ -62,6 +62,6 @@ export function sensorAt(name: string, entity: string): Sensor {
 
 /** The entities in the order the page lists them: those that report nothing yet first, then by entity. */
 export function entitiesInOrder(view: HomeAssistantView): EntityView[] {
-  const linked = (entity: EntityView) => (entity.reports_light !== null || entity.reports_sensor !== null ? 1 : 0);
+  const linked = (entity: EntityView) => (entity.reports !== null ? 1 : 0);
   return [...view.entities].sort((a, b) => linked(a) - linked(b) || (a.entity < b.entity ? -1 : a.entity > b.entity ? 1 : 0));
 }

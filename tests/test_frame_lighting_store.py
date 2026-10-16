@@ -13,7 +13,7 @@ from psycopg.types.json import Jsonb
 from test_registry import frame
 
 from central.frame_lighting.paper_profiles import LUT_RECIPE_ID, PaperProfileRefused
-from central.infra.frame_lighting_store import PgFrameLighting
+from central.infra.frame_lighting_store import PgFrameLighting, PgHouseLock
 from central.infra.paper_profile_store import PgPaperProfiles
 from central.infra.room_light_store import PgRoomLights
 from central.infra.transactions import PgTransaction
@@ -68,7 +68,7 @@ def test_a_room_light_removal_waits_for_the_check_then_is_refused(registry):
     """A4. Mutation probe M2: fitted_within without its shared lock -> the removal does not wait;
     remove_room_light without `changing_within` -> it does not wait either."""
     frame(registry, "hall")
-    lights = PgRoomLights(registry.db, PgFrameLighting(LUT_RECIPE_ID))
+    lights = PgRoomLights(registry.db, PgHouseLock())
     lights.save_room_light("lamp", FixedLight(name="Lamp", colour=FixedColour(kelvin=3000)))
     refused = _removal_waits_then_sees(registry, _lit("lamp"), lambda: lights.remove_room_light("lamp"))
     assert isinstance(refused, RoomLightRefused) and refused.code.value == "named_by_a_frame"
@@ -81,7 +81,7 @@ def test_a_paper_profile_removal_waits_for_the_check_then_is_refused(registry):
     with registry.db.transaction() as conn:
         conn.execute("INSERT INTO paper_profiles(profile_sha256, name, profile, added_at) "
                      "VALUES (%s, 'Paper', %s, 0)", (PROFILE, bytes(128)))
-    profiles = PgPaperProfiles(registry.db, registry.clock, PgFrameLighting(LUT_RECIPE_ID))
+    profiles = PgPaperProfiles(registry.db, registry.clock, PgHouseLock())
     refused = _removal_waits_then_sees(registry, _lit(profile=PROFILE), lambda: profiles.remove_paper_profile(PROFILE))
     assert isinstance(refused, PaperProfileRefused) and refused.code.value == "named_by_a_frame"
     assert refused.frames == ("Frame 1",)               # by the Frame's name

@@ -52,7 +52,7 @@ def _contract(maximum: float = 100) -> dict:
         "schemas": {"Thing": Thing.model_json_schema(mode="serialization"),
                     "Lux": TypeAdapter(lux).json_schema(), "ThingId": TypeAdapter(Id).json_schema()},
         "constants": {"B_SOURCE": "pi", "A_MAX": 4.0},
-        "refusals": {"things": [code.value for code in Refusal]},
+        "refusals": {"ThingRefusal": [code.value for code in Refusal]},
     }
 
 
@@ -75,7 +75,8 @@ def test_central_answers_one_json_contract_with_every_table():
     contract = console_contract()
     assert set(contract) >= {"schemas", "constants", "refusals"}
     assert json.loads(json.dumps(contract)) == contract
-    assert {"room_light", "frame_lighting", "paper_profiles", "reports"} <= set(contract["refusals"])
+    assert {"RoomLightRefusal", "FrameLightingRefusal", "PaperProfileRefusal", "ReportRefusal"} <= set(
+        contract["refusals"])
 
 
 def test_types_limits_constants_and_refusals_are_written_as_typescript():
@@ -91,8 +92,8 @@ def test_types_limits_constants_and_refusals_are_written_as_typescript():
     assert "    steps: {\n      integer: true,\n      maximum: 9,\n      minimum: 1,\n      multipleOf: 2,\n    }," in text
     assert 'ThingId: "^[a-z]+$",' in text
     assert "export const CONSTANTS = {\n  A_MAX: 4,\n  B_SOURCE: \"pi\",\n} as const;" in text
-    assert 'export const REFUSALS = {\n  things: [\n    "gone",\n    "taken",\n  ],\n} as const;' in text
-    assert 'export type ThingsRefusal = (typeof REFUSALS)["things"][number];' in text
+    assert 'export const REFUSALS = {\n  ThingRefusal: [\n    "gone",\n    "taken",\n  ],\n} as const;' in text
+    assert 'export type ThingRefusal = (typeof REFUSALS)["ThingRefusal"][number];' in text
 
 
 def test_an_alias_named_by_its_own_title_is_a_type_with_no_table_entry():

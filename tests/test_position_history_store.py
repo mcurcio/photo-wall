@@ -210,10 +210,9 @@ def test_a_new_frame_records_its_creation_so_no_change_reads_as_made_outside(reg
     its first kept entry, so its first kept write records no change made outside Photo Wall.
     Mutation probe: create_frame without its KEPT_CREATED entry and the old fixed default back in
     `unrecorded_record` -> a kept-unrecorded entry appears."""
-    from central.frame_lighting.paper_profiles import LUT_RECIPE_ID
-    from central.infra.frame_lighting_store import PgFrameLighting
+    from central.infra.frame_lighting_store import PgHouseLock
     from central.infra.room_light_store import PgRoomLights
-    PgRoomLights(registry.db, PgFrameLighting(LUT_RECIPE_ID)).remove_room_light("room")
+    PgRoomLights(registry.db, PgHouseLock()).remove_room_light("room")
     frame(registry, "spare")
     assert _history(registry, "spare")["unrecorded_change"] is False
     with registry.db.transaction() as conn:
@@ -444,14 +443,13 @@ def test_restore_refuses_an_entry_whose_lighting_names_a_room_light_gone_since(r
     keeps a light that adds nothing. Mutation probe: no `fitted_within` in `restore` -> the gone light
     is loaded into the draft."""
     from central.frame_lighting.model import FrameLightingRefused
-    from central.frame_lighting.paper_profiles import LUT_RECIPE_ID
-    from central.infra.frame_lighting_store import PgFrameLighting
+    from central.infra.frame_lighting_store import PgHouseLock
     from central.infra.room_light_store import PgRoomLights
     from central.room_light.model import FixedLight
     from contracts.frame_lighting import AT_FULL, WashLight
     from contracts.room_light import FixedColour
 
-    lights = PgRoomLights(registry.db, PgFrameLighting(LUT_RECIPE_ID))
+    lights = PgRoomLights(registry.db, PgHouseLock())
     lights.save_room_light("spot", FixedLight(name="Spot", colour=FixedColour(kelvin=2700)))
     spotlit = LIGHTING.model_copy(update={"lights": (WashLight(light="spot", lux=500.0, reference=AT_FULL),)})
     node = Node(registry)

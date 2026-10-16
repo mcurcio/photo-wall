@@ -8,7 +8,8 @@ central/console/src/generated/ at build time; its --check test fails when they d
                                                     # console sends, "serialization" for a view it reads
                                                     # and for a named alias (CONSOLE_ALIASES)
      "constants": {<NAME>: <number | string>, ...}, # values the console shows or steps by
-     "refusals": {<context>: [<code>, ...], ...}}   # each context's closed refusal vocabulary
+     "refusals": {<Name>Refusal: [<code>, ...], ...}}  # each context's closed refusal vocabulary,
+                                                     # under its Python enum's own name
 
 Keys are sorted and every value is plain JSON, so the generated files are stable for an unchanged
 contract. A model, constant or refusal vocabulary the console needs is added to the tables below,
@@ -91,11 +92,10 @@ CONSOLE_CONSTANTS: Final[Mapping[str, float | int | str]] = {
     "MATCHED_LUX_MIN": MATCHED_LUX_MIN, "MATCHED_LUX_MAX": MATCHED_LUX_MAX, "PANEL_BLACK_MIN": PANEL_BLACK_MIN,
     "PANEL_BLACK_MAX": PANEL_BLACK_MAX,
 }
-CONSOLE_REFUSALS: Final[Mapping[str, type[StrEnum]]] = {   # context name -> its closed refusal enum
-    "room_light": RoomLightRefusal, "frame_lighting": FrameLightingRefusal, "paper_profiles": PaperProfileRefusal,
-    "reports": ReportRefusal, "drawn_report": DrawnReportRefusal, "trial": TrialRefusal,
-    "position_restore": PositionRestoreRefusal,
-}
+CONSOLE_REFUSALS: Final[tuple[type[StrEnum], ...]] = (   # each context's closed refusal enum
+    RoomLightRefusal, FrameLightingRefusal, PaperProfileRefusal, ReportRefusal, DrawnReportRefusal, TrialRefusal,
+    PositionRestoreRefusal,
+)
 
 
 def console_contract() -> dict[str, object]:
@@ -107,7 +107,7 @@ def console_contract() -> dict[str, object]:
                     for name, alias in CONSOLE_ALIASES.items()})
     schemas.update({model.__name__: model.model_json_schema(mode="serialization") for model in CONSOLE_VIEWS})
     contract = {"schemas": schemas, "constants": dict(CONSOLE_CONSTANTS),
-                "refusals": {context: [code.value for code in refusal] for context, refusal in CONSOLE_REFUSALS.items()}}
+                "refusals": {refusal.__name__: [code.value for code in refusal] for refusal in CONSOLE_REFUSALS}}
     return json.loads(json.dumps(contract, sort_keys=True))
 
 

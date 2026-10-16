@@ -1180,7 +1180,7 @@ Dropped squares in a reading (`reflection-edge`, `covered`, `clipped`, `copy-unl
 
 The reader (`scripts/calibration_target/`) is the agent's tool and is never shipped; its thresholds have one home, `scripts/calibration_target/model.py`. **NOT RUN on real hardware yet:** [0027](decisions/0027-calibration-targets-v2.md#not-run) lists the bench steps. CI reads synthetic photos only.
 
-## LUTs: paper profiles
+## Paper profiles
 
 The print look's LUT ([0023](decisions/0023-print-look.md)) is made from a **paper profile**: the free ICC file a paper maker publishes for each paper and printer (search the maker's site for "ICC profiles", for example Hahnemühle, Canson or Ilford, and take the profile for your paper on any printer; the printer matters little here). Central keeps the profile (`paper_profiles`, migrations 093 and 099) and bakes the LUT from it whenever a Player asks, so there is nothing else to keep or back up.
 

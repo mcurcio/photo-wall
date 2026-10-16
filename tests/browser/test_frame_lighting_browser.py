@@ -31,8 +31,7 @@ from test_frame_picture_browser import _off_thread
 
 from central.fleet.node_routes import _OPERATION, _trial_body
 from central.fleet.node_sessions import NodeControlError
-from central.frame_lighting.paper_profiles import LUT_RECIPE_ID
-from central.infra.frame_lighting_store import PgFrameLighting
+from central.infra.frame_lighting_store import PgHouseLock
 from central.infra.room_light_store import PgRoomLights
 from central.registry import RegistryError
 from central.room_light.model import SensorRef
@@ -75,7 +74,7 @@ def room_lights(page, origin, *, daylight_on=None):
 
 def record_reading(registry, player_id, lux):
     """The Pi's wired Sensor reads `lux`, through Central's reporting port."""
-    lights = PgRoomLights(registry.db, PgFrameLighting(LUT_RECIPE_ID))
+    lights = PgRoomLights(registry.db, PgHouseLock())
     _off_thread(lambda: lights.record_reading(SensorRef(source=PI, address=player_id), Measured(lux=lux)))
 
 

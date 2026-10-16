@@ -59,12 +59,6 @@ def illuminance_sensor(entity: str) -> SensorRef:
     return SensorRef(source=SOURCE, address=entity)
 
 
-def kind_of(reference: ReporterRef | SensorRef) -> EntityKind:
-    """What an entity referenced so reports: a light's state (a room light's reporter) or an
-    illuminance reading (a Sensor's). Pure."""
-    return "light" if isinstance(reference, ReporterRef) else "illuminance"
-
-
 __all__ = ["ENTITY_MAX", "ENTITY_PATTERN", "ILLUMINANCE_TOPIC_PREFIX", "LIGHT_TOPIC_PREFIX", "MESSAGE_BYTES",
-           "SOURCE", "SUBSCRIPTION", "EntityKind", "Topic", "illuminance_sensor", "is_entity", "kind_of",
+           "SOURCE", "SUBSCRIPTION", "EntityKind", "Topic", "illuminance_sensor", "is_entity",
            "light_reporter", "topic_of"]

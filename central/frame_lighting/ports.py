@@ -1,5 +1,6 @@
-"""What Frame lighting's writers, and the house's, depend on: one port, called inside the writer's own
-transaction. central/infra/frame_lighting_store.py `PgFrameLighting` implements it over PostgreSQL."""
+"""What Frame lighting's writers, and the house's, depend on: two ports, each called inside the
+writer's own transaction. central/infra/frame_lighting_store.py implements them over PostgreSQL
+(`PgFrameLighting`, `PgHouseLock`), both on the one lock."""
 from __future__ import annotations
 
 from typing import Protocol
@@ -11,12 +12,9 @@ from contracts.node_picture import DisplayLight
 
 
 class FrameLightingCheck(Protocol):
-    """The house's one lock and the one "which Frames name it" query, injected into every writer of a
-    Frame's lighting (Position's trial begin and edit, Restore, the Registry's new Frame) and every
-    writer or remover of what a lighting names (House › Lights' room lights and Sensors, the words
-    their reporters send, the paper profiles list). A check shares the lock; a change takes it
-    exclusive, first; so no removal commits between a check and its write, and two checks never wait
-    for each other."""
+    """The check every writer of a Frame's lighting goes through (Position's trial begin and edit,
+    Restore, the Registry's new Frame), under the house's lock shared (HouseLock), so no removal
+    commits between a check and its write, and two checks never wait for each other."""
 
     def fitted_within(self, tx: Transaction, lighting: FrameLighting) -> FrameLighting:
         """`lighting` checked against the house now (`policy.check`) and stamped with today's
@@ -29,6 +27,13 @@ class FrameLightingCheck(Protocol):
         under the lock shared."""
         ...
 
+
+class HouseLock(Protocol):
+    """The house's one lock, and the one "which Frames name it" query, for every writer or remover of
+    what a Frame's lighting names (House › Lights' room lights and Sensors, the words their reporters
+    send, the paper profiles list): a change takes the lock exclusive, first; a Frame-lighting check
+    shares it."""
+
     def changing_within(self, tx: Transaction) -> None:
         """Take the lock exclusive for `tx`: the first step of every change to the house (a room
         light, a Sensor, a reporter's word, a paper profile)."""
@@ -40,4 +45,4 @@ class FrameLightingCheck(Protocol):
         ...
 
 
-__all__ = ["FrameLightingCheck"]
+__all__ = ["FrameLightingCheck", "HouseLock"]
