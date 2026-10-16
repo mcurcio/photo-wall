@@ -541,8 +541,9 @@ class FrameLights:
     (the shader's uniforms): `to_opening` (output fractions -> the opening's unit square,
     inverse(homography(fit.corners))), the opening's physical `size_mm` (`opening_size_mm`), the
     mat's `depth_mm`, the `paper`, each light that adds light (`lights`, at most FRAME_LIGHTS_MAX;
-    one adding none is left out) and the Frame's `peak`: an upper bound of its paper white's signal,
-    the same for every pixel of the Frame, so the rolloff keeps the cone's shape."""
+    one adding none is left out) and the Frame's `peak`: its paper white's brightest signal over the
+    opening (`_brightest_white`), the same for every pixel of the Frame, so the rolloff keeps the
+    cone's shape."""
     to_opening: Matrix
     size_mm: tuple[float, float]
     depth_mm: float
@@ -600,21 +601,30 @@ def _lit(light: WashLight | FarLight | CloseLight, rgb: Linear, depth: float, qu
                     beam=(math.radians(light.inner_beam_degrees) / 2, math.radians(light.outer_beam_degrees) / 2))
 
 
-def _close_reach(lit: LitLight, size: tuple[float, float]) -> float:
-    """The largest inverse-square factor (d0 / d)**3 a close light gives anywhere on the opening:
-    at the opening's point nearest the light along the wall."""
-    lx, ly, out = lit.position_mm
-    near = (min(max(lx, 0.0), size[0]), min(max(ly, 0.0), size[1]), 0.0)
-    centre = math.dist((lx, ly, out), (size[0] / 2, size[1] / 2, 0.0))
-    return (centre / math.dist((lx, ly, out), near)) ** 3
+PEAK_GRID: Final = 33     # the peak's samples a side of the opening (`_brightest_white`)
+
+
+def _brightest_white(lights: tuple[LitLight, ...], size: tuple[float, float], depth: float,
+                     paper: Paper, display: DisplayLight) -> float:
+    """The largest channel of the paper white's `paper_signal` over the opening: `_irradiance_at`
+    (every light with its shape, its cone and the mat's shadow) on a PEAK_GRID x PEAK_GRID lattice of
+    the opening's unit square, edges included, and at each close light's foot on the wall when that
+    lies inside the opening. A wash alone is exact (the light is the same everywhere); between
+    samples a brighter point may lie, and `rolled_off` takes it to the TV's white. Pure."""
+    points = [(size[0] * i / (PEAK_GRID - 1), size[1] * j / (PEAK_GRID - 1))
+              for i in range(PEAK_GRID) for j in range(PEAK_GRID)]
+    points += [(lit.position_mm[0], lit.position_mm[1]) for lit in lights if lit.kind == "close"
+               and 0 <= lit.position_mm[0] <= size[0] and 0 <= lit.position_mm[1] <= size[1]]
+    white = (paper.whiteness,) * 3
+    return max((max(paper_signal(white, _irradiance_at(lights, point, size, depth), display)) for point in points),
+               default=0.0)
 
 
 def frame_lights(lighting: FrameLighting, document: RoomLightsDocument | None,
                  fit: CornersFit | CoverFit, profile: FrameProfile, display: DisplayLight) -> FrameLights:
     """`lighting`'s lights against `document` (None: none received yet, so every light adds none),
     in the opening's mat space at its physical size (`opening_size_mm`), with the Frame's peak: the
-    paper white's `paper_signal` under the sum of every light at its brightest on the opening (a
-    close light's `_close_reach`; a cone never adds), largest channel. quarter = the nearest quarter
+    paper white's brightest signal over the opening (`_brightest_white`). quarter = the nearest quarter
     turn of fit.rotation; a far light's `toward` = (sin a, -cos a), a = from_degrees + quarter, its
     band (depth cot(min(90, steep + softness/2)), depth cot(max(LIGHT_ELEVATION_MIN_DEGREES, steep -
     softness/2))); a close light's place `_to_mat` from the opening's centre. Pure."""
@@ -626,14 +636,9 @@ def frame_lights(lighting: FrameLighting, document: RoomLightsDocument | None,
         rgb = light_on_frame(light, entry)
         if max(rgb) > 0:
             lights.append(_lit(light, rgb, lighting.mat_depth_mm, quarter, size))
-    brightest = [0.0, 0.0, 0.0]
-    for lit in lights:
-        reach = _close_reach(lit, size) if lit.kind == "close" else 1.0
-        for channel in range(3):
-            brightest[channel] += lit.rgb[channel] * reach
-    white = paper_signal((lighting.paper.whiteness,) * 3, tuple(brightest), display)
-    return FrameLights(inverse(homography(fit.corners)), size, lighting.mat_depth_mm, lighting.paper,
-                       tuple(lights), max(white))
+    lit = tuple(lights)
+    return FrameLights(inverse(homography(fit.corners)), size, lighting.mat_depth_mm, lighting.paper, lit,
+                       _brightest_white(lit, size, lighting.mat_depth_mm, lighting.paper, display))
 
 
 def _smoothstep(t: float) -> float:
@@ -690,13 +695,19 @@ def irradiance(lights: FrameLights, x: float, y: float) -> Linear:
     `_close_shape`. Reaches: `_reached` (the mat shadow). No floor (owner, 2026-10-15, Q1 B: the
     brightness follows the room down). Pure."""
     u, v = transform(lights.to_opening, x, y)
-    point = (u * lights.size_mm[0], v * lights.size_mm[1])
+    return _irradiance_at(lights.lights, (u * lights.size_mm[0], v * lights.size_mm[1]), lights.size_mm,
+                          lights.depth_mm)
+
+
+def _irradiance_at(lights: tuple[LitLight, ...], point: tuple[float, float], size: tuple[float, float],
+                   depth: float) -> Linear:
+    """`irradiance` at a mat-space `point` (mm). Pure."""
     total = [0.0, 0.0, 0.0]
-    for lit in lights.lights:
-        shape = _close_shape(lit, point, lights.size_mm) if lit.kind == "close" else 1.0
+    for lit in lights:
+        shape = _close_shape(lit, point, size) if lit.kind == "close" else 1.0
         if shape == 0:
             continue
-        share = shape * _reached(lit, point, lights.size_mm, lights.depth_mm)
+        share = shape * _reached(lit, point, size, depth)
         for channel in range(3):
             total[channel] += lit.rgb[channel] * share
     return tuple(total)
@@ -719,12 +730,17 @@ def paper_signal(reflectance: Linear, light: Linear, display: DisplayLight) -> L
 
 
 def highlight_rolled(signal: Linear, peak: float) -> Linear:
-    """The one fixed rolloff above the TV's white (Q2 B): identity when peak <= 1; otherwise each
-    channel at or below HIGHLIGHT_KNEE unchanged and [HIGHLIGHT_KNEE, peak] mapped onto
-    [HIGHLIGHT_KNEE, 1] by `rolled_off`'s curve, monotone and continuous in signal and peak. Pure."""
-    if peak <= 1:
+    """The one fixed rolloff above the TV's white (Q2 B), keeping each pixel's hue: identity when
+    peak <= 1; otherwise a pixel whose largest channel m is at or below HIGHLIGHT_KNEE is unchanged,
+    and one above it is scaled as a whole by rolled_off(m, HIGHLIGHT_KNEE, peak) / m, so
+    [HIGHLIGHT_KNEE, peak] lands on [HIGHLIGHT_KNEE, 1] and the channels keep their ratios (a print
+    under one light has one colour at every tone; rolling each channel apart would turn a warm
+    light's highlights yellow-white). Monotone and continuous in signal and peak. Pure."""
+    largest = max(signal)
+    if peak <= 1 or largest <= HIGHLIGHT_KNEE:
         return signal
-    return tuple(rolled_off(value, HIGHLIGHT_KNEE, peak) for value in signal)
+    scale = rolled_off(largest, HIGHLIGHT_KNEE, peak) / largest
+    return tuple(value * scale for value in signal)
 
 
 def dithered(encoded: float, x: int, y: int) -> float:

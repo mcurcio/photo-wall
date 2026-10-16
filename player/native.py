@@ -405,6 +405,18 @@ class _Surface:
     target_qr: int = 0
     target_code: tuple[str, str, int] | None = None
     target_qr_modules: int = 0
+    # The last `frame_lights` this surface drew and what it was worked out from: a render reuses it
+    # while its inputs are equal (the peak samples the opening, too much to repeat every frame).
+    lights_key: tuple | None = None
+    lights: FrameLights | None = None
+
+    def lights_for(self, lighting: FrameLighting, document: RoomLightsDocument | None, fit, profile,
+                   display: DisplayLight) -> FrameLights:
+        """geometry.py `frame_lights` for these inputs, worked out again only when one changed."""
+        key = (lighting, document, fit, profile, display)
+        if self.lights is None or self.lights_key != key:
+            self.lights, self.lights_key = frame_lights(lighting, document, fit, profile, display), key
+        return self.lights
 
     def fail(self, reason: str) -> None:
         self.failure, self.failed_episode = reason, self.episode
@@ -639,17 +651,20 @@ vec3 irradiance(vec2 point) {
     }
     return total;
 }
-// geometry.py `rolled_off` on one channel, through the shortfall, so the peak is exactly white.
+// geometry.py `rolled_off` on a pixel's largest channel, through the shortfall, so the peak is
+// exactly white.
 float rolled_off(float value) {
     if (value <= HIGHLIGHT_KNEE) return value;
     float t = (min(value, peak)-HIGHLIGHT_KNEE)/(1.0-HIGHLIGHT_KNEE);
     float w = (peak-HIGHLIGHT_KNEE)/(1.0-HIGHLIGHT_KNEE);
     return 1.0-(1.0-HIGHLIGHT_KNEE)*(w-t)*(w+t)/(w*w*(1.0+t));
 }
-// geometry.py `highlight_rolled`.
+// geometry.py `highlight_rolled`: the whole pixel scaled by its largest channel's rolloff, so its
+// hue stays.
 vec3 highlight_rolled(vec3 signal) {
-    if (peak <= 1.0) return signal;
-    return vec3(rolled_off(signal.r), rolled_off(signal.g), rolled_off(signal.b));
+    float largest = max(signal.r, max(signal.g, signal.b));
+    if (peak <= 1.0 || largest <= HIGHLIGHT_KNEE) return signal;
+    return signal*(rolled_off(largest)/largest);
 }
 // Step 0 (geometry.py `pattern_signal`): the pattern's encoded signal at the opening's unit square.
 vec3 pattern_signal(vec2 point) {
@@ -1554,8 +1569,9 @@ class NativeRenderer:
             lights, lut_drawn = None, False
             if shown:
                 lighting = _drawn_lighting(shown)
-                lights = frame_lights(lighting, self._room_lights, _drawn_fit(shown), shown.composition.binding.profile,
-                                      DisplayLight(operations.matched_lux, operations.panel_black))
+                lights = surface.lights_for(lighting, self._room_lights, _drawn_fit(shown),
+                                            shown.composition.binding.profile,
+                                            DisplayLight(operations.matched_lux, operations.panel_black))
                 lut_drawn = self._bind_lut(surface, lighting.paper.profile)
             target = None
             if operations.test_pattern in TARGET_PATTERNS:

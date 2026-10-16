@@ -37,7 +37,9 @@ from player.geometry import (
     final_pixel,
     frame_lights,
     highlight_rolled,
+    irradiance,
     light_on_frame,
+    paper_reflectance,
     paper_signal,
 )
 
@@ -129,9 +131,68 @@ def test_the_spot_is_a_cone_that_feathers_and_switching_it_off_leaves_the_wash()
 
 def test_the_highlights_above_white_roll_off_and_stay_continuous():
     assert highlight_rolled((0.5, 1.2, 2.0), 1.0) == (0.5, 1.2, 2.0)
-    rolled = highlight_rolled((0.5, HIGHLIGHT_KNEE, 1.5, 3.0), 3.0)
-    assert rolled[:2] == (0.5, HIGHLIGHT_KNEE) and HIGHLIGHT_KNEE < rolled[2] < 1 and rolled[3] == 1.0
-    assert highlight_rolled((0.95,), 1.0 + 1e-9)[0] == pytest.approx(0.95, abs=1e-6)
+    assert highlight_rolled((0.5, 0.3, HIGHLIGHT_KNEE), 3.0) == (0.5, 0.3, HIGHLIGHT_KNEE)
+    rolled = highlight_rolled((3.0, 1.5, 0.3), 3.0)
+    assert rolled == pytest.approx((1.0, 0.5, 0.1))
+    middle = highlight_rolled((1.5, 0.75, 0.15), 3.0)
+    assert HIGHLIGHT_KNEE < middle[0] < 1
+    assert highlight_rolled((0.95, 0.5, 0.2), 1.0 + 1e-9) == pytest.approx((0.95, 0.5, 0.2), abs=1e-6)
+
+
+def test_a_warm_light_keeps_one_colour_from_the_shadows_to_paper_white():
+    """A print under one light has one colour at every tone: a grey ramp under a 2700 K wash bright
+    enough to pass the TV's white keeps the same green/red and blue/red ratios after the rolloff.
+    Mutation probe: roll each channel apart -> the ratios climb toward white (0.17 -> 0.51)."""
+    warm = frame_lights(lighting(WashLight(light="lamp", lux=MATCHED, reference=DIMMER_AT_FULL)),
+                        document(lamp=RoomLightEntry(FixedColour(2700), FULL_ON)), FIT, PROFILE, DISPLAY)
+    assert warm.peak > 1
+    ratios = []
+    for grey in (0.05, 0.18, 0.4, 0.7, 1.0):
+        signal = highlight_rolled(paper_signal(paper_reflectance((grey,) * 3, UPGRADE_PAPER),
+                                               irradiance(warm, .5, .5), DISPLAY), warm.peak)
+        shown = [BLACK + (1 - BLACK) * value for value in signal]    # the light the panel gives, its glow included
+        ratios.append((shown[1] / shown[0], shown[2] / shown[0]))
+    for green, blue in ratios:
+        assert green == pytest.approx(ratios[0][0], rel=0.01) and blue == pytest.approx(ratios[0][1], rel=0.05)
+
+
+def test_the_close_light_falls_off_as_the_inverse_square_on_a_slant_and_feathers_smoothly():
+    """R2 and R5 against numbers worked by hand: the spot alone (400 lx at the Frame's centre, 350 mm up
+    and 250 mm out, 20 and 40 degree beams) gives (d0 / d)**3 x 400 inside its inner beam, the
+    smoothstep of (outer - phi) / (outer - inner) of that in the feather, and nothing past the outer
+    beam. Mutation probes: drop the (d0 / d)**3 -> the inner point reads 400; a linear feather -> the
+    feather point misses the smoothstep."""
+    lit = frame_lights(lighting(SPOT), document(bookshelf_spot=WHITE_ROOM), FIT, PROFILE, DISPLAY)
+    width, height = lit.size_mm
+    light = (width / 2, height / 2 - 350.0, 250.0)
+
+    def expected(above_mm: float) -> float:
+        point = (width / 2, height / 2 - above_mm, 0.0)
+        aim = [c - l for c, l in zip((width / 2, height / 2, 0.0), light, strict=True)]
+        ray = [p - l for p, l in zip(point, light, strict=True)]
+        d0, d = math.hypot(*aim), math.hypot(*ray)
+        phi = math.degrees(math.acos(sum(a * r for a, r in zip(aim, ray, strict=True)) / (d0 * d)))
+        t = min(1.0, max(0.0, (20.0 - phi) / (20.0 - 10.0)))
+        return 400.0 * (d0 / d) ** 3 * t * t * (3 - 2 * t)
+
+    for above in (100.0, 150.0, 200.0):     # inside the inner beam, in the feather, past the outer
+        measured = irradiance(lit, .5, .5 - above / height)
+        assert measured == pytest.approx((expected(above),) * 3, rel=1e-9, abs=1e-9), above
+    assert expected(100.0) > 700 and 0 < expected(150.0) < 400 and expected(200.0) == 0
+
+
+def test_the_peak_is_the_brightest_paper_white_on_the_opening_not_a_bound_past_the_cone():
+    """The rolloff's peak is where the paper white is brightest on the opening, the cone and the mat
+    included: a spot close to the wall, its foot off the cone's aim, no longer overstates it many
+    times over (the review's 22 against 3). Mutation probe: the nearest point's (d0 / d)**3 with no
+    cone -> the peak is far above every pixel's signal."""
+    close = CloseLight(light="bookshelf-spot", lux=400, reference=DIMMER_AT_FULL, across_mm=200, up_mm=0, out_mm=60,
+                       inner_beam_degrees=20, outer_beam_degrees=40)
+    lit = frame_lights(lighting(close), document(bookshelf_spot=WHITE_ROOM), FIT, PROFILE, DISPLAY)
+    white = (UPGRADE_PAPER.whiteness,) * 3
+    brightest = max(max(paper_signal(white, irradiance(lit, (i + .5) / 101, (j + .5) / 101), DISPLAY))
+                    for i in range(101) for j in range(101))
+    assert brightest <= lit.peak * 1.05 and lit.peak <= brightest * 1.25, (lit.peak, brightest)
 
 
 def test_below_the_panels_glow_the_signal_is_the_glow():

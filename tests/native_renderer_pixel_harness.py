@@ -525,7 +525,7 @@ def crop_offset_keeps_the_left_edge(native, frames, variant) -> None:
 
 # -- Room light (decision 0028): the physics, the Frame's paper profile and the trial's lighting -------
 
-SPOT = CloseLight(light="bookshelf-spot", lux=400, reference=DIMMER_AT_FULL, across_mm=0, up_mm=350, out_mm=250,
+SPOT = CloseLight(light="bookshelf-spot", lux=1500, reference=DIMMER_AT_FULL, across_mm=0, up_mm=350, out_mm=250,
                   inner_beam_degrees=20, outer_beam_degrees=40)
 SPOT_LIGHTING = FrameLighting(mat_depth_mm=0, paper=UPGRADE_PAPER,
                               lights=(SPOT, WashLight(light="room", lux=40, reference=DIMMER_AT_FULL)))
@@ -539,6 +539,10 @@ ROOM_WASH = WashLight(light="room", lux=300, reference=DIMMER_AT_FULL)
 DEEP_LIGHTING = FrameLighting(mat_depth_mm=8, paper=UPGRADE_PAPER, lights=(ROOM_WASH, TOP_LIGHT))  # ~10..22 mm band
 WINDOW_LIGHTING = FrameLighting(mat_depth_mm=8, paper=UPGRADE_PAPER, lights=(ROOM_WASH, COOL_SIDE, TOP_LIGHT))
 TRIAL_SHA = "a" * 64
+# Q1 B, the room followed down: a 10 lx wash on the upgrade paper, where the photo spans a few dozen
+# 8-bit codes and only the dither keeps a ramp from banding.
+DIM_LIGHTING = FrameLighting(mat_depth_mm=0, paper=UPGRADE_PAPER,
+                             lights=(WashLight(light="room", lux=10, reference=DIMMER_AT_FULL),))
 # A 27" Frame: the cone's core, its feather and the wash beyond all fall inside the opening, and the
 # spot's peak passes the TV's white, so the fixed rolloff is drawn too.
 SPOT_PROFILE = FrameProfile(width_px=1600, height_px=900, diagonal_inches=27)
@@ -549,7 +553,7 @@ def lit_binding(lighting: FrameLighting, profile: FrameProfile = PROFILE) -> Out
 
 
 def the_spot_cone_matches_the_reference_and_switches_off(native, frames, variant) -> None:
-    """Acceptance 1, the tracer's Pi half: one close light (the bookshelf spot: 400 lx at the centre,
+    """Acceptance 1, the tracer's Pi half: one close light (the bookshelf spot: 1,500 lx at the centre,
     inner 20, outer 40 degrees, 250 mm out, 350 mm up) and a wash of the room on the upgrade paper.
     With the spot on, the pixels across the cone (inside, the feather, outside) equal `final_pixel`;
     a room-lights document with the spot off redraws at once, no present asked, and the Frame then
@@ -578,6 +582,37 @@ def the_spot_cone_matches_the_reference_and_switches_off(native, frames, variant
     print(f"SPOT inside={inside} off={off} wash={wash} zones={sorted(zones)} frame={frame_seconds * 1000:.1f} ms",
           flush=True)
     assert inside > 500 and off > 500 and wash > 500, (inside, off, wash)
+
+
+def a_dim_room_matches_the_reference_code_for_code_with_its_dither(native, frames, variant) -> None:
+    """Q1 B in the shader: under a 10 lx wash every sample's 8-bit code equals `final_pixel`'s with the
+    ordered dither at that output pixel (`dither_at=(i, j)`, counted from the top as the shader's), no
+    sample off by more than one code and at most 2 % off by one (the last bit of texture filtering and
+    float32). The pixel harness's tolerance elsewhere is near four codes, so this case is the one
+    that holds the dither and the panel's black to the reference. Mutation probes: the shader's dither
+    removed, or its rows counted from the bottom, or the panel's black not subtracted -> far more than
+    2 % of the samples are a code off."""
+    frames.operations = OPERATIONS
+    fit = CoverFit(corners=OPENING)
+    show(native, composition(variant, Calibration(fit=fit), binding=lit_binding(DIM_LIGHTING)))
+    lights = frame_lights(DIM_LIGHTING, ROOM, fit, PROFILE, display_of(OPERATIONS))
+    width, height, _ = native.captured
+    compared = off = 0
+    for i, j, x, y in samples(native, fit.corners, step=3):
+        uv = picture_source_uv(x, y, fit, (width, height), PROFILE.width_px / PROFILE.height_px, WIDTH, HEIGHT,
+                               CENTRED)
+        linear = None if uv is None else texel_colour(*uv)
+        if linear is None:
+            continue
+        expected = final_pixel(linear, OPERATIONS, inside=True, lights=lights, x=x, y=y, dither_at=(i, j))
+        actual = pixel(native, i, j)
+        codes = max(abs(round(a * 255) - round(min(1.0, max(0.0, e)) * 255))
+                    for a, e in zip(actual[:3], expected[:3], strict=True))
+        assert codes <= 1, ("dim_code", i, j, actual, expected)
+        compared += 1
+        off += codes
+    print(f"DIM compared={compared} off_by_one={off}", flush=True)
+    assert compared > 1000 and off <= compared * 0.02, (compared, off)
 
 
 def the_upgrade_draws_todays_picture(native, frames, variant) -> None:
@@ -918,6 +953,7 @@ CASES = (cover_matches_the_reference(0), cover_matches_the_reference(7),
          a_corrupt_picture_fails_and_the_frame_still_presents,
          the_diagnostic_shows_only_while_the_output_is_unbound, crop_offset_keeps_the_left_edge,
          the_spot_cone_matches_the_reference_and_switches_off, the_upgrade_draws_todays_picture,
+         a_dim_room_matches_the_reference_code_for_code_with_its_dither,
          one_far_light_from_the_top_matches, cover_at_90_shades_the_wall_up_edge, two_coloured_lights_match,
          the_lights_uniforms_are_live, trial_lighting_drawn, lut_matches_the_reference,
          *(case for pattern in TestPattern for case in pattern_cases(pattern)),
