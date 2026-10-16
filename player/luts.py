@@ -1,5 +1,5 @@
-"""The Player's LUTs: each Frame's paper profile (decision 0028: the paper lives on the Frame,
-`lighting.paper.profile`; "Nothing waits on a LUT", the print look's rule 3, stands).
+"""The Player's LUTs: each Frame's paper profile (the paper lives on the Frame,
+`lighting.paper.profile`). Nothing waits on a LUT.
 
 Every bound Frame's LUT is wanted as its configuration arrives (`LutWants.want`, from
 player/service.py), and the renderer asks for the LUT of the Frame it draws (`LutSource.lut`) on

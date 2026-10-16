@@ -1,9 +1,8 @@
-"""Central's side of one Node, per pipe, and of the wall: NodeLink and WallWriter (E3b design §7.2,
-§8, §9.1-§9.3, §9.6, §10; E3d runs them).
+"""Central's side of one Node, per pipe, and of the wall: NodeLink and WallWriter.
 
 A NodeLink holds one client in the Node's hub account and one pipe. It finds what the Node has from
 the streams themselves (names, then each description with no options: never a reply that grows with
-stream state, X4), drains every event and state stream of its pipe through cursor readers from
+stream state), drains every event and state stream of its pipe through cursor readers from
 Central's own cursors, and calls and discovers the pipe's components. Every read item is committed
 with its cursor in one store transaction: a gap row (a count, or "unknown" when an epoch ended), the
 raw record keyed (stream, epoch, sequence) with its message id, then the cursor. A crash mid-commit
@@ -15,24 +14,25 @@ every key in an epoch Central has not written. Each put is conditional on Centra
 "absent" in a new epoch. A conflict re-reads the key: Central's own value (an earlier write whose
 acknowledgement was lost) gives Central its token; any other writer's value is adopted as Central's
 for that projection and logged (`document_adopted`), so Central never overwrites it until its
-projection changes again (C16). A key the bucket's table does not list (rollout skew), or a value
+projection changes again. A key the bucket's table does not list (rollout skew), or a value
 past its size, is refused before sending and logged (`document_refused`); every reconcile tries it
 again, so the release that lists it (a new `birth`) gets it. Besides every reconcile, a running link
 asserts every desired bucket of its pipe each time its `DocumentSource.changed()` returns, so a
-projection change reaches the Node without waiting for a reconcile (roadmap 1b, erratum E-1B-1).
+projection change reaches the Node without waiting for a reconcile.
 When a bucket's table changes in an epoch Central has written, every key Central owns there is put
-again (an adopted key is left), so a shrink never leaves a listed key without its value (§9.2).
+again (an adopted key is left), so a shrink never leaves a listed key without its value.
 
 The link reconciles when it comes up, when a reader is lost or its stream goes absent, when a new
 `birth` is drained, and when the bus's stream names differ from those its last reconcile listed: a
-line created after it is drained within about 2 s (erratum E-E3B-CC-1). `run_link` is the one way
+line created after it is drained within about 2 s. `run_link` is the one way
 Central runs a NodeLink: it owns the client (Central imports no NATS type), connects as Central's
 user in the Node's account, and connects again until stopped.
 
 WallWriter keeps WALL in the hub's wall account: absent (the hub restarted empty), it is created at
 Central's mark + 1 + WALL_MARGIN and every wall document is put again. The mark is recorded after
 each acknowledgement, so a crash between the two loses at most the writes in flight, which the
-margin covers: no Node mirror is ever ahead of the new WALL's first sequence (X8).
+margin covers: no Node mirror is ever ahead of the new WALL's first sequence. A put
+is content-keyed: a key that already holds the value is not written again.
 
 Central reaches the hub only through the connection-owning entries here (`run_link`, `HubAdmin`,
 `WallWriter.connect`), so it names no NATS type: every one of them connects once or raises
@@ -94,7 +94,7 @@ class HubUnavailable(Exception):
     entry below and by WallWriter.ensure/put; a store error still propagates as itself."""
 
 
-HUB_RELOAD_REQUESTS: Final = 2   # X6: a reload-added account's service imports are wired only by the second
+HUB_RELOAD_REQUESTS: Final = 2   # a reload-added account's service imports are wired only by the second
 
 
 class LinkStore(Protocol):
@@ -294,7 +294,7 @@ class NodeLink:
     async def _look(self, stop: asyncio.Event, again: asyncio.Event) -> None:
         """Set `again` once the bus's stream names differ from those the last reconcile listed: a line
         applied after it. Polled (one bounded STREAM.NAMES reply), since nothing on the Node may send
-        toward the hub (erratum E-E3B-CC-1)."""
+        toward the hub."""
         while not stop.is_set() and not again.is_set():
             await _pause(stop, _NAMES_SECONDS)
             try:
@@ -592,6 +592,8 @@ class WallWriter:
         while True:
             with _answered():
                 found = await self._writer.read(key)
+                if found is not None and found.value == value:
+                    return found.token.seq
                 try:
                     token = await self._writer.put(key, value, expect=ABSENT if found is None else found.token)
                     break

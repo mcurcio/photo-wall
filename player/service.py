@@ -53,7 +53,13 @@ from contracts.player_control import (
     ControlHello,
     ControlSelection,
 )
-from contracts.room_light import RoomLightsDocument
+from contracts.room_light import (
+    ROOM_LIGHTS_DRAWN_PATH,
+    ROOM_LIGHTS_DRAWN_REPEAT_SECONDS,
+    RoomLightsDocument,
+    RoomLightsDrawn,
+    room_lights_digest,
+)
 from contracts.time import Clock, SystemClock, TimeMapping
 from player.cache import Cache, CacheError
 from player.central_link import CentralLink, Session, read_refusal
@@ -65,7 +71,7 @@ from player.node_app_link import NodeAppLinkClient
 from player.output_discovery import discover_outputs, output_app_id
 from player.probe_responder import ProbeResponder
 from player.rendering import CapacityResult, PrepareResult, PresentationResult, Renderer
-from player.room_lights import follow_room_lights
+from player.room_lights import start_room_lights
 from uplink.causes import Cause, UplinkError
 from uplink.clock import RunClockRecord
 from uplink.diagnosis import failure_text
@@ -110,6 +116,9 @@ APP_LINK_RETRY = 5.0
 # main_loop_late fault instead of waiting on a starved loop in silence (G8). Readiness
 # is left as last sent: a late loop never withdraws prepared playback (E-G8-8 decision).
 DISPATCH_DEADLINE = 2 * REPORT_INTERVAL
+# How often the room-lights report looks for a change (and retries a failed PUT); it is sent on a
+# change and at least every ROOM_LIGHTS_DRAWN_REPEAT_SECONDS.
+ROOM_LIGHTS_DRAWN_TURN = REPORT_INTERVAL
 LOG = logging.getLogger("photo_wall.player")
 
 
@@ -338,11 +347,15 @@ class PlayerService:
         # PlayerLuts the renderer was built with (`main`).
         self.luts = luts
         self.renderer, self.dispatcher = renderer, dispatcher
-        # The room-lights document's hop onto the GLib thread (decision 0028): its own lane (`main`),
-        # so a light switching never takes a control dispatch's slot; the newest pending document
-        # wins (`room_lights_changed`).
+        # The room-lights document's hop onto the GLib thread: its own lane (`main`), so a light
+        # switching never takes a control dispatch's slot; the newest pending document wins
+        # (`room_lights_changed`).
         self._room_lights_dispatch = room_lights_dispatch or dispatcher
         self._room_lights_pending: RoomLightsDocument | None = None
+        # What the renderer last drew with, and the reader's health: reported to Central.
+        self._room_lights_drawn: str | None = None
+        self._room_lights_following: Callable[[], bool] | None = None
+        self._room_lights_wake: tuple[asyncio.AbstractEventLoop, asyncio.Event] | None = None
         self.clock = clock or SystemClock()
         self.mapping = TimeMapping(self.clock)
         self.link = CentralLink(trust, unauthorized=Unauthorized, client=client,
@@ -418,8 +431,9 @@ class PlayerService:
     def room_lights_changed(self, document: RoomLightsDocument) -> None:
         """A newer room-lights document (player/room_lights.py, on the WallReader's thread): handed to
         the renderer on the GLib thread, which draws every Frame again with it. It never touches the
-        executor, the plan, the configuration or the control State's delivery, and sends nothing to
-        Central (design rule 2). Several arriving before the loop runs the hop draw once, newest."""
+        executor, the plan, the configuration or the control State's delivery; Central hears of it
+        only through `room_lights_drawn`. Several arriving before the loop runs the hop draw once,
+        newest."""
         with self._lock:
             idle = self._room_lights_pending is None
             self._room_lights_pending = document
@@ -429,8 +443,59 @@ class PlayerService:
     def _draw_room_lights(self) -> None:
         with self._lock:
             document, self._room_lights_pending = self._room_lights_pending, None
-        if document is not None:
-            self.renderer.set_room_lights(document)
+        if document is None:
+            return
+        self.renderer.set_room_lights(document)
+        with self._lock:
+            self._room_lights_drawn = room_lights_digest(document)
+        self._wake_room_lights_report()
+
+    def watch_room_lights_reader(self, following: Callable[[], bool]) -> None:
+        """The room-lights reader's health, asked at every report (thread-safe, never blocks)."""
+        with self._lock:
+            self._room_lights_following = following
+        self._wake_room_lights_report()
+
+    def room_lights_drawn(self) -> RoomLightsDrawn:
+        """What the Frames were last drawn with (None before the first document) and whether the
+        reader follows the Node's WALL mirror now (False before one is watched)."""
+        with self._lock:
+            drawn, following = self._room_lights_drawn, self._room_lights_following
+        return RoomLightsDrawn(drawn=drawn, following=following is not None and bool(following()))
+
+    def _wake_room_lights_report(self) -> None:
+        """Thread-safe: the room-lights report takes its next turn now."""
+        if (report_wake := self._room_lights_wake) is not None:
+            loop, wake = report_wake
+            with contextlib.suppress(RuntimeError):  # the loop has closed: nothing to wake
+                loop.call_soon_threadsafe(wake.set)
+
+    async def _room_lights_drawn_loop(self) -> None:
+        """While linked: PUT `room_lights_drawn()` whenever it differs from the last one Central
+        accepted, and at least every ROOM_LIGHTS_DRAWN_REPEAT_SECONDS. A failed PUT is tried at the
+        next turn; it never ends the session or touches the control State."""
+        wake = asyncio.Event()
+        self._room_lights_wake = (asyncio.get_running_loop(), wake)
+        accepted: RoomLightsDrawn | None = None
+        due = 0.0
+        while not self._stop.is_set():
+            wake.clear()
+            report = self.room_lights_drawn()
+            now = asyncio.get_running_loop().time()
+            if report != accepted or now >= due:
+                try:
+                    await self._put_no_content(ROOM_LIGHTS_DRAWN_PATH, report.model_dump(mode="json"))
+                    accepted, due = report, now + ROOM_LIGHTS_DRAWN_REPEAT_SECONDS
+                except Exception as error:
+                    LOG.debug("player: room-lights report not accepted: %s", type(error).__name__)
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(wake.wait(), ROOM_LIGHTS_DRAWN_TURN)
+
+    async def _put_no_content(self, path: str, body: dict) -> None:
+        """One PUT Central answers 204; any other answer is its refusal."""
+        async with self.link.stream(self.session, "PUT", path, body=body) as response:
+            if response.status_code != 204:
+                raise await read_refusal(response, self.central.origin.url(path))
 
     def _render_unbound_diagnostic(self) -> None:
         """Publish Central-link context only on known unbound outputs."""
@@ -738,7 +803,7 @@ class PlayerService:
                     rejected = True
                 self._seen_commits.append(commit)
             bound = {binding.output_id for binding in configuration.bindings}
-            # Every bound Frame's paper profile LUT is fetched before its first draw (decision 0028).
+            # Every bound Frame's paper profile LUT is fetched before its first draw.
             self.luts.want(tuple(binding.lighting.paper.profile for binding in configuration.bindings
                                  if binding.lighting is not None and binding.lighting.paper.profile is not None))
             self._unbound_outputs = tuple(output.output_id for output in self.outputs
@@ -1245,7 +1310,8 @@ class PlayerService:
                     tasks = [asyncio.create_task(self._control_loop()),
                              asyncio.create_task(self._time_loop()),
                              asyncio.create_task(self._media_loop()),
-                             asyncio.create_task(self._observation_loop())]
+                             asyncio.create_task(self._observation_loop()),
+                             asyncio.create_task(self._room_lights_drawn_loop())]
                     if self.link.websocket_connect is not False:
                         tasks.append(asyncio.create_task(self._websocket_loop()))
                     done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
@@ -1475,9 +1541,9 @@ def main():
     signal.signal(signal.SIGINT, finish)
     Tick(GLib, 33, tick)
     service.start()
-    # The room lights from the Node's WALL mirror (decision 0028): their own thread, never blocking
-    # the Player; the bus away keeps the last document (the mirror) and the Player draws on.
-    follow_room_lights(NODE_BUS_URL, service.room_lights_changed)
+    # The room lights from the Node's WALL mirror: their own thread, never blocking the Player; the
+    # bus away keeps the last document (the mirror) and the Player draws on.
+    start_room_lights(service, NODE_BUS_URL)
     # Probes are answered at control dispatch's priority (own one-slot lane), never here.
     ProbeResponder(dispatcher, on_relink=service.request_relink,
                    gl_renderer=lambda: renderer.gl_renderer).start()

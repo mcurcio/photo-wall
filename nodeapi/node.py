@@ -1,24 +1,25 @@
-"""The Node-role session: one component's way to use its bus (E3b design §7.2 node, §9.3, §9.5).
+"""A component's way to use its Node's bus: the Node-role session, and a read-only WALL follower.
 
-A session runs its own thread and event loop and connects forever. Every connect runs **attach**:
-apply every line this component declares (`contracts.node_link.STORE_LINES`: its own slice's line and
-any line handed to `apply_line`, such as apps' Player line from the held Player releases, §7.3), or,
-for a slice whose line another component declares, wait with backoff until every stream of the slice
-exists; then re-put the state it holds plus `birth`, register its methods once as a `nats.micro`
-service named the component (subjects `<component>.method.<name>`), and mark attached. A session that
-reads the wall also creates the Node's WALL mirror at attach when it is absent. Attach runs again on
+Both run on one lifecycle (`_Lifecycle`): their own thread and event loop, a connect that runs
+forever, **attach** at every connect, and stop. A session's attach applies every line this component
+declares (`contracts.node_link.STORE_LINES`: its own slice's line and any line handed to `apply_line`,
+such as apps' Player line from the held Player releases), or, for a slice whose line another
+component declares, waits with backoff until every stream of the slice exists; then re-puts the state
+it holds plus `birth`, registers its methods once as a `nats.micro` service named the component
+(subjects `<component>.method.<name>`), and marks attached. A session that reads the wall, and every
+WallReader, also creates the Node's WALL mirror at attach when it is absent. Attach runs again on
 every reconnect and whenever a publish finds a stream of the slice absent, so `birth` is written in
 every epoch in any start order, and a bus that started empty is refilled by the writer that owns the
-data (§9.5, erratum E-E3B-R2-4).
+data.
 
 The handles never wait on the bus: `Events.emit` enqueues into a bounded outbox (full, it drops its
 oldest) whose events carry headers built once at the emit, so a retried publish keeps its message id
 and the server dedupes it. The session holds state `outbox` = {"dropped": n}, the events the outbox
 dropped since the session started, re-held whenever n changes and published once the outbox is empty,
-so a loss on the Node reaches Central as one counted row (§11 "outbox full"; erratum E-E3B-FR3).
-`State.put` keeps the latest value per key and publishes it. Both publish only while attached, in
-order, retrying until the bus acknowledges; every attach re-puts the held state. Each handled method call emits
-`<line>.record.call` naming its caller. The raw client is never exposed.
+so a loss on the Node reaches Central as one counted row. `State.put` keeps the latest value per key
+and publishes it. Both publish only while attached, in order, retrying until the bus acknowledges;
+every attach re-puts the held state. Each handled method call emits `<line>.record.call` naming its
+caller. The raw client is never exposed.
 
 Two read-only views follow their streams through a cursor reader that starts at each key's latest
 value (`pull.StartAt.LAST_PER_SUBJECT`): `desired`, the slice's desired bucket, written by Central and
@@ -35,13 +36,14 @@ import logging
 import re
 import threading
 from collections import deque
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Coroutine, Mapping
 from dataclasses import dataclass
 from typing import Final, Generic, TypeVar
 
 import nats
 import nats.errors
 import nats.micro
+from nats.aio.client import Client
 from nats.js.errors import NoStreamResponseError, NotFoundError
 from nats.micro.service import ServiceConfig
 
@@ -54,7 +56,10 @@ from nodeapi.buffers import (
     Slice,
     apply,
     declare,
+    desired_prefix,
+    desired_stream,
     role_of,
+    state_prefix,
     table_of,
     wall_mirror_config,
 )
@@ -93,46 +98,154 @@ _WATCH_SECONDS: Final = 1.0
 _COMPONENT = re.compile(r"[a-z]+")
 
 
-async def _connect(url: str, name: str, stopping: asyncio.Event, pause: Callable[[float], Awaitable[None]], *,
-                   disconnected: Callable[[], Awaitable[None]], reconnected: Callable[[], Awaitable[None]]):
-    """Connect to `url` forever (reconnecting by itself once connected), with backoff; None once
-    `stopping` is set. The session's and the WallReader's one connect."""
-    async def on_error(error: Exception) -> None:
-        log.debug("%s: %r", name, error)
+class _Lifecycle:
+    """One component's connection to its Node's bus: its own thread and event loop, a connect that runs
+    forever (the client reconnects by itself once connected), `attach` at every connect and whenever
+    asked, and stop. `attach(client, refresh)` is retried with backoff until it returns; `refresh` is
+    True when it was asked for while already attached. `run(client)` gives the tasks that live as long
+    as the connection does; they wait on `ready` to touch the bus. NodeSession and WallReader each run
+    on one."""
 
-    delay = _BACKOFF[0]
-    while not stopping.is_set():
+    def __init__(self, name: str, url: str, *, attach: Callable[[Client, bool], Awaitable[None]],
+                 run: Callable[[Client], list[Coroutine[object, object, None]]]) -> None:
+        self._name, self._url, self._attach, self._run = name, url, attach, run
+        self._lock = threading.Lock()
+        self._stop_requested = False
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._thread: threading.Thread | None = None
+        self.attached = threading.Event()      # attached on the current connection, read on any thread
+        self.ready = asyncio.Event()           # the same, for the loop's own tasks
+        self._attach_needed = asyncio.Event()
+        self._stopping = asyncio.Event()
+
+    def start(self, thread_name: str) -> None:
+        """Run on its own thread and loop; returns at once. RuntimeError("session_started") twice."""
+        if self._thread is not None:
+            raise RuntimeError("session_started")
+        self._thread = threading.Thread(target=asyncio.run, args=(self._main(),), name=thread_name, daemon=True)
+        self._thread.start()
+
+    def stop(self, timeout: float) -> None:
+        """Stop and join the thread, at most `timeout` seconds."""
+        with self._lock:
+            self._stop_requested = True
+        self.call_soon(self._stopping.set)
+        if self._thread is not None:
+            self._thread.join(timeout)
+
+    def call_soon(self, callback: Callable[[], object]) -> None:
+        """Run `callback` on the loop; thread-safe and never blocks. Nothing runs before the loop
+        starts (its first turn does the work) or after it ends."""
+        with self._lock:
+            loop = self._loop
+        if loop is not None:
+            with contextlib.suppress(RuntimeError):   # the loop already ended
+                loop.call_soon_threadsafe(callback)
+
+    def request_attach(self) -> None:
+        """Attach again, or refresh while attached; thread-safe."""
+        self.call_soon(self._attach_needed.set)
+
+    def lost(self) -> None:
+        """On the loop: the bus no longer holds what attach made; attach again."""
+        self.ready.clear()
+        self.attached.clear()
+        self._attach_needed.set()
+
+    async def pause(self, seconds: float) -> None:
+        """Wait `seconds`, or less once stopping."""
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(self._stopping.wait(), seconds)
+
+    async def _main(self) -> None:
+        with self._lock:
+            self._loop = asyncio.get_running_loop()
+            if self._stop_requested:
+                self._stopping.set()
+        client = await self._connect()
+        if client is None:
+            return
+        self._attach_needed.set()
+        tasks = [asyncio.create_task(self._attacher(client)),
+                 *(asyncio.create_task(work) for work in self._run(client))]
         try:
-            return await nats.connect(
-                servers=[url], allow_reconnect=True, max_reconnect_attempts=-1,
-                reconnect_time_wait=.5, connect_timeout=2, error_cb=on_error,
-                disconnected_cb=disconnected, reconnected_cb=reconnected)
-        except (OSError, nats.errors.Error, asyncio.TimeoutError) as error:
-            log.debug("%s: connect: %r", name, error)
-            await pause(delay)
-            delay = min(delay * 2, _BACKOFF[1])
-    return None
+            await self._stopping.wait()
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(client.close(), _PUBLISH_SECONDS)
+            self.ready.clear()
+            self.attached.clear()
+
+    async def _connect(self) -> Client | None:
+        """Connect to the bus forever, with backoff; None once stopping."""
+        async def on_error(error: Exception) -> None:
+            log.debug("%s: %r", self._name, error)
+
+        delay = _BACKOFF[0]
+        while not self._stopping.is_set():
+            try:
+                return await nats.connect(
+                    servers=[self._url], allow_reconnect=True, max_reconnect_attempts=-1,
+                    reconnect_time_wait=.5, connect_timeout=2, error_cb=on_error,
+                    disconnected_cb=self._on_disconnected, reconnected_cb=self._on_reconnected)
+            except (OSError, nats.errors.Error, asyncio.TimeoutError) as error:
+                log.debug("%s: connect: %r", self._name, error)
+                await self.pause(delay)
+                delay = min(delay * 2, _BACKOFF[1])
+        return None
+
+    async def _on_disconnected(self) -> None:
+        self.ready.clear()
+        self.attached.clear()
+
+    async def _on_reconnected(self) -> None:
+        self._attach_needed.set()
+
+    async def _attacher(self, client: Client) -> None:
+        while True:
+            await self._attach_needed.wait()
+            self._attach_needed.clear()
+            refresh = self.ready.is_set()
+            delay = _BACKOFF[0]
+            while True:
+                try:
+                    await self._attach(client, refresh)
+                    break
+                except Exception as error:   # the bus is away or restarting: attach again
+                    log.info("%s: attach: %r", self._name, error)
+                    await self.pause(delay)
+                    delay = min(delay * 2, _BACKOFF[1])
+            if not refresh:
+                self.ready.set()
+                self.attached.set()
 
 
-async def _watch(client, stream: str, prefix: str, view: _View, value: Callable[[Read], object], *,
-                 ready: asyncio.Event, pause: Callable[[float], Awaitable[None]], name: str) -> None:
-    """Follow `stream` into `view` from each key's latest value, while `ready`. The reader keeps its
+async def _watch(client: Client, stream: str, prefix: str, view: _View, value: Callable[[Read], object], *,
+                 life: _Lifecycle, name: str, answered: Callable[[bool], None] | None = None) -> None:
+    """Follow `stream` into `view` from each key's latest value, while attached. The reader keeps its
     own cursor and recreates its consumer itself; a stream absent or a bus away is read again after a
     pause. The view is never cleared: each key's last value stays until the key is written again.
-    The session's and the WallReader's one watch."""
+    `answered` is told after each read whether it answered."""
     reader = CursorReader(client, stream, None, start=StartAt.LAST_PER_SUBJECT)
     delay = _BACKOFF[0]
     try:
         while True:
-            await ready.wait()
+            await life.ready.wait()
             try:
                 batch = await reader.read(_WATCH_BATCH, timeout=_WATCH_SECONDS)
             except Exception as error:   # the stream is absent or the bus away: read again
                 log.debug("%s: watch %s: %r", name, stream, error)
-                await pause(delay)
+                if answered is not None:
+                    answered(False)
+                await life.pause(delay)
                 delay = min(delay * 2, _BACKOFF[1])
                 continue
             delay = _BACKOFF[0]
+            if answered is not None:
+                answered(True)
             latest = {item.subject.removeprefix(prefix): value(item)
                       for item in batch.items if isinstance(item, Read)}
             if latest:
@@ -165,11 +278,11 @@ class NodeSession:
         desired = [config for config in slice_.buffers if role_of(config) is Role.DESIRED]
         if len(desired) > 1:
             raise ValueError("session_one_desired_bucket")
-        self._desired_stream = desired[0].name if desired else None
-        self._desired_prefix = desired[0].subjects[0].removesuffix(">") if desired else ""
+        self._desired_stream = desired_stream(line) if desired else None
+        self._desired_prefix = desired_prefix(line)
         self._reads_wall = bool(reads_wall)
         self._state_table = table_of(state)
-        self._state_prefix = state.subjects[0].removesuffix(">")
+        self._state_prefix = state_prefix(line)
         self._birth = json.dumps({
             "component": component, "version": release.version, "pipe": slice_.store_line.pipe.value,
             "release_digest": release.digest, "schema_majors": dict(release.schema_majors),
@@ -184,10 +297,9 @@ class NodeSession:
         self._lines: dict[str, Slice] = {}  # line -> the slice `apply_line` handed over, applied at every attach
         self._dirty: dict[str, None] = {}   # state keys put and not yet acknowledged, in put order
         self._count_dropped(0)
-        self._attached = threading.Event()
-        self._stop_requested = False
-        self._loop: asyncio.AbstractEventLoop | None = None
-        self._thread: threading.Thread | None = None
+        self._life = _Lifecycle(component, url, attach=self._attach_or_refresh, run=self._tasks)
+        self._wake = asyncio.Event()
+        self._service = None
         self._events = Events(self)
         self._state = State(self)
         self._desired = DesiredView() if self._desired_stream is not None else None
@@ -213,103 +325,44 @@ class NodeSession:
 
     def start(self) -> None:
         """Run the session on its own thread and loop; returns at once."""
-        if self._thread is not None:
-            raise RuntimeError("session_started")
-        self._thread = threading.Thread(target=asyncio.run, args=(self._main(),),
-                                        name=f"nodeapi-{self._component}", daemon=True)
-        self._thread.start()
+        self._life.start(f"nodeapi-{self._component}")
 
     def stop(self, timeout: float = 5.0) -> None:
-        with self._lock:
-            self._stop_requested = True
-            loop = self._loop
-        if loop is not None:
-            with contextlib.suppress(RuntimeError):   # the loop already ended
-                loop.call_soon_threadsafe(self._stopping.set)
-        if self._thread is not None:
-            self._thread.join(timeout)
+        self._life.stop(timeout)
 
     def wait_attached(self, timeout: float) -> bool:
-        return self._attached.wait(timeout)
+        return self._life.attached.wait(timeout)
 
     def apply_line(self, slice_: Slice) -> None:
         """Hold `slice_` as the slice of a line this component declares (not its own slice's line) and
         apply it now and at every later attach; thread-safe, never blocks. apps hands over the union of
-        the held Player releases' slices during a hot-swap, then the new slice alone (§9.7)."""
+        the held Player releases' slices during a hot-swap, then the new slice alone."""
         if slice_.store_line.declarer != self._component or slice_.line == self._slice.line:
             raise ValueError("session_does_not_declare_line")
         with self._lock:
             self._lines[slice_.line] = slice_
-            loop = self._loop
-        if loop is not None:
-            with contextlib.suppress(RuntimeError):   # the loop already ended
-                loop.call_soon_threadsafe(self._attach_needed.set)
+        self._life.request_attach()
 
     # The session's own loop.
 
-    async def _main(self) -> None:
-        self._stopping = asyncio.Event()
-        self._wake = asyncio.Event()
-        self._ready = asyncio.Event()          # attached on the current connection
-        self._attach_needed = asyncio.Event()
-        self._service = None
-        with self._lock:
-            self._loop = asyncio.get_running_loop()
-            if self._stop_requested:
-                self._stopping.set()
-        client = await _connect(self._url, self._component, self._stopping, self._pause,
-                                disconnected=self._on_disconnected, reconnected=self._on_reconnected)
-        if client is None:
-            return
+    def _tasks(self, client: Client) -> list[Coroutine[object, object, None]]:
         self._client, self._jetstream = client, client.jetstream()
-        self._attach_needed.set()
         self._wake.set()
-        tasks = [asyncio.create_task(self._attacher()), asyncio.create_task(self._publisher())]
+        tasks = [self._publisher()]
         if self._desired is not None:
-            tasks.append(asyncio.create_task(_watch(
-                client, self._desired_stream, self._desired_prefix, self._desired,
-                lambda item: Document(item.data, writer_of(item.headers), item.token),
-                ready=self._ready, pause=self._pause, name=self._component)))
+            tasks.append(_watch(client, self._desired_stream, self._desired_prefix, self._desired,
+                                lambda item: Document(item.data, writer_of(item.headers), item.token),
+                                life=self._life, name=self._component))
         if self._wall is not None:
-            tasks.append(asyncio.create_task(_watch(client, WALL_STREAM, WALL_PREFIX, self._wall, _wall_value,
-                                                    ready=self._ready, pause=self._pause, name=self._component)))
-        try:
-            await self._stopping.wait()
-        finally:
-            for task in tasks:
-                task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-            with contextlib.suppress(Exception):
-                await asyncio.wait_for(client.close(), _PUBLISH_SECONDS)
-            self._attached.clear()
+            tasks.append(_watch(client, WALL_STREAM, WALL_PREFIX, self._wall, _wall_value,
+                                life=self._life, name=self._component))
+        return tasks
 
-    async def _pause(self, seconds: float) -> None:
-        with contextlib.suppress(asyncio.TimeoutError):
-            await asyncio.wait_for(self._stopping.wait(), seconds)
-
-    async def _on_disconnected(self) -> None:
-        self._ready.clear()
-        self._attached.clear()
-
-    async def _on_reconnected(self) -> None:
-        self._attach_needed.set()
-
-    async def _attacher(self) -> None:
-        while True:
-            await self._attach_needed.wait()
-            self._attach_needed.clear()
-            delay = _BACKOFF[0]
-            while True:
-                try:
-                    if self._ready.is_set():   # attached: `apply_line` handed over a line
-                        await self._apply_lines()
-                    else:
-                        await self._attach()
-                    break
-                except Exception as error:   # the bus is away or restarting: attach again
-                    log.info("%s: attach: %r", self._component, error)
-                    await self._pause(delay)
-                    delay = min(delay * 2, _BACKOFF[1])
+    async def _attach_or_refresh(self, client: Client, refresh: bool) -> None:
+        if refresh:   # attached: `apply_line` handed over a line
+            await self._apply_lines()
+        else:
+            await self._attach()
 
     async def _attach(self) -> None:
         """Apply every line this component declares, or wait until its slice's declarer has; create
@@ -322,10 +375,10 @@ class NodeSession:
             delay = ATTACH_BACKOFF_SECONDS[0]
             while missing := await self._missing():
                 log.debug("%s: waiting for %s's declarer: %s absent", self._component, self._slice.line, missing)
-                await self._pause(delay)
+                await self._life.pause(delay)
                 delay = min(delay * 2, ATTACH_BACKOFF_SECONDS[1])
         if self._reads_wall:
-            await declare(self._jetstream, wall_mirror_config())   # create only, never updated (§10)
+            await declare(self._jetstream, wall_mirror_config())   # create only, never updated
         with self._lock:
             held = dict(self._held)
         for key, value in {**held, BIRTH_KEY: self._birth}.items():
@@ -342,8 +395,6 @@ class NodeSession:
                     await service.stop()
                 raise
             self._service = service
-        self._ready.set()
-        self._attached.set()
 
     async def _apply_lines(self) -> None:
         with self._lock:
@@ -385,7 +436,7 @@ class NodeSession:
             await self._wake.wait()
             self._wake.clear()
             while True:
-                await self._ready.wait()
+                await self._life.ready.wait()
                 item = self._next()
                 if item is None:
                     break
@@ -394,13 +445,11 @@ class NodeSession:
                     await self._jetstream.publish(subject, payload, headers=headers, timeout=_PUBLISH_SECONDS)
                 except NoStreamResponseError as error:   # a stream of the slice went absent: attach again
                     log.info("%s: publish %s: %r", self._component, subject, error)
-                    self._ready.clear()
-                    self._attached.clear()
-                    self._attach_needed.set()
+                    self._life.lost()
                     continue
                 except Exception as error:   # kept, retried with its headers (and message id)
                     log.info("%s: publish %s: %r", self._component, subject, error)
-                    await self._pause(delay)
+                    await self._life.pause(delay)
                     delay = min(delay * 2, _BACKOFF[1])
                     continue
                 delay = _BACKOFF[0]
@@ -435,11 +484,7 @@ class NodeSession:
     # The handles' side, on any thread.
 
     def _notify(self) -> None:
-        with self._lock:
-            loop = self._loop
-        if loop is not None:
-            with contextlib.suppress(RuntimeError):   # the loop already ended
-                loop.call_soon_threadsafe(self._wake.set)
+        self._life.call_soon(self._wake.set)
 
     def _emit(self, subject: str, payload: bytes, schema_major: int) -> None:
         full = f"{self._slice.line}.{subject}"
@@ -474,27 +519,23 @@ class NodeSession:
 
 
 class WallReader:
-    """A read-only follower of the Node's WALL mirror for a component that holds no store line (the
-    Player, decision 0028: it reads the room-lights document and writes nothing to the bus). No
-    slice, state, birth or methods. It runs its own thread and loop and connects forever; at every
-    connect it creates the WALL mirror when absent (create only, `wall_mirror_config`, as a session
-    with reads_wall does) and follows WALL into `wall` from each key's latest value
-    (`pull.StartAt.LAST_PER_SUBJECT`), through the session's own connect and watch. The view keeps
-    each key's last value across a bus restart until the key is written again (last good stays) and
-    calls its callbacks on the reader's thread. `start` returns at once; nothing here blocks its
+    """A read-only follower of the Node's WALL mirror for a component that holds no store line and
+    writes nothing to the bus (the Player reads the room-lights document through one). No slice,
+    state, birth or methods. It runs on the session's lifecycle: at every connect it creates the WALL
+    mirror when absent (create only, `wall_mirror_config`, as a session with reads_wall does), then
+    follows WALL into `wall` from each key's latest value through the session's own watch. The view
+    keeps each key's last value across a bus restart until the key is written again (last good stays)
+    and calls its callbacks on the reader's thread. `start` returns at once; nothing here blocks its
     caller."""
 
     def __init__(self, component: str, *, url: str) -> None:
         """ValueError("session_component") unless component matches [a-z]+."""
         if type(component) is not str or not _COMPONENT.fullmatch(component):
             raise ValueError("session_component")
-        self._component, self._url = component, url
+        self._component = component
         self._wall = WallView()
-        self._lock = threading.Lock()
-        self._stop_requested = False
-        self._loop: asyncio.AbstractEventLoop | None = None
-        self._thread: threading.Thread | None = None
-        self._attaches = 0                  # connects that reached the mirror (read by tests)
+        self._answered = False              # the latest watch read on this attach answered
+        self._life = _Lifecycle(component, url, attach=self._attach, run=self._tasks)
 
     @property
     def wall(self) -> WallView:
@@ -505,78 +546,26 @@ class WallReader:
         """Whether the reader follows the mirror now: connected, the mirror there, and its latest
         read answered. False before the first, while the bus is away and while reads fail. Thread-safe;
         never blocks."""
-        ...
+        return self._life.attached.is_set() and self._answered
 
     def start(self) -> None:
         """Run on its own thread and loop; returns at once. RuntimeError("session_started") twice."""
-        if self._thread is not None:
-            raise RuntimeError("session_started")
-        self._thread = threading.Thread(target=asyncio.run, args=(self._main(),),
-                                        name=f"nodeapi-wall-{self._component}", daemon=True)
-        self._thread.start()
+        self._life.start(f"nodeapi-wall-{self._component}")
 
     def stop(self, timeout: float = 5.0) -> None:
         """Stop and join the thread, at most `timeout` seconds."""
-        with self._lock:
-            self._stop_requested = True
-            loop = self._loop
-        if loop is not None:
-            with contextlib.suppress(RuntimeError):   # the loop already ended
-                loop.call_soon_threadsafe(self._stopping.set)
-        if self._thread is not None:
-            self._thread.join(timeout)
+        self._life.stop(timeout)
 
-    async def _main(self) -> None:
-        self._stopping = asyncio.Event()
-        self._ready = asyncio.Event()           # the mirror is there on the current connection
-        self._attach_needed = asyncio.Event()
-        with self._lock:
-            self._loop = asyncio.get_running_loop()
-            if self._stop_requested:
-                self._stopping.set()
-        client = await _connect(self._url, self._component, self._stopping, self._pause,
-                                disconnected=self._on_disconnected, reconnected=self._on_reconnected)
-        if client is None:
-            return
-        self._attach_needed.set()
-        tasks = [asyncio.create_task(self._attacher(client.jetstream())),
-                 asyncio.create_task(_watch(client, WALL_STREAM, WALL_PREFIX, self._wall, _wall_value,
-                                            ready=self._ready, pause=self._pause, name=self._component))]
-        try:
-            await self._stopping.wait()
-        finally:
-            for task in tasks:
-                task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-            with contextlib.suppress(Exception):
-                await asyncio.wait_for(client.close(), _PUBLISH_SECONDS)
+    def _tasks(self, client: Client) -> list[Coroutine[object, object, None]]:
+        return [_watch(client, WALL_STREAM, WALL_PREFIX, self._wall, _wall_value, life=self._life,
+                       name=self._component, answered=self._read)]
 
-    async def _pause(self, seconds: float) -> None:
-        with contextlib.suppress(asyncio.TimeoutError):
-            await asyncio.wait_for(self._stopping.wait(), seconds)
+    async def _attach(self, client: Client, refresh: bool) -> None:
+        self._answered = False
+        await declare(client.jetstream(), wall_mirror_config())   # create only, never updated
 
-    async def _on_disconnected(self) -> None:
-        self._ready.clear()
-
-    async def _on_reconnected(self) -> None:
-        self._attach_needed.set()
-
-    async def _attacher(self, jetstream) -> None:
-        """At every connect: create the WALL mirror when absent, then read."""
-        while True:
-            await self._attach_needed.wait()
-            self._attach_needed.clear()
-            delay = _BACKOFF[0]
-            while True:
-                try:
-                    await declare(jetstream, wall_mirror_config())   # create only, never updated (§10)
-                    break
-                except Exception as error:   # the bus is away or restarting: try again
-                    log.info("%s: wall mirror: %r", self._component, error)
-                    await self._pause(delay)
-                    delay = min(delay * 2, _BACKOFF[1])
-            self._attaches += 1
-            self._ready.set()
+    def _read(self, answered: bool) -> None:
+        self._answered = answered
 
 
 class Events:

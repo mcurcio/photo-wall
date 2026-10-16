@@ -1,12 +1,13 @@
 """A light sensor wired to the Pi, read through Linux IIO and reported on the host line's state as
 LIGHT_SENSOR_KEY.
 
-HostCore samples it every SAMPLE_SECONDS on its own thread (`LightMeter`), never waiting on the bus:
-the first iio device (by name) that reads illuminance (`find_meter`), its lux (`read_lux`; None
-when the read fails or is out of range), put as contracts/room_light.py `LightSensorReading` when
-`worth_reporting`. A Pi with no meter writes no key; a meter that reported and then went away
-reports unavailable. Central turns a reading into the state of the
-room light the Sensor reports (central/room_light/); nothing here knows which.
+HostCore samples it every SAMPLE_SECONDS on its own thread (`start_light_meter`), never waiting on
+the bus: the first iio device (by name) that reads illuminance (`find_meter`), its lux (`read_lux`;
+None when the read fails or is out of range), put as contracts/room_light.py `LightSensorReading`
+when `worth_reporting`. A Pi with no meter writes no key. A failed read (the read refused, or the
+meter gone) keeps the last good reading until UNAVAILABLE_AFTER_FAILED_READS fail in a row, so one
+flaky read never takes the light away; then the meter reports unavailable. Central turns a reading
+into the state of the room light the Sensor reports (central/room_light/); nothing here knows which.
 """
 from __future__ import annotations
 
@@ -33,6 +34,7 @@ SAMPLE_SECONDS: Final = 5.0
 CHANGE_SHARE: Final = 0.05          # a reading is reported when it moves by more than this share...
 CHANGE_LUX_LOW: Final = 1.0         # ...or, below LOW_LUX, by more than this many lux
 LOW_LUX: Final = 20.0
+UNAVAILABLE_AFTER_FAILED_READS: Final = 3   # failed reads in a row before the meter reports unavailable
 # IIO's illuminance channel, unindexed or as channel 0 (tsl2563, isl29018): a processed `_input`,
 # or `_raw` with an optional `_offset` and `_scale` (IIO: lux = (raw + offset) x scale), each of
 # which may also be shared, without the index.
@@ -110,17 +112,24 @@ class LightMeter:
     def __init__(self, put: Callable[[str, bytes], None], *, root: Path = IIO_ROOT) -> None:
         self._put, self._root = put, root
         self._last: LightSensorReading | None = None
+        self._failed = 0                    # failed reads in a row
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
     def sample(self) -> LightSensorReading | None:
-        """One sample: the reading, put when worth reporting. None, and no key put, while no meter
-        has been seen this boot; a meter seen and then gone (unplugged, its driver gone) reads
-        unavailable, so Central never keeps a stale reading as the light's."""
+        """One sample: the reading held, put when worth reporting. None, and no key put, while no
+        meter has been seen this boot. A failed read (a refused read, or a meter seen and then gone:
+        unplugged, its driver gone) keeps the last reading, nothing put, until
+        UNAVAILABLE_AFTER_FAILED_READS fail in a row; then it reads unavailable, so Central never keeps
+        a stale reading as the light's. A good read resets the count."""
         device = find_meter(self._root)
         if device is None and self._last is None:
             return None
-        reading = reading_of(None if device is None else read_lux(device))
+        lux = None if device is None else read_lux(device)
+        self._failed = 0 if lux is not None else self._failed + 1
+        if 0 < self._failed < UNAVAILABLE_AFTER_FAILED_READS:
+            return self._last
+        reading = reading_of(lux)
         if worth_reporting(self._last, reading):
             self._put(LIGHT_SENSOR_KEY, encode_light_sensor(reading))
             self._last = reading
@@ -144,4 +153,13 @@ class LightMeter:
             self._stop.wait(SAMPLE_SECONDS)
 
 
-__all__ = ["IIO_ROOT", "SAMPLE_SECONDS", "LightMeter", "find_meter", "read_lux", "reading_of", "worth_reporting"]
+def start_light_meter(put: Callable[[str, bytes], None], *, root: Path = IIO_ROOT) -> LightMeter:
+    """A LightMeter putting through `put` (the host session's `state.put`), started on its own
+    thread; returns at once."""
+    meter = LightMeter(put, root=root)
+    meter.start()
+    return meter
+
+
+__all__ = ["IIO_ROOT", "SAMPLE_SECONDS", "UNAVAILABLE_AFTER_FAILED_READS", "LightMeter", "find_meter", "read_lux",
+           "reading_of", "start_light_meter", "worth_reporting"]

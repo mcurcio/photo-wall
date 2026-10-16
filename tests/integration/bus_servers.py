@@ -370,6 +370,18 @@ def node_server(tmp: Path, serial: str, hub: BusServer, *, leaf_port: int | None
                      client_url=f"nats://127.0.0.1:{port}", environment=environment)
 
 
+def plain_server(tmp: Path) -> BusServer:
+    """A nats-server with no JetStream on a free loopback port: a bus that answers and on which no
+    stream (a WALL mirror, say) can be created."""
+    nats_server_binary()
+    directory = Path(tmp) / "plain"
+    directory.mkdir(parents=True, exist_ok=True)
+    port = _free_port()
+    config = directory / "plain.conf"
+    config.write_text(f"listen: 127.0.0.1:{port}\n")
+    return BusServer(name="plain", config=config, client_url=f"nats://127.0.0.1:{port}", environment={})
+
+
 async def _connect(url: str, **options) -> Client:
     return await nats.connect(servers=[url], allow_reconnect=False, connect_timeout=2, **options)
 

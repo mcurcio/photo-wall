@@ -1,6 +1,6 @@
-"""The Player's room lights (decision 0028, design rule 2): a light switching redraws the Frames and
-never rides the control State. Through the running PlayerService's test rig (tests/test_player_service.py)
-and player/room_lights.py, the WallView callback the WallReader calls."""
+"""The Player's room lights: a light switching redraws the Frames and never rides the control State.
+Through the running PlayerService's test rig (tests/test_player_service.py) and player/room_lights.py,
+the WallView callback the WallReader calls."""
 from __future__ import annotations
 
 import asyncio
@@ -24,9 +24,9 @@ def document(change: int, on: bool) -> RoomLightsDocument:
 
 
 def test_ten_switches_redraw_ten_times_and_leave_the_delivery_alone(tmp_path):
-    """Acceptance 4: ten documents offered in a row to a running Player redraw ten times; no
-    configuration or plan is applied, the executor's revisions and the delivery sequence stay, and
-    nothing (no Readiness, no Commit) is sent to Central."""
+    """Ten documents offered in a row to a running Player redraw ten times; no configuration or plan
+    is applied, the executor's revisions and the delivery sequence stay, and nothing on the control
+    State (no Readiness, no Commit) is sent to Central."""
     async def check():
         service, server = await rig(tmp_path)
         try:

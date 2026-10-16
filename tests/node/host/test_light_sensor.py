@@ -1,10 +1,11 @@
-"""HostCore's wired light meter (decision 0028), through a fake Linux IIO tree: the reading reaches the
-host line's state, a failing read reports None, no device puts no key, and only a change worth
-reporting is put again."""
+"""HostCore's wired light meter, through a fake Linux IIO tree: the reading reaches the host line's
+state, a meter that keeps failing reports unavailable, no device puts no key, and only a change worth
+reporting is put again. The failed-read debounce is tests/node/host/test_light_sensor_debounce.py."""
 from __future__ import annotations
 
 from appliance.host.bus import HOST_STATE
 from appliance.host.light_sensor import (
+    UNAVAILABLE_AFTER_FAILED_READS,
     LightMeter,
     find_meter,
     read_lux,
@@ -47,9 +48,12 @@ def test_an_input_channel_is_read_as_lux(tmp_path):
     assert find_meter(tmp_path) == path and read_lux(path) == 42.5
 
 
-def test_a_failing_read_reports_none(tmp_path):
+def test_a_meter_that_keeps_failing_reports_unavailable(tmp_path):
     path = device(tmp_path, "iio:device0", in_illuminance_input="not a number\n")
     light, puts = meter(tmp_path)
+    for _ in range(UNAVAILABLE_AFTER_FAILED_READS - 1):
+        assert light.sample() is None
+    assert puts == []
     assert light.sample() == reading_of(None)
     assert [decode_light_sensor(value) for _, value in puts] == [reading_of(None)]
     (path / "in_illuminance_input").write_text("-3\n")                           # out of range
@@ -98,5 +102,7 @@ def test_a_meter_that_reported_and_went_away_reports_unavailable(tmp_path):
     for child in path.iterdir():
         child.unlink()
     path.rmdir()
+    for _ in range(UNAVAILABLE_AFTER_FAILED_READS - 1):
+        assert light.sample() == reading_of(80.0)
     assert light.sample() == reading_of(None)
     assert [decode_light_sensor(value) for _, value in puts] == [reading_of(80.0), reading_of(None)]

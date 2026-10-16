@@ -1,9 +1,9 @@
-"""The host component on its Node's bus (E3b design §7.2 node, §7.3, §9.5; erratum E-E3C-CUT-2).
+"""The host component on its Node's bus.
 
 HostCore declares the host store line: a circular record buffer and its state bucket, which holds
 `birth`, `outbox` and two keys of its own: `base` (the base this boot runs) and, on a Pi with a wired
-light meter, LIGHT_SENSOR_KEY (contracts/room_light.py `LightSensorReading`, decision 0028; put by
-appliance/host/light_sensor.py `LightMeter`). The session connects
+light meter, LIGHT_SENSOR_KEY (contracts/room_light.py `LightSensorReading`; put by
+appliance/host/light_sensor.py `start_light_meter`). The session connects
 forever on its own thread and attaches at every connect, so after a bus restart (which starts empty)
 the line, `birth` and `base` are back in the new epoch with no help from Central. HostCore never
 waits on the bus: `start` returns at once.

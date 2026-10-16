@@ -170,8 +170,8 @@ def _drawn_fit(draw: _Draw):
 
 def _drawn_lighting(draw: _Draw) -> FrameLighting:
     """The lighting a draw shows: its trial's (Position's trial carries the draft lighting), else its
-    binding's. ValueError("frame_lighting") for a binding without one (decision 0028: Central sends
-    every binding's lighting)."""
+    binding's. ValueError("frame_lighting") for a binding without one (Central sends every
+    binding's lighting)."""
     lighting = draw.applied_lighting if draw.applied_lighting is not None else draw.composition.binding.lighting
     if lighting is None:
         raise ValueError("frame_lighting")
@@ -424,7 +424,7 @@ class _Surface:
     def _tagged_change(self, operations: PictureOperations | None) -> int | None:
         """The picture change a draw's tag names (the one home of the Done rule): the change of the
         operations drawn, else the newest this surface drew; None before any. Nothing waits on a
-        Frame's paper profile LUT (decision 0028: it is the Frame's, not the picture change's)."""
+        Frame's paper profile LUT (it is the Frame's, not the picture change's)."""
         if operations is not None:
             self.complete_change = operations.picture_change
         return self.complete_change
@@ -501,13 +501,12 @@ void main() {
     color = vec4(linear_rgb(sample_color.rgb)*alpha, alpha);
 }
 """
-# The final pass (player/geometry.py `final_pixel`, decision 0028): the Frame's paper under the
+# The final pass (player/geometry.py `final_pixel`): the Frame's paper under the
 # room's light, the signal between the panel's black and its white at the matched lux, the fixed
 # rolloff, white balance, contrast, gamma, the dither, then the per-Output mask LAST, so black stays
-# black outside the opening whatever the light (owner 2026-10-10 q2). A test pattern (display
-# tuning, step 0) replaces the composed picture here, so Position's grid and every Frame layer are
-# replaced with no change to the layer pass; the look patterns skip the light and the paper, the
-# Black level skips every step. geometry.py's constants are written in (`_FINAL_CONSTANTS`), so each
+# black outside the opening whatever the light. A test pattern replaces the composed picture here,
+# so Position's grid and every Frame layer are replaced with no change to the layer pass; the look
+# patterns skip the light and the paper, the Black level skips every step. geometry.py's constants are written in (`_FINAL_CONSTANTS`), so each
 # has one home.
 _LUT_UNIT = 1      # the LUT's texture unit; the picture is on unit 0
 _TARGET_LAYOUT_UNIT = 2     # the screen board's raster (contracts.calibration_target.board_raster)
@@ -778,7 +777,7 @@ class NativeRenderer:
         self._decoders: dict[str, _Decoder] = {}
         self._surfaces: dict[str, _Surface] = {}
         self._player_id: str | None = None      # the registered id a calibration target's QR names
-        # The latest room-lights document (decision 0028; None: none received yet, so every Frame
+        # The latest room-lights document (None: none received yet, so every Frame
         # light adds none): every final pass draws with it (`set_room_lights`).
         self._room_lights: RoomLightsDocument | None = None
         self._serial = 0
@@ -907,7 +906,7 @@ class NativeRenderer:
     def set_room_lights(self, document: RoomLightsDocument) -> None:
         """The newest room-lights document (player/room_lights.py, handed over on this thread): every
         Output's final pass draws again with it, from the draw it already shows. It never touches a
-        composition, a draw's grant or the executor (design rule 2)."""
+        composition, a draw's grant or the executor."""
         self._thread()
         self._room_lights = document
         for surface in self._surfaces.values():

@@ -1,32 +1,27 @@
 """Scalar calibration/SDR reference. Production pixels are processed by shaders.
 
-Roadmap 1c (run ledger .claude/runs/display-1c.md, slice R1) adds the Frame fit and the final
-pass, each stated once here and mirrored by player/native.py's shaders:
+The Frame fit and the final pass are each stated once here and mirrored by player/native.py's shaders:
 - **One matrix per fit** (`output_to_picture`): output fractions -> the picture's unit square.
   Corners: the inverse perspective onto the corners with the quarter turn folded in. Cover: the
   inverse of rotate, scale evenly and move onto contracts/frame_fit.py's cover rectangle (the
   Frame profile's aspect), worked in output pixels so a non-square output never skews it.
-- **Per-Frame mask** (`inside_opening`): a Frame draws nothing outside its own opening (owner
-  2026-10-10 q2: outside the Frame is "someone else's territory"), in the position pass.
+- **Per-Frame mask** (`inside_opening`): a Frame draws nothing outside its own opening (outside the
+  Frame is someone else's territory), in the position pass.
 - **Final pass** (`final_pixel`): contracts/node_frame.py PictureOperations in their stated
   order, then the per-Output mask LAST, so black stays black outside every opening whatever
   the picture settings.
 - **Photo fit** (`photo_rect`): each photo's source rectangle, the window `Layer.crop` names, cut
-  from the Frame profile's aspect (contracts/photo_crop.py, the one home of the window; no trim,
-  owner q3). It is the one crop in either fit: in Cover the drawn rectangle has that same aspect,
+  from the Frame profile's aspect (contracts/photo_crop.py, the one home of the window; no trim). It is the one crop in either fit: in Cover the drawn rectangle has that same aspect,
   so the photo is never cropped twice or squeezed.
 
-Room light (decision 0028) replaces the print look's sliders, the Display's LUT and the mat's
-relative lights with one physics path in real units, every Frame always through it (design rule
-3): the Frame's paper (`paper_reflectance`, its profile's LUT first) under E(x), the room's light
+Room light is one physics path in real units, every Frame always through it: the Frame's paper (`paper_reflectance`, its profile's LUT first) under E(x), the room's light
 summed over the Frame's lights (`frame_lights`, `irradiance`: a wash, a far light's mat shadow, a
 close light's inverse square, cone and shadow), as a signal fitted between the panel's black and
 its white at the Display's matched lux (`paper_signal`), the one fixed highlight rolloff
 (`highlight_rolled`), then the Display's white balance, contrast and gamma, the dither
 (`dithered`) and the per-Output mask (`final_pixel`).
 
-Display tuning (decision 0024) adds the test patterns (`pattern_signal`): since decision 0028 a
-look pattern (White, Grey ramp) replaces the photos inside the opening and goes through white
+The test patterns (`pattern_signal`): a look pattern (White, Grey ramp) replaces the photos inside the opening and goes through white
 balance, contrast and gamma only, never the room's light, the paper or the mat (White is the TV's
 own white for the paper match); the Black level is the raw signal, through no step; the per-Output
 mask stays last.
@@ -245,7 +240,7 @@ def picture_source_uv(x: float, y: float, fit: CornersFit | CoverFit, output: Ou
     return left + u*(right-left), top + v*(bottom-top)
 
 
-# -- The physics' shared rules (decision 0028): luminance, a light's colour, the rolloff's curve, the mat's
+# -- The physics' shared rules: luminance, a light's colour, the rolloff's curve, the mat's
 # edge and the paper profile's LUT. Each is stated once here and mirrored by player/native.py's final pass.
 
 LUMA: Final[Linear] = (0.2126, 0.7152, 0.0722)    # Rec. 709 linear luminance: a light's colour at luminance 1
@@ -438,7 +433,7 @@ def final_pixel(photo: Linear, operations: PictureOperations, *, inside: bool, l
                 x: float, y: float, lut: bytes | None = None, opening_uv: tuple[float, float] | None = None,
                 board: BoardDraw | None = None,
                 dither_at: tuple[int, int] | None = None) -> tuple[float, float, float, float]:
-    """One output pixel's final pass (decision 0028), at output point (x, y) (output fractions) of a
+    """One output pixel's final pass, at output point (x, y) (output fractions) of a
     Frame lit by `lights` (`frame_lights`; required when `inside`: ValueError("lights")):
     the paper profile's LUT (`lut_applied`, the bytes of the Frame's `lighting.paper.profile`,
     fully, when held) -> `paper_reflectance` -> `irradiance` -> `paper_signal` (the Display's light:
@@ -521,7 +516,7 @@ def output_pixel(x: float, y: float,
     return final_pixel(colour, operations, inside=inside, lights=lights, x=x, y=y)
 
 
-# ---- Room light (decision 0028): one physics path, the scalar reference player/native.py mirrors ----
+# ---- Room light: one physics path, the scalar reference player/native.py mirrors ----
 
 HIGHLIGHT_KNEE: Final = 0.8         # the fixed rolloff's knee, in signal (a share of the TV's white)
 NO_LIGHT: Final[Linear] = (0.0, 0.0, 0.0)
@@ -715,8 +710,8 @@ def _close_shape(lit: LitLight, point: tuple[float, float], size: tuple[float, f
 def irradiance(lights: FrameLights, x: float, y: float) -> Linear:
     """E at output point (x, y), rgb lux: the sum over the Frame's lights of light_on_frame x shape x
     reaches, at m = transform(to_opening, x, y) x size_mm. Shape: 1 for wash and far; for close,
-    `_close_shape`. Reaches: `_reached` (the mat shadow). No floor (owner, 2026-10-15, Q1 B: the
-    brightness follows the room down). Pure."""
+    `_close_shape`. Reaches: `_reached` (the mat shadow). No floor: the brightness follows the room
+    down. Pure."""
     u, v = transform(lights.to_opening, x, y)
     return _irradiance_at(lights.lights, (u * lights.size_mm[0], v * lights.size_mm[1]), lights.size_mm,
                           lights.depth_mm)
@@ -738,7 +733,7 @@ def _irradiance_at(lights: tuple[LitLight, ...], point: tuple[float, float], siz
 
 def paper_reflectance(photo: Linear, paper: Paper) -> Linear:
     """rho = whiteness x (10^-ink + (1 - 10^-ink) x photo_c), the photo already through the paper
-    profile's LUT when it has one (the only source of saturation, Q2 B). Pure."""
+    profile's LUT when it has one (the only source of saturation). Pure."""
     black = 10 ** -paper.ink_density
     return tuple(paper.whiteness * (black + (1 - black) * value) for value in photo)
 
@@ -753,7 +748,7 @@ def paper_signal(reflectance: Linear, light: Linear, display: DisplayLight) -> L
 
 
 def highlight_rolled(signal: Linear, peak: float) -> Linear:
-    """The one fixed rolloff above the TV's white (Q2 B), keeping each pixel's hue: identity when
+    """The one fixed rolloff above the TV's white, keeping each pixel's hue: identity when
     peak <= 1; otherwise a pixel whose largest channel m is at or below HIGHLIGHT_KNEE is unchanged,
     and one above it is scaled as a whole by rolled_off(m, HIGHLIGHT_KNEE, peak) / m, so
     [HIGHLIGHT_KNEE, peak] lands on [HIGHLIGHT_KNEE, 1] and the channels keep their ratios (a print

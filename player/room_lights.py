@@ -1,21 +1,23 @@
-"""The Player's room lights (decision 0028): the room-lights document Central writes on the hub's WALL
-stream, read from the Node's WALL mirror through nodeapi's read-only `WallReader`.
+"""The Player's room lights: the room-lights document Central writes on the hub's WALL stream, read
+from the Node's WALL mirror through nodeapi's read-only `WallReader`.
 
-It never rides the Player's control State (design rule 2): a light switching ten times redraws the
-Frames ten times and moves no configuration, plan, executor revision, delivery, Readiness or Commit.
-The latest good document stays: a value the codec refuses is logged and dropped, and one equal to
-the held one is not drawn again (WALL is sticky and its mirror replays the last value at every
-connect). Whatever WALL delivers last wins, `change` included: WALL keeps one value per key, so an
-older value cannot arrive after a newer one, and a restored Central whose `change` restarted lower
-is still followed. Until the first document arrives every Frame light adds none (rule 2; 0028's
-costs). The bus away never blocks or stops the Player: the reader connects forever on its own
-thread, and the Node's mirror keeps the last document while Central is away.
+It never rides the Player's control State: a light switching ten times redraws the Frames ten times
+and moves no configuration, plan, executor revision, delivery, Readiness or Commit. The latest good
+document stays: a value the codec refuses is logged and dropped, and one equal to the held one is not
+drawn again (WALL is sticky and its mirror replays the last value at every connect). Whatever WALL
+delivers last wins, `change` included: WALL keeps one value per key, so an older value cannot arrive
+after a newer one, and a restored Central whose `change` restarted lower is still followed. Until the
+first document arrives every Frame light adds none. The bus away never blocks or stops the Player:
+the reader connects forever on its own thread, and the Node's mirror keeps the last document while
+Central is away. The Player reports back what it drew with and whether the reader is following
+(`start_room_lights`, then `PlayerService.room_lights_drawn`).
 """
 from __future__ import annotations
 
 import logging
 import threading
 from collections.abc import Callable
+from typing import Protocol
 
 from contracts.room_light import ROOM_LIGHTS_KEY, RoomLightsDocument, decode_room_lights
 from nodeapi.node import WallReader
@@ -58,6 +60,17 @@ class RoomLights:
             return self._held
 
 
+class RoomLightsSink(Protocol):
+    """What draws the room lights and reports on them (the PlayerService)."""
+
+    def room_lights_changed(self, document: RoomLightsDocument) -> None:
+        """A newer document, on the reader's thread."""
+
+    def watch_room_lights_reader(self, following: Callable[[], bool]) -> None:
+        """The reader's health: `following()` answers, on any thread and without blocking, whether
+        the reader follows the Node's WALL mirror now."""
+
+
 def follow_room_lights(url: str, changed: Callable[[RoomLightsDocument], None]) -> tuple[WallReader, RoomLights]:
     """The composition: WallReader("player", url=url), its wall's on_change -> `RoomLights.offer`;
     started (it returns at once)."""
@@ -68,4 +81,12 @@ def follow_room_lights(url: str, changed: Callable[[RoomLightsDocument], None]) 
     return reader, lights
 
 
-__all__ = ["READER_COMPONENT", "RoomLights", "follow_room_lights"]
+def start_room_lights(sink: RoomLightsSink, url: str) -> WallReader:
+    """The Player's room lights wired to `sink`: each newer document to `room_lights_changed`, and the
+    reader's `following` handed to `watch_room_lights_reader`; started (it returns at once)."""
+    reader, _ = follow_room_lights(url, sink.room_lights_changed)
+    sink.watch_room_lights_reader(reader.following)
+    return reader
+
+
+__all__ = ["READER_COMPONENT", "RoomLights", "RoomLightsSink", "follow_room_lights", "start_room_lights"]

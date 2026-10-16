@@ -72,7 +72,7 @@ class Renderer(Protocol):
 
     def set_player(self, player_id: str | None) -> None: ...   # the Player's registered id; None: none yet
 
-    def set_room_lights(self, document: RoomLightsDocument) -> None: ...   # every Output draws with it (0028)
+    def set_room_lights(self, document: RoomLightsDocument) -> None: ...   # every Output draws with it
 
     def prepare(self, layer: LocalLayer) -> PrepareResult: ...
 
