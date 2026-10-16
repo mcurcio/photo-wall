@@ -79,7 +79,9 @@ def test_stored_scenes_cross_fade_and_captured_copies_keep_their_fades(registry)
     in at the same revision, deriving exactly the fades they carried, ending included; the
     Default Scene restarts on the new revision. Mutation probes: rewrite captured copies to a
     cross-fade (the Run's photo would no longer fade out); skip child Scenes (the snapshot no
-    longer restores); keep the stored revision (the Default Scene keeps its old copy)."""
+    longer restores); keep the stored revision (the Default Scene keeps its old copy); cap a
+    stored Scene's cross-fade at its photo's seconds only (the 6 s Scene keeps a 3 s cross-fade,
+    which its own save refuses)."""
     set_house(registry.db, UTC_HOUSE)
     runtime = Runtime(house=UTC_HOUSE)
     child = Scene(scene_id="child", cycle_seconds=10, transition=Transition(
@@ -94,6 +96,12 @@ def test_stored_scenes_cross_fade_and_captured_copies_keep_their_fades(registry)
                             outro_contributions=(Contribution(target="frame:left", kind="black"),)))
     runtime.set_scene(Scene(scene_id="background", cycle_seconds=30, loop=True,
                             transition=THROUGH_BLACK, contributions=(_media("frame:hall"),)))
+    # Short photos the previous console allowed (a fade no longer than each photo): a save now
+    # refuses them (`Scene.check_transition`), so they are stored as that build stored them.
+    for scene_id, cycle, seconds in (("short", 6, 3), ("tiny", 4, 1.5)):
+        runtime._state.scenes[scene_id] = Scene(
+            scene_id=scene_id, cycle_seconds=cycle, loop=True, contributions=(_media("frame:hall"),),
+            transition=Transition(style="fade_out_and_in", seconds=seconds))
     runtime.set_default_scene("background", 1000)
     run_id = runtime.activate("dissolve", "showing", 1000).run_id
     runtime.activate("dissolve", "waiting", 1001, repeat="queue", expires_at=9000)
@@ -106,6 +114,11 @@ def test_stored_scenes_cross_fade_and_captured_copies_keep_their_fades(registry)
     assert (stored["revision"], stored["transition"]) == (5, {"style": "cross_fade", "seconds": 3})
     assert stored["children"][0]["scene"]["transition"] == {"style": "cross_fade", "seconds": 2}
     assert state["scenes"]["black-end"]["transition"] == {"style": "cross_fade", "seconds": 3}
+    # Capped at each photo's seconds less 5, a cut when none is left, so each saves unchanged.
+    assert state["scenes"]["short"]["transition"] == {"style": "cross_fade", "seconds": 1}
+    assert state["scenes"]["tiny"]["transition"] == {"style": "cross_fade", "seconds": 0}
+    for scene_id in ("short", "tiny"):
+        migrated.set_scene(Scene.model_validate(state["scenes"][scene_id]))
     run = state["runs"][run_id]["scene"]
     assert (run["revision"], run["transition"]) == (4, {"style": "fade_out_and_in", "seconds": 3})
     assert run["children"][0]["scene"]["transition"] == {"style": "fade_out_and_in", "seconds": 2}

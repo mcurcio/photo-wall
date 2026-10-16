@@ -703,9 +703,9 @@ def project(
         settings=settings, frame_outputs=frame_outputs, house=runtime.house,
     )
     try:
-        # A turn starting up to a cycle past the plan's end may start to show inside it (a
-        # cross-fade's lead is at most its cycle).
-        timeline = runtime.timeline(now, window.plan_end + limits.max_cycle_seconds,
+        # A turn starting up to the longest cross-fade lead past the plan's end may start to
+        # show inside it.
+        timeline = runtime.timeline(now, window.plan_end + runtime.longest_lead(),
                                     max_events=limits.max_events)
     except RuntimeBudgetExceeded as error:
         raise PlanningBudgetExceeded("Runtime event budget exceeded") from error

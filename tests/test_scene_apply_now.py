@@ -75,7 +75,8 @@ def test_save_lists_what_plays_an_earlier_version_and_apply_now_replaces_it_at_o
         new = next(_root(runtime, run.run_id) for run in successors
                    if _root(runtime, run.run_id).program_id == old.program_id)
         assert new.started_at == 500 and new.priority == old.priority
-        assert new.root_order > old.root_order                  # drawn over it
+        assert new.root_order == old.root_order                 # takes its place in the order
+    assert view.for_target(FRAME).run_id in {run.run_id for run in successors}   # drawn over it
     on_schedule = next(_root(runtime, run.run_id) for run in successors if run.program_id == "evenings")
     assert on_schedule.program_ends_at == 6000                  # the window's end
     assert on_schedule.stop_at == 60 + 1800                     # the new duration, from the window
@@ -146,6 +147,11 @@ def test_the_default_scene_restarts_itself_and_is_never_listed():
         defaults = [run for run in runtime._state.runs.values()
                     if run.active and run.finish_requested_at is None]
         assert [run.scene.revision for run in defaults] == [revision]
+        # It restarts under the Default Scene's own identity (`_stale_defaults`); Save and apply
+        # now admits no successor for it, even one that would finish at once.
+        assert defaults[0].activation_id.startswith(f"default:evening:1:{revision}:")
+        assert not [run.activation_id for run in runtime._state.runs.values()
+                    if ":scene-" in (run.activation_id or "")]
 
 
 def test_a_stale_revision_is_refused_changed_with_the_stored_scene():
@@ -194,7 +200,7 @@ def test_save_and_apply_now_through_the_routes(registry):
         successors = [run for run in state["runs"].values()
                       if run["scene"]["revision"] == 2 and run["phase"] == "body"]
         assert sorted(run["started_at"] for run in successors) == [now, now]
-        assert min(run["root_order"] for run in successors) > max(
+        assert sorted(run["root_order"] for run in successors) == sorted(
             state["runs"][ref["run_id"]]["root_order"] for ref in playing)
 
         assert client.post("/v1/operator/scenes/evening/apply-now", headers=AUTH,
@@ -224,7 +230,7 @@ def test_the_authored_save_and_apply_now_replaces_in_its_own_transaction(registr
     saved = coordinator.configure_authored_scene(authored_scene(asset), spec.source_ref, (asset,))
     assert saved["earlier_version"] == {"playing": [], "waiting": []}
     show = coordinator.runtime.command_current("activate", "authored-scene", "show")
-    registry.clock.advance(30)
+    registry.clock.advance(10)      # inside the Scene's one 30 s photo: the Run still plays
     revised = authored_scene(asset, revision=2)
     applied = coordinator.configure_authored_scene_and_apply_now(revised, spec.source_ref, (asset,))
     assert applied == {"scene": revised.model_dump(mode="json"),
@@ -233,3 +239,28 @@ def test_the_authored_save_and_apply_now_replaces_in_its_own_transaction(registr
     state = coordinator.runtime.read().export_state()
     assert state["runs"][show.run_id]["finish_requested_at"] == registry.clock.utc()
     assert state["admissions"]["show:scene-2"]["status"] == "admitted"
+
+
+def test_a_replacement_takes_its_predecessors_place_under_a_later_show_now():
+    """A Run replaced by Save and apply now takes its predecessor's place in the stacking order:
+    a Schedule plays "evening", the operator then shows "party" at the same priority (on top: it
+    was admitted later), and Save and apply now of "evening" leaves "party" on top, its successor
+    drawn over only the Run it replaces.
+
+    Mutation probe: a fresh root order for the successor (`_replace` without `root_order`) ->
+    "evening" covers the operator's Show now; the predecessor's admission order (no place above
+    it) -> at the cut the earlier version stays on top of its successor."""
+    runtime = Runtime(house=UTC_HOUSE)
+    runtime.set_scene(_scene())
+    runtime.set_scene(Scene(scene_id="party", cycle_seconds=60, loop=True,
+                            contributions=(Contribution(target=FRAME, source_refs=("party:1",)),)))
+    runtime.create_program(window_program("evenings", "evening", 60, 6000), 30)
+    runtime.advance(100)
+    runtime.activate("party", "party", 200, priority=1)
+    assert runtime.advance(250).for_target(FRAME).scene_id == "party"
+    # At a cut (300): the replaced Run's new turn and its successor's first photo start together.
+    runtime.save_scene_and_apply_now(_scene(2), 300)
+    view = runtime.advance(310)
+    assert view.for_target(FRAME).scene_id == "party"
+    evening = [intent for intent in view.contributions if intent.scene_id == "evening"]
+    assert max(evening, key=lambda intent: intent.precedence).scene_revision == 2

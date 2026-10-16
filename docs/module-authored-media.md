@@ -37,8 +37,10 @@ The Coordinator takes its coordination lock, the Runtime lock, then the media
 lock in one PostgreSQL transaction. It rechecks pool membership, immutable
 metadata and each Frame's original-media compatibility,
 and saves the references and Scene together. Any failure rolls back both.
-The response contains `status: "configured"`, `scene_id`, `revision`,
-`asset_refs` and `created`. Repeating a successful current-source request
+The response is the Scene save's answer, `SceneOnWall` (the stored `scene` and
+the `earlier_version` that still plays: [Runtime](module-runtime.md)), with
+`asset_refs` and `created`; `…/authored/apply-now` saves and applies it at once
+in the same transaction. Repeating a successful current-source request
 creates no extra authored rows. Live Scene saves use the existing Scene PUT.
 
 Per-Frame candidate reads are advisory and may observe different checks.

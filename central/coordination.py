@@ -333,10 +333,9 @@ class Coordinator:
         }
         cues: dict[tuple, dict] = {}
         # A cue starts when its layers do: as each photo starts to show (`Intent.shows_from`, a
-        # cross-fade's lead before its turn, at most a cycle), so the timeline reaches a cycle
-        # past the horizon for the turns that start to show inside it.
-        reach = horizon_end + PlannerLimits().max_cycle_seconds
-        for view in runtime.timeline(now, reach):
+        # cross-fade's lead before its turn), so the timeline reaches the longest lead past the
+        # horizon for the turns that start to show inside it.
+        for view in runtime.timeline(now, horizon_end + runtime.longest_lead()):
             for intent in view.contributions:
                 if (intent.kind == "actuator" or intent.interval_end <= now
                         or intent.shows_from >= horizon_end):

@@ -236,9 +236,11 @@ def test_no_photo_is_on_two_frames_at_once_across_replans(case):
     hand-placed Frames, the first plan's offered layers locked into a re-plan after a pool
     refresh: no photo has
     overlapping extents on two Frames anywhere in either plan, locked layers and kept stills
-    included, and the re-plan never changes a locked layer. Mutation probes: check extents only
-    within one instant (forget earlier picks' extents); plan a slot from its turn while its
-    layer starts at `shows_from` (a cross-fade's photo on two Frames for 3 s)."""
+    included, and the re-plan never changes a locked layer. Mutation probe: check extents only
+    within one instant (forget earlier picks' extents). Planning a slot from its turn while its
+    layer starts at `shows_from` is caught by the deterministic
+    `test_a_cross_fading_photo_is_never_on_two_frames_while_it_dissolves_in`, not reliably here:
+    random examples seldom put the one photo on two Frames within one dissolve."""
     frames, photos, refreshed, kept, cycle, order, later, transition = case
     instance = scene(frames, cycle=cycle, order=order, transition=transition)
     history = WallHistory(kept=kept)

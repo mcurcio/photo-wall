@@ -717,17 +717,32 @@ class Runtime:
         it never stops a Scene): admit `scene` under `identity` at the processed instant, over
         `predecessors`, and only then ask them to finish gracefully beneath it. A protection
         refusal (the Runs in `excluded` left out of the check, as `activate`'s restart leaves out
-        the Runs it replaces) leaves them playing. Answers the admission or the refusal."""
+        the Runs it replaces) leaves them playing. The successor takes its predecessors' place in
+        the stacking order (`_place_over`), so a Run admitted after them at the same priority
+        stays on top of it. Answers the admission or the refusal."""
         now = self._state.now
         denial = self._protected_conflict(scene, priority, False, excluded)
         if denial:
             return _refusal(identity, denial)
         admission = self._admit(scene, identity, now, priority, program_id=program_id,
-                                program_end=program_end)
+                                program_end=program_end,
+                                place=self._place_over(predecessors))
         self._state.runs[admission.run_id].duration_from = duration_from
         for run in predecessors:
             run.scheduled_finish_at = min(run.scheduled_finish_at or now, now)
         return admission
+
+    @staticmethod
+    def _place_over(predecessors: list[_Run]) -> tuple[int, int] | None:
+        """Where in the stacking order a Run replacing `predecessors` goes (root order, admission
+        order): in the topmost one's place, above it and every Run it launched, so it is drawn
+        over them and still beneath any Run admitted after them at its priority. A finishing
+        Run launches no more children, so nothing of it is admitted above its successor. None
+        (the next root order) with nothing to replace."""
+        if not predecessors:
+            return None
+        top = max(predecessors, key=lambda run: (run.root_order, run.descendant_sequence))
+        return top.root_order, top.descendant_sequence + 1
 
     @staticmethod
     def _scene_ids(scene: Scene) -> set[str]:
@@ -1117,6 +1132,18 @@ class Runtime:
         start = float(run.activation_id.rsplit(":", 1)[1])
         return Window(start=start, end=run.program_ends_at), run.activation_id
 
+    def longest_lead(self) -> float:
+        """The longest a photo of any Scene that may play starts to show before its turn (a
+        cross-fade's seconds, `_turn_lead`; an ending dissolves in by the same): over the stored
+        Scenes and the copies Runs and queued activations hold, child Scenes included. A reader
+        of the timeline up to an instant reaches this much further for the turns that start to
+        show before it (the Planner, coordination's cues); 0 when nothing cross-fades."""
+        def lead(scene: Scene) -> float:
+            return max([_turn_lead(scene), *(lead(child.scene) for child in scene.children)])
+        scenes = [*self._state.scenes.values(), *(run.scene for run in self._state.runs.values()),
+                  *(item.scene for item in self._state.queue)]
+        return max((lead(scene) for scene in scenes), default=0.0)
+
     def timeline(
         self, start: float, end: float, *, max_events: int = 10000
     ) -> tuple[RuntimeView, ...]:
@@ -1351,11 +1378,13 @@ class Runtime:
     def _admit(
         self, scene: Scene, identity: str, start: float, priority: int,
         *, parent: _Run | None = None, program_end: float | None = None,
-        program_id: str | None = None,
+        program_id: str | None = None, place: tuple[int, int] | None = None,
     ) -> Admission:
+        """Admit a Run of `scene`. A root Run's place in the stacking order (root order,
+        admission order) is the next root order unless `place` gives it one (`_place_over`)."""
         self._state.sequence += 1
         run_id = _run_id(("child:" if parent else "activation:") + identity)
-        local_order = 0
+        local_order = 0 if place is None else place[1]
         if parent:
             root = self._state.runs[parent.root_id]
             root.descendant_sequence += 1
@@ -1364,8 +1393,9 @@ class Runtime:
             run_id=run_id, root_id=parent.root_id if parent else run_id,
             parent_id=parent.run_id if parent else None,
             scene=scene, started_at=start, priority=priority, order=self._state.sequence,
-            root_order=parent.root_order if parent else self._state.sequence,
-            local_order=local_order,
+            root_order=(parent.root_order if parent
+                        else self._state.sequence if place is None else place[0]),
+            local_order=local_order, descendant_sequence=0 if parent else local_order,
             program_id=program_id, program_ends_at=program_end,
             activation_id=None if parent else identity,
         )

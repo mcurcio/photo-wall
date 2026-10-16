@@ -6,7 +6,10 @@
 -- longer than each photo shows for, the model's bound):
 --   * stored Scenes (`scenes`) become a cross-fade at those seconds (owner, 2026-10-15, asked
 --     whether saved Scenes become cross-fade: "Yes"), at the next revision, so the Default
---     Scene restarts on it and a Program's next window plays it;
+--     Scene restarts on it and a Program's next window plays it; the seconds are capped at each
+--     photo's seconds less 5 (PREPARE_SECONDS, the bound a save checks: `Scene.check_transition`),
+--     a cut when nothing is left, so a short-photo Scene neither holds a third photo per screen
+--     while it dissolves nor is refused when saved unchanged;
 --   * the copies Runs and queued Show now activations captured (`runs[].scene`,
 --     `queue[].scene`) become fade out and in at those seconds, keeping their revision, which
 --     derives exactly the fields they carried, so their offered layers stay as they are.
@@ -20,10 +23,11 @@ CREATE FUNCTION pg_temp.with_transition(scene jsonb, style text, next_revision b
     RETURNS jsonb LANGUAGE plpgsql AS $$
 DECLARE
     first jsonb := scene->'contributions'->0;
-    seconds numeric := LEAST(
+    photo_seconds numeric := COALESCE((scene->>'cycle_seconds')::numeric, 30);
+    seconds numeric := GREATEST(0, LEAST(
         COALESCE((first->>'fade_in_seconds')::numeric, 0)
             + COALESCE((first->>'fade_out_seconds')::numeric, 0),
-        COALESCE((scene->>'cycle_seconds')::numeric, 30));
+        CASE WHEN style = 'cross_fade' THEN photo_seconds - 5 ELSE photo_seconds END));
 BEGIN
     RETURN scene || jsonb_build_object(
         'transition', jsonb_build_object('style', style, 'seconds', seconds),

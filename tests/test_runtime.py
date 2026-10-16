@@ -562,6 +562,22 @@ def test_save_and_apply_now_is_refused_by_another_protecting_run():
     assert own.active and own.finish_requested_at is None and own.scheduled_finish_at is None
 
 
+def test_save_and_apply_now_with_no_window_covering_now_finishes_the_playing_run():
+    """Save and apply now moving the Schedule's window off the current time: nothing replaces its
+    playing Run, which finishes gracefully at once (the new rule applies now).
+
+    Mutation probe: never finish them in `_admit_covering` -> the old window plays on to 01:40."""
+    runtime = Runtime(house=UTC_HOUSE)
+    runtime.set_scene(Scene(scene_id="bg", cycle_seconds=600, loop=True, contributions=(media(),)))
+    created = schedule(runtime, "schedule", "bg", 0, 100)
+    original = runtime.advance(300).for_target("frame:left").run_id
+    saved = runtime.save_program_and_apply_now(created, ProgramDraft(
+        name="schedule", scene_id="bg", when=daily(hm(10), hm(90))), 360)
+    assert not any(identity.startswith(saved.window_prefix) for identity in runtime._state.admissions)
+    assert get_run(runtime.advance(360), original).finish_requested_at == 360
+    assert get_run(runtime.advance(600), original).ended_at == 600     # its turn played out
+
+
 def test_programs_refuse_without_storing_and_compare_the_expected_program():
     runtime = Runtime(house=UTC_HOUSE)
     runtime.set_scene(Scene(scene_id="scene", cycle_seconds=600, loop=True, contributions=(media(),)))
@@ -1471,3 +1487,55 @@ def test_a_transition_must_leave_five_seconds_of_each_photo_free():
     runtime.set_scene(Scene(scene_id="short", cycle_seconds=2, contributions=(media(),)))
     with pytest.raises(ValidationError):
         Scene(scene_id="scene", cycle_seconds=10, transition=Transition(seconds=11))
+
+
+def test_actuators_never_fade_under_a_cross_fade():
+    """An actuator's value has no photo to dissolve: under a cross-fade it starts at its turn and
+    neither fades in nor out, while the photo beside it shows from 3 s before its turn.
+
+    Mutation probe: let actuators take the Transition in `_transition_at` -> they fade."""
+    runtime = Runtime(house=UTC_HOUSE)
+    runtime.set_scene(Scene(scene_id="scene", cycle_seconds=10, loop=True, transition=CROSS,
+                            contributions=(media(), lamp())))
+    runtime.activate("scene", "scene", 0)
+    turns = {(intent.target, intent.interval_start): (intent.shows_from, intent.fade_in_seconds,
+                                                       intent.fade_out_seconds)
+             for view in runtime.timeline(0, 15) for intent in view.contributions}
+    assert turns[("actuator:lamp", 10)] == (10, 0, 0)
+    assert turns[("frame:left", 10)] == (7, 3, 0)
+
+
+def test_a_photo_never_starts_to_show_after_its_turn():
+    """The Intent's own guard: `shows_from` is at most the turn's start (a lead, never a lag).
+
+    Mutation probe: drop `Intent.shows_by_its_turn` -> the late Intent is accepted."""
+    intent = _playing(CROSS).advance(12).for_target("frame:left")
+    assert intent.shows_from == 7
+    with pytest.raises(ValidationError):
+        intent.model_validate({**intent.model_dump(), "shows_from": intent.interval_start + 1})
+
+
+def test_the_timeline_readers_reach_only_as_far_as_the_longest_cross_fade_lead():
+    """The Planner and coordination's cues read the timeline past their end by the longest time
+    a photo starts to show before its turn: 0 with no cross-fade (fade out and in and cuts lead
+    by nothing), else the longest cross-fade among the stored Scenes, child Scenes and the
+    copies Runs hold, never a whole cycle more for every Scene.
+
+    Mutation probes: answer the longest cycle -> 600, not 0; skip child Scenes or captured
+    copies -> the 4 s and 2 s leads go unseen."""
+    runtime = Runtime(house=UTC_HOUSE)
+    runtime.set_scene(Scene(scene_id="scene", cycle_seconds=600, loop=True, transition=THROUGH_BLACK,
+                            contributions=(media(),)))
+    assert runtime.longest_lead() == 0
+    runtime.activate("scene", "scene", 0)
+    runtime.set_scene(Scene(scene_id="scene", revision=2, cycle_seconds=600, loop=True,
+                            transition=Transition(style="cross_fade", seconds=1),
+                            contributions=(media(),)))
+    runtime._state.runs[next(iter(runtime._state.runs))].scene = Scene(
+        scene_id="scene", cycle_seconds=600, loop=True, contributions=(media(),),
+        transition=Transition(style="cross_fade", seconds=2))
+    assert runtime.longest_lead() == 2                      # the Run's copy
+    runtime.set_scene(Scene(scene_id="parent", cycle_seconds=600, children=(Child(scene=Scene(
+        scene_id="child", cycle_seconds=10, transition=Transition(style="cross_fade", seconds=4),
+        contributions=(media("frame:right"),))),)))
+    assert runtime.longest_lead() == 4                      # a child Scene's
