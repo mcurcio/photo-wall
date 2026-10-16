@@ -1,0 +1,7 @@
+# Galleria's test environment (Python 3.13), apart from the repository's (uv.lock):
+#   python3.13 -m venv .galleria-venv && .galleria-venv/bin/pip install -r galleria_tests/requirements.txt
+#   .galleria-venv/bin/pytest galleria_tests
+# The pinned harness brings its own Home Assistant (2026.2.3) and its test dependencies; nats-py is the
+# integration's manifest requirement.
+pytest-homeassistant-custom-component==0.13.316
+nats-py==2.16.0

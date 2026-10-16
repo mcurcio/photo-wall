@@ -348,8 +348,11 @@ NOT_SHIPPED: Final = (
     # 0028): pasted into Home Assistant, never part of a Photo Wall build.
     "integrations/home-assistant/**",
     # Galleria, the Home Assistant integration: HACS installs it from this repository at a release
-    # tag; no Photo Wall package or image build reads it.
+    # tag; no Photo Wall package or image build reads it. Its contract's generator and its own test
+    # environment are development tooling.
     "custom_components/**", "hacs.json",
+    "scripts/galleria_contract.py",  # writes custom_components/galleria/contract.py; never shipped
+    "galleria_tests/**",
 )
 
 

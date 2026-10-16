@@ -125,6 +125,18 @@ Be honest with yourself about what is proven:
 
 Track progress against the [delivery checklist](docs/implementation-checklist.md) and dated [acceptance evidence](docs/evidence/README.md). A passing CI run does not establish physical-Pi, real-Immich, or visible-timing behavior.
 
+## Home Assistant: the Galleria integration
+
+Galleria is the integration for Home Assistant (its future name for this project). It shows your wall in Home Assistant as devices: **Central**, the **Installation**, one **Player** per Pi (with an update you can install on that Pi alone) and one **Frame** per Frame (Showing, and the light on the Frame). It also publishes Home Assistant's lights and light sensors to Central, which the room-light setup listens to. It talks to Central's hub and to each Pi over NATS on your home network, with no broker and no token to make.
+
+Install it with [HACS](https://hacs.xyz):
+
+1. In HACS, open the menu › **Custom repositories**, add `https://github.com/mcurcio/photo-wall` with the type **Integration**, then download **Galleria** and restart Home Assistant.
+2. In **Settings › Devices & services**, press **Add integration** and pick **Galleria**.
+3. Enter Central's address, as you open its console (for example `http://photo-wall.local` or `http://192.168.1.10:8000`). Galleria checks it by reading Central's version; one entry per Central.
+
+Home Assistant needs to reach Central's address and each Pi's address on the home network (Central lists them; each Pi's read-only door is port 4280). The code lives in `custom_components/galleria/`; its tests run in their own environment (`galleria_tests/requirements.txt`).
+
 ## Documentation
 
 Start with the [documentation guide](docs/README.md), or choose a topic:

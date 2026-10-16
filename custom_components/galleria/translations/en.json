@@ -1,0 +1,58 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to Photo Wall's Central",
+        "description": "Enter Central's address, as you open its console.",
+        "data": {
+          "origin": "Central's address"
+        },
+        "data_description": {
+          "origin": "For example http://photo-wall.local or http://192.168.1.10:8000"
+        }
+      }
+    },
+    "error": {
+      "invalid_origin": "Enter an http or https address with a host, and no path.",
+      "cannot_connect": "Central's door did not answer at this address.",
+      "not_central": "Something answered, but it is not a Central this Galleria reads."
+    },
+    "abort": {
+      "already_configured": "This Central is already added."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "central_version": {
+        "name": "Central version"
+      },
+      "room_light": {
+        "state": {
+          "on": "On",
+          "off": "Off",
+          "not_reported": "Not reported"
+        }
+      },
+      "light_meter": {
+        "name": "Light meter"
+      },
+      "frame_light": {
+        "name": "Light on the Frame"
+      }
+    },
+    "binary_sensor": {
+      "hub_connected": {
+        "name": "Hub connected"
+      },
+      "showing": {
+        "name": "Showing"
+      }
+    }
+  },
+  "issues": {
+    "unreadable_player": {
+      "title": "A Player this Galleria cannot read",
+      "description": "The Player on Pi {serial} writes its line in a version this Galleria does not read. Update Galleria in HACS, or install a matching release on that Player."
+    }
+  }
+}
