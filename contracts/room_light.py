@@ -57,6 +57,8 @@ LIGHT_SENSOR_KEY: Final = "light-sensor"        # the host line's state key of L
 LIGHT_SENSOR_BYTES: Final = 64
 ROOM_LIGHTS_DRAWN_PATH: Final = "/v1/player/room-lights-drawn"   # PUT RoomLightsDrawn, the Player's control link
 ROOM_LIGHTS_DRAWN_BYTES: Final = 256
+ROOM_LIGHTS_DRAWN_REPEAT_SECONDS: Final = 30.0  # the Player repeats its report at least this often, and on change
+ROOM_LIGHTS_DRAWN_LEASE_SECONDS: Final = 3 * ROOM_LIGHTS_DRAWN_REPEAT_SECONDS   # older on Central's clock: not reported
 
 RoomLightId = Annotated[str, Field(pattern=rf"^{ROOM_LIGHT_ID_PATTERN}$", title="RoomLightId")]
 Lux = Annotated[float, Field(ge=0, le=LUX_MAX, allow_inf_nan=False, title="Lux")]   # a reading: 0..LUX_MAX
@@ -217,6 +219,7 @@ def _decoded[M: Model](cls: type[M], raw: bytes, limit: int, code: str) -> M:
 
 __all__ = [
     "LIGHT_SENSOR_BYTES", "LIGHT_SENSOR_KEY", "LUX_MAX", "ROOM_LIGHTS_BYTES", "ROOM_LIGHTS_DRAWN_BYTES",
+    "ROOM_LIGHTS_DRAWN_LEASE_SECONDS", "ROOM_LIGHTS_DRAWN_REPEAT_SECONDS",
     "ROOM_LIGHTS_DRAWN_PATH", "ROOM_LIGHTS_KEY", "ROOM_LIGHTS_MAX", "ROOM_LIGHT_ID_PATTERN", "ColourDimmer",
     "ColourEntry", "Dimmer", "DocumentDigest", "FixedColour", "FixedEntry", "LightSensorReading", "Lux",
     "Measured", "MeasuredEntry", "NotReported", "ReportedColour", "Rgb", "RoomLightEntry", "RoomLightId",
