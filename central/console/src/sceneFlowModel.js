@@ -13,6 +13,7 @@ import { sameValue } from "./flow/draftState.js";
 import { editedId, flowKeys } from "./flow/instance.js";
 import { FRAME_ID_PATTERN } from "./frameIds.js";
 import { routeIdName } from "./routes.js";
+import { SCENE, scene as sceneWords, schedule, scheduleName } from "./showWords.js";
 
 /** @typedef {import("./flow/steps.js").Step} Step */
 
@@ -50,6 +51,7 @@ export const SCENE_FIELD_STEP = Object.freeze({
   media: "media",
   cycle: "playback",
   loop: "playback",
+  transition: "playback",
   fade: "playback",
   ending: "playback",
   endingSeconds: "playback",
@@ -128,7 +130,8 @@ const RELOADED = [
   [SCENE_ANSWER_LABELS.media, (draft) => draft.selections],
   [SCENE_ANSWER_LABELS.cycle, (draft) => Number(draft.cycleSeconds)],
   [SCENE_ANSWER_LABELS.loop, (draft) => draft.loop],
-  [SCENE_ANSWER_LABELS.fade, (draft) => Number(draft.fadeSeconds)],
+  // The Review answer names the style with the seconds ("Cross-fade, 1.5 s"): one value.
+  [SCENE_ANSWER_LABELS.fade, (draft) => `${draft.transitionStyle}:${Number(draft.fadeSeconds)}`],
   [SCENE_ANSWER_LABELS.ending, (draft) =>
     (draft.ending === "none" ? "none" : `${draft.ending}:${Number(draft.endingSeconds)}`)],
   [SCENE_ANSWER_LABELS.keepLastPhoto, (draft) => draft.keepLastPhoto],
@@ -147,4 +150,51 @@ const RELOADED = [
  */
 export function changedSceneFields(before, after) {
   return RELOADED.filter(([, read]) => !sameValue(read(before), read(after))).map(([label]) => label);
+}
+
+/**
+ * What still plays an earlier version of a just-saved Scene, in the operator's words: each
+ * Schedule by its name, "Show now", and "a waiting Show now" for a queued one (a Scene save's
+ * answer, central/runtime.py `SceneOnWall.earlier_version`). Each name once; empty when the
+ * wall already follows the saved Scene (or the answer carries none).
+ *
+ * @param {{playing?: {run_id: string, started_by: "schedule"|"show_now"}[], waiting?: string[]}|null|undefined} earlier
+ * @param {object|null|undefined} runtime the served runtime (snapshot.runtime): a Schedule's
+ *   Run names its Program there
+ * @returns {string[]}
+ */
+export function earlierVersionNames(earlier, runtime) {
+  const runs = runtime?.current?.runs ?? [];
+  const named = (ref) => {
+    if (ref.started_by !== "schedule") {
+      return SCENE.earlierShowNow;
+    }
+    const programId = runs.find((run) => run.run_id === ref.run_id)?.program_id ?? null;
+    return programId === null ? SCENE.earlierSchedule : schedule("named", { name: scheduleName(runtime, programId) });
+  };
+  const names = [
+    ...(earlier?.playing ?? []).map(named),
+    ...((earlier?.waiting ?? []).length > 0 ? [SCENE.earlierWaiting] : []),
+  ];
+  return [...new Set(names)];
+}
+
+/**
+ * The notice after a Scene save whose answer says something still plays an earlier version
+ * (`earlierVersionNames`), or null when nothing does. After a plain Save it offers Save and
+ * apply now; after Save and apply now, what is left is what Central could not replace (a Scene
+ * keeping its Frames refused the new version: central/runtime.py `_replace`).
+ *
+ * @param {string} sceneId
+ * @param {Parameters<typeof earlierVersionNames>[0]} earlier
+ * @param {object|null|undefined} runtime
+ * @param {boolean} applied whether the save was Save and apply now
+ * @returns {{names: string[], message: string}|null}
+ */
+export function earlierNotice(sceneId, earlier, runtime, applied) {
+  const names = earlierVersionNames(earlier, runtime);
+  if (names.length === 0) {
+    return null;
+  }
+  return { names, message: sceneWords(applied ? "earlierKept" : "earlier", { id: sceneId, names: names.join(", ") }) };
 }

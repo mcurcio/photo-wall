@@ -11,8 +11,9 @@ single-window Program routes. One route per question:
 | PUT | /v1/operator/default-scene | DefaultSceneRequest | 204 | 422 unknown-scene |
 
 PUT saves from the next window: the window playing now keeps its end (R10). apply-now saves and
-applies at once: the window playing now finishes gracefully and the new rule's window covering now
-(if any) is admitted at once. DELETE finishes the Program's Run gracefully now and forgets it.
+applies at once: the new rule's window covering now (if any) is admitted at once, and only then
+does the window playing now finish gracefully (a refused window leaves it playing; with no window
+covering now it finishes; `Runtime._replace`, shared with a Scene's Save and apply now). DELETE finishes the Program's Run gracefully now and forgets it.
 The stored Programs and the Default Scene are read through the operator snapshot's runtime
 document (central/operator_snapshot.py `runtime_document`), with each Program's current and next
 window worked out in Central; there is no list route.

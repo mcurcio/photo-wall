@@ -12,6 +12,7 @@ import logging
 import math
 from contextlib import contextmanager
 from dataclasses import dataclass
+from typing import Literal
 
 from psycopg.types.json import Jsonb
 from pydantic import Field, ValidationError
@@ -48,6 +49,7 @@ from central.wall_plan.order import PhotoShowing
 from central.wall_plan.ports import FitSettingsStore, ShownHistory
 from central.wall_plan.selection import crop_limit_of
 from contracts.models import (
+    PREPARE_SECONDS,
     Commit,
     IdentifyOutput,
     Layer,
@@ -66,7 +68,7 @@ LOG = logging.getLogger(__name__)
 class CoordinationLimits(Model):
     horizon_seconds: float = Field(default=300, gt=0, le=3600)
     renewal_seconds: float = Field(default=30, gt=0, le=60)
-    prepare_seconds: float = Field(default=5, gt=0, le=30)
+    prepare_seconds: float = Field(default=PREPARE_SECONDS, gt=0, le=30)
     readiness_seconds: float = Field(default=2, gt=0, le=10)
     max_uncertainty: float = Field(default=0.1, gt=0, le=1)
     max_offers: int = Field(default=64, ge=1, le=256)
@@ -185,7 +187,21 @@ class Coordinator:
     def configure_authored_scene(
         self, scene: Scene, source_ref: str, asset_ids: tuple[str, ...]
     ) -> dict:
-        """Atomically author media refs and adopt their Scene definition."""
+        """Atomically author media refs and save their Scene definition (`Runtime.save_scene`):
+        the answer is the `SceneOnWall` with the authored refs (`asset_refs`, `created`)."""
+        return self._author_scene("save_scene", scene, source_ref, asset_ids)
+
+    def configure_authored_scene_and_apply_now(
+        self, scene: Scene, source_ref: str, asset_ids: tuple[str, ...]
+    ) -> dict:
+        """As `configure_authored_scene`, saved and applied at once in the same transaction
+        (`Runtime.save_scene_and_apply_now`)."""
+        return self._author_scene("save_scene_and_apply_now", scene, source_ref, asset_ids)
+
+    def _author_scene(
+        self, command: Literal["save_scene", "save_scene_and_apply_now"], scene: Scene,
+        source_ref: str, asset_ids: tuple[str, ...],
+    ) -> dict:
         try:
             requested = tuple(asset_ids)
             requested_set = set(requested)
@@ -204,13 +220,10 @@ class Coordinator:
             profiles = self._authored_scene_profiles(conn, scene)
             authored = self.media.author_candidates_in(conn, source_ref, requested)
             self._validate_authored_scene(conn, scene, requested, profiles)
-            runtime.set_scene(scene)
-            return {
-                "status": "configured",
-                "scene_id": scene.scene_id,
-                "revision": scene.revision,
-                **authored,
-            }
+            # One Runtime command, at the post-lock cut on Central's clock (as
+            # RuntimeStore.command_current).
+            on_wall = getattr(runtime, command)(scene, self.clock.utc())
+            return {**on_wall.model_dump(mode="json"), **authored}
 
     @contextmanager
     def _transaction(self):
@@ -319,11 +332,15 @@ class Coordinator:
             if b.output_id in c.enabled_outputs
         }
         cues: dict[tuple, dict] = {}
-        for view in runtime.timeline(now, horizon_end):
+        # A cue starts when its layers do: as each photo starts to show (`Intent.shows_from`, a
+        # cross-fade's lead before its turn), so the timeline reaches the longest lead past the
+        # horizon for the turns that start to show inside it.
+        for view in runtime.timeline(now, horizon_end + runtime.longest_lead()):
             for intent in view.contributions:
-                if intent.kind == "actuator" or intent.interval_end <= now:
+                if (intent.kind == "actuator" or intent.interval_end <= now
+                        or intent.shows_from >= horizon_end):
                     continue
-                key = (intent.root_id, intent.interval_start)
+                key = (intent.root_id, intent.shows_from)
                 cue = cues.setdefault(key, {"members": {}, "ends": {}, "end": intent.interval_end})
                 cue["end"] = max(cue["end"], intent.interval_end)
                 cue["members"][assignment_id(intent)] = owners.get(intent.target)

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import re
 from collections.abc import Mapping
 from datetime import timedelta
 from functools import lru_cache
@@ -19,7 +20,7 @@ from pydantic import BaseModel, ConfigDict, Field, FiniteFloat, model_validator
 from central.house_time import calculator
 from central.house_time.model import HouseTime, LocalDateTime, When, Window
 from central.wall_plan.selection import SceneSelection
-from contracts.models import TARGET_ID_PATTERN, AfterEnd
+from contracts.models import PREPARE_SECONDS, TARGET_ID_PATTERN, AfterEnd
 
 if TYPE_CHECKING:
     from central.execution_outcomes import ExecutionOutcome
@@ -48,7 +49,8 @@ class FrozenModel(BaseModel):
 
 
 class Contribution(FrozenModel):
-    """Authored intent; references identify centrally owned versioned definitions."""
+    """Authored intent; references identify centrally owned versioned definitions. How a photo
+    fades is its Scene's (`Scene.transition`), never a Contribution's."""
 
     target: Target
     kind: Literal["media", "black", "actuator"] = "media"
@@ -56,8 +58,6 @@ class Contribution(FrozenModel):
     source_refs: tuple[Identifier, ...] = ()
     asset_refs: tuple[Identifier, ...] = ()
     opacity: Unit = 1
-    fade_in_seconds: Seconds = 0
-    fade_out_seconds: Seconds = 0
     after_end: AfterEnd = "leave_as_is"
     ramp_from: Unit = 0
     ramp_to: Unit = 0
@@ -75,6 +75,35 @@ class Contribution(FrozenModel):
         if self.after_end != "leave_as_is" and self.kind == "actuator":
             raise ValueError("an actuator contribution keeps nothing on a Frame")
         return self
+
+
+TransitionStyle = Literal[
+    "cross_fade",        # the next photo dissolves in over the current one, which stays at full
+    "fade_out_and_in",   # through black: the current fades out over half the seconds, the next
+                         # fades up over the other half
+]
+
+
+class Transition(FrozenModel):
+    """How one photo gives way to the next on a Frame (owner, 2026-10-15: "Let's make cross fade
+    an option"). Runtime alone turns it into each photo's start and fades (`_transition_at`)."""
+
+    style: TransitionStyle = "cross_fade"
+    seconds: Seconds = 0          # 0: a cut
+
+
+class SceneWriteRefused(Exception):
+    """A Scene save refused; nothing changed. `reason` "changed": the stored revision moved on
+    (`current` is the stored Scene; HTTP 409); "transition_too_long": the Transition is longer
+    than `max_seconds`, each photo's seconds less PREPARE_SECONDS, which keeps a Player from
+    holding more than two photos per screen while it gets the next one ready (HTTP 422)."""
+
+    def __init__(self, reason: Literal["changed", "transition_too_long"], *,
+                 current: Scene | None = None, max_seconds: float | None = None) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.current = current
+        self.max_seconds = max_seconds
 
 
 class Child(FrozenModel):
@@ -95,6 +124,8 @@ class Scene(FrozenModel):
     protect_frames: bool = False
     # Roadmap 5a: how this Scene's Frames pick from its photos (order, no-repeat days, crop limit).
     selection: SceneSelection = SceneSelection()
+    # How each photo gives way to the next, the ending's included (one value for every Frame).
+    transition: Transition = Transition()
 
     @model_validator(mode="after")
     def coherent_cycle(self) -> Self:
@@ -105,7 +136,21 @@ class Scene(FrozenModel):
             raise ValueError("children must start before the parent cycle ends")
         if self.outro_contributions and self.outro_seconds == 0:
             raise ValueError("outro contributions require a positive outro duration")
+        # Every layer's fades fit it (contracts Layer): a cross-faded photo shows for its turn and
+        # the Transition before it. The tighter bound is a save's (`check_transition`).
+        if self.transition.seconds > self.cycle_seconds:
+            raise ValueError("a Transition may last no longer than each photo shows for")
         return self
+
+    def check_transition(self) -> None:
+        """SceneWriteRefused "transition_too_long" unless this Scene's Transition, and each child
+        Scene's, is a cut or leaves PREPARE_SECONDS of each photo's turn free of it. Checked when
+        a Scene is saved, never when one stored or captured is read back."""
+        if self.transition.seconds > 0 and self.transition.seconds > self.cycle_seconds - PREPARE_SECONDS:
+            raise SceneWriteRefused("transition_too_long",
+                                    max_seconds=max(0.0, self.cycle_seconds - PREPARE_SECONDS))
+        for child in self.children:
+            child.scene.check_transition()
 
     @property
     def participants(self) -> frozenset[str]:
@@ -220,8 +265,12 @@ class Intent(FrozenModel):
     logical_position: Seconds
     cycle_index: int
     cycle_position: Seconds
-    interval_start: FiniteFloat
-    interval_end: FiniteFloat
+    interval_start: FiniteFloat     # the turn (the layer's identity, central/planner.py)
+    interval_end: FiniteFloat       # the cut: the layer's end
+    # When the photo starts to show: a cross-fade's seconds before its turn when it follows a
+    # photo of its Run (or, an ending, the Run's last photo), else the turn's start
+    # (`_transition_at`). The layer's start.
+    shows_from: FiniteFloat
     opacity: Unit
     base_opacity: Unit
     fade_in_seconds: Seconds
@@ -232,6 +281,12 @@ class Intent(FrozenModel):
     # Roadmap 5a: the Intent's own Scene's selection (a child Scene's is its own), copied by
     # `timeline` (slice O1); the Planner reads it.
     selection: SceneSelection = SceneSelection()
+
+    @model_validator(mode="after")
+    def shows_by_its_turn(self) -> Self:
+        if self.shows_from > self.interval_start:
+            raise ValueError("a photo starts to show no later than its turn")
+        return self
 
     @property
     def precedence(self) -> tuple[int, int, int]:
@@ -265,6 +320,28 @@ class RuntimeView(FrozenModel):
 
     def for_target(self, target: str) -> Intent | None:
         return next((intent for intent in self.visible if intent.target == target), None)
+
+
+class RunRef(FrozenModel):
+    """A root Run playing an earlier revision of a saved Scene."""
+    run_id: str
+    scene_revision: int
+    started_by: Literal["schedule", "show_now"]   # a Default Scene Run restarts itself on save
+
+
+class EarlierVersion(FrozenModel):
+    """What still plays an earlier revision of a saved Scene: root Runs showing one (not those
+    already finishing) and queued Show now activations holding an older copy. Both empty: the
+    wall already follows the saved revision."""
+    playing: tuple[RunRef, ...] = ()
+    waiting: tuple[str, ...] = ()
+
+
+class SceneOnWall(FrozenModel):
+    """A Scene write's answer (Save, and Save and apply now): the Scene as stored and what on the
+    wall still plays an earlier version of it."""
+    scene: Scene
+    earlier_version: EarlierVersion = EarlierVersion()
 
 
 # The operator's read keeps ended Runs for this long, and Runtime forgets a root Run (with its
@@ -324,6 +401,9 @@ class _Run(_MutableModel):
     program_ends_at: FiniteFloat | None = None
     activation_id: str | None = None
     scheduled_finish_at: FiniteFloat | None = None
+    # When the Scene's duration counts from: the start of the Run this one replaced (Save and
+    # apply now, `Runtime._replace`), so a Show now keeps its original start; None: `started_at`.
+    duration_from: FiniteFloat | None = None
     phase: Literal["body", "outro", "completed", "cancelled"] = "body"
     cycle_index: int = 0
     launched_children: set[int] = Field(default_factory=set)
@@ -350,24 +430,83 @@ class _Run(_MutableModel):
     def stop_at(self) -> float | None:
         times = [self.program_ends_at, self.scheduled_finish_at, self.finish_requested_at]
         if self.scene.duration_seconds is not None:
-            times.append(self.started_at + self.scene.duration_seconds)
+            origin = self.started_at if self.duration_from is None else self.duration_from
+            times.append(origin + self.scene.duration_seconds)
         return min((t for t in times if t is not None), default=None)
 
 
+def _turn_lead(scene: Scene) -> float:
+    """How long before its turn a photo that follows another of its Run starts to show: a
+    cross-fade's seconds; none for fade out and in."""
+    return scene.transition.seconds if scene.transition.style == "cross_fade" else 0.0
+
+
+def _last_turn(run: _Run, stop: float | None) -> bool:
+    """Whether the Run's current body turn is its last, the Run stopping at `stop` (design rule
+    1: a turn begins when its photo starts to show). It is when the Scene does not loop, or the
+    stop comes no later than the next photo would start to show (the cut less a cross-fade), or
+    is the cut itself; a stop inside a dissolve lets the photo dissolving in play its turn, so
+    nothing snaps back."""
+    if not run.scene.loop:
+        return True
+    return stop is not None and (stop <= run.cycle_end - _turn_lead(run.scene) or stop == run.cycle_end)
+
+
+def _ending_dissolves(scene: Scene, target: str) -> bool:
+    """Whether the Scene's ending on `target` dissolves in over its last body photo there: a
+    cross-fade, a body photo on that Frame, and an ending that starts as the body ends (no child
+    Scene to wait for)."""
+    return (scene.transition.style == "cross_fade" and scene.transition.seconds > 0
+            and not scene.children
+            and any(c.target == target for c in scene.contributions)
+            and any(c.target == target for c in scene.outro_contributions))
+
+
+def _transition_at(run: _Run, contribution: Contribution, start: float,
+                   end: float) -> tuple[float, float, float]:
+    """The one rule turning a Scene's Transition into a photo's (shows from, fade in, fade out)
+    for its turn [start, end) (design "What fade seconds means"), before the final-turn hold
+    (`_may_hold_to_the_end`).
+
+    Cross-fade, F seconds: a photo following one of its Run shows from F before its turn and
+    fades in over F; a Run's first photo fades in over F from its turn (over what plays
+    beneath); a photo stays at full to its cut unless it is the Run's last, which fades out over
+    its last F, or under an ending that dissolves in over it. An ending's photo enters the same
+    way, then a photo ending fades out over the rest of the ending. Fade out and in: every body
+    photo fades in and out over F/2 each; an ending's photo fades in over F/2 and out over the
+    rest; a black ending cuts. Actuators never fade."""
+    if contribution.kind == "actuator":
+        return start, 0.0, 0.0
+    scene = run.scene
+    seconds = scene.transition.seconds
+    if scene.transition.style == "fade_out_and_in":
+        if run.phase == "body":
+            return start, seconds / 2, seconds / 2
+        if contribution.kind == "black":
+            return start, 0.0, 0.0
+        fade_in = min(seconds / 2, end - start)
+        return start, fade_in, end - start - fade_in
+    if run.phase == "outro":
+        shows_from = start - seconds if _ending_dissolves(scene, contribution.target) else start
+        fade_in = min(seconds, end - shows_from)
+        return shows_from, fade_in, (end - shows_from - fade_in if contribution.kind == "media" else 0.0)
+    shows_from = start - seconds if run.cycle_index > 0 else start
+    if not _last_turn(run, run.stop_at) or _ending_dissolves(scene, contribution.target):
+        return shows_from, seconds, 0.0
+    return shows_from, seconds, min(seconds, end - shows_from - seconds)
+
+
 def _may_hold_to_the_end(run: _Run, contribution: Contribution) -> bool:
-    """A kept photo in its Run's final body cycle, with no ending of its Scene on its Frame:
-    it plans no fade-out unless another Run plays on the Frame at the cycle's end
-    (`Runtime._playing_at`), so it never dips to black and snaps back to itself. The cycle is
-    final when the Scene does not loop, or when the Run's stop (Program end, duration,
-    scheduled finish or Finish) falls within it; a Finish, or a follower that appears later,
-    revises the cycle's fade-out, which the planner allows on an offered layer
-    (`planner.REVISABLE`)."""
+    """A kept photo in its Run's last body turn (`_last_turn`), with no ending of its Scene on
+    its Frame: it plans no fade-out unless another Run plays on the Frame at the turn's end
+    (`Runtime._playing_at`), so it never dips to black and snaps back to itself. A Finish, or a
+    follower that appears later, revises the turn's fade-out, which the planner allows on an
+    offered layer (`planner.REVISABLE`)."""
     if run.phase != "body" or contribution.after_end != "keep_this_photo":
         return False
     if any(ending.target == contribution.target for ending in run.scene.outro_contributions):
         return False
-    stop = run.stop_at
-    return not run.scene.loop or (stop is not None and stop <= run.cycle_end)
+    return _last_turn(run, run.stop_at)
 
 
 class _Queued(_MutableModel):
@@ -421,6 +560,20 @@ def _finite(value: float) -> float:
 
 def _run_id(identity: str) -> str:
     return "run-" + hashlib.sha256(identity.encode()).hexdigest()[:32]
+
+
+_SCENE_MARK: Final = re.compile(r":scene-\d+$")
+
+
+def _successor_identity(identity: str, scene_revision: int) -> str:
+    """The activation identity of the Run replacing the one admitted under `identity`, on
+    `scene_revision` of its Scene (Save and apply now): deterministic and distinct per revision.
+    A Schedule window's keeps the window's start last (`Runtime._playing_window` reads it); an
+    operator identity never holds ':' (contracts Identifier), so the mark cannot collide."""
+    if identity.startswith(PROGRAM_PREFIX):
+        head, start = identity.rsplit(":", 1)
+        return f"{_SCENE_MARK.sub('', head)}:scene-{scene_revision}:{start}"
+    return f"{_SCENE_MARK.sub('', identity)}:scene-{scene_revision}"
 
 
 def _refusal(activation_id: str, denial: tuple[str, str]) -> Admission:
@@ -486,14 +639,110 @@ class Runtime:
     def set_scene(self, scene: Scene) -> None:
         """Store a Scene; a save must move its revision past the stored one.
 
-        A revision at or below the stored one is refused (`scene_revision_conflict`)
-        so a save built from an older copy never silently replaces a newer one,
-        unless it is the stored Scene exactly (an idempotent retry).
+        A revision at or below the stored one is refused (SceneWriteRefused "changed", with
+        the stored Scene) so a save built from an older copy never silently replaces a newer
+        one, unless it is the stored Scene exactly (an idempotent retry). A Transition too long
+        for its photos is refused (SceneWriteRefused "transition_too_long").
         """
         stored = self._state.scenes.get(scene.scene_id)
         if stored is not None and scene.revision <= stored.revision and scene != stored:
-            raise RuntimeConflict("scene_revision_conflict")
+            raise SceneWriteRefused("changed", current=stored)
+        scene.check_transition()
         self._state.scenes[scene.scene_id] = scene
+
+    def save_scene(self, scene: Scene, now: float) -> SceneOnWall:
+        """Save (R4: "Authored configuration edits default to the next Run"): store `scene`
+        (`set_scene`'s refusals) at `now` and answer what still plays an earlier version of it.
+        Only a Default Scene Run restarts on it (`_stale_defaults`)."""
+        self.advance(now)
+        self.set_scene(scene)
+        self.advance(now)
+        return self.scene_on_wall(scene.scene_id)
+
+    def save_scene_and_apply_now(self, scene: Scene, now: float) -> SceneOnWall:
+        """Save and apply now: store `scene` as `save_scene` does, then replace each root Run
+        playing an earlier version of it at once (`_replace`: its successor, on the stored
+        revision, is admitted over it before it finishes gracefully beneath it; a refused one
+        leaves it playing, and it is still answered). A Schedule's successor keeps the window's
+        end; a Show now's keeps its original start, so it ends there plus the new duration.
+        Queued Show now activations take the new copy. An identical retry replaces nothing."""
+        self.advance(now)
+        self.set_scene(scene)
+        stored = self._state.scenes[scene.scene_id]
+        earlier = self._earlier_runs(stored)
+        replaced = {run.run_id for run in earlier}
+        for run in earlier:
+            identity = _successor_identity(run.activation_id or run.run_id, stored.revision)
+            admission = self._replace(
+                [run], stored, identity, run.priority, replaced,
+                program_id=run.program_id, program_end=run.program_ends_at,
+                duration_from=run.started_at if run.duration_from is None else run.duration_from)
+            if admission.status == "admitted":
+                self._state.admissions[identity] = admission
+                replaced.add(admission.run_id)
+        for item in self._earlier_queued(stored):
+            item.scene = stored
+        self.advance(now)
+        return self.scene_on_wall(scene.scene_id)
+
+    def scene_on_wall(self, scene_id: str) -> SceneOnWall:
+        """The stored Scene and what on the wall still plays an earlier version of it, at the
+        processed instant: root Runs showing an older revision and not already finishing, and
+        queued Show now activations holding an older copy. A Default Scene Run is never listed:
+        it restarts itself on a save (`_stale_defaults`)."""
+        stored = self._state.scenes[scene_id]
+        return SceneOnWall(scene=stored, earlier_version=EarlierVersion(
+            playing=tuple(RunRef(run_id=run.run_id, scene_revision=run.scene.revision,
+                                 started_by="schedule" if run.program_id is not None else "show_now")
+                          for run in self._earlier_runs(stored)),
+            waiting=tuple(item.activation_id for item in self._earlier_queued(stored))))
+
+    def _earlier_runs(self, scene: Scene) -> list[_Run]:
+        """The root Runs playing an earlier revision of `scene`, in admission order: not a Default
+        Scene's, and not finishing."""
+        return sorted((run for run in self._state.runs.values()
+                       if run.parent_id is None and run.phase == "body" and run.finish_requested_at is None
+                       and run.scene.scene_id == scene.scene_id and run.scene.revision < scene.revision
+                       and not (run.activation_id or "").startswith(DEFAULT_PREFIX)),
+                      key=lambda run: run.order)
+
+    def _earlier_queued(self, scene: Scene) -> list[_Queued]:
+        return [item for item in self._state.queue
+                if item.scene.scene_id == scene.scene_id and item.scene.revision < scene.revision]
+
+    def _replace(self, predecessors: list[_Run], scene: Scene, identity: str, priority: int,
+                 excluded: set[str], *, program_id: str | None = None,
+                 program_end: float | None = None, duration_from: float | None = None) -> Admission:
+        """The one replace step of Save and apply now, a Scene's and a Schedule's (design rule 3:
+        it never stops a Scene): admit `scene` under `identity` at the processed instant, over
+        `predecessors`, and only then ask them to finish gracefully beneath it. A protection
+        refusal (the Runs in `excluded` left out of the check, as `activate`'s restart leaves out
+        the Runs it replaces) leaves them playing. The successor takes its predecessors' place in
+        the stacking order (`_place_over`), so a Run admitted after them at the same priority
+        stays on top of it. Answers the admission or the refusal."""
+        now = self._state.now
+        denial = self._protected_conflict(scene, priority, False, excluded)
+        if denial:
+            return _refusal(identity, denial)
+        admission = self._admit(scene, identity, now, priority, program_id=program_id,
+                                program_end=program_end,
+                                place=self._place_over(predecessors))
+        self._state.runs[admission.run_id].duration_from = duration_from
+        for run in predecessors:
+            run.scheduled_finish_at = min(run.scheduled_finish_at or now, now)
+        return admission
+
+    @staticmethod
+    def _place_over(predecessors: list[_Run]) -> tuple[int, int] | None:
+        """Where in the stacking order a Run replacing `predecessors` goes (root order, admission
+        order): in the topmost one's place, above it and every Run it launched, so it is drawn
+        over them and still beneath any Run admitted after them at its priority. A finishing
+        Run launches no more children, so nothing of it is admitted above its successor. None
+        (the next root order) with nothing to replace."""
+        if not predecessors:
+            return None
+        top = max(predecessors, key=lambda run: (run.root_order, run.descendant_sequence))
+        return top.root_order, top.descendant_sequence + 1
 
     @staticmethod
     def _scene_ids(scene: Scene) -> set[str]:
@@ -665,7 +914,7 @@ class Runtime:
             raise ProgramRefused("changed", stored)
         self._check_program(program)
         self._state.programs[program.program_id] = program
-        self._admit_covering(program, set())
+        self._admit_covering(program, [])
         self._state.program_from[program.program_id] = self._state.now
         self.advance(now)
         return program
@@ -681,37 +930,34 @@ class Runtime:
         return saved
 
     def save_program_and_apply_now(self, expected: Program, draft: ProgramDraft, now: float) -> Program:
-        """As `save_program`, but applied at once: the Program's playing Runs finish gracefully at
-        `now`, and the new rule's window covering `now`, if any, is admitted at once (from `now`
-        to its end, under its own identity), the finishing Runs left out of the protection check
-        (as `activate`'s restart leaves out the Runs it replaces). Later windows follow the new
-        rule from `now`."""
+        """As `save_program`, but applied at once: the new rule's window covering `now`, if any,
+        is admitted at once (from `now` to its end, under its own identity) over the Program's
+        playing Runs, which then finish gracefully at `now` (`_replace`; a refused window leaves
+        them playing). With no window covering `now` under the new rule they finish. Later
+        windows follow the new rule from `now`."""
         saved, playing = self._replace_program(expected, draft, now)
         if playing is None:
             return saved
-        for run in playing:
-            run.scheduled_finish_at = min(run.scheduled_finish_at or now, now)
-        self._admit_covering(saved, {run.run_id for run in playing})
+        self._admit_covering(saved, playing)
         self._state.program_from[saved.program_id] = self._state.now
         self.advance(now)
         return saved
 
-    def _admit_covering(self, program: Program, finishing: set[str]) -> None:
+    def _admit_covering(self, program: Program, playing: list[_Run]) -> None:
         """Admit `program`'s window covering the processed instant, if any, at once: from that
-        instant to the window's end, under the window's own identity, or record its refusal. The
-        Runs in `finishing` are left out of the protection check (as `activate`'s restart leaves
-        out the Runs it replaces). Creation and Save and apply now share it."""
+        instant to the window's end, under the window's own identity, over the `playing` Runs it
+        replaces (`_replace`), or record its refusal. With no covering window the `playing` Runs
+        finish gracefully. Creation and Save and apply now share it."""
         now = self._state.now
         window = calculator.window_at(program.when, self._house, now)
         if window is None:
+            for run in playing:
+                run.scheduled_finish_at = min(run.scheduled_finish_at or now, now)
             return
         identity = program.window_id(window.start)
-        scene = self._state.scenes[program.scene_id]
-        rank = PRIORITY_RANK[program.priority]
-        denial = self._protected_conflict(scene, rank, False, finishing)
-        self._state.admissions[identity] = (
-            _refusal(identity, denial) if denial else self._admit(
-                scene, identity, now, rank, program_id=program.program_id, program_end=window.end))
+        self._state.admissions[identity] = self._replace(
+            playing, self._state.scenes[program.scene_id], identity, PRIORITY_RANK[program.priority],
+            {run.run_id for run in playing}, program_id=program.program_id, program_end=window.end)
 
     def _replace_program(self, expected: Program, draft: ProgramDraft,
                          now: float) -> tuple[Program, list[_Run] | None]:
@@ -885,6 +1131,18 @@ class Runtime:
         # The window's start is its identity's (Save and apply now starts its Run later, at `now`).
         start = float(run.activation_id.rsplit(":", 1)[1])
         return Window(start=start, end=run.program_ends_at), run.activation_id
+
+    def longest_lead(self) -> float:
+        """The longest a photo of any Scene that may play starts to show before its turn (a
+        cross-fade's seconds, `_turn_lead`; an ending dissolves in by the same): over the stored
+        Scenes and the copies Runs and queued activations hold, child Scenes included. A reader
+        of the timeline up to an instant reaches this much further for the turns that start to
+        show before it (the Planner, coordination's cues); 0 when nothing cross-fades."""
+        def lead(scene: Scene) -> float:
+            return max([_turn_lead(scene), *(lead(child.scene) for child in scene.children)])
+        scenes = [*self._state.scenes.values(), *(run.scene for run in self._state.runs.values()),
+                  *(item.scene for item in self._state.queue)]
+        return max((lead(scene) for scene in scenes), default=0.0)
 
     def timeline(
         self, start: float, end: float, *, max_events: int = 10000
@@ -1120,11 +1378,13 @@ class Runtime:
     def _admit(
         self, scene: Scene, identity: str, start: float, priority: int,
         *, parent: _Run | None = None, program_end: float | None = None,
-        program_id: str | None = None,
+        program_id: str | None = None, place: tuple[int, int] | None = None,
     ) -> Admission:
+        """Admit a Run of `scene`. A root Run's place in the stacking order (root order,
+        admission order) is the next root order unless `place` gives it one (`_place_over`)."""
         self._state.sequence += 1
         run_id = _run_id(("child:" if parent else "activation:") + identity)
-        local_order = 0
+        local_order = 0 if place is None else place[1]
         if parent:
             root = self._state.runs[parent.root_id]
             root.descendant_sequence += 1
@@ -1133,8 +1393,9 @@ class Runtime:
             run_id=run_id, root_id=parent.root_id if parent else run_id,
             parent_id=parent.run_id if parent else None,
             scene=scene, started_at=start, priority=priority, order=self._state.sequence,
-            root_order=parent.root_order if parent else self._state.sequence,
-            local_order=local_order,
+            root_order=(parent.root_order if parent
+                        else self._state.sequence if place is None else place[0]),
+            local_order=local_order, descendant_sequence=0 if parent else local_order,
             program_id=program_id, program_ends_at=program_end,
             activation_id=None if parent else identity,
         )
@@ -1243,7 +1504,7 @@ class Runtime:
                         changed = True
                     continue
                 if run.body_done_at is None and run.cycle_end <= at:
-                    if run.finish_requested_at is not None:
+                    if run.finish_requested_at is not None and _last_turn(run, run.finish_requested_at):
                         run.body_done_at = run.cycle_end
                     else:
                         run.cycle_index += 1
@@ -1346,7 +1607,7 @@ class Runtime:
             definitions = run.scene.outro_contributions if run.phase == "outro" else run.scene.contributions
             position = max(0.0, now - start)
             for contribution in definitions:
-                fade_out = contribution.fade_out_seconds
+                shows_from, fade_in, fade_out = _transition_at(run, contribution, start, end)
                 after_end = contribution.after_end
                 if budget is not None:
                     if (fade_out and _may_hold_to_the_end(run, contribution)
@@ -1359,8 +1620,8 @@ class Runtime:
                             and contribution.target in others(run, end, beneath=True)):
                         after_end = "leave_as_is"
                 opacity = contribution.opacity
-                if contribution.fade_in_seconds:
-                    opacity *= min(1.0, position / contribution.fade_in_seconds)
+                if fade_in:
+                    opacity *= min(1.0, max(0.0, now - shows_from) / fade_in)
                 if fade_out:
                     opacity *= min(1.0, max(0.0, end - now) / fade_out)
                 fraction = min(1.0, position / (end - start))
@@ -1377,10 +1638,9 @@ class Runtime:
                     priority=run.priority, root_order=run.root_order, admission_order=run.local_order,
                     logical_origin=run.started_at, logical_position=max(0.0, now - run.started_at),
                     cycle_index=run.cycle_index, cycle_position=position,
-                    interval_start=start, interval_end=end, opacity=opacity,
-                    base_opacity=contribution.opacity,
-                    fade_in_seconds=contribution.fade_in_seconds,
-                    fade_out_seconds=fade_out,
+                    interval_start=start, interval_end=end, shows_from=shows_from,
+                    opacity=opacity, base_opacity=contribution.opacity,
+                    fade_in_seconds=fade_in, fade_out_seconds=fade_out,
                     after_end=after_end,
                     actuator_value=value, phase=run.phase,
                     selection=run.scene.selection,

@@ -66,6 +66,7 @@ from contracts.models import (
     Model,
     OutputBinding,
     PhotoCrop,
+    stack_order,
 )
 
 if TYPE_CHECKING:
@@ -347,8 +348,11 @@ class _ProjectionBuilder:
             assignment_id=identity, run_id=intent.run_id,
             output_id=binding.output_id, frame_id=binding.frame_id,
             binding_generation=binding.generation,
-            start=intent.interval_start, end=intent.interval_end,
-            media_origin=intent.interval_start,
+            # The layer lasts while its photo can be seen: from when it starts to show (a
+            # cross-fade's lead included, central/runtime.py `_transition_at`) to its cut; a
+            # video starts as it appears.
+            start=intent.shows_from, end=intent.interval_end,
+            media_origin=intent.shows_from,
             priority=intent.priority, root_order=intent.root_order,
             admission_order=intent.admission_order,
             opacity=intent.base_opacity,
@@ -357,8 +361,9 @@ class _ProjectionBuilder:
 
     def add(self, intent: Intent, window: PlanWindow) -> None:
         """One Intent of the plan horizon: a lock or a black layer is fixed (a layer when it
-        starts inside the preparation horizon); a media Intent becomes a wall-plan slot."""
-        if (intent.kind == "actuator" or intent.interval_start >= window.plan_end
+        starts inside the preparation horizon); a media Intent becomes a wall-plan slot. Each
+        starts when its photo starts to show (`Intent.shows_from`)."""
+        if (intent.kind == "actuator" or intent.shows_from >= window.plan_end
                 or intent.interval_end <= window.now):
             return
         _bound(len(intent.source_refs), self.limits.max_sources, "authored source reference count")
@@ -366,15 +371,13 @@ class _ProjectionBuilder:
         identity = assignment_id(intent)
         if identity in self.seen:
             return
-        inside = intent.interval_start < window.preparation_end
+        inside = intent.shows_from < window.preparation_end
         if inside:
             _bound(self.layered + 1, self.limits.max_assignments, "assignment count")
             self.layered += 1
         self.seen.add(identity)
         if intent.interval_end - intent.interval_start > self.limits.max_cycle_seconds:
             raise PlanningBudgetExceeded("cycle length exceeds supported preparation extent")
-        if intent.fade_in_seconds + intent.fade_out_seconds > intent.interval_end - intent.interval_start:
-            raise PlanningError("authored fades exceed their complete cycle interval")
         owner = self.frames.get(intent.target)
         if owner is None:
             if inside:
@@ -406,7 +409,7 @@ class _ProjectionBuilder:
             after_end = _after_end(intent, still=False)
             self.fixed.append(FixedShowing(
                 slot_id=identity, frame_id=binding.frame_id, asset_id=None,
-                start=intent.interval_start, end=intent.interval_end,
+                start=intent.shows_from, end=intent.interval_end,
                 fade_in=intent.fade_in_seconds, after_end=after_end))
             if inside:
                 self.layers[player].append(Layer(**fields, presentation="black",
@@ -418,7 +421,7 @@ class _ProjectionBuilder:
             self.pool_refs[pool] = intent.source_refs
         self.pending.append(_Pending(intent=intent, player_id=player, fields=fields, slot=Slot(
             slot_id=identity, frame_id=binding.frame_id, scene_id=intent.scene_id,
-            start=intent.interval_start, end=intent.interval_end,
+            start=intent.shows_from, end=intent.interval_end,
             fade_in=intent.fade_in_seconds, after_end=intent.after_end,
             target=FitTarget(profile=binding.profile,
                              output_px=self.frame_outputs.get(binding.frame_id)),
@@ -635,9 +638,7 @@ class _ProjectionBuilder:
         players = tuple(PlayerProposal(
             player_id=player,
             layers=tuple(sorted(layers, key=lambda layer: (
-                layer.start, layer.priority, layer.root_order, layer.admission_order,
-                layer.output_id, layer.assignment_id,
-            ))),
+                *stack_order(layer), layer.output_id, layer.assignment_id))),
         ) for player, layers in sorted(self.layers.items()))
         extent = max([horizon_end, *(layer.end for p in players for layer in p.layers)])
         if extent > horizon_end:
@@ -702,7 +703,10 @@ def project(
         settings=settings, frame_outputs=frame_outputs, house=runtime.house,
     )
     try:
-        timeline = runtime.timeline(now, window.plan_end, max_events=limits.max_events)
+        # A turn starting up to the longest cross-fade lead past the plan's end may start to
+        # show inside it.
+        timeline = runtime.timeline(now, window.plan_end + runtime.longest_lead(),
+                                    max_events=limits.max_events)
     except RuntimeBudgetExceeded as error:
         raise PlanningBudgetExceeded("Runtime event budget exceeded") from error
     for view in timeline:

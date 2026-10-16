@@ -1519,7 +1519,7 @@ def test_authored_save_refusals_are_said_in_plain_words(page, registry):
 
 def test_two_editors_replacing_one_scene_the_second_ends_changed(page, registry):
     """§13, Question 4 flipped: both editors open revision 1; the first Replace lands
-    as revision 2, so Central refuses the second (409 scene_revision_conflict) and the
+    as revision 2, so Central refuses the second (409 changed) and the
     dialog ends "changed" with the first editor's Scene kept. Mutation probe: drop the
     guard in Runtime.set_scene (the second silently replaces the first)."""
     _seed(registry)
@@ -1546,7 +1546,7 @@ def test_two_editors_replacing_one_scene_the_second_ends_changed(page, registry)
             lambda r: r.url.endswith(f"/v1/operator/scenes/{SCENE_ID}") and r.request.method == "PUT"
         ) as info:
             dialog.get_by_role("button", name="Confirm replace", exact=True).click()
-        assert (info.value.status, info.value.json()) == (409, {"error": "scene_revision_conflict"})
+        assert (info.value.status, info.value.json()["error"]) == (409, "changed")
         expect(dialog.get_by_role("status")).to_have_text(
             "This Scene was changed since you opened it; nothing was replaced. "
             "Review now offers Reload.")

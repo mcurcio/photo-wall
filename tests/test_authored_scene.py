@@ -34,8 +34,9 @@ def test_authored_scene_commit_is_atomic_and_idempotent(registry):
     scene = authored_scene(originals[0].asset_id)
 
     result = coordinator.configure_authored_scene(scene, spec.source_ref, (originals[0].asset_id,))
-    assert result == {"status": "configured", "scene_id": scene.scene_id,
-                      "revision": 1, "asset_refs": [originals[0].asset_id], "created": 1}
+    assert result == {"scene": scene.model_dump(mode="json"),
+                      "earlier_version": {"playing": [], "waiting": []},
+                      "asset_refs": [originals[0].asset_id], "created": 1}
     assert coordinator.runtime.read().export_state()["scenes"][scene.scene_id] == scene.model_dump(mode="json")
     assert count_authored(registry) == 1
 

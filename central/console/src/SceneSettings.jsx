@@ -1,6 +1,8 @@
 import React from "react";
 
-import { cropPercent, ORDERS, PLAYBACK_LABELS, SCENE_SETTING_DEFAULTS, SETTING_RANGES } from "./authoring.js";
+import {
+  cropPercent, ORDERS, PLAYBACK_LABELS, SCENE_SETTING_DEFAULTS, SETTING_RANGES, TRANSITION_STYLES,
+} from "./authoring.js";
 import { SettingRow } from "./patterns/setting-row.tsx";
 import { NumberInput } from "./ui/field.tsx";
 import { SegmentedControl } from "./ui/segmented-control.tsx";
@@ -37,6 +39,26 @@ export function secondsWords(seconds) {
 export function onOff(value) {
   return value ? "On" : "Off";
 }
+
+/** How one photo gives way to the next, in the words the control and Review use. */
+export const TRANSITION_LABELS = Object.freeze({ cross_fade: "Cross-fade", fade_out_and_in: "Fade out and in" });
+
+const TRANSITION_OPTIONS = Object.freeze(
+  TRANSITION_STYLES.map((value) => ({ value, label: TRANSITION_LABELS[value] })),
+);
+
+/** The fade between photos in Review's words: "Off", or "Cross-fade, 1.5 s". */
+export function transitionWords({ transitionStyle, fadeSeconds }) {
+  return Number(fadeSeconds) > 0
+    ? `${TRANSITION_LABELS[transitionStyle ?? D.transitionStyle]}, ${secondsWords(fadeSeconds)}`
+    : secondsWords(fadeSeconds);
+}
+
+// What each style does, as the fade row's help.
+const TRANSITION_HELP = Object.freeze({
+  cross_fade: "The next photo appears over the current one, which stays until the next is fully in.",
+  fade_out_and_in: "Each photo fades out and the next fades in, through black or what plays beneath.",
+});
 
 /** How a Scene ends, in the words the control and Review use. */
 export const ENDING_LABELS = Object.freeze({ none: "Stops", black: "Black", fade: "Fades out" });
@@ -87,36 +109,58 @@ function reason(problems, field) {
 }
 
 /**
- * Timing: "Fade between photos" (#41). The built fade passes through black (or what plays
- * beneath); a crossfade is delivery 5b's transition type (#40).
+ * Timing: "Transition" (#40: Cross-fade or Fade out and in; owner 2026-10-15, "Let's make cross
+ * fade an option") and "Fade between photos" (#41), its seconds. Central plans either; the fade
+ * must leave 5 s of each photo free (authoring.js `sceneProblems`, Central's refusal).
  *
  * @param {RowsProps} props
  */
 export function TimingRows({ value, patch, problems }) {
   const fade = Number(value.fadeSeconds ?? 0);
+  const style = value.transitionStyle ?? D.transitionStyle;
   return (
-    <FieldSlot problems={problems} field="fade">
-      <SettingRow
-        kind="content"
-        label={PLAYBACK_LABELS.fade}
-        help="Each photo fades out and the next fades in, through black or what plays beneath."
-        defaultLabel={`Default: ${secondsWords(D.fadeSeconds)}`}
-        onReset={fade === D.fadeSeconds ? undefined : () => patch({ fadeSeconds: D.fadeSeconds })}
-        state="idle"
-        error={reason(problems, "fade")}
-        control={
-          <Slider
-            {...SETTING_RANGES.fadeSeconds}
-            value={fade}
-            unit="s"
-            onCommit={(fadeSeconds) => {
-              patch({ fadeSeconds });
-              problems.touch("fade");
-            }}
-          />
-        }
-      />
-    </FieldSlot>
+    <>
+      <FieldSlot problems={problems} field="transition">
+        <SettingRow
+          kind="content"
+          label={PLAYBACK_LABELS.transition}
+          help={TRANSITION_HELP[style]}
+          defaultLabel={`Default: ${TRANSITION_LABELS[D.transitionStyle]}`}
+          onReset={style === D.transitionStyle ? undefined : () => patch({ transitionStyle: D.transitionStyle })}
+          state="idle"
+          control={
+            <SegmentedControl
+              label={PLAYBACK_LABELS.transition}
+              value={style}
+              options={TRANSITION_OPTIONS}
+              onChange={(next) => patch({ transitionStyle: next })}
+            />
+          }
+        />
+      </FieldSlot>
+      <FieldSlot problems={problems} field="fade">
+        <SettingRow
+          kind="content"
+          label={PLAYBACK_LABELS.fade}
+          help="How long the change from one photo to the next takes. Off is a cut."
+          defaultLabel={`Default: ${secondsWords(D.fadeSeconds)}`}
+          onReset={fade === D.fadeSeconds ? undefined : () => patch({ fadeSeconds: D.fadeSeconds })}
+          state="idle"
+          error={reason(problems, "fade")}
+          control={
+            <Slider
+              {...SETTING_RANGES.fadeSeconds}
+              value={fade}
+              unit="s"
+              onCommit={(fadeSeconds) => {
+                patch({ fadeSeconds });
+                problems.touch("fade");
+              }}
+            />
+          }
+        />
+      </FieldSlot>
+    </>
   );
 }
 

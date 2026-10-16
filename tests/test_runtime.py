@@ -19,6 +19,8 @@ from central.runtime import (
     RuntimeView,
     RunView,
     Scene,
+    SceneWriteRefused,
+    Transition,
 )
 from central.wall_plan.selection import SceneSelection
 
@@ -304,8 +306,9 @@ def test_a_scene_save_must_move_past_the_stored_revision():
     runtime.set_scene(stored)
     for stale in (stored.model_copy(update={"cycle_seconds": 45}),
                   stored.model_copy(update={"revision": 1})):
-        with pytest.raises(RuntimeConflict, match="scene_revision_conflict"):
+        with pytest.raises(SceneWriteRefused, match="changed") as raised:
             runtime.set_scene(stale)
+        assert raised.value.current == stored
         assert runtime.export_state()["scenes"]["scene"]["cycle_seconds"] == 10
     runtime.set_scene(Scene.model_validate(stored.model_dump(mode="json")))  # a retry
     runtime.set_scene(stored.model_copy(update={"revision": 3, "cycle_seconds": 45}))
@@ -413,11 +416,11 @@ def test_opacity_distinguishes_black_from_dissolve_and_keeps_underlying_layers()
     runtime = Runtime(house=UTC_HOUSE)
     runtime.set_scene(Scene(scene_id="bg", cycle_seconds=100, contributions=(media(),)))
     runtime.set_scene(Scene(scene_id="black", cycle_seconds=20, contributions=(
-        Contribution(target="frame:left", kind="black", fade_out_seconds=10),
-    )))
+        Contribution(target="frame:left", kind="black"),
+    ), transition=Transition(style="cross_fade", seconds=10)))
     runtime.activate("bg", "bg", 0)
     runtime.activate("black", "black", 0, priority=10)
-    assert runtime.advance(5).for_target("frame:left").opacity == 1
+    assert runtime.advance(10).for_target("frame:left").opacity == 1
     fading = runtime.advance(15)
     assert fading.for_target("frame:left").kind == "black"
     assert fading.for_target("frame:left").opacity == 0.5
@@ -536,9 +539,12 @@ def test_save_and_apply_now_replaces_its_own_protecting_run():
 
 def test_save_and_apply_now_is_refused_by_another_protecting_run():
     """Another live Run that protects the Frames refuses the covering window (recorded, with
-    the Run that refused it); the Program's own Run still finishes.
+    the Run that refused it); the Program's own Run keeps playing (design rule 3 of the
+    cross-fade delivery: Save and apply now never stops a Scene; it finishes only once its
+    successor is admitted).
 
-    Mutation probe: never refuse in `save_program_and_apply_now` -> the window is admitted."""
+    Mutation probes: never refuse in `save_program_and_apply_now` -> the window is admitted;
+    finish before admitting -> the Program's own Run finishes."""
     runtime = Runtime(house=UTC_HOUSE)
     runtime.set_scene(Scene(scene_id="bg", cycle_seconds=600, loop=True, contributions=(media(),)))
     runtime.set_scene(Scene(scene_id="guard", cycle_seconds=600, loop=True, protect_frames=True,
@@ -552,6 +558,24 @@ def test_save_and_apply_now_is_refused_by_another_protecting_run():
     assert (refused.status, refused.reason, refused.blocking_run_id) == (
         "rejected", "protected_frames", guard)
     assert runtime.advance(400).for_target("frame:left").run_id == guard
+    (own,) = [run for run in runtime._state.runs.values() if run.program_id == "schedule"]
+    assert own.active and own.finish_requested_at is None and own.scheduled_finish_at is None
+
+
+def test_save_and_apply_now_with_no_window_covering_now_finishes_the_playing_run():
+    """Save and apply now moving the Schedule's window off the current time: nothing replaces its
+    playing Run, which finishes gracefully at once (the new rule applies now).
+
+    Mutation probe: never finish them in `_admit_covering` -> the old window plays on to 01:40."""
+    runtime = Runtime(house=UTC_HOUSE)
+    runtime.set_scene(Scene(scene_id="bg", cycle_seconds=600, loop=True, contributions=(media(),)))
+    created = schedule(runtime, "schedule", "bg", 0, 100)
+    original = runtime.advance(300).for_target("frame:left").run_id
+    saved = runtime.save_program_and_apply_now(created, ProgramDraft(
+        name="schedule", scene_id="bg", when=daily(hm(10), hm(90))), 360)
+    assert not any(identity.startswith(saved.window_prefix) for identity in runtime._state.admissions)
+    assert get_run(runtime.advance(360), original).finish_requested_at == 360
+    assert get_run(runtime.advance(600), original).ended_at == 600     # its turn played out
 
 
 def test_programs_refuse_without_storing_and_compare_the_expected_program():
@@ -677,16 +701,16 @@ def test_timeline_contains_short_child_and_all_loop_boundaries_without_effects()
 def test_timeline_does_not_skip_leaf_cycles_and_retains_authored_fade_origin():
     runtime = Runtime(house=UTC_HOUSE)
     runtime.set_scene(Scene(scene_id="scene", loop=True, cycle_seconds=10, contributions=(
-        media(opacity=0.8, fade_in_seconds=2, fade_out_seconds=3),
-    )))
+        media(opacity=0.8),
+    ), transition=Transition(style="fade_out_and_in", seconds=4)))
     runtime.activate("scene", "scene", 0)
     timeline = runtime.timeline(5, 31)
     assert [v.now for v in timeline] == [5, 10, 20, 30]
     intent = timeline[0].for_target("frame:left")
-    assert intent.interval_start == 0
+    assert intent.interval_start == intent.shows_from == 0
     assert intent.base_opacity == 0.8
     assert intent.fade_in_seconds == 2
-    assert intent.fade_out_seconds == 3
+    assert intent.fade_out_seconds == 2
     assert runtime.timeline(5, 10)[-1].now == 5
 
 
@@ -985,11 +1009,12 @@ def test_deleting_definition_does_not_rewrite_ended_run_snapshot():
 
 
 KEEP = {"after_end": "keep_this_photo"}
+DIP = Transition(style="fade_out_and_in", seconds=4)   # each photo fades in and out over 2 s
 
 
 def _kept_scene(cycle_seconds=10, **scene):
-    return Scene(scene_id="kept", cycle_seconds=cycle_seconds, loop=True, contributions=(
-        media(fade_in_seconds=1, fade_out_seconds=2, **KEEP),), **scene)
+    return Scene(scene_id="kept", cycle_seconds=cycle_seconds, loop=True, transition=DIP,
+                 contributions=(media(**KEEP),), **scene)
 
 
 def _fades(view):
@@ -1005,32 +1030,32 @@ def test_a_kept_photo_plans_no_fade_out_in_its_final_cycle_only():
     runtime = Runtime(house=UTC_HOUSE)
     runtime.set_scene(_kept_scene(600))
     schedule(runtime, "evening", "kept", 0, 20)
-    assert _fades(runtime.advance(300)) == [("body", 1, 2)]
-    assert _fades(runtime.advance(900)) == [("body", 1, 0)]
+    assert _fades(runtime.advance(300)) == [("body", 2, 2)]
+    assert _fades(runtime.advance(900)) == [("body", 2, 0)]
 
     timed = Runtime(house=UTC_HOUSE)
     timed.set_scene(_kept_scene(duration_seconds=15))
     timed.activate("kept", "timed", 0)
-    assert _fades(timed.advance(5)) == [("body", 1, 2)]
-    assert _fades(timed.advance(12)) == [("body", 1, 0)]
+    assert _fades(timed.advance(5)) == [("body", 2, 2)]
+    assert _fades(timed.advance(12)) == [("body", 2, 0)]
 
     finished = Runtime(house=UTC_HOUSE)
     finished.set_scene(_kept_scene())
     run = finished.activate("kept", "finished", 0).run_id
-    assert _fades(finished.advance(3)) == [("body", 1, 2)]
-    assert _fades(finished.finish(run, 4)) == [("body", 1, 0)]
+    assert _fades(finished.advance(3)) == [("body", 2, 2)]
+    assert _fades(finished.finish(run, 4)) == [("body", 2, 0)]
 
     ending = Runtime(house=UTC_HOUSE)
     ending.set_scene(_kept_scene(outro_seconds=4, outro_contributions=(
         Contribution(target="frame:left", kind="black"),)))
     run = ending.activate("kept", "ending", 0).run_id
-    assert _fades(ending.finish(run, 4)) == [("body", 1, 2)]
+    assert _fades(ending.finish(run, 4)) == [("body", 2, 2)]
 
     plain = Runtime(house=UTC_HOUSE)
-    plain.set_scene(Scene(scene_id="plain", cycle_seconds=10, contributions=(
-        media(fade_in_seconds=1, fade_out_seconds=2),)))
+    plain.set_scene(Scene(scene_id="plain", cycle_seconds=10, transition=DIP,
+                          contributions=(media(),)))
     plain.activate("plain", "plain", 0)
-    assert _fades(plain.advance(5)) == [("body", 1, 2)]
+    assert _fades(plain.advance(5)) == [("body", 2, 2)]
 
 
 def test_a_kept_photo_followed_on_its_frame_keeps_its_fade_out():
@@ -1046,9 +1071,9 @@ def test_a_kept_photo_followed_on_its_frame_keeps_its_fade_out():
     following.set_scene(Scene(scene_id="next", cycle_seconds=600, contributions=(media(),)))
     schedule(following, "evening", "kept", 0, 10)
     following.advance(300)
-    assert kept(following) == [(1, 0)]
+    assert kept(following) == [(2, 0)]
     schedule(following, "night", "next", 10, 20)
-    assert kept(following) == [(1, 2)]
+    assert kept(following) == [(2, 2)]
 
     beneath = Runtime(house=UTC_HOUSE)
     beneath.set_scene(_kept_scene(600))
@@ -1056,7 +1081,7 @@ def test_a_kept_photo_followed_on_its_frame_keeps_its_fade_out():
     beneath.activate("under", "under", 0)
     schedule(beneath, "evening", "kept", 0, 10)
     beneath.advance(300)
-    assert kept(beneath) == [(1, 2)]
+    assert kept(beneath) == [(2, 2)]
 
 
 def test_looking_at_what_follows_a_kept_photo_spends_the_callers_budget():
@@ -1065,8 +1090,8 @@ def test_looking_at_what_follows_a_kept_photo_spends_the_callers_budget():
     probe: give the projection its own budget (the kept advance succeeds)."""
     def advance(after_end):
         runtime = Runtime(house=UTC_HOUSE)
-        runtime.set_scene(Scene(scene_id="kept", cycle_seconds=600, loop=True, contributions=(
-            media(fade_in_seconds=1, fade_out_seconds=2, after_end=after_end),)))
+        runtime.set_scene(Scene(scene_id="kept", cycle_seconds=600, loop=True, transition=DIP,
+                                contributions=(media(after_end=after_end),)))
         schedule(runtime, "evening", "kept", 0, 10)
         return runtime.advance(300, max_events=1)
 
@@ -1325,3 +1350,192 @@ def test_choosing_another_default_scene_finishes_the_old_one_gracefully():
     assert runtime.advance(700).for_target("frame:left").scene_id == "bright"
     assert runtime.set_default_scene(None, 800).contributions[0].scene_id == "bright"   # finishing
     assert runtime.advance(1300).contributions == ()
+
+
+# The Scene's Transition (owner, 2026-10-15: "i want my photos to fade between themselves";
+# "Let's make cross fade an option"): Runtime alone turns it into each photo's start and fades.
+
+CROSS = Transition(style="cross_fade", seconds=3)
+THROUGH_BLACK = Transition(style="fade_out_and_in", seconds=3)
+
+
+def _turns(runtime, end, scene_id="scene"):
+    """Each turn of `scene_id`'s Runs on frame:left up to `end`, once each, as (phase, turn
+    start, shows from, fade in, fade out), as the last view holding it planned it."""
+    turns = {}
+    for view in runtime.timeline(runtime._state.now or 0, end):
+        for intent in view.contributions:
+            if intent.scene_id == scene_id and intent.target == "frame:left":
+                turns[(intent.run_id, intent.phase, intent.interval_start)] = (
+                    intent.phase, intent.interval_start, intent.shows_from,
+                    intent.fade_in_seconds, intent.fade_out_seconds)
+    return sorted(turns.values(), key=lambda turn: (turn[2], turn[1]))
+
+
+def _playing(transition, *, loop=True, after_end="leave_as_is", ending=None, duration=None):
+    """A 10 s Scene on frame:left shown at 0 (Show now); `ending` (kind, seconds) its ending."""
+    runtime = Runtime(house=UTC_HOUSE)
+    outro = {}
+    if ending is not None:
+        kind, seconds = ending
+        outro = {"outro_seconds": seconds, "outro_contributions": (
+            Contribution(target="frame:left", kind="black", after_end="keep_nothing")
+            if kind == "black" else media(after_end="keep_nothing"),)}
+    runtime.set_scene(Scene(scene_id="scene", cycle_seconds=10, loop=loop, transition=transition,
+                            duration_seconds=duration,
+                            contributions=(media(after_end=after_end),), **outro))
+    runtime.activate("scene", "scene", 0)
+    return runtime
+
+
+def test_between_two_photos_a_cross_fade_shows_the_next_over_the_current():
+    """Cross-fade: the Run's first photo fades in over 3 s from its turn; each later one shows
+    from 3 s before its turn and fades in over the current one, which stays at full to its cut.
+    Fade out and in (today's): each fades out over its last 1.5 s and the next up over 1.5 s.
+    Mutation probes: give the first photo the lead too (it would start before its Run); fade
+    the current photo out under a cross-fade."""
+    assert _turns(_playing(CROSS), 25) == [
+        ("body", 0, 0, 3, 0), ("body", 10, 7, 3, 0), ("body", 20, 17, 3, 0)]
+    assert _turns(_playing(THROUGH_BLACK), 25) == [
+        ("body", 0, 0, 1.5, 1.5), ("body", 10, 10, 1.5, 1.5), ("body", 20, 20, 1.5, 1.5)]
+    for style in ("cross_fade", "fade_out_and_in"):        # 0 s: a cut
+        assert _turns(_playing(Transition(style=style, seconds=0)), 15) == [
+            ("body", 0, 0, 0, 0), ("body", 10, 10, 0, 0)]
+
+
+def test_a_runs_last_photo_fades_out_unless_kept_with_nothing_after_it():
+    """The last photo: kept with nothing after it, it stays at full; otherwise it fades out over
+    its last 3 s (cross-fade) or 1.5 s (fade out and in); a Run beneath it makes its fade-out a
+    dissolve into that Run. Mutation probe: hold every last photo (no fade-out when not kept)."""
+    assert _turns(_playing(CROSS, loop=False), 15) == [("body", 0, 0, 3, 3)]
+    assert _turns(_playing(CROSS, loop=False, after_end="keep_this_photo"), 15) == [
+        ("body", 0, 0, 3, 0)]
+    assert _turns(_playing(CROSS, duration=20), 25) == [("body", 0, 0, 3, 0), ("body", 10, 7, 3, 3)]
+    assert _turns(_playing(THROUGH_BLACK, loop=False), 15) == [("body", 0, 0, 1.5, 1.5)]
+    assert _turns(_playing(THROUGH_BLACK, loop=False, after_end="keep_this_photo"), 15) == [
+        ("body", 0, 0, 1.5, 0)]
+    beneath = _playing(CROSS, loop=False, after_end="keep_this_photo")
+    beneath.set_scene(Scene(scene_id="under", cycle_seconds=600, loop=True,
+                            contributions=(media(),)))
+    beneath.activate("under", "under", 0)
+    assert _turns(beneath, 15) == [("body", 0, 0, 3, 3)]
+
+
+def test_an_ending_enters_by_the_transition():
+    """Cross-fade: the ending's photo (or black) dissolves in over the last body photo, which
+    stays at full to its cut; a photo ending then fades out over the whole ending. Fade out and
+    in: the last photo fades out over 1.5 s, the ending's photo returns over 1.5 s and fades out
+    over the rest, a black ending cuts in. Mutation probe: start the ending at its own start
+    under a cross-fade (it would come in over black)."""
+    assert _turns(_playing(CROSS, loop=False, ending=("photo", 4)), 20) == [
+        ("body", 0, 0, 3, 0), ("outro", 10, 7, 3, 4)]
+    assert _turns(_playing(CROSS, loop=False, ending=("black", 4)), 20) == [
+        ("body", 0, 0, 3, 0), ("outro", 10, 7, 3, 0)]
+    assert _turns(_playing(THROUGH_BLACK, loop=False, ending=("photo", 4)), 20) == [
+        ("body", 0, 0, 1.5, 1.5), ("outro", 10, 10, 1.5, 2.5)]
+    assert _turns(_playing(THROUGH_BLACK, loop=False, ending=("black", 4)), 20) == [
+        ("body", 0, 0, 1.5, 1.5), ("outro", 10, 10, 0, 0)]
+
+
+def test_a_stop_inside_a_dissolve_lets_that_photo_play_its_turn():
+    """Design rule 1 (a turn begins when its photo starts to show): Finish at 8.5 s, inside the
+    second photo's dissolve, ends the Run after the second photo's turn, which is its last
+    (fading out); Finish at 6 s, before it, ends it at the first photo's cut; a Program ending
+    exactly at a cut ends it there. Mutation probe: end the body at the cut the stop falls
+    before (the Run ends at 10 s)."""
+    inside = _playing(CROSS)
+    run = inside.activate("scene", "scene", 0).run_id
+    inside.finish(run, 8.5)
+    assert _turns(inside, 30)[-2:] == [("body", 0, 0, 3, 0), ("body", 10, 7, 3, 3)]
+    assert get_run(inside.advance(20), run).phase == "completed"
+    assert get_run(inside.advance(20), run).ended_at == 20
+
+    before = _playing(CROSS)
+    run = before.activate("scene", "scene", 0).run_id
+    before.finish(run, 6)
+    assert _turns(before, 30) == [("body", 0, 0, 3, 3)]
+    assert get_run(before.advance(10), run).ended_at == 10
+
+    scheduled = Runtime(house=UTC_HOUSE)
+    scheduled.set_scene(Scene(scene_id="scene", cycle_seconds=10, loop=True, transition=CROSS,
+                              contributions=(media(),)))
+    schedule(scheduled, "evening", "scene", 0, 1)            # ends at 60 s, a cut
+    assert [turn[1] for turn in _turns(scheduled, 90)] == [0, 10, 20, 30, 40, 50]
+    assert _turns(scheduled, 90)[-1] == ("body", 50, 47, 3, 3)
+
+
+def test_a_transition_must_leave_five_seconds_of_each_photo_free():
+    """A save is refused when the Transition is longer than each photo's seconds less 5 (a Pi
+    holds at most two photos per screen while it gets the next ready), a child Scene's too, in
+    either style; a cut is always allowed; the stored Scene is unchanged. A Transition longer
+    than the photo is not a Scene at all. Mutation probe: drop the bound (6 s is stored)."""
+    runtime = Runtime(house=UTC_HOUSE)
+    runtime.set_scene(Scene(scene_id="scene", cycle_seconds=10, transition=CROSS,
+                            contributions=(media(),)))
+    for style in ("cross_fade", "fade_out_and_in"):
+        with pytest.raises(SceneWriteRefused) as refused:
+            runtime.set_scene(Scene(scene_id="scene", revision=2, cycle_seconds=10,
+                                    transition=Transition(style=style, seconds=6),
+                                    contributions=(media(),)))
+        assert (refused.value.reason, refused.value.max_seconds) == ("transition_too_long", 5)
+    child = Scene(scene_id="child", cycle_seconds=6, transition=CROSS, contributions=(media(),))
+    with pytest.raises(SceneWriteRefused):
+        runtime.set_scene(Scene(scene_id="parent", children=(Child(scene=child),)))
+    assert runtime.export_state()["scenes"]["scene"]["transition"]["seconds"] == 3
+    runtime.set_scene(Scene(scene_id="scene", revision=2, cycle_seconds=10,
+                            transition=Transition(seconds=5), contributions=(media(),)))
+    runtime.set_scene(Scene(scene_id="short", cycle_seconds=2, contributions=(media(),)))
+    with pytest.raises(ValidationError):
+        Scene(scene_id="scene", cycle_seconds=10, transition=Transition(seconds=11))
+
+
+def test_actuators_never_fade_under_a_cross_fade():
+    """An actuator's value has no photo to dissolve: under a cross-fade it starts at its turn and
+    neither fades in nor out, while the photo beside it shows from 3 s before its turn.
+
+    Mutation probe: let actuators take the Transition in `_transition_at` -> they fade."""
+    runtime = Runtime(house=UTC_HOUSE)
+    runtime.set_scene(Scene(scene_id="scene", cycle_seconds=10, loop=True, transition=CROSS,
+                            contributions=(media(), lamp())))
+    runtime.activate("scene", "scene", 0)
+    turns = {(intent.target, intent.interval_start): (intent.shows_from, intent.fade_in_seconds,
+                                                       intent.fade_out_seconds)
+             for view in runtime.timeline(0, 15) for intent in view.contributions}
+    assert turns[("actuator:lamp", 10)] == (10, 0, 0)
+    assert turns[("frame:left", 10)] == (7, 3, 0)
+
+
+def test_a_photo_never_starts_to_show_after_its_turn():
+    """The Intent's own guard: `shows_from` is at most the turn's start (a lead, never a lag).
+
+    Mutation probe: drop `Intent.shows_by_its_turn` -> the late Intent is accepted."""
+    intent = _playing(CROSS).advance(12).for_target("frame:left")
+    assert intent.shows_from == 7
+    with pytest.raises(ValidationError):
+        intent.model_validate({**intent.model_dump(), "shows_from": intent.interval_start + 1})
+
+
+def test_the_timeline_readers_reach_only_as_far_as_the_longest_cross_fade_lead():
+    """The Planner and coordination's cues read the timeline past their end by the longest time
+    a photo starts to show before its turn: 0 with no cross-fade (fade out and in and cuts lead
+    by nothing), else the longest cross-fade among the stored Scenes, child Scenes and the
+    copies Runs hold, never a whole cycle more for every Scene.
+
+    Mutation probes: answer the longest cycle -> 600, not 0; skip child Scenes or captured
+    copies -> the 4 s and 2 s leads go unseen."""
+    runtime = Runtime(house=UTC_HOUSE)
+    runtime.set_scene(Scene(scene_id="scene", cycle_seconds=600, loop=True, transition=THROUGH_BLACK,
+                            contributions=(media(),)))
+    assert runtime.longest_lead() == 0
+    runtime.activate("scene", "scene", 0)
+    runtime.set_scene(Scene(scene_id="scene", revision=2, cycle_seconds=600, loop=True,
+                            transition=Transition(style="cross_fade", seconds=1),
+                            contributions=(media(),)))
+    runtime._state.runs[next(iter(runtime._state.runs))].scene = Scene(
+        scene_id="scene", cycle_seconds=600, loop=True, contributions=(media(),),
+        transition=Transition(style="cross_fade", seconds=2))
+    assert runtime.longest_lead() == 2                      # the Run's copy
+    runtime.set_scene(Scene(scene_id="parent", cycle_seconds=600, children=(Child(scene=Scene(
+        scene_id="child", cycle_seconds=10, transition=Transition(style="cross_fade", seconds=4),
+        contributions=(media("frame:right"),))),)))
+    assert runtime.longest_lead() == 4                      # a child Scene's

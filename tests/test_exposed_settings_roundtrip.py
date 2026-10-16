@@ -6,7 +6,8 @@ The Scene bodies are exactly what the console's `buildSave` writes for each sett
 the operator route, started through the activation route, and read back from the stored Scene
 and from the Player's offered plan:
 
-- #41 fade between photos: each layer's `fade_in` and `fade_out` (half each);
+- #41 fade between photos: the Scene's Transition (cross-fade or fade out and in, and its
+  seconds), turned by Runtime into each layer's start, `fade_in` and `fade_out`;
 - #62, #63 how it ends: after Finish, the outro's layer, opaque black or a fading photo, which
   keeps nothing after it (`after_end`);
 - #64 keep the last photo up: each layer keeps its photo after it (`after_end`);
@@ -35,6 +36,7 @@ from central.app import create_app
 from contracts.time import ManualClock, TimeMapping
 from player.cache import Cache
 from player.executor import AuthorityError, Executor
+from player.geometry import compose_pixel
 from player.rendering import RecordingRenderer
 
 AUTH = {"Authorization": "Bearer " + ADMIN}
@@ -43,26 +45,24 @@ FRAME = "frame-0"
 
 def _scene(scene_id, **settings):
     """A live Scene as the console saves it, with delivery 1x's settings applied the way
-    `buildSave` writes them."""
+    `buildSave` writes them; `fade` is the Transition's seconds and `style` its style (fade out
+    and in unless named: most tests below pin that style's endings)."""
     fade = settings.get("fade", 0)
     keep_last = settings.get("keep_last", True)
     contribution = {"target": f"frame:{FRAME}", "role": FRAME, "kind": "media",
                     "source_refs": ["library:1"]}
     body = {"scene_id": scene_id, "revision": 1, "cycle_seconds": 20, "loop": True,
+            "transition": {"style": settings.get("style", "fade_out_and_in"), "seconds": fade},
             "contributions": [{**contribution,
-                               **({"fade_in_seconds": fade / 2, "fade_out_seconds": fade / 2}
-                                  if fade else {}),
                                **({"after_end": "keep_this_photo"} if keep_last else {})}]}
     ending, seconds = settings.get("ending", ("none", 0))
     if ending != "none":
         body["outro_seconds"] = seconds
-        # "Fades out": the last photo returns over half the fade, then fades out over the rest.
+        # "Fades out": one more photo, which enters by the Transition and fades out after it.
         body["outro_contributions"] = [
             {"target": f"frame:{FRAME}", "role": FRAME, "kind": "black", "after_end": "keep_nothing"}
             if ending == "black"
-            else {**contribution,
-                  **({"fade_in_seconds": fade / 2} if fade else {}),
-                  "fade_out_seconds": seconds - fade / 2, "after_end": "keep_nothing"}]
+            else {**contribution, "after_end": "keep_nothing"}]
     if settings.get("keep_together"):
         body["protect_frames"] = True
     return body
@@ -104,9 +104,9 @@ def test_fade_and_keep_last_photo_reach_the_players_plan(registry):
     player, app, coordinator = _rig(registry)
     with TestClient(app) as client:
         _save_and_start(client, _scene("faded", fade=3, keep_last=True))
-        stored = _stored(coordinator, "faded")["contributions"][0]
-        assert (stored["fade_in_seconds"], stored["fade_out_seconds"], stored["after_end"]) == (
-            1.5, 1.5, "keep_this_photo")
+        stored = _stored(coordinator, "faded")
+        assert stored["transition"] == {"style": "fade_out_and_in", "seconds": 3}
+        assert stored["contributions"][0]["after_end"] == "keep_this_photo"
         layers = _layers(coordinator, player)
         assert layers and all(
             (layer.fade_in, layer.fade_out, layer.after_end) == (1.5, 1.5, "keep_this_photo")
@@ -149,7 +149,7 @@ def test_fade_out_ending_reaches_the_players_plan(registry):
     with TestClient(app) as client:
         admission = _save_and_start(client, _scene("fade-end", ending=("fade", 5)))
         stored = _stored(coordinator, "fade-end")
-        assert (stored["outro_seconds"], stored["outro_contributions"][0]["fade_out_seconds"]) == (5, 5)
+        assert (stored["outro_seconds"], stored["outro_contributions"][0]["kind"]) == (5, "media")
         _finish_and_reach_outro(client, coordinator, registry, admission)
         outro = [layer for layer in _layers(coordinator, player)
                  if layer.end - layer.start == 5 and layer.fade_out == 5]
@@ -663,3 +663,108 @@ def test_a_run_starting_on_top_at_the_top_scenes_end_still_leaves_keeping_to_the
         tops = [layer for layer in _layers(coordinator, player)
                 if layer.run_id == _run_id(coordinator, "top")]
         assert tops and all(layer.after_end == "leave_as_is" for layer in tops)
+
+
+# --- Cross-fade (owner, 2026-10-15: "i want my photos to fade between themselves. i configured it
+# to 3 seconds, but its not happening."; "Let's make cross fade an option").
+
+
+def _dissolving(scene_id="dissolve", style="cross_fade", **settings):
+    """A 10 s Scene with a 3 s Transition of `style` on FRAME."""
+    return {**_scene(scene_id, fade=3, style=style, **settings), "cycle_seconds": 10}
+
+
+def _cue(registry, assignment_id):
+    with registry.db.transaction() as conn:
+        return conn.execute("SELECT starts_at,deadline FROM coordination_groups "
+                            "WHERE members ? %s ORDER BY cohort_sequence DESC LIMIT 1",
+                            (assignment_id,)).fetchone()
+
+
+def _grey(composition):
+    """What the Frame shows when every photo drawn is the same mid grey: the layers' strengths
+    as the Player's executor drew them, composed by the compositing reference."""
+    return compose_pixel([((.5, .5, .5, 1.0), local.alpha, False) for local in composition.layers])
+
+
+def test_a_cross_fade_dissolves_the_next_photo_over_the_current_one(registry, tmp_path):
+    """The tracer: saved through the operator route and started by Show now, a 10 s Scene with a
+    3 s cross-fade. The second photo's layer starts 3 s before the first ends (both fade in over
+    3 s; the first stays at full to its cut), its coordination cue starts with it, and at
+    mid-dissolve the Player's executor draws it on top at half strength over the first at full,
+    which over two equal greys is that grey. Mutation probes: start the next layer at its turn
+    (no overlap); key the cue on the turn's start (the cue starts 3 s late); sort the executor's
+    layers by plan order with the old photo last (the old photo on top)."""
+    player, app, coordinator = _rig(registry)
+    frame = _Frame(registry, coordinator, player, tmp_path)
+    with TestClient(app) as client:
+        _save_and_start(client, _dissolving())
+        start = registry.clock.utc()
+        first, second = sorted(_layers(coordinator, player), key=lambda layer: layer.start)[:2]
+        assert (first.start, first.end, first.fade_in, first.fade_out) == (start, start + 10, 3, 0)
+        assert (second.start, second.end, second.fade_in, second.fade_out) == (
+            start + 7, start + 20, 3, 0)
+        assert second.media_origin == second.start
+        cue = _cue(registry, second.assignment_id)
+        assert cue["starts_at"] == start + 7 and cue["deadline"] == start + 7
+        frame.sync()
+        shown = frame.advance(8.5)
+        assert _shown(shown) == (False, [("photo", 1.0), ("photo", 0.5)])
+        assert [local.layer.assignment_id for local in shown.layers] == [
+            first.assignment_id, second.assignment_id]
+        assert _grey(shown) == compose_pixel([((.5, .5, .5, 1.0), 1.0, False)])
+        assert _shown(frame.advance(2)) == (False, [("photo", 1.0)])  # 10.5 s: the second alone
+
+
+def test_fade_out_and_in_dips_through_black_where_a_cross_fade_does_not(registry, tmp_path):
+    """The same Scene with fade out and in (today's fade): half way down the first photo's fade
+    out the Frame is darker than the photo, where the cross-fade above never is."""
+    player, app, coordinator = _rig(registry)
+    frame = _Frame(registry, coordinator, player, tmp_path)
+    with TestClient(app) as client:
+        _save_and_start(client, _dissolving(style="fade_out_and_in"))
+        first, second = sorted(_layers(coordinator, player), key=lambda layer: layer.start)[:2]
+        assert (first.end, first.fade_in, first.fade_out) == (second.start, 1.5, 1.5)
+        frame.sync()
+        shown = frame.advance(9.25)
+        assert _shown(shown) == (False, [("photo", 0.5)])
+        assert _grey(shown)[0] < compose_pixel([((.5, .5, .5, 1.0), 1.0, False)])[0]
+
+
+def test_a_finish_inside_a_dissolve_lets_that_photo_play_its_turn(registry, tmp_path):
+    """Design rule 1, "a turn begins when its photo starts to show": Finish at 8.5 s, half way
+    through the second photo's dissolve, ends the Scene after the second photo's turn (20 s), so
+    nothing snaps back; it is the last, kept with nothing after it, so it holds to the end and
+    stays. Mutation probe: end the body at the cut the stop falls before (the second photo is
+    withdrawn at 10 s and the first is kept)."""
+    player, app, coordinator = _rig(registry)
+    frame = _Frame(registry, coordinator, player, tmp_path)
+    with TestClient(app) as client:
+        _save_and_start(client, _dissolving(keep_last=True))
+        start = registry.clock.utc()
+        frame.sync()
+        assert _shown(frame.advance(8.5)) == (False, [("photo", 1.0), ("photo", 0.5)])
+        _operate(client, coordinator, "dissolve", "finish")
+        second = [layer for layer in _layers(coordinator, player) if layer.start == start + 7]
+        assert [(layer.end, layer.fade_out) for layer in second] == [(start + 20, 0)]
+        assert _shown(frame.advance(1)) == (False, [("photo", 1.0), ("photo", 0.83)])
+        shown = frame.advance(9)  # 18.5 s: the second photo's turn, at full
+        assert _shown(shown) == (False, [("photo", 1.0)])
+        assert shown.layers[-1].layer.assignment_id == second[0].assignment_id
+        assert _shown(frame.advance(2)) == KEPT  # 20.5 s: the Scene has ended
+
+
+def test_a_transition_too_long_for_its_photos_is_refused(registry):
+    """A 10 s photo leaves at most 5 s for its Transition: a 6 s cross-fade is refused with the
+    most it may be, and nothing is stored, by Save and apply now too."""
+    _player, app, coordinator = _rig(registry)
+    with TestClient(app) as client:
+        body = {**_scene("long", fade=6, style="cross_fade"), "cycle_seconds": 10}
+        refused = client.put("/v1/operator/scenes/long", json=body, headers=AUTH)
+        assert (refused.status_code, refused.json()) == (
+            422, {"error": "transition_too_long", "max_seconds": 5})
+        assert "long" not in coordinator.runtime.read().export_state()["scenes"]
+        later = client.post("/v1/operator/scenes/long/apply-now", json=body, headers=AUTH)
+        assert (later.status_code, later.json()) == (
+            422, {"error": "transition_too_long", "max_seconds": 5})
+        assert "long" not in coordinator.runtime.read().export_state()["scenes"]

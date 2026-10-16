@@ -50,7 +50,7 @@ def test_stored_scenes_runs_plans_and_locks_move_to_the_after_state(registry):
     kept one); skip the endings step (the ending stays "leave_as_is")."""
     runtime = Runtime(house=UTC_HOUSE)
     black = Contribution(target="frame:left", kind="black")
-    fading = Contribution(target="frame:left", source_refs=("library:1",), fade_out_seconds=4)
+    fading = Contribution(target="frame:left", source_refs=("library:1",))
     runtime.set_scene(_scene("black-end", black))
     runtime.set_scene(_scene("fade-end", fading))
     runtime.set_scene(Scene(scene_id="plain", contributions=(

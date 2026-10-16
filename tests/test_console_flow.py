@@ -19,13 +19,16 @@ from pathlib import Path
 from typing import get_args
 
 import pytest
+from support.console_words import SCENE, scene_words, schedule
 
+from central.runtime import Transition, TransitionStyle
 from central.wall_plan.fit_settings import FIT_SETTING_RANGES
 from central.wall_plan.selection import (
     MAX_NO_REPEAT_DAYS,
     Order,
     SceneSelection,
 )
+from contracts.models import PREPARE_SECONDS
 
 MIN_CROP_LIMIT, MAX_CROP_LIMIT = FIT_SETTING_RANGES["crop_limit"]
 
@@ -224,18 +227,56 @@ const hands = authoring.buildSave("authored", { sceneId: "evening", sourceRefs: 
   ...settings, ending: "black" }).body.scene;
 out.authoredOutro = hands.outro_contributions;
 out.authoredBack = pick(authoring.editableDraft(hands));
-// Unequal fades (or a setting that differs per Frame) are not the console's: Edit is withheld.
+// The Transition: each style saved is the Scene's `transition`, read back by Edit.
+out.transitions = ["cross_fade", "fade_out_and_in"].map((transitionStyle) => {
+  const body = authoring.buildSave("live", { sceneId: "evening", sourceRefs: ["holiday:1"],
+    targetIds: ["lobby"], cycleSeconds: 20, loop: true, ...settings, transitionStyle }).body;
+  const back = authoring.editableDraft(body);
+  return [body.transition, back && [back.transitionStyle, back.fadeSeconds]];
+});
+// A stored Scene without a transition reads as the model's default (a cut, cross-fade).
+const { transition: _transition, ...untransitioned } = live;
+const bareBack = authoring.decodeScene(untransitioned);
+out.transitionMissing = [bareBack.transitionStyle, bareBack.fadeSeconds];
+// A setting that differs per Frame is not the console's: Edit is withheld.
 out.unequal = authoring.editableDraft({ ...live, contributions: [
-  { ...live.contributions[0], fade_in_seconds: 1 }] });
+  ...live.contributions, { ...live.contributions[0], target: "frame:hall", role: "hall",
+  after_end: "keep_this_photo" }] });
+// Central refuses a Transition that leaves less than 5 s of each photo free; so does the editor.
+out.freeProblems = [[10, 5], [10, 5.5], [5, 0], [4, 0.5]].map(([cycleSeconds, fadeSeconds]) =>
+  authoring.sceneProblems({ ...hand, mode: "live", cycleSeconds, fadeSeconds }, new Set())
+    .map((p) => [p.field, p.message]));
+out.transitionFree = authoring.TRANSITION_FREE_SECONDS;
+// After a plain Save: what still plays the earlier version, in the operator's words.
+const runtime = { programs: { "p-1": { name: "Evenings" } },
+                  current: { runs: [{ run_id: "r-1", program_id: "p-1" }, { run_id: "r-2", program_id: null }] } };
+out.earlier = [
+  scene.earlierVersionNames({ playing: [
+    { run_id: "r-1", scene_revision: 1, started_by: "schedule" },
+    { run_id: "r-2", scene_revision: 1, started_by: "show_now" },
+    { run_id: "r-3", scene_revision: 1, started_by: "show_now" },
+    { run_id: "r-9", scene_revision: 1, started_by: "schedule" }], waiting: ["a-1", "a-2"] }, runtime),
+  scene.earlierVersionNames({ playing: [], waiting: [] }, runtime),
+  scene.earlierVersionNames(undefined, null),
+];
+// The notice after a save: a plain Save offers Save and apply now; after Save and apply now what
+// is left is what Central could not replace.
+const keptOn = { playing: [{ run_id: "r-2", scene_revision: 1, started_by: "show_now" }], waiting: [] };
+out.notices = [scene.earlierNotice("evening", keptOn, runtime, false),
+               scene.earlierNotice("evening", keptOn, runtime, true),
+               scene.earlierNotice("evening", { playing: [], waiting: [] }, runtime, true)];
+out.transitionStyles = authoring.TRANSITION_STYLES;
 // Values the sliders cannot show exactly are not the console's either (no silent snapping).
 const stretched = (fade, ending) => authoring.buildSave("live", { sceneId: "evening",
   sourceRefs: ["holiday:1"], targetIds: ["lobby"], cycleSeconds: 20, loop: true, ...settings,
   fadeSeconds: fade, endingSeconds: ending }).body;
 out.outOfRange = [stretched(3, 12), stretched(1.3, 4.5), stretched(6, 4.5), stretched(3, 4.5)]
   .map((body) => authoring.editableDraft(body) !== null);
-// "Fades out" brings the last photo back over half the fade, inside the ending.
-out.endingProblem = authoring.sceneProblems({ ...hand, mode: "live", cycleSeconds: 20,
-  fadeSeconds: 3, ending: "fade", endingSeconds: 1 }, new Set()).map((p) => [p.field, p.message]);
+// Fade out and in brings the ending's photo up over half the fade, inside the ending; a
+// cross-fade brings it in over the last photo, before the ending.
+out.endingProblem = ["fade_out_and_in", "cross_fade"].map((transitionStyle) => authoring
+  .sceneProblems({ ...hand, mode: "live", cycleSeconds: 20, fadeSeconds: 3, ending: "fade",
+    endingSeconds: 1, transitionStyle }, new Set()).map((p) => [p.field, p.message]));
 
 // --- Roadmap 5a: the Scene's selection, written, read back and bounded.
 const chosen = { order: "chronological", noRepeatDays: "3", cropLimit: 0.3 };
@@ -336,11 +377,12 @@ def test_flow_kit_and_scene_flow_shape():
     assert out["fieldSteps"] == [
         "kind", "photos", "frames", "media", "playback", "playback", "review", "review"]
     assert out["advanced"] == ["id", "keepLastPhoto", "keepTogether", "loop"]
-    # A new Scene's 1x settings at the settings catalogue's defaults (#41 1.5 s, #64 on,
-    # #65 off); how it ends stays "none" (roadmap 1x: #62 and #63's defaults disagree).
+    # A new Scene's 1x settings at the settings catalogue's defaults (#41 1.5 s, a cross-fade,
+    # #64 on, #65 off); how it ends stays "none" (roadmap 1x: #62 and #63's defaults disagree).
     assert out["seedNew"] == {
         "mode": "live", "name": "", "idOverride": None, "sourceRefs": [], "targets": [],
-        "selections": {}, "cycleSeconds": 30, "loop": True, "fadeSeconds": 1.5,
+        "selections": {}, "cycleSeconds": 30, "loop": True, "transitionStyle": "cross_fade",
+        "fadeSeconds": 1.5,
         "ending": "none", "endingSeconds": 3, "keepLastPhoto": True, "keepTogether": False,
         "order": "shuffle", "noRepeatDays": 7, "cropLimit": None, "revision": None}
     assert out["seedNewTarget"]["targets"] == ["frame_one"]
@@ -349,7 +391,7 @@ def test_flow_kit_and_scene_flow_shape():
     assert out["seedEdit"] == {
         "mode": "live", "name": "", "idOverride": None, "sourceRefs": ["holiday:1"],
         "targets": ["lobby"], "selections": {}, "cycleSeconds": 20, "loop": True,
-        "fadeSeconds": 0, "ending": "none", "endingSeconds": 3, "keepLastPhoto": True,
+        "transitionStyle": "cross_fade", "fadeSeconds": 0, "ending": "none", "endingSeconds": 3, "keepLastPhoto": True,
         "keepTogether": False, "order": "shuffle", "noRepeatDays": 7, "cropLimit": None,
         "revision": 3}
     assert out["seedMissing"] is None
@@ -379,19 +421,18 @@ def test_flow_kit_and_scene_flow_shape():
         "fade": "Fade between photos", "ending": "How it ends",
         "keepLastPhoto": "Keep the last photo up", "keepTogether": "Keep these Frames together",
         "order": "Order", "noRepeatDays": "Don't repeat within", "cropLimit": "Crop limit"}
-    # A fade longer than the cycle is the fade's problem (the planner refuses it).
+    # A fade leaving less than 5 s of each photo is the fade's problem (Central refuses it).
     assert out["fadeProblem"] == [
-        ["fade", "Fade between photos must be no longer than each photo shows for."]]
+        ["fade", "Fade between photos must leave 5 s of each photo without a fade: at most 0 s."]]
 
     # Delivery 1x: each setting is written to the Scene model's own field...
     body = out["liveBody"]
     assert body["contributions"] == [{
-        "target": "frame:lobby", "role": "lobby", "kind": "media", "source_refs": ["holiday:1"],
-        "fade_in_seconds": 1.5, "fade_out_seconds": 1.5}]
+        "target": "frame:lobby", "role": "lobby", "kind": "media", "source_refs": ["holiday:1"]}]
+    assert body["transition"] == {"style": "cross_fade", "seconds": 3}
     assert (body["outro_seconds"], body["protect_frames"]) == (4.5, True)
     assert body["outro_contributions"] == [{
         "target": "frame:lobby", "role": "lobby", "kind": "media", "source_refs": ["holiday:1"],
-        "fade_in_seconds": 1.5, "fade_out_seconds": 3,  # back over half the fade, out over the rest
         "after_end": "keep_nothing"}]  # an ending keeps nothing after it
     assert out["authoredOutro"] == [
         {"target": "frame:lobby", "role": "lobby", "kind": "black", "after_end": "keep_nothing"}]
@@ -401,10 +442,36 @@ def test_flow_kit_and_scene_flow_shape():
     assert out["liveBack"] == settings
     assert out["authoredBack"] == {**settings, "ending": "black"}
     assert out["unequal"] is None
+    # The Transition round-trips: buildSave writes the style and seconds as the Scene's
+    # `transition` (Central's model), and decodeScene reads both back.
+    assert out["transitions"] == [
+        [{"style": "cross_fade", "seconds": 3}, ["cross_fade", 3]],
+        [{"style": "fade_out_and_in", "seconds": 3}, ["fade_out_and_in", 3]]]
+    for transition, _ in out["transitions"]:
+        assert Transition.model_validate(transition).model_dump() == transition
+    assert out["transitionMissing"] == ["cross_fade", 0]
+    # The bound is Central's (`Scene.check_transition`): at most each photo's seconds less 5 s.
+    assert out["transitionFree"] == PREPARE_SECONDS
+    assert out["transitionStyles"] == list(get_args(TransitionStyle))
+    free = "Fade between photos must leave 5 s of each photo without a fade: at most {} s."
+    # A plain Save's answer (SceneOnWall.earlier_version) named: each Schedule by its name, a
+    # Show now, a waiting one; nothing when the wall follows the saved Scene.
+    assert out["earlier"] == [
+        [schedule("named", name="Evenings"), SCENE["earlierShowNow"], SCENE["earlierSchedule"],
+         SCENE["earlierWaiting"]], [], []]
+    # After Save and apply now, a Run Central could not replace is still named, and why.
+    names = [SCENE["earlierShowNow"]]
+    assert out["notices"] == [
+        {"names": names, "message": scene_words("earlier", id="evening", names=names[0])},
+        {"names": names, "message": scene_words("earlierKept", id="evening", names=names[0])},
+        None]
+    # The status line says it was not applied everywhere; the notice under it does not say it again.
+    assert scene_words("savedNowKept", id="evening").rstrip(".") not in out["notices"][1]["message"]
+    assert out["freeProblems"] == [[], [["fade", free.format(5)]], [], [["fade", free.format(0)]]]
     # A 12 s ending, a 1.3 s fade or a 6 s fade would be snapped by the sliders: not editable.
     assert out["outOfRange"] == [False, False, False, True]
     assert out["endingProblem"] == [
-        ["endingSeconds", "Ending length must be at least half of Fade between photos."]]
+        [["endingSeconds", "Ending length must be at least half of Fade between photos."]], []]
 
     # Roadmap 5a: the selection is written as the model's fields (the crop limit a fraction,
     # the days a number), read back by Edit, and missing reads as the model's default.

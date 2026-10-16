@@ -103,6 +103,7 @@ export function identityProblems(kind, draft, existingIds) {
 export const PLAYBACK_LABELS = Object.freeze({
   cycle: "Each photo shows for",
   loop: "Keep repeating",
+  transition: "Transition",
   fade: "Fade between photos",
   ending: "How it ends",
   endingSeconds: "Ending length",
@@ -121,6 +122,24 @@ export const PLAYBACK_LABELS = Object.freeze({
  * @typedef {"none"|"black"|"fade"} Ending
  */
 export const ENDINGS = Object.freeze(["none", "black", "fade"]);
+
+/**
+ * How one photo gives way to the next (central/runtime.py `TransitionStyle`, owner 2026-10-15:
+ * "Let's make cross fade an option"): "cross_fade", the next photo dissolves in over the
+ * current one, which stays at full until it is fully in; or "fade_out_and_in", through black
+ * (or what plays beneath), half the seconds each way.
+ *
+ * @typedef {"cross_fade"|"fade_out_and_in"} TransitionStyle
+ */
+export const TRANSITION_STYLES = Object.freeze(["cross_fade", "fade_out_and_in"]);
+
+/**
+ * The seconds of each photo a Transition must leave free (contracts/models.py
+ * `PREPARE_SECONDS`, pinned by tests/test_console_flow.py): Central refuses a fade longer than
+ * each photo's seconds less this (`Scene.check_transition`), so a Player never holds more than
+ * two photos per screen while it gets the next one ready.
+ */
+export const TRANSITION_FREE_SECONDS = 5;
 
 /**
  * How a Scene's Frames pick from its photos (roadmap 5a, central/wall_plan/selection.py
@@ -181,16 +200,21 @@ export function sceneProblems(draft, existingIds, { editing = false } = {}) {
   }
   if (!(Number(draft.cycleSeconds) > 0)) {
     problems.push({ field: "cycle", message: `${PLAYBACK_LABELS.cycle}: choose more than 0 seconds.` });
-  } else if (Number(draft.fadeSeconds) > Number(draft.cycleSeconds)) {
-    // A photo's fade out and the next one's fade in share its cycle (central/planner.py
-    // refuses fades longer than the cycle).
+  } else if (Number(draft.fadeSeconds) > 0
+      && Number(draft.fadeSeconds) > Number(draft.cycleSeconds) - TRANSITION_FREE_SECONDS) {
+    // Central's refusal ("transition_too_long", central/runtime.py `Scene.check_transition`).
+    const most = Math.max(0, Number(draft.cycleSeconds) - TRANSITION_FREE_SECONDS);
     problems.push({
       field: "fade",
-      message: `${PLAYBACK_LABELS.fade} must be no longer than each photo shows for.`,
+      message:
+        `${PLAYBACK_LABELS.fade} must leave ${TRANSITION_FREE_SECONDS} s of each photo ` +
+        `without a fade: at most ${most} s.`,
     });
   }
-  if (draft.ending === "fade" && Number(draft.endingSeconds) < Number(draft.fadeSeconds) / 2) {
-    // "Fades out" brings the last photo back over half the fade, inside the ending.
+  if (draft.ending === "fade" && draft.transitionStyle === "fade_out_and_in"
+      && Number(draft.endingSeconds) < Number(draft.fadeSeconds) / 2) {
+    // Fade out and in brings the ending's photo up over half the fade, inside the ending (a
+    // cross-fade brings it in over the last photo, before the ending starts).
     problems.push({
       field: "endingSeconds",
       message: `${PLAYBACK_LABELS.endingSeconds} must be at least half of ${PLAYBACK_LABELS.fade}.`,
@@ -236,12 +260,11 @@ export function sceneProblems(draft, existingIds, { editing = false } = {}) {
  * `revision` is 1 for a new Scene; an edit sends the stored revision + 1 (§13).
  *
  * Delivery 1x's settings (an omitted one writes what the console always wrote):
- * - `fadeSeconds` (#41): each photo fades out over half of it and the next fades in over
- *   the other half (every body Contribution's `fade_out_seconds` and `fade_in_seconds`);
+ * - `transitionStyle` and `fadeSeconds` (#40, #41): the Scene's `transition`, its style and
+ *   seconds (Central turns it into each photo's fades, central/runtime.py `_transition_at`);
  * - `ending` and `endingSeconds` (#62, #63): the outro. "black" is one opaque black
  *   Contribution per Frame; "fade" is one more media Contribution per Frame, from the same
- *   photos: the last photo returns over half the fade between photos, then fades out over
- *   the rest of the outro (so `endingSeconds` must be at least half the fade). Either keeps
+ *   photos, which enters by the transition and then fades out. Either keeps
  *   nothing after it (`after_end: "keep_nothing"`): the Frame is black once it has shown;
  * - `keepLastPhoto` (#64): every body Contribution keeps its photo after it
  *   (`after_end: "keep_this_photo"`);
@@ -252,7 +275,7 @@ export function sceneProblems(draft, existingIds, { editing = false } = {}) {
  * @param {"live"|"authored"} mode
  * @param {{sceneId: string, sourceRefs: string[], targetIds: string[], cycleSeconds: number,
  *          loop: boolean, selections?: Record<string,string>, revision?: number,
- *          fadeSeconds?: number, ending?: Ending, endingSeconds?: number,
+ *          transitionStyle?: TransitionStyle, fadeSeconds?: number, ending?: Ending, endingSeconds?: number,
  *          keepLastPhoto?: boolean, keepTogether?: boolean, order?: Order,
  *          noRepeatDays?: number|string, cropLimit?: number}} draft
  * @returns {{path: string, body: object}}
@@ -261,7 +284,7 @@ export function buildSave(
   mode,
   {
     sceneId, sourceRefs, targetIds, cycleSeconds, loop, selections = {}, revision = 1,
-    fadeSeconds = 0, ending = "none", endingSeconds = 0, keepLastPhoto = true, keepTogether = false,
+    transitionStyle = SCENE_DEFAULTS.transition.style, fadeSeconds = 0, ending = "none", endingSeconds = 0, keepLastPhoto = true, keepTogether = false,
     order = SCENE_DEFAULTS.selection.order, noRepeatDays = SCENE_DEFAULTS.selection.no_repeat_days,
     cropLimit = SCENE_DEFAULTS.selection.crop_limit,
   },
@@ -275,17 +298,16 @@ export function buildSave(
   const media = (frameId) => (mode === "authored"
     ? { asset_refs: [selections[frameId]] }
     : { source_refs: [...sourceRefs] });
-  const half = Number(fadeSeconds) / 2;
   const contributions = targetIds.map((frameId) => ({
     target: toTarget(frameId),
     role: frameId,
     kind: "media",
     ...media(frameId),
-    ...(half > 0 ? { fade_in_seconds: half, fade_out_seconds: half } : {}),
     ...(keepLastPhoto ? { after_end: "keep_this_photo" } : {}),
   }));
   const scene = {
     scene_id: sceneId, revision, cycle_seconds: cycleSeconds, loop, contributions,
+    transition: { style: transitionStyle, seconds: Number(fadeSeconds) },
     selection: {
       order, no_repeat_days: Number(noRepeatDays),
       // null: the Scene follows the house crop limit (Settings › Photo fit, follow-ups B1).
@@ -298,8 +320,7 @@ export function buildSave(
     scene.outro_contributions = targetIds.map((frameId) => (ending === "black"
       ? { target: toTarget(frameId), role: frameId, kind: "black", after_end: "keep_nothing" }
       : { target: toTarget(frameId), role: frameId, kind: "media", ...media(frameId),
-          ...(half > 0 ? { fade_in_seconds: half } : {}),
-          fade_out_seconds: seconds - half, after_end: "keep_nothing" }));
+          after_end: "keep_nothing" }));
   }
   if (keepTogether) {
     scene.protect_frames = true;
@@ -335,6 +356,10 @@ export const SCENE_DEFAULTS = {
     "order": "shuffle",
     "no_repeat_days": 7,
     "crop_limit": null
+  },
+  "transition": {
+    "style": "cross_fade",
+    "seconds": 0
   }
 };
 
@@ -344,16 +369,14 @@ export const CONTRIBUTION_DEFAULTS = {
   "source_refs": [],
   "asset_refs": [],
   "opacity": 1,
-  "fade_in_seconds": 0,
-  "fade_out_seconds": 0,
   "after_end": "leave_as_is",
   "ramp_from": 0,
   "ramp_to": 0
 };
 
 /**
- * The defaults of the Scene settings the console sets (settings catalogue): a 1.5 s fade
- * between photos (#41); no ending (#62, #63: the catalogue's "dissolve 3 s" and "black" are
+ * The defaults of the Scene settings the console sets (settings catalogue): a 1.5 s
+ * cross-fade between photos (#40, #41; owner 2026-10-15, "Yes" to saved Scenes cross-fading); no ending (#62, #63: the catalogue's "dissolve 3 s" and "black" are
  * one choice in the built model and disagree, so the built behaviour stays until the owner
  * picks); 3 s once an ending is chosen; the last photo kept up (#64); Frames not held
  * together (#65); and the selection's order and no-repeat, which are the Scene model's own
@@ -362,6 +385,7 @@ export const CONTRIBUTION_DEFAULTS = {
  * and C1), so the value lives in one place until a Scene sets its own.
  */
 export const SCENE_SETTING_DEFAULTS = Object.freeze({
+  transitionStyle: SCENE_DEFAULTS.transition.style,
   fadeSeconds: 1.5,
   ending: "none",
   endingSeconds: 3,
@@ -404,22 +428,22 @@ function canonical(value) {
  * Contribution names assets, otherwise live from its first Source. An authored
  * Scene does not store its Source, so the operator picks it again.
  *
- * Delivery 1x's settings are read from the first Contribution (fade, keep the last photo)
- * and the first outro Contribution (how it ends); a Scene whose other Contributions differ
+ * Delivery 1x's settings are read from the Scene's transition (its style and the fade), the
+ * first Contribution (keep the last photo) and the first outro Contribution (how it ends); a Scene whose other Contributions differ
  * does not rebuild to itself, so {@link editableDraft} withholds Edit. Roadmap 5a's are its
  * `selection` (the model's default when it has none).
  *
  * @param {object} scene a served Scene definition
  * @returns {{mode: "live"|"authored", sourceRefs: string[], targetIds: string[],
  *            cycleSeconds: number, loop: boolean, selections: Record<string, string>,
- *            fadeSeconds: number, ending: Ending, endingSeconds: number,
- *            keepLastPhoto: boolean, keepTogether: boolean, order: Order,
- *            noRepeatDays: number, cropLimit: number}}
+ *            transitionStyle: TransitionStyle, fadeSeconds: number, ending: Ending,
+ *            endingSeconds: number, keepLastPhoto: boolean, keepTogether: boolean,
+ *            order: Order, noRepeatDays: number, cropLimit: number}}
  */
 export function decodeScene(scene) {
   const {
     contributions, cycle_seconds: cycleSeconds, loop, outro_seconds: outroSeconds,
-    outro_contributions: outro, protect_frames: keepTogether, selection,
+    outro_contributions: outro, protect_frames: keepTogether, selection, transition,
   } = normalizeScene(scene);
   const authored = contributions.length > 0 && contributions[0].asset_refs.length > 0;
   const frameIdOf = (entry) => frameOf(entry.target) ?? entry.target;
@@ -434,7 +458,8 @@ export function decodeScene(scene) {
     selections: authored
       ? Object.fromEntries(contributions.map((entry) => [frameIdOf(entry), entry.asset_refs[0]]))
       : {},
-    fadeSeconds: first ? first.fade_in_seconds + first.fade_out_seconds : 0,
+    transitionStyle: transition.style,
+    fadeSeconds: transition.seconds,
     ending,
     endingSeconds: ending === "none" ? SCENE_SETTING_DEFAULTS.endingSeconds : outroSeconds,
     keepLastPhoto: first ? first.after_end === "keep_this_photo" : SCENE_SETTING_DEFAULTS.keepLastPhoto,
@@ -449,7 +474,7 @@ export function decodeScene(scene) {
  * The draft to edit a stored Scene with, or null when the console cannot
  * author it losslessly (§13): the Scene must equal `buildSave(decodeScene(it))`
  * apart from `revision`, both sides filled with the model defaults. Anything
- * else — child Scenes, opacity, unequal fades, settings that differ per Frame,
+ * else — child Scenes, opacity, settings that differ per Frame,
  * several Sources — would be dropped by a save, so Edit is withheld with
  * {@link UNAUTHORABLE_REASON}.
  *
@@ -460,7 +485,8 @@ export function editableDraft(scene) {
   const draft = decodeScene(scene);
   // A value the controls cannot show exactly (a 12 s ending, a 1.3 s fade, a 33.3 % crop
   // limit) would be moved by the first touch, so such a Scene is not the console's to edit.
-  if (!inRange(draft.fadeSeconds, SETTING_RANGES.fadeSeconds)
+  if (!TRANSITION_STYLES.includes(draft.transitionStyle)
+      || !inRange(draft.fadeSeconds, SETTING_RANGES.fadeSeconds)
       || (draft.ending !== "none" && !inRange(draft.endingSeconds, SETTING_RANGES.endingSeconds))
       || !ORDERS.includes(draft.order)
       || !inRange(draft.noRepeatDays, SETTING_RANGES.noRepeatDays)
@@ -483,7 +509,8 @@ export function editableDraft(scene) {
  *
  * @typedef {{mode: "live"|"authored", name: string, idOverride: string|null,
  *            sourceRefs: string[], targets: string[], selections: Record<string, string>,
- *            cycleSeconds: string|number, loop: boolean, fadeSeconds: number,
+ *            cycleSeconds: string|number, loop: boolean,
+ *            transitionStyle: TransitionStyle, fadeSeconds: number,
  *            ending: Ending, endingSeconds: number, keepLastPhoto: boolean,
  *            keepTogether: boolean, order: Order, noRepeatDays: number|string,
  *            cropLimit: number, revision: number|null}} SceneDraft

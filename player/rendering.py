@@ -86,8 +86,9 @@ class RecordingRenderer:
     ``pending`` and ``prepare_failures`` are controlled before preroll;
     ``presentation_failures`` exercises failure after successful preparation. A
     failed/pending presentation never replaces ``outputs``' successful composition.
-    Capacity includes already-resident current pictures as well as replacements,
-    all Outputs, overlays and retained reveal media.
+    Capacity counts, as the native renderer's decoder slots do, every resident picture
+    (current, replacement, overlay, retained, on any Output) plus the compositions asked
+    about; a released picture frees its slot even while ``outputs`` still records it.
     """
 
     def __init__(self, capacity: int = 4):
@@ -137,10 +138,9 @@ class RecordingRenderer:
         return PrepareResult("prepared")
 
     def capacity(self, compositions: tuple[OutputComposition, ...]) -> CapacityResult:
-        # Current/replacement/reveal media may need concurrent decode resources.
         media = {
             local.layer.assignment_id
-            for composition in (*self.outputs.values(), *compositions)
+            for composition in compositions
             for local in composition.layers
             if local.layer.variant is not None
         }

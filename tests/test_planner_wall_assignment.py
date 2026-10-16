@@ -21,7 +21,7 @@ from support.key_content_builders import face, measured
 
 from central.catalog import Candidate, SourcePool
 from central.planner import PlannerLimits, Projection, project
-from central.runtime import Contribution, Runtime, Scene
+from central.runtime import Contribution, Runtime, Scene, Transition
 from central.wall_plan.assignment import _Spans
 from central.wall_plan.fit_settings import FitSettings
 from central.wall_plan.key_content import MeasureFailed
@@ -57,19 +57,27 @@ def photo(asset: str, shape: str, *, captured: float = 0, prepared: bool = True,
 @dataclass(frozen=True)
 class FrameSetup:
     shape: str
-    fade_in: float = 0
     after_end: AfterEnd = "leave_as_is"
     authored: tuple[str, ...] = ()
 
 
+CUT = Transition()
+
+
+def fade_in_of(transition: Transition) -> float:
+    """Every photo's fade-in under `transition` (a looping Scene's: central/runtime.py
+    `_transition_at`): a cross-fade's seconds, half of fade out and in's."""
+    return transition.seconds if transition.style == "cross_fade" else transition.seconds / 2
+
+
 def scene(frames: dict[str, FrameSetup], *, cycle: float = 30, order="newest_first",
-          no_repeat_days: int = 0) -> Runtime:
+          no_repeat_days: int = 0, transition: Transition = CUT) -> Runtime:
     instance = Runtime(house=UTC_HOUSE)
     instance.set_scene(Scene(
-        scene_id="scene", cycle_seconds=cycle, loop=True,
+        scene_id="scene", cycle_seconds=cycle, loop=True, transition=transition,
         selection=SceneSelection(order=order, no_repeat_days=no_repeat_days),
         contributions=tuple(Contribution(
-            target=f"frame:{frame}", fade_in_seconds=setup.fade_in, after_end=setup.after_end,
+            target=f"frame:{frame}", after_end=setup.after_end,
             **({"asset_refs": setup.authored} if setup.authored else {"source_refs": (POOL,)}))
             for frame, setup in frames.items())))
     instance.activate("scene", "run", 0)
@@ -134,21 +142,28 @@ def offered_history(*projections: Projection) -> tuple[PhotoShowing, ...]:
 
 def assert_never_on_two_frames(frames: dict[str, FrameSetup], projection: Projection,
                                fixed: tuple[PhotoShowing, ...] = (),
-                               kept: tuple[KeptStill, ...] = ()) -> None:
+                               kept: tuple[KeptStill, ...] = (), *,
+                               transition: Transition = CUT) -> None:
     """Rule 1 over the whole plan with every showing known: the fixed (offered) layers, the plan's
-    new and tentative photos, and the kept stills from the history."""
+    new and tentative photos (each from when it starts to show, faded in by `transition`), and
+    the kept stills from the history."""
     on_frame: dict[str, list[Showing]] = defaultdict(list)
     seen = set()
     for row in fixed:
         on_frame[row.frame_id].append(Showing(row.start, row.end, row.fade_in, row.after_end,
                                               row.asset_id))
         seen.add(row.assignment_id)
+    offered = {layer.assignment_id: layer for layer in layers(projection)}
     for entry in projection.plan:
         if entry.asset_id is None or entry.assignment_id in seen:
             continue
         setup = frames[entry.frame_id]
-        on_frame[entry.frame_id].append(Showing(entry.start, entry.end, setup.fade_in,
-                                                setup.after_end, entry.asset_id))
+        # An offered photo is on screen as its layer says (what the Player draws).
+        layer = offered.get(entry.assignment_id)
+        on_frame[entry.frame_id].append(
+            Showing(layer.start, layer.end, layer.fade_in, layer.after_end, entry.asset_id)
+            if layer is not None else
+            Showing(entry.start, entry.end, fade_in_of(transition), setup.after_end, entry.asset_id))
     extents: list[tuple[str, str, Extent]] = [
         (showing.asset_id, frame, on_screen_extent(showing, showings, UNCERTAINTY))
         for frame, showings in on_frame.items() for showing in showings]
@@ -186,7 +201,7 @@ PHOTO_SHAPES = ("wide", "tall", "four_three", "three_four", "square")
 def walls(draw):
     count = draw(st.integers(2, 4))
     frames = {f"frame-{n}": FrameSetup(
-        shape=draw(st.sampled_from(SHAPES)), fade_in=draw(st.sampled_from((0, 2))),
+        shape=draw(st.sampled_from(SHAPES)),
         after_end=draw(st.sampled_from(("leave_as_is", "keep_this_photo", "keep_nothing"))))
         for n in range(count)}
     size = draw(st.integers(1, 8))
@@ -195,7 +210,7 @@ def walls(draw):
     # Hand-placed Frames (F-13): some Frames show one of the pool's photos, by hand, so a
     # hand-placed photo contends with the Scene lines' and with another hand-placed Frame's.
     for name in [name for name in frames if draw(st.booleans()) and name != "frame-0"]:
-        frames[name] = FrameSetup(shape=frames[name].shape, fade_in=frames[name].fade_in,
+        frames[name] = FrameSetup(shape=frames[name].shape,
                                   after_end=frames[name].after_end, authored=(
                                       draw(st.sampled_from([c.asset_id for c in photos])),))
     refreshed = [candidate for candidate in photos if draw(st.booleans())] + [
@@ -206,25 +221,32 @@ def walls(draw):
         kept = (KeptStill(frame_id="frame-0",
                           asset_id=draw(st.sampled_from([c.asset_id for c in photos])),
                           since=-5),)
+    transition = draw(st.sampled_from((CUT, Transition(style="cross_fade", seconds=3),
+                                       Transition(style="fade_out_and_in", seconds=2))))
     return (frames, photos, refreshed, kept, draw(st.sampled_from((10, 30))),
-            draw(st.sampled_from(("shuffle", "newest_first"))), draw(st.integers(5, 45)))
+            draw(st.sampled_from(("shuffle", "newest_first"))), draw(st.integers(5, 45)),
+            transition)
 
 
 @settings(max_examples=60, deadline=None, suppress_health_check=[HealthCheck.too_slow])
 @given(walls())
 def test_no_photo_is_on_two_frames_at_once_across_replans(case):
-    """Case 2 (property): random pools, Frame shapes, fades and after-states, a kept still,
+    """Case 2 (property): random pools, Frame shapes, Transitions (a cut, a cross-fade whose
+    next photo shows 3 s before its turn, fade out and in) and after-states, a kept still,
     hand-placed Frames, the first plan's offered layers locked into a re-plan after a pool
     refresh: no photo has
     overlapping extents on two Frames anywhere in either plan, locked layers and kept stills
     included, and the re-plan never changes a locked layer. Mutation probe: check extents only
-    within one instant (forget earlier picks' extents)."""
-    frames, photos, refreshed, kept, cycle, order, later = case
-    instance = scene(frames, cycle=cycle, order=order)
+    within one instant (forget earlier picks' extents). Planning a slot from its turn while its
+    layer starts at `shows_from` is caught by the deterministic
+    `test_a_cross_fading_photo_is_never_on_two_frames_while_it_dissolves_in`, not reliably here:
+    random examples seldom put the one photo on two Frames within one dissolve."""
+    frames, photos, refreshed, kept, cycle, order, later, transition = case
+    instance = scene(frames, cycle=cycle, order=order, transition=transition)
     history = WallHistory(kept=kept)
     first = plan(instance, frames, photos, horizon=60, plan_seconds=600, history=history,
                  authored=photos)
-    assert_never_on_two_frames(frames, first, kept=kept)
+    assert_never_on_two_frames(frames, first, kept=kept, transition=transition)
     locks = layers(first)
     selected = offered_history(first)
     second = plan(instance, frames, refreshed, now=later, horizon=60, plan_seconds=600,
@@ -234,8 +256,29 @@ def test_no_photo_is_on_two_frames_at_once_across_replans(case):
     for lock in locks:
         if lock.end > later:
             assert replanned[lock.assignment_id] == lock
-    assert_never_on_two_frames(frames, second, fixed=selected, kept=kept)
+    assert_never_on_two_frames(frames, second, fixed=selected, kept=kept, transition=transition)
 
+
+
+def test_a_cross_fading_photo_is_never_on_two_frames_while_it_dissolves_in():
+    """A cross-faded photo is on screen from when it starts to show, 3 s before its turn: the
+    wall plan keeps it off every other Frame from then, here beside another Scene whose turns
+    (9 s) end inside that lead. Mutation probe: plan the slot from its turn while its layer
+    starts at `shows_from` (a photo shows on both Frames during the dissolve)."""
+    frames = {"left": FrameSetup("wide"), "right": FrameSetup("wide")}
+    instance = Runtime(house=UTC_HOUSE)
+    for scene_id, frame, cycle, transition in (
+            ("dissolving", "left", 10, Transition(style="cross_fade", seconds=3)),
+            ("cutting", "right", 9, CUT)):
+        instance.set_scene(Scene(
+            scene_id=scene_id, cycle_seconds=cycle, loop=True, transition=transition,
+            selection=SceneSelection(order="newest_first", no_repeat_days=0),
+            contributions=(Contribution(target=f"frame:{frame}", source_refs=(POOL,)),)))
+        instance.activate(scene_id, scene_id, 0)
+    photos = [photo(f"p{n}", "wide", captured=n) for n in range(3)]
+    projection = plan(instance, frames, photos, horizon=120, plan_seconds=240)
+    assert {layer.start for layer in layers(projection) if layer.frame_id == "left"} >= {0, 7, 17}
+    assert_never_on_two_frames(frames, projection)
 
 def test_every_photo_that_fits_some_frame_is_shown_in_time():
     """Case 3 (liveness): no-repeat off, every photo fits one of the Frames: within the hour

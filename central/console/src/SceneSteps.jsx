@@ -10,7 +10,7 @@ import { candidateLabels } from "./mediaHealth.js";
 import { SCENE_ANSWER_LABELS } from "./sceneFlowModel.js";
 import {
   AdvancedRows, cropWords, daysWords, EndingRows, endingWords, onOff, ORDER_LABELS, secondsWords, SelectionRows,
-  TimingRows,
+  TimingRows, transitionWords,
 } from "./SceneSettings.jsx";
 import { SourcePicker } from "./SourcePicker.jsx";
 import { sourceName } from "./sourceNames.js";
@@ -242,7 +242,7 @@ export function MediaStep({ value, problems, candidates, onSelect }) {
 }
 
 /**
- * Step 4, Playback: "Seconds per cycle" (default 30) and "Fade between photos"; how the
+ * Step 4, Playback: "Seconds per cycle" (default 30), the "Transition" and "Fade between photos"; how the
  * Scene ends; "Order", "Don't repeat within" and "Crop limit" (roadmap 5a); under Advanced, "Keep repeating" (default on), "Keep
  * the last photo up" and "Keep these Frames together" (SceneSettings.jsx).
  *
@@ -335,7 +335,7 @@ export function ReviewStep({
     rows: [
       { label: SCENE_ANSWER_LABELS.cycle, value: secondsWords(value.cycleSeconds) },
       { label: SCENE_ANSWER_LABELS.loop, value: value.loop ? onOff(true) : "Off: it plays once through" },
-      { label: SCENE_ANSWER_LABELS.fade, value: secondsWords(value.fadeSeconds) },
+      { label: SCENE_ANSWER_LABELS.fade, value: transitionWords(value) },
       { label: SCENE_ANSWER_LABELS.ending, value: endingWords(value) },
       { label: SCENE_ANSWER_LABELS.keepLastPhoto, value: onOff(value.keepLastPhoto) },
       { label: SCENE_ANSWER_LABELS.keepTogether, value: onOff(value.keepTogether) },
