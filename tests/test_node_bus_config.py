@@ -444,7 +444,7 @@ def test_the_store_lines_fill_the_store_and_each_slice_stays_in_its_line():
     assert {name: (line.pipe, line.declarer, line.streams, line.max_bytes) for name, line in STORE_LINES.items()} == {
         "host": (Pipe.FLEET, "host", 2, 768 * kib), "apps": (Pipe.FLEET, "apps", 3, 1536 * kib),
         "display": (Pipe.FLEET, "display", 3, 1536 * kib), "health": (Pipe.FLEET, "health", 3, 1536 * kib),
-        "content": (Pipe.SHOW, "content", 2, 1280 * kib), "player": (Pipe.SHOW, "apps", 3, 4608 * kib)}
+        "content": (Pipe.SHOW, "content", 2, 1280 * kib), "player": (Pipe.SHOW, "player", 3, 4608 * kib)}
     assert sum(line.max_bytes for line in STORE_LINES.values()) + WALL_STREAM_BYTES == 11 * mib + mib // 2
     assert NODE_STORE_BYTES == 12 * mib
     assert sum(line.streams for line in STORE_LINES.values()) + 1 == NODE_MAX_STREAMS == 17

@@ -223,7 +223,7 @@ STORE_LINES: Final[Mapping[str, StoreLine]] = MappingProxyType({line.name: line 
     StoreLine("display", Pipe.FLEET, "display", 3, 1536 * _KIB),
     StoreLine("health", Pipe.FLEET, "health", 3, 1536 * _KIB),
     StoreLine("content", Pipe.SHOW, "content", 2, 1280 * _KIB),
-    StoreLine("player", Pipe.SHOW, "apps", 3, 4608 * _KIB),   # the app line: apps declares it (§7.3)
+    StoreLine("player", Pipe.SHOW, "player", 3, 4608 * _KIB),   # the Player declares its own line (0017 C4, 2026-10-16)
 )})
 # Every line and the WALL mirror fit the store and the server's stream count, so no line's apply is
 # refused for room by another's (11.5 of 12 MiB, 17 of 17 streams).
