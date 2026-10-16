@@ -13,6 +13,7 @@ import hashlib
 import io
 import json
 import os
+import shutil
 import tarfile
 import time
 import zipfile
@@ -59,12 +60,12 @@ from scripts.package_release_artifacts import package as _package
 
 
 def package(bundle, destination, *, revision, images=IMAGE_REFERENCES, source_date_epoch=EPOCH,
-            components=None, tag=TAG):
+            components=None, tag=TAG, galleria=galleria_zip.SOURCE):
     """The real packager, with a stamped component set beside `destination` unless given."""
     if components is None:
         components = node_components(destination.parent / f"{destination.name}-components")
     return _package(bundle, components, destination, revision=revision, tag=tag, images=images,
-                    source_date_epoch=source_date_epoch)
+                    source_date_epoch=source_date_epoch, galleria=galleria)
 
 
 def test_package_produces_expected_bundle(tmp_path):
@@ -519,9 +520,14 @@ def _zipped(path):
 def test_every_release_carries_galleria_zipped_for_its_tag(tmp_path):
     """The release's zip holds the integration's files at its root (HACS extracts it into
     custom_components/galleria/), manifest.json versioned from the tag, byte for byte the same on
-    a second run, recorded in manifest.json and listed in SHA256SUMS."""
+    a second run from a checkout whose file times differ (as a re-run's seal checks out afresh),
+    recorded in manifest.json and listed in SHA256SUMS."""
     destination, manifest = _packaged(tmp_path, tag=FAKE_TAG)
-    again, _ = _packaged(tmp_path, "again", tag=FAKE_TAG)
+    checkout = tmp_path / "other-checkout"
+    shutil.copytree(galleria_zip.SOURCE, checkout, ignore=shutil.ignore_patterns("__pycache__"))
+    for path in checkout.rglob("*"):
+        os.utime(path, (1_000_000_000, 1_000_000_000))
+    again, _ = _packaged(tmp_path, "again", tag=FAKE_TAG, galleria=checkout)
     zipped = destination / GALLERIA_ZIP
     assert zipped.read_bytes() == (again / GALLERIA_ZIP).read_bytes()
 
