@@ -1,7 +1,7 @@
 """The V2 node deployment: an immutable boot target, and how one is derived from a release.
 
 Pure (kernel and contracts only, no persistence), so it sits below infra: the infra deployment
-writer and the fleet services share one model without infra importing fleet. A deployment is what `node_boot_policy` selects and what a boot offer freezes.
+writer and the fleet services share one model without infra importing fleet. A deployment is what a Pi's version names and what a boot offer freezes.
 """
 from __future__ import annotations
 

@@ -79,7 +79,8 @@ def test_install_on_one_pi_moves_only_that_pis_next_offer(registry, wall):
     """Mutation probes: boot_deployment_in ignores the Pi's version -> A's offer carries v2.1.0;
     install writes every Pi -> B's offer moves too."""
     client, *_ = wall
-    # No version yet: both boot the newest READY stable release (v2.2.0 still downloads).
+    # No version yet: both boot the newest READY stable release (v2.2.0 still downloads), which their
+    # first offers record as their versions.
     assert {serial: _offer(client, serial).base.tag for serial in (A, B)} == {A: "v2.1.0", B: "v2.1.0"}
     assert client.get("/v1/operator/releases", headers=HEADERS).json()["default"] == "v2.1.0"
     started = _install(client, A, "v2.0.0")
@@ -89,7 +90,7 @@ def test_install_on_one_pi_moves_only_that_pis_next_offer(registry, wall):
     assert _offer(client, B).base.tag == "v2.1.0"
     pis = _pis(client)
     assert (pis[A]["version"], pis[A]["chosen"], pis[A]["previous"]) == ("v2.0.0", True, "v2.1.0")
-    assert (pis[B]["version"], pis[B]["chosen"]) == ("v2.1.0", False)
+    assert (pis[B]["version"], pis[B]["chosen"]) == ("v2.1.0", True)   # recorded by its first boot offer
 
 
 @pytest.mark.parametrize("serial, version, status, code", [

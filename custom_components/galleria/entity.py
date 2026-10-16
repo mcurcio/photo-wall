@@ -113,9 +113,12 @@ class FrameEntity(CentralEntity):
         self.async_write_ha_state()
 
     def report(self) -> FrameReport | None:
-        """This Frame's report from the Pi that drives it, at the binding's generation; None else."""
+        """This Frame's report from the Pi that drives it, at the binding's generation; None else.
+        With Central away the Pi is the one Central last named (only Central changes a binding): the
+        coordinator keeps its last successful listing while Home Assistant runs, never across a
+        restart."""
         snapshot = self.coordinator.data
-        frame = snapshot.frames().get(self.frame_id) if self.coordinator.last_update_success and snapshot else None
+        frame = snapshot.frames().get(self.frame_id) if snapshot else None
         driven_by = frame["driven_by"] if frame else None
         reader = self.runtime.pis.get(driven_by["serial"]) if driven_by else None
         if reader is None or not reader.last_update_success or reader.data is None:

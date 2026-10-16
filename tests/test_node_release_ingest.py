@@ -374,7 +374,8 @@ def _fail(world, upload):
 
 def test_a_pi_with_no_version_boots_the_newest_ready_stable_release(registry, sync_world):
     """Never a pre-release, never a release still downloading or failed: the newest ready stable
-    one, read again at each boot (nothing is stored for the Pi)."""
+    one, recorded as the Pi's version by its first boot offer; a newer release becoming ready later
+    never moves it (0010: no auto-advance), only a Pi with no version yet would boot it."""
     from test_node_release_catalog import store_files
     upstream, older, middle, newest = Upstream(), node_upload("v2.0.0"), node_upload("v2.1.0"), node_upload("v2.2.0")
     rc = node_upload("v2.3.0-rc.1")
@@ -390,11 +391,10 @@ def test_a_pi_with_no_version_boots_the_newest_ready_stable_release(registry, sy
     assert offer_for(registry, world).base.tag == "v2.0.0"
     assert read(registry, world)["default"] == "v2.0.0"
     store_files(world, newest)
-    assert offer_for(registry, world).base.tag == "v2.2.0"
+    assert read(registry, world)["default"] == "v2.2.0"
+    assert offer_for(registry, world).base.tag == "v2.0.0"
     pi = next(pi for pi in read(registry, world)["players"] if pi["serial"] == "abcdef1234567890")
-    assert (pi["version"], pi["chosen"]) == ("v2.2.0", False)
-    with registry.db.transaction() as conn:
-        assert conn.execute("SELECT 1 FROM player_versions").fetchone() is None
+    assert (pi["version"], pi["chosen"], pi["previous"]) == ("v2.0.0", True, None)
 
 
 def test_with_no_version_and_nothing_ready_no_boot_is_offered(registry, sync_world):

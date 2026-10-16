@@ -2,7 +2,7 @@ import { useCallback, useMemo, useRef } from "react";
 
 import { apiWrite } from "./apiWrite.js";
 import { readReleases, setWallVersion } from "./domain/releases/api";
-import { deployable, refusalWords, wallOn } from "./domain/releases/model";
+import { answerLost, deployable, refusalWords, wallOn } from "./domain/releases/model";
 import { usePolledRead } from "./polledRead.js";
 import { answerOutcome, UNKNOWN_MESSAGE } from "./sendOutcome.js";
 
@@ -55,6 +55,9 @@ export function useReleaseRead() {
 
 // --- Update the wall's one write.
 
+/** What Update the wall did, in its one wording: every Player's version is `version`. */
+export const wallVersionWords = (version) => `Every Player boots ${version} from its next boot on.`;
+
 /** Update the wall's scope: every Player's own version, no reboot by itself. */
 export const WALL_SCOPE = "Every Player Central knows boots this release from its next boot on. A Player that "
   + "enrols later boots the newest ready release until it is given one.";
@@ -86,10 +89,8 @@ export async function sendWallVersion(version, releases) {
   const refusal = wallRefusal(releases.latest().read, version);
   if (refusal !== null) return { outcome: "changed", message: `${refusal}.`, code: null };
   const answer = await setWallVersion({ version });
-  if (answer.ok) return { outcome: "done", message: `Every Player boots ${version} from its next boot on.`, code: null };
-  if (answer.error === "unreachable" || /^http_5\d\d$/.test(answer.error)) {
-    return { outcome: "unknown", message: UNKNOWN_MESSAGE, code: null };
-  }
+  if (answer.ok) return { outcome: "done", message: wallVersionWords(version), code: null };
+  if (answerLost(answer.error)) return { outcome: "unknown", message: UNKNOWN_MESSAGE, code: null };
   return { outcome: "refused", message: refusalWords(answer.error), code: answer.error };
 }
 
@@ -103,7 +104,7 @@ export async function sendWallVersion(version, releases) {
  */
 export function wallSettled(version, read) {
   return read != null && wallOn(read, version)
-    ? { outcome: "done", message: `Every Player boots ${version} from its next boot on.`, code: null }
+    ? { outcome: "done", message: wallVersionWords(version), code: null }
     : { outcome: "changed", message: "The Players' versions changed meanwhile; review them.", code: null };
 }
 

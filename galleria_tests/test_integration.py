@@ -229,14 +229,17 @@ async def test_a_player_of_another_schema_major_raises_a_repair_issue(hass: Home
     assert ir.async_get(hass).async_get_issue(DOMAIN, "unreadable_player_p1") is None
 
 
-async def test_central_away_leaves_its_facts_unavailable_and_the_hub_reads_disconnected(
+async def test_central_away_leaves_its_facts_unavailable_and_frames_read_from_the_pi_it_last_named(
         hass: HomeAssistant, entry: MockConfigEntry, door: FakeDoor) -> None:
+    light = state_of(hass, "sensor", "galleria_frame_frame-1_light").state
+    assert light != STATE_UNAVAILABLE
     door.down = True
     door.connected = False
     await read_all(hass, entry)
     assert state_of(hass, "sensor", f"galleria_{ORIGIN}_central_version").state == STATE_UNAVAILABLE
     assert state_of(hass, "binary_sensor", f"galleria_{ORIGIN}_hub_connected").state == STATE_OFF
-    assert state_of(hass, "sensor", "galleria_frame_frame-1_light").state == STATE_UNAVAILABLE
+    # Only Central changes a binding: the Frame still reads from the Pi Central last named.
+    assert state_of(hass, "sensor", "galleria_frame_frame-1_light").state == light
 
 
 async def test_unloading_stops_publishing(hass: HomeAssistant, entry: MockConfigEntry, door: FakeDoor) -> None:

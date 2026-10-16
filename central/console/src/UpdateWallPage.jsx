@@ -17,7 +17,7 @@ import { liveRunsFor } from "./join.js";
 import { currentSessionBoot, useNodeDevice } from "./nodeRead.js";
 import { playerPageHref } from "./players.js";
 import { QualifiedFallback } from "./QualifiedFallback.jsx";
-import { sendWallVersion, useReleaseRead, WALL_SCOPE, wallSettled } from "./releases.js";
+import { sendWallVersion, useReleaseRead, WALL_SCOPE, wallSettled, wallVersionWords } from "./releases.js";
 import { formatRoute } from "./routes.js";
 import { SectionBoundary } from "./SectionBoundary.jsx";
 import { BoundRule } from "./StageApp.jsx";
@@ -584,7 +584,7 @@ function Journey({ tag, tried, skippedIds, snapshot, bootFacts, navigate, say, m
       )}
       {(step.step === "keeping" || step.step === "paused") && (
         <SectionBoundary title="Put on the wall" resetKey={null}>
-          <p className="player__state">{`Every Player boots ${tag} from its next boot on.`}</p>
+          <p className="player__state">{wallVersionWords(tag)}</p>
           <p className="roster__note">{KEEP_SCOPE}</p>
           {step.step === "paused" && (
             <>

@@ -344,9 +344,6 @@ NOT_SHIPPED: Final = (
     "scripts/calibration_target/**",  # the agent's calibration target reader (decision 0026); never shipped
     "scripts/calibration_boards.py",  # builds contracts/calibration_boards.py (decision 0027); never shipped
     "scripts/console_types.py",  # builds the console's generated contract.ts at build time; never shipped
-    # The owner's Home Assistant automation that publishes room lights to the broker (decision
-    # 0028): pasted into Home Assistant, never part of a Photo Wall build.
-    "integrations/home-assistant/**",
     # Galleria, the Home Assistant integration: HACS installs it from this repository at a release
     # tag; no Photo Wall package or image build reads it. Its contract's generator and its own test
     # environment are development tooling.

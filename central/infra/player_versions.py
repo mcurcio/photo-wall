@@ -3,9 +3,11 @@ a version per Pi"): `PgPlayerVersions` implements central/content_catalog/ports.
 the one writer and reader of each Pi's version (`player_versions`, migration 100).
 
 A Pi's version is a release tag naming one deployment (the tag's last good manifest, through
-node_release_observations). A Pi with no row boots the newest ready stable release
-(`boot_policy.newest_ready_stable`) and keeps no version until one is chosen for it. Install sets one
-Pi's version (its old one becomes its previous), queues the download (a Prefetch in the same
+node_release_observations). A Pi with no version yet is offered the newest ready stable release
+(`boot_policy.newest_ready_stable`) at its first boot, and that offer records it as the Pi's version
+(decided once, where the first offer is made): after that a Pi's version changes only through Install
+or Update the wall, never because a newer release became ready (0010: no auto-advance), and the keep
+set holds the release it runs. Install sets one Pi's version (its old one becomes its previous), queues the download (a Prefetch in the same
 transaction: the version is now part of the keep set, `boot_policy.kept`), and restarts that Pi once
 the release is ready: at once when it already is, else at the worker's next `advance_installs` after
 it is. A restart is a reboot command on the Pi's current host session (NodeCommands
@@ -146,9 +148,7 @@ class PgPlayerVersions:
                 raise VersionRefused(InstallRefusal.UNKNOWN_PLAYER)
             deployment = _deployment_of(conn, version)
             install: InstallProgress = "restarting" if self._ready(conn, deployment) else "downloading"
-            default = default_deployment_in(conn, self._clock, self._readiness)
-            self._set_in(conn, device_id, deployment, install,
-                         None if default is None else UUID(default.deployment_id))
+            self._set_in(conn, device_id, deployment, install)
         if install == "restarting":
             self._restart(device_id, version)
         return InstallStarted(serial=serial, version=version, install=install)
@@ -156,21 +156,28 @@ class PgPlayerVersions:
     def set_wall_version(self, version: str) -> Versions:
         with self._db.transaction() as conn:
             deployment = _deployment_of(conn, version)
-            default = default_deployment_in(conn, self._clock, self._readiness)
             for device_id in enrolled_devices_in(conn).values():
-                self._set_in(conn, device_id, deployment, None,
-                             None if default is None else UUID(default.deployment_id))
+                self._set_in(conn, device_id, deployment, None)
         return self.versions()
 
     def boot_deployment_in(self, tx: Any, serial: str) -> str | None:
+        """The deployment `serial`'s boot is offered. A Pi with no version yet gets the newest ready
+        stable release, recorded here as its version in the offer's own transaction."""
         conn = pg_connection(tx)
         device_id = device_id_for_serial(serial)
-        row = None if device_id is None else conn.execute(
-            "SELECT deployment_id FROM player_versions WHERE device_id=%s", (device_id,)).fetchone()
+        if device_id is None:
+            return None
+        row = conn.execute("SELECT deployment_id FROM player_versions WHERE device_id=%s", (device_id,)).fetchone()
         if row is not None:
             return str(row["deployment_id"])
         default = default_deployment_in(conn, self._clock, self._readiness)
-        return None if default is None else default.deployment_id
+        if default is None:
+            return None
+        conn.execute("INSERT INTO player_versions(device_id, deployment_id, changed_at) "
+                     "VALUES (%s, %s, to_timestamp(%s)) ON CONFLICT (device_id) DO NOTHING",
+                     (device_id, UUID(default.deployment_id), self._clock.utc()))
+        return str(conn.execute("SELECT deployment_id FROM player_versions WHERE device_id=%s",
+                                (device_id,)).fetchone()["deployment_id"])
 
     def advance_installs(self) -> None:
         restart: list[tuple[str, str | None]] = []
@@ -193,19 +200,17 @@ class PgPlayerVersions:
         for device_id, version in restart:
             self._restart(device_id, version)
 
-    def _set_in(self, conn: Any, device_id: str, deployment: UUID, install: InstallProgress | None,
-                default: UUID | None) -> None:
-        """Set one Pi's version; its old one (or, with none kept, the release it booted by default)
-        becomes its previous when it differs; the download is queued in the same transaction."""
+    def _set_in(self, conn: Any, device_id: str, deployment: UUID, install: InstallProgress | None) -> None:
+        """Set one Pi's version; its old one becomes its previous when it differs (a Pi that never
+        booted has none: its first offer records its version); the download is queued in the same
+        transaction."""
         conn.execute(
             "INSERT INTO player_versions(device_id, deployment_id, previous_deployment_id, install, changed_at) "
-            "VALUES (%(device)s, %(deployment)s, CASE WHEN %(default)s::uuid IS DISTINCT FROM %(deployment)s::uuid "
-            "THEN %(default)s::uuid END, %(install)s, to_timestamp(%(now)s)) "
+            "VALUES (%(device)s, %(deployment)s, NULL, %(install)s, to_timestamp(%(now)s)) "
             "ON CONFLICT (device_id) DO UPDATE SET deployment_id=EXCLUDED.deployment_id, install=EXCLUDED.install, "
             "changed_at=EXCLUDED.changed_at, previous_deployment_id=CASE WHEN player_versions.deployment_id "
             "<> EXCLUDED.deployment_id THEN player_versions.deployment_id ELSE player_versions.previous_deployment_id END",
-            {"device": device_id, "deployment": deployment, "default": default, "install": install,
-             "now": self._clock.utc()})
+            {"device": device_id, "deployment": deployment, "install": install, "now": self._clock.utc()})
         if self._publisher is not None:
             self._publisher.publish(Prefetch(), within=PgTransaction(conn))
 

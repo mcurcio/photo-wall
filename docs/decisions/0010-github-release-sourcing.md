@@ -55,9 +55,12 @@ selection of 2026-10-04 (not its whole-wall apply) and supersedes this record's 
   `offer.base.tag` is the Pi's version, and an older initramfs keeps parsing offers). The wall-wide
   selection (`node_boot_policy`), its compare-and-set and the first-run auto-select are gone; migration
   100 gives every enrolled Pi the selection it had and its previous one.
-- **A Pi with no version boots the newest ready stable release** (`boot_policy.newest_ready_stable`),
-  read again at every boot and never stored: a new or swapped-in Pi gets the newest release unasked,
-  and can run ahead of its neighbours (a cost the owner accepted with Q2 A).
+- **A Pi with no version yet boots the newest ready stable release** (`boot_policy.newest_ready_stable`),
+  and its first boot offer records that release as its version: a new or swapped-in Pi gets the newest
+  release unasked, and can run ahead of its neighbours (a cost the owner accepted with Q2 A), but from
+  then on its version changes only through Install or Update the wall, never because a newer release
+  became ready (no auto-advance channel), and the keep set holds the release it runs (fix cycle 1,
+  2026-10-16).
 - **Install on one Pi** (the console's `POST /v1/operator/players/{serial}/install`, and Home
   Assistant's `installPlayer` on Central's hub, one service) sets that Pi's version (its old one
   becomes its previous), queues the download, and restarts that Pi once the release is ready: a reboot

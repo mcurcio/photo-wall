@@ -3,6 +3,7 @@ import type {
 } from "../../generated/contract";
 import { appHandle, words } from "../../facts.js";
 import { gigabytes } from "../../health.js";
+import { answerUnknown, UNKNOWN_MESSAGE } from "../../sendOutcome.js";
 
 /*
  * Releases in the console's words: a version per Player (Q2 A, 2026-10-16). Pure: no React, no
@@ -18,10 +19,21 @@ export const INSTALL_REFUSAL_WORDS: Record<InstallRefusal, string> = {
   not_deployable: "Central cannot put this release on a Player: its upload was refused.",
 };
 
+/**
+ * Whether a release write's answer was lost (Update the wall, Install): no answer, or a 5xx that
+ * carries no code of Central's (a gateway). The rule is sendOutcome.js `answerUnknown`'s; this reads
+ * it on the domains' Answer (`unreachable`, or `http_<status>` for a body outside its shape).
+ */
+export function answerLost(error: string): boolean {
+  if (error === "unreachable") return true;
+  const status = /^http_(\d{3})$/.exec(error);
+  return status !== null && answerUnknown({ ok: false, status: Number(status[1]), error: null });
+}
+
 /** A refusal or a lost answer in words: an InstallRefusal code's own sentence, else what happened. */
 export function refusalWords(error: string): string {
   if (Object.hasOwn(INSTALL_REFUSAL_WORDS, error)) return INSTALL_REFUSAL_WORDS[error as InstallRefusal];
-  if (error === "unreachable") return "Central did not answer: the outcome is unknown until the next read.";
+  if (answerLost(error)) return UNKNOWN_MESSAGE;
   return `Central refused it (${error}).`;
 }
 

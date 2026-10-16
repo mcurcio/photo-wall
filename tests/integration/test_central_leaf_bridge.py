@@ -221,6 +221,7 @@ def test_home_assistants_door_through_centrals_origin(registry, tmp_path, monkey
         DOOR_PATH,
         INSTALL_PLAYER,
         INSTALLATION_KEY,
+        RELEASES_KEY,
         InstallPlayer,
         InstallRefused,
         InstallStarted,
@@ -265,6 +266,15 @@ def test_home_assistants_door_through_centrals_origin(registry, tmp_path, monkey
                     return None if raw is None else decode_central_state(INSTALLATION_KEY, raw)
                 listed = await until(installation, SECONDS, "Central's installation reads at the door")
                 assert [each.serial for each in listed.players] == ["pi-a", "pi-b"]
+
+                # Releases: what Galleria's "latest" reads, from the Releases page's read; a rejected
+                # release (v2.3.0) is not listed, the downloaded one reads ready.
+                async def releases():
+                    raw = await house.central(RELEASES_KEY)
+                    return None if raw is None else decode_central_state(RELEASES_KEY, raw)
+                listing = {each.version: each for each in (await until(releases, SECONDS, "Central's releases")).releases}
+                assert set(listing) == {"v2.1.0", "v2.0.0"}
+                assert (listing["v2.0.0"].stable, listing["v2.0.0"].readiness) == (True, "ready")
                 await house.publish("light.door", HomeAssistantLight(name="Door", on=True, brightness=255,
                                                                      kelvin=None, rgb=None))   # acknowledged
 

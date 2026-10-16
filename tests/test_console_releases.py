@@ -64,7 +64,8 @@ out.target = [model.updateTarget(view()), model.updateTarget(view({ default: nul
 out.lines = ["v2.0.0", "v1.5.0", "v3.0.0", "v1.2.0", "v1.0.0"].map((version) =>
   model.readinessLine(view().releases.find((row) => row.version === version)));
 out.sizes = [model.downloadSize(1200000000), model.downloadSize(5000)];
-out.refusals = ["unknown_player", "unknown_version", "not_deployable", "unreachable", "http_422"].map(model.refusalWords);
+out.refusals = ["unknown_player", "unknown_version", "not_deployable", "unreachable", "http_502", "http_422"]
+  .map(model.refusalWords);
 
 let answer = () => new Response(JSON.stringify(view()), { status: 200 });
 const sent = [];
@@ -201,7 +202,8 @@ def test_every_install_refusal_has_its_own_sentence_and_a_lost_answer_is_unknown
         "Central does not know this Player.",
         "Central's list of releases has no such release.",
         "Central cannot put this release on a Player: its upload was refused.",
-        "Central did not answer: the outcome is unknown until the next read.",
+        "Central did not answer. Check this after the next refresh.",
+        "Central did not answer. Check this after the next refresh.",   # a gateway's 5xx: lost, not refused
         "Central refused it (http_422).",
     ]
 

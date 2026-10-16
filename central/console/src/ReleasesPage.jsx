@@ -4,7 +4,7 @@ import { useConfirm } from "./ConfirmAction.jsx";
 import { installOnPlayer } from "./domain/releases/api";
 import { FactLine } from "./domain/fact-line.tsx";
 import {
-  deployable, installWords, playerRows, readinessLine, refusalWords, releaseRows, updateTarget,
+  answerLost, deployable, installWords, playerRows, readinessLine, refusalWords, releaseRows, updateTarget,
 } from "./domain/releases/model";
 import { clock, fact } from "./facts.js";
 import { sendCatalogCheck, useReleaseRead } from "./releases.js";
@@ -151,7 +151,7 @@ function ReleaseRecords() {
         const answer = await installOnPlayer(row.serial, { version });
         void releases.refresh();
         if (answer.ok) return { state: "done", message: `${row.name}: ${installWords(answer.started.install, version)}.` };
-        return { state: answer.error === "unreachable" ? "unknown" : "refused", message: refusalWords(answer.error) };
+        return { state: answerLost(answer.error) ? "unknown" : "refused", message: refusalWords(answer.error) };
       },
     });
   };
