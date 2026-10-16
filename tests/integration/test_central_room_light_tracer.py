@@ -1,21 +1,26 @@
-"""Room light end to end, through the real composition roots: a retained Home Assistant message and a
-Pi's light sensor reach the Player's room-lights callback, and never the Player's control State.
+"""Room light end to end, through the real composition roots: a Home Assistant state on Central's hub
+and a Pi's light sensor reach the Player's room-lights callback, and never the Player's control State.
 
-The pieces are each side's own: Central's app for House > Lights and the Player's control State; the
-worker as `media.worker` composes and runs it (`build_bus_and_link`, `_run_workers`), with its Home
-Assistant link on the pinned nats-server's MQTT listener (the house's broker) and its Node bus on a
-hub on free ports (bus_servers.py, configured by Fleet's generator as the worker configures it); a
-Node on the shipped configuration; HostCore's bus as its `main()` starts it (`start_host_bus`: the
-host session and the wired light sensor); and the Player as its `main()` starts it
-(`PlayerService.start`, which follows the room lights), drawing on a recording renderer.
+The pieces are each side's own: Central's app for House > Lights, the Home Assistant page and the
+Player's control State; the worker as `media.worker` composes and runs it (`build_node_bus`,
+`_run_workers`), with Central's hub session listening to Home Assistant's states and its Node bus on
+a hub on free ports (bus_servers.py, configured by Fleet's generator as the worker configures it);
+Home Assistant publishing its states on the hub's WebSocket listener as HOME_ASSISTANT_USER, as the
+Galleria integration does (room_light_rig.HomeAssistant); a Node on the shipped configuration;
+HostCore's bus as its `main()` starts it (`start_host_bus`: the host session and the wired light
+sensor); and the Player as its `main()` starts it (`PlayerService.start`, which follows the room
+lights), drawing on a recording renderer.
 
-E1. A retained light state published before the worker starts reaches the callback.
-E2. Ten switches reach the callback, and the Player's control State delivery does not move.
+E1. A state published before the worker starts (while Central is away) reaches the callback.
+E2. Ten switches reach the callback, and the Player's control State delivery does not move. Home
+    Assistant's own "unavailable" reads Unavailable; a key that is not an entity id and a value that
+    is not a state are refused (UNKNOWN_ADDRESS, UNREADABLE); the Home Assistant page shows when
+    Central last heard the entity, by its name.
 E3. A reading the Pi sent before its Sensor existed is that Sensor's light once the Sensor and the
     light it reports are set up, with no new reading.
-E4. A change made while the hub is away reaches the callback once the hub is back; and after a hub
-    restart with no change, a Player starting on a Node whose bus restarted empty gets the document
-    (WALL holds what Central holds, whatever was put before).
+E4. A change made while the hub is away (a House > Lights edit) reaches the callback once the hub is
+    back; and after a hub restart with no change, a Player starting on a Node whose bus restarted
+    empty gets the document (WALL holds what Central holds, whatever was put before).
 """
 from __future__ import annotations
 
@@ -25,7 +30,7 @@ from fastapi.testclient import TestClient
 from integration.bus_servers import hub_server, node_server, until
 from integration.room_light_rig import (
     RESTART_SECONDS,
-    Broker,
+    HomeAssistant,
     Player,
     Worker,
     light_sensor_root,
@@ -35,13 +40,14 @@ from test_registry import ADMIN, enroll, frame, hello
 from appliance.host.host_runner import start_host_bus
 from central.app import create_app
 from central.content_catalog.catalog import device_id_for_serial
-from central.infra.home_assistant.link import MQTT_URL_ENV
-from central.infra.home_assistant.topics import LIGHT_TOPIC_PREFIX, light_reporter
+from central.infra.home_assistant.references import light_reporter
 from central.infra.light_sensor_judge import PI_SOURCE
 from central.node_bus_wiring import HUB_CONFIG_ENV, HUB_URL_ENV, WALL_RECHECK_SECONDS
 from central.room_light.model import MeasuredLight, ReportedLight, Sensor, SensorRef
 from central.room_light.views import RoomLightsView
 from central.room_light_routes import HOUSE_LIGHTS, HOUSE_SENSORS
+from contracts.central_api import STATES_EPOCH_KEY
+from contracts.home_assistant import HomeAssistantLight, HomeAssistantUnavailable
 from contracts.room_light import (
     LIGHT_SENSOR_KEY,
     Dimmer,
@@ -49,6 +55,7 @@ from contracts.room_light import (
     Measured,
     MeasuredEntry,
     RoomLightsDocument,
+    Unavailable,
     WhiteEntry,
 )
 from contracts.wire_model import Model
@@ -56,8 +63,9 @@ from nodeapi.buffers import state_prefix, state_stream
 
 SERIAL = "serial-room-light"
 ENTITY = "light.bookshelf_spot"
-TOPIC = LIGHT_TOPIC_PREFIX + ENTITY
-ON, OFF = b'{"state":"on","brightness":255}', b'{"state":"off"}'
+NAME = "Bookshelf spot"
+ON = HomeAssistantLight(name=NAME, on=True, brightness=255, kelvin=None, rgb=None)
+OFF = HomeAssistantLight(name=NAME, on=False, brightness=None, kelvin=None, rgb=None)
 FULL = Dimmer(on=True, brightness=1.0)
 LUX = 240.0
 ADMIN_HEADERS = {"Authorization": "Bearer " + ADMIN}
@@ -70,7 +78,9 @@ def _spot(document: RoomLightsDocument) -> Dimmer | None:
     return entry.state if isinstance(entry, WhiteEntry) and isinstance(entry.state, Dimmer) else None
 
 
-def test_room_light_reaches_the_player_through_the_real_composition(registry, tmp_path):
+def test_room_light_reaches_the_player_through_the_real_composition(registry, tmp_path, monkeypatch):
+    """Mutation probe: the listener records a light under SensorRef -> E1 never sees the spot."""
+    monkeypatch.setenv("PHOTO_WALL_CACHE_ROOT", str(tmp_path / "worker-cache"))
     database = registry.db
     device_id = device_id_for_serial(SERIAL)
     with database.transaction() as conn:   # the Node's device, as its boot offer records it
@@ -82,12 +92,12 @@ def test_room_light_reaches_the_player_through_the_real_composition(registry, tm
     registry.bind("hall", player["player_id"], "HDMI-A-1", expected_generation=0)
     player_headers = {"Authorization": "Bearer " + player["token"]}
 
-    broker = Broker(tmp_path)
     hub = hub_server(tmp_path, [SERIAL])
+    house = HomeAssistant(f"ws://127.0.0.1:{hub.websocket_port}")
     node = node_server(tmp_path, SERIAL, hub)
     host = None
     stoppers: list = []
-    env = {HUB_URL_ENV: hub.client_url, HUB_CONFIG_ENV: str(tmp_path / "worker-hub.json"), MQTT_URL_ENV: broker.url}
+    env = {HUB_URL_ENV: hub.client_url, HUB_CONFIG_ENV: str(tmp_path / "worker-hub.json")}
 
     with TestClient(create_app(database, registry.clock, ADMIN)) as client:
         def call(method: str, path: str, *, json: dict | Model | None = None, headers=ADMIN_HEADERS) -> dict:
@@ -113,10 +123,21 @@ def test_room_light_reaches_the_player_through_the_real_composition(registry, tm
         async def run() -> None:
             # House > Lights: the spot Home Assistant reports.
             await asyncio.to_thread(call, "PUT", f"{HOUSE_LIGHTS}/bookshelf-spot", json=ReportedLight(
-                name="Bookshelf spot", reporter=light_reporter(ENTITY), colour=FixedColour(kelvin=4000)))
-            await broker.publish(TOPIC, ON)   # retained, before the worker starts
+                name=NAME, reporter=light_reporter(ENTITY), colour=FixedColour(kelvin=4000)))
             await asyncio.to_thread(hub.start)
             await asyncio.to_thread(node.start)
+            await house.__aenter__()
+            stoppers.append(house.__aexit__)
+            # A worker declares Home Assistant's bucket on the hub and goes away (a deploy): the state
+            # published meanwhile waits there.
+            first = Worker(database.dsn, env)
+            first.start()
+
+            async def epoch():
+                return await house.central(STATES_EPOCH_KEY)
+            await until(epoch, FIRST_SECONDS, "Central names the states epoch on its hub")
+            await first.stop()
+            await house.publish(ENTITY, ON)   # before the worker starts
             worker = Worker(database.dsn, env)
             worker.start()
             stoppers.append(worker.stop)
@@ -134,11 +155,33 @@ def test_room_light_reaches_the_player_through_the_real_composition(registry, tm
             before = await asyncio.to_thread(control_state)
             for index in range(10):
                 on = index % 2 == 1
-                await broker.publish(TOPIC, ON if on else OFF)
+                await house.publish(ENTITY, ON if on else OFF)
                 await until(latest(lambda d, on=on: _spot(d) is not None and _spot(d).on is on, followed), SECONDS,
                             f"switch {index + 1} reaches the Player")
             assert _spot(followed.latest()) == FULL
             assert await asyncio.to_thread(control_state) == before
+
+            # Home Assistant's own unavailable; a key that is no entity id and a value that is no state.
+            await house.publish(ENTITY, HomeAssistantUnavailable(entity_kind="light", name=NAME))
+
+            def unavailable(document):
+                entry = document.lights.get("bookshelf-spot")
+                return isinstance(entry, WhiteEntry) and isinstance(entry.state, Unavailable)
+            await until(latest(unavailable, followed), SECONDS, "the Player sees the spot unavailable")
+            await house.publish("Not_An_Entity", ON)
+            await house.publish("light.garbage", b"not a state")
+
+            async def refused():
+                answer = await asyncio.to_thread(call, "GET", "/v1/operator/house/refused-reports")
+                return {(each["address"], each["reason"]) for each in answer["refused"]} >= {
+                    ("Not_An_Entity", "unknown_address"), ("light.garbage", "unreadable")}
+            await until(refused, SECONDS, "Central refuses the key and the value it cannot read")
+            page = await asyncio.to_thread(call, "GET", "/v1/operator/integrations/home-assistant")
+            [spot_entity] = [each for each in page["entities"] if each["entity"] == ENTITY]
+            assert (spot_entity["name"], spot_entity["reports"]) == (NAME, "bookshelf-spot")
+            assert page["heard_at"] is not None and spot_entity["heard_at"] is not None
+            await house.publish(ENTITY, ON)
+            await until(latest(lambda d: _spot(d) == FULL, followed), SECONDS, "the spot is back on")
 
             # E3: the Pi's reading, recorded before its Sensor exists, is the Sensor's light once set up.
             async def reading_recorded():
@@ -161,15 +204,20 @@ def test_room_light_reaches_the_player_through_the_real_composition(registry, tm
 
             # E4a: a change while the hub is away (its WALL put fails) reaches the Player once it is back.
             await asyncio.to_thread(hub.stop)
-            await broker.publish(TOPIC, OFF)
+            await asyncio.to_thread(call, "PUT", f"{HOUSE_LIGHTS}/bookshelf-spot", json=ReportedLight(
+                name=NAME, reporter=light_reporter(ENTITY), colour=FixedColour(kelvin=3000)))
 
-            async def recorded_off():
+            def warmer(document):
+                entry = document.lights.get("bookshelf-spot")
+                return isinstance(entry, WhiteEntry) and entry.colour == FixedColour(kelvin=3000)
+
+            async def recorded_warmer():
                 view = RoomLightsView.model_validate(await asyncio.to_thread(call, "GET", HOUSE_LIGHTS))
-                [spot] = [light.entry for light in view.lights if light.id == "bookshelf-spot"]
-                return isinstance(spot, WhiteEntry) and isinstance(spot.state, Dimmer) and not spot.state.on
-            await until(recorded_off, SECONDS, "Central records the spot off while the hub is away")
+                [spot] = [light.light for light in view.lights if light.id == "bookshelf-spot"]
+                return spot.colour == FixedColour(kelvin=3000)
+            await until(recorded_warmer, SECONDS, "Central records the edit while the hub is away")
             await asyncio.to_thread(hub.start)
-            await until(latest(lambda d: _spot(d) is not None and not _spot(d).on, followed), RESTART_SECONDS,
+            await until(latest(warmer, followed), RESTART_SECONDS,
                         "the Player sees the change made while the hub was away")
             current = followed.latest()
 
@@ -196,11 +244,9 @@ def test_room_light_reaches_the_player_through_the_real_composition(registry, tm
                     await stop()
 
         try:
-            broker.start()
             asyncio.run(main())
         finally:
             if host is not None:
                 host.stop()
             node.stop()
             hub.stop()
-            broker.stop()

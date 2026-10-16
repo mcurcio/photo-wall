@@ -18,16 +18,15 @@ class PgReleaseRecords:
     """Implements `ReleaseRecords`."""
 
     def fleet_desired_assets(self, tx: Transaction) -> FleetDesiredAssets:
-        """The wanted node deployments' files (`wanted_deployments`): the selected and the
+        """The wanted node deployments' files (`wanted_deployments`): every Pi's version and
         previous one are fetched first; the window's (the newest stable releases) in the
         background, newest release first."""
         conn = pg_connection(tx)
         wanted = wanted_deployments(conn)
         jobs = deployment_jobs(conn, wanted.deployments)
         node: set[AssetJob] = set()
-        for deployment in (wanted.selected, wanted.previous):
-            if deployment is not None:
-                node.update(jobs.get(deployment, ()))
+        for deployment in wanted.versions | wanted.previous:
+            node.update(jobs.get(deployment, ()))
         window: list[AssetJob] = []
         for _, deployment in wanted.window:
             for job in sorted(jobs.get(deployment, ()), key=lambda job: str(asset_key(job))):

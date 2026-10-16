@@ -13,7 +13,7 @@ import signal
 from pathlib import Path
 
 import pytest
-from runtime_fakes import PrepareMediaStub, apply_procrastinate_schema, unconfigured_link
+from runtime_fakes import PrepareMediaStub, apply_procrastinate_schema
 
 from central.content_wiring import (
     WAITER_SLOTS,
@@ -171,7 +171,7 @@ def test_one_sigterm_stops_both_loops_and_the_worker_returns_normally():
         loop = asyncio.get_running_loop()
         loop.call_later(0.05, os.kill, os.getpid(), signal.SIGTERM)
         media = _media_queue(app, {"media_worker": object()})
-        await asyncio.wait_for(_run_workers(media, runtime, None, unconfigured_link()), 5)
+        await asyncio.wait_for(_run_workers(media, runtime, None), 5)
         # the handler is removed again: SIGTERM is back to the default disposition
         assert signal.getsignal(signal.SIGTERM) in (signal.SIG_DFL, None)
 
@@ -193,7 +193,7 @@ def test_a_failing_loop_stops_the_other():
     app = FakeMediaApp()
 
     async def main() -> None:
-        await _run_workers(_media_queue(app, {}), Broken(), None, unconfigured_link())
+        await _run_workers(_media_queue(app, {}), Broken(), None)
 
     with pytest.raises(ExceptionGroup):
         asyncio.run(main())
@@ -210,7 +210,7 @@ def test_a_failing_node_bus_ends_the_worker_with_its_failure():
     app = FakeMediaApp()
 
     async def main() -> None:
-        await _run_workers(_media_queue(app, {}), FakeRuntime(), BrokenBus(), unconfigured_link())
+        await _run_workers(_media_queue(app, {}), FakeRuntime(), BrokenBus())
 
     with pytest.raises(ExceptionGroup) as caught:
         asyncio.run(asyncio.wait_for(main(), 5))
@@ -235,9 +235,9 @@ def test_a_loop_that_returns_while_not_stopping_fails_the_worker(which):
 
     async def main() -> None:
         if which == "media":
-            await _run_workers(_returns(), FakeRuntime(), None, unconfigured_link())
+            await _run_workers(_returns(), FakeRuntime(), None)
         else:
-            await _run_workers(_media_queue(app, {}), Returns(), None, unconfigured_link())
+            await _run_workers(_media_queue(app, {}), Returns(), None)
 
     with pytest.raises(ExceptionGroup) as caught:
         asyncio.run(asyncio.wait_for(main(), 5))

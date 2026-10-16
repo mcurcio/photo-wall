@@ -9,7 +9,6 @@ every Pi without waiting.
 """
 from __future__ import annotations
 
-from collections.abc import Callable
 from typing import Protocol
 
 from central.kernel.transactions import Transaction
@@ -41,7 +40,7 @@ from contracts.room_light import (
 
 
 class RoomLightReports(Protocol):
-    """Injected into every reporting source's adapter: the worker's Home Assistant link
+    """Injected into every reporting source's adapter: the Home Assistant listener on Central's hub
     (central/infra/home_assistant/) and the Pi light sensor's judge of the host line. No source's
     names, scales or shapes cross it."""
 
@@ -73,18 +72,6 @@ class RoomLightReports(Protocol):
         ...
 
 
-class NamedReferences(Protocol):
-    """Injected into a reporting source's adapter that can be asked again (the worker's Home Assistant
-    link): each reference a room light or Sensor was just saved with, in any process, so the source
-    re-reads it at once rather than at its next change."""
-
-    async def follow(self, named: Callable[[ReporterRef | SensorRef], None]) -> None:
-        """Until cancelled: `named(reference)` for each room light saved with a reporter and each
-        Sensor saved, from now on. One saved while nothing follows is not handed again: its source's
-        next word still arrives."""
-        ...
-
-
 class RoomLightSetup(Protocol):
     """Injected into the House › Lights routes. The four writers raise RoomLightRefused."""
 
@@ -93,8 +80,7 @@ class RoomLightSetup(Protocol):
         ...
 
     def save_room_light(self, light_id: RoomLightId, light: RoomLight) -> RoomLightView:
-        """Create or replace room light `light_id` (policy.check_room_light); a reported light's
-        reporter is handed to NamedReferences' followers at commit."""
+        """Create or replace room light `light_id` (policy.check_room_light)."""
         ...
 
     def remove_room_light(self, light_id: RoomLightId) -> None:
@@ -102,8 +88,7 @@ class RoomLightSetup(Protocol):
         ...
 
     def save_sensor(self, sensor_id: SensorId, sensor: Sensor) -> SensorView:
-        """Create or replace Sensor `sensor_id` (policy.check_sensor); its reference is handed to
-        NamedReferences' followers at commit."""
+        """Create or replace Sensor `sensor_id` (policy.check_sensor)."""
         ...
 
     def remove_sensor(self, sensor_id: SensorId) -> None:
@@ -129,10 +114,11 @@ class ReportSources(Protocol):
 
 
 class DrawnReports(Protocol):
-    """Injected into the Player's drawn-report route."""
+    """Injected into the Player line's judge (central/infra/drawn_report_judge.py)."""
 
-    def record_drawn(self, player_id: str, report: RoomLightsDrawn) -> None:
-        """Keep `report` as the Player's latest, stamped with Central's clock."""
+    def record_drawn_within(self, tx: Transaction, player_id: str, report: RoomLightsDrawn) -> None:
+        """Keep `report` as the Player's latest, stamped with Central's clock, inside the caller's open
+        transaction under a savepoint of its own: a failure rolls back only this report and is raised."""
         ...
 
 
@@ -146,4 +132,4 @@ class RoomLightsDocuments(Protocol):
         ...
 
 
-__all__ = ["DrawnReports", "NamedReferences", "ReportSources", "RoomLightReports", "RoomLightSetup", "RoomLightsDocuments"]
+__all__ = ["DrawnReports", "ReportSources", "RoomLightReports", "RoomLightSetup", "RoomLightsDocuments"]

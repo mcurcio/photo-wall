@@ -1,8 +1,9 @@
-"""The node release order and the first-run choice, PURE (no I/O).
+"""The node release order, the release a Pi with no version boots and the keep set, PURE (no I/O).
 
 `newest_first` is the one newest-first release order (the window, the stable deployments, the
-release list); `window` is the newest stable releases Central keeps downloaded besides the
-selection; `first_run_choice` is the release a wall that never had a selection gets.
+release list); `window` is the newest stable releases Central keeps downloaded besides every Pi's
+versions; `newest_ready_stable` is the release a Pi with no version boots; `kept` is what Central
+keeps downloaded (a version per Pi, Q2 A, 2026-10-16).
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ from typing import TypeVar
 from central.kernel.ports import Readiness
 from central.kernel.types import release_version
 
-# How many of the newest stable node releases Central keeps downloaded besides the selection.
+# How many of the newest stable node releases Central keeps downloaded besides every Pi's versions.
 WINDOW_SIZE = 3
 
 
@@ -37,21 +38,24 @@ def window(tags: Iterable[str], size: int = WINDOW_SIZE) -> tuple[str, ...]:
     return tuple(newest_first(set(tags))[:size])
 
 
-def first_run_choice(candidates: Iterable[tuple[T, Readiness]]) -> tuple[T, Readiness] | None:
-    """The release a wall that never had a selection gets (R4), from its stable releases with
-    a deployment, newest first, each with its readiness: the newest one that has not failed.
-    The caller selects it only once it is `ready`, so an older release that finishes first is
-    never chosen while a newer one still downloads (R6 forbids following later). With every
-    candidate failed, the newest failed one (shown, never selected); None when there is none.
+def newest_ready_stable(candidates: Iterable[tuple[T, Readiness]]) -> T | None:
+    """The release a Pi with no version boots (Q2 A, 2026-10-16), from the stable releases with a
+    deployment, newest first, each with its readiness: the first that is ready; None when none is.
+    An older release that is ready is booted while a newer one still downloads, so a new Pi never
+    waits on a download.
 
-    Lazy: readiness is asked of no candidate after the first one that has not failed."""
-    newest_failed = None
+    Lazy: readiness is asked of no candidate after the first ready one."""
     for candidate, readiness in candidates:
-        if readiness.state != "failed":
-            return candidate, readiness
-        if newest_failed is None:
-            newest_failed = (candidate, readiness)
-    return newest_failed
+        if readiness.state == "ready":
+            return candidate
+    return None
+
+
+def kept(window: Iterable[str], versions: Iterable[str], previous: Iterable[str]) -> frozenset[str]:
+    """The deployment ids Central keeps downloaded: the window's (the newest WINDOW_SIZE stable
+    releases), every Pi's version and every Pi's previous version. The ONE definition of the keep
+    set (0010)."""
+    return frozenset(window) | frozenset(versions) | frozenset(previous)
 
 
 def _order_key(tag: str) -> tuple[int, int, int, bool, str] | None:

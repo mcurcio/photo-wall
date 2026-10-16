@@ -15,13 +15,34 @@ the console stays on HTTP"). The worker runs it through nodeapi.hub `run_hub_ses
 """
 from __future__ import annotations
 
+import asyncio
+import logging
 from collections.abc import Mapping
 from typing import Protocol
 
-from central.content_catalog.ports import PlayerVersions
-from contracts.central_api import Installation, Listening, Releases, RoomLightsListing, Versions
-from nodeapi.envelope import MethodHandler
+from central.content_catalog.ports import PlayerVersions, VersionRefused
+from contracts.central_api import (
+    INSTALL_PLAYER,
+    INSTALLATION_KEY,
+    LISTENING_KEY,
+    RELEASES_KEY,
+    ROOM_LIGHTS_KEY,
+    VERSIONS_KEY,
+    Installation,
+    InstallRefused,
+    InstallStarted,
+    Listening,
+    Releases,
+    RoomLightsListing,
+    Versions,
+    decode_install_player,
+    encode_central_state,
+    encode_install_answer,
+)
+from nodeapi.envelope import MethodCall, MethodHandler
 from nodeapi.hub import CentralState
+
+log = logging.getLogger(__name__)
 
 
 class CentralStateReads(Protocol):
@@ -47,11 +68,37 @@ class StateWakes(Protocol):
     async def changed(self) -> None: ...
 
 
+class _CentralState:
+    """nodeapi.hub's CentralState over one Central's reads and wakes."""
+
+    def __init__(self, reads: CentralStateReads, wakes: StateWakes) -> None:
+        self._reads = reads
+        self._wakes = wakes
+        self._returned = False
+
+    async def values(self) -> Mapping[str, bytes]:
+        return await asyncio.to_thread(self._encoded)
+
+    def _encoded(self) -> dict[str, bytes]:
+        reads = self._reads
+        return {INSTALLATION_KEY: encode_central_state(INSTALLATION_KEY, reads.installation()),
+                LISTENING_KEY: encode_central_state(LISTENING_KEY, reads.listening()),
+                ROOM_LIGHTS_KEY: encode_central_state(ROOM_LIGHTS_KEY, reads.room_lights()),
+                RELEASES_KEY: encode_central_state(RELEASES_KEY, reads.releases()),
+                VERSIONS_KEY: encode_central_state(VERSIONS_KEY, reads.versions())}
+
+    async def changed(self) -> None:
+        if not self._returned:   # at once the first time
+            self._returned = True
+            return
+        await self._wakes.changed()
+
+
 def central_state(reads: CentralStateReads, wakes: StateWakes) -> CentralState:
     """nodeapi.hub's CentralState over `reads`: `values()` encodes each read under its key
     (contracts.central_api encode_central_state, in a thread: the reads block); `changed()` is
     `wakes.changed()`."""
-    raise NotImplementedError("central lane: central/hub_api.py central_state")
+    return _CentralState(reads, wakes)
 
 
 def hub_methods(versions: PlayerVersions) -> Mapping[str, MethodHandler]:
@@ -59,7 +106,19 @@ def hub_methods(versions: PlayerVersions) -> Mapping[str, MethodHandler]:
     an error reply, never an install), calls `versions.install` in a thread, and answers
     encode_install_answer(InstallStarted) or encode_install_answer(InstallRefused(refusal)) for a
     VersionRefused; the call's caller is logged with the outcome."""
-    raise NotImplementedError("central lane: central/hub_api.py hub_methods")
+
+    async def install_player(call: MethodCall) -> bytes:
+        request = decode_install_player(call.payload)   # ValueError: an error reply, never an install
+        answer: InstallStarted | InstallRefused
+        try:
+            answer = await asyncio.to_thread(versions.install, request.serial, request.version)
+        except VersionRefused as refused:
+            answer = InstallRefused(refusal=refused.refusal)
+        log.info("installPlayer %s %s from %s: %s", request.serial, request.version, call.caller,
+                 answer.install if isinstance(answer, InstallStarted) else answer.refusal.value)
+        return encode_install_answer(answer)
+
+    return {INSTALL_PLAYER: install_player}
 
 
 __all__ = ["CentralStateReads", "StateWakes", "central_state", "hub_methods"]

@@ -129,7 +129,7 @@ def test_070_drops_the_v1_fleet_and_node_boot_keeps_its_quota(before_070, tmp_pa
     assert _one(registry, "SELECT count(*) AS n FROM job_outcomes "
                           "WHERE job_name='player_deb.fetch'")["n"] == 0
 
-    cold_setup(registry)  # a selected node deployment, as the release sync and operator make it
+    cold_setup(registry)  # a node deployment kept as one Pi's version
     app = create_app(registry.db, registry.clock, ADMIN, cache_root=tmp_path,
                      node_control=NodeControlConfig("v1-fleet-test"))
     auth = {"Authorization": "Bearer " + ADMIN}
@@ -137,24 +137,26 @@ def test_070_drops_the_v1_fleet_and_node_boot_keeps_its_quota(before_070, tmp_pa
         for method, path in DELETED_ROUTES:
             assert client.request(method, path, headers=auth, json={}).status_code == 404, path
 
-        # A serial never seen: its offer creates the device and is charged to its daily quota.
+        # A serial never seen: its offer creates the device and is charged to its daily quota (no
+        # release is ready for a Pi with no version here: the offer is refused, and still counted).
         fresh = "20000000feed0001"
         fresh_id = device_id_for_serial(fresh)
         assert _one(registry, "SELECT 1 FROM devices WHERE device_id=%s", fresh_id) is None
-        assert _offer(client, fresh).status_code == 200
+        first = _offer(client, fresh)
+        assert (first.status_code, first.json()) == (503, {"error": "node_boot_no_ready_release"})
         assert _one(registry, "SELECT serial FROM devices WHERE device_id=%s",
                     fresh_id) == {"serial": fresh}
         assert _quota(registry, fresh_id) == 1
         assert _one(registry, "SELECT used FROM fleet_t0_daily_quotas WHERE scope='global' "
                               "AND kind='new_device' AND day=0")["used"] == 1
 
-        # One offer short of the limit: the last one is served, the next refused until tomorrow.
+        # One offer short of the limit: the last one is answered, the next refused until tomorrow.
         busy = "20000000feed0002"
         busy_id = device_id_for_serial(busy)
         with registry.db.transaction() as conn:
             conn.execute("INSERT INTO fleet_t0_daily_quotas(scope,kind,day,used) "
                          "VALUES(%s,'offer',0,%s)", (busy_id, OFFER_DEVICE_DAILY - 1))
-        assert _offer(client, busy).status_code == 200
+        assert _offer(client, busy).status_code == 503   # answered (no release ready), not rate limited
         assert _quota(registry, busy_id) == OFFER_DEVICE_DAILY
         refused = _offer(client, busy)
         assert refused.status_code == 429 and refused.json() == {"error": "t0_rate_limited"}

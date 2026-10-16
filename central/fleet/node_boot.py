@@ -1,8 +1,9 @@
-"""Exact V2 boot selection, offers, and immutable nonce decisions.
+"""Exact V2 boot offers and immutable nonce decisions.
 
-Deployments are written only by the release sync's ingest; the select writer lives in
-`central/infra/node_releases.py`, shared with the sync's first-run selection, and this service
-is its HTTP-facing half.
+Deployments are written only by the release sync's ingest. Which one a Pi boots is its version
+(a version per Pi, Q2 A, 2026-10-16: `PlayerVersions.boot_deployment_in`, its chosen version or
+the newest ready stable release). The offer's wire is unchanged: a release's base carries the
+release's own tag (scripts/node_release_artifacts.py), so `offer.base.tag` is the Pi's version.
 
 Fleet chooses references; the shared content worker owns acquired bytes. Manager
 roots are immutable properties of the selected base content, not a separate
@@ -10,7 +11,7 @@ mutable manager policy. No offer receipt proves download, boot, or playback.
 """
 from __future__ import annotations
 
-from typing import Literal
+from typing import Final, Literal
 from uuid import UUID, uuid4
 
 from central.content_catalog.catalog import device_id_for_serial, sanitize_serial
@@ -23,14 +24,11 @@ from central.content_catalog.deployment import (
 from central.content_catalog.deployment import (
     parse_node_deployment as parse_node_deployment,
 )
-from central.content_catalog.ports import NodeReleaseRefused
+from central.content_catalog.ports import PlayerVersions
 from central.fleet.device_fence import fence_in, standing_in
 from central.fleet.models import FleetError, OfferAsset
 from central.fleet.node_sessions import NodeControlError, NodeSessions
-from central.infra.node_releases import select_deployment
 from central.infra.transactions import PgTransaction
-from central.kernel.job_types import Prefetch
-from central.kernel.publishing import Publisher
 from contracts.node_boot import (
     NodeBootOfferV2,
     NodeBootRequestV2,
@@ -38,12 +36,14 @@ from contracts.node_boot import (
     encode_node_boot_request,
     parse_node_boot_offer,
 )
-from contracts.node_protocol import counter, identifier
 
 _DAY_SECONDS = 86400
 _OFFER_DEVICE_DAILY = 128
 _OFFER_GLOBAL_DAILY = 32768  # 128 Players x 128 offers, plus equivalent spoof headroom
 _NEW_CLAIMS_GLOBAL_DAILY = 1024  # bounds distinct fake serial rows, above 128-Player ceiling
+# The offer's policy revision (contracts/node_boot.py): a wall-wide selection's revision once; with a
+# version per Pi there is no such revision, and the field stays on the wire at 1.
+OFFER_POLICY_REVISION: Final = 1
 
 
 def claim_quota(conn, *, device_id: str, kind: Literal["offer"], now: float) -> None:
@@ -85,25 +85,10 @@ def claim_new_device(conn, *, device_id: str, serial: str, now: float) -> None:
 
 
 class NodeBootService:
-    """`publisher` warms the cache when a deployment is selected (a Prefetch in the selecting
-    transaction, as catalog changes do); None where no content worker is wired."""
+    """The boot offer: each Pi's version (`versions`) chooses its deployment."""
 
-    def __init__(self, sessions: NodeSessions, *, publisher: Publisher | None = None):
-        self.sessions, self.publisher = sessions, publisher
-
-    def select(self, deployment_id: UUID, expected_revision: int) -> dict:
-        identifier(deployment_id)
-        counter(expected_revision)
-        try:
-            with self.sessions.db.transaction() as conn:
-                revision = select_deployment(conn, deployment_id, expected_revision,
-                                             now=self.sessions.clock.utc())
-                if self.publisher is not None:
-                    self.publisher.publish(Prefetch(), within=PgTransaction(conn))
-        except NodeReleaseRefused as refused:
-            raise NodeControlError(refused.reason,
-                                   404 if refused.kind == "not_found" else 409) from None
-        return {"revision": revision, "deployment_id": str(deployment_id)}
+    def __init__(self, sessions: NodeSessions, *, versions: PlayerVersions):
+        self.sessions, self.versions = sessions, versions
 
     def offer(self, request: NodeBootRequestV2) -> NodeBootOfferV2:
         config = self.sessions.config
@@ -134,16 +119,17 @@ class NodeBootService:
                 else:
                     result = parse_node_boot_offer(bytes(prior["offer_payload"]))
             else:
-                policy = conn.execute("SELECT p.revision,d.document FROM node_boot_policy p "
-                                      "JOIN node_deployments d USING(deployment_id) WHERE singleton").fetchone()
+                chosen = self.versions.boot_deployment_in(PgTransaction(conn), serial)
+                row = None if chosen is None else conn.execute(
+                    "SELECT document FROM node_deployments WHERE deployment_id=%s", (chosen,)).fetchone()
                 offer_id = uuid4()
-                if policy:
-                    deployment = parse_node_deployment(bytes(policy["document"]))
+                if row:
+                    deployment = parse_node_deployment(bytes(row["document"]))
                     result = deployment.offer(offer_id=offer_id, audience=config.installation_audience,
                         request=request, device_id=device_id, generation=generation,
-                        revision=policy["revision"], now=now)
+                        revision=OFFER_POLICY_REVISION, now=now)
                 else:
-                    refusal = "node_boot_policy_unconfigured"
+                    refusal = "node_boot_no_ready_release"
                 conn.execute("INSERT INTO node_boot_offers(offer_id,device_id,device_generation,kernel_boot_id,"
                              "boot_nonce,request_payload,offer_payload,refusal,created_at) "
                              "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s)",

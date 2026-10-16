@@ -1,6 +1,8 @@
 """Room lights over PostgreSQL (migration 099): `PgRoomLights` implements central/room_light/ports.py's
 RoomLightReports (every reporting source's adapter), RoomLightSetup (House › Lights),
-RoomLightsDocuments (the worker's WALL writer) and DrawnReports (each Player's drawn report).
+RoomLightsDocuments (the worker's WALL writer) and DrawnReports (each Player's drawn report), and
+the Home Assistant adapter's HeardEntities (central/infra/home_assistant/states.py: each entity Home
+Assistant published, its kind, name and when Central last heard it, home_assistant_entities).
 
 Every word is kept by its reference (light_words, reading_words) whether or not a room light or
 Sensor names it, and is resolved only when the document is built (policy.room_lights_document). Each
@@ -15,8 +17,7 @@ the ranges pydantic's.
 """
 from __future__ import annotations
 
-import json
-from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any, Final
 
 from psycopg.types.json import Jsonb
@@ -25,7 +26,6 @@ from pydantic import TypeAdapter
 from central.db import Database
 from central.frame_lighting.ports import HouseLock
 from central.infra.light_sensor_judge import PI_SOURCE, missed_readings_in
-from central.infra.listen import listen
 from central.infra.room_light_rows import ROOM_LIGHT, lights_in
 from central.infra.transactions import PgTransaction, pg_connection
 from central.kernel.transactions import Transaction
@@ -64,6 +64,7 @@ from central.room_light.views import (
     RoomLightView,
     SensorView,
 )
+from contracts.home_assistant import HOME_ASSISTANT_ENTITIES_MAX
 from contracts.room_light import (
     LightWord,
     Reading,
@@ -73,7 +74,6 @@ from contracts.room_light import (
 )
 
 ROOM_LIGHTS_CHANNEL: Final = "room_lights"     # NOTIFY payload: empty; the WALL writer re-reads the document
-NAMED_CHANNEL: Final = "room_light_named"      # NOTIFY payload: named_payload(a reference just saved)
 REFUSALS_KEPT: Final = 20                      # the newest refused reports kept per source
 WORDS_KEPT_PER_SOURCE: Final = 256             # the newest references' words kept per source
 
@@ -193,12 +193,31 @@ class PgRoomLights:
 
     # ---- DrawnReports ----
 
-    def record_drawn(self, player_id: str, report: RoomLightsDrawn) -> None:
-        with self._db.transaction() as conn:
+    def record_drawn_within(self, tx: Transaction, player_id: str, report: RoomLightsDrawn) -> None:
+        conn = pg_connection(tx)
+        with conn.transaction():
             conn.execute("INSERT INTO room_lights_drawn(player_id, drawn, following, reported_at) "
                          "VALUES (%s, %s, %s, clock_timestamp()) ON CONFLICT (player_id) DO UPDATE "
                          "SET drawn=EXCLUDED.drawn, following=EXCLUDED.following, reported_at=EXCLUDED.reported_at",
                          (player_id, report.drawn, report.following))
+
+    def record_drawn(self, player_id: str, report: RoomLightsDrawn) -> None:
+        """`record_drawn_within` in a transaction of its own (a test's seeding; the judge records
+        within the Player line's record)."""
+        with self._db.transaction() as conn:
+            self.record_drawn_within(PgTransaction(conn), player_id, report)
+
+    # ---- HeardEntities (the Home Assistant adapter) ----
+
+    def record_heard(self, entity: str, kind: str, name: str) -> None:
+        with self._db.transaction() as conn:
+            conn.execute("INSERT INTO home_assistant_entities(entity, kind, name, heard_at) "
+                         "VALUES (%s, %s, %s, clock_timestamp()) ON CONFLICT (entity) DO UPDATE "
+                         "SET kind=EXCLUDED.kind, name=EXCLUDED.name, heard_at=EXCLUDED.heard_at",
+                         (entity, kind, name))
+            conn.execute("DELETE FROM home_assistant_entities WHERE entity NOT IN (SELECT entity FROM "
+                         "home_assistant_entities ORDER BY heard_at DESC, entity LIMIT %s)",
+                         (HOME_ASSISTANT_ENTITIES_MAX,))
 
     # ---- RoomLightSetup ----
 
@@ -236,8 +255,6 @@ class PgRoomLights:
                          "ON CONFLICT (id) DO UPDATE SET light=EXCLUDED.light",
                          (light_id, Jsonb(ROOM_LIGHT.dump_python(light, mode="json"))))
             _changed_in(conn, before)
-            if isinstance(light, ReportedLight):
-                _named_in(conn, light.reporter)
             return next(view for view in _view_in(conn, self._house).lights if view.id == light_id)
 
     def remove_room_light(self, light_id: RoomLightId) -> None:
@@ -263,7 +280,6 @@ class PgRoomLights:
                          "ON CONFLICT (id) DO UPDATE SET sensor=EXCLUDED.sensor",
                          (sensor_id, Jsonb(sensor.model_dump(mode="json"))))
             _changed_in(conn, before)
-            _named_in(conn, sensor.at)
             return next(view for view in _view_in(conn, self._house).sensors if view.id == sensor_id)
 
     def remove_sensor(self, sensor_id: SensorId) -> None:
@@ -273,45 +289,6 @@ class PgRoomLights:
             if refused is not None:
                 raise refused
             conn.execute("DELETE FROM sensors WHERE id=%s", (sensor_id,))
-
-
-def named_payload(reference: ReporterRef | SensorRef) -> str:
-    """NAMED_CHANNEL's payload for `reference`: {"reporter" | "sensor": {"source", "address"}}."""
-    kind = "reporter" if isinstance(reference, ReporterRef) else "sensor"
-    return json.dumps({kind: reference.model_dump(mode="json")}, sort_keys=True)
-
-
-def named_reference(payload: str) -> ReporterRef | SensorRef | None:
-    """The reference `named_payload` wrote; None for any other payload."""
-    try:
-        [(kind, reference)] = json.loads(payload).items()
-        return {"reporter": ReporterRef, "sensor": SensorRef}[kind].model_validate(reference)
-    except (ValueError, TypeError, KeyError, AttributeError):
-        return None
-
-
-def _named_in(conn: Any, reference: ReporterRef | SensorRef) -> None:
-    """Hand `reference` to NamedReferences' followers when the caller's transaction commits."""
-    conn.execute("SELECT pg_notify(%s, %s)", (NAMED_CHANNEL, named_payload(reference)))
-
-
-_NAMED_APPLICATION: Final = "photo-wall-named-references"
-_NAMED_RETRY_SECONDS: Final = 1.0
-
-
-class PgNamedReferences:
-    """NamedReferences over PostgreSQL: one supervised LISTEN NAMED_CHANNEL (central/infra/listen.py)."""
-
-    def __init__(self, dsn: str) -> None:
-        self._dsn = dsn
-
-    async def follow(self, named: Callable[[ReporterRef | SensorRef], None]) -> None:
-        def notified(payload: str) -> None:
-            reference = named_reference(payload)
-            if reference is not None:
-                named(reference)
-        await listen(self._dsn, NAMED_CHANNEL, application=_NAMED_APPLICATION, connected=lambda: None,
-                     notified=notified, retry_seconds=_NAMED_RETRY_SECONDS)
 
 
 def _view_in(conn: Any, house: HouseLock) -> RoomLightsView:
@@ -346,30 +323,55 @@ def refused_in(conn: Any, source: Source | None) -> tuple[RefusedReportView, ...
                                    at=float(row["at"])) for row in rows)
 
 
-def references_in(conn: Any, source: Source) -> dict[ReporterRef | SensorRef, tuple[str | None, float | None]]:
-    """Every reference of `source` heard or named, a reporter's (ReporterRef) apart from a Sensor's
-    (SensorRef) even at one address: (the room light it reports or the Sensor it is, when Central last
-    heard it), in address order, reporters first."""
-    heard = _heard_in(conn)
-    named: dict[ReporterRef | SensorRef, str | None] = {}
-    for (table, word_source, address) in heard:
-        if word_source == source:
-            named[ReporterRef(source=source, address=address) if table == "light_words"
-                  else SensorRef(source=source, address=address)] = None
+def named_in(conn: Any, source: Source) -> dict[ReporterRef | SensorRef, str]:
+    """Every reference of `source` a room light reports by (ReporterRef) or a Sensor is (SensorRef), with
+    that room light's or Sensor's id, room lights first in House > Lights order, then Sensors by id."""
+    named: dict[ReporterRef | SensorRef, str] = {}
     for light_id, light in lights_in(conn).items():
         if isinstance(light, ReportedLight) and light.reporter.source == source:
             named[light.reporter] = light_id
     for sensor_id, sensor in _sensors_in(conn).items():
         if sensor.at.source == source:
             named[sensor.at] = sensor_id
-
-    def table(reference: ReporterRef | SensorRef) -> str:
-        return "light_words" if isinstance(reference, ReporterRef) else "reading_words"
-
-    return {reference: (named[reference], heard.get((table(reference), source, reference.address)))
-            for reference in sorted(named, key=lambda ref: (table(ref), ref.address))}
+    return named
 
 
-__all__ = ["NAMED_CHANNEL", "REFUSALS_KEPT", "ROOM_LIGHTS_CHANNEL", "WORDS_KEPT_PER_SOURCE",
-           "PgNamedReferences", "PgRoomLights", "document_in", "named_payload", "named_reference", "references_in",
-           "refused_in"]
+@dataclass(frozen=True)
+class HeardEntity:
+    """One entity Home Assistant published or a room light or Sensor names: its kind, its published
+    name (None: never published), the room light or Sensor it reports for (None: none) and when
+    Central last heard it (None: never)."""
+    kind: str
+    entity: str
+    name: str | None
+    reports: str | None
+    heard_at: float | None
+
+
+def heard_entities_in(conn: Any, source: Source) -> tuple[HeardEntity, ...]:
+    """Every entity Home Assistant published (home_assistant_entities) and every reference of `source`
+    a room light or Sensor names, newest heard first, then the never heard by entity id. A reporter
+    and a Sensor at one entity id are two entries (by kind)."""
+    rows = conn.execute("SELECT entity, kind, name, EXTRACT(EPOCH FROM heard_at) AS heard_at "
+                        "FROM home_assistant_entities").fetchall()
+    found: dict[tuple[str, str], HeardEntity] = {
+        (row["kind"], row["entity"]): HeardEntity(row["kind"], row["entity"], row["name"], None,
+                                                  float(row["heard_at"])) for row in rows}
+    for reference, named in named_in(conn, source).items():
+        kind = "light" if isinstance(reference, ReporterRef) else "illuminance"
+        held = found.get((kind, reference.address))
+        found[(kind, reference.address)] = HeardEntity(
+            kind, reference.address, None if held is None else held.name, named,
+            None if held is None else held.heard_at)
+    return tuple(sorted(found.values(), key=lambda each: (each.heard_at is None, -(each.heard_at or 0.0),
+                                                          each.entity, each.kind)))
+
+
+def last_heard_in(conn: Any) -> float | None:
+    """When Central last heard any of Home Assistant's states (None: never)."""
+    row = conn.execute("SELECT EXTRACT(EPOCH FROM max(heard_at)) AS heard_at FROM home_assistant_entities").fetchone()
+    return None if row["heard_at"] is None else float(row["heard_at"])
+
+
+__all__ = ["REFUSALS_KEPT", "ROOM_LIGHTS_CHANNEL", "WORDS_KEPT_PER_SOURCE", "HeardEntity", "PgRoomLights",
+           "document_in", "heard_entities_in", "last_heard_in", "named_in", "refused_in"]

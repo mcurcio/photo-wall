@@ -12,7 +12,7 @@ import itertools
 import json
 from dataclasses import dataclass, replace
 from hashlib import sha256
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
@@ -226,14 +226,26 @@ def sessions_for(registry):
 
 
 def read(registry, world=None):
+    """The Releases page's read (`NodeReleaseCatalog.view`), as its route answers it: over the world's
+    cache, or a cache with nothing ready."""
+    from test_node_boot import NOTHING_READY
+
     from central.fleet.node_release_catalog import NodeReleaseCatalog
     return NodeReleaseCatalog(sessions_for(registry),
-                              readiness=world.stored if world else None).list()
+                              readiness=world.stored if world else NOTHING_READY).view().model_dump(mode="json")
+
+
+def offer_for(registry, world, serial="abcdef1234567890"):
+    """A new boot's offer for `serial` through Central's boot service over the world's cache."""
+    from test_node_boot import boot_service
+
+    from contracts.node_boot import NodeBootRequestV2
+    return boot_service(sessions_for(registry), readiness=world.stored).offer(
+        NodeBootRequestV2(serial, uuid4(), uuid4().hex + uuid4().hex))
 
 
 def test_tracer_one_valid_one_malformed_one_conflicting_release_in_one_run(registry, sync_world):
-    from central.fleet.node_boot import NodeBootService
-    from contracts.node_boot import NodeBootRequestV2
+    from test_node_boot import enroll, player_versions
     upstream = Upstream()
     first = node_upload("v2.0.0")
     upstream.put(first, at="2026-09-30T00:00:00Z")
@@ -255,13 +267,13 @@ def test_tracer_one_valid_one_malformed_one_conflicting_release_in_one_run(regis
     assert seen["v2.0.0"]["problem"] == "node_release_identity_conflict"
     assert count(registry, "node_deployments") == 2
     rows = read(registry)["releases"]
-    assert [(row["tag"], row["deployment_id"], row["problem"]) for row in rows] == [
+    assert [(row["version"], row["base_tag"], row["problem"]) for row in rows] == [
         ("v2.2.0", None, "node_release_invalid"),
-        ("v2.1.0", str(valid.deployment_id), None),
-        ("v2.0.0", str(first.deployment_id), "node_release_identity_conflict")]
-    boots = NodeBootService(sessions_for(registry))
-    boots.select(valid.deployment_id, 0)
-    offer = boots.offer(NodeBootRequestV2("abcdef1234567890", UUID(int=7), "b" * 64))
+        ("v2.1.0", "v2.1.0", None),
+        ("v2.0.0", "v2.0.0", "node_release_identity_conflict")]
+    enroll(registry.db, "abcdef1234567890", registry.clock.utc())
+    player_versions(sessions_for(registry), readiness=world.stored).install("abcdef1234567890", "v2.1.0")
+    offer = offer_for(registry, world)
     assert offer.base == valid.release.base
     assert offer.app_environment == valid.release.app_environment
 
@@ -274,7 +286,7 @@ def test_ingest_writes_references_with_the_derived_id_and_never_selects(registry
     with registry.db.transaction() as conn:
         assets = conn.execute("SELECT kind, identity FROM node_deployment_assets "
                               "WHERE deployment_id=%s ORDER BY kind", (upload.deployment_id,)).fetchall()
-        assert conn.execute("SELECT 1 FROM node_boot_policy").fetchone() is None
+        assert conn.execute("SELECT 1 FROM player_versions").fetchone() is None
     assert [(row["kind"], row["identity"]) for row in assets] == [
         ("os-image", upload.release.base.content_key),
         ("sealed-environment", upload.release.manager_primary.environment_sha256)]
@@ -347,13 +359,7 @@ def test_a_hand_deployment_holding_the_derived_id_with_other_contents_is_that_ta
     assert observations(registry)["v2.0.0"]["manifest_sha256"] is None
 
 
-# -- B6: first-run auto-select -------------------------------------------------------------------
-
-
-def policy(registry):
-    with registry.db.transaction() as conn:
-        return conn.execute("SELECT revision, deployment_id, previous_deployment_id "
-                            "FROM node_boot_policy").fetchone()
+# -- B6: a Pi with no version boots the newest ready stable release (Q2 A, 2026-10-16) -------------
 
 
 def _fail(world, upload):
@@ -366,113 +372,55 @@ def _fail(world, upload):
                              retry_not_before=None, now=world.clock.utc())
 
 
-def test_first_run_selects_the_newest_stable_release_once_it_is_ready(registry, sync_world):
+def test_a_pi_with_no_version_boots_the_newest_ready_stable_release(registry, sync_world):
+    """Never a pre-release, never a release still downloading or failed: the newest ready stable
+    one, read again at each boot (nothing is stored for the Pi)."""
     from test_node_release_catalog import store_files
-    upstream, older, newest = Upstream(), node_upload("v2.0.0"), node_upload("v2.1.0")
-    rc = node_upload("v2.2.0-rc.1")
-    for upload in (older, newest):
+    upstream, older, middle, newest = Upstream(), node_upload("v2.0.0"), node_upload("v2.1.0"), node_upload("v2.2.0")
+    rc = node_upload("v2.3.0-rc.1")
+    for upload in (older, middle, newest):
         upstream.put(upload)
     upstream.put(rc, prerelease=True)
     world = sync_world(upstream)
     sync(world)
     store_files(world, older)
     store_files(world, rc)
-    sync(world)
-    # The older release finished first; the newest is still downloading: nothing is selected.
-    assert policy(registry) is None
-    assert read(registry, world)["selection"]["auto"]["tag"] == "v2.1.0"
+    _fail(world, middle)
+    # The newest still downloads and the middle failed: the older one, which is ready.
+    assert offer_for(registry, world).base.tag == "v2.0.0"
+    assert read(registry, world)["default"] == "v2.0.0"
     store_files(world, newest)
-    sync(world)
-    row = policy(registry)
-    # A pre-release is never chosen; the selection is created at revision 1 with no previous.
-    assert (row["revision"], row["deployment_id"], row["previous_deployment_id"]) == (
-        1, newest.deployment_id, None)
-    assert read(registry, world)["selection"]["auto"] is None
+    assert offer_for(registry, world).base.tag == "v2.2.0"
+    pi = next(pi for pi in read(registry, world)["players"] if pi["serial"] == "abcdef1234567890")
+    assert (pi["version"], pi["chosen"]) == ("v2.2.0", False)
+    with registry.db.transaction() as conn:
+        assert conn.execute("SELECT 1 FROM player_versions").fetchone() is None
 
 
-def test_a_failed_newest_release_falls_back_to_the_next_newest(registry, sync_world):
-    from test_node_release_catalog import store_files
-    upstream, older, newest = Upstream(), node_upload("v2.0.0"), node_upload("v2.1.0")
-    for upload in (older, newest):
-        upstream.put(upload)
-    world = sync_world(upstream)
-    sync(world)
-    _fail(world, newest)
-    auto = read(registry, world)["selection"]["auto"]
-    assert (auto["tag"], auto["readiness"]) == ("v2.0.0", "downloading")
-    store_files(world, older)
-    sync(world)
-    assert policy(registry)["deployment_id"] == older.deployment_id
-
-
-def test_with_every_candidate_failed_the_empty_state_names_the_newest_failure(registry, sync_world):
+def test_with_no_version_and_nothing_ready_no_boot_is_offered(registry, sync_world):
+    from central.fleet.node_sessions import NodeControlError
     upstream, upload = Upstream(), node_upload("v2.0.0")
     upstream.put(upload)
     world = sync_world(upstream)
     sync(world)
-    _fail(world, upload)
-    auto = read(registry, world)["selection"]["auto"]
-    assert (auto["tag"], auto["readiness"], auto["readiness_reason"]) == (
-        "v2.0.0", "failed", "all_references_rejected")
-    sync(world)
-    assert policy(registry) is None
+    with pytest.raises(NodeControlError, match="node_boot_no_ready_release") as refused:
+        offer_for(registry, world)
+    assert refused.value.status == 503
+    assert read(registry, world)["default"] is None
 
 
-def test_an_existing_selection_is_never_moved(registry, sync_world):
+def test_a_sync_never_moves_a_pis_version(registry, sync_world):
+    from test_node_boot import keep_version
     from test_node_release_catalog import store_files
-
-    from central.fleet.node_boot import NodeBootService
     upstream, older, newest = Upstream(), node_upload("v2.0.0"), node_upload("v2.1.0")
     for upload in (older, newest):
         upstream.put(upload)
     world = sync_world(upstream)
     sync(world)
-    NodeBootService(sessions_for(registry)).select(older.deployment_id, 0)
+    keep_version(registry.db, "abcdef1234567890", older.deployment_id, registry.clock.utc())
     store_files(world, newest)
     sync(world)
-    row = policy(registry)
-    assert (row["revision"], row["deployment_id"]) == (1, older.deployment_id)
-
-
-def test_auto_select_racing_an_operator_put_at_revision_zero_writes_exactly_one_selection(
-        registry, sync_world):
-    """Two creators at expected revision 0, no advisory lock: the first holds the uncommitted
-    policy row; the operator's PUT and the sync's auto-select wait on its key and then insert
-    nothing (`ON CONFLICT DO NOTHING`), so each sees a conflict and exactly one row is written."""
-    import threading
-
-    from test_node_release_catalog import store_files
-
-    from central.fleet.node_boot import NodeBootService
-    from central.fleet.node_sessions import NodeControlError
-    from central.infra.node_releases import select_deployment
-    upstream, older, newest = Upstream(), node_upload("v2.0.0"), node_upload("v2.1.0")
-    for upload in (older, newest):
-        upstream.put(upload)
-    world = sync_world(upstream)
-    sync(world)
-    store_files(world, newest)  # the auto-select's candidate is ready
-    outcomes: list = []
-
-    def operator():
-        try:
-            NodeBootService(sessions_for(registry)).select(newest.deployment_id, 0)
-            outcomes.append("operator")
-        except NodeControlError as error:
-            outcomes.append(error.code)
-
-    with registry.db.transaction() as first:
-        assert select_deployment(first, older.deployment_id, 0, now=1.0) == 1
-        threads = [threading.Thread(target=operator), threading.Thread(target=lambda: sync(world))]
-        for thread in threads:
-            thread.start()
-        threading.Event().wait(0.5)
-        assert threads[0].is_alive()  # waiting on the uncommitted row's key, not refused yet
-    for thread in threads:
-        thread.join(30)
-    assert outcomes == ["node_boot_policy_conflict"]
-    row = policy(registry)
-    assert (row["revision"], row["deployment_id"]) == (1, older.deployment_id)  # one write
+    assert offer_for(registry, world).base.tag == "v2.0.0"
 
 
 def test_an_unforeseen_ingest_failure_is_that_release_problem_and_the_tick_continues(
@@ -534,10 +482,10 @@ def test_a_database_error_while_ingesting_fails_the_tick_and_blames_no_release(
 def test_prefetch_fetches_every_wanted_file_and_one_window_only_file_per_tick(
         registry, sync_world):
     from fakes.publisher import RecordingPublisher
+    from test_node_boot import keep_version
     from test_node_release_catalog import store_files
 
     from central.assets.handlers import PrefetchHandler
-    from central.fleet.node_boot import NodeBootService
     from central.kernel.job_types import FetchOsImage, Prefetch
     from contracts.time import ManualClock
     upstream = Upstream()
@@ -546,7 +494,7 @@ def test_prefetch_fetches_every_wanted_file_and_one_window_only_file_per_tick(
         upstream.put(upload)
     world = sync_world(upstream)
     sync(world)
-    NodeBootService(sessions_for(registry)).select(uploads[0].deployment_id, 0)  # out of window
+    keep_version(registry.db, "pi-a", uploads[0].deployment_id, registry.clock.utc())  # out of window
 
     def tick() -> list[str]:
         publisher = RecordingPublisher(ManualClock(0))
@@ -559,7 +507,7 @@ def test_prefetch_fetches_every_wanted_file_and_one_window_only_file_per_tick(
     def base(upload) -> str:
         return upload.release.base.content_key
 
-    # Every missing file of the selection, then ONE window-only file: the newest release's.
+    # Every missing file of the Pi's version, then ONE window-only file: the newest release's.
     assert tick() == [base(uploads[0]), base(uploads[3])]
     store_files(world, uploads[0])
     store_files(world, uploads[3])
@@ -572,9 +520,9 @@ def test_prefetch_skips_a_failed_window_file_and_starts_the_next(registry, sync_
     from datetime import timedelta
 
     from fakes.publisher import RecordingPublisher
+    from test_node_boot import keep_version
 
     from central.assets.handlers import PrefetchHandler
-    from central.fleet.node_boot import NodeBootService
     from central.kernel.job_types import Prefetch
     from central.kernel.publishing import Failed
     from contracts.time import ManualClock
@@ -584,7 +532,7 @@ def test_prefetch_skips_a_failed_window_file_and_starts_the_next(registry, sync_
         upstream.put(upload)
     world = sync_world(upstream)
     sync(world)
-    NodeBootService(sessions_for(registry)).select(uploads[0].deployment_id, 0)
+    keep_version(registry.db, "pi-a", uploads[0].deployment_id, registry.clock.utc())
 
     window = asyncio.run(world.catalog.desired_tiers()).background  # newest release first
     publisher = RecordingPublisher(ManualClock(0))

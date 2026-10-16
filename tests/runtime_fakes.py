@@ -7,7 +7,6 @@ Handler classes import their job types at runtime (never under TYPE_CHECKING): t
 
 from __future__ import annotations
 
-import asyncio
 from typing import Any
 
 import procrastinate
@@ -105,25 +104,3 @@ def apply_procrastinate_schema(dsn: str) -> None:
         app.schema_manager.apply_schema()
     finally:
         app.close()
-
-
-class NoNames:
-    """NamedReferences that never names a reference: follows until cancelled."""
-
-    async def follow(self, named) -> None:
-        await asyncio.Event().wait()
-
-
-class _UnheardHealth:
-    """A link health that keeps no beat."""
-
-    def beat(self, beat: str) -> None:
-        pass
-
-
-def unconfigured_link():
-    """The worker's Home Assistant link as it runs with no broker configured: it only beats
-    "not-configured" (here, to nothing) until stopped, and has no pool to close."""
-    from central.infra.home_assistant.link import HomeAssistantLink
-
-    return HomeAssistantLink(None, None, _UnheardHealth(), NoNames(), close=lambda: None)  # type: ignore[arg-type]

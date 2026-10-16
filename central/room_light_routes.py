@@ -1,5 +1,4 @@
-"""House › Lights' routes and the Player's drawn report (a composition-root module like
-power_routes.py). One route per question, the shapes central/room_light/views.py's:
+"""House › Lights' routes (a composition-root module like power_routes.py). One route per question, the shapes central/room_light/views.py's:
 
 | Method | Path | Body | Answer | Refusals |
 |---|---|---|---|---|
@@ -10,32 +9,28 @@ power_routes.py). One route per question, the shapes central/room_light/views.py
 | DELETE | /v1/operator/house/sensors/{sensor_id} | | 204 | 404 unknown_sensor; 409 sensor_reports_a_light |
 | GET | /v1/operator/house/lights/drawn | | DrawnView | |
 | GET | /v1/operator/house/refused-reports | | RefusedReportsView | |
-| PUT | ROOM_LIGHTS_DRAWN_PATH (the Player's bearer) | RoomLightsDrawn | 204 | 413 room_lights_drawn_too_large, 422 room_lights_drawn_invalid |
 
 The operator routes take the `admin` dependency. A refusal answers {"error": <code>} at the one
 status `REFUSAL_STATUS` gives its code (one exception handler); an id or body outside its shape
-answers 422.
+answers 422. What each Player drew with arrives on its own bus line (central/infra/drawn_report_judge.py),
+never through a route.
 """
 from __future__ import annotations
 
-import asyncio
 from typing import Annotated, Any, Final
 
 from fastapi import Depends, FastAPI, Path, Request
 from fastapi.responses import JSONResponse, Response
-from pydantic import ValidationError
 
 from central.operator_auth import OPERATOR_PREFIX
-from central.request_body import capped_body
 from central.room_light.model import (
-    DrawnReportRefusal,
     ReportedLight,
     RoomLight,
     RoomLightRefusal,
     RoomLightRefused,
     Sensor,
 )
-from central.room_light.ports import DrawnReports, ReportSources, RoomLightSetup
+from central.room_light.ports import ReportSources, RoomLightSetup
 from central.room_light.views import (
     DrawnView,
     RefusedReportsView,
@@ -43,19 +38,14 @@ from central.room_light.views import (
     RoomLightView,
     SensorView,
 )
-from contracts.room_light import (
-    ROOM_LIGHT_ID_PATTERN,
-    ROOM_LIGHTS_DRAWN_BYTES,
-    ROOM_LIGHTS_DRAWN_PATH,
-    RoomLightsDrawn,
-)
+from contracts.room_light import ROOM_LIGHT_ID_PATTERN
 
 HOUSE_LIGHTS: Final = OPERATOR_PREFIX + "house/lights"
 HOUSE_SENSORS: Final = OPERATOR_PREFIX + "house/sensors"
 HOUSE_REFUSED: Final = OPERATOR_PREFIX + "house/refused-reports"
 _ID: Final = rf"^{ROOM_LIGHT_ID_PATTERN}$"
 LightId = Annotated[str, Path(pattern=_ID)]
-REFUSAL_STATUS: Final[dict[RoomLightRefusal | DrawnReportRefusal, int]] = {
+REFUSAL_STATUS: Final[dict[RoomLightRefusal, int]] = {
     RoomLightRefusal.UNKNOWN_ROOM_LIGHT: 404,
     RoomLightRefusal.UNKNOWN_SENSOR: 404,
     RoomLightRefusal.UNKNOWN_ADDRESS: 422,
@@ -63,15 +53,12 @@ REFUSAL_STATUS: Final[dict[RoomLightRefusal | DrawnReportRefusal, int]] = {
     RoomLightRefusal.SENSOR_REPORTS_A_LIGHT: 409,
     RoomLightRefusal.NAMED_BY_A_FRAME: 409,
     RoomLightRefusal.TOO_MANY: 409,
-    DrawnReportRefusal.TOO_LARGE: 413,
-    DrawnReportRefusal.INVALID: 422,
 }
 SensorIdPath = Annotated[str, Path(pattern=_ID)]
 
 
-def mount_room_light_routes(app: FastAPI, *, admin: Any, player: Any, lights: RoomLightSetup,
-                            sources: ReportSources, drawn: DrawnReports) -> None:
-    """Declare the routes above on `app`. `player` answers the Player's identity ({"id": ...})."""
+def mount_room_light_routes(app: FastAPI, *, admin: Any, lights: RoomLightSetup, sources: ReportSources) -> None:
+    """Declare the routes above on `app`."""
 
     @app.exception_handler(RoomLightRefused)
     async def refused(_request: Request, exc: RoomLightRefused) -> JSONResponse:
@@ -117,26 +104,9 @@ def mount_room_light_routes(app: FastAPI, *, admin: Any, player: Any, lights: Ro
         lights.remove_sensor(sensor_id)
         return Response(status_code=204)
 
-    @app.put(ROOM_LIGHTS_DRAWN_PATH, status_code=204, response_class=Response)
-    async def drawn_report(request: Request, identity: dict = Depends(player)) -> Response:  # noqa: B008
-        try:
-            raw = await capped_body(request, ROOM_LIGHTS_DRAWN_BYTES, _TooLarge)
-        except _TooLarge:
-            return _refusal(DrawnReportRefusal.TOO_LARGE)
-        try:
-            report = RoomLightsDrawn.model_validate_json(raw, strict=True)
-        except ValidationError:
-            return _refusal(DrawnReportRefusal.INVALID)
-        await asyncio.to_thread(drawn.record_drawn, identity["id"], report)
-        return Response(status_code=204)
 
-
-def _refusal(code: RoomLightRefusal | DrawnReportRefusal) -> JSONResponse:
+def _refusal(code: RoomLightRefusal) -> JSONResponse:
     return JSONResponse({"error": code.value}, status_code=REFUSAL_STATUS[code])
-
-
-class _TooLarge(Exception):
-    """The drawn report's body passed ROOM_LIGHTS_DRAWN_BYTES."""
 
 
 __all__ = ["HOUSE_LIGHTS", "HOUSE_REFUSED", "HOUSE_SENSORS", "REFUSAL_STATUS", "mount_room_light_routes"]

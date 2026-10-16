@@ -33,7 +33,7 @@ from central.fleet.position_views import PositionHistoryView, PositionRestore
 from central.frame_lighting.model import FrameLightingRefusal
 from central.frame_lighting.paper_profiles import PaperProfileRefusal
 from central.frame_lighting.views import PaperProfilesView, PaperProfileView
-from central.infra.home_assistant import topics
+from central.infra.home_assistant import references
 from central.infra.home_assistant.views import HomeAssistantStatesView, HomeAssistantView
 from central.infra.light_sensor_judge import PI_SOURCE
 from central.room_light.model import (
@@ -90,7 +90,7 @@ CONSOLE_CONSTANTS: Final[Mapping[str, float | int | str]] = {
     "SHEET_WHITENESS": SHEET_WHITENESS, "LUX_MAX": LUX_MAX, "KELVIN_TABLE_MIN": KELVIN_TABLE_MIN,
     "KELVIN_TABLE_MAX": KELVIN_TABLE_MAX, "KELVIN_TABLE_STEP": KELVIN_TABLE_STEP, "ROOM_LIGHTS_MAX": ROOM_LIGHTS_MAX,
     "SENSORS_MAX": SENSORS_MAX, "ROOM_LIGHT_NAME_MAX": ROOM_LIGHT_NAME_MAX,
-    "ROOM_LIGHT_ID_PATTERN": ROOM_LIGHT_ID_PATTERN, "HOME_ASSISTANT_SOURCE": topics.SOURCE, "PI_SOURCE": PI_SOURCE,
+    "ROOM_LIGHT_ID_PATTERN": ROOM_LIGHT_ID_PATTERN, "HOME_ASSISTANT_SOURCE": references.SOURCE, "PI_SOURCE": PI_SOURCE,
     "MATCHED_LUX_MIN": MATCHED_LUX_MIN, "MATCHED_LUX_MAX": MATCHED_LUX_MAX, "PANEL_BLACK_MIN": PANEL_BLACK_MIN,
     "PANEL_BLACK_MAX": PANEL_BLACK_MAX,
 }

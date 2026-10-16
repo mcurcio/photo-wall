@@ -1,6 +1,10 @@
-"""The Home Assistant settings page's answer (GET /v1/operator/integrations/home-assistant): the
-link's health, which entity reports which room light or Sensor, what each entity last said, and the
-messages the link refused. Every entity here is an address of SOURCE; House › Lights shows none.
+"""The Home Assistant settings page's answer (GET /v1/operator/integrations/home-assistant,
+`HomeAssistantStatesView`): when Central last heard Home Assistant's states, every entity Home
+Assistant published or a room light or Sensor names, and the states Central refused. Every entity
+here is an address of SOURCE.
+
+The MQTT link's views above it (`HomeAssistantView`, `EntityView`, `LinkHealthView`) answer no route
+any more; they stay exported only while the console still names them.
 """
 from __future__ import annotations
 
@@ -8,11 +12,19 @@ from typing import Annotated, Literal
 
 from pydantic import Field
 
-from central.infra.home_assistant.health import LinkHealthView
 from central.room_light.model import RoomLightId, SensorId
 from central.room_light.views import RefusedReportView
 from contracts.home_assistant import EntityId, EntityName
 from contracts.models import Instant, Model
+
+LinkState = Literal["not-configured", "connecting", "connected", "away", "never-run"]
+
+
+class LinkHealthView(Model):
+    """The link as the Home Assistant settings page shows it: its state and since when it has been
+    in it (Central's clock; None for never-run)."""
+    state: LinkState
+    since: Instant | None
 
 
 class LightEntityView(Model):
@@ -85,4 +97,4 @@ class HomeAssistantStatesView(Model):
 
 
 __all__ = ["EntityView", "HeardEntityView", "HeardLightView", "HeardSensorView", "HomeAssistantStatesView",
-           "HomeAssistantView", "LightEntityView", "SensorEntityView"]
+           "HomeAssistantView", "LightEntityView", "LinkHealthView", "SensorEntityView"]

@@ -16,13 +16,13 @@ from uuid import UUID
 import pytest
 from fastapi.testclient import TestClient
 from test_fleet_attempts import BOOT_ID, SERIAL
+from test_node_boot import boot_service, keep_version
 from test_node_release_catalog import store_files
 from test_node_release_ingest import (
     Upstream,
     make_sync_world,
     node_upload,
     observations,
-    policy,
     sessions_for,
     sync,
 )
@@ -30,7 +30,6 @@ from test_registry import ADMIN
 
 import contracts.node_boot
 from central.app import create_app
-from central.fleet.node_boot import NodeBootService
 from central.fleet.node_sessions import NodeControlConfig
 from contracts.node_boot import NodeBootRequestV2, parse_node_boot_offer
 from contracts.node_commands import NodeSessionClaim, encode_session_claim
@@ -66,7 +65,7 @@ def _boot(client, request: NodeBootRequestV2):
     return client.post("/v2/node/boot-offers", content=encode_node_boot_request(request))
 
 
-def test_a_release_the_earlier_central_ingested_is_listed_auto_selected_and_offered(
+def test_a_release_the_earlier_central_ingested_is_listed_and_offered(
         registry, sync_world, monkeypatch):
     with monkeypatch.context() as earlier:
         _as_earlier_central(earlier)
@@ -74,17 +73,16 @@ def test_a_release_the_earlier_central_ingested_is_listed_auto_selected_and_offe
         sync(world)  # the earlier Central's ingest: catalog row, observation, deployment
     assert observations(registry)["v2.0.0"]["manifest_sha256"] == upload.sha
 
-    # The release sync's tail reads the stored catalog row and auto-selects its deployment.
+    # The release sync reads the stored catalog row again; the Pi's version names its deployment.
     store_files(world, upload)
     sync(world)
     assert observations(registry)["v2.0.0"]["problem"] is None
-    assert policy(registry)["deployment_id"] == upload.deployment_id
+    keep_version(registry.db, SERIAL, upload.deployment_id, registry.clock.utc())
 
     with _client(registry) as client:
-        page = client.get("/v1/operator/node/releases", headers=HEADERS)
+        page = client.get("/v1/operator/releases", headers=HEADERS)
         assert page.status_code == 200, page.text
-        assert [(row["tag"], row["deployment_id"]) for row in page.json()["releases"]] == [
-            ("v2.0.0", str(upload.deployment_id))]
+        assert [(row["version"], row["base_tag"]) for row in page.json()["releases"]] == [("v2.0.0", "v2.0.0")]
         response = _boot(client, NodeBootRequestV2(SERIAL, BOOT_ID, "a" * 64))
         assert response.status_code == 200, response.text
     offer = parse_node_boot_offer(response.content)
@@ -95,12 +93,12 @@ def test_a_release_the_earlier_central_ingested_is_listed_auto_selected_and_offe
 def test_an_offer_the_earlier_central_stored_replays_enrolls_and_serves_its_artifacts(
         registry, sync_world, monkeypatch):
     request = NodeBootRequestV2(SERIAL, BOOT_ID, "a" * 64)
-    boots = NodeBootService(sessions_for(registry))
+    boots = boot_service(sessions_for(registry))
     with monkeypatch.context() as earlier:
         _as_earlier_central(earlier)
         upload, world = _published(sync_world)
         sync(world)
-        boots.select(upload.deployment_id, 0)
+        keep_version(registry.db, SERIAL, upload.deployment_id, registry.clock.utc())
         boots.offer(request)  # stored in node_boot_offers
     with registry.db.transaction() as conn:
         stored = bytes(conn.execute("SELECT offer_payload FROM node_boot_offers").fetchone()[
@@ -118,8 +116,9 @@ def test_an_offer_the_earlier_central_stored_replays_enrolls_and_serves_its_arti
         assert enrolled.status_code == 200, enrolled.text
         fresh = _boot(client, NodeBootRequestV2(SERIAL, UUID(int=902), "b" * 64))
         assert fresh.status_code == 200, fresh.text  # a new boot: the stored deployment's offer
-        page = client.get("/v1/operator/node/releases", headers=HEADERS)
+        page = client.get("/v1/operator/releases", headers=HEADERS)
         assert page.status_code == 200, page.text
-        assert page.json()["selection"]["deployment_id"] == str(upload.deployment_id)
+        [pi] = page.json()["players"]
+        assert (pi["serial"], pi["version"], pi["chosen"]) == (SERIAL, "v2.0.0", True)
     asset = boots.asset(offer.offer_id, "manager-primary")
     assert asset.sha256 == offer.manager_primary.environment_sha256

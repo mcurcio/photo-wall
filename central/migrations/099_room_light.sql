@@ -1,5 +1,5 @@
 -- Room light on the wall (decision 0028). Room lights and Sensors, observed, never driven; each
--- reporting reference's last word; the one refusal log; the Home Assistant link's heartbeat; what
+-- reporting reference's last word; the one refusal log; each entity Home Assistant published; what
 -- each Player drew with; the Display's light replaces the picture's sliders and its LUT; a Frame's
 -- lighting replaces its mat. The rules live in app code (central/room_light/, central/frame_lighting/,
 -- central/infra/); there is no trigger and no stored procedure here, and every range is pydantic's:
@@ -52,12 +52,14 @@ CREATE TABLE report_refusals (
     reason TEXT NOT NULL,
     at TIMESTAMPTZ NOT NULL);
 
--- The Home Assistant link's newest heartbeat: what it was doing, since when, and when it beat.
-CREATE TABLE home_assistant_link (
-    one BOOLEAN PRIMARY KEY DEFAULT true CHECK (one),
-    beat TEXT NOT NULL,
-    since TIMESTAMPTZ NOT NULL,
-    beat_at TIMESTAMPTZ NOT NULL);
+-- Each entity Home Assistant published on Central's hub (contracts/home_assistant.py): its kind
+-- ("light" or "illuminance"), its friendly name and when Central last heard it, for the House › Lights
+-- picker and "states last heard" (central/infra/home_assistant/states.py; the newest are kept).
+CREATE TABLE home_assistant_entities (
+    entity TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    name TEXT NOT NULL,
+    heard_at TIMESTAMPTZ NOT NULL);
 
 -- The room-lights document's `change`, raised in the same transaction as any change below it. Its
 -- row is also the house's lock (central/infra/frame_lighting_store.py).

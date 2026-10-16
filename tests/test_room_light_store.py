@@ -1,8 +1,8 @@
 """Room lights over PostgreSQL (central/infra/room_light_store.py, central/infra/light_sensor_judge.py,
-the Home Assistant link's heartbeat, and the WALL marks): every word is kept by its reference and
-resolved when the document is built, the Pi sensor's judge never rolls back the host line, the
-link's health is judged by its beat's age on the database's clock, and ensuring WALL only wakes the
-room-lights writer."""
+the entities Home Assistant published, and the WALL marks): every word is kept by its reference and
+resolved when the document is built, the Pi sensor's judge never rolls back the host line, the Home
+Assistant page reads when Central last heard each entity, and ensuring WALL only wakes the room-lights
+writer."""
 from __future__ import annotations
 
 import asyncio
@@ -12,7 +12,7 @@ from test_registry import enroll
 from central.content_catalog.catalog import device_id_for_serial
 from central.infra import room_light_store
 from central.infra.frame_lighting_store import PgHouseLock
-from central.infra.home_assistant.health import LEASE_SECONDS, PgLinkHealth
+from central.infra.home_assistant.settings import PgHomeAssistantSettings
 from central.infra.light_sensor_judge import HOST_STATE_STREAM, PI_SOURCE, LightSensorJudge
 from central.infra.node_link_store import PgLinkStores, PgWallMarks
 from central.infra.room_light_store import PgRoomLights
@@ -155,19 +155,22 @@ def test_a_refusal_that_fails_never_rolls_back_the_host_lines_record(registry, m
     assert _sql(registry, "SELECT seq FROM node_link_records WHERE stream=%s", (HOST_STATE_STREAM,)) == [{"seq": 1}]
 
 
-def test_the_links_health_is_judged_by_its_beats_age_on_the_databases_clock(registry):
-    """A7. Mutation probe M5: judged ignoring the age -> the old beat reads connected."""
-    health = PgLinkHealth(registry.db)
-    assert health.health().state == "never-run"
-    health.beat("connecting")
-    health.beat("connected")
-    connected = health.health()
-    assert connected.state == "connected" and connected.since is not None
-    health.beat("connected")
-    assert health.health().since == connected.since                 # since moves only with the state
-    _sql(registry, "UPDATE home_assistant_link SET beat_at = clock_timestamp() - make_interval(secs => %s)",
-         (LEASE_SECONDS + 1,))
-    assert health.health().state == "away"
+def test_the_home_assistant_page_reads_when_each_entity_was_heard_and_its_name(registry):
+    """"States last heard": the newest heard_at; every entity Home Assistant published, by its name,
+    newest heard first; a room light's entity never published reads with no name and no time."""
+    lights = PgRoomLights(registry.db, PgHouseLock())
+    settings = PgHomeAssistantSettings(registry.db)
+    assert settings.view().heard_at is None
+    lights.save_room_light("spot", ReportedLight(name="Spot", reporter=ReporterRef(source="home-assistant",
+                                                                                   address="light.unheard"),
+                                                 colour=FixedColour(kelvin=4000)))
+    lights.record_heard("light.hall", "light", "Hall")
+    lights.record_heard("sensor.lux", "illuminance", "Hall lux")
+    view = settings.view()
+    assert [(each.kind, each.entity, each.name, each.reports) for each in view.entities] == [
+        ("illuminance", "sensor.lux", "Hall lux", None), ("light", "light.hall", "Hall", None),
+        ("light", "light.unheard", None, "spot")]
+    assert view.heard_at == view.entities[0].heard_at and view.entities[2].heard_at is None
 
 
 def test_ensuring_wall_only_wakes_the_room_lights_writer():

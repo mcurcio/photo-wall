@@ -1,7 +1,7 @@
 """House › Lights, the refused reports, each Player's drawn report and the Home Assistant settings
 page through the real app (create_app on the test database): one refusal vocabulary at its status,
-references whose address form the source's adapter judges, and the Player's report judged against
-the document now."""
+references whose address form the source's adapter judges, and the Player's report (from its bus
+line, tests/test_drawn_report_judge.py) judged against the document now."""
 from __future__ import annotations
 
 from fastapi.testclient import TestClient
@@ -12,7 +12,13 @@ from central.fleet.node_sessions import NodeControlConfig
 from central.infra.frame_lighting_store import PgHouseLock
 from central.infra.room_light_store import PgRoomLights
 from central.room_light.model import ReporterRef, ReportRefusal, SensorRef
-from contracts.room_light import ROOM_LIGHTS_DRAWN_PATH, Dimmer, Measured, room_lights_digest
+from contracts.room_light import (
+    ROOM_LIGHTS_DRAWN_PATH,
+    Dimmer,
+    Measured,
+    RoomLightsDrawn,
+    room_lights_digest,
+)
 
 AUTH = {"Authorization": "Bearer " + ADMIN}
 LIGHTS = "/v1/operator/house/lights"
@@ -70,40 +76,41 @@ def test_house_lights_refuse_with_one_vocabulary_at_its_status(registry):
 
 def test_refused_reports_and_the_home_assistant_page(registry):
     lights = PgRoomLights(registry.db, PgHouseLock())
-    lights.record_refused("home-assistant", "photowall/light/light.cellar", ReportRefusal.UNKNOWN_ADDRESS)
+    lights.record_refused("home-assistant", "Cellar.Light", ReportRefusal.UNKNOWN_ADDRESS)
     lights.record_refused("pi", "p-1", ReportRefusal.UNREADABLE)
     lights.record_light_state(ReporterRef(source="home-assistant", address="light.heard"), Dimmer(on=True, brightness=1.0))
+    lights.record_heard("light.heard", "light", "Heard light")
     lights.record_reading(SensorRef(source="home-assistant", address="sensor.lux"), Measured(lux=80.0))
+    lights.record_heard("sensor.lux", "illuminance", "Lux")
     with _client(registry) as client:
         assert client.put(f"{LIGHTS}/x", headers=AUTH, json=_reported("light.x")).status_code == 200
         refused = client.get("/v1/operator/house/refused-reports", headers=AUTH).json()["refused"]
         assert [(each["source"], each["address"], each["reason"]) for each in refused] == [
-            ("pi", "p-1", "unreadable"), ("home-assistant", "photowall/light/light.cellar", "unknown_address")]
+            ("pi", "p-1", "unreadable"), ("home-assistant", "Cellar.Light", "unknown_address")]
         page = client.get("/v1/operator/integrations/home-assistant", headers=AUTH).json()
-        assert page["link"] == {"state": "never-run", "since": None}
         entities = {each["entity"]: each for each in page["entities"]}
+        assert page["heard_at"] == max(each["heard_at"] for each in entities.values() if each["heard_at"])
         assert entities["light.x"]["reports"] == "x" and entities["light.x"]["heard_at"] is None
-        assert entities["light.heard"]["reports"] is None and entities["light.heard"]["heard_at"] is not None
+        assert (entities["light.heard"]["reports"], entities["light.heard"]["name"]) == (None, "Heard light")
+        assert entities["light.heard"]["heard_at"] is not None
         assert {entity: each["kind"] for entity, each in entities.items()} == {
             "light.x": "light", "light.heard": "light", "sensor.lux": "illuminance"}   # what each reports, said
         assert [(each["source"], each["address"], each["reason"]) for each in page["refused"]] == [
-            ("home-assistant", "photowall/light/light.cellar", "unknown_address")]   # one view shape, its source only
+            ("home-assistant", "Cellar.Light", "unknown_address")]   # one view shape, its source only
 
 
 def test_a_players_drawn_report_is_judged_against_the_document_now(registry):
     player, _, _ = enroll(registry)
-    bearer = {"Authorization": "Bearer " + player["token"]}
-    now = room_lights_digest(PgRoomLights(registry.db, PgHouseLock()).current())
+    lights = PgRoomLights(registry.db, PgHouseLock())
+    now = room_lights_digest(lights.current())
     with _client(registry) as client:
         assert client.get(f"{LIGHTS}/drawn", headers=AUTH).json() == {"players": []}
-        assert client.put(ROOM_LIGHTS_DRAWN_PATH, json={"drawn": now, "following": True}).status_code == 401
-        sent = client.put(ROOM_LIGHTS_DRAWN_PATH, headers=bearer, json={"drawn": now, "following": True})
-        assert sent.status_code == 204, sent.text
+        lights.record_drawn(player["player_id"], RoomLightsDrawn(drawn=now, following=True))   # as its line's judge
         [drawn] = client.get(f"{LIGHTS}/drawn", headers=AUTH).json()["players"]
         assert (drawn["player_id"], drawn["state"]) == (player["player_id"], "drawn")
         assert client.put(f"{LIGHTS}/x", headers=AUTH, json={"kind": "fixed", "name": "X", "colour": WHITE}
                           ).status_code == 200
         assert client.get(f"{LIGHTS}/drawn", headers=AUTH).json()["players"][0]["state"] == "behind"
-        for body, status in (({"drawn": now, "following": "yes"}, 422), ({"drawn": now}, 422),
-                             ({"drawn": now, "following": True, "pad": "x" * 300}, 413)):
-            assert client.put(ROOM_LIGHTS_DRAWN_PATH, headers=bearer, json=body).status_code == status
+        bearer = {"Authorization": "Bearer " + player["token"]}   # the Player's former route is gone
+        assert client.put(ROOM_LIGHTS_DRAWN_PATH, headers=bearer, json={"drawn": now, "following": True}
+                          ).status_code in (404, 405)

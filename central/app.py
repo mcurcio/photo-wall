@@ -34,7 +34,7 @@ from central.content_wiring import ContentServices, build_content_services
 from central.coordination import CoordinationLimits, Coordinator
 from central.db import Database, DatabaseTransactionClock, ProcessTransactionClock, TransactionClock
 from central.display_routes import mount_display_routes, mount_picture_routes
-from central.fleet.leaf_bridge import mount_leaf_bridge
+from central.fleet.leaf_bridge import mount_bus_bridges
 from central.fleet.node_routes import mount_node_routes
 from central.fleet.node_sessions import NodeControlConfig
 from central.frame_lighting.paper_profiles import LUT_RECIPE_ID
@@ -49,8 +49,7 @@ from central.infra.display_store import (
 from central.infra.fit_analysis_store import PgFitAnalysisReader
 from central.infra.fit_settings_store import PgFitSettings
 from central.infra.frame_lighting_store import PgFrameLighting, PgHouseLock
-from central.infra.home_assistant import topics as home_assistant_topics
-from central.infra.home_assistant.health import PgLinkHealth
+from central.infra.home_assistant import references as home_assistant_references
 from central.infra.home_assistant.settings import PgHomeAssistantSettings
 from central.infra.house_store import PgHouse, seed_house
 from central.infra.light_sensor_judge import PI_SOURCE, is_player
@@ -178,7 +177,7 @@ class ReportSourceForms:
         return None if form is not None and form(address) else RoomLightRefusal.UNKNOWN_ADDRESS
 
 
-REPORT_SOURCES: Final = ReportSourceForms({home_assistant_topics.SOURCE: home_assistant_topics.is_entity,
+REPORT_SOURCES: Final = ReportSourceForms({home_assistant_references.SOURCE: home_assistant_references.is_entity,
                                            PI_SOURCE: is_player})
 
 
@@ -848,9 +847,8 @@ def create_app(
     house = PgHouse(db, times=media_times)
     mount_house_routes(app, admin=admin, queries=house, commands=house)
     room_lights = PgRoomLights(db, house_lock)
-    mount_room_light_routes(app, admin=admin, player=player, lights=room_lights, sources=REPORT_SOURCES,
-                            drawn=room_lights)
-    mount_home_assistant_routes(app, admin=admin, settings=PgHomeAssistantSettings(db, PgLinkHealth(db)))
+    mount_room_light_routes(app, admin=admin, lights=room_lights, sources=REPORT_SOURCES)
+    mount_home_assistant_routes(app, admin=admin, settings=PgHomeAssistantSettings(db))
     pictures = PgPictureSessions(db)
     mount_picture_routes(app, admin=admin, queries=pictures, commands=pictures)
     mount_tuning_history_routes(app, admin=admin, queries=PgTuningHistory(db))
@@ -862,10 +860,10 @@ def create_app(
     mount_node_routes(app, db=db, clock=clock, admin=admin, coordinator=coordinator, config=node_control,
                       content=content)
     app.state.node_reconciler = NodeRuntimeReconciler(app.state.node_sessions, coordinator)
-    # A Node's leaf arrives at its origin (erratum E-E3D-CUT-4): relayed to the hub when Central has one.
+    # A Node's leaf and Home Assistant's door arrive at Central's origin (erratum E-E3D-CUT-4): relayed to the hub.
     hub_leaf_url = hub_leaf_url or os.environ.get("PHOTO_WALL_HUB_LEAF_URL")
     if hub_leaf_url:
-        mount_leaf_bridge(app, hub_leaf_url)
+        mount_bus_bridges(app, hub_leaf_url)
     # Every route is bound: refuse one that `admin` guards outside the cookie's path.
     operator_auth.require_scoped(app)
     return app

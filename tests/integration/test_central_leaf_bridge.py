@@ -6,7 +6,8 @@ generated configuration, a real Node bus whose leaf dials Central's port at "/" 
 fleet NodeLinks over PostgreSQL. 1: the leaf links through Central, the Node's birth is recorded (Node
 to hub) and a WALL write reaches the Node's wall view (hub to Node). 2: Central stops and starts again
 on the same port; the leaf relinks and a later event is recorded. 3: a Central with no hub refuses a
-WebSocket at the leaf's route.
+WebSocket at the leaf's route. Home Assistant's door is the same relay at "/" + DOOR_PATH
+(`test_home_assistants_door_through_centrals_origin`).
 """
 from __future__ import annotations
 
@@ -14,6 +15,9 @@ import asyncio
 import threading
 import time
 
+import httpx
+import nats
+import nats.errors
 import pytest
 import uvicorn
 from integration.bus_servers import (
@@ -33,6 +37,7 @@ from central.app import create_app
 from central.content_catalog.catalog import device_id_for_serial
 from central.db import Database
 from central.fleet.leaf_bridge import LEAF_ROUTE
+from central.infra.home_assistant.settings import PgHomeAssistantSettings
 from central.infra.node_link_store import PgLinkStores
 from central.infra.node_links import NodeLinks
 from contracts.node_link import Pipe, account_id
@@ -177,5 +182,126 @@ def test_a_node_leaf_links_through_centrals_origin(database, tmp_path, monkeypat
         session.stop()
         node.stop()
         unbridged.stop()
+        central.stop()
+        hub.stop()
+
+
+def test_home_assistants_door_through_centrals_origin(registry, tmp_path, monkeypatch):
+    """C1, C5: Home Assistant at Central's origin ("/" + DOOR_PATH, relayed to the hub's client
+    WebSocket) publishes a state, reads Central's state one key at a time and calls installPlayer,
+    whose answers equal the route's; the hub refuses it anything else, and refuses every other hub
+    user at the door. Central's side is its hub session over its real services.
+
+    Mutation probes: drop allowed_connection_types from the fleet user -> "fleet at the door" logs in;
+    add "$KV.state_central.>" to Home Assistant's publish allow list -> its write lands."""
+    from integration.room_light_rig import HomeAssistant
+    from runtime_fakes import apply_procrastinate_schema
+    from test_node_boot import enroll
+    from test_node_release_catalog import store_files
+    from test_node_release_ingest import Upstream, make_sync_world, node_upload, sync
+
+    from central.fleet.node_bus_accounts import FLEET_SYSTEM_USER
+    from central.fleet.node_commands import NodeCommands
+    from central.fleet.node_release_catalog import NodeReleaseCatalog
+    from central.fleet.node_sessions import NodeControlConfig, NodeSessions
+    from central.hub_api import central_state, hub_methods
+    from central.infra.central_state import PgCentralStateReads, PgStateWakes
+    from central.infra.frame_lighting_store import PgHouseLock
+    from central.infra.home_assistant.states import HomeAssistantListener
+    from central.infra.player_versions import PgPlayerVersions
+    from central.infra.room_light_store import PgRoomLights
+    from contracts.central_api import (
+        CENTRAL_STATE_PREFIX,
+        CENTRAL_STATE_STREAM,
+        CENTRAL_USER,
+        DOOR_PATH,
+        INSTALLATION_KEY,
+        InstallRefused,
+        InstallStarted,
+        decode_central_state,
+    )
+    from contracts.home_assistant import HomeAssistantLight
+    from contracts.node_link import WALL_WRITER_USER, central_user, node_user
+    from nodeapi.hub import run_hub_session
+
+    monkeypatch.setenv("PHOTO_WALL_CACHE_ROOT", str(tmp_path))
+    monkeypatch.delenv("PHOTO_WALL_HUB_LEAF_URL", raising=False)
+    apply_procrastinate_schema(registry.db.dsn)
+    upstream = Upstream()
+    uploads = {tag: node_upload(tag) for tag in ("v2.0.0", "v2.1.0")}
+    for upload in uploads.values():
+        upstream.put(upload)
+    upstream.put(node_upload("v2.3.0"), manifest=b"[]")
+    world = make_sync_world(registry, tmp_path)(upstream)
+    sync(world)
+    store_files(world, uploads["v2.0.0"])
+    for serial in ("pi-a", "pi-b"):
+        enroll(registry.db, serial, registry.clock.utc())
+    hub = hub_server(tmp_path, ["pi-a", "pi-b"])
+    central = _Central(registry.db, _free_port(), f"ws://127.0.0.1:{hub.websocket_port}/leafnode")
+    door = f"ws://127.0.0.1:{central.port}/{DOOR_PATH}"
+    sessions = NodeSessions(registry.db, registry.clock, NodeControlConfig("node-test"))
+    versions = PgPlayerVersions(registry.db, registry.clock, world.stored, None, NodeCommands(sessions))
+    lights = PgRoomLights(registry.db, PgHouseLock())
+    reads = PgCentralStateReads(registry.db, registry.clock, versions, lights,
+                                NodeReleaseCatalog(sessions, readiness=world.stored).view)
+
+    async def run() -> None:
+        stop = asyncio.Event()
+        serving = asyncio.create_task(run_hub_session(
+            hub.client_url, version="0.1.0", state=central_state(reads, PgStateWakes()),
+            listened=HomeAssistantListener(lights, lights), methods=hub_methods(versions), stop=stop))
+        try:
+            async with HomeAssistant(door) as house:
+                async def installation():
+                    raw = await house.central(INSTALLATION_KEY)
+                    return None if raw is None else decode_central_state(INSTALLATION_KEY, raw)
+                listed = await until(installation, SECONDS, "Central's installation reads at the door")
+                assert [each.serial for each in listed.players] == ["pi-a", "pi-b"]
+                await house.publish("light.door", HomeAssistantLight(name="Door", on=True, brightness=255,
+                                                                     kelvin=None, rgb=None))   # acknowledged
+
+                async def heard():
+                    return "light.door" in {each.entity for each in
+                                            (await asyncio.to_thread(PgHomeAssistantSettings(registry.db).view)).entities}
+                await until(heard, SECONDS, "Central hears the state published at the door")
+
+                # installPlayer answers as the route does.
+                assert await house.install("pi-a", "v2.0.0") == InstallStarted(serial="pi-a", version="v2.0.0",
+                                                                              install="restarting")
+                assert (await house.install("pi-b", "v2.1.0")).install == "downloading"
+                async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{central.port}") as http:
+                    for serial, version in (("pi-unknown", "v2.0.0"), ("pi-a", "v9.9.9"), ("pi-a", "v2.3.0")):
+                        answer = await house.install(serial, version)
+                        route = await http.post(f"/v1/operator/players/{serial}/install", json={"version": version},
+                                                headers={"Authorization": "Bearer " + ADMIN})
+                        assert isinstance(answer, InstallRefused)
+                        assert route.json() == {"error": answer.refusal.value}, (serial, version)
+
+                # Anything else is refused by the hub, and Central's state is unchanged.
+                before = await house.central(INSTALLATION_KEY)
+                for subject in (CENTRAL_STATE_PREFIX + INSTALLATION_KEY, "wall.timing",
+                                f"$JS.API.STREAM.DELETE.{CENTRAL_STATE_STREAM}"):
+                    await house.client.publish(subject, b"{}")
+                await house.client.flush()
+
+                async def refused():
+                    return sum("permissions violation" in each.lower() for each in house.violations) >= 3
+                await until(refused, SECONDS, "the hub refuses Home Assistant's three")
+                assert await house.central(INSTALLATION_KEY) == before
+            for user in (FLEET_SYSTEM_USER, CENTRAL_USER, WALL_WRITER_USER, central_user("pi-a"), node_user("pi-a")):
+                with pytest.raises((nats.errors.Error, OSError)):
+                    client = await HomeAssistant(door).connect(user)
+                    await client.close()
+                    raise AssertionError(f"{user} logged in at the door")   # never reached when refused
+        finally:
+            stop.set()
+            await asyncio.wait_for(serving, SECONDS)
+
+    hub.start()
+    try:
+        central.start()
+        asyncio.run(run())
+    finally:
         central.stop()
         hub.stop()

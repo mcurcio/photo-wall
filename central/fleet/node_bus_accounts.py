@@ -1,4 +1,5 @@
-"""Fleet's hub bus configuration: one account per Node, plus the wall-wide account (0017 C4/C5, API6).
+"""Fleet's hub bus configuration: one account per Node, the wall-wide account and Central's own account
+with Home Assistant's door (0017 C4/C5, API6; the Home Assistant system design, 2026-10-16).
 
 Pure: no I/O and no NATS client. The output is nats-server configuration written as JSON text,
 which the server's configuration parser reads, so the same set of serials always gives the same
@@ -11,6 +12,15 @@ carry the leaf's subject contract (contracts.node_link, erratum E-W1-LEAF-1): th
 toward the hub only LEAF_EXPORTS and receive only LEAF_IMPORTS, and Central may send only
 LEAF_IMPORTS and subscribe only to its wildcard inboxes, so nothing a Node program does crosses the
 leaf except what Central asked for.
+
+CENTRAL_ACCOUNT (contracts/central_api.py) holds Central's state, its methods and Home Assistant's
+states: Central's own client (CENTRAL_USER, unrestricted inside its account) and the door's one user
+(HOME_ASSISTANT_USER), whose permissions the hub holds (HOME_ASSISTANT_PUBLISH, HOME_ASSISTANT_SUBSCRIBE).
+
+Every user is confined to the one connection type it arrives on (`allowed_connection_types`), so a
+user of one listener cannot log in on another: a Node's leaf user only as a WebSocket leaf (through
+Central's origin relay), Home Assistant only as a WebSocket client (the door), and every Central and
+Fleet user only on the plain client port inside the deployment.
 """
 from __future__ import annotations
 
@@ -19,11 +29,21 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Final
 
+from contracts.central_api import (
+    CENTRAL_ACCOUNT,
+    CENTRAL_USER,
+    HOME_ASSISTANT_PUBLISH,
+    HOME_ASSISTANT_SUBSCRIBE,
+    HOME_ASSISTANT_USER,
+)
 from contracts.node_link import (
     CENTRAL_SUBSCRIPTIONS,
+    DOOR_CONNECTIONS,
     HUB_DOMAIN,
     LEAF_EXPORTS,
     LEAF_IMPORTS,
+    LEAF_WEBSOCKET_CONNECTION,
+    LOCAL_CONNECTIONS,
     NODE_MAX_CONTROL_LINE,
     NODE_MAX_PAYLOAD,
     WALL_ACCOUNT,
@@ -66,7 +86,8 @@ def hub_configuration(serials: Iterable[str], listeners: HubListeners) -> str:
     node_accounts = {account_id(serial): serial for serial in serials}
     accounts: dict[str, object] = {
         WALL_ACCOUNT: _wall_account(),
-        SYSTEM_ACCOUNT: {"users": [_user(FLEET_SYSTEM_USER)]},
+        SYSTEM_ACCOUNT: {"users": [_local(FLEET_SYSTEM_USER)]},
+        CENTRAL_ACCOUNT: _central_account(),
     }
     for name, serial in node_accounts.items():
         accounts[name] = _node_account(serial)
@@ -102,9 +123,15 @@ def hub_configuration(serials: Iterable[str], listeners: HubListeners) -> str:
     return json.dumps(configuration, sort_keys=True, indent=2) + "\n"
 
 
-def _user(name: str) -> dict[str, str]:
-    # The password is the user name: a selector on the trusted network, not a secret.
-    return {"user": name, "password": name}
+def _user(name: str, connections: tuple[str, ...]) -> dict[str, object]:
+    # The password is the user name: a selector on the trusted network, not a secret. The user logs in
+    # only on `connections` (nats-server's allowed_connection_types).
+    return {"user": name, "password": name, "allowed_connection_types": list(connections)}
+
+
+def _local(name: str) -> dict[str, object]:
+    """A user of the hub's plain client port only: Central's and Fleet's clients inside the deployment."""
+    return _user(name, LOCAL_CONNECTIONS)
 
 
 def _permissions(publish: tuple[str, ...], subscribe: tuple[str, ...]) -> dict[str, object]:
@@ -118,7 +145,7 @@ def _wall_account() -> dict[str, object]:
         # a write the stream's discard-old policy takes. The hub's max_memory_store is the one fence:
         # the server reserves each stream's cap against it at create, never at a write (E-W1-BUF-2).
         "jetstream": {"max_bytes_required": True},
-        "users": [_user(WALL_WRITER_USER)],
+        "users": [_local(WALL_WRITER_USER)],
         "exports": [
             *({"service": subject} for subject in WALL_CONSUMER_SERVICES),
             {"stream": _WALL_DELIVERY_STREAM},
@@ -130,8 +157,9 @@ def _wall_account() -> dict[str, object]:
 def _node_account(serial: str) -> dict[str, object]:
     return {
         "users": [
-            {**_user(node_user(serial)), "permissions": _permissions(LEAF_EXPORTS, LEAF_IMPORTS)},
-            {**_user(central_user(serial)), "permissions": _permissions(LEAF_IMPORTS, CENTRAL_SUBSCRIPTIONS)},
+            {**_user(node_user(serial), (LEAF_WEBSOCKET_CONNECTION,)),
+             "permissions": _permissions(LEAF_EXPORTS, LEAF_IMPORTS)},
+            {**_local(central_user(serial)), "permissions": _permissions(LEAF_IMPORTS, CENTRAL_SUBSCRIPTIONS)},
         ],
         "imports": [
             *({"service": {"account": WALL_ACCOUNT, "subject": subject},
@@ -139,5 +167,20 @@ def _node_account(serial: str) -> dict[str, object]:
             {"stream": {"account": WALL_ACCOUNT, "subject": _WALL_DELIVERY_STREAM}},
             *({"service": {"account": WALL_ACCOUNT, "subject": subject}}
               for subject in WALL_FLOW_CONTROL_SERVICES),
+        ],
+    }
+
+
+def _central_account() -> dict[str, object]:
+    """Central on its hub: its state bucket, its methods and Home Assistant's states bucket (each
+    stream has its own byte cap, as WALL's do), Central's own client on the plain port, and the door's
+    one user, which may only publish Home Assistant's states, read Central's state one key at a time
+    and call Central's methods, and only over WebSocket."""
+    return {
+        "jetstream": {"max_bytes_required": True},
+        "users": [
+            _local(CENTRAL_USER),
+            {**_user(HOME_ASSISTANT_USER, DOOR_CONNECTIONS),
+             "permissions": _permissions(HOME_ASSISTANT_PUBLISH, HOME_ASSISTANT_SUBSCRIBE)},
         ],
     }

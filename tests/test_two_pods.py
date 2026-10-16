@@ -57,9 +57,10 @@ from support.workers import (
     wait_for,
     worker_env,
 )
+from test_node_boot import keep_version
 
 from central.fleet.node_boot import NodeDeployment
-from central.infra.node_releases import select_deployment, write_deployment
+from central.infra.node_releases import write_deployment
 from central.kernel.assets import OriginLocator
 from contracts.app_environment import AppEnvironmentRefV2
 from contracts.node_boot import (
@@ -254,7 +255,7 @@ class TwoPods:
             write_deployment(conn, deployment, OriginLocator(
                 f"{url}/{TARBALL_NAME}", release.tarball_sha, len(release.tarball)),
                 clock=SystemClock())
-            select_deployment(conn, deployment.deployment_id, 0, now=time.time())
+        keep_version(self.db, SERIAL, deployment.deployment_id, time.time())
         response = httpx.post(self.procs["central-a"].url + "/v2/node/boot-offers", timeout=30,
                               content=encode_node_boot_request(
                                   NodeBootRequestV2(SERIAL, uuid4(), "a" * 64)))

@@ -22,6 +22,7 @@ from nats.js.api import DiscardPolicy, RetentionPolicy, StorageType
 
 from appliance.boot.bus_environment import bus_environment
 from central.fleet.node_bus_accounts import FLEET_SYSTEM_USER, HubListeners, hub_configuration
+from contracts.central_api import CENTRAL_ACCOUNT
 from contracts.node_link import (
     CENTRAL_SUBSCRIPTIONS,
     CONSUMER_HEAP,
@@ -29,6 +30,7 @@ from contracts.node_link import (
     HUB_DOMAIN,
     LEAF_EXPORTS,
     LEAF_IMPORTS,
+    LEAF_WEBSOCKET_CONNECTION,
     LOCAL_CONNECTIONS,
     MAX_STORED_MESSAGE,
     MEMORY_STORE_FACTOR,
@@ -221,27 +223,33 @@ def test_centrals_websocket_frame_cap_carries_a_nodes_largest_frame():
 def test_node_accounts_import_only_the_wall_set_and_export_nothing():
     config = json.loads(hub_configuration(["serial-a", "serial-b"], LISTENERS))
     accounts = config["accounts"]
-    assert set(accounts) == {WALL_ACCOUNT, "SYS", account_id("serial-a"), account_id("serial-b")}
+    # CENTRAL_ACCOUNT, Central's own with Home Assistant's door, is tests/test_hub_accounts.py's.
+    assert set(accounts) == {WALL_ACCOUNT, "SYS", CENTRAL_ACCOUNT, account_id("serial-a"), account_id("serial-b")}
     for serial in ("serial-a", "serial-b"):
         account = accounts[account_id(serial)]
         assert set(account) == {"users", "imports"}  # no jetstream, no exports
         # The leaf's subject contract (E-W1-LEAF-1): the Node's leaf user sends only the exports and
         # receives only the imports; Central sends only the imports and subscribes only to its
-        # wildcard inboxes.
+        # wildcard inboxes. Each logs in only on its own listener: the leaf as a WebSocket leaf, Central
+        # on the plain client port.
         assert account["users"] == [
-            {"user": node_user(serial), "password": node_user(serial), "permissions": {
-                "publish": {"allow": list(LEAF_EXPORTS)}, "subscribe": {"allow": list(LEAF_IMPORTS)}}},
-            {"user": central_user(serial), "password": central_user(serial), "permissions": {
-                "publish": {"allow": list(LEAF_IMPORTS)}, "subscribe": {"allow": list(CENTRAL_SUBSCRIPTIONS)}}}]
+            {"user": node_user(serial), "password": node_user(serial),
+             "allowed_connection_types": [LEAF_WEBSOCKET_CONNECTION], "permissions": {
+                 "publish": {"allow": list(LEAF_EXPORTS)}, "subscribe": {"allow": list(LEAF_IMPORTS)}}},
+            {"user": central_user(serial), "password": central_user(serial),
+             "allowed_connection_types": [STANDARD_CONNECTION], "permissions": {
+                 "publish": {"allow": list(LEAF_IMPORTS)}, "subscribe": {"allow": list(CENTRAL_SUBSCRIPTIONS)}}}]
         assert account["imports"] == WALL_IMPORTS
     wall = accounts[WALL_ACCOUNT]
     assert wall["jetstream"] == {"max_bytes_required": True}
-    assert wall["users"] == [{"user": WALL_WRITER_USER, "password": WALL_WRITER_USER}]
+    assert wall["users"] == [{"user": WALL_WRITER_USER, "password": WALL_WRITER_USER,
+                              "allowed_connection_types": [STANDARD_CONNECTION]}]
     assert wall["exports"] == [
         {"service": "$JS.API.CONSUMER.CREATE.*"}, {"service": "$JS.API.CONSUMER.CREATE.WALL.>"},
         {"service": "$JS.API.CONSUMER.DELETE.WALL.*"}, {"stream": "DELIVER.WALL.>"},
         {"service": "$JS.FC.WALL.>"}, {"service": "$JS.FC.*.*.WALL.>"}]
-    assert accounts["SYS"] == {"users": [{"user": FLEET_SYSTEM_USER, "password": FLEET_SYSTEM_USER}]}
+    assert accounts["SYS"] == {"users": [{"user": FLEET_SYSTEM_USER, "password": FLEET_SYSTEM_USER,
+                                          "allowed_connection_types": [STANDARD_CONNECTION]}]}
     assert config["system_account"] == "SYS"
     # The hub's JetStream is the memory store, with no store directory: it starts empty and Central
     # rebuilds WALL (E3b design §9.6, §12).
@@ -440,7 +448,9 @@ def test_no_account_has_a_store_limit_only_the_server_fences_the_store():
                                                     "max_consumers": "12"}
     hub = json.loads(hub_configuration(["serial-a"], LISTENERS))
     assert hub["accounts"][WALL_ACCOUNT]["jetstream"] == {"max_bytes_required": True}
-    assert [name for name, account in hub["accounts"].items() if "jetstream" in account] == [WALL_ACCOUNT]
+    assert hub["accounts"][CENTRAL_ACCOUNT]["jetstream"] == {"max_bytes_required": True}
+    assert {name for name, account in hub["accounts"].items() if "jetstream" in account} == {
+        WALL_ACCOUNT, CENTRAL_ACCOUNT}
     # The server's store is the outer fence, reserved per stream at create: every line fits it.
     assert sum(config.max_bytes for slice_ in line_slices().values() for config in slice_.buffers) <= _bytes(
         node["jetstream"]["max_memory_store"])

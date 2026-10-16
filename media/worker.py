@@ -22,14 +22,10 @@ from central.assets.maintenance import CacheSettings, MediaCacheBudget
 from central.assets.store import CacheStore
 from central.content_wiring import build_job_runtime
 from central.db import Database, DatabaseTransactionClock
-from central.infra.frame_lighting_store import PgHouseLock
-from central.infra.home_assistant.health import PgLinkHealth
-from central.infra.home_assistant.link import HomeAssistantLink, build_home_assistant_link
 from central.infra.house_store import seed_house
 from central.infra.key_content_store import PgKeyContent
 from central.infra.media_cache_records import PgMediaVariantUse
 from central.infra.photo_library_store import PgPhotoLibrary
-from central.infra.room_light_store import PgNamedReferences, PgRoomLights
 from central.infra.runtime import (
     COMPLETION_NOT_RECORDED,
     WORKER_EXITED,
@@ -273,10 +269,9 @@ async def _media_loop(worker: MediaWorker, run_queue: Callable[[], Awaitable[Non
     await run_queue()
 
 
-async def _run_workers(media: Awaitable[None], runtime: JobRuntime,
-                       bus: NodeBus | None, link: HomeAssistantLink) -> None:
-    """The legacy media loop, the job runtime, the Home Assistant link and, with a hub deployed, the
-    Node bus side by side, under ONE signal handler.
+async def _run_workers(media: Awaitable[None], runtime: JobRuntime, bus: NodeBus | None) -> None:
+    """The legacy media loop, the job runtime and, with a hub deployed, the Node bus (with Central on
+    its hub, which hears Home Assistant's states) side by side, under ONE signal handler.
 
     SIGTERM/SIGINT stops each gracefully (running jobs finish), then `_entry` returns and the
     process exits 0. None installs its own handlers. A loop that fails, or ends without being
@@ -295,7 +290,6 @@ async def _run_workers(media: Awaitable[None], runtime: JobRuntime,
             group.create_task(until_stopped(runtime.run(), stopped), name="worker jobs")
             if bus is not None:
                 group.create_task(until_stopped(bus.run(bus_stop), stopped), name="worker node bus")
-            group.create_task(until_stopped(link.run(bus_stop), stopped), name="worker home assistant link")
 
             def stop() -> None:
                 nonlocal stopping
@@ -309,18 +303,6 @@ async def _run_workers(media: Awaitable[None], runtime: JobRuntime,
     finally:
         for number in _STOP_SIGNALS:
             loop.remove_signal_handler(number)
-
-
-def build_bus_and_link(dsn: str, env: Mapping[str, str]) -> tuple[NodeBus | None, HomeAssistantLink]:
-    """The worker's Node bus (None without a hub) and its Home Assistant link. The link has a database
-    pool of its own and closes it when it ends; a recorded change wakes the bus's room-lights writer
-    through the store's NOTIFY, and a room light or Sensor saved in the API process wakes the link to
-    re-read its entity (`PgNamedReferences`)."""
-    bus = build_node_bus(dsn, env)
-    db = Database(dsn, pool_size=2)
-    link = build_home_assistant_link(env, PgRoomLights(db, PgHouseLock()), PgLinkHealth(db),
-                                     PgNamedReferences(dsn), close=db.close)
-    return bus, link
 
 
 def build_repository(dsn: str, clock: Clock | None = None, *,
@@ -380,7 +362,7 @@ async def _entry():
     media = _media_loop(worker, lambda: _media_queue(app, additional_context))
     try:
         async with app.open_async():
-            await _run_workers(media, runtime, *build_bus_and_link(dsn, os.environ))
+            await _run_workers(media, runtime, build_node_bus(dsn, os.environ))
     finally:
         await worker._close_clients()
         await checks.close()

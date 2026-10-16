@@ -1,26 +1,44 @@
-"""The room-light tracer's rig: the house's broker, the worker as `media.worker` composes it, the
-Player as its `main()` starts it (`PlayerService.start`) and a Pi's light sensor on disk.
+"""The room-light tracer's rig: Home Assistant on Central's hub (as the Galleria integration speaks to
+it), the worker as `media.worker` composes it, the Player as its `main()` starts it
+(`PlayerService.start`) and a Pi's light sensor on disk.
 
 Everything Node-bus (servers, ports, `until`) is bus_servers.py's; this module adds only what the
-room-light tracer needs beside it.
+room-light tracer and the door's tests need beside it.
 """
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
 import os
 import signal
-import subprocess
 from collections.abc import Mapping
 from pathlib import Path
 
-import aiomqtt
 import httpx
-from integration.bus_servers import _free_port, nats_server_binary, until
+import nats
+import nats.errors
+from integration.bus_servers import until
 from integration.test_central_hub import RESTART_SECONDS
 from integration.test_central_worker_hub import _IdleRuntime
 from test_player_service import TRUST, Server, boot_context, close, immediate
 from uplink_fakes import finding
 
+from contracts.central_api import (
+    CENTRAL_COMPONENT,
+    CENTRAL_STATE_PREFIX,
+    CENTRAL_STATE_STREAM,
+    HOME_ASSISTANT_STATES_PREFIX,
+    HOME_ASSISTANT_USER,
+    INSTALL_PLAYER,
+    InstallPlayer,
+    InstallRefused,
+    InstallStarted,
+    decode_install_answer,
+    encode_install_player,
+)
+from contracts.home_assistant import HomeAssistantState, encode_home_assistant_state
+from contracts.node_link import METHOD_TOKEN
 from contracts.room_light import RoomLightsDocument
 from contracts.time import ManualClock
 from player.identity import load_identity
@@ -28,65 +46,80 @@ from player.luts import PlayerLuts
 from player.rendering import RecordingRenderer
 from player.service import PlayerConfig, PlayerService
 
-__all__ = ["RESTART_SECONDS", "Broker", "Player", "Worker", "light_sensor_root"]
+__all__ = ["RESTART_SECONDS", "HomeAssistant", "Player", "Worker", "light_sensor_root"]
 
 
-class Broker:
-    """The pinned nats-server as the house's MQTT broker: its MQTT listener needs JetStream, which
-    keeps retained messages as Home Assistant's Mosquitto does."""
+class HomeAssistant:
+    """Home Assistant at a door of Central's hub (`url`: the hub's client WebSocket, or Central's
+    origin at "/" + DOOR_PATH) as HOME_ASSISTANT_USER, over nats-py's WebSocket transport. Every
+    permission violation the hub reports lands in `violations`."""
 
-    def __init__(self, tmp: Path) -> None:
-        self.port = _free_port()
-        directory = tmp / "broker"
-        directory.mkdir()
-        self.config = directory / "broker.conf"
-        self.config.write_text(f'server_name: house\nlisten: 127.0.0.1:{_free_port()}\n'
-                               f'jetstream {{ store_dir: "{directory / "js"}", max_memory_store: 16MB, '
-                               'max_file_store: 64MB }\n'
-                               f'mqtt {{ listen: 127.0.0.1:{self.port} }}\n')
-        self.log = directory / "broker.log"
-        self._process: subprocess.Popen | None = None
+    def __init__(self, url: str) -> None:
+        self.url = url
+        self.violations: list[str] = []
+        self.client: nats.NATS | None = None
 
-    @property
-    def url(self) -> str:
-        """The worker's PHOTO_WALL_MQTT_URL for this broker."""
-        return f"mqtt://127.0.0.1:{self.port}"
+    async def connect(self, user: str = HOME_ASSISTANT_USER) -> nats.NATS:
+        """A client at the door as `user` (password = user name); nats' error for a refused login."""
+        async def errors(error: Exception) -> None:
+            self.violations.append(str(error))
+        return await nats.connect(servers=[self.url], user=user, password=user, allow_reconnect=False,
+                                  connect_timeout=2, error_cb=errors)
 
-    def start(self) -> None:
-        with self.log.open("ab") as log:
-            self._process = subprocess.Popen([str(nats_server_binary()), "-c", str(self.config)],
-                                             stdout=log, stderr=subprocess.STDOUT)
+    async def __aenter__(self) -> HomeAssistant:
+        self.client = await until(self._connected, 10, f"Home Assistant connects at {self.url}")
+        return self
 
-    def stop(self) -> None:
-        if self._process is not None:
-            self._process.terminate()
-            self._process.wait(10)
+    async def _connected(self):
+        try:
+            return await self.connect()
+        except (OSError, nats.errors.Error):
+            return None
 
-    async def publish(self, topic: str, payload: bytes) -> None:
-        """Publish `payload` retained at QoS 1, as Home Assistant's automation does; retried until
-        the broker takes it."""
+    async def __aexit__(self, *_exc) -> None:
+        if self.client is not None:
+            await self.client.close()
+
+    async def publish(self, entity: str, state: HomeAssistantState | bytes) -> None:
+        """Put `state` as `entity`'s, as the integration does: a JetStream publish, retried until the hub
+        acknowledges it (the bucket exists once Central's hub session declared it)."""
+        payload = state if isinstance(state, bytes) else encode_home_assistant_state(state)
+
         async def taken():
             try:
-                async with aiomqtt.Client("127.0.0.1", self.port, identifier="home-assistant") as client:
-                    await client.publish(topic, payload, qos=1, retain=True)
+                await self.client.jetstream().publish(HOME_ASSISTANT_STATES_PREFIX + entity, payload, timeout=2)
                 return True
-            except aiomqtt.MqttError:
+            except (nats.errors.Error, asyncio.TimeoutError):
                 return False
-        await until(taken, 10, f"the broker takes {topic}")
+        await until(taken, 10, f"the hub takes {entity}'s state")
+
+    async def central(self, key: str) -> bytes | None:
+        """Central's state `key`: one STREAM.MSG.GET by last subject (None: not written)."""
+        reply = await self.client.request(f"$JS.API.STREAM.MSG.GET.{CENTRAL_STATE_STREAM}",
+                                          json.dumps({"last_by_subj": CENTRAL_STATE_PREFIX + key}).encode(), timeout=2)
+        message = json.loads(reply.data).get("message")
+        return None if message is None else base64.b64decode(message["data"])
+
+    async def install(self, serial: str, version: str) -> InstallStarted | InstallRefused:
+        """installPlayer, answered once."""
+        reply = await self.client.request(f"{CENTRAL_COMPONENT}.{METHOD_TOKEN}.{INSTALL_PLAYER}",
+                                          encode_install_player(InstallPlayer(serial=serial, version=version)),
+                                          timeout=10)
+        return decode_install_answer(reply.data)
 
 
 class Worker:
-    """`media.worker`'s own loops, composed by its own `build_bus_and_link`, under `_run_workers`
-    with a media loop and a job runtime that only wait; stopped as the process is, by SIGTERM."""
+    """`media.worker`'s own loops, its Node bus composed by `build_node_bus`, under `_run_workers` with
+    a media loop and a job runtime that only wait; stopped as the process is, by SIGTERM."""
 
     def __init__(self, dsn: str, env: Mapping[str, str]) -> None:
-        from media.worker import build_bus_and_link
-        self._parts = build_bus_and_link(dsn, env)
+        from central.node_bus_wiring import build_node_bus
+        self._bus = build_node_bus(dsn, env)
         self._task: asyncio.Task | None = None
 
     def start(self) -> None:
         from media.worker import _run_workers
-        self._task = asyncio.create_task(_run_workers(asyncio.Event().wait(), _IdleRuntime(), *self._parts))
+        self._task = asyncio.create_task(_run_workers(asyncio.Event().wait(), _IdleRuntime(), self._bus))
 
     def running(self) -> bool:
         return self._task is not None and not self._task.done()
@@ -97,6 +130,7 @@ class Worker:
         if not self._task.done():   # a worker that ended has removed its handler: SIGTERM would kill pytest
             os.kill(os.getpid(), signal.SIGTERM)
         await asyncio.wait_for(self._task, 30)
+        self._task = None
 
 
 class Player:

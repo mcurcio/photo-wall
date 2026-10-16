@@ -1,22 +1,17 @@
-"""PostgreSQL node release records: the ONE deployment writer, the ONE select writer, the
-per-tag observations and the wanted deployments (auto-ingest design §6).
+"""PostgreSQL node release records: the ONE deployment writer, the per-tag observations and the
+wanted deployments (auto-ingest design §6; a version per Pi, Q2 A, 2026-10-16).
 
 Tables: `node_release_catalog` (058, immutable), `node_release_observations` (065),
 `node_deployments` / `node_deployment_assets` / `node_base_managers` / `node_environment_catalog`
-/ `node_boot_policy` (054, 065).
+(054, 065); each Pi's version is `player_versions` (100, central/infra/player_versions.py).
 
 * **Deployment writer** (`write_deployment`): used by the release sync's ingest. An existing id
   with the same canonical bytes is a `duplicate`, with other bytes a refusal.
-* **Select writer** (`select_deployment`): used by the operator's `PUT boot-policy` and by the
-  first-run auto-select (expected revision 0, so it can only create the row). A compare-and-set
-  on the policy row's own lock: expected revision 0 inserts the row (`ON CONFLICT DO NOTHING`,
-  so two creators serialize on its key and the loser sees a conflict); any other revision locks
-  the row. Records the previous deployment when the selection changes to a different one.
 * **Observations** (`_observe`, from `ingest` and `record_problem`): a tag's stable flag and
   manifest decide whether it is in the window.
 * **Wanted deployments** (`wanted_deployments`): the window (newest 3 stable tags with a
-  deployment), the selected and the previous deployment. The ONE definition of "wanted";
-  `fleet_desired_assets` turns it into keys.
+  deployment), every Pi's version and every Pi's previous one (`boot_policy.kept`). The ONE
+  definition of "wanted"; `fleet_desired_assets` turns it into keys.
 
 No writer here takes a lock for the cache cleaner: the cleaner re-reads the desired set right
 before each unlink (mark and sweep, `central/assets/maintenance.py`), and a file removed anyway
@@ -35,7 +30,7 @@ from uuid import UUID
 
 from psycopg.types.json import Jsonb
 
-from central.content_catalog.boot_policy import newest_first, window
+from central.content_catalog.boot_policy import kept, newest_first, window
 from central.content_catalog.deployment import (
     NodeDeployment,
     deployment_for_release,
@@ -53,8 +48,6 @@ from central.kernel.transactions import Transaction
 from contracts.node_release import NodeReleaseV2, parse_node_release
 from contracts.time import Clock
 
-POLICY_CONFLICT: Final = "node_boot_policy_conflict"
-DEPLOYMENT_UNKNOWN: Final = "node_deployment_unknown"
 IDENTITY_CONFLICT: Final = "node_release_identity_conflict"
 # Serializes deployment writers with each other only: taken alone, so a release sync never waits on
 # a device's requests (the device fence, `central/fleet/device_fence.py`) and none waits on it.
@@ -154,50 +147,20 @@ def write_deployment(conn: Any, deployment: NodeDeployment, base_source: OriginL
     return False
 
 
-def select_deployment(conn: Any, deployment_id: UUID, expected_revision: int, *,
-                      now: float) -> int:
-    """Compare-and-set the boot selection; the new revision. The outgoing deployment becomes
-    `previous_deployment_id` when the selection changes to a different deployment; re-selecting
-    the same one keeps the previous.
-
-    The policy row's own lock decides the race, no advisory lock (the `set_promoted` pattern,
-    `central/infra/catalog_records.py`): expected revision 0 can only create the row, so it
-    INSERTs with `ON CONFLICT DO NOTHING`. A concurrent creator waits on the uncommitted key and
-    then inserts nothing, which is a conflict. Any other revision locks the row and compares."""
-    if not conn.execute("SELECT 1 FROM node_deployments WHERE deployment_id=%s", (deployment_id,)).fetchone():
-        raise NodeReleaseRefused(DEPLOYMENT_UNKNOWN, "not_found")
-    if expected_revision == 0:
-        if conn.execute("INSERT INTO node_boot_policy(singleton,revision,deployment_id,changed_at) "
-                        "VALUES(TRUE,1,%s,%s) ON CONFLICT(singleton) DO NOTHING",
-                        (deployment_id, now)).rowcount != 1:
-            raise NodeReleaseRefused(POLICY_CONFLICT)
-        return 1
-    row = conn.execute("SELECT revision,deployment_id,previous_deployment_id FROM node_boot_policy "
-                       "WHERE singleton FOR UPDATE").fetchone()
-    if row is None or row["revision"] != expected_revision:
-        raise NodeReleaseRefused(POLICY_CONFLICT)
-    previous = (row["deployment_id"] if row["deployment_id"] != deployment_id
-                else row["previous_deployment_id"])
-    conn.execute("UPDATE node_boot_policy SET revision=%s,deployment_id=%s,changed_at=%s,"
-                 "previous_deployment_id=%s WHERE singleton",
-                 (expected_revision + 1, deployment_id, now, previous))
-    return expected_revision + 1
-
-
 @dataclass(frozen=True, slots=True)
 class WantedDeployments:
-    """What the cache must keep for node boots (the one definition, design §6.2)."""
+    """What the cache must keep for node boots (the one definition, design §6.2; a version per Pi,
+    Q2 A, 2026-10-16)."""
 
     window: tuple[tuple[str, UUID], ...]  # (tag, deployment), newest release first
-    selected: UUID | None
-    previous: UUID | None
+    versions: frozenset[UUID]             # every Pi's version
+    previous: frozenset[UUID]             # every Pi's previous version
 
     @property
     def deployments(self) -> frozenset[UUID]:
-        """Every wanted deployment named by id (window, selected, previous)."""
-        named = {deployment for _, deployment in self.window}
-        named.update(item for item in (self.selected, self.previous) if item is not None)
-        return frozenset(named)
+        """Every wanted deployment (`boot_policy.kept`: the window, every Pi's version and previous)."""
+        return frozenset(UUID(each) for each in kept((str(deployment) for _, deployment in self.window),
+                                                      map(str, self.versions), map(str, self.previous)))
 
 
 def _stable_observed(conn: Any) -> dict[str, str]:
@@ -219,17 +182,25 @@ def _deployment_ids(conn: Any, manifests: dict[str, str]) -> dict[str, UUID]:
 
 
 def wanted_deployments(conn: Any) -> WantedDeployments:
-    """The window, the selected and the previous deployment. A Pi still preparing a deployment
-    that is neither (selected twice since its offer) is covered by `SERVE_GRACE` while it reads
-    and by read-through after: nothing else roots it."""
-    policy = conn.execute("SELECT deployment_id, previous_deployment_id FROM node_boot_policy "
-                          "WHERE singleton").fetchone()
+    """The window, every Pi's version and every Pi's previous version (player_versions). A Pi still
+    preparing a deployment that is none of them (its version changed twice since its offer) is
+    covered by `SERVE_GRACE` while it reads and by read-through after: nothing else roots it."""
+    rows = conn.execute("SELECT deployment_id, previous_deployment_id FROM player_versions").fetchall()
     observed = _stable_observed(conn)
     tags = window(observed)
     ids = _deployment_ids(conn, {tag: observed[tag] for tag in tags})
     return WantedDeployments(tuple((tag, ids[tag]) for tag in tags),
-                             policy["deployment_id"] if policy else None,
-                             policy["previous_deployment_id"] if policy else None)
+                             frozenset(row["deployment_id"] for row in rows),
+                             frozenset(row["previous_deployment_id"] for row in rows
+                                       if row["previous_deployment_id"] is not None))
+
+
+def tag_deployments_in(conn: Any) -> dict[str, UUID]:
+    """tag -> the deployment its last good manifest became, for every observed tag that has one
+    (stable and pre-release)."""
+    rows = conn.execute("SELECT tag, manifest_sha256 FROM node_release_observations "
+                        "WHERE manifest_sha256 IS NOT NULL").fetchall()
+    return _deployment_ids(conn, {row["tag"]: row["manifest_sha256"] for row in rows})
 
 
 def deployment_jobs(conn: Any, deployments) -> dict[UUID, frozenset[AssetJob]]:
@@ -303,22 +274,9 @@ class PgNodeReleaseRecords:
                        now: float) -> bool:
         return _observe(pg_connection(tx), release, manifest=None, problem=problem, now=now)
 
-    def selection_exists(self, tx: Transaction) -> bool:
-        return pg_connection(tx).execute(
-            "SELECT 1 FROM node_boot_policy WHERE singleton").fetchone() is not None
-
     def stable_deployments(self, tx: Transaction) -> tuple[StableDeployment, ...]:
         conn = pg_connection(tx)
         ids = _deployment_ids(conn, _stable_observed(conn))
         jobs = deployment_jobs(conn, ids.values())
         return tuple(StableDeployment(tag, str(ids[tag]), jobs[ids[tag]])
                      for tag in newest_first(ids))
-
-    def select_first(self, tx: Transaction, deployment_id: str, *, now: float) -> bool:
-        try:
-            select_deployment(pg_connection(tx), UUID(deployment_id), 0, now=now)
-        except NodeReleaseRefused as refused:
-            if refused.reason == POLICY_CONFLICT:
-                return False
-            raise
-        return True

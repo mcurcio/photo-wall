@@ -6,7 +6,7 @@ import json
 
 from central.console_contract import console_contract
 from central.frame_lighting.model import FrameLightingRefusal
-from central.infra.home_assistant.topics import SOURCE
+from central.infra.home_assistant.references import SOURCE
 from central.room_light.model import RoomLightRefusal
 from contracts.frame_lighting import FRAME_LIGHTS_MAX, SHEET_WHITENESS
 from contracts.room_light import ROOM_LIGHT_ID_PATTERN
