@@ -1194,7 +1194,7 @@ Add answers 201 with the LUT (its name is the profile's own description), or 200
 | 413 `too_large` | The file is over 8 MiB | A paper profile is a few hundred KB: check it is the `.icc`/`.icm` file and not an archive |
 | 422 `not_a_colour_profile` | Not an ICC file | Unzip the maker's download and send the profile itself |
 | 422 `not_a_printer_profile` | An ICC file, but not an RGB or CMYK printer (output) profile, or it does not bake | A monitor or camera profile is not a paper; take the paper's printer profile |
-| 409 `lut_in_use` (with `frames`) | A Frame's paper names it, saved or drafted in an open Position trial | Choose no paper profile, or another, on those Frames first |
+| 409 `lut_in_use` (with `displays`, which since 0028 names Frames) | A Frame's paper names it, saved or drafted in an open Position trial | Choose no paper profile, or another, on those Frames first |
 | 404 `lut_unknown` | No LUT with that digest | Read the list for the digest |
 
 **On the Pi.** The Player fetches `GET /v1/luts/<profile sha256>/<recipe>` with its own bearer and checks it against the served `Repr-Digest`, then keeps it in its media cache. Until it has it, the Frame shows the sliders without the LUT and the Picture tab's Done waits ("The sliders show at once; the LUT joins when the Pi has it, and Done waits for it"). A Done that never unlocks with a LUT chosen: read the Player's journal for the fetch's fault (`lut_type`, `lut_length`, `lut_digest` or `media_digest` name the refusal; it is retried on the media backoff).

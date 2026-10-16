@@ -5,7 +5,7 @@ One route per question:
 |---|---|---|---|---|
 | GET | /v1/operator/luts | | LutsView | |
 | POST | /v1/operator/luts | the paper profile (.icc bytes) | 201 LutView; 200 LutView when already listed | 413 too_large, 422 not_a_colour_profile, not_a_printer_profile |
-| DELETE | /v1/operator/luts/{profile_sha256} | | 204 | 404 lut_unknown, 409 lut_in_use (+ "frames") |
+| DELETE | /v1/operator/luts/{profile_sha256} | | 204 | 404 lut_unknown, 409 lut_in_use (+ "displays": the Frames' names, the key kept from the print look) |
 | GET | /v1/luts/{profile_sha256}/{recipe_id} | | the baked LUT (contracts/lut.py) | 401 unauthorized, 404 lut_unknown |
 
 The operator routes take the `admin` dependency; the LUT itself the Player's bearer (`player`), as
@@ -41,7 +41,7 @@ def mount_lut_routes(app: FastAPI, *, admin: Any, player: Any, luts: PgLuts) -> 
     async def refused(request: Request, exc: LutRefused) -> JSONResponse:
         body: dict[str, Any] = {"error": exc.code}
         if exc.code == "lut_in_use":
-            body["frames"] = list(exc.frames)
+            body["displays"] = list(exc.frames)
         return JSONResponse(body, status_code=exc.status)
 
     @app.get(LUTS, dependencies=[Depends(admin)], response_model=LutsView)

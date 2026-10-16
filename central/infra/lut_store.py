@@ -16,7 +16,7 @@ from collections.abc import Iterable, Mapping
 from typing import Any, Final
 
 from central.db import Database
-from central.displays.lut import LutRefusal, PaperProfile, checked_profile
+from central.displays.lut import LUT_RECIPE_ID, LutRefusal, PaperProfile, checked_profile
 from central.displays.views import LutsView, LutView
 from contracts.frame_lighting import FrameLighting
 from contracts.time import Clock
@@ -102,7 +102,8 @@ def _users_in(conn: Any, profile_sha256: str | None) -> Mapping[str, tuple[str, 
 
 
 def _view(row: Mapping[str, Any], users: Mapping[str, Iterable[str]]) -> LutView:
-    return LutView(profile_sha256=row["profile_sha256"], name=row["name"], added_at=row["added_at"],
+    return LutView(profile_sha256=row["profile_sha256"], recipe_id=LUT_RECIPE_ID, name=row["name"],
+                   added_at=row["added_at"],
                    used_by=tuple(users.get(row["profile_sha256"], ())))
 
 

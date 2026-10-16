@@ -296,10 +296,12 @@ class TestPatternView(Model):
 # source of the LUT baked from it.
 
 class LutView(Model):
-    """One LUT on the list: its paper profile's digest, the profile's own name, when it was added
-    (Central's clock), and the Frames whose paper names it (saved, or drafted in an open Position
-    trial), by name."""
+    """One LUT on the list: its paper profile's digest, the recipe Central bakes it with today (a
+    Frame's paper names the LUT as {profile_sha256, recipe_id}, contracts/lut.py LutRef), the
+    profile's own name, when it was added (Central's clock), and the Frames whose paper names it
+    (saved, or drafted in an open Position trial), by name."""
     profile_sha256: Digest
+    recipe_id: str
     name: str
     added_at: Instant
     used_by: tuple[str, ...]

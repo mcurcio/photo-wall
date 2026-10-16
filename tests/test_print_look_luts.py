@@ -175,7 +175,7 @@ def test_an_upload_is_checked_listed_once_and_refused_with_nothing_stored(regist
         assert client.get(LUTS, headers=AUTH).json() == {"luts": []}
         first = _add(client, printer)
         assert first.status_code == 201, first.text
-        assert first.json() == {"profile_sha256": _sha(printer), "name": "sRGB built-in", "added_at": 1000.0,
+        assert first.json() == {"profile_sha256": _sha(printer), "recipe_id": LUT_RECIPE_ID, "name": "sRGB built-in", "added_at": 1000.0,
                                 "used_by": []}
         again = _add(client, printer)
         assert (again.status_code, again.json()) == (200, first.json())
@@ -239,9 +239,10 @@ def test_a_frames_paper_profile_holds_its_lut_on_the_list(registry):
         assert (unlisted.status_code, unlisted.json()["error"]) == (422, "trial_lighting_invalid")
         begun = client.post(trials, headers=AUTH, json={"lighting": lighting(_sha(printer))})
         assert begun.status_code == 200, begun.text
-        assert client.get(LUTS, headers=AUTH).json()["luts"][0]["used_by"] == [name]
+        listed = client.get(LUTS, headers=AUTH).json()["luts"][0]
+        assert (listed["used_by"], listed["recipe_id"]) == ([name], LUT_RECIPE_ID)
         refused = client.delete(f"{LUTS}/{_sha(printer)}", headers=AUTH)
-        assert (refused.status_code, refused.json()) == (409, {"error": "lut_in_use", "frames": [name]})
+        assert (refused.status_code, refused.json()) == (409, {"error": "lut_in_use", "displays": [name]})
         ended = client.post(f"{trials}/{begun.json()['trial_id']}", headers=AUTH,
                             json={"operation": "end", "expected_sequence": 1})
         assert ended.status_code == 200, ended.text
