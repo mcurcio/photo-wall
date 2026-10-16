@@ -66,6 +66,7 @@ from player.rendering import (
     PrepareResult,
     PresentationResult,
 )
+from player.visibility import visible_now
 
 
 @dataclass(frozen=True)
@@ -273,17 +274,6 @@ def _shown(composition: OutputComposition, generations: tuple, sample_serials: t
             tuple(local.alpha for local in composition.layers), sample_serials,
             _trial_key(frames, composition, grant),
             _picture_key(frames, composition, luts))
-
-
-def _visible(composition: OutputComposition) -> tuple[LocalLayer, ...]:
-    layers = []
-    for local in reversed(composition.layers):
-        if local.alpha > 0:
-            layers.append(local)
-        if local.alpha >= 1 and (local.layer.variant is None
-                                 or local.layer.variant.media_type != "image/png"):
-            break
-    return tuple(reversed(layers))
 
 
 def _gl_text(value: object) -> str | None:
@@ -1221,7 +1211,7 @@ class NativeRenderer:
         return tuple((local.layer.assignment_id,
                       self._decoders[local.layer.assignment_id].incarnation,
                       self._decoders[local.layer.assignment_id].generation)
-                     for local in _visible(composition) if local.layer.variant is not None
+                     for local in visible_now(composition.layers) if local.layer.variant is not None
                      and local.layer.assignment_id in self._decoders)
 
     def present(self, composition: OutputComposition) -> PresentationResult:
@@ -1246,7 +1236,7 @@ class NativeRenderer:
             surface.pending = None
         if not self.capacity((composition,)).available:
             return PresentationResult("failed", "capacity")
-        visible = _visible(composition)
+        visible = visible_now(composition.layers)
         for local in visible:
             result = self.prepare(local)
             if result.status != "prepared":
@@ -1467,7 +1457,7 @@ class NativeRenderer:
         if commissioning:
             gl.glUniform4f(gl.glGetUniformLocation(program, "photo"), 0.0, 0.0, 1.0, 1.0)
             gl.glDrawArrays(gl.GL_TRIANGLES, 0, 3)
-        for local in _visible(draw.composition):
+        for local in visible_now(draw.composition.layers):
             variant = local.layer.variant
             if variant is not None:
                 texture = self._upload(surface, local)
@@ -1552,7 +1542,7 @@ class NativeRenderer:
                     self._draw_candidate(surface, draw)
                     candidate_ok = True
                 except Exception:
-                    for local in _visible(draw.composition):
+                    for local in visible_now(draw.composition.layers):
                         decoder = self._decoders.get(local.layer.assignment_id)
                         if decoder:
                             decoder.failure, decoder.prepared = "decode", False
@@ -1611,7 +1601,7 @@ class NativeRenderer:
                 # no timer, configure handler or later idle callback tags it.
                 metadata = surface.acknowledged.applied_calibration
                 tag = ("trial-" + metadata.candidate_sha256 if metadata and metadata.trial_id
-                       else composition_tag(actual, _visible(actual)))
+                       else composition_tag(actual, visible_now(actual.layers)))
                 frames.tag_rendered_buffer(surface.window.get_window(), grant, tag,
                                            surface.acknowledged.primitives,
                                            picture_change=surface._tagged_change(surface.operations))

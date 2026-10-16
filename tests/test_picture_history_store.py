@@ -187,7 +187,7 @@ def test_a_change_made_outside_photo_wall_is_recorded_before_the_next_kept_write
 
 
 def test_an_entry_from_before_the_light_restores_with_todays_light(registry):
-    """(4) Decision 0028: a kept entry written before migration 098 has no light; the history shows
+    """(4) Decision 0028: a kept entry written before migration 099 has no light; the history shows
     none and its Restore keeps the draft's light and says so. Mutation probe: read the stand-in light
     as recorded -> the draft takes 1000 lx."""
     player = _bound(registry)

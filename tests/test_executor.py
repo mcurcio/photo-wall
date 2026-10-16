@@ -995,3 +995,26 @@ def test_first_commissioning_without_plan_renders_empty_operational_fallback(tmp
     assert rig.renderer.outputs["hdmi1"].layers == ()
     with pytest.raises(AuthorityError, match="no current plan"):
         rig.executor.readiness()
+
+
+def test_a_photo_dissolving_in_is_drawn_over_the_one_it_replaces_whatever_the_plan_order(tmp_path):
+    """The executor stacks by contracts `stack_order` itself (priority, root order, admission
+    order, then start), not by the order the plan lists its layers: two photos of one Run that
+    overlap (a cross-fade) arrive with the later one listed first, and the later one is drawn on
+    top, at half strength halfway through its fade-in.
+
+    Mutation probe: sort by priority only (the old key) -> the earlier photo is drawn on top."""
+    rig = Rig(tmp_path)
+    current = layer("current", start=100, end=110)
+    following = layer("following", data=b"following", start=104, end=120, media_origin=104, fade_in=3)
+    rig.offer(following, current)
+    rig.secure("current")
+    rig.secure("following", b"following")
+    rig.executor.prepare_imminent()
+    rig.commit("current", "following")
+    rig.advance(5.5)
+    rig.executor.prepare_imminent()
+    rig.executor.tick()
+    drawn = rig.renderer.outputs["hdmi1"].layers
+    assert [local.layer.assignment_id for local in drawn] == ["current", "following"]
+    assert drawn[-1].alpha == pytest.approx(.5)

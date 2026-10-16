@@ -10,12 +10,12 @@ from support.position import LIGHTING
 from central.catalog import Candidate, SourcePool
 from central.house_time.model import HouseTime
 from central.planner import PlannerLimits, PlanningBudgetExceeded, PlanningError, eligible, project
-from central.runtime import Child, Contribution, RecordingActuator, Runtime, Scene
+from central.runtime import Child, Contribution, RecordingActuator, Runtime, Scene, Transition
 from central.wall_plan.fit import FitTarget
 from central.wall_plan.fit_settings import FitSettings
 from central.wall_plan.order import PoolLines, WallHistory
 from central.wall_plan.selection import SceneSelection
-from contracts.models import FrameProfile, OutputBinding, Plan, Variant
+from contracts.models import FrameProfile, OutputBinding, Plan, Variant, stack_order
 
 # Roadmap 5a: a photo is placed only once its key content is measured and it fills its Frame
 # (central/wall_plan/assignment.py), so these candidates are measured, with an even interest
@@ -44,11 +44,12 @@ def binding(frame="left", output="hdmi-1", *, width=1080, height=1920, diagonal=
                                               diagonal_inches=diagonal, video=video), lighting=LIGHTING)
 
 
-def runtime(*, cycle=10, contributions=None, children=(), order="newest_first"):
+def runtime(*, cycle=10, contributions=None, children=(), order="newest_first",
+            transition=Transition()):
     """One looping Scene; newest first unless named (its order is roadmap 5a's Scene setting)."""
     instance = Runtime(house=UTC_HOUSE)
     instance.set_scene(Scene(
-        scene_id="scene", cycle_seconds=cycle, loop=True, children=children,
+        scene_id="scene", cycle_seconds=cycle, loop=True, children=children, transition=transition,
         selection=SceneSelection(order=order),
         contributions=contributions if contributions is not None else (
             Contribution(target="frame:left", source_refs=("holiday:1",)),
@@ -255,12 +256,11 @@ def test_missing_source_diagnosed_and_missing_variant_requests_deduplicated_acqu
 def test_horizon_preserves_current_full_cycle_origins_and_fade_under_locks():
     instance = runtime(contributions=(Contribution(
         target="frame:left", source_refs=("holiday:1",), opacity=0.8,
-        fade_in_seconds=2, fade_out_seconds=3,
-    ),))
+    ),), transition=Transition(style="fade_out_and_in", seconds=4))
     at_seven = propose(instance, now=7, horizon=10)
     first, second = layers(at_seven)
     assert (first.start, first.end, first.media_origin) == (0, 10, 0)
-    assert (first.opacity, first.fade_in, first.fade_out) == (0.8, 2, 3)
+    assert (first.opacity, first.fade_in, first.fade_out) == (0.8, 2, 2)
     assert second.start == 10
     assert at_seven.horizon_end == 17
     assert at_seven.valid_until == 20
@@ -299,8 +299,8 @@ def test_overlay_and_later_background_child_keep_root_precedence():
     ))
     instance = runtime(children=(Child(scene=nested, delay_seconds=2),))
     instance.set_scene(Scene(scene_id="overlay", cycle_seconds=8, contributions=(
-        Contribution(target="frame:left", kind="black", fade_out_seconds=2),
-    )))
+        Contribution(target="frame:left", kind="black"),
+    ), transition=Transition(style="fade_out_and_in", seconds=2)))
     overlay = instance.activate("overlay", "overlay", 0).run_id
     result = propose(instance, horizon=7)
     at_three = [layer for layer in layers(result) if layer.start <= 3 < layer.end]
@@ -427,9 +427,7 @@ def test_a_locked_layer_takes_a_revised_fade_out_and_nothing_else():
     in-flight endings at "leave_as_is"); any other change to it stays a stale lock. Mutation
     probes: refuse the revised fade-out (the layer is dropped as stale); accept any change (the
     revised fade-in is planned)."""
-    instance = runtime(contributions=(Contribution(
-        target="frame:left", source_refs=("holiday:1",), fade_in_seconds=1, fade_out_seconds=2,
-    ),))
+    instance = runtime(transition=Transition(style="fade_out_and_in", seconds=4))
     offered = layers(propose(instance, now=3, horizon=5))[0]
     assert offered.fade_out == 2
     revised = propose(instance, now=4, horizon=5,
@@ -444,3 +442,18 @@ def test_a_locked_layer_takes_a_revised_fade_out_and_nothing_else():
     assert offered.assignment_id not in {layer.assignment_id for layer in layers(stale)}
     assert "lock_stale_authority" in {
         d.code for d in stale.diagnostics if d.assignment_id == offered.assignment_id}
+
+
+def test_a_cross_faded_photo_starts_its_layer_before_its_turn():
+    """Cross-fade, 3 s of a 10 s turn: from the Run's second photo on, each layer starts (and a
+    video starts playing) 3 s before its turn, fades in over 3 s and stays at full to its cut;
+    a layer whose photo starts to show inside the preparation horizon is offered though its
+    turn starts after it; the plan lists layers by the one stacking order, a later photo above
+    the one it dissolves in over. Mutation probes: start the layer at its turn; stop the
+    timeline at the plan's end (the 7 s layer is missing at an 8 s horizon)."""
+    instance = runtime(transition=Transition(style="cross_fade", seconds=3))
+    offered = layers(propose(instance, horizon=25))
+    assert [(layer.start, layer.end, layer.media_origin, layer.fade_in, layer.fade_out)
+            for layer in offered] == [(0, 10, 0, 3, 0), (7, 20, 7, 3, 0), (17, 30, 17, 3, 0)]
+    assert list(offered) == sorted(offered, key=stack_order)
+    assert [layer.start for layer in layers(propose(instance, horizon=8))] == [0, 7]

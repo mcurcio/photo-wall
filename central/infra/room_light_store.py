@@ -1,4 +1,4 @@
-"""Room lights over PostgreSQL (decision 0028; migration 098): `PgRoomLights` implements every port
+"""Room lights over PostgreSQL (decision 0028; migration 099): `PgRoomLights` implements every port
 of central/room_light/ports.py (the Home Assistant link's reports, a Pi's light meter, House >
 Lights' setup and the room-lights document), and `LightSensorJudge` reads a Pi's meter off the host
 line's state bucket as it is recorded.

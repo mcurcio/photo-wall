@@ -139,7 +139,7 @@ The supported minimum is a **Raspberry Pi 5 with 4 GB of memory or more** (owner
 | **Program** | Scheduling policy determining when selected Scenes should be active, including recurrence, defaults, and activation settings. Sources and playback preferences belong to Scenes. |
 | **Trigger** | Event or condition whose configured handling requests activation, such as a button press or motion event. Programs can also produce requests from schedules. |
 | **Activation request** | Particular launch circumstances: requested Scene, timing, priority, activation/stacking intent, and explicit force intent. This need not be a prominent user-facing resource. |
-| **Effect / Transition** | Primitive operation, such as an entrance, exit, fade, compositing adjustment, or lighting effect. A visual primitive does not require a separate Scene. |
+| **Effect / Transition** | Primitive operation, such as an entrance, exit, fade, compositing adjustment, or lighting effect. A visual primitive does not require a separate Scene. A Scene's **Transition** is how one photo gives way to the next on its Frames, one style and seconds for the Scene: cross-fade (the next photo dissolves in over the current one) or fade out and in (through black) (owner, 2026-10-15: "Let's make cross fade an option"). |
 | **Timeline** | Optional relative timing of media, Effects, and cues within a Scene. A parent can coordinate children; ordinary playback need not be fully scripted. |
 
 **Presentation** describes output rather than a separate domain entity. Nested Scenes provide authored composition. A **presentation variant** is a playback-compatible version of a media asset.

@@ -50,10 +50,12 @@ import { useMutate } from "./useMutate.js";
  * @typedef {{frameId: string, outcome: string, label: string}} FrameResult
  * @typedef {{state: ConfirmState, message: string|null, results?: FrameResult[]}} ConfirmResult
  * @typedef {{key: string, title: string, body: React.ReactNode, confirmLabel: string,
- *            handle?: string|null, progress?: string,
+ *            handle?: string|null, progress?: string, tone?: "danger"|"primary",
  *            run: () => Promise<ConfirmResult>}} ConfirmRequest
  *   `progress` replaces "Sending…" while in flight, for a write whose work happens inside its
- *   request (a release publish says what Central is downloading).
+ *   request (a release publish says what Central is downloading). `tone` is the confirm
+ *   button's: danger (the default) for a destructive verb, primary for one that destroys
+ *   nothing (design language: danger only for a destructive confirmation's confirm).
  *
  * @param {{request: ConfirmRequest,
  *          onClose: (result: ConfirmResult|null) => void}} props
@@ -225,7 +227,7 @@ export function ConfirmAction({ request, onClose }) {
           <div className="confirm__actions">
             <button
               type="button"
-              className="confirm__confirm"
+              className={request.tone === "primary" ? "confirm__confirm confirm__confirm--primary" : "confirm__confirm"}
               onClick={confirm}
               disabled={!typedOk || phase !== "idle"}
             >

@@ -60,7 +60,7 @@ class PictureRecord:
     """What a writer appends; the store gives it its id, number and time. `test_pattern` is a sent
     kind's only (None for every kept kind); `restored_from` the entry the session's draft was last
     restored from; `light_recorded` False only for an entry read back from before the Display's light
-    (decision 0028, migration 098): its `picture.light` is then a stand-in, never a value it
+    (decision 0028, migration 099): its `picture.light` is then a stand-in, never a value it
     recorded."""
     kind: PictureEntryKind
     picture: DisplayPicture

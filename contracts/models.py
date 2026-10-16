@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Annotated, Literal, Self
+from typing import Annotated, Final, Literal, Self
 
 from pydantic import Field, model_serializer, model_validator
 
@@ -248,6 +248,21 @@ class Layer(Model):
         if self.variant and self.variant.duration:
             position %= self.variant.duration
         return position
+
+
+# How long before a layer starts its Player prepares it (its decoder resident) and Central's cue
+# may grant it: the one home of the executor's `prepare_lead`, coordination's `prepare_seconds`
+# and the bound on a Scene's Transition (central/runtime.py `Scene.check_transition`), which
+# keeps that long of each photo's turn free of a dissolve.
+PREPARE_SECONDS: Final = 5.0
+
+
+def stack_order(layer: Layer) -> tuple[int, int, int, float]:
+    """The one stacking order of a Frame's layers, bottom to top: priority, then root order,
+    then admission order, then start, so of two photos of one Run that overlap (a cross-fade)
+    the later one is drawn over the earlier. Central's Planner orders a plan's layers by it and
+    the Player's executor draws by it (player/executor.py `_compositions`)."""
+    return (layer.priority, layer.root_order, layer.admission_order, layer.start)
 
 
 class Plan(Model):

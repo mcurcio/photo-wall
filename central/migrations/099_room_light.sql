@@ -121,7 +121,7 @@ UPDATE picture_documents SET
                          (document->'software') - 'brightness_percent' - 'saturation_percent'
                          - 'highlight_rolloff_percent' - 'black_floor_tenths' - 'lut' - 'lut_amount_percent')
                || '{"light": {"matched_lux": 1000.0, "black": 0.0003}}'::jsonb,
-    digest = 'upgraded-098';
+    digest = 'upgraded-099';
 
 -- A Frame's lighting (contracts/frame_lighting.py FrameLighting) replaces its mat, on its binding.
 ALTER TABLE frames ADD COLUMN lighting JSONB NULL CHECK (jsonb_typeof(lighting) = 'object');

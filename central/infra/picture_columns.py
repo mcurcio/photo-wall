@@ -1,10 +1,10 @@
-"""The Display picture's stored columns (decision 0022, the picture split; migrations 092-094, 098):
+"""The Display picture's stored columns (decision 0022, the picture split; migrations 092-094, 099):
 the one home of how a DisplayPicture is laid out in a displays row, a picture session's draft and a
 picture history entry (migration 096), so central/infra/display_store.py and
 central/infra/picture_history_store.py read and write it alike without importing each other.
 
-Room light (decision 0028, migration 098) removed the print look's sliders and the Display's LUT and
-added the Display's light (`matched_lux`, `panel_black`). A history entry written before 098 has no
+Room light (decision 0028, migration 099) removed the print look's sliders and the Display's LUT and
+added the Display's light (`matched_lux`, `panel_black`). A history entry written before 099 has no
 light: `entry_picture` says so.
 """
 from __future__ import annotations
@@ -39,7 +39,7 @@ def stored_picture(row: Mapping[str, Any]) -> DisplayPicture:
 
 def entry_picture(row: Mapping[str, Any]) -> tuple[DisplayPicture, bool]:
     """(the DisplayPicture of a mapping with `PICTURE_FIELDS`, whether it records the Display's light):
-    a history entry from before migration 098 has none, and reads with UPGRADE_DISPLAY_LIGHT as a
+    a history entry from before migration 099 has none, and reads with UPGRADE_DISPLAY_LIGHT as a
     stand-in (never a value it recorded)."""
     hardware = {code: int(value) for code, value in row["hardware_picture"].items()}
     recorded = row.get("matched_lux") is not None and row.get("panel_black") is not None

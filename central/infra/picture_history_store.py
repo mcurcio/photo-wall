@@ -11,7 +11,7 @@ Writers (each in its caller's transaction, so a history write fails only with it
 Each trims its own key to the newest central/tuning_history/bounds.py KEPT_ENTRIES (per Display) or
 SENT_ENTRIES (per port) after appending. Every `at` is `clock_timestamp()` in the INSERT
 (PostgreSQL's clock). An entry's picture is stored under the displays columns' names
-(picture_columns `picture_fields`, as picture_sessions.draft); one from before migration 098 has
+(picture_columns `picture_fields`, as picture_sessions.draft); one from before migration 099 has
 no Display's light (`picture_columns.entry_picture`, the record's `light_recorded`).
 """
 from __future__ import annotations

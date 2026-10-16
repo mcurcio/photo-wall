@@ -1,7 +1,7 @@
 """A Frame's Position history, pure (configuration snapshots; owner, 2026-10-13: "configuration
 snapshots" that keep "a history of what has been done in the past", scope "Everything per
 Display+Frame"; migration 096): the Frame fit (mode, corners, rotation) and the Frame's lighting
-(decision 0028: its lights, mat depth and paper; migration 098 replaced the mat).
+(decision 0028: its lights, mat depth and paper; migration 099 replaced the mat).
 
 One numbering per Frame, in commit order under the Frame's row lock, for two kinds of entry, each
 written where its state converges and never by an editor:

@@ -44,7 +44,8 @@ def test_the_runtime_read_serves_protection_and_program_windows(registry):
 
 def test_a_stale_scene_put_is_refused_with_409_and_an_identical_retry_is_not(registry):
     """Both Scene routes store through Runtime.set_scene, so both refuse a save that
-    does not move past the stored revision (slice 3 §13, Question 4 flipped)."""
+    does not move past the stored revision (slice 3 §13, Question 4 flipped), answering 409
+    "changed" with the stored Scene (cross-fade delivery, SceneWriteRefused)."""
     app = create_app(registry.db, registry.clock, ADMIN, run_scheduler=False)
     scene = {"scene_id": "night", "revision": 1, "cycle_seconds": 30, "loop": True,
              "contributions": [{"target": "frame:portrait", "source_refs": ["holiday:1"]}]}
@@ -54,7 +55,8 @@ def test_a_stale_scene_put_is_refused_with_409_and_an_identical_retry_is_not(reg
         assert put(scene).status_code == 200
         assert put(scene).status_code == 200  # the same save, retried
         stale = put({**scene, "cycle_seconds": 45})
-        assert (stale.status_code, stale.json()) == (409, {"error": "scene_revision_conflict"})
+        assert (stale.status_code, stale.json()["error"]) == (409, "changed")
+        assert stale.json()["current"]["cycle_seconds"] == 30
         assert put({**scene, "revision": 2, "cycle_seconds": 45}).status_code == 200
         stored = client.get("/v1/operator/runtime", headers=AUTH).json()["definitions"]["night"]
     assert (stored["revision"], stored["cycle_seconds"]) == (2, 45)

@@ -1,7 +1,7 @@
-"""098 (room light, decision 0028): on a database at 097 with a Display at 50 % software brightness, a
+"""099 (room light, decision 0028): on a database at 098 with a Display at 50 % software brightness, a
 Frame with a mat whose Position names that Display, a Position history entry, a stored Player
 configuration and an offered plan whose bindings carry the mat (one of them for a Frame gone since),
-098 gives the Display UPGRADE_DISPLAY_LIGHT, the Frame `upgrade_lighting(UPGRADE_DISPLAY_LIGHT, depth)`
+099 gives the Display UPGRADE_DISPLAY_LIGHT, the Frame `upgrade_lighting(UPGRADE_DISPLAY_LIGHT, depth)`
 with its wash at 500 lx (the brightness multiplied the linear picture, so the picture is today's),
 every stored and offered binding its Frame's lighting and no mat (a gone Frame's: its mat's upgrade),
 the history entry the upgrade at 1,000 lx (the old mat lights are not carried), and creates the fixed
@@ -27,28 +27,28 @@ OLD_MAT = {"depth_mm": 2.5, "lights": [{"from_degrees": 0, "steep_degrees": 30, 
 PROFILE = {"width_px": 1920, "height_px": 1080, "diagonal_inches": 27}
 
 
-def _at_097(db: Database) -> None:
-    """Every migration up to 097, as Database.migrate applies them."""
+def _at_098(db: Database) -> None:
+    """Every migration up to 098, as Database.migrate applies them."""
     with db.transaction() as conn:
         conn.execute("CREATE TABLE IF NOT EXISTS schema_migrations (name TEXT PRIMARY KEY, sha256 TEXT NOT NULL, "
                      "applied_at TIMESTAMPTZ NOT NULL DEFAULT now())")
         for path in sorted(MIGRATIONS.glob("*.sql")):
-            if path.name >= "098":
+            if path.name >= "099":
                 break
             conn.execute(path.read_text())
             conn.execute("INSERT INTO schema_migrations(name, sha256) VALUES (%s, %s)",
                          (path.name, sha256(path.read_bytes()).hexdigest()))
 
 
-def test_098_upgrades_every_display_and_frame_to_todays_picture(database_provisioner):
+def test_099_upgrades_every_display_and_frame_to_todays_picture(database_provisioner):
     """Mutation probes: write the paper's ink as 3.0 instead of -log10(0.0003) in a scratch copy of
-    098 -> the Frame's lighting differs from upgrade_lighting and this fails; the wash at 1000 lx
+    099 -> the Frame's lighting differs from upgrade_lighting and this fails; the wash at 1000 lx
     whatever the brightness -> the Frame's 500 lx fails; the offered plan's bindings at the mat's
     upgrade instead of the Frame's lighting -> its 500 lx fails."""
     with database_provisioner.empty() as conninfo:
         db = Database(conninfo)
         try:
-            _at_097(db)
+            _at_098(db)
             with db.transaction() as conn:
                 display = conn.execute(
                     "INSERT INTO displays(id, maker, product, name, serial, first_seen_at, software_brightness_percent, "

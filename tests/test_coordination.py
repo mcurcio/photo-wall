@@ -696,7 +696,7 @@ def test_a_hand_placed_photo_is_authored_at_its_scenes_crop_limit(registry):
     scene, square = square_photo_scene(registry, crop_limit=0.5)
     coordinator = Coordinator(registry.db, registry.clock)
     result = coordinator.configure_authored_scene(scene, "square:1", (square.asset_id,))
-    assert result["status"] == "configured" and result["created"] == 1
+    assert result["scene"]["revision"] == 1 and result["created"] == 1
 
 
 def test_a_hand_placed_photo_beyond_the_default_crop_limit_is_refused(registry):
