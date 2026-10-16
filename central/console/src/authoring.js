@@ -182,8 +182,7 @@ export function sceneProblems(draft, existingIds, { editing = false } = {}) {
   if (!(Number(draft.cycleSeconds) > 0)) {
     problems.push({ field: "cycle", message: `${PLAYBACK_LABELS.cycle}: choose more than 0 seconds.` });
   } else if (Number(draft.fadeSeconds) > Number(draft.cycleSeconds)) {
-    // A photo's fade out and the next one's fade in share its cycle (central/planner.py
-    // refuses fades longer than the cycle).
+    // A fade fits inside each photo's turn (central/runtime.py `Scene` refuses a longer one).
     problems.push({
       field: "fade",
       message: `${PLAYBACK_LABELS.fade} must be no longer than each photo shows for.`,
@@ -236,12 +235,11 @@ export function sceneProblems(draft, existingIds, { editing = false } = {}) {
  * `revision` is 1 for a new Scene; an edit sends the stored revision + 1 (§13).
  *
  * Delivery 1x's settings (an omitted one writes what the console always wrote):
- * - `fadeSeconds` (#41): each photo fades out over half of it and the next fades in over
- *   the other half (every body Contribution's `fade_out_seconds` and `fade_in_seconds`);
+ * - `fadeSeconds` (#41): the Scene's `transition`, a cross-fade of those seconds (Central
+ *   turns it into each photo's fades, central/runtime.py `_transition_at`);
  * - `ending` and `endingSeconds` (#62, #63): the outro. "black" is one opaque black
  *   Contribution per Frame; "fade" is one more media Contribution per Frame, from the same
- *   photos: the last photo returns over half the fade between photos, then fades out over
- *   the rest of the outro (so `endingSeconds` must be at least half the fade). Either keeps
+ *   photos, which enters by the transition and then fades out. Either keeps
  *   nothing after it (`after_end: "keep_nothing"`): the Frame is black once it has shown;
  * - `keepLastPhoto` (#64): every body Contribution keeps its photo after it
  *   (`after_end: "keep_this_photo"`);
@@ -275,17 +273,16 @@ export function buildSave(
   const media = (frameId) => (mode === "authored"
     ? { asset_refs: [selections[frameId]] }
     : { source_refs: [...sourceRefs] });
-  const half = Number(fadeSeconds) / 2;
   const contributions = targetIds.map((frameId) => ({
     target: toTarget(frameId),
     role: frameId,
     kind: "media",
     ...media(frameId),
-    ...(half > 0 ? { fade_in_seconds: half, fade_out_seconds: half } : {}),
     ...(keepLastPhoto ? { after_end: "keep_this_photo" } : {}),
   }));
   const scene = {
     scene_id: sceneId, revision, cycle_seconds: cycleSeconds, loop, contributions,
+    transition: { style: "cross_fade", seconds: Number(fadeSeconds) },
     selection: {
       order, no_repeat_days: Number(noRepeatDays),
       // null: the Scene follows the house crop limit (Settings › Photo fit, follow-ups B1).
@@ -298,8 +295,7 @@ export function buildSave(
     scene.outro_contributions = targetIds.map((frameId) => (ending === "black"
       ? { target: toTarget(frameId), role: frameId, kind: "black", after_end: "keep_nothing" }
       : { target: toTarget(frameId), role: frameId, kind: "media", ...media(frameId),
-          ...(half > 0 ? { fade_in_seconds: half } : {}),
-          fade_out_seconds: seconds - half, after_end: "keep_nothing" }));
+          after_end: "keep_nothing" }));
   }
   if (keepTogether) {
     scene.protect_frames = true;
@@ -335,6 +331,10 @@ export const SCENE_DEFAULTS = {
     "order": "shuffle",
     "no_repeat_days": 7,
     "crop_limit": null
+  },
+  "transition": {
+    "style": "cross_fade",
+    "seconds": 0
   }
 };
 
@@ -344,8 +344,6 @@ export const CONTRIBUTION_DEFAULTS = {
   "source_refs": [],
   "asset_refs": [],
   "opacity": 1,
-  "fade_in_seconds": 0,
-  "fade_out_seconds": 0,
   "after_end": "leave_as_is",
   "ramp_from": 0,
   "ramp_to": 0
@@ -404,7 +402,8 @@ function canonical(value) {
  * Contribution names assets, otherwise live from its first Source. An authored
  * Scene does not store its Source, so the operator picks it again.
  *
- * Delivery 1x's settings are read from the first Contribution (fade, keep the last photo)
+ * Delivery 1x's settings are read from the Scene's transition (fade), the first Contribution
+ * (keep the last photo)
  * and the first outro Contribution (how it ends); a Scene whose other Contributions differ
  * does not rebuild to itself, so {@link editableDraft} withholds Edit. Roadmap 5a's are its
  * `selection` (the model's default when it has none).
@@ -419,7 +418,7 @@ function canonical(value) {
 export function decodeScene(scene) {
   const {
     contributions, cycle_seconds: cycleSeconds, loop, outro_seconds: outroSeconds,
-    outro_contributions: outro, protect_frames: keepTogether, selection,
+    outro_contributions: outro, protect_frames: keepTogether, selection, transition,
   } = normalizeScene(scene);
   const authored = contributions.length > 0 && contributions[0].asset_refs.length > 0;
   const frameIdOf = (entry) => frameOf(entry.target) ?? entry.target;
@@ -434,7 +433,7 @@ export function decodeScene(scene) {
     selections: authored
       ? Object.fromEntries(contributions.map((entry) => [frameIdOf(entry), entry.asset_refs[0]]))
       : {},
-    fadeSeconds: first ? first.fade_in_seconds + first.fade_out_seconds : 0,
+    fadeSeconds: transition.seconds,
     ending,
     endingSeconds: ending === "none" ? SCENE_SETTING_DEFAULTS.endingSeconds : outroSeconds,
     keepLastPhoto: first ? first.after_end === "keep_this_photo" : SCENE_SETTING_DEFAULTS.keepLastPhoto,

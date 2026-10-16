@@ -75,7 +75,7 @@ from central.registry import (
     Registry,
     RegistryError,
 )
-from central.runtime import RuntimeConflict, Scene, SceneInUse
+from central.runtime import RuntimeConflict, Scene, SceneInUse, SceneWriteRefused
 from central.runtime_store import RuntimeStore
 from central.source_names import SourceInUse, SourceNameService
 from central.tuning_history_routes import mount_tuning_history_routes
@@ -360,6 +360,13 @@ def create_app(
     @app.exception_handler(RuntimeConflict)
     async def runtime_conflict(request, exc):
         return JSONResponse({"error": exc.code}, status_code=409)
+
+    @app.exception_handler(SceneWriteRefused)
+    async def scene_write_refused(request, exc):
+        if exc.reason == "changed":
+            return JSONResponse({"error": "changed", "current": exc.current.model_dump(mode="json")},
+                                status_code=409)
+        return JSONResponse({"error": exc.reason, "max_seconds": exc.max_seconds}, status_code=422)
 
     @app.exception_handler(SceneInUse)
     async def scene_in_use(request, exc):
@@ -760,6 +767,20 @@ def create_app(
             raise ValueError("Scene identity mismatch")
         coordinator.runtime.command("set_scene", scene)
         return {"status": "configured"}
+
+    # Save and apply now (cross-fade delivery, slice 2): the same bodies as the two saves, one
+    # Runtime command each, answering a `SceneOnWall`. Declared here; not built yet.
+    @app.post("/v1/operator/scenes/{scene_id}/apply-now", dependencies=[Depends(admin)])
+    def apply_scene_now(scene_id: Identifier, scene: Scene):
+        if scene.scene_id != scene_id:
+            raise ValueError("Scene identity mismatch")
+        return JSONResponse({"error": "not_implemented"}, status_code=501)
+
+    @app.post("/v1/operator/scenes/{scene_id}/authored/apply-now", dependencies=[Depends(admin)])
+    def apply_authored_scene_now(scene_id: Identifier, request: AuthoredSceneRequest):
+        if request.scene.scene_id != scene_id:
+            raise ValueError("Scene identity mismatch")
+        return JSONResponse({"error": "not_implemented"}, status_code=501)
 
     @app.delete("/v1/operator/scenes/{scene_id}", dependencies=[Depends(admin)])
     def delete_scene(scene_id: Identifier, expected_revision: int = Query(ge=1)):

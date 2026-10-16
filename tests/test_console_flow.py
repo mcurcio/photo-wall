@@ -224,9 +224,9 @@ const hands = authoring.buildSave("authored", { sceneId: "evening", sourceRefs: 
   ...settings, ending: "black" }).body.scene;
 out.authoredOutro = hands.outro_contributions;
 out.authoredBack = pick(authoring.editableDraft(hands));
-// Unequal fades (or a setting that differs per Frame) are not the console's: Edit is withheld.
-out.unequal = authoring.editableDraft({ ...live, contributions: [
-  { ...live.contributions[0], fade_in_seconds: 1 }] });
+// A fade out and in (no style control yet), or a setting that differs per Frame, is not the
+// console's: Edit is withheld.
+out.unequal = authoring.editableDraft({ ...live, transition: { style: "fade_out_and_in", seconds: 3 } });
 // Values the sliders cannot show exactly are not the console's either (no silent snapping).
 const stretched = (fade, ending) => authoring.buildSave("live", { sceneId: "evening",
   sourceRefs: ["holiday:1"], targetIds: ["lobby"], cycleSeconds: 20, loop: true, ...settings,
@@ -379,19 +379,18 @@ def test_flow_kit_and_scene_flow_shape():
         "fade": "Fade between photos", "ending": "How it ends",
         "keepLastPhoto": "Keep the last photo up", "keepTogether": "Keep these Frames together",
         "order": "Order", "noRepeatDays": "Don't repeat within", "cropLimit": "Crop limit"}
-    # A fade longer than the cycle is the fade's problem (the planner refuses it).
+    # A fade longer than the cycle is the fade's problem (Central refuses it).
     assert out["fadeProblem"] == [
         ["fade", "Fade between photos must be no longer than each photo shows for."]]
 
     # Delivery 1x: each setting is written to the Scene model's own field...
     body = out["liveBody"]
     assert body["contributions"] == [{
-        "target": "frame:lobby", "role": "lobby", "kind": "media", "source_refs": ["holiday:1"],
-        "fade_in_seconds": 1.5, "fade_out_seconds": 1.5}]
+        "target": "frame:lobby", "role": "lobby", "kind": "media", "source_refs": ["holiday:1"]}]
+    assert body["transition"] == {"style": "cross_fade", "seconds": 3}
     assert (body["outro_seconds"], body["protect_frames"]) == (4.5, True)
     assert body["outro_contributions"] == [{
         "target": "frame:lobby", "role": "lobby", "kind": "media", "source_refs": ["holiday:1"],
-        "fade_in_seconds": 1.5, "fade_out_seconds": 3,  # back over half the fade, out over the rest
         "after_end": "keep_nothing"}]  # an ending keeps nothing after it
     assert out["authoredOutro"] == [
         {"target": "frame:lobby", "role": "lobby", "kind": "black", "after_end": "keep_nothing"}]

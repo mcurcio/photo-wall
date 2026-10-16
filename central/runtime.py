@@ -19,7 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field, FiniteFloat, model_validator
 from central.house_time import calculator
 from central.house_time.model import HouseTime, LocalDateTime, When, Window
 from central.wall_plan.selection import SceneSelection
-from contracts.models import TARGET_ID_PATTERN, AfterEnd
+from contracts.models import PREPARE_SECONDS, TARGET_ID_PATTERN, AfterEnd
 
 if TYPE_CHECKING:
     from central.execution_outcomes import ExecutionOutcome
@@ -48,7 +48,8 @@ class FrozenModel(BaseModel):
 
 
 class Contribution(FrozenModel):
-    """Authored intent; references identify centrally owned versioned definitions."""
+    """Authored intent; references identify centrally owned versioned definitions. How a photo
+    fades is its Scene's (`Scene.transition`), never a Contribution's."""
 
     target: Target
     kind: Literal["media", "black", "actuator"] = "media"
@@ -56,8 +57,6 @@ class Contribution(FrozenModel):
     source_refs: tuple[Identifier, ...] = ()
     asset_refs: tuple[Identifier, ...] = ()
     opacity: Unit = 1
-    fade_in_seconds: Seconds = 0
-    fade_out_seconds: Seconds = 0
     after_end: AfterEnd = "leave_as_is"
     ramp_from: Unit = 0
     ramp_to: Unit = 0
@@ -75,6 +74,35 @@ class Contribution(FrozenModel):
         if self.after_end != "leave_as_is" and self.kind == "actuator":
             raise ValueError("an actuator contribution keeps nothing on a Frame")
         return self
+
+
+TransitionStyle = Literal[
+    "cross_fade",        # the next photo dissolves in over the current one, which stays at full
+    "fade_out_and_in",   # through black: the current fades out over half the seconds, the next
+                         # fades up over the other half
+]
+
+
+class Transition(FrozenModel):
+    """How one photo gives way to the next on a Frame (owner, 2026-10-15: "Let's make cross fade
+    an option"). Runtime alone turns it into each photo's start and fades (`_transition_at`)."""
+
+    style: TransitionStyle = "cross_fade"
+    seconds: Seconds = 0          # 0: a cut
+
+
+class SceneWriteRefused(Exception):
+    """A Scene save refused; nothing changed. `reason` "changed": the stored revision moved on
+    (`current` is the stored Scene; HTTP 409); "transition_too_long": the Transition is longer
+    than `max_seconds`, each photo's seconds less PREPARE_SECONDS, which keeps a Player from
+    holding more than two photos per screen while it gets the next one ready (HTTP 422)."""
+
+    def __init__(self, reason: Literal["changed", "transition_too_long"], *,
+                 current: Scene | None = None, max_seconds: float | None = None) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.current = current
+        self.max_seconds = max_seconds
 
 
 class Child(FrozenModel):
@@ -95,6 +123,8 @@ class Scene(FrozenModel):
     protect_frames: bool = False
     # Roadmap 5a: how this Scene's Frames pick from its photos (order, no-repeat days, crop limit).
     selection: SceneSelection = SceneSelection()
+    # How each photo gives way to the next, the ending's included (one value for every Frame).
+    transition: Transition = Transition()
 
     @model_validator(mode="after")
     def coherent_cycle(self) -> Self:
@@ -105,7 +135,21 @@ class Scene(FrozenModel):
             raise ValueError("children must start before the parent cycle ends")
         if self.outro_contributions and self.outro_seconds == 0:
             raise ValueError("outro contributions require a positive outro duration")
+        # Every layer's fades fit it (contracts Layer): a cross-faded photo shows for its turn and
+        # the Transition before it. The tighter bound is a save's (`check_transition`).
+        if self.transition.seconds > self.cycle_seconds:
+            raise ValueError("a Transition may last no longer than each photo shows for")
         return self
+
+    def check_transition(self) -> None:
+        """SceneWriteRefused "transition_too_long" unless this Scene's Transition, and each child
+        Scene's, is a cut or leaves PREPARE_SECONDS of each photo's turn free of it. Checked when
+        a Scene is saved, never when one stored or captured is read back."""
+        if self.transition.seconds > 0 and self.transition.seconds > self.cycle_seconds - PREPARE_SECONDS:
+            raise SceneWriteRefused("transition_too_long",
+                                    max_seconds=max(0.0, self.cycle_seconds - PREPARE_SECONDS))
+        for child in self.children:
+            child.scene.check_transition()
 
     @property
     def participants(self) -> frozenset[str]:
@@ -220,8 +264,12 @@ class Intent(FrozenModel):
     logical_position: Seconds
     cycle_index: int
     cycle_position: Seconds
-    interval_start: FiniteFloat
-    interval_end: FiniteFloat
+    interval_start: FiniteFloat     # the turn (the layer's identity, central/planner.py)
+    interval_end: FiniteFloat       # the cut: the layer's end
+    # When the photo starts to show: a cross-fade's seconds before its turn when it follows a
+    # photo of its Run (or, an ending, the Run's last photo), else the turn's start
+    # (`_transition_at`). The layer's start.
+    shows_from: FiniteFloat
     opacity: Unit
     base_opacity: Unit
     fade_in_seconds: Seconds
@@ -232,6 +280,12 @@ class Intent(FrozenModel):
     # Roadmap 5a: the Intent's own Scene's selection (a child Scene's is its own), copied by
     # `timeline` (slice O1); the Planner reads it.
     selection: SceneSelection = SceneSelection()
+
+    @model_validator(mode="after")
+    def shows_by_its_turn(self) -> Self:
+        if self.shows_from > self.interval_start:
+            raise ValueError("a photo starts to show no later than its turn")
+        return self
 
     @property
     def precedence(self) -> tuple[int, int, int]:
@@ -265,6 +319,28 @@ class RuntimeView(FrozenModel):
 
     def for_target(self, target: str) -> Intent | None:
         return next((intent for intent in self.visible if intent.target == target), None)
+
+
+class RunRef(FrozenModel):
+    """A root Run playing an earlier revision of a saved Scene."""
+    run_id: str
+    scene_revision: int
+    started_by: Literal["schedule", "show_now"]   # a Default Scene Run restarts itself on save
+
+
+class EarlierVersion(FrozenModel):
+    """What still plays an earlier revision of a saved Scene: root Runs showing one (not those
+    already finishing) and queued Show now activations holding an older copy. Both empty: the
+    wall already follows the saved revision."""
+    playing: tuple[RunRef, ...] = ()
+    waiting: tuple[str, ...] = ()
+
+
+class SceneOnWall(FrozenModel):
+    """A Scene write's answer (Save, and Save and apply now): the Scene as stored and what on the
+    wall still plays an earlier version of it."""
+    scene: Scene
+    earlier_version: EarlierVersion = EarlierVersion()
 
 
 # The operator's read keeps ended Runs for this long, and Runtime forgets a root Run (with its
@@ -354,20 +430,78 @@ class _Run(_MutableModel):
         return min((t for t in times if t is not None), default=None)
 
 
+def _turn_lead(scene: Scene) -> float:
+    """How long before its turn a photo that follows another of its Run starts to show: a
+    cross-fade's seconds; none for fade out and in."""
+    return scene.transition.seconds if scene.transition.style == "cross_fade" else 0.0
+
+
+def _last_turn(run: _Run, stop: float | None) -> bool:
+    """Whether the Run's current body turn is its last, the Run stopping at `stop` (design rule
+    1: a turn begins when its photo starts to show). It is when the Scene does not loop, or the
+    stop comes no later than the next photo would start to show (the cut less a cross-fade), or
+    is the cut itself; a stop inside a dissolve lets the photo dissolving in play its turn, so
+    nothing snaps back."""
+    if not run.scene.loop:
+        return True
+    return stop is not None and (stop <= run.cycle_end - _turn_lead(run.scene) or stop == run.cycle_end)
+
+
+def _ending_dissolves(scene: Scene, target: str) -> bool:
+    """Whether the Scene's ending on `target` dissolves in over its last body photo there: a
+    cross-fade, a body photo on that Frame, and an ending that starts as the body ends (no child
+    Scene to wait for)."""
+    return (scene.transition.style == "cross_fade" and scene.transition.seconds > 0
+            and not scene.children
+            and any(c.target == target for c in scene.contributions)
+            and any(c.target == target for c in scene.outro_contributions))
+
+
+def _transition_at(run: _Run, contribution: Contribution, start: float,
+                   end: float) -> tuple[float, float, float]:
+    """The one rule turning a Scene's Transition into a photo's (shows from, fade in, fade out)
+    for its turn [start, end) (design "What fade seconds means"), before the final-turn hold
+    (`_may_hold_to_the_end`).
+
+    Cross-fade, F seconds: a photo following one of its Run shows from F before its turn and
+    fades in over F; a Run's first photo fades in over F from its turn (over what plays
+    beneath); a photo stays at full to its cut unless it is the Run's last, which fades out over
+    its last F, or under an ending that dissolves in over it. An ending's photo enters the same
+    way, then a photo ending fades out over the rest of the ending. Fade out and in: every body
+    photo fades in and out over F/2 each; an ending's photo fades in over F/2 and out over the
+    rest; a black ending cuts. Actuators never fade."""
+    if contribution.kind == "actuator":
+        return start, 0.0, 0.0
+    scene = run.scene
+    seconds = scene.transition.seconds
+    if scene.transition.style == "fade_out_and_in":
+        if run.phase == "body":
+            return start, seconds / 2, seconds / 2
+        if contribution.kind == "black":
+            return start, 0.0, 0.0
+        fade_in = min(seconds / 2, end - start)
+        return start, fade_in, end - start - fade_in
+    if run.phase == "outro":
+        shows_from = start - seconds if _ending_dissolves(scene, contribution.target) else start
+        fade_in = min(seconds, end - shows_from)
+        return shows_from, fade_in, (end - shows_from - fade_in if contribution.kind == "media" else 0.0)
+    shows_from = start - seconds if run.cycle_index > 0 else start
+    if not _last_turn(run, run.stop_at) or _ending_dissolves(scene, contribution.target):
+        return shows_from, seconds, 0.0
+    return shows_from, seconds, min(seconds, end - shows_from - seconds)
+
+
 def _may_hold_to_the_end(run: _Run, contribution: Contribution) -> bool:
-    """A kept photo in its Run's final body cycle, with no ending of its Scene on its Frame:
-    it plans no fade-out unless another Run plays on the Frame at the cycle's end
-    (`Runtime._playing_at`), so it never dips to black and snaps back to itself. The cycle is
-    final when the Scene does not loop, or when the Run's stop (Program end, duration,
-    scheduled finish or Finish) falls within it; a Finish, or a follower that appears later,
-    revises the cycle's fade-out, which the planner allows on an offered layer
-    (`planner.REVISABLE`)."""
+    """A kept photo in its Run's last body turn (`_last_turn`), with no ending of its Scene on
+    its Frame: it plans no fade-out unless another Run plays on the Frame at the turn's end
+    (`Runtime._playing_at`), so it never dips to black and snaps back to itself. A Finish, or a
+    follower that appears later, revises the turn's fade-out, which the planner allows on an
+    offered layer (`planner.REVISABLE`)."""
     if run.phase != "body" or contribution.after_end != "keep_this_photo":
         return False
     if any(ending.target == contribution.target for ending in run.scene.outro_contributions):
         return False
-    stop = run.stop_at
-    return not run.scene.loop or (stop is not None and stop <= run.cycle_end)
+    return _last_turn(run, run.stop_at)
 
 
 class _Queued(_MutableModel):
@@ -488,11 +622,13 @@ class Runtime:
 
         A revision at or below the stored one is refused (`scene_revision_conflict`)
         so a save built from an older copy never silently replaces a newer one,
-        unless it is the stored Scene exactly (an idempotent retry).
+        unless it is the stored Scene exactly (an idempotent retry). A Transition too long
+        for its photos is refused (SceneWriteRefused "transition_too_long").
         """
         stored = self._state.scenes.get(scene.scene_id)
         if stored is not None and scene.revision <= stored.revision and scene != stored:
             raise RuntimeConflict("scene_revision_conflict")
+        scene.check_transition()
         self._state.scenes[scene.scene_id] = scene
 
     @staticmethod
@@ -1243,7 +1379,7 @@ class Runtime:
                         changed = True
                     continue
                 if run.body_done_at is None and run.cycle_end <= at:
-                    if run.finish_requested_at is not None:
+                    if run.finish_requested_at is not None and _last_turn(run, run.finish_requested_at):
                         run.body_done_at = run.cycle_end
                     else:
                         run.cycle_index += 1
@@ -1346,7 +1482,7 @@ class Runtime:
             definitions = run.scene.outro_contributions if run.phase == "outro" else run.scene.contributions
             position = max(0.0, now - start)
             for contribution in definitions:
-                fade_out = contribution.fade_out_seconds
+                shows_from, fade_in, fade_out = _transition_at(run, contribution, start, end)
                 after_end = contribution.after_end
                 if budget is not None:
                     if (fade_out and _may_hold_to_the_end(run, contribution)
@@ -1359,8 +1495,8 @@ class Runtime:
                             and contribution.target in others(run, end, beneath=True)):
                         after_end = "leave_as_is"
                 opacity = contribution.opacity
-                if contribution.fade_in_seconds:
-                    opacity *= min(1.0, position / contribution.fade_in_seconds)
+                if fade_in:
+                    opacity *= min(1.0, max(0.0, now - shows_from) / fade_in)
                 if fade_out:
                     opacity *= min(1.0, max(0.0, end - now) / fade_out)
                 fraction = min(1.0, position / (end - start))
@@ -1377,10 +1513,9 @@ class Runtime:
                     priority=run.priority, root_order=run.root_order, admission_order=run.local_order,
                     logical_origin=run.started_at, logical_position=max(0.0, now - run.started_at),
                     cycle_index=run.cycle_index, cycle_position=position,
-                    interval_start=start, interval_end=end, opacity=opacity,
-                    base_opacity=contribution.opacity,
-                    fade_in_seconds=contribution.fade_in_seconds,
-                    fade_out_seconds=fade_out,
+                    interval_start=start, interval_end=end, shows_from=shows_from,
+                    opacity=opacity, base_opacity=contribution.opacity,
+                    fade_in_seconds=fade_in, fade_out_seconds=fade_out,
                     after_end=after_end,
                     actuator_value=value, phase=run.phase,
                     selection=run.scene.selection,

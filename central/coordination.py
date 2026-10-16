@@ -48,6 +48,7 @@ from central.wall_plan.order import PhotoShowing
 from central.wall_plan.ports import FitSettingsStore, ShownHistory
 from central.wall_plan.selection import crop_limit_of
 from contracts.models import (
+    PREPARE_SECONDS,
     Commit,
     IdentifyOutput,
     Layer,
@@ -66,7 +67,7 @@ LOG = logging.getLogger(__name__)
 class CoordinationLimits(Model):
     horizon_seconds: float = Field(default=300, gt=0, le=3600)
     renewal_seconds: float = Field(default=30, gt=0, le=60)
-    prepare_seconds: float = Field(default=5, gt=0, le=30)
+    prepare_seconds: float = Field(default=PREPARE_SECONDS, gt=0, le=30)
     readiness_seconds: float = Field(default=2, gt=0, le=10)
     max_uncertainty: float = Field(default=0.1, gt=0, le=1)
     max_offers: int = Field(default=64, ge=1, le=256)
@@ -319,11 +320,16 @@ class Coordinator:
             if b.output_id in c.enabled_outputs
         }
         cues: dict[tuple, dict] = {}
-        for view in runtime.timeline(now, horizon_end):
+        # A cue starts when its layers do: as each photo starts to show (`Intent.shows_from`, a
+        # cross-fade's lead before its turn, at most a cycle), so the timeline reaches a cycle
+        # past the horizon for the turns that start to show inside it.
+        reach = horizon_end + PlannerLimits().max_cycle_seconds
+        for view in runtime.timeline(now, reach):
             for intent in view.contributions:
-                if intent.kind == "actuator" or intent.interval_end <= now:
+                if (intent.kind == "actuator" or intent.interval_end <= now
+                        or intent.shows_from >= horizon_end):
                     continue
-                key = (intent.root_id, intent.interval_start)
+                key = (intent.root_id, intent.shows_from)
                 cue = cues.setdefault(key, {"members": {}, "ends": {}, "end": intent.interval_end})
                 cue["end"] = max(cue["end"], intent.interval_end)
                 cue["members"][assignment_id(intent)] = owners.get(intent.target)

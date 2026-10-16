@@ -10,6 +10,7 @@ from pathlib import Path
 from threading import RLock
 
 from contracts.models import (
+    PREPARE_SECONDS,
     Commit,
     Failure,
     Layer,
@@ -20,6 +21,7 @@ from contracts.models import (
     PlayerConfiguration,
     Readiness,
     Revocation,
+    stack_order,
 )
 from contracts.on_screen import kept_from
 from contracts.time import Clock, TimeMapping
@@ -104,7 +106,7 @@ class Executor:
         renderer: Renderer,
         clock: Clock,
         mapping: TimeMapping,
-        prepare_lead: float = 5,
+        prepare_lead: float = PREPARE_SECONDS,
     ):
         if not math.isfinite(prepare_lead) or prepare_lead <= 0:
             raise ValueError("prepare_lead must be finite and positive")
@@ -494,9 +496,9 @@ class Executor:
         for output_id, layers in grouped.items():
             binding = self._binding(output_id)
             if binding:
-                layers.sort(key=lambda local: (
-                    local.layer.priority, local.layer.root_order, local.layer.admission_order
-                ))
+                # Bottom to top by the one stacking order: a later photo of a Run is drawn over
+                # the one it dissolves in over.
+                layers.sort(key=lambda local: stack_order(local.layer))
                 result.append(OutputComposition(binding, binding.calibration,
                                                 tuple(layers)))
         return tuple(result)

@@ -1349,13 +1349,12 @@ def test_each_built_scene_setting_is_set_saved_and_shown_again(page, registry):
             form.get_by_role("button", name="Save Scene", exact=True).click()
         assert info.value.status == 200
         stored = _definition(page, origin, "evening-fade")
-        body = stored["contributions"][0]
-        assert (body["fade_in_seconds"], body["fade_out_seconds"], body["after_end"]) == (
-            1.5, 1.5, "leave_as_is")
+        assert stored["transition"] == {"style": "cross_fade", "seconds": 3}
+        assert stored["contributions"][0]["after_end"] == "leave_as_is"
         assert (stored["outro_seconds"], stored["protect_frames"]) == (4.5, True)
-        # Fades out: the last photo returns over half the 3 s fade, then fades out over the rest.
-        assert [(c["kind"], c["fade_in_seconds"], c["fade_out_seconds"], c["after_end"])
-                for c in stored["outro_contributions"]] == [("media", 1.5, 3, "keep_nothing")]
+        # Fades out: one more photo, which enters by the 3 s fade and then fades out.
+        assert [(c["kind"], c["after_end"])
+                for c in stored["outro_contributions"]] == [("media", "keep_nothing")]
 
         # Shown again after a reload: Review answers each value and Playback holds it. The
         # console goes back to the Scenes list after a save; a reload during that navigation
