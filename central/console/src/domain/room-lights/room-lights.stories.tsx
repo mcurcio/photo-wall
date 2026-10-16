@@ -2,13 +2,13 @@ import type { Meta, StoryObj } from "@storybook/react-vite";
 
 import { entryWords, idFromName, readingWords, refusalWords } from "./model";
 import { RoomLights } from "./room-lights";
-import { PI_NAMES, ROOMS } from "./room-lights.fixtures";
+import { HOME_ASSISTANT_STATES, PI_NAMES, ROOMS } from "./room-lights.fixtures";
 
 const meta = {
   title: "Domain/RoomLights",
   component: RoomLights,
   args: {
-    view: ROOMS, piName: (id: string) => PI_NAMES[id] ?? id, since: () => "Tue 14:20", note: null,
+    view: ROOMS, heard: HOME_ASSISTANT_STATES.entities, piName: (id: string) => PI_NAMES[id] ?? id, since: () => "Tue 14:20", note: null,
     onSaveLight: async () => null, onRemoveLight: async () => null, onSaveSensor: async () => null, onRemoveSensor: async () => null,
   },
 } satisfies Meta<typeof RoomLights>;

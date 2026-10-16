@@ -1,4 +1,4 @@
-import { CONSTANTS, type FrameLighting, type RoomLightsView } from "../../generated/contract";
+import { CONSTANTS, type FrameLighting, type HomeAssistantStatesView, type RoomLightsView } from "../../generated/contract";
 
 /*
  * One house's lights for the stories: daylight a window Sensor measures, the colour overheads that
@@ -61,6 +61,20 @@ export const ROOMS: RoomLightsView = {
 };
 
 export const PI_NAMES: Readonly<Record<string, string>> = { "player-1": "Player …1a2b3c" };
+
+/** Home Assistant's states as Central last heard them: the two lights and the window meter the house
+ * names, the kitchen light nothing names yet, and the porch meter. */
+export const HOME_ASSISTANT_STATES: HomeAssistantStatesView = {
+  heard_at: HEARD,
+  entities: [
+    { entity: "light.living_room", kind: "light", name: "Living room", reports: "overheads", heard_at: HEARD - MINUTE },
+    { entity: "light.bookshelf", kind: "light", name: "Bookshelf", reports: "bookshelf-spot", heard_at: null },
+    { entity: "sensor.window_illuminance", kind: "illuminance", name: "Window illuminance", reports: "window-meter", heard_at: HEARD },
+    { entity: "light.kitchen", kind: "light", name: "Kitchen", reports: null, heard_at: HEARD - 2 * MINUTE },
+    { entity: "sensor.porch_illuminance", kind: "illuminance", name: "Porch illuminance", reports: null, heard_at: HEARD },
+  ],
+  refused: [],
+};
 
 /** The paper profiles on the list. */
 export const PROFILES = [

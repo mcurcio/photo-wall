@@ -1,8 +1,8 @@
 import { useState } from "react";
 
 import {
-  type FixedColour, LIMITS, type ReportedColour, type RoomLight, type RoomLightsView, type RoomLightView, type Sensor,
-  type SensorView,
+  type FixedColour, type HeardEntityView, LIMITS, type ReportedColour, type RoomLight, type RoomLightsView, type RoomLightView,
+  type Sensor, type SensorView,
 } from "../../generated/contract";
 import { EntityList } from "../../patterns/entity-list";
 import { Note } from "../../patterns/fact-row";
@@ -16,11 +16,14 @@ import { SegmentedControl } from "../../ui/segmented-control";
 import { Select } from "../../ui/select";
 import { Inline, Stack } from "../../ui/stack";
 import {
-  colourWords, entryWords, heardWords, lightNames, NEW_KELVIN, newId, readingWords, reporterWords, whereWords,
+  colourWords, entitiesFor, entityLabel, entryWords, heardWords, lightNames, NEW_KELVIN, newId, readingWords,
+  reportedThrough, reporterOf, reporterWords, smartSensor, whereWords,
 } from "./model";
 
 export interface RoomLightsProps {
   view: RoomLightsView;
+  /** The smart home's light and illuminance entities as Central last heard them: the picker's choices. */
+  heard: readonly HeardEntityView[];
   /** A Pi's name by its player id. */
   piName: (playerId: string) => string;
   /** Central's time in words. */
@@ -38,7 +41,8 @@ const PERCENT = 100;
 const EVEN_SHARES = ["34", "33", "33"] as const;
 const SENSOR_PLACEMENT = "A Sensor reads every light that reaches it. Put it where the light it measures is the "
   + "strongest, and never facing the wall: the wall's own glow would read as room light.";
-const LINK_A_SMART_LIGHT = "A smart light that reports itself, or a smart sensor, is linked on its system's settings page.";
+const NO_SMART_LIGHT = "No smart light has been heard yet: one that reports itself is offered here once it has.";
+const NO_SMART_SENSOR = "No smart light sensor has been heard yet: one is offered here once it has.";
 
 type Kind = RoomLight["kind"];
 const KIND_LABELS: Record<Kind, string> = { reported: "Reports itself", measured: "Measured by a Sensor", fixed: "Always on" };
@@ -51,18 +55,22 @@ const KIND_HELP: Record<Kind, string> = {
 interface LightDraft {
   name: string;
   kind: Kind;
+  /** The smart light it reports itself through ("" before one is chosen). */
+  entity: string;
   sensor: string;
   colour: (FixedColour | ReportedColour)["kind"];
   kelvin: number;
   shares: readonly [string, string, string];
 }
 
-const lightDraft = (view: RoomLightView | null, sensors: readonly SensorView[]): LightDraft => {
+const lightDraft = (view: RoomLightView | null, sensors: readonly SensorView[],
+  lights: readonly HeardEntityView[]): LightDraft => {
   const light = view?.light ?? null;
   const colour = light?.colour ?? null;
   return {
     name: light?.name ?? "",
     kind: light?.kind ?? "fixed",
+    entity: reporterOf(light) ?? lights[0]?.entity ?? "",
     sensor: light?.kind === "measured" ? light.sensor : sensors[0]?.id ?? "",
     colour: colour?.kind ?? "fixed",
     kelvin: colour?.kind === "fixed" ? colour.kelvin : NEW_KELVIN,
@@ -72,8 +80,8 @@ const lightDraft = (view: RoomLightView | null, sensors: readonly SensorView[]):
   };
 };
 
-/** The light a draft saves (keeping a light's own reporter), or what is wrong with it. */
-function lightOf(draft: LightDraft, before: RoomLight | null): { light: RoomLight } | { problem: string } {
+/** The light a draft saves, or what is wrong with it. */
+function lightOf(draft: LightDraft): { light: RoomLight } | { problem: string } {
   const name = draft.name.trim();
   if (name === "") return { problem: "Give the light a name, as Bookshelf spot." };
   const fixed: FixedColour = { kind: "fixed", kelvin: draft.kelvin };
@@ -81,28 +89,35 @@ function lightOf(draft: LightDraft, before: RoomLight | null): { light: RoomLigh
     if (draft.sensor === "") return { problem: "A Sensor measures this light: add one first, then choose it here." };
     return { light: { kind: "measured", name, sensor: draft.sensor, colour: fixed } };
   }
-  if (draft.kind === "reported" && before?.kind === "reported") {
-    if (draft.colour === "fixed") return { light: { ...before, name, colour: fixed } };
+  if (draft.kind === "reported") {
+    if (draft.entity === "") return { problem: "Choose the smart light that reports it." };
+    if (draft.colour === "fixed") return { light: reportedThrough(name, draft.entity, fixed) };
     const shares = draft.shares.map(Number);
     if (shares.some((share) => !Number.isFinite(share) || share < 0 || share > PERCENT) || shares.every((share) => share === 0)) {
       return { problem: `Each colour share is a percent from 0 to ${PERCENT}, and they cannot all be 0.` };
     }
     const channel_shares = shares.map((share) => share / PERCENT) as [number, number, number];
-    return { light: { ...before, name, colour: { kind: "reported", channel_shares } } };
+    return { light: reportedThrough(name, draft.entity, { kind: "reported", channel_shares }) };
   }
   return { light: { kind: "fixed", name, colour: fixed } };
 }
 
-function LightDialog({ view, house, onClose, onSave }: {
-  view: RoomLightView | null; house: RoomLightsView; onClose: () => void; onSave: RoomLightsProps["onSaveLight"];
+function LightDialog({ view, house, heard, onClose, onSave }: {
+  view: RoomLightView | null; house: RoomLightsView; heard: readonly HeardEntityView[]; onClose: () => void;
+  onSave: RoomLightsProps["onSaveLight"];
 }) {
-  const [draft, setDraft] = useState(() => lightDraft(view, house.sensors));
+  const smartLights = entitiesFor(heard, "light");
+  const [draft, setDraft] = useState(() => lightDraft(view, house.sensors, smartLights));
   const before = view?.light ?? null;
-  const kinds = (before?.kind === "reported" ? ["reported", "measured", "fixed"] as const : ["measured", "fixed"] as const)
-    .map((kind) => ({ value: kind, label: KIND_LABELS[kind] }));
+  const kinds = (before?.kind === "reported" || smartLights.length > 0 ? ["reported", "measured", "fixed"] as const
+    : ["measured", "fixed"] as const).map((kind) => ({ value: kind, label: KIND_LABELS[kind] }));
   const reported = draft.kind === "reported";
+  // A light reporting through an entity not heard lately keeps it among the choices.
+  const kept = reporterOf(before);
+  const choices = [...smartLights.map((entity) => ({ value: entity.entity, label: entityLabel(entity) })),
+    ...(kept !== null && !smartLights.some((entity) => entity.entity === kept) ? [{ value: kept, label: kept }] : [])];
   const save = async () => {
-    const built = lightOf(draft, before);
+    const built = lightOf(draft);
     if ("problem" in built) return built.problem;
     const named = view === null ? newId(draft.name, house.lights.map((each) => each.id)) : { id: view.id };
     if ("problem" in named) return named.problem;
@@ -122,7 +137,13 @@ function LightDialog({ view, house, onClose, onSave }: {
               <SegmentedControl label="How Photo Wall knows it is on" value={draft.kind} options={kinds} disabled={busy}
                 onChange={(kind) => change({ kind, colour: kind === "reported" ? draft.colour : "fixed" })} />
             </Field>
-            {before?.kind !== "reported" && <Note>{LINK_A_SMART_LIGHT}</Note>}
+            {smartLights.length === 0 && before?.kind !== "reported" && <Note>{NO_SMART_LIGHT}</Note>}
+            {reported && (
+              <Field label="Smart light" help="The light reports whether it is on and how bright through this">
+                <Select value={draft.entity === "" ? null : draft.entity} disabled={busy} width="fit" options={choices}
+                  onChange={(entity) => change({ entity })} />
+              </Field>
+            )}
             {draft.kind === "measured" && (house.sensors.length === 0 ? <Note>Add a Sensor first, then choose it here.</Note> : (
               <Field label="Sensor">
                 <Select value={draft.sensor === "" ? null : draft.sensor} disabled={busy}
@@ -177,19 +198,54 @@ function SensorDialog({ view, onClose, onSave }: {
   );
 }
 
+function SmartSensorDialog({ house, heard, onClose, onSave }: {
+  house: RoomLightsView; heard: readonly HeardEntityView[]; onClose: () => void; onSave: RoomLightsProps["onSaveSensor"];
+}) {
+  const meters = entitiesFor(heard, "illuminance");
+  const [name, setName] = useState("");
+  const [entity, setEntity] = useState(meters[0]?.entity ?? "");
+  const save = async () => {
+    if (name.trim() === "") return "Give the Sensor a name, as Window Sensor.";
+    if (entity === "") return NO_SMART_SENSOR;
+    const named = newId(name, house.sensors.map((each) => each.id));
+    if ("problem" in named) return named.problem;
+    return onSave(named.id, smartSensor(name.trim(), entity));
+  };
+  return (
+    <SaveDialog title="Add a smart Sensor" action="Add Sensor" onSave={save} onClose={onClose}>
+      {({ busy, edited }) => (
+        <>
+          <Field label="Name">
+            <TextInput value={name} onChange={(next) => { setName(next); edited(); }} disabled={busy} />
+          </Field>
+          {meters.length === 0 ? <Note>{NO_SMART_SENSOR}</Note> : (
+            <Field label="Smart light sensor" help="Its readings come from this from now on">
+              <Select value={entity === "" ? null : entity} disabled={busy} width="fit"
+                options={meters.map((each) => ({ value: each.entity, label: entityLabel(each) }))}
+                onChange={(next) => { setEntity(next); edited(); }} />
+            </Field>
+          )}
+        </>
+      )}
+    </SaveDialog>
+  );
+}
+
 type LightRow = RoomLightView & { key: string; severity: null };
 type SensorRow = SensorView & { key: string; severity: null };
-type Editing = { kind: "light"; light: RoomLightView | null } | { kind: "sensor"; sensor: SensorView } | null;
+type Editing = { kind: "light"; light: RoomLightView | null } | { kind: "sensor"; sensor: SensorView } | { kind: "smart-sensor" }
+  | null;
 type Removing = { kind: "light"; light: RoomLightView } | { kind: "sensor"; sensor: SensorView } | null;
 
 /**
  * House › Lights: the house's real lights, each with how Photo Wall knows it is on, its colour, its
  * last state and when it was last heard; the Sensors, each with where it is, its last reading and
- * the light it measures. Lights are added, changed and removed here; a Sensor is renamed or removed
- * here and set up where it is (a Pi's Hardware page, a smart home's settings page). Central's
- * refusals in words. The page reads and writes; this is what a story draws.
+ * the light it measures. Lights are added, changed and removed here, a smart light picked from
+ * the smart home's light entities; a smart Sensor is added here from its illuminance entities, a
+ * wired one on its Pi's Hardware page; a Sensor is renamed or removed here. Central's refusals in
+ * words. The page reads and writes; this is what a story draws.
  */
-export function RoomLights({ view, piName, since, note, onSaveLight, onRemoveLight, onSaveSensor, onRemoveSensor }: RoomLightsProps) {
+export function RoomLights({ view, heard, piName, since, note, onSaveLight, onRemoveLight, onSaveSensor, onRemoveSensor }: RoomLightsProps) {
   const [editing, setEditing] = useState<Editing>(null);
   const [removing, setRemoving] = useState<Removing>(null);
   const names = lightNames(view);
@@ -247,17 +303,23 @@ export function RoomLights({ view, piName, since, note, onSaveLight, onRemoveLig
             },
           ]}
           groups={[{ title: "Sensors in the house", rows: sensors }]}
-          empty="No Sensors. Wire one to a Pi on its Hardware page, or link a smart sensor on its system's settings page."
+          empty="No Sensors. Wire one to a Pi on its Hardware page, or add a smart Sensor."
         />
+        <Inline label="Sensor actions">
+          <Button onClick={() => setEditing({ kind: "smart-sensor" })}>Add a smart Sensor</Button>
+        </Inline>
         <Note>{SENSOR_PLACEMENT}</Note>
         <OwnerLinks links={[{ text: "Pis and their Sensors", href: formatRoute({ section: "hardware" }) }]} />
       </Stack>
       {note !== null && <Note live>{note}</Note>}
       {editing?.kind === "light" && (
-        <LightDialog view={editing.light} house={view} onClose={() => setEditing(null)} onSave={onSaveLight} />
+        <LightDialog view={editing.light} house={view} heard={heard} onClose={() => setEditing(null)} onSave={onSaveLight} />
       )}
       {editing?.kind === "sensor" && (
         <SensorDialog view={editing.sensor} onClose={() => setEditing(null)} onSave={onSaveSensor} />
+      )}
+      {editing?.kind === "smart-sensor" && (
+        <SmartSensorDialog house={view} heard={heard} onClose={() => setEditing(null)} onSave={onSaveSensor} />
       )}
       {removing?.kind === "light" && (
         <RemoveDialog name={removing.light.light.name} what="Photo Wall forgets this light." onClose={() => setRemoving(null)}

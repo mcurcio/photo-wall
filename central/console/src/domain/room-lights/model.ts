@@ -1,5 +1,5 @@
 import {
-  CONSTANTS, type FixedColour, type Measured, PATTERNS, type PlayerDrawnView, type RefusedReportView,
+  CONSTANTS, type FixedColour, type HeardEntityView, type Measured, PATTERNS, type PlayerDrawnView, type RefusedReportView,
   type ReportedColour, type ReportRefusal, type RoomLight, type RoomLightRefusal, type RoomLightsView,
   type RoomLightView, type Sensor, type SensorView, type Unavailable,
 } from "../../generated/contract";
@@ -163,4 +163,31 @@ export const DRAWN_WORDS: Record<PlayerDrawnView["state"], string> = {
 /** The drawn state Central judged for `playerId` (none: Central has no word of it). */
 export function drawnOf(players: readonly PlayerDrawnView[], playerId: string): PlayerDrawnView | undefined {
   return players.find((player) => player.player_id === playerId);
+}
+
+/** The smart home's entities a light or a Sensor may be reported by (Home Assistant's states as
+ * Central last heard them): a light from a light entity only, a Sensor from an illuminance entity only. */
+export function entitiesFor<K extends HeardEntityView["kind"]>(heard: readonly HeardEntityView[], kind: K):
+  Extract<HeardEntityView, { kind: K }>[] {
+  return heard.filter((entity): entity is Extract<HeardEntityView, { kind: K }> => entity.kind === kind);
+}
+
+/** An entity as the picker shows it: its name, with its entity id as the detail ("Bookshelf (light.bookshelf)"). */
+export function entityLabel(entity: HeardEntityView): string {
+  return entity.name === null ? entity.entity : `${entity.name} (${entity.entity})`;
+}
+
+/** The smart-home entity a light reports itself through, or null for a light that does not. */
+export function reporterOf(light: RoomLight | null): string | null {
+  return light?.kind === "reported" && light.reporter.source === CONSTANTS.HOME_ASSISTANT_SOURCE ? light.reporter.address : null;
+}
+
+/** A light named `name` that reports itself through smart-home entity `entity`, in `colour`. */
+export function reportedThrough(name: string, entity: string, colour: FixedColour | ReportedColour): RoomLight {
+  return { kind: "reported", name, reporter: { source: CONSTANTS.HOME_ASSISTANT_SOURCE, address: entity }, colour };
+}
+
+/** A Sensor named `name` whose readings smart-home illuminance entity `entity` reports. */
+export function smartSensor(name: string, entity: string): Sensor {
+  return { name, at: { source: CONSTANTS.HOME_ASSISTANT_SOURCE, address: entity } };
 }

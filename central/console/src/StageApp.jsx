@@ -1,6 +1,5 @@
 import React, { useId, useRef, useState } from "react";
 
-import { useReleaseRead } from "./releases.js";
 import { formatRoute } from "./routes.js";
 import { RESEND_LABEL } from "./sendOutcome.js";
 import {
@@ -12,8 +11,9 @@ import {
   stageRefusal,
   stageReplaces,
   stageRequest,
-  stageScope,
+  STAGE_SCOPE,
   stageTargets,
+  useDeploymentRead,
   useHeldStage,
 } from "./stage.js";
 import { useSendDialog } from "./useSendDialog.js";
@@ -50,7 +50,7 @@ export function BoundRule() {
 function StageDialog({ deviceId, name, opened, held, node, onSent, onClose }) {
   const titleId = useId();
   const { dialogRef, cancelRef, phase, result, run, close } = useSendDialog(onClose);
-  const releases = useReleaseRead();
+  const releases = useDeploymentRead();
   const sentRef = useRef(opened.request ?? null);
   const [chosen, setChosen] = useState(opened.request?.body.deployment_id ?? "");
   const targets = stageTargets(releases.read);
@@ -71,7 +71,7 @@ function StageDialog({ deviceId, name, opened, held, node, onSent, onClose }) {
     <dialog ref={dialogRef} className="confirm" aria-labelledby={titleId} tabIndex={-1}>
       <h2 id={titleId} className="confirm__title">{`Stage an app on ${name}?`}</h2>
       <div className="confirm__body">
-        <p>{stageScope(releases.read?.selection)}</p>
+        <p>{STAGE_SCOPE}</p>
         {replaces !== null && <p>{replaces}</p>}
         {opened.frames.length > 0 && (
           <>
@@ -93,7 +93,7 @@ function StageDialog({ deviceId, name, opened, held, node, onSent, onClose }) {
             <label key={row.deploymentId} className="confirm__choice">
               <input type="radio" name="stage-deployment" value={row.deploymentId}
                 checked={chosen === row.deploymentId} onChange={() => setChosen(row.deploymentId)} />
-              {`Deployment ${row.deploymentId.slice(0, 4)}… · ${row.contents}${row.selected ? " · selected for every boot" : ""}`}
+              {`Deployment ${row.deploymentId.slice(0, 4)}… · ${row.contents}${row.tag === null ? "" : ` · release ${row.tag}`}`}
             </label>
           ))}
         </fieldset>

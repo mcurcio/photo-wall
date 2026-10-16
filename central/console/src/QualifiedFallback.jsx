@@ -1,6 +1,6 @@
 import React, { useEffect, useId, useRef, useState } from "react";
 
-import { fact } from "./facts.js";
+import { appHandle, fact } from "./facts.js";
 import { FactLine } from "./domain/fact-line.tsx";
 import {
   beginOffer,
@@ -11,7 +11,6 @@ import {
   sendBegin,
   useQualificationSampler,
 } from "./qualification.js";
-import { appHandle } from "./releases.js";
 
 /**
  * App › Qualified fallback (Part E §25, §27): the linked app this boot would qualify, Begin

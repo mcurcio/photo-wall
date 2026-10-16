@@ -515,8 +515,7 @@ def test_the_reboot_dialog_names_frames_and_a_recorded_reboot_is_requested(page,
         expect(dialog).to_contain_text(RUN_STAYS)
         expect(dialog).to_contain_text("Central offers the request to Host Management for 30 s.")
         # NR2: the one static sentence on what the next boot is offered, linking to Releases.
-        expect(dialog).to_contain_text("On its next boot, Central offers this Player the boot selection current "
-                                       "at that moment (see Releases).")
+        expect(dialog).to_contain_text("On its next boot, Central offers this Player its own version (see Releases).")
         expect(dialog.get_by_role("link", name="Releases", exact=True)).to_have_attribute("href", "#/releases")
         dialog.get_by_role("button", name="Reboot Player", exact=True).click()
         expect(dialog).to_have_count(0)
@@ -711,7 +710,8 @@ STAGES = f"**/v1/operator/node/devices/{DEVICE_ID}/app-stages"
 BOUND_RULE = ("Each Frame this Player drives shows the base page while the app switches, then rejoins its Run "
               "at the current point (missed content is not replayed), as on Reboot.")
 BOUND_PROVEN = "A switch on a Frame-bound Player is proven on Central only; the Player's side of it is not yet qualified."
-THIS_BOOT = "Applies to this boot only. Any later boot, including an unplanned one, is offered the boot selection"
+THIS_BOOT = ("Applies to this boot only. Any later boot, including an unplanned one, is offered this Player's own "
+             "version (Releases).")
 RECORDED = "Stage recorded; App Effect Broker has not responded yet."
 
 
@@ -780,7 +780,7 @@ def test_a_bound_player_stages_with_the_bound_rule_and_renders_every_served_stat
         offer = NodeBootService(fixture.sessions).offer(NodeBootRequestV2(SERIAL, uuid4(), "b" * 64))
         fixture.sessions.enroll(claim_for(offer, owner="app_effect_broker"))
         expect(operations).to_contain_text("Ended by a later boot", timeout=10_000)
-        expect(operations).to_contain_text("a later boot was admitted; Central offers each boot the boot selection")
+        expect(operations).to_contain_text("a later boot was admitted; Central offers each boot its Player's own version")
         assert len(sent) == 1
         assert sent[0]["deployment_id"] == str(fixture.deployments[0].deployment_id)
         assert "rollout_generation" not in sent[0]
