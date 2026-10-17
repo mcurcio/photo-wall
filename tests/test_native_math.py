@@ -558,10 +558,11 @@ def test_the_frame_renewer_paints_only_surfaces_not_renewed_within_a_renewal():
         "none": 1, "fresh": 0, "old": 1}
 
 
-def test_a_crossfade_step_a_trial_edit_or_a_picture_change_is_a_change_to_redraw():
-    """G8 render on change, E-G8-3: alpha, the calibration trial and (1c) the Output's picture
+def test_a_trial_edit_or_a_picture_change_is_a_change_to_redraw():
+    """G8 render on change, E-G8-3: the calibration trial and (1c) the Output's picture
     operations change pixels without changing the composition's fingerprint, so each is part of
-    what a surface shows."""
+    what a surface shows. A crossfade's alpha is not: no tick's, it is drawn on the frame clock
+    (tests/test_player_frame_clock.py)."""
     class Frames:
         def __init__(self, candidate, operations=None):
             self.candidate, self.operations = candidate, operations
@@ -588,7 +589,7 @@ def test_a_crossfade_step_a_trial_edit_or_a_picture_change_is_a_change_to_redraw
         return native_module._shown(composition, (), (), frames, object(), PlayerLuts())
 
     assert shown() == shown()
-    assert shown(.5) != shown(1.0)
+    assert shown(.5) == shown(1.0)
     assert shown(frames=Frames(None)) == shown()
     assert shown(frames=Frames(trial(1))) != shown()
     assert shown(frames=Frames(trial(1))) == shown(frames=Frames(trial(1)))

@@ -26,7 +26,7 @@ def opaque(layer: Layer, alpha: float) -> bool:
 
 def opaque_span(layer: Layer) -> Span | None:
     """When `layer` is opaque: from the end of its fade-in to the start of its fade-out (its alpha,
-    `player/executor.py` `_alpha`, is 1 exactly then); None when it never is."""
+    `contracts/models.py` `Layer.alpha`, is 1 exactly then); None when it never is."""
     if not opaque(layer, layer.opacity):
         return None
     start, end = layer.start + layer.fade_in, layer.end - layer.fade_out

@@ -88,12 +88,6 @@ def _binding_identity(binding: OutputBinding) -> tuple:
     return binding.output_id, binding.frame_id, binding.generation
 
 
-def _alpha(layer: Layer, now: float) -> float:
-    fade_in = min(1.0, max(0.0, (now - layer.start) / layer.fade_in)) if layer.fade_in else 1
-    fade_out = min(1.0, max(0.0, (layer.end - now) / layer.fade_out)) if layer.fade_out else 1
-    return layer.opacity * min(fade_in, fade_out)
-
-
 class Executor:
     """One process's execution state; constructor never restores playback authority.
 
@@ -149,13 +143,18 @@ class Executor:
         self._unwanted: set[str] = set()
         self._retired_outputs: dict[str, OutputBinding] = {}
 
-    def _now(self) -> float:
+    def _timebase(self) -> float:
+        """Plan time less this machine's monotonic time: anchored while the mapping is healthy,
+        so a renderer reads a composition's layers at its own frame times (player/look.py)."""
         if self.mapping.healthy():
             self._anchor = self.clock.utc(), self.clock.monotonic()
         if self._anchor is not None:
             utc, mono = self._anchor
-            return utc + self.clock.monotonic() - mono
-        return self.clock.utc()
+            return utc - mono
+        return self.clock.utc() - self.clock.monotonic()
+
+    def _now(self) -> float:
+        return self._timebase() + self.clock.monotonic()
 
     def _binding(self, output_id: str) -> OutputBinding | None:
         if self._config:
@@ -475,7 +474,7 @@ class Executor:
 
     def _local(self, assignment: _Assignment, now: float) -> LocalLayer:
         return LocalLayer(assignment.layer, assignment.path, assignment.layer.position(now),
-                          _alpha(assignment.layer, now))
+                          assignment.layer.alpha(now))
 
     def _apply_after_end(self, binding: OutputBinding, local: LocalLayer, now: float) -> None:
         """A drawn layer, covered or not, sets what its Frame keeps for when nothing plays
@@ -495,10 +494,12 @@ class Executor:
         self._retained[binding.output_id] = _Retained(
             replace(local, alpha=layer.opacity), binding, owner)
 
-    def _compositions(self, items: Iterable[_Assignment], now: float) -> tuple[OutputComposition, ...]:
-        return self._group(self._local(assignment, now) for assignment in items)
+    def _compositions(self, items: Iterable[_Assignment], now: float,
+                      timebase: float) -> tuple[OutputComposition, ...]:
+        return self._group((self._local(assignment, now) for assignment in items), timebase)
 
-    def _group(self, pictures: Iterable[LocalLayer]) -> tuple[OutputComposition, ...]:
+    def _group(self, pictures: Iterable[LocalLayer],
+               timebase: float | None = None) -> tuple[OutputComposition, ...]:
         grouped: dict[str, list[LocalLayer]] = {}
         for local in pictures:
             grouped.setdefault(local.layer.output_id, []).append(local)
@@ -510,7 +511,7 @@ class Executor:
                 # the one it dissolves in over.
                 layers.sort(key=lambda local: stack_order(local.layer))
                 result.append(OutputComposition(binding, binding.calibration,
-                                                tuple(layers)))
+                                                tuple(layers), timebase=timebase))
         return tuple(result)
 
     def _imminent(self, now: float) -> list[_Assignment]:
@@ -926,7 +927,10 @@ class Executor:
         """Renderer thread: current-state execution and calibration/fallback updates."""
         with self._lock:
             self._drain_renderer_releases()
-            now = self._now()
+            # What each Output shows is decided at `now`; how it looks, at each frame the
+            # renderer draws, through `timebase` (player/look.py).
+            timebase = self._timebase()
+            now = timebase + self.clock.monotonic()
             self._clock_gate()
             if not self._config:
                 return ()
@@ -954,7 +958,7 @@ class Executor:
                     active.append(replace(assignment, layer=executing))
             # Every playing layer, a covered one included; what is drawn leaves out a deferred one
             # while it is covered (it holds no decoder).
-            playing = {c.binding.output_id: c for c in self._compositions(active, now)}
+            playing = {c.binding.output_id: c for c in self._compositions(active, now, timebase)}
             candidates = {output_id: self._drawable(composition)
                           for output_id, composition in playing.items()}
             observations = []
@@ -1067,8 +1071,8 @@ class Executor:
                     continuation = OutputComposition(
                         binding, binding.calibration, tuple(
                             LocalLayer(local.layer, local.path, local.layer.position(now),
-                                       _alpha(local.layer, now)) for local in previous.layers
-                        )
+                                       local.layer.alpha(now)) for local in previous.layers
+                        ), timebase=timebase,
                     )
                     acknowledgment = self._acknowledgment(
                         continuation, self.renderer.present(continuation))

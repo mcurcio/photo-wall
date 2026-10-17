@@ -5,7 +5,8 @@ timeout re-arms from the iteration's start. So a 33 ms tick that costs more than
 GDK paint (priority 120) behind it, is ready on every iteration and starves every source below
 it. Control dispatch therefore runs ABOVE the tick and paint (refused at construction
 otherwise), and the tick re-arms only after its work, with a gap, so it never runs back to
-back. tests/test_player_mainloop.py walks player/ and fails on any GLib source added outside
+back. The tick plans what to show; a picture that changes over time is drawn on its display's
+frame clock (`FrameFollower`), never at the tick's pace. tests/test_player_mainloop.py walks player/ and fails on any GLib source added outside
 this module; tests/native_player_mainloop_harness.py holds these numbers to real GLib and Gdk.
 
 Stdlib only: callers pass the GLib module, so importing this needs no native dependency.
@@ -169,10 +170,52 @@ class Tick:
             self._source = None
 
 
+def frame_time(glib, frame_clock, clock: Callable[[], float] = time.monotonic) -> float:
+    """A GdkFrameClock's frame time on `clock`'s timeline, in seconds. GDK counts microseconds of
+    g_get_monotonic_time; one paired reading maps it, never an assumed shared epoch."""
+    return clock() - (glib.get_monotonic_time() - frame_clock.get_frame_time()) / 1e6
+
+
+class FrameFollower:
+    """Calls `frame(at)` on every frame of `widget`'s frame clock (gtk_widget_add_tick_callback,
+    paced by the display's refresh), `at` the frame time on `clock`'s timeline, from `follow()`
+    until `frame` returns False or raises. `frame` queues the widget's render itself when the
+    frame needs drawing; nothing here draws, and no timer stands in for the frame clock."""
+
+    def __init__(self, glib, widget, frame: Callable[[float], bool], *,
+                 clock: Callable[[], float] = time.monotonic):
+        self.glib, self.widget = glib, widget
+        self._frame, self._clock = frame, clock
+        self._callback: int | None = None
+
+    @property
+    def following(self) -> bool:
+        return self._callback is not None
+
+    def follow(self) -> None:
+        if self._callback is None:
+            self._callback = self.widget.add_tick_callback(self._tick)
+
+    def stop(self) -> None:
+        if self._callback is not None:
+            self.widget.remove_tick_callback(self._callback)
+            self._callback = None
+
+    def _tick(self, _widget, frame_clock) -> bool:
+        keep = False
+        try:
+            keep = self._frame(frame_time(self.glib, frame_clock, self._clock)) is True
+        finally:
+            if not keep:
+                self._callback = None
+        return keep
+
+
 def watch_bus(bus) -> None:
     """Emit a GStreamer bus's messages as signals on the main loop, at BUS priority."""
     bus.add_signal_watch_full(BUS)
 
 
 __all__ = ["BUS", "CONTROL", "GDK_PRIORITY_REDRAW", "MIN_GAP_MS", "TICK", "DispatchRefused",
-           "LatePosts", "LoopLate", "MainLoopDispatcher", "Tick", "watch_bus"]
+           "FrameFollower", "LatePosts", "LoopLate", "MainLoopDispatcher", "Tick", "frame_time",
+           "watch_bus"]

@@ -283,11 +283,29 @@ class Layer(Model):
             raise ValueError("only an opaque still may be kept")
         return self
 
+    # The layer's look at an instant, each value a function of plan time alone: `position`,
+    # `alpha`, and `motion`, when either changes. A renderer evaluates them at the time of the
+    # frame it draws (player/look.py), never at a planning tick's time.
     def position(self, now: float) -> float:
         position = max(0.0, now - self.media_origin)
         if self.variant and self.variant.duration:
             position %= self.variant.duration
         return position
+
+    def alpha(self, now: float) -> float:
+        """Its strength at `now`: its opacity through its fade-in and fade-out."""
+        fade_in = min(1.0, max(0.0, (now - self.start) / self.fade_in)) if self.fade_in else 1
+        fade_out = min(1.0, max(0.0, (self.end - now) / self.fade_out)) if self.fade_out else 1
+        return self.opacity * min(fade_in, fade_out)
+
+    def motion(self) -> tuple[tuple[float, float], ...]:
+        """When its look changes, as half-open spans of plan time: a video's whole time (its
+        position runs), else its fade-in and its fade-out (its alpha runs)."""
+        if self.variant is not None and self.variant.duration:
+            return ((self.start, self.end),)
+        return tuple(span for span, fade in (((self.start, self.start + self.fade_in), self.fade_in),
+                                             ((self.end - self.fade_out, self.end), self.fade_out))
+                     if fade)
 
 
 # How long before a layer starts its Player prepares it (its decoder resident) and Central's cue

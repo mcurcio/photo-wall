@@ -53,8 +53,9 @@ from player.geometry import (
     photo_rect,
     rolloff_skipped,
 )
+from player.look import changed, look, until_change
 from player.luts import LutSource
-from player.mainloop import Tick, watch_bus
+from player.mainloop import FrameFollower, Tick, frame_time, watch_bus
 from player.rendering import (
     PRESENTATION_FRESHNESS,
     REDRAW_RENEWAL,
@@ -269,11 +270,11 @@ def _picture_key(frames, composition: OutputComposition, luts: LutSource) -> obj
 
 def _shown(composition: OutputComposition, generations: tuple, sample_serials: tuple,
            frames, grant, luts: LutSource) -> tuple:
-    """Everything that changes a surface's pixels (G8 render on change, E-G8-3): layers,
-    decoder generations, alpha, each video's newest sample, the calibration trial and the
-    Output's picture operations (1c)."""
-    return (_fingerprint(composition), generations,
-            tuple(local.alpha for local in composition.layers), sample_serials,
+    """Everything a planning tick can change in a surface's pixels (G8 render on change,
+    E-G8-3): layers, decoder generations, each video's newest sample, the calibration trial and
+    the Output's picture operations (1c). How the layers look over time (a fade, a video's
+    position) is no tick's: the surface draws it on its frame clock (`NativeRenderer._frame`)."""
+    return (_fingerprint(composition), generations, sample_serials,
             _trial_key(frames, composition, grant),
             _picture_key(frames, composition, luts))
 
@@ -357,6 +358,8 @@ class _Draw:
     # What this draw shows (_shown): the one record present() compares against, so "a draw
     # is owed" is just "the newest draw, pending or else acknowledged, shows something else".
     shown: tuple | None = None
+    # The frame time it was drawn at (`NativeRenderer._frame_time`); None until drawn.
+    at: float | None = None
 
 
 @dataclass
@@ -396,6 +399,9 @@ class _Surface:
     target_qr: int = 0
     target_code: tuple[str, str, int] | None = None
     target_qr_modules: int = 0
+    # Draws on every frame of the surface's frame clock while its newest composition's look
+    # changes (`NativeRenderer._frame`); a still picture is not followed.
+    follower: FrameFollower | None = None
 
     def fail(self, reason: str) -> None:
         self.failure, self.failed_episode = reason, self.episode
@@ -817,6 +823,8 @@ class NativeRenderer:
             identify.hide()
             window.add(overlay)
             surface = _Surface(output, window, area, diagnostic, label, identify)
+            surface.follower = FrameFollower(
+                self.GLib, area, lambda at, surface=surface: self._frame(surface, at))
             self._surfaces[output.output_id] = surface
             area.connect("render", self._render, surface)
             area.connect("unrealize", self._unrealize, surface)
@@ -895,6 +903,37 @@ class NativeRenderer:
             if _renewal_due(surface.acknowledged, now):
                 surface.area.queue_render()
         return True
+
+    def _frame(self, surface: _Surface, at: float) -> bool:
+        """One frame of the surface's frame clock at frame time `at`: queue a render when the
+        drawn composition's look changed since it was drawn, and stop following once no change
+        lies ahead of that draw (player/look.py). A pending draw has its own render queued."""
+        drawn = surface.acknowledged
+        if (self._closed or drawn is None or drawn.at is None
+                or until_change(drawn.composition, drawn.at) is None):
+            return False
+        if changed(drawn.composition, drawn.at, at):
+            surface.area.queue_render()
+        return True
+
+    def _frame_time(self, area) -> float:
+        """The time of the frame being drawn on this machine's monotonic clock: the area's frame
+        clock's, else now."""
+        clock = area.get_frame_clock()
+        return time.monotonic() if clock is None else frame_time(self.GLib, clock)
+
+    def _current(self, generations: tuple) -> bool:
+        """The decoders a draw used still hold those decodes (none was sought or replaced)."""
+        return all(key in self._decoders and (self._decoders[key].incarnation,
+                                              self._decoders[key].generation) == (incarnation, generation)
+                   for key, incarnation, generation in generations)
+
+    def _ready(self, composition: OutputComposition) -> bool:
+        """Every layer seen in `composition` has a decoded picture to draw."""
+        return all(local.layer.variant is None or (
+            (decoder := self._decoders.get(local.layer.assignment_id)) is not None
+            and decoder.prepared and not decoder.failure)
+            for local in visible_now(composition.layers))
 
     def _window_mapped(self, window, surface) -> None:
         """Every map begins a new episode: a remap (an output blip) gets a fresh surface."""
@@ -1208,8 +1247,8 @@ class NativeRenderer:
                 decoder.playing = playing
         generations = self._generations(composition)
         # Render on change: a new draw only when what it shows changed (layers, decoder
-        # generations, alpha, a new video sample, a trial edit) or the last one is due for
-        # renewal. A static photo is not redrawn every tick (G8).
+        # generations, a new video sample, a trial edit) or the last one is due for renewal. A
+        # static photo is not redrawn every tick (G8); a changing look is drawn on the frame clock.
         shown = _shown(composition, generations,
                        tuple(self._decoders[key].sample_serial for key, _, _ in generations),
                        frames, grant if frames is not None else None, self._luts)
@@ -1223,7 +1262,7 @@ class NativeRenderer:
             surface.pending = _Draw(self._serial, composition, generations, shown=shown)
             surface.area.queue_render()
         # Presented stays keyed on layers and generations only: a playing video's newer sample
-        # or a crossfade step never makes the composition already drawn read as pending.
+        # or a frame of a crossfade never makes the composition already drawn read as pending.
         if (ack and _fingerprint(ack.composition) == _fingerprint(composition)
                 and ack.generations == generations
                 and now-ack.completed_at < PRESENTATION_FRESHNESS):
@@ -1457,6 +1496,7 @@ class NativeRenderer:
                                            "candidate-" + str(grant.grant_id))
             surface.acknowledged = None
             return True
+        at = self._frame_time(area)
         draw = surface.pending
         if draw and draw.generations != self._generations(draw.composition):
             surface.pending = draw = None
@@ -1464,6 +1504,19 @@ class NativeRenderer:
             pending_grant = frames.grant(surface.output.output_id, draw.composition)
             if pending_grant is None or not pending_grant.admitted:
                 surface.pending = draw = None
+        ack = surface.acknowledged
+        if (draw is None and ack is not None and ack.at is not None
+                and changed(ack.composition, ack.at, at) and self._current(ack.generations)):
+            # Its look is changing: draw it again at this frame's time, no tick needed.
+            self._serial += 1
+            draw = _Draw(self._serial, ack.composition, ack.generations, shown=ack.shown)
+        if draw is not None:
+            drawn = look(draw.composition, at)
+            if self._ready(drawn):
+                draw.composition = drawn
+            elif draw is not surface.pending:
+                draw = None     # a layer seen only at this frame time is not decoded: next frame
+            # else: the pending draw as present() prepared it, its look at the tick's time
         logical = draw.composition if draw else (surface.acknowledged.composition if surface.acknowledged else None)
         applied = None
         trial = None
@@ -1534,11 +1587,13 @@ class NativeRenderer:
                             local = replace(local, position=position)
                     actual.append(local)
                 draw.composition = replace(draw.composition, layers=tuple(actual))
-                draw.completed_at = time.monotonic()
+                draw.completed_at, draw.at = time.monotonic(), at
                 surface.targets.reverse()
                 surface.acknowledged = draw
                 if surface.pending is draw:
                     surface.pending = None
+                if until_change(draw.composition, at) is not None:
+                    surface.follower.follow()       # its look changes: draw it on each frame
             if frames is not None and surface.acknowledged is not None:
                 actual = surface.acknowledged.composition
                 grant = frames.grant(surface.output.output_id, actual)
@@ -1690,5 +1745,6 @@ class NativeRenderer:
             self._destroy_decoder(decoder)
         self._decoders.clear()
         for surface in self._surfaces.values():
+            surface.follower.stop()
             surface.window.destroy()
         self._closed = True
