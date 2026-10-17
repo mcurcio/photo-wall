@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { apiWrite } from "./apiWrite.js";
-import { fact, LAYER_NAMES } from "./facts.js";
+import { appHandle, fact, LAYER_NAMES } from "./facts.js";
 import { auditRef } from "./frozenRequest.js";
 import { usePolledRead } from "./polledRead.js";
-import { appHandle, releaseResult } from "./releases.js";
+import { answerOutcome } from "./sendOutcome.js";
 import { boundFrames } from "./stage.js";
 
 /**
@@ -36,7 +36,7 @@ import { boundFrames } from "./stage.js";
  * @typedef {{id: string|null, phase: "sampling"|"stopped"|"accepted", answer: SampleAnswer|null,
  *            stopped: string|null, sustained: number|null, quietMs: number, lastAt: number,
  *            samples: number}} SamplerState
- * @typedef {import("./releases.js").Outcome} Outcome
+ * @typedef {import("./sendOutcome.js").Outcome} Outcome
  */
 
 export const SAMPLE_CADENCE_MS = 2000;
@@ -167,7 +167,7 @@ export async function sendBegin(deviceId, request, { node, snapshot, playerId },
   } catch {
     result = null;
   }
-  return releaseResult(result, () => "Qualification begun.", BEGIN_CODES);
+  return answerOutcome(result, () => "Qualification begun.", BEGIN_CODES);
 }
 
 // Central's sample codes (§27). Waiting codes keep sampling; every other code stops it.

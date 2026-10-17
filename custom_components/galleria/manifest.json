@@ -1,0 +1,13 @@
+{
+  "domain": "galleria",
+  "name": "Galleria",
+  "codeowners": ["@mcurcio"],
+  "config_flow": true,
+  "dependencies": [],
+  "documentation": "https://github.com/mcurcio/photo-wall",
+  "integration_type": "hub",
+  "iot_class": "local_polling",
+  "issue_tracker": "https://github.com/mcurcio/photo-wall/issues",
+  "requirements": ["nats-py==2.16.0"],
+  "version": "0.0.0"
+}

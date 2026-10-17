@@ -15,29 +15,26 @@ that tints only the Output's bottom-right quarter, which no sample reads.
 
 1. a_picture_document_changes_the_pixels_and_comes_back_presented: before any picture document,
    pixels inside the opening are the neutral reference and outside are black. A document with
-   software brightness 30 % and contrast 25 % (100 % changes nothing; picture change 3) and no
-   hardware value makes the controller's report say `presented_change` 3, and the captured pixels
-   inside the opening equal `final_pixel` of the operations the controller computed for that
-   document; outside every opening they stay exactly black although contrast below 100 lifts black
-   (the mask is last).
-2. neutral_is_v4 (print look, 2026-10-12, P3): a v5 document whose software group is neutral,
-   print look included, on a binding whose Mat is Mat(): presented, and the pixels equal picture
-   operations v4's formula (written out here, not player/geometry.py's).
-3. tracer_black_floor_and_one_light (the design's tracer): a document with software black floor
-   2 % (black_floor_tenths 20) and all else neutral, on a binding whose Mat is 2 mm deep with one
-   light from the wall's up (steep 45, no softness, strength 1.0, 6500 K): presented, and the
-   pixels equal `final_pixel` with the floor share 0.02 (worked here from the tenths, so a
-   controller that compiled the floor another way fails) and `mat_shade`'s shade, including the
-   point 1 mm below the picture's top edge, in the light's shadow.
-4. lut_leg_waits_for_the_lut (the tracer's second leg): a document naming a LUT (a fixture table)
-   at amount 80. The Player has no Central here: its PlayerLuts is fed by this harness (the
-   Player holds the fixture bytes once a release file appears, as the service does after its
-   digest-checked fetch). Before the release the report's presented change stays below the
-   document's and the pixels are the sliders-only reference; after it the presented change
-   reaches the document's and the pixels are the reference with the LUT.
+   software contrast 25 % (100 % changes nothing; picture change 3) and no hardware value makes the
+   controller's report say `presented_change` 3, and the captured pixels inside the opening equal
+   `final_pixel` of the operations the controller computed for that document; outside every
+   opening they stay exactly black although contrast below 100 lifts black (the mask is last).
+2. neutral_is_todays_picture (decision 0028): a neutral document on a binding with the upgrade's
+   light (one wash at the matched lux, paper that matches the TV): presented, and the pixels equal
+   the 1c final pass at neutral sliders (written out here, not player/geometry.py's).
+3. tracer_matched_light_and_one_far_light: a document moving only the Display's matched lux (800
+   lx, picture operations v8 through the controller and the shell), on a binding lit by a wash
+   and a far light from the wall's up on a 2 mm mat: presented, and the pixels equal `final_pixel`
+   under those lights, including the point 1 mm below the picture's top edge, in the far light's
+   shadow.
+4. the_frames_paper_profile_joins_when_held: the binding's paper names a profile (a fixture table).
+   The Player has no Central here: its PlayerLuts is fed by this harness (the Player holds the
+   fixture bytes once a release file appears, as the service does after its digest-checked fetch).
+   Before the release the pixels are the reference without the LUT; after it, with it.
 
-The Player child reads the binding's Mat from MAT_FILE (absent: Mat()) on every present, so the
-harness moves the Frame's mat as Central would move the binding.
+The Player child reads the binding's lighting from LIGHTING_FILE (absent: the upgrade's) on every
+present and draws with a room-lights document holding the room light full on, so the harness moves
+the Frame's lighting as Central would move the binding.
 """
 import mmap
 import os
@@ -70,13 +67,36 @@ ROTATION = 7.0
 TOLERANCE = 0.02            # the GL reference's 0.015 plus the framebuffer's 8-bit rounding
 PICTURE_CHANGE = 3
 PROFILE = dict(width_px=1600, height_px=900, diagonal_inches=10)
-MAT_FILE = pathlib.Path("/tmp/pw-picture-e2e-mat.json")             # the binding's Mat, for the Player
+LIGHTING_FILE = pathlib.Path("/tmp/pw-picture-e2e-lighting.json")   # the binding's lighting, for the Player
 LUT_FILE = pathlib.Path("/tmp/pw-picture-e2e-lut.bin")              # the fixture LUT's bytes
 LUT_RELEASE = pathlib.Path("/tmp/pw-picture-e2e-lut-release")       # present: the Player holds them
 LUT_PROFILE_SHA256, LUT_RECIPE = "ef" * 32, "lut33-perceptual-relcol-bpc-1"
 PLAYER_ENV = {"XDG_RUNTIME_DIR": str(ROOT), "WAYLAND_DISPLAY": SOCKET, "GDK_BACKEND": "wayland",
               "LIBGL_ALWAYS_SOFTWARE": "1", "PYOPENGL_PLATFORM": "egl", "GSETTINGS_BACKEND": "memory",
               "PHOTO_WALL_DISPLAY_HOST": "1", "HOME": "/tmp/pw-picture-e2e-home"}
+
+
+def upgrade_lighting():
+    """The upgrade's lighting (decision 0028): one wash of the room light at the matched lux, paper
+    that matches the TV."""
+    import math
+
+    from contracts.frame_lighting import AT_FULL, FrameLighting, Paper, WashLight
+    from contracts.node_picture import UPGRADE_DISPLAY_LIGHT
+
+    return FrameLighting(mat_depth_mm=0, paper=Paper(whiteness=.9, ink_density=-math.log10(UPGRADE_DISPLAY_LIGHT.black)),
+                         lights=(WashLight(light="room", lux=UPGRADE_DISPLAY_LIGHT.matched_lux,
+                                           reference=AT_FULL),))
+
+
+def room():
+    from contracts.room_light import (
+        FixedColour,
+        FixedEntry,
+        RoomLightsDocument,
+    )
+
+    return RoomLightsDocument(change=1, lights={"room": FixedEntry(colour=FixedColour(kelvin=6500))})
 
 
 def grey_png(path: pathlib.Path) -> bytes:
@@ -100,13 +120,13 @@ def player() -> None:
 
     from gi.repository import GLib
 
+    from contracts.frame_lighting import FrameLighting
     from contracts.lut import LutRef
     from contracts.models import (
         Calibration,
         CoverFit,
         FrameProfile,
         Layer,
-        Mat,
         OutputBinding,
         Variant,
     )
@@ -118,7 +138,8 @@ def player() -> None:
     payload = PHOTO.read_bytes()
     variant = Variant(asset_id="asset-" + hashlib.sha256(payload).hexdigest()[:16], recipe_id="e" * 64, sha256=hashlib.sha256(payload).hexdigest(), size=len(payload),
                       media_type="image/png", width=64, height=48)
-    binding = OutputBinding(output_id=OUTPUT, frame_id="frame", generation=1, profile=FrameProfile(**PROFILE), mat=Mat(),
+    binding = OutputBinding(output_id=OUTPUT, frame_id="frame", generation=1, profile=FrameProfile(**PROFILE),
+                            lighting=upgrade_lighting(),
                             calibration=Calibration(fit=CoverFit(corners=OPENING, rotation=ROTATION)))
     layer = LocalLayer(Layer(assignment_id="grey", run_id="run", output_id=OUTPUT, frame_id="frame",
                              binding_generation=1, start=0, end=10**9, media_origin=0, variant=variant,
@@ -128,11 +149,13 @@ def player() -> None:
     native = NativeRenderer((NativeOutput(OUTPUT, "photo-wall-headless", WIDTH_PX, HEIGHT_PX),), luts=luts)
     native.set_unbound_outputs((), None)
     native.set_identify_output(None)        # as player/service.py does: no identify banner
+    native.set_room_lights(room())
     context = GLib.MainContext.default()
     last = None
     while True:
-        mat = Mat.model_validate_json(MAT_FILE.read_text()) if MAT_FILE.exists() else Mat()
-        shown = OutputComposition(binding.model_copy(update={"mat": mat}), (layer,))
+        lighting = (FrameLighting.model_validate_json(LIGHTING_FILE.read_text()) if LIGHTING_FILE.exists()
+                    else upgrade_lighting())
+        shown = OutputComposition(binding.model_copy(update={"lighting": lighting}), (layer,))
         if LUT_RELEASE.exists() and luts.wanted():
             luts.hold(LutRef(LUT_PROFILE_SHA256, LUT_RECIPE), LUT_FILE.read_bytes())
             print("PLAYER lut held", flush=True)
@@ -221,14 +244,25 @@ def grey_linear() -> tuple[float, float, float]:
     return (decode_channel(GREY / 255),) * 3
 
 
+def lights_of(operations, lighting=None):
+    """The Frame's lights (`frame_lights`) as the Player draws them with `operations`."""
+    from contracts.models import CoverFit, FrameProfile
+    from player.geometry import frame_lights
+
+    return frame_lights(lighting or upgrade_lighting(), room(), CoverFit(corners=OPENING, rotation=ROTATION),
+                        FrameProfile(**PROFILE), operations.light)
+
+
 def compare(operations, *, reference=None) -> tuple[int, int]:
     """Every sampled pixel clear of the opening's edges equals the reference: inside, the grey
-    through `final_pixel` with `operations` (or `reference(x, y)`, an RGB, when given); outside,
-    exactly black. The (inside, outside) counts; AssertionError at the first that differs."""
+    through `final_pixel` with `operations` under the upgrade's light (or `reference(x, y)`, an
+    RGB, when given); outside, exactly black. The (inside, outside) counts; AssertionError at the
+    first that differs."""
     from player.geometry import final_pixel, inside_opening
 
     width, height, data = capture()
-    flat = final_pixel(grey_linear(), operations, inside=True)[:3] if reference is None else None
+    flat = (final_pixel(grey_linear(), operations, inside=True, lights=lights_of(operations), x=.5, y=.5)[:3]
+            if reference is None else None)
     counts = [0, 0]
     for j in range(4, height, 9):
         for i in range(4, width, 9):
@@ -327,6 +361,7 @@ def main() -> None:
     from contracts.node_display import Surface
     from contracts.node_frame import neutral_operations
     from contracts.node_picture import (
+    UPGRADE_DISPLAY_LIGHT,
         PictureDocument,
         SoftwarePicture,
         decode_picture_document,
@@ -405,7 +440,8 @@ def main() -> None:
         pump(lambda seen: isinstance(seen, DiagnosticRelease))
         print("PASS the_player_is_handed_the_output", flush=True)
 
-        inside, outside = await_compare(neutral_operations(OUTPUT, 1), drain)
+        stand_in = neutral_operations(OUTPUT, 1, UPGRADE_DISPLAY_LIGHT)
+        inside, outside = await_compare(stand_in, drain)
         print(f"NEUTRAL inside={inside} outside={outside}", flush=True)
         assert inside > 300 and outside > 1000, (inside, outside)
 
@@ -424,10 +460,10 @@ def main() -> None:
         backend.picture_events = controller
         controller.output(OUTPUT, connected=True, identity=None)
         controller.start()
-        wanted = SoftwarePicture(30, 25, 6500, 22)
+        wanted = SoftwarePicture(contrast_percent=25, colour_temperature_kelvin=6500, gamma_tenths=22)
         # The document as it crosses the wire for HDMI-A-1, then retargeted at the headless Output.
         document = replace(decode_picture_document(encode_picture_document(
-            PictureDocument("HDMI-A-1", PICTURE_CHANGE, {}, wanted))), output_id=OUTPUT)
+            PictureDocument("HDMI-A-1", PICTURE_CHANGE, {}, wanted, light=UPGRADE_DISPLAY_LIGHT))), output_id=OUTPUT)
         controller.document(OUTPUT, document)
         end = time.monotonic() + 15
         while True:
@@ -439,17 +475,17 @@ def main() -> None:
             time.sleep(0.01)
         print(f"REPORT {report}", flush=True)
         assert report.for_change == PICTURE_CHANGE and report.results == {}, report   # no hardware value
-        operations = operations_for(OUTPUT, PICTURE_CHANGE, wanted, None)
-        assert operations.contrast_slope < 1 and operations.light_factor < 1, operations
+        operations = operations_for(OUTPUT, PICTURE_CHANGE, wanted, UPGRADE_DISPLAY_LIGHT, None)
+        assert operations.contrast_slope < 1, operations
         inside, outside = await_compare(operations, drain)
         print(f"ADJUSTED inside={inside} outside={outside}", flush=True)
         assert inside > 300 and outside > 1000, (inside, outside)
         print("PASS a_picture_document_changes_the_pixels_and_comes_back_presented", flush=True)
 
-        def send(change: int, software) -> None:
+        def send(change: int, software, light=UPGRADE_DISPLAY_LIGHT) -> None:
             """The document as it crosses the wire for HDMI-A-1, retargeted at the headless Output."""
             controller.document(OUTPUT, replace(decode_picture_document(encode_picture_document(
-                PictureDocument("HDMI-A-1", change, {}, software))), output_id=OUTPUT))
+                PictureDocument("HDMI-A-1", change, {}, software, light=light))), output_id=OUTPUT))
 
         def presented(change: int, seconds: float = 15.0):
             end = time.monotonic() + seconds
@@ -461,7 +497,7 @@ def main() -> None:
                 drain()
                 time.sleep(0.01)
 
-        print_look_cases(send, presented, drain, reports, SoftwarePicture)
+        room_light_cases(send, presented, drain, SoftwarePicture)
     except BaseException:
         player_log.flush()
         print("PLAYER LOG:\n" + pathlib.Path("/tmp/pw-picture-e2e-player.log").read_text()[-4000:], flush=True)
@@ -479,17 +515,16 @@ def main() -> None:
             weston.kill()
 
 
-# --- the print look (P3): the design's tracer, end to end ------------------------------------------
+# --- room light (decision 0028): the Display's light and the Frame's lighting, end to end -----------
 
-def v4_pixel(linear, operations) -> tuple[float, float, float]:
-    """Picture operations v4's final pass as it shipped (1c), written out: the oracle for "neutral
-    is today"."""
+def today_pixel(linear, operations) -> tuple[float, float, float]:
+    """The 1c final pass at neutral sliders, written out: the oracle for "the upgrade is today"."""
     def encode(value: float) -> float:
         value = min(1.0, max(0.0, value))
         return 12.92 * value if value <= .0031308 else 1.055 * value ** (1 / 2.4) - .055
     pixel = []
     for value, multiplier in zip(linear, operations.rgb_multipliers, strict=True):
-        value = min(1.0, max(0.0, value * multiplier * operations.light_factor))
+        value = min(1.0, max(0.0, value * multiplier))
         value = (encode(value) - .5) * operations.contrast_slope + .5
         pixel.append(min(1.0, max(0.0, value) ** operations.gamma_exponent))
     return tuple(pixel)
@@ -510,90 +545,84 @@ def lut_fixture() -> bytes:
     return bytes(body)
 
 
-def print_look_cases(send, presented, drain, reports, SoftwarePicture) -> None:
+def write_lighting(lighting) -> None:
+    LIGHTING_FILE.write_text(lighting.model_dump_json())
+    LIGHTING_FILE.chmod(0o644)
+
+
+def room_light_cases(send, presented, drain, SoftwarePicture) -> None:
+    from contracts.frame_lighting import AT_FULL, FarLight, WashLight
     from contracts.lut import LutRef
-    from contracts.models import CoverFit, FrameProfile, Light, Mat
-    from contracts.node_frame import LutMix, PictureOperations
-    from player.geometry import final_pixel, homography, mat_shade, mat_shadow, transform
+    from contracts.node_frame import PictureOperations
+    from contracts.node_picture import UPGRADE_DISPLAY_LIGHT, DisplayLight
+    from player.geometry import final_pixel, homography, irradiance, transform
 
-    fit = CoverFit(corners=OPENING, rotation=ROTATION)
-    profile = FrameProfile(**PROFILE)
-    neutral = SoftwarePicture(100, 100, 6500, 22)
+    neutral = SoftwarePicture(contrast_percent=100, colour_temperature_kelvin=6500, gamma_tenths=22)
+    matched, black = UPGRADE_DISPLAY_LIGHT.matched_lux, UPGRADE_DISPLAY_LIGHT.black
 
-    # 2. neutral_is_v4
-    MAT_FILE.unlink(missing_ok=True)
+    # 2. neutral_is_todays_picture
+    LIGHTING_FILE.unlink(missing_ok=True)
     send(4, neutral)
     presented(4)
-    operations = PictureOperations(OUTPUT, 4, (1.0, 1.0, 1.0), 1.0, 1.0, 1.0)
-    v4 = v4_pixel(grey_linear(), operations)
-    inside, outside = await_compare(operations, drain, reference=lambda _x, _y: v4)
-    print(f"NEUTRAL_V4 inside={inside} outside={outside}", flush=True)
+    operations = PictureOperations(OUTPUT, 4, (1.0, 1.0, 1.0), 1.0, 1.0, DisplayLight(matched, black))
+    today = today_pixel(grey_linear(), operations)
+    inside, outside = await_compare(operations, drain, reference=lambda _x, _y: today)
+    print(f"NEUTRAL_TODAY inside={inside} outside={outside}", flush=True)
     assert inside > 300 and outside > 1000, (inside, outside)
-    print("PASS neutral_is_v4", flush=True)
+    print("PASS neutral_is_todays_picture", flush=True)
 
-    # 3. tracer_black_floor_and_one_light
-    mat = Mat(depth_mm=2, lights=(Light(from_degrees=0, steep_degrees=45, softness_degrees=0,
-                                        strength_tenths=10, colour_kelvin=6500),))
-    MAT_FILE.write_text(mat.model_dump_json())
-    MAT_FILE.chmod(0o644)
-    floored = SoftwarePicture(100, 100, 6500, 22, black_floor_tenths=20)
-    send(5, floored)
+    # 3. tracer_matched_light_and_one_far_light
+    lighting = upgrade_lighting().model_copy(update={"mat_depth_mm": 2.0, "lights": (
+        WashLight(light="room", lux=500, reference=AT_FULL),
+        FarLight(light="room", lux=500, reference=AT_FULL, from_degrees=0, steep_degrees=45,
+                 softness_degrees=0))})
+    write_lighting(lighting)
+    light = DisplayLight(matched_lux=800.0, black=black)
+    send(5, neutral, light)
     report = presented(5)
-    expected = PictureOperations(OUTPUT, 5, (1.0, 1.0, 1.0), 1.0, 1.0, 1.0,
-                                 black_floor=20 / 1000)
-    shadow = mat_shadow(fit, profile, mat)
+    expected = PictureOperations(OUTPUT, 5, (1.0, 1.0, 1.0), 1.0, 1.0, DisplayLight(800.0, black))
+    lights = lights_of(expected, lighting)
 
-    def shaded(x: float, y: float) -> tuple[float, float, float]:
-        return final_pixel(grey_linear(), expected, inside=True, shade=mat_shade(shadow, x, y))[:3]
+    def lit(x: float, y: float) -> tuple[float, float, float]:
+        return final_pixel(grey_linear(), expected, inside=True, lights=lights, x=x, y=y)[:3]
 
-    inside, outside = await_compare(expected, drain, reference=shaded)
-    # The point 1 mm below the opening's top edge (mat space), mid-width: in the light's shadow.
-    to_output = homography(fit.corners)
-    u, v = .5, 1 / shadow.size_mm[1]
-    x, y = transform(to_output, u, v)
-    assert mat_shade(shadow, x, y) == (.5, .5, .5), mat_shade(shadow, x, y)
+    inside, outside = await_compare(expected, drain, reference=lit)
+    # The point 1 mm below the opening's top edge (mat space), mid-width: in the far light's shadow.
+    x, y = transform(homography(OPENING), .5, 1 / lights.size_mm[1])
+    assert abs(irradiance(lights, x, y)[0] - 500) < 1e-6, irradiance(lights, x, y)
     width, height, data = capture()
     i, j = int(x * width), int(y * height)
-    centre_x, centre_y = (i + .5) / width, (j + .5) / height
     offset = (j * width + i) * 4
     blue, green, red = data[offset:offset + 3]
-    want = shaded(centre_x, centre_y)
+    want = lit((i + .5) / width, (j + .5) / height)
     actual = (red / 255, green / 255, blue / 255)
     print(f"TRACER inside={inside} outside={outside} report={report} one_mm={actual} want={want}", flush=True)
     assert max(abs(a - e) for a, e in zip(actual, want, strict=True)) <= TOLERANCE, ("one_mm", actual, want)
-    assert want[0] < final_pixel(grey_linear(), expected, inside=True)[0] - .1, want      # shaded
+    assert want[0] < lit(.5, .5)[0] - .1, want                                       # shaded
     assert inside > 300 and outside > 1000, (inside, outside)
-    print("PASS tracer_black_floor_and_one_light", flush=True)
+    print("PASS tracer_matched_light_and_one_far_light", flush=True)
 
-    # 4. lut_leg_waits_for_the_lut
-    MAT_FILE.unlink(missing_ok=True)
+    # 4. the_frames_paper_profile_joins_when_held
     table = lut_fixture()
     LUT_FILE.write_bytes(table)
     LUT_FILE.chmod(0o644)
     LUT_RELEASE.unlink(missing_ok=True)
     ref = LutRef(LUT_PROFILE_SHA256, LUT_RECIPE)
-    looked = SoftwarePicture(100, 100, 6500, 22, black_floor_tenths=20, lut=ref, lut_amount_percent=80)
-    send(6, looked)
-    sliders = PictureOperations(OUTPUT, 6, (1.0, 1.0, 1.0), 1.0, 1.0, 1.0,
-                                black_floor=20 / 1000)
-    inside, _ = await_compare(sliders, drain)
-    end = time.monotonic() + 2.0
-    while time.monotonic() < end:           # the Player draws on with the sliders; Done waits
-        drain()
-        report = reports.latest.get(OUTPUT)
-        assert report is None or report.presented_change is None or report.presented_change < 6, (
-            "presented_before_the_lut", report)
-        time.sleep(0.05)
-    compare(sliders)
+    upgrade = upgrade_lighting()
+    profiled = upgrade.model_copy(update={"paper": upgrade.paper.model_copy(update={"profile": ref})})
+    write_lighting(profiled)
+    send(6, neutral)
+    presented(6)                            # nothing waits on the Frame's LUT
+    operations = PictureOperations(OUTPUT, 6, (1.0, 1.0, 1.0), 1.0, 1.0, DisplayLight(matched, black))
+    inside, _ = await_compare(operations, drain)
     LUT_RELEASE.touch()
     LUT_RELEASE.chmod(0o644)
-    report = presented(6)
-    with_lut = replace(sliders, lut=LutMix(ref, .8))
-    lut_pixel = final_pixel(grey_linear(), with_lut, inside=True, lut=table)[:3]
-    inside_after, _ = await_compare(with_lut, drain, reference=lambda _x, _y: lut_pixel)
-    print(f"LUT before={inside} after={inside_after} report={report} pixel={lut_pixel}", flush=True)
+    lut_pixel = final_pixel(grey_linear(), operations, inside=True, lights=lights_of(operations, profiled),
+                            x=.5, y=.5, lut=table)[:3]
+    inside_after, _ = await_compare(operations, drain, reference=lambda _x, _y: lut_pixel)
+    print(f"LUT before={inside} after={inside_after} pixel={lut_pixel}", flush=True)
     assert lut_pixel[2] < lut_pixel[0] - .1, lut_pixel          # the warm table is drawn
-    print("PASS lut_leg_waits_for_the_lut", flush=True)
+    print("PASS the_frames_paper_profile_joins_when_held", flush=True)
 
 
 if __name__ == "__main__":

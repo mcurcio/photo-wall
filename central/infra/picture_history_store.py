@@ -11,13 +11,13 @@ Writers (each in its caller's transaction, so a history write fails only with it
 Each trims its own key to the newest central/tuning_history/bounds.py KEPT_ENTRIES (per Display) or
 SENT_ENTRIES (per port) after appending. Every `at` is `clock_timestamp()` in the INSERT
 (PostgreSQL's clock). An entry's picture is stored under the displays columns' names
-(picture_columns `picture_fields`, as picture_sessions.draft) with its LUT's recipe beside it.
+(picture_columns `picture_fields`, as picture_sessions.draft); one from before migration 099 has
+no Display's light (`picture_columns.entry_picture`, the record's `light_recorded`).
 """
 from __future__ import annotations
 
 import uuid
 from collections.abc import Mapping
-from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any, Final
 from uuid import UUID
@@ -32,19 +32,18 @@ from central.displays.picture_history import (
     PictureRecord,
     Port,
 )
-from central.infra.picture_columns import picture_fields, stored_picture
+from central.infra.picture_columns import entry_picture, picture_fields
 from central.tuning_history import bounds as retention
 from central.tuning_history.bounds import HistoryPage
-from contracts.lut import LutRef
 from contracts.tuning import TestPattern
 
 # Both tables read under one shape, so every reader decodes an entry alike (`_entry`): a kept entry
 # has no port, Frame or test pattern; a sent entry's number is its port's picture_change.
 _KEPT: Final = ("SELECT k.id, k.display_id, k.number, k.kind, k.at, k.session_id, k.restored_from, k.picture, "
-                "k.lut_recipe_id, NULL::text AS player_id, NULL::text AS output_id, NULL::text AS frame_id, "
+                "NULL::text AS player_id, NULL::text AS output_id, NULL::text AS frame_id, "
                 "NULL::text AS test_pattern FROM picture_kept_entries k")
 _SENT: Final = ("SELECT s.id, s.display_id, s.picture_change AS number, s.kind, s.at, s.session_id, s.restored_from, "
-                "s.picture, s.lut_recipe_id, s.player_id, s.output_id, s.frame_id, s.test_pattern "
+                "s.picture, s.player_id, s.output_id, s.frame_id, s.test_pattern "
                 "FROM picture_sent_entries s")
 
 
@@ -54,16 +53,15 @@ def append_kept_in(conn: Any, display_id: UUID, record: PictureRecord) -> Pictur
     if record.kind not in KEPT_KINDS:
         raise ValueError("picture_history_kind")
     conn.execute("SELECT 1 FROM displays WHERE id=%s FOR NO KEY UPDATE", (display_id,))
-    lut = record.picture.software.lut
     row = conn.execute(
         "INSERT INTO picture_kept_entries AS k (id, display_id, number, kind, at, session_id, restored_from, "
-        "picture, lut_recipe_id) SELECT %s, %s, COALESCE(max(number), 0) + 1, %s, clock_timestamp(), %s, %s, %s, %s "
+        "picture) SELECT %s, %s, COALESCE(max(number), 0) + 1, %s, clock_timestamp(), %s, %s, %s "
         "FROM picture_kept_entries WHERE display_id=%s "
         "RETURNING k.id, k.display_id, k.number, k.kind, k.at, k.session_id, k.restored_from, k.picture, "
-        "k.lut_recipe_id, NULL::text AS player_id, NULL::text AS output_id, NULL::text AS frame_id, "
+        "NULL::text AS player_id, NULL::text AS output_id, NULL::text AS frame_id, "
         "NULL::text AS test_pattern",
         (uuid.uuid4(), display_id, record.kind.value, record.session_id, record.restored_from,
-         Jsonb(picture_fields(record.picture)), None if lut is None else lut.recipe_id, display_id)).fetchone()
+         Jsonb(picture_fields(record.picture)), display_id)).fetchone()
     conn.execute("DELETE FROM picture_kept_entries WHERE display_id=%s AND number <= (SELECT number "
                  "FROM picture_kept_entries WHERE display_id=%s ORDER BY number DESC OFFSET %s LIMIT 1)",
                  (display_id, display_id, retention.KEPT_ENTRIES))
@@ -77,15 +75,15 @@ def append_sent_in(conn: Any, port: Port, picture_change: int, *, display_id: UU
     that change. Trims the port to SENT_ENTRIES. ValueError("picture_history_kind") for a kept kind."""
     if record.kind not in SENT_KINDS:
         raise ValueError("picture_history_kind")
-    lut, pattern = record.picture.software.lut, record.test_pattern
+    pattern = record.test_pattern
     conn.execute(
         "INSERT INTO picture_sent_entries(id, player_id, output_id, picture_change, display_id, frame_id, kind, at, "
-        "session_id, restored_from, picture, lut_recipe_id, test_pattern) "
-        "VALUES (%s, %s, %s, %s, %s, %s, %s, clock_timestamp(), %s, %s, %s, %s, %s) "
+        "session_id, restored_from, picture, test_pattern) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, clock_timestamp(), %s, %s, %s, %s) "
         "ON CONFLICT (player_id, output_id, picture_change) DO NOTHING",
         (uuid.uuid4(), port.player_id, port.output_id, picture_change, display_id, frame_id, record.kind.value,
          record.session_id, record.restored_from, Jsonb(picture_fields(record.picture)),
-         None if lut is None else lut.recipe_id, None if pattern is None else pattern.value))
+         None if pattern is None else pattern.value))
     conn.execute("DELETE FROM picture_sent_entries WHERE player_id=%(player)s AND output_id=%(output)s "
                  "AND picture_change <= (SELECT picture_change FROM picture_sent_entries WHERE player_id=%(player)s "
                  "AND output_id=%(output)s ORDER BY picture_change DESC OFFSET %(keep)s LIMIT 1)",
@@ -143,18 +141,14 @@ def _one(conn: Any, sql: str, params: tuple[Any, ...]) -> PictureEntry | None:
 
 
 def _entry(row: Mapping[str, Any]) -> PictureEntry:
-    """The entry of a row read under `_KEPT`'s or `_SENT`'s shape: its picture with the LUT under the
-    recipe recorded beside it (the stored picture names only the paper profile), `at` in UTC."""
-    picture = stored_picture(row["picture"])
-    lut, recipe = picture.software.lut, row["lut_recipe_id"]
-    if lut is not None and recipe is not None:
-        picture = replace(picture, software=replace(picture.software, lut=LutRef(lut.profile_sha256, recipe)))
+    """The entry of a row read under `_KEPT`'s or `_SENT`'s shape, `at` in UTC."""
+    picture, light_recorded = entry_picture(row["picture"])
     pattern = row["test_pattern"]
     return PictureEntry(
         row["id"], row["display_id"], row["number"], row["at"].astimezone(UTC),
         None if row["player_id"] is None else Port(row["player_id"], row["output_id"]), row["frame_id"],
         PictureRecord(PictureEntryKind(row["kind"]), picture, row["session_id"], row["restored_from"],
-                      None if pattern is None else TestPattern(pattern)))
+                      None if pattern is None else TestPattern(pattern), light_recorded))
 
 
 __all__ = ["append_kept_in", "append_sent_in", "latest_kept_at_in", "latest_kept_in", "latest_sent_for_frame_at_in",

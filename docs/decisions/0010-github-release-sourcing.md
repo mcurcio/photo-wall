@@ -42,6 +42,39 @@ unchanged):
 - **Docs (bead 5).** `README.md` "Bring a display online" and
   `docs/runbook.md` "promote a release from GitHub (0010)".
 
+### A version per Pi (2026-10-16)
+
+The owner, 2026-10-16: "There is no "Installation release"; each node can use its own version";
+"Updates can also be triggered by the Player device and apply only to that device"; his answer Q2 A on
+the Home Assistant system design: Central keeps only a version per Pi. It reopens the stored wall-wide
+selection of 2026-10-04 (not its whole-wall apply) and supersedes this record's single boot selection:
+
+- **Each Pi's version** is a release tag Central keeps for that Pi (`player_versions`, migration 100;
+  `central/infra/player_versions.py`, the one writer and reader). Its boot offer carries its version's
+  deployment; the offer's wire is unchanged (a release's base carries the release's own tag, so
+  `offer.base.tag` is the Pi's version, and an older initramfs keeps parsing offers). The wall-wide
+  selection (`node_boot_policy`), its compare-and-set and the first-run auto-select are gone; migration
+  100 gives every enrolled Pi the selection it had and its previous one.
+- **A Pi with no version yet boots the newest ready stable release** (`boot_policy.newest_ready_stable`),
+  and its first boot offer records that release as its version: a new or swapped-in Pi gets the newest
+  release unasked, and can run ahead of its neighbours (a cost the owner accepted with Q2 A), but from
+  then on its version changes only through Install or Update the wall, never because a newer release
+  became ready (no auto-advance channel), and the keep set holds the release it runs (fix cycle 1,
+  2026-10-16).
+- **Install on one Pi** (the console's `POST /v1/operator/players/{serial}/install`, and Home
+  Assistant's `installPlayer` on Central's hub, one service) sets that Pi's version (its old one
+  becomes its previous), queues the download, and restarts that Pi once the release is ready: a reboot
+  command on its current host session; with none, it stays restarting and its next boot takes the
+  version anyway. The install ends when its host reports the version's base tag. **Update the wall**
+  (`PUT /v1/operator/releases/wall`) sets every enrolled Pi's version in one transaction and restarts
+  none; the console's rollout reboots them in turn.
+- **The keep set** (`boot_policy.kept`): Central keeps downloaded the newest three stable releases plus
+  every Pi's version and every Pi's previous version, so Undo on any Pi needs no download.
+- **Stage app stays** (this boot only): it never stores a version, and removing it reaches deep into
+  the Pi's apps broker. While a staged app runs, the Pi's "installed" version reads the boot's release.
+- **Costs.** A Pi left on an old version holds back wall-wide wire changes (WALL's two-step growth
+  waits on every Pi's reboot onto a new base, 0017 C14); the kernel and initrd stay iac's TFTP staging.
+
 ---
 
 ## The problem in plain words

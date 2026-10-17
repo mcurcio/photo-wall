@@ -20,13 +20,18 @@ import pytest
 from integration.bus_servers import WALL_TABLE, line_slices
 from nats.js.api import DiscardPolicy, RetentionPolicy, StorageType
 
+from appliance.boot.bus_environment import bus_environment
 from central.fleet.node_bus_accounts import FLEET_SYSTEM_USER, HubListeners, hub_configuration
+from contracts.central_api import CENTRAL_ACCOUNT, HOME_ASSISTANT_ACCOUNT
 from contracts.node_link import (
     CENTRAL_SUBSCRIPTIONS,
     CONSUMER_HEAP,
+    DOOR_CONNECTIONS,
     HUB_DOMAIN,
     LEAF_EXPORTS,
     LEAF_IMPORTS,
+    LEAF_WEBSOCKET_CONNECTION,
+    LOCAL_CONNECTIONS,
     MAX_STORED_MESSAGE,
     MEMORY_STORE_FACTOR,
     NODE_BUS_BASELINE,
@@ -34,20 +39,29 @@ from contracts.node_link import (
     NODE_BUS_HEADROOM,
     NODE_BUS_MEMORY_MAX,
     NODE_DOMAIN,
+    NODE_DOOR_ACCOUNT,
+    NODE_DOOR_PORT,
     NODE_MAX_CONSUMERS,
     NODE_MAX_CONTROL_LINE,
     NODE_MAX_PAYLOAD,
     NODE_MAX_PENDING,
     NODE_MAX_STREAMS,
+    NODE_READER_IMPORTS,
+    NODE_READER_PUBLISH,
+    NODE_READER_SUBSCRIBE,
+    NODE_READER_USER,
     NODE_STORE_BYTES,
     REPLY_ENVELOPE,
+    STANDARD_CONNECTION,
     STORE_LINES,
     WALL_ACCOUNT,
     WALL_API_PREFIX,
     WALL_STREAM_BYTES,
     WALL_WRITER_USER,
+    WEBSOCKET_CONNECTION,
     Pipe,
     account_id,
+    bus_server_name,
     central_user,
     node_user,
 )
@@ -165,16 +179,43 @@ def test_the_shipped_node_config_is_loopback_domain_node_and_caps_every_stream()
     assert int(account["jetstream"]["max_streams"]) == NODE_MAX_STREAMS
     # And the 13th consumer on a stream, per stream: the fit's consumer count (E-W1-CONS-2).
     assert int(account["jetstream"]["max_consumers"]) == NODE_MAX_CONSUMERS
-    # One local user with no permissions: the local deny list is gone (E3b design §12); the hub's
-    # allow-lists on the leaf user hold the leaf's subject contract (E-W1-LEAF-1).
-    assert account["users"] == [{"user": "local", "password": "local"}]
+    # The local user has no permissions: the local deny list is gone (E3b design §12); the hub's
+    # allow-lists on the leaf user hold the leaf's subject contract (E-W1-LEAF-1). It is admitted only
+    # on the loopback client port; the door's reader only at the door, in its own account, and may only
+    # ask for one stored message and hear the reply (0017 C3): the server holds the door read-only, and
+    # the request is a service DOOR imports from API, so every reply lands in DOOR.
+    assert account["users"] == [
+        {"user": "local", "password": "local", "allowed_connection_types": list(LOCAL_CONNECTIONS)}]
+    assert account["exports"] == [{"service": subject} for subject in NODE_READER_IMPORTS]
+    assert set(config["accounts"]) == {"API", NODE_DOOR_ACCOUNT}
+    assert config["accounts"][NODE_DOOR_ACCOUNT] == {
+        "users": [{"user": NODE_READER_USER, "password": NODE_READER_USER,
+                   "allowed_connection_types": list(DOOR_CONNECTIONS),
+                   "permissions": {"publish": {"allow": list(NODE_READER_PUBLISH)},
+                                   "subscribe": {"allow": list(NODE_READER_SUBSCRIBE)}}}],
+        "imports": [{"service": {"account": "API", "subject": subject}, "to": to}
+                    for subject, to in NODE_READER_IMPORTS.items()]}
+    assert LOCAL_CONNECTIONS == (STANDARD_CONNECTION,) and DOOR_CONNECTIONS == (WEBSOCKET_CONNECTION,)
     assert config["no_auth_user"] == "local"
+    # The door: every address, its port from the environment, no TLS, its clients landing in reader.
+    assert config["websocket"] == {"host": "0.0.0.0", "port": "$PHOTO_WALL_BUS_DOOR_PORT", "no_tls": True,
+                                   "no_auth_user": NODE_READER_USER}
     assert [remote["account"] for remote in config["leafnodes"]["remotes"]] == ["API"]
     assert config["leafnodes"]["remotes"][0]["urls"] == ["$PHOTO_WALL_BUS_LEAF_URL"]
     assert "deny_" not in text
     # Every per-Node value is the unit's environment, so the base ships one file for every Node.
     assert set(re.findall(r"\$(PHOTO_WALL_[A-Z_]+)", text)) == {
-        "PHOTO_WALL_BUS_NAME", "PHOTO_WALL_BUS_PORT", "PHOTO_WALL_BUS_LEAF_URL"}
+        "PHOTO_WALL_BUS_NAME", "PHOTO_WALL_BUS_PORT", "PHOTO_WALL_BUS_DOOR_PORT", "PHOTO_WALL_BUS_LEAF_URL"}
+
+
+def test_the_handoff_writes_every_variable_the_shipped_conf_reads():
+    """The bus environment names exactly the conf's variables (and Go's GOMEMLIMIT): the door's port
+    is NODE_DOOR_PORT and the server's name `bus_server_name`, which a door reader checks."""
+    environment = bus_environment("http://central.example:8080", "serial-c")
+    wanted = set(re.findall(r"\$(PHOTO_WALL_[A-Z_]+)", NODE_BUS_CONF.read_text()))
+    assert environment.keys() == wanted | {"GOMEMLIMIT"}
+    assert environment["PHOTO_WALL_BUS_DOOR_PORT"] == str(NODE_DOOR_PORT)
+    assert environment["PHOTO_WALL_BUS_NAME"] == f'"{bus_server_name("serial-c")}"'
 
 
 def test_centrals_websocket_frame_cap_carries_a_nodes_largest_frame():
@@ -191,27 +232,34 @@ def test_centrals_websocket_frame_cap_carries_a_nodes_largest_frame():
 def test_node_accounts_import_only_the_wall_set_and_export_nothing():
     config = json.loads(hub_configuration(["serial-a", "serial-b"], LISTENERS))
     accounts = config["accounts"]
-    assert set(accounts) == {WALL_ACCOUNT, "SYS", account_id("serial-a"), account_id("serial-b")}
+    # CENTRAL_ACCOUNT, Central's own with Home Assistant's door, is tests/test_hub_accounts.py's.
+    assert set(accounts) == {WALL_ACCOUNT, "SYS", CENTRAL_ACCOUNT, HOME_ASSISTANT_ACCOUNT, account_id("serial-a"),
+                             account_id("serial-b")}
     for serial in ("serial-a", "serial-b"):
         account = accounts[account_id(serial)]
         assert set(account) == {"users", "imports"}  # no jetstream, no exports
         # The leaf's subject contract (E-W1-LEAF-1): the Node's leaf user sends only the exports and
         # receives only the imports; Central sends only the imports and subscribes only to its
-        # wildcard inboxes.
+        # wildcard inboxes. Each logs in only on its own listener: the leaf as a WebSocket leaf, Central
+        # on the plain client port.
         assert account["users"] == [
-            {"user": node_user(serial), "password": node_user(serial), "permissions": {
-                "publish": {"allow": list(LEAF_EXPORTS)}, "subscribe": {"allow": list(LEAF_IMPORTS)}}},
-            {"user": central_user(serial), "password": central_user(serial), "permissions": {
-                "publish": {"allow": list(LEAF_IMPORTS)}, "subscribe": {"allow": list(CENTRAL_SUBSCRIPTIONS)}}}]
+            {"user": node_user(serial), "password": node_user(serial),
+             "allowed_connection_types": [LEAF_WEBSOCKET_CONNECTION], "permissions": {
+                 "publish": {"allow": list(LEAF_EXPORTS)}, "subscribe": {"allow": list(LEAF_IMPORTS)}}},
+            {"user": central_user(serial), "password": central_user(serial),
+             "allowed_connection_types": [STANDARD_CONNECTION], "permissions": {
+                 "publish": {"allow": list(LEAF_IMPORTS)}, "subscribe": {"allow": list(CENTRAL_SUBSCRIPTIONS)}}}]
         assert account["imports"] == WALL_IMPORTS
     wall = accounts[WALL_ACCOUNT]
     assert wall["jetstream"] == {"max_bytes_required": True}
-    assert wall["users"] == [{"user": WALL_WRITER_USER, "password": WALL_WRITER_USER}]
+    assert wall["users"] == [{"user": WALL_WRITER_USER, "password": WALL_WRITER_USER,
+                              "allowed_connection_types": [STANDARD_CONNECTION]}]
     assert wall["exports"] == [
         {"service": "$JS.API.CONSUMER.CREATE.*"}, {"service": "$JS.API.CONSUMER.CREATE.WALL.>"},
         {"service": "$JS.API.CONSUMER.DELETE.WALL.*"}, {"stream": "DELIVER.WALL.>"},
         {"service": "$JS.FC.WALL.>"}, {"service": "$JS.FC.*.*.WALL.>"}]
-    assert accounts["SYS"] == {"users": [{"user": FLEET_SYSTEM_USER, "password": FLEET_SYSTEM_USER}]}
+    assert accounts["SYS"] == {"users": [{"user": FLEET_SYSTEM_USER, "password": FLEET_SYSTEM_USER,
+                                          "allowed_connection_types": [STANDARD_CONNECTION]}]}
     assert config["system_account"] == "SYS"
     # The hub's JetStream is the memory store, with no store directory: it starts empty and Central
     # rebuilds WALL (E3b design §9.6, §12).
@@ -410,7 +458,9 @@ def test_no_account_has_a_store_limit_only_the_server_fences_the_store():
                                                     "max_consumers": "12"}
     hub = json.loads(hub_configuration(["serial-a"], LISTENERS))
     assert hub["accounts"][WALL_ACCOUNT]["jetstream"] == {"max_bytes_required": True}
-    assert [name for name, account in hub["accounts"].items() if "jetstream" in account] == [WALL_ACCOUNT]
+    assert hub["accounts"][CENTRAL_ACCOUNT]["jetstream"] == {"max_bytes_required": True}
+    assert {name for name, account in hub["accounts"].items() if "jetstream" in account} == {
+        WALL_ACCOUNT, CENTRAL_ACCOUNT}
     # The server's store is the outer fence, reserved per stream at create: every line fits it.
     assert sum(config.max_bytes for slice_ in line_slices().values() for config in slice_.buffers) <= _bytes(
         node["jetstream"]["max_memory_store"])
@@ -444,7 +494,7 @@ def test_the_store_lines_fill_the_store_and_each_slice_stays_in_its_line():
     assert {name: (line.pipe, line.declarer, line.streams, line.max_bytes) for name, line in STORE_LINES.items()} == {
         "host": (Pipe.FLEET, "host", 2, 768 * kib), "apps": (Pipe.FLEET, "apps", 3, 1536 * kib),
         "display": (Pipe.FLEET, "display", 3, 1536 * kib), "health": (Pipe.FLEET, "health", 3, 1536 * kib),
-        "content": (Pipe.SHOW, "content", 2, 1280 * kib), "player": (Pipe.SHOW, "apps", 3, 4608 * kib)}
+        "content": (Pipe.SHOW, "content", 2, 1280 * kib), "player": (Pipe.SHOW, "player", 3, 4608 * kib)}
     assert sum(line.max_bytes for line in STORE_LINES.values()) + WALL_STREAM_BYTES == 11 * mib + mib // 2
     assert NODE_STORE_BYTES == 12 * mib
     assert sum(line.streams for line in STORE_LINES.values()) + 1 == NODE_MAX_STREAMS == 17

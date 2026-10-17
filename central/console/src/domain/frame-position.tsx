@@ -15,7 +15,6 @@ import { Select } from "../ui/select";
 import { Section } from "../ui/section";
 import { Slider } from "../ui/slider";
 import { Inline } from "../ui/stack";
-import { FrameMat } from "./frame-mat";
 import type { Readiness } from "./frame-profile";
 import { type Adjustment, LiveAdjustment } from "./live-adjustment";
 
@@ -81,9 +80,8 @@ const PARTS: QuadPart[] = [
  * edge (both its corners together) on the drawing, or choose what to move (the whole picture, one
  * corner or one edge) and press the arrows (or the
  * arrow keys on the drawing) in steps of 1, 10 or 50 pixels; turn it a quarter at a time, or in
- * Cover to any angle; reset. The Frame's **Mat** and the lights on it (print look R5, R6) sit below:
- * the shadows they cast are part of this Frame's place on the wall. Each corner's pixels are under
- * **Exact values**. Every change is sent
+ * Cover to any angle; reset. Each corner's pixels are under **Exact values**. The Frame's lighting
+ * has its own tab on the same live session. Every change is sent
  * to the Pi as it is made (liveAdjustment.js), and Done keeps it. A Frame whose Position must be
  * checked again (its picture changed, or another display is on its port) is kept by Done with no
  * change. A change that would fold the picture or leave the screen is refused where it is made.
@@ -216,9 +214,6 @@ export function FramePosition({ adjustment, size: reported, piHref, readiness, w
             ))}
           </Inline>
         </Disclosure>
-        {/* The mat after the corners and their exact values: its own concern, the same session's Done and Revert. */}
-        <FrameMat mat={adjustment.draft.mat} onChange={adjustment.changeMat}
-          disabled={adjustment.busy || adjustment.phase === "stopped"} />
       </LiveAdjustment>
     </Section>
   );

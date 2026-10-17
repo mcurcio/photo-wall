@@ -22,6 +22,11 @@ SESSION_CONTRACT: Final = "The Central session is retiring: only the listed work
 NATS_CONTRACT: Final = "Only the Node API library talks to NATS"
 FEED_CONTRACT: Final = "The feed is retiring: it gains no importer"
 NODE_API_PACKAGE: Final = "nodeapi"
+# Galleria, the Home Assistant integration: a root of its own (a package under the PEP 420
+# `custom_components` directory, HACS's layout), and the one NATS client outside nodeapi, because it
+# ships on its own and imports no package of this repository ("Galleria imports no package of this
+# repository").
+GALLERIA_PACKAGE: Final = "custom_components.galleria"
 # The Node kernel's whole allow-list besides the stdlib (AGENTS.md code map).
 KERNEL: Final = "appliance.kernel"
 KERNEL_MAY_IMPORT: Final = ("contracts", "uplink", KERNEL)
@@ -190,14 +195,14 @@ def test_retiring_packages_only_shrink() -> None:
 
 
 def test_root_packages_are_every_first_party_package() -> None:
-    assert set(_importlinter()["root_packages"]) == set(first_party_packages(REPO))
+    assert set(_importlinter()["root_packages"]) == set(first_party_packages(REPO)) | {GALLERIA_PACKAGE}
 
 
 def test_the_nats_fence_covers_every_root_package_but_the_node_api() -> None:
     contract = _contract(NATS_CONTRACT)
     assert contract["type"] == "forbidden"
     assert set(contract["source_modules"]) == (
-        set(_importlinter()["root_packages"]) - {NODE_API_PACKAGE})
+        set(_importlinter()["root_packages"]) - {NODE_API_PACKAGE, GALLERIA_PACKAGE})
     assert contract["forbidden_modules"] == ["nats"]
 
 

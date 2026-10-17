@@ -37,9 +37,9 @@ import { FRAME_ID_PATTERN } from "./frameIds.js";
  * `sameRoute(parseRoute(formatRoute(r)), r)` holds, and it throws for a value that is
  * not a Route, so a caller's mistake cannot write an unparseable hash.
  *
- * @typedef {"now"|"scenes"|"schedule"|"sources"|"wall"|"hardware"|"players"|"releases"|"photo-library"|"photo-fit"|"house"|"luts"|"attention"} Section
+ * @typedef {"now"|"scenes"|"schedule"|"sources"|"wall"|"hardware"|"players"|"releases"|"photo-library"|"photo-fit"|"house"|"lights"|"home-assistant"|"paper-profiles"|"attention"} Section
  * @typedef {"new"|"edit"|"show"|"update"} Flow
- * @typedef {"overview"|"position"|"picture"|"power"|"hardware"} Tab
+ * @typedef {"overview"|"position"|"lighting"|"picture"|"power"|"hardware"} Tab
  * @typedef {"layout"} Mode
  * @typedef {{section: Section, id?: string, flow?: Flow, step?: string, tab?: Tab,
  *            mode?: Mode, initialTarget?: string, tried?: string, skipped?: string[],
@@ -89,12 +89,14 @@ export const SECTIONS = Object.freeze([
   "photo-library",
   "photo-fit",
   "house",
-  "luts",
+  "lights",
+  "home-assistant",
+  "paper-profiles",
   "attention",
 ]);
 
 /** The Frame page's tabs, in their order (pages/frame-page.tsx). */
-export const TABS = Object.freeze(["overview", "position", "picture", "power", "hardware"]);
+export const TABS = Object.freeze(["overview", "position", "lighting", "picture", "power", "hardware"]);
 
 /** The tab a Frame page opens on when nothing names one. */
 export const DEFAULT_TAB = "overview";

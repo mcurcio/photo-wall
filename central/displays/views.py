@@ -16,7 +16,7 @@ from central.displays.picture_history import PictureEntry, PictureEntryKind
 from central.house_time.calculator import local_date_time
 from central.house_time.model import HouseTime, LocalDateTime
 from central.installation_models import FrameRefView
-from contracts.models import Digest, Identifier, Instant, Model
+from contracts.models import Identifier, Instant, Model
 from contracts.node_output import (
     InForceKind,
     OutputReport,
@@ -26,7 +26,6 @@ from contracts.node_output import (
     decode_set_time,
 )
 from contracts.node_picture import (
-    BLACK_FLOOR_TENTHS_MAX,
     CHOICE_NAME_MAX,
     CHOICE_VALUE_MAX,
     GAMMA_TENTHS_MAX,
@@ -34,14 +33,15 @@ from contracts.node_picture import (
     KELVIN_MAX,
     KELVIN_MIN,
     LEVEL_MAX,
-    LUT_AMOUNT_PERCENT_MAX,
+    MATCHED_LUX_MAX,
+    MATCHED_LUX_MIN,
     MAX_CHOICES,
-    ROLLOFF_PERCENT_MAX,
-    SATURATION_PERCENT_MAX,
-    SATURATION_PERCENT_MIN,
+    PANEL_BLACK_MAX,
+    PANEL_BLACK_MIN,
     SOFTWARE_PERCENT_MAX,
     SOFTWARE_PERCENT_MIN,
     VCP_CODE_PATTERN,
+    DisplayLight,
     RangeKind,
     SignalRange,
     SignalResult,
@@ -217,24 +217,25 @@ class HardwareSettingView(Model):
     changed_on_buttons: bool                        # hardware.changed_on_buttons: set here, read otherwise
 
 
-class LutChoiceView(Model):
-    """The LUT a Display uses: its paper profile's digest and the name the LUTs list shows."""
-    profile_sha256: Digest
-    name: str
-
-
 class SoftwarePictureView(Model):
-    """The Photo Wall (software) section's values in force: the picture split's four and the print
-    look's (contracts.node_picture.SoftwarePicture's ranges)."""
-    brightness_percent: SoftwarePercent
+    """The Photo Wall (software) section's values in force (contracts.node_picture.SoftwarePicture's
+    ranges). Room light (decision 0028) removed the print look's sliders and LUT: the Frame's paper
+    replaces them."""
     contrast_percent: SoftwarePercent
     colour_temperature_kelvin: Annotated[int, Field(ge=KELVIN_MIN, le=KELVIN_MAX)]
     gamma_tenths: Annotated[int, Field(ge=GAMMA_TENTHS_MIN, le=GAMMA_TENTHS_MAX)]
-    saturation_percent: Annotated[int, Field(ge=SATURATION_PERCENT_MIN, le=SATURATION_PERCENT_MAX)]
-    highlight_rolloff_percent: Annotated[int, Field(ge=0, le=ROLLOFF_PERCENT_MAX)]
-    black_floor_tenths: Annotated[int, Field(ge=0, le=BLACK_FLOOR_TENTHS_MAX)]
-    lut: LutChoiceView | None                       # None: no LUT
-    lut_amount_percent: Annotated[int, Field(ge=0, le=LUT_AMOUNT_PERCENT_MAX)]
+
+
+MatchedLux = Annotated[float, Field(ge=MATCHED_LUX_MIN, le=MATCHED_LUX_MAX, allow_inf_nan=False)]
+PanelBlack = Annotated[float, Field(ge=PANEL_BLACK_MIN, le=PANEL_BLACK_MAX, allow_inf_nan=False)]
+
+
+class LightView(Model):
+    """The Display's light (decision 0028, contracts.node_picture.DisplayLight): the matched lux (the
+    light at the Frame when the TV's full white matched a sheet of paper) and the panel's black (a
+    share of its white)."""
+    matched_lux: MatchedLux
+    black: PanelBlack
 
 
 class HardwareEdit(Model):
@@ -252,10 +253,11 @@ class SoftwareEdit(Model):
     expected_sequence: Annotated[int, Field(ge=1)]
 
 
-class LutEdit(Model):
-    """POST /v1/operator/picture-sessions/{session_id}/lut-edits: the LUT choice, a listed paper
-    profile's digest, or None for no LUT."""
-    profile_sha256: Digest | None
+class LightEdit(Model):
+    """POST /v1/operator/picture-sessions/{session_id}/light-edits: the Display's light (decision
+    0028), live in the session, kept by Done, put back by Revert, copied by Copy."""
+    matched_lux: MatchedLux
+    black: PanelBlack
     expected_sequence: Annotated[int, Field(ge=1)]
 
 
@@ -290,24 +292,6 @@ class TestPatternView(Model):
     state: TestPatternState
 
 
-# The LUTs list (print look, design "The LUT"): the paper profiles the house keeps, each the one
-# source of the LUT baked from it.
-
-class LutView(Model):
-    """One LUT on the list: its paper profile's digest, the profile's own name, when it was added
-    (Central's clock), and the Displays that use it (stored, or chosen in an open picture session),
-    by name."""
-    profile_sha256: Digest
-    name: str
-    added_at: Instant
-    used_by: tuple[str, ...]
-
-
-class LutsView(Model):
-    """GET /v1/operator/luts."""
-    luts: tuple[LutView, ...]
-
-
 class FramePictureView(Model):
     """GET /v1/operator/frames/{frame_id}/picture: the Picture tab."""
     frame_id: Identifier
@@ -318,6 +302,7 @@ class FramePictureView(Model):
                                                     # while connected); a list kept while the display is away stays known
     hardware: tuple[HardwareSettingView, ...]       # hardware.hardware_rows, names from PICTURE_LIST
     software: SoftwarePictureView
+    light: LightView                                # in force: the draft's while a session is live, else stored
     signal_range: SignalRange                       # in force: the draft's while a session is live, else stored
     signal: SignalView | None                       # the latest report's; None: none since the Pi's controller started
     test_pattern: TestPatternView | None            # the live session's; None: off
@@ -345,13 +330,13 @@ class DisplayRefView(Model):
 
 class PictureValuesView(Model):
     """The values an entry records, as the Picture tab shows values: the hardware codes set in Photo
-    Wall (MCCS code -> value; a code absent is "as the display has it"), the software group (its LUT
-    named as the LUTs list names it today, or "Paper profile <8 hex>" when it is no longer listed),
-    the signal range, and the recipe its LUT was baked under then (None: no LUT)."""
+    Wall (MCCS code -> value; a code absent is "as the display has it"), the software group, the
+    signal range and the Display's light (None: the entry was written before the Display had one;
+    its Restore keeps the draft's)."""
     hardware: dict[VcpCodeField, int]
     software: SoftwarePictureView
     signal_range: SignalRange
-    lut_recipe_id: str | None
+    light: LightView | None
 
 
 class PictureEntryView(Model):
@@ -389,33 +374,30 @@ class PictureRestore(Model):
 
 class PictureRestoreResult(Model):
     """An accepted Restore: the sequence the next edit names; the entry's hardware codes this display
-    does not offer now (not in the draft); whether its LUT is no longer listed (the draft kept its
-    own); whether today's LUT recipe renders it."""
+    does not offer now (not in the draft); whether it had no Display's light (decision 0028), so the
+    draft kept its own."""
     sequence: Annotated[int, Field(ge=1)]
     hardware_skipped: tuple[VcpCodeField, ...]
-    lut_skipped: bool
-    lut_recipe_changed: bool
+    light_kept: bool                                # the entry had no Display's light: the draft kept its own
 
 
-def software_view(software: SoftwarePicture, lut_name: str | None) -> SoftwarePictureView:
-    """The Photo Wall section's values; the LUT by its digest and `lut_name`, the LUTs list's name
-    for it, or "Paper profile <first 8 hex>" when it has none. The one mapping of a SoftwarePicture
-    to its view: the Picture tab's read and every picture history entry."""
-    lut = software.lut
-    return SoftwarePictureView(
-        brightness_percent=software.brightness_percent, contrast_percent=software.contrast_percent,
-        colour_temperature_kelvin=software.colour_temperature_kelvin, gamma_tenths=software.gamma_tenths,
-        saturation_percent=software.saturation_percent, highlight_rolloff_percent=software.highlight_rolloff_percent,
-        black_floor_tenths=software.black_floor_tenths, lut_amount_percent=software.lut_amount_percent,
-        lut=None if lut is None else LutChoiceView(profile_sha256=lut.profile_sha256,
-                                                   name=lut_name or f"Paper profile {lut.profile_sha256[:8]}"))
+def software_view(software: SoftwarePicture) -> SoftwarePictureView:
+    """The Photo Wall section's values. The one mapping of a SoftwarePicture to its view: the Picture
+    tab's read and every picture history entry."""
+    return SoftwarePictureView(contrast_percent=software.contrast_percent,
+                               colour_temperature_kelvin=software.colour_temperature_kelvin,
+                               gamma_tenths=software.gamma_tenths)
 
 
-def picture_entry_view(entry: PictureEntry, *, display_name: str, frame_name: str | None,
-                       lut_name: str | None) -> PictureEntryView:
-    """`entry` as the routes answer it, with the names read today: the Display's, the sent entry's
-    Frame's (None: no Frame then, or it was deleted) and its LUT's (`software_view`)."""
-    record, lut = entry.record, entry.record.picture.software.lut
+def light_view(light: DisplayLight) -> LightView:
+    """The Display's light as the Picture tab and every picture history entry show it."""
+    return LightView(matched_lux=light.matched_lux, black=light.black)
+
+
+def picture_entry_view(entry: PictureEntry, *, display_name: str, frame_name: str | None) -> PictureEntryView:
+    """`entry` as the routes answer it, with the names read today: the Display's and the sent entry's
+    Frame's (None: no Frame then, or it was deleted)."""
+    record = entry.record
     return PictureEntryView(
         entry_id=entry.entry_id, display=DisplayRefView(id=entry.display_id, name=display_name), kind=record.kind,
         number=entry.number, at=entry.at,
@@ -423,7 +405,7 @@ def picture_entry_view(entry: PictureEntry, *, display_name: str, frame_name: st
                                                                                     name=frame_name),
         session_id=record.session_id, restored_from=record.restored_from,
         picture=PictureValuesView(hardware=dict(record.picture.hardware),
-                                  software=software_view(record.picture.software, lut_name),
+                                  software=software_view(record.picture.software),
                                   signal_range=record.picture.signal_range,
-                                  lut_recipe_id=None if lut is None else lut.recipe_id),
+                                  light=light_view(record.picture.light) if record.light_recorded else None),
         test_pattern=record.test_pattern)

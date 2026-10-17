@@ -1,9 +1,10 @@
 """Update the wall, its pure parts (console DDD Part E §25a, beads NU1 and B8): updateWall.js
 (`journeyStep` over every row of the step table, the one Put-on-the-wall confirmation and its
 download wait, `keepPlan`'s order, `keepRow` over every row of the Keep table,
-`nextReboot`'s one-in-flight rule, `keepPause`), run under Node as
-tests/test_console_stage.py runs stage.js, and the static rule that the journey's modules name no
-route (every write goes through its verb's one send function). Without Node it skips on a
+`nextReboot`'s one-in-flight rule, `keepPause`) on Central's ReleasesView (a version per Player,
+Q2 A 2026-10-16), bundled by the console's own esbuild and run under Node, and the static rule
+that the journey's modules name no route (every write goes through its verb's one send function)
+and never send an Install. Without Node it skips on a
 developer machine, but FAILS where the checks are meant to run in full. The browser half is in
 tests/browser/test_update_wall_browser.py.
 """
@@ -11,39 +12,35 @@ tests/browser/test_update_wall_browser.py.
 import json
 import re
 import subprocess
+import tempfile
 from pathlib import Path
 
 from test_console_flow import _require_node
+from test_console_routes_r4 import ESBUILD, _require_esbuild
 
 SRC = Path(__file__).parents[1] / "central/console/src"
 OLD_APP = "11" * 32
 NEW_APP = "22" * 32
 
 SCRIPT = r"""
-const uw = await import(process.argv[1]);
+const { uw, stage } = await import(process.argv[1]);
 const [OLD_APP, NEW_APP] = [process.argv[2], process.argv[3]];
 const out = {};
 
-const MANIFEST = "ab".repeat(32);
-const NOAPP_MANIFEST = "cd".repeat(32);
-const BASE_MANIFEST = "ef".repeat(32);
-const TARGET = "abababab-abab-8bab-abab-abababababab";
-const release = (manifest, tag, base, app, extra = {}) => ({ manifest_sha256: manifest, tag, revision: "a".repeat(40),
-  discovered_at: 900, base_tag: base, app_environment_sha256: app, stable: true, problem: null,
-  deployment_id: `${manifest.slice(0, 8)}-0000-8000-8000-000000000000`, in_window: true, readiness: "ready",
+const release = (version, base, app, extra = {}) => ({ version, discovered_at: 900, base_tag: base,
+  app_environment_sha256: app, stable: true, problem: null, in_window: true, readiness: "ready",
   readiness_reason: null, missing_bytes: 0, ...extra });
-const releases = [release(MANIFEST, "v2.0.0", "v1.0.0", NEW_APP, { deployment_id: TARGET }),
-  release(NOAPP_MANIFEST, "v2.1.0", "v1.0.0", null), release(BASE_MANIFEST, "v3.0.0", "v3.0.0", NEW_APP)];
-// A tag whose every upload was refused: no deployment.
-const REJECTED = release("ff".repeat(32), "v4.0.0", null, null, { manifest_sha256: null, deployment_id: null,
-  problem: "node_release_invalid", readiness: null, missing_bytes: null });
-const old = { deployment_id: "d0000000-0000-8000-8000-000000000000", published_at: 800, base_tag: "v1.0.0",
-  app_environment_sha256: OLD_APP };
-const target = { deployment_id: TARGET, published_at: 850, base_tag: "v1.0.0", app_environment_sha256: NEW_APP };
-// The target's deployment is beyond the capped Deployments list unless `listed`: its own row names it.
-const readOf = ({ listed = true, selected = old.deployment_id, extra = [], rows = releases } = {}) => ({ read_at: 1000,
-  selection: { deployment_id: selected, revision: 4, changed_at: 900, previous_deployment_id: null },
-  releases: [...rows, REJECTED], deployments: [old, ...(listed ? [target] : []), ...extra] });
+const releases = [release("v2.0.0", "v1.0.0", NEW_APP), release("v2.1.0", "v1.0.0", null),
+  release("v3.0.0", "v3.0.0", NEW_APP)];
+// The release every Player boots before the journey.
+const OLD = release("v1.0.0", "v1.0.0", OLD_APP);
+// A release whose upload Central refused.
+const REJECTED = release("v4.0.0", null, null, { problem: "node_release_invalid", readiness: null });
+const version = (serial, on, previous) => ({ serial, player_id: `p-${serial}`, name: serial, version: on, chosen: true,
+  previous, install: null, running: null });
+// `on`: the release every Player boots next (the target once Put on the wall gave it to them).
+const readOf = ({ on = "v1.0.0", previous = null, rows = releases } = {}) => ({ read_at: 1000, default: "v2.0.0",
+  releases: [...rows, OLD, REJECTED], players: [version("S1", on, previous), version("S2", on, previous)] });
 const qual = (linked, accepted = []) => ({ linked_app: linked === null ? null : { environment_sha256: linked, admitted_at: 1 },
   acceptances: accepted.map((sha) => ({ environment_sha256: sha, base_content_key: "k", base_tag: "v1.0.0", accepted_at: 2 })) });
 const ops = (operations, linked = OLD_APP, accepted = [OLD_APP]) => ({ read_at: 1000, operations, qualification: qual(linked, accepted) });
@@ -62,8 +59,8 @@ out.steps = {
   noRelease: step({ ...r(readOf()), tag: "v9.9.9" }, null),
   rejected: step({ ...r(readOf()), tag: "v4.0.0" }, null),
   choose: step(r(readOf()), null),
-  // Beyond the capped Deployments list: the release row's own deployment is enough.
-  chooseUnlisted: step(r(readOf({ listed: false })), null),
+  // One Player already on the target is not the wall on it.
+  chooseOnePlayerOn: step(r({ ...readOf(), players: [version("S1", "v2.0.0", null), version("S2", "v1.0.0", null)] }), null),
   // Tried, no stored acceptance for the linked app: qualify first.
   qualifyingNoAcceptance: step(r(readOf(), { operations: ops([], OLD_APP, []) }), "p-1"),
   qualifyingSampling: step(r(readOf(), { operations: ops([]) }), "p-1", held({ sampling: true })),
@@ -86,13 +83,13 @@ out.steps = {
     held({ stageId: "o-1", backingOut: true })),
   backedOutEnded: step(r(readOf(), { operations: ops([op("o-1", "ended_by_later_boot")]) }), "p-1",
     held({ stageId: "o-1", backingOut: true })),
-  pausedOnOpen: step(r(readOf({ selected: TARGET }), null, [{ state: "rejoined" }, { state: "waiting" }]), null),
-  keeping: step(r(readOf({ selected: TARGET }), null, [{ state: "rejoined" }, { state: "waiting" }]), null,
+  pausedOnOpen: step(r(readOf({ on: "v2.0.0" }), null, [{ state: "rejoined" }, { state: "waiting" }]), null),
+  keeping: step(r(readOf({ on: "v2.0.0" }), null, [{ state: "rejoined" }, { state: "waiting" }]), null,
     held({ rolling: true })),
-  doneKept: step(r(readOf({ selected: TARGET }), null, [{ state: "rejoined" }, { state: "skipped" }]), null,
+  doneKept: step(r(readOf({ on: "v2.0.0" }), null, [{ state: "rejoined" }, { state: "skipped" }]), null,
     held({ rolling: true })),
-  // A selection the target lost (another page selected) goes back to Choose.
-  selectionLost: step(r(readOf({ selected: old.deployment_id })), null, held({ rolling: true })),
+  // A wall the target lost (another page put another release on) goes back to Choose.
+  selectionLost: step(r(readOf()), null, held({ rolling: true })),
 };
 
 // --- Try's pre-check: a hint only.
@@ -105,15 +102,14 @@ out.withdrawn = {
 out.target = targetOf("v2.0.0");
 
 // --- Put vX on the wall: ONE confirmation naming the reboot cost, with the readiness line.
-const request = { contents: "Base v1.0.0 · app 222222…", noApp: false, body: { deployment_id: TARGET, expected_revision: 4 } };
-const downloading = targetOf("v2.0.0", readOf({ rows: [release(MANIFEST, "v2.0.0", "v1.0.0", NEW_APP,
-  { deployment_id: TARGET, readiness: "downloading", missing_bytes: 1500000000 })] }));
+const downloading = targetOf("v2.0.0", readOf({ rows: [release("v2.0.0", "v1.0.0", NEW_APP,
+  { readiness: "downloading", missing_bytes: 1500000000 })] }));
 out.put = {
-  open: uw.putConfirmation(request, targetOf("v2.0.0")),
-  openDownloading: uw.putConfirmation(request, downloading),
+  open: uw.putConfirmation(targetOf("v2.0.0")),
+  openDownloading: uw.putConfirmation(downloading),
   wait: [uw.downloadWait(targetOf("v2.0.0")), uw.downloadWait(downloading),
-    uw.downloadWait({ release: { tag: "v2.0.0", readiness: "failed", readiness_reason: "cache_disk_full" } }),
-    uw.downloadWait({ release: { tag: "v2.0.0", readiness: null } })],
+    uw.downloadWait({ release: { version: "v2.0.0", readiness: "failed", readiness_reason: "cache_disk_full" } }),
+    uw.downloadWait({ release: { version: "v2.0.0", readiness: null } })],
   rejectedTarget: targetOf("v4.0.0"),
 };
 
@@ -150,14 +146,12 @@ const node = ({ bootId = "boot-1", linked = OLD_APP, commands = [] } = {}) => ({
 const sent = (atMs = 0, epoch = 0) => ({ request: { body: { command_id: "cmd-1" }, kernelBootId: "boot-1" }, atMs, epoch });
 // v2.0.0's app is carried by no other release on another base, so it identifies v2.0.0; in the
 // full catalog v3.0.0 pairs the same app with base v3.0.0, a base-only release of it.
-const IDENTIFIED_READ = { ...readOf(), releases: releases.slice(0, 2) };
+const IDENTIFIED_READ = readOf({ rows: releases.slice(0, 2) });
 // A pre-release pairing the same app with another base is not a release any Player runs.
-const PRE = release(BASE_MANIFEST, "v3.0.0-rc.1", "v3.0.0", NEW_APP, { stable: false });
-const PRE_READ = { ...readOf(), releases: [...releases.slice(0, 2), PRE],
-  deployments: [old, target, { deployment_id: PRE.deployment_id, published_at: 870, base_tag: "v3.0.0",
-    app_environment_sha256: NEW_APP }] };
-// ...unless it is the previous selection: a Player not rebooted since may still run it.
-const PRE_PREVIOUS = { ...PRE_READ, selection: { ...PRE_READ.selection, previous_deployment_id: PRE.deployment_id } };
+const PRE = release("v3.0.0-rc.1", "v3.0.0", NEW_APP, { stable: false });
+const PRE_READ = readOf({ rows: [...releases.slice(0, 2), PRE] });
+// ...unless a Player booted it before: a Player not rebooted since may still run it.
+const PRE_PREVIOUS = readOf({ rows: [...releases.slice(0, 2), PRE], previous: PRE.version });
 const T = targetOf("v2.0.0", IDENTIFIED_READ);
 const SHARED = targetOf("v2.0.0");
 const BASE_ONLY = targetOf("v3.0.0");
@@ -222,8 +216,7 @@ out.evidence = {
 // and the first Player is rebooted (the bug: every row read Rejoined, Done with zero reboots).
 const baseOnlyRows = ["p-a", "p-b", "p-c"].map((id) => uw.keepRow({ node: node({ linked: NEW_APP }),
   snapshot: snapshotOf(), playerId: id, target: BASE_ONLY, sent: null, waitedMs: 0, skipped: false }));
-const BASE_ONLY_READ = readOf({ selected: BASE_ONLY.deploymentId,
-  extra: [{ deployment_id: BASE_ONLY.deploymentId, published_at: 860, base_tag: "v3.0.0", app_environment_sha256: NEW_APP }] });
+const BASE_ONLY_READ = readOf({ on: "v3.0.0" });
 out.baseOnlySession = {
   states: baseOnlyRows.map((value) => value.state),
   step: uw.journeyStep({ releases: BASE_ONLY_READ, tried: null, rows: baseOnlyRows }, { tag: "v3.0.0", tried: null },
@@ -239,7 +232,7 @@ uw.keepRow({ node: node({ linked: NEW_APP }), snapshot: snapshotOf(), playerId: 
 out.triedFirst = { states: triedRows.map((value) => value.state), next: uw.nextReboot(triedRows) };
 
 // --- A selected target whose snapshot is unread: no Done from no reads.
-out.unreadPlan = uw.journeyStep({ releases: readOf({ selected: TARGET }), tried: null, rows: null },
+out.unreadPlan = uw.journeyStep({ releases: readOf({ on: "v2.0.0" }), tried: null, rows: null },
   { tag: "v2.0.0", tried: null }, held({ rolling: true })).step;
 
 // --- stageFollowUp keys on Central's code: rewording a refusal keeps the journey's behaviour.
@@ -258,7 +251,7 @@ out.followUp = {
     "No qualified fallback for this Player's current Outputs and base: qualify the running app first."), 0),
   codeReworded: uw.stageFollowUp(outcome("refused", "node_app_target_base_mismatch", ""), 0),
 };
-const { stageResult } = await import(new URL("./stage.js", process.argv[1]).href);
+const { stageResult } = stage;
 out.stageCodes = {
   fallback: stageResult({ ok: false, status: 409, error: "node_app_qualified_fallback_required", data: null }).code,
   done: stageResult({ ok: true, status: 201, error: null, data: { duplicate: false } }).code,
@@ -326,26 +319,38 @@ out.rollout = {
   outsideLabel: memberRows[2].label,
   next: uw.nextReboot(memberRows),
   count: uw.keepCount(memberRows),
-  step: uw.journeyStep({ releases: readOf({ selected: TARGET }), tried: null, rows: memberRows },
+  step: uw.journeyStep({ releases: readOf({ on: "v2.0.0" }), tried: null, rows: memberRows },
     { tag: "v2.0.0", tried: null }, held({ rolling: true })).step,
 };
 console.log(JSON.stringify(out));
 """
 
 
+_BUNDLED = {}
+
+
 def _run():
-    _require_node()
-    result = subprocess.run(
-        ["node", "--input-type=module", "-e", SCRIPT, "--", (SRC / "updateWall.js").as_uri(), OLD_APP, NEW_APP],
-        capture_output=True, text=True, timeout=30, check=True)
-    return json.loads(result.stdout)
+    """The script's answer, on updateWall.js and stage.js bundled once by the console's esbuild."""
+    if "out" not in _BUNDLED:
+        _require_node()
+        _require_esbuild()
+        folder = Path(tempfile.mkdtemp(prefix="update-wall-"))
+        entry = folder / "entry.js"
+        entry.write_text(f'export * as uw from "{SRC / "updateWall.js"}";\nexport * as stage from "{SRC / "stage.js"}";\n')
+        bundle = folder / "entry.mjs"
+        subprocess.run([str(ESBUILD), str(entry), "--bundle", "--format=esm", "--platform=node", f"--outfile={bundle}",
+                        "--log-level=error"], check=True, timeout=60)
+        result = subprocess.run(["node", "--input-type=module", "-e", SCRIPT, "--", bundle.as_uri(), OLD_APP, NEW_APP],
+                                capture_output=True, text=True, timeout=30, check=True)
+        _BUNDLED["out"] = json.loads(result.stdout)
+    return _BUNDLED["out"]
 
 
 def test_every_row_of_the_step_table_derives_from_the_reads():
     steps = _run()["steps"]
     assert steps == {
         "reading": "reading", "noRelease": "no_release", "rejected": "rejected", "choose": "choose",
-        "chooseUnlisted": "choose",
+        "chooseOnePlayerOn": "choose",
         "qualifyingNoAcceptance": "qualifying", "qualifyingSampling": "qualifying",
         "qualifyingAfterRefusal": "qualifying", "stagingAccepted": "staging", "stagingQualifiedHere": "staging",
         "stagingHeldInProgress": "staging", "stagingOtherSwitching": "staging", "lookingHeld": "looking",
@@ -365,18 +370,18 @@ def test_try_is_withdrawn_for_a_base_change_or_no_app_as_a_hint():
         "noApp": ("This release has no app, so there is nothing to try live; putting it on the wall reboots each "
                   "Player onto it"),
     }
-    assert out["target"]["withApp"] is True and out["target"]["deploymentId"] == "abababab-abab-8bab-abab-abababababab"
+    assert out["target"]["withApp"] is True and out["target"]["deployable"] is True
     assert out["target"]["app"] == NEW_APP
 
 
-SCOPE = ("Every Player that boots by node path from now on is offered this deployment, including Players Central "
-         "has not seen. Central cannot list which Players will boot.")
+SCOPE = ("Every Player Central knows boots this release from its next boot on. A Player that enrols later boots "
+         "the newest ready release until it is given one.")
 
 
 def test_put_on_the_wall_is_one_confirmation_naming_the_reboot_cost():
     put = _run()["put"]
     assert put["open"]["title"] == "Put release v2.0.0 on the wall?"
-    assert put["open"]["lines"][:3] == ["Base v1.0.0 · app 222222…", SCOPE, "Selects v2.0.0 for every boot."]
+    assert put["open"]["lines"][:2] == ["Base v1.0.0 · app 222222…", SCOPE]
     assert put["open"]["lines"][-1] == "These are the Players this console knows; this page reboots them in this order:"
     assert put["open"]["after"] == [
         "Then this page reboots these Players one at a time, each after the previous one rejoins. Each Frame a "
@@ -388,7 +393,7 @@ def test_put_on_the_wall_is_one_confirmation_naming_the_reboot_cost():
         "for the download.", "The first reboot waits until Central has downloaded it."]
     assert put["wait"] == [None, "Waiting for Central to download v2.0.0: 1.5 GB left",
                            "Waiting: Central could not download v2.0.0 (cache disk full)", None]
-    assert put["rejectedTarget"]["deploymentId"] is None
+    assert put["rejectedTarget"]["deployable"] is False
 
 
 def test_the_keep_plan_puts_the_tried_player_first_then_the_rest_by_name_and_skips_retired():
@@ -417,12 +422,12 @@ def test_every_row_of_the_keep_table_derives_from_the_reads():
         "Rejoining: Central's snapshot does not list the Player app's enrollment on the new boot yet")
     assert rows["waiting"]["label"] == "Waiting"
     assert rows["baseOnlyNotRebooted"]["label"] == (
-        "Waiting · unknown whether it booted the selection (another release carries the same app on a different "
+        "Waiting · unknown whether it booted this release (another release carries the same app on a different "
         "base, so it cannot be recognised by its app); this page reboots it to make sure")
     assert rows["sharedAppNotRebooted"]["label"] == rows["baseOnlyNotRebooted"]["label"]
     assert rows["triedStageRunning"]["label"] == (
-        "Waiting · it runs a Stage, which applies to this boot only; this page reboots it; its next boot is offered the selection")
-    assert rows["waitingNoApp"]["label"].startswith("Waiting · unknown whether it booted the selection")
+        "Waiting · it runs a Stage, which applies to this boot only; this page reboots it; its next boot is offered its version")
+    assert rows["waitingNoApp"]["label"].startswith("Waiting · unknown whether it booted this release")
     assert rows["rebootingHeldUnlisted"]["label"] == "Reboot sent by this page; Central has not listed it yet"
     assert rows["rebootingListed"]["label"].startswith("Requested · delivery unknown")
     assert rows["rebootingRejected"]["pause"] == "Rejected by Host Management"
@@ -443,15 +448,15 @@ def test_the_linked_app_counts_only_when_it_identifies_the_target():
 def test_a_base_only_release_reboots_every_player_in_the_same_session_and_is_not_done():
     session = _run()["baseOnlySession"]
     assert session == {"states": ["waiting", "waiting", "waiting"], "step": "keeping", "next": "p-a",
-                       "count": "0 of 3 Players on the selection"}
+                       "count": "0 of 3 Players on this release"}
 
 
-def test_the_tried_player_running_a_stage_is_rebooted_first_not_counted_as_on_the_selection():
+def test_the_tried_player_running_a_stage_is_rebooted_first_not_counted_as_on_the_release():
     tried = _run()["triedFirst"]
     assert tried == {"states": ["waiting", "rejoined"], "next": "p-c"}
 
 
-def test_rows_on_the_selection_carry_a_derived_fact_naming_their_basis():
+def test_rows_on_the_release_carry_a_derived_fact_naming_their_basis():
     evidence = _run()["evidence"]
     assert evidence["rejoinedRebooted"]["kind"] == "derived"
     assert "later kernel boot than the reboot this page sent" in evidence["rejoinedRebooted"]["basis"]
@@ -484,12 +489,13 @@ def test_next_reboot_holds_while_any_earlier_row_is_unsettled():
     assert out["pause"] == {"stall": {"playerId": "p-1", "reason": "stalled"},
                             "cannot": {"playerId": "p-0", "reason": "Cannot reboot: no session"},
                             "none": None}
-    assert out["count"] == "1 of 3 Players on the selection"
+    assert out["count"] == "1 of 3 Players on this release"
 
 
 # Any Central route, or any way of reaching one: the journey writes only through the verbs'
 # send functions, which stay the only callers of their routes (their own source-scan tests).
-_ROUTE = re.compile(r"/v[12]/|apiWrite|fetch\(|/reboots|/app-stages|/app-qualifications|/boot-policy|/deployments")
+_ROUTE = re.compile(r"/v[12]/|apiWrite|fetch\(|/reboots|/app-stages|/app-qualifications|/boot-policy|/deployments"
+                    r"|/install|installOnPlayer|setWallVersion")
 
 
 def test_the_journey_modules_name_no_route():
@@ -499,7 +505,7 @@ def test_the_journey_modules_name_no_route():
     # Positive control: the pattern does find the verbs' own routes in their homes.
     assert _ROUTE.search((SRC / "fleetCommands.js").read_text()) is not None
     page = (SRC / "UpdateWallPage.jsx").read_text()
-    for send in ("sendStage(", "sendSelection(", "sendReboot("):
+    for send in ("sendStage(", "sendWallVersion(", "sendReboot("):
         assert send in page, send
     assert "<QualifiedFallback" in page  # sendBegin and the sampler, through their one component
 
@@ -535,5 +541,5 @@ def test_only_the_frozen_rollout_is_rebooted_a_later_player_is_not_in_it():
     assert rollout["states"] == ["rejoined", "rejoined", "not_in_rollout"]
     assert rollout["outsideLabel"] == "Not in this rollout: no confirmation named it; this page never reboots it"
     assert rollout["next"] is None
-    assert rollout["count"] == "2 of 2 Players on the selection"
+    assert rollout["count"] == "2 of 2 Players on this release"
     assert rollout["step"] == "done"

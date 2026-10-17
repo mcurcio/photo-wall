@@ -297,8 +297,8 @@ class NodeLifecycle:
                 # A later stage replaces this one whatever it reported; latest_effect keeps that detail.
                 state = ("superseded" if index > 0
                          else _TERMINAL_STATES.get(event["phase"], "switching") if event else "staged")
-                # A stage is desired state for its own boot only; a later admitted boot runs the
-                # boot selection's app, so a completed stage no longer describes the box either.
+                # A stage is desired state for its own boot only; a later admitted boot runs its
+                # Pi's version's app, so a completed stage no longer describes the box either.
                 rebooted = current is not None and current["kernel_boot_id"] != command.producer.kernel_boot_id
                 if rebooted and state in ("staged", "switching", "effect_unknown"):
                     state = "interrupted_by_reboot"

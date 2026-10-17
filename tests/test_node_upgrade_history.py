@@ -23,6 +23,8 @@ from test_registry import enroll
 import central.db as database_module
 from central.db import Database
 from central.fleet.node_ingest import NodeIngest
+from central.frame_lighting.paper_profiles import LUT_RECIPE_ID
+from central.infra.frame_lighting_store import PgFrameLighting
 from central.registry import Registry
 from contracts.node_protocol import NodeEventV2, RebootFact, encode_node_message
 from contracts.time import ManualClock
@@ -50,7 +52,7 @@ def history(empty_database, tmp_path, monkeypatch):
         db = Database(empty_database)
         try:
             through(db, number)
-            yield Registry(db, ManualClock(1000)), through
+            yield Registry(db, ManualClock(1000), lighting=PgFrameLighting(LUT_RECIPE_ID)), through
         finally:
             db.close()
 

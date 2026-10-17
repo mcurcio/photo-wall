@@ -9,6 +9,7 @@ and the migration's SQL runs on them (as tests/test_after_end_migration.py does 
 from pathlib import Path
 
 from psycopg.types.json import Jsonb
+from support.position import LIGHTING
 
 from contracts.models import Layer, Plan
 
@@ -41,7 +42,7 @@ def test_stored_media_layers_without_a_crop_read_back_centred(registry):
             "bindings": [{"output_id": "HDMI-A-1", "frame_id": "frame-0", "generation": 1,
                           "profile": {"width_px": 1920, "height_px": 1080,
                                       "diagonal_inches": 24},
-                          "mat": {"depth_mm": 0.0, "lights": []}}],
+                          "lighting": LIGHTING.model_dump(mode="json")}],
             "layers": layers}
     with registry.db.transaction() as conn:
         for table in ("plan_offers", "assignment_locks"):

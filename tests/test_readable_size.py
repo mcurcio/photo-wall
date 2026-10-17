@@ -11,6 +11,7 @@ from __future__ import annotations
 import pytest
 from support.house_time import UTC_HOUSE
 from support.key_content_builders import key_content
+from support.position import LIGHTING
 
 from central.catalog import Candidate, SourcePool
 from central.photo_library.model import CopySize, LibraryAsset, OriginalFile
@@ -23,7 +24,7 @@ from central.wall_plan.fit_settings import FitSettings
 from central.wall_plan.key_content import Measured
 from central.wall_plan.order import PoolLines, WallHistory
 from central.wall_plan.selection import SceneSelection
-from contracts.models import FrameProfile, Mat, OutputBinding
+from contracts.models import FrameProfile, OutputBinding
 
 RAW = "image/x-sony-arw"
 SHA = "a" * 40
@@ -81,7 +82,7 @@ def _plan(photo: Candidate, profile: FrameProfile):
     runtime.activate("scene", "run", 0)
     return project(
         runtime, 0, bindings_by_player={"player": (OutputBinding(
-            output_id="out", frame_id="f", generation=1, profile=profile, mat=Mat()),)},
+            output_id="out", frame_id="f", generation=1, profile=profile, lighting=LIGHTING),)},
         lines=PoolLines({"pool": SourcePool(source_ref="pool", ready=True, candidates=(photo,))}),
         authored_candidates={}, locked_assignments={}, history=WallHistory(),
         horizon_seconds=300, plan_seconds=600, settings=HOUSE,

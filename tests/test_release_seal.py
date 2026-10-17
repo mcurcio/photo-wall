@@ -19,6 +19,7 @@ import json
 import socket
 import stat
 import threading
+import zipfile
 from dataclasses import dataclass, field, replace
 from urllib.parse import parse_qs, urlparse
 
@@ -36,7 +37,7 @@ from support.release_build import (
 )
 
 from contracts.node_release import NODE_RELEASE_MANIFEST
-from contracts.release import CHECKSUMS, IMAGES, MANIFEST
+from contracts.release import CHECKSUMS, GALLERIA_ZIP, IMAGES, MANIFEST
 from scripts import release_seal
 from scripts.package_release_artifacts import package, verify
 from scripts.release_seal import (
@@ -418,6 +419,17 @@ def test_a_seal_publishes_the_complete_release_as_the_newest(github, registry, b
         assert f"`{REPOSITORY}/{name}:{TAG}` = `{digest(name)}`" in published["body"]
 
 
+def test_every_release_attaches_galleria_zipped_for_its_version(github, registry, build):
+    """HACS installs Galleria from the release's galleria.zip (hacs.json's zip_release), so the
+    seal publishes it with the rest, its manifest.json carrying the version the tag names."""
+    state, api = github
+    seal(api, registry, build)
+    [published] = _for(state, TAG)
+    assert GALLERIA_ZIP in {asset["name"] for asset in published["assets"]}
+    with zipfile.ZipFile(build.destination / GALLERIA_ZIP) as archive:
+        assert json.loads(archive.read("manifest.json"))["version"] == TAG.removeprefix("v")
+
+
 def test_the_release_is_invisible_until_every_asset_and_image_is_ready(github, registry, build):
     """Every asset is attached to the (invisible) draft before the first visible write, the
     images' version tags; the one publish is the last write: nothing is visible half-made."""
@@ -580,11 +592,14 @@ def _packaging_then(damage):
     (lambda destination, manifest: (destination / f"photo-wall-node-{REVISION}-app.deb")
      .unlink(), f"missing photo-wall-node-{REVISION}-app.deb"),
     (lambda destination, manifest: (destination / CHECKSUMS).unlink(), "missing SHA256SUMS"),
+    (lambda destination, manifest: (destination / GALLERIA_ZIP).unlink(),
+     f"asset_missing:{GALLERIA_ZIP}"),
     (lambda destination, manifest: (destination / manifest["boot_image"]["filename"])
      .write_bytes(b"truncated"), "digest_mismatch"),
     (lambda destination, manifest: (destination / "notes.md").write_text("x"),
      "undeclared notes.md"),
-], ids=["missing-asset", "missing-checksums", "corrupt-asset", "undeclared-asset"])
+], ids=["missing-asset", "missing-checksums", "missing-galleria-zip", "corrupt-asset",
+        "undeclared-asset"])
 def test_a_missing_or_wrong_declared_asset_refuses_before_any_promote_or_publish(
         github, registry, build, monkeypatch, damage, reason):
     state, api = github

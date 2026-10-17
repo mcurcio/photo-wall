@@ -181,8 +181,8 @@ def test_clicking_a_frame_opens_its_page_at_overview_with_hardware_and_position(
         expect(frame_heading(page, frame_name(registry, SHOWING))).to_be_visible()
         inspector = visible_page(page)
 
-        # The five tabs, Overview first.
-        expect(inspector.get_by_role("tab")).to_have_text(["Overview", "Position", "Picture", "Power", "Hardware"])
+        # The six tabs, Overview first.
+        expect(inspector.get_by_role("tab")).to_have_text(["Overview", "Position", "Lighting", "Picture", "Power", "Hardware"])
         expect(inspector.get_by_role("tab", name="Overview", exact=True)).to_have_attribute(
             "aria-selected", "true")
         assert current_hash(page) == f"#/wall/frames/{SHOWING}/overview"

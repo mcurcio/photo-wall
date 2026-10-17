@@ -1,18 +1,16 @@
-"""The node release read (console DDD Part E G1, R18; auto-ingest design §6.5).
+"""The node release read (console DDD Part E G1, R18; auto-ingest design §6.5; a version per Pi,
+Q2 A, 2026-10-16).
 
 Releases are ingested by the real sync from a mock upstream (`test_node_release_ingest`); the read
-is `NodeReleaseCatalog.list` over the same database, with the one readiness check over the
+is `NodeReleaseCatalog.view` over the same database, with the one readiness check over the
 world's cache directory.
 """
-from dataclasses import replace
-from uuid import uuid4
-
 import pytest
 from content_db import facts_of, put_file
+from test_node_boot import NOTHING_READY, enroll, player_versions
 from test_node_release_ingest import Upstream, make_sync_world, node_upload, read, sync
 
 from central.db import Database
-from central.fleet.node_boot import NodeBootService
 from central.fleet.node_release_catalog import NodeReleaseCatalog
 from central.fleet.node_sessions import NodeControlConfig, NodeSessions
 from central.infra.node_releases import deployment_jobs
@@ -70,10 +68,6 @@ class _Recording:
     read_snapshot = Database.read_snapshot
 
 
-def _boots(registry):
-    return NodeBootService(NodeSessions(registry.db, registry.clock, NodeControlConfig("node-test")))
-
-
 def store_files(world, upload, *, missing=()):
     """Put `upload`'s deployment files in the world's cache (produced facts plus file)."""
     with world.db.transaction() as conn:
@@ -95,19 +89,16 @@ def test_release_read_is_one_repeatable_read_read_only_snapshot(registry, sync_w
     sync(sync_world(upstream))
     recording = _Recording(registry.db)
     sessions = NodeSessions(recording, registry.clock, NodeControlConfig("node-test"))
-    result = NodeReleaseCatalog(sessions).list()
+    result = NodeReleaseCatalog(sessions, readiness=NOTHING_READY).view()
     # One transaction: the snapshot is fixed before its first data query, and it writes nothing.
     assert recording.statements[0] == "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"
     assert all(sql.lstrip().upper().startswith("SELECT") for sql in recording.statements[1:])
-    assert result["read_at"] == registry.clock.utc()
+    assert result.read_at == registry.clock.utc()
 
 
-def test_with_no_policy_row_the_selection_is_revision_zero_and_nothing_is_listed(registry):
+def test_with_nothing_observed_nothing_is_listed_and_no_release_is_the_default(registry):
     result = read(registry)
-    assert result["selection"] == {"revision": 0, "deployment_id": None,
-                                   "previous_deployment_id": None, "changed_at": None,
-                                   "auto": None}
-    assert result["deployments"] == [] and result["releases"] == []
+    assert (result["releases"], result["players"], result["default"]) == ([], [], None)
 
 
 def test_rows_are_semver_ordered_with_their_own_deployment_and_window(registry, sync_world):
@@ -119,17 +110,15 @@ def test_rows_are_semver_ordered_with_their_own_deployment_and_window(registry, 
     upstream.put(rc, prerelease=True)
     sync(sync_world(upstream))
     rows = read(registry)["releases"]
-    assert [row["tag"] for row in rows] == ["v2.11.0-rc.1", "v2.10.0", "v2.3.0", "v2.2.0", "v2.0.0"]
-    by_tag = {row["tag"]: row for row in rows}
+    assert [row["version"] for row in rows] == ["v2.11.0-rc.1", "v2.10.0", "v2.3.0", "v2.2.0", "v2.0.0"]
+    by_tag = {row["version"]: row for row in rows}
     # The window is the newest 3 STABLE releases: never a pre-release.
-    assert [row["tag"] for row in rows if row["in_window"]] == ["v2.10.0", "v2.3.0", "v2.2.0"]
+    assert [row["version"] for row in rows if row["in_window"]] == ["v2.10.0", "v2.3.0", "v2.2.0"]
     assert by_tag["v2.11.0-rc.1"]["stable"] is False and by_tag["v2.0.0"]["stable"] is True
     for upload in uploads:
         row = by_tag[upload.tag]
-        assert row["deployment_id"] == str(upload.deployment_id)
-        assert row["base_tag"] == upload.tag and row["manifest_sha256"] == upload.sha
+        assert row["base_tag"] == upload.tag
         assert row["app_environment_sha256"] == upload.release.app_environment.environment_sha256
-    assert "verified_at" not in rows[0]
 
 
 def test_readiness_is_derived_from_the_cache_for_each_row(registry, sync_world):
@@ -144,7 +133,7 @@ def test_readiness_is_derived_from_the_cache_for_each_row(registry, sync_world):
     sync(world)
     store_files(world, ready)
     store_files(world, partial, missing={partial.release.manager_primary.environment_sha256})
-    by_tag = {row["tag"]: row for row in read(registry, world)["releases"]}
+    by_tag = {row["version"]: row for row in read(registry, world)["releases"]}
     assert (by_tag["v2.1.0"]["readiness"], by_tag["v2.1.0"]["missing_bytes"]) == ("ready", 0)
     # Wanted (in the window) with a file absent: downloading, with the absent file's size left.
     assert by_tag["v2.2.0"]["readiness"] == "downloading"
@@ -178,47 +167,27 @@ def test_a_terminal_fetch_or_a_full_disk_reads_failed_with_its_reason(registry, 
     assert (row["readiness"], row["readiness_reason"]) == ("ready", None)
 
 
-def test_the_selection_names_its_previous_deployment(registry, sync_world):
+def test_each_pi_reads_its_own_version_and_its_previous_one(registry, sync_world):
+    """Install on one Pi: its version, chosen, with the one before as its previous; another Pi with
+    no version reads the default (the newest ready stable release), not chosen."""
     upstream, first, second = Upstream(), node_upload("v2.0.0"), node_upload("v2.1.0")
     upstream.put(first)
     upstream.put(second)
-    sync(sync_world(upstream))
-    boots = _boots(registry)
-    boots.select(first.deployment_id, 0)
-    boots.select(second.deployment_id, 1)
-    selection = read(registry)["selection"]
-    assert selection["deployment_id"] == str(second.deployment_id)
-    assert selection["previous_deployment_id"] == str(first.deployment_id)
-    assert selection["auto"] is None  # a selection exists: Central never selects by itself
-
-
-def test_the_selected_and_previous_deployments_are_listed_even_when_older_than_the_newest_fifty(
-        registry):
-    from test_node_boot import cold_setup
-
-    from central.fleet.node_boot import encode_node_deployment
-    _, _, selected = cold_setup(registry)
-    changed_at = registry.clock.utc()
-    older = replace(selected, deployment_id=uuid4())
-    newer = [replace(selected, deployment_id=uuid4()) for _ in range(50)]
-    with registry.db.transaction() as conn:
-        conn.execute("INSERT INTO node_deployments VALUES(%s,%s,%s)",
-                     (older.deployment_id, encode_node_deployment(older), changed_at - 10))
-        for offset, deployment in enumerate(newer, start=1):
-            conn.execute("INSERT INTO node_deployments VALUES(%s,%s,%s)",
-                         (deployment.deployment_id, encode_node_deployment(deployment), changed_at + offset))
-    result = read(registry)
-    listed = [row["deployment_id"] for row in result["deployments"]]
-    # The 50 newest, newest first, then the selected one; the older unselected one is not listed.
-    assert listed == [str(d.deployment_id) for d in reversed(newer)] + [str(selected.deployment_id)]
-    assert str(older.deployment_id) not in listed
-    assert result["selection"] == {"revision": 1, "deployment_id": str(selected.deployment_id),
-                                   "previous_deployment_id": None, "changed_at": changed_at,
-                                   "auto": None}
-    assert result["deployments"][-1] == {
-        "deployment_id": str(selected.deployment_id), "published_at": changed_at,
-        "base_tag": selected.base.tag,
-        "app_environment_sha256": selected.app_environment.environment_sha256}
+    world = sync_world(upstream)
+    sync(world)
+    store_files(world, first)
+    for serial in ("pi-a", "pi-b"):
+        enroll(registry.db, serial, registry.clock.utc())
+    versions = player_versions(NodeSessions(registry.db, registry.clock, NodeControlConfig("node-test")),
+                               readiness=world.stored)
+    versions.install("pi-a", "v2.0.0")
+    versions.install("pi-a", "v2.1.0")
+    players = {pi["serial"]: pi for pi in read(registry, world)["players"]}
+    assert {key: players["pi-a"][key] for key in ("version", "chosen", "previous", "install")} == {
+        "version": "v2.1.0", "chosen": True, "previous": "v2.0.0", "install": "downloading"}
+    assert {key: players["pi-b"][key] for key in ("version", "chosen", "previous", "install")} == {
+        "version": "v2.0.0", "chosen": False, "previous": None, "install": None}
+    assert read(registry, world)["default"] == "v2.0.0"
 
 
 def test_actual_producer_manifest_roundtrips_through_the_sync(registry, sync_world, tmp_path):
@@ -245,5 +214,5 @@ def test_actual_producer_manifest_roundtrips_through_the_sync(registry, sync_wor
     world.handler._origin = GitHubReleaseOrigin("test/repo", transport=httpx.MockTransport(handle))
     sync(world)
     [row] = read(registry)["releases"]
-    assert row["tag"] == manifest.base.tag and row["problem"] is None
-    assert row["deployment_id"] is not None
+    assert row["version"] == manifest.base.tag and row["problem"] is None
+    assert row["base_tag"] == manifest.base.tag

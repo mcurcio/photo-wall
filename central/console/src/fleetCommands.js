@@ -373,10 +373,10 @@ function operationState(operation, readAt) {
         prior: prior() };
     case "ended_by_later_boot":
       // G2: the stage had finished (target or fallback running); a later boot was admitted, and Central offers each
-      // boot the boot selection.
+      // boot its Player's own version.
       return { state: "ended_by_later_boot", label: "Ended by a later boot",
         fact: fact({ kind: "derived", value: "Ended by a later boot",
-          basis: "a later boot was admitted; Central offers each boot the boot selection" }),
+          basis: "a later boot was admitted; Central offers each boot its Player's own version" }),
         prior: prior() };
     default:
       return { state: "unknown", label: "Unknown state",

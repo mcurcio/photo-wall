@@ -9,8 +9,9 @@ from pydantic import Field, JsonValue, model_validator
 
 from central.displays.model import Readiness
 from contracts.enrollment import OutputReport
+from contracts.frame_lighting import FrameLighting
 from contracts.liveness import REPORT_INTERVAL, SILENT_AFTER_SECONDS
-from contracts.models import Calibration, FrameProfile, Identifier, Instant, Mat, Model
+from contracts.models import Calibration, FrameProfile, Identifier, Instant, Model
 from contracts.node_commands import Owner
 
 
@@ -77,7 +78,7 @@ class FrameInventory(Model):
     profile: FrameProfile
     generation: int = Field(ge=0)
     calibration: Calibration
-    mat: Mat                                  # the Frame's mat and lights (print look), on its binding
+    lighting: FrameLighting                   # the Frame's lights, mat and paper (decision 0028), on its binding
     readiness: Readiness                      # worked out (central/displays/model.py), never stored
     configuration_revision: int = Field(ge=1)
     player_id: Identifier | None = None

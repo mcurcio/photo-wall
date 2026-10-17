@@ -1,30 +1,21 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useMemo, useRef, useState } from "react";
 
 import { useConfirm } from "./ConfirmAction.jsx";
+import { installOnPlayer } from "./domain/releases/api";
 import { FactLine } from "./domain/fact-line.tsx";
-import { clock, fact } from "./facts.js";
 import {
-  deploymentHandle,
-  newestStable,
-  releaseHome,
-  selectionConfirmation,
-  selectionOffer,
-  selectionRequest,
-  selectionSettled,
-  sendCatalogCheck,
-  sendSelection,
-  useReleaseRead,
-} from "./releases.js";
+  deployable, installWords, playerRows, readinessLine, refusalWords, releaseRows, updateTarget,
+} from "./domain/releases/model";
+import { clock, fact } from "./facts.js";
+import { answerLost, sendCatalogCheck, useReleaseRead } from "./releases.js";
 import { formatRoute } from "./routes.js";
 import { SectionBoundary } from "./SectionBoundary.jsx";
-
-const SELECT_UNKNOWN = "Outcome unknown: Central did not answer. The next read of the boot selection decides.";
-
+import { UNKNOWN_MESSAGE } from "./sendOutcome.js";
 
 /** "Release read as of <time>", whether its last refresh failed, or why it has no answer. */
 function ReadLine({ releases }) {
   // role=status with aria-busy while a read is in flight: busy clears only once the read is
-  // settled (what Select judges), matching the snapshot status in the shell.
+  // settled, matching the snapshot status in the shell.
   const status = { role: "status", "aria-label": "Release read", "aria-busy": releases.busy ? "true" : undefined };
   if (releases.read === null) {
     return releases.error === null
@@ -43,52 +34,55 @@ function ReadLine({ releases }) {
   );
 }
 
-function SelectionSection({ read }) {
-  const home = releaseHome(read);
+/**
+ * One Player's Install: a release Central may put on (newest first) and the button that opens
+ * the one confirmation. Install changes this Player only (owner, 2026-10-16: "Updates can also be
+ * triggered by the Player device and apply only to that device").
+ */
+function InstallControl({ read, row, onInstall }) {
+  const choices = read.releases.filter(deployable);
+  const [version, setVersion] = useState(() => updateTarget(read) ?? choices[0]?.version ?? "");
+  if (choices.length === 0) return <p className="roster__note">No release can be installed yet.</p>;
   return (
-    <>
-      <FactLine label="Boot selection" fact={home.selection} />
-      {home.previous !== null && <FactLine label="Previous" fact={home.previous} />}
-    </>
+    <p>
+      <label>
+        {`Release for ${row.name} `}
+        <select value={version} onChange={(event) => setVersion(event.target.value)}>
+          {choices.map((release) => <option key={release.version} value={release.version}>{release.version}</option>)}
+        </select>
+      </label>
+      {" "}
+      <button type="button" onClick={(event) => onInstall(event, row, version)}>{`Install on ${row.name}…`}</button>
+    </p>
   );
 }
 
-function DeploymentsSection({ read, onSelect }) {
-  const rows = releaseHome(read).deployments;
-  if (rows.length === 0) {
-    return <p className="roster__empty">No deployments. Central records one for each valid release it observes.</p>;
-  }
+/** Every Player with the release it boots next, its previous, an install's progress and what its host reported. */
+function PlayersSection({ read, onInstall }) {
+  const rows = playerRows(read);
+  if (rows.length === 0) return <p className="roster__empty">Central knows no Player yet.</p>;
   return (
-    <ul className="player__commands" aria-label="Deployments">
-      {rows.map((row) => {
-        const offer = selectionOffer(read, row.deploymentId);
-        return (
-          <li key={row.deploymentId} className="player__command" aria-label={`Deployment ${row.deploymentId}`}>
-            <FactLine label="Deployment" fact={row.deployment} suffix={row.contents} />
-            {row.from !== null && <FactLine label="Release" fact={row.from} />}
-            {offer.offer === "selected" && <p className="player__state">Selected</p>}
-            {row.previous && <p className="player__state">Previous selection</p>}
-            {offer.offer === "select" && (
-              <button type="button" onClick={(event) => onSelect(event, row.deploymentId)}>
-                Select for every boot…
-              </button>
-            )}
-          </li>
-        );
-      })}
+    <ul className="player__commands" aria-label="Players">
+      {rows.map((row) => (
+        <li key={row.serial} className="player__command" aria-label={row.name}>
+          <p className="player__state">{`${row.name} · boots ${row.version}`}</p>
+          {row.previous !== null && <p className="roster__note">{`Previous: ${row.previous}`}</p>}
+          <p className="roster__note">{`Running: ${row.running}`}</p>
+          {row.install !== null && <p className="player__state" role="status">{row.install}</p>}
+          <InstallControl read={read} row={row} onInstall={onInstall} />
+        </li>
+      ))}
     </ul>
   );
 }
 
 /**
- * The releases Central observed (§25, §6.5): one row per tag, newest first, each with one
- * readiness fact and one verb, "Put vX on the wall…", which opens Update the wall for it
- * (§25a: the one confirmation lives there). On the selected row it reads "Continue putting vX
- * on the wall…": the rolling reboot is tab-driven (R8), so a paused rollout of a release that
- * is not the newest stable resumes from here. A Rejected release has none.
+ * The releases Central observed: one row per version, newest first, each with its readiness and
+ * the Players that boot it next, and one verb, "Put vX on the wall…", which opens Update the wall
+ * for it (the one confirmation lives there). A Rejected release has none.
  */
 function CatalogSection({ read, checking, onCheck }) {
-  const rows = releaseHome(read).releases;
+  const rows = releaseRows(read);
   return (
     <>
       <button type="button" onClick={onCheck} disabled={checking}>
@@ -96,26 +90,23 @@ function CatalogSection({ read, checking, onCheck }) {
       </button>
       {rows.length === 0 ? <p className="roster__empty">GitHub releases has reported no node release yet.</p> : (
         <ul className="player__commands" aria-label="Release catalog">
-          {rows.map((row) => {
-            const { release } = row;
-            return (
-              <li key={release.tag} className="player__command" aria-label={`Release ${release.tag}`}>
-                <FactLine label="Release" fact={row.catalog} />
-                {row.prerelease && <p className="roster__note">Pre-release: listed, not downloaded ahead</p>}
-                {row.contents !== null && <FactLine label="Contents" fact={row.contents} />}
-                <FactLine label="Download" fact={row.readiness} suffix="not proof a Player holds it" />
-                {row.newerRejected !== null && <p className="roster__note">{row.newerRejected}</p>}
-                {row.label !== null && <p className="player__state">{row.label}</p>}
-                {row.deploymentId !== null && (
-                  <a href={formatRoute({ section: "releases", flow: "update", id: release.tag })}>
-                    {row.label === "Selected for every boot"
-                      ? `Continue putting ${release.tag} on the wall…`
-                      : `Put ${release.tag} on the wall…`}
-                  </a>
-                )}
-              </li>
-            );
-          })}
+          {rows.map((row) => (
+            <li key={row.version} className="player__command" aria-label={`Release ${row.version}`}>
+              <p>{`Release ${row.version}`}</p>
+              {row.prerelease && <p className="roster__note">Pre-release: listed, not downloaded ahead</p>}
+              {row.contents !== null && <p className="roster__note">{row.contents}</p>}
+              <FactLine label="Download" suffix="not proof a Player holds it" fact={row.readiness === null
+                ? fact({ kind: "unknown", why: "Central did not serve whether it is downloaded" })
+                : fact({ kind: "set", value: row.readiness })} />
+              {row.isDefault && <p className="roster__note">Newest ready: a Player with no version of its own boots it</p>}
+              {row.bootedBy.length > 0 && <p className="player__state">{`Booted next by ${row.bootedBy.join(", ")}`}</p>}
+              {row.deployable && (
+                <a href={formatRoute({ section: "releases", flow: "update", id: row.version })}>
+                  {`Put ${row.version} on the wall…`}
+                </a>
+              )}
+            </li>
+          ))}
         </ul>
       )}
     </>
@@ -123,12 +114,12 @@ function CatalogSection({ read, checking, onCheck }) {
 }
 
 /**
- * The release sections (§25): one read feeds them all (releases.js `useReleaseRead`), and the
- * Select dialog sends through its one send function, judged on the newest read.
+ * The release sections: one read feeds them all (releases.js `useReleaseRead`); Install sends
+ * one request for one Player.
  */
 function ReleaseRecords() {
   const releases = useReleaseRead();
-  // This page's unanswered "Check GitHub releases now" (releases.js `HeldCheck`): the same shape.
+  // This page's unanswered "Check GitHub releases now" (releases.js `HeldCheck`).
   const checkRef = useRef(false);
   const [checking, setChecking] = useState(false);
   const heldCheck = useMemo(() => ({
@@ -138,45 +129,31 @@ function ReleaseRecords() {
       setChecking(value);
     },
   }), []);
-  // A selection whose answer was lost: the first read started after the answer settles it.
-  const [pending, setPending] = useState(/** @type {{request: object, after: number}|null} */ (null));
   const { open, setStatus, confirmation } = useConfirm(null);
 
-  useEffect(() => {
-    if (pending !== null && releases.seq > pending.after && releases.read !== null) {
-      setStatus(selectionSettled(pending.request, releases.read).message);
-      setPending(null);
-    }
-  }, [pending, releases.seq, releases.read, setStatus]);
-
-  const onSelect = (event, deploymentId) => {
-    const request = selectionRequest(releases.read, deploymentId);
-    if ("refused" in request) {
-      setStatus(`Select unavailable: ${request.refused}.`);
+  const onInstall = (event, row, version) => {
+    const release = releases.read?.releases.find((each) => each.version === version);
+    if (release === undefined) {
+      setStatus("Install unavailable: Central no longer lists this release.");
       return;
     }
-    setPending(null);
     open(event, {
-      key: `select-${deploymentId}-${request.body.expected_revision}`,
-      title: `Select deployment ${deploymentHandle(deploymentId)} for every boot?`,
+      key: `install-${row.serial}-${version}`,
+      title: `Install ${version} on ${row.name}?`,
       body: (
         <>
-          {selectionConfirmation(request).map((line) => <p key={line}>{line}</p>)}
-          <details>
-            <summary>Request</summary>
-            <ul>
-              <li>{`Deployment ${deploymentId}`}</li>
-              <li>{`Expected revision ${request.body.expected_revision}`}</li>
-            </ul>
-          </details>
+          <p>{`Only ${row.name} changes: it restarts onto ${version}, and every Frame it drives is blank while it `
+            + "restarts. Every other Player keeps its own version."}</p>
+          <p>{readinessLine(release)}</p>
         </>
       ),
-      confirmLabel: "Select for every boot",
+      confirmLabel: "Install and restart",
       run: async () => {
-        const outcome = await sendSelection(request, releases);
-        if (outcome.outcome === "unknown") setPending({ request, after: releases.startedReads() });
+        const answer = await installOnPlayer(row.serial, { version });
         void releases.refresh();
-        return { state: outcome.outcome, message: outcome.outcome === "unknown" ? SELECT_UNKNOWN : outcome.message };
+        if (answer.ok) return { state: "done", message: `${row.name}: ${installWords(answer.started.install, version)}.` };
+        return answerLost(answer.error) ? { state: "unknown", message: UNKNOWN_MESSAGE }
+          : { state: "refused", message: refusalWords(answer.error) };
       },
     });
   };
@@ -188,13 +165,13 @@ function ReleaseRecords() {
   };
 
   const { read, readAt } = releases;
-  const newest = newestStable(read);
+  const target = updateTarget(read);
   return (
     <>
       <ReadLine releases={releases} />
-      {newest !== null && (
+      {target !== null && (
         <p>
-          <a className="releases__update" href={formatRoute({ section: "releases", flow: "update", id: newest.tag })}>
+          <a className="releases__update" href={formatRoute({ section: "releases", flow: "update", id: target })}>
             Update the wall…
           </a>
         </p>
@@ -202,11 +179,8 @@ function ReleaseRecords() {
       {confirmation("roster__status-line")}
       {read !== null && (
         <>
-          <SectionBoundary title="Boot selection" resetKey={readAt}>
-            <SelectionSection read={read} />
-          </SectionBoundary>
-          <SectionBoundary title="Deployments" resetKey={readAt}>
-            <DeploymentsSection read={read} onSelect={onSelect} />
+          <SectionBoundary title="Players" resetKey={readAt}>
+            <PlayersSection read={read} onInstall={onInstall} />
           </SectionBoundary>
           <SectionBoundary title="Release catalog" resetKey={readAt}>
             <CatalogSection read={read} checking={checking} onCheck={onCheck} />
@@ -218,9 +192,9 @@ function ReleaseRecords() {
 }
 
 /**
- * Fleet › Releases (console DDD Part E §25, beads NR1, NR2 and B7): the releases Central
- * observed and downloads by itself → their deployments → the boot selection: the fleet-wide
- * aggregates' home.
+ * Fleet › Releases: the releases Central observed and downloads by itself, and a version per
+ * Player (Q2 A, 2026-10-16): each Player boots its own version, or the newest ready release when
+ * it has none; Install puts a release on one Player, Update the wall on every Player.
  */
 export function ReleasesPage() {
   return (

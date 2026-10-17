@@ -19,7 +19,14 @@ from central.db import Database
 from central.displays.model import Readiness
 from central.fleet.acceptance_evidence import applied_is_latest
 from central.fleet.device_fence import fence_in, retire_in
-from central.fleet.position_history import position_values, profile_changed_record, saved_record
+from central.fleet.models import TrialRefusal, TrialRefused
+from central.fleet.position_history import (
+    created_record,
+    position_values,
+    profile_changed_record,
+    saved_record,
+)
+from central.frame_lighting.ports import FrameLightingCheck
 from central.infra.display_store import (
     POSITION_COLUMNS,
     POSITION_FACTS,
@@ -29,8 +36,9 @@ from central.infra.display_store import (
     frame_readiness_in,
     resolve_output,
 )
-from central.infra.position_history_store import write_position_in
+from central.infra.position_history_store import record_created_in, write_position_in
 from central.infra.power_store import forget_frame_in
+from central.infra.transactions import PgTransaction
 from central.installation_models import (
     FrameInventory,
     InstallationInventory,
@@ -44,16 +52,17 @@ from central.transaction_locks import acquire_runtime_locks, holds_runtime_locks
 from contracts.enrollment import Enrollment as Enrollment
 from contracts.enrollment import OutputReport as OutputReport
 from contracts.enrollment import enrollment_message as enrollment_message
+from contracts.frame_lighting import FrameLighting
 from contracts.models import (
     Calibration,
     CoverFit,
     FrameProfile,
     Identifier,
-    Mat,
     Model,
     OutputBinding,
     TargetIdentifier,
 )
+from contracts.node_picture import UPGRADE_DISPLAY_LIGHT
 from contracts.player_control import (
     SCHEMA,
     ControlAck,
@@ -141,8 +150,11 @@ def _name_or(exc: UniqueViolation, code: str) -> str:
 class Registry:
     IDENTIFY_OUTPUT_TTL_SECONDS = 15
 
-    def __init__(self, db: Database, clock: Clock):
+    def __init__(self, db: Database, clock: Clock, *, lighting: FrameLightingCheck):
+        """`lighting`: the Frame-lighting check every lighting write goes through (the composition
+        root's PgFrameLighting)."""
         self.db, self.clock = db, clock
+        self.lighting = lighting
 
     @contextmanager
     def _equipment_write(self):
@@ -477,14 +489,20 @@ class Registry:
                 "expires_at": expires_at}
 
     def create_frame(self, frame: FrameCreate) -> dict:
+        """A new Frame at the cover fit and the lighting a new Frame starts with (a new Frame is bound
+        to no port yet, so no Display is seen: UPGRADE_DISPLAY_LIGHT), and its KEPT_CREATED Position
+        entry, in one transaction."""
         try:
             with self.db.transaction() as conn:
                 name = frame.name if frame.name is not None else _smallest_free(conn, "frames", "Frame")
+                calibration = Calibration(fit=CoverFit())
+                lighting = self.lighting.new_frame_within(PgTransaction(conn), UPGRADE_DISPLAY_LIGHT)
                 conn.execute("INSERT INTO frames(id,name,surface_id,x_mm,y_mm,width_mm,height_mm,"
-                             "profile,calibration) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                             "profile,calibration,lighting) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                              (frame.id, name, frame.surface_id, frame.x_mm, frame.y_mm,
                               frame.width_mm, frame.height_mm, Jsonb(frame.profile.model_dump()),
-                              Jsonb(Calibration(fit=CoverFit()).model_dump(mode="json"))))
+                              Jsonb(calibration.model_dump(mode="json")), Jsonb(lighting.model_dump(mode="json"))))
+                record_created_in(conn, frame.id, created_record(position_values(calibration, lighting)))
                 _ensure_wall(conn, frame.surface_id)
                 self._audit(conn, "frame_created", frame.id)
         except UniqueViolation as exc:
@@ -640,7 +658,7 @@ class Registry:
         calibration = Calibration.model_validate(frame["calibration"])
         invalidated = calibration.model_copy(update={"revision": calibration.revision + 1})
         row = {"generation": write_position_in(
-            conn, frame_id, profile_changed_record(position_values(calibration, Mat.model_validate(frame["mat"]))),
+            conn, frame_id, profile_changed_record(position_values(calibration, FrameLighting.model_validate(frame["lighting"]))),
             calibration=invalidated, profile=profile)}
         self._audit(conn, "frame_profile_changed", frame_id,
                     {"profile": profile.model_dump(), **row})
@@ -732,15 +750,15 @@ class Registry:
     def commit_calibration_trial_in(self, conn, *, frame_id: str, player_id: str,
             authority_epoch: int, output_id: str, binding_generation: int,
             config_revision: int, calibration_revision: int,
-            calibration: Calibration, mat: Mat, session_id: uuid.UUID | None,
+            calibration: Calibration, lighting: FrameLighting, session_id: uuid.UUID | None,
             restored_from: uuid.UUID | None) -> Calibration:
         """Registry-owned Save CAS inside the Trial owner's existing transaction.
 
         Caller holds Coordination→Runtime, then the device fence and session locks. This method
-        owns the persistent Frame calibration and mat (print look: the mat rides the binding
-        beside the calibration and is saved with it; it never changes the Frame output). It never
-        interprets trial evidence. It is a kept Position write (configuration snapshots, migration
-        096): a change made outside Photo Wall is recorded first, then the Save's kept-saved entry
+        owns the persistent Frame calibration and lighting (the lighting rides the binding beside the
+        calibration and is saved with it; it never changes the Frame output). It never interprets
+        trial evidence. It is a kept Position write: a change made outside Photo Wall is recorded
+        first, then the Save's kept-saved entry
         (the trial's `session_id`, and `restored_from` when its draft came from a Restore), in this
         transaction.
         """
@@ -754,13 +772,13 @@ class Registry:
             row["player_id"], row["authority_epoch"], row["output_id"], row["generation"],
             row["configuration_revision"]
         ) != (player_id, authority_epoch, output_id, binding_generation, config_revision):
-            raise RegistryError("calibration_trial_baseline_changed")
+            raise TrialRefused(TrialRefusal.CALIBRATION_BASELINE_CHANGED)
         current = Calibration.model_validate(row["calibration"])
         if current.revision != calibration_revision:
-            raise RegistryError("calibration_revision_conflict")
+            raise TrialRefused(TrialRefusal.CALIBRATION_REVISION_CONFLICT)
         committed = Calibration.model_validate(calibration.model_dump()).model_copy(
             update={"revision": current.revision + 1})
-        write_position_in(conn, frame_id, saved_record(position_values(committed, mat), session_id=session_id,
+        write_position_in(conn, frame_id, saved_record(position_values(committed, lighting), session_id=session_id,
                                                        restored_from=restored_from), calibration=committed)
         commit_position(conn, frame_id)
         self._audit(conn, "calibration_trial_commit", frame_id)
@@ -788,7 +806,7 @@ class Registry:
                               configuration_revision=r["configuration_revision"],
                               profile=FrameProfile.model_validate(r["profile"]),
                               calibration=Calibration.model_validate(r["calibration"]),
-                              mat=Mat.model_validate(r["mat"]))
+                              lighting=FrameLighting.model_validate(r["lighting"]))
                 for r in rows]
         return {"bindings": bindings, "execution_bindings": [binding for binding, row in
                 zip(bindings, rows, strict=True) if frame_readiness(row) is Readiness.READY]}
@@ -804,7 +822,7 @@ class Registry:
         outputs = conn.execute("SELECT player_id,output_id,observation FROM outputs "
                                "ORDER BY player_id,output_id").fetchall()
         frames = conn.execute("SELECT f.id,f.name,f.surface_id,f.x_mm,f.y_mm,f.width_mm,f.height_mm,f.profile,"  # noqa: S608
-                              "f.calibration,f.mat,f.configuration_revision,"
+                              "f.calibration,f.lighting,f.configuration_revision,"
                               f"b.player_id,b.output_id,{POSITION_COLUMNS} FROM frames f LEFT JOIN bindings b "
                               f"ON b.frame_id=f.id {SEEN_DISPLAY_JOIN} ORDER BY f.id").fetchall()
         bound_player_ids = {frame["player_id"] for frame in frames if frame["player_id"] is not None}

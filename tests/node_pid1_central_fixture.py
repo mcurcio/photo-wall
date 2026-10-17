@@ -26,7 +26,7 @@ from fastapi.responses import JSONResponse
 from integration.bus_servers import BusServer
 from psycopg.types.json import Jsonb
 from test_fleet_attempts import DEVICE_ID, SERIAL
-from test_node_boot import publish_deployment
+from test_node_boot import boot_service, keep_version, publish_deployment
 
 from central.app import create_app
 from central.assets.layout import CacheLayout
@@ -36,7 +36,7 @@ from central.fleet.acceptance_evidence import current_control_receipt_matches
 from central.fleet.acceptance_query import load_current_app_control_in
 from central.fleet.node_acceptance import current_cohort_in
 from central.fleet.node_app_links import load_current_node_app_link_in
-from central.fleet.node_boot import NodeBootService, NodeDeployment
+from central.fleet.node_boot import NodeDeployment
 from central.fleet.node_bus_hub import HUB_LISTENERS
 from central.fleet.node_lifecycle import OperatorAppStage
 from central.fleet.node_sessions import NodeControlConfig, NodeControlError
@@ -165,7 +165,7 @@ def _central_fixture(
     components_dir, workdir = Path(components_dir), Path(workdir)
     workdir.mkdir(parents=True, exist_ok=True)
     clock = SystemClock()
-    registry = Registry(registry.db, clock)
+    registry = Registry(registry.db, clock, lighting=registry.lighting)
     components = json.loads((components_dir / "components.json").read_text())
     manager = AppEnvironmentRefV2(**components["manager_primary"])
     original = AppEnvironmentRefV2(**components["app_environment"])
@@ -225,7 +225,7 @@ def _central_fixture(
     lifecycle.effect = observe_refusals("effect", lifecycle.effect, protocol_refusals)
     links = app.state.node_app_links
     links.admit = observe_refusals("app_link", links.admit, app_link_refusals)
-    boots = NodeBootService(sessions)
+    boots = boot_service(sessions)
     base = NodeBaseRefV2(
         "v99.0.0",
         "8" * 64,
@@ -250,7 +250,7 @@ def _central_fixture(
         )
         publish_deployment(registry.db, selected, sessions.clock)
         deployments[phase] = selected
-    boots.select(deployments["cold"].deployment_id, 0)
+    keep_version(registry.db, SERIAL, deployments["cold"].deployment_id, sessions.clock.utc())
     for digest, path in archives.items():
         with transactions.begin() as tx:
             records.record_produced(

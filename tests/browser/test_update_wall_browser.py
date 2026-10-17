@@ -1,18 +1,20 @@
 """Fleet › Releases › Update the wall (console DDD Part E §25a, beads NU1 and B8) in the
 production app.
 
-Central is real for everything the journey's own judgement rests on: the release catalog and the
-deployment Central ingests from it (filled the way the media worker fills it), Select's
-compare-and-set, the Registry's Players, Frames and bindings, and their readiness (Frame
-health). No media worker runs here, so the release's download readiness is set on Central's real
-release read by the test (`Fleet.readiness`): Ready unless a test says otherwise. The node layer is a
-stand-in (`Fleet`): each box's node read, its app operations read and the node writes are served
-by the test, so a box can "reboot onto the selection" between two reads, deterministically. The
+Central is real for the Registry's Players, Frames and bindings and their readiness (Frame
+health), and for the deployment Central ingests from the release catalog (filled the way the media
+worker fills it), which Try stages. Central's Releases read and Update the wall's PUT (a version per
+Player, Q2 A 2026-10-16) are the central lane's; until they land here, `Fleet` serves them with the
+contract's shapes (ReleasesView, VersionChoice), the target's download readiness set by the test
+(`Fleet.readiness`): Ready unless a test says otherwise. The node layer is a stand-in too: each
+box's node read, its app operations read and the node writes are served by the test, so a box can
+"reboot onto its version" between two reads, deterministically. The
 send rules themselves are Central's elsewhere (tests/browser/test_player_page_browser.py runs
 Reboot and Stage against Central's real owners); here the evidence is the journey's ORDER: how
 many requests it sends, and when.
 
-Every assertion is behavioural (role, text, request count).
+Every assertion is behavioural (role, text, request count). Mutation probe: Update the wall that
+calls `installOnPlayer` per Player -> the main case's "no POST install" fails.
 """
 
 import json
@@ -24,12 +26,9 @@ import pytest
 from console_tasks import connect, visit
 from operator_harness import operator_server, reload_after, report_readiness, run_page_clock
 from playwright.sync_api import expect
-from test_node_boot import cold_setup
 from test_registry import enroll
 from test_releases_browser import _catalog
 
-from central.fleet.node_boot import NodeBootService
-from central.fleet.node_sessions import NodeControlConfig, NodeSessions
 from central.registry import FrameCreate
 from contracts.models import FrameProfile
 
@@ -43,10 +42,11 @@ JOURNEY = "#/releases/update/v9.0.0"
 PUT_TITLE = "Put release v9.0.0 on the wall?"
 REBOOT = "Put it on the wall and reboot"
 NO_REBOOT = "No Player is rebooted; each gets it at its next boot."
-KEEP_WORDS = "These are the Players this console knows. Select is fleet-wide: any other Pi that boots by node path is offered deployment"
+WALL_SCOPE = ("Every Player Central knows boots this release from its next boot on. A Player that enrols later boots "
+              "the newest ready release until it is given one.")
+KEEP_WORDS = f"These are the Players this console knows. {WALL_SCOPE}"
 TRIED_RUNNING = "App Effect Broker reported the staged app running"
-SELECT_SCOPE = ("Every Player that boots by node path from now on is offered this deployment, including Players "
-                "Central has not seen. Central cannot list which Players will boot.")
+OLD = "v8.0.0"
 
 
 class Fleet:
@@ -61,22 +61,63 @@ class Fleet:
     def __init__(self, page, devices, accepted=True):
         self.page, self.target_app = page, None
         self.readiness = {"readiness": "ready", "readiness_reason": None, "missing_bytes": 0}
+        # Central's Releases read, a version per Player: every Player on OLD, on the target's base
+        # unless `old_base` says otherwise. `walls`: each Update the wall PUT's version;
+        # `installs`: each Install POST (Update the wall sends none).
+        self.base, self.old_base = "v1.0.0", "v1.0.0"
+        self.players = {device: {"version": OLD, "previous": None} for device in devices}
+        self.walls, self.installs, self.wall_answer = [], [], None
+        self.deployments = {}  # version -> the deployment Central's real Releases read says it became
         self.boxes = {device: {"boot": f"boot-{next(self._ids)}", "linked": OLD_APP,
                                "acceptances": [OLD_APP] if accepted else [], "commands": [], "operations": []}
                       for device in devices}
         self.reboots, self.stages, self.begins, self.samples = [], [], [], []
         page.route(re.compile(r".*/v1/operator/node/devices/[^/]+(/[a-z-]+)?$"), self._device)
         page.route("**/v1/operator/node/app-qualifications/*/sample", self._sample)
-        page.route("**/v1/operator/node/releases", self._releases)
+        page.route("**/v1/operator/releases", self._view)
+        page.route("**/v1/operator/releases/wall", self._wall)
+        page.route("**/v1/operator/players/*/install", self._install)
 
-    def _releases(self, route):
-        """Central's real release read, with the download readiness this test sets."""
-        response = route.fetch()
-        body = response.json()
-        for row in body["releases"]:
-            if row["deployment_id"] is not None:
-                row.update(self.readiness)
-        route.fulfill(response=response, json=body)
+    def view(self):
+        """Central's ReleasesView: the target, the release every Player booted before, each Player's version."""
+        release = lambda version, base, app, extra: {  # noqa: E731
+            "version": version, "stable": True, "problem": None, "deployment_id": self.deployments.get(version),
+            "base_tag": base, "app_environment_sha256": app,
+            "in_window": True, "discovered_at": 1_759_363_000, "readiness": "ready", "readiness_reason": None,
+            "missing_bytes": 0, **extra}
+        return {"read_at": 1_759_363_300, "default": "v9.0.0",
+                "releases": [release("v9.0.0", self.base, self.target_app, self.readiness),
+                             release(OLD, self.old_base, OLD_APP, {})],
+                "players": [{"serial": device, "player_id": None, "name": device, "version": entry["version"],
+                             "chosen": True, "previous": entry["previous"], "install": None, "running": None}
+                            for device, entry in self.players.items()]}
+
+    def put_all(self, version):
+        """Every Player's version becomes `version` (Update the wall, here or on another page)."""
+        for entry in self.players.values():
+            if entry["version"] != version:
+                entry["previous"], entry["version"] = entry["version"], version
+
+    def _view(self, route):
+        """Central's real Releases read names the deployment each release became (Try stages it);
+        the Players' versions and the target's readiness are this test's."""
+        real = route.fetch().json()
+        self.deployments.update({row["version"]: row["deployment_id"] for row in real["releases"]})
+        self._json(route, self.view())
+
+    def _wall(self, route):
+        version = route.request.post_data_json["version"]
+        self.walls.append(version)
+        if self.wall_answer is not None and self.wall_answer[0] != 502:
+            return self._json(route, {"error": self.wall_answer[1]}, self.wall_answer[0])
+        self.put_all(version)
+        if self.wall_answer is not None:  # recorded, but the answer never reaches the page
+            return route.fulfill(status=502, body="bad gateway")
+        self._json(route, self.view())
+
+    def _install(self, route):
+        self.installs.append(route.request.url)
+        self._json(route, {"error": "unknown_player"}, 404)
 
     @staticmethod
     def _json(route, body, status=200):
@@ -129,7 +170,9 @@ class Fleet:
         self._json(route, {"status": "accepted", "accepted": True})
 
     def add(self, device):
-        """A box that enrolled after the test began, on its first boot with the old app."""
+        """A box that enrolled after the test began, on its first boot with the old app; Central gives
+        it the wall's version (a Player with none boots the newest ready release)."""
+        self.players[device] = {"version": "v9.0.0", "previous": None}
         self.boxes[device] = {"boot": f"boot-{next(self._ids)}", "linked": OLD_APP, "acceptances": [OLD_APP],
                               "commands": [], "operations": []}
 
@@ -191,12 +234,12 @@ def _section(page, name):
 
 
 def _put(page, label=REBOOT, says=None, double=False):
-    """Put v9.0.0 on the wall: the ONE confirmation (Select's own R17 words, and what it costs),
+    """Put v9.0.0 on the wall: the ONE confirmation (every Player's version, and what it costs),
     confirmed with `label` (double-clicked when `double`)."""
     _section(page, "Choose").or_(_section(page, "Look")).get_by_role(
         "button", name="Put v9.0.0 on the wall…", exact=True).click()
     dialog = page.get_by_role("dialog", name=PUT_TITLE)
-    expect(dialog).to_contain_text(SELECT_SCOPE)  # Select's own R17 words (releases.js `selectionConfirmation`)
+    expect(dialog).to_contain_text(WALL_SCOPE)  # releases.js `WALL_SCOPE`
     for text in says or ():
         expect(dialog).to_contain_text(text)
     button = dialog.get_by_role("button", name=label, exact=True)
@@ -212,7 +255,7 @@ def _rolling(page):
     section = _section(page, "Put on the wall")
     expect(section).to_be_visible(timeout=10_000)
     expect(section.get_by_role("status")).to_have_text(
-        re.compile(r"^Rebooting one at a time · 0 of \d+ Players on the selection$"))
+        re.compile(r"^Rebooting one at a time · 0 of \d+ Players on this release$"))
     return section
 
 
@@ -236,14 +279,12 @@ def _journey(page, origin, registry, route=JOURNEY):
     expect(_section(page, "Choose").or_(_section(page, "Put on the wall"))).to_be_visible(timeout=15_000)
 
 
-def test_put_sends_one_put_then_one_reboot_at_a_time_each_after_the_previous_rejoins_and_undo_selects_previous(
+def test_put_sends_one_put_then_one_reboot_at_a_time_each_after_the_previous_rejoins_and_undo_puts_previous(
         page, registry, monkeypatch):
-    _, _, before = cold_setup(registry)  # the selection this Put replaces: Undo puts it back by id
     release, wall = _start(registry, monkeypatch)
     with operator_server(registry.db, registry.clock) as origin:
         fleet = Fleet(page, [device for _, device in wall])
         fleet.target_app = release.app_environment.environment_sha256
-        puts = _writes(page, "PUT", "/boot-policy")
         _journey(page, origin, registry)
         expect(_section(page, "Choose")).to_contain_text(KEEP_WORDS)
         expect(_section(page, "Choose")).to_contain_text("Download: Ready")
@@ -252,7 +293,7 @@ def test_put_sends_one_put_then_one_reboot_at_a_time_each_after_the_previous_rej
         _put(page, says=["Each Frame a Player drives is blank while it reboots",
                          "Ready: Central has every file of v9.0.0."], double=True)
         keep = _rolling(page)
-        assert len(puts) == 1
+        assert fleet.walls == ["v9.0.0"]
         _settle(page)
         assert len(fleet.reboots) == 1
         first = fleet.reboots[0]
@@ -271,16 +312,16 @@ def test_put_sends_one_put_then_one_reboot_at_a_time_each_after_the_previous_rej
         assert len(fleet.reboots) == 3
         fleet.reboot(fleet.reboots[2])
         _settle(page, times=2)
-        expect(_section(page, "Done")).to_contain_text("Done · 3 of 3 Players on the selection")
+        expect(_section(page, "Done")).to_contain_text("Done · 3 of 3 Players on this release")
         assert sorted(fleet.reboots) == sorted(device for _, device in wall)
-        assert len(puts) == 1
-        # Undo selects the previous selection's deployment directly, by id (Select alone).
-        _section(page, "Done").get_by_role("button", name=re.compile("^Undo: put deployment")).click()
-        undo = page.get_by_role("dialog", name=f"Put deployment {str(before.deployment_id)[:4]}… back for every boot?")
+        assert fleet.walls == ["v9.0.0"] and fleet.installs == []  # one PUT for the wall, no Install
+        # Undo puts every Player back on the release they all booted before, with no reboot.
+        _section(page, "Done").get_by_role("button", name=f"Undo: put release {OLD} back…", exact=True).click()
+        undo = page.get_by_role("dialog", name=f"Put release {OLD} back on every Player?")
         expect(undo).to_contain_text(NO_REBOOT)
-        undo.get_by_role("button", name="Select for every boot", exact=True).click()
+        undo.get_by_role("button", name=f"Put {OLD} back", exact=True).click()
         expect(undo).to_be_hidden()
-        assert [put.post_data_json["deployment_id"] for put in puts][1:] == [str(before.deployment_id)]
+        assert fleet.walls == ["v9.0.0", OLD] and fleet.installs == []
         assert len(fleet.reboots) == 3
 
 
@@ -296,8 +337,8 @@ def test_a_reload_mid_rollout_sends_nothing_until_resume_and_rederives_the_rows(
         assert len(fleet.reboots) == 1
         reload_after(page, lambda: fleet.reboot(fleet.reboots[0]))  # it comes back while the page is away
         keep = _section(page, "Put on the wall")
-        expect(keep.get_by_role("status")).to_have_text("Paused · 1 of 3 Players on the selection", timeout=10_000)
-        expect(keep).to_contain_text("Paused means this page sends no more reboots. Select is fleet-wide")
+        expect(keep.get_by_role("status")).to_have_text("Paused · 1 of 3 Players on this release", timeout=10_000)
+        expect(keep).to_contain_text("Paused means this page sends no more reboots. Every Player already boots v9.0.0")
         rows = keep.get_by_role("list", name="Players to keep it on", exact=True).get_by_role("listitem")
         expect(rows).to_have_count(3)
         expect(rows.filter(has_text="Rejoined")).to_have_count(1)
@@ -328,7 +369,7 @@ def test_ten_minutes_without_rejoining_pauses_with_zero_further_posts(page, regi
         page.clock.fast_forward(10 * 60 * 1000)
         _settle(page)
         keep = _section(page, "Put on the wall")
-        expect(keep.get_by_role("status")).to_have_text("Paused · 0 of 3 Players on the selection", timeout=10_000)
+        expect(keep.get_by_role("status")).to_have_text("Paused · 0 of 3 Players on this release", timeout=10_000)
         expect(keep).to_contain_text("has not come back on a new boot after 10 minutes")
         _settle(page, times=4)
         assert len(fleet.reboots) == 1
@@ -340,7 +381,6 @@ def test_try_samples_then_stages_then_looks_and_back_out_reboots_only_the_tried_
     with operator_server(registry.db, registry.clock) as origin:
         fleet = Fleet(page, [device for _, device in wall], accepted=False)
         fleet.target_app = release.app_environment.environment_sha256
-        puts = _writes(page, "PUT", "/boot-policy")
         _journey(page, origin, registry)
         _section(page, "Choose").get_by_role("link", name=re.compile(f"^Try on .*{tried_device}")).click()
         qualify = _section(page, "Qualify")
@@ -366,15 +406,15 @@ def test_try_samples_then_stages_then_looks_and_back_out_reboots_only_the_tried_
         fleet.reboot(tried_device)
         _settle(page)
         expect(_section(page, "Done")).to_contain_text("Backed out:", timeout=10_000)
-        assert fleet.reboots == [tried_device] and puts == [] and fleet.stages == [tried_device]
+        assert fleet.reboots == [tried_device] and fleet.walls == [] and fleet.stages == [tried_device]
 
 
 def test_a_base_changing_target_withdraws_try_with_its_words(page, registry, monkeypatch):
-    cold_setup(registry)  # a selection on another base
     release, wall = _start(registry, monkeypatch)
     with operator_server(registry.db, registry.clock) as origin:
         fleet = Fleet(page, [device for _, device in wall])
         fleet.target_app = release.app_environment.environment_sha256
+        fleet.old_base = "v0.9.0"  # every Player boots a release on another base
         _journey(page, origin, registry)
         choose = _section(page, "Choose")
         expect(choose).to_contain_text("Try unavailable: This release changes the base, so it cannot be tried live; "
@@ -389,7 +429,6 @@ def test_put_names_its_plan_and_a_player_skipped_in_choose_receives_no_reboot(pa
     with operator_server(registry.db, registry.clock) as origin:
         fleet = Fleet(page, [device for _, device in wall])
         fleet.target_app = release.app_environment.environment_sha256
-        puts = _writes(page, "PUT", "/boot-policy")
         _journey(page, origin, registry)
         choose = _section(page, "Choose")
         plan = choose.get_by_role("list", name="Players this page reboots, in order", exact=True).get_by_role("listitem")
@@ -404,17 +443,17 @@ def test_put_names_its_plan_and_a_player_skipped_in_choose_receives_no_reboot(pa
         expect(dialog).to_contain_text("Skipped:")
         dialog.get_by_role("button", name=REBOOT, exact=True).click()
         _rolling(page)
-        assert len(puts) == 1
+        assert fleet.walls == ["v9.0.0"]
         for _ in range(2):
             _settle(page)
             assert len(fleet.reboots) >= 1
             fleet.reboot(fleet.reboots[-1])
             _settle(page, times=2)
-        expect(_section(page, "Done")).to_contain_text("Done · 2 of 3 Players on the selection", timeout=10_000)
+        expect(_section(page, "Done")).to_contain_text("Done · 2 of 3 Players on this release", timeout=10_000)
         assert len(fleet.reboots) == 2 and skipped_device not in fleet.reboots
 
 
-def test_after_try_put_reboots_the_tried_player_first_its_stage_is_not_the_selection(page, registry, monkeypatch):
+def test_after_try_put_reboots_the_tried_player_first_its_stage_is_not_its_version(page, registry, monkeypatch):
     release, wall = _start(registry, monkeypatch)
     tried_device = wall[2][1]
     with operator_server(registry.db, registry.clock) as origin:
@@ -455,7 +494,7 @@ def test_a_player_enrolled_after_put_is_not_in_the_rollout_and_gets_zero_reboots
             assert fleet.reboots and late_device not in fleet.reboots
             fleet.reboot(fleet.reboots[-1])
             _settle(page, times=2)
-        expect(_section(page, "Done")).to_contain_text("Done · 3 of 3 Players on the selection", timeout=10_000)
+        expect(_section(page, "Done")).to_contain_text("Done · 3 of 3 Players on this release", timeout=10_000)
         _settle(page, times=3)
         assert len(fleet.reboots) == 3 and late_device not in fleet.reboots
 
@@ -478,7 +517,7 @@ def test_a_player_skipped_before_a_reload_gets_zero_reboots_after_resume(page, r
         assert len(fleet.reboots) == 1 and skipped_device not in fleet.reboots
         reload_after(page, lambda: fleet.reboot(fleet.reboots[0]))
         keep = _section(page, "Put on the wall")
-        expect(keep.get_by_role("status")).to_have_text("Paused · 1 of 3 Players on the selection", timeout=10_000)
+        expect(keep.get_by_role("status")).to_have_text("Paused · 1 of 3 Players on this release", timeout=10_000)
         rows = keep.get_by_role("list", name="Players to keep it on", exact=True).get_by_role("listitem")
         expect(rows.filter(has_text=skipped_device)).to_contain_text("Skipped")
         keep.get_by_role("button", name="Resume", exact=True).click()
@@ -491,7 +530,7 @@ def test_a_player_skipped_before_a_reload_gets_zero_reboots_after_resume(page, r
         assert len(fleet.reboots) == 2
         fleet.reboot(fleet.reboots[-1])
         _settle(page, times=2)
-        expect(_section(page, "Done")).to_contain_text("Done · 2 of 3 Players on the selection", timeout=10_000)
+        expect(_section(page, "Done")).to_contain_text("Done · 2 of 3 Players on this release", timeout=10_000)
         _settle(page, times=3)
         assert len(fleet.reboots) == 2 and skipped_device not in fleet.reboots
 
@@ -531,7 +570,7 @@ def test_a_rebooted_player_with_a_readiness_failure_is_not_rejoined_and_gets_zer
         failing.append(frames[first])
         fleet.reboot(first)  # a later boot, linking the target's app, but it cannot decode its assignment
         _settle(page, times=2)
-        expect(keep.get_by_role("status")).to_have_text("Paused · 0 of 3 Players on the selection", timeout=10_000)
+        expect(keep.get_by_role("status")).to_have_text("Paused · 0 of 3 Players on this release", timeout=10_000)
         rows = keep.get_by_role("list", name="Players to keep it on", exact=True).get_by_role("listitem")
         expect(rows.filter(has_text=first)).to_contain_text("Not rejoined: it reports a readiness failure.")
         expect(keep).to_contain_text(DECODE_RECOVERY)
@@ -559,22 +598,17 @@ def test_the_first_reboot_waits_for_centrals_download_then_rolls(page, registry,
         assert len(fleet.reboots) == 1
 
 
-def test_a_lost_put_answer_starts_rolling_only_once_a_read_shows_it_selected(page, registry, monkeypatch):
+def test_a_lost_put_answer_starts_rolling_only_once_a_read_shows_every_player_on_it(page, registry, monkeypatch):
     release, wall = _start(registry, monkeypatch)
-
-    def lost(route):
-        route.fetch()  # Central records it; the answer never reaches the page
-        route.fulfill(status=502, body="bad gateway")
-
     with operator_server(registry.db, registry.clock) as origin:
         fleet = Fleet(page, [device for _, device in wall])
         fleet.target_app = release.app_environment.environment_sha256
         _journey(page, origin, registry)
-        page.route("**/v1/operator/node/boot-policy", lost)
+        fleet.wall_answer = (502, None)  # Central records it; the answer never reaches the page
         dialog = _put(page)
         expect(dialog.get_by_role("status")).to_contain_text("Outcome unknown: Central did not answer.")
         dialog.get_by_role("button", name="Close", exact=True).click()
-        # The read after the lost answer shows the target selected: rolling starts, one reboot.
+        # The read after the lost answer shows every Player on the target: rolling starts, one reboot.
         _rolling(page)
         _settle(page)
         assert len(fleet.reboots) == 1
@@ -586,20 +620,18 @@ def test_a_refused_put_starts_no_rolling(page, registry, monkeypatch):
         fleet = Fleet(page, [device for _, device in wall])
         fleet.target_app = release.app_environment.environment_sha256
         _journey(page, origin, registry)
-        page.route("**/v1/operator/node/boot-policy", lambda route: route.fulfill(
-            status=422, content_type="application/json", body='{"error": "mystery_code"}'))
+        fleet.wall_answer = (409, "not_deployable")
         dialog = _put(page)
-        expect(dialog.get_by_role("alert")).to_have_text("Central refused: mystery_code.")
+        expect(dialog.get_by_role("alert")).to_have_text(
+            "Central cannot put this release on a Player: its upload was refused.")
         dialog.get_by_role("button", name="Cancel", exact=True).click()
         _settle(page, times=4)
         expect(_section(page, "Choose")).to_be_visible()
-        # Another page selects it meanwhile: this page shows Paused and sends no reboot, because
-        # no Put of its own landed (no confirmation here started a rollout).
-        with registry.db.transaction() as conn:
-            [deployment] = [row["deployment_id"] for row in conn.execute("SELECT deployment_id FROM node_deployments")]
-        NodeBootService(NodeSessions(registry.db, registry.clock, NodeControlConfig("node-test"))).select(deployment, 0)
+        # Another page puts it on the wall meanwhile: this page shows Paused and sends no reboot,
+        # because no Put of its own landed (no confirmation here started a rollout).
+        fleet.put_all("v9.0.0")
         run_page_clock(page, 30_000)  # the next release read
         keep = _section(page, "Put on the wall")
-        expect(keep.get_by_role("status")).to_have_text("Paused · 0 of 3 Players on the selection", timeout=10_000)
+        expect(keep.get_by_role("status")).to_have_text("Paused · 0 of 3 Players on this release", timeout=10_000)
         _settle(page, times=4)
         assert fleet.reboots == []

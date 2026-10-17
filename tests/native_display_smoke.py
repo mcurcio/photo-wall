@@ -517,8 +517,8 @@ def foreign_bind_refused():
 # Frame protocol v4 (roadmap 1c, P2). The slate's sixth line (overlay/render.py render_slate) on a
 # 640-wide Output: scale 0.5, baseline y 172.5, x from 24, 9 px text.
 BRIGHTNESS_BOX = (20, 160, 260, 178)
-OPERATIONS = ('{"contrast_slope":1.0,"gamma_exponent":1.0,"light_factor":0.8,"output_id":"headless",'
-              '"picture_change":6,"rgb_multipliers":[1.0,1.0,1.0]}')
+OPERATIONS = ('{"contrast_slope":0.8,"gamma_exponent":1.0,"light":{"black":0.0003,"matched_lux":1000.0},'
+              '"output_id":"headless","picture_change":6,"rgb_multipliers":[1.0,1.0,1.0],"test_pattern":null}')
 NOT_JSON = "not-json!!"     # 10 bytes: the shell forwards, never parses
 
 
@@ -555,7 +555,7 @@ def picture_v4():
     read_until(lambda e: e["event"] == "diagnostic_presented", limit=6)
     time.sleep(0.5)
     before = capture_box(*BRIGHTNESS_BOX)
-    assert request("picture", operations=OPERATIONS, brightness="Brightness: display 46 % \u00b7 Photo Wall 114 %")["accepted"]
+    assert request("picture", operations=OPERATIONS, brightness="Brightness: display 46 %")["accepted"]
     assert not request("picture", operations="x" * 1025, brightness="")["accepted"]
     assert not request("picture", operations=OPERATIONS, brightness="b" * 129)["accepted"]
     end = time.monotonic() + 5

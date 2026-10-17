@@ -222,7 +222,8 @@ def image_inputs(target: str, text: str | None = None) -> tuple[str, ...]:
 # that alters how an artefact is built releases NOTHING by itself: it first reaches a release
 # with the next change to a package's inputs. Accepted, so that CI-only edits never cut a
 # version. What a release CONTAINS is a release input: contracts/release.py declares it and
-# scripts/package_release_artifacts.py writes it (the release-assets package).
+# scripts/package_release_artifacts.py writes it (the release-assets package), Galleria's zip
+# and the integration it is cut from included.
 
 # The locked Python project every build syncs. pyproject.toml counts only through DIGESTED below.
 _PROJECT: Final = ("pyproject.toml", "uv.lock")
@@ -296,7 +297,8 @@ PACKAGES: Final = (
             "component set's components.json",
             (*_NODE_DEBS, "appliance/__init__.py", "scripts/seal_root.py",
              "scripts/node_release_writer.py", "scripts/node_release_artifacts.py",
-             "scripts/package_release_artifacts.py")),
+             "scripts/package_release_artifacts.py",
+             "scripts/galleria_zip.py")),        # the packager's import, not a root input
     # The squashfs installs photo-wall-node from the local repo; the initrd build root installs
     # photo-wall-netboot-init from it, whose hook copies stage 1's package directories (contracts,
     # uplink and appliance's stage-1 modules) into the initrd; the rest of appliance/ is the image
@@ -306,14 +308,18 @@ PACKAGES: Final = (
              "uplink/**", "scripts/build_netboot_bundle.sh", "scripts/verify_netboot_initrd.py",
              "scripts/node_release_artifacts.py", "nodeapi/**",
              "debian/**", "debian-packaging/**", "scripts/package_release_artifacts.py",
+             "scripts/galleria_zip.py",          # the packager's import, not a base input
              "scripts/initrd_mount_probe.py", "scripts/kernel_config_check.py",
              "scripts/eeprom_update.py", "scripts/verify_boot_display.py")),
-    # The published files: the base and boot tarballs, manifest.json, SHA256SUMS and the node
-    # release, whose names, layout and contents this packager writes to the declaration.
+    # The published files: the base and boot tarballs, galleria.zip, manifest.json, SHA256SUMS and
+    # the node release, whose names, layout and contents this packager writes to the declaration.
+    # Galleria ships in galleria.zip, which HACS installs (hacs.json's zip_release names it, and
+    # HACS reads hacs.json at the release), so a change to either releases.
     Package("release-assets", "the GitHub Release's asset set (base and boot tarballs, "
-            "manifest.json, SHA256SUMS, the node release)",
+            "galleria.zip, manifest.json, SHA256SUMS, the node release)",
             ("scripts/package_release_artifacts.py", "contracts/release.py",
-             "contracts/node_release.py", "scripts/node_release_artifacts.py")),
+             "contracts/node_release.py", "scripts/node_release_artifacts.py",
+             "scripts/galleria_zip.py", "custom_components/**", "hacs.json")),
 )
 
 # Every tracked path no package claims must match one of these, so a new top-level directory or
@@ -352,6 +358,11 @@ NOT_SHIPPED: Final = (
     "scripts/catalog_baselines.py",  # the console-catalog leg's baseline tool; never shipped
     "scripts/calibration_target/**",  # the agent's calibration target reader (decision 0026); never shipped
     "scripts/calibration_boards.py",  # builds contracts/calibration_boards.py (decision 0027); never shipped
+    "scripts/console_types.py",  # builds the console's generated contract.ts at build time; never shipped
+    # Galleria's contract generator and its own test environment are development tooling (the
+    # integration itself ships as release-assets' galleria.zip).
+    "scripts/galleria_contract.py",  # writes custom_components/galleria/contract.py; never shipped
+    "galleria_tests/**",
 )
 
 
@@ -431,7 +442,7 @@ SUITES: Final = (
                  "tests/integration/bus_servers.py", "tests/systemd_environment.py",
                  "scripts/nats_server.py", "debian-packaging/nats-server.env",
                  "scripts/node_release_artifacts.py",
-                 "scripts/package_release_artifacts.py",
+                 "scripts/package_release_artifacts.py", "scripts/galleria_zip.py",
                  "scripts/container_build.py",
                  "scripts/initrd_mount_probe.py", "scripts/verify_netboot_initrd.py",
                  ".github/workflows/node-pid1.yml",

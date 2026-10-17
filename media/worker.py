@@ -269,10 +269,9 @@ async def _media_loop(worker: MediaWorker, run_queue: Callable[[], Awaitable[Non
     await run_queue()
 
 
-async def _run_workers(media: Awaitable[None], runtime: JobRuntime,
-                       bus: NodeBus | None = None) -> None:
-    """The legacy media loop, the job runtime and, with a hub deployed, the Node bus side by side,
-    under ONE signal handler.
+async def _run_workers(media: Awaitable[None], runtime: JobRuntime, bus: NodeBus | None) -> None:
+    """The legacy media loop, the job runtime and, with a hub deployed, the Node bus (with Central on
+    its hub, which hears Home Assistant's states) side by side, under ONE signal handler.
 
     SIGTERM/SIGINT stops each gracefully (running jobs finish), then `_entry` returns and the
     process exits 0. None installs its own handlers. A loop that fails, or ends without being
@@ -360,11 +359,10 @@ async def _entry():
         library, lambda secret: ImmichClient.for_connection(secret, clock=clock), clock,
         queue=ProcrastinateCheckQueue(app))
     additional_context = {"media_worker": worker, "library_checks": checks}
+    media = _media_loop(worker, lambda: _media_queue(app, additional_context))
     try:
         async with app.open_async():
-            await _run_workers(_media_loop(worker, lambda: _media_queue(app, additional_context)),
-                               runtime,
-                               build_node_bus(dsn, os.environ))
+            await _run_workers(media, runtime, build_node_bus(dsn, os.environ))
     finally:
         await worker._close_clients()
         await checks.close()

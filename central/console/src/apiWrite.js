@@ -18,7 +18,7 @@ const TIMEOUT_MS = 15000;
  * When `body` is supplied it is JSON-encoded and a `Content-Type` header is set;
  * when it is omitted (e.g. DELETE frame) neither is sent, matching the requests
  * the endpoints issued before this extraction. A body that is not JSON (a file the
- * operator chose, as Settings › LUTs' paper profile) names its `contentType`: the
+ * operator chose, as Settings › Paper profiles' ICC file) names its `contentType`: the
  * body (a Blob, File or bytes) is then sent as it is, under that type. The
  * response body is parsed as JSON best-effort on BOTH paths — an empty/non-JSON body yields `data: null`
  * and, on failure, `error: null` — so a caller reads one shape regardless.
@@ -71,4 +71,22 @@ export async function apiWrite(path, { method, body, contentType } = {}) {
     error,
     data,
   };
+}
+
+/**
+ * One operator call folded into `{ok: true, [key]: data}` or `{ok: false, error}` (the refusal's
+ * code, else `http_<status>`; `unreachable` for a lost request). Every module whose answer is one
+ * value reads it through this one fold.
+ *
+ * @param {string} key
+ * @param {string} path
+ * @param {{method: string, body?: any}} options
+ */
+export async function callApi(key, path, options) {
+  try {
+    const result = await apiWrite(path, options);
+    return result.ok ? { ok: true, [key]: result.data } : { ok: false, error: result.error ?? `http_${result.status}` };
+  } catch {
+    return { ok: false, error: "unreachable" };
+  }
 }

@@ -25,7 +25,8 @@ from playwright.sync_api import expect
 from support.position import save_position
 from test_registry import enroll
 
-from central.registry import FrameCreate, RegistryError
+from central.fleet.models import TrialRefused
+from central.registry import FrameCreate
 from contracts.models import Calibration, CornersFit, CoverFit, FrameProfile
 
 pytestmark = pytest.mark.skipif(
@@ -214,7 +215,7 @@ class FakeSessions:
             try:  # Central's Save is a compare-and-set on the draft's base revision
                 save_position(self.registry, FRAME, calibration,
                               expected_revision=self.row["calibration_revision"])
-            except RegistryError as error:
+            except TrialRefused as error:
                 route.fulfill(status=409, json={"error": error.code})
                 return
             self.row.update(state="saved", saved_calibration=self._saved())
@@ -297,7 +298,7 @@ def test_one_click_on_a_wall_tile_opens_the_frame_page_and_its_position_is_kept_
         expect(page.get_by_role("heading", level=1)).to_have_count(1)
         assert page.evaluate("location.hash") == f"#/wall/frames/{FRAME}/overview"
         tabs = page.get_by_role("tablist", name="Frame settings", exact=True)
-        expect(tabs.get_by_role("tab")).to_have_text(["Overview", "Position", "Picture", "Power", "Hardware"])
+        expect(tabs.get_by_role("tab")).to_have_text(["Overview", "Position", "Lighting", "Picture", "Power", "Hardware"])
 
         tabs.get_by_role("tab", name="Position", exact=True).click()
         assert page.evaluate("location.hash") == f"#/wall/frames/{FRAME}/position"
@@ -900,6 +901,6 @@ def test_the_side_rail_stays_put_and_the_tabs_never_wrap(page, registry, session
         page.set_viewport_size({"width": 320, "height": 700})
         tabs = page.get_by_role("tablist", name="Frame settings", exact=True)
         rows = {round(tabs.get_by_role("tab", name=name, exact=True).bounding_box()["y"])
-                for name in ("Overview", "Position", "Picture", "Power", "Hardware")}
+                for name in ("Overview", "Position", "Lighting", "Picture", "Power", "Hardware")}
         assert len(rows) == 1, rows
         assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth + 1")

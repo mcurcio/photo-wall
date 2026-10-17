@@ -19,6 +19,7 @@ range below every kernel's ephemeral floor, so two of a test's servers cannot be
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import random
@@ -43,6 +44,7 @@ from appliance.boot.bus_environment import write_bus_environment
 from central.fleet.node_bus_accounts import FLEET_SYSTEM_USER, HubListeners, hub_configuration
 from contracts.node_link import (
     CENTRAL_INBOX_PREFIX,
+    NODE_DOOR_API_PREFIX,
     STORE_LINES,
     WALL_STREAM,
     WALL_WRITER_USER,
@@ -128,6 +130,7 @@ class BusServer:
     client_url: str
     environment: Mapping[str, str]
     websocket_port: int | None = None    # the hub's leaf listener for Nodes
+    door_url: str | None = None          # a Node's read-only door, "ws://127.0.0.1:<port>"; None for the hub
     monitor_url: str | None = None       # the hub's /leafz
     listeners: HubListeners | None = None  # the hub's generator input, kept for a reload
     _process: subprocess.Popen | None = field(default=None, init=False, repr=False)
@@ -159,13 +162,15 @@ class BusServer:
             raise
 
     def expected_ports(self) -> dict[str, set[int]]:
-        """The ports file this server must write: its client port, and the hub's WebSocket and
-        monitor ports. nats-server 2.15 lists no leafnodes port there; the hub's leaf listener is
+        """The ports file this server must write: its client port, the hub's WebSocket and monitor
+        ports, and a Node's door (its WebSocket listener). nats-server 2.15 lists no leafnodes port there; the hub's leaf listener is
         bound before the file is written and failing to bind it is fatal, so the file's presence
         covers it."""
         expected = {"nats": {_port_of(self.client_url)}}
         if self.websocket_port is not None:
             expected["websocket"] = {self.websocket_port}
+        if self.door_url is not None:
+            expected["websocket"] = {_port_of(self.door_url)}
         if self.monitor_url is not None:
             expected["monitoring"] = {_port_of(self.monitor_url)}
         return expected
@@ -354,20 +359,35 @@ def node_server(tmp: Path, serial: str, hub: BusServer, *, leaf_port: int | None
     the unit's EnvironmentFile, with `port` the hub's WebSocket
     port or `leaf_port` (a proxy in front of it), so every harness Node exercises the real
     derivation: its leaf at LEAF_PATH, ws:// for http and wss:// for https. Only
-    PHOTO_WALL_BUS_PORT is replaced, by a free port (NODE_BUS_PORT cannot be shared by servers
-    side by side); `extra_environment` adds to it (SSL_CERT_FILE, say). `origin` replaces the
+    PHOTO_WALL_BUS_PORT and PHOTO_WALL_BUS_DOOR_PORT are replaced, by free ports (NODE_BUS_PORT and
+    NODE_DOOR_PORT cannot be shared by servers side by side); the door is `door_url` on loopback (it
+    listens on every address, as on a Pi); `extra_environment` adds to it (SSL_CERT_FILE, say). `origin` replaces the
     whole boot origin (one with the scheme's default port, say)."""
     nats_server_binary()
     directory = Path(tmp) / node_user(serial)
     directory.mkdir(parents=True, exist_ok=True)
     config = directory / "node-bus.conf"
     shutil.copyfile(NODE_BUS_CONF, config)
-    port = _free_port()
+    port, door = _free_port(), _free_port()
     origin = origin or f"{scheme}://{host}:{leaf_port or hub.websocket_port}"
     environment = {**read_environment_file(write_bus_environment(directory, origin, serial)),
-                   "PHOTO_WALL_BUS_PORT": str(port), **(extra_environment or {})}
+                   "PHOTO_WALL_BUS_PORT": str(port), "PHOTO_WALL_BUS_DOOR_PORT": str(door),
+                   **(extra_environment or {})}
     return BusServer(name=f"node {serial}", config=config,
-                     client_url=f"nats://127.0.0.1:{port}", environment=environment)
+                     client_url=f"nats://127.0.0.1:{port}", environment=environment,
+                     door_url=f"ws://127.0.0.1:{door}")
+
+
+def plain_server(tmp: Path) -> BusServer:
+    """A nats-server with no JetStream on a free loopback port: a bus that answers and on which no
+    stream (a WALL mirror, say) can be created."""
+    nats_server_binary()
+    directory = Path(tmp) / "plain"
+    directory.mkdir(parents=True, exist_ok=True)
+    port = _free_port()
+    config = directory / "plain.conf"
+    config.write_text(f"listen: 127.0.0.1:{port}\n")
+    return BusServer(name="plain", config=config, client_url=f"nats://127.0.0.1:{port}", environment={})
 
 
 async def _connect(url: str, **options) -> Client:
@@ -390,6 +410,31 @@ async def wall_writer(hub: BusServer) -> Client:
 async def local(node: BusServer, **options) -> Client:
     """A Node component's client: no credentials (no_auth_user)."""
     return await _connect(node.client_url, **options)
+
+
+async def door(node: BusServer, **options) -> Client:
+    """A home-network client at the Node's read-only door (nats-py over WebSocket), with no
+    credentials unless `options` name some: it lands in the reader (0017 C3)."""
+    return await _connect(node.door_url, **options)
+
+
+async def door_message(client: Client, stream: str, subject: str) -> dict | None:
+    """The latest stored message on `subject` in `stream`, as a door reader asks for it: one
+    STREAM.MSG.GET (under NODE_DOOR_API_PREFIX) with `last_by_subj`; the reply's message ("seq", "data" in base64, ...),
+    None when the stream holds none (or does not exist yet: a fresh bus epoch)."""
+    reply = json.loads((await client.request(f"{NODE_DOOR_API_PREFIX}.STREAM.MSG.GET.{stream}",
+                                             json.dumps({"last_by_subj": subject}).encode(), timeout=2)).data)
+    if "error" in reply:
+        if reply["error"].get("err_code") in (10037, 10059):   # no message; no stream
+            return None
+        raise RuntimeError(f"door get {stream} {subject}: {reply['error']}")
+    return reply["message"]
+
+
+async def door_get(client: Client, stream: str, subject: str) -> bytes | None:
+    """`door_message`'s value; None when there is none."""
+    message = await door_message(client, stream, subject)
+    return None if message is None else base64.b64decode(message.get("data", ""))
 
 
 async def declare_wall(writer: Client, table: KeyTable = WALL_TABLE, *, first_seq: int = 1) -> None:

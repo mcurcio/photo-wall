@@ -17,6 +17,8 @@ Mutation probes (each fails the named case):
 - K1-always-enabled: `restoreState` always enabled -> the other-window case.
 - K1-silent-skip: `restoreNotes` says nothing -> the skipped-setting case.
 - K1-no-notice: no `unrecorded_change` Note -> the unrecorded case.
+- Light-dropped (decision 0028): `entryDetails` without the Display's light -> the tracer's Matched
+  light and Display black lines.
 - U1-label (calibration targets): drop "target-pre-software" from frame-picture.tsx's PATTERN_NAMES
   -> the typecheck fails (Record<TestPattern, string>), and the target try's Details lack its name.
 """
@@ -94,9 +96,9 @@ def _values(row):
     return row
 
 
-def _kept_brightness(page, steps=1):
-    """One Photo Wall brightness change kept by Done: 100 % -> 100 + steps."""
-    _press(page, PHOTO_WALL, "Brightness", "ArrowRight", steps)
+def _kept_contrast(page, steps=1):
+    """One Photo Wall contrast change kept by Done: 100 % -> 100 + steps."""
+    _press(page, PHOTO_WALL, "Contrast", "ArrowRight", steps)
     _done(page)
     expect(_rows(page, KEPT)).to_have_count(1)
 
@@ -113,28 +115,31 @@ def test_a_kept_and_a_tried_change_are_listed_and_restore_puts_the_kept_one_back
         expect(_history(page)).to_be_visible()
 
         seen = _history_reads(page)
-        _press(page, PHOTO_WALL, "Brightness", "ArrowRight", 3)
+        _press(page, PHOTO_WALL, "Contrast", "ArrowRight", 3)
         _done(page)
         kept = _rows(page, KEPT)
         expect(kept).to_have_count(1)
         expect(kept.first).to_have_attribute("aria-label", re.compile(TIME.pattern + re.escape(KEPT)))
-        expect(_values(kept.first)).to_contain_text(re.compile(r"Brightness\s*103 %"))
+        expect(_values(kept.first)).to_contain_text(re.compile(r"Contrast\s*103 %"))
+        # The Display's light (decision 0028) is in every entry: the upgrade's 1,000 lx and 0.03 %.
+        expect(kept.first).to_contain_text(re.compile(r"Matched light\s*1,000 lx"))
+        expect(kept.first).to_contain_text(re.compile(r"Display black\s*0.03 %"))
         # Read again as Done is answered, not at the next poll (CADENCE_MS 2000).
         [done] = seen["done"]
         assert any(done <= at <= done + 0.25 for at in seen["reads"]), (done, seen["reads"])
 
-        expect(_slider(page, PHOTO_WALL, "Brightness")).to_be_enabled()  # the next session has begun
-        brightness = _press(page, PHOTO_WALL, "Brightness", "ArrowRight", 5)
-        expect(brightness).to_have_value("108")
+        expect(_slider(page, PHOTO_WALL, "Contrast")).to_be_enabled()  # the next session has begun
+        contrast = _press(page, PHOTO_WALL, "Contrast", "ArrowRight", 5)
+        expect(contrast).to_have_value("108")
         tried = _rows(page, TRIED)
-        expect(tried.first).to_contain_text("Brightness 108 %")
+        expect(tried.first).to_contain_text("Contrast 108 %")
         expect(tried.first).to_have_attribute("data-kept", "false")
 
         kept.first.get_by_role("button", name="Restore", exact=True).click()
-        expect(_slider(page, PHOTO_WALL, "Brightness")).to_have_value("103")
+        expect(_slider(page, PHOTO_WALL, "Contrast")).to_have_value("103")
         _done(page)
         expect(_rows(page, KEPT)).to_have_count(2)
-        expect(_values(_rows(page, KEPT).first)).to_contain_text(re.compile(r"Brightness\s*103 %"))
+        expect(_values(_rows(page, KEPT).first)).to_contain_text(re.compile(r"Contrast\s*103 %"))
 
 
 def test_restore_waits_with_its_reason_while_another_window_holds_the_editor(page, registry):
@@ -143,7 +148,7 @@ def test_restore_waits_with_its_reason_while_another_window_holds_the_editor(pag
         connect(page, origin, "wall")
         open_frame(page, FRAME, "picture")
         expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
-        _kept_brightness(page)
+        _kept_contrast(page)
         restore = _rows(page, KEPT).first.get_by_role("button", name="Restore", exact=True)
         expect(restore).to_be_enabled()
 
@@ -192,7 +197,7 @@ def test_values_changed_outside_photo_wall_are_said_until_the_next_done(page, re
         connect(page, origin, "wall")
         open_frame(page, FRAME, "picture")
         expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
-        _kept_brightness(page)
+        _kept_contrast(page)
         notice = "This display's values changed outside Photo Wall since its last kept change."
         expect(_history(page)).not_to_contain_text(notice)
 

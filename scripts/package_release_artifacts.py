@@ -20,6 +20,9 @@ pipeline's seal (`scripts/release_seal.py`) publishes as a GitHub Release:
   same staged copy in the same run (so its kernel and initrd are the base tarball's), for
   infrastructure that stages a TFTP tree without downloading the base squashfs. Reproducible
   the same way.
+- `galleria.zip`: the Home Assistant integration as HACS installs it, from this checkout's
+  `custom_components/galleria/` (the built commit's), its `manifest.json` versioned from the
+  release tag (scripts/galleria_zip.py). Reproducible the same way.
 - A top-level `manifest.json` (schema, revision, each file's filename + sha256 +
   size, and each service image's repository + digest) and a `SHA256SUMS`
   covering every other produced file.
@@ -66,6 +69,8 @@ from contracts.release import (
     CMDLINE_MEMORY_CONTROLLER,
     CMDLINE_PLACEHOLDER,
     FILES,
+    GALLERIA,
+    GALLERIA_ZIP,
     IMAGES,
     IMAGES_KEY,
     MANIFEST,
@@ -75,7 +80,7 @@ from contracts.release import (
     boot_member,
     tarball_name,
 )
-from scripts import node_release_artifacts
+from scripts import galleria_zip, node_release_artifacts
 
 MIB = 1024**2
 
@@ -182,9 +187,11 @@ def package(
     tag: str,
     images: Mapping[str, str],
     source_date_epoch: int,
+    galleria: Path = galleria_zip.SOURCE,
 ) -> dict:
     """Assemble the flat operator artifact set into a new `destination` directory: the base and
-    boot tarballs, manifest.json, the node release (`tag`'s) and SHA256SUMS."""
+    boot tarballs, Galleria's zip (from the integration directory `galleria`, versioned for
+    `tag`), manifest.json, the node release (`tag`'s) and SHA256SUMS."""
     if (
         not isinstance(revision, str)
         or len(revision) != 40
@@ -230,12 +237,19 @@ def package(
                                source_date_epoch)
     finally:
         shutil.rmtree(staging, ignore_errors=True)
+    try:
+        galleria_zip.build(galleria, tag, destination / GALLERIA_ZIP)
+    except (ValueError, OSError) as error:
+        raise PackagingError(str(error)) from error
+    galleria_record = {"filename": GALLERIA_ZIP,
+                       **checked_file(destination / GALLERIA_ZIP, galleria_zip.MAX_ZIP_BYTES)}
 
     manifest = {
         "schema": MANIFEST_SCHEMA,
         "revision": revision,
         BASE_IMAGE: base_record,
         BOOT_IMAGE: boot_record,
+        GALLERIA: galleria_record,
         IMAGES_KEY: image_block,
     }
     (destination / MANIFEST).write_bytes(
@@ -451,7 +465,8 @@ def verify(directory: Path, *, revision: str) -> Packaged:
     """`directory` holds exactly the declared release for `revision`: a manifest naming every
     declared file and image and nothing else, each file present with the recorded sha256 and
     size, the base and boot tarballs in the declared layouts with one boot/ tree between them,
-    the node release naming those same two tarballs and its own files, a checksum list that
+    the node release naming those same two tarballs and its own files, Galleria's zip under its
+    one name and versioned for the node release's tag, a checksum list that
     matches every other file, and no other file. Raises PackagingError naming the first
     difference."""
     directory = directory.absolute()
@@ -495,6 +510,12 @@ def verify(directory: Path, *, revision: str) -> Packaged:
             directory, revision, {"base": declared.files[BASE_IMAGE],
                                   "boot": declared.files[BOOT_IMAGE]})
     except (ValueError, OSError) as error:
+        raise PackagingError(str(error)) from error
+    if declared.files[GALLERIA][0] != GALLERIA_ZIP:
+        raise PackagingError(f"galleria_filename_invalid:{declared.files[GALLERIA][0]}")
+    try:
+        galleria_zip.check(directory / GALLERIA_ZIP, node.base.tag)
+    except ValueError as error:
         raise PackagingError(str(error)) from error
     assets.append(Asset(NODE_RELEASE_MANIFEST, directory / NODE_RELEASE_MANIFEST, **node_record))
     shared = {asset.name for asset in assets}

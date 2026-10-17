@@ -1,7 +1,7 @@
 import React, { useId, useRef, useState } from "react";
 
-import { useReleaseRead } from "./releases.js";
 import { formatRoute } from "./routes.js";
+import { useReleaseRead } from "./releases.js";
 import { RESEND_LABEL } from "./sendOutcome.js";
 import {
   boundFrames,
@@ -12,7 +12,7 @@ import {
   stageRefusal,
   stageReplaces,
   stageRequest,
-  stageScope,
+  STAGE_SCOPE,
   stageTargets,
   useHeldStage,
 } from "./stage.js";
@@ -71,7 +71,7 @@ function StageDialog({ deviceId, name, opened, held, node, onSent, onClose }) {
     <dialog ref={dialogRef} className="confirm" aria-labelledby={titleId} tabIndex={-1}>
       <h2 id={titleId} className="confirm__title">{`Stage an app on ${name}?`}</h2>
       <div className="confirm__body">
-        <p>{stageScope(releases.read?.selection)}</p>
+        <p>{STAGE_SCOPE}</p>
         {replaces !== null && <p>{replaces}</p>}
         {opened.frames.length > 0 && (
           <>
@@ -82,7 +82,7 @@ function StageDialog({ deviceId, name, opened, held, node, onSent, onClose }) {
         <fieldset className="confirm__choices" disabled={again || phase === "in-flight"}>
           <legend>Deployment</legend>
           {releases.read == null ? (
-            <p>{releases.error ? `Deployments could not be read (${releases.error.code}).` : "Reading deployments…"}</p>
+            <p>{releases.error ? `Releases could not be read (${releases.error.code}).` : "Reading releases…"}</p>
           ) : targets.length === 0 ? (
             <p>
               {"No deployment carries an app yet; Central records one for each valid release with an app. See "}
@@ -93,7 +93,7 @@ function StageDialog({ deviceId, name, opened, held, node, onSent, onClose }) {
             <label key={row.deploymentId} className="confirm__choice">
               <input type="radio" name="stage-deployment" value={row.deploymentId}
                 checked={chosen === row.deploymentId} onChange={() => setChosen(row.deploymentId)} />
-              {`Deployment ${row.deploymentId.slice(0, 4)}… · ${row.contents}${row.selected ? " · selected for every boot" : ""}`}
+              {`Deployment ${row.deploymentId.slice(0, 4)}… · ${row.contents}${row.tag === null ? "" : ` · release ${row.tag}`}`}
             </label>
           ))}
         </fieldset>

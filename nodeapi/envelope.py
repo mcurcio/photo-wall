@@ -8,9 +8,23 @@ no clock: Central keys by epoch and sequence.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass
 
 from contracts.node_link import MESSAGE_ID_HEADER, SCHEMA_MAJOR_HEADER, WRITER_HEADER
+
+
+@dataclass(frozen=True)
+class MethodCall:
+    """One call of a component's method `<component>.method.<name>`, on a Node's bus (nodeapi.node
+    NodeSession) or on the hub (nodeapi.hub `run_hub_session`): its name, its payload and its caller,
+    the request's writer header ("unknown" when absent)."""
+    method: str
+    payload: bytes
+    caller: str
+
+
+MethodHandler = Callable[[MethodCall], Awaitable[bytes]]   # answers once, with the reply's payload
 
 
 def event_headers(schema_major: int) -> dict[str, str]:

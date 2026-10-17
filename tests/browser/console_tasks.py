@@ -51,19 +51,20 @@ from support.console_words import SCENE
 SHOW_SECTIONS = frozenset({"now", "scenes", "schedule", "sources"})
 WALL_SECTIONS = frozenset({"wall"})
 FLEET_SECTIONS = frozenset({"hardware", "releases"})
-SETTINGS_SECTIONS = frozenset({"photo-library", "photo-fit", "house", "luts"})
+SETTINGS_SECTIONS = frozenset({"photo-library", "photo-fit", "house", "lights", "home-assistant", "paper-profiles"})
 SECTIONS = SHOW_SECTIONS | WALL_SECTIONS | FLEET_SECTIONS | SETTINGS_SECTIONS | {"attention"}
 LABELS = {
     "now": "Now", "scenes": "Scenes", "schedule": "Schedule", "sources": "Sources",
     "wall": "Wall", "hardware": "Hardware", "releases": "Releases", "attention": "Needs attention",
-    "photo-library": "Photo library", "photo-fit": "Photo fit", "house": "House", "luts": "LUTs",
+    "photo-library": "Photo library", "photo-fit": "Photo fit", "house": "House", "lights": "House › Lights",
+    "home-assistant": "Home Assistant", "paper-profiles": "Paper profiles",
     # No sidebar link: one Pi's Software and screens page, reached from its Pi header.
     "players": "Software and screens",
 }
 
 # The Frame page's tab keys (routes.js TABS) and their labels.
-TABS = {"overview": "Overview", "position": "Position", "picture": "Picture", "power": "Power",
-        "hardware": "Hardware"}
+TABS = {"overview": "Overview", "position": "Position", "lighting": "Lighting", "picture": "Picture",
+        "power": "Power", "hardware": "Hardware"}
 
 
 def go(page, section):

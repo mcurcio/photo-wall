@@ -1,5 +1,4 @@
-"""A Frame's Position history, pure (configuration snapshots, slice S3; owner, 2026-10-13: scope
-"Everything per Display+Frame", use "View and restore"): central/fleet/position_history.py's records,
+"""A Frame's Position history, pure: central/fleet/position_history.py's records,
 what an exchange appends, and Restore's refusals and draft.
 
 The store, Registry's kept writes, the exchanges and the routes are tests/test_position_history_store.py's.
@@ -9,8 +8,9 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from uuid import uuid4
 
+from support.position import LIGHTING
+
 from central.fleet.position_history import (
-    DEFAULT_POSITION,
     MadeFor,
     PositionEntry,
     PositionEntryKind,
@@ -18,6 +18,7 @@ from central.fleet.position_history import (
     PositionRestoreRefusal,
     PositionValues,
     TrialHanded,
+    created_record,
     position_values,
     profile_changed_record,
     restore_refusal,
@@ -26,14 +27,18 @@ from central.fleet.position_history import (
     sent_record,
     unrecorded_record,
 )
-from contracts.models import Calibration, CornersFit, CoverFit, Light, Mat
+from contracts.frame_lighting import FarLight, FrameLighting, Paper
+from contracts.models import Calibration, CornersFit, CoverFit
 
-SKEWED = PositionValues(CornersFit(corners=((0.1, 0), (1, 0), (1, 1), (0, 1))), Mat())
-MATTED = PositionValues(CoverFit(), Mat(depth_mm=2.0, lights=(Light(from_degrees=90, steep_degrees=30, softness_degrees=5,
-                                                                    strength_tenths=5, colour_kelvin=4000),)))
+SKEWED = PositionValues(CornersFit(corners=((0.1, 0), (1, 0), (1, 1), (0, 1))), LIGHTING)
+MATTED = PositionValues(CoverFit(), FrameLighting(
+    mat_depth_mm=2.0, lights=(FarLight(light="room", lux=400.0, reference={"kind": "at-full"}, from_degrees=90,
+                                       steep_degrees=30, softness_degrees=5),),
+    paper=Paper(whiteness=0.9, ink_density=2.3)))
 PORTRAIT, LANDSCAPE = (1080, 1920), (1920, 1080)
 SAMSUNG, DELL = uuid4(), uuid4()
 SESSION = uuid4()
+CREATED = PositionValues(CoverFit(), LIGHTING)
 
 
 def _entry(kind: PositionEntryKind, values: PositionValues, *, frame_id: str = "kitchen", profile=PORTRAIT,
@@ -44,18 +49,20 @@ def _entry(kind: PositionEntryKind, values: PositionValues, *, frame_id: str = "
 
 def test_position_values_and_kept_records():
     calibration = Calibration(revision=4, fit=SKEWED.fit)
-    assert position_values(calibration, Mat()) == SKEWED
+    assert position_values(calibration, LIGHTING) == SKEWED
     restored = uuid4()
     assert saved_record(SKEWED, session_id=SESSION, restored_from=restored) == PositionRecord(
         PositionEntryKind.KEPT_SAVED, SKEWED, SESSION, restored)
     assert profile_changed_record(MATTED) == PositionRecord(PositionEntryKind.KEPT_PROFILE_CHANGED, MATTED, None, None)
+    assert created_record(CREATED) == PositionRecord(PositionEntryKind.KEPT_CREATED, CREATED, None, None)
 
 
 def test_an_unrecorded_record_only_for_values_no_kept_entry_says():
-    """Design rule 3. Mutation probes: P3-no-unrecorded (always None) -> no record of the SQL mat;
-    P3-default-unrecorded (no default exception) -> a new Frame at its defaults gets one."""
-    assert unrecorded_record(None, DEFAULT_POSITION) is None
-    assert unrecorded_record(None, MATTED) == PositionRecord(PositionEntryKind.KEPT_UNRECORDED, MATTED, None, None)
+    """A Frame with no kept entry has nothing that recorded how it came to be; one whose newest kept
+    entry (its creation included) holds the stored values needs none. Mutation probe: always None ->
+    no record of the SQL lighting."""
+    assert unrecorded_record(None, CREATED) == PositionRecord(PositionEntryKind.KEPT_UNRECORDED, CREATED, None, None)
+    assert unrecorded_record(_entry(PositionEntryKind.KEPT_CREATED, CREATED), CREATED) is None
     assert unrecorded_record(_entry(PositionEntryKind.KEPT_SAVED, MATTED), MATTED) is None
     assert unrecorded_record(_entry(PositionEntryKind.KEPT_SAVED, SKEWED), MATTED) is not None
 
@@ -65,11 +72,11 @@ def test_sent_record_with_a_trial_appends_its_draft_only_when_it_changed():
     the unchanged draft appends again."""
     restored = uuid4()
     handed = TrialHanded(SKEWED, SESSION, restored)
-    assert sent_record(trial=handed, saved=DEFAULT_POSITION, latest=None) == PositionRecord(
+    assert sent_record(trial=handed, saved=CREATED, latest=None) == PositionRecord(
         PositionEntryKind.SENT_DRAFT, SKEWED, SESSION, restored)
-    assert sent_record(trial=handed, saved=DEFAULT_POSITION,
-                       latest=_entry(PositionEntryKind.KEPT_SAVED, DEFAULT_POSITION)) is not None
-    assert sent_record(trial=handed, saved=DEFAULT_POSITION,
+    assert sent_record(trial=handed, saved=CREATED,
+                       latest=_entry(PositionEntryKind.KEPT_SAVED, CREATED)) is not None
+    assert sent_record(trial=handed, saved=CREATED,
                        latest=_entry(PositionEntryKind.SENT_DRAFT, SKEWED, session_id=SESSION)) is None
     assert sent_record(trial=handed, saved=SKEWED, latest=_entry(PositionEntryKind.KEPT_SAVED, SKEWED)) is None
 
@@ -77,12 +84,12 @@ def test_sent_record_with_a_trial_appends_its_draft_only_when_it_changed():
 def test_sent_record_with_no_trial_is_back_only_after_a_differing_draft():
     """Acceptance 11, branches 3 and 4."""
     draft = _entry(PositionEntryKind.SENT_DRAFT, SKEWED, session_id=SESSION)
-    assert sent_record(trial=None, saved=DEFAULT_POSITION, latest=draft) == PositionRecord(
-        PositionEntryKind.SENT_BACK, DEFAULT_POSITION, SESSION, None)
+    assert sent_record(trial=None, saved=CREATED, latest=draft) == PositionRecord(
+        PositionEntryKind.SENT_BACK, CREATED, SESSION, None)
     assert sent_record(trial=None, saved=SKEWED, latest=draft) is None                 # saved as drafted
-    assert sent_record(trial=None, saved=DEFAULT_POSITION, latest=None) is None
+    assert sent_record(trial=None, saved=CREATED, latest=None) is None
     for kind in (PositionEntryKind.KEPT_SAVED, PositionEntryKind.SENT_BACK):
-        assert sent_record(trial=None, saved=DEFAULT_POSITION, latest=_entry(kind, SKEWED)) is None
+        assert sent_record(trial=None, saved=CREATED, latest=_entry(kind, SKEWED)) is None
 
 
 def test_restore_refusal_order():
@@ -104,5 +111,5 @@ def test_restore_refusal_order():
 
 def test_a_restored_draft_keeps_the_trials_base_revision():
     """Mutation probe P3-entry-revision is the DB test's (an entry has no revision of its own)."""
-    calibration, mat = restored_draft(_entry(PositionEntryKind.SENT_DRAFT, MATTED), base_revision=7)
-    assert calibration == Calibration(revision=7, fit=MATTED.fit) and mat == MATTED.mat
+    calibration, lighting = restored_draft(_entry(PositionEntryKind.SENT_DRAFT, MATTED), base_revision=7)
+    assert calibration == Calibration(revision=7, fit=MATTED.fit) and lighting == MATTED.lighting

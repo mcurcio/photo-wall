@@ -1,6 +1,6 @@
 """The print look's shared contracts (design /print-look, 2026-10-12): the one kelvin-to-white
-conversion (contracts/kelvin.py), a LUT's name and layout (contracts/lut.py), the Frame's Mat and
-Light on its binding (contracts/models.py) and the mat in Position's trial
+conversion (contracts/kelvin.py), a LUT's name and layout (contracts/lut.py), and, since room light
+(decision 0028), the Frame's lighting on its binding (contracts/models.py) and in Position's trial
 (contracts/node_calibration.py)."""
 from __future__ import annotations
 
@@ -10,11 +10,11 @@ from uuid import uuid4
 import pytest
 from pydantic import ValidationError
 
+from contracts.frame_lighting import CloseLight, FrameLighting, Paper, WashLight
 from contracts.kelvin import KELVIN_TABLE_MAX, KELVIN_TABLE_MIN, KELVIN_WHITE, kelvin_white
 from contracts.lut import LUT_BYTES, LUT_GRID, LutRef, lut_offset
-from contracts.models import MAT_LIGHTS_MAX, FrameProfile, Light, Mat, OutputBinding
+from contracts.models import FrameProfile, OutputBinding
 from contracts.node_calibration import (
-    NO_MAT_JSON,
     TrialCandidate,
     candidate_hash,
     canonical,
@@ -25,8 +25,11 @@ from contracts.node_display import Surface
 from contracts.node_picture import KELVIN_MAX, KELVIN_MIN
 from contracts.node_protocol import NodeProcessIdentity, OutputKey
 
-WARM_TOP = Light(from_degrees=0, steep_degrees=45, softness_degrees=10, strength_tenths=10, colour_kelvin=2700)
-COOL_SIDE = Light(from_degrees=90, steep_degrees=20, softness_degrees=30, strength_tenths=15, colour_kelvin=7500)
+LIGHTING = FrameLighting(mat_depth_mm=0.0, lights=(WashLight(light="room", lux=1000.0, reference={"kind": "at-full"}),),
+                         paper=Paper(whiteness=0.9, ink_density=2.3))
+SPOT_LIGHTING = LIGHTING.model_copy(update={"mat_depth_mm": 2.5, "lights": (
+    CloseLight(light="bookshelf-spot", lux=800.0, reference={"kind": "at-full"}, across_mm=0, up_mm=600, out_mm=900,
+               inner_beam_degrees=20, outer_beam_degrees=40),)})
 
 
 def test_kelvin_white_is_the_displays_white_at_6500_and_covers_the_lights_range():
@@ -61,69 +64,50 @@ def test_a_lut_is_named_by_its_inputs_and_laid_out_red_fastest():
             LutRef(profile, recipe)
 
 
-def test_the_mat_rides_the_binding_and_shades_only_with_depth_and_a_light():
+def test_the_lighting_rides_the_binding():
     binding = OutputBinding(output_id="HDMI-A-1", frame_id="f", generation=1,
-                            profile=FrameProfile(width_px=1920, height_px=1080, diagonal_inches=27), mat=Mat())
-    assert binding.mat == Mat() and not binding.mat.shades
-    assert canonical(Mat().model_dump(mode="json")) == NO_MAT_JSON
-    assert Mat(depth_mm=1.5, lights=(WARM_TOP, COOL_SIDE)).shades
-    assert not Mat(depth_mm=0, lights=(WARM_TOP,)).shades
-    assert not Mat(depth_mm=2, lights=()).shades
-    assert not Mat(depth_mm=2, lights=(WARM_TOP.model_copy(update={"strength_tenths": 0}),)).shades
+                            profile=FrameProfile(width_px=1920, height_px=1080, diagonal_inches=27), lighting=LIGHTING)
     round_trip = OutputBinding.model_validate_json(
-        binding.model_copy(update={"mat": Mat(depth_mm=2.5, lights=(COOL_SIDE,))}).model_dump_json())
-    assert round_trip.mat.lights == (COOL_SIDE,)
+        binding.model_copy(update={"lighting": SPOT_LIGHTING}).model_dump_json())
+    assert round_trip.lighting == SPOT_LIGHTING
 
 
-@pytest.mark.parametrize("bad", [
-    {"depth_mm": 20.5}, {"depth_mm": 1.25}, {"depth_mm": -0.5},
-    {"lights": [WARM_TOP.model_dump()] * (MAT_LIGHTS_MAX + 1)},
-    {"lights": [{**WARM_TOP.model_dump(), "from_degrees": 360}]},
-    {"lights": [{**WARM_TOP.model_dump(), "steep_degrees": 4}]},
-    {"lights": [{**WARM_TOP.model_dump(), "softness_degrees": 46}]},
-    {"lights": [{**WARM_TOP.model_dump(), "strength_tenths": 101}]},
-    {"lights": [{**WARM_TOP.model_dump(), "colour_kelvin": 2750}]},
-    {"lights": [{**WARM_TOP.model_dump(), "colour_kelvin": 10100}]},
-    {"lights": [{**WARM_TOP.model_dump(), "colour_kelvin": 6500, "extra": 1}]},
-])
-def test_the_mat_refuses_out_of_range(bad):
-    with pytest.raises(ValidationError):
-        Mat.model_validate(bad)
-
-
-def test_the_trial_candidate_hash_covers_the_mat():
-    """Mutation probe: leave "mat" out of candidate_hash -> the two hashes are equal."""
+def test_the_trial_candidate_hash_covers_the_lighting():
+    """Mutation probe: leave "lighting" out of candidate_hash -> the two hashes are equal."""
     trial_id = uuid4()
     calibration = '{"fit":{"corners":[[0,0],[1,0],[1,1],[0,1]],"mode":"cover","rotation":0},"revision":1}'
-    mat = canonical(Mat(depth_mm=1.5, lights=(WARM_TOP,)).model_dump(mode="json"))
-    assert json.loads(mat)["lights"][0]["colour_kelvin"] == 2700
     baseline = _surface()
-    assert candidate_hash(trial_id, 1, 1, baseline, calibration, mat) != candidate_hash(
-        trial_id, 1, 1, baseline, calibration, NO_MAT_JSON)
+    assert candidate_hash(trial_id, 1, 1, baseline, calibration, SPOT_LIGHTING) != candidate_hash(
+        trial_id, 1, 1, baseline, calibration, LIGHTING)
 
 
-def test_the_frames_wires_refuse_a_message_without_its_mat():
-    """No backwards compatibility: a binding or a trial envelope from a release before the mat is
-    refused, never read as "no shadow" (the Display's wires are strict the same way).
+def test_the_frames_wires_refuse_a_message_without_its_lighting():
+    """No backwards compatibility: a trial envelope without `lighting`, and a binding without
+    `lighting` (or with the print look's `mat`), are refused, never read as a default (decision 0028).
 
-    Mutation probes: give OutputBinding.mat a default_factory -> the binding is read; let
-    parse_trial take a missing mat_json (a default on TrialCandidate) -> the envelope is read."""
-    binding = OutputBinding(output_id="HDMI-A-1", frame_id="f", generation=1,
-                            profile=FrameProfile(width_px=1920, height_px=1080, diagonal_inches=27), mat=Mat())
-    old_binding = binding.model_dump(mode="json")
-    del old_binding["mat"]
-    with pytest.raises(ValidationError):
-        OutputBinding.model_validate(old_binding)
-
+    Mutation probes: let parse_trial take a missing lighting (a default on TrialCandidate) ->
+    the envelope is read; default OutputBinding.lighting -> the binding without it is read."""
     trial_id, baseline = uuid4(), _surface()
     calibration = '{"fit":{"corners":[[0,0],[1,0],[1,1],[0,1]],"mode":"cover","rotation":0},"revision":1}'
+    lighting = LIGHTING
     envelope = json.loads(encode_trial(TrialCandidate(
-        trial_id, 1, 1, baseline, calibration, candidate_hash(trial_id, 1, 1, baseline, calibration, NO_MAT_JSON),
-        5000, 9000, NO_MAT_JSON)))
-    assert parse_trial(canonical(envelope)).mat_json == NO_MAT_JSON
-    del envelope["mat_json"]
+        trial_id, 1, 1, baseline, calibration, candidate_hash(trial_id, 1, 1, baseline, calibration, lighting),
+        5000, 9000, lighting)))
+    assert parse_trial(canonical(envelope)).lighting == lighting
+    del envelope["lighting"]
     with pytest.raises(ValueError, match="trial_envelope_invalid"):
         parse_trial(canonical(envelope))
+    binding = {"output_id": "HDMI-A-1", "frame_id": "f", "generation": 1,
+               "profile": {"width_px": 1920, "height_px": 1080, "diagonal_inches": 27}}
+    for bad in (binding, {**binding, "mat": {"depth_mm": 0.0, "lights": []}},
+                {**binding, "lighting": LIGHTING.model_dump(mode="json"), "mat": {"depth_mm": 0.0, "lights": []}}):
+        with pytest.raises(ValidationError):
+            OutputBinding.model_validate(bad)
+    assert OutputBinding.model_validate({**binding, "lighting": LIGHTING.model_dump(mode="json")}).lighting == LIGHTING
+
+
+def _json(lighting: FrameLighting) -> str:
+    return canonical(lighting.model_dump(mode="json"))
 
 
 def _surface() -> Surface:

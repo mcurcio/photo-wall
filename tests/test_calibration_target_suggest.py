@@ -26,7 +26,6 @@ from calibration_target_scenes import (
 )
 
 from contracts.calibration_target import TargetCode
-from contracts.lut import LUT_BYTES, LUT_GRID, LutRef, lut_offset
 from contracts.node_picture import NEUTRAL_SOFTWARE, SoftwarePicture
 from contracts.tuning import TestPattern
 from scripts.calibration_target.locate import Located, locate
@@ -43,7 +42,7 @@ from scripts.calibration_target.model import (
 )
 from scripts.calibration_target.photos import load_photo
 from scripts.calibration_target.read import read_photo
-from scripts.calibration_target.suggest import software_of, suggest
+from scripts.calibration_target.suggest import suggest
 
 POST = TestPattern.TARGET_POST_SOFTWARE
 
@@ -55,24 +54,7 @@ def shot(**fields: object) -> Scene:
 
 BASE = shot()
 RIGHT = paper_matched(BASE)
-FOUR = ("brightness_percent", "contrast_percent", "colour_temperature_kelvin", "gamma_tenths")
-LUT = LutRef("c0ffee" + "0" * 58, "lut33-test-recipe")
-
-
-def table(red: float) -> bytes:
-    """A LUT whose red is `red` of its input's (encoded), green and blue unchanged."""
-    body = bytearray(LUT_BYTES)
-    top = LUT_GRID - 1
-    for b in range(LUT_GRID):
-        for g in range(LUT_GRID):
-            for r in range(LUT_GRID):
-                at = lut_offset(r, g, b)
-                body[at:at + 3] = bytes((round(255 * red * r / top), round(255 * g / top), round(255 * b / top)))
-    return bytes(body)
-
-
-TINT = table(0.75)
-IDENTITY = table(1.0)
+THREE = ("contrast_percent", "colour_temperature_kelvin", "gamma_tenths")
 
 
 @functools.cache
@@ -85,20 +67,15 @@ def reading(scene: Scene) -> Reading:
 
 
 def steps(scene: Scene) -> dict[PreProperty, PreSoftwareStep]:
-    out = suggest(reading(scene), None)
+    out = suggest(reading(scene))
     assert isinstance(out, PreSoftwareSuggestion)
     return {step.property: step for step in out.steps}
 
 
-def post(scene: Scene, lut: bytes | None = None) -> PostSoftwareSuggestion:
-    out = suggest(reading(scene), lut)
+def post(scene: Scene) -> PostSoftwareSuggestion:
+    out = suggest(reading(scene))
     assert isinstance(out, PostSoftwareSuggestion), out
     return out
-
-
-def look(software: SoftwarePicture) -> SoftwarePicture:
-    """The software picture without the four the residual may move."""
-    return replace(software, **{knob: getattr(NEUTRAL_SOFTWARE, knob) for knob in FOUR})
 
 
 def next_change(scene: Scene, software: SoftwarePicture) -> Scene:
@@ -151,7 +128,7 @@ def test_pre_a_normal_photo_gives_the_white_steps_only(tmp_path: Path) -> None:
     path.write_bytes(jpeg_photo(scene))
     found = locate(load_photo(path))
     assert isinstance(found, Located)
-    out = suggest(read_photo(found, entry(scene)), None)  # type: ignore[arg-type]
+    out = suggest(read_photo(found, entry(scene)))  # type: ignore[arg-type]
     assert isinstance(out, PreSoftwareSuggestion)
     assert [step.property for step in out.steps] == [PreProperty.WHITE_LEVEL, PreProperty.WHITE_COLOUR]
 
@@ -159,9 +136,9 @@ def test_pre_a_normal_photo_gives_the_white_steps_only(tmp_path: Path) -> None:
 # -- The viewing angle's bound: a dimmer screen may be the panel's off-axis loss ------------------------
 
 
-# Post-software, the white reads 10 % short through the software (brightness 90): no software step
-# can raise the panel's own white past its peak, so the dim picture is the software's.
-DIMMED = replace(NEUTRAL_SOFTWARE, brightness_percent=90)
+# Post-software, the white reads short through the software (contrast 90): no software step can
+# raise the panel's own white past its peak, so the dim picture is the software's.
+DIMMED = replace(NEUTRAL_SOFTWARE, contrast_percent=90)
 
 
 def test_a_screen_10_percent_dim_at_30_degrees_is_unsure_before_and_after_software() -> None:
@@ -172,8 +149,8 @@ def test_a_screen_10_percent_dim_at_30_degrees_is_unsure_before_and_after_softwa
     assert step.gap == pytest.approx(10.0, abs=1.0)
     out = post(shot(display=RIGHT, stage=POST, software=DIMMED, yaw_deg=30.0, pitch_deg=0.0))
     assert out.unsure == (PreProperty.WHITE_LEVEL,)
-    # Held, and never "no change": the reading does not prove the white matched.
-    assert out.to == DIMMED and not out.no_change
+    # Contrast held, and never "no change": the reading does not prove the white matched.
+    assert out.to.contrast_percent == DIMMED.contrast_percent and not out.no_change
 
 
 def test_the_same_square_on_is_raised() -> None:
@@ -218,65 +195,42 @@ def test_post_refuses_without_the_greys(tmp_path: Path) -> None:
     assert isinstance(found, Located)
     normal = read_photo(found, entry(scene))
     assert isinstance(normal, Reading) and normal.tone == ()
-    out = suggest(normal, None)
+    out = suggest(normal)
     assert isinstance(out, SuggestionRefused) and out.why is SuggestionRefusal.TONE_UNREAD
     every_grey_dropped = replace(reading(scene), tone=())
-    out = suggest(every_grey_dropped, None)
+    out = suggest(every_grey_dropped)
     assert isinstance(out, SuggestionRefused) and out.why is SuggestionRefusal.TONE_UNREAD
-
-
-def test_an_entry_naming_a_lut_without_its_recipe_is_an_error() -> None:
-    sent = entry(shot(stage=POST, software=replace(NEUTRAL_SOFTWARE, lut=LUT)))
-    broken = sent.model_copy(update={"picture": sent.picture.model_copy(update={"lut_recipe_id": None})})
-    with pytest.raises(ValueError, match="entry_lut_recipe"):
-        software_of(broken)
 
 
 def test_post_a_right_display_goes_back_to_neutral() -> None:
-    out = post(shot(display=RIGHT, stage=POST, software=replace(NEUTRAL_SOFTWARE, brightness_percent=90)))
+    out = post(shot(display=RIGHT, stage=POST, software=DIMMED))
     assert not out.no_change and out.to == NEUTRAL_SOFTWARE
 
 
-def test_post_a_display_10_percent_too_bright_is_dimmed_to_the_paper() -> None:
-    scene = shot(display=paper_matched(BASE, level=1.1), stage=POST)
-    out = post(scene)
-    assert not out.no_change and out.to.brightness_percent < 100
-    assert out.to == replace(NEUTRAL_SOFTWARE, brightness_percent=out.to.brightness_percent)
-    after = reading(next_change(scene, out.to))
-    level = 100 * (float(np.mean(after.white.value)) - 1)
-    assert abs(level) <= 1                      # the paper's white, as read
-    assert post(next_change(scene, out.to)).no_change
+def test_post_a_display_10_percent_too_bright_is_never_no_change() -> None:
+    """The white the Display sends is the paper match's (decision 0028: no brightness slider), so the
+    three cannot close a white level gap: it is pre-software work, never "no change"."""
+    out = post(shot(display=paper_matched(BASE, level=1.1), stage=POST))
+    assert not out.no_change
 
 
 LOOKS = {
     "gamma 2.5": shot(display=paper_matched(BASE, gamma=2.5), stage=POST),
-    "warm, the look on": shot(display=paper_matched(BASE, kelvin=4500), stage=POST,
-                               software=replace(NEUTRAL_SOFTWARE, saturation_percent=85, black_floor_tenths=20,
-                                                highlight_rolloff_percent=40)),
-    "dim and cool, a LUT": shot(display=paper_matched(BASE, level=0.9, kelvin=5600), stage=POST,
-                                 software=replace(NEUTRAL_SOFTWARE, lut=LUT, lut_amount_percent=60,
-                                                  black_floor_tenths=10), lut=TINT),
+    "warm": shot(display=paper_matched(BASE, kelvin=4500), stage=POST),
+    "dim and cool": shot(display=paper_matched(BASE, level=0.9, kelvin=5600), stage=POST),
 }
 
 
 @pytest.mark.parametrize("name", list(LOOKS))
-def test_post_only_the_four_move_and_the_look_stays(name: str) -> None:
-    scene = LOOKS[name]
-    out = post(scene, scene.lut)
-    assert look(out.to) == look(scene.software)
+def test_post_moves_only_the_displays_three(name: str) -> None:
+    out = post(LOOKS[name])
+    moved = {knob for knob in ("contrast_percent", "colour_temperature_kelvin", "gamma_tenths")
+             if getattr(out.to, knob) != getattr(NEUTRAL_SOFTWARE, knob)}
+    assert moved and moved <= set(THREE)
+    assert out.to == SoftwarePicture(contrast_percent=out.to.contrast_percent,
+                                     colour_temperature_kelvin=out.to.colour_temperature_kelvin,
+                                     gamma_tenths=out.to.gamma_tenths)
     assert not out.no_change
-
-
-def test_post_with_a_lut_reads_its_table() -> None:
-    scene = shot(display=paper_matched(BASE, level=1.1), stage=POST, software=replace(NEUTRAL_SOFTWARE, lut=LUT),
-                  lut=TINT)
-    unread = suggest(reading(scene), None)
-    assert isinstance(unread, SuggestionRefused) and unread.why is SuggestionRefusal.LUT_UNREAD
-    out = post(scene, TINT)
-    assert out.to == replace(scene.software, brightness_percent=out.to.brightness_percent)
-    assert out.to.brightness_percent < 100
-    assert post(scene, IDENTITY).to != out.to          # predicted without the look: another picture
-    assert post(next_change(scene, out.to), TINT).no_change     # drawn with it: the aim is met
 
 
 # -- Keep only what the reading proves (owner, 2026-10-14: "It shouldn’t say “change nothing” unless it
@@ -291,7 +245,7 @@ def loose(scene: Scene, spread: float) -> Reading:
 
 
 def test_pre_a_right_display_read_too_loosely_says_retake_never_keep() -> None:
-    out = suggest(loose(shot(display=RIGHT), 0.03), None)
+    out = suggest(loose(shot(display=RIGHT), 0.03))
     assert isinstance(out, PreSoftwareSuggestion)
     found = {step.property: step for step in out.steps}
     assert found[PreProperty.WHITE_LEVEL].direction is Direction.RETAKE
@@ -301,13 +255,13 @@ def test_pre_a_right_display_read_too_loosely_says_retake_never_keep() -> None:
 
 
 def test_pre_a_gap_the_loose_reading_still_shows_is_named() -> None:
-    step = {s.property: s for s in suggest(loose(shot(display=paper_matched(BASE, level=1.1)), 0.03),
-                                            None).steps}[PreProperty.WHITE_LEVEL]  # type: ignore[union-attr]
+    step = {s.property: s for s in suggest(loose(shot(display=paper_matched(BASE, level=1.1)), 0.03)
+                                            ).steps}[PreProperty.WHITE_LEVEL]  # type: ignore[union-attr]
     assert (step.direction, step.gap) == (Direction.LOWER, pytest.approx(10.0, abs=1.0))
 
 
 def test_post_a_right_display_read_too_loosely_is_never_no_change() -> None:
-    out = suggest(loose(shot(display=RIGHT, stage=POST), 0.03), None)
+    out = suggest(loose(shot(display=RIGHT, stage=POST), 0.03))
     assert isinstance(out, PostSoftwareSuggestion)
     assert out.to == NEUTRAL_SOFTWARE and not out.no_change
     assert PreProperty.WHITE_LEVEL in out.retake
@@ -325,6 +279,6 @@ def test_a_right_display_read_tightly_is_proven_matched() -> None:
 def test_suggest_remembers_nothing() -> None:
     first = reading(shot(display=paper_matched(BASE, level=1.06)))
     second = reading(shot(display=paper_matched(BASE, level=1.1), stage=POST))
-    alone = (suggest(first, None), suggest(second, None))
-    assert (suggest(second, None), suggest(first, None)) == alone[::-1]
-    assert (suggest(first, None), suggest(second, None)) == alone
+    alone = (suggest(first), suggest(second))
+    assert (suggest(second), suggest(first)) == alone[::-1]
+    assert (suggest(first), suggest(second)) == alone

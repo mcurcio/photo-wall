@@ -1,9 +1,8 @@
-"""Central's side of one Node, per pipe, and of the wall: NodeLink and WallWriter (E3b design §7.2,
-§8, §9.1-§9.3, §9.6, §10; E3d runs them).
+"""Central's side of one Node, per pipe, and of the wall: NodeLink and WallWriter.
 
 A NodeLink holds one client in the Node's hub account and one pipe. It finds what the Node has from
 the streams themselves (names, then each description with no options: never a reply that grows with
-stream state, X4), drains every event and state stream of its pipe through cursor readers from
+stream state), drains every event and state stream of its pipe through cursor readers from
 Central's own cursors, and calls and discovers the pipe's components. Every read item is committed
 with its cursor in one store transaction: a gap row (a count, or "unknown" when an epoch ended), the
 raw record keyed (stream, epoch, sequence) with its message id, then the cursor. A crash mid-commit
@@ -15,24 +14,25 @@ every key in an epoch Central has not written. Each put is conditional on Centra
 "absent" in a new epoch. A conflict re-reads the key: Central's own value (an earlier write whose
 acknowledgement was lost) gives Central its token; any other writer's value is adopted as Central's
 for that projection and logged (`document_adopted`), so Central never overwrites it until its
-projection changes again (C16). A key the bucket's table does not list (rollout skew), or a value
+projection changes again. A key the bucket's table does not list (rollout skew), or a value
 past its size, is refused before sending and logged (`document_refused`); every reconcile tries it
 again, so the release that lists it (a new `birth`) gets it. Besides every reconcile, a running link
 asserts every desired bucket of its pipe each time its `DocumentSource.changed()` returns, so a
-projection change reaches the Node without waiting for a reconcile (roadmap 1b, erratum E-1B-1).
+projection change reaches the Node without waiting for a reconcile.
 When a bucket's table changes in an epoch Central has written, every key Central owns there is put
-again (an adopted key is left), so a shrink never leaves a listed key without its value (§9.2).
+again (an adopted key is left), so a shrink never leaves a listed key without its value.
 
 The link reconciles when it comes up, when a reader is lost or its stream goes absent, when a new
 `birth` is drained, and when the bus's stream names differ from those its last reconcile listed: a
-line created after it is drained within about 2 s (erratum E-E3B-CC-1). `run_link` is the one way
+line created after it is drained within about 2 s. `run_link` is the one way
 Central runs a NodeLink: it owns the client (Central imports no NATS type), connects as Central's
 user in the Node's account, and connects again until stopped.
 
 WallWriter keeps WALL in the hub's wall account: absent (the hub restarted empty), it is created at
 Central's mark + 1 + WALL_MARGIN and every wall document is put again. The mark is recorded after
 each acknowledgement, so a crash between the two loses at most the writes in flight, which the
-margin covers: no Node mirror is ever ahead of the new WALL's first sequence (X8).
+margin covers: no Node mirror is ever ahead of the new WALL's first sequence. A put
+is content-keyed: a key that already holds the value is not written again.
 
 Central reaches the hub only through the connection-owning entries here (`run_link`, `HubAdmin`,
 `WallWriter.connect`), so it names no NATS type: every one of them connects once or raises
@@ -49,14 +49,31 @@ import hashlib
 import json
 import logging
 import time
-from collections.abc import Collection, Iterator, Mapping
+from collections.abc import Collection, Iterator, Mapping, Sequence
+from dataclasses import dataclass
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Final, Protocol
 
 import nats
 import nats.errors
-from nats.js.errors import APIError, NotFoundError
+import nats.micro
+from nats.js.errors import APIError, NoStreamResponseError, NotFoundError
+from nats.micro.service import ServiceConfig
 
+from contracts.central_api import BIRTH_KEY as CENTRAL_BIRTH_KEY
+from contracts.central_api import (
+    CENTRAL_COMPONENT,
+    CENTRAL_STATE_PREFIX,
+    CENTRAL_STATE_STREAM,
+    CENTRAL_STATE_TABLE,
+    CENTRAL_USER,
+    HOME_ASSISTANT_STATES_PREFIX,
+    HOME_ASSISTANT_STATES_STREAM,
+    STATES_EPOCH_KEY,
+    CentralBirth,
+    StatesEpoch,
+    encode_central_state,
+)
 from contracts.node_link import (
     CENTRAL_INBOX_PREFIX,
     CENTRAL_WRITER,
@@ -68,11 +85,23 @@ from contracts.node_link import (
     Pipe,
     central_user,
 )
-from nodeapi.buffers import BIRTH_KEY, PIPE_KEY, KeyTable, Role, declare, role_of, wall_config
+from nodeapi.buffers import (
+    BIRTH_KEY,
+    KV_OPERATION_HEADER,
+    PIPE_KEY,
+    KeyTable,
+    Role,
+    central_state_bucket,
+    declare,
+    home_assistant_states_bucket,
+    role_of,
+    table_of,
+    wall_config,
+)
 from nodeapi.documents import ABSENT, Absent, Conflict, DocumentRefused, DocumentWriter
-from nodeapi.envelope import caller_headers
+from nodeapi.envelope import MethodCall, MethodHandler, caller_headers, writer_of
 from nodeapi.epoch import Token, epoch_of
-from nodeapi.pull import Batch, CursorReader, Gap, Read, StreamAbsent
+from nodeapi.pull import Batch, CursorReader, Gap, Read, StartAt, StreamAbsent
 
 if TYPE_CHECKING:
     from nats.aio.client import Client
@@ -85,7 +114,7 @@ class HubUnavailable(Exception):
     entry below and by WallWriter.ensure/put; a store error still propagates as itself."""
 
 
-HUB_RELOAD_REQUESTS: Final = 2   # X6: a reload-added account's service imports are wired only by the second
+HUB_RELOAD_REQUESTS: Final = 2   # a reload-added account's service imports are wired only by the second
 
 
 class LinkStore(Protocol):
@@ -285,7 +314,7 @@ class NodeLink:
     async def _look(self, stop: asyncio.Event, again: asyncio.Event) -> None:
         """Set `again` once the bus's stream names differ from those the last reconcile listed: a line
         applied after it. Polled (one bounded STREAM.NAMES reply), since nothing on the Node may send
-        toward the hub (erratum E-E3B-CC-1)."""
+        toward the hub."""
         while not stop.is_set() and not again.is_set():
             await _pause(stop, _NAMES_SECONDS)
             try:
@@ -540,13 +569,25 @@ class WallWriter:
 
     async def ensure(self) -> bool:
         """Create WALL at mark + 1 + WALL_MARGIN if it is absent and put every wall document again;
-        True when this call created it. Create-if-absent is race-safe with another Central."""
+        True when this call created it. Create-if-absent is race-safe with another Central. A WALL
+        whose key table is not this writer's (a hub that outlived a Central upgrade adding a key) is
+        deleted and created again the same way, past the mark, so the Nodes' mirrors carry on and no
+        key the table gained is refused forever."""
         jetstream = self._client.jetstream()
         with _answered():
             try:
-                await jetstream.stream_info(WALL_STREAM)
+                info = await jetstream.stream_info(WALL_STREAM)
                 absent = False
             except NotFoundError:
+                absent = True
+        if not absent:
+            found = table_of(info.config)
+            if found is None or found.encoded() != self._table.encoded():
+                log.warning("WALL's key table %s is not Central's %s: WALL is created again past the mark",
+                            None if found is None else found.encoded(), self._table.encoded())
+                with _answered():
+                    with contextlib.suppress(NotFoundError):   # another Central deleted it first
+                        await jetstream.delete_stream(WALL_STREAM)
                 absent = True
         created = False
         if absent:
@@ -562,12 +603,17 @@ class WallWriter:
 
     async def put(self, key: str, value: bytes) -> int:
         """Write one wall document, admitted by the table; the mark is recorded after the ack. WALL
-        has one writer, Central, so a conflict (another Central instance) re-reads and writes again."""
+        has one writer, Central, so a conflict (another Central instance) re-reads and writes again.
+        Content-keyed: when the key already holds exactly `value`, nothing is written and the held
+        value's sequence is answered, so a writer may put whenever it is unsure (safe to repeat) and
+        a put never depends on what any process remembers having written."""
         if self._writer is None:
             raise RuntimeError("wall_writer_not_ensured")
         while True:
             with _answered():
                 found = await self._writer.read(key)
+                if found is not None and found.value == value:
+                    return found.token.seq
                 try:
                     token = await self._writer.put(key, value, expect=ABSENT if found is None else found.token)
                     break
@@ -575,3 +621,223 @@ class WallWriter:
                     continue
         await self._marks.record_mark(token.seq)
         return token.seq
+
+
+# ---- Central on its own hub (contracts/central_api.py; the Home Assistant system design) ----
+
+
+@dataclass(frozen=True)
+class Heard:
+    """One newest value of Home Assistant's states bucket: the entity id (the subject past
+    HOME_ASSISTANT_STATES_PREFIX) and its raw value (None: the key was deleted or purged, a value
+    with the KV-Operation header). The value is undecoded: its reader judges it."""
+    entity: str
+    value: bytes | None
+
+
+class CentralState(Protocol):
+    """Central's state on its hub, as Central's own services compute it now (one source of truth:
+    Central's database; the bucket is a copy any reader may trust only while Central runs)."""
+
+    async def values(self) -> Mapping[str, bytes]: ...
+        # every key of CENTRAL_STATE_TABLE but BIRTH_KEY and STATES_EPOCH_KEY -> its encoded value now
+
+    async def changed(self) -> None: ...
+        # returns when any value may have changed since the previous return (or at once the first time)
+
+
+class ListenedStates(Protocol):
+    """Where Central's hub session hands Home Assistant's states (Central's Home Assistant adapter)."""
+
+    async def heard(self, epoch: str, items: Sequence[Heard]) -> None: ...
+        # the newest value of each key in one read, in stream order, from the bucket's epoch `epoch`;
+        # raising re-reads the same items after a backoff (a database away loses nothing)
+
+
+async def run_hub_session(url: str, *, version: str, state: CentralState, listened: ListenedStates,
+                          methods: Mapping[str, MethodHandler], stop: asyncio.Event) -> None:
+    """Central as a component on its hub, until `stop`: the one way Central serves Home Assistant's
+    door, owning its client (Central imports no NATS type).
+
+    Connects as CENTRAL_USER (HubUnavailable at once when the hub does not answer the first time;
+    reconnects forever once connected). At every connect, and whenever either bucket is found absent
+    (a hub restart starts empty), it declares `central_state_bucket(KeyTable(CENTRAL_STATE_TABLE))` and
+    `home_assistant_states_bucket()` (create-if-absent), puts BIRTH_KEY (`CentralBirth(version)`),
+    STATES_EPOCH_KEY (the states bucket's epoch) and every key of `state.values()`, and registers one
+    `nats.micro` service named CENTRAL_COMPONENT whose endpoints are `methods` on subjects
+    `central.method.<name>` (a handler's exception answers an error reply; each call answers once).
+    Then, until `stop`: each return of `state.changed()` puts every key whose value differs from what
+    this session last put in this epoch (content-keyed: an equal value is not put again); and Home
+    Assistant's states are read from the latest value per entity (at every connect and every new
+    epoch: all of them again) and followed, each batch handed to `listened.heard` before the reader's
+    position moves past it. A value past its table size is refused before sending and logged."""
+    client = await _connect(url, CENTRAL_USER)
+    try:
+        await _HubSession(client, version, state, listened, methods).run(stop)
+    finally:
+        await _close(client)
+
+
+HUB_API_VERSION: Final = "1.0.0"   # the version of Central's method service (nats.micro wants SemVer)
+HEARD_BATCH: Final = 256           # Home Assistant's states read at once
+_UNKNOWN_CALLER: Final = "unknown"
+
+
+class _Absent(Exception):
+    """A bucket of Central's account went absent or was created again (a hub restart starts empty)."""
+
+
+class _HubSession:
+    """One connected client's life as Central on its hub (`run_hub_session`)."""
+
+    def __init__(self, client: Client, version: str, state: CentralState, listened: ListenedStates,
+                 methods: Mapping[str, MethodHandler]) -> None:
+        self._client = client
+        self._jetstream = client.jetstream()
+        self._birth = encode_central_state(CENTRAL_BIRTH_KEY, CentralBirth(version=version))
+        self._state = state
+        self._listened = listened
+        self._methods = dict(methods)
+        self._put: dict[str, bytes] = {}   # what this session last put, in Central's state epoch `_epoch`
+        self._epoch: str | None = None
+        self._lock = asyncio.Lock()        # one put pass at a time: a change's and a new epoch's
+
+    async def run(self, stop: asyncio.Event) -> None:
+        service = await self._serve() if self._methods else None
+        delay = _BACKOFF[0]
+        try:
+            while not stop.is_set():
+                try:
+                    states_epoch = await self._ensure()
+                    delay = _BACKOFF[0]
+                    await self._attached(stop, states_epoch)
+                except (_Absent, StreamAbsent, NoStreamResponseError) as absent:
+                    log.info("central on its hub: declare again: %r", absent)
+                except (nats.errors.Error, asyncio.TimeoutError, OSError) as error:
+                    log.info("central on its hub: %r", error)
+                    await _pause(stop, delay)
+                    delay = min(delay * 2, _BACKOFF[1])
+        finally:
+            if service is not None:
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(service.stop(), _REQUEST_SECONDS)
+
+    async def _serve(self) -> object:
+        """The method service, registered once per client (nats-py restores its subscriptions at
+        every reconnect)."""
+        service = await nats.micro.add_service(self._client, config=ServiceConfig(
+            name=CENTRAL_COMPONENT, version=HUB_API_VERSION))
+        for name, handler in self._methods.items():
+            await service.add_endpoint(name=name, subject=f"{CENTRAL_COMPONENT}.{METHOD_TOKEN}.{name}",
+                                       handler=_endpoint(name, handler))
+        return service
+
+    async def _ensure(self) -> str:
+        """Declare both buckets (create-if-absent); in a state epoch this session has not put into,
+        put every key again. Answers the states bucket's epoch."""
+        await declare(self._jetstream, central_state_bucket(KeyTable(CENTRAL_STATE_TABLE)))
+        await declare(self._jetstream, home_assistant_states_bucket())
+        try:
+            state_epoch = epoch_of(await self._jetstream.stream_info(CENTRAL_STATE_STREAM))
+            states_epoch = epoch_of(await self._jetstream.stream_info(HOME_ASSISTANT_STATES_STREAM))
+        except NotFoundError:
+            raise _Absent("gone once declared") from None
+        async with self._lock:
+            if state_epoch != self._epoch:
+                self._put, self._epoch = {}, state_epoch
+            await self._put_one(CENTRAL_BIRTH_KEY, self._birth)
+            await self._put_one(STATES_EPOCH_KEY,
+                                encode_central_state(STATES_EPOCH_KEY, StatesEpoch(epoch=states_epoch)))
+        await self._put_values()
+        return states_epoch
+
+    async def _attached(self, stop: asyncio.Event, states_epoch: str) -> None:
+        """Until `stop` or a bucket goes absent: put what changes, and follow Home Assistant's states."""
+        tasks = [asyncio.create_task(self._putting()), asyncio.create_task(self._following(states_epoch)),
+                 asyncio.create_task(stop.wait())]
+        try:
+            done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+        for task in done:
+            task.result()
+
+    async def _putting(self) -> None:
+        while True:
+            await self._state.changed()
+            await self._put_values()
+
+    async def _put_values(self) -> None:
+        """Put each value of `state.values()` that differs from this session's last put of it. Values
+        Central could not read now (its database away) are logged, and the next change tries again."""
+        try:
+            values = await self._state.values()
+        except Exception as error:   # Central's own reads: the hub keeps the last values meanwhile
+            log.warning("central on its hub: state not read: %r", error)
+            return
+        async with self._lock:
+            for key, value in values.items():
+                await self._put_one(key, value)
+
+    async def _put_one(self, key: str, value: bytes) -> None:
+        if self._put.get(key) == value:
+            return
+        largest = CENTRAL_STATE_TABLE.get(key)
+        if largest is None or len(value) > largest:
+            log.warning("central on its hub: %s refused before sending (%d bytes; table: %s)", key, len(value),
+                        largest)
+            return
+        await self._jetstream.publish(CENTRAL_STATE_PREFIX + key, value, stream=CENTRAL_STATE_STREAM,
+                                      timeout=_REQUEST_SECONDS)
+        self._put[key] = value
+
+    async def _following(self, states_epoch: str) -> None:
+        """Home Assistant's states, latest per entity first and then as they come. A read from
+        another epoch (the bucket created again under the reader) or an absent bucket ends this, so
+        `_ensure` runs again and every state of the new epoch is read."""
+        reader = CursorReader(self._client, HOME_ASSISTANT_STATES_STREAM, None, start=StartAt.LAST_PER_SUBJECT)
+        try:
+            while True:
+                batch = await reader.read(HEARD_BATCH, timeout=DRAIN_TIMEOUT_SECONDS)
+                reads = [item for item in batch.items if isinstance(item, Read)]
+                if any(item.token.epoch != states_epoch for item in reads):
+                    raise _Absent("a new states epoch")
+                if reads:
+                    await self._hand(states_epoch, tuple(_heard(item) for item in reads))
+        finally:
+            await reader.close()
+
+    async def _hand(self, epoch: str, items: tuple[Heard, ...]) -> None:
+        """`listened.heard` until it takes the batch: a failure (a database away) is logged and the
+        same items are handed again after a backoff, so none is lost."""
+        delay = _BACKOFF[0]
+        while True:
+            try:
+                await self._listened.heard(epoch, items)
+                return
+            except Exception as error:
+                log.warning("central on its hub: Home Assistant's states not taken: %r", error)
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, _BACKOFF[1])
+
+
+def _heard(item: Read) -> Heard:
+    removed = bool((item.headers or {}).get(KV_OPERATION_HEADER))
+    return Heard(item.subject[len(HOME_ASSISTANT_STATES_PREFIX):], None if removed else item.data)
+
+
+def _endpoint(name: str, handler: MethodHandler):
+    """One method's endpoint: the handler's answer, or an error reply when it raises (logged)."""
+    async def answer(request) -> None:
+        call = MethodCall(name, request.data, writer_of(request.headers) or _UNKNOWN_CALLER)
+        try:
+            reply = await handler(call)
+        except Exception as error:
+            log.exception("central on its hub: method %s", name)
+            with contextlib.suppress(Exception):
+                await request.respond_error("500", type(error).__name__)
+            return
+        await request.respond(reply)
+    return answer

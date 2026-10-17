@@ -123,9 +123,17 @@ claim as the controller's behaviour.
 
 Two groups, set apart ([Player architecture › Picture settings](../../../docs/player-architecture.md#picture-settings-1c)):
 the display's own settings someone set in Photo Wall, which the controller writes over DDC/CI, and
-Photo Wall's own (its four and the print look, [0023](../../../docs/decisions/0023-print-look.md)),
-which the Player applies (light factor = Photo Wall brightness ÷ 100). Nothing
-nobody set is ever written.
+Photo Wall's own (contrast, colour temperature and gamma, beside the Display's light: the matched
+lux and the panel's black, [0028](../../../docs/decisions/0028-room-light.md)), which the Player
+applies. The print look's sliders and Photo Wall's brightness are gone: the room's light on the
+Frame's paper dims the picture. **The paper match types the matched lux**: with the White pattern up
+(the TV's own white, through white balance, contrast and gamma only), hold a sheet of white paper
+beside the screen lit by daylight or a 6500 K lamp only, set the colour temperature until the two
+whites are the same colour (it makes the TV's white neutral; a warm room is its room lights'
+kelvin, never the Display's colour temperature, or the warmth counts twice), then change the light
+at the Frame until the two read equally bright, measure that light at the Frame with a light meter
+(a phone app will do) and type it as the Display's matched light; the panel's black comes from the
+calibration reader. Nothing nobody set is ever written.
 
 **Asking the picture list.** On a display's first appearance (per EDID identity, kept across
 controller restarts) the controller asks every code on the picture list, a few codes per
@@ -279,8 +287,7 @@ his iPhone 14 Pro: a ProRAW photo lands in `~/Downloads` on the Mac as `IMG_####
 chat. He may photograph with the phone the tab runs on: a test pattern stays up a minute while the
 tab is hidden (the picture session's idle limit, `central/displays/picture.py` `idle_seconds`).
 
-1. **Run the reader** from the repository on the Mac (the admin token, and for a post-software
-   reading with a LUT on a read-only database address, from 1Password; how, in
+1. **Run the reader** from the repository on the Mac (the admin token from 1Password; how, in
    [Runbook › Calibration targets](../../../docs/runbook.md#calibration-targets)):
    `op run -- .venv/bin/python -m scripts.calibration_target ~/Downloads/IMG_1234.DNG --central <url>`.
    Read the newest photo he sent; one is enough (owner, 2026-10-14: "The point of using two
@@ -320,23 +327,21 @@ tab is hidden (the picture session's idle limit, `central/displays/picture.py` `
    controls (raise, lower, warmer, cooler, keep, `unsure` or `retake`, with the gap's size and its
    `spread`); name the
    Samsung's menu item you think matches, and say it is your reading. Photo Wall does not record
-   those menus: ask him what he changed. Post-software: values for Photo Wall's brightness,
-   contrast, colour temperature and gamma, or "no change", which is the best result; the print
-   look never moves. **`keep` and "no change" are proven** (owner, 2026-10-14: "It shouldn’t say
+   those menus: ask him what he changed. Post-software: values for Photo Wall's contrast,
+   colour temperature and gamma, or "no change", which is the best result (the target goes through
+   those three only, decision 0028). **`keep` and "no change" are proven** (owner, 2026-10-14: "It shouldn’t say
    “change nothing” unless it can prove the system is perfectly calibrated. “Retake the photo” is
    closer to the truth"): said only when the gap, widened by its spread, lies within the match
    tolerance (`model.py` `judged`, `MATCH_TOLERANCE`). **`retake`** (a pre-software direction, or a
    post-software `retake` list) means the spread is too wide to tell a match from a gap: never call
    the display right; ask for a new photo with the light, lamp or himself moved off the paper (the
    reading's `dropped` places say where). A post-software `to` equal to the entry's with
-   `no_change` false and nothing in `retake` or `unsure` is a gap the four cannot close: pre-software
-   work. **`unsure`** (a pre-software direction, or a post-software `unsure` list)
+   `no_change` false and nothing in `retake` or `unsure` is a gap the three cannot close (a white
+   level gap is the paper match's or the display's own): pre-software work. **`unsure`** (a pre-software direction, or a post-software `unsure` list)
    means the screen read dimmer by no more than the viewing angle can explain: ask for a squarer
    photo, or the 2x lens from farther, before saying "raise". On a display that answers DDC/CI,
    the pre-software controls include the tab's Display (hardware) sliders; say which.
-   `{"suggestion": {"why": "lut-unread"}}` means a post-software reading with a LUT on whose table
-   could not be read: run again with `PHOTO_WALL_READ_DATABASE_URL` set; `tone-unread`, a
-   post-software reading with no grey read (a normal photo, or every grey dropped): ask for a
+   `{"suggestion": {"why": "tone-unread"}}` means a post-software reading with no grey read (a normal photo, or every grey dropped): ask for a
    ProRAW photo. You never apply anything: no Picture edit, no Done, no DDC/CI write. He moves the
    sliders or the TV's controls, sends new photos, and presses Done when it reads right.
 6. **Know the limits** ([0027](../../../docs/decisions/0027-calibration-targets-v2.md#costs)): the

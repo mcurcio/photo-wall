@@ -9,7 +9,7 @@ Modules, dependencies pointing down (held by tests/test_calibration_target_reade
 | Module | Owns | May import |
 |---|---|---|
 | `__main__` | the command line: decode, locate, fetch the entry, read, suggest, print JSON | every module here |
-| `photos`, `central_reads` | the edges: a photo file to a linear `Photo` (rawpy for ProRAW DNG, Pillow and pillow-heif for normal photos); Central's sent entry (the operator route) and a LUT's table (read-only SQL) | `model` |
+| `photos`, `central_reads` | the edges: a photo file to a linear `Photo` (rawpy for ProRAW DNG, Pillow and pillow-heif for normal photos); Central's sent entry (the operator route) | `model` |
 | `suggest` | what to change, by stage | `model`, `player.geometry`, `appliance.display_host.picture` (`operations_for`), `contracts` |
 | `read` | a Reading from a located photo and its sent entry: squares, whites over their blacks, the ink, the lens falloff, the vote, greys and rulers | `locate`, `model`, `contracts` |
 | `locate` | both boards (OpenCV's ChArUco detector and USAC homography), the code (its QR detector), the viewing angle (solvePnP) | `boards`, `model`, `contracts` |

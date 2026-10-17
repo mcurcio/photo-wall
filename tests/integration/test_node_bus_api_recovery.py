@@ -1,16 +1,13 @@
-"""Recovery on real servers: a Node session whose line another component declares (E3b design §7.2
-node, §7.3, §9.5, §9.7, §11 attach row, §16.1 "also in E3b"; erratum E-E3B-R2-4), and every loss
-reaching Central as one counted row, rollout skew and key-table changes (§9.2, §9.3, §11).
+"""Recovery on real servers: the Player's own line, declared by the Player (0017 C4 amended
+2026-10-16; E3b design §7.2 node, §7.3, §9.5, §9.7, §11 attach row), and every loss reaching Central
+as one counted row, rollout skew and key-table changes (§9.2, §9.3, §11).
 
-The Player's store line is declared by apps, from the held Player releases' slices; the Player
-session never applies it. Attach before declare: the Player starts first and its events wait in the
-outbox; once apps applies the line, the Player attaches and Central's show NodeLink records its
-`birth` and every event in that epoch, and again in the next epoch after a bus crash with the start
-order reversed. Hot-swap: apps applies the union of the old and new releases' slices, both Player
-sessions attach, then apps applies the new slice alone; the old-only stream is pruned and Central
-records an unknown gap for it. A release whose union with the running one does not fit the line is
-refused before anything is applied. No session meets an absent stream on the way. Central's link
-runs from before any line exists and finds each by the bus's stream names (erratum E-E3B-CC-1).
+The Player declares its own store line with its release's slice: its events wait in the outbox until
+it attaches, then Central's show NodeLink records its `birth` and every event in that epoch, and
+again in the next epoch after a bus crash. A next release applies its changed slice in place: the
+old-only stream is pruned and Central records an unknown gap for it, the kept streams keep their
+epochs and the state table drops the old key. No session meets an absent stream on the way. Central's
+link runs from before any line exists and finds each by the bus's stream names (erratum E-E3B-CC-1).
 
 Losses: an event buffer that overflows while Central's link is away is one gap row with the exact
 count, then every held event once; state written faster than the link drains is counted gap rows and
@@ -28,7 +25,6 @@ import json
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 
-import pytest
 from integration.bus_servers import (
     STATE_TABLE,
     BusServer,
@@ -63,7 +59,6 @@ from nodeapi.node import OUTBOX_MESSAGES, NodeSession, Release
 
 SERIAL = "serial-p"
 MIB = 1024 * 1024
-APPS = Release("1.0.0", "sha256:apps-release", {"apps": 1})
 PLAYER = Release("1.0.0", "sha256:player-release", {"player": 1})
 PLAYER_NEXT = Release("2.0.0", "sha256:player-next", {"player": 2})
 PLAYER_STATE = "KV_state_player"
@@ -99,7 +94,7 @@ def _born(store: FileLinkStore, epoch: str) -> dict | None:
     return births[-1] if births else None
 
 
-def test_a_session_attaches_before_its_lines_declarer_and_writes_birth_in_every_epoch(tmp_path, caplog):
+def test_the_player_declares_its_own_line_and_writes_birth_in_every_epoch(tmp_path, caplog):
     caplog.set_level(logging.DEBUG, logger="nodeapi.node")
     hub = hub_server(tmp_path, [SERIAL])
     node = node_server(tmp_path, SERIAL, hub)
@@ -139,25 +134,18 @@ def test_a_session_attaches_before_its_lines_declarer_and_writes_birth_in_every_
         stop = asyncio.Event()
         running = asyncio.create_task(NodeLink(client, Pipe.SHOW, store, Projection()).run(stop))
         try:
-            # The Player starts first: nothing declares its line, so it waits, its events held.
+            # The Player declares its own line (0017 C4, 2026-10-16): its events are held until it
+            # attaches, then recorded with its birth in that epoch.
             player = session("player", player_slice, PLAYER)
             emitted: list[bytes] = []
             player.start()
             emit(player, emitted, 10)
-            await asyncio.sleep(3)
-            assert not player.wait_attached(0)
-            assert await _held(jetstream, (records, state, desired)) == {}
-
-            # apps starts and applies the Player's line: the Player attaches in that epoch.
-            apps = session("apps", slices["apps"], APPS)
-            apps.apply_line(player_slice)
-            apps.start()
-            epochs = await until(lambda: _held(jetstream, (records, state, desired)), 15, "apps applies the Player line")
+            epochs = await until(lambda: _held(jetstream, (records, state, desired)), 15, "the Player applies its line")
             assert await asyncio.to_thread(player.wait_attached, 15)
             await recorded(store, epochs, emitted, player_slice.digest)
 
-            # The bus crashes and starts empty; the start order is reversed: apps re-attaches and
-            # applies the held line again, then a Player starts. The link keeps running.
+            # The bus crashes and starts empty; a Player starting afterwards declares the line again in
+            # a new epoch. The link keeps running.
             player.stop()
             await node_client.close()
             node.crash()
@@ -165,15 +153,15 @@ def test_a_session_attaches_before_its_lines_declarer_and_writes_birth_in_every_
             await _linked(hub)
             node_client = await local(node)
             jetstream = node_client.jetstream()
-
-            async def reapplied():
-                held = await _held(jetstream, (records, state, desired))
-                return held if held and not set(held.values()) & set(epochs.values()) else {}
-            epochs = await until(reapplied, 15, "apps re-applies the Player line in a new epoch")
             player = session("player", player_slice, PLAYER)
             player.start()
             emitted = []
             emit(player, emitted, 10)
+
+            async def reapplied():
+                held = await _held(jetstream, (records, state, desired))
+                return held if held and not set(held.values()) & set(epochs.values()) else {}
+            epochs = await until(reapplied, 15, "the Player re-applies its line in a new epoch")
             assert await asyncio.to_thread(player.wait_attached, 15)
             await recorded(store, epochs, emitted, player_slice.digest)
         finally:
@@ -194,22 +182,15 @@ def test_a_session_attaches_before_its_lines_declarer_and_writes_birth_in_every_
     _no_absent_stream(caplog)
 
 
-def test_apps_hot_swaps_the_player_line_through_the_union_of_its_held_slices(tmp_path, caplog):
+def test_a_player_release_applies_its_changed_slice_in_place(tmp_path, caplog):
     caplog.set_level(logging.DEBUG, logger="nodeapi.node")
     hub = hub_server(tmp_path, [SERIAL])
     node = node_server(tmp_path, SERIAL, hub)
     old = Slice("player", (event_buffer("player", "record", 2 * MIB),
+                           event_buffer("player", "observation", 2 * MIB),
                            state_bucket("player", KeyTable({"track": 256, "legacy": 128}))))
     new = Slice("player", (event_buffer("player", "observation", 2 * MIB),
                            state_bucket("player", KeyTable({"track": 512, "volume": 64}))))
-    # A release that needs a third stream of its own: with the old release held, four.
-    fourth = Slice("player", (event_buffer("player", "observation", MIB),
-                              state_bucket("player", KeyTable({"track": 512})),
-                              desired_bucket("player", KeyTable({"show": 256}))))
-    both = old.union(new)
-    assert [config.name for config in both.buffers] == ["RECORD_player", PLAYER_STATE, "OBSERVATION_player"]
-    assert table_of(both.buffers[1]).sizes == {"birth": 4096, "legacy": 128, "outbox": 4096, "track": 512,
-                                                "volume": 64}
     sessions: list[NodeSession] = []
     hub.start()
     node.start()
@@ -220,57 +201,40 @@ def test_apps_hot_swaps_the_player_line_through_the_union_of_its_held_slices(tmp
         node_client = await local(node)
         jetstream = node_client.jetstream()
         store = FileLinkStore(tmp_path / "link.jsonl")
+        stop = asyncio.Event()   # before the line exists (erratum E-E3B-CC-1)
+        running = asyncio.create_task(NodeLink(client, Pipe.SHOW, store, Projection()).run(stop))
         try:
-            apps = NodeSession("apps", line_slices()["apps"], APPS, url=node.client_url)
-            sessions.append(apps)
-            apps.start()
-            assert await asyncio.to_thread(apps.wait_attached, 15)
-            stop = asyncio.Event()   # before the line exists (erratum E-E3B-CC-1)
-            running = asyncio.create_task(NodeLink(client, Pipe.SHOW, store, Projection()).run(stop))
-            apps.apply_line(both)   # attached: applied now
-            names = [config.name for config in both.buffers]
-            epochs = await until(lambda: _held(jetstream, names), 15, "apps applies the union")
-
-            # Both releases attach and play on the union.
             playing = NodeSession("player", old, PLAYER, url=node.client_url)
-            starting = NodeSession("player", new, PLAYER_NEXT, url=node.client_url)
-            sessions.extend((playing, starting))
+            sessions.append(playing)
             playing.state.put("legacy", b"old")
             playing.start()
-            starting.start()
             assert await asyncio.to_thread(playing.wait_attached, 15)
-            assert await asyncio.to_thread(starting.wait_attached, 15)
+            names = [config.name for config in old.buffers]
+            epochs = await until(lambda: _held(jetstream, names), 15, "the old release applies its slice")
             for index in range(5):
                 playing.events.emit("record.play", f"old-{index}".encode(), schema_major=1)
-                starting.events.emit("observation.play", f"new-{index}".encode(), schema_major=2)
 
             async def drained():
                 cursors = await store.cursors()
-                ends = {name: (await jetstream.stream_info(name)).state.last_seq for name in names}
-                return (len(store.records("RECORD_player")) == 5 and len(store.records("OBSERVATION_player")) == 5
-                        and all(name in cursors and cursors[name].seq == end for name, end in ends.items())
-                        and cursors)
-            last = (await until(drained, 20, "Central drains both releases"))["RECORD_player"]
+                end = (await jetstream.stream_info("RECORD_player")).state.last_seq
+                return (len(store.records("RECORD_player")) == 5 and "RECORD_player" in cursors
+                        and cursors["RECORD_player"].seq == end and cursors)
+            last = (await until(drained, 20, "Central drains the old release"))["RECORD_player"]
 
-            # A next release whose union with the running one needs a fourth stream is refused before
-            # anything is applied; the running slice stays.
-            before = {info.config.name: (epoch_of(info), info.config) for info in await jetstream.streams_info()}
-            with pytest.raises(ValueError, match="slice_past_its_line"):
-                apps.apply_line(old.union(fourth))
-            assert {info.config.name: (epoch_of(info), info.config)
-                    for info in await jetstream.streams_info()} == before
-
-            # The old release leaves; apps applies the new slice alone: the old-only stream is pruned
-            # (Central records an unknown gap after the last event it read), the kept streams keep
-            # their epochs, and the state table drops the old key.
+            # The old release leaves and the next one applies its own slice: the old-only stream is
+            # pruned (Central records an unknown gap after the last event it read), the kept streams
+            # keep their epochs, and the state table drops the old key.
             playing.stop()
-            apps.apply_line(new)
+            starting = NodeSession("player", new, PLAYER_NEXT, url=node.client_url)
+            sessions.append(starting)
+            starting.start()
+            assert await asyncio.to_thread(starting.wait_attached, 15)
 
             async def swapped():
                 held = {info.config.name: info for info in await jetstream.streams_info()}
                 return "RECORD_player" not in held and table_of(held[PLAYER_STATE].config) == table_of(
                     new.buffers[1]) and held
-            held = await until(swapped, 15, "apps applies the new slice alone")
+            held = await until(swapped, 15, "the new release applies its slice in place")
             assert {name: epoch_of(held[name]) for name in (PLAYER_STATE, "OBSERVATION_player")} == {
                 name: epochs[name] for name in (PLAYER_STATE, "OBSERVATION_player")}
 
@@ -279,16 +243,13 @@ def test_apps_hot_swaps_the_player_line_through_the_union_of_its_held_slices(tmp
             gaps = await until(pruned, 20, "Central records the pruned stream's gap")
             assert gaps == [{"kind": "gap", "stream": "RECORD_player", "epoch": last.epoch, "after": last.seq,
                              "count": None}]
-            for index in range(5, 8):
+            for index in range(3):
                 starting.events.emit("observation.play", f"new-{index}".encode(), schema_major=2)
 
             async def playing_on():
                 return [row["data"] for row in store.records("OBSERVATION_player")] == [
-                    f"new-{index}".encode() for index in range(8)]
+                    f"new-{index}".encode() for index in range(3)]
             await until(playing_on, 15, "the new release keeps recording")
-            # Both releases' births share one sticky key, so one may be superseded before Central reads
-            # it: a counted gap, never an unknown one (§11 "state written faster").
-            assert [row for row in store.rows("gap") if row["count"] is None] == gaps
             stop.set()
             await asyncio.wait_for(running, 15)
         finally:

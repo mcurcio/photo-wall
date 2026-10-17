@@ -99,8 +99,7 @@ def make_world(registry, tmp_path):
         handler = SyncReleasesHandler(origin=origin, releases=PgReleaseRecords(),
                                       transactions=transactions, publisher=publisher,
                                       clock=clock,
-                                      node_releases=node_releases or PgNodeReleaseRecords(clock),
-                                      readiness=stored)
+                                      node_releases=node_releases or PgNodeReleaseRecords(clock))
         return World(handler, origin, assets, transactions, publisher, store,
                      Reads(RecordingTransactions(registry.db)), registry.db, catalog, clock,
                      stored)

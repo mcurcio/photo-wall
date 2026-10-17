@@ -942,6 +942,8 @@ def operator_action(action: str):
     from support.position import save_position
 
     from central.db import Database
+    from central.frame_lighting.paper_profiles import LUT_RECIPE_ID
+    from central.infra.frame_lighting_store import PgFrameLighting
     from central.registry import Registry
     from contracts.time import SystemClock
     client = httpx.Client(base_url="http://central:8000", trust_env=False, follow_redirects=False,
@@ -997,7 +999,7 @@ def operator_action(action: str):
         require(len(outputs) == expected, "players_not_registered")
         frames = []
         database = Database(os.environ["PHOTO_WALL_DATABASE_URL"])
-        registry = Registry(database, SystemClock())
+        registry = Registry(database, SystemClock(), lighting=PgFrameLighting(LUT_RECIPE_ID))
         try:
             for index, output in enumerate(outputs):
                 frame = "demo-frame-" + str(index + 1)

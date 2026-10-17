@@ -14,6 +14,7 @@ display-harness leg).
 from __future__ import annotations
 
 import pytest
+from support.position import LIGHTING
 from test_executor import binding, layer
 from test_player_frame_clock import (  # noqa: F401
     Frames,
@@ -25,8 +26,11 @@ from test_player_frame_clock import (  # noqa: F401
     paint,
 )
 
-from contracts.models import Calibration, CoverFit, FrameProfile, Light, Mat, PhotoCrop
+from contracts.frame_lighting import AtFull, FarLight, FrameLighting
+from contracts.models import Calibration, CoverFit, FrameProfile, PhotoCrop
 from contracts.node_frame import PictureOperations
+from contracts.node_picture import UPGRADE_DISPLAY_LIGHT
+from contracts.room_light import FixedColour, FixedEntry, RoomLightsDocument
 from player.fitted import FitKey, prepared, redrawn_by_frames, shown_at_once
 from player.mainloop import DisplayEvents
 from player.rendering import REDRAW_RENEWAL, LocalLayer, OutputComposition
@@ -236,7 +240,7 @@ def test_a_picture_settings_edit_is_one_frame_pass_and_draws_no_fitted_picture()
     renderer.present(composition(still, timebase=100 - start))
     paint(renderer, surface, area, start + .1)
     assert gpu(renderer) == (1, 1)
-    frames.operations = PictureOperations("hdmi1", 2, (1.0, .9, .8), .5, 1.1, 1.0)
+    frames.operations = PictureOperations("hdmi1", 2, (1.0, .9, .8), 1.1, 1.0, UPGRADE_DISPLAY_LIGHT)
     renderer.GLib.readable(9)
     paint(renderer, surface, area, start + .1 + 1 / 60)
     assert gpu(renderer) == (1, 2)
@@ -457,28 +461,28 @@ def test_a_failed_redraw_of_the_photo_on_screen_holds_the_screen_and_never_fails
 
 # -- What a frame repaints -----------------------------------------------------------------------
 
-def _still(clock_, mat: Mat = Mat()):
+def _still(clock_, lighting: FrameLighting = LIGHTING):
     still = layer("still", start=100, end=200)
     renderer, surface, area = frame_renderer({"still": decoder(still)})
-    shown = OutputComposition(binding(mat=mat), (local(still),), timebase=100 - clock_.now)
+    shown = OutputComposition(binding(lighting=lighting), (local(still),), timebase=100 - clock_.now)
     renderer.present(shown)
     paint(renderer, surface, area, clock_.now + .1)
     assert gpu(renderer) == (1, 1)
     return renderer, surface, area, shown
 
 
-DEEP = Mat(depth_mm=10, lights=(Light(from_degrees=0, steep_degrees=30, softness_degrees=5,
-                                       strength_tenths=10, colour_kelvin=6500),))
+DEEP = LIGHTING.model_copy(update={"mat_depth_mm": 10, "lights": (FarLight(
+    light="room", lux=200, reference=AtFull(), from_degrees=0, steep_degrees=30, softness_degrees=5),)})
 
 
-@pytest.mark.parametrize("edit", ["mat", "profile"])
-def test_a_mat_or_profile_edit_on_a_still_photo_is_one_frame_pass_and_no_fit(clock, edit):  # noqa: F811
-    """The binding's mat, or its Frame profile's size at the same aspect (the mat shadow's
-    millimetres), changes under a still photo: the next frame paints it, one frame pass and no
+@pytest.mark.parametrize("edit", ["lighting", "profile"])
+def test_a_lighting_or_profile_edit_on_a_still_photo_is_one_frame_pass_and_no_fit(clock, edit):  # noqa: F811
+    """The binding's lighting (its mat), or its Frame profile's size at the same aspect (the mat
+    shadow's millimetres), changes under a still photo: the next frame paints it, one frame pass and no
     fitted picture (neither is in the photo's FitKey)."""
     renderer, surface, area, shown = _still(clock, DEEP)
-    changed = (shown.binding.model_copy(update={"mat": Mat(depth_mm=20, lights=DEEP.lights)})
-               if edit == "mat" else shown.binding.model_copy(update={"profile": FrameProfile(
+    changed = (shown.binding.model_copy(update={"lighting": DEEP.model_copy(update={"mat_depth_mm": 20})})
+               if edit == "lighting" else shown.binding.model_copy(update={"profile": FrameProfile(
                    width_px=1920, height_px=1080, diagonal_inches=55)}))
     renderer.present(OutputComposition(changed, shown.layers, timebase=shown.timebase))
     paint(renderer, surface, area, clock.now + .2)
@@ -494,3 +498,16 @@ def test_a_buffer_gtk_made_anew_is_painted_again(clock):  # noqa: F811
     renderer._resized(area, 64, 36, surface)
     renderer._render(area, None, surface)
     assert gpu(renderer) == (1, 2)
+
+
+def test_a_room_lights_document_under_a_still_photo_is_one_frame_pass_and_no_fit(clock):  # noqa: F811
+    """A newer room-lights document (a light switched in the room) changes the light on the
+    Frame's paper, not the photo: the next frame paints it, one frame pass and no fitted picture,
+    and a render after it with nothing new paints nothing."""
+    renderer, surface, area, _shown = _still(clock, DEEP)
+    renderer.set_room_lights(RoomLightsDocument(change=1, lights={"room": FixedEntry(
+        colour=FixedColour(kelvin=6500))}))
+    paint(renderer, surface, area, clock.now + .2)
+    assert gpu(renderer) == (1, 2)
+    renderer._render(area, None, surface)
+    assert gpu(renderer) == (1, 2), "the same frame: nothing painted"

@@ -11,14 +11,13 @@ import time
 from pathlib import Path
 
 import pytest
+from test_node_boot import keep_version
 from test_node_release_catalog import store_files
 from test_node_release_ingest import Upstream, make_sync_world, node_upload, sync
 
 from central.assets import maintenance
 from central.assets.layout import TEMP_PREFIX
 from central.assets.maintenance import CLOCK_MARKER, MAX_UNLINKS_PER_RUN, MaintainCacheHandler
-from central.fleet.node_boot import NodeBootService
-from central.fleet.node_sessions import NodeControlConfig, NodeSessions
 from central.infra.transactions import PgTransactions
 from central.kernel.assets import AssetKey, AssetKind
 from central.kernel.handling import handler_job_type
@@ -53,8 +52,8 @@ def files(world, upload) -> set:
 
 @pytest.fixture
 def wall(registry, tmp_path):
-    """Seven stable releases, every file cached and old. Wanted: v2.0.0 as the previous
-    selection, v2.1.0 selected, v2.2.0-v2.4.0 the window. v1.8.0 (selected twice before) and
+    """Seven stable releases, every file cached and old. Wanted: v2.0.0 as a Pi's previous
+    version, v2.1.0 its version, v2.2.0-v2.4.0 the window. v1.8.0 (its version twice before) and
     v1.9.0 are wanted by nothing."""
     upstream = Upstream()
     uploads = {tag: node_upload(tag) for tag in TAGS}
@@ -62,10 +61,11 @@ def wall(registry, tmp_path):
         upstream.put(upload)
     world = make_sync_world(registry, tmp_path)(upstream)
     sync(world)
-    boots = NodeBootService(NodeSessions(registry.db, world.clock, NodeControlConfig("node-test")))
-    boots.select(uploads["v1.8.0"].deployment_id, 0)
-    boots.select(uploads["v2.0.0"].deployment_id, 1)
-    boots.select(uploads["v2.1.0"].deployment_id, 2)
+    def boots(serial, tag):   # a Pi's version, as Install keeps it
+        keep_version(registry.db, serial, uploads[tag].deployment_id, world.clock.utc())
+
+    for tag in ("v1.8.0", "v2.0.0", "v2.1.0"):
+        boots("pi-a", tag)
     for upload in uploads.values():
         store_files(world, upload)
         for path in files(world, upload):
@@ -91,11 +91,11 @@ def test_every_desired_file_is_kept_and_only_the_unwanted_releases_are_removed(r
 
 def test_a_key_that_becomes_desired_between_mark_and_unlink_is_kept(registry, wall):
     """Mark and sweep without a lock: the desired set is re-read right before each unlink, so a
-    selection committed after the run picked its candidates still keeps its files."""
+    Pi's version kept after the run picked its candidates still keeps its files."""
     world, uploads, boots = wall
 
     class SelectingMidRun:
-        """The catalog; its second read (the first re-check) follows a selection of v1.9.0."""
+        """The catalog; its second read (the first re-check) follows another Pi's install of v1.9.0."""
 
         def __init__(self) -> None:
             self.reads = 0
@@ -103,7 +103,7 @@ def test_a_key_that_becomes_desired_between_mark_and_unlink_is_kept(registry, wa
         async def desired_assets(self):
             self.reads += 1
             if self.reads == 2:
-                boots.select(uploads["v1.9.0"].deployment_id, 3)
+                boots("pi-b", "v1.9.0")
             return await world.catalog.desired_assets()
 
     removed = set(sweep(cleaner(world, registry, SelectingMidRun())))

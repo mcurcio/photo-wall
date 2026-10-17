@@ -24,6 +24,7 @@ from test_executor import Rig, binding, layer
 
 from contracts.models import Calibration
 from contracts.node_frame import PictureOperations
+from contracts.node_picture import UPGRADE_DISPLAY_LIGHT
 from contracts.time import ManualClock, TimeMapping
 from player import native as native_module
 from player.cache import Cache
@@ -445,6 +446,7 @@ def frame_renderer(decoders=None, area=None):
     renderer = NativeRenderer.__new__(NativeRenderer)
     renderer._owner, renderer._closed, renderer._serial = threading.get_ident(), False, 0
     renderer._luts, renderer._frames, renderer.GL, renderer.GLib = PlayerLuts(), None, GL(), GLib()
+    renderer._room_lights = None
     renderer.gl_renderer, renderer.texture_budget = "fake", 1 << 30
     renderer._decoders = decoders or {}
     area = area or Area()
@@ -688,7 +690,7 @@ class Frames:
             candidate=SimpleNamespace(trial_id=self.trial_id, generation=1, sequence=self.sequence,
                                       candidate_sha256="0" * 64,
                                       expires_boottime_ms=round(self.expires * 1000)),
-            calibration=Calibration(), mat=None, primitives=None)
+            calibration=Calibration(), lighting=None, primitives=None)
 
     def picture(self, _output_id):
         return self.operations
@@ -701,8 +703,8 @@ class Frames:
         pass
 
 
-def operations(change: int, light: float = 1.0) -> PictureOperations:
-    return PictureOperations("hdmi1", change, (1.0, 1.0, 1.0), light, 1.0, 1.0)
+def operations(change: int, contrast: float = 1.0) -> PictureOperations:
+    return PictureOperations("hdmi1", change, (1.0, 1.0, 1.0), contrast, 1.0, UPGRADE_DISPLAY_LIGHT)
 
 
 def test_a_slider_edit_between_ticks_is_drawn_on_the_next_frame():
@@ -723,7 +725,7 @@ def test_a_slider_edit_between_ticks_is_drawn_on_the_next_frame():
     renderer.GLib.readable(9)                       # an event that changes nothing on screen
     assert area.renders == 1 and not area.callbacks
 
-    frames.operations = operations(2, light=.5)     # the owner moves a slider
+    frames.operations = operations(2, contrast=.5)  # the owner moves a slider
     renderer.GLib.readable(9)
     renderer.GLib.readable(9)                       # another event before the frame
     assert area.renders == 2, "the edit queues the next frame, once"

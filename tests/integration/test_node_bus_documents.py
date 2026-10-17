@@ -200,3 +200,28 @@ def test_a_token_from_a_lost_store_raises_a_conflict_and_is_never_applied(tmp_pa
         await client.close()
 
     _run(hub, [node], body)
+
+
+def test_a_wall_put_is_keyed_by_content(tmp_path):
+    # The same bytes put ten times write WALL once and move Central's mark once, so a writer may put
+    # whenever it is unsure; different bytes write again. Mutation probe: write when the key already
+    # holds the bytes -> WALL's last sequence and the mark move ten times.
+    hub = hub_server(tmp_path, ["serial-a"])
+
+    async def body():
+        writer_client = await wall_writer(hub)
+        marks = FileLinkStore(tmp_path / "marks.jsonl")
+        wall = WallWriter(writer_client, KeyTable({"lights": 64}), marks)
+        await wall.ensure()
+        jetstream = writer_client.jetstream()
+        before = (await jetstream.stream_info(WALL_STREAM)).state.last_seq
+        answers = [await wall.put("lights", b"lights-on") for _ in range(10)]
+        assert set(answers) == {before + 1}
+        assert (await jetstream.stream_info(WALL_STREAM)).state.last_seq == before + 1
+        assert [row["seq"] for row in marks.rows("mark")] == [before + 1]
+        assert await wall.put("lights", b"lights-off") == before + 2
+        assert (await jetstream.stream_info(WALL_STREAM)).state.last_seq == before + 2
+        assert [row["seq"] for row in marks.rows("mark")] == [before + 1, before + 2]
+        await writer_client.close()
+
+    _run(hub, [], body)

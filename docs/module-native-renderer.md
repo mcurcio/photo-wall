@@ -126,12 +126,13 @@ that built it (perf(player): draw each photo once and blend per frame).
   pass into its own GL_RGBA16F texture of the Output's size. It is drawn for one `FitKey`
   (decode, sample, drawn fit, Frame aspect, crop, Output size) and drawn again exactly when the
   key changes; a layer's strength and the Display's picture settings are not in it. 16-bit float,
-  because an 8-bit store misses the one-code bound once a print look bends the light after it.
+  because an 8-bit store misses the one-code bound once the room's light and the paper bend the
+  light after it.
 - **Frame pass**: the one pass a shown frame draws (`_FINAL`): the Frame's layers mixed at the
   frame's strengths (`compose_pixel`: a fitted picture, a black layer or the commissioning grid
-  per slot, up to `FRAME_LAYERS`), then `final_pixel`. Each step set (LUT, saturation, rolloff,
-  black floor, mat, test pattern; `_steps`) is its own compiled program with its switches as
-  constants, compiled on first use. A frame whose inputs equal the last painted one draws
+  per slot, up to `FRAME_LAYERS`), then `final_pixel`. Each step set (the paper profile's LUT
+  bound or not, the test pattern; `_steps`) is its own compiled program with its switches as
+  constants, compiled on first use; the room's light, the paper and the display fit always run. A frame whose inputs equal the last painted one draws
   nothing: GTK keeps the GLArea's buffer between renders, so the once-a-second renewal only
   commits a fresh tag (R4). GtkGLArea's "resize" (on every size allocation, the same size too)
   makes that buffer anew, so it forgets what was painted and the next render paints again.
@@ -157,7 +158,7 @@ that built it (perf(player): draw each photo once and blend per frame).
 
 Measured (headless Weston, software GL): today's renderer and this one differ by at most one
 8-bit code at any pixel, strengths 0 to 1, with a print look, a LUT and a mat shadow (identical
-at strength 0). Expected on the 4K Pi, not yet measured: a fade frame of one frame pass (~23 ms
+at strength 0; measured before room light replaced the print look, [0028](decisions/0028-room-light.md)). Expected on the 4K Pi, not yet measured: a fade frame of one frame pass (~23 ms
 neutral, ~44 ms with the full print look) where it was three jobs (~76 ms); no Player GPU work
 per still second.
 

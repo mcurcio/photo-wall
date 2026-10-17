@@ -44,11 +44,11 @@ from operator_harness import (
 from playwright.sync_api import expect
 from test_fleet_attempts import BOOT_ID, DEVICE_ID, SERIAL
 from test_node_acceptance import Witnesses
-from test_node_boot import claim_for, cold_setup, environment, publish_deployment
+from test_node_boot import boot_service, claim_for, cold_setup, environment, publish_deployment
 from test_node_lifecycle import Rig
 from test_registry import enroll
 
-from central.fleet.node_boot import NodeBootService, parse_node_deployment
+from central.fleet.node_boot import parse_node_deployment
 from central.fleet.node_commands import NodeCommands, OperatorReboot
 from central.fleet.node_ingest import NodeIngest
 from central.fleet.node_observations import NodeObservations
@@ -321,8 +321,8 @@ def test_a_reboot_render_error_leaves_the_header_and_health_standing(page, regis
 
 
 def test_health_follows_reboot_from_the_fleet_host_read_and_link_keeps_only_the_receipt(page, registry):
-    """The Pi's Hardware page: Reboot, Health (from Central's real fleet host read), then Link
-    and sessions; Health's raw disclosure holds the sample's lines; Link and sessions keeps
+    """The Pi's Hardware page: Reboot, Health (from Central's real fleet host read), Light (the
+    Pi's light sensor), then Link and sessions; Health's raw disclosure holds the sample's lines; Link and sessions keeps
     Host Management's "Last reported" and its session line."""
     box = Box(registry)
     box.host_sample()
@@ -331,7 +331,7 @@ def test_health_follows_reboot_from_the_fleet_host_read_and_link_keeps_only_the_
         connect(page, origin)
         pi = open_pi(page, NAME)
         sections = pi.locator("section[aria-label]").evaluate_all("(all) => all.map((s) => s.ariaLabel)")
-        assert sections == ["Reboot", "Health", "Link and sessions", "Danger zone"], sections
+        assert sections == ["Reboot", "Health", "Light", "Link and sessions", "Danger zone"], sections
         health = page.get_by_role("region", name="Health", exact=True)
         expect(health).to_contain_text("Host Management: Host Management last reported 2 s ago")
         health.get_by_role("button", name="Every reported metric", exact=True).click()
@@ -515,8 +515,7 @@ def test_the_reboot_dialog_names_frames_and_a_recorded_reboot_is_requested(page,
         expect(dialog).to_contain_text(RUN_STAYS)
         expect(dialog).to_contain_text("Central offers the request to Host Management for 30 s.")
         # NR2: the one static sentence on what the next boot is offered, linking to Releases.
-        expect(dialog).to_contain_text("On its next boot, Central offers this Player the boot selection current "
-                                       "at that moment (see Releases).")
+        expect(dialog).to_contain_text("On its next boot, Central offers this Player its own version (see Releases).")
         expect(dialog.get_by_role("link", name="Releases", exact=True)).to_have_attribute("href", "#/releases")
         dialog.get_by_role("button", name="Reboot Player", exact=True).click()
         expect(dialog).to_have_count(0)
@@ -711,8 +710,39 @@ STAGES = f"**/v1/operator/node/devices/{DEVICE_ID}/app-stages"
 BOUND_RULE = ("Each Frame this Player drives shows the base page while the app switches, then rejoins its Run "
               "at the current point (missed content is not replayed), as on Reboot.")
 BOUND_PROVEN = "A switch on a Frame-bound Player is proven on Central only; the Player's side of it is not yet qualified."
-THIS_BOOT = "Applies to this boot only. Any later boot, including an unplanned one, is offered the boot selection"
+THIS_BOOT = ("Applies to this boot only. Any later boot, including an unplanned one, is offered this Player's own "
+             "version (Releases).")
 RECORDED = "Stage recorded; App Effect Broker has not responded yet."
+
+
+@pytest.fixture(autouse=True)
+def _rig_releases(page, registry):
+    """Stage names the deployment each release became, from Central's real Releases read. The Rig
+    publishes its deployments directly (no release observed), so the read Central answers gains one
+    release per published deployment it does not list yet, with that deployment's real id, base and
+    app; Central's real stage owner judges every stage sent."""
+    def releases(route):
+        if route.request.method != "GET":
+            return route.fallback()
+        response = route.fetch()
+        body = response.json()
+        listed = {row["deployment_id"] for row in body["releases"]}
+        with registry.db.transaction() as conn:
+            documents = conn.execute("SELECT document FROM node_deployments ORDER BY published_at").fetchall()
+        for index, row in enumerate(documents):
+            deployment = parse_node_deployment(bytes(row["document"]))
+            if str(deployment.deployment_id) in listed:
+                continue
+            body["releases"].append({
+                "version": f"v0.0.{index + 1}", "stable": True, "problem": None,
+                "deployment_id": str(deployment.deployment_id), "base_tag": deployment.base.tag,
+                "app_environment_sha256": None if deployment.app_environment is None
+                else deployment.app_environment.environment_sha256,
+                "in_window": False, "readiness": "ready", "readiness_reason": None, "missing_bytes": 0,
+                "discovered_at": None})
+        route.fulfill(response=response, json=body)
+
+    page.route("**/v1/operator/releases", releases)
 
 
 def _stage_posts(page):
@@ -777,10 +807,10 @@ def test_a_bound_player_stages_with_the_bound_rule_and_renders_every_served_stat
             fixture.report(command, phase, sequence)
         expect(operations).to_contain_text("App Effect Broker reported the staged app running", timeout=10_000)
         expect(stage_button).to_be_enabled()
-        offer = NodeBootService(fixture.sessions).offer(NodeBootRequestV2(SERIAL, uuid4(), "b" * 64))
+        offer = boot_service(fixture.sessions).offer(NodeBootRequestV2(SERIAL, uuid4(), "b" * 64))
         fixture.sessions.enroll(claim_for(offer, owner="app_effect_broker"))
         expect(operations).to_contain_text("Ended by a later boot", timeout=10_000)
-        expect(operations).to_contain_text("a later boot was admitted; Central offers each boot the boot selection")
+        expect(operations).to_contain_text("a later boot was admitted; Central offers each boot its Player's own version")
         assert len(sent) == 1
         assert sent[0]["deployment_id"] == str(fixture.deployments[0].deployment_id)
         assert "rollout_generation" not in sent[0]
