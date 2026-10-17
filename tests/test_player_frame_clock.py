@@ -15,6 +15,7 @@ import math
 import threading
 import time
 import uuid
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -961,3 +962,25 @@ def test_a_slider_edit_while_a_frame_is_in_flight_is_drawn_on_the_frame_after_it
     assert len(frames.commits) == 2 and frames.picture_changes[-1] == 2
     assert first_light <= frames.commits[1][0] < first_light + REFRESH
     assert not area.callbacks
+
+
+def test_the_first_present_after_admission_draws_with_no_renewal(clock):
+    """Before admission the candidate colour is drawn on every planning tick; those renders set
+    the surface up (its programs and size, which capacity() needs), so the first present() after
+    admission asks for its draw and the next frame draws it. Nothing renews a frame, so nothing
+    else could set it up (the display harness's picture leg found this)."""
+    renderer, surface, area = frame_renderer()
+    del renderer.capacity                           # the real capacity(): it reads the setup
+    renderer.decoder_limit = 4
+    surface.programs, surface.size = None, (0, 0)
+    renderer._frames = frames = Compositor(clock)
+    admitted = frames.grant_
+    frames.grant_ = replace(admitted, admitted=False)
+    start = round(clock.now)
+    still = composition(black("still", start=100, end=10_000), timebase=100 - start)
+    frames_at(clock, renderer, surface, area, start, .2, shown=still)
+    assert renderer.GL.passes == 0 and frames.tags
+    assert all(tag.startswith("candidate-") for tag in frames.tags)
+    frames.grant_ = admitted
+    frames_at(clock, renderer, surface, area, start + .2, .3, shown=still)
+    assert renderer.GL.passes == 1 and renderer.present(still).status == "presented"

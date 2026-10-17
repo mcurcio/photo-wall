@@ -131,6 +131,8 @@ screen, on a steady beat).
   for is `NativeRenderer._request`. A still photo is drawn once: no renewal, no frame callback, no
   commit, no GTK copy and no Weston composite afterwards. The shell's lease holds on the Player's
   answers to Weston's ping ([display host](display-host-backend.md#the-lease-presentation-or-a-ping-answer)).
+  Every render sets its surface up (programs and size, `_setup`), the candidate colour's before
+  admission included, since capacity() reads that setup and no later render is owed to make it.
 - **The pacer** (`player/pacing.py`, pure): one per Output. Each tagged commit is `submitted`
   with its sequence (`WaylandFrames.tag_rendered_buffer`); the compositor's word for it
   (`WaylandFrames.presentation`: the frame client's own `wp_presentation` feedback, presented

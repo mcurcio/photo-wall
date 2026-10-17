@@ -1998,6 +1998,18 @@ class NativeRenderer:
         # The Output's picture operations, read each render like the trial; a new value is
         # drawn by this render's frame pass and named in its tag.
         surface.operations = frames.picture(surface.output.output_id) if frames is not None else None
+        try:
+            # Programs and drawn size on every render, the candidate's too: capacity() needs
+            # them, so the first present() after admission can ask for its draw (no later render
+            # is owed to set them up: nothing renews a frame).
+            self._setup(surface, width, height)
+        except Exception as error:
+            surface.pending = surface.painted = None
+            surface.fail(type(error).__name__)
+            gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, gtk_framebuffer)
+            gl.glClearColor(0, 0, 0, 1)
+            gl.glClear(gl.GL_COLOR_BUFFER_BIT)
+            return True
         if frames is not None and (grant is None or not grant.admitted):
             # Before surface admission, show only a fixed synthetic handoff
             # colour. Authored layers remain in Executor under their own grant.
@@ -2014,7 +2026,6 @@ class NativeRenderer:
             return True
         at = self._frame_time(area)
         try:
-            self._setup(surface, width, height)
             draw = self._owed(surface, at)
             if draw is not None and not self._redraw_fitted(surface, draw):
                 draw = None                     # a failed redraw: the draw is dropped
