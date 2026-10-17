@@ -20,7 +20,7 @@ from pydantic import BaseModel, ConfigDict, Field, FiniteFloat, model_validator
 from central.house_time import calculator
 from central.house_time.model import HouseTime, LocalDateTime, When, Window
 from central.wall_plan.selection import SceneSelection
-from contracts.models import PREPARE_SECONDS, TARGET_ID_PATTERN, AfterEnd
+from contracts.models import PREPARE_SECONDS, TARGET_ID_PATTERN, AfterEnd, fade_share
 
 if TYPE_CHECKING:
     from central.execution_outcomes import ExecutionOutcome
@@ -1619,11 +1619,8 @@ class Runtime:
                     if (after_end == "keep_this_photo" and run.phase == "body"
                             and contribution.target in others(run, end, beneath=True)):
                         after_end = "leave_as_is"
-                opacity = contribution.opacity
-                if fade_in:
-                    opacity *= min(1.0, max(0.0, now - shows_from) / fade_in)
-                if fade_out:
-                    opacity *= min(1.0, max(0.0, end - now) / fade_out)
+                opacity = contribution.opacity * fade_share(
+                    now, start=shows_from, end=end, fade_in=fade_in, fade_out=fade_out)
                 fraction = min(1.0, position / (end - start))
                 value = (
                     contribution.ramp_from

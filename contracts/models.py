@@ -244,6 +244,16 @@ class PhotoCrop(Model):
 AfterEnd = Literal["leave_as_is", "keep_this_photo", "keep_nothing"]
 
 
+def fade_share(now: float, *, start: float, end: float, fade_in: float, fade_out: float) -> float:
+    """The share of its opacity a layer shown over [start, end) has at `now`, through a fade-in
+    of `fade_in` seconds from `start` and a fade-out of `fade_out` seconds to `end`: the lesser
+    of the two when they overlap. The one fade rule, for Central's planned opacity
+    (central/runtime.py) and the alpha the Player draws (`Layer.alpha`)."""
+    faded_in = min(1.0, max(0.0, (now - start) / fade_in)) if fade_in else 1.0
+    faded_out = min(1.0, max(0.0, (end - now) / fade_out)) if fade_out else 1.0
+    return min(faded_in, faded_out)
+
+
 class Layer(Model):
     assignment_id: Identifier
     run_id: Identifier
@@ -295,9 +305,8 @@ class Layer(Model):
 
     def alpha(self, now: float) -> float:
         """Its strength at `now`: its opacity through its fade-in and fade-out."""
-        fade_in = min(1.0, max(0.0, (now - self.start) / self.fade_in)) if self.fade_in else 1
-        fade_out = min(1.0, max(0.0, (self.end - now) / self.fade_out)) if self.fade_out else 1
-        return self.opacity * min(fade_in, fade_out)
+        return self.opacity * fade_share(now, start=self.start, end=self.end,
+                                         fade_in=self.fade_in, fade_out=self.fade_out)
 
     def fades(self) -> tuple[tuple[float, float], tuple[float, float]]:
         """Its fade-in and its fade-out as half-open spans of plan time, either empty when it has
