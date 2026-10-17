@@ -29,7 +29,7 @@ from contracts.models import Calibration, CoverFit, FrameProfile, Light, Mat, Ph
 from contracts.node_frame import PictureOperations
 from player.fitted import FitKey, prepared, redrawn_by_frames, shown_at_once
 from player.mainloop import DisplayEvents
-from player.rendering import REDRAW_RENEWAL, LocalLayer, OutputComposition
+from player.rendering import LocalLayer, OutputComposition
 
 TURNED = Calibration(fit=CoverFit(rotation=5))
 
@@ -201,9 +201,9 @@ def test_a_fade_frame_is_one_pass_and_only_an_edit_draws_its_fitted_pictures_aga
 
 
 def test_a_still_picture_costs_no_gpu_work_per_second(clock):  # noqa: F811
-    """A still photo is drawn once. Each second the planning tick renews its draw (Display Host's
-    lease and the presented freshness need fresh tagged commits): the renewal draws nothing on
-    the GPU, while its tag is committed again and the draw is acknowledged anew."""
+    """A still photo is drawn once. Ten seconds of planning ticks and frames after it queue no
+    render, draw nothing on the GPU and commit no tag (Display Host's lease holds on the Player's
+    answers to Weston's pings), and the draw reads as presented throughout."""
     still = layer("still", start=100, end=200)
     renderer, surface, area = frame_renderer({"still": decoder(still)})
     renderer._frames = frames = TrialFrames()
@@ -214,13 +214,14 @@ def test_a_still_picture_costs_no_gpu_work_per_second(clock):  # noqa: F811
     paint(renderer, surface, area, start + .1)
     drawn, tags = gpu(renderer), len(frames.tags)
     assert drawn == (1, 1)
+    renders, completed = area.renders, surface.acknowledged.completed_at
     for second in range(1, 11):
-        clock.now = start + .1 + second * REDRAW_RENEWAL
-        renderer.present(shown)
+        clock.now = start + .1 + second
+        assert renderer.present(shown).status == "presented"
         paint(renderer, surface, area, clock.now)
-        assert surface.acknowledged.completed_at == clock.now
-    assert gpu(renderer) == drawn, "ten renewals, no GPU work"
-    assert len(frames.tags) == tags + 10, "each renewal commits a fresh tag"
+    assert gpu(renderer) == drawn, "no GPU work"
+    assert len(frames.tags) == tags, "no commit"
+    assert area.renders == renders and surface.acknowledged.completed_at == completed
 
 
 def test_a_picture_settings_edit_is_one_frame_pass_and_draws_no_fitted_picture():

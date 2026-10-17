@@ -1,7 +1,8 @@
 """App-owned, render-thread-only bridge to the base Wayland frame protocol.
 
 Requests correlate a draw with its next GDK surface commit; only DisplayHost's
-server-side feedback is evidence. No privileged controller socket is opened here.
+server-side feedback is evidence. The app's own copy of that feedback (`presentation`)
+only paces its drawing (player/pacing.py). No privileged controller socket is opened here.
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ from contracts.node_frame import (
     frame_witness_tag,
     picture_change_text,
 )
+from player.pacing import Word
 from player.rendering import LocalLayer, OutputComposition
 
 CLIENT_LIBRARY = "/usr/lib/photo-wall/frame-client/libphoto-wall-frame-client.so"
@@ -126,6 +128,17 @@ class WaylandFrames:
             ctypes.c_char_p,
         )
         self.lib.pw_frame_client_overlay.restype = ctypes.c_int
+        # Pacing (player/pacing.py): each tag's sequence, and the compositor's word per surface.
+        self.lib.pw_frame_client_tagged.argtypes = (pointer,)
+        self.lib.pw_frame_client_tagged.restype = ctypes.c_uint64
+        self.lib.pw_frame_client_presentation.argtypes = (
+            pointer,
+            pointer,
+            ctypes.POINTER(ctypes.c_uint64),
+            ctypes.POINTER(ctypes.c_int64),
+            ctypes.POINTER(ctypes.c_uint32),
+        )
+        self.lib.pw_frame_client_presentation.restype = ctypes.c_int
         display = self.gdk.gdk_wayland_display_get_wl_display(self._pointer(gdk_display))
         self.client = self.lib.pw_frame_client_create(display)
         if not self.client:
@@ -227,9 +240,10 @@ class WaylandFrames:
     def tag_rendered_buffer(
         self, gdk_window, grant: FrameGrant, frame_tag: str, primitives=None, *,
         picture_change: int | None = None
-    ) -> None:
+    ) -> int:
         """Only call within a successful GLArea render, before GDK's paint commit. The tag names
-        the picture change the buffer was drawn with (None: neutral, none received)."""
+        the picture change the buffer was drawn with (None: neutral, none received). Answers the
+        tag's sequence, which the compositor's word for this commit names (`presentation`)."""
         self._thread()
         surface = self.gdk.gdk_wayland_window_get_wl_surface(self._pointer(gdk_window))
         if primitives is not None:
@@ -250,6 +264,27 @@ class WaylandFrames:
             != 0
         ):
             raise RuntimeError("display_frame_tag_failed")
+        return int(self.lib.pw_frame_client_tagged(self.client))
+
+    def presentation(self, gdk_window, now: float) -> Word | None:
+        """The compositor's newest word for the window's tagged commits (player/pacing.py), None
+        before any. A presented commit's time is the compositor's when it is on this machine's
+        monotonic clock, else `now` (the time it was read)."""
+        self._thread()
+        if gdk_window is None:
+            return None
+        surface = self.gdk.gdk_wayland_window_get_wl_surface(self._pointer(gdk_window))
+        sequence, at_ns, refresh_ns = ctypes.c_uint64(), ctypes.c_int64(), ctypes.c_uint32()
+        result = self.lib.pw_frame_client_presentation(self.client, surface, sequence, at_ns,
+                                                       refresh_ns)
+        if result < 0:
+            raise RuntimeError("display_frame_protocol_lost")
+        if result == 0:
+            return None
+        if result == 2:
+            return Word(sequence.value, None)
+        at = at_ns.value / 1e9 if at_ns.value >= 0 else now
+        return Word(sequence.value, at, refresh_ns.value / 1e9)
 
     def close(self) -> None:
         self._thread()

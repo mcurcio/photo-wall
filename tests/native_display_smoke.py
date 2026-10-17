@@ -39,6 +39,8 @@ from overlay.instruction import INSTRUCTION_STALE_MS  # noqa: E402
 from overlay.render import card_rect  # noqa: E402
 
 HEALTH_MARKER = "/tmp/pw-health-client-marker"  # display_harness_health_client.py MARKER_FILE
+PROBE_STILL = "/tmp/pw-probe-still"  # native_display_probe.c: while it exists, the probe commits nothing
+PROBE_UNTAGGED = "/tmp/pw-probe-untagged"  # while it exists, the probe's commits carry no tag
 # The probe's protocol code, generated as the library's own build does.
 xml = "/usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml"
 subprocess.run(["wayland-scanner", "client-header", xml, "/tmp/xdg-shell-client.h"], check=True)
@@ -647,6 +649,13 @@ try:
     )
     assert bad.returncode != 0 and "PermissionError" in bad.stderr
     print("PASS unprivileged_controller_socket_rejected", flush=True)
+    # The frame client's word per surface (the Player's pacing): more surfaces than its table
+    # holds (a remap gives an Output a new wl_surface) each still get their word. Mutation probe:
+    # no oldest-entry reuse in frame-client.c `retire` (surface 33 gets none).
+    words = subprocess.run(["/tmp/probe", "words"], env=env, preexec_fn=user,
+                           capture_output=True, text=True, timeout=20)
+    assert words.returncode == 0, (words.returncode, words.stderr)
+    print("PASS frame_client_word_for_every_new_surface", flush=True)
     app = subprocess.Popen(["/tmp/probe"], env=env, preexec_fn=user)
     ticks = int(pathlib.Path(f"/proc/{app.pid}/stat").read_text().rpartition(") ")[2].split()[19])
     identity = {"frame_id": "native-frame",
@@ -685,9 +694,9 @@ try:
     print("PASS handed_off_app_pixel_captured", assert_pixel(320, 240, PROBE_APP), flush=True)
     print("PASS health_layer_above_live_app_after_handoff",
           assert_pixel(*HEALTH, health_over(PROBE_APP)), flush=True)
-    # Signal off (1b D2): a forced-off output presents nothing, so the app's surface lease (renewed
-    # only by a presentation, LEASE_MS 5 s) must hold while it is off; on again, the same grant
-    # presents. Mutation probe: drop the lease hold in lease_tick (invalidated after 5 s).
+    # Signal off (1b D2): a forced-off output presents nothing, so the app's surface lease
+    # (LEASE_MS 5 s) holds on the app's answers to Weston's ping while it is off; on again, the
+    # same grant presents. Mutation probe: drop the ping in lease_tick (invalidated after 5 s).
     def output_power(power):
         """The op, and the shell's `output_power` event (sent ahead of the op's response)."""
         sent = len(events)
@@ -894,12 +903,54 @@ try:
     assert new_frame["frame_tag"] == "synthetic-probe"
     assert not request("withdraw", identity=revision, decision_id=removal)["accepted"]
     print("PASS equal_counter_new_frame_fences_old_withdrawal", flush=True)
+    # Render only what reaches the screen (2026-10-17): a still app commits nothing for longer than
+    # LEASE_MS and keeps its grant, on its answers to Weston's ping (one a second), with no
+    # presentation at all. Mutation probe: drop the ping in lease_tick (invalidated after 5 s).
+    pathlib.Path(PROBE_STILL).write_text("")
+    time.sleep(0.3)
+    drain()
+    still_from = len(events)
+    quiet = time.monotonic() + 7
+    while time.monotonic() < quiet:
+        time.sleep(0.25)
+        drain()
+    still_events = events[still_from:]
+    assert not any(e["event"] in ("invalidated", "presented") for e in still_events), \
+        still_events[-12:]
+    print("PASS still_app_keeps_its_grant_on_ping_answers_with_no_commit", flush=True)
+    # An app whose draws fail commits untagged buffers while it still answers every ping: what it
+    # shows is no frame it can name, so its answers keep no lease and the diagnostic returns within
+    # LEASE_MS, as it did before the ping. Mutation probe: renew on a pong whatever the newest
+    # commit (`untagged` dropped from `pong`): the grant is kept.
+    pathlib.Path(PROBE_UNTAGGED).write_text("")
+    pathlib.Path(PROBE_STILL).unlink()
+    untagged = time.monotonic()
+    lost = read_until(lambda e: e["event"] == "invalidated", limit=8)
+    assert lost["reason"] == "surface_lease_or_process_lost", lost
+    assert time.monotonic() - untagged < 7, time.monotonic() - untagged
+    read_until(lambda e: e["event"] == "diagnostic_presented")
+    pathlib.Path(PROBE_UNTAGGED).unlink()
+    print("PASS untagged_app_loses_its_grant_on_ping_answers_and_the_diagnostic_returns", flush=True)
+    regranted = {**replacement, "frame_id": "regranted-frame"}
+    assert request("candidate", identity=regranted, grant_id=str(uuid.uuid4()), uid=10004)["accepted"]
+    read_until(lambda e: e["event"] == "presented" and e["identity"] == regranted)
+    pathlib.Path(PROBE_STILL).write_text("")
+    time.sleep(0.3)
+    drain()
+    # A stopped app answers no ping: its grant lapses within the lease, and the diagnostic returns.
+    # Mutation probe: renew the lease on every ping sent rather than on its answer.
+    os.kill(app.pid, signal.SIGSTOP)
+    stopped = time.monotonic()
+    lost = read_until(lambda e: e["event"] == "invalidated", limit=8)
+    assert lost["reason"] == "surface_lease_or_process_lost", lost
+    assert time.monotonic() - stopped < 7, time.monotonic() - stopped
+    read_until(lambda e: e["event"] == "diagnostic_presented")
+    os.kill(app.pid, signal.SIGCONT)
+    pathlib.Path(PROBE_STILL).unlink()
     app.terminate()
     app.wait(timeout=3)
     app = None
-    read_until(lambda e: e["event"] == "invalidated")
-    read_until(lambda e: e["event"] == "diagnostic_presented")
-    print("PASS app_exit_private_diagnostic_restored", flush=True)
+    print("PASS stopped_app_loses_its_grant_within_the_lease_and_the_diagnostic_returns", flush=True)
     picture_v4()
     print("PASS health_layer_survives_invalidate", assert_pixel(*HEALTH, health_over(SLATE)),
           flush=True)
