@@ -82,7 +82,7 @@ from scripts.package_release_artifacts import (
     read_manifest,
     verify,
 )
-from scripts.release_plan import FULL_SHA, REPO, STRICT_TAG, PlanError, git
+from scripts.release_plan import FULL_SHA, RELEASE_BRANCH, REPO, STRICT_TAG, PlanError, git
 
 T = TypeVar("T")
 
@@ -90,9 +90,6 @@ PER_PAGE: Final = 100
 MAX_PAGES: Final = 20            # 2000 releases: past that the claim cannot see every one
 WRITE_TRIES: Final = 3           # writes per step; each is read back before the next
 READ_BACK: Final = (1, 2, 4, 8)   # seconds between re-reads of a write GitHub has not shown yet
-# The branch a release is cut from (pipeline.yml's release guard: refs/heads/main): its tip is
-# the newest commit, whose seal wins an unpublished version.
-RELEASE_BRANCH: Final = "main"
 API_TIMEOUT: Final = 60
 UPLOAD_TIMEOUT: Final = 600
 
@@ -706,25 +703,26 @@ class GitHubApi:
     def _api(self, path: str) -> str:
         return f"{self.url}/repos/{self.repository}{path}"
 
-    def _get(self, path: str) -> object:
+    def get(self, path: str) -> object:
+        """A read of a repository path: its JSON, None for HTTP 404, SealError otherwise."""
         return self._call("GET", self._api(path))
 
     def _require_repository(self) -> None:
         # A token that cannot see a private repository gets 404 for everything in it; that must
         # never read as "no tag" or "no release".
-        if self._get("") is None:
+        if self.get("") is None:
             raise SealError(f"GitHub answers 404 for {self.repository} itself: this token "
                             "cannot read it, so no absence it reports can be trusted")
 
     def _ref_commit(self, ref_name: str) -> str | None:
         self._require_repository()
         # The single-ref endpoint: exactly this ref or 404 (git/matching-refs prefix-matches).
-        ref = self._get(f"/git/ref/{ref_name}")
+        ref = self.get(f"/git/ref/{ref_name}")
         if ref is None:
             return None
         target = ref.get("object") if isinstance(ref, dict) else None
         while isinstance(target, dict) and target.get("type") == "tag":   # annotated: peel it
-            peeled = self._get(f"/git/tags/{target.get('sha')}")
+            peeled = self.get(f"/git/tags/{target.get('sha')}")
             target = peeled.get("object") if isinstance(peeled, dict) else None
         if (not isinstance(target, dict) or target.get("type") != "commit"
                 or not FULL_SHA.match(str(target.get("sha")))):
@@ -741,7 +739,7 @@ class GitHubApi:
         return head
 
     def is_ancestor(self, ancestor: str, descendant: str) -> bool:
-        compared = self._get(f"/compare/{ancestor}...{descendant}")
+        compared = self.get(f"/compare/{ancestor}...{descendant}")
         status = compared.get("status") if isinstance(compared, dict) else None
         if status not in ("ahead", "behind", "identical", "diverged"):
             raise SealError(f"comparing {ancestor}...{descendant}: {compared}")
@@ -751,7 +749,7 @@ class GitHubApi:
         self._require_repository()
         found: list[dict] = []
         for page in range(1, MAX_PAGES + 1):
-            batch = self._get(f"/releases?per_page={PER_PAGE}&page={page}")
+            batch = self.get(f"/releases?per_page={PER_PAGE}&page={page}")
             if not isinstance(batch, list) or not all(isinstance(item, dict) for item in batch):
                 raise SealError(f"the release list (page {page}) is not a list of releases")
             found += batch
@@ -780,7 +778,7 @@ class GitHubApi:
         return body
 
     def release(self, release_id: int) -> dict | None:
-        release = self._get(f"/releases/{release_id}")
+        release = self.get(f"/releases/{release_id}")
         if release is not None and not isinstance(release, dict):
             raise SealError(f"release {release_id} is not a release: {release}")
         return release

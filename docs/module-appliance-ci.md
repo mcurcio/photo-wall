@@ -21,6 +21,25 @@ It has no manual release path: a release that fails is recovered only by the nex
 push to `main`, which releases whatever changed since the last published tag.
 Its `plan` job runs `scripts/release_plan.py`, whose package manifest decides
 which test workflows run and whether a push releases.
+
+**A merge reuses its pull request's pass.** On a push to `main`, the plan
+(`release_plan.py push --before`, `passed_run`) finds the pull request the push
+merged and its newest `pipeline.yml` run. When that run checked out exactly the
+pushed tree, the plan lists only the suites the run did not pass and outputs the
+rest as `reused`; `tested` and `gate` accept a reused suite in place of running it
+and still fail on any failed or cancelled job. "Exactly the pushed tree" is proven
+from history, not from anything a run wrote: the pull request is from this
+repository, its head has the push's tree, and every `main` commit the run could
+have merged the head into is either in the head's history or added nothing the
+head lacks (`tested_tree`). A fork, a rebase merge, `main` moving first, a red or
+unfinished run, or any GitHub API error runs every suite. Only verdicts are
+reused, never bytes: a release still builds `node-components` and `base-image`
+in its own run, so the boundary under **Limits** below holds. Costs: a merge
+reuses a flaky leg's passing re-run; a pass vouches for what the unpinned Pi and
+Ubuntu archives served when the pull request ran; `linux-media`'s cache, written
+only by `main`'s `checks`, is refreshed only on merges that re-run them. The plan's
+step summary names the reused run, so the first `main` run after a merge shows
+what it took.
 Only `base-image.yml` builds the Pi base OS, the netboot bundle and both
 `.deb`s: the pipeline calls it for the plan's revision. On a release, the
 `images` job pushes the service images by digest, and the `seal` job
