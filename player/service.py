@@ -291,13 +291,22 @@ class Download:
 
 
 class _ChunkBridge:
-    """A download's bytes, from the network task to the cache worker. Once `stopped` is set or the
-    job's authority is gone, both sides raise AcquisitionStopped: the Player's own stop."""
+    """A download's bytes, from the network task to the cache worker. The network side `end`s it
+    with why it stopped: a download error is the content's failure, and the cache worker raises
+    ServiceError("download"); the Player's own stop (its session ended, or the job's authority is
+    gone) is AcquisitionStopped on both sides."""
 
     def __init__(self, authorized: Callable[[], bool]):
         self.queue = queue.Queue(maxsize=4)
         self.stopped = threading.Event()
+        self.failure: Exception | None = None
         self.authorized = authorized
+
+    def end(self, failure: Exception | None) -> None:
+        """The network side is done: `failure` is the download error that ended it, None when it
+        finished or the Player stopped it. Set before `stopped`, so the worker reads it."""
+        self.failure = failure
+        self.stopped.set()
 
     async def put(self, chunk: bytes | None):
         while not self.stopped.is_set() and self.authorized():
@@ -319,6 +328,8 @@ class _ChunkBridge:
             if not self.authorized() or self.stopped.is_set():
                 break
             yield chunk
+        if self.failure is not None and self.authorized():
+            raise ServiceError("download") from self.failure
         raise AcquisitionStopped("download_stopped")
 
 
@@ -876,6 +887,7 @@ class PlayerService:
         target = variant.path  # by name: a re-make keeps it
         bridge = _ChunkBridge(lambda: self._authorized(job))
         worker = None
+        failure = None
         try:
             async with self.link.stream(self.session, "GET", target, timeout=120) as response:
                 await self._check_status(response, target)
@@ -905,9 +917,15 @@ class PlayerService:
                     raise ServiceError("media_length")
                 await bridge.put(None)
                 return await asyncio.shield(worker)
+        except AcquisitionStopped:
+            raise               # the job's authority is gone: the Player's own stop
+        except Exception as error:
+            failure = error     # a download error (reset, short body, overrun): the content's
+            raise
         finally:
-            # No HTTP failure/cancellation leaves the worker blocked on queue.get.
-            bridge.stopped.set()
+            # No HTTP failure/cancellation leaves the worker blocked on queue.get. Cancellation
+            # (the session ended) is a BaseException, so it ends the bridge as the Player's stop.
+            bridge.end(failure)
             if worker is not None:
                 await asyncio.shield(worker)
 

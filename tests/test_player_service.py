@@ -1126,6 +1126,45 @@ def test_a_download_the_player_stops_is_not_a_download_failure(tmp_path, stop):
     asyncio.run(check())
 
 
+@pytest.mark.parametrize("end", ["short", "reset"])
+def test_a_download_that_breaks_mid_stream_is_a_download_failure(tmp_path, end):
+    """A download whose bytes already reach the cache breaks on the network side: the body ends
+    short of its Content-Length, or the connection resets. That is the content's failure, not the
+    Player's stop: the next readiness carries a `download` failure and `media_download` is raised.
+    (The counterpart of test_a_download_the_player_stops_is_not_a_download_failure.)"""
+    async def check():
+        service, server = await rig(tmp_path)
+        try:
+            service._feedback()
+            job = service._jobs[0]
+
+            async def body():
+                yield server.data[:3]
+                await asyncio.sleep(.05)       # the cache worker is waiting for the next chunk
+                if end == "reset":
+                    raise httpx.ReadError("connection reset")
+
+            def serve(request):
+                if request.url.path.startswith("/v1/media/"):
+                    return httpx.Response(200, headers=media_headers(server.data), content=body())
+                return server(request)
+            await service.link.client.aclose()
+            service.link.client = httpx.AsyncClient(transport=httpx.MockTransport(serve))
+            faults = []
+            record = service.fault
+            service.fault = lambda code, **kw: (faults.append(code), record(code, **kw))
+            await asyncio.wait_for(service._attempt(
+                {}, job, functools.partial(service.download, job), "media_download"), 2)
+            readiness, _ = service._feedback()
+            assert "picture" not in readiness.secured
+            assert [failure.code for failure in readiness.failures] == ["download"], \
+                readiness.failures
+            assert faults == ["media_download"], faults
+        finally:
+            await close(service)
+    asyncio.run(check())
+
+
 def test_revocation_and_full_plan_omission_cancel_jobs_before_draw(tmp_path):
     async def check():
         service, server = await rig(tmp_path)
