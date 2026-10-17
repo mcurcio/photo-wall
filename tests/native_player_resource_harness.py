@@ -132,13 +132,13 @@ def remap(native: NativeRenderer) -> None:
 
 def fail_one_render(native: NativeRenderer) -> None:
     """The surface's next render raises once, inside its own try (as a GL error would)."""
-    original = native._targets
+    original = native._setup
 
     def raises_once(*args):
-        native._targets = original
+        native._setup = original
         raise RuntimeError("injected render failure")
 
-    native._targets = raises_once
+    native._setup = raises_once
 
 
 def decoder_churn_releases_every_descriptor(native: NativeRenderer, variant: Variant) -> None:
@@ -148,7 +148,7 @@ def decoder_churn_releases_every_descriptor(native: NativeRenderer, variant: Var
     def churn(count: int, prefix: str) -> None:
         for index in range(count):
             local = slide(f"{prefix}-{run}-{index}", variant).layers[0]
-            status = until(lambda: native.prepare(local).status, "prepared")
+            status = until(lambda: native.prepare(local, BINDING).status, "prepared")
             assert status == "prepared", ("churn_prepare", index, status, native.diagnostics())
             pipelines.add(native._decoders[local.layer.assignment_id].pipeline.get_name())
             native.release(local.layer.assignment_id)
@@ -178,7 +178,7 @@ def remap_child() -> None:
     previous = None
     for index in range(150):
         composition = slide(f"slide-{index}", variant)
-        native.prepare(composition.layers[0])
+        native.prepare(composition.layers[0], BINDING)
         status = show(native, composition)
         if status != "presented":
             print(f"SLIDE {index} {status} fds={fds()} {native.diagnostics()}", flush=True)
@@ -278,7 +278,7 @@ def each_teardown_mechanism_holds_alone(native: NativeRenderer, variant: Variant
     weakly); (b) release disconnects every handler the decoder made, on the element itself."""
     run = uuid.uuid4().hex[:8]
     local = slide(f"weak-{run}", variant).layers[0]
-    assert until(lambda: native.prepare(local).status, "prepared") == "prepared"
+    assert until(lambda: native.prepare(local, BINDING).status, "prepared") == "prepared"
     decoder = native._decoders.pop(local.layer.assignment_id)
     owner = weakref.ref(decoder)
     pipeline, bus, handlers, probes = decoder.pipeline, decoder.bus, list(decoder.handlers), list(decoder.probes)
@@ -295,7 +295,7 @@ def each_teardown_mechanism_holds_alone(native: NativeRenderer, variant: Variant
     print("PASS connected_callbacks_hold_their_decoder_weakly", flush=True)
 
     local = slide(f"disconnect-{run}", variant).layers[0]
-    assert until(lambda: native.prepare(local).status, "prepared") == "prepared"
+    assert until(lambda: native.prepare(local, BINDING).status, "prepared") == "prepared"
     handlers = list(native._decoders[local.layer.assignment_id].handlers)
     assert len(handlers) >= 3, handlers     # new-preroll, new-sample, the bus's message
     native.release(local.layer.assignment_id)
@@ -308,7 +308,7 @@ def a_decoders_sample_hops_to_the_main_loop(native: NativeRenderer, variant: Var
     arrivals = []
     native._sample_arrived = lambda key, incarnation: arrivals.append((key, incarnation))
     local = slide(f"hop-{uuid.uuid4().hex[:8]}", variant).layers[0]
-    assert until(lambda: native.prepare(local).status, "prepared") == "prepared"
+    assert until(lambda: native.prepare(local, BINDING).status, "prepared") == "prepared"
     spin(0.2)
     incarnation = native._decoders[local.layer.assignment_id].incarnation
     assert (local.layer.assignment_id, incarnation) in arrivals, ("no_sample_hop", arrivals)

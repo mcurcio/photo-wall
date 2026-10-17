@@ -235,7 +235,7 @@ def test_the_luts_arrival_redraws_and_only_then_is_the_change_claimed():
     surface = native_module._Surface(output=None, window=None, area=Area())
     renderer._surfaces = {"hdmi1": surface}
     renderer.capacity = lambda compositions: SimpleNamespace(available=True)
-    renderer.prepare = lambda local: PrepareResult("prepared")
+    renderer._prepare = lambda local, composition, seen: PrepareResult("prepared")
     photo = SimpleNamespace(binding=SimpleNamespace(output_id="hdmi1"), calibration=Calibration(),
                             fallback=False, timebase=None, layers=(SimpleNamespace(
                                 layer=SimpleNamespace(assignment_id="a", variant=None), path=None, alpha=1.0),))

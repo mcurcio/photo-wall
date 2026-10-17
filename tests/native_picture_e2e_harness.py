@@ -136,7 +136,7 @@ def player() -> None:
         if LUT_RELEASE.exists() and luts.wanted():
             luts.hold(LutRef(LUT_PROFILE_SHA256, LUT_RECIPE), LUT_FILE.read_bytes())
             print("PLAYER lut held", flush=True)
-        native.prepare(layer)
+        native.prepare(layer, shown.binding)
         status = native.present(shown).status
         if status != last:
             print(f"PLAYER {status}", flush=True)

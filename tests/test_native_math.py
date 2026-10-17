@@ -441,7 +441,9 @@ def test_decoder_recovery_cannot_reuse_texture_from_previous_incarnation():
     assert uploads == [b"new!"]
 
 
-def test_resize_bounds_peak_memory_before_allocating_replacement_targets():
+def test_a_resize_over_the_texture_budget_frees_and_allocates_nothing():
+    """The budget counts each resident picture's fitted picture at its Output's size: a resize
+    that would pass it fails before any GL call, keeping the size and every fitted picture."""
     from types import SimpleNamespace
 
     from player.native import NativeRenderer
@@ -449,14 +451,16 @@ def test_resize_bounds_peak_memory_before_allocating_replacement_targets():
     renderer = NativeRenderer.__new__(NativeRenderer)
     renderer.GL = object()  # No allocation calls are permitted before this gate.
     renderer.texture_budget = 1100
-    renderer._decoders = {}
+    layer = SimpleNamespace(output_id="out", variant=SimpleNamespace(width=4, height=4))
+    renderer._decoders = {"photo": SimpleNamespace(local=SimpleNamespace(layer=layer))}
     surface = SimpleNamespace(programs=(1, 2), output=NativeOutput("out", "app", 4, 4),
-                              size=(4, 4), targets=[(1, 11), (2, 12)])
+                              size=(4, 4), fitted={"photo": "kept"})
     renderer._surfaces = {"out": surface}
+    assert renderer._estimate(())[1] == 4*4*4 + 4*4*8
     with pytest.raises(RuntimeError, match="texture budget"):
-        renderer._targets(surface, 8, 8)
+        renderer._setup(surface, 12, 12)
     assert surface.size == (4, 4)
-    assert surface.targets == [(1, 11), (2, 12)]
+    assert surface.fitted == {"photo": "kept"}
 
 
 def test_failed_gl_texture_allocation_does_not_leak_untracked_object():
@@ -620,7 +624,7 @@ def _presenting_renderer(decoders=None):
     renderer._decoders = decoders or {}
     renderer._surfaces = {"hdmi1": native_module._Surface(output=None, window=None, area=Area())}
     renderer.capacity = lambda compositions: SimpleNamespace(available=True)
-    renderer.prepare = lambda local: PrepareResult("prepared")
+    renderer._prepare = lambda local, composition, seen: PrepareResult("prepared")
     return renderer, renderer._surfaces["hdmi1"]
 
 
