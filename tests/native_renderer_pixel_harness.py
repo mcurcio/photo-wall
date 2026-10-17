@@ -86,6 +86,11 @@ a 64x48 PNG of four flat quadrants (red, green, blue, white) written here with t
    GTK frame clock (PyGObject's tick callback, frame times against g_get_monotonic_time, a GLArea
    render queued in the update phase) draws it: many renders, the centre darkening from one to
    the next, black at the end; then the surface no longer follows its frame clock.
+28. blended_fitted_pictures_match_the_reference_within_one_code (render cost, owner 2026-10-17:
+   "Picture quality stays the same"): a photo under a second photo at strength 0, 0.5 and 1,
+   under a print look and a two-light mat shadow, with and without a held LUT: every sample equals
+   `compose_pixel`'s mix through `final_pixel` within one 8-bit code (LUT_FILTER_CODES with the
+   LUT), and the photo underneath is fitted once across all three frames.
 """
 import hashlib
 import os
