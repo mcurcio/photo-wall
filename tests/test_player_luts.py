@@ -237,7 +237,7 @@ def test_the_luts_arrival_redraws_and_only_then_is_the_change_claimed():
     renderer.capacity = lambda compositions: SimpleNamespace(available=True)
     renderer.prepare = lambda local: PrepareResult("prepared")
     photo = SimpleNamespace(binding=SimpleNamespace(output_id="hdmi1"), calibration=Calibration(),
-                            fallback=False, layers=(SimpleNamespace(
+                            fallback=False, timebase=None, layers=(SimpleNamespace(
                                 layer=SimpleNamespace(assignment_id="a", variant=None), path=None, alpha=1.0),))
 
     def draw():

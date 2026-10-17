@@ -176,38 +176,67 @@ def frame_time(glib, frame_clock, clock: Callable[[], float] = time.monotonic) -
     return clock() - (glib.get_monotonic_time() - frame_clock.get_frame_time()) / 1e6
 
 
+WAKE_LEAD = 0.1
+"""Seconds before a change a sleeping FrameFollower follows its frame clock again: a few frames,
+so the change's first frame is drawn on the frame clock though the main loop runs a little late."""
+
+
 class FrameFollower:
     """Calls `frame(at)` on every frame of `widget`'s frame clock (gtk_widget_add_tick_callback,
     paced by the display's refresh), `at` the frame time on `clock`'s timeline, from `follow()`
-    until `frame` returns False or raises. `frame` queues the widget's render itself when the
-    frame needs drawing; nothing here draws, and no timer stands in for the frame clock."""
+    on. `frame` answers the seconds until it next needs a frame: within WAKE_LEAD it is called on
+    the next frame; a longer wait removes the callback and a one-shot main-loop timeout follows
+    again WAKE_LEAD before it ends, so an idle picture costs the frame clock nothing; None (or an
+    exception) stops. `frame` queues the widget's render itself when the frame needs drawing;
+    nothing here draws, and the timeout only wakes the frame clock, never draws or times a
+    change."""
 
-    def __init__(self, glib, widget, frame: Callable[[float], bool], *,
+    def __init__(self, glib, widget, frame: Callable[[float], float | None], *,
                  clock: Callable[[], float] = time.monotonic):
         self.glib, self.widget = glib, widget
         self._frame, self._clock = frame, clock
         self._callback: int | None = None
+        self._wake: int | None = None
 
     @property
     def following(self) -> bool:
         return self._callback is not None
 
+    @property
+    def sleeping(self) -> bool:
+        return self._wake is not None
+
     def follow(self) -> None:
+        self._cancel_wake()
         if self._callback is None:
             self._callback = self.widget.add_tick_callback(self._tick)
 
     def stop(self) -> None:
+        self._cancel_wake()
         if self._callback is not None:
             self.widget.remove_tick_callback(self._callback)
             self._callback = None
 
+    def _cancel_wake(self) -> None:
+        if self._wake is not None:
+            self.glib.source_remove(self._wake)
+            self._wake = None
+
+    def _woken(self) -> bool:
+        self._wake = None
+        self.follow()
+        return False
+
     def _tick(self, _widget, frame_clock) -> bool:
-        keep = False
+        wait = None
         try:
-            keep = self._frame(frame_time(self.glib, frame_clock, self._clock)) is True
+            wait = self._frame(frame_time(self.glib, frame_clock, self._clock))
         finally:
+            keep = wait is not None and wait <= WAKE_LEAD
             if not keep:
                 self._callback = None
+                if wait is not None:
+                    self._wake = self.glib.timeout_add(round((wait - WAKE_LEAD) * 1000), self._woken)
         return keep
 
 
@@ -217,5 +246,5 @@ def watch_bus(bus) -> None:
 
 
 __all__ = ["BUS", "CONTROL", "GDK_PRIORITY_REDRAW", "MIN_GAP_MS", "TICK", "DispatchRefused",
-           "FrameFollower", "LatePosts", "LoopLate", "MainLoopDispatcher", "Tick", "frame_time",
-           "watch_bus"]
+           "FrameFollower", "LatePosts", "LoopLate", "MainLoopDispatcher", "Tick", "WAKE_LEAD",
+           "frame_time", "watch_bus"]

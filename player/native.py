@@ -53,7 +53,7 @@ from player.geometry import (
     photo_rect,
     rolloff_skipped,
 )
-from player.look import changed, look, until_change
+from player.look import changed, look, retimed, until_change
 from player.luts import LutSource
 from player.mainloop import FrameFollower, Tick, frame_time, watch_bus
 from player.rendering import (
@@ -159,6 +159,11 @@ def _trial_key(frames, composition: OutputComposition, grant) -> object:
     candidate = trial.candidate
     return (candidate.trial_id, candidate.generation, candidate.sequence,
             candidate.candidate_sha256)
+
+
+def _trial_drawn(draw: _Draw) -> bool:
+    """Whether `draw` shows a calibration trial (its edits arrive at any frame)."""
+    return draw.applied_calibration is not None and draw.applied_calibration.trial_id is not None
 
 
 def _drawn_fit(draw: _Draw):
@@ -272,8 +277,9 @@ def _shown(composition: OutputComposition, generations: tuple, sample_serials: t
            frames, grant, luts: LutSource) -> tuple:
     """Everything a planning tick can change in a surface's pixels (G8 render on change,
     E-G8-3): layers, decoder generations, each video's newest sample, the calibration trial and
-    the Output's picture operations (1c). How the layers look over time (a fade, a video's
-    position) is no tick's: the surface draws it on its frame clock (`NativeRenderer._frame`)."""
+    the Output's picture operations (1c). How the layers look over time (a fade) is no tick's,
+    and while a surface follows its frame clock it compares these on every frame
+    (`NativeRenderer._moved`)."""
     return (_fingerprint(composition), generations, sample_serials,
             _trial_key(frames, composition, grant),
             _picture_key(frames, composition, luts))
@@ -399,8 +405,8 @@ class _Surface:
     target_qr: int = 0
     target_code: tuple[str, str, int] | None = None
     target_qr_modules: int = 0
-    # Draws on every frame of the surface's frame clock while its newest composition's look
-    # changes (`NativeRenderer._frame`); a still picture is not followed.
+    # Watches the surface's frame clock while what its drawn composition shows may change
+    # (`NativeRenderer._frame`); a still picture is not followed.
     follower: FrameFollower | None = None
 
     def fail(self, reason: str) -> None:
@@ -904,17 +910,56 @@ class NativeRenderer:
                 surface.area.queue_render()
         return True
 
-    def _frame(self, surface: _Surface, at: float) -> bool:
-        """One frame of the surface's frame clock at frame time `at`: queue a render when the
-        drawn composition's look changed since it was drawn, and stop following once no change
-        lies ahead of that draw (player/look.py). A pending draw has its own render queued."""
+    def _frame(self, surface: _Surface, at: float) -> float | None:
+        """One frame of the surface's frame clock at frame time `at`: queue a render when what the
+        drawn composition shows moved since it was drawn (`_moved`); answer the seconds until it
+        may next move (0: watch the next frame), None once nothing can (FrameFollower). A pending
+        draw has its own render queued."""
         drawn = surface.acknowledged
-        if (self._closed or drawn is None or drawn.at is None
-                or until_change(drawn.composition, drawn.at) is None):
+        if self._closed or drawn is None or drawn.at is None or not self._follows(drawn):
+            return None
+        if self._moved(surface, drawn, at):
+            surface.area.queue_render()
+            return 0.0
+        if _trial_drawn(drawn):
+            return 0.0
+        return max(0.0, until_change(drawn.composition, drawn.at) - (at - drawn.at))
+
+    def _follows(self, draw: _Draw) -> bool:
+        """Whether what `draw` shows may change without a new composition, so its surface follows
+        the frame clock: a fade or a playing video lies ahead of it (player/look.py), or it shows
+        a calibration trial, whose edits come from Display Host at any frame."""
+        return _trial_drawn(draw) or until_change(draw.composition, draw.at) is not None
+
+    def _moved(self, surface: _Surface, drawn: _Draw, at: float) -> bool:
+        """Whether `drawn`, drawn again at frame time `at` with its decoders as they are, would
+        draw other pixels: its look changed (a fade), or anything present() compares (`_shown`:
+        a video's newer sample, a trial edit, the Output's picture operations) did. False while
+        a decoder it used was sought or replaced, or its grant is not admitted: present() owes a
+        new draw then."""
+        if not self._current(drawn.generations):
             return False
         if changed(drawn.composition, drawn.at, at):
-            surface.area.queue_render()
-        return True
+            return True
+        frames = getattr(self, "_frames", None)
+        if frames is not None:
+            grant = frames.grant(surface.output.output_id, drawn.composition)
+            if grant is None or not grant.admitted:
+                return False
+        for key, _, _ in drawn.generations:
+            if self._decoders[key].local.layer.variant.duration:
+                self._read_sample(self._decoders[key])
+        return self._shown_now(drawn.composition, drawn.generations) != drawn.shown
+
+    def _shown_now(self, composition: OutputComposition, generations: tuple) -> tuple:
+        """`_shown` of `composition` drawn with `generations` now: its decoders' newest samples,
+        the trial and the picture operations Display Host holds at this moment."""
+        frames = getattr(self, "_frames", None)
+        grant = (frames.grant(composition.binding.output_id, composition)
+                 if frames is not None else None)
+        return _shown(composition, generations,
+                      tuple(self._decoders[key].sample_serial for key, _, _ in generations),
+                      frames, grant, self._luts)
 
     def _frame_time(self, area) -> float:
         """The time of the frame being drawn on this machine's monotonic clock: the area's frame
@@ -1249,15 +1294,14 @@ class NativeRenderer:
         # Render on change: a new draw only when what it shows changed (layers, decoder
         # generations, a new video sample, a trial edit) or the last one is due for renewal. A
         # static photo is not redrawn every tick (G8); a changing look is drawn on the frame clock.
-        shown = _shown(composition, generations,
-                       tuple(self._decoders[key].sample_serial for key, _, _ in generations),
-                       frames, grant if frames is not None else None, self._luts)
+        shown = self._shown_now(composition, generations)
         # The newest draw is the pending one, else the acknowledged one: whatever _render
         # dropped or drew, present() reads it from those two and nothing else.
         ack = surface.acknowledged
         newest = surface.pending or ack
         now = time.monotonic()
-        if newest is None or newest.shown != shown or _renewal_due(ack, now):
+        if (newest is None or newest.shown != shown or retimed(newest.composition, composition)
+                or _renewal_due(ack, now)):
             self._serial += 1
             surface.pending = _Draw(self._serial, composition, generations, shown=shown)
             surface.area.queue_render()
@@ -1506,10 +1550,12 @@ class NativeRenderer:
                 surface.pending = draw = None
         ack = surface.acknowledged
         if (draw is None and ack is not None and ack.at is not None
-                and changed(ack.composition, ack.at, at) and self._current(ack.generations)):
-            # Its look is changing: draw it again at this frame's time, no tick needed.
+                and self._moved(surface, ack, at)):
+            # What it shows moved (a fade, a video's new sample, a trial edit): draw it again at
+            # this frame's time, no tick needed.
             self._serial += 1
-            draw = _Draw(self._serial, ack.composition, ack.generations, shown=ack.shown)
+            draw = _Draw(self._serial, ack.composition, ack.generations,
+                         shown=self._shown_now(ack.composition, ack.generations))
         if draw is not None:
             drawn = look(draw.composition, at)
             if self._ready(drawn):
@@ -1534,7 +1580,9 @@ class NativeRenderer:
                 # Trial edits and expiry redraw retained authorized content through the same shader.
                 # A cached logical composition is never treated as restored baseline pixels.
                 self._serial += 1
-                draw = _Draw(self._serial, logical, self._generations(logical))
+                generations = self._generations(logical)
+                draw = _Draw(self._serial, logical, generations,
+                             shown=self._shown_now(logical, generations))
             if draw is not None:
                 draw.applied_calibration = applied
                 draw.applied_mat = trial.mat if trial else None
@@ -1592,8 +1640,8 @@ class NativeRenderer:
                 surface.acknowledged = draw
                 if surface.pending is draw:
                     surface.pending = None
-                if until_change(draw.composition, at) is not None:
-                    surface.follower.follow()       # its look changes: draw it on each frame
+                if self._follows(draw):
+                    surface.follower.follow()       # what it shows changes: watch each frame
             if frames is not None and surface.acknowledged is not None:
                 actual = surface.acknowledged.composition
                 grant = frames.grant(surface.output.output_id, actual)

@@ -78,6 +78,12 @@ a 64x48 PNG of four flat quadrants (red, green, blue, white) written here with t
    that module of `target_modules(TargetCode(player, "headless", 9))`, to the exact code. The
    modules decode with OpenCV (tests/test_player_calibration_target.py); this image has no
    OpenCV, so the harness holds the modules, not a decode.
+27. a_fade_is_drawn_on_the_frame_clock (render loop, owner 2026-10-16: "Make it a general render
+   loop solution"): a black layer fading in over 0.5 s on a white picture, in a composition with
+   a timebase, is presented once; with no present() after that, the real GTK frame clock
+   (PyGObject's tick callback, frame times against g_get_monotonic_time, a GLArea render queued
+   in the update phase) draws it: many renders, the centre darkening from one to the next, black
+   at the end; then the surface no longer follows its frame clock.
 """
 import ctypes
 import hashlib
@@ -229,8 +235,10 @@ class Frames:
 
 
 class CapturingRenderer(NativeRenderer):
-    """The real renderer; after each render, the GTK framebuffer's pixels (rows bottom-up)."""
+    """The real renderer; after each render, the GTK framebuffer's pixels (rows bottom-up), and
+    each render's time and centre pixel in `centres`."""
     captured: tuple[int, int, bytes] | None = None
+    centres: list[tuple[float, tuple[float, ...]]] | None = None
 
     def _render(self, area, context, surface):
         result = super()._render(area, context, surface)
@@ -239,6 +247,8 @@ class CapturingRenderer(NativeRenderer):
         height = max(1, area.get_allocated_height() * area.get_scale_factor())
         self.captured = (width, height, bytes(gl.glReadPixels(0, 0, width, height, gl.GL_RGBA,
                                                               gl.GL_UNSIGNED_BYTE)))
+        if self.centres is not None:
+            self.centres.append((time.monotonic(), centre(self)))
         return result
 
 
@@ -451,6 +461,34 @@ def alpha_and_black_layers_compose_as_the_reference(native, frames, variant) -> 
                              layer("black", None, None, .5)))
     expected = compose_pixel([((1, 1, 1, 1), 1, False), ((0, 0, 0, 1), .5, False)])
     assert close(centre(native), expected), ("black_layer", centre(native), expected)
+
+
+def a_fade_is_drawn_on_the_frame_clock(native, frames, variant) -> None:
+    """Case 27: plan time is monotonic time here (timebase 0); the fade begins 0.3 s after the
+    composition is presented, so every one of its frames is the frame clock's."""
+    frames.operations = None
+    white = png_fixture(RUNTIME / "white.png", lambda _x, _y: (255, 255, 255, 255))
+    base = layer("white", RUNTIME / "white.png", white)
+    show(native, composition(variant, Calibration(), base))
+    begins = time.monotonic() + 0.3
+    fade = Layer(assignment_id="fade", run_id="run", output_id="headless", frame_id="frame",
+                 binding_generation=1, start=begins, end=begins + 10**6, media_origin=begins,
+                 presentation="black", fade_in=0.5)
+    fading = OutputComposition(BINDING, Calibration(), (base, LocalLayer(fade, None, 0.0, 0.0)),
+                               timebase=0.0)
+    assert until(lambda: native.present(fading).status == "presented"), native.diagnostics()
+    presented = time.monotonic()
+    assert presented < begins, ("presented_too_late", presented - begins)
+    native.centres = []
+    spin(1.2)                           # the main loop alone: no present() from here on
+    centres, native.centres = native.centres, None
+    during = [red for at, (red, *_rest) in centres if begins <= at <= begins + 0.5]
+    assert len({round(red, 2) for red in during}) >= 5, ("too_few_frames", centres)
+    reds = [red for _at, (red, *_rest) in centres]
+    assert all(later <= earlier + TOLERANCE for earlier, later in zip(reds, reds[1:])), reds
+    assert max(reds) > .9 and reds[-1] < TOLERANCE, reds
+    follower = native._surfaces["headless"].follower
+    assert not follower.following and not follower.sleeping, "a still picture is not followed"
 
 
 def a_corrupt_picture_fails_and_the_frame_still_presents(native, frames, variant) -> None:
@@ -853,7 +891,8 @@ CASES = (cover_matches_the_reference(0), cover_matches_the_reference(7),
          cover_at_90_shades_the_wall_up_edge, neutral_program_takes_no_new_step, trial_mat_drawn,
          lut_matches_the_reference, two_coloured_lights_match,
          *(case for pattern in TestPattern for case in pattern_cases(pattern)),
-         pattern_matches_the_reference(TestPattern.BLACK_LEVEL, Mat()), the_target_qr_names_the_port)
+         pattern_matches_the_reference(TestPattern.BLACK_LEVEL, Mat()), the_target_qr_names_the_port,
+         a_fade_is_drawn_on_the_frame_clock)
 
 
 def main() -> None:

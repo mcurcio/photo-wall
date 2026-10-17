@@ -70,14 +70,19 @@ returns pending until the GLArea render callback completed that token. Candidate
 rendering uses a separate framebuffer; front/candidate swap happens only after
 all layers succeed. Failures retain the previous successful front buffer.
 Acknowledgment records the exact token snapshot/time and seek generations.
-Positions and fade alpha are read at the time of the frame being drawn, never at a
-tick: a composition carries its `timebase` (plan time less local monotonic time) and
-`_render` draws `player/look.py` `look` at the GdkFrameClock's frame time. While the
-drawn look still changes (`until_change`: a fade, a seen playing video, any property
-in `Layer.motion`) the surface follows its frame clock (`player/mainloop.py`
-`FrameFollower`, a GTK tick callback) and draws each frame whose look changed; once
-nothing changes after its last draw the callback is removed, so a still picture is
-not redrawn. Subsequent calls therefore correlate the completed token by immutable
+Fade alpha is read at the time of the frame being drawn, never at a tick: a
+composition carries its `timebase` (plan time less local monotonic time) and `_render`
+draws `player/look.py` `look` at the GdkFrameClock's frame time; a timebase moved by
+more than `TIMEBASE_TOLERANCE` (a re-anchored clock mapping) is a new draw. While what
+the drawn composition shows may still change (`until_change`: a fade, a seen playing
+video; or a calibration trial drawn) the surface follows its frame clock
+(`player/mainloop.py` `FrameFollower`, a GTK tick callback) and draws each frame on
+which it moved (`NativeRenderer._moved`: the look changed, or anything present()
+compares did, such as a video's newer decoded sample or a trial edit), so a video is
+drawn once per sample, not once per refresh. A wait longer than `WAKE_LEAD` removes
+the callback and one main-loop timeout follows again just before the change (it only
+wakes the frame clock); once nothing can change the callback is removed, so a still
+picture is not redrawn. Subsequent calls therefore correlate the completed token by immutable
 execution/binding/effective-calibration identity and seek generation, with a 500ms
 freshness bound.
 The native PresentationResult carries the actual acknowledged composition and

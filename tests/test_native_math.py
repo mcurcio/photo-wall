@@ -624,7 +624,7 @@ def _presenting_renderer(decoders=None):
 
 def _composition(*layers):
     return SimpleNamespace(binding=SimpleNamespace(output_id="hdmi1"), calibration=Calibration(),
-                           fallback=False, layers=layers)
+                           fallback=False, layers=layers, timebase=None)
 
 
 def _acknowledge(surface):

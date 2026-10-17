@@ -283,9 +283,10 @@ class Layer(Model):
             raise ValueError("only an opaque still may be kept")
         return self
 
-    # The layer's look at an instant, each value a function of plan time alone: `position`,
-    # `alpha`, and `motion`, when either changes. A renderer evaluates them at the time of the
-    # frame it draws (player/look.py), never at a planning tick's time.
+    # The layer at an instant, each value a function of plan time alone: `position` (the media
+    # time a video is sought to) and `alpha`, which changes only during `fades`. A renderer draws
+    # a layer's alpha at the time of the frame it draws (player/look.py), never at a planning
+    # tick's time; a video's picture is its decoder's newest sample, not a plan-time value.
     def position(self, now: float) -> float:
         position = max(0.0, now - self.media_origin)
         if self.variant and self.variant.duration:
@@ -298,14 +299,10 @@ class Layer(Model):
         fade_out = min(1.0, max(0.0, (self.end - now) / self.fade_out)) if self.fade_out else 1
         return self.opacity * min(fade_in, fade_out)
 
-    def motion(self) -> tuple[tuple[float, float], ...]:
-        """When its look changes, as half-open spans of plan time: a video's whole time (its
-        position runs), else its fade-in and its fade-out (its alpha runs)."""
-        if self.variant is not None and self.variant.duration:
-            return ((self.start, self.end),)
-        return tuple(span for span, fade in (((self.start, self.start + self.fade_in), self.fade_in),
-                                             ((self.end - self.fade_out, self.end), self.fade_out))
-                     if fade)
+    def fades(self) -> tuple[tuple[float, float], tuple[float, float]]:
+        """Its fade-in and its fade-out as half-open spans of plan time, either empty when it has
+        none: `alpha` changes inside them and nowhere else, so it is its opacity between them."""
+        return (self.start, self.start + self.fade_in), (self.end - self.fade_out, self.end)
 
 
 # How long before a layer starts its Player prepares it (its decoder resident) and Central's cue
