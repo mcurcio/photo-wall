@@ -17,7 +17,8 @@ ABI check alone is not the release package lock.
 
 The shell owns per-Output constrained app views, a protected diagnostic layer,
 connection/mode generations, process checks, and the five-second renewable surface
-lease. The controller owns portable DisplayHost admission and receives protected
+lease (renewed by a presented tagged commit or by the app's answer to Weston's ping; see
+[the lease](#the-lease-presentation-or-a-ping-answer)). The controller owns portable DisplayHost admission and receives protected
 root-only lifecycle/configuration requests. The app never receives that socket.
 The shell and its Cairo diagnostic client run from the base, independently of app
 files or imports. The sealed Player receives only the public Wayland socket.
@@ -63,9 +64,27 @@ The resulting evidence carries the exact process, local app epoch, OutputKey,
 binding generation, **per-Output `OutputBinding.configuration_revision`**, grant,
 frame tag, and compositor-created buffer serial. It means that buffer contributed
 to a compositor presentation; it is not proof of physical panel pixels or correct
-application geometry. Static photos must renew with fresh tagged commits and
-presentation feedback. Missing tag/feedback support leaves the lease unrenewed
-and restores the base diagnostic.
+application geometry. A still photo commits nothing and needs no renewal: its lease
+holds on the app's answers to Weston's ping ([the lease](#the-lease-presentation-or-a-ping-answer)).
+Missing tag/feedback support leaves the handoff without evidence and restores the base
+diagnostic.
+
+## The lease: presentation or a ping answer
+
+Owner, 2026-10-17: "The render loop should not fire if it there is nothing to render." The
+shell renews an Output's lease (`LEASE_MS`, 5 s) on a presented tagged commit of the app's
+surface, or on the app's answer to Weston's standard desktop ping (`xdg_wm_base.ping`/`pong`,
+libweston's `weston_desktop_client_ping` and the desktop API's `pong`), sent once every
+`PING_MS` (1 s) while the Output holds an identity and an app surface (Weston keeps at most one
+outstanding). GDK answers the ping on the Player's main loop, so a hung or stopped loop loses
+the grant within the lease, while a still photo, an Output forced off (`output_power`) or under
+the black curtain (`black`) keeps it with no commit. A pong is evidence only that the app is
+alive: handoff, `presented`, `handoff_presented` and revision adoption still need a real
+presented commit, and the handoff still names a buffer presented within `LEASE_MS` (the
+Player draws its candidate colour on every planning tick until it is admitted). The Player's
+own copy of the presentation feedback paces its drawing ([native renderer](module-native-renderer.md#pacing-render-only-what-reaches-the-screen));
+it is never evidence. `tests/native_display_smoke.py` proves both sides: a probe that stops
+committing keeps its grant past `LEASE_MS`, and a stopped (SIGSTOP) one loses it.
 
 A fully opaque diagnostic occludes candidate content and cannot provide meaningful
 candidate presentation feedback. During an explicitly authorized `starting_new`
@@ -198,8 +217,8 @@ GDK/Wayland surface from the successful `Gtk.GLArea::render` callback. GTK3's
 [Wayland paint path](https://gitlab.gnome.org/GNOME/gtk/-/blob/3.24.49/gdk/wayland/gdkwindow-wayland.c)
 commits that paint after rendering; no later idle/configure callback supplies the
 tag. Initialization and a private Wayland event queue stay on the GTK owning
-thread. A one-second queue-render timer renews static frames through actual
-commits. Before admission only a fixed synthetic colour is rendered. After
+thread. Nothing renews a still frame: the lease holds on ping answers. Before admission
+only a fixed synthetic colour is rendered, on every planning tick. After
 admission the existing Executor still supplies independently authorized content.
 The adapter is opt-in through `PHOTO_WALL_DISPLAY_HOST=1` and refuses missing
 Wayland protocol or missing app-private native library; it does not load a base
@@ -211,7 +230,7 @@ Central has the exact latest matching real backend acknowledgment and all existi
 trial authority checks. No simulator callback may open that gate.
 
 Native compilation, compositor launch, typed grant/feedback/handoff recovery tests,
-private-client failure, two-Output clipping, static renewal and GPIO/HDMI timing are
+private-client failure, two-Output clipping, the still lease and GPIO/HDMI timing are
 separate evidence tiers. Build and controlled virtual-compositor checks can expose
 API/lifetime errors but cannot qualify physical scanout. The native client limits
 buffer sizes and total allocation; those software bounds do not establish Pi GPU
@@ -259,8 +278,8 @@ up belong to the [Player architecture](player-architecture.md#display-identity-a
   boolean). The shell maps a solid-colour black view (a Weston curtain, never a shm buffer)
   at the Output's size in its own layer above every other, the health layer included
   (`WESTON_LAYER_POSITION_LOCK + 2`), and answers a `black` event (`output_id`, `on`) ahead of
-  the response. It does not capture input. The app's grant holds its lease under it, as
-  under signal off, so taking it down shows the app at once.
+  the response. It does not capture input. The app's grant holds its lease under it on the
+  app's ping answers, as under signal off, so taking it down shows the app at once.
 - **Kept across a hot-plug.** The wanted state stays on the Output's slot: the curtain is
   rebuilt when the Output comes back or changes mode, and the `output` event carries `black`,
   so the controller (`weston.py` `black_shown`) knows whether it is up.
