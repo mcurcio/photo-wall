@@ -77,7 +77,9 @@ class Renderer(Protocol):
 
     def set_player(self, player_id: str | None) -> None: ...   # the Player's registered id; None: none yet
 
-    def prepare(self, layer: LocalLayer) -> PrepareResult: ...
+    # Prepared: ready to be drawn on `binding`'s Frame, whose fit and profile a native renderer
+    # draws the layer's fitted picture for ahead of its first frame (player/fitted.py).
+    def prepare(self, layer: LocalLayer, binding: OutputBinding) -> PrepareResult: ...
 
     def capacity(self, compositions: tuple[OutputComposition, ...]) -> CapacityResult: ...
 
@@ -132,7 +134,7 @@ class RecordingRenderer:
     def set_player(self, player_id: str | None) -> None:
         self.player_id = player_id
 
-    def prepare(self, layer: LocalLayer) -> PrepareResult:
+    def prepare(self, layer: LocalLayer, binding: OutputBinding) -> PrepareResult:
         self.preparations.append(layer)
         key = layer.layer.assignment_id
         if key in self.prepare_failures:

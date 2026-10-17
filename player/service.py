@@ -1315,7 +1315,7 @@ class UnavailableRenderer:
 
     gl_renderer = None  # no GL context: nothing to report
 
-    def prepare(self, layer):
+    def prepare(self, layer, binding):
         return PrepareResult("failed", "capacity")
 
     def set_unbound_outputs(self, output_ids, player_id, central_link_state,

@@ -639,13 +639,14 @@ class Executor:
                         assignment.failure = None
             for output_id, retained in self._retained.items():
                 if retained.local.layer.assignment_id not in released:
-                    self.renderer.prepare(retained.local)
+                    self.renderer.prepare(retained.local, self._binding(output_id) or retained.binding)
                     self._renderer_residents.add(retained.local.layer.assignment_id)
             for assignment in (*(a for items in seen.values() for a in items),
                                *(a for a in covered if a.layer.assignment_id not in released)):
                 if not assignment.secured:
                     continue
-                result = self.renderer.prepare(pictures[assignment.layer.assignment_id])
+                result = self.renderer.prepare(pictures[assignment.layer.assignment_id],
+                                               self._binding(assignment.layer.output_id))
                 self._renderer_residents.add(assignment.layer.assignment_id)
                 if result.status == "pending" and assignment.deferred:
                     # Its decode for the reveal is in flight: still ready, its grant kept.
@@ -865,7 +866,8 @@ class Executor:
     def _show_fallback(self, composition: OutputComposition) -> bool:
         """Only observed fallback replaces state; unavailable retained media yields black."""
         if composition.layers and any(
-            self.renderer.prepare(local).status != "prepared" for local in composition.layers
+            self.renderer.prepare(local, composition.binding).status != "prepared"
+            for local in composition.layers
         ):
             composition = replace(composition, layers=())
         self._renderer_residents.update(local.layer.assignment_id for local in composition.layers)
@@ -988,7 +990,7 @@ class Executor:
                         if local.layer.assignment_id not in formerly_visible:
                             # A covered pipeline may have paused. Seek to logical now
                             # before reveal instead of using its historical preroll.
-                            prepared = self.renderer.prepare(local)
+                            prepared = self.renderer.prepare(local, candidate.binding)
                             self._renderer_residents.add(local.layer.assignment_id)
                             assignment = self._assignments[local.layer.assignment_id]
                             if prepared.status == "prepared":
