@@ -29,7 +29,7 @@ from player.geometry import (
 )
 from player.luts import PlayerLuts
 from player.native import NativeOutput, NativeRenderer, SampleMailbox, diagnostic_text, packed_rgba
-from player.rendering import REDRAW_RENEWAL, PrepareResult
+from player.rendering import PrepareResult
 
 
 def test_local_diagnostic_distinguishes_startup_from_enrolled_unbound_output():
@@ -539,29 +539,6 @@ def test_capacity_waits_for_real_surface_initialization():
     assert not renderer.capacity(()).qualified
 
 
-def test_the_frame_renewer_paints_only_surfaces_not_renewed_within_a_renewal():
-    """G8 E-G8-4: present() renews a shown draw every REDRAW_RENEWAL, so the display-host
-    renewer paints only surfaces with no acknowledgment or one at least that old."""
-    class Area:
-        def __init__(self):
-            self.renders = 0
-
-        def queue_render(self):
-            self.renders += 1
-
-    now = time.monotonic()
-    renderer = NativeRenderer.__new__(NativeRenderer)
-    renderer._closed = False
-    renderer._surfaces = {
-        name: SimpleNamespace(area=Area(), acknowledged=None if completed is None
-                              else SimpleNamespace(completed_at=completed))
-        for name, completed in (("none", None), ("fresh", now + 60),
-                                ("old", now - REDRAW_RENEWAL - .1))}
-    assert renderer._renew_display_frames() is True
-    assert {name: surface.area.renders for name, surface in renderer._surfaces.items()} == {
-        "none": 1, "fresh": 0, "old": 1}
-
-
 def test_a_trial_edit_or_a_picture_change_is_a_change_to_redraw():
     """G8 render on change, E-G8-3: the calibration trial and (1c) the Output's picture
     operations change pixels without changing the composition's fingerprint, so each is part of
@@ -642,7 +619,7 @@ def _acknowledge(surface):
 def test_a_draw_render_dropped_is_drawn_again_on_the_next_present():
     """Render on change keeps one record of what is owed: the newest draw (pending, else
     acknowledged). When _render drops a pending draw (its grant lapsed, its decoder sought, its
-    candidate failed), the next present() queues it again at once, not after REDRAW_RENEWAL."""
+    candidate failed), the next present() queues it again at once."""
     renderer, surface = _presenting_renderer()
     photo = _composition(SimpleNamespace(layer=SimpleNamespace(assignment_id="a", variant=None),
                                          path=None, alpha=1.0))
@@ -661,7 +638,7 @@ def test_a_draw_render_dropped_is_drawn_again_on_the_next_present():
 
 def test_a_playing_video_is_redrawn_on_each_new_sample_only():
     """Video: a new decoded sample is a change to draw (its serial is in the redraw key); with
-    no new sample nothing is redrawn before REDRAW_RENEWAL."""
+    no new sample nothing is redrawn, however long it plays."""
     layer = SimpleNamespace(assignment_id="v", output_id="hdmi1",
                             variant=SimpleNamespace(duration=10.0, media_type="video/mp4"))
     decoder = SimpleNamespace(incarnation=0, generation=0, sample_serial=1, playing=True,
@@ -686,6 +663,8 @@ class _FrameClient:
     def __init__(self):
         self.texts: dict[bytes, bytes] = {}
         self.tags: list[tuple[bytes, bytes, bytes]] = []
+        # The compositor's newest word for the surface: (result, sequence, at_ns, refresh_ns).
+        self.word: tuple[int, int, int, int] = (0, 0, 0, 0)
 
     def pw_frame_client_picture(self, _client, output_id, buffer, capacity):
         if output_id == b"lost":
@@ -699,6 +678,13 @@ class _FrameClient:
     def pw_frame_client_tag_picture_next_commit(self, _client, _surface, grant_id, tag, change):
         self.tags.append((grant_id, tag, change))
         return 0
+
+    def pw_frame_client_tagged(self, _client):
+        return len(self.tags)
+
+    def pw_frame_client_presentation(self, _client, _surface, sequence, at_ns, refresh_ns):
+        result, sequence.value, at_ns.value, refresh_ns.value = self.word
+        return result
 
 
 def _wayland_frames():
@@ -746,6 +732,30 @@ def test_every_tag_names_the_picture_change_its_buffer_was_drawn_with():
     frames.tag_rendered_buffer(object(), grant, "tag-b", picture_change=7)
     assert frames.lib.tags == [(str(grant.grant_id).encode(), b"tag-a", b"0"),
                                (str(grant.grant_id).encode(), b"tag-b", b"7")]
+
+
+def test_each_tag_has_a_sequence_and_the_compositors_word_names_it():
+    """Pacing (player/pacing.py): a tag answers its sequence; the frame client's word for the
+    surface is presented (its time on this machine's monotonic clock, else the time it was read,
+    and the refresh), discarded, none yet, or a lost transport."""
+    from player.pacing import Word
+    from player.wayland_frames import FrameGrant
+
+    frames = _wayland_frames()
+    grant = FrameGrant(uuid.uuid4(), 1, 1, "frame", True)
+    assert frames.presentation(object(), 5.0) is None
+    assert frames.tag_rendered_buffer(object(), grant, "tag-a") == 1
+    assert frames.tag_rendered_buffer(object(), grant, "tag-b") == 2
+    frames.lib.word = (1, 2, 4_250_000_000, 16_666_667)
+    assert frames.presentation(object(), 5.0) == Word(2, 4.25, 0.016666667)
+    frames.lib.word = (1, 2, -1, 16_666_667)            # another clock: the time it was read
+    assert frames.presentation(object(), 5.0) == Word(2, 5.0, 0.016666667)
+    frames.lib.word = (2, 2, -1, 0)
+    assert frames.presentation(object(), 5.0) == Word(2, None)
+    assert frames.presentation(None, 5.0) is None       # an unrealized window
+    frames.lib.word = (-1, 0, 0, 0)
+    with pytest.raises(RuntimeError, match="display_frame_protocol_lost"):
+        frames.presentation(object(), 5.0)
 
 
 def test_a_new_picture_change_is_drawn_again_at_once():

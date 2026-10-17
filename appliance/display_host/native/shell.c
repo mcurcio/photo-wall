@@ -1,6 +1,9 @@
 /* Base-owned Weston 14 shell. MIT; no Player/app-root imports.
  * Server-side wp_presentation events are the sole app presentation evidence.
- * A surface commit, frame callback, or repaint request is never that evidence.
+ * A surface commit, frame callback, repaint request or ping answer is never that evidence.
+ * An app's lease (LEASE_MS) is renewed by a presented commit or by its answer to Weston's
+ * desktop ping, sent once a second (PING_MS): a still picture commits nothing and keeps its grant
+ * while its process answers; a hung or stopped one loses it.
  */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -30,6 +33,7 @@
 #define MAX_FEEDBACK 128
 #define MAX_PACKET 16384
 #define LEASE_MS 5000
+#define PING_MS 1000         /* how often an app holding an Output is pinged */
 #define FRAME_VERSION 4      /* pw_frame_manager_v1 and pw_diagnostic_manager_v1: v4 carries the picture (1c) */
 #define MAX_OPERATIONS 1024  /* contracts.node_frame.PICTURE_OPERATIONS_BYTES (picture operations v5) */
 #define MAX_BRIGHTNESS 128
@@ -60,7 +64,7 @@ struct output {
     char grant[37], handoff[37];
     uid_t uid;
     pid_t pid;
-    uint64_t start_ticks, lease_until, last_presented, handoff_after;
+    uint64_t start_ticks, lease_until, last_presented, handoff_after, pinged;
     struct { uint64_t serial, at; } recent_presented[128];
     unsigned recent_next;
     uint32_t diagnostic_serial;
@@ -763,9 +767,21 @@ static void set_parent(struct weston_desktop_surface *d, struct weston_desktop_s
     (void)parent; (void)data;
     weston_desktop_surface_close(d); /* no popups/transients may bypass a slot */
 }
+/* The app answered Weston's ping: it is alive, so each Output whose app surface it owns, with a
+ * matching process, keeps its lease. Never presentation evidence. */
+static void pong(struct weston_desktop_client *client, void *data) {
+    struct shell *s = data;
+    for (int i = 0; i < MAX_OUTPUTS; i++) {
+        struct output *o = &s->outputs[i];
+        if (o->identity && o->app && weston_desktop_surface_get_client(o->app->desktop) == client &&
+            matches_process(o, o->app))
+            o->lease_until = now_ms() + LEASE_MS;
+    }
+}
 static const struct weston_desktop_api desktop_api = {
     .struct_size = sizeof(struct weston_desktop_api), .surface_added = surface_added,
-    .surface_removed = surface_removed, .committed = committed, .set_parent = set_parent
+    .surface_removed = surface_removed, .committed = committed, .set_parent = set_parent,
+    .pong = pong
 };
 static bool same_key(struct output *o, json_t *key) {
     json_t *expected = output_key(o);
@@ -1062,13 +1078,14 @@ static int lease_tick(void *data) {
         }
         if (o->trial_json[0] && boot_ms() >= o->trial_until) trial_end(o);
         if (o->revision_identity && now_ms() >= o->revision_until) revision_clear(o, true);
-        /* A forced-off output (signal off, `output_power`) presents nothing, and an app under the
-         * black curtain (`black`) may have its presentation discarded, so no presentation can
-         * renew the lease: it holds while the output is off or black and runs again after.
-         * The app's process is still checked. */
-        if (o->identity && o->weston &&
-            (o->weston->power_state == WESTON_OUTPUT_POWER_FORCED_OFF || o->black))
-            o->lease_until = now_ms() + LEASE_MS;
+        /* The app's liveness: one ping a second while it holds the Output (Weston keeps at most one
+         * outstanding); its answer renews the lease (`pong`), so a still picture, an Output forced
+         * off (`output_power`) or under the black curtain (`black`) needs no presentation to keep
+         * it. The app's process is still checked. */
+        if (o->identity && o->app && now_ms() >= o->pinged + PING_MS) {
+            o->pinged = now_ms();
+            weston_desktop_client_ping(weston_desktop_surface_get_client(o->app->desktop));
+        }
         if (o->identity && (now_ms() >= o->lease_until || process_start(o->pid) != o->start_ticks))
             invalidate(o, "surface_lease_or_process_lost");
     }

@@ -55,7 +55,8 @@ uint32_t pending_state; char pending_id[37];
 if(pw_frame_client_grant_revision(c,"headless",frame,1,2,pending_id,&pending_state)==1){
 strcpy(grant,pending_id);state=pending_state;current=1;}
 
-if(configured){
+/* A still app (the file exists): commits nothing, still answers Weston's pings above. */
+if(configured&&access("/tmp/pw-probe-still",F_OK)!=0){
 char trial[4097], trial_tag[97]; const char *tag=state?"authored-probe":"synthetic-probe";
 if(current==1&&pw_frame_client_trial(c,"headless",grant,trial,sizeof trial)==1){
 json_error_t error; json_t *candidate=json_loads(trial,0,&error);

@@ -39,6 +39,7 @@ from player.mainloop import (
     frame_time,
 )
 from player.native import FOLLOW_LEAD, NativeOutput, NativeRenderer
+from player.pacing import Word
 from player.rendering import LocalLayer, OutputComposition, PrepareResult, PresentationResult
 from player.visibility import visible_now
 from player.wayland_frames import FrameGrant
@@ -854,3 +855,109 @@ def test_display_events_call_once_per_readable_wake_and_re_arm_behind_gdks_paint
     events.stop()
     events.stop()
     assert not glib.watches and not glib.idles
+
+
+# -- Render only what reaches the screen (owner, 2026-10-17: "The render loop should not fire if
+# it there is nothing to render.") ---------------------------------------------------------------
+
+REFRESH = 1 / 60
+
+
+class Compositor(Frames):
+    """Display Host with Weston's presentation feedback faked: a tagged commit made at frame time
+    t turns to light at the first vblank after t + `cost` (vblanks every REFRESH from 0); the
+    frame client's word for the newest commit answered is readable once that time has passed."""
+
+    def __init__(self, clock, cost: float = .067):
+        super().__init__()
+        self.sequence = None                        # no calibration trial
+        self.clock, self.cost = clock, cost
+        self.commits: list[tuple[float, float]] = []   # (made at, presented at)
+
+    def tag_rendered_buffer(self, window, grant, tag, primitives=None, *, picture_change=None):
+        super().tag_rendered_buffer(window, grant, tag, primitives, picture_change=picture_change)
+        made = self.clock.now
+        self.commits.append((made, math.ceil((made + self.cost) / REFRESH - 1e-9) * REFRESH))
+        return len(self.commits)
+
+    def presentation(self, _window, now):
+        answered = [index for index, (_, at) in enumerate(self.commits) if at <= now]
+        if not answered:
+            return None
+        return Word(answered[-1] + 1, self.commits[answered[-1]][1], REFRESH)
+
+
+def frames_at(clock, renderer, surface, area, start: float, seconds: float, *, shown=None):
+    """`seconds` of 60 Hz frames from `start` (each 4 ms after a vblank), with a planning tick
+    (present(shown)) every other frame when `shown` is given."""
+    for index in range(round(seconds / REFRESH)):
+        clock.now = start + .004 + index * REFRESH
+        if shown is not None and index % 2 == 0:
+            renderer.present(shown)
+        paint(renderer, surface, area, clock.now)
+
+
+def test_a_still_minute_draws_copies_and_commits_nothing(clock):
+    """A still photo is drawn and committed once. A minute of planning ticks (every 33 ms) and
+    60 Hz frames after it installs no frame callback, queues no render (so GTK copies nothing),
+    runs no GL pass and makes no commit, and every present() reads "presented"."""
+    renderer, surface, area = frame_renderer()
+    renderer._frames = frames = Compositor(clock)
+    start = round(clock.now)
+    still = composition(black("still", start=100, end=10_000), timebase=100 - start)
+    frames_at(clock, renderer, surface, area, start, .5, shown=still)
+    drawn = (area.renders, renderer.GL.passes, len(frames.commits))
+    assert drawn == (1, 1, 1)
+    statuses = set()
+    for index in range(round(60 / REFRESH)):
+        clock.now = start + .5 + .004 + index * REFRESH
+        if index % 2 == 0:
+            statuses.add(renderer.present(still).status)
+        paint(renderer, surface, area, clock.now)
+    assert (area.renders, renderer.GL.passes, len(frames.commits)) == drawn
+    assert not area.callbacks and area.added == 0
+    assert statuses == {"presented"}
+
+
+def test_a_fade_draws_each_frame_only_after_the_last_was_presented_on_a_steady_beat(clock):
+    """A two-second fade whose frames cost about 67 ms to reach the screen (the 4K Pi): no frame
+    is drawn while the last commit has no word from the compositor (none is replaced unseen), and
+    after the first the frames land every 5th refresh, steady. Then the still end costs nothing."""
+    renderer, surface, area = frame_renderer()
+    renderer._frames = frames = Compositor(clock)
+    start = round(clock.now)
+    fading = composition(black("fade", start=100, end=10_000, fade_in=2), timebase=100 - start)
+    frames_at(clock, renderer, surface, area, start, 3, shown=fading)
+    made = [commit[0] for commit in frames.commits]
+    shown_at = [commit[1] for commit in frames.commits]
+    assert all(made[index] >= shown_at[index - 1] for index in range(1, len(made))), \
+        "a frame drawn before the last was presented"
+    beat = {round((b - a) / REFRESH) for a, b in zip(shown_at[1:], shown_at[2:]) if b < start + 2}
+    assert beat == {5}, beat
+    assert renderer.GL.opacities[-1] == 1.0
+    commits = len(frames.commits)
+    frames_at(clock, renderer, surface, area, start + 3, 2, shown=fading)
+    assert len(frames.commits) == commits and not area.callbacks
+
+
+def test_a_slider_edit_while_a_frame_is_in_flight_is_drawn_on_the_frame_after_its_word(clock):
+    """Display Host's edit arrives while the last frame has no word yet: the surface follows its
+    frame clock and draws the edit on the first frame after that frame was presented."""
+    renderer, surface, area = frame_renderer()
+    renderer._frames = frames = Compositor(clock)
+    renderer._display_events = DisplayEvents(renderer.GLib, 9, renderer._arrived)
+    frames.operations = operations(1)
+    start = round(clock.now)
+    still = composition(black("still", start=100, end=10_000), timebase=100 - start)
+    clock.now = start + .004
+    renderer.present(still)
+    paint(renderer, surface, area, clock.now)
+    first_light = frames.commits[0][1]
+    frames.operations = operations(2, light=.5)
+    clock.now = start + .004 + REFRESH
+    renderer.GLib.readable(9)
+    assert surface.follower.following and area.renders == 1, "held: the first frame is in flight"
+    frames_at(clock, renderer, surface, area, start + REFRESH, .2)
+    assert len(frames.commits) == 2 and frames.picture_changes[-1] == 2
+    assert first_light <= frames.commits[1][0] < first_light + REFRESH
+    assert not area.callbacks

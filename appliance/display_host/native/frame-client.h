@@ -34,3 +34,12 @@ int pw_frame_client_picture(struct pw_frame_client *client, const char *output_i
 /* tag_next_commit plus the picture change the buffer was drawn with ("0": none yet). */
 int pw_frame_client_tag_picture_next_commit(struct pw_frame_client *client,
     struct wl_surface *surface, const char *grant_id, const char *frame_tag, const char *picture_change);
+/* Pacing (player/pacing.py). The sequence of the newest tagged commit (0: none); each tag takes the
+ * next. */
+uint64_t pw_frame_client_tagged(struct pw_frame_client *client);
+/* The compositor's newest word for `surface`'s tagged commits: returns 1 presented, 2 discarded,
+ * 0 none yet, -1 transport failure. `sequence` names the tag it answers; `at_ns` is when it turned
+ * to light on CLOCK_MONOTONIC (-1: discarded, or the compositor's clock is another); `refresh_ns`
+ * the Output's refresh period (0: unknown). Dispatches the client's queue first. */
+int pw_frame_client_presentation(struct pw_frame_client *client, struct wl_surface *surface,
+    uint64_t *sequence, int64_t *at_ns, uint32_t *refresh_ns);
