@@ -13,7 +13,7 @@ import math
 
 import pytest
 
-from player.pacing import OVERDUE, FramePacer, Word
+from player.pacing import OVERDUE, WINDOW, FramePacer, Word
 
 REFRESH = 1 / 60
 PHASE = .004            # the frame clock's tick after each vblank
@@ -23,16 +23,17 @@ def vblank_after(at: float) -> float:
     return math.ceil(at / REFRESH - 1e-9) * REFRESH
 
 
-def fade(pacer: FramePacer, cost, seconds: float, *, start: float = 0.0, words: bool = True):
+def fade(pacer: FramePacer, cost, seconds: float, *, start: float = 0.0, words: bool = True,
+         sequence: int = 0, busy=lambda _tick: False):
     """Run a fade of `seconds` (a draw owed on every tick) against the fake compositor; `cost(t)`
-    is a frame's draw-to-vblank cost when drawn at t. Answers (drawn, presented times, frames
-    drawn while one was in flight)."""
+    is a frame's draw-to-vblank cost when drawn at t; the fade's commits follow `sequence`; a
+    tick where `busy(tick)` holds reads no word (the main loop was busy: the next tick reads it).
+    Answers (drawn, presented times, frames drawn while one was in flight)."""
     drawn, presented, overlapped = [], [], 0
     flight: tuple[int, float] | None = None
-    sequence = 0
     tick = start + PHASE
     while tick < start + seconds:
-        if flight is not None and flight[1] <= tick - 1e-6:
+        if flight is not None and flight[1] <= tick - 1e-6 and not busy(tick):
             presented.append(flight[1])
             if words:
                 pacer.answered(Word(flight[0], flight[1], REFRESH), tick)
@@ -112,6 +113,56 @@ def test_the_cadence_rises_at_once_when_frames_cost_more_and_falls_back_after():
     assert during and len(set(slow)) == 1 and slow[0] > 5
     late = gaps([a for a in presented if a > 3.2])
     assert late and set(late) == {5} and pacer.cadence == 5
+
+
+def test_a_word_read_a_tick_late_holds_the_frames_after_it_to_one_steady_beat():
+    """The slot keeps the beat steady when words are read at uneven delays: one word read a tick
+    late (a busy main loop) lands its next frame 6 refreshes on; the frames after it, whose words
+    come on time, are held to their slot so they land every 6th refresh too for the WINDOW that
+    late read stays in, never alternating 5 and 6, then every 5th. Drawn as soon as each word is
+    read (no slot), the gaps would fall back to 5 at once."""
+    pacer = FramePacer()
+    late: list[float] = []
+
+    def busy(tick):
+        if tick >= 1.0 and not late:
+            late.append(tick)
+            return True
+        return False
+
+    _drawn, presented, overlapped = fade(pacer, lambda _t: .067, 3.5, busy=busy)
+    assert overlapped == 0
+    held = gaps([at for at in presented if late[0] <= at < late[0] + WINDOW - .1])
+    assert held and set(held) == {6}, held
+    after = gaps([at for at in presented if at > late[0] + WINDOW + .2])
+    assert after and set(after) == {5}, after
+
+
+def test_a_word_not_waited_for_measures_no_read_delay_and_the_fade_after_it_keeps_its_beat():
+    """A still picture's word is read only when the next draw is asked for (nobody follows the
+    frame clock while nothing is owed): here half a second later, when a fade starts, so the
+    renderer passes no read time. That wait is idle time, not a cost: the fade's frames land every
+    5th refresh from the first, never held by the pause."""
+    pacer = FramePacer()
+    pacer.submitted(1, PHASE)
+    pacer.answered(Word(1, vblank_after(PHASE + .067), REFRESH), None)
+    assert pacer.ready(.5 + PHASE)
+    _drawn, presented, overlapped = fade(pacer, lambda _t: .067, 1.5, start=.5, sequence=1)
+    assert overlapped == 0
+    assert set(gaps(presented)) == {5}, gaps(presented)
+
+
+def test_a_word_given_again_changes_nothing():
+    """The same word read twice (the frame client keeps the newest word per surface): the second
+    read, later, adds no sample, so neither the cadence nor the next slot moves."""
+    pacer = FramePacer()
+    pacer.submitted(1, PHASE)
+    light = vblank_after(PHASE + .067)
+    pacer.answered(Word(1, light, REFRESH), light + .001)
+    cadence, slots = pacer.cadence, [pacer.ready(light + k * REFRESH / 4) for k in range(40)]
+    pacer.answered(Word(1, light, REFRESH), light + .9 * REFRESH)
+    assert pacer.cadence == cadence == 5
+    assert [pacer.ready(light + k * REFRESH / 4) for k in range(40)] == slots
 
 
 def test_drawing_ignores_the_words_draws_over_frames_in_flight():

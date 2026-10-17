@@ -133,6 +133,15 @@ screen, on a steady beat).
   answers to Weston's ping ([display host](display-host-backend.md#the-lease-presentation-or-a-ping-answer)).
   Every render sets its surface up (programs and size, `_setup`), the candidate colour's before
   admission included, since capacity() reads that setup and no later render is owed to make it.
+- **Before admission** (`NativeRenderer._candidate`): the candidate colour is drawn when a
+  candidate grant comes and again each `CANDIDATE_RENEWAL` (1 s) while it waits for its handoff,
+  which needs a presentation newer than the shell's 5 s lease; with no grant the Output is
+  cleared once; an admitted grant for an older revision of the composition keeps its buffer
+  until the new revision's grant comes. The planning tick asks for nothing else.
+- **Every commit named.** The shell's ping keeps a lease only while the Output's newest commit is
+  tagged, so whatever makes GTK paint the window draws and tags the picture again in that paint:
+  the identify banner shown or hidden over a still marks it (`set_identify_output`). A render
+  that fails commits untagged, and the diagnostic returns within the lease.
 - **The pacer** (`player/pacing.py`, pure): one per Output. Each tagged commit is `submitted`
   with its sequence (`WaylandFrames.tag_rendered_buffer`); the compositor's word for it
   (`WaylandFrames.presentation`: the frame client's own `wp_presentation` feedback, presented
@@ -142,10 +151,17 @@ screen, on a steady beat).
   draws at most four frames a second and never stops.
 - **Cadence.** After a frame was presented at P, the next is drawn at the frame-clock tick nearest
   P + N x refresh - latency, where latency is the longest submit-to-presented time over the last
-  `WINDOW` (1 s) and N the refreshes that latency and the wait for the word need. At the Pi's
-  ~67 ms per frame N is 5: 12 frames a second, every frame shown. A costlier stretch raises N at
-  once. GTK 3 commits as soon as it renders, so the pacer chooses when to draw, not when to
-  commit: a frame whose GPU cost crosses a refresh boundary can still land one refresh early.
+  `WINDOW` (1 s) and N = ceil((latency + learn) / refresh), learn being the longest wait from a
+  presentation to the tick that read its word. At the Pi's ~67 ms per frame N is 5: 12 frames a
+  second, every frame shown. A costlier stretch raises N at once. The slot holds a frame when its
+  word came sooner than the window's slowest read (a busy main loop), so the gaps stay one
+  multiple of the refresh. GTK 3 commits as soon as it renders, so the pacer chooses when to
+  draw, not when to commit: a frame whose GPU cost crosses a refresh boundary can still land one
+  refresh early.
+- **Only a word waited for measures learn.** A word read with no frame clock followed (after a
+  still, a video sample, a pause before a fade or an edit) sat unread through idle time: its
+  latency counts, its read delay does not (`_heard` passes no read time), so a pause never holds
+  the frames after it.
 - **Wake path.** The word reaches the frame client's queue when GDK's event source reads the
   display's socket; while a draw waits the surface follows its frame clock, and each tick
   dispatches that queue (`_heard`), so a word is seen within one tick. No GLib source is added.
@@ -159,8 +175,11 @@ screen, on a steady beat).
 Tests: `tests/test_player_pacing.py` (the pacer against a fake compositor),
 `tests/test_player_frame_clock.py` (a still minute draws, copies and commits nothing; a fade draws
 each frame only after the last was presented, every 5th refresh; an edit during a frame in flight
-is drawn on the frame after its word), `tests/native_player_mainloop_harness.py` (a still photo is
-never redrawn on real GTK and GL), `tests/native_display_smoke.py` (the lease on ping answers).
+is drawn on the frame after its word; video at 24 to 30 fps draws every sample; a slider drag after
+a pause draws each edit on the next frame it may; before admission only the candidate colour,
+once a second; the identify banner's paint is tagged), `tests/native_player_mainloop_harness.py`
+(a still photo is never redrawn on real GTK and GL), `tests/native_display_smoke.py` (the lease
+on ping answers, lost by an app committing untagged; a word for every new surface).
 
 ## Fitted pictures and the frame pass
 

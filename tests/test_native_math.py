@@ -92,6 +92,7 @@ def test_native_identify_banner_is_high_contrast_and_target_only():
             self.text = ""
         def show_all(self): self.visible = True
         def hide(self): self.visible = False
+        def get_visible(self): return self.visible
         def get_child(self): return self
         def set_text(self, value): self.text = value
 
@@ -100,8 +101,8 @@ def test_native_identify_banner_is_high_contrast_and_target_only():
     renderer._closed = False
     first, second = Widget(), Widget()
     renderer._surfaces = {
-        "HDMI-A-1": SimpleNamespace(identify_banner=first),
-        "HDMI-A-2": SimpleNamespace(identify_banner=second),
+        "HDMI-A-1": SimpleNamespace(identify_banner=first, acknowledged=None),
+        "HDMI-A-2": SimpleNamespace(identify_banner=second, acknowledged=None),
     }
     renderer.set_identify_output("HDMI-A-1")
     assert first.visible and not second.visible

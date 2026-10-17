@@ -166,6 +166,11 @@ FOLLOW_LEAD = 0.1
 """Seconds ahead of a change over time a surface follows its frame clock: three planning ticks,
 each of which wakes it (`NativeRenderer._wake`), so the change's first frame is the frame clock's
 though a tick runs late. A surface whose next change is further off installs no frame callback."""
+CANDIDATE_RENEWAL = 1.0
+"""Seconds between draws of the candidate colour while a candidate grant waits for its handoff:
+the handoff needs a presentation newer than the shell's lease (LEASE_MS, 5 s) and Central's
+receipt bound (5 s), so one a second leaves room for the exchange's round trip. Nothing else is
+ever drawn again unchanged."""
 
 
 def _expires(trial) -> float:
@@ -494,6 +499,10 @@ class _Surface:
     # When the next frame may be drawn (player/pacing.py): the compositor's words for this
     # surface's tagged commits.
     pacer: FramePacer = field(default_factory=FramePacer)
+    # The last candidate drawn before admission (`NativeRenderer._candidate`): the grant it was
+    # drawn under (None: no grant, a plain clear) and its frame time; None: none since the last
+    # admitted draw.
+    candidate: tuple[UUID | None, float] | None = None
     # An event since the last draw changed what the drawn composition shows (a video's new
     # sample, Display Host's edit): the next render draws it again (`NativeRenderer._invalidate`).
     dirty: bool = False
@@ -1009,11 +1018,19 @@ class NativeRenderer:
         """Show or hide the conspicuous banner on one Output."""
         self._thread()
         for key, surface in self._surfaces.items():
-            if key == output_id:
+            shown = key == output_id
+            if shown == surface.identify_banner.get_visible():
+                continue
+            if shown:
                 surface.identify_banner.get_child().set_text("IDENTIFY THIS OUTPUT  •  " + key)
                 surface.identify_banner.show_all()
             else:
                 surface.identify_banner.hide()
+            # GTK paints the window again for the banner and commits it: the picture under it is
+            # drawn (and tagged) again in that paint, so the Output's newest commit stays named
+            # (the shell's ping keeps a lease only while it is).
+            if surface.acknowledged is not None:
+                self._invalidate(surface)
 
     def set_player(self, player_id: str | None) -> None:
         """The Player's registered id (None: none yet), which a calibration target's QR names; a
@@ -1077,13 +1094,30 @@ class NativeRenderer:
 
     def _heard(self, surface: _Surface, at: float) -> None:
         """Give the pacer the compositor's newest word for the surface's commits, while one it
-        waits for may have come (read at `at`)."""
+        waits for may have come (read at `at`). The word was waited for only while the surface
+        follows its frame clock, whose ticks read it within a refresh; with no clock followed it
+        sat unread through idle time, so its read time is no sample (player/pacing.py)."""
         frames = getattr(self, "_frames", None)
         if frames is None or not surface.pacer.in_flight:
             return
         word = frames.presentation(surface.window.get_window(), at)
         if word is not None:
-            surface.pacer.answered(word, at)
+            surface.pacer.answered(word, at if surface.follower.following else None)
+
+    def _candidate(self, surface: _Surface, frames, now: float) -> None:
+        """Before admission the Output shows what Display Host lets it: the candidate colour under
+        a candidate grant, a plain clear under none (`_render`'s candidate branch). Each is asked
+        for once per grant, and the candidate colour again each CANDIDATE_RENEWAL while its grant
+        waits for the handoff, which needs a recent presentation. An admitted grant for another
+        revision of the composition keeps what the buffer shows: nothing is asked."""
+        current = frames.grant(surface.output.output_id)
+        if current is not None and current.admitted:
+            return
+        key = None if current is None else current.grant_id
+        drawn = surface.candidate
+        if (drawn is None or drawn[0] != key
+                or (current is not None and now - drawn[1] >= CANDIDATE_RENEWAL)):
+            self._request(surface, now)
 
     def _wake(self, surface: _Surface, now: float) -> None:
         """Follow the frame clock when the surface owes a draw within FOLLOW_LEAD of `now`: after
@@ -1613,11 +1647,10 @@ class NativeRenderer:
             return PresentationResult("failed", "decode")
         if frames is not None:
             if grant is None or not grant.admitted or not grant.matches(composition):
-                # Nothing drawn before admission stands: a cleared acknowledgment makes the
-                # first present() after admission draw. A pending draw needs no reset here:
-                # _render drops it while its grant is not admitted.
-                surface.acknowledged = None
-                surface.area.queue_render()
+                # Nothing drawn before admission stands and nothing is owed: a cleared
+                # acknowledgment makes the first present() after admission draw.
+                surface.acknowledged = surface.pending = None
+                self._candidate(surface, frames, time.monotonic())
                 return PresentationResult("pending")
         if surface.pending and _fingerprint(surface.pending.composition) != _fingerprint(composition):
             surface.pending = None
@@ -2018,13 +2051,17 @@ class NativeRenderer:
             gl.glClearColor(0.12, 0.17, 0.24, 1)
             gl.glClear(gl.GL_COLOR_BUFFER_BIT)
             gl.glFlush()
+            at = self._frame_time(area)
             if grant is not None and gl.glGetError() == gl.GL_NO_ERROR:
                 self._submitted(surface, frames.tag_rendered_buffer(
-                    surface.window.get_window(), grant, "candidate-" + str(grant.grant_id)),
-                    self._frame_time(area))
-            surface.acknowledged = surface.painted = None
+                    surface.window.get_window(), grant, "candidate-" + str(grant.grant_id)), at)
+            # Nothing authored is owed under this grant (`_candidate` asks for the next one).
+            surface.acknowledged = surface.painted = surface.pending = None
+            surface.dirty = False
+            surface.candidate = (None if grant is None else grant.grant_id, at)
             return True
         at = self._frame_time(area)
+        surface.candidate = None
         try:
             draw = self._owed(surface, at)
             if draw is not None and not self._redraw_fitted(surface, draw):

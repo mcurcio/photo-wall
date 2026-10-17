@@ -401,11 +401,8 @@ class NodeCalibration:
         if (
             receipt is not None
             and receipt.surface == request.admitted
-            and (
-                receipt.frame_tag == "trial-" + row["candidate_sha256"]
-                and request.sampled_boottime_ms - receipt.sampled_boottime_ms
-                < self.display.receipt_ms
-            )
+            and receipt.frame_tag == "trial-" + row["candidate_sha256"]
+            and self.display.recent(request, receipt)
         ):
             conn.execute(
                 "UPDATE node_calibration_trials SET presented_sequence=sequence,"

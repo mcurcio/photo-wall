@@ -107,7 +107,10 @@ static void global_remove(void *data, struct wl_registry *registry, uint32_t nam
     if (name == c->manager_name || name == c->presentation_name) c->lost = true;
 }
 static const struct wl_registry_listener registry_listener = {.global = global, .global_remove = global_remove};
-/* Keep the word for the feedback's surface when it answers a newer tag than the word held. */
+/* Keep the word for the feedback's surface when it answers a newer tag than the word held. A
+ * surface new to a full table takes the oldest word's entry (the lowest sequence: tag sequences
+ * rise across surfaces): a remap gives the Output a new wl_surface and the old one answers no more,
+ * so the table never fills for good. */
 static void retire(struct pw_frame_client *c, struct wp_presentation_feedback *f, uint32_t kind,
                    int64_t at_ns, uint32_t refresh_ns) {
     for (int i = 0; i < MAX_FEEDBACK; i++) if (c->feedback[i] == f) {
@@ -116,6 +119,11 @@ static void retire(struct pw_frame_client *c, struct wp_presentation_feedback *f
         struct word *w = NULL;
         for (int j = 0; j < MAX_OUTPUTS * 2 && !w; j++) if (c->words[j].surface == surface) w = &c->words[j];
         for (int j = 0; j < MAX_OUTPUTS * 2 && !w; j++) if (!c->words[j].surface) w = &c->words[j];
+        if (!w) {
+            w = &c->words[0];
+            for (int j = 1; j < MAX_OUTPUTS * 2; j++) if (c->words[j].sequence < w->sequence) w = &c->words[j];
+            *w = (struct word){0};
+        }
         if (w && sequence > w->sequence)
             *w = (struct word){.surface = surface, .sequence = sequence, .at_ns = at_ns,
                                .refresh_ns = refresh_ns, .kind = kind};

@@ -3,7 +3,9 @@
  * A surface commit, frame callback, repaint request or ping answer is never that evidence.
  * An app's lease (LEASE_MS) is renewed by a presented commit or by its answer to Weston's
  * desktop ping, sent once a second (PING_MS): a still picture commits nothing and keeps its grant
- * while its process answers; a hung or stopped one loses it.
+ * while its process answers; a hung or stopped one loses it. A ping answer renews only while the
+ * app's newest commit was tagged: an app that commits untagged buffers (its draws fail, it shows
+ * nothing it can name) holds the Output only until the lease runs out, as before the ping.
  */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -83,6 +85,7 @@ struct app_surface {
     struct weston_view *view;
     struct output *output;
     uint64_t commit;
+    bool untagged;           /* the newest commit carried no frame tag (`pong` renews nothing) */
     bool diagnostic;
     uint32_t diagnostic_ack;
     struct wl_listener committed, destroyed;
@@ -626,6 +629,7 @@ static void protocol_log(void *data, enum wl_protocol_logger_type direction,
             memcpy(f->tag, a->pending_tag, sizeof f->tag);
             memcpy(f->picture_change, a->pending_picture, sizeof f->picture_change);
         }
+        a->untagged = !a->pending_tag[0];
         a->pending_grant[0] = a->pending_tag[0] = a->pending_picture[0] = 0;
         a->overlay_grant[0] = a->overlay_tag[0] = a->primitives[0] = 0;
         a->diagnostic_ack = 0;
@@ -768,13 +772,13 @@ static void set_parent(struct weston_desktop_surface *d, struct weston_desktop_s
     weston_desktop_surface_close(d); /* no popups/transients may bypass a slot */
 }
 /* The app answered Weston's ping: it is alive, so each Output whose app surface it owns, with a
- * matching process, keeps its lease. Never presentation evidence. */
+ * matching process and a tagged newest commit, keeps its lease. Never presentation evidence. */
 static void pong(struct weston_desktop_client *client, void *data) {
     struct shell *s = data;
     for (int i = 0; i < MAX_OUTPUTS; i++) {
         struct output *o = &s->outputs[i];
-        if (o->identity && o->app && weston_desktop_surface_get_client(o->app->desktop) == client &&
-            matches_process(o, o->app))
+        if (o->identity && o->app && !o->app->untagged &&
+            weston_desktop_surface_get_client(o->app->desktop) == client && matches_process(o, o->app))
             o->lease_until = now_ms() + LEASE_MS;
     }
 }

@@ -984,3 +984,128 @@ def test_the_first_present_after_admission_draws_with_no_renewal(clock):
     frames.grant_ = admitted
     frames_at(clock, renderer, surface, area, start + .2, .3, shown=still)
     assert renderer.GL.passes == 1 and renderer.present(still).status == "presented"
+
+
+@pytest.mark.parametrize("fps", [24, 25, 30])
+def test_a_video_draws_every_sample_with_presentation_feedback(clock, fps):
+    """A video's samples arrive as events between frames, so nobody follows the frame clock and
+    each word is read only at the next sample: that wait is idle time, never a cost the pacer
+    learns. Three seconds of 24, 25 or 30 fps video costing 10 ms a frame draw every sample."""
+    video = layer("video", video=True, start=100, end=10_000, media_origin=100)
+    playing = decoder(video)
+    renderer, surface, area = frame_renderer({"video": playing})
+    renderer._frames = Compositor(clock, cost=.01)
+    start = round(clock.now)
+    clock.now = start + .004
+    renderer.present(composition(video, timebase=100 - start))
+    paint(renderer, surface, area, clock.now)
+    samples = [start + .01 + index / fps for index in range(3 * fps)]
+    expected = set(range(2, len(samples) + 2))
+    drawn, tick, end = set(), start + .004, samples[-1] + .2
+    while tick < end:
+        tick += REFRESH
+        while samples and samples[0] <= tick:
+            clock.now = samples.pop(0)
+            playing.sample_serial += 1
+            renderer._sample_arrived("video", playing.incarnation)
+        clock.now = tick
+        passes = renderer.GL.passes
+        paint(renderer, surface, area, tick)
+        if renderer.GL.passes > passes:
+            drawn.add(playing.sample_serial)
+    assert expected <= drawn, sorted(expected - drawn)
+
+
+@pytest.mark.parametrize("pause", [.3, .6])
+@pytest.mark.parametrize(("cost", "within"), [(.01, 1), (.03, 3)])
+def test_a_slider_drag_after_a_pause_draws_each_edit_on_the_next_frame_it_may(
+        clock, pause, cost, within):
+    """A still photo, then a pause shorter than the pacer's window, then the owner drags a slider
+    (an edit every 50 ms): the still's word sat unread through the pause, which the pacer never
+    takes for latency, so every edit is drawn within the frames its cost needs (one refresh at
+    10 ms a frame, three at 30 ms), never held for the length of the pause."""
+    renderer, surface, area = frame_renderer()
+    renderer._frames = frames = Compositor(clock, cost=cost)
+    renderer._display_events = DisplayEvents(renderer.GLib, 9, renderer._arrived)
+    frames.operations = operations(1)
+    start = round(clock.now)
+    clock.now = start + .004
+    renderer.present(composition(black("still", start=100, end=10_000), timebase=100 - start))
+    paint(renderer, surface, area, clock.now)
+    edits = [start + pause + index * .05 for index in range(10)]
+    waiting, delays, change, tick, end = [], [], 1, start + .004, edits[-1] + .5
+    while tick < end:
+        tick += REFRESH
+        while edits and edits[0] <= tick:
+            clock.now = edits.pop(0)
+            change += 1
+            frames.operations = operations(change, light=1 - change / 100)
+            waiting.append((clock.now, change))
+            renderer.GLib.readable(9)
+        clock.now = tick
+        commits = len(frames.commits)
+        paint(renderer, surface, area, tick)
+        if len(frames.commits) > commits:
+            drawn = frames.picture_changes[-1]
+            delays += [tick - at for at, edit in waiting if edit <= drawn]
+            waiting = [(at, edit) for at, edit in waiting if edit > drawn]
+    assert len(delays) == 10 and not waiting
+    assert max(delays) < within * REFRESH + 1e-6, [round(d * 1000) for d in delays]
+
+
+def test_before_admission_only_display_hosts_colour_is_drawn_and_only_as_often_as_handoff_needs(
+        clock):
+    """Before admission the planning tick (every 33 ms) asks for no render on its own. A candidate
+    grant's colour is drawn when the grant comes and once a second after (the handoff needs a
+    presentation newer than the shell's 5 s lease); with no grant the Output is cleared once and
+    nothing more; an admitted grant for an older revision of the composition keeps its buffer
+    (no render at all until the new revision's grant comes)."""
+    renderer, surface, area = frame_renderer()
+    renderer._frames = frames = Compositor(clock)
+    admitted = frames.grant_
+    frames.grant_ = replace(admitted, admitted=False)
+    start = round(clock.now)
+    still = composition(black("still", start=100, end=10_000), timebase=100 - start)
+    frames_at(clock, renderer, surface, area, start, 3, shown=still)
+    assert frames.tags == ["candidate-" + str(admitted.grant_id)] * 3, frames.tags
+    assert renderer.GL.passes == 0 and area.renders == 3
+
+    frames.grant_ = None                             # the grant withdrawn
+    frames_at(clock, renderer, surface, area, start + 3, 2, shown=still)
+    assert area.renders == 4 and len(frames.tags) == 3, "one clear, untagged, then nothing"
+
+    successor = replace(admitted, grant_id=uuid.uuid4(), admitted=False)
+    frames.grant_ = successor                        # a new candidate grant: drawn at once
+    frames_at(clock, renderer, surface, area, start + 5, .1, shown=still)
+    assert area.renders == 5 and frames.tags[-1] == "candidate-" + str(successor.grant_id)
+
+    frames.grant_ = admitted                         # admitted, but for an older revision
+    frames.grant = lambda output_id, shown=None: None if shown is not None else admitted
+    frames_at(clock, renderer, surface, area, start + 6, 2, shown=still)
+    assert area.renders == 5 and renderer.GL.passes == 0, "the buffer is kept"
+
+
+def test_the_identify_banner_shown_or_hidden_over_a_still_is_committed_tagged(clock):
+    """GTK paints the window again when the identify banner appears or goes, and commits it: the
+    still under it is tagged again in that paint (no frame pass: the buffer holds it), so the
+    Output's newest commit stays named, which the shell's ping needs to keep the lease. The
+    planning tick sets the banner on every tick: only a change asks for a paint."""
+    class Banner:
+        def __init__(self):
+            self.visible = False
+        def show_all(self): self.visible = True
+        def hide(self): self.visible = False
+        def get_visible(self): return self.visible
+        def get_child(self): return SimpleNamespace(set_text=lambda _text: None)
+
+    renderer, surface, area = frame_renderer()
+    renderer._frames = frames = Compositor(clock)
+    surface.identify_banner = Banner()
+    start = round(clock.now)
+    still = composition(black("still", start=100, end=10_000), timebase=100 - start)
+    frames_at(clock, renderer, surface, area, start, .5, shown=still)
+    assert (len(frames.tags), renderer.GL.passes) == (1, 1)
+    for shown in ("hdmi1", "hdmi1", None, None):
+        renderer.set_identify_output(shown)
+        frames_at(clock, renderer, surface, area, clock.now + REFRESH, .3, shown=still)
+    assert (len(frames.tags), renderer.GL.passes) == (3, 1), (frames.tags, renderer.GL.passes)

@@ -78,13 +78,21 @@ libweston's `weston_desktop_client_ping` and the desktop API's `pong`), sent onc
 `PING_MS` (1 s) while the Output holds an identity and an app surface (Weston keeps at most one
 outstanding). GDK answers the ping on the Player's main loop, so a hung or stopped loop loses
 the grant within the lease, while a still photo, an Output forced off (`output_power`) or under
-the black curtain (`black`) keeps it with no commit. A pong is evidence only that the app is
+the black curtain (`black`) keeps it with no commit. A ping answer renews only while the app's
+newest commit on that Output was tagged: an app that commits untagged buffers (its draws fail,
+or it shows nothing it can name) holds the Output only until the lease runs out, and the
+diagnostic returns, as before the ping. A pong is evidence only that the app is
 alive: handoff, `presented`, `handoff_presented` and revision adoption still need a real
 presented commit, and the handoff still names a buffer presented within `LEASE_MS` (the
-Player draws its candidate colour on every planning tick until it is admitted). The Player's
+Player draws its candidate colour when its candidate grant comes and once a second after, until
+it is admitted). The Player's
 own copy of the presentation feedback paces its drawing ([native renderer](module-native-renderer.md#pacing-render-only-what-reaches-the-screen));
 it is never evidence. `tests/native_display_smoke.py` proves both sides: a probe that stops
-committing keeps its grant past `LEASE_MS`, and a stopped (SIGSTOP) one loses it.
+committing keeps its grant past `LEASE_MS`, one committing untagged buffers loses it, and a
+stopped (SIGSTOP) one loses it. Central's display exchange keeps a receipt however old (a still
+picture is presented once); only a handoff, its completion, a removal recognized from an issued
+role and a calibration trial's presentation need a receipt under 5 s old
+(`central/fleet/node_display.py` `NodeDisplay.recent`).
 
 A fully opaque diagnostic occludes candidate content and cannot provide meaningful
 candidate presentation feedback. During an explicitly authorized `starting_new`
@@ -218,7 +226,8 @@ GDK/Wayland surface from the successful `Gtk.GLArea::render` callback. GTK3's
 commits that paint after rendering; no later idle/configure callback supplies the
 tag. Initialization and a private Wayland event queue stay on the GTK owning
 thread. Nothing renews a still frame: the lease holds on ping answers. Before admission
-only a fixed synthetic colour is rendered, on every planning tick. After
+only a fixed synthetic colour is rendered, when the candidate grant comes and once a second
+after. After
 admission the existing Executor still supplies independently authorized content.
 The adapter is opt-in through `PHOTO_WALL_DISPLAY_HOST=1` and refuses missing
 Wayland protocol or missing app-private native library; it does not load a base

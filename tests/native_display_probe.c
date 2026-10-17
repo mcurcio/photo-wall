@@ -31,6 +31,24 @@ static const struct xdg_surface_listener surface_listener={configure};
 static void top_config(void*d,struct xdg_toplevel*t,int32_t w,int32_t h,struct wl_array*a){(void)d;(void)t;(void)w;(void)h;(void)a;}
 static void top_close(void*d,struct xdg_toplevel*t){(void)d;(void)t;exit(0);}
 static const struct xdg_toplevel_listener top_listener={.configure=top_config,.close=top_close};
+/* `words`: more live surfaces than the frame client's word table holds (2 x 16 Outputs), each
+ * tagged once and its commit superseded (so discarded): every surface still gets its own word. */
+static int words(struct wl_display*d,struct pw_frame_client*c){
+int fd=memfd_create("words",MFD_CLOEXEC);if(fd<0||ftruncate(fd,4)<0)return 20;
+struct wl_shm_pool*pool=wl_shm_create_pool(shm,fd,4);
+struct wl_buffer*b=wl_shm_pool_create_buffer(pool,0,1,1,4,WL_SHM_FORMAT_XRGB8888);close(fd);
+for(uint64_t n=1;n<=40;n++){
+struct wl_surface*s=wl_compositor_create_surface(comp);struct xdg_surface*xs=xdg_wm_base_get_xdg_surface(wm,s);
+configured=0;xdg_surface_add_listener(xs,&surface_listener,NULL);struct xdg_toplevel*top=xdg_surface_get_toplevel(xs);
+xdg_toplevel_set_app_id(top,"words-probe");wl_surface_commit(s);
+while(!configured)if(wl_display_dispatch(d)<0)return 21;
+if(pw_frame_client_tag_next_commit(c,s,"00000000-0000-4000-8000-000000000000","words-probe")<0)return 22;
+wl_surface_attach(s,b,0,0);wl_surface_commit(s);wl_surface_attach(s,b,0,0);wl_surface_commit(s);
+uint64_t sequence=0;int64_t at=0;uint32_t refresh=0;int kind=0;
+for(int k=0;k<50&&kind==0;k++){if(wl_display_roundtrip(d)<0)return 23;kind=pw_frame_client_presentation(c,s,&sequence,&at,&refresh);}
+if(kind<=0||sequence!=n){fprintf(stderr,"words: surface %llu: word %d for sequence %llu\n",
+(unsigned long long)n,kind,(unsigned long long)sequence);return 24;}}
+return 0;}
 int main(int argc,char**argv){private_probe=argc>1&&!strcmp(argv[1],"private");
 struct wl_display*d=wl_display_connect(NULL);if(!d)return 2;
 struct wl_registry*r=wl_display_get_registry(d);wl_registry_add_listener(r,&registry_listener,NULL);
@@ -38,6 +56,7 @@ if(wl_display_roundtrip(d)<0)return private_probe?0:3;
 if(wl_display_roundtrip(d)<0)return private_probe?0:3;
 if(private_probe)return 4;
 struct pw_frame_client*c=pw_frame_client_create(d);if(!c)return 5;
+if(argc>1&&!strcmp(argv[1],"words"))return words(d,c);
 struct wl_surface*s=wl_compositor_create_surface(comp);struct xdg_surface*xs=xdg_wm_base_get_xdg_surface(wm,s);
 xdg_surface_add_listener(xs,&surface_listener,NULL);struct xdg_toplevel*top=xdg_surface_get_toplevel(xs);
 xdg_toplevel_add_listener(top,&top_listener,NULL);xdg_toplevel_set_app_id(top,"photo-wall-headless");wl_surface_commit(s);
@@ -67,7 +86,8 @@ tag=trial_tag;pw_frame_client_overlay(c,s,grant,tag,"[[0.4,0.1],[0.9,0.3],[0.8,0
 if(json_integer_value(json_object_get(candidate,"sequence"))==3)wl_surface_commit(s);
 }
 json_decref(candidate);}
-if(current==1&&pw_frame_client_tag_next_commit(c,s,grant,tag)<0){fprintf(stderr,"probe tag failed\n");return 8;}
+/* An app whose draws fail (the file exists): commits untagged buffers, still answers pings. */
+if(current==1&&access("/tmp/pw-probe-untagged",F_OK)!=0&&pw_frame_client_tag_next_commit(c,s,grant,tag)<0){fprintf(stderr,"probe tag failed\n");return 8;}
 wl_surface_attach(s,b,0,0);wl_surface_damage(s,0,0,640,480);wl_surface_commit(s);}
 }
 return 0;}

@@ -13,9 +13,17 @@ Rules (docs/module-native-renderer.md, "Pacing"):
   silence means only "overdue", never "stop".
 - A steady cadence: after a frame was presented at P, the next is drawn at the frame-clock tick
   nearest to P + N x refresh - latency, where latency is the longest submit-to-presented time of
-  the last WINDOW of frames and N the refreshes that latency and the wait for the word need. A
-  frame drawn at the same phase as the slowest then lands N refreshes after its predecessor; a
-  slower one raises N at once, and N falls when that sample ages out of the window.
+  the last WINDOW of frames and N = ceil((latency + learn) / refresh): learn is the longest wait
+  between a presentation and the frame tick that read its word. A frame drawn at the same phase
+  as the slowest then lands N refreshes after its predecessor; a slower one raises N at once, and
+  N falls when that sample ages out of the window. The slot holds a frame when its word was read
+  sooner than the slowest read of the window (a busy main loop reads some words a tick late):
+  every frame then starts as late as that one, so the gaps stay one multiple of the refresh. A
+  frame's own GPU cost cannot be held: GTK 3 commits as soon as the GLArea renders.
+- Only a word waited for measures learn: one read on a frame tick of a frame clock followed for
+  it. A word read with no clock followed (nothing was owed: a still picture, a pause before a
+  fade or an edit) sat unread for idle time, which is no cost: its latency counts, its read
+  delay is no sample (the renderer passes `seen` None).
 - Nothing submitted, or submissions with no feedback source (no Display Host): never held.
 """
 
@@ -55,8 +63,9 @@ class FramePacer:
         self._submitted_at = -math.inf      # its frame time
         self._answered = 0                  # the newest sequence answered
         self._slot = -math.inf              # the frame time from which the next frame may draw
-        # (presented at, submit-to-presented latency, presented-to-seen delay) per frame.
-        self._samples: deque[tuple[float, float, float]] = deque()
+        # (presented at, submit-to-presented latency, presented-to-seen delay or None: the word
+        # was not waited for) per frame.
+        self._samples: deque[tuple[float, float, float | None]] = deque()
 
     @property
     def in_flight(self) -> bool:
@@ -69,9 +78,11 @@ class FramePacer:
         if sequence > self._sequence:
             self._sequence, self._submitted_at = sequence, at
 
-    def answered(self, word: Word, seen: float) -> None:
-        """The compositor's `word`, read at frame time `seen`. Only the newest submission's word
-        counts; an older one (a frame already superseded) is ignored."""
+    def answered(self, word: Word, seen: float | None) -> None:
+        """The compositor's `word`, read at frame time `seen` of a frame clock followed while the
+        frame was in flight; None: read with no clock followed (not waited for). Only the newest
+        submission's word counts, once; an older one (a frame already superseded) or one already
+        answered is ignored."""
         if word.sequence != self._sequence or word.sequence <= self._answered:
             return
         self._answered = word.sequence
@@ -81,11 +92,13 @@ class FramePacer:
             # Discarded, or a time this machine's clock cannot place: free, no sample.
             self._slot = -math.inf
             return
-        self._samples.append((word.at, word.at - self._submitted_at, max(0.0, seen - word.at)))
+        # A word not waited for (`seen` None, the rule above) gives no learn sample.
+        learn = None if seen is None else max(0.0, seen - word.at)
+        self._samples.append((word.at, word.at - self._submitted_at, learn))
         while self._samples and self._samples[0][0] < word.at - self.window:
             self._samples.popleft()
         latency = max(sample[1] for sample in self._samples)
-        learn = max(sample[2] for sample in self._samples)
+        learn = max((sample[2] for sample in self._samples if sample[2] is not None), default=0.0)
         # Ticks fall on the refresh grid, so latency + learn is close to whole refreshes; a
         # sliver over one (TOLERANCE) is clock noise, not another refresh.
         self.cadence = max(1, math.ceil((latency + learn) / self.refresh - TOLERANCE))
