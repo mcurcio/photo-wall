@@ -27,7 +27,6 @@ from contracts.on_screen import kept_from
 from contracts.time import Clock, TimeMapping
 from player.cache import Cache, CacheCapacityError, CacheError
 from player.rendering import (
-    PRESENTATION_FRESHNESS,
     LocalLayer,
     OutputComposition,
     PresentationResult,
@@ -924,8 +923,10 @@ class Executor:
         drawn, completed = result.composition, result.presented_at
         if drawn is None or completed is None or not math.isfinite(completed):
             return None
+        # A renderer's "presented" is a state (the draw still stands, however long ago it was
+        # drawn: a still photo is never redrawn); only a draw time in the future is refused.
         age = self.clock.monotonic() - completed
-        if (not 0 <= age <= PRESENTATION_FRESHNESS or drawn.binding != candidate.binding
+        if (not 0 <= age or drawn.binding != candidate.binding
                 or drawn.fallback != candidate.fallback
                 or len(drawn.layers) != len(candidate.layers)):
             return None

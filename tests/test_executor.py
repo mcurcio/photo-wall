@@ -26,12 +26,7 @@ from contracts.photo_crop import CENTRED
 from contracts.time import ManualClock, TimeMapping
 from player.cache import Cache
 from player.executor import AuthorityError, Executor
-from player.rendering import (
-    PRESENTATION_FRESHNESS,
-    REDRAW_RENEWAL,
-    PresentationResult,
-    RecordingRenderer,
-)
+from player.rendering import PresentationResult, RecordingRenderer
 
 
 def media(data: bytes = b"picture", video: bool = False) -> Variant:
@@ -153,7 +148,7 @@ def test_kept_still_takes_effect_from_its_first_draw_at_or_after_its_fade_in(
     assert [local.layer.assignment_id for local in shown.layers] == (["picture"] if kept else [])
 
 
-@pytest.mark.parametrize("fault", ["old", "future", "binding", "layer", "calibration"])
+@pytest.mark.parametrize("fault", ["future", "binding", "layer", "calibration"])
 def test_native_ack_rejects_stale_or_different_authority(tmp_path, fault):
     rig = Rig(tmp_path)
 
@@ -163,9 +158,7 @@ def test_native_ack_rejects_stale_or_different_authority(tmp_path, fault):
                 return super().present(composition)
             drawn = composition
             completed = rig.clock.monotonic()
-            if fault == "old":
-                completed -= PRESENTATION_FRESHNESS + .1
-            elif fault == "future":
+            if fault == "future":
                 completed += .1
             elif fault == "binding":
                 drawn = replace(drawn, binding=drawn.binding.model_copy(update={"generation": 2}))
@@ -184,11 +177,12 @@ def test_native_ack_rejects_stale_or_different_authority(tmp_path, fault):
     assert any(o.status == "failed" for o in observations)
 
 
-def test_native_ack_older_than_a_renewal_but_within_freshness_is_presented(tmp_path):
-    """G8 render on change: an unchanged photo is redrawn only every REDRAW_RENEWAL, so an
-    acknowledgment up to PRESENTATION_FRESHNESS old still reads as presented."""
+def test_a_still_photo_drawn_long_ago_still_reads_as_presented(tmp_path):
+    """Render only what reaches the screen: a still photo is never redrawn, so the renderer's
+    "presented" is a state; a draw ten minutes old that still stands is presented, with the
+    time it was drawn."""
     rig = Rig(tmp_path)
-    age = (REDRAW_RENEWAL + PRESENTATION_FRESHNESS) / 2
+    age = 600.0
 
     class RenewingRenderer(RecordingRenderer):
         def present(self, composition):

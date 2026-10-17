@@ -17,6 +17,8 @@ import pytest
 from support.position import LIGHTING
 from test_executor import binding, layer
 from test_player_frame_clock import (  # noqa: F401
+    REFRESH,
+    Compositor,
     Frames,
     black,
     clock,
@@ -33,7 +35,7 @@ from contracts.node_picture import UPGRADE_DISPLAY_LIGHT
 from contracts.room_light import FixedColour, FixedEntry, RoomLightsDocument
 from player.fitted import FitKey, prepared, redrawn_by_frames, shown_at_once
 from player.mainloop import DisplayEvents
-from player.rendering import REDRAW_RENEWAL, LocalLayer, OutputComposition
+from player.rendering import LocalLayer, OutputComposition
 
 TURNED = Calibration(fit=CoverFit(rotation=5))
 
@@ -205,9 +207,9 @@ def test_a_fade_frame_is_one_pass_and_only_an_edit_draws_its_fitted_pictures_aga
 
 
 def test_a_still_picture_costs_no_gpu_work_per_second(clock):  # noqa: F811
-    """A still photo is drawn once. Each second the planning tick renews its draw (Display Host's
-    lease and the presented freshness need fresh tagged commits): the renewal draws nothing on
-    the GPU, while its tag is committed again and the draw is acknowledged anew."""
+    """A still photo is drawn once. Ten seconds of planning ticks and frames after it queue no
+    render, draw nothing on the GPU and commit no tag (Display Host's lease holds on the Player's
+    answers to Weston's pings), and the draw reads as presented throughout."""
     still = layer("still", start=100, end=200)
     renderer, surface, area = frame_renderer({"still": decoder(still)})
     renderer._frames = frames = TrialFrames()
@@ -218,13 +220,14 @@ def test_a_still_picture_costs_no_gpu_work_per_second(clock):  # noqa: F811
     paint(renderer, surface, area, start + .1)
     drawn, tags = gpu(renderer), len(frames.tags)
     assert drawn == (1, 1)
+    renders, completed = area.renders, surface.acknowledged.completed_at
     for second in range(1, 11):
-        clock.now = start + .1 + second * REDRAW_RENEWAL
-        renderer.present(shown)
+        clock.now = start + .1 + second
+        assert renderer.present(shown).status == "presented"
         paint(renderer, surface, area, clock.now)
-        assert surface.acknowledged.completed_at == clock.now
-    assert gpu(renderer) == drawn, "ten renewals, no GPU work"
-    assert len(frames.tags) == tags + 10, "each renewal commits a fresh tag"
+    assert gpu(renderer) == drawn, "no GPU work"
+    assert len(frames.tags) == tags, "no commit"
+    assert area.renders == renders and surface.acknowledged.completed_at == completed
 
 
 def test_a_picture_settings_edit_is_one_frame_pass_and_draws_no_fitted_picture():
@@ -511,3 +514,41 @@ def test_a_room_lights_document_under_a_still_photo_is_one_frame_pass_and_no_fit
     assert gpu(renderer) == (1, 2)
     renderer._render(area, None, surface)
     assert gpu(renderer) == (1, 2), "the same frame: nothing painted"
+
+
+def test_a_room_lights_document_reaches_the_screen_on_the_next_beat_the_pacer_allows(clock):  # noqa: F811
+    """Render only what reaches the screen: a still photo is drawn and committed once. A room-lights
+    document arriving while that frame has no word from the compositor is held (no render, so it
+    is never drawn over a frame in flight), then painted and committed on the first frame after
+    the word: one frame pass, no fitted picture. A second document on the still photo, nothing in
+    flight, is painted on the very next frame. Then the still photo costs nothing again.
+    Mutation probe: set_room_lights calling `surface.area.queue_render()` again (bypassing the
+    pacer) fails the hold; doing nothing fails the repaint."""
+    still = layer("still", start=100, end=10_000)
+    renderer, surface, area = frame_renderer({"still": decoder(still)})
+    renderer._frames = frames = Compositor(clock)
+    start = round(clock.now)
+    shown = OutputComposition(binding(lighting=DEEP), (local(still),), timebase=100 - start)
+    clock.now = start + .004
+    renderer.present(shown)
+    paint(renderer, surface, area, clock.now)
+    assert gpu(renderer) == (1, 1) and len(frames.commits) == 1
+    first_light = frames.commits[0][1]
+    clock.now = start + .004 + REFRESH
+    renderer.set_room_lights(RoomLightsDocument(change=1, lights={"room": FixedEntry(
+        colour=FixedColour(kelvin=6500))}))
+    assert area.renders == 1 and surface.follower.following, "held: the first frame is in flight"
+    for index in range(1, round(.2 / REFRESH)):
+        clock.now = start + .004 + index * REFRESH
+        paint(renderer, surface, area, clock.now)
+    assert gpu(renderer) == (1, 2) and len(frames.commits) == 2
+    assert first_light <= frames.commits[1][0] < first_light + REFRESH
+    assert not area.callbacks
+    clock.now = start + 1.004
+    renderer.set_room_lights(RoomLightsDocument(change=2, lights={"room": FixedEntry(
+        colour=FixedColour(kelvin=2700))}))
+    paint(renderer, surface, area, clock.now)
+    assert gpu(renderer) == (1, 3) and len(frames.commits) == 3
+    for index in range(1, 30):
+        paint(renderer, surface, area, clock.now + index * REFRESH)
+    assert gpu(renderer) == (1, 3) and len(frames.commits) == 3 and not area.callbacks

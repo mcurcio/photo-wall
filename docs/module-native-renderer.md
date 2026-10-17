@@ -86,8 +86,10 @@ change over time (a fade, a drawn calibration trial running out) comes from
 follows its frame clock (`player/mainloop.py` `FrameFollower`, a GTK tick callback)
 and each frame on which the look changed is drawn; the planning tick's present() and
 each render follow it again when a change comes near, so a still picture installs no
-frame callback at all. A change that arrives as an event queues the next frame's
-render (GTK's queue-draw idiom): a new composition from present() as a pending draw;
+frame callback at all. A change that arrives as an event asks for the next frame the
+pacer allows (`_request`: GTK's queue-draw idiom when the last frame was answered, else the
+frame clock is followed until it is; [pacing](#pacing-render-only-what-reaches-the-screen)):
+a new composition from present() as a pending draw;
 a video's new decoded sample (the decoder's streaming thread hops to the main loop
 once per sample, so a video is drawn once per sample, not per refresh) and Display
 Host's edits (the Output's picture operations as a Live slider moves, a trial edit;
@@ -102,8 +104,10 @@ them (`_shown_now`). So while any Output paints, those reads run about once per 
 no frame callback reads them. A draw owed whose layer is not decoded yet waits,
 unfollowed, for the planning tick (whose prepare() reads the decoder). A missed event is
 caught by the next planning tick, which compares everything but time (`_shown`). Subsequent calls therefore correlate the completed token by
-immutable execution/binding/effective-calibration identity and seek generation, with a
-500ms freshness bound.
+immutable execution/binding/effective-calibration identity and seek generation. "Presented"
+is a state: the newest draw stands until superseded, its grant withdrawn or its decoders
+replaced, however long ago it was drawn (a still photo is never redrawn), and the executor
+refuses only a draw time in the future.
 The native PresentationResult carries the actual acknowledged composition and
 `presented_at` as local monotonic draw-completion time; Executor maps that time
 through its own clock mapping. Video positions come from the drawn sample PTS
@@ -112,6 +116,70 @@ Diagnostics retain the actual acknowledged composition rather than claiming the
 newly queued position has already drawn. This is application draw evidence, not
 scanout or photon timing. A new authority/composition replaces a queued token;
 release removes stale queued work before another draw can execute.
+
+## Pacing: render only what reaches the screen
+
+Owner, 2026-10-17: "seems like a baseline feature. The render loop should not fire if it there is
+nothing to render." Measured on the 4K Pi (v0.39.2): a fade frame cost the GPU the Player's mix
+(41 ms), GTK's copy of the GLArea into its window (10 ms) and Weston's copy to the screen
+(15.6 ms); 8 of 26 frames drawn per fade were never shown (the missing ~20 ms per shown frame),
+and a still photo was drawn, copied and composited once a second. The design and the deferred
+steps are in the pull request that built this (perf(player): render only what reaches the
+screen, on a steady beat).
+
+- **Nothing owed, nothing drawn.** The one draw decision is `_owed`; the one place a draw is asked
+  for is `NativeRenderer._request`. A still photo is drawn once: no renewal, no frame callback, no
+  commit, no GTK copy and no Weston composite afterwards. The shell's lease holds on the Player's
+  answers to Weston's ping ([display host](display-host-backend.md#the-lease-presentation-or-a-ping-answer)).
+  Every render sets its surface up (programs and size, `_setup`), the candidate colour's before
+  admission included, since capacity() reads that setup and no later render is owed to make it.
+- **Before admission** (`NativeRenderer._candidate`): the candidate colour is drawn when a
+  candidate grant comes and again each `CANDIDATE_RENEWAL` (1 s) while it waits for its handoff,
+  which needs a presentation newer than the shell's 5 s lease; with no grant the Output is
+  cleared once; an admitted grant for an older revision of the composition keeps its buffer
+  until the new revision's grant comes. The planning tick asks for nothing else.
+- **Every commit named.** The shell's ping keeps a lease only while the Output's newest commit is
+  tagged, so whatever makes GTK paint the window draws and tags the picture again in that paint:
+  the identify banner shown or hidden over a still marks it (`set_identify_output`). A render
+  that fails commits untagged, and the diagnostic returns within the lease.
+- **The pacer** (`player/pacing.py`, pure): one per Output. Each tagged commit is `submitted`
+  with its sequence (`WaylandFrames.tag_rendered_buffer`); the compositor's word for it
+  (`WaylandFrames.presentation`: the frame client's own `wp_presentation` feedback, presented
+  with its time and refresh, or discarded) is `answered` while a frame waits. No frame is drawn
+  while the newest commit is unanswered, so none is replaced unseen. A word overdue by `OVERDUE`
+  (0.25 s: an Output off or under the black picture says nothing) frees the slot; a fade there
+  draws at most four frames a second and never stops.
+- **Cadence.** After a frame was presented at P, the next is drawn at the frame-clock tick nearest
+  P + N x refresh - latency, where latency is the longest submit-to-presented time over the last
+  `WINDOW` (1 s) and N = ceil((latency + learn) / refresh), learn being the longest wait from a
+  presentation to the tick that read its word. At the Pi's ~67 ms per frame N is 5: 12 frames a
+  second, every frame shown. A costlier stretch raises N at once. The slot holds a frame when its
+  word came sooner than the window's slowest read (a busy main loop), so the gaps stay one
+  multiple of the refresh. GTK 3 commits as soon as it renders, so the pacer chooses when to
+  draw, not when to commit: a frame whose GPU cost crosses a refresh boundary can still land one
+  refresh early.
+- **Only a word waited for measures learn.** A word read with no frame clock followed (after a
+  still, a video sample, a pause before a fade or an edit) sat unread through idle time: its
+  latency counts, its read delay does not (`_heard` passes no read time), so a pause never holds
+  the frames after it.
+- **Wake path.** The word reaches the frame client's queue when GDK's event source reads the
+  display's socket; while a draw waits the surface follows its frame clock, and each tick
+  dispatches that queue (`_heard`), so a word is seen within one tick. No GLib source is added.
+- **Without Display Host** (development, the kiosk pixel harness) no tag has a sequence, so the
+  pacer never holds a frame and GDK's frame clock alone paces, as before.
+- **Not done here** (costed in the pull request): GTK's 10 ms copy stays (the Player would have to
+  own its surface); Weston's copy stays because Weston 14 cannot scan the Player's buffer out on
+  the Pi 5: its 32-bit plane masks alias the HDMI-A-1 primary plane (index 54) with an overlay
+  plane (index 22) it visits first ([health layer buffers](display-host-backend.md#the-health-layers-buffers)).
+
+Tests: `tests/test_player_pacing.py` (the pacer against a fake compositor),
+`tests/test_player_frame_clock.py` (a still minute draws, copies and commits nothing; a fade draws
+each frame only after the last was presented, every 5th refresh; an edit during a frame in flight
+is drawn on the frame after its word; video at 24 to 30 fps draws every sample; a slider drag after
+a pause draws each edit on the next frame it may; before admission only the candidate colour,
+once a second; the identify banner's paint is tagged), `tests/native_player_mainloop_harness.py`
+(a still photo is never redrawn on real GTK and GL), `tests/native_display_smoke.py` (the lease
+on ping answers, lost by an app committing untagged; a word for every new surface).
 
 ## Fitted pictures and the frame pass
 
@@ -132,9 +200,10 @@ that built it (perf(player): draw each photo once and blend per frame).
   frame's strengths (`compose_pixel`: a fitted picture, a black layer or the commissioning grid
   per slot, up to `FRAME_LAYERS`), then `final_pixel`. Each step set (the paper profile's LUT
   bound or not, the test pattern; `_steps`) is its own compiled program with its switches as
-  constants, compiled on first use; the room's light, the paper and the display fit always run. A frame whose inputs equal the last painted one draws
-  nothing: GTK keeps the GLArea's buffer between renders, so the once-a-second renewal only
-  commits a fresh tag (R4). GtkGLArea's "resize" (on every size allocation, the same size too)
+  constants, compiled on first use; the room's light, the paper and the display fit always run. A
+  frame whose inputs equal the last painted one draws nothing: GTK keeps the GLArea's buffer
+  between renders, so a render GTK makes on its own only commits a fresh tag. GtkGLArea's
+  "resize" (on every size allocation, the same size too)
   makes that buffer anew, so it forgets what was painted and the next render paints again.
 - **Prepared** (`fitted.prepared`, the one readiness rule): decoded, and the GPU has finished a
   fitted picture of this decode (past its fence, `glFenceSync`, asked without waiting). prepare()

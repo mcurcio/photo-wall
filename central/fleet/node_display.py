@@ -141,7 +141,6 @@ class NodeDisplay:
             if request.producer != principal.grant.producer:
                 raise NodeControlError("display_producer_mismatch", 403)
             now = principal.admission.ensure_current(self.sessions.clock)
-            self._fresh_receipt(request)
             prior = conn.execute(
                 "SELECT request,response FROM node_display_exchanges "
                 "WHERE producer_id=%s AND request_id=%s",
@@ -278,7 +277,7 @@ class NodeDisplay:
         both required. Current Runtime withdrawal authority is checked separately.
         """
         receipt = request.receipt
-        if receipt is None or receipt.surface != previous:
+        if not self.recent(request, receipt) or receipt.surface != previous:
             return False
         rows = conn.execute(
             "SELECT request,response FROM node_display_exchanges "
@@ -305,11 +304,16 @@ class NodeDisplay:
                 return True
         return False
 
-    def _fresh_receipt(self, request):
-        """Compare only samples of one node clock; Central never maps node time."""
-        if request.receipt and not (
-                0 <= request.sampled_boottime_ms - request.receipt.sampled_boottime_ms < self.receipt_ms):
-            raise NodeControlError("display_receipt_stale", 409)
+    def recent(self, request, receipt) -> bool:
+        """The one age rule for a presentation receipt, comparing samples of one node clock only
+        (Central never maps node time): sampled less than `receipt_ms` before `request` (never
+        after it: the contract refuses that). Required only where a recent presentation is the
+        evidence: a handoff and its completion, a removal recognized from an issued role, a
+        calibration trial's frame presented. An older receipt stands in an exchange: a still
+        picture is presented once, and the shell's lease, kept by the app's answers to its pings
+        and never by presenting again, says the app still holds the Output."""
+        return (receipt is not None
+                and 0 <= request.sampled_boottime_ms - receipt.sampled_boottime_ms < self.receipt_ms)
 
     def current_frame_in(self, conn, frame_id: str):
         """Operator-side read under Runtime locks, then the device fence and session order."""
@@ -371,8 +375,9 @@ class NodeDisplay:
             or request.admitted != expected
             or request.receipt is None
             or request.receipt.surface != expected
-            or not 0 <= request.sampled_boottime_ms - request.receipt.sampled_boottime_ms < self.receipt_ms
         ):
+            # The admitted surface and an exchange within 10 s say the app holds the Output; its
+            # last presentation may be old (a still picture is presented once).
             raise TrialRefused(TrialRefusal.ADMITTED_SURFACE_REQUIRED)
         admission = self.runtime.display_admission_in(
             conn,
@@ -407,11 +412,7 @@ class NodeDisplay:
             return "retain", "authorized_withdrawal_required"
         if request.candidate == surface:
             receipt = request.receipt
-            if (
-                receipt
-                and receipt.surface == surface
-                and (request.sampled_boottime_ms - receipt.sampled_boottime_ms < self.receipt_ms)
-            ):
+            if receipt and receipt.surface == surface and self.recent(request, receipt):
                 return "handoff", "handoff_requires_runtime"
             return "retain", "awaiting_compositor_presentation"
         if request.candidate is None:
@@ -449,7 +450,7 @@ class NodeDisplay:
             or receipt.grant_id != decision.receipt.grant_id
             or receipt.buffer_id == decision.receipt.buffer_id
             or receipt.sampled_boottime_ms <= decision.receipt.sampled_boottime_ms
-            or request.sampled_boottime_ms - receipt.sampled_boottime_ms >= self.receipt_ms
+            or not self.recent(request, receipt)
         ):
             raise NodeControlError("display_handoff_receipt_mismatch", 409)
         admission = self.runtime.display_admission_in(
