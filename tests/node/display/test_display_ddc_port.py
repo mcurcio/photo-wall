@@ -130,10 +130,29 @@ def test_a_picture_command_is_cut_at_the_hold(display):
     assert time.monotonic() - began < PICTURE_HOLD_SECONDS + 0.5
 
 
-def test_a_power_probe_answers_within_one_hold_while_the_list_is_asked_back_to_back(display):
-    """With the asker running batches back to back (each holding the port about a second), a
-    power probe with PROBE_SECONDS completes within PICTURE_HOLD_SECONDS + 0.5 s of its call."""
-    display.script(read_seconds=1.0)
+def picture_runs(runs) -> int:
+    """How many of the channel's runs (`Display.runs`) are picture commands (all but power's D6)."""
+    return sum("D6" not in command for _, command in runs)
+
+
+def power_taken(runs, began: float) -> float:
+    """Seconds from `began` until the first power (D6) command took the port, asserting that no
+    picture command took it in between: power goes first, however many picture waiters queue."""
+    after = [(at, command) for at, command in runs if at >= began]
+    index = next(index for index, (_, command) in enumerate(after) if "D6" in command)
+    assert picture_runs(after[:index]) == 0, after[:index + 1]
+    return after[index][0] - began
+
+
+@pytest.mark.parametrize("read_seconds", [1.0, PICTURE_HOLD_SECONDS + 1.0], ids=["finishes", "cut"])
+def test_a_power_probe_answers_within_one_hold_while_the_list_is_asked_back_to_back(display, read_seconds):
+    """With the asker running batches back to back (each holding the port about a second, or for
+    the whole hold when the display is slower: each batch cut), a power probe with PROBE_SECONDS
+    takes the port within PICTURE_HOLD_SECONDS + 0.5 s of its call, no picture command before it.
+    Measured where the channel takes the port (`Display.runs`), not at the fake tool's finish: a
+    loaded runner is slow to start a process, which is no part of the port's turn (CI: every 1 s
+    batch was cut and the wait for two finished batches never ended)."""
+    display.script(read_seconds=read_seconds)
     asker = PictureListAsker(display.channel)
     stop = threading.Event()
 
@@ -145,20 +164,20 @@ def test_a_power_probe_answers_within_one_hold_while_the_list_is_asked_back_to_b
     for thread in asking:
         thread.start()
     try:
-        until(lambda: sum(call["at"] == "end" for call in display.calls()) >= 2)
+        until(lambda: picture_runs(display.runs) >= 2)                  # back to back on the port
         power = DdcCiAdapter(display.channel)
-        took = []
+        waited = []
         for _ in range(2):
             began = time.monotonic()
             assert power.probe(OUTPUT, timeout=PROBE_SECONDS)
-            took.append(time.monotonic() - began)
-        assert max(took) < PICTURE_HOLD_SECONDS + 0.5, took
+            waited.append(power_taken(display.runs, began))
+        assert max(waited) < PICTURE_HOLD_SECONDS + 0.5, waited
     finally:
         stop.set()
         for thread in asking:
             thread.join(15)
-    batches = [args for args in display.started() if args[0] == "getvcp" and args[1] != "D6"]
-    assert all(len(args) - 1 <= ASK_BATCH for args in batches)
+    batches = [command for _, command in display.runs if command[0] == "getvcp" and "D6" not in command]
+    assert all(len(command) - 1 <= ASK_BATCH for command in batches)
 
 
 def test_one_command_at_a_time_per_port_and_ports_do_not_wait_on_each_other(display):
@@ -240,8 +259,10 @@ def test_power_calls_at_powers_turn_and_picture_calls_at_pictures():
 
 def test_a_whole_power_operation_waits_at_most_one_picture_hold(display):
     """A power set is two commands (setvcp D6, then its read-back), each its own hold; with picture
-    reads queued back to back, the read-back must not queue behind another picture hold. Mutation
-    probe: POWER_GRACE_SECONDS 0 -> each power command waits a hold (about 2 s for the set)."""
+    reads queued back to back, the read-back must not queue behind another picture hold: no picture
+    command takes the port between the two, and the set takes it within one hold of its call.
+    Mutation probe: POWER_GRACE_SECONDS 0 -> a picture read runs between the write and its
+    read-back."""
     display.script(read_seconds=1.2)
     channel = display.channel
     stop = threading.Event()
@@ -254,11 +275,14 @@ def test_a_whole_power_operation_waits_at_most_one_picture_hold(display):
     for thread in reading:
         thread.start()
     try:
-        until(lambda: sum(call["at"] == "end" for call in display.calls()) >= 2)
+        until(lambda: picture_runs(display.runs) >= 2)
         began = time.monotonic()
         assert DdcCiAdapter(channel).set(OUTPUT, Power.OFF, timeout=10) is PowerResult.CONFIRMED
-        took = time.monotonic() - began
-        assert took < PICTURE_HOLD_SECONDS + 0.6, took
+        waited = power_taken(display.runs, began)
+        power = [index for index, (at, command) in enumerate(display.runs) if at >= began and "D6" in command]
+        assert [display.runs[index][1][0] for index in power[:2]] == ["setvcp", "getvcp"]
+        assert power[1] == power[0] + 1, display.runs[power[0]:power[1] + 1]   # nothing between
+        assert waited < PICTURE_HOLD_SECONDS + 0.5, waited
     finally:
         stop.set()
         for thread in reading:
