@@ -40,6 +40,13 @@ class AuthorityError(ValueError):
     """A message cannot establish current execution authority."""
 
 
+class AcquisitionStopped(Exception):
+    """The Player stopped an acquisition before its last byte: its session ended, or the job's
+    authority moved on (a newer plan revision, a revocation). Raised by the bytes' producer. The
+    Player's own stop is never the content's failure, so `acquire` records no readiness failure
+    for it: the assignment is simply not secured, and the next job fetches it again."""
+
+
 @dataclass
 class _Assignment:
     layer: Layer
@@ -307,7 +314,8 @@ class Executor:
                 size: int) -> bool:
         """Worker-only acquisition of the bytes Central served for the assignment's variant,
         `size` bytes whose SHA-256 is `sha256` (its `Content-Length` and `Repr-Digest`);
-        streaming never owns the execution lock."""
+        streaming never owns the execution lock. `chunks` raising AcquisitionStopped is the
+        Player's own stop: not secured, and no readiness failure recorded."""
         with self._cache_work:
             return self._acquire(assignment_id, chunks, sha256=sha256, size=size)
 
@@ -352,7 +360,9 @@ class Executor:
                 if self._assignments.get(assignment_id) is assignment:
                     assignment.secured = False
                     self._lose_preparation(assignment)
-                    assignment.failure = "capacity" if isinstance(error, CacheCapacityError) else "download"
+                    if not isinstance(error, AcquisitionStopped):
+                        assignment.failure = ("capacity" if isinstance(error, CacheCapacityError)
+                                              else "download")
             return False
         return self._accept_acquired_path(assignment_id, assignment, path)
 
