@@ -14,7 +14,7 @@ name: Pipeline
 #                   package, Central's fleet owners or the scenarios' own paths changed.
 #   node-components node-components.yml: the V2 node components (and the PID1 fixture when
 #                   node-pid1 runs), built ONCE for e2e (the Player runs from its app image),
-#                   base-image and node-pid1 when the plan lists one, so on every run. A build,
+#                   base-image and node-pid1 when the plan lists one of them. A build,
 #                   not a test: scripts/release_plan.py's BUILD_JOBS names its consumers, and the
 #                   gate fails a run where it failed.
 #   tested          the barrier every release job needs: each test job the plan listed passed
@@ -29,12 +29,14 @@ name: Pipeline
 #
 # A MERGE REUSES ITS PULL REQUEST'S PASS. A push to main whose tree its pull request's newest
 # run already tested (the push is that pull request's merge, the head has the push's tree, and
-# every main commit that run could have merged the head into added nothing the head lacks, so it
-# checked out this very tree: release_plan.py passed_run and tested_tree) does not test it
-# again: the plan lists only the suites that run did not pass, and outputs the
+# git's merge of the head into every main commit that run could have started from is the head's
+# tree, so it checked out this very tree: release_plan.py passed_run and tested_tree) does not
+# test it again: the plan lists only the suites that run did not pass, and outputs the
 # rest as `reused`, which the gate accepts in place of the always-run suites. Only a verdict is
 # reused, never a byte: a release still builds node-components and base-image in this run, so
-# no pull request's build output reaches the seal. Anything in doubt (an API error, a fork, main
+# no pull request's build output reaches the seal. The cost: on a reused merge, e2e and
+# node-pid1 ran against the pull request run's build of the same tree, not against the bytes the
+# seal ships, which only their build proofs check. Anything in doubt (an API error, a fork, main
 # moved first) runs every suite. The plan's summary names the reused run.
 #
 # WHEN IT RELEASES (scripts/release_plan.py owns the rule): a push to main releases exactly
@@ -276,9 +278,10 @@ jobs:
         with:
           buildkitd-config-inline: ${{ steps.docker-hub-mirror.outputs.buildkitd-config }}
           driver-opts: image=${{ steps.docker-hub-mirror.outputs.buildkit-image }}
-      # The service-image action reads the amd64 caches checks.yml wrote for this
-      # revision, so a release does not rebuild from scratch. github.repository is
-      # already lowercase (mcurcio/photo-wall), which ghcr requires.
+      # The service-image action reads main's amd64 cache scopes, written by checks.yml
+      # when this run re-ran it and by this job itself, so a release does not rebuild
+      # from scratch. github.repository is already lowercase (mcurcio/photo-wall), which
+      # ghcr requires.
       - name: Push the central service image by digest
         id: central
         uses: ./.github/actions/service-image

@@ -678,20 +678,19 @@ def tested_tree(repo: Path, head: str, before: str) -> None:
     """Raise NoReuse unless every pull request run of `head` checked out `head`'s own tree.
 
     A pull request run checks out GitHub's merge of the head into the branch as it was when the
-    run started: some first-parent commit `base` of the branch up to `before`. That merge IS the
-    head's tree when `base` is an ancestor of the head, or when `base`'s tree is the tree of its
-    merge base with the head (the branch added nothing the head lacks, so a three-way merge takes
-    the head whole). Each candidate is checked, walking back from `before` until one is an
-    ancestor of the head; every earlier one is too, and the head was pushed after them."""
+    run started: some first-parent commit `base` of the branch up to `before`. Each candidate's
+    merge is computed as git makes it (`git merge-tree --write-tree`, criss-cross histories and
+    their virtual merge base included) and must be the head's tree, walking back from `before`
+    until one is an ancestor of the head; every earlier one is too, so its merge is the head
+    itself, and the head was pushed after them."""
+    head_tree = git(repo, "rev-parse", f"{head}^{{tree}}").strip()
     base = before
     for _ in range(MAX_BASES):
         if _ok(repo, "merge-base", "--is-ancestor", base, head):
             return
-        found = subprocess.run(["git", "-C", str(repo), "merge-base", base, head],
-                               capture_output=True, text=True)
-        common = found.stdout.strip()
-        if found.returncode != 0 or (git(repo, "rev-parse", f"{common}^{{tree}}")
-                                     != git(repo, "rev-parse", f"{base}^{{tree}}")):
+        merged = subprocess.run(["git", "-C", str(repo), "merge-tree", "--write-tree", base, head],
+                                capture_output=True, text=True)
+        if merged.returncode != 0 or merged.stdout.split("\n", 1)[0].strip() != head_tree:
             raise NoReuse(f"a run based on {base[:12]} would have merged in changes the head "
                           "lacks, so it tested another tree")
         parent = subprocess.run(["git", "-C", str(repo), "rev-parse", "--verify", "--quiet",
@@ -722,7 +721,7 @@ def passed_run(repo: Path, history: RunHistory, revision: str, before: str) -> P
         raise NoReuse(f"pull request #{pull.number} comes from a fork")
     if not _ok(repo, "cat-file", "-e", f"{pull.head}^{{commit}}"):
         raise NoReuse(f"pull request #{pull.number}'s head {pull.head[:12]} is not in this "
-                      "checkout (a rebase merge)")
+                      "checkout (a rebase merge whose branch is already deleted)")
     if git(repo, "rev-parse", f"{pull.head}^{{tree}}") != git(repo, "rev-parse",
                                                                f"{revision}^{{tree}}"):
         raise NoReuse(f"pull request #{pull.number}'s head {pull.head[:12]} has another tree: "

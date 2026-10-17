@@ -29,15 +29,27 @@ pushed tree, the plan lists only the suites the run did not pass and outputs the
 rest as `reused`; `tested` and `gate` accept a reused suite in place of running it
 and still fail on any failed or cancelled job. "Exactly the pushed tree" is proven
 from history, not from anything a run wrote: the pull request is from this
-repository, its head has the push's tree, and every `main` commit the run could
-have merged the head into is either in the head's history or added nothing the
-head lacks (`tested_tree`). A fork, a rebase merge, `main` moving first, a red or
-unfinished run, or any GitHub API error runs every suite. Only verdicts are
-reused, never bytes: a release still builds `node-components` and `base-image`
-in its own run, so the boundary under **Limits** below holds. Costs: a merge
-reuses a flaky leg's passing re-run; a pass vouches for what the unpinned Pi and
-Ubuntu archives served when the pull request ran; `linux-media`'s cache, written
-only by `main`'s `checks`, is refreshed only on merges that re-run them. The plan's
+repository, its head has the push's tree, and for every `main` commit the run
+could have started from, git's merge of the head into it (`git merge-tree
+--write-tree`, the merge GitHub checks out) is the head's tree (`tested_tree`).
+A rebase merge is reused on those same terms while its head branch still exists
+(the head is then in the checkout); once the branch is deleted, it runs every
+suite. A fork, `main` moving first, a red or unfinished run, or any GitHub API
+error runs every suite. Only verdicts are reused, never bytes: a release still
+builds `node-components` and `base-image` in its own run, so the boundary under
+**Limits** below holds. Costs: on a reused merge, `e2e` and `node-pid1` ran
+against the pull request run's build of the same tree, not against the bytes the
+seal ships, which only their build proofs check (the debs built twice, the roots
+proof, the base image's content checks); a merge reuses a flaky leg's passing
+re-run; a pass vouches for what the unpinned Pi and Ubuntu archives served when
+the pull request ran. Two cache scopes are written only by suites a reused merge
+skips, so they refresh only on merges that re-run them (when `main` moved
+first): `linux-media`'s, written by `main`'s `checks`, and the arm64 `central`
+and `media-worker` scopes, written by `main`'s `e2e`. Pull request `e2e` legs
+fall back to those `main` scopes and rebuild every layer changed since (a
+`uv.lock` or Central change), which lengthens legs already over the 4-minute
+budget; measure `e2e` leg times after a few reused merges before adding an
+arm64 cache-writing job to the release. The plan's
 step summary names the reused run, so the first `main` run after a merge shows
 what it took.
 Only `base-image.yml` builds the Pi base OS, the netboot bundle and both
