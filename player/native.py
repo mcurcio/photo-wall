@@ -34,7 +34,7 @@ from contracts.models import MAT_LIGHTS_MAX, AppliedCalibration, Mat, OutputBind
 from contracts.node_frame import PictureOperations
 from contracts.tuning import TARGET_PATTERNS, TestPattern
 from player.calibration_target import target_modules
-from player.fitted import FITTED_BYTES, FitKey, prepared, shown_at_once
+from player.fitted import FITTED_BYTES, FitKey, prepared, redrawn_by_frames, shown_at_once
 from player.geometry import (
     BLACK_LEVEL_PATCH,
     BLACK_LEVEL_STEPS,
@@ -1211,12 +1211,12 @@ class NativeRenderer:
             decoder = self._decoders.get(key)
             if decoder is None or not decoder.prepared or decoder.failure:
                 return False
-            if key in on_screen:
-                continue
             fitted = surface.fitted.get(key)
-            if not shown_at_once(fitted.key if fitted else None,
-                                 self._key(surface, local, composition.binding, fit, decoder),
-                                 self._done(fitted)):
+            drawn = fitted.key if fitted else None
+            now = self._key(surface, local, composition.binding, fit, decoder)
+            if redrawn_by_frames(drawn, now, key in on_screen):
+                continue
+            if not shown_at_once(drawn, now, self._done(fitted)):
                 return False
         return True
 
@@ -1488,8 +1488,9 @@ class NativeRenderer:
             return PrepareResult("pending")
         now = self._key(surface, local, binding, _drawn_fit(probe), decoder)
         fitted = surface.fitted.get(key)
-        if (not now.same_picture(fitted.key if fitted else None)
-                and key not in self._on_screen(surface)
+        drawn = fitted.key if fitted else None
+        if (not now.same_picture(drawn)
+                and not redrawn_by_frames(drawn, now, key in self._on_screen(surface))
                 and (seen or not surface.follower.following)):
             try:
                 fitted = self._fit(surface, local, now)
