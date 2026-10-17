@@ -11,6 +11,10 @@ at /smoke. It starts its own headless Weston (kiosk shell, no photo-wall shell o
 3. A static photo is not redrawn every tick: after it is presented, NativeRenderer paints it
    at most twice a second while present() is still called every 33 ms, and every present()
    meanwhile reads "presented" (the acknowledgment freshness covers the renewal).
+4. A display socket nobody reads never starves GDK's paint: while GDK pauses its events between
+   a frame's flush and its paint, the socket stays readable; DisplayEvents' watch, re-armed only
+   behind the paint, lets the paint run (a level-triggered watch at GDK's event priority starved
+   it forever: no frame again on any Output).
 """
 import os
 import pathlib
@@ -101,6 +105,35 @@ def saturated_control(seconds=3.0):
     print("PASS control_dispatch_answers_on_a_saturated_loop", flush=True)
 
 
+def unread_display_socket_never_starves_paint(seconds=1.0):
+    """A readable fd nothing reads, as the display's socket is while GDK pauses its events: the
+    paint at GDK_PRIORITY_REDRAW still runs every time it is ready."""
+    loop = GLib.MainLoop()
+    read_end, write_end = os.pipe()
+    os.write(write_end, b"x")
+    arrivals, paints = [0], [0]
+
+    def arrived():
+        arrivals[0] += 1
+
+    def paint():
+        paints[0] += 1
+        return paints[0] < 10
+
+    events = mainloop.DisplayEvents(GLib, read_end, arrived)
+    try:
+        GLib.idle_add(paint, priority=mainloop.GDK_PRIORITY_REDRAW)
+        GLib.timeout_add(int(seconds * 1000), loop.quit, priority=GLib.PRIORITY_HIGH)
+        loop.run()
+    finally:
+        events.stop()
+        os.close(read_end)
+        os.close(write_end)
+    print(f"UNREAD_SOCKET paints={paints[0]} arrivals={arrivals[0]}", flush=True)
+    assert paints[0] == 10 and arrivals[0] >= 1, ("paint_starved", paints[0], arrivals[0])
+    print("PASS an_unread_display_socket_never_starves_paint", flush=True)
+
+
 def static_photo_render_rate(seconds=6.0):
     from native_display_media import image_fixture
 
@@ -182,6 +215,7 @@ def static_photo_render_rate(seconds=6.0):
 try:
     priorities()
     saturated_control()
+    unread_display_socket_never_starves_paint()
     static_photo_render_rate()
 except BaseException:
     log = pathlib.Path("/tmp/pw-mainloop-weston.log")

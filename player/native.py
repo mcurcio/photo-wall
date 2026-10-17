@@ -428,6 +428,10 @@ class _Surface:
     # An event since the last draw changed what the drawn composition shows (a video's new
     # sample, Display Host's edit): the next render draws it again (`NativeRenderer._invalidate`).
     dirty: bool = False
+    # A draw is owed but a layer it shows holds no decoded picture yet: frames cannot change that
+    # (only prepare() reads a decoder's sample), so the frame clock is not followed until the
+    # planning tick or an event wakes the surface (`NativeRenderer._owed`).
+    waiting: bool = False
 
     def fail(self, reason: str) -> None:
         self.failure, self.failed_episode = reason, self.episode
@@ -937,6 +941,8 @@ class NativeRenderer:
         pending or an event marked the drawn one; else when its drawn look next changes over time
         (`player/look.py` `next_change`: a fade, the drawn trial running out); None: nothing."""
         drawn = surface.acknowledged
+        if surface.waiting:
+            return None
         if surface.pending is not None or (surface.dirty and drawn is not None):
             return -math.inf
         if drawn is None or drawn.at is None:
@@ -946,7 +952,7 @@ class NativeRenderer:
     def _frame(self, surface: _Surface, at: float) -> bool:
         """The surface's per-frame hook (FrameFollower) at frame time `at`: queue the render when
         a draw is owed by `at`; keep following while one is owed within FOLLOW_LEAD."""
-        due = None if self._closed else self._due(surface)
+        due = self._due(surface)        # close() stops every follower first
         if due is not None and due <= at:
             surface.area.queue_render()
         return due is not None and due <= at + FOLLOW_LEAD
@@ -962,7 +968,7 @@ class NativeRenderer:
     def _invalidate(self, surface: _Surface) -> None:
         """An event changed what the surface's drawn composition shows: the next frame draws it
         again (GTK paints a queued render on the next frame of its clock)."""
-        surface.dirty = True
+        surface.dirty, surface.waiting = True, False
         surface.area.queue_render()
 
     def _arrived(self) -> None:
@@ -991,7 +997,8 @@ class NativeRenderer:
         """The one redraw decision, for the frame at `at`: the pending draw (a new composition
         from present()), else the drawn one again when an event marked it (`dirty`) or its look
         changed by `at` (`_due`), in either case as it looks at `at`. None: what is drawn stands,
-        also while a layer seen at `at` is not decoded yet (the draw stays owed: next frame)."""
+        also while a layer seen at `at` is not decoded yet: the draw stays owed and the surface
+        `waiting`, unfollowed until the planning tick (whose prepare() reads the decoder) wakes it."""
         draw, drawn = surface.pending, surface.acknowledged
         if draw is not None and draw.generations != self._generations(draw.composition):
             surface.pending = draw = None
@@ -1012,6 +1019,7 @@ class NativeRenderer:
                 return None
         seen = look(draw.composition, at)
         if not self._ready(seen):
+            surface.waiting = True
             return None
         draw.composition, surface.dirty = seen, False
         return draw
@@ -1374,6 +1382,7 @@ class NativeRenderer:
         ack = surface.acknowledged
         newest = surface.pending or ack
         now = time.monotonic()
+        surface.waiting = False                     # this tick's prepare() read the decoders
         self._wake(surface, now)
         if newest is None or newest.shown != shown or _renewal_due(ack, now):
             self._serial += 1

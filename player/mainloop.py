@@ -34,6 +34,9 @@ display's socket into every event queue. A watch on that socket runs no higher: 
 check of lower-priority sources once a higher one is ready, so nothing would read it."""
 GDK_PRIORITY_REDRAW = 120
 """GDK's paint (G_PRIORITY_HIGH_IDLE + 20), which every queue_render feeds."""
+REARM = GDK_PRIORITY_REDRAW + 1
+"""Below GDK's paint: `DisplayEvents` re-arms its watch only after a frame's paint has resumed
+GDK's events, so a socket GDK is not reading never starves that paint."""
 MIN_GAP_MS = 8
 """The least idle time a Tick leaves after its work, so lower-priority paint still runs."""
 
@@ -220,33 +223,50 @@ class FrameFollower:
 
 
 class DisplayEvents:
-    """Calls `arrived()` on the main loop after each read of the Wayland display's socket `fd`
+    """Calls `arrived()` on the main loop after a read of the Wayland display's socket `fd`
     (g_unix_fd_add, at WAYLAND_EVENTS): GDK's event source reads the socket in its check, before
     any source of the same iteration dispatches, so `arrived` finds every event read since it last
     ran queued on its own event queue (wl_display_dispatch_queue_pending). Nothing runs while no
-    event arrives. Events read outside the main loop's poll (a roundtrip) wait for the next event;
-    the planning tick still compares what they change. A raising `arrived` is logged and the
-    watch kept: the next event calls it again."""
+    event arrives.
+
+    The watch is one-shot: after each call it is re-armed by an idle at REARM, below GDK's paint.
+    Between a frame's flush and its paint GDK pauses its events and reads nothing, so a socket
+    with bytes waiting stays readable; a level-triggered watch at this priority would then be
+    ready on every iteration and starve the paint (priority 120) that resumes GDK's events: no
+    frame ever again on any Output. Re-armed behind the paint, it calls `arrived` once per frame
+    at most. Events read while it is disarmed, or outside the main loop's poll (a roundtrip),
+    wait for the next event; the planning tick still compares what they change. A raising
+    `arrived` is logged and the watch re-armed: the next event calls it again."""
 
     def __init__(self, glib, fd: int, arrived: Callable[[], object], *,
                  priority: int = WAYLAND_EVENTS):
         if priority < WAYLAND_EVENTS:
             raise ValueError("display_events_priority")
-        self.glib, self._arrived = glib, arrived
-        self._source: int | None = glib.unix_fd_add_full(
-            priority, fd, glib.IOCondition.IN, self._readable)
+        self.glib, self._fd, self._priority, self._arrived = glib, fd, priority, arrived
+        self._source: int | None = None
+        self._rearm: int | None = None
+        self._watch()
+
+    def _watch(self) -> bool:
+        self._rearm = None
+        self._source = self.glib.unix_fd_add_full(
+            self._priority, self._fd, self.glib.IOCondition.IN, self._readable)
+        return False
 
     def _readable(self, _fd, _condition) -> bool:
+        self._source = None
         try:
             self._arrived()
         except Exception:
             logging.getLogger(__name__).exception("display event handling failed")
-        return True
+        self._rearm = self.glib.idle_add(self._watch, priority=REARM)
+        return False
 
     def stop(self) -> None:
-        if self._source is not None:
-            self.glib.source_remove(self._source)
-            self._source = None
+        for source in (self._source, self._rearm):
+            if source is not None:
+                self.glib.source_remove(source)
+        self._source = self._rearm = None
 
 
 def watch_bus(bus) -> None:
@@ -254,6 +274,6 @@ def watch_bus(bus) -> None:
     bus.add_signal_watch_full(BUS)
 
 
-__all__ = ["BUS", "CONTROL", "DisplayEvents", "GDK_PRIORITY_REDRAW", "MIN_GAP_MS", "TICK",
+__all__ = ["BUS", "CONTROL", "DisplayEvents", "GDK_PRIORITY_REDRAW", "MIN_GAP_MS", "REARM", "TICK",
            "DispatchRefused", "FrameFollower", "LatePosts", "LoopLate", "MainLoopDispatcher", "Tick",
            "WAYLAND_EVENTS", "frame_time", "watch_bus"]

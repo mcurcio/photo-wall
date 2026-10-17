@@ -16,6 +16,9 @@ NativeRenderer on software GL. Its JPEG fixture is made here with GStreamer.
    until the window is mapped again, not forever.
 4. a_failed_surface_presents_again_under_a_new_grant: a failure under grant G1 ends when the
    display host hands the Output a new grant G2.
+6. a_decoders_sample_hops_to_the_main_loop: a decoder's sample (a photo's preroll here) hops to
+   the main loop once and reaches NativeRenderer._sample_arrived for that decoder: the event
+   that draws a drawn video's new sample on the next frame.
 5. each_teardown_mechanism_holds_alone: case 1 stays green while either mechanism alone holds,
    so each is checked by itself: connected callbacks hold their decoder weakly, and release
    disconnects every handler the decoder made.
@@ -301,6 +304,17 @@ def each_teardown_mechanism_holds_alone(native: NativeRenderer, variant: Variant
     print("PASS release_disconnects_every_handler", flush=True)
 
 
+def a_decoders_sample_hops_to_the_main_loop(native: NativeRenderer, variant: Variant) -> None:
+    arrivals = []
+    native._sample_arrived = lambda key, incarnation: arrivals.append((key, incarnation))
+    local = slide(f"hop-{uuid.uuid4().hex[:8]}", variant).layers[0]
+    assert until(lambda: native.prepare(local).status, "prepared") == "prepared"
+    spin(0.2)
+    incarnation = native._decoders[local.layer.assignment_id].incarnation
+    assert (local.layer.assignment_id, incarnation) in arrivals, ("no_sample_hop", arrivals)
+    print("PASS a_decoders_sample_hops_to_the_main_loop", flush=True)
+
+
 def main() -> None:
     variant = jpeg_fixture()
     with WESTON_LOG.open("w") as log:
@@ -316,6 +330,7 @@ def main() -> None:
                 time.sleep(0.05)
             failed = []
             for case in (decoder_churn_releases_every_descriptor, each_teardown_mechanism_holds_alone,
+                         a_decoders_sample_hops_to_the_main_loop,
                          a_failed_surface_presents_again_after_a_remap,
                          a_failed_surface_presents_again_under_a_new_grant):
                 native = renderer()     # each case on its own surface: one red stays one red

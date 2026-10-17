@@ -11,6 +11,7 @@ nothing per frame.
 
 from __future__ import annotations
 
+import math
 import threading
 import time
 import uuid
@@ -29,7 +30,14 @@ from player.cache import Cache
 from player.executor import TIMEBASE_TOLERANCE, Executor
 from player.look import look, next_change
 from player.luts import PlayerLuts
-from player.mainloop import WAYLAND_EVENTS, DisplayEvents, FrameFollower, frame_time
+from player.mainloop import (
+    GDK_PRIORITY_REDRAW,
+    REARM,
+    WAYLAND_EVENTS,
+    DisplayEvents,
+    FrameFollower,
+    frame_time,
+)
 from player.native import FOLLOW_LEAD, NativeOutput, NativeRenderer
 from player.rendering import LocalLayer, OutputComposition, PrepareResult, PresentationResult
 from player.visibility import visible_now
@@ -172,6 +180,21 @@ def test_a_continuation_keeps_the_executors_timebase(tmp_path):
     assert look(kept, at + 99).layers[0].alpha < look(kept, at + 74).layers[0].alpha
 
 
+def test_a_mapping_gone_unhealthy_keeps_its_anchor_through_a_utc_step(tmp_path):
+    """Anchored while healthy; once the mapping ages out a UTC step is not a new timeline: the
+    executor keeps handing over the anchor it took while the mapping was healthy."""
+    clock = ManualClock(100)
+    mapping = TimeMapping(clock)
+    mapping.establish(.01)
+    executor = Executor("player1", Cache(tmp_path / "cache", 4096), Rig(tmp_path / "r").renderer,
+                        clock, mapping)
+    anchored = executor._timebase()
+    clock.advance(mapping.max_age + 1)
+    assert not mapping.healthy()
+    clock.step_utc(5)
+    assert executor._timebase() == anchored
+
+
 def test_an_unanchored_clock_mapping_hands_over_utc_less_monotonic(tmp_path):
     """Never healthy, so nothing is anchored: the timebase is this moment's UTC less monotonic."""
     clock = ManualClock(100)
@@ -240,11 +263,12 @@ class Area:
 
 
 class GLib:
-    """GLib's monotonic time and fd watches, recorded rather than run."""
+    """GLib's monotonic time, fd watches and idles, recorded rather than run."""
     IOCondition = SimpleNamespace(IN=1)
 
     def __init__(self):
         self.watches: dict[int, tuple[int, int, object]] = {}
+        self.idles: dict[int, tuple[int, object]] = {}
         self.added = 0
 
     def unix_fd_add_full(self, priority, fd, condition, callback):
@@ -253,18 +277,29 @@ class GLib:
         self.watches[self.added] = (priority, fd, callback)
         return self.added
 
-    def readable(self, fd) -> None:
-        """`fd` has input: each watch on it runs, as the main loop's dispatch would."""
+    def idle_add(self, callback, priority):
+        self.added += 1
+        self.idles[self.added] = (priority, callback)
+        return self.added
+
+    def readable(self, fd, *, idle: bool = True) -> None:
+        """`fd` has input: each watch on it runs, as the main loop's dispatch would; then, unless
+        `idle` is False (a higher-priority source stays ready), the idles queued run."""
         for key, (_priority, watched, callback) in list(self.watches.items()):
             if watched == fd and not callback(fd, self.IOCondition.IN):
                 del self.watches[key]
+        if idle:
+            for key, (_priority, callback) in list(self.idles.items()):
+                del self.idles[key]
+                callback()
 
     @staticmethod
     def get_monotonic_time():
         return round(time.monotonic() * 1e6)
 
     def source_remove(self, key):
-        self.watches.pop(key)
+        if self.watches.pop(key, None) is None:
+            self.idles.pop(key)
 
 
 def test_frame_time_maps_gdk_microseconds_onto_the_monotonic_clock():
@@ -501,7 +536,9 @@ def test_a_re_anchor_within_tolerance_draws_nothing_and_a_real_one_redraws(tmp_p
 def test_a_layer_seen_only_at_a_later_frame_waits_for_its_decode_and_does_not_fail(clock):
     """A photo fading in whose first draw had alpha 0 becomes visible at a later frame time
     before its decoder holds a picture: that frame draws nothing new and the decoder is not
-    failed; the surface tries each frame and draws it once decoded."""
+    failed. Frames cannot decode it, so the surface stops following its frame clock (no render
+    per refresh); the next planning tick, whose prepare() reads the decoder, wakes it and the
+    next frame draws it."""
     base = black("base", start=100, end=200)
     photo = layer("photo", start=101, end=200, fade_in=1, priority=1)
     decoding = decoder(photo, prepared=False)
@@ -515,15 +552,21 @@ def test_a_layer_seen_only_at_a_later_frame_waits_for_its_decode_and_does_not_fa
     renderer.present(shown)                         # the tick before its fade-in wakes the clock
     paint(renderer, surface, area, start + 1.5)
     assert renderer.GL.opacities == [1.0] and decoding.failure is None
-    assert surface.follower.following, "the draw is still owed"
+    renders = area.renders
+    for index in range(1, 30):                      # half a second of refreshes, no tick
+        paint(renderer, surface, area, start + 1.5 + index / 60)
+    assert area.renders == renders and not area.callbacks, "not rendered per refresh"
     decoding.prepared = True
-    paint(renderer, surface, area, start + 1.75)
-    assert renderer.GL.opacities == [1.0, 1.0, .75]
+    clock.now = start + 1.98
+    renderer.present(shown)                         # the tick: its prepare() read the decode
+    paint(renderer, surface, area, start + 2)
+    assert renderer.GL.opacities == [1.0, 1.0, 1.0]
 
 
 def test_a_pending_draw_not_decoded_for_its_frame_waits_and_is_drawn_at_its_frames_look():
     """present() made a draw, but at the frame's time a layer it shows is not decoded yet: the
-    frame draws nothing (never the tick's look); the next frame after its decode draws it."""
+    frame draws nothing (never the tick's look) and the surface waits, unfollowed; the frame
+    after the next tick (whose prepare() read the decode) draws it at that frame's look."""
     base = black("base", start=100, end=200)
     photo = layer("photo", start=99.5, end=200, fade_in=1, priority=1)
     decoding = decoder(photo, prepared=False)
@@ -532,7 +575,9 @@ def test_a_pending_draw_not_decoded_for_its_frame_waits_and_is_drawn_at_its_fram
     renderer.present(composition(base, photo, timebase=100 - start))
     paint(renderer, surface, area, start + .25)
     assert renderer.GL.opacities == [] and surface.pending is not None
+    assert not surface.follower.following
     decoding.prepared = True
+    renderer.present(composition(base, photo, timebase=100 - start))
     paint(renderer, surface, area, start + .3)
     assert renderer.GL.opacities == [1.0, .8]
 
@@ -618,7 +663,8 @@ def test_a_slider_edit_between_ticks_is_drawn_on_the_next_frame():
 
     frames.operations = operations(2, light=.5)     # the owner moves a slider
     renderer.GLib.readable(9)
-    assert area.renders == 2, "the edit queues the next frame"
+    renderer.GLib.readable(9)                       # another event before the frame
+    assert area.renders == 2, "the edit queues the next frame, once"
     paint(renderer, surface, area, start + .1 + 2 / 60)
     assert renderer.GL.opacities == [1.0, 1.0]
     assert frames.picture_changes[-1] == 2, "the tag names the edit the buffer shows"
@@ -667,6 +713,38 @@ def test_a_trial_is_never_polled_per_frame_its_edit_is_drawn_next_frame_and_its_
     assert not area.callbacks
 
 
+def test_a_draw_whose_grant_was_withdrawn_before_its_frame_is_dropped_undrawn():
+    """present() made a draw under an admitted grant; Display Host withdrew the grant for that
+    composition before the frame: the frame draws nothing and the draw is dropped (the next
+    present() decides again)."""
+    renderer, surface, area = frame_renderer()
+    renderer._frames = frames = Frames()
+    frames.sequence = None
+    start = time.monotonic()
+    renderer.present(composition(black("still", start=100, end=200), timebase=100 - start))
+    exact = frames.grant
+    frames.grant = lambda output_id, shown=None: None if shown is not None else exact(output_id)
+    paint(renderer, surface, area, start + .1)
+    assert renderer.GL.opacities == [] and surface.pending is None
+    assert surface.acknowledged is None and not surface.failed()
+
+
+def test_a_trials_end_on_boot_time_is_drawn_at_its_expiry_on_the_monotonic_clock(monkeypatch):
+    """Display Host's trial runs out on CLOCK_BOOTTIME, ahead of the monotonic clock by the time
+    the machine was suspended: the drawn trial ends at its expiry less that lead."""
+    now, ahead = 1000.0, 250.0
+    monkeypatch.setattr(native_module, "time", SimpleNamespace(
+        monotonic=lambda: now, CLOCK_BOOTTIME=7,
+        clock_gettime=lambda which: now + ahead if which == 7 else math.nan))
+    renderer, surface, area = frame_renderer()
+    renderer._frames = frames = Frames()
+    frames.expires = now + ahead + .5               # boot time, as Display Host writes it
+    renderer.present(composition(black("still", start=100, end=200), timebase=100 - now))
+    paint(renderer, surface, area, now + .1)
+    assert surface.acknowledged.applied_calibration.trial_sequence == 1
+    assert surface.acknowledged.expires == pytest.approx(now + .5)
+
+
 def test_close_removes_the_frame_callback():
     renderer, surface, area = frame_renderer()
     start = time.monotonic()
@@ -684,10 +762,12 @@ def test_a_surface_with_no_frame_clock_draws_at_now():
     assert before <= renderer._frame_time(area) <= time.monotonic()
 
 
-def test_display_events_call_on_each_read_of_the_display_and_stop():
+def test_display_events_call_once_per_readable_wake_and_re_arm_behind_gdks_paint():
     """The watch sits on the display's socket at GDK's event priority (never above it: GDK's
-    check reads the socket), calls `arrived` once per readable wake, survives a raising one, and
-    stop() removes it."""
+    check reads the socket), calls `arrived` once per readable wake and then waits for an idle
+    below GDK's paint before it watches again: while GDK pauses its events nothing reads the
+    socket, and a watch still armed at this priority would starve the paint forever. It survives
+    a raising `arrived`, and stop() removes the watch or the idle, whichever is armed."""
     glib, arrivals = GLib(), []
 
     def arrived():
@@ -699,10 +779,16 @@ def test_display_events_call_on_each_read_of_the_display_and_stop():
         DisplayEvents(glib, 9, arrived, priority=WAYLAND_EVENTS - 1)
     events = DisplayEvents(glib, 9, arrived)
     assert [(priority, fd) for priority, fd, _ in glib.watches.values()] == [(WAYLAND_EVENTS, 9)]
-    glib.readable(9)
+    for _ in range(5):                              # paused: the paint has not run
+        glib.readable(9, idle=False)
+    assert len(arrivals) == 1 and not glib.watches, "disarmed until the paint has run"
+    assert [priority for priority, _ in glib.idles.values()] == [REARM]
+    assert REARM > GDK_PRIORITY_REDRAW
+    glib.readable(9)                                # the paint ran: the idle re-armed the watch
     glib.readable(9)
     glib.readable(9)
     assert len(arrivals) == 3 and glib.watches, "a raising arrival keeps the watch"
+    glib.readable(9, idle=False)
     events.stop()
     events.stop()
-    assert not glib.watches
+    assert not glib.watches and not glib.idles

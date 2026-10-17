@@ -87,8 +87,15 @@ once per sample, so a video is drawn once per sample, not per refresh) and Displ
 Host's edits (the Output's picture operations as a Live slider moves, a trial edit;
 read from the Wayland display's socket by `DisplayEvents` at GDK's event priority, and
 only when they change what the surface shows) by marking the drawn composition dirty.
-Nothing reads inputs per frame. A missed event is caught by the next planning tick, which compares everything
-but time (`_shown`). Subsequent calls therefore correlate the completed token by
+The display's socket carries every Wayland event, GDK's frame callbacks and
+presentation feedback included, so `DisplayEvents` cannot tell an edit from a frame: on
+each wake (at most once per frame: its watch is re-armed only behind GDK's paint, since
+a socket GDK is not reading while it pauses its events would otherwise starve that paint)
+`_arrived` reads each drawn surface's grant, trial and picture operations and compares
+them (`_shown_now`). So while any Output paints, those reads run about once per frame;
+no frame callback reads them. A draw owed whose layer is not decoded yet waits,
+unfollowed, for the planning tick (whose prepare() reads the decoder). A missed event is
+caught by the next planning tick, which compares everything but time (`_shown`). Subsequent calls therefore correlate the completed token by
 immutable execution/binding/effective-calibration identity and seek generation, with a
 500ms freshness bound.
 The native PresentationResult carries the actual acknowledged composition and

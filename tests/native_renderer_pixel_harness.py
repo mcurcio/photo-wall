@@ -640,8 +640,10 @@ class TrialFrames(Frames):
     def __init__(self, fit, mat: Mat):
         super().__init__()
         self.active = SimpleNamespace(
-            candidate=SimpleNamespace(trial_id=uuid.uuid4(), generation=1, sequence=1,
-                                      candidate_sha256=TRIAL_SHA),
+            # A trial runs out on CLOCK_BOOTTIME (contracts/node_calibration.py): an hour away.
+            candidate=SimpleNamespace(
+                trial_id=uuid.uuid4(), generation=1, sequence=1, candidate_sha256=TRIAL_SHA,
+                expires_boottime_ms=round(time.clock_gettime(time.CLOCK_BOOTTIME) * 1000) + 3_600_000),
             calibration=Calibration(fit=fit), primitives=fit.corners, mat=mat)
 
     def trial(self, _composition, _grant):
