@@ -81,7 +81,7 @@ def slide(assignment_id: str, variant: Variant) -> OutputComposition:
     layer = Layer(assignment_id=assignment_id, run_id="run", output_id="headless",
                   frame_id="frame", binding_generation=1, start=0, end=10**9,
                   media_origin=0, variant=variant, crop=CENTRED)
-    return OutputComposition(BINDING, BINDING.calibration, (LocalLayer(layer, PHOTO, 0.0, 1.0),))
+    return OutputComposition(BINDING, (LocalLayer(layer, PHOTO, 0.0, 1.0),))
 
 
 def fds() -> int:

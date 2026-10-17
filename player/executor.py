@@ -518,7 +518,7 @@ class Executor:
                 # Bottom to top by the one stacking order: a later photo of a Run is drawn over
                 # the one it dissolves in over.
                 layers.sort(key=lambda local: stack_order(local.layer))
-                result.append(OutputComposition(binding, binding.calibration,
+                result.append(OutputComposition(binding,
                                                 tuple(layers), timebase=timebase))
         return tuple(result)
 
@@ -861,7 +861,7 @@ class Executor:
     def _fallback(self, binding: OutputBinding, now: float) -> OutputComposition:
         retained = self._retained.get(binding.output_id)
         layers = (retained.local,) if retained else ()
-        return OutputComposition(binding, binding.calibration, layers, fallback=True)
+        return OutputComposition(binding, layers, fallback=True)
 
     def _show_fallback(self, composition: OutputComposition) -> bool:
         """Only observed fallback replaces state; unavailable retained media yields black."""
@@ -906,7 +906,7 @@ class Executor:
             return None
         age = self.clock.monotonic() - completed
         if (not 0 <= age <= PRESENTATION_FRESHNESS or drawn.binding != candidate.binding
-                or drawn.calibration != candidate.calibration or drawn.fallback != candidate.fallback
+                or drawn.fallback != candidate.fallback
                 or len(drawn.layers) != len(candidate.layers)):
             return None
         for actual, requested in zip(drawn.layers, candidate.layers, strict=True):
@@ -945,9 +945,7 @@ class Executor:
             if not self._config:
                 return ()
             for output_id, binding in tuple(self._retired_outputs.items()):
-                if self._show_fallback(OutputComposition(
-                    binding, binding.calibration, fallback=True
-                )):
+                if self._show_fallback(OutputComposition(binding, fallback=True)):
                     del self._retired_outputs[output_id]
             active = []
             for assignment in self._assignments.values():
@@ -1079,7 +1077,7 @@ class Executor:
                     self._valid_current(local, previous, now) for local in previous.layers
                 ):
                     continuation = OutputComposition(
-                        binding, binding.calibration, tuple(
+                        binding, tuple(
                             LocalLayer(local.layer, local.path, local.layer.position(now),
                                        local.layer.alpha(now)) for local in previous.layers
                         ), timebase=timebase,

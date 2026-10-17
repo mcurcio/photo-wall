@@ -145,7 +145,7 @@ def packed_rgba(data: bytes | memoryview, width: int, height: int,
 
 
 def _fingerprint(composition: OutputComposition) -> tuple:
-    return (composition.binding, composition.calibration, composition.fallback,
+    return (composition.binding, composition.fallback,
             tuple((local.layer, local.path) for local in composition.layers))
 
 
@@ -442,6 +442,9 @@ class _Fitted:
     key: FitKey | None = None
     # The GPU's marker after its draw (glFenceSync); None once the GPU passed it.
     fence: Any = None
+    # The decode of the last draw the GPU finished (player/fitted.py `prepared`), kept while a
+    # newer draw of it (an edit, a resize) is in flight; None: none finished, or a draw failed.
+    finished: tuple[int, int] | None = None
 
 
 @dataclass
@@ -980,6 +983,7 @@ class NativeRenderer:
                 self.GLib, area, lambda at, surface=surface: self._frame(surface, at))
             self._surfaces[output.output_id] = surface
             area.connect("render", self._render, surface)
+            area.connect("resize", self._resized, surface)
             area.connect("unrealize", self._unrealize, surface)
             window.connect("realize", self._window_realized, surface)
             # GtkWindow's default map handler resets the backend app ID. Restore
@@ -1180,7 +1184,8 @@ class NativeRenderer:
 
     def _done(self, fitted: _Fitted | None) -> bool:
         """Whether `fitted` holds a finished draw: drawn, and the GPU past its fence (asked
-        without waiting). The surface's GL context is current."""
+        without waiting), which records its decode as `finished`. The surface's GL context is
+        current."""
         if fitted is None or fitted.key is None:
             return False
         if fitted.fence is not None:
@@ -1190,6 +1195,7 @@ class NativeRenderer:
                 return False
             gl.glDeleteSync(fitted.fence)
             fitted.fence = None
+        fitted.finished = fitted.key.decode
         return True
 
     @staticmethod
@@ -1482,7 +1488,7 @@ class NativeRenderer:
         is still (not following its frame clock), so a photo's first frame (a fade's first) only
         mixes it."""
         self._thread()
-        return self._prepare(local, OutputComposition(binding, binding.calibration), seen=False)
+        return self._prepare(local, OutputComposition(binding), seen=False)
 
     def _prepare(self, local: LocalLayer, composition: OutputComposition, *,
                  seen: bool) -> PrepareResult:
@@ -1497,8 +1503,9 @@ class NativeRenderer:
     def _prepare_fitted(self, local: LocalLayer, composition: OutputComposition, *,
                         seen: bool) -> PrepareResult:
         """Draw `local`'s fitted picture when it is not on screen and has none for its picture now
-        (missing, or stale after an edit), if `seen` or its Output is still; a picture on screen
-        is its frames' to redraw. Prepared by player/fitted.py `prepared`."""
+        (missing, or stale after an edit), if `seen` or its Output is still, and no draw of it is
+        in flight (the GPU has not passed its fence: drawn once, never again before that); a
+        picture on screen is its frames' to redraw. Prepared by player/fitted.py `prepared`."""
         surface = self._surfaces[local.layer.output_id]
         key = local.layer.assignment_id
         decoder = self._decoders[key]
@@ -1514,7 +1521,8 @@ class NativeRenderer:
         now = self._key(surface, local, binding, _drawn_fit(probe), decoder)
         fitted = surface.fitted.get(key)
         drawn = fitted.key if fitted else None
-        if (not now.same_picture(drawn)
+        in_flight = drawn is not None and not self._done(fitted)
+        if (not in_flight and not now.same_picture(drawn)
                 and not redrawn_by_frames(drawn, now, key in self._on_screen(surface))
                 and (seen or not surface.follower.following)):
             try:
@@ -1526,8 +1534,9 @@ class NativeRenderer:
             finally:
                 # Outside GTK's paint: the window's own framebuffer is bound again, as GTK left it.
                 self.GL.glBindFramebuffer(self.GL.GL_FRAMEBUFFER, 0)
-        return PrepareResult("prepared" if prepared(fitted.key if fitted else None, now,
-                                                    self._done(fitted)) else "pending")
+            self._done(fitted)
+        return PrepareResult("prepared" if prepared(fitted.finished if fitted else None, now)
+                             else "pending")
 
     def _decode(self, local: LocalLayer) -> PrepareResult:
         """`local`'s decoder: made, read, sought to its position; prepared once it holds a sample
@@ -1734,9 +1743,11 @@ class NativeRenderer:
         return texture
 
     def _setup(self, surface: _Surface, width: int, height: int) -> None:
-        """The surface's programs (compiled once per GL context) and its drawn size: a new size
-        frees every fitted picture (each is drawn again at the new size before it is shown) and
-        forgets what is drawn and painted."""
+        """The surface's programs (compiled once per GL context) and its drawn size. A new size is
+        an edit like any other (player/fitted.py): every fitted picture stays (its key names the
+        old size, so each is drawn again at the new one before it is shown, and stays prepared),
+        what is on screen is drawn again by this render (`dirty`), and the GLArea's buffer, which
+        GTK made anew, holds nothing painted."""
         gl = self.GL
         if surface.programs is None:
             fit_program = self._program(_FIT)
@@ -1755,9 +1766,8 @@ class NativeRenderer:
         if self._estimate(())[1] > self.texture_budget:
             surface.size = old_size
             raise RuntimeError("resized Output exceeds texture budget")
-        for key in list(surface.fitted):
-            self._free_fitted(surface, key)
-        surface.acknowledged = surface.painted = None
+        surface.painted = None
+        surface.dirty, surface.waiting = True, False
 
     def _new_fitted(self, surface: _Surface) -> _Fitted:
         """A fitted picture's texture (GL_RGBA16F, the surface's size) and framebuffer."""
@@ -1830,18 +1840,37 @@ class NativeRenderer:
 
     def _fit(self, surface: _Surface, local: LocalLayer, key: FitKey) -> _Fitted:
         """Draw `local`'s fitted picture for `key` (the fit pass) into its texture, made at the
-        surface's size when it has none, and mark the GPU's progress with a fence; flushed, so the
-        GPU draws it now. Its key is None until the draw is issued without a GL error, so a failed
-        draw is never shown. The surface's GL context is current; the framebuffer is left bound."""
+        surface's size when it has none or one of another size (a resize), and mark the GPU's
+        progress with a fence; flushed, so the GPU draws it now. Its key is None until the draw is
+        issued without a GL error, so a failed draw is never shown, and a failed draw forgets the
+        finished one too (its texture was cleared). The surface's GL context is current; the
+        framebuffer is left bound."""
         gl = self.GL
         assignment = local.layer.assignment_id
         fitted = surface.fitted.get(assignment)
-        if fitted is None:
-            fitted = surface.fitted[assignment] = self._new_fitted(surface)
+        if fitted is None or fitted.size != surface.size:
+            resized = self._new_fitted(surface)
+            if fitted is not None:
+                resized.finished = fitted.finished      # still this decode's, being redrawn
+                self._free_fitted(surface, assignment)
+            fitted = surface.fitted[assignment] = resized
         fitted.key = None
         if fitted.fence is not None:
             gl.glDeleteSync(fitted.fence)
             fitted.fence = None
+        try:
+            self._fit_pass(surface, local, key, fitted)
+        except Exception:
+            fitted.finished = None
+            raise
+        decoder = self._decoders[assignment]
+        fitted.key = replace(key, sample=decoder.sample_serial)    # the sample uploaded
+        return fitted
+
+    def _fit_pass(self, surface: _Surface, local: LocalLayer, key: FitKey, fitted: _Fitted) -> None:
+        """The fit pass's GL work for `_fit`: `local`'s decoded picture through `key`'s fit into
+        `fitted`'s framebuffer, then its fence. Raises on a GL error."""
+        gl = self.GL
         texture = self._upload(surface, local)
         program, variant = surface.programs[0], local.layer.variant
         gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, fitted.framebuffer)
@@ -1864,9 +1893,6 @@ class NativeRenderer:
         gl.glFlush()
         if gl.glGetError() != gl.GL_NO_ERROR:
             raise RuntimeError("fit GL error")
-        decoder = self._decoders[assignment]
-        fitted.key = replace(key, sample=decoder.sample_serial)    # the sample uploaded
-        return fitted
 
     def _redraw_fitted(self, surface: _Surface, draw: _Draw) -> bool:
         """Draw again the fitted picture of each picture `draw` shows whose key changed (`_ready`
@@ -1894,10 +1920,11 @@ class NativeRenderer:
         return True
 
     @staticmethod
-    def _slots(surface: _Surface, shown: _Draw | None) -> tuple:
+    def _slots(surface: _Surface, shown: _Draw | None) -> tuple | None:
         """The frame pass's layers for `shown`, bottom to top: (kind, fitted texture, its key,
         strength) per layer seen; the commissioning grid alone while an explicit trial draws a
-        fallback with no layers (it is never a Layer, Run or readiness fact)."""
+        fallback with no layers (it is never a Layer, Run or readiness fact). None: a picture it
+        shows has no fitted picture to mix (its last draw failed), so no frame can draw it."""
         if shown is None:
             return ()
         composition = shown.composition
@@ -1911,7 +1938,7 @@ class NativeRenderer:
                 continue
             fitted = surface.fitted.get(local.layer.assignment_id)
             if fitted is None or fitted.key is None:
-                raise RuntimeError("fitted_picture_missing")
+                return None
             slots.append((_SLOT_PICTURE, fitted.texture, fitted.key, local.alpha))
         return tuple(slots)
 
@@ -1983,10 +2010,15 @@ class NativeRenderer:
         try:
             self._setup(surface, width, height)
             draw = self._owed(surface, at)
-            # A failed redraw keeps what the GLArea's buffer shows (GTK keeps it between renders).
-            kept = draw is not None and not self._redraw_fitted(surface, draw)
-            draw = None if kept else draw
+            if draw is not None and not self._redraw_fitted(surface, draw):
+                draw = None                     # a failed redraw: the draw is dropped
             shown = draw or surface.acknowledged
+            slots = self._slots(surface, shown)
+            if slots is None and surface.painted is None:
+                # What is on screen lost its fitted picture (a failed redraw) and the GLArea's
+                # buffer holds nothing known (GTK made it anew): nothing of it can be shown.
+                shown = surface.acknowledged = None
+                slots = ()
             gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, gtk_framebuffer)
             lut_drawn = self._bind_lut(surface, surface.operations)
             target = None
@@ -1994,16 +2026,17 @@ class NativeRenderer:
                 modules = self._bind_target(surface, surface.operations, lut_drawn=lut_drawn)
                 if shown:
                     target = (modules, board_draw(_drawn_fit(shown), shown.composition.binding.profile, None))
-            slots = () if kept else self._slots(surface, shown)
             # Everything the frame pass reads: GTK keeps the GLArea's buffer between renders, so a
-            # frame equal to the one painted (a renewal, an edit that changed nothing) draws nothing.
-            painted = (surface.size, slots, surface.operations, lut_drawn,
-                       surface.lut_ref if lut_drawn else None,
-                       (target, surface.target_code) if target else None,
-                       _drawn_fit(shown) if shown else None,
-                       shown.composition.binding.profile if shown else None,
-                       _drawn_mat(shown) if shown else None)
-            if painted != surface.painted and not (kept and surface.painted is not None):
+            # frame equal to the one painted (a renewal, an edit that changed nothing) draws nothing,
+            # and a frame that cannot be drawn (`slots` None) keeps what the buffer shows. The LUT
+            # bound is the one `operations` names once `lut_drawn` (`_bind_lut`).
+            painted = None if slots is None else (
+                surface.size, slots, surface.operations, lut_drawn,
+                (target, surface.target_code) if target else None,
+                _drawn_fit(shown) if shown else None,
+                shown.composition.binding.profile if shown else None,
+                _drawn_mat(shown) if shown else None)
+            if painted is not None and painted != surface.painted:
                 surface.painted = None
                 self._frame_pass(surface, shown, slots, lut_drawn, target)
                 surface.painted = painted
@@ -2134,6 +2167,13 @@ class NativeRenderer:
         gl.glPixelStorei(gl.GL_UNPACK_ALIGNMENT, 1)
         gl.glTexImage2D(gl.GL_TEXTURE_2D, 0, internal, width, height, 0, layout, gl.GL_UNSIGNED_BYTE, data)
         return texture
+
+    @staticmethod
+    def _resized(_area, _width, _height, surface: _Surface) -> None:
+        """GtkGLArea's "resize": GTK made the GLArea's buffer anew (on every size allocation, the
+        size changed or not), so its contents are undefined and the render it emits next must
+        paint the frame again, never take the buffer for what was painted."""
+        surface.painted = None
 
     def _unrealize(self, area, surface) -> None:
         area.make_current()

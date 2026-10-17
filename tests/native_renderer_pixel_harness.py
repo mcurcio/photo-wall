@@ -213,7 +213,9 @@ def layer(assignment_id: str, path: pathlib.Path | None, variant: Variant | None
 
 def composition(variant: Variant, calibration: Calibration, *layers: LocalLayer,
                 binding: OutputBinding = BINDING) -> OutputComposition:
-    return OutputComposition(binding, calibration, layers or (layer("quadrants", PHOTO, variant),))
+    """`layers` (else the quadrants photo) on `binding` calibrated with `calibration`."""
+    return OutputComposition(binding.model_copy(update={"calibration": calibration}),
+                             layers or (layer("quadrants", PHOTO, variant),))
 
 
 class Frames:
@@ -482,8 +484,7 @@ def a_fade_is_drawn_on_the_frame_clock(native, frames, variant) -> None:
     fade = Layer(assignment_id="fade", run_id="run", output_id="headless", frame_id="frame",
                  binding_generation=1, start=begins, end=begins + 10**6, media_origin=begins,
                  presentation="black", fade_in=0.5)
-    fading = OutputComposition(BINDING, Calibration(), (base, LocalLayer(fade, None, 0.0, 0.0)),
-                               timebase=0.0)
+    fading = OutputComposition(BINDING, (base, LocalLayer(fade, None, 0.0, 0.0)), timebase=0.0)
     assert until(lambda: native.present(fading).status == "presented"), native.diagnostics()
     presented = time.monotonic()
     assert presented < begins - FOLLOW_LEAD, ("presented_too_late", presented - begins)
@@ -831,7 +832,8 @@ def pattern_matches_the_reference(pattern: TestPattern, mat: Mat = DEEP_MAT):
         trial.operations = PictureOperations("headless", 9, (1.0, 1.0, 1.0), .8, 1.0, 1.0,
                                              black_floor=.05, test_pattern=pattern)
         native._frames = trial
-        show(native, OutputComposition(BINDING, Calibration(fit=fit), (), True))    # the grid's canvas
+        show(native, OutputComposition(
+            BINDING.model_copy(update={"calibration": Calibration(fit=fit)}), (), True))    # the grid's canvas
         assert until(lambda: trial.tags and trial.tags[-1][0] == "trial-" + TRIAL_SHA), trial.tags[-3:]
         spin(0.3)
         width, height, _ = native.captured
@@ -880,8 +882,8 @@ def show_target(native: CapturingRenderer, pattern: TestPattern, fit, mat: Mat,
     trial.operations = PictureOperations("headless", 9, (1.0, .95, .9), .8, 1.1, 1.0,
                                          black_floor=.05, test_pattern=pattern)
     native._frames = trial
-    binding = BINDING.model_copy(update={"profile": profile})
-    show(native, OutputComposition(binding, Calibration(fit=fit), (), True))
+    binding = BINDING.model_copy(update={"profile": profile, "calibration": Calibration(fit=fit)})
+    show(native, OutputComposition(binding, (), True))
     assert until(lambda: trial.tags and trial.tags[-1][0] == "trial-" + TRIAL_SHA), trial.tags[-3:]
     spin(0.3)
     return trial

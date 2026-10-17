@@ -46,7 +46,7 @@ from player.wayland_frames import FrameGrant
 
 def composition(*layers, timebase: float | None = 100.0) -> OutputComposition:
     """`layers` bottom to top on hdmi1; with timebase 100, monotonic 0 is plan time 100."""
-    return OutputComposition(binding(), Calibration(), tuple(
+    return OutputComposition(binding(), tuple(
         LocalLayer(item, None, item.position(100), item.alpha(100)) for item in layers),
         timebase=timebase)
 
@@ -346,8 +346,12 @@ class GL:
     """Enough OpenGL for _render and the fit pass, every other call a no-op. It records, per draw,
     the program drawn with: a fit pass (program 1, `fits`: the framebuffer it drew into) or a
     frame pass (program 2, `passes`, and `opacities`: each of its layers' strengths, bottom to
-    top). Names are fresh integers; every fence is passed at once and every framebuffer complete."""
+    top). Names are fresh integers and every framebuffer complete. A fence is passed at once,
+    unless `held`: then it stays in flight (the GPU still drawing) until `signal()`. With
+    `failing_fits` a fit pass reports GL_OUT_OF_MEMORY."""
     GL_NO_ERROR = 0
+    GL_OUT_OF_MEMORY = 0x0505
+    GL_ALREADY_SIGNALED, GL_TIMEOUT_EXPIRED, GL_CONDITION_SATISFIED = 0x911A, 0x911B, 0x911C
 
     def __init__(self):
         self.opacities: list[float] = []
@@ -357,6 +361,20 @@ class GL:
         self.names = 100
         self.count = 0
         self.alphas: list[float] = []
+        self.held = False
+        self.in_flight: set[int] = set()
+        self.failing_fits = False
+        self.error = 0
+
+    def glFenceSync(self, *_args):
+        fence = self._name()
+        if self.held:
+            self.in_flight.add(fence)
+        return fence
+
+    def signal(self) -> None:
+        """The GPU passes every fence issued so far."""
+        self.in_flight.clear()
 
     def __getattr__(self, name):
         if name.startswith("GL_"):
@@ -367,13 +385,13 @@ class GL:
         self.names += 1
         return self.names
 
-    glGenTextures = glGenFramebuffers = glGenVertexArrays = glFenceSync = _name
+    glGenTextures = glGenFramebuffers = glGenVertexArrays = _name
 
     def glCheckFramebufferStatus(self, _target):
         return self.GL_FRAMEBUFFER_COMPLETE
 
-    def glClientWaitSync(self, _fence, _flags, _timeout):
-        return self.GL_ALREADY_SIGNALED
+    def glClientWaitSync(self, fence, _flags, _timeout):
+        return self.GL_TIMEOUT_EXPIRED if fence in self.in_flight else self.GL_ALREADY_SIGNALED
 
     def glBindFramebuffer(self, _target, framebuffer):
         self.framebuffer = framebuffer
@@ -395,6 +413,8 @@ class GL:
     def glDrawArrays(self, *_args):
         if self.program == 1:
             self.fits.append(self.framebuffer)
+            if self.failing_fits:
+                self.error = self.GL_OUT_OF_MEMORY
         else:
             self.passes += 1
             self.opacities.extend(round(alpha, 3) for alpha in self.alphas[:self.count])
@@ -403,7 +423,8 @@ class GL:
         return 0
 
     def glGetError(self):
-        return 0
+        error, self.error = self.error, 0
+        return error
 
     def glGetString(self, _name):
         return b"fake"
