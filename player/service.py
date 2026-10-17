@@ -304,10 +304,22 @@ class Download:
 
 
 class _ChunkBridge:
+    """A download's bytes, from the network task to the cache worker. The network side `end`s it
+    with why it stopped: a download error is the content's failure, and the cache worker raises
+    ServiceError("download"); the Player's own stop (its session ended, or the job's authority is
+    gone) is AcquisitionStopped on both sides."""
+
     def __init__(self, authorized: Callable[[], bool]):
         self.queue = queue.Queue(maxsize=4)
         self.stopped = threading.Event()
+        self.failure: Exception | None = None
         self.authorized = authorized
+
+    def end(self, failure: Exception | None) -> None:
+        """The network side is done: `failure` is the download error that ended it, None when it
+        finished or the Player stopped it. Set before `stopped`, so the worker reads it."""
+        self.failure = failure
+        self.stopped.set()
 
     async def put(self, chunk: bytes | None):
         while not self.stopped.is_set() and self.authorized():
@@ -316,7 +328,7 @@ class _ChunkBridge:
                 return
             except queue.Full:
                 await asyncio.sleep(.005)
-        raise AcquisitionStopped("download_cancelled")
+        raise AcquisitionStopped("download_stopped")
 
     def chunks(self):
         while not self.stopped.is_set() and self.authorized():
@@ -329,7 +341,9 @@ class _ChunkBridge:
             if not self.authorized() or self.stopped.is_set():
                 break
             yield chunk
-        raise AcquisitionStopped("download_cancelled")
+        if self.failure is not None and self.authorized():
+            raise ServiceError("download") from self.failure
+        raise AcquisitionStopped("download_stopped")
 
 
 class PlayerService:
@@ -979,6 +993,7 @@ class PlayerService:
         target = variant.path  # by name: a re-make keeps it
         bridge = _ChunkBridge(lambda: self._authorized(job))
         worker = None
+        failure = None
         try:
             async with self.link.stream(self.session, "GET", target, timeout=120) as response:
                 await self._check_status(response, target)
@@ -1008,9 +1023,15 @@ class PlayerService:
                     raise ServiceError("media_length")
                 await bridge.put(None)
                 return await asyncio.shield(worker)
+        except AcquisitionStopped:
+            raise               # the job's authority is gone: the Player's own stop
+        except Exception as error:
+            failure = error     # a download error (reset, short body, overrun): the content's
+            raise
         finally:
-            # No HTTP failure/cancellation leaves the worker blocked on queue.get.
-            bridge.stopped.set()
+            # No HTTP failure/cancellation leaves the worker blocked on queue.get. Cancellation
+            # (the session ended) is a BaseException, so it ends the bridge as the Player's stop.
+            bridge.end(failure)
             if worker is not None:
                 await asyncio.shield(worker)
 
@@ -1057,19 +1078,20 @@ class PlayerService:
     async def _attempt(self, attempts: dict, key, fetch: Callable[[], Awaitable[bool]],
                        fault: str) -> None:
         """One fetch of `key` (a media download or a LUT) on its own retry schedule: a failure is
-        the `fault` and retried after MEDIA_RETRY_BACKOFF; a 401 or a redirect ends the cycle."""
+        the `fault` and retried after MEDIA_RETRY_BACKOFF; a 401 or a redirect ends the cycle.
+        A fetch the Player stopped itself (AcquisitionStopped) is no fault."""
         count, _ = attempts.get(key, (0, 0))
         try:
             success = await fetch()
         except Unauthorized:
             raise
+        except AcquisitionStopped:
+            success = False
         except UplinkError as error:
             if error.cause is Cause.REDIRECT:
                 raise           # ends the cycle: run() locates again (0014)
             success = False
             self._uplink_fault(fault, error)
-        except AcquisitionStopped:
-            success = False     # stopped, not failed: no fault (its authority is checked again)
         except (httpx.HTTPError, ServiceError, TimeoutError, OSError, AuthorityError):
             success = False
             self.fault(fault)
@@ -1441,7 +1463,7 @@ class UnavailableRenderer:
 
     gl_renderer = None  # no GL context: nothing to report
 
-    def prepare(self, layer):
+    def prepare(self, layer, binding):
         return PrepareResult("failed", "capacity")
 
     def set_unbound_outputs(self, output_ids, player_id, central_link_state,

@@ -145,7 +145,7 @@ def test_local_terminal_expiry_rejects_delayed_trial_and_canonical_output_primit
 
     state = TrialState()
     applied = state.apply(
-        encode_trial(candidate), OutputComposition(config, config.calibration), 1500
+        encode_trial(candidate), OutputComposition(config), 1500
     )
     assert applied.calibration == calibration
     for observed, expected in zip(applied.primitives, calibration.fit.corners, strict=True):
@@ -153,7 +153,7 @@ def test_local_terminal_expiry_rejects_delayed_trial_and_canonical_output_primit
     assert (
         state.apply(
             encode_trial(candidate),
-            OutputComposition(config, config.calibration),
+            OutputComposition(config),
             candidate.expires_boottime_ms,
         )
         is None
@@ -163,7 +163,7 @@ def test_local_terminal_expiry_rejects_delayed_trial_and_canonical_output_primit
     assert (
         state.apply(
             encode_trial(delayed),
-            OutputComposition(config, config.calibration),
+            OutputComposition(config),
             candidate.expires_boottime_ms + 1,
         )
         is None

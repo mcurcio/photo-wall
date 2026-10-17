@@ -8,8 +8,11 @@ commitizen. Three commands:
                             base..head lands on main (merge and rebase keep them), so each must
                             be a Conventional Commit; the plan then reports what merging releases
                             and runs only its tests (a PullRequestRun has no release job).
-  push                      main. Releases exactly when a shipped package changed, and refuses
-                            at once a next version whose tag already exists.
+  push [--before SHA]       main. Releases exactly when a shipped package changed, and refuses
+                            at once a next version whose tag already exists. With --before (the
+                            branch's previous commit), it runs only the suites its pull request's
+                            run did not pass on exactly this tree (passed_run), and outputs the
+                            others as `reused`; any doubt runs them all.
   gate                      A run passed when every job the plan expected succeeded and no job
                             failed or was cancelled (reads NEEDS, the workflow's `toJSON(needs)`).
 
@@ -54,7 +57,7 @@ import tomllib
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import ClassVar, Final
+from typing import ClassVar, Final, Protocol
 
 REPO: Final = Path(__file__).resolve().parents[1]
 
@@ -64,6 +67,12 @@ NO_COMMITS_TO_BUMP: Final = 21          # commitizen's exit status for "no commi
 STRICT_VERSION: Final = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$")
 STRICT_TAG: Final = re.compile(r"^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$")
 FULL_SHA: Final = re.compile(r"^[0-9a-f]{40}$")
+# The branch a release is cut from (pipeline.yml's release guard: refs/heads/main): its tip is
+# the newest commit, whose seal wins an unpublished version; only a pull request merged into it
+# can lend a push its pass (passed_run).
+RELEASE_BRANCH: Final = "main"
+# The one workflow whose pull request runs a push may reuse (passed_run).
+PIPELINE: Final = "pipeline.yml"
 
 
 class PlanError(Exception):
@@ -596,6 +605,232 @@ class Plan:
         return f"v{self.version}" if self.version else ""
 
 
+# --- reuse: a push to main takes its pull request's pass --------------------------------------
+#
+# A push to main whose tree its pull request's run already tested does not test it again: the
+# plan lists only the suites that run did not pass, and outputs the rest as `reused`. The run
+# must have checked out exactly this tree, so every workflow, action, test and script that gave
+# the verdict is main's. Only a verdict is reused, never a byte: every build the release ships
+# still runs in the push's own run. Anything in doubt runs the suites (fail closed).
+
+class NoReuse(Exception):
+    """This push runs its suites; the message says why it cannot take a pull request's pass."""
+
+
+class ReuseUnavailable(NoReuse):
+    """GitHub could not answer (no token, HTTP, network, an unreadable answer): run the suites."""
+
+
+@dataclass(frozen=True, slots=True)
+class MergedPull:
+    """The pull request a push merged: its number, head commit, and whether that head branch is
+    this repository's (a fork's run is never reused)."""
+    number: int
+    head: str
+    same_repository: bool
+
+
+@dataclass(frozen=True, slots=True)
+class PipelineRun:
+    """One pipeline.yml run: its id, its page, and its conclusion (None while it runs)."""
+    id: int
+    url: str
+    conclusion: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class PassedRun:
+    """The pull request run a push reuses, and the suites it passed."""
+    url: str
+    suites: tuple[str, ...]
+
+
+class RunHistory(Protocol):
+    """GitHub's records, read only: one plain question per method. Raises ReuseUnavailable when
+    it cannot answer."""
+
+    def merged_pull(self, revision: str) -> MergedPull | None:
+        """The pull request merged into RELEASE_BRANCH whose merge commit is `revision`."""
+
+    def latest_pull_request_run(self, head: str) -> PipelineRun | None:
+        """The newest PIPELINE run of event pull_request for head commit `head` whose head
+        branch is this repository's."""
+
+    def jobs(self, run_id: int) -> tuple[tuple[str, str | None], ...]:
+        """(name, conclusion) of every job in the run's latest attempt."""
+
+
+_PASSING: Final = frozenset({"success", "skipped"})
+
+
+def passed_suites(jobs: Iterable[tuple[str, str | None]]) -> tuple[str, ...]:
+    """The suites a run passed: a suite's jobs are named `<suite> / ...` (a called workflow's
+    jobs) or `<suite>`; it passed when one of them succeeded and every one succeeded or was
+    skipped."""
+    seen: dict[str, list[str | None]] = {}
+    for name, conclusion in jobs:
+        suite = name.split(" / ", 1)[0]
+        if suite in SUITE_JOBS:
+            seen.setdefault(suite, []).append(conclusion)
+    return tuple(sorted(suite for suite, results in seen.items()
+                        if "success" in results and all(result in _PASSING for result in results)))
+
+
+# How far back along the branch a pull request run's base is checked (tested_tree): further
+# than this many first-parent commits since the head's history and the push runs its suites.
+MAX_BASES: Final = 50
+
+
+def _ok(repo: Path, *args: str) -> bool:
+    return subprocess.run(["git", "-C", str(repo), *args], capture_output=True).returncode == 0
+
+
+def tested_tree(repo: Path, head: str, before: str) -> None:
+    """Raise NoReuse unless every pull request run of `head` checked out `head`'s own tree.
+
+    A pull request run checks out GitHub's merge of the head into the branch as it was when the
+    run started: some first-parent commit `base` of the branch up to `before`. Each candidate's
+    merge is computed as git makes it (`git merge-tree --write-tree`, criss-cross histories and
+    their virtual merge base included) and must be the head's tree, walking back from `before`
+    until one is an ancestor of the head; every earlier one is too, so its merge is the head
+    itself, and the head was pushed after them."""
+    head_tree = git(repo, "rev-parse", f"{head}^{{tree}}").strip()
+    base = before
+    for _ in range(MAX_BASES):
+        if _ok(repo, "merge-base", "--is-ancestor", base, head):
+            return
+        merged = subprocess.run(["git", "-C", str(repo), "merge-tree", "--write-tree", base, head],
+                                capture_output=True, text=True)
+        if merged.returncode != 0 or merged.stdout.split("\n", 1)[0].strip() != head_tree:
+            raise NoReuse(f"a run based on {base[:12]} would have merged in changes the head "
+                          "lacks, so it tested another tree")
+        parent = subprocess.run(["git", "-C", str(repo), "rev-parse", "--verify", "--quiet",
+                                 f"{base}^1"], capture_output=True, text=True)
+        if parent.returncode != 0:
+            raise NoReuse(f"{base[:12]} has no parent and shares no history with the head")
+        base = parent.stdout.strip()
+    raise NoReuse(f"the branch moved more than {MAX_BASES} commits past the head's history")
+
+
+def passed_run(repo: Path, history: RunHistory, revision: str, before: str) -> PassedRun:
+    """The pull request run whose pass `revision` (a push to RELEASE_BRANCH; `before` is where
+    the branch was) may reuse. Raises NoReuse naming the first condition that fails:
+
+      1. `revision` is the merge commit of a pull request from this repository;
+      2. that pull request's head is in this checkout and has `revision`'s tree;
+      3. every run of that head checked out that same tree (tested_tree);
+      4. the head's newest PIPELINE pull request run concluded success;
+      5. it passed at least one suite (passed_suites)."""
+    if not FULL_SHA.match(before) or before == "0" * 40:
+        raise NoReuse("the push names no earlier commit of the branch")
+    if not _ok(repo, "merge-base", "--is-ancestor", before, revision):
+        raise NoReuse(f"{before[:12]} is not an ancestor of {revision[:12]}")
+    pull = history.merged_pull(revision)
+    if pull is None:
+        raise NoReuse(f"{revision[:12]} is not a pull request's merge into {RELEASE_BRANCH}")
+    if not pull.same_repository:
+        raise NoReuse(f"pull request #{pull.number} comes from a fork")
+    if not _ok(repo, "cat-file", "-e", f"{pull.head}^{{commit}}"):
+        raise NoReuse(f"pull request #{pull.number}'s head {pull.head[:12]} is not in this "
+                      "checkout (a rebase merge whose branch is already deleted)")
+    if git(repo, "rev-parse", f"{pull.head}^{{tree}}") != git(repo, "rev-parse",
+                                                               f"{revision}^{{tree}}"):
+        raise NoReuse(f"pull request #{pull.number}'s head {pull.head[:12]} has another tree: "
+                      f"{RELEASE_BRANCH} moved before the merge")
+    tested_tree(repo, pull.head, before)
+    run = history.latest_pull_request_run(pull.head)
+    if run is None:
+        raise NoReuse(f"pull request #{pull.number}'s head has no {PIPELINE} run")
+    if run.conclusion != "success":
+        raise NoReuse(f"pull request #{pull.number}'s newest run ({run.url}) concluded "
+                      f"{run.conclusion or 'nothing yet'}")
+    suites = passed_suites(history.jobs(run.id))
+    if not suites:
+        raise NoReuse(f"pull request #{pull.number}'s run ({run.url}) passed no suite")
+    return PassedRun(run.url, suites)
+
+
+@dataclass(frozen=True, slots=True)
+class GitHubRunHistory:
+    """RunHistory over GitHub's REST API, through the seal's read-only GET (404 is None)."""
+    get: Callable[[str], object]
+    repository: str
+
+    @classmethod
+    def from_environment(cls) -> GitHubRunHistory:
+        # Imported here: the seal imports this module, so this module cannot import it first.
+        from scripts.release_seal import GitHubApi, SealError
+        try:
+            api = GitHubApi.from_env()
+        except SealError as error:
+            raise ReuseUnavailable(str(error)) from None
+
+        def get(path: str) -> object:
+            try:
+                return api.get(path)
+            except SealError as error:
+                raise ReuseUnavailable(str(error)) from None
+        return cls(get, api.repository)
+
+    def _read(self, path: str) -> object:
+        found = self.get(path)
+        if found is None:
+            raise ReuseUnavailable(f"GitHub answers 404 for {path}")
+        return found
+
+    def _from_here(self, head: object) -> bool:
+        repo = head.get("repo") if isinstance(head, dict) else None
+        return isinstance(repo, dict) and repo.get("full_name") == self.repository
+
+    def merged_pull(self, revision: str) -> MergedPull | None:
+        pulls = self._read(f"/commits/{revision}/pulls")
+        if not isinstance(pulls, list):
+            raise ReuseUnavailable(f"the pull requests of {revision} are not a list")
+        for pull in pulls:
+            if (isinstance(pull, dict) and pull.get("merged_at")
+                    and pull.get("merge_commit_sha") == revision
+                    and isinstance(pull.get("base"), dict)
+                    and pull["base"].get("ref") == RELEASE_BRANCH
+                    and isinstance(pull.get("number"), int)
+                    and isinstance(pull.get("head"), dict)
+                    and FULL_SHA.match(str(pull["head"].get("sha")))):
+                return MergedPull(pull["number"], str(pull["head"]["sha"]),
+                                  self._from_here(pull["head"]))
+        return None
+
+    def latest_pull_request_run(self, head: str) -> PipelineRun | None:
+        found = self._read(f"/actions/workflows/{PIPELINE}/runs?event=pull_request"
+                           f"&head_sha={head}&per_page=100")
+        runs = found.get("workflow_runs") if isinstance(found, dict) else None
+        if not isinstance(runs, list):
+            raise ReuseUnavailable(f"the {PIPELINE} runs of {head} are not a list")
+        ours = [run for run in runs if isinstance(run, dict) and run.get("head_sha") == head
+                and run.get("event") == "pull_request" and isinstance(run.get("id"), int)
+                and self._from_here({"repo": run.get("head_repository")})]
+        if not ours:
+            return None
+        newest = max(ours, key=lambda run: (str(run.get("created_at")), run["id"]))
+        return PipelineRun(newest["id"], str(newest.get("html_url")),
+                           newest.get("conclusion") if newest.get("status") == "completed"
+                           else None)
+
+    def jobs(self, run_id: int) -> tuple[tuple[str, str | None], ...]:
+        found: list[tuple[str, str | None]] = []
+        for page in range(1, 11):
+            batch = self._read(f"/actions/runs/{run_id}/jobs?filter=latest&per_page=100"
+                               f"&page={page}")
+            jobs = batch.get("jobs") if isinstance(batch, dict) else None
+            if not isinstance(jobs, list) or not all(isinstance(job, dict) for job in jobs):
+                raise ReuseUnavailable(f"the jobs of run {run_id} (page {page}) are not a list")
+            total = batch.get("total_count")
+            if not isinstance(total, int):
+                raise ReuseUnavailable(f"the jobs of run {run_id} have no total_count")
+            found += [(str(job.get("name")), job.get("conclusion")) for job in jobs]
+            if len(found) >= total or len(jobs) < 100:
+                return tuple(found)
+        raise ReuseUnavailable(f"run {run_id} has more than 1000 jobs")
+
+
 # A run: the conditional pipeline jobs it starts (pipeline.yml's `if:`s read `jobs` and the gate
 # requires each to succeed) and whether it releases. Two types, so that "which jobs run" is
 # decided by the event's type, never by what the plan forecasts.
@@ -603,21 +838,29 @@ class Plan:
 @dataclass(frozen=True, slots=True)
 class PullRequestRun:
     """A pull request's run: the plan's test suites and nothing else. Its plan still reports what
-    merging releases, but this type has no path to RELEASE_JOBS and outputs no tag or version."""
+    merging releases, but this type has no path to RELEASE_JOBS and outputs no tag or version,
+    and it reuses no other run's pass."""
     plan: Plan
     subject: ClassVar[str] = "merging"
     releases: ClassVar[bool] = False
+    passed: ClassVar[PassedRun | None] = None
 
     @property
     def jobs(self) -> tuple[str, ...]:
         return tuple(sorted(self.plan.suites))
 
+    @property
+    def reused(self) -> tuple[str, ...]:
+        return ()
+
 
 @dataclass(frozen=True, slots=True)
 class ReleaseRun:
-    """A push to main (main() builds one for nothing else): the plan's test suites and, when the
-    plan releases, every release job."""
+    """A push to main (main() builds one for nothing else): the plan's test suites, less those
+    its pull request's run passed (`passed`, see passed_run), and, when the plan releases, every
+    release job."""
     plan: Plan
+    passed: PassedRun | None = None
     subject: ClassVar[str] = "this push"
 
     @property
@@ -626,7 +869,16 @@ class ReleaseRun:
 
     @property
     def jobs(self) -> tuple[str, ...]:
-        return tuple(sorted({*self.plan.suites, *(RELEASE_JOBS if self.releases else ())}))
+        taken = set(self.passed.suites) if self.passed else set()
+        return tuple(sorted({*(set(self.plan.suites) - taken),
+                             *(RELEASE_JOBS if self.releases else ())}))
+
+    @property
+    def reused(self) -> tuple[str, ...]:
+        """The due suites this run does not start because `passed` passed them."""
+        if self.passed is None:
+            return ()
+        return tuple(sorted(set(self.plan.suites) & set(self.passed.suites) - set(self.jobs)))
 
 
 Run = PullRequestRun | ReleaseRun
@@ -706,6 +958,8 @@ def summary(run: Run) -> str:
                   for commit in plan.commits]
         lines.append("")
     lines.append(f"Jobs: {', '.join(run.jobs) or 'none beyond plan and gate'}")
+    if run.passed is not None:
+        lines += ["", f"Reused from {run.passed.url}: {', '.join(run.reused) or 'nothing due'}"]
     return "\n".join(lines) + "\n"
 
 
@@ -717,35 +971,46 @@ def outputs(run: Run) -> dict[str, str]:
     return {"should_release": str(releases).lower(), "tag": plan.tag if releases else "",
             "version": (plan.version or "") if releases else "",
             "since": (plan.since or "") if releases else "", "revision": plan.revision,
-            "packages": json.dumps(list(plan.packages)), "jobs": json.dumps(list(run.jobs))}
+            "packages": json.dumps(list(plan.packages)), "jobs": json.dumps(list(run.jobs)),
+            "reused": json.dumps(list(run.reused))}
 
 
 # --- the gate ----------------------------------------------------------------------------------
 
-def _listed_jobs(outputs_: Mapping[str, object]) -> list[str] | None:
-    """The plan's `jobs` output, when it is a non-empty JSON list of job names."""
+def _names(outputs_: Mapping[str, object], key: str, *, default: str = "") -> list[str] | None:
+    """The plan's `key` output as a JSON list of job names; None when it is anything else."""
     try:
-        jobs = json.loads(str(outputs_.get("jobs") or ""))
+        names = json.loads(str(outputs_.get(key) or default))
     except ValueError:
         return None
-    if not isinstance(jobs, list) or not jobs or not all(isinstance(job, str) for job in jobs):
+    if not isinstance(names, list) or not all(isinstance(name, str) for name in names):
         return None
-    return jobs
+    return names
 
 
 def gate(needs: Mapping[str, Mapping[str, object]]) -> list[str]:
     """What is wrong with a run whose jobs finished as `needs` (`toJSON(needs)`): the plan must
-    succeed and list its jobs, every job it listed and every ALWAYS_JOBS job must succeed, and no
-    other job may fail or be cancelled. An empty list is a pass."""
+    succeed and list its jobs, every job it listed and every ALWAYS_JOBS job it did not reuse
+    must succeed, and no other job may fail or be cancelled. An empty list is a pass.
+
+    The plan's outputs are the one decision: `reused` (the suites a push took from its pull
+    request's run, passed_run) is never looked up again here. It only excuses an always-run
+    suite from running, and it must name suites this run does not list."""
     plan = needs.get("plan") or {}
     problems, expected = [], set(ALWAYS_JOBS)
+    outputs_ = plan.get("outputs") or {}
+    listed = _names(outputs_, "jobs")
+    reused = _names(outputs_, "reused", default="[]")
     if plan.get("result") != "success":
         problems.append(f"plan: {plan.get('result', 'missing')}")
-    elif (listed := _listed_jobs(plan.get("outputs") or {})) is None:
+    elif listed is None or reused is None or not (listed or reused):
         problems.append("plan: succeeded but its `jobs` output is missing, empty or not a JSON "
                         "list of job names, so this run's required jobs are unknown")
+    elif set(reused) - SUITE_JOBS or set(reused) & set(listed):
+        problems.append(f"plan: its `reused` output {reused} names a job that is not a suite or "
+                        "that this run lists, so this run's required jobs are unknown")
     else:
-        expected |= set(listed)
+        expected = (expected - set(reused)) | set(listed)
     for job, need in sorted(needs.items()):
         result = need.get("result")
         if job == "plan":
@@ -771,14 +1036,31 @@ def _publish(run: Run) -> None:
             handle.writelines(f"{key}={value}\n" for key, value in outputs(run).items())
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def _reuse(repo: Path, history: Callable[[], RunHistory], plan: Plan,
+           before: str) -> PassedRun | None:
+    """passed_run for a push, or None (its suites run) with the reason as a notice."""
+    try:
+        return passed_run(repo, history(), plan.revision, before)
+    except NoReuse as error:
+        text = f"this push runs its own suites: {error}"
+        print(f"::notice title=Reuse::{text}")
+        if path := os.environ.get("GITHUB_STEP_SUMMARY"):
+            with open(path, "a") as handle:
+                handle.write(f"{text}\n\n")
+        return None
+
+
+def main(argv: Sequence[str] | None = None,
+         history: Callable[[], RunHistory] = GitHubRunHistory.from_environment) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--repo", type=Path, default=REPO)
     commands = parser.add_subparsers(dest="command", required=True)
     pr = commands.add_parser("pr", help="plan a pull request's merge ref (HEAD)")
     pr.add_argument("--base", required=True)
     pr.add_argument("--head", required=True)
-    commands.add_parser("push", help="plan main's HEAD")
+    push = commands.add_parser("push", help="plan main's HEAD")
+    push.add_argument("--before", help="the branch's commit before this push: reuse the suites "
+                                       "its pull request's run passed (passed_run)")
     commands.add_parser("gate", help="judge the run from NEEDS (toJSON(needs))")
     args = parser.parse_args(argv)
     try:
@@ -794,7 +1076,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             check_commits(args.repo, cz, args.base, args.head)
             run = PullRequestRun(plan_head(args.repo, cz))
         else:
-            run = ReleaseRun(refuse_a_taken_tag(args.repo, plan_head(args.repo, cz)))
+            plan = refuse_a_taken_tag(args.repo, plan_head(args.repo, cz))
+            run = ReleaseRun(plan, _reuse(args.repo, history, plan, args.before)
+                             if args.before else None)
         _publish(run)
     except PlanError as error:
         for line in str(error).splitlines():

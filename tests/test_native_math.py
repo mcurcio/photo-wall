@@ -473,7 +473,9 @@ def test_decoder_recovery_cannot_reuse_texture_from_previous_incarnation():
     assert uploads == [b"new!"]
 
 
-def test_resize_bounds_peak_memory_before_allocating_replacement_targets():
+def test_a_resize_over_the_texture_budget_frees_and_allocates_nothing():
+    """The budget counts each resident picture's fitted picture at its Output's size: a resize
+    that would pass it fails before any GL call, keeping the size and every fitted picture."""
     from types import SimpleNamespace
 
     from player.native import NativeRenderer
@@ -481,14 +483,16 @@ def test_resize_bounds_peak_memory_before_allocating_replacement_targets():
     renderer = NativeRenderer.__new__(NativeRenderer)
     renderer.GL = object()  # No allocation calls are permitted before this gate.
     renderer.texture_budget = 1100
-    renderer._decoders = {}
+    layer = SimpleNamespace(output_id="out", variant=SimpleNamespace(width=4, height=4))
+    renderer._decoders = {"photo": SimpleNamespace(local=SimpleNamespace(layer=layer))}
     surface = SimpleNamespace(programs=(1, 2), output=NativeOutput("out", "app", 4, 4),
-                              size=(4, 4), targets=[(1, 11), (2, 12)])
+                              size=(4, 4), fitted={"photo": "kept"})
     renderer._surfaces = {"out": surface}
+    assert renderer._estimate(())[1] == 4*4*4 + 4*4*8
     with pytest.raises(RuntimeError, match="texture budget"):
-        renderer._targets(surface, 8, 8)
+        renderer._setup(surface, 12, 12)
     assert surface.size == (4, 4)
-    assert surface.targets == [(1, 11), (2, 12)]
+    assert surface.fitted == {"photo": "kept"}
 
 
 def test_failed_gl_texture_allocation_does_not_leak_untracked_object():
@@ -652,7 +656,7 @@ def _presenting_renderer(decoders=None):
     renderer._decoders = decoders or {}
     renderer._surfaces = {"hdmi1": native_module._Surface(output=None, window=None, area=Area())}
     renderer.capacity = lambda compositions: SimpleNamespace(available=True)
-    renderer.prepare = lambda local: PrepareResult("prepared")
+    renderer._prepare = lambda local, composition, seen: PrepareResult("prepared")
     return renderer, renderer._surfaces["hdmi1"]
 
 
@@ -823,14 +827,33 @@ class _UniformGL:
         raise AttributeError(call)
 
 
+def test_each_step_set_is_its_own_program_with_its_switches_as_constants():
+    """The frame pass compiles one program per step set: its switches are constants, so the GPU
+    runs no switched-off step's code (a uniform switch costs every step's instructions)."""
+    steps = native_module._Steps(True, 3)
+    source = native_module._frame_source(steps)
+    for name, value in (("lut_on", 1), ("test_pattern", 3)):
+        assert f"const int {name} = {value};\n" in source
+        assert f"uniform int {name};" not in source
+
+
+def test_the_paper_lut_alone_switches_a_step():
+    """The paper profile's LUT is the one switchable step: on only while it is bound; a test
+    pattern is its own program; everything else (the room's light, the paper, the display fit)
+    always runs."""
+    operations = _operations()
+    assert native_module._steps(operations, lut_drawn=False) == native_module._NEUTRAL_STEPS
+    assert native_module._steps(operations, lut_drawn=True) == native_module._Steps(True, 0)
+
+
 _PROFILE = SimpleNamespace(width_px=1920, height_px=1080, diagonal_inches=27)
 
 
 def test_no_frame_drawn_has_no_light():
     gl = _UniformGL()
-    native_module._final_uniforms(gl, 1, _operations(), native_module._NO_OPENING, None, lut_drawn=False,
+    native_module._final_uniforms(gl, 1, _operations(), native_module._NO_OPENING, None,
                                   output_height=1080)
-    assert gl.values["light_count"] == (0,) and gl.values["lut_on"] == (0,)
+    assert gl.values["light_count"] == (0,)
     assert gl.values["matched_lux"] == (MATCHED,) and gl.values["panel_black"] == (BLACK,)
 
 
@@ -848,9 +871,9 @@ def test_the_frames_lights_reach_the_shader_as_the_reference_holds_them():
                    inner_beam_degrees=20, outer_beam_degrees=40)))
     lights = frame_lights(lighting, ROOM, CoverFit(rotation=90), _PROFILE, DisplayLight(MATCHED, BLACK))
     gl = _UniformGL()
-    native_module._final_uniforms(gl, 1, _operations(), CoverFit().corners, lights, lut_drawn=True,
+    native_module._final_uniforms(gl, 1, _operations(), CoverFit().corners, lights,
                                   output_height=1080)
-    assert gl.values["light_count"] == (3,) and gl.values["lut_on"] == (1,)
+    assert gl.values["light_count"] == (3,)
     assert gl.values["light_kind"] == (4, [LIGHT_KINDS.index(kind) for kind in ("wash", "far", "close")] + [0])
     count, rgb = gl.values["light_rgb"]
     assert count == 4 and rgb[:9] == [v for light in lights.lights for v in light.rgb] and rgb[9:] == [0.0] * 3

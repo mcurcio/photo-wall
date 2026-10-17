@@ -31,12 +31,13 @@ from contracts.calibration_target import (
 )
 from contracts.frame_lighting import FRAME_LIGHTS_MAX, SHEET_WHITENESS, FrameLighting
 from contracts.lut import LUT_GRID, LutRef
-from contracts.models import AppliedCalibration
+from contracts.models import AppliedCalibration, OutputBinding
 from contracts.node_frame import PictureOperations, neutral_operations
 from contracts.node_picture import UPGRADE_DISPLAY_LIGHT, DisplayLight
 from contracts.room_light import RoomLightsDocument
 from contracts.tuning import TARGET_PATTERNS, TestPattern
 from player.calibration_target import target_modules
+from player.fitted import FITTED_BYTES, FitKey, prepared, redrawn_by_frames, shown_at_once
 from player.geometry import (
     BAYER_4,
     BLACK_LEVEL_PATCH,
@@ -146,7 +147,7 @@ def packed_rgba(data: bytes | memoryview, width: int, height: int,
 
 
 def _fingerprint(composition: OutputComposition) -> tuple:
-    return (composition.binding, composition.calibration, composition.fallback,
+    return (composition.binding, composition.fallback,
             tuple((local.layer, local.path) for local in composition.layers))
 
 
@@ -214,17 +215,43 @@ def _stand_in(output_id: str) -> PictureOperations:
     return neutral_operations(output_id, 1, UPGRADE_DISPLAY_LIGHT)
 
 
+@dataclass(frozen=True)
+class _Steps:
+    """Which of the frame pass's switchable steps a frame computes: each set is its own compiled
+    program (`_frame_source`), so a step switched off costs a frame nothing (a uniform switch left
+    the GPU running every step's code). The room's light, the paper and the display fit always
+    run (player/geometry.py `final_pixel`); the paper profile's LUT runs only while it is bound,
+    and a test pattern replaces the photo."""
+    lut_on: bool
+    test_pattern: int       # _PATTERN_CODES (0: the photos)
+
+
+def _steps(operations: PictureOperations, *, lut_drawn: bool) -> _Steps:
+    """The step set for `operations`. `lut_drawn`: the Frame's paper profile LUT is bound on
+    texture unit 1 (`NativeRenderer._bind_lut`); otherwise the LUT step is skipped."""
+    return _Steps(lut_on=lut_drawn, test_pattern=_PATTERN_CODES[operations.test_pattern])
+
+
+def _frame_source(steps: _Steps) -> str:
+    """The frame pass's fragment shader for one step set: its switches as constants."""
+    return _FINAL.replace(_STEP_SWITCHES, "".join(
+        f"const int {name} = {int(getattr(steps, name))};\n" for name in _Steps.__dataclass_fields__))
+
+
+_NEUTRAL_STEPS = _Steps(False, 0)
+
+
 def _final_uniforms(gl, program: int, operations: PictureOperations, opening, lights: FrameLights | None, *,
-                    lut_drawn: bool, output_height: int, target: tuple[int, BoardDraw] | None = None) -> None:
-    """The final pass's operations, the Frame's lights (`frame_lights`; None: no Frame drawn yet, so
-    no light) and the per-Output mask's opening. `lut_drawn`: the Frame's paper profile LUT is bound
-    on texture unit 1 (`NativeRenderer._bind_lut`); otherwise the LUT step is skipped. `to_opening`
-    is always the opening's (the physics and the patterns read it); with no Frame drawn yet the
-    opening is `_NO_OPENING`, off the output, and everything stays black. `output_height`: the dither
-    reads output pixels from the top, as player/geometry.py `dithered`. `target`: for a calibration
-    target, the QR's module count bound on _TARGET_QR_UNIT (0: no code, every QR square draws light)
-    and the opening's BoardDraw (`board_draw`: its columns, aspect and turn; its modules unread, the
-    count stands for them); the board's raster is bound on _TARGET_LAYOUT_UNIT
+                    output_height: int, target: tuple[int, BoardDraw] | None = None) -> None:
+    """The frame pass's operations, the Frame's lights (`frame_lights`; None: no Frame drawn yet, so
+    no light) and the per-Output mask's opening, for the program of `_steps(operations)`.
+    `to_opening` is always the opening's (the physics and the patterns read it); with no Frame
+    drawn yet the opening is `_NO_OPENING`, off the output, and everything stays black.
+    `output_height`: the dither reads output pixels from the top, as player/geometry.py
+    `dithered`. `target`: for a calibration target, the QR's module count bound on
+    _TARGET_QR_UNIT (0: no code, every QR square draws light) and the opening's BoardDraw
+    (`board_draw`: its columns, aspect and turn; its modules unread, the count stands for them);
+    the board's raster is bound on _TARGET_LAYOUT_UNIT
     (`NativeRenderer._bind_target`). None: no columns, so nothing is drawn."""
     def uniform(name: str) -> int:
         return gl.glGetUniformLocation(program, name)
@@ -235,9 +262,7 @@ def _final_uniforms(gl, program: int, operations: PictureOperations, opening, li
     gl.glUniform1f(uniform("matched_lux"), operations.light.matched_lux)
     gl.glUniform1f(uniform("panel_black"), operations.light.black)
     gl.glUniform1i(uniform("output_height"), output_height)
-    gl.glUniform1i(uniform("lut_on"), int(lut_drawn))
     gl.glUniform1i(uniform("lut"), _LUT_UNIT)       # never unit 0: two sampler types may not share one
-    gl.glUniform1i(uniform("test_pattern"), _PATTERN_CODES[operations.test_pattern])
     gl.glUniform1i(uniform("target_layout"), _TARGET_LAYOUT_UNIT)   # each sampler on its own unit
     gl.glUniform1i(uniform("target_qr"), _TARGET_QR_UNIT)
     modules, draw = target if target is not None else (0, None)
@@ -267,6 +292,28 @@ def _final_uniforms(gl, program: int, operations: PictureOperations, opening, li
     gl.glUniform2fv(uniform("light_beam"), FRAME_LIGHTS_MAX,
                     [v for light in padded for v in (light.beam if light else (0.0, 0.0))])
     _set_opening(gl, program, opening)
+
+
+def _layer_uniforms(gl, program: int, slots: tuple, matrix: Matrix) -> None:
+    """The frame pass's layers, bottom to top (`NativeRenderer._slots`): each slot's kind and
+    strength, its fitted picture bound on its unit, and the drawn fit's matrix (a black layer and
+    the commissioning grid cover the Frame's picture square). Texture unit 0 stays active."""
+    if len(slots) > FRAME_LAYERS:
+        raise RuntimeError("frame_layers_exceeded")
+    padding = (0,) * (FRAME_LAYERS - len(slots))
+    gl.glUniform1i(gl.glGetUniformLocation(program, "layer_count"), len(slots))
+    gl.glUniform1iv(gl.glGetUniformLocation(program, "layer_kind"), FRAME_LAYERS,
+                    [kind for kind, _, _, _ in slots] + list(padding))
+    gl.glUniform1fv(gl.glGetUniformLocation(program, "layer_alpha"), FRAME_LAYERS,
+                    [alpha for _, _, _, alpha in slots] + [0.0 for _ in padding])
+    for index in range(FRAME_LAYERS):
+        gl.glUniform1i(gl.glGetUniformLocation(program, f"layer{index}"), _FITTED_UNIT + index)
+    for index, (_, texture, _, _) in enumerate(slots):
+        if texture is not None:
+            gl.glActiveTexture(gl.GL_TEXTURE0 + _FITTED_UNIT + index)
+            gl.glBindTexture(gl.GL_TEXTURE_2D, texture)
+    gl.glActiveTexture(gl.GL_TEXTURE0)
+    _set_matrix(gl, program, "output_to_picture", matrix)
 
 
 def _set_matrix(gl, program: int, name: str, matrix: Matrix) -> None:
@@ -384,6 +431,22 @@ class _Draw:
 
 
 @dataclass
+class _Fitted:
+    """A layer's fitted picture (player/fitted.py): a GL_RGBA16F texture of the Output's size and
+    the framebuffer that draws it."""
+    framebuffer: int
+    texture: int
+    size: tuple[int, int]
+    # The key it was drawn for; None while it holds no finished draw (new, or a draw failed).
+    key: FitKey | None = None
+    # The GPU's marker after its draw (glFenceSync); None once the GPU passed it.
+    fence: Any = None
+    # The decode of the last draw the GPU finished (player/fitted.py `prepared`), kept while a
+    # newer draw of it (an edit, a resize) is in flight; None: none finished, or a draw failed.
+    finished: tuple[int, int] | None = None
+
+
+@dataclass
 class _Surface:
     output: NativeOutput
     window: Any
@@ -400,9 +463,20 @@ class _Surface:
     failed_episode: int | None = None
     grant_key: tuple[UUID, int, int] | None = None
     textures: dict[str, tuple[int, int, int]] = field(default_factory=dict)
-    targets: list[tuple[int, int]] = field(default_factory=list)
+    # Each layer's fitted picture on this Output (player/fitted.py), by assignment.
+    fitted: dict[str, _Fitted] = field(default_factory=dict)
+    # What the GLArea's buffer holds (`NativeRenderer._frame_key` of its last frame pass); None:
+    # unknown, so the next render runs the pass. GTK keeps the buffer between renders, so a
+    # render whose frame equals it (a renewal) draws nothing.
+    painted: tuple | None = None
     size: tuple[int, int] = (0, 0)
+    # The fit pass's program and the frame pass's for neutral steps, compiled with the surface's
+    # GL context; None: none yet (not realized, or unrealized).
     programs: tuple[int, int] | None = None
+    # The frame pass's program per step set (`_frame_source`), each compiled on first use.
+    frame_programs: dict[_Steps, int] = field(default_factory=dict)
+    # The step set the last frame pass ran; None before one.
+    steps: _Steps | None = None
     vao: int = 0
     # The Output's picture operations from the display host's shell (frame protocol v4), read
     # each render; None: neutral (none received yet, or no display host).
@@ -499,20 +573,30 @@ bool inside_opening(vec2 point) {
     return true;
 }
 """
-# The position pass (player/geometry.py `picture_source_uv`): the per-Frame mask first, then the
-# fit's one matrix onto the picture's unit square, then the photo's rectangle (Photo fit).
-_LAYER = """#version 300 es
+# Where an output point falls in the Frame's picture (player/geometry.py `picture_source_uv`):
+# the fit's one matrix onto the picture's unit square; a point of the Frame is inside the opening
+# (the per-Frame mask) and inside that square.
+_PICTURE = """
+uniform mat3 output_to_picture;
+vec2 picture_point(vec2 point) {
+    vec3 q = output_to_picture * vec3(point, 1.0);
+    return q.xy/q.z;
+}
+bool in_frame(vec2 point, vec2 p) {
+    return inside_opening(point) && all(greaterThanEqual(p, vec2(0.0))) && all(lessThanEqual(p, vec2(1.0)));
+}
+"""
+# The fit pass (player/fitted.py): one layer's fitted picture, drawn once per FitKey into its own
+# linear floating-point texture (cleared to transparent): the per-Frame mask, the fit's matrix, the
+# photo's rectangle (Photo fit), the transfer to linear light, premultiplied, at full strength.
+_FIT = """#version 300 es
 precision highp float;
 in vec2 uv;
 out vec4 color;
 uniform sampler2D media;
-uniform mat3 output_to_picture;
 uniform vec4 photo;
 uniform int video;
-uniform int black;
-uniform int commissioning;
-uniform float opacity;
-""" + _OPENING + """
+""" + _OPENING + _PICTURE + """
 vec3 linear_rgb(vec3 value) {
     if (video == 1) {
         return mix(pow((value+0.099)/1.099, vec3(1.0/0.45)), value/4.5,
@@ -522,33 +606,34 @@ vec3 linear_rgb(vec3 value) {
                lessThanEqual(value, vec3(0.04045)));
 }
 void main() {
-    if (!inside_opening(uv)) discard;
-    vec3 q = output_to_picture * vec3(uv, 1.0);
-    vec2 p = q.xy/q.z;
-    if (any(lessThan(p, vec2(0.0))) || any(greaterThan(p, vec2(1.0)))) discard;
-    if (commissioning == 1) {
-        vec2 grid = fract(mix(photo.xy, photo.zw, p)*10.0);
-        float line = float(grid.x < 0.035 || grid.y < 0.035);
-        color = vec4(mix(vec3(0.2, 0.3, 0.45), vec3(0.9), line), 1.0);
-        return;
-    }
-    if (black == 1) { color=vec4(0.0, 0.0, 0.0, opacity); return; }
+    vec2 p = picture_point(uv);
+    if (!in_frame(uv, p)) discard;
     vec4 sample_color = texture(media, mix(photo.xy, photo.zw, p));
-    float alpha = sample_color.a * opacity;
-    color = vec4(linear_rgb(sample_color.rgb)*alpha, alpha);
+    color = vec4(linear_rgb(sample_color.rgb)*sample_color.a, sample_color.a);
 }
 """
-# The final pass (player/geometry.py `final_pixel`): the Frame's paper under the
-# room's light, the signal between the panel's black and its white at the matched lux, the fixed
-# rolloff, white balance, contrast, gamma, the dither, then the per-Output mask LAST, so black stays
-# black outside the opening whatever the light. A test pattern replaces the composed picture here,
-# so Position's grid and every Frame layer are replaced with no change to the layer pass; the look
-# patterns skip the light and the paper, the Black level skips every step. geometry.py's constants are written in (`_FINAL_CONSTANTS`), so each
-# has one home.
-_LUT_UNIT = 1      # the LUT's texture unit; the picture is on unit 0
+# The frame pass, the one pass each shown frame draws: the composition of the Frame's layers at
+# the frame's strengths (player/geometry.py `compose_pixel`: linear premultiplied source-over,
+# bottom to top, from black; per slot a fitted picture, a black layer or Position's commissioning
+# grid), then `final_pixel`: the Frame's paper under the room's light, the signal between the
+# panel's black and its white at the matched lux, the fixed rolloff, white balance, contrast,
+# gamma, the dither, then the per-Output mask LAST, so black stays black outside the opening
+# whatever the light. A test pattern replaces the composed picture here, so Position's grid and
+# every Frame layer are replaced with no change to the fit pass; the look patterns skip the light
+# and the paper, the Black level skips every step. geometry.py's constants are written in
+# (`_FINAL_CONSTANTS`), so each has one home.
+_LUT_UNIT = 1      # the LUT's texture unit; unit 0 is the fit pass's photo
 _TARGET_LAYOUT_UNIT = 2     # the screen board's raster (contracts.calibration_target.board_raster)
 _TARGET_QR_UNIT = 3         # its QR's modules
+_FITTED_UNIT = 4            # slot i's fitted picture is on unit _FITTED_UNIT + i
+FRAME_LAYERS = 8
+"""The most layers one frame composes, one sampler each (ES 3.0 guarantees 16 texture units; the
+LUT and the target take three). A frame that sees more fails its surface rather than drop one."""
+_SLOT_PICTURE, _SLOT_BLACK, _SLOT_COMMISSIONING = 1, 2, 3
 _FINAL_CONSTANTS = (
+    f"#define FRAME_LAYERS {FRAME_LAYERS}\n"
+    f"#define SLOT_PICTURE {_SLOT_PICTURE}\n"
+    f"#define SLOT_BLACK {_SLOT_BLACK}\n"
     f"#define FRAME_LIGHTS_MAX {FRAME_LIGHTS_MAX}\n"
     + "".join(f"#define LIGHT_{kind.upper()} {code}\n" for code, kind in enumerate(LIGHT_KINDS))
     + f"const float LUT_GRID = {float(LUT_GRID)!r};\n"
@@ -570,23 +655,33 @@ _FINAL_CONSTANTS = (
     + ", ".join(f"ivec2({row}, {offset})" for row, offset in QR_COPY_PLACES) + ");\n"
     f"const int QR_SQUARES = {QR_SQUARES};\n"
     f"const float QR_QUIET_MODULES = {float(QR_QUIET_MODULES)!r};\n")
+_STEP_SWITCHES = "// The step set: _frame_source writes each switch here as a constant.\n"
 _FINAL = """#version 300 es
 precision highp float;
 precision highp int;
 precision highp sampler3D;
 in vec2 uv;
 out vec4 color;
+""" + _STEP_SWITCHES + """
 """ + _FINAL_CONSTANTS + """
-uniform sampler2D picture;
+uniform int layer_count;
+uniform int layer_kind[FRAME_LAYERS];
+uniform float layer_alpha[FRAME_LAYERS];
+uniform sampler2D layer0;
+uniform sampler2D layer1;
+uniform sampler2D layer2;
+uniform sampler2D layer3;
+uniform sampler2D layer4;
+uniform sampler2D layer5;
+uniform sampler2D layer6;
+uniform sampler2D layer7;
 uniform vec3 rgb_multipliers;
 uniform float contrast_slope;
 uniform float gamma_exponent;
 uniform float matched_lux;
 uniform float panel_black;
 uniform int output_height;
-uniform int lut_on;
 uniform sampler3D lut;
-uniform int test_pattern;
 uniform sampler2D target_layout;
 uniform sampler2D target_qr;
 uniform int target_qr_modules;
@@ -606,7 +701,43 @@ uniform vec2 light_toward[FRAME_LIGHTS_MAX];
 uniform vec2 light_band[FRAME_LIGHTS_MAX];
 uniform vec3 light_position[FRAME_LIGHTS_MAX];
 uniform vec2 light_beam[FRAME_LIGHTS_MAX];
-""" + _OPENING + """
+""" + _OPENING + _PICTURE + """
+// Slot i's fitted picture at st (ES 3.00 indexes a sampler array only by a constant).
+vec4 fitted(int i, vec2 st) {
+    if (i == 0) return texture(layer0, st);
+    if (i == 1) return texture(layer1, st);
+    if (i == 2) return texture(layer2, st);
+    if (i == 3) return texture(layer3, st);
+    if (i == 4) return texture(layer4, st);
+    if (i == 5) return texture(layer5, st);
+    if (i == 6) return texture(layer6, st);
+    return texture(layer7, st);
+}
+// The Frame's layers composed at `point` (geometry.py `compose_pixel`), in linear light. A fitted
+// picture is drawn in GL's lower-left orientation, unlike decoded bytes.
+vec3 composed(vec2 point) {
+    vec2 st = vec2(point.x, 1.0-point.y);
+    vec2 p = picture_point(point);
+    bool framed = in_frame(point, p);
+    vec3 value = vec3(0.0);
+    for (int i = 0; i < FRAME_LAYERS; i++) {
+        if (i >= layer_count) break;
+        float alpha = layer_alpha[i];
+        if (layer_kind[i] == SLOT_PICTURE) {
+            vec4 source = fitted(i, st)*alpha;
+            value = source.rgb+value*(1.0-source.a);
+        } else if (framed) {
+            if (layer_kind[i] == SLOT_BLACK) {
+                value *= 1.0-alpha;
+            } else {
+                vec2 grid = fract(p*10.0);
+                float line = float(grid.x < 0.035 || grid.y < 0.035);
+                value = mix(vec3(0.2, 0.3, 0.45), vec3(0.9), line);
+            }
+        }
+    }
+    return value;
+}
 vec3 srgb_encoded(vec3 value) {
     value = clamp(value, 0.0, 1.0);
     return mix(1.055*pow(value, vec3(1.0/2.4))-0.055, 12.92*value, lessThanEqual(value, vec3(0.0031308)));
@@ -767,10 +898,9 @@ void main() {
     } else if (test_pattern != 0) {
         signal = srgb_decoded(pattern_signal(uv));
     } else {
-        // The photo on paper under the room's light (geometry.py `paper_reflectance`,
-        // `paper_signal`, `highlight_rolled`). Composition targets use OpenGL's lower-left
-        // orientation, unlike decoded bytes.
-        vec3 photo = texture(picture, vec2(uv.x, 1.0-uv.y)).rgb;
+        // The Frame's composed photo on paper under the room's light (geometry.py
+        // `paper_reflectance`, `paper_signal`, `highlight_rolled`).
+        vec3 photo = composed(uv);
         if (lut_on == 1) photo = lut_applied(photo);
         vec3 reflectance = paper_white*(paper_black+(1.0-paper_black)*photo);
         vec3 lit = reflectance*irradiance(uv)/(SHEET_WHITENESS*matched_lux);
@@ -896,6 +1026,7 @@ class NativeRenderer:
                 self.GLib, area, lambda at, surface=surface: self._frame(surface, at))
             self._surfaces[output.output_id] = surface
             area.connect("render", self._render, surface)
+            area.connect("resize", self._resized, surface)
             area.connect("unrealize", self._unrealize, surface)
             window.connect("realize", self._window_realized, surface)
             # GtkWindow's default map handler resets the backend app ID. Restore
@@ -1042,9 +1173,11 @@ class NativeRenderer:
     def _owed(self, surface: _Surface, at: float) -> _Draw | None:
         """The one redraw decision, for the frame at `at`: the pending draw (a new composition
         from present()), else the drawn one again when an event marked it (`dirty`) or its look
-        changed by `at` (`_due`), in either case as it looks at `at`. None: what is drawn stands,
-        also while a layer seen at `at` is not decoded yet: the draw stays owed and the surface
-        `waiting`, unfollowed until the planning tick (whose prepare() reads the decoder) wakes it."""
+        changed by `at` (`_due`), in either case as it looks at `at`, with the calibration trial
+        Display Host holds now. None: what is drawn stands, also while a layer seen at `at` cannot
+        be drawn yet (`_ready`: not decoded, or its first fitted picture not finished): the draw
+        stays owed and the surface `waiting`, unfollowed until the planning tick (whose prepare()
+        reads the decoder and draws the fitted picture) wakes it."""
         draw, drawn = surface.pending, surface.acknowledged
         if draw is not None and draw.generations != self._generations(draw.composition):
             surface.pending = draw = None
@@ -1064,11 +1197,66 @@ class NativeRenderer:
                 surface.pending, surface.dirty = None, False
                 return None
         seen = look(draw.composition, at)
-        if not self._ready(seen):
+        self._apply_trial(draw)
+        if not self._ready(surface, seen, _drawn_fit(draw)):
             surface.waiting = True
             return None
         draw.composition, surface.dirty = seen, False
         return draw
+
+    def _apply_trial(self, draw: _Draw) -> None:
+        """Record on `draw` what Display Host's calibration trial for its composition draws now: the
+        fit's calibration, the lighting, the primitives and when it runs out (no trial: the
+        composition's calibration and the binding's lighting). The one read of the drawn fit, for a
+        frame and for a fitted picture prepare() draws ahead of its frame."""
+        frames = getattr(self, "_frames", None)
+        trial = None
+        if frames is not None:
+            grant = frames.grant(draw.composition.binding.output_id, draw.composition)
+            if grant is not None:
+                trial = frames.trial(draw.composition, grant)
+        draw.applied_calibration = AppliedCalibration(
+            calibration=trial.calibration if trial else draw.composition.calibration,
+            trial_id=str(trial.candidate.trial_id) if trial else None,
+            trial_generation=trial.candidate.generation if trial else None,
+            trial_sequence=trial.candidate.sequence if trial else None,
+            candidate_sha256=trial.candidate.candidate_sha256 if trial else None)
+        draw.applied_lighting = trial.lighting if trial else None
+        draw.primitives = trial.primitives if trial else None
+        draw.expires = _expires(trial) if trial else None
+
+    def _key(self, surface: _Surface, local: LocalLayer, binding: OutputBinding, fit,
+             decoder: _Decoder) -> FitKey:
+        """The FitKey `local` is drawn for now on `surface`, with the drawn `fit`."""
+        profile = binding.profile
+        return FitKey(decode=(decoder.incarnation, decoder.generation),
+                      sample=decoder.sample_serial, fit=fit,
+                      aspect=profile.width_px / profile.height_px, crop=local.layer.crop,
+                      size=surface.size)
+
+    def _done(self, fitted: _Fitted | None) -> bool:
+        """Whether `fitted` holds a finished draw: drawn, and the GPU past its fence (asked
+        without waiting), which records its decode as `finished`. The surface's GL context is
+        current."""
+        if fitted is None or fitted.key is None:
+            return False
+        if fitted.fence is not None:
+            gl = self.GL
+            if gl.glClientWaitSync(fitted.fence, 0, 0) not in (gl.GL_ALREADY_SIGNALED,
+                                                               gl.GL_CONDITION_SATISFIED):
+                return False
+            gl.glDeleteSync(fitted.fence)
+            fitted.fence = None
+        fitted.finished = fitted.key.decode
+        return True
+
+    @staticmethod
+    def _on_screen(surface: _Surface) -> set[str]:
+        """The pictures the surface's last completed draw shows."""
+        drawn = surface.acknowledged
+        return set() if drawn is None else {
+            local.layer.assignment_id for local in visible_now(drawn.composition.layers)
+            if local.layer.variant is not None}
 
     def _shown_now(self, composition: OutputComposition, generations: tuple) -> tuple:
         """`_shown` of `composition` drawn with `generations` now: its decoders' newest samples,
@@ -1092,12 +1280,28 @@ class NativeRenderer:
                                               self._decoders[key].generation) == (incarnation, generation)
                    for key, incarnation, generation in generations)
 
-    def _ready(self, composition: OutputComposition) -> bool:
-        """Every layer seen in `composition` has a decoded picture to draw."""
-        return all(local.layer.variant is None or (
-            (decoder := self._decoders.get(local.layer.assignment_id)) is not None
-            and decoder.prepared and not decoder.failure)
-            for local in visible_now(composition.layers))
+    def _ready(self, surface: _Surface, composition: OutputComposition, fit) -> bool:
+        """Every layer seen in `composition` can be drawn by this frame: decoded, and either on
+        screen already (the frame redraws a fitted picture an edit or a newer video sample made
+        stale, as it draws any edit) or with its fitted picture finished for this picture
+        (player/fitted.py `shown_at_once`). A frame never draws a layer's first fitted picture,
+        so a fade's first frame costs one frame pass. The surface's GL context is current."""
+        on_screen = self._on_screen(surface)
+        for local in visible_now(composition.layers):
+            if local.layer.variant is None:
+                continue
+            key = local.layer.assignment_id
+            decoder = self._decoders.get(key)
+            if decoder is None or not decoder.prepared or decoder.failure:
+                return False
+            fitted = surface.fitted.get(key)
+            drawn = fitted.key if fitted else None
+            now = self._key(surface, local, composition.binding, fit, decoder)
+            if redrawn_by_frames(drawn, now, key in on_screen):
+                continue
+            if not shown_at_once(drawn, now, self._done(fitted)):
+                return False
+        return True
 
     def _window_mapped(self, window, surface) -> None:
         """Every map begins a new episode: a remap (an output blip) gets a fresh surface."""
@@ -1303,15 +1507,24 @@ class NativeRenderer:
         return True
 
     def _estimate(self, compositions: tuple[OutputComposition, ...]) -> tuple[int, int]:
-        variants = {key: d.local.layer.variant for key, d in self._decoders.items()}
+        """Resident pictures (decoders and those `compositions` add) and their texture bytes."""
+        pictures = {key: (d.local.layer.output_id, d.local.layer.variant)
+                    for key, d in self._decoders.items()}
         for composition in compositions:
             for local in composition.layers:
                 if local.layer.variant is not None:
-                    variants[local.layer.assignment_id] = local.layer.variant
-        # 2 linear RGBA16F targets per Output + one RGBA8 texture per assignment.
-        target_bytes = sum(max(s.output.width*s.output.height, s.size[0]*s.size[1])*16
-                           for s in self._surfaces.values())
-        return len(variants), target_bytes + sum(v.width*v.height*4 for v in variants.values())
+                    pictures[local.layer.assignment_id] = (local.layer.output_id, local.layer.variant)
+        return len(pictures), sum(self._picture_bytes(output_id, variant)
+                                  for output_id, variant in pictures.values())
+
+    def _picture_bytes(self, output_id: str, variant) -> int:
+        """One picture's texture bytes: its decoded RGBA8 texture, kept to draw its fitted picture
+        again after an edit, and its fitted picture at its Output's size (or the size it was
+        configured with, before the first render)."""
+        surface = self._surfaces.get(output_id)
+        pixels = 0 if surface is None else max(surface.output.width*surface.output.height,
+                                               surface.size[0]*surface.size[1])
+        return variant.width*variant.height*4 + pixels*FITTED_BYTES
 
     def capacity(self, compositions: tuple[OutputComposition, ...]) -> CapacityResult:
         self._thread()
@@ -1321,8 +1534,65 @@ class NativeRenderer:
         return CapacityResult(surfaces_ok and count <= self.decoder_limit
                               and size <= self.texture_budget, qualified=False)
 
-    def prepare(self, local: LocalLayer) -> PrepareResult:
+    def prepare(self, local: LocalLayer, binding: OutputBinding) -> PrepareResult:
+        """`local`, on `binding`'s Frame: prepared once decoded and its fitted picture drawn and
+        finished (player/fitted.py `prepared`), drawn here on the planning tick while its Output
+        is still (not following its frame clock), so a photo's first frame (a fade's first) only
+        mixes it."""
         self._thread()
+        return self._prepare(local, OutputComposition(binding), seen=False)
+
+    def _prepare(self, local: LocalLayer, composition: OutputComposition, *,
+                 seen: bool) -> PrepareResult:
+        """prepare() for a layer of `composition` (whose calibration and binding a frame draws it
+        with), and for `seen` (present()'s layers seen now) its fitted picture drawn whatever the
+        Output shows: it is late, and its frames wait for it."""
+        decoded = self._decode(local)
+        if decoded.status != "prepared" or local.layer.variant is None:
+            return decoded
+        return self._prepare_fitted(local, composition, seen=seen)
+
+    def _prepare_fitted(self, local: LocalLayer, composition: OutputComposition, *,
+                        seen: bool) -> PrepareResult:
+        """Draw `local`'s fitted picture when it is not on screen and has none for its picture now
+        (missing, or stale after an edit), if `seen` or its Output is still, and no draw of it is
+        in flight (the GPU has not passed its fence: drawn once, never again before that); a
+        picture on screen is its frames' to redraw. Prepared by player/fitted.py `prepared`."""
+        surface = self._surfaces[local.layer.output_id]
+        key = local.layer.assignment_id
+        decoder = self._decoders[key]
+        binding = composition.binding
+        probe = _Draw(0, composition, ())
+        try:
+            self._apply_trial(probe)
+        except Exception:
+            return PrepareResult("pending")         # Display Host unreadable now: the next tick
+        surface.area.make_current()
+        if surface.area.get_error() is not None or surface.size == (0, 0):
+            return PrepareResult("pending")
+        now = self._key(surface, local, binding, _drawn_fit(probe), decoder)
+        fitted = surface.fitted.get(key)
+        drawn = fitted.key if fitted else None
+        in_flight = drawn is not None and not self._done(fitted)
+        if (not in_flight and not now.same_picture(drawn)
+                and not redrawn_by_frames(drawn, now, key in self._on_screen(surface))
+                and (seen or not surface.follower.following)):
+            try:
+                fitted = self._fit(surface, local, now)
+            except Exception:
+                decoder.failure, decoder.prepared = "decode", False
+                decoder.retry_at = time.monotonic()+1
+                return PrepareResult("failed", "decode")
+            finally:
+                # Outside GTK's paint: the window's own framebuffer is bound again, as GTK left it.
+                self.GL.glBindFramebuffer(self.GL.GL_FRAMEBUFFER, 0)
+            self._done(fitted)
+        return PrepareResult("prepared" if prepared(fitted.finished if fitted else None, now)
+                             else "pending")
+
+    def _decode(self, local: LocalLayer) -> PrepareResult:
+        """`local`'s decoder: made, read, sought to its position; prepared once it holds a sample
+        and the surface's programs exist."""
         if (local.layer.output_id not in self._surfaces or not math.isfinite(local.position)
                 or local.position < 0 or not math.isfinite(local.alpha) or not 0 <= local.alpha <= 1):
             return PrepareResult("failed", "decode")
@@ -1344,7 +1614,8 @@ class NativeRenderer:
         if decoder is None:
             variant = local.layer.variant
             count, size = self._estimate(())
-            if count >= self.decoder_limit or size+variant.width*variant.height*4 > self.texture_budget:
+            if (count >= self.decoder_limit
+                    or size+self._picture_bytes(local.layer.output_id, variant) > self.texture_budget):
                 return PrepareResult("failed", "capacity")
             # Cache worker validates file identity. Only absolute local paths enter filesrc.
             if local.path is None or not isinstance(local.path, Path) or not local.path.is_absolute():
@@ -1401,9 +1672,11 @@ class NativeRenderer:
             surface.pending = None
         if not self.capacity((composition,)).available:
             return PresentationResult("failed", "capacity")
-        visible = visible_now(composition.layers)
+        # The layers seen now (the tick's look): each is decoded, and its fitted picture drawn if
+        # the planning tick could not draw it ahead (late), since its frames wait for it.
+        visible = visible_now(look(composition, time.monotonic()).layers)
         for local in visible:
-            result = self.prepare(local)
+            result = self._prepare(local, composition, seen=True)
             if result.status != "prepared":
                 return PresentationResult(result.status, result.code)
         visible_ids = {local.layer.assignment_id for local in visible}
@@ -1461,12 +1734,14 @@ class NativeRenderer:
                 texture = surface.textures.pop(assignment_id, None)
                 if texture:
                     self.GL.glDeleteTextures([texture[0]])
+                self._free_fitted(surface, assignment_id)
 
     def diagnostics(self) -> dict:
         self._thread()
         return {"qualified": False, "resident_decoders": len(self._decoders),
                 "estimated_texture_bytes": self._estimate(())[1],
                 "outputs": {key: {"size": surface.size, "failure": surface.failed(),
+                                  "fitted": sorted(surface.fitted),
                                   "draw_serial": surface.acknowledged.serial if surface.acknowledged else None,
                                   "draw_time": surface.acknowledged.completed_at if surface.acknowledged else None,
                                   "positions": {local.layer.assignment_id: local.position for local in
@@ -1519,53 +1794,68 @@ class NativeRenderer:
             raise
         return texture
 
-    def _targets(self, surface: _Surface, width: int, height: int) -> None:
+    def _setup(self, surface: _Surface, width: int, height: int) -> None:
+        """The surface's programs (compiled once per GL context) and its drawn size. A new size is
+        an edit like any other (player/fitted.py): every fitted picture stays (its key names the
+        old size, so each is drawn again at the new one before it is shown, and stays prepared),
+        what is on screen is drawn again by this render (`dirty`), and the GLArea's buffer, which
+        GTK made anew, holds nothing painted."""
         gl = self.GL
         if surface.programs is None:
-            layer_program = self._program(_LAYER)
+            fit_program = self._program(_FIT)
             try:
-                final_program = self._program(_FINAL)
+                final_program = self._program(_frame_source(_NEUTRAL_STEPS))
             except Exception:
-                gl.glDeleteProgram(layer_program)
+                gl.glDeleteProgram(fit_program)
                 raise
-            surface.programs = layer_program, final_program
+            surface.programs = fit_program, final_program
+            surface.frame_programs = {_NEUTRAL_STEPS: final_program}
             surface.vao = int(gl.glGenVertexArrays(1))
         if surface.size == (width, height):
             return
         old_size = surface.size
         surface.size = (width, height)
-        old_targets = old_size[0]*old_size[1]*16 if surface.targets else 0
-        if self._estimate(())[1]+old_targets > self.texture_budget:
+        if self._estimate(())[1] > self.texture_budget:
             surface.size = old_size
             raise RuntimeError("resized Output exceeds texture budget")
-        targets = []
+        surface.painted = None
+        surface.dirty, surface.waiting = True, False
+
+    def _new_fitted(self, surface: _Surface) -> _Fitted:
+        """A fitted picture's texture (GL_RGBA16F, the surface's size) and framebuffer."""
+        gl = self.GL
+        texture = self._texture(*surface.size, floating=True)
         try:
-            for _ in range(2):
-                texture = self._texture(width, height, floating=True)
-                try:
-                    framebuffer = int(gl.glGenFramebuffers(1))
-                except Exception:
-                    gl.glDeleteTextures([texture])
-                    raise
-                targets.append((framebuffer, texture))
-                gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, framebuffer)
-                gl.glFramebufferTexture2D(gl.GL_FRAMEBUFFER, gl.GL_COLOR_ATTACHMENT0,
-                                          gl.GL_TEXTURE_2D, texture, 0)
-                if gl.glCheckFramebufferStatus(gl.GL_FRAMEBUFFER) != gl.GL_FRAMEBUFFER_COMPLETE:
-                    raise RuntimeError("linear floating framebuffer unsupported")
-                gl.glClearColor(0, 0, 0, 1)
-                gl.glClear(gl.GL_COLOR_BUFFER_BIT)
+            framebuffer = int(gl.glGenFramebuffers(1))
         except Exception:
-            for framebuffer, texture in targets:
-                gl.glDeleteFramebuffers(1, [framebuffer])
-                gl.glDeleteTextures([texture])
-            surface.size = old_size
-            raise
-        for framebuffer, texture in surface.targets:
-            gl.glDeleteFramebuffers(1, [framebuffer])
             gl.glDeleteTextures([texture])
-        surface.targets = targets
-        surface.acknowledged = None
+            raise
+        fitted = _Fitted(framebuffer, texture, surface.size)
+        gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, framebuffer)
+        gl.glFramebufferTexture2D(gl.GL_FRAMEBUFFER, gl.GL_COLOR_ATTACHMENT0,
+                                  gl.GL_TEXTURE_2D, texture, 0)
+        if gl.glCheckFramebufferStatus(gl.GL_FRAMEBUFFER) != gl.GL_FRAMEBUFFER_COMPLETE:
+            self._delete_fitted(fitted)
+            raise RuntimeError("linear floating framebuffer unsupported")
+        return fitted
+
+    def _delete_fitted(self, fitted: _Fitted) -> None:
+        gl = self.GL
+        if fitted.fence is not None:
+            gl.glDeleteSync(fitted.fence)
+            fitted.fence = None
+        gl.glDeleteFramebuffers(1, [fitted.framebuffer])
+        gl.glDeleteTextures([fitted.texture])
+
+    def _free_fitted(self, surface: _Surface, key: str) -> None:
+        """Delete `key`'s fitted picture on `surface` (its GL context current), if it has one."""
+        fitted = surface.fitted.pop(key, None)
+        if fitted is None:
+            return
+        self._delete_fitted(fitted)
+        if surface.painted is not None and any(texture == fitted.texture
+                                               for _, texture, _, _ in surface.painted[1]):
+            surface.painted = None          # a later texture may take its name
 
     def _upload(self, surface: _Surface, local: LocalLayer) -> int:
         gl = self.GL
@@ -1600,44 +1890,144 @@ class NativeRenderer:
                                                        decoder.sample_serial)
         return texture
 
-    def _draw_candidate(self, surface: _Surface, draw: _Draw) -> None:
+    def _fit(self, surface: _Surface, local: LocalLayer, key: FitKey) -> _Fitted:
+        """Draw `local`'s fitted picture for `key` (the fit pass) into its texture, made at the
+        surface's size when it has none or one of another size (a resize), and mark the GPU's
+        progress with a fence; flushed, so the GPU draws it now. Its key is None until the draw is
+        issued without a GL error, so a failed draw is never shown, and a failed draw forgets the
+        finished one too (its texture was cleared). The surface's GL context is current; the
+        framebuffer is left bound."""
         gl = self.GL
-        program = surface.programs[0]
-        gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, surface.targets[1][0])
-        gl.glClearColor(0, 0, 0, 1)
+        assignment = local.layer.assignment_id
+        fitted = surface.fitted.get(assignment)
+        if fitted is None or fitted.size != surface.size:
+            resized = self._new_fitted(surface)
+            if fitted is not None:
+                resized.finished = fitted.finished      # still this decode's, being redrawn
+                self._free_fitted(surface, assignment)
+            fitted = surface.fitted[assignment] = resized
+        fitted.key = None
+        if fitted.fence is not None:
+            gl.glDeleteSync(fitted.fence)
+            fitted.fence = None
+        try:
+            self._fit_pass(surface, local, key, fitted)
+        except Exception:
+            fitted.finished = None
+            raise
+        decoder = self._decoders[assignment]
+        fitted.key = replace(key, sample=decoder.sample_serial)    # the sample uploaded
+        return fitted
+
+    def _fit_pass(self, surface: _Surface, local: LocalLayer, key: FitKey, fitted: _Fitted) -> None:
+        """The fit pass's GL work for `_fit`: `local`'s decoded picture through `key`'s fit into
+        `fitted`'s framebuffer, then its fence. Raises on a GL error."""
+        gl = self.GL
+        texture = self._upload(surface, local)
+        program, variant = surface.programs[0], local.layer.variant
+        gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, fitted.framebuffer)
+        gl.glBindVertexArray(surface.vao)
+        gl.glViewport(0, 0, *fitted.size)
+        gl.glDisable(gl.GL_BLEND)
+        gl.glClearColor(0, 0, 0, 0)
         gl.glClear(gl.GL_COLOR_BUFFER_BIT)
         gl.glUseProgram(program)
-        gl.glEnable(gl.GL_BLEND)
-        gl.glBlendFunc(gl.GL_ONE, gl.GL_ONE_MINUS_SRC_ALPHA)
-        fit = _drawn_fit(draw)
-        profile = draw.composition.binding.profile
-        aspect = profile.width_px / profile.height_px      # the Frame's aspect: Cover's and the photo's
-        _set_matrix(gl, program, "output_to_picture", output_to_picture(fit, surface.size, aspect))
-        _set_opening(gl, program, fit.corners)
+        gl.glActiveTexture(gl.GL_TEXTURE0)
+        gl.glBindTexture(gl.GL_TEXTURE_2D, texture)
         gl.glUniform1i(gl.glGetUniformLocation(program, "media"), 0)
-        # An explicit Trial may render a procedural commissioning canvas when
-        # no authorized media exists. It is never a Layer, Run or readiness fact.
-        commissioning = bool(draw.applied_calibration and draw.applied_calibration.trial_id
-                             and draw.composition.fallback and not draw.composition.layers)
-        gl.glUniform1i(gl.glGetUniformLocation(program, "commissioning"), int(commissioning))
-        if commissioning:
-            gl.glUniform4f(gl.glGetUniformLocation(program, "photo"), 0.0, 0.0, 1.0, 1.0)
-            gl.glDrawArrays(gl.GL_TRIANGLES, 0, 3)
-        for local in visible_now(draw.composition.layers):
-            variant = local.layer.variant
-            if variant is not None:
-                texture = self._upload(surface, local)
-                gl.glActiveTexture(gl.GL_TEXTURE0)
-                gl.glBindTexture(gl.GL_TEXTURE_2D, texture)
-                rectangle = photo_rect(aspect, variant.width, variant.height, local.layer.crop)
-                gl.glUniform4f(gl.glGetUniformLocation(program, "photo"), *rectangle)
-            gl.glUniform1i(gl.glGetUniformLocation(program, "video"), int(bool(variant and variant.duration)))
-            gl.glUniform1i(gl.glGetUniformLocation(program, "black"), int(variant is None))
-            gl.glUniform1f(gl.glGetUniformLocation(program, "opacity"), local.alpha)
-            gl.glDrawArrays(gl.GL_TRIANGLES, 0, 3)
-        gl.glDisable(gl.GL_BLEND)
+        _set_matrix(gl, program, "output_to_picture", output_to_picture(key.fit, fitted.size, key.aspect))
+        _set_opening(gl, program, key.fit.corners)
+        gl.glUniform4f(gl.glGetUniformLocation(program, "photo"),
+                       *photo_rect(key.aspect, variant.width, variant.height, local.layer.crop))
+        gl.glUniform1i(gl.glGetUniformLocation(program, "video"), int(bool(variant.duration)))
+        gl.glDrawArrays(gl.GL_TRIANGLES, 0, 3)
+        fitted.fence = gl.glFenceSync(gl.GL_SYNC_GPU_COMMANDS_COMPLETE, 0)
+        gl.glFlush()
         if gl.glGetError() != gl.GL_NO_ERROR:
-            raise RuntimeError("composition GL error")
+            raise RuntimeError("fit GL error")
+
+    def _redraw_fitted(self, surface: _Surface, draw: _Draw) -> bool:
+        """Draw again the fitted picture of each picture `draw` shows whose key changed (`_ready`
+        lets only a picture on screen, or a video's newer sample, reach here): an edit or a new
+        sample, drawn on this frame as any edit is. False when one fails: that decoder fails (a
+        new decoder after a second, as a failed decode) and the draw is dropped, so the screen
+        keeps what it shows."""
+        fit = _drawn_fit(draw)
+        for local in visible_now(draw.composition.layers):
+            if local.layer.variant is None:
+                continue
+            decoder = self._decoders[local.layer.assignment_id]
+            self._read_sample(decoder)          # a playing video's newest picture
+            key = self._key(surface, local, draw.composition.binding, fit, decoder)
+            fitted = surface.fitted.get(local.layer.assignment_id)
+            if fitted is not None and fitted.key == key:
+                continue
+            try:
+                self._fit(surface, local, key)
+            except Exception:
+                decoder.failure, decoder.prepared = "decode", False
+                decoder.retry_at = time.monotonic()+1
+                surface.pending = None
+                return False
+        return True
+
+    @staticmethod
+    def _slots(surface: _Surface, shown: _Draw | None) -> tuple | None:
+        """The frame pass's layers for `shown`, bottom to top: (kind, fitted texture, its key,
+        strength) per layer seen; the commissioning grid alone while an explicit trial draws a
+        fallback with no layers (it is never a Layer, Run or readiness fact). None: a picture it
+        shows has no fitted picture to mix (its last draw failed), so no frame can draw it."""
+        if shown is None:
+            return ()
+        composition = shown.composition
+        if (shown.applied_calibration and shown.applied_calibration.trial_id
+                and composition.fallback and not composition.layers):
+            return ((_SLOT_COMMISSIONING, None, None, 1.0),)
+        slots = []
+        for local in visible_now(composition.layers):
+            if local.layer.variant is None:
+                slots.append((_SLOT_BLACK, None, None, local.alpha))
+                continue
+            fitted = surface.fitted.get(local.layer.assignment_id)
+            if fitted is None or fitted.key is None:
+                return None
+            slots.append((_SLOT_PICTURE, fitted.texture, fitted.key, local.alpha))
+        return tuple(slots)
+
+    def _frame_program(self, surface: _Surface, steps: _Steps) -> int:
+        """The frame pass's program for `steps`, compiled on its first use with this GL context
+        (a picture settings edit that switches a step: one compile, then cached)."""
+        program = surface.frame_programs.get(steps)
+        if program is None:
+            program = surface.frame_programs[steps] = self._program(_frame_source(steps))
+        surface.steps = steps
+        return program
+
+    def _frame_pass(self, surface: _Surface, shown: _Draw | None, slots: tuple,
+                    operations: PictureOperations, lights: FrameLights | None, lut_drawn: bool,
+                    target: tuple[int, BoardDraw] | None) -> None:
+        """The one pass a shown frame draws, into GTK's framebuffer (bound): the fitted pictures
+        and black layers mixed at their strengths, then the Frame's paper under its `lights`, the
+        Display's picture settings and the per-Output mask (`_FINAL`), with the program of its
+        step set."""
+        gl = self.GL
+        fit = _drawn_fit(shown) if shown else None
+        profile = shown.composition.binding.profile if shown else None
+        steps = _steps(operations, lut_drawn=lut_drawn)
+        program = self._frame_program(surface, steps)
+        gl.glBindVertexArray(surface.vao)
+        gl.glViewport(0, 0, *surface.size)
+        gl.glDisable(gl.GL_BLEND)
+        gl.glUseProgram(program)
+        matrix = (output_to_picture(fit, surface.size, profile.width_px / profile.height_px)
+                  if shown else (1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0))
+        _layer_uniforms(gl, program, slots, matrix)
+        _final_uniforms(gl, program, operations, fit.corners if shown else _NO_OPENING,
+                        lights, output_height=surface.size[1], target=target)
+        gl.glDrawArrays(gl.GL_TRIANGLES, 0, 3)
+        gl.glFlush()
+        if gl.glGetError() != gl.GL_NO_ERROR:
+            raise RuntimeError("presentation GL error")
 
     def _render(self, area, _context, surface: _Surface) -> bool:
         gl = self.GL
@@ -1654,7 +2044,7 @@ class NativeRenderer:
         grant = frames.grant(surface.output.output_id) if frames is not None else None
         _observe_grant(surface, grant)
         # The Output's picture operations, read each render like the trial; a new value is
-        # drawn by this render's final pass and named in its tag.
+        # drawn by this render's frame pass and named in its tag.
         surface.operations = frames.picture(surface.output.output_id) if frames is not None else None
         if frames is not None and (grant is None or not grant.admitted):
             # Before surface admission, show only a fixed synthetic handoff
@@ -1667,53 +2057,24 @@ class NativeRenderer:
             if grant is not None and gl.glGetError() == gl.GL_NO_ERROR:
                 frames.tag_rendered_buffer(surface.window.get_window(), grant,
                                            "candidate-" + str(grant.grant_id))
-            surface.acknowledged = None
+            surface.acknowledged = surface.painted = None
             return True
         at = self._frame_time(area)
-        draw = self._owed(surface, at)
-        logical = draw.composition if draw else (surface.acknowledged.composition if surface.acknowledged else None)
-        applied = None
-        trial = None
-        if logical is not None:
-            if frames is not None:
-                exact_grant = frames.grant(surface.output.output_id, logical)
-                if exact_grant is not None:
-                    trial = frames.trial(logical, exact_grant)
-            applied = AppliedCalibration(calibration=trial.calibration if trial else logical.calibration,
-                trial_id=str(trial.candidate.trial_id) if trial else None,
-                trial_generation=trial.candidate.generation if trial else None,
-                trial_sequence=trial.candidate.sequence if trial else None,
-                candidate_sha256=trial.candidate.candidate_sha256 if trial else None)
-            if draw is not None:
-                draw.applied_calibration = applied
-                draw.applied_lighting = trial.lighting if trial else None
-                draw.primitives = trial.primitives if trial else None
-                draw.expires = _expires(trial) if trial else None
-        candidate_ok = False
         try:
-            self._targets(surface, width, height)
-            gl.glBindVertexArray(surface.vao)
-            gl.glViewport(0, 0, width, height)
-            if draw:
-                try:
-                    self._draw_candidate(surface, draw)
-                    candidate_ok = True
-                except Exception:
-                    for local in visible_now(draw.composition.layers):
-                        decoder = self._decoders.get(local.layer.assignment_id)
-                        if decoder:
-                            decoder.failure, decoder.prepared = "decode", False
-                            decoder.retry_at = time.monotonic()+1
-                    surface.pending = None
+            self._setup(surface, width, height)
+            draw = self._owed(surface, at)
+            if draw is not None and not self._redraw_fitted(surface, draw):
+                draw = None                     # a failed redraw: the draw is dropped
+            shown = draw or surface.acknowledged
+            slots = self._slots(surface, shown)
+            if slots is None and surface.painted is None:
+                # What is on screen lost its fitted picture (a failed redraw) and the GLArea's
+                # buffer holds nothing known (GTK made it anew): nothing of it can be shown.
+                shown = surface.acknowledged = None
+                slots = ()
             gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, gtk_framebuffer)
-            gl.glDisable(gl.GL_BLEND)
-            gl.glUseProgram(surface.programs[1])
-            gl.glActiveTexture(gl.GL_TEXTURE0)
-            gl.glBindTexture(gl.GL_TEXTURE_2D, surface.targets[1 if candidate_ok else 0][1])
-            gl.glUniform1i(gl.glGetUniformLocation(surface.programs[1], "picture"), 0)
-            shown = draw if candidate_ok else surface.acknowledged
             operations = surface.operations or _stand_in(surface.output.output_id)
-            lights, lut_drawn = None, False
+            lighting, lights, lut_drawn = None, None, False
             if shown:
                 lighting = _drawn_lighting(shown)
                 lights = surface.lights_for(lighting, self._room_lights, _drawn_fit(shown),
@@ -1725,14 +2086,22 @@ class NativeRenderer:
                 modules = self._bind_target(surface, operations)
                 if shown:
                     target = (modules, board_draw(_drawn_fit(shown), shown.composition.binding.profile, None))
-            _final_uniforms(gl, surface.programs[1], operations,
-                            _drawn_fit(shown).corners if shown else _NO_OPENING, lights,
-                            lut_drawn=lut_drawn, output_height=height, target=target)
-            gl.glDrawArrays(gl.GL_TRIANGLES, 0, 3)
-            gl.glFlush()
-            if gl.glGetError() != gl.GL_NO_ERROR:
-                raise RuntimeError("presentation GL error")
-            if draw and candidate_ok:
+            # Everything the frame pass reads: GTK keeps the GLArea's buffer between renders, so a
+            # frame equal to the one painted (a renewal, an edit that changed nothing) draws nothing,
+            # and a frame that cannot be drawn (`slots` None) keeps what the buffer shows. The LUT
+            # bound is the drawn lighting's paper profile once `lut_drawn` (`_bind_lut`); `lights`
+            # carries the room-lights document (`set_room_lights`), so a new one paints again.
+            painted = None if slots is None else (
+                surface.size, slots, operations, lut_drawn,
+                (target, surface.target_code) if target else None,
+                _drawn_fit(shown) if shown else None,
+                shown.composition.binding.profile if shown else None,
+                lighting, lights)
+            if painted is not None and painted != surface.painted:
+                surface.painted = None
+                self._frame_pass(surface, shown, slots, operations, lights, lut_drawn, target)
+                surface.painted = painted
+            if draw:
                 actual = []
                 for local in draw.composition.layers:
                     decoder = self._decoders.get(local.layer.assignment_id)
@@ -1745,7 +2114,6 @@ class NativeRenderer:
                 draw.completed_at, draw.at = time.monotonic(), at
                 # What it shows now, its decoders' samples read: an event compares against it.
                 draw.shown = self._shown_now(draw.composition, draw.generations)
-                surface.targets.reverse()
                 surface.acknowledged = draw
                 if surface.pending is draw:
                     surface.pending = None
@@ -1765,7 +2133,7 @@ class NativeRenderer:
                                            surface.acknowledged.primitives,
                                            picture_change=surface._tagged_change(surface.operations))
         except Exception as error:
-            surface.pending = None
+            surface.pending = surface.painted = None
             surface.fail(type(error).__name__)
             gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, gtk_framebuffer)
             gl.glClearColor(0, 0, 0, 1)
@@ -1856,6 +2224,13 @@ class NativeRenderer:
         gl.glTexImage2D(gl.GL_TEXTURE_2D, 0, internal, width, height, 0, layout, gl.GL_UNSIGNED_BYTE, data)
         return texture
 
+    @staticmethod
+    def _resized(_area, _width, _height, surface: _Surface) -> None:
+        """GtkGLArea's "resize": GTK made the GLArea's buffer anew (on every size allocation, the
+        size changed or not), so its contents are undefined and the render it emits next must
+        paint the frame again, never take the buffer for what was painted."""
+        surface.painted = None
+
     def _unrealize(self, area, surface) -> None:
         area.make_current()
         if area.get_error() is not None:
@@ -1871,16 +2246,18 @@ class NativeRenderer:
         surface.target_code = None
         for texture, _, _ in surface.textures.values():
             gl.glDeleteTextures([texture])
-        for framebuffer, texture in surface.targets:
-            gl.glDeleteFramebuffers(1, [framebuffer])
-            gl.glDeleteTextures([texture])
+        for fitted in surface.fitted.values():
+            self._delete_fitted(fitted)
         if surface.programs:
-            for program in surface.programs:
-                gl.glDeleteProgram(program)
+            gl.glDeleteProgram(surface.programs[0])
+        for program in surface.frame_programs.values():
+            gl.glDeleteProgram(program)
+        surface.frame_programs, surface.steps = {}, None
         if surface.vao:
             gl.glDeleteVertexArrays(1, [surface.vao])
         surface.textures.clear()
-        surface.targets.clear()
+        surface.fitted.clear()
+        surface.painted = None
         surface.programs, surface.vao = None, 0
         surface.size = (0, 0)
 

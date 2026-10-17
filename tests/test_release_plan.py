@@ -27,6 +27,7 @@ from scripts.release_plan import (
     SUITES,
     Commitizen,
     DockerfileError,
+    NoReuse,
     Plan,
     PlanError,
     PullRequestRun,
@@ -40,6 +41,8 @@ from scripts.release_plan import (
     gate,
     image_inputs,
     matches,
+    passed_run,
+    passed_suites,
     plan_head,
     pyproject_digest,
     refuse_a_taken_tag,
@@ -521,11 +524,320 @@ def test_the_gate_always_requires_the_suites_that_always_run():
         "checks: skipped, but this run requires it"]
 
 
+def _reusing(jobs, reused, **results):
+    needs = _needs(jobs, **results)
+    needs["plan"]["outputs"]["reused"] = json.dumps(reused)
+    return needs
+
+
+def test_the_gate_accepts_an_always_run_suite_the_plan_reused():
+    assert gate(_reusing([], ["checks", "e2e"], checks="skipped", e2e="skipped",
+                         tested="success")) == []
+    assert gate(_reusing(["base-image", "seal"], ["checks", "e2e", "node-pid1"],
+                         checks="skipped", e2e="skipped", tested="success",
+                         **{"base-image": "success", "seal": "success"})) == []
+    # Only what was reused is excused, and a failed or cancelled job still fails the run.
+    assert gate(_reusing([], ["checks"], checks="skipped", e2e="skipped", tested="success")) == [
+        "e2e: skipped, but this run requires it"]
+    assert gate(_reusing([], ["checks", "e2e"], checks="cancelled", e2e="skipped",
+                         tested="success")) == ["checks: cancelled"]
+
+
+@pytest.mark.parametrize("reused", [["seal"], ["checks", "tested"], ["e2e"], "checks"])
+def test_the_gate_fails_when_the_plan_reused_what_is_not_a_suite_or_what_it_lists(reused):
+    needs = _needs(["e2e"], checks="skipped", e2e="success", tested="success")
+    needs["plan"]["outputs"]["reused"] = json.dumps(reused)
+    problems = gate(needs)
+    assert len(problems) >= 1 and problems[0].startswith("plan: ")
+
+
 def test_the_gate_command_reads_needs(monkeypatch, capsys):
     monkeypatch.setenv("NEEDS", json.dumps(_needs(["checks"], checks="failure")))
     assert release_plan.main(["gate"]) == 1
     assert "::error title=gate::checks: failure, but this run requires it" in \
         capsys.readouterr().out
+
+
+# --- a push reuses its pull request's pass -----------------------------------------------------
+
+RUN_URL = "https://github.com/o/r/actions/runs/7"
+PASSED_JOBS = (("plan", "success"), ("checks / unit (1)", "success"),
+               ("checks / service-base / prepare", "success"), ("e2e / photo-sources", "success"),
+               ("node-pid1 / components", "skipped"), ("node-pid1 / scenario (join)", "success"),
+               ("base-image", "skipped"), ("tested", "success"), ("seal", "skipped"))
+
+
+class History:
+    """A RunHistory answering from fields: a merged pull request (head commit, same repository),
+    the head's newest run and its jobs."""
+
+    def __init__(self, scratch: Scratch, head: str, *, same_repository=True,
+                 run=release_plan.PipelineRun(7, RUN_URL, "success"), jobs=PASSED_JOBS,
+                 merged=True):
+        self.head, self.same_repository = head, same_repository
+        self.run, self.job_list, self.merged = run, jobs, merged
+
+    def merged_pull(self, revision):
+        return release_plan.MergedPull(42, self.head, self.same_repository) if self.merged \
+            else None
+
+    def latest_pull_request_run(self, head):
+        assert head == self.head
+        return self.run
+
+    def jobs(self, run_id):
+        assert run_id == self.run.id
+        return self.job_list
+
+
+@pytest.fixture
+def merged(scratch):
+    """A pull request branched from main's tip, merged with a merge commit: (before, head, merge)."""
+    before = scratch.git("rev-parse", "HEAD")
+    scratch.git("checkout", "-q", "-b", "topic")
+    head = scratch.commit("fix(player): ships", {"player/service.py": "VALUE = 20\n"})
+    scratch.git("checkout", "-q", "main")
+    scratch.git("-c", "commit.gpgsign=false", "merge", "-q", "--no-ff", "-m", "Merge topic", head)
+    return before, head, scratch.git("rev-parse", "HEAD")
+
+
+def test_passed_suites_needs_a_success_and_no_failure_per_suite():
+    assert passed_suites(PASSED_JOBS) == ("checks", "e2e", "node-pid1")
+    assert passed_suites((("checks / unit (1)", "success"), ("checks / unit (2)", "failure"),
+                          ("e2e / photo-sources", "cancelled"), ("node-pid1", "skipped"),
+                          ("e2e / x", "success"))) == ()
+    assert passed_suites((("seal", "success"), ("tested", "success"))) == ()
+
+
+def test_a_merge_of_a_head_with_its_tree_reuses_the_suites_its_run_passed(scratch, merged):
+    before, head, merge = merged
+    assert scratch.git("rev-parse", f"{head}^{{tree}}") == scratch.git("rev-parse",
+                                                                       f"{merge}^{{tree}}")
+    passed = passed_run(scratch.root, History(scratch, head), merge, before)
+    assert passed == release_plan.PassedRun(RUN_URL, ("checks", "e2e", "node-pid1"))
+
+
+@pytest.mark.parametrize(("change", "reason"), [
+    ({"merged": False}, "is not a pull request's merge into main"),
+    ({"same_repository": False}, "comes from a fork"),
+    ({"head": "f" * 40}, "is not in this checkout (a rebase merge whose branch is already deleted)"),
+    ({"run": None}, "has no pipeline.yml run"),
+    ({"run": release_plan.PipelineRun(7, RUN_URL, "failure")}, "concluded failure"),
+    ({"run": release_plan.PipelineRun(7, RUN_URL, None)}, "concluded nothing yet"),
+    ({"jobs": (("checks / unit (1)", "failure"), ("e2e / x", "cancelled"))}, "passed no suite"),
+])
+def test_any_doubt_reuses_nothing(scratch, merged, change, reason):
+    before, head, merge = merged
+    history = History(scratch, change.pop("head", head), **change)
+    with pytest.raises(NoReuse, match=re.escape(reason)):
+        passed_run(scratch.root, history, merge, before)
+
+
+def _merge(scratch: Scratch, branch: str) -> str:
+    scratch.git("checkout", "-q", "main")
+    scratch.git("merge", "-q", "--no-ff", "-m", f"Merge {branch}", branch)
+    return scratch.git("rev-parse", "HEAD")
+
+
+def test_main_moving_first_gives_the_merge_another_tree(scratch):
+    before = scratch.git("rev-parse", "HEAD")
+    scratch.git("checkout", "-q", "-b", "topic")
+    head = scratch.commit("fix(player): ships", {"player/service.py": "VALUE = 21\n"})
+    scratch.git("checkout", "-q", "main")
+    before = scratch.commit("docs: first", {"docs/guide.md": "# Moved\n"})
+    merge = _merge(scratch, "topic")
+    with pytest.raises(NoReuse, match="has another tree: main moved before the merge"):
+        passed_run(scratch.root, History(scratch, head), merge, before)
+
+
+def test_a_branch_continued_after_its_first_merge_reuses(scratch):
+    """PR 107's shape: the branch of a merged pull request goes on from its own head, so main's
+    merge commit is not in its history but adds nothing the head lacks."""
+    scratch.git("checkout", "-q", "-b", "topic")
+    scratch.commit("fix(player): first", {"player/service.py": "VALUE = 22\n"})
+    before = _merge(scratch, "topic")
+    scratch.git("checkout", "-q", "topic")
+    head = scratch.commit("fix(player): second", {"player/service.py": "VALUE = 23\n"})
+    merge = _merge(scratch, "topic")
+    assert passed_run(scratch.root, History(scratch, head), merge, before).url == RUN_URL
+
+
+def test_a_base_whose_merge_is_the_head_reuses_without_shared_history(scratch):
+    """main's change reached the head as an equal edit, not through history: git's merge of the
+    head into main's commit, the tree that run checked out, is the head's tree, so it reuses."""
+    scratch.git("checkout", "-q", "-b", "topic")
+    scratch.git("checkout", "-q", "main")
+    before = scratch.commit("docs: on main", {"docs/guide.md": "# Same\n"})
+    scratch.git("checkout", "-q", "topic")
+    head = scratch.commit("docs: same edit", {"docs/guide.md": "# Same\n",
+                                              "player/service.py": "VALUE = 24\n"})
+    merge = _merge(scratch, "topic")
+    assert passed_run(scratch.root, History(scratch, head), merge, before).url == RUN_URL
+
+
+def test_a_base_whose_merge_differs_from_the_head_is_refused(scratch):
+    scratch.git("checkout", "-q", "-b", "topic")
+    scratch.git("checkout", "-q", "main")
+    before = scratch.commit("docs: on main", {"docs/guide.md": "# Main\n"})
+    scratch.git("checkout", "-q", "topic")
+    head = scratch.commit("fix(player): ships", {"player/service.py": "VALUE = 25\n"})
+    with pytest.raises(NoReuse, match=f"based on {before[:12]} would have merged in changes"):
+        release_plan.tested_tree(scratch.root, head, before)
+
+
+def test_a_criss_cross_base_is_judged_by_its_real_merge(scratch):
+    """Two merge bases: git merges through a virtual base, so a base whose tree equals the one
+    merge base `git merge-base` picks can still merge to another tree. The reviewer's history:
+    main reverts b after the topic merged it in, so a run based on Mm tested b=0, not the head's
+    b=1, and the walk refuses at Mm itself."""
+    scratch.commit("chore: b", {"b.txt": "0\n"})
+    scratch.git("checkout", "-q", "-b", "topic")
+    t1 = scratch.commit("chore: a", {"a.txt": "1\n"})
+    scratch.git("checkout", "-q", "main")
+    m1 = scratch.commit("chore: b on", {"b.txt": "1\n"})
+    scratch.commit("chore: b off", {"b.txt": "0\n"})
+    mm = _merge(scratch, "topic")
+    scratch.git("checkout", "-q", "topic")
+    scratch.git("merge", "-q", "--no-ff", "-m", "Merge b on", m1)
+    head = scratch.commit("chore: c", {"c.txt": "1\n"})
+    assert len(scratch.git("merge-base", "--all", mm, head).split()) == 2
+    assert scratch.git("rev-parse", f"{mm}^{{tree}}") == scratch.git("rev-parse", f"{t1}^{{tree}}")
+    with pytest.raises(NoReuse, match=f"based on {mm[:12]} would have merged in changes"):
+        release_plan.tested_tree(scratch.root, head, mm)
+
+
+def test_a_rebase_merge_whose_head_is_still_fetched_reuses(scratch):
+    """A rebase merge lands copies of the head's commits; while the branch exists the head is in
+    the checkout, and with the same tree and main not moved the run tested this tree."""
+    before = scratch.git("rev-parse", "HEAD")
+    scratch.git("checkout", "-q", "-b", "topic")
+    head = scratch.commit("fix(player): ships", {"player/service.py": "VALUE = 26\n"})
+    scratch.git("checkout", "-q", "main")
+    scratch.git("cherry-pick", "-x", head)
+    rebased = scratch.git("rev-parse", "HEAD")
+    assert rebased != head
+    assert passed_run(scratch.root, History(scratch, head), rebased, before).url == RUN_URL
+
+
+def test_a_before_off_the_pushed_history_reuses_nothing(scratch, merged):
+    _, head, merge = merged
+    scratch.git("checkout", "-q", "-b", "elsewhere")
+    stray = scratch.commit("chore: stray")
+    with pytest.raises(NoReuse, match="is not an ancestor of"):
+        passed_run(scratch.root, History(scratch, head), merge, stray)
+
+
+@pytest.mark.parametrize("before", ["", "0" * 40, "main"])
+def test_a_push_without_an_earlier_commit_reuses_nothing(scratch, merged, before):
+    _, head, merge = merged
+    with pytest.raises(NoReuse, match="names no earlier commit"):
+        passed_run(scratch.root, History(scratch, head), merge, before)
+
+
+def test_a_release_run_lists_what_was_not_reused_and_every_release_job():
+    plan = Plan("0" * 40, "v0.8.0", ("node-debs",), ("base-image", "checks", "e2e", "node-pid1"),
+                version="0.8.1", increment="PATCH", source="commitizen")
+    passed = release_plan.PassedRun(RUN_URL, ("base-image", "checks", "e2e"))
+    run = ReleaseRun(plan, passed)
+    # base-image is the release's build: it runs whatever the pull request's run proved.
+    assert run.jobs == ("base-image", "images", "node-pid1", "seal", "service-base")
+    assert run.reused == ("checks", "e2e")
+    assert json.loads(release_plan.outputs(run)["reused"]) == ["checks", "e2e"]
+    assert f"Reused from {RUN_URL}: checks, e2e" in release_plan.summary(run)
+    quiet = ReleaseRun(Plan("0" * 40, "v0.8.0", (), ("checks", "e2e")), passed)
+    assert (quiet.jobs, quiet.reused) == ((), ("checks", "e2e"))
+    assert gate(_reusing(list(quiet.jobs), list(quiet.reused), checks="skipped", e2e="skipped",
+                         tested="success")) == []
+    assert PullRequestRun(plan).reused == () and ReleaseRun(plan).reused == ()
+
+
+@needs_uvx
+def test_push_with_before_outputs_what_it_reused(scratch, merged, tmp_path, monkeypatch):
+    before, head, _ = merged
+    output = tmp_path / "output"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(output))
+    assert release_plan.main(["--repo", str(scratch.root), "push", "--before", before],
+                             history=lambda: History(scratch, head)) == 0
+    values = dict(line.split("=", 1) for line in output.read_text().splitlines())
+    assert json.loads(values["reused"]) == ["checks", "e2e", "node-pid1"]
+    assert "checks" not in json.loads(values["jobs"]) and values["should_release"] == "true"
+
+
+@needs_uvx
+def test_push_runs_every_suite_when_github_cannot_answer(scratch, merged, tmp_path, monkeypatch,
+                                                         capsys):
+    before, _, _ = merged
+    output = tmp_path / "output"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(output))
+
+    def unavailable():
+        raise release_plan.ReuseUnavailable("HTTP 502")
+    assert release_plan.main(["--repo", str(scratch.root), "push", "--before", before],
+                             history=unavailable) == 0
+    values = dict(line.split("=", 1) for line in output.read_text().splitlines())
+    assert json.loads(values["reused"]) == []
+    assert {"checks", "e2e"} <= set(json.loads(values["jobs"]))
+    assert "::notice title=Reuse::this push runs its own suites: HTTP 502" in \
+        capsys.readouterr().out
+
+
+def _github(answers):
+    """A GitHubRunHistory whose GET answers from `answers` (path -> JSON; absent is a 404)."""
+    return release_plan.GitHubRunHistory(answers.get, "o/r")
+
+
+HEAD = "a" * 40
+MERGE = "b" * 40
+
+
+def _pull(number, *, merged=True, repo="o/r", base="main", merge=MERGE):
+    return {"number": number, "merged_at": "2026-10-17T00:00:00Z" if merged else None,
+            "merge_commit_sha": merge, "base": {"ref": base},
+            "head": {"sha": HEAD, "repo": {"full_name": repo} if repo else None}}
+
+
+def test_the_github_history_finds_the_pull_request_merged_into_main():
+    pulls = f"/commits/{MERGE}/pulls"
+    assert _github({pulls: [_pull(1, merged=False), _pull(2, base="dev"), _pull(3, merge=HEAD),
+                            _pull(4)]}).merged_pull(MERGE) == release_plan.MergedPull(4, HEAD,
+                                                                                      True)
+    assert _github({pulls: [_pull(5, repo="fork/r")]}).merged_pull(MERGE).same_repository is False
+    assert _github({pulls: [_pull(6, repo=None)]}).merged_pull(MERGE).same_repository is False
+    assert _github({pulls: []}).merged_pull(MERGE) is None
+
+
+def test_the_github_history_reads_the_newest_run_of_this_repository_and_its_jobs():
+    runs = f"/actions/workflows/pipeline.yml/runs?event=pull_request&head_sha={HEAD}&per_page=100"
+
+    def run(id_, created, conclusion, repo="o/r", status="completed"):
+        return {"id": id_, "html_url": f"u{id_}", "head_sha": HEAD, "event": "pull_request",
+                "created_at": created, "status": status, "conclusion": conclusion,
+                "head_repository": {"full_name": repo}}
+    history = _github({runs: {"workflow_runs": [
+        run(1, "2026-10-17T01:00:00Z", "success"), run(2, "2026-10-17T02:00:00Z", "failure"),
+        run(3, "2026-10-17T03:00:00Z", "success", repo="fork/r")]}})
+    assert history.latest_pull_request_run(HEAD) == release_plan.PipelineRun(2, "u2", "failure")
+    running = _github({runs: {"workflow_runs": [run(4, "x", None, status="in_progress")]}})
+    assert running.latest_pull_request_run(HEAD).conclusion is None
+    assert _github({runs: {"workflow_runs": []}}).latest_pull_request_run(HEAD) is None
+    page = "/actions/runs/9/jobs?filter=latest&per_page=100&page="
+    first = [{"name": f"checks / leg {n}", "conclusion": "success"} for n in range(100)]
+    jobs = _github({page + "1": {"total_count": 101, "jobs": first},
+                    page + "2": {"total_count": 101, "jobs": [{"name": "e2e / x",
+                                                               "conclusion": "success"}]}}).jobs(9)
+    assert len(jobs) == 101 and jobs[-1] == ("e2e / x", "success")
+
+
+@pytest.mark.parametrize("call", [
+    lambda history: history.merged_pull(MERGE),
+    lambda history: history.latest_pull_request_run(HEAD),
+    lambda history: history.jobs(9),
+])
+def test_the_github_history_never_reads_a_404_or_a_malformed_answer_as_an_answer(call):
+    with pytest.raises(release_plan.ReuseUnavailable):
+        call(_github({}))
+    with pytest.raises(release_plan.ReuseUnavailable):
+        call(release_plan.GitHubRunHistory(lambda path: {"unexpected": True}, "o/r"))
 
 
 # --- the package manifest against the real tree ------------------------------------------------
@@ -1035,7 +1347,12 @@ def test_the_seal_is_one_script_given_the_plan_and_the_images():
     assert "      since: ${{ steps.plan.outputs.since }}\n" in plan
     # The branch whose tip wins an unpublished version is the one the release guard names.
     assert f"github.ref == 'refs/heads/{RELEASE_BRANCH}'" in RELEASE_EVENT
-    assert "GH_TOKEN" not in plan                                # the plan reads no GitHub API
+    # The plan reads GitHub's records (passed_run) and writes nothing there.
+    assert _permissions(plan, "    ") == {"contents": "read", "actions": "read",
+                                          "pull-requests": "read"}
+    assert "python -m scripts.release_plan push --before \"$BEFORE\"" in plan
+    assert "BEFORE: ${{ github.event.before }}" in plan
+    assert "      reused: ${{ steps.plan.outputs.reused }}\n" in plan
 
 
 def test_no_workflow_hands_its_secrets_to_a_called_workflow():

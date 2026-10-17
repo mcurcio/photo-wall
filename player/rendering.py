@@ -33,13 +33,18 @@ class LocalLayer:
 @dataclass(frozen=True)
 class OutputComposition:
     binding: OutputBinding
-    calibration: Calibration
     layers: tuple[LocalLayer, ...] = ()
     fallback: bool = False
     # Plan time less this machine's monotonic time, so a renderer reads its layers at the time of
     # the frame it draws (player/look.py). None: a still composition, drawn as its layers say
     # (a fallback: black, or a kept photo at full strength).
     timebase: float | None = None
+
+    @property
+    def calibration(self) -> Calibration:
+        """The Frame's calibration: its binding's, the one home of the fit a composition is drawn
+        with, so a layer prepared ahead on the same binding is fitted as its frames draw it."""
+        return self.binding.calibration
 
 
 @dataclass(frozen=True)
@@ -80,7 +85,9 @@ class Renderer(Protocol):
 
     def set_room_lights(self, document: RoomLightsDocument) -> None: ...   # every Output draws with it
 
-    def prepare(self, layer: LocalLayer) -> PrepareResult: ...
+    # Prepared: ready to be drawn on `binding`'s Frame, whose fit and profile a native renderer
+    # draws the layer's fitted picture for ahead of its first frame (player/fitted.py).
+    def prepare(self, layer: LocalLayer, binding: OutputBinding) -> PrepareResult: ...
 
     def capacity(self, compositions: tuple[OutputComposition, ...]) -> CapacityResult: ...
 
@@ -139,7 +146,7 @@ class RecordingRenderer:
     def set_room_lights(self, document: RoomLightsDocument) -> None:
         self.room_lights.append(document)
 
-    def prepare(self, layer: LocalLayer) -> PrepareResult:
+    def prepare(self, layer: LocalLayer, binding: OutputBinding) -> PrepareResult:
         self.preparations.append(layer)
         key = layer.layer.assignment_id
         if key in self.prepare_failures:

@@ -139,12 +139,12 @@ def player() -> None:
     variant = Variant(asset_id="asset-" + hashlib.sha256(payload).hexdigest()[:16], recipe_id="e" * 64, sha256=hashlib.sha256(payload).hexdigest(), size=len(payload),
                       media_type="image/png", width=64, height=48)
     binding = OutputBinding(output_id=OUTPUT, frame_id="frame", generation=1, profile=FrameProfile(**PROFILE),
-                            lighting=upgrade_lighting())
+                            lighting=upgrade_lighting(),
+                            calibration=Calibration(fit=CoverFit(corners=OPENING, rotation=ROTATION)))
     layer = LocalLayer(Layer(assignment_id="grey", run_id="run", output_id=OUTPUT, frame_id="frame",
                              binding_generation=1, start=0, end=10**9, media_origin=0, variant=variant,
                              crop=CENTRED),
                        PHOTO, 0.0, 1.0)
-    calibration = Calibration(fit=CoverFit(corners=OPENING, rotation=ROTATION))
     luts = PlayerLuts()
     native = NativeRenderer((NativeOutput(OUTPUT, "photo-wall-headless", WIDTH_PX, HEIGHT_PX),), luts=luts)
     native.set_unbound_outputs((), None)
@@ -155,11 +155,11 @@ def player() -> None:
     while True:
         lighting = (FrameLighting.model_validate_json(LIGHTING_FILE.read_text()) if LIGHTING_FILE.exists()
                     else upgrade_lighting())
-        shown = OutputComposition(binding.model_copy(update={"lighting": lighting}), calibration, (layer,))
+        shown = OutputComposition(binding.model_copy(update={"lighting": lighting}), (layer,))
         if LUT_RELEASE.exists() and luts.wanted():
             luts.hold(LutRef(LUT_PROFILE_SHA256, LUT_RECIPE), LUT_FILE.read_bytes())
             print("PLAYER lut held", flush=True)
-        native.prepare(layer)
+        native.prepare(layer, shown.binding)
         status = native.present(shown).status
         if status != last:
             print(f"PLAYER {status}", flush=True)

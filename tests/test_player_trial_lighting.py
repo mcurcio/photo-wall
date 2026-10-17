@@ -20,7 +20,7 @@ LIGHTING = FrameLighting(mat_depth_mm=0, lights=(WashLight(light="room", lux=100
                          paper=Paper(whiteness=0.9, ink_density=3.5))
 BINDING = OutputBinding(output_id="HDMI-A-1", frame_id="frame", generation=3, configuration_revision=2,
                         profile=FrameProfile(width_px=1920, height_px=1080, diagonal_inches=27), lighting=LIGHTING)
-COMPOSITION = OutputComposition(BINDING, BINDING.calibration)
+COMPOSITION = OutputComposition(BINDING)
 BASELINE = Surface(OutputKey(uuid4(), uuid4(), "HDMI-A-1", 1, 1), NodeProcessIdentity(100, 5, uuid4()),
                    1, BINDING.generation, BINDING.configuration_revision, "frame")
 SPOT = CloseLight(light="bookshelf-spot", lux=400, reference=AT_FULL, across_mm=0, up_mm=350, out_mm=250,

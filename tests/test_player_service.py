@@ -1079,34 +1079,90 @@ def test_cancel_during_http_response_releases_download_worker(tmp_path):
     asyncio.run(check())
 
 
-def test_a_download_stopped_midway_is_no_failure(tmp_path):
-    """A session that ends (or a stop) while the bytes are streaming cancels the download: the
-    cache worker's chunks stop, and the assignment is simply not secured, never reported as a
-    `download` failure, so the next readiness after the loop runs again is clean. Mutation
-    probe: record "download" for AcquisitionStopped in Executor._acquire again."""
+@pytest.mark.parametrize("stop", ["session_ends", "plan_moves_on"])
+def test_a_download_the_player_stops_is_not_a_download_failure(tmp_path, stop):
+    """The Player stops a download part-way through, after its bytes started reaching the cache:
+    its session ends (run() cancels the media loop) or Central's next plan revision takes the job's
+    authority. That stop is the Player's own, not the content's: the assignment is not secured,
+    its next readiness carries no `download` failure, and no `media_download` fault is raised.
+    (CI: a session that ended mid-download made the next report say the picture failed.)"""
     async def check():
         service, server = await rig(tmp_path)
         try:
             service._feedback()
-            data = b"picture" * 4
-            streaming = asyncio.Event()
+            job = service._jobs[0]
+            first, rest = asyncio.Event(), asyncio.Event()
 
             async def body():
-                yield data[:7]
-                streaming.set()
-                await asyncio.Event().wait()
+                yield server.data[:3]
+                first.set()
+                await rest.wait()
+                yield server.data[3:]
 
-            async def stalled(request):
-                return httpx.Response(200, content=body(), headers=media_headers(data))
+            def serve(request):
+                if request.url.path.startswith("/v1/media/"):
+                    return httpx.Response(200, headers=media_headers(server.data), content=body())
+                return server(request)
             await service.link.client.aclose()
-            service.link.client = httpx.AsyncClient(transport=httpx.MockTransport(stalled))
-            task = asyncio.create_task(service.download(service._jobs[0]))
-            await asyncio.wait_for(streaming.wait(), 2)
-            task.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await asyncio.wait_for(task, 2)
-            readiness = service._feedback()[0]
-            assert not readiness.secured and readiness.failures == ()
+            service.link.client = httpx.AsyncClient(transport=httpx.MockTransport(serve))
+            faults = []
+            record = service.fault
+            service.fault = lambda code, **kw: (faults.append(code), record(code, **kw))
+            attempt = asyncio.create_task(service._attempt(
+                {}, job, functools.partial(service.download, job), "media_download"))
+            await asyncio.wait_for(first.wait(), 2)
+            if stop == "session_ends":
+                attempt.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await asyncio.wait_for(attempt, 2)
+            else:
+                server.offer(revision=2)
+                await service.poll_state()
+                rest.set()
+                await asyncio.wait_for(attempt, 2)
+            readiness, _ = service._feedback()
+            assert "picture" not in readiness.secured
+            assert readiness.failures == (), readiness.failures
+            assert "media_download" not in faults, faults
+        finally:
+            await close(service)
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize("end", ["short", "reset"])
+def test_a_download_that_breaks_mid_stream_is_a_download_failure(tmp_path, end):
+    """A download whose bytes already reach the cache breaks on the network side: the body ends
+    short of its Content-Length, or the connection resets. That is the content's failure, not the
+    Player's stop: the next readiness carries a `download` failure and `media_download` is raised.
+    (The counterpart of test_a_download_the_player_stops_is_not_a_download_failure.)"""
+    async def check():
+        service, server = await rig(tmp_path)
+        try:
+            service._feedback()
+            job = service._jobs[0]
+
+            async def body():
+                yield server.data[:3]
+                await asyncio.sleep(.05)       # the cache worker is waiting for the next chunk
+                if end == "reset":
+                    raise httpx.ReadError("connection reset")
+
+            def serve(request):
+                if request.url.path.startswith("/v1/media/"):
+                    return httpx.Response(200, headers=media_headers(server.data), content=body())
+                return server(request)
+            await service.link.client.aclose()
+            service.link.client = httpx.AsyncClient(transport=httpx.MockTransport(serve))
+            faults = []
+            record = service.fault
+            service.fault = lambda code, **kw: (faults.append(code), record(code, **kw))
+            await asyncio.wait_for(service._attempt(
+                {}, job, functools.partial(service.download, job), "media_download"), 2)
+            readiness, _ = service._feedback()
+            assert "picture" not in readiness.secured
+            assert [failure.code for failure in readiness.failures] == ["download"], \
+                readiness.failures
+            assert faults == ["media_download"], faults
         finally:
             await close(service)
     asyncio.run(check())
