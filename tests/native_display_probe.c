@@ -32,7 +32,8 @@ static void top_config(void*d,struct xdg_toplevel*t,int32_t w,int32_t h,struct w
 static void top_close(void*d,struct xdg_toplevel*t){(void)d;(void)t;exit(0);}
 static const struct xdg_toplevel_listener top_listener={.configure=top_config,.close=top_close};
 /* `words`: more live surfaces than the frame client's word table holds (2 x 16 Outputs), each
- * tagged once and its commit superseded (so discarded): every surface still gets its own word. */
+ * tagged once and its commit superseded (so discarded), its role then dropped: every surface still
+ * gets its own word. */
 static int words(struct wl_display*d,struct pw_frame_client*c){
 int fd=memfd_create("words",MFD_CLOEXEC);if(fd<0||ftruncate(fd,4)<0)return 20;
 struct wl_shm_pool*pool=wl_shm_create_pool(shm,fd,4);
@@ -47,7 +48,9 @@ wl_surface_attach(s,b,0,0);wl_surface_commit(s);wl_surface_attach(s,b,0,0);wl_su
 uint64_t sequence=0;int64_t at=0;uint32_t refresh=0;int kind=0;
 for(int k=0;k<50&&kind==0;k++){if(wl_display_roundtrip(d)<0)return 23;kind=pw_frame_client_presentation(c,s,&sequence,&at,&refresh);}
 if(kind<=0||sequence!=n){fprintf(stderr,"words: surface %llu: word %d for sequence %llu\n",
-(unsigned long long)n,kind,(unsigned long long)sequence);return 24;}}
+(unsigned long long)n,kind,(unsigned long long)sequence);return 24;}
+/* Free the shell's slot (MAX_SURFACES) but keep the wl_surface: no address is reused. */
+xdg_toplevel_destroy(top);xdg_surface_destroy(xs);if(wl_display_roundtrip(d)<0)return 25;}
 return 0;}
 int main(int argc,char**argv){private_probe=argc>1&&!strcmp(argv[1],"private");
 struct wl_display*d=wl_display_connect(NULL);if(!d)return 2;
