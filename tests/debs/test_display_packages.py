@@ -22,6 +22,8 @@ from pathlib import Path
 
 import pytest
 
+from scripts import nats_server
+
 REPO = Path(__file__).resolve().parents[2]
 BUILT = os.environ.get("PHOTO_WALL_LOCAL_REPO")
 BUILDER_IMAGE = "photo-wall-debian-builder"
@@ -44,6 +46,9 @@ FROZEN = {
 NATIVE = ("usr/lib/photo-wall/node-display/photo-wall-shell.so",
           "usr/lib/photo-wall/frame-client/libphoto-wall-frame-client.so")
 AARCH64 = 183  # ELF e_machine EM_AARCH64
+# Photo Wall's Weston (debian-packaging/weston/): the version the display names exactly.
+WESTON = nats_server.read_pin((REPO / "debian-packaging/weston/upstream.env").read_text())
+WESTON_VERSION = WESTON["WESTON_LOCAL_VERSION"]
 
 pytestmark = pytest.mark.skipif(not BUILT, reason="set PHOTO_WALL_LOCAL_REPO to a "
                                                   "debian-packaging/build-repo.sh output directory")
@@ -142,6 +147,18 @@ def test_the_native_files_are_aarch64_shared_objects(installed):
         assert int.from_bytes(blob[18:20], "little") == AARCH64, path
 
 
+def test_the_display_names_photo_wall_weston_exactly_and_resolves_against_it(installed):
+    """Debian's own weston cannot satisfy the display: it names Photo Wall's build at its exact
+    version, the library too (Debian's weston would take an unpatched libweston-14-0), and
+    that is what installs, so graphics_abi below hashes the patched Weston."""
+    depends = installed[f"meta/{DISPLAY}.depends"][1].decode()
+    named = dict(re.findall(r"(?:^|,)\s*(weston|libweston-14-0) \(= ([^)]+)\)", depends))
+    assert named == {"weston": WESTON_VERSION, "libweston-14-0": WESTON_VERSION}
+    versions = {name.split(":")[0]: version for name, version, _ in
+                (line.split() for line in installed["meta/installed"][1].decode().splitlines())}
+    assert versions["weston"] == versions["libweston-14-0"] == WESTON_VERSION
+
+
 def test_abi_json_is_the_display_identity_recomputed_from_the_installed_packages(installed):
     raw = installed[f"{DISPLAY}/{ABI}"][1]
     abi = json.loads(raw)
@@ -160,7 +177,7 @@ cp /src/debian/control /src/debian/changelog debian/
 for package in {DISPLAY} {CLIENT}; do
   dpkg-deb -x /repo/"$package"_*.deb "debian/$package"
 done
-abi() {{ sh /src/debian/graphics-abi; cat debian/{DISPLAY}/{ABI}; echo; }}
+abi() {{ sh /src/debian/graphics-abi -Vweston:Version={WESTON_VERSION}; cat debian/{DISPLAY}/{ABI}; echo; }}
 abi
 echo '# an edit' >> debian/{DISPLAY}/{PYTHON_TREE}display_host/runner.py
 abi

@@ -17,12 +17,16 @@
 # already follows. The display's own version is not an input either: debian/content-versions
 # derives it from this tree, abi.json included (erratum E-0019-P1A-5).
 #
-# Run by debian/rules after dh_shlibdeps, when ${shlibs:Depends} is known; dpkg-gencontrol -O
-# expands each package's Depends as dh_gencontrol will, without writing a control file. Each
+# Run by debian/rules after dh_shlibdeps, when ${shlibs:Depends} is known, given the -V
+# substvars debian/rules sets (${weston:Version}); dpkg-gencontrol -O expands each package's
+# Depends as dh_gencontrol will, with those arguments, without writing a control file. Each
 # ${pw-version:...} gets a placeholder there (content-versions sets them later) and the sibling
 # names it expands to are dropped.
 # tests/debs/test_display_packages.py recomputes the identity from the installed packages.
 set -eu
+
+# debian/rules' -V arguments, passed on to every dpkg-gencontrol call.
+substvars="$*"
 
 DISPLAY=photo-wall-node-display
 CLIENT=photo-wall-frame-client
@@ -40,7 +44,7 @@ placeholders=$(grep -o 'pw-version:[a-z0-9.+-]*' debian/control | LC_ALL=C sort 
 depends() {
 	# shellcheck disable=SC2086 # one -V argument per word
 	dpkg-gencontrol -p"$1" -P"debian/$1" -T"debian/$1.substvars" -f"$scratch/files" \
-		-O"$scratch/control" $placeholders
+		-O"$scratch/control" $placeholders $substvars
 	sed -n 's/^Depends: //p' "$scratch/control" | tr ',|' '\n\n' |
 		sed -e 's/([^)]*)//g' -e 's/\[[^]]*\]//g' -e 's/:[a-z0-9]*//' -e 's/[[:space:]]//g' \
 			-e '/^$/d' -e '/^photo-wall-/d' >> "$2"
