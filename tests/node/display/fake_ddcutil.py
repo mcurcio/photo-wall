@@ -5,7 +5,13 @@ The tool records every call with its start and end time and answers from the scr
 continuous codes (`vcp`: code -> [current, maximum]), simple non-continuous ones (`snc`: code ->
 byte), the `capabilities` text it prints, power D6, whether it answers at all, whether a write takes, how long a read or a write
 lasts (`read_seconds`, for every read but power's), and which codes hang a read (`hang`: a getvcp naming one sleeps `hang_seconds`). It runs
-through the production `run_tool` and the real `DdcChannel`. Codes are the terse format's
+through the production `run_tool` and the real `DdcChannel`.
+
+A read or a write lasts its scripted time from the moment the channel ran the tool (`Display.run`
+passes that instant), not from when the tool's own interpreter got going: a loaded test runner can
+take a large part of a second to start a Python process, and a 1 s read that started late would
+run past PICTURE_HOLD_SECONDS and be cut, although the display took 1 s. `Display.runs` records
+every command the channel ran, with that instant, in order: the moment it took its port. Codes are the terse format's
 upper-case hex; `getvcp` takes several codes at once and answers each on its own line, an unknown
 code with `ERR`, as ddcutil does.
 """
@@ -13,12 +19,13 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from pathlib import Path
 
 from node.display.fake_display_state import SOURCE as STATE_SOURCE
 from node.display.fake_display_state import changing_state
 
-from appliance.display_host.ddc import DdcChannel
+from appliance.display_host.ddc import DdcChannel, PortLock, Urgency
 from appliance.display_host.power_methods import DDCUTIL, run_tool
 
 OUTPUT = "HDMI-A-1"
@@ -136,6 +143,9 @@ FAKE_DDCUTIL = '''
 import json, sys, time
 state_path, log_path = {state!r}, {log!r}
 started = time.monotonic()
+ran_at = float(sys.argv[sys.argv.index("--ran-at") + 1])
+def last(seconds):
+    time.sleep(max(0.0, seconds - (time.monotonic() - ran_at)))
 args = sys.argv[sys.argv.index("--noconfig") + 1:]
 bus = sys.argv[sys.argv.index("--bus") + 1]
 state = read_state(state_path)
@@ -149,7 +159,7 @@ try:
         if any(code in state["hang"] for code in codes):
             time.sleep(state["hang_seconds"])
         if codes != ["D6"]:
-            time.sleep(state["read_seconds"])          # a picture read's time; power's own read is quick
+            last(state["read_seconds"])                # a picture read's time; power's own read is quick
         if not state["answer"]:
             print("No monitor detected on bus", file=sys.stderr); sys.exit(1)
         for code in codes:
@@ -165,12 +175,12 @@ try:
     elif args[0] == "capabilities":
         if not state["answer"]:
             print("No monitor detected on bus", file=sys.stderr); sys.exit(1)
-        time.sleep(state["read_seconds"])
+        last(state["read_seconds"])
         print(state["capabilities"], end="")
     elif args[0] == "setvcp":
         if not state["answer"]:
             print("No monitor detected on bus", file=sys.stderr); sys.exit(1)
-        time.sleep(state["write_seconds"])
+        last(state["write_seconds"])
         with changing_state(state_path) as state:
             code, value = args[1].upper(), int(args[2])
             if code == "D6":
@@ -184,6 +194,28 @@ try:
 finally:
     record(at="end", time=time.monotonic())
 '''
+
+
+class RecordingPortLock(PortLock):
+    """The real PortLock, recording in `turns` each waiter's ("queued", urgency, instant) as it
+    joins its queue and each holder's ("released", urgency, instant) as it lets the port go. Each
+    record is taken inside the lock's own condition (a re-entrant lock: its wait releases it
+    whole), so `turns` is the order the lock saw, not the test runner's timing."""
+
+    def __init__(self, turns: list[tuple[str, Urgency, float]]) -> None:
+        super().__init__()
+        self.turns = turns
+
+    def acquire(self, urgency: Urgency, timeout: float) -> bool:
+        with self._turn:
+            self.turns.append(("queued", urgency, time.monotonic()))
+            return super().acquire(urgency, timeout)
+
+    def release(self) -> None:
+        with self._turn:
+            if self._held is not None:
+                self.turns.append(("released", self._held, time.monotonic()))
+            super().release()
 
 
 class Display:
@@ -212,7 +244,10 @@ class Display:
             directory.mkdir(parents=True)
             (root / f"i2c-{bus}").mkdir()
             (directory / "ddc").symlink_to(root / f"i2c-{bus}")
+        self.runs: list[tuple[float, list[str]]] = []      # (when it took the port, its command)
         self.channel = DdcChannel(self.run, drm_root=self.drm, cache_dir=root / "cache")
+        self.turns: list[tuple[str, Urgency, float]] = []   # HDMI-A-1's lock, as it saw them
+        self.channel._ports[OUTPUT] = RecordingPortLock(self.turns)
 
     def script(self, **values: object) -> None:
         with changing_state(self.state_path) as state:
@@ -223,8 +258,12 @@ class Display:
             state["vcp"][code] = [current, maximum]
 
     def run(self, argv, timeout):
-        """The production runner, with the tool's path pointed at the fake."""
-        return run_tool([str(self.tool), *argv[1:]], timeout)
+        """The production runner, with the tool's path pointed at the fake and the instant it ran
+        (the channel calls this holding the port), recorded in `runs` and passed to the tool."""
+        ran_at = time.monotonic()
+        command = argv[list(argv).index("--noconfig") + 1:]
+        self.runs.append((ran_at, [arg for arg in command if arg != "--terse"]))
+        return run_tool([str(self.tool), "--ran-at", repr(ran_at), *argv[1:]], timeout)
 
     def calls(self) -> list[dict]:
         return [json.loads(line) for line in self.log_path.read_text().splitlines()]
