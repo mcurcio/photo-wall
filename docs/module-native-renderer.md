@@ -62,7 +62,8 @@ are authoritative; the renderer does not invent elapsed Run time.
 `capacity` includes all resident decoders and, per resident picture, its decoded RGBA8
 texture and its fitted picture (RGBA16F at its Output's size), with proposed exact variant
 dimensions. A resize over the budget fails before anything is freed or allocated; one within it
-frees every fitted picture, each drawn again at the new size before it is shown. Texture, shader,
+is an edit like any other: each fitted picture is drawn again at the new size before it is shown
+(the photo on screen by the render GTK runs for the resize), and stays prepared. Texture, shader,
 program and framebuffer allocation
 failures clean up partially created objects. Limits are conservative software allocation gates and always report
 `qualified=False`. Native decoder internals and driver memory require separate
@@ -71,7 +72,9 @@ measurement. No four-video Pi claim follows from a four-slot setting.
 `present(OutputComposition)` prepares every layer seen now (drawing a late layer's fitted
 picture whatever the Output shows), queues a render and returns pending until the GLArea render
 callback completed that token. A frame whose layer cannot be drawn yet holds what is on screen;
-a failed redraw of a fitted picture drops its draw and the screen keeps what GTK's buffer shows.
+a failed redraw of a fitted picture drops its draw and the screen keeps what GTK's buffer shows,
+render after render, until GTK makes that buffer anew (its "resize"): then nothing of it can be
+shown, and the Output draws black and reports nothing on screen.
 Acknowledgment records the exact token snapshot/time and seek generations.
 Fade alpha is read at the time of the frame being drawn, never at a tick: a
 composition carries its `timebase` (plan time less local monotonic time, re-anchored by
@@ -130,22 +133,27 @@ that built it (perf(player): draw each photo once and blend per frame).
   black floor, mat, test pattern; `_steps`) is its own compiled program with its switches as
   constants, compiled on first use. A frame whose inputs equal the last painted one draws
   nothing: GTK keeps the GLArea's buffer between renders, so the once-a-second renewal only
-  commits a fresh tag (R4).
-- **Prepared** (`fitted.prepared`, the one readiness rule): decoded, and a fitted picture of this
-  decode drawn with the GPU past its fence (`glFenceSync`, asked without waiting). prepare()
+  commits a fresh tag (R4). GtkGLArea's "resize" (on every size allocation, the same size too)
+  makes that buffer anew, so it forgets what was painted and the next render paints again.
+- **Prepared** (`fitted.prepared`, the one readiness rule): decoded, and the GPU has finished a
+  fitted picture of this decode (past its fence, `glFenceSync`, asked without waiting). prepare()
   draws it on the planning tick while its Output is not following its frame clock (no fade on
   screen there; Central keeps `PREPARE_SECONDS` of each turn free of a dissolve, so this opens in
-  every lead); present() draws a layer seen now whatever the Output shows (it is late). An edit
-  after that leaves the layer prepared.
+  every lead), and never again while a draw of it is in flight; present() draws a layer seen now
+  whatever the Output shows (it is late). An edit after that (Position's trial, a crop, a resize)
+  leaves the layer prepared while its new fit is drawn: a grant is never revoked by an edit.
+- **The drawn fit** has one source: the binding's calibration (`OutputComposition.calibration`
+  reads it), or Display Host's trial over it, for prepare() and the frames alike.
 - **The first frame** (`fitted.shown_at_once`): a frame shows a layer not on screen yet only from a
   finished fitted picture of this picture; otherwise it holds what is on screen, unfollowed, and
   the planning tick draws it. A frame never draws a layer's first fitted picture, so a fade's
   first frame costs one frame pass. A layer already on screen whose fitted picture an edit
   (Position's trial, a resize) or a video's next sample made stale is drawn again by the next
   frame (`fitted.redrawn_by_frames`); another decode is prepared again.
-- **Failures**: a fit's GL error fails its decoder (`decode`, retried after a second) and leaves
-  it unshown; unrealize frees every fitted picture (prepare() is pending until they are drawn
-  again).
+- **Failures**: a fit's GL error fails its decoder (`decode`, retried after a second), and its
+  fitted picture no longer counts as finished (its texture was cleared), so it stays unshown;
+  a frame showing it holds GTK's buffer (above). Unrealize frees every fitted picture (prepare()
+  is pending until they are drawn again).
 
 Measured (headless Weston, software GL): today's renderer and this one differ by at most one
 8-bit code at any pixel, strengths 0 to 1, with a print look, a LUT and a mat shadow (identical
