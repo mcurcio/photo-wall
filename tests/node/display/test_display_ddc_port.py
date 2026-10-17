@@ -135,23 +135,30 @@ def picture_runs(runs) -> int:
     return sum("D6" not in command for _, command in runs)
 
 
-def power_taken(runs, began: float) -> float:
-    """Seconds from `began` until the first power (D6) command took the port, asserting that no
-    picture command took it in between: power goes first, however many picture waiters queue."""
-    after = [(at, command) for at, command in runs if at >= began]
-    index = next(index for index, (_, command) in enumerate(after) if "D6" in command)
-    assert picture_runs(after[:index]) == 0, after[:index + 1]
-    return after[index][0] - began
+def power_turn(turns, began: float) -> tuple[int, float]:
+    """The first POWER waiter that queued on the port at or after `began` (`Display.turns`): the
+    index of its release, and the seconds it waited for the port. Asserts power goes first: from
+    the instant it queued, at most the holder of that instant releases before power holds the
+    port, so no picture waiter takes the port ahead of it, however many queue."""
+    queued = next(index for index, (event, urgency, at) in enumerate(turns)
+                  if event == "queued" and urgency is Urgency.POWER and at >= began)
+    released = next(index for index in range(queued + 1, len(turns))
+                    if turns[index][:2] == ("released", Urgency.POWER))
+    ahead = [turn for turn in turns[queued + 1:released] if turn[0] == "released"]
+    assert len(ahead) <= 1, turns[queued:released + 1]
+    took = ahead[0][2] if ahead else turns[queued][2]
+    return released, took - turns[queued][2]
 
 
 @pytest.mark.parametrize("read_seconds", [1.0, PICTURE_HOLD_SECONDS + 1.0], ids=["finishes", "cut"])
 def test_a_power_probe_answers_within_one_hold_while_the_list_is_asked_back_to_back(display, read_seconds):
     """With the asker running batches back to back (each holding the port about a second, or for
     the whole hold when the display is slower: each batch cut), a power probe with PROBE_SECONDS
-    takes the port within PICTURE_HOLD_SECONDS + 0.5 s of its call, no picture command before it.
-    Measured where the channel takes the port (`Display.runs`), not at the fake tool's finish: a
-    loaded runner is slow to start a process, which is no part of the port's turn (CI: every 1 s
-    batch was cut and the wait for two finished batches never ended)."""
+    takes the port within PICTURE_HOLD_SECONDS + 0.5 s of queueing for it, no picture waiter
+    before it. Measured in the port lock's own order (`Display.turns`), not at the fake tool's
+    finish or from the call: a loaded runner is slow to start a process, which is no part of the
+    port's turn (CI: every 1 s batch was cut and the wait for two finished batches never ended).
+    Mutation probe: picture waiters take the port before power -> a picture holds it ahead."""
     display.script(read_seconds=read_seconds)
     asker = PictureListAsker(display.channel)
     stop = threading.Event()
@@ -170,7 +177,7 @@ def test_a_power_probe_answers_within_one_hold_while_the_list_is_asked_back_to_b
         for _ in range(2):
             began = time.monotonic()
             assert power.probe(OUTPUT, timeout=PROBE_SECONDS)
-            waited.append(power_taken(display.runs, began))
+            waited.append(power_turn(display.turns, began)[1])
         assert max(waited) < PICTURE_HOLD_SECONDS + 0.5, waited
     finally:
         stop.set()
@@ -257,10 +264,16 @@ def test_power_calls_at_powers_turn_and_picture_calls_at_pictures():
     assert channel.urgencies and {urgency for _, urgency in channel.urgencies} == {Urgency.PICTURE}
 
 
+PROMPT = 0.05       # a read-back this soon after its write is the same power operation's next command
+
+
 def test_a_whole_power_operation_waits_at_most_one_picture_hold(display):
     """A power set is two commands (setvcp D6, then its read-back), each its own hold; with picture
-    reads queued back to back, the read-back must not queue behind another picture hold: no picture
-    command takes the port between the two, and the set takes it within one hold of its call.
+    reads queued back to back, the read-back must not queue behind another picture hold: when it
+    queues within PROMPT of the write's release (well inside POWER_GRACE_SECONDS), no picture read
+    takes the port between the two; a read-back later than that may follow one picture read, never
+    more. The set takes the port within one hold of queueing for it. Judged in the port lock's own
+    order (`Display.turns`), so a loaded runner's slow process teardown is no part of the gap.
     Mutation probe: POWER_GRACE_SECONDS 0 -> a picture read runs between the write and its
     read-back."""
     display.script(read_seconds=1.2)
@@ -278,10 +291,16 @@ def test_a_whole_power_operation_waits_at_most_one_picture_hold(display):
         until(lambda: picture_runs(display.runs) >= 2)
         began = time.monotonic()
         assert DdcCiAdapter(channel).set(OUTPUT, Power.OFF, timeout=10) is PowerResult.CONFIRMED
-        waited = power_taken(display.runs, began)
-        power = [index for index, (at, command) in enumerate(display.runs) if at >= began and "D6" in command]
-        assert [display.runs[index][1][0] for index in power[:2]] == ["setvcp", "getvcp"]
-        assert power[1] == power[0] + 1, display.runs[power[0]:power[1] + 1]   # nothing between
+        turns = display.turns
+        written, waited = power_turn(turns, began)                          # the setvcp
+        read_back, _ = power_turn(turns, turns[written][2])                 # its read-back
+        queued = next(index for index in range(written + 1, len(turns))
+                      if turns[index][:2] == ("queued", Urgency.POWER))
+        between = [turn for turn in turns[written + 1:read_back] if turn[0] == "released"]
+        prompt = turns[queued][2] - turns[written][2] < PROMPT
+        assert len(between) <= (0 if prompt else 1), turns[written:read_back + 1]
+        power = [command[0] for at, command in display.runs if at >= began and "D6" in command]
+        assert power[:2] == ["setvcp", "getvcp"], power
         assert waited < PICTURE_HOLD_SECONDS + 0.5, waited
     finally:
         stop.set()

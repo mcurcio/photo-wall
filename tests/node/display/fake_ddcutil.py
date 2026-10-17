@@ -25,7 +25,7 @@ from pathlib import Path
 from node.display.fake_display_state import SOURCE as STATE_SOURCE
 from node.display.fake_display_state import changing_state
 
-from appliance.display_host.ddc import DdcChannel
+from appliance.display_host.ddc import DdcChannel, PortLock, Urgency
 from appliance.display_host.power_methods import DDCUTIL, run_tool
 
 OUTPUT = "HDMI-A-1"
@@ -196,6 +196,28 @@ finally:
 '''
 
 
+class RecordingPortLock(PortLock):
+    """The real PortLock, recording in `turns` each waiter's ("queued", urgency, instant) as it
+    joins its queue and each holder's ("released", urgency, instant) as it lets the port go. Each
+    record is taken inside the lock's own condition (a re-entrant lock: its wait releases it
+    whole), so `turns` is the order the lock saw, not the test runner's timing."""
+
+    def __init__(self, turns: list[tuple[str, Urgency, float]]) -> None:
+        super().__init__()
+        self.turns = turns
+
+    def acquire(self, urgency: Urgency, timeout: float) -> bool:
+        with self._turn:
+            self.turns.append(("queued", urgency, time.monotonic()))
+            return super().acquire(urgency, timeout)
+
+    def release(self) -> None:
+        with self._turn:
+            if self._held is not None:
+                self.turns.append(("released", self._held, time.monotonic()))
+            super().release()
+
+
 class Display:
     """One scripted display on HDMI-A-1 (bus 13) and HDMI-A-2 (bus 14), and its ddcutil. It reads
     brightness (10) as 60 of 100 and contrast (12) as 50 of 100, and answers nothing else on the
@@ -224,6 +246,8 @@ class Display:
             (directory / "ddc").symlink_to(root / f"i2c-{bus}")
         self.runs: list[tuple[float, list[str]]] = []      # (when it took the port, its command)
         self.channel = DdcChannel(self.run, drm_root=self.drm, cache_dir=root / "cache")
+        self.turns: list[tuple[str, Urgency, float]] = []   # HDMI-A-1's lock, as it saw them
+        self.channel._ports[OUTPUT] = RecordingPortLock(self.turns)
 
     def script(self, **values: object) -> None:
         with changing_state(self.state_path) as state:
