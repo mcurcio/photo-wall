@@ -801,16 +801,14 @@ _SWITCHES = ("saturation_on", "rolloff_on", "floor_on", "mat_on")
 
 def test_neutral_operations_and_no_mat_switch_every_print_step_off():
     """Rule 2: each step's switch is geometry.py's skip rule, so neutral v5 operations and Mat()
-    run v4's shader path. Mutation probe: switch saturation on whenever operations arrive ->
-    saturation_on is 1 here."""
+    run v4's shader path: the neutral step set, whose program computes no print step. Mutation
+    probe: switch saturation on whenever operations arrive -> saturation_on is True here."""
     from contracts.models import Mat
     from player.geometry import mat_shadow
 
     for operations in (None, _operations(), _operations(light=1.5)):
-        gl = _UniformGL()
-        native_module._final_uniforms(gl, 1, operations, native_module._NO_OPENING,
-                                      mat_shadow(CoverFit(), _PROFILE, Mat()), lut_drawn=False)
-        assert {name: gl.values[name] for name in _SWITCHES} == {name: (0,) for name in _SWITCHES}
+        steps = native_module._steps(operations, mat_shadow(CoverFit(), _PROFILE, Mat()), lut_drawn=False)
+        assert steps == native_module._NEUTRAL_STEPS
 
 
 def test_print_operations_and_a_shading_mat_switch_their_steps_on():
@@ -821,9 +819,10 @@ def test_print_operations_and_a_shading_mat_switch_their_steps_on():
                                    highlight_knee=.6, black_floor=.07)
     shadow = mat_shadow(CoverFit(rotation=90), _PROFILE, Mat(depth_mm=2, lights=(Light(
         from_degrees=0, steep_degrees=45, softness_degrees=0, strength_tenths=10, colour_kelvin=2700),)))
+    steps = native_module._steps(operations, shadow, lut_drawn=False)
+    assert all(getattr(steps, name) for name in _SWITCHES) and not steps.lut_on
     gl = _UniformGL()
-    native_module._final_uniforms(gl, 1, operations, CoverFit().corners, shadow, lut_drawn=False)
-    assert {name: gl.values[name] for name in _SWITCHES} == {name: (1,) for name in _SWITCHES}
+    native_module._final_uniforms(gl, 1, operations, CoverFit().corners, shadow, steps)
     assert gl.values["saturation"] == (.8,) and gl.values["highlight_knee"] == (.6,)
     assert gl.values["peak"] == (peak(operations),) and gl.values["black_floor"] == (.07,)
     assert gl.values["light_count"] == (1,) and gl.values["mat_size"] == shadow.size_mm
@@ -834,6 +833,17 @@ def test_print_operations_and_a_shading_mat_switch_their_steps_on():
     # The same column-major upload as output_to_picture's.
     columns = gl.values["to_opening"][2]
     assert [columns[column*3 + row] for row in range(3) for column in range(3)] == list(shadow.to_opening)
+
+
+def test_each_step_set_is_its_own_program_with_its_switches_as_constants():
+    """The frame pass compiles one program per step set: its switches are constants, so the GPU
+    runs no switched-off step's code (a uniform switch costs every step's instructions)."""
+    steps = native_module._Steps(True, False, True, False, True, 3)
+    source = native_module._frame_source(steps)
+    for name, value in (("lut_on", 1), ("saturation_on", 0), ("rolloff_on", 1), ("floor_on", 0),
+                        ("mat_on", 1), ("test_pattern", 3)):
+        assert f"const int {name} = {value};\n" in source
+        assert f"uniform int {name};" not in source
 
 
 _PROFILE = SimpleNamespace(width_px=1920, height_px=1080, diagonal_inches=27)
