@@ -14,7 +14,7 @@ display-harness leg).
 from __future__ import annotations
 
 import pytest
-from test_executor import layer
+from test_executor import binding, layer
 from test_player_frame_clock import (  # noqa: F401
     Frames,
     black,
@@ -25,7 +25,7 @@ from test_player_frame_clock import (  # noqa: F401
     paint,
 )
 
-from contracts.models import Calibration, CoverFit, FrameProfile, PhotoCrop
+from contracts.models import Calibration, CoverFit, FrameProfile, Light, Mat, PhotoCrop
 from contracts.node_frame import PictureOperations
 from player.fitted import FitKey, prepared, redrawn_by_frames, shown_at_once
 from player.mainloop import DisplayEvents
@@ -68,15 +68,15 @@ def key(**fields) -> FitKey:
 
 
 def test_prepared_needs_the_decodes_fitted_picture_finished_and_an_edit_never_revokes_it():
-    """Prepared: a fitted picture of this decode, the GPU done with it. A later edit (another fit,
+    """Prepared: the GPU finished a fitted picture of this decode. A later edit (another fit,
     size, crop) leaves it prepared (it is drawn again before it is shown); another decode does
-    not. Shown at once (a layer's first frame) needs the picture itself, any sample of it. The
-    frames redraw an edit of a layer on screen; another decode is the planning tick's."""
+    not. Shown at once (a layer's first frame) needs the picture itself, any sample of it, its
+    draw finished. The frames redraw an edit of a layer on screen; another decode is the planning
+    tick's."""
     drawn = key()
-    assert prepared(drawn, key(), done=True)
-    assert not prepared(drawn, key(), done=False) and not prepared(None, key(), done=True)
-    assert prepared(drawn, key(fit=CoverFit(rotation=5), size=(80, 45)), done=True)
-    assert not prepared(drawn, key(decode=(1, 2)), done=True)
+    assert prepared((1, 1), key()) and not prepared(None, key())
+    assert prepared((1, 1), key(fit=CoverFit(rotation=5), size=(80, 45), crop=PhotoCrop(offset=0)))
+    assert not prepared((1, 1), key(decode=(1, 2)))
     assert shown_at_once(drawn, key(sample=7), done=True)
     for stale in (key(fit=CoverFit(rotation=5)), key(size=(80, 45)), key(crop=PhotoCrop(offset=0)),
                   key(aspect=4 / 3), key(decode=(2, 1))):
@@ -275,20 +275,20 @@ def _fit(renderer, surface, area, frames, held, shown, still, at):
 
 def _crop(renderer, surface, area, frames, held, shown, still, at):
     cropped = still.model_copy(update={"crop": PhotoCrop(offset=0)})
-    renderer.present(OutputComposition(shown.binding, shown.calibration,
+    renderer.present(OutputComposition(shown.binding,
                                        (LocalLayer(cropped, None, 0.0, 1.0),), timebase=shown.timebase))
 
 
 def _profile(renderer, surface, area, frames, held, shown, still, at):
     square = shown.binding.model_copy(update={
         "profile": FrameProfile(width_px=1000, height_px=1000, diagonal_inches=20)})
-    renderer.present(OutputComposition(square, shown.calibration, shown.layers, timebase=shown.timebase))
+    renderer.present(OutputComposition(square, shown.layers, timebase=shown.timebase))
 
 
 def _size(renderer, surface, area, frames, held, shown, still, at):
     area.get_allocated_width = lambda: 80           # the Output's mode changed
-    renderer.present(shown)
-    area.renders += 1                               # GTK queues the resized area's render
+    renderer._resized(area, 80, 36, surface)        # GTK made the GLArea's buffer anew
+    area.renders += 1                               # and queues the resized area's render
 
 
 @pytest.mark.parametrize("change", [_decode, _sample, _fit, _crop, _profile, _size],
@@ -298,14 +298,7 @@ def test_every_change_to_a_photos_look_on_its_frame_draws_its_fitted_picture_aga
     photo's crop, the Frame profile's aspect, the Output's size) draws the fitted picture again
     before the frame that shows it; then frames draw it no more."""
     renderer, surface, area, frames, held, shown, still = _on_screen(clock)
-    if change is _size:
-        clock.now += .2
-        change(renderer, surface, area, frames, held, shown, still, clock.now)
-        paint(renderer, surface, area, clock.now)   # resized: nothing on screen to keep
-        renderer.present(shown)                     # the next tick draws it at the new size
-        clock.now += .05
-    else:
-        change(renderer, surface, area, frames, held, shown, still, clock.now)
+    change(renderer, surface, area, frames, held, shown, still, clock.now)
     paint(renderer, surface, area, clock.now + .2)
     assert surface.fitted["still"].key is not None
     total = len(renderer.GL.fits)
@@ -313,3 +306,191 @@ def test_every_change_to_a_photos_look_on_its_frame_draws_its_fitted_picture_aga
     for index in range(1, 4):
         paint(renderer, surface, area, clock.now + .2 + index / 60)
     assert len(renderer.GL.fits) == total
+
+
+# -- Finished before shown: the GPU's fence ------------------------------------------------------
+
+def test_a_photo_is_prepared_only_once_the_gpu_has_finished_its_fitted_picture(clock):  # noqa: F811
+    """Answers the owner's question ("Is the new picture fully prepared before the fade starts?").
+    prepare() draws the incoming photo's fitted picture and reports it pending while the GPU is
+    still drawing it (its fence not passed), never drawing it twice; a fade that begins then
+    holds the screen (no frame shows the photo half drawn). Once the GPU passed the fence the
+    next tick reports it prepared, and the fade is drawn on the frame clock with no fit."""
+    showing = layer("showing", start=100, end=200)
+    incoming = layer("incoming", data=b"incoming", start=105, end=200, fade_in=1, priority=1)
+    renderer, surface, area = frame_renderer({"showing": decoder(showing), "incoming": decoder(incoming)})
+    start = clock.now
+    shown = composition(showing, incoming, timebase=100 - start)
+    renderer.present(shown)
+    paint(renderer, surface, area, start + .1)
+    renderer.GL.held = True                         # the GPU is busy from here
+    clock.now = start + 1
+    assert renderer.prepare(local(incoming, 101), shown.binding).status == "pending"
+    clock.now = start + 2
+    assert renderer.prepare(local(incoming, 102), shown.binding).status == "pending"
+    assert len(renderer.GL.fits) == 2, "drawn once, not again while the GPU draws it"
+    fits, passes = gpu(renderer)
+    clock.now = start + 4.95
+    renderer.present(shown)                         # the tick that finds the fade near
+    for index in range(1, 4):
+        paint(renderer, surface, area, start + 5 + index / 60)
+    assert gpu(renderer) == (fits, passes) and surface.waiting, "the screen holds the outgoing photo"
+    renderer.GL.signal()
+    clock.now = start + 5.1
+    assert renderer.prepare(local(incoming, 105.1), shown.binding).status == "prepared"
+    renderer.present(shown)
+    paint(renderer, surface, area, start + 5.12)
+    assert gpu(renderer) == (fits, passes + 1)
+    assert renderer.GL.opacities[-2:] == [1.0, .12]
+
+
+def test_an_edit_or_a_resize_never_revokes_a_prepared_photo_while_its_new_fit_is_drawn(clock):  # noqa: F811
+    """A photo prepared ahead of its fade stays prepared while Position's trial edit, and then a
+    resize, have its fitted picture drawn again and the GPU has not finished that draw yet (its
+    grant is kept); a frame that would show it first waits for the finished draw."""
+    showing = layer("showing", start=100, end=200)
+    incoming = layer("incoming", data=b"incoming", start=110, end=200, fade_in=1, priority=1)
+    renderer, surface, area = frame_renderer({"showing": decoder(showing), "incoming": decoder(incoming)})
+    renderer._frames = frames = TrialFrames()
+    start = clock.now
+    shown = composition(showing, incoming, timebase=100 - start)
+    renderer.present(shown)
+    paint(renderer, surface, area, start + .1)
+    assert renderer.prepare(local(incoming, 101), shown.binding).status == "prepared"
+    renderer.GL.held = True
+    frames.calibration, frames.sequence = TURNED, 2     # the owner moves Position
+    fits = len(renderer.GL.fits)
+    assert renderer.prepare(local(incoming, 101), shown.binding).status == "prepared"
+    assert len(renderer.GL.fits) == fits + 1, "drawn again for the edit"
+    renderer.GL.signal()
+    area.get_allocated_width = lambda: 80
+    renderer._resized(area, 80, 36, surface)
+    area.renders += 1
+    paint(renderer, surface, area, start + .2)
+    assert surface.fitted["incoming"].size == (64, 36)
+    renderer.GL.held = True
+    assert renderer.prepare(local(incoming, 101), shown.binding).status == "prepared"
+    assert surface.fitted["incoming"].size == (80, 36) and len(renderer.GL.fits) == fits + 3
+    assert renderer.prepare(local(incoming, 101), shown.binding).status == "prepared"
+
+
+def test_a_resize_redraws_the_photo_on_screen_in_its_render_and_keeps_it_prepared(clock):  # noqa: F811
+    """The Output's size changes under a photo on screen: the render GTK runs for it draws the
+    photo's fitted picture again at the new size and shows it (no black frame, no tick needed);
+    the photo stays on screen and prepared while the GPU draws it."""
+    renderer, surface, area, _frames, _held, shown, still = _on_screen(clock)
+    drawn = surface.acknowledged
+    renderer.GL.held = True
+    area.get_allocated_width = lambda: 80
+    renderer._resized(area, 80, 36, surface)
+    renderer._render(area, None, surface)
+    assert gpu(renderer) == (2, 2) and surface.size == (80, 36)
+    assert surface.fitted["still"].size == (80, 36) and surface.acknowledged is not None
+    assert surface.acknowledged.composition.layers == drawn.composition.layers
+    assert renderer.prepare(local(still), shown.binding).status == "prepared"
+
+
+def test_the_harness_loop_with_a_calibrated_binding_presents_its_photo_with_one_fit(clock):  # noqa: F811
+    """tests/native_picture_e2e_harness.py's loop (prepare then present each tick) on a binding
+    with its own calibration, the GPU passing each fence only by the next tick: one fit, then
+    presented. prepare() and the frames read the one drawn fit (the binding's calibration)."""
+    photo = layer("photo", start=100, end=10**9)
+    renderer, surface, area = frame_renderer({"photo": decoder(photo)})
+    renderer.GL.held = True
+    calibrated = binding(calibration=TURNED)
+    shown = OutputComposition(calibrated, (local(photo),))
+    statuses = []
+    for tick in range(6):
+        clock.now += .05
+        renderer.prepare(local(photo), calibrated)
+        statuses.append(renderer.present(shown).status)
+        paint(renderer, surface, area, clock.now)
+        renderer.GL.signal()                        # the GPU catches up by the next tick
+    assert "presented" in statuses, statuses
+    assert len(renderer.GL.fits) == 1
+
+
+# -- Failures --------------------------------------------------------------------------------------
+
+def test_a_failed_fit_fails_the_decode_and_shows_nothing_new(clock):  # noqa: F811
+    """The GPU cannot draw a photo's fitted picture again after Position's edit (GL_OUT_OF_MEMORY
+    on a 4K texture): prepare() reports a failed decode (its decoder retried after a second), the
+    earlier finished draw no longer counts (its texture was cleared), and nothing is shown."""
+    showing = layer("showing", start=100, end=200)
+    incoming = layer("incoming", data=b"incoming", start=110, end=200, fade_in=1, priority=1)
+    held = decoder(incoming)
+    renderer, surface, area = frame_renderer({"showing": decoder(showing), "incoming": held})
+    renderer._frames = frames = TrialFrames()
+    shown = composition(showing, incoming, timebase=100 - clock.now)
+    renderer.present(shown)
+    paint(renderer, surface, area, clock.now + .1)
+    assert renderer.prepare(local(incoming, 101), shown.binding).status == "prepared"
+    passes = renderer.GL.passes
+    renderer.GL.failing_fits = True
+    frames.calibration, frames.sequence = TURNED, 2
+    result = renderer.prepare(local(incoming, 101), shown.binding)
+    assert (result.status, result.code) == ("failed", "decode") and held.failure == "decode"
+    assert surface.fitted["incoming"].key is None and surface.fitted["incoming"].finished is None
+    assert renderer.GL.passes == passes
+
+
+def test_a_failed_redraw_of_the_photo_on_screen_holds_the_screen_and_never_fails_it(clock):  # noqa: F811
+    """Position's edit has the photo on screen drawn again and that draw fails: the frame is
+    dropped and the screen keeps what GTK's buffer shows, render after render (a renewal), with
+    the Output never failed. Once GTK makes the buffer anew nothing of the photo can be shown:
+    the Output draws black and reports nothing on screen, still not failed."""
+    renderer, surface, area, frames, held, shown, still = _on_screen(clock)
+    renderer.GL.failing_fits = True
+    frames.calibration, frames.sequence = TURNED, 2
+    renderer.GLib.readable(9)
+    paint(renderer, surface, area, clock.now + .2)
+    assert held.failure == "decode" and gpu(renderer) == (2, 1)
+    for _ in range(3):                              # GTK repaints, the renewal's renders
+        renderer._render(area, None, surface)
+    assert surface.failed() is None and gpu(renderer) == (2, 1)
+    assert surface.acknowledged is not None and frames.tags[-1] == frames.tags[0]
+    renderer._resized(area, 64, 36, surface)
+    renderer._render(area, None, surface)
+    assert surface.failed() is None and surface.acknowledged is None
+    assert gpu(renderer) == (2, 2) and renderer.GL.count == 0, "black: no layer"
+
+
+# -- What a frame repaints -----------------------------------------------------------------------
+
+def _still(clock_, mat: Mat = Mat()):
+    still = layer("still", start=100, end=200)
+    renderer, surface, area = frame_renderer({"still": decoder(still)})
+    shown = OutputComposition(binding(mat=mat), (local(still),), timebase=100 - clock_.now)
+    renderer.present(shown)
+    paint(renderer, surface, area, clock_.now + .1)
+    assert gpu(renderer) == (1, 1)
+    return renderer, surface, area, shown
+
+
+DEEP = Mat(depth_mm=10, lights=(Light(from_degrees=0, steep_degrees=30, softness_degrees=5,
+                                       strength_tenths=10, colour_kelvin=6500),))
+
+
+@pytest.mark.parametrize("edit", ["mat", "profile"])
+def test_a_mat_or_profile_edit_on_a_still_photo_is_one_frame_pass_and_no_fit(clock, edit):  # noqa: F811
+    """The binding's mat, or its Frame profile's size at the same aspect (the mat shadow's
+    millimetres), changes under a still photo: the next frame paints it, one frame pass and no
+    fitted picture (neither is in the photo's FitKey)."""
+    renderer, surface, area, shown = _still(clock, DEEP)
+    changed = (shown.binding.model_copy(update={"mat": Mat(depth_mm=20, lights=DEEP.lights)})
+               if edit == "mat" else shown.binding.model_copy(update={"profile": FrameProfile(
+                   width_px=1920, height_px=1080, diagonal_inches=55)}))
+    renderer.present(OutputComposition(changed, shown.layers, timebase=shown.timebase))
+    paint(renderer, surface, area, clock.now + .2)
+    assert gpu(renderer) == (1, 2)
+
+
+def test_a_buffer_gtk_made_anew_is_painted_again(clock):  # noqa: F811
+    """GtkGLArea's "resize" (on any size allocation, the same size too) leaves its buffer
+    undefined: the render after it paints the photo again, though nothing it shows changed."""
+    renderer, surface, area, _shown = _still(clock)
+    renderer._render(area, None, surface)
+    assert gpu(renderer) == (1, 1), "the same frame: nothing painted"
+    renderer._resized(area, 64, 36, surface)
+    renderer._render(area, None, surface)
+    assert gpu(renderer) == (1, 2)

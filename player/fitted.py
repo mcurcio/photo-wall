@@ -45,12 +45,14 @@ class FitKey:
             other.decode, other.fit, other.aspect, other.crop, other.size)
 
 
-def prepared(drawn: FitKey | None, now: FitKey, done: bool) -> bool:
-    """The one readiness rule, which the executor's prepare() reads: the layer's decode has a
-    fitted picture (`drawn`, the key it was drawn for) and the GPU has finished drawing it (`done`).
-    An edit since (a Position trial, a resize) leaves it prepared: the picture is redrawn before
-    it is shown, and a grant is never revoked by an edit."""
-    return drawn is not None and drawn.decode == now.decode and done
+def prepared(finished: tuple[int, int] | None, now: FitKey) -> bool:
+    """The one readiness rule, which the executor's prepare() reads: the GPU has finished a fitted
+    picture of the layer's decode (`finished`: the decode of the last draw it finished, kept while
+    a newer draw is in flight). An edit since (a Position trial, a crop, a resize) leaves it
+    prepared while its new fit is drawn: a frame shows it only once that draw is finished
+    (`shown_at_once`) or, on screen, draws it itself (`redrawn_by_frames`), and a grant is never
+    revoked by an edit. Another decode (a seek, a new decoder) is prepared again."""
+    return finished is not None and finished == now.decode
 
 
 def redrawn_by_frames(drawn: FitKey | None, now: FitKey, on_screen: bool) -> bool:
