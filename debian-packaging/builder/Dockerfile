@@ -14,6 +14,9 @@
 #            its .dsc from the snapshot's archive, refused unless its sha256 is the pinned one, the
 #            tarballs it names (dpkg-source -x checks them against it) and its Build-Depends, in
 #            /src/weston: debian-packaging/build-weston.sh builds it, patched, with no network.
+#            /tmp/.X11-unix is made as a Debian build chroot has it (root's, mode 1777): Weston's
+#            Xwayland test cannot start an X server in the one debian/rules makes as the build
+#            user.
 #            Apart from the builder, so Weston's large build closure stays out of every other
 #            build.
 FROM debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f AS pinned
@@ -50,5 +53,6 @@ RUN . ./upstream.env \
  && for file in $(sed -n '/^Checksums-Sha256:/,/^[^ ]/s/^ [0-9a-f]\{64\} [0-9]* //p' "$dsc"); do \
       curl -fsSL --retry 3 -o "$file" "$pool/$file"; done \
  && apt-get build-dep -y --no-install-recommends "./$dsc" \
- && rm -rf /var/lib/apt/lists/*
+ && rm -rf /var/lib/apt/lists/* \
+ && install -d -m 1777 /tmp/.X11-unix
 WORKDIR /
