@@ -771,8 +771,51 @@ def test_push_runs_every_suite_when_github_cannot_answer(scratch, merged, tmp_pa
     values = dict(line.split("=", 1) for line in output.read_text().splitlines())
     assert json.loads(values["reused"]) == []
     assert {"checks", "e2e"} <= set(json.loads(values["jobs"]))
-    assert "::notice title=Reuse::this push runs its own suites: HTTP 502" in \
+    assert "::notice title=Reuse::no reuse, this push runs its own suites: HTTP 502" in \
         capsys.readouterr().out
+
+
+@needs_uvx
+def test_a_merge_whose_newest_run_passed_after_cancelled_ones_reuses_it(scratch, merged,
+                                                                         tmp_path, monkeypatch,
+                                                                         capsys):
+    """PR 112's history, as GitHub answered it: main had not moved, two runs of the branch were
+    cancelled by newer pushes and the newest passed, and the commit's pull request index was
+    empty. The merge reuses the passing run and says so."""
+    before, head, merge = merged
+    output = tmp_path / "output"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(output))
+    runs = f"/actions/workflows/pipeline.yml/runs?event=pull_request&head_sha={head}&per_page=100"
+
+    def run(id_, created, conclusion):
+        return {"id": id_, "html_url": f"https://github.com/o/r/actions/runs/{id_}",
+                "head_sha": head, "event": "pull_request", "created_at": created,
+                "status": "completed", "conclusion": conclusion,
+                "head_repository": {"full_name": "o/r"}}
+    answers = {
+        f"/commits/{merge}/pulls": [],
+        PULLS: [{"number": 112, "merged_at": "2026-10-17T23:12:58Z", "merge_commit_sha": merge,
+                 "base": {"ref": "main"}, "head": {"sha": head, "repo": {"full_name": "o/r"}}}],
+        runs: {"workflow_runs": [run(3, "2026-10-17T22:00:00Z", "success"),
+                                 run(2, "2026-10-17T21:00:00Z", "cancelled"),
+                                 run(1, "2026-10-17T20:00:00Z", "cancelled")]},
+        "/actions/runs/3/jobs?filter=latest&per_page=100&page=1": {
+            "total_count": len(PASSED_JOBS),
+            "jobs": [{"name": name, "conclusion": result} for name, result in PASSED_JOBS]},
+    }
+    assert release_plan.main(["--repo", str(scratch.root), "push", "--before", before],
+                             history=lambda: _github(answers)) == 0
+    values = dict(line.split("=", 1) for line in output.read_text().splitlines())
+    assert json.loads(values["reused"]) == ["checks", "e2e", "node-pid1"]
+    assert ("::notice title=Reuse::reused from https://github.com/o/r/actions/runs/3: checks, "
+            "e2e, node-pid1") in capsys.readouterr().out
+
+
+@needs_uvx
+def test_a_push_without_before_says_why_it_reuses_nothing(scratch, merged, capsys):
+    assert release_plan.main(["--repo", str(scratch.root), "push"]) == 0
+    assert "::notice title=Reuse::no reuse, this push runs its own suites: the push names no " \
+        "earlier commit of the branch" in capsys.readouterr().out
 
 
 def _github(answers):
@@ -790,8 +833,14 @@ def _pull(number, *, merged=True, repo="o/r", base="main", merge=MERGE):
             "head": {"sha": HEAD, "repo": {"full_name": repo} if repo else None}}
 
 
+PULLS = "/pulls?state=closed&base=main&sort=updated&direction=desc&per_page=100"
+
+
 def test_the_github_history_finds_the_pull_request_merged_into_main():
-    pulls = f"/commits/{MERGE}/pulls"
+    """Read from main's closed pull requests by their merge commit, never from GitHub's
+    commit-to-pull-request index: for PR 112's merge (12106f17) that index answered an empty
+    list, so the merge ran every suite."""
+    pulls = PULLS
     assert _github({pulls: [_pull(1, merged=False), _pull(2, base="dev"), _pull(3, merge=HEAD),
                             _pull(4)]}).merged_pull(MERGE) == release_plan.MergedPull(4, HEAD,
                                                                                       True)
