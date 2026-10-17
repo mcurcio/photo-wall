@@ -129,12 +129,13 @@ jobs:
           name: photo-wall-node-debs-${{ env.REVISION }}
           path: ${{ runner.temp }}/photo-wall-node-debs
 
-      # Cache A's node input: the Package=Version lines of every package the local repo gives
-      # photo-wall-node, itself included, following each Depends name the repo's index holds
-      # (the contexts, python3-nats, nats-server). Each Photo Wall version is a hash of what the
-      # package installs (debian/content-versions), nats-server's is its pin, and python3-nats
-      # is built from debian-packaging/python-nats/ (in the key below), so the lines name the
-      # bytes the squashfs installs; the OS packages the layers name come from the pin and the
+      # Cache A's node input: the Package=Version and SHA256 lines of every package the local
+      # repo gives photo-wall-node, itself included, following each Depends name the repo's
+      # index holds (the contexts, python3-nats, nats-server, Photo Wall's Weston). Each Photo
+      # Wall version is a hash of what the package installs (debian/content-versions),
+      # nats-server's is its pin, python3-nats is built from debian-packaging/python-nats/ (in
+      # the key below), and the SHA256 names Weston's bytes whatever its version says, so the
+      # lines name the bytes the squashfs installs; the OS packages the layers name come from the pin and the
       # recipe, also in the key. A stale hit cannot pass silently: the node ABI check below
       # requires the cached squashfs's installed ABI to equal these components'.
       - name: Compute the base's package set from the local repo
@@ -158,7 +159,7 @@ jobs:
           if "photo-wall-node" not in seen:
               raise SystemExit("the local repo holds no photo-wall-node")
           for name in sorted(seen):
-              print(f"{name}={index[name]['Version']}")
+              print(f"{name}={index[name]['Version']} {index[name]['SHA256']}")
           PYCODE
           cat "$RUNNER_TEMP/base-node-packages"
           echo "digest=$(sha256sum < "$RUNNER_TEMP/base-node-packages" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
@@ -388,7 +389,8 @@ jobs:
 
           echo "== DEVICE ROOT CHECKS (scripts/device_root_checks.py) =="
           # photo-wall-node (dpkg installs it only with every Depends: the
-          # contexts, nats-server, python3-nats) and the OS packages the layers'
+          # contexts, nats-server, python3-nats), Photo Wall's Weston at its local
+          # version, and the OS packages the layers'
           # `packages:` lists name are installed (dpkg's own database:
           # `install ok installed`); no watchdog override,
           # time daemon or resolver writer; the image's apt sources are exactly
@@ -399,7 +401,10 @@ jobs:
           # sets LANG, no V1 unit or bootstrapper directory is left, and
           # ddcutil, cec-ctl, the DDC/CI modules-load file and the i2c group
           # are there.
-          { echo photo-wall-node
+          # Photo Wall's Weston must be the one installed, at exactly its local version
+          # (debian-packaging/weston/upstream.env): Debian's has no 64-bit plane masks.
+          weston=$(sed -n 's/^WESTON_LOCAL_VERSION=//p' debian-packaging/weston/upstream.env)
+          { echo photo-wall-node "weston=$weston" "libweston-14-0=$weston"
             sed -n '/^  packages:$/,/^  [^ ]/s/^    - //p' appliance/rpi_image_gen/layer/*.yaml
           } > "$RUNNER_TEMP/base-packages.list"
           if python3 scripts/device_root_checks.py --root "$extract" \

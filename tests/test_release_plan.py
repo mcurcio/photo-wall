@@ -1126,6 +1126,12 @@ def test_every_script_a_release_build_runs_is_claimed_by_what_it_builds():
     assert "tests/debs/test_netboot_init.py" in debs
     assert "scripts/uplink_device_harness.py" in (REPO / "tests/debs/test_netboot_init.py").read_text()
     assert _package("node-debs").claims("scripts/uplink_device_harness.py")
+    # Photo Wall's Weston, built in the weston job and installed and shipped by the debs job's
+    # repo build, refused by its patch check while a plane mask can alias.
+    weston = _job("node-components.yml", "weston")
+    assert "debian-packaging/build-weston.sh" in weston and "--weston" in debs
+    assert "scripts/weston_patch_check.py" in (REPO / "debian-packaging/build-weston.sh").read_text()
+    assert _package("node-debs").claims("scripts/weston_patch_check.py")
 
 
 def _harness(suite: Suite) -> list[str]:

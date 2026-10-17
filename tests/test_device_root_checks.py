@@ -169,7 +169,7 @@ def test_read_dpkg_status_keeps_installed_stanzas_and_strips_provides_versions(t
     installed = {package.name: package for package in read_dpkg_status(tmp_path)}
     assert "systemd-timesyncd" not in installed
     assert installed["systemd"] == InstalledPackage(
-        "systemd", frozenset({"systemd-sysusers", "systemd-tmpfiles"}))
+        "systemd", frozenset({"systemd-sysusers", "systemd-tmpfiles"}), "1.0-1")
     assert installed["mawk"].provides == frozenset({"awk"})
     assert installed["bash"].provides == frozenset()
     assert len(installed) == len(MINBASE)
@@ -206,6 +206,14 @@ def test_missing_packages_counts_config_files_as_missing(tmp_path):
     assert missing_packages(tmp_path, ["python3", "weston", "libegl1", "python3-gi",
                                        "weston"]) == ["weston", "libegl1", "python3-gi"]
     assert missing_packages(tmp_path, ["python3", "ca-certificates"]) == []
+
+
+def test_a_pinned_entry_needs_exactly_its_version(tmp_path):
+    """`NAME=VERSION` (Photo Wall's Weston on the base) is missing at any other version."""
+    debian_root(tmp_path, stanza("weston"))
+    assert missing_packages(tmp_path, ["weston=1.0-1", "python3=1.0-1"]) == []
+    assert missing_packages(tmp_path, ["weston=1.0-1+photowall1", "weston", "libweston-14-0=1.0-1"]
+                            ) == ["weston=1.0-1+photowall1", "libweston-14-0=1.0-1"]
 
 
 # --- AC6: foreign apt sources ------------------------------------------------------------------
