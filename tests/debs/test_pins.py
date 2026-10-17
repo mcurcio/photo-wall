@@ -66,3 +66,27 @@ def test_centrals_hub_runs_the_pinned_release():
     measured on it (contracts/node_link.py), and the hub and every leaf speak one version."""
     compose = (REPO / "compose.yaml").read_text()
     assert re.findall(r"image: nats:([0-9.]+)-alpine@", compose) == [_pin()["NATS_SERVER_VERSION"]]
+
+
+def test_the_display_depends_on_photo_wall_weston_through_its_one_variable():
+    """debian/rules includes the Weston pin and hands its local version to dpkg-gencontrol (and to
+    debian/graphics-abi, which expands the same Depends) as ${weston:Version}, the only way the
+    display names Weston's version; both Weston packages are named at exactly it."""
+    rules = (REPO / "debian/rules").read_text()
+    assert "include debian-packaging/weston/upstream.env" in rules
+    assert "WESTON_SUBSTVARS := -Vweston:Version=$(WESTON_LOCAL_VERSION)" in rules
+    assert "debian/graphics-abi $(WESTON_SUBSTVARS)" in rules
+    assert ("\tdebian/content-versions -Vnats:Version=$(NATS_SERVER_VERSION) $(WESTON_SUBSTVARS)\n"
+            in rules)
+    control = (REPO / "debian/control").read_text()
+    assert re.findall(r"\b((?:lib)?weston[a-z0-9-]*) \(([^)]*)\)", control) == [
+        ("weston", "= ${weston:Version}"), ("libweston-14-0", "= ${weston:Version}")]
+
+
+def test_the_weston_pin_names_debians_version_and_a_local_one_above_it():
+    pin = nats_server.read_pin((REPO / "debian-packaging/weston/upstream.env").read_text())
+    assert sorted(pin) == ["WESTON_DSC_SHA256", "WESTON_LOCAL_VERSION", "WESTON_VERSION"]
+    assert re.fullmatch(r"14\.[0-9.]+-[0-9]+", pin["WESTON_VERSION"]), "libweston-14-0's ABI"
+    assert re.fullmatch(re.escape(pin["WESTON_VERSION"]) + r"\+photowall[0-9]+",
+                        pin["WESTON_LOCAL_VERSION"])
+    assert re.fullmatch(r"[0-9a-f]{64}", pin["WESTON_DSC_SHA256"])

@@ -3,6 +3,9 @@
 
 # The nats-server pin's one home: photo-wall-node Depends on upstream's .deb at exactly it.
 include debian-packaging/nats-server.env
+# The Weston pin's: photo-wall-node-display Depends on Photo Wall's Weston at exactly it.
+include debian-packaging/weston/upstream.env
+WESTON_SUBSTVARS := -Vweston:Version=$(WESTON_LOCAL_VERSION)
 
 # Meson is the source package's one build system: appliance/display_host builds the display
 # (photo-wall-node-display) and the frame client (photo-wall-frame-client).
@@ -28,7 +31,7 @@ execute_after_dh_install:
 # The display's ABI identity, written into its tree once both trees are final (stripped, their
 # shlibs resolved) and before debian/content-versions hashes them.
 execute_after_dh_shlibdeps:
-	debian/graphics-abi
+	debian/graphics-abi $(WESTON_SUBSTVARS)
 
 # photo-wall-node.target is enabled by a link the package ships as data
 # (debian/photo-wall-node.links), never by a maintainer script: the base's rpi-image-gen chroot and
@@ -48,4 +51,4 @@ override_dh_strip:
 
 # Every binary package at its own content-derived version (0019 Q1).
 override_dh_gencontrol:
-	debian/content-versions -Vnats:Version=$(NATS_SERVER_VERSION)
+	debian/content-versions -Vnats:Version=$(NATS_SERVER_VERSION) $(WESTON_SUBSTVARS)
