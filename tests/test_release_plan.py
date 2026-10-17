@@ -614,7 +614,7 @@ def test_a_merge_of_a_head_with_its_tree_reuses_the_suites_its_run_passed(scratc
 @pytest.mark.parametrize(("change", "reason"), [
     ({"merged": False}, "is not a pull request's merge into main"),
     ({"same_repository": False}, "comes from a fork"),
-    ({"head": "f" * 40}, "is not in this checkout (a rebase merge)"),
+    ({"head": "f" * 40}, "is not in this checkout (a rebase merge whose branch is already deleted)"),
     ({"run": None}, "has no pipeline.yml run"),
     ({"run": release_plan.PipelineRun(7, RUN_URL, "failure")}, "concluded failure"),
     ({"run": release_plan.PipelineRun(7, RUN_URL, None)}, "concluded nothing yet"),
@@ -656,10 +656,9 @@ def test_a_branch_continued_after_its_first_merge_reuses(scratch):
     assert passed_run(scratch.root, History(scratch, head), merge, before).url == RUN_URL
 
 
-def test_a_base_the_head_lacks_by_history_is_never_trusted_by_content(scratch):
-    """main's change reached the head as an equal edit, not through history: the merge has the
-    head's tree, but a run based on main's commit merged a three-way result git chose, so the
-    rule refuses rather than reason about it."""
+def test_a_base_whose_merge_is_the_head_reuses_without_shared_history(scratch):
+    """main's change reached the head as an equal edit, not through history: git's merge of the
+    head into main's commit, the tree that run checked out, is the head's tree, so it reuses."""
     scratch.git("checkout", "-q", "-b", "topic")
     scratch.git("checkout", "-q", "main")
     before = scratch.commit("docs: on main", {"docs/guide.md": "# Same\n"})
@@ -667,10 +666,51 @@ def test_a_base_the_head_lacks_by_history_is_never_trusted_by_content(scratch):
     head = scratch.commit("docs: same edit", {"docs/guide.md": "# Same\n",
                                               "player/service.py": "VALUE = 24\n"})
     merge = _merge(scratch, "topic")
-    assert scratch.git("rev-parse", f"{head}^{{tree}}") == scratch.git("rev-parse",
-                                                                       f"{merge}^{{tree}}")
-    with pytest.raises(NoReuse, match="would have merged in changes the head lacks"):
-        passed_run(scratch.root, History(scratch, head), merge, before)
+    assert passed_run(scratch.root, History(scratch, head), merge, before).url == RUN_URL
+
+
+def test_a_base_whose_merge_differs_from_the_head_is_refused(scratch):
+    scratch.git("checkout", "-q", "-b", "topic")
+    scratch.git("checkout", "-q", "main")
+    before = scratch.commit("docs: on main", {"docs/guide.md": "# Main\n"})
+    scratch.git("checkout", "-q", "topic")
+    head = scratch.commit("fix(player): ships", {"player/service.py": "VALUE = 25\n"})
+    with pytest.raises(NoReuse, match=f"based on {before[:12]} would have merged in changes"):
+        release_plan.tested_tree(scratch.root, head, before)
+
+
+def test_a_criss_cross_base_is_judged_by_its_real_merge(scratch):
+    """Two merge bases: git merges through a virtual base, so a base whose tree equals the one
+    merge base `git merge-base` picks can still merge to another tree. The reviewer's history:
+    main reverts b after the topic merged it in, so a run based on Mm tested b=0, not the head's
+    b=1, and the walk refuses at Mm itself."""
+    scratch.commit("chore: b", {"b.txt": "0\n"})
+    scratch.git("checkout", "-q", "-b", "topic")
+    t1 = scratch.commit("chore: a", {"a.txt": "1\n"})
+    scratch.git("checkout", "-q", "main")
+    m1 = scratch.commit("chore: b on", {"b.txt": "1\n"})
+    scratch.commit("chore: b off", {"b.txt": "0\n"})
+    mm = _merge(scratch, "topic")
+    scratch.git("checkout", "-q", "topic")
+    scratch.git("merge", "-q", "--no-ff", "-m", "Merge b on", m1)
+    head = scratch.commit("chore: c", {"c.txt": "1\n"})
+    assert len(scratch.git("merge-base", "--all", mm, head).split()) == 2
+    assert scratch.git("rev-parse", f"{mm}^{{tree}}") == scratch.git("rev-parse", f"{t1}^{{tree}}")
+    with pytest.raises(NoReuse, match=f"based on {mm[:12]} would have merged in changes"):
+        release_plan.tested_tree(scratch.root, head, mm)
+
+
+def test_a_rebase_merge_whose_head_is_still_fetched_reuses(scratch):
+    """A rebase merge lands copies of the head's commits; while the branch exists the head is in
+    the checkout, and with the same tree and main not moved the run tested this tree."""
+    before = scratch.git("rev-parse", "HEAD")
+    scratch.git("checkout", "-q", "-b", "topic")
+    head = scratch.commit("fix(player): ships", {"player/service.py": "VALUE = 26\n"})
+    scratch.git("checkout", "-q", "main")
+    scratch.git("cherry-pick", "-x", head)
+    rebased = scratch.git("rev-parse", "HEAD")
+    assert rebased != head
+    assert passed_run(scratch.root, History(scratch, head), rebased, before).url == RUN_URL
 
 
 def test_a_before_off_the_pushed_history_reuses_nothing(scratch, merged):
