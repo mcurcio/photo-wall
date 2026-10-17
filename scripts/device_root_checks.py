@@ -10,7 +10,7 @@ the snapshot it was built from.
   (rule 3).
 - Resolver writer: a package in RESOLVER_WRITERS would replace the resolver stage 1 hands over.
 - Missing package (`--require-installed FILE`): every named package is installed (dpkg's own
-  database).
+  database); a `NAME=VERSION` entry at exactly that version.
 - Pinned sources (`--pinned-sources`): the apt sources are exactly the pin's, the sources of
   debian-packaging/snapshot.list (decision 0019, rule 1) -- no foreign source, and none of the
   pin's missing.
@@ -95,6 +95,7 @@ I2C_GROUP: Final = "i2c"
 class InstalledPackage:
     name: str
     provides: frozenset[str]          # virtual names from Provides:, versions stripped
+    version: str
 
 
 def _read(root: Path, path: Path) -> str | None:
@@ -154,7 +155,8 @@ def read_dpkg_status(root: Path) -> tuple[InstalledPackage, ...]:
             continue
         provides = (item.split("(")[0].strip() for item in fields.get("provides", "").split(","))
         installed.append(InstalledPackage(fields["package"],
-                                          frozenset(name for name in provides if name)))
+                                          frozenset(name for name in provides if name),
+                                          fields.get("version", "")))
     return tuple(installed)
 
 
@@ -203,11 +205,16 @@ def resolver_writers(root: Path) -> list[str]:
 
 
 def missing_packages(root: Path, required: Iterable[str]) -> list[str]:
-    """Required names not installed, once each, in the order given. On the base: the device set
-    and the Player .deb's own Depends (read from the built .deb), so `dpkg --install` of that
-    Player cannot fail on a dependency."""
-    installed = {package.name for package in read_dpkg_status(root)}
-    return [name for name in dict.fromkeys(required) if name not in installed]
+    """Required entries not installed, once each, in the order given: a `NAME` installed at any
+    version, a `NAME=VERSION` at exactly that one. On the base: the device set and Photo Wall's
+    Weston at its local version (debian-packaging/weston/upstream.env)."""
+    installed = {package.name: package.version for package in read_dpkg_status(root)}
+    missing = []
+    for entry in dict.fromkeys(required):
+        name, pinned, version = entry.partition("=")
+        if name not in installed or (pinned and installed[name] != version):
+            missing.append(entry)
+    return missing
 
 
 def _one_line_sources(text: str) -> Iterator[tuple[str, str]]:
