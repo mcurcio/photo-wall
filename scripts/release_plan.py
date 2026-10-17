@@ -639,7 +639,8 @@ class RunHistory(Protocol):
     it cannot answer."""
 
     def merged_pull(self, revision: str) -> MergedPull | None:
-        """The pull request merged into RELEASE_BRANCH whose merge commit is `revision`."""
+        """The pull request merged into RELEASE_BRANCH whose merge commit is `revision`, among
+        the 100 most recently updated (None beyond them: the push runs its suites)."""
 
     def latest_pull_request_run(self, head: str) -> PipelineRun | None:
         """The newest PIPELINE run of event pull_request for head commit `head` whose head
@@ -772,9 +773,15 @@ class GitHubRunHistory:
         return isinstance(repo, dict) and repo.get("full_name") == self.repository
 
     def merged_pull(self, revision: str) -> MergedPull | None:
-        pulls = self._read(f"/commits/{revision}/pulls")
+        # The pull request records themselves, newest change first: a merge updates its pull
+        # request, so it is on the first page. Never GitHub's commit-to-pull-request index
+        # (/commits/{sha}/pulls): it is built apart from the records and answered an empty
+        # list for PR 112's merge (12106f17), whose commits also sat on another open branch.
+        pulls = self._read(f"/pulls?state=closed&base={RELEASE_BRANCH}&sort=updated"
+                           "&direction=desc&per_page=100")
         if not isinstance(pulls, list):
-            raise ReuseUnavailable(f"the pull requests of {revision} are not a list")
+            raise ReuseUnavailable(f"the closed pull requests into {RELEASE_BRANCH} are not a "
+                                   "list")
         for pull in pulls:
             if (isinstance(pull, dict) and pull.get("merged_at")
                     and pull.get("merge_commit_sha") == revision
@@ -1027,16 +1034,21 @@ def _publish(run: Run) -> None:
 
 def _reuse(repo: Path, history: Callable[[], RunHistory], plan: Plan,
            before: str) -> PassedRun | None:
-    """passed_run for a push, or None (its suites run) with the reason as a notice."""
+    """passed_run for a push, or None (its suites run), the outcome always a notice: the run
+    reused, or why not."""
+    passed: PassedRun | None
     try:
-        return passed_run(repo, history(), plan.revision, before)
+        if not before:
+            raise NoReuse("the push names no earlier commit of the branch")
+        passed = passed_run(repo, history(), plan.revision, before)
+        text = f"reused from {passed.url}: {', '.join(passed.suites)}"
     except NoReuse as error:
-        text = f"this push runs its own suites: {error}"
-        print(f"::notice title=Reuse::{text}")
-        if path := os.environ.get("GITHUB_STEP_SUMMARY"):
-            with open(path, "a") as handle:
-                handle.write(f"{text}\n\n")
-        return None
+        passed, text = None, f"no reuse, this push runs its own suites: {error}"
+    print(f"::notice title=Reuse::{text}")
+    if path := os.environ.get("GITHUB_STEP_SUMMARY"):
+        with open(path, "a") as handle:
+            handle.write(f"{text}\n\n")
+    return passed
 
 
 def main(argv: Sequence[str] | None = None,
@@ -1066,8 +1078,7 @@ def main(argv: Sequence[str] | None = None,
             run = PullRequestRun(plan_head(args.repo, cz))
         else:
             plan = refuse_a_taken_tag(args.repo, plan_head(args.repo, cz))
-            run = ReleaseRun(plan, _reuse(args.repo, history, plan, args.before)
-                             if args.before else None)
+            run = ReleaseRun(plan, _reuse(args.repo, history, plan, args.before or ""))
         _publish(run)
     except PlanError as error:
         for line in str(error).splitlines():

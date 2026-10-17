@@ -24,7 +24,9 @@ which test workflows run and whether a push releases.
 
 **A merge reuses its pull request's pass.** On a push to `main`, the plan
 (`release_plan.py push --before`, `passed_run`) finds the pull request the push
-merged and its newest `pipeline.yml` run. When that run checked out exactly the
+merged (by its merge commit among `main`'s closed pull requests, never GitHub's
+commit-to-pull-request index, which answered nothing for PR 112's merge) and
+its newest `pipeline.yml` run. When that run checked out exactly the
 pushed tree, the plan lists only the suites the run did not pass and outputs the
 rest as `reused`; `tested` and `gate` accept a reused suite in place of running it
 and still fail on any failed or cancelled job. "Exactly the pushed tree" is proven
@@ -49,9 +51,9 @@ and `media-worker` scopes, written by `main`'s `e2e`. Pull request `e2e` legs
 fall back to those `main` scopes and rebuild every layer changed since (a
 `uv.lock` or Central change), which lengthens legs already over the 4-minute
 budget; measure `e2e` leg times after a few reused merges before adding an
-arm64 cache-writing job to the release. The plan's
-step summary names the reused run, so the first `main` run after a merge shows
-what it took.
+arm64 cache-writing job to the release. The plan always
+logs a `Reuse` notice, also in its step summary: `reused from <run>: <suites>`,
+or `no reuse, this push runs its own suites: <why>`.
 Only `base-image.yml` builds the Pi base OS, the netboot bundle and both
 `.deb`s: the pipeline calls it for the plan's revision. On a release, the
 `images` job pushes the service images by digest, and the `seal` job
