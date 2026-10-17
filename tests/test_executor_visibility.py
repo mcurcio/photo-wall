@@ -51,10 +51,10 @@ class SlowRenderer(RecordingRenderer):
         super().__init__(capacity)
         self.clock, self.decode, self.asked = clock, decode, {}
 
-    def prepare(self, layer: LocalLayer) -> PrepareResult:
+    def prepare(self, layer: LocalLayer, binding) -> PrepareResult:
         key = layer.layer.assignment_id
         asked = self.asked.setdefault(key, self.clock.utc())
-        result = super().prepare(layer)
+        result = super().prepare(layer, binding)
         if (result.status == "prepared" and layer.layer.variant is not None
                 and self.clock.utc() - asked < self.decode):
             return PrepareResult("pending")

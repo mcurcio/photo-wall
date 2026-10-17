@@ -46,7 +46,7 @@ from player.wayland_frames import FrameGrant
 
 def composition(*layers, timebase: float | None = 100.0) -> OutputComposition:
     """`layers` bottom to top on hdmi1; with timebase 100, monotonic 0 is plan time 100."""
-    return OutputComposition(binding(), Calibration(), tuple(
+    return OutputComposition(binding(), tuple(
         LocalLayer(item, None, item.position(100), item.alpha(100)) for item in layers),
         timebase=timebase)
 
@@ -343,30 +343,88 @@ def test_a_follower_whose_frame_raises_stops_following():
 # -- The native renderer's render loop -----------------------------------------------------------
 
 class GL:
-    """Enough OpenGL for _render: every call a no-op but the layer pass's `opacity` uniform,
-    recorded per draw, and the queries _render reads."""
+    """Enough OpenGL for _render and the fit pass, every other call a no-op. It records, per draw,
+    the program drawn with: a fit pass (program 1, `fits`: the framebuffer it drew into) or a
+    frame pass (program 2, `passes`, and `opacities`: each of its layers' strengths, bottom to
+    top). Names are fresh integers and every framebuffer complete. A fence is passed at once,
+    unless `held`: then it stays in flight (the GPU still drawing) until `signal()`. With
+    `failing_fits` a fit pass reports GL_OUT_OF_MEMORY."""
     GL_NO_ERROR = 0
+    GL_OUT_OF_MEMORY = 0x0505
+    GL_ALREADY_SIGNALED, GL_TIMEOUT_EXPIRED, GL_CONDITION_SATISFIED = 0x911A, 0x911B, 0x911C
 
     def __init__(self):
         self.opacities: list[float] = []
+        self.fits: list[int] = []
+        self.passes = 0
+        self.program = self.framebuffer = 0
+        self.names = 100
+        self.count = 0
+        self.alphas: list[float] = []
+        self.held = False
+        self.in_flight: set[int] = set()
+        self.failing_fits = False
+        self.error = 0
+
+    def glFenceSync(self, *_args):
+        fence = self._name()
+        if self.held:
+            self.in_flight.add(fence)
+        return fence
+
+    def signal(self) -> None:
+        """The GPU passes every fence issued so far."""
+        self.in_flight.clear()
 
     def __getattr__(self, name):
         if name.startswith("GL_"):
             return 1
         return lambda *_args: None
 
+    def _name(self, *_args):
+        self.names += 1
+        return self.names
+
+    glGenTextures = glGenFramebuffers = glGenVertexArrays = _name
+
+    def glCheckFramebufferStatus(self, _target):
+        return self.GL_FRAMEBUFFER_COMPLETE
+
+    def glClientWaitSync(self, fence, _flags, _timeout):
+        return self.GL_TIMEOUT_EXPIRED if fence in self.in_flight else self.GL_ALREADY_SIGNALED
+
+    def glBindFramebuffer(self, _target, framebuffer):
+        self.framebuffer = framebuffer
+
+    def glUseProgram(self, program):
+        self.program = program
+
     def glGetUniformLocation(self, _program, name):
         return name
 
-    def glUniform1f(self, location, value):
-        if location == "opacity":
-            self.opacities.append(round(value, 3))
+    def glUniform1i(self, location, value):
+        if location == "layer_count":
+            self.count = value
+
+    def glUniform1fv(self, location, _count, values):
+        if location == "layer_alpha":
+            self.alphas = list(values)
+
+    def glDrawArrays(self, *_args):
+        if self.program == 1:
+            self.fits.append(self.framebuffer)
+            if self.failing_fits:
+                self.error = self.GL_OUT_OF_MEMORY
+        else:
+            self.passes += 1
+            self.opacities.extend(round(alpha, 3) for alpha in self.alphas[:self.count])
 
     def glGetIntegerv(self, _name):
         return 0
 
     def glGetError(self):
-        return 0
+        error, self.error = self.error, 0
+        return error
 
     def glGetString(self, _name):
         return b"fake"
@@ -381,8 +439,9 @@ def decoder(item, *, prepared=True):
 
 
 def frame_renderer(decoders=None, area=None):
-    """A NativeRenderer with one realized surface, faked GL and GTK, and real present, _render,
-    _frame and FrameFollower. Decoded pictures upload as texture 7 and read no new sample."""
+    """A NativeRenderer with one realized surface, faked GL and GTK, and real present, prepare's
+    fitted pictures, _render, _frame and FrameFollower. Every layer decodes at once; decoded
+    pictures upload as texture 7 and read no new sample."""
     renderer = NativeRenderer.__new__(NativeRenderer)
     renderer._owner, renderer._closed, renderer._serial = threading.get_ident(), False, 0
     renderer._luts, renderer._frames, renderer.GL, renderer.GLib = PlayerLuts(), None, GL(), GLib()
@@ -392,12 +451,12 @@ def frame_renderer(decoders=None, area=None):
     window = SimpleNamespace(destroyed=False, get_window=lambda: None)
     window.destroy = lambda: setattr(window, "destroyed", True)
     surface = native_module._Surface(NativeOutput("hdmi1", "photo-wall-hdmi1"), window, area,
-                                     programs=(1, 2), size=(64, 36), targets=[(1, 1), (2, 2)],
-                                     vao=1)
+                                     programs=(1, 2), size=(64, 36), vao=1)
     surface.follower = FrameFollower(renderer.GLib, area, lambda at: renderer._frame(surface, at))
     renderer._surfaces = {"hdmi1": surface}
     renderer.capacity = lambda compositions: SimpleNamespace(available=True)
-    renderer.prepare = lambda local: PrepareResult("prepared")
+    renderer._decode = lambda local: PrepareResult("prepared")
+    renderer._program = lambda _source: 2           # every step set's frame program
     renderer._upload = lambda _surface, _local: 7
     renderer._read_sample = lambda _decoder: None
     return renderer, surface, area
@@ -492,9 +551,12 @@ def test_a_video_is_drawn_once_per_new_sample_not_per_refresh():
     for index in range(1, 4):                       # 60 Hz refreshes, no new sample
         paint(renderer, surface, area, start + .1 + index / 60)
     assert area.renders == 1 and not area.callbacks and area.added == 0
+    fits = len(renderer.GL.fits)
+    playing.sample_serial += 1                      # the sample _read_sample takes
     renderer._sample_arrived("video", playing.incarnation)
     paint(renderer, surface, area, start + .1 + 4 / 60)
     assert area.renders == 2 and renderer.GL.opacities == [1.0, 1.0]
+    assert len(renderer.GL.fits) == fits + 1, "its fitted picture is drawn again with the sample"
     paint(renderer, surface, area, start + .1 + 5 / 60)
     assert area.renders == 2, "drawn once per sample"
     renderer._sample_arrived("video", playing.incarnation + 1)     # a replaced decoder's

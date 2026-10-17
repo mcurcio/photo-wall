@@ -39,9 +39,10 @@ a 64x48 PNG of four flat quadrants (red, green, blue, white) written here with t
    up) shades a band under the top edge, equal to `final_pixel` with `mat_shade`'s shade.
 12. cover_at_90_shades_the_wall_up_edge: the same light on a Frame turned 90 degrees shades the
    output's right edge (the picture's up), not its top.
-13. neutral_program_takes_no_new_step: neutral v5 operations and Mat() leave every new step's
-   switch (lut_on, saturation_on, rolloff_on, floor_on, mat_on) at 0 in the linked program, and
-   the pixels are the v4 reference's.
+13. neutral_program_takes_no_new_step: neutral v5 operations and Mat() draw with the neutral step
+   set's program (lut_on, saturation_on, rolloff_on, floor_on, mat_on all 0, each a constant of
+   its program), the pixels are the v4 reference's, and the program with every step on links
+   every step's uniform.
 14. trial_mat_drawn: while Position's trial is drawn its mat shades the picture, though the
    binding's Mat() casts none; when the trial ends the binding's (no shadow) is drawn again.
 15. lut_matches_the_reference (slice P2, rule 3): a picture of four mid-tone quadrants whose
@@ -85,8 +86,12 @@ a 64x48 PNG of four flat quadrants (red, green, blue, white) written here with t
    GTK frame clock (PyGObject's tick callback, frame times against g_get_monotonic_time, a GLArea
    render queued in the update phase) draws it: many renders, the centre darkening from one to
    the next, black at the end; then the surface no longer follows its frame clock.
+28. blended_fitted_pictures_match_the_reference_within_one_code (render cost, owner 2026-10-17:
+   "Picture quality stays the same"): a photo under a second photo at strength 0, 0.5 and 1,
+   under a print look and a two-light mat shadow, with and without a held LUT: every sample equals
+   `compose_pixel`'s mix through `final_pixel` within one 8-bit code (LUT_FILTER_CODES with the
+   LUT), and the photo underneath is fitted once across all three frames.
 """
-import ctypes
 import hashlib
 import os
 import pathlib
@@ -96,6 +101,7 @@ import sys
 import time
 import uuid
 import zlib
+from dataclasses import replace
 from types import SimpleNamespace
 
 sys.path[:0] = ["/repo", "/smoke"]
@@ -133,6 +139,7 @@ from contracts.models import (  # noqa: E402
 from contracts.node_frame import LutMix, PictureOperations  # noqa: E402
 from contracts.photo_crop import CENTRED  # noqa: E402
 from contracts.tuning import TARGET_PATTERNS, TestPattern  # noqa: E402
+from player import native as native_module  # noqa: E402
 from player.calibration_target import target_modules  # noqa: E402
 from player.geometry import (  # noqa: E402
     BoardDraw,
@@ -206,7 +213,9 @@ def layer(assignment_id: str, path: pathlib.Path | None, variant: Variant | None
 
 def composition(variant: Variant, calibration: Calibration, *layers: LocalLayer,
                 binding: OutputBinding = BINDING) -> OutputComposition:
-    return OutputComposition(binding, calibration, layers or (layer("quadrants", PHOTO, variant),))
+    """`layers` (else the quadrants photo) on `binding` calibrated with `calibration`."""
+    return OutputComposition(binding.model_copy(update={"calibration": calibration}),
+                             layers or (layer("quadrants", PHOTO, variant),))
 
 
 class Frames:
@@ -475,8 +484,7 @@ def a_fade_is_drawn_on_the_frame_clock(native, frames, variant) -> None:
     fade = Layer(assignment_id="fade", run_id="run", output_id="headless", frame_id="frame",
                  binding_generation=1, start=begins, end=begins + 10**6, media_origin=begins,
                  presentation="black", fade_in=0.5)
-    fading = OutputComposition(BINDING, Calibration(), (base, LocalLayer(fade, None, 0.0, 0.0)),
-                               timebase=0.0)
+    fading = OutputComposition(BINDING, (base, LocalLayer(fade, None, 0.0, 0.0)), timebase=0.0)
     assert until(lambda: native.present(fading).status == "presented"), native.diagnostics()
     presented = time.monotonic()
     assert presented < begins - FOLLOW_LEAD, ("presented_too_late", presented - begins)
@@ -499,7 +507,7 @@ def a_corrupt_picture_fails_and_the_frame_still_presents(native, frames, variant
     corrupt_path = RUNTIME / "corrupt.png"
     corrupt_path.write_bytes(b"not a PNG")
     corrupt = layer("corrupt", corrupt_path, variant_of(corrupt_path))
-    assert until(lambda: native.prepare(corrupt).status == "failed"), native.prepare(corrupt)
+    assert until(lambda: native.prepare(corrupt, BINDING).status == "failed"), native.prepare(corrupt, BINDING)
     show(native, composition(variant, Calibration(fit=CoverFit())))
     native.release("corrupt")
 
@@ -622,16 +630,17 @@ def neutral_program_takes_no_new_step(native, frames, variant) -> None:
     until(lambda: frames.tags and frames.tags[-1][1] == 6)
     check_fit(native, fit, neutral)
     surface = native._surfaces["headless"]
-    surface.area.make_current()
-    gl = native.GL
-    final = surface.programs[1]
     switches = {name: switch(native, name)
                 for name in ("lut_on", "saturation_on", "rolloff_on", "floor_on", "mat_on")}
     print(f"NEUTRAL switches={switches}", flush=True)
     assert switches == dict.fromkeys(switches, 0), switches
+    assert native._surfaces["headless"].steps == native_module._NEUTRAL_STEPS
+    surface.area.make_current()
+    gl = native.GL
+    every = native._frame_program(surface, native_module._Steps(True, True, True, True, True, 0))
     for name in ("lut", "lut_amount", "saturation", "highlight_knee", "peak", "black_floor", "to_opening", "mat_size",
                  "light_count", "light_toward", "light_band", "light_weight"):
-        assert gl.glGetUniformLocation(final, name) != -1, ("missing_uniform", name)
+        assert gl.glGetUniformLocation(every, name) != -1, ("missing_uniform", name)
 
 
 class TrialFrames(Frames):
@@ -691,12 +700,8 @@ def turning_table() -> bytes:
 
 
 def switch(native: CapturingRenderer, name: str) -> int:
-    surface = native._surfaces["headless"]
-    surface.area.make_current()
-    gl = native.GL
-    value = (ctypes.c_int * 1)()
-    gl.glGetUniformiv(surface.programs[1], gl.glGetUniformLocation(surface.programs[1], name), value)
-    return value[0]
+    """A step's switch in the program the last frame pass drew with (its step set's constant)."""
+    return int(getattr(native._surfaces["headless"].steps, name))
 
 
 def lut_matches_the_reference(native, frames, variant) -> None:
@@ -725,6 +730,98 @@ def lut_matches_the_reference(native, frames, variant) -> None:
     assert before > 500 and after > 500, (before, after)
 
 
+SHADES = ((200, 40, 90, 255), (30, 160, 220, 255), (250, 230, 120, 255), (70, 70, 70, 255))
+LOOKED = PictureOperations("headless", 10, (.92, .96, 1.0), 1.15, 1.08, 1.04, saturation=1.15,
+                           highlight_knee=.6, black_floor=.03, lut=LutMix(LUT_REF, .7))
+
+
+def gentle_table() -> bytes:
+    """contracts/lut.py's layout: a print-like LUT that turns the channels and bends each gently
+    (grid point (r, g, b) holds (g^0.8, b, r^1.2)): every step's slope stays near one, so the
+    harness can hold the frame pass to one 8-bit code (the steep table above holds the sampling)."""
+    body = bytearray(LUT_BYTES)
+    top = LUT_GRID - 1
+    for r in range(LUT_GRID):
+        for g in range(LUT_GRID):
+            for b in range(LUT_GRID):
+                offset = lut_offset(r, g, b)
+                body[offset:offset + 3] = bytes((round(255 * (g / top) ** .8), round(255 * b / top),
+                                                 round(255 * (r / top) ** 1.2)))
+    return bytes(body)
+
+
+LUT_FILTER_CODES = 2.5
+"""The software GL (llvmpipe) filters the RGB8 LUT texture to 8 bits, which the steps after the
+LUT carry to the output: today's renderer is up to 2.19 codes from the scalar reference on this
+case's LUT samples, and the fitted pictures the same 2.19 (an A/B of both renderers' captures
+differs by at most one code at any pixel; design "Quality"). So with the LUT the bound against the
+reference is 2.5 codes; without it, one."""
+
+
+def within_codes(actual, expected, codes: float) -> bool:
+    """Within `codes` 8-bit code values in every channel."""
+    return max(abs(a - b) for a, b in zip(actual, expected, strict=True)) * 255 <= codes
+
+
+def blended_fitted_pictures_match_the_reference_within_one_code(native, frames, variant) -> None:
+    """Fitted pictures (render cost, owner 2026-10-17: "Picture quality stays the same"): a photo
+    under a second photo at strength 0, 0.5 and 1, under a print look (white balance, brightness
+    with the highlight rolloff, contrast, gamma, saturation, a black floor) and a two-light mat
+    shadow, with and without a held LUT, equals `compose_pixel`'s mix (linear light, source-over)
+    through `final_pixel` at every sample: within one 8-bit code, LUT_FILTER_CODES with the LUT.
+    The photo underneath is fitted once and mixed by each frame after: no strength and no new
+    photo above it draws its fitted picture again."""
+    table = gentle_table()
+    under = png_fixture(RUNTIME / "midtones.png", lambda x, y: quadrant(x, y, MIDTONES))
+    over = png_fixture(RUNTIME / "shades.png", lambda x, y: quadrant(x, y, SHADES))
+    fit = CoverFit(corners=OPENING, rotation=7)
+    binding = shaded_binding(WINDOW_MAT)
+    shadow = mat_shadow(fit, PROFILE, WINDOW_MAT)
+    fits = []
+    drawn = native._fit
+    native._fit = lambda *args: fits.append(args[1].layer.assignment_id) or drawn(*args)
+    compared = {}
+    for lut_on in (False, True):
+        luts = PlayerLuts()
+        native._luts = luts
+        luts.hold(LUT_REF, table)
+        looked = LOOKED if lut_on else replace(LOOKED, lut=None, picture_change=11)
+        frames.operations = looked
+        bottom = f"under-{lut_on}"
+        for strength in (0.0, 0.5, 1.0):
+            top = f"over-{lut_on}-{strength}"     # a new photo each time: a new composition
+            show(native, composition(under, Calibration(fit=fit),
+                                     layer(bottom, RUNTIME / "midtones.png", under),
+                                     layer(top, RUNTIME / "shades.png", over, strength),
+                                     binding=binding))
+            assert until(lambda: frames.tags and frames.tags[-1][1] == looked.picture_change), \
+                frames.tags[-3:]
+            spin(0.2)
+            width, height, _ = native.captured
+            count = 0
+            for i, j, x, y in samples(native, fit.corners):
+                uv = picture_source_uv(x, y, fit, (width, height), PROFILE.width_px / PROFILE.height_px,
+                                       WIDTH, HEIGHT, CENTRED)
+                if uv is None:
+                    continue
+                below, above = texel_colour(*uv, MIDTONES), texel_colour(*uv, SHADES)
+                if below is None:
+                    continue
+                mixed = tuple(a * strength + b * (1 - strength) for a, b in zip(above, below, strict=True))
+                expected = final_pixel(mixed, looked, inside=True, shade=mat_shade(shadow, x, y),
+                                       lut=table if lut_on else None)
+                actual = pixel(native, i, j)
+                assert within_codes(actual, expected, LUT_FILTER_CODES if lut_on else 1.0), (
+                    "blend", lut_on, strength, i, j, actual, expected)
+                count += 1
+            compared[(lut_on, strength)] = count
+            native.release(top)
+    print(f"BLEND compared={compared} fits={fits}", flush=True)
+    assert all(count > 300 for count in compared.values()), compared
+    assert fits.count("under-False") == 1 and fits.count("under-True") == 1, ("fitted once", fits)
+    assert len(fits) == 6, ("one fit per photo shown", fits)     # strength 0 hides the top one
+
+
 def pattern_matches_the_reference(pattern: TestPattern, mat: Mat = DEEP_MAT):
     """The pattern drawn as the scalar reference: inside the opening (turned with the Frame), black
     outside. With DEEP_MAT the opening's square comes from the mat's shadow; with Mat() (no shading
@@ -735,7 +832,8 @@ def pattern_matches_the_reference(pattern: TestPattern, mat: Mat = DEEP_MAT):
         trial.operations = PictureOperations("headless", 9, (1.0, 1.0, 1.0), .8, 1.0, 1.0,
                                              black_floor=.05, test_pattern=pattern)
         native._frames = trial
-        show(native, OutputComposition(BINDING, Calibration(fit=fit), (), True))    # the grid's canvas
+        show(native, OutputComposition(
+            BINDING.model_copy(update={"calibration": Calibration(fit=fit)}), (), True))    # the grid's canvas
         assert until(lambda: trial.tags and trial.tags[-1][0] == "trial-" + TRIAL_SHA), trial.tags[-3:]
         spin(0.3)
         width, height, _ = native.captured
@@ -784,8 +882,8 @@ def show_target(native: CapturingRenderer, pattern: TestPattern, fit, mat: Mat,
     trial.operations = PictureOperations("headless", 9, (1.0, .95, .9), .8, 1.1, 1.0,
                                          black_floor=.05, test_pattern=pattern)
     native._frames = trial
-    binding = BINDING.model_copy(update={"profile": profile})
-    show(native, OutputComposition(binding, Calibration(fit=fit), (), True))
+    binding = BINDING.model_copy(update={"profile": profile, "calibration": Calibration(fit=fit)})
+    show(native, OutputComposition(binding, (), True))
     assert until(lambda: trial.tags and trial.tags[-1][0] == "trial-" + TRIAL_SHA), trial.tags[-3:]
     spin(0.3)
     return trial
@@ -894,6 +992,7 @@ CASES = (cover_matches_the_reference(0), cover_matches_the_reference(7),
          print_sliders_match_the_reference, one_light_from_the_top_matches,
          cover_at_90_shades_the_wall_up_edge, neutral_program_takes_no_new_step, trial_mat_drawn,
          lut_matches_the_reference, two_coloured_lights_match,
+         blended_fitted_pictures_match_the_reference_within_one_code,
          *(case for pattern in TestPattern for case in pattern_cases(pattern)),
          pattern_matches_the_reference(TestPattern.BLACK_LEVEL, Mat()), the_target_qr_names_the_port,
          a_fade_is_drawn_on_the_frame_clock)

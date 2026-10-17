@@ -38,8 +38,10 @@ timer. It is an operator aid, not Scene content or evidence of scanout.
 Software tests cover target selection and expiry; actual pixels and physical
 HDMI visibility still require Pi verification.
 
-`prepare(LocalLayer)` creates an explicit local-file JPEG, PNG or silent H.264 MP4
-pipeline, returns pending until preroll/seek and a matching RGBA sample complete,
+`prepare(LocalLayer, OutputBinding)` creates an explicit local-file JPEG, PNG or silent H.264 MP4
+pipeline, returns pending until preroll/seek and a matching RGBA sample complete and the
+layer's fitted picture is drawn and finished on the binding's Frame ([Fitted pictures and the
+frame pass](#fitted-pictures-and-the-frame-pass)),
 and reports decode/capacity failure without touching another successful surface.
 Malformed streams without a preroll frame fail after the bounded preparation
 timeout. Negotiated buffer size/stride and initialized GL surfaces gate readiness.
@@ -57,18 +59,22 @@ Hidden resources pause; they retain decoder/texture capacity until explicit
 release. The central/executor time mapping, loop position and original fade alpha
 are authoritative; the renderer does not invent elapsed Run time.
 
-`capacity` includes all resident decoders, textures, per-Output persistent front
-and candidate linear framebuffer storage and proposed exact variant dimensions.
-Resize accounting includes the old and replacement framebuffer pairs until the
-new allocation succeeds. Texture, shader, program and framebuffer allocation
+`capacity` includes all resident decoders and, per resident picture, its decoded RGBA8
+texture and its fitted picture (RGBA16F at its Output's size), with proposed exact variant
+dimensions. A resize over the budget fails before anything is freed or allocated; one within it
+is an edit like any other: each fitted picture is drawn again at the new size before it is shown
+(the photo on screen by the render GTK runs for the resize), and stays prepared. Texture, shader,
+program and framebuffer allocation
 failures clean up partially created objects. Limits are conservative software allocation gates and always report
 `qualified=False`. Native decoder internals and driver memory require separate
 measurement. No four-video Pi claim follows from a four-slot setting.
 
-`present(OutputComposition)` prepares a complete candidate, queues a render and
-returns pending until the GLArea render callback completed that token. Candidate
-rendering uses a separate framebuffer; front/candidate swap happens only after
-all layers succeed. Failures retain the previous successful front buffer.
+`present(OutputComposition)` prepares every layer seen now (drawing a late layer's fitted
+picture whatever the Output shows), queues a render and returns pending until the GLArea render
+callback completed that token. A frame whose layer cannot be drawn yet holds what is on screen;
+a failed redraw of a fitted picture drops its draw and the screen keeps what GTK's buffer shows,
+render after render, until GTK makes that buffer anew (its "resize"): then nothing of it can be
+shown, and the Output draws black and reports nothing on screen.
 Acknowledgment records the exact token snapshot/time and seek generations.
 Fade alpha is read at the time of the frame being drawn, never at a tick: a
 composition carries its `timebase` (plan time less local monotonic time, re-anchored by
@@ -107,6 +113,54 @@ newly queued position has already drawn. This is application draw evidence, not
 scanout or photon timing. A new authority/composition replaces a queued token;
 release removes stale queued work before another draw can execute.
 
+## Fitted pictures and the frame pass
+
+Owner, 2026-10-17: "Each photo's finished look (fit, picture settings, print look) is drawn once
+when it first appears, not every frame. A fade frame then only blends two finished pictures ...
+It also removes the once-a-second redraw", and: "Is the new picture fully prepared before the
+fade starts?" The design, its costs and the Pi measurement that drove it are in the pull request
+that built it (perf(player): draw each photo once and blend per frame).
+
+- **Fitted picture** (`player/fitted.py`): a layer's photo as its Frame shows it (the fit, the
+  photo's crop, the transfer to linear light, premultiplied, at full strength), drawn by the fit
+  pass into its own GL_RGBA16F texture of the Output's size. It is drawn for one `FitKey`
+  (decode, sample, drawn fit, Frame aspect, crop, Output size) and drawn again exactly when the
+  key changes; a layer's strength and the Display's picture settings are not in it. 16-bit float,
+  because an 8-bit store misses the one-code bound once a print look bends the light after it.
+- **Frame pass**: the one pass a shown frame draws (`_FINAL`): the Frame's layers mixed at the
+  frame's strengths (`compose_pixel`: a fitted picture, a black layer or the commissioning grid
+  per slot, up to `FRAME_LAYERS`), then `final_pixel`. Each step set (LUT, saturation, rolloff,
+  black floor, mat, test pattern; `_steps`) is its own compiled program with its switches as
+  constants, compiled on first use. A frame whose inputs equal the last painted one draws
+  nothing: GTK keeps the GLArea's buffer between renders, so the once-a-second renewal only
+  commits a fresh tag (R4). GtkGLArea's "resize" (on every size allocation, the same size too)
+  makes that buffer anew, so it forgets what was painted and the next render paints again.
+- **Prepared** (`fitted.prepared`, the one readiness rule): decoded, and the GPU has finished a
+  fitted picture of this decode (past its fence, `glFenceSync`, asked without waiting). prepare()
+  draws it on the planning tick while its Output is not following its frame clock (no fade on
+  screen there; Central keeps `PREPARE_SECONDS` of each turn free of a dissolve, so this opens in
+  every lead), and never again while a draw of it is in flight; present() draws a layer seen now
+  whatever the Output shows (it is late). An edit after that (Position's trial, a crop, a resize)
+  leaves the layer prepared while its new fit is drawn: a grant is never revoked by an edit.
+- **The drawn fit** has one source: the binding's calibration (`OutputComposition.calibration`
+  reads it), or Display Host's trial over it, for prepare() and the frames alike.
+- **The first frame** (`fitted.shown_at_once`): a frame shows a layer not on screen yet only from a
+  finished fitted picture of this picture; otherwise it holds what is on screen, unfollowed, and
+  the planning tick draws it. A frame never draws a layer's first fitted picture, so a fade's
+  first frame costs one frame pass. A layer already on screen whose fitted picture an edit
+  (Position's trial, a resize) or a video's next sample made stale is drawn again by the next
+  frame (`fitted.redrawn_by_frames`); another decode is prepared again.
+- **Failures**: a fit's GL error fails its decoder (`decode`, retried after a second), and its
+  fitted picture no longer counts as finished (its texture was cleared), so it stays unshown;
+  a frame showing it holds GTK's buffer (above). Unrealize frees every fitted picture (prepare()
+  is pending until they are drawn again).
+
+Measured (headless Weston, software GL): today's renderer and this one differ by at most one
+8-bit code at any pixel, strengths 0 to 1, with a print look, a LUT and a mat shadow (identical
+at strength 0). Expected on the 4K Pi, not yet measured: a fade frame of one frame pass (~23 ms
+neutral, ~44 ms with the full print look) where it was three jobs (~76 ms); no Player GPU work
+per still second.
+
 ## Geometry and colour
 
 `player/geometry.py` is the authoritative pure reference for the Frame fit's one
@@ -123,7 +177,7 @@ every opening and empty output are black, whatever the picture settings.
 
 Stills use sRGB and video uses BT.709. Each sampled straight RGB value is decoded
 to linear before multiplying by source alpha and effective Layer alpha. Ordered
-layers compose in linear floating-point framebuffer storage. The picture
+layers compose in linear light from their fitted pictures (16-bit floating point). The picture
 operations apply once after composition (white balance and light factor in
 linear light, then sRGB encoding, contrast and gamma). Black is a real source-over
 layer; alpha zero contributes nothing. HDR, ICC management and measured panel

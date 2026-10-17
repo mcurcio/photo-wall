@@ -441,7 +441,9 @@ def test_decoder_recovery_cannot_reuse_texture_from_previous_incarnation():
     assert uploads == [b"new!"]
 
 
-def test_resize_bounds_peak_memory_before_allocating_replacement_targets():
+def test_a_resize_over_the_texture_budget_frees_and_allocates_nothing():
+    """The budget counts each resident picture's fitted picture at its Output's size: a resize
+    that would pass it fails before any GL call, keeping the size and every fitted picture."""
     from types import SimpleNamespace
 
     from player.native import NativeRenderer
@@ -449,14 +451,16 @@ def test_resize_bounds_peak_memory_before_allocating_replacement_targets():
     renderer = NativeRenderer.__new__(NativeRenderer)
     renderer.GL = object()  # No allocation calls are permitted before this gate.
     renderer.texture_budget = 1100
-    renderer._decoders = {}
+    layer = SimpleNamespace(output_id="out", variant=SimpleNamespace(width=4, height=4))
+    renderer._decoders = {"photo": SimpleNamespace(local=SimpleNamespace(layer=layer))}
     surface = SimpleNamespace(programs=(1, 2), output=NativeOutput("out", "app", 4, 4),
-                              size=(4, 4), targets=[(1, 11), (2, 12)])
+                              size=(4, 4), fitted={"photo": "kept"})
     renderer._surfaces = {"out": surface}
+    assert renderer._estimate(())[1] == 4*4*4 + 4*4*8
     with pytest.raises(RuntimeError, match="texture budget"):
-        renderer._targets(surface, 8, 8)
+        renderer._setup(surface, 12, 12)
     assert surface.size == (4, 4)
-    assert surface.targets == [(1, 11), (2, 12)]
+    assert surface.fitted == {"photo": "kept"}
 
 
 def test_failed_gl_texture_allocation_does_not_leak_untracked_object():
@@ -620,7 +624,7 @@ def _presenting_renderer(decoders=None):
     renderer._decoders = decoders or {}
     renderer._surfaces = {"hdmi1": native_module._Surface(output=None, window=None, area=Area())}
     renderer.capacity = lambda compositions: SimpleNamespace(available=True)
-    renderer.prepare = lambda local: PrepareResult("prepared")
+    renderer._prepare = lambda local, composition, seen: PrepareResult("prepared")
     return renderer, renderer._surfaces["hdmi1"]
 
 
@@ -797,16 +801,14 @@ _SWITCHES = ("saturation_on", "rolloff_on", "floor_on", "mat_on")
 
 def test_neutral_operations_and_no_mat_switch_every_print_step_off():
     """Rule 2: each step's switch is geometry.py's skip rule, so neutral v5 operations and Mat()
-    run v4's shader path. Mutation probe: switch saturation on whenever operations arrive ->
-    saturation_on is 1 here."""
+    run v4's shader path: the neutral step set, whose program computes no print step. Mutation
+    probe: switch saturation on whenever operations arrive -> saturation_on is True here."""
     from contracts.models import Mat
     from player.geometry import mat_shadow
 
     for operations in (None, _operations(), _operations(light=1.5)):
-        gl = _UniformGL()
-        native_module._final_uniforms(gl, 1, operations, native_module._NO_OPENING,
-                                      mat_shadow(CoverFit(), _PROFILE, Mat()), lut_drawn=False)
-        assert {name: gl.values[name] for name in _SWITCHES} == {name: (0,) for name in _SWITCHES}
+        steps = native_module._steps(operations, mat_shadow(CoverFit(), _PROFILE, Mat()), lut_drawn=False)
+        assert steps == native_module._NEUTRAL_STEPS
 
 
 def test_print_operations_and_a_shading_mat_switch_their_steps_on():
@@ -817,9 +819,10 @@ def test_print_operations_and_a_shading_mat_switch_their_steps_on():
                                    highlight_knee=.6, black_floor=.07)
     shadow = mat_shadow(CoverFit(rotation=90), _PROFILE, Mat(depth_mm=2, lights=(Light(
         from_degrees=0, steep_degrees=45, softness_degrees=0, strength_tenths=10, colour_kelvin=2700),)))
+    steps = native_module._steps(operations, shadow, lut_drawn=False)
+    assert all(getattr(steps, name) for name in _SWITCHES) and not steps.lut_on
     gl = _UniformGL()
-    native_module._final_uniforms(gl, 1, operations, CoverFit().corners, shadow, lut_drawn=False)
-    assert {name: gl.values[name] for name in _SWITCHES} == {name: (1,) for name in _SWITCHES}
+    native_module._final_uniforms(gl, 1, operations, CoverFit().corners, shadow, steps)
     assert gl.values["saturation"] == (.8,) and gl.values["highlight_knee"] == (.6,)
     assert gl.values["peak"] == (peak(operations),) and gl.values["black_floor"] == (.07,)
     assert gl.values["light_count"] == (1,) and gl.values["mat_size"] == shadow.size_mm
@@ -830,6 +833,17 @@ def test_print_operations_and_a_shading_mat_switch_their_steps_on():
     # The same column-major upload as output_to_picture's.
     columns = gl.values["to_opening"][2]
     assert [columns[column*3 + row] for row in range(3) for column in range(3)] == list(shadow.to_opening)
+
+
+def test_each_step_set_is_its_own_program_with_its_switches_as_constants():
+    """The frame pass compiles one program per step set: its switches are constants, so the GPU
+    runs no switched-off step's code (a uniform switch costs every step's instructions)."""
+    steps = native_module._Steps(True, False, True, False, True, 3)
+    source = native_module._frame_source(steps)
+    for name, value in (("lut_on", 1), ("saturation_on", 0), ("rolloff_on", 1), ("floor_on", 0),
+                        ("mat_on", 1), ("test_pattern", 3)):
+        assert f"const int {name} = {value};\n" in source
+        assert f"uniform int {name};" not in source
 
 
 _PROFILE = SimpleNamespace(width_px=1920, height_px=1080, diagonal_inches=27)
