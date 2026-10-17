@@ -88,6 +88,11 @@ def _binding_identity(binding: OutputBinding) -> tuple:
     return binding.output_id, binding.frame_id, binding.generation
 
 
+TIMEBASE_TOLERANCE = 0.001
+"""Seconds the clock mapping may move before compositions carry the new one (`_timebase`): each
+re-anchor reads two clocks, which moves it by microseconds that no frame can show."""
+
+
 class Executor:
     """One process's execution state; constructor never restores playback authority.
 
@@ -134,7 +139,8 @@ class Executor:
         self._last_revocation_sequence = 0
         self._last_configuration_revision = 0
         self._frame_generations: dict[str, int] = {}
-        self._anchor: tuple[float, float] | None = None
+        self._anchor: float | None = None       # the timebase while the mapping was last healthy
+        self._handed: float | None = None       # the timebase compositions carry (`_timebase`)
         self._capacity_ok = False
         self._renderer_releases: set[str] = set()
         self._renderer_residents: set[str] = set()
@@ -144,14 +150,16 @@ class Executor:
         self._retired_outputs: dict[str, OutputBinding] = {}
 
     def _timebase(self) -> float:
-        """Plan time less this machine's monotonic time: anchored while the mapping is healthy,
-        so a renderer reads a composition's layers at its own frame times (player/look.py)."""
+        """Plan time less this machine's monotonic time, so a renderer reads a composition's
+        layers at its own frame times (player/look.py): anchored while the mapping is healthy,
+        and handed over unchanged until it moves by more than TIMEBASE_TOLERANCE, so the renderer
+        compares it by equality and two clock readings' jitter never redraws a still picture."""
         if self.mapping.healthy():
-            self._anchor = self.clock.utc(), self.clock.monotonic()
-        if self._anchor is not None:
-            utc, mono = self._anchor
-            return utc - mono
-        return self.clock.utc() - self.clock.monotonic()
+            self._anchor = self.clock.utc() - self.clock.monotonic()
+        mapped = self._anchor if self._anchor is not None else self.clock.utc() - self.clock.monotonic()
+        if self._handed is None or abs(mapped - self._handed) > TIMEBASE_TOLERANCE:
+            self._handed = mapped
+        return self._handed
 
     def _now(self) -> float:
         return self._timebase() + self.clock.monotonic()

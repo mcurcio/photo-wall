@@ -80,10 +80,11 @@ a 64x48 PNG of four flat quadrants (red, green, blue, white) written here with t
    OpenCV, so the harness holds the modules, not a decode.
 27. a_fade_is_drawn_on_the_frame_clock (render loop, owner 2026-10-16: "Make it a general render
    loop solution"): a black layer fading in over 0.5 s on a white picture, in a composition with
-   a timebase, is presented once; with no present() after that, the real GTK frame clock
-   (PyGObject's tick callback, frame times against g_get_monotonic_time, a GLArea render queued
-   in the update phase) draws it: many renders, the centre darkening from one to the next, black
-   at the end; then the surface no longer follows its frame clock.
+   a timebase, is presented; one more present() just before the fade (the planning tick that
+   finds it within FOLLOW_LEAD) wakes the frame clock, and with no present() after that the real
+   GTK frame clock (PyGObject's tick callback, frame times against g_get_monotonic_time, a GLArea
+   render queued in the update phase) draws it: many renders, the centre darkening from one to
+   the next, black at the end; then the surface no longer follows its frame clock.
 """
 import ctypes
 import hashlib
@@ -152,7 +153,7 @@ from player.geometry import (  # noqa: E402
     transform,
 )
 from player.luts import PlayerLuts  # noqa: E402
-from player.native import NativeOutput, NativeRenderer  # noqa: E402
+from player.native import FOLLOW_LEAD, NativeOutput, NativeRenderer  # noqa: E402
 from player.rendering import LocalLayer, OutputComposition  # noqa: E402
 from player.wayland_frames import FrameGrant  # noqa: E402
 
@@ -478,7 +479,9 @@ def a_fade_is_drawn_on_the_frame_clock(native, frames, variant) -> None:
                                timebase=0.0)
     assert until(lambda: native.present(fading).status == "presented"), native.diagnostics()
     presented = time.monotonic()
-    assert presented < begins, ("presented_too_late", presented - begins)
+    assert presented < begins - FOLLOW_LEAD, ("presented_too_late", presented - begins)
+    spin(begins - FOLLOW_LEAD / 2 - time.monotonic())
+    native.present(fading)              # the tick that finds the fade near
     native.centres = []
     spin(1.2)                           # the main loop alone: no present() from here on
     centres, native.centres = native.centres, None
@@ -487,8 +490,7 @@ def a_fade_is_drawn_on_the_frame_clock(native, frames, variant) -> None:
     reds = [red for _at, (red, *_rest) in centres]
     assert all(later <= earlier + TOLERANCE for earlier, later in zip(reds, reds[1:])), reds
     assert max(reds) > .9 and reds[-1] < TOLERANCE, reds
-    follower = native._surfaces["headless"].follower
-    assert not follower.following and not follower.sleeping, "a still picture is not followed"
+    assert not native._surfaces["headless"].follower.following, "a still picture is not followed"
 
 
 def a_corrupt_picture_fails_and_the_frame_still_presents(native, frames, variant) -> None:

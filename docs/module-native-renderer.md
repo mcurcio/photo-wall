@@ -71,24 +71,26 @@ rendering uses a separate framebuffer; front/candidate swap happens only after
 all layers succeed. Failures retain the previous successful front buffer.
 Acknowledgment records the exact token snapshot/time and seek generations.
 Fade alpha is read at the time of the frame being drawn, never at a tick: a
-composition carries its `timebase` (plan time less local monotonic time) and `_render`
-draws `player/look.py` `look` at the GdkFrameClock's frame time; a timebase moved by
-more than `TIMEBASE_TOLERANCE` (a re-anchored clock mapping) is a new draw. While what
-the drawn composition shows may still change (`until_change`: a fade, a seen playing
-video; or a calibration trial drawn) the surface follows its frame clock
-(`player/mainloop.py` `FrameFollower`, a GTK tick callback) and draws each frame on
-which it moved (`NativeRenderer._moved`: the look changed, or anything present()
-compares did, such as a video's newer decoded sample or a trial edit), so a video is
-drawn once per sample, not once per refresh. A wait longer than `WAKE_LEAD` removes
-the callback and one main-loop timeout follows again just before the change (it only
-wakes the frame clock); once nothing can change the callback is removed, so a still
-picture is not redrawn. A change from Display Host (the Output's picture operations, as
-a Live slider moves, or a trial edit) is an event, not a poll: `DisplayEvents` watches
-the Wayland display's socket at GDK's event priority, and after each read a surface not
-following whose drawn composition `_moved` follows its frame clock again, so the edit
-is drawn on the next frame; an event that moves nothing costs no frame. Subsequent calls therefore correlate the completed token by immutable
-execution/binding/effective-calibration identity and seek generation, with a 500ms
-freshness bound.
+composition carries its `timebase` (plan time less local monotonic time, re-anchored by
+the executor only when it moves by more than `TIMEBASE_TOLERANCE`) and `_render` draws
+`player/look.py` `look` at the GdkFrameClock's frame time. Whether a frame draws is one
+decision (`NativeRenderer._owed`), fed by two kinds of change, each with one home. A
+change over time (a fade, a drawn calibration trial running out) comes from
+`player/look.py` `next_change`: while one is due within `FOLLOW_LEAD` the surface
+follows its frame clock (`player/mainloop.py` `FrameFollower`, a GTK tick callback)
+and each frame on which the look changed is drawn; the planning tick's present() and
+each render follow it again when a change comes near, so a still picture installs no
+frame callback at all. A change that arrives as an event queues the next frame's
+render (GTK's queue-draw idiom): a new composition from present() as a pending draw;
+a video's new decoded sample (the decoder's streaming thread hops to the main loop
+once per sample, so a video is drawn once per sample, not per refresh) and Display
+Host's edits (the Output's picture operations as a Live slider moves, a trial edit;
+read from the Wayland display's socket by `DisplayEvents` at GDK's event priority, and
+only when they change what the surface shows) by marking the drawn composition dirty.
+Nothing reads inputs per frame. A missed event is caught by the next planning tick, which compares everything
+but time (`_shown`). Subsequent calls therefore correlate the completed token by
+immutable execution/binding/effective-calibration identity and seek generation, with a
+500ms freshness bound.
 The native PresentationResult carries the actual acknowledged composition and
 `presented_at` as local monotonic draw-completion time; Executor maps that time
 through its own clock mapping. Video positions come from the drawn sample PTS

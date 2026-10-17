@@ -582,14 +582,16 @@ def test_a_trial_edit_or_a_picture_change_is_a_change_to_redraw():
         return SimpleNamespace(trial_id="t", generation=1, sequence=sequence,
                                candidate_sha256="0" * 64)
 
-    def shown(alpha=1.0, frames=None):
+    def shown(alpha=1.0, frames=None, timebase=None):
         local = SimpleNamespace(layer="picture", path=None, alpha=alpha)
         composition = SimpleNamespace(binding=SimpleNamespace(output_id="hdmi1"),
-                                      calibration=Calibration(), fallback=False, layers=(local,))
+                                      calibration=Calibration(), fallback=False, layers=(local,),
+                                      timebase=timebase)
         return native_module._shown(composition, (), (), frames, object(), PlayerLuts())
 
     assert shown() == shown()
     assert shown(.5) == shown(1.0)
+    assert shown(timebase=5.0) != shown(timebase=6.0), "a re-anchored timeline is a change"
     assert shown(frames=Frames(None)) == shown()
     assert shown(frames=Frames(trial(1))) != shown()
     assert shown(frames=Frames(trial(1))) == shown(frames=Frames(trial(1)))

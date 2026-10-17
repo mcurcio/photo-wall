@@ -1,11 +1,12 @@
-"""The Player draws every time-varying picture property at the time of the frame it draws (its
-display's frame clock), never at the planning tick's pace (owner, 2026-10-16: "The crossfade
-between photos is jittery"; "Make it a general render loop solution").
+"""The Player's render loop: the planning tick decides what an Output shows; every picture change
+is drawn at the time of the frame that shows it (owner, 2026-10-16: "The crossfade between photos
+is jittery"; "Don't make a fix specific to fade. Make it a general render loop solution").
 
-The planning tick decides what an Output shows; player/look.py evaluates how it looks at a frame
-time; a surface follows its frame clock only while that look changes. Fades and a playing video
-are two cases of one rule: two renders at two frame times with no tick between them draw two
-looks, and a still picture is not followed.
+A change has two kinds, each with one home. A change over time (a fade, a calibration trial
+running out) comes from `player/look.py` `next_change`, and the surface follows its display's
+frame clock only while one is due. A change that arrives as an event (a new composition, a
+video's new sample, Display Host's edit) queues the next frame's render. A still picture costs
+nothing per frame.
 """
 
 from __future__ import annotations
@@ -13,7 +14,6 @@ from __future__ import annotations
 import threading
 import time
 import uuid
-from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -26,11 +26,11 @@ from contracts.node_frame import PictureOperations
 from contracts.time import ManualClock, TimeMapping
 from player import native as native_module
 from player.cache import Cache
-from player.executor import Executor
-from player.look import TIMEBASE_TOLERANCE, changed, look, retimed, until_change
+from player.executor import TIMEBASE_TOLERANCE, Executor
+from player.look import look, next_change
 from player.luts import PlayerLuts
-from player.mainloop import WAKE_LEAD, WAYLAND_EVENTS, DisplayEvents, FrameFollower, frame_time
-from player.native import NativeOutput, NativeRenderer
+from player.mainloop import WAYLAND_EVENTS, DisplayEvents, FrameFollower, frame_time
+from player.native import FOLLOW_LEAD, NativeOutput, NativeRenderer
 from player.rendering import LocalLayer, OutputComposition, PrepareResult, PresentationResult
 from player.visibility import visible_now
 from player.wayland_frames import FrameGrant
@@ -47,7 +47,7 @@ def black(key: str, **fields):
     return layer(key, presentation="black", variant=None, **fields)
 
 
-# -- The look at a frame time, and whether it still changes (pure) -------------------------------
+# -- The look at a frame time, and when it next changes over time (pure) -------------------------
 
 def test_a_composition_looks_as_at_the_frame_time_it_is_drawn():
     """Alpha (a fade) is read at the frame time; a video's position is its decoder's sample, never
@@ -61,41 +61,42 @@ def test_a_composition_looks_as_at_the_frame_time_it_is_drawn():
     assert look(kept, 1.5) == kept
 
 
-def test_what_is_shown_changes_only_while_something_moves():
-    """A fade or a seen video changes now (0); a still photo waits for its fade-out; nothing after
-    it changes (None); a video under an opaque photo does not change what is seen. A video's new
-    picture is no plan-time change of its look (`changed`): its decoder's samples pace it."""
+def test_the_next_change_is_now_while_a_seen_layer_fades_else_the_next_fade_or_expiry():
+    """While a seen layer fades the look changes now; a still photo next changes at its fade-out;
+    nothing after it changes; a fade beginning at the frame is a change of that frame; a covered
+    layer's fade is unseen; a video's pictures are no change over time; a drawn trial's expiry
+    is one, the sooner of it and a fade."""
     photo = composition(black("photo", start=100, end=110, fade_in=2, fade_out=2))
-    assert until_change(photo, 1) == 0                      # fading in
-    assert until_change(photo, 5) == 3                      # still until its fade-out at 108
-    assert until_change(photo, 9) == 0                      # fading out
-    assert until_change(photo, 10) is None                  # over
-    assert until_change(composition(black("still", start=100, end=110)), 1) is None
+    assert next_change(photo, 1) == 1                       # fading in
+    assert next_change(photo, 5) == 8                       # still until its fade-out at 108
+    assert next_change(photo, 9) == 9                       # fading out
+    assert next_change(photo, 10) is None                   # over
+    assert next_change(photo, 0) == 0                       # its fade-in begins at this frame
+    assert next_change(composition(black("still", start=100, end=110)), 1) is None
+    under = black("under", start=100, end=110, fade_in=4)
+    assert next_change(composition(under, black("cover", start=100, end=110, priority=1)), 1) is None
     video = layer("video", video=True, start=100, end=200, media_origin=100)
-    assert until_change(composition(video), 1) == 0
-    assert until_change(composition(video), 1, pictures=False) is None
-    assert not changed(composition(video), 1, 2)
-    assert until_change(composition(video, black("cover", start=100, end=200, priority=1)), 1) is None
-    assert until_change(composition(video, timebase=None), 1) is None
-    # A draw mid-fade is followed by one more at the fade's end, then none.
-    assert changed(photo, 1.5, 2.5) and not changed(photo, 2.5, 3)
-    assert changed(photo, 5, 8.5)
+    assert next_change(composition(video), 1) is None
+    assert next_change(composition(video), 1, expires=3) == 3
+    assert next_change(photo, 5, expires=6) == 6 and next_change(photo, 5, expires=9) == 8
+    assert next_change(composition(video, timebase=None), 1) is None
 
 
 @settings(max_examples=300, deadline=None)
 @given(st.lists(st.tuples(st.integers(0, 20), st.integers(1, 20), st.integers(0, 6),
                           st.integers(0, 6), st.sampled_from([1.0, .5])), min_size=1, max_size=4),
        st.floats(-5, 45), st.floats(0, 20))
-def test_what_is_seen_is_constant_wherever_the_look_does_not_change(shapes, since, gap):
-    """`look` and `changed` are one model: wherever `changed` says no, the layers seen and their
-    alphas are the same at both frame times, whatever the layers' fades and opacities."""
+def test_what_is_seen_is_constant_until_the_next_change(shapes, since, gap):
+    """`look` and `next_change` are one model: until the next change, the layers seen and their
+    alphas are those of the frame drawn at `since`, whatever the layers' fades and opacities."""
     layers = []
     for index, (start, length, fade_in, fade_out, opacity) in enumerate(shapes):
         length = max(length, fade_in + fade_out)
         layers.append(black(f"l{index}", start=100 + start, end=100 + start + length,
                             fade_in=fade_in, fade_out=fade_out, opacity=opacity, priority=index))
     shown = composition(*layers)
-    if not changed(shown, since, since + gap):
+    change = next_change(shown, since)
+    if change is None or change > since + gap:
         def seen(at):
             return [(local.layer.assignment_id, local.alpha)
                     for local in visible_now(look(shown, at).layers)]
@@ -112,15 +113,7 @@ def test_a_fades_spans_are_where_its_alpha_runs_and_its_opaque_span_between_them
     assert item.alpha(101) == .5 and item.alpha(104) == 1 and item.alpha(108.5) == .5
 
 
-def test_a_timebase_moved_beyond_its_tolerance_is_another_timeline():
-    drawn = composition(black("a", start=100, end=110), timebase=100.0)
-    assert not retimed(drawn, replace(drawn, timebase=100 + TIMEBASE_TOLERANCE / 2))
-    assert retimed(drawn, replace(drawn, timebase=100 + TIMEBASE_TOLERANCE * 2))
-    assert retimed(drawn, replace(drawn, timebase=None))
-    assert not retimed(replace(drawn, timebase=None), replace(drawn, timebase=None))
-
-
-# -- The executor hands over timing, not values baked at its tick --------------------------------
+# -- The executor hands over a timeline, not values baked at its tick -----------------------------
 
 def test_the_tick_hands_the_renderer_a_composition_it_reads_at_any_frame_time(tmp_path):
     """The executor's composition carries its timebase: read at two later frame times, with no
@@ -132,7 +125,24 @@ def test_the_tick_hands_the_renderer_a_composition_it_reads_at_any_frame_time(tm
     at = rig.clock.monotonic()
     assert look(drawn, at + 1).layers[0].alpha == .25
     assert look(drawn, at + 3).layers[0].alpha == .75
-    assert until_change(drawn, at + 1) == 0 and until_change(drawn, at + 5) is None
+    assert next_change(drawn, at + 1) == at + 1 and next_change(drawn, at + 5) is None
+
+
+def test_the_executor_re_anchors_its_timeline_only_when_it_really_moved(tmp_path):
+    """Each tick re-anchors a healthy clock mapping from two clock readings; a move within
+    TIMEBASE_TOLERANCE hands over the same timebase (the renderer compares it by equality), a
+    larger one the new timebase."""
+    rig = Rig(tmp_path)
+    rig.play(layer(start=100, end=200, fade_in=4))
+    first = rig.renderer.outputs["hdmi1"].timebase
+    rig.clock.step_utc(TIMEBASE_TOLERANCE / 2)
+    rig.advance(.033)
+    rig.executor.tick()
+    assert rig.renderer.outputs["hdmi1"].timebase == first
+    rig.clock.step_utc(TIMEBASE_TOLERANCE * 2)
+    rig.advance(.033)
+    rig.executor.tick()
+    assert rig.renderer.outputs["hdmi1"].timebase == rig.clock.utc() - rig.clock.monotonic()
 
 
 def test_a_continuation_keeps_the_executors_timebase(tmp_path):
@@ -183,6 +193,7 @@ class Area:
         self.frame_us = 0
         self.frame_clock = frame_clock
         self.added = 0
+        self.painted = 0
 
     def queue_render(self):
         self.renders += 1
@@ -215,25 +226,24 @@ class Area:
     def get_scale_factor(self):
         return 1
 
-    def frame(self, seconds: float) -> bool:
+    def frame(self, seconds: float) -> int:
         """The frame clock reaches `seconds` (monotonic): every tick callback runs, as GDK's
-        update phase does; one returning False is removed."""
+        update phase does, and one returning False is removed. Answers how many ran."""
         self.frame_us = round(seconds * 1e6)
         clock = self.get_frame_clock()
-        kept = True
+        ran = 0
         for key, callback in list(self.callbacks.items()):
+            ran += 1
             if not callback(self, clock):
                 del self.callbacks[key]
-                kept = False
-        return kept
+        return ran
 
 
 class GLib:
-    """GLib's monotonic time, one-shot timeouts and fd watches, recorded rather than run."""
+    """GLib's monotonic time and fd watches, recorded rather than run."""
     IOCondition = SimpleNamespace(IN=1)
 
     def __init__(self):
-        self.timeouts: dict[int, tuple[int, object]] = {}
         self.watches: dict[int, tuple[int, int, object]] = {}
         self.added = 0
 
@@ -253,19 +263,8 @@ class GLib:
     def get_monotonic_time():
         return round(time.monotonic() * 1e6)
 
-    def timeout_add(self, milliseconds, callback):
-        self.added += 1
-        self.timeouts[self.added] = (milliseconds, callback)
-        return self.added
-
     def source_remove(self, key):
-        self.timeouts.pop(key, None) or self.watches.pop(key)
-
-    def fire(self) -> None:
-        """Every armed timeout runs, as the main loop would once it is due."""
-        for key, (_ms, callback) in list(self.timeouts.items()):
-            del self.timeouts[key]
-            callback()
+        self.watches.pop(key)
 
 
 def test_frame_time_maps_gdk_microseconds_onto_the_monotonic_clock():
@@ -277,55 +276,36 @@ def test_frame_time_maps_gdk_microseconds_onto_the_monotonic_clock():
 def test_a_follower_runs_on_each_frame_until_its_frame_says_stop():
     area, seen = Area(), []
     follower = FrameFollower(GLib(), area,
-                             lambda at: seen.append(round(at, 3)) or (0.0 if len(seen) < 2 else None))
+                             lambda at: seen.append(round(at, 3)) or len(seen) < 2)
     follower.follow()
     follower.follow()                       # once only
     assert len(area.callbacks) == 1 and follower.following
     now = time.monotonic()
-    assert area.frame(now) and not area.frame(now + 1 / 60)
+    area.frame(now)
+    area.frame(now + 1 / 60)
     assert seen == [round(now, 3), round(now + 1 / 60, 3)]
+    assert not area.callbacks and not follower.following
+    follower.follow()
+    follower.stop()
     assert not area.callbacks and not follower.following
 
 
 def test_a_follower_whose_frame_raises_stops_following():
-    area, glib = Area(), GLib()
+    area = Area()
 
     def frame(_at):
         raise RuntimeError("frame")
 
-    follower = FrameFollower(glib, area, frame)
+    follower = FrameFollower(GLib(), area, frame)
     follower.follow()
     with pytest.raises(RuntimeError):
         area.frame(time.monotonic())
-    assert not follower.following and not follower.sleeping and not glib.timeouts
+    assert not follower.following
     follower.follow()
     assert follower.following, "a later follow() installs it again"
 
 
-def test_a_follower_sleeps_through_a_long_wait_and_wakes_ahead_of_it():
-    """A wait beyond WAKE_LEAD removes the frame callback: one main-loop timeout follows again
-    WAKE_LEAD before the change; a follow() meanwhile cancels it; stop() removes either."""
-    area, glib, waits = Area(), GLib(), [3.0, WAKE_LEAD, 0.0]
-    follower = FrameFollower(glib, area, lambda _at: waits.pop(0) if waits else None)
-    follower.follow()
-    assert not area.frame(time.monotonic())
-    assert not follower.following and follower.sleeping and not area.callbacks
-    assert [ms for ms, _ in glib.timeouts.values()] == [round((3.0 - WAKE_LEAD) * 1000)]
-    glib.fire()
-    assert follower.following and not follower.sleeping
-    assert area.frame(time.monotonic()) and area.frame(time.monotonic())   # within the lead
-    assert not area.frame(time.monotonic()) and not follower.sleeping      # None: stopped
-    waits[:] = [5.0]
-    follower.follow()
-    area.frame(time.monotonic())
-    assert follower.sleeping
-    follower.follow()                       # a new draw follows at once: the wake is cancelled
-    assert follower.following and not glib.timeouts
-    follower.stop()
-    assert not follower.following and not area.callbacks
-
-
-# -- The native renderer on its frame clock ------------------------------------------------------
+# -- The native renderer's render loop -----------------------------------------------------------
 
 class GL:
     """Enough OpenGL for _render: every call a no-op but the layer pass's `opacity` uniform,
@@ -388,10 +368,21 @@ def frame_renderer(decoders=None, area=None):
     return renderer, surface, area
 
 
-def render(renderer, surface, area, at: float) -> None:
-    """GDK paints the frame at `at`: tick callbacks first, then the queued render."""
+def paint(renderer, surface, area, at: float) -> None:
+    """GDK's frame at `at`: tick callbacks first (the update phase), then the GLArea's render
+    when one was queued since the last paint."""
     area.frame(at)
-    renderer._render(area, None, surface)
+    if area.renders > area.painted:
+        area.painted = area.renders
+        renderer._render(area, None, surface)
+
+
+@pytest.fixture
+def clock(monkeypatch):
+    """The renderer's monotonic clock, set by the test (`clock.now`)."""
+    fake = SimpleNamespace(now=time.monotonic())
+    monkeypatch.setattr(native_module, "time", SimpleNamespace(monotonic=lambda: fake.now))
+    return fake
 
 
 def test_a_fade_is_drawn_at_each_frames_time_with_no_tick_between():
@@ -401,101 +392,149 @@ def test_a_fade_is_drawn_at_each_frames_time_with_no_tick_between():
     start = time.monotonic()
     fading = composition(black("fade", start=100, end=200, fade_in=1), timebase=100 - start)
     assert renderer.present(fading).status == "pending" and area.renders == 1
-    render(renderer, surface, area, start + .25)
+    paint(renderer, surface, area, start + .25)
     assert renderer.GL.opacities == [.25]
     assert surface.follower.following, "a changing look follows the frame clock"
-    for at in (start + .5, start + .75):
-        area.frame(at)                  # the follower queues each frame's render
-        renderer._render(area, None, surface)
-    assert renderer.GL.opacities == [.25, .5, .75] and area.renders == 3
-    area.frame(start + 1.25)            # the fade ended since the last draw: one more
-    renderer._render(area, None, surface)
+    for at in (start + .5, start + .75, start + 1.25):
+        paint(renderer, surface, area, at)
     assert renderer.GL.opacities == [.25, .5, .75, 1.0] and area.renders == 4
-    assert not area.frame(start + 1.5), "a still picture is not followed"
-    assert not surface.follower.following and not surface.follower.sleeping and area.renders == 4
+    assert area.frame(start + 1.5) == 1 and not area.callbacks, "a still picture is not followed"
     renderer._render(area, None, surface)           # GTK repaints: nothing new is drawn
     assert renderer.GL.opacities == [.25, .5, .75, 1.0]
     assert renderer.present(fading).status == "presented"
 
 
-def test_a_still_photo_sleeps_until_its_fade_out_and_then_is_drawn_each_frame():
-    """A still look with a fade-out ahead removes its frame callback (no call per frame while
-    nothing changes) and wakes WAKE_LEAD before the fade-out, which the frame clock draws."""
+def test_a_still_picture_installs_no_frame_callback_after_its_draw():
+    """A still photo is drawn once on the frame after its present(); no frame callback is ever
+    installed for it, so nothing runs per frame however many frames pass."""
     renderer, surface, area = frame_renderer()
     start = time.monotonic()
+    still = composition(black("still", start=100, end=200), timebase=100 - start)
+    renderer.present(still)
+    paint(renderer, surface, area, start + .1)
+    assert renderer.GL.opacities == [1.0] and area.renders == 1
+    assert not area.callbacks and area.added == 0
+    for index in range(1, 30):
+        paint(renderer, surface, area, start + .1 + index / 60)
+        renderer.present(still)                     # each planning tick
+    assert renderer.GL.opacities == [1.0] and area.renders == 1 and area.added == 0
+
+
+def test_a_fade_far_ahead_is_woken_by_the_tick_and_drawn_on_the_frame_clock(clock):
+    """A still photo whose fade-out is seconds away installs no frame callback (each tick's
+    renewal draw included); the planning tick that finds it within FOLLOW_LEAD follows the frame
+    clock, which draws the fade-out at its frames' times."""
+    renderer, surface, area = frame_renderer()
+    start = clock.now
     photo = composition(black("photo", start=100, end=110, fade_out=2), timebase=100 - start)
+    for after in (0, 2, 4, 6, 7.8):                 # ticks, each followed by a frame
+        clock.now = start + after
+        renderer.present(photo)
+        paint(renderer, surface, area, start + after)
+        assert not area.callbacks and area.added == 0
+    clock.now = start + 8 - FOLLOW_LEAD / 2
     renderer.present(photo)
-    render(renderer, surface, area, start + 1)
-    assert renderer.GL.opacities == [1.0] and surface.follower.following
-    assert not area.frame(start + 5)
-    assert area.renders == 1 and not area.callbacks and surface.follower.sleeping
-    (ms, _), = renderer.GLib.timeouts.values()
-    assert abs(ms - (3 - WAKE_LEAD) * 1000) <= 1
-    renderer.GLib.fire()                # the main loop wakes it ahead of the fade-out
     assert surface.follower.following
-    area.frame(start + 9)
-    assert area.renders == 2
-    renderer._render(area, None, surface)
-    assert renderer.GL.opacities == [1.0, .5]
+    drawn = len(renderer.GL.opacities)
+    paint(renderer, surface, area, start + 8 - FOLLOW_LEAD / 4)
+    assert len(renderer.GL.opacities) == drawn, "followed ahead of the change, drawn from it"
+    paint(renderer, surface, area, start + 9)
+    paint(renderer, surface, area, start + 9.5)
+    assert renderer.GL.opacities[drawn:] == [.5, .25]
 
 
-def test_a_playing_video_is_drawn_on_the_frame_after_each_new_sample_only():
-    """A seen video keeps its surface following; a frame with no new decoded sample draws nothing
-    (its pixels would be the same); the frame after a new one draws it, with no tick. A still
-    photo with no fade draws once and installs no frame callback."""
+def test_a_video_is_drawn_once_per_new_sample_not_per_refresh():
+    """A playing video installs no frame callback: refreshes with no new sample draw nothing and
+    call nothing. Each sample its decoder brings hops to the main loop once and is drawn on the
+    next frame, with no tick; a covered video's sample draws nothing."""
     video = layer("video", video=True, start=100, end=200, media_origin=100)
     playing = decoder(video)
     renderer, surface, area = frame_renderer({"video": playing})
     start = time.monotonic()
     renderer.present(composition(video, timebase=100 - start))
-    render(renderer, surface, area, start + .1)
+    paint(renderer, surface, area, start + .1)
     assert area.renders == 1 and renderer.GL.opacities == [1.0]
-    for index in range(1, 4):           # 60 Hz frames, no new sample
-        render(renderer, surface, area, start + .1 + index / 60)
-    assert area.renders == 1 and renderer.GL.opacities == [1.0]
-    assert surface.follower.following, "a playing video is watched on every frame"
-    playing.sample_serial += 1          # the decoder brings its next picture
-    render(renderer, surface, area, start + .1 + 4 / 60)
+    for index in range(1, 4):                       # 60 Hz refreshes, no new sample
+        paint(renderer, surface, area, start + .1 + index / 60)
+    assert area.renders == 1 and not area.callbacks and area.added == 0
+    renderer._sample_arrived("video", playing.incarnation)
+    paint(renderer, surface, area, start + .1 + 4 / 60)
     assert area.renders == 2 and renderer.GL.opacities == [1.0, 1.0]
-    render(renderer, surface, area, start + .1 + 5 / 60)
+    paint(renderer, surface, area, start + .1 + 5 / 60)
     assert area.renders == 2, "drawn once per sample"
+    renderer._sample_arrived("video", playing.incarnation + 1)     # a replaced decoder's
+    assert area.renders == 2
 
-    still, still_surface, still_area = frame_renderer()
-    still.present(composition(black("still", start=100, end=200), timebase=100 - start))
-    render(still, still_surface, still_area, start + 1)
-    assert still.GL.opacities == [1.0] and not still_surface.follower.following
-    assert not still_area.callbacks
+    cover = black("cover", start=100, end=200, priority=1)
+    paused = decoder(video)
+    paused.playing = False
+    covered, covered_surface, covered_area = frame_renderer({"video": paused})
+    covered.present(composition(video, cover, timebase=100 - start))
+    paint(covered, covered_surface, covered_area, start + .1)
+    covered._sample_arrived("video", 1)
+    assert covered_area.renders == 1
 
 
-def test_a_layer_seen_only_at_a_later_frame_waits_for_its_decode_and_does_not_fail():
+def test_a_re_anchor_within_tolerance_draws_nothing_and_a_real_one_redraws(tmp_path):
+    """The executor's ticks with a clock mapping that moved by microseconds hand the renderer the
+    same timeline: no new draw. A real re-anchor is a new timeline, drawn on the next frame."""
+    rig = Rig(tmp_path)
+    rig.play(layer(start=100, end=200))
+    picture = rig.renderer.outputs["hdmi1"].layers[0].layer
+    renderer, surface, area = frame_renderer({"picture": decoder(picture)})
+    renderer.present(rig.renderer.outputs["hdmi1"])
+    paint(renderer, surface, area, time.monotonic())
+    assert area.renders == 1 and renderer.GL.opacities == [1.0]
+    for _ in range(3):
+        rig.clock.step_utc(TIMEBASE_TOLERANCE / 4)
+        rig.advance(.033)
+        rig.executor.tick()
+        renderer.present(rig.renderer.outputs["hdmi1"])
+    assert area.renders == 1 and not area.callbacks
+    rig.clock.step_utc(.5)
+    rig.advance(.033)
+    rig.executor.tick()
+    renderer.present(rig.renderer.outputs["hdmi1"])
+    assert area.renders == 2
+
+
+def test_a_layer_seen_only_at_a_later_frame_waits_for_its_decode_and_does_not_fail(clock):
     """A photo fading in whose first draw had alpha 0 becomes visible at a later frame time
     before its decoder holds a picture: that frame draws nothing new and the decoder is not
-    failed; it is drawn on a frame once decoded."""
+    failed; the surface tries each frame and draws it once decoded."""
     base = black("base", start=100, end=200)
     photo = layer("photo", start=101, end=200, fade_in=1, priority=1)
     decoding = decoder(photo, prepared=False)
     renderer, surface, area = frame_renderer({"photo": decoding})
-    start = time.monotonic()
-    renderer.present(composition(base, photo, timebase=100 - start))
-    render(renderer, surface, area, start + .5)
+    start = clock.now
+    shown = composition(base, photo, timebase=100 - start)
+    renderer.present(shown)
+    paint(renderer, surface, area, start + .5)
     assert renderer.GL.opacities == [1.0]           # the base; the photo has alpha 0
-    render(renderer, surface, area, start + 1.5)
+    clock.now = start + .95
+    renderer.present(shown)                         # the tick before its fade-in wakes the clock
+    paint(renderer, surface, area, start + 1.5)
     assert renderer.GL.opacities == [1.0] and decoding.failure is None
+    assert surface.follower.following, "the draw is still owed"
     decoding.prepared = True
-    render(renderer, surface, area, start + 1.75)
+    paint(renderer, surface, area, start + 1.75)
     assert renderer.GL.opacities == [1.0, 1.0, .75]
 
 
-def test_a_pending_draw_not_yet_decoded_at_the_frame_time_is_drawn_at_the_ticks_look():
-    """present() prepared what the tick sees (the photo at alpha .5); at the frame time a layer
-    is not decoded for the frame's look, so the pending draw is drawn as the tick saw it."""
+def test_a_pending_draw_not_decoded_for_its_frame_waits_and_is_drawn_at_its_frames_look():
+    """present() made a draw, but at the frame's time a layer it shows is not decoded yet: the
+    frame draws nothing (never the tick's look); the next frame after its decode draws it."""
     base = black("base", start=100, end=200)
     photo = layer("photo", start=99.5, end=200, fade_in=1, priority=1)
-    renderer, surface, area = frame_renderer({"photo": decoder(photo, prepared=False)})
+    decoding = decoder(photo, prepared=False)
+    renderer, surface, area = frame_renderer({"photo": decoding})
     start = time.monotonic()
     renderer.present(composition(base, photo, timebase=100 - start))
-    render(renderer, surface, area, start + .25)
-    assert renderer.GL.opacities == [1.0, .5]
+    paint(renderer, surface, area, start + .25)
+    assert renderer.GL.opacities == [] and surface.pending is not None
+    decoding.prepared = True
+    paint(renderer, surface, area, start + .3)
+    assert renderer.GL.opacities == [1.0, .8]
 
 
 def test_a_draw_whose_decoder_was_sought_is_not_redrawn_on_the_frame_clock():
@@ -506,42 +545,26 @@ def test_a_draw_whose_decoder_was_sought_is_not_redrawn_on_the_frame_clock():
     renderer, surface, area = frame_renderer({"photo": held})
     start = time.monotonic()
     renderer.present(composition(photo, timebase=100 - start))
-    render(renderer, surface, area, start + .25)
+    paint(renderer, surface, area, start + .25)
     assert renderer.GL.opacities == [.75]
-    render(renderer, surface, area, start + .3)
+    paint(renderer, surface, area, start + .3)
     assert renderer.GL.opacities == [.75, .8] and area.renders == 2
     held.generation += 1
-    render(renderer, surface, area, start + .4)
-    assert renderer.GL.opacities == [.75, .8] and area.renders == 2
-
-
-def test_a_moved_timebase_reaches_the_drawn_surface_and_its_jitter_does_not():
-    """A re-anchored clock mapping, same layers: present() makes a new draw on the new timeline,
-    and the frame clock draws on from it. A timebase moved within the tolerance draws nothing."""
-    renderer, surface, area = frame_renderer()
-    start = time.monotonic()
-    fading = composition(black("fade", start=100, end=200, fade_in=2), timebase=100 - start)
-    renderer.present(fading)
-    render(renderer, surface, area, start + .5)
-    assert renderer.GL.opacities == [.25]
-    renderer.present(replace(fading, timebase=fading.timebase + TIMEBASE_TOLERANCE / 2))
-    assert area.renders == 1
-    renderer.present(replace(fading, timebase=fading.timebase + .5))
-    assert area.renders == 2
-    render(renderer, surface, area, start + .5)
-    assert renderer.GL.opacities == [.25, .5]
-    render(renderer, surface, area, start + 1)
-    assert renderer.GL.opacities == [.25, .5, .75]
+    paint(renderer, surface, area, start + .4)
+    assert renderer.GL.opacities == [.75, .8]
 
 
 class Frames:
-    """Display Host faked: one admitted grant, a calibration trial at `sequence` (None: none)."""
+    """Display Host faked: one admitted grant, a calibration trial at `sequence` (None: none) that
+    runs out at `expires` (monotonic), and the Output's picture operations."""
 
     def __init__(self):
         self.grant_ = FrameGrant(grant_id=uuid.uuid4(), binding_generation=1, config_revision=1,
                                  frame_id="frame1", admitted=True)
         self.trial_id = uuid.uuid4()
         self.sequence: int | None = 1
+        self.expires = time.monotonic() + 3600
+        self.trials = 0
         self.tags: list[str] = []
         self.operations: PictureOperations | None = None
         self.picture_changes: list[int | None] = []
@@ -550,11 +573,14 @@ class Frames:
         return self.grant_
 
     def trial(self, _composition, _grant):
+        self.trials += 1
         if self.sequence is None:
             return None
+        # Under the `clock` fixture the renderer reads no CLOCK_BOOTTIME: boot time is monotonic.
         return SimpleNamespace(
             candidate=SimpleNamespace(trial_id=self.trial_id, generation=1, sequence=self.sequence,
-                                      candidate_sha256="0" * 64),
+                                      candidate_sha256="0" * 64,
+                                      expires_boottime_ms=round(self.expires * 1000)),
             calibration=Calibration(), mat=None, primitives=None)
 
     def picture(self, _output_id):
@@ -568,27 +594,77 @@ class Frames:
         pass
 
 
-def test_a_trial_edit_is_drawn_on_the_frame_clock_and_its_end_stops_following():
-    """While a calibration trial is drawn its surface follows the frame clock: an edit (a new
-    sequence) is drawn on the next frame with no tick, and the trial's end is drawn too, after
-    which the still picture is not followed."""
+def operations(change: int, light: float = 1.0) -> PictureOperations:
+    return PictureOperations("hdmi1", change, (1.0, 1.0, 1.0), light, 1.0, 1.0)
+
+
+def test_a_slider_edit_between_ticks_is_drawn_on_the_next_frame():
+    """A still photo is drawn once and not followed. A Live slider edit (new picture operations)
+    arrives as Display Host's event: the next frame draws it, with no planning tick between, and
+    its tag names the edit. An event that changes nothing draws nothing."""
     renderer, surface, area = frame_renderer()
     renderer._frames = frames = Frames()
+    frames.sequence = None                          # no calibration trial drawn
+    frames.operations = operations(1)
+    renderer._display_events = DisplayEvents(renderer.GLib, 9, renderer._arrived)
     start = time.monotonic()
+    renderer.present(composition(black("still", start=100, end=200), timebase=100 - start))
+    paint(renderer, surface, area, start + .1)
+    assert renderer.GL.opacities == [1.0] and area.renders == 1
+    assert frames.picture_changes[-1] == 1 and not area.callbacks
+
+    renderer.GLib.readable(9)                       # an event that changes nothing on screen
+    assert area.renders == 1 and not area.callbacks
+
+    frames.operations = operations(2, light=.5)     # the owner moves a slider
+    renderer.GLib.readable(9)
+    assert area.renders == 2, "the edit queues the next frame"
+    paint(renderer, surface, area, start + .1 + 2 / 60)
+    assert renderer.GL.opacities == [1.0, 1.0]
+    assert frames.picture_changes[-1] == 2, "the tag names the edit the buffer shows"
+    renderer.GLib.readable(9)
+    paint(renderer, surface, area, start + .1 + 3 / 60)
+    assert renderer.GL.opacities == [1.0, 1.0] and not area.callbacks
+
+    renderer.close()
+    assert not renderer.GLib.watches
+
+
+def test_a_trial_is_never_polled_per_frame_its_edit_is_drawn_next_frame_and_its_end_at_expiry(
+        clock):
+    """A drawn calibration trial installs no frame callback until its expiry comes near: frames
+    read nothing from Display Host. An edit arrives as an event and is drawn on the next frame.
+    The trial's running out is a change over time, drawn on the frame at its expiry."""
+    renderer, surface, area = frame_renderer()
+    renderer._frames = frames = Frames()
+    renderer._display_events = DisplayEvents(renderer.GLib, 9, renderer._arrived)
+    start = clock.now
+    frames.expires = start + .5
     still = composition(black("still", start=100, end=200), timebase=100 - start)
     renderer.present(still)
-    render(renderer, surface, area, start + .1)
+    paint(renderer, surface, area, start + .1)
     assert surface.acknowledged.applied_calibration.trial_sequence == 1
-    assert surface.follower.following, "a drawn trial is watched on each frame"
-    render(renderer, surface, area, start + .1 + 1 / 60)
-    assert area.renders == 1, "no edit, no draw"
-    frames.sequence = 2
-    render(renderer, surface, area, start + .1 + 2 / 60)
+    assert not area.callbacks
+    read = frames.trials
+    for index in range(1, 4):
+        area.frame(start + .1 + index / 60)
+    assert frames.trials == read and area.renders == 1, "no per-frame polling"
+
+    frames.sequence = 2                             # the owner edits the trial
+    renderer.GLib.readable(9)
+    paint(renderer, surface, area, start + .2)
     assert area.renders == 2 and surface.acknowledged.applied_calibration.trial_sequence == 2
-    frames.sequence = None
-    render(renderer, surface, area, start + .1 + 3 / 60)
+
+    clock.now = start + .45                         # the tick before the expiry wakes the clock
+    renderer.present(still)
+    assert surface.follower.following and area.renders == 2
+    frames.sequence = None                          # Display Host's trial state at its expiry
+    paint(renderer, surface, area, start + .48)
+    assert area.renders == 2
+    paint(renderer, surface, area, start + .501)     # the first frame at its expiry (in ms)
     assert area.renders == 3 and surface.acknowledged.applied_calibration.trial_id is None
-    assert not area.frame(start + .1 + 4 / 60) and not surface.follower.following
+    area.frame(start + .5 + 1 / 60)
+    assert not area.callbacks
 
 
 def test_close_removes_the_frame_callback():
@@ -596,7 +672,7 @@ def test_close_removes_the_frame_callback():
     start = time.monotonic()
     renderer.present(composition(black("fade", start=100, end=200, fade_in=1),
                                  timebase=100 - start))
-    render(renderer, surface, area, start + .25)
+    paint(renderer, surface, area, start + .25)
     assert surface.follower.following
     renderer.close()
     assert not area.callbacks and not surface.follower.following and surface.window.destroyed
@@ -607,8 +683,6 @@ def test_a_surface_with_no_frame_clock_draws_at_now():
     before = time.monotonic()
     assert before <= renderer._frame_time(area) <= time.monotonic()
 
-
-# -- Display Host's changes arrive as events, drawn on the next frame -----------------------------
 
 def test_display_events_call_on_each_read_of_the_display_and_stop():
     """The watch sits on the display's socket at GDK's event priority (never above it: GDK's
@@ -632,41 +706,3 @@ def test_display_events_call_on_each_read_of_the_display_and_stop():
     events.stop()
     events.stop()
     assert not glib.watches
-
-
-def operations(change: int, light: float = 1.0) -> PictureOperations:
-    return PictureOperations("hdmi1", change, (1.0, 1.0, 1.0), light, 1.0, 1.0)
-
-
-def test_picture_operations_arriving_between_ticks_are_drawn_on_the_next_frame():
-    """A still photo is drawn once and not followed. A Live slider edit (new picture operations)
-    arrives as Display Host's event: the surface follows its frame clock again and the next frame
-    draws it, with no planning tick between; then it is not followed again. An event that changes
-    nothing installs no frame callback, so nothing runs per frame while no edit arrives."""
-    renderer, surface, area = frame_renderer()
-    renderer._frames = frames = Frames()
-    frames.sequence = None                          # no calibration trial drawn
-    frames.operations = operations(1)
-    renderer._display_events = DisplayEvents(renderer.GLib, 9, renderer._arrived)
-    start = time.monotonic()
-    renderer.present(composition(black("still", start=100, end=200), timebase=100 - start))
-    render(renderer, surface, area, start + .1)
-    assert renderer.GL.opacities == [1.0] and area.renders == 1
-    assert frames.picture_changes[-1] == 1
-    assert not area.callbacks, "a still picture is not followed"
-
-    renderer.GLib.readable(9)                       # an event that changes nothing on screen
-    assert not area.callbacks and not surface.follower.following and area.renders == 1
-
-    frames.operations = operations(2, light=.5)     # the owner moves a slider
-    renderer.GLib.readable(9)
-    assert surface.follower.following, "the edit wakes the frame clock"
-    render(renderer, surface, area, start + .1 + 2 / 60)
-    assert area.renders == 2 and renderer.GL.opacities == [1.0, 1.0]
-    assert frames.picture_changes[-1] == 2, "the tag names the edit the buffer shows"
-    assert not area.frame(start + .1 + 3 / 60) and not area.callbacks
-    renderer._render(area, None, surface)           # GTK repaints: nothing new is drawn
-    assert renderer.GL.opacities == [1.0, 1.0]
-
-    renderer.close()
-    assert not renderer.GLib.watches
