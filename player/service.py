@@ -55,7 +55,7 @@ from contracts.player_control import (
 from contracts.time import Clock, SystemClock, TimeMapping
 from player.cache import Cache, CacheError
 from player.central_link import CentralLink, Session, read_refusal
-from player.executor import AuthorityError, Executor
+from player.executor import AcquisitionStopped, AuthorityError, Executor
 from player.identity import Identity, load_identity
 from player.luts import LutWants, PlayerLuts
 from player.mainloop import DispatchRefused, LatePosts, LoopLate, MainLoopDispatcher, Tick
@@ -291,6 +291,9 @@ class Download:
 
 
 class _ChunkBridge:
+    """A download's bytes, from the network task to the cache worker. Once `stopped` is set or the
+    job's authority is gone, both sides raise AcquisitionStopped: the Player's own stop."""
+
     def __init__(self, authorized: Callable[[], bool]):
         self.queue = queue.Queue(maxsize=4)
         self.stopped = threading.Event()
@@ -303,7 +306,7 @@ class _ChunkBridge:
                 return
             except queue.Full:
                 await asyncio.sleep(.005)
-        raise ServiceError("download_cancelled")
+        raise AcquisitionStopped("download_stopped")
 
     def chunks(self):
         while not self.stopped.is_set() and self.authorized():
@@ -316,7 +319,7 @@ class _ChunkBridge:
             if not self.authorized() or self.stopped.is_set():
                 break
             yield chunk
-        raise ServiceError("download_cancelled")
+        raise AcquisitionStopped("download_stopped")
 
 
 class PlayerService:
@@ -951,12 +954,15 @@ class PlayerService:
     async def _attempt(self, attempts: dict, key, fetch: Callable[[], Awaitable[bool]],
                        fault: str) -> None:
         """One fetch of `key` (a media download or a LUT) on its own retry schedule: a failure is
-        the `fault` and retried after MEDIA_RETRY_BACKOFF; a 401 or a redirect ends the cycle."""
+        the `fault` and retried after MEDIA_RETRY_BACKOFF; a 401 or a redirect ends the cycle.
+        A fetch the Player stopped itself (AcquisitionStopped) is no fault."""
         count, _ = attempts.get(key, (0, 0))
         try:
             success = await fetch()
         except Unauthorized:
             raise
+        except AcquisitionStopped:
+            success = False
         except UplinkError as error:
             if error.cause is Cause.REDIRECT:
                 raise           # ends the cycle: run() locates again (0014)
