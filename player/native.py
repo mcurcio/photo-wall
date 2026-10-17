@@ -202,21 +202,55 @@ _PATTERN_CODES: dict[TestPattern | None, int] = {
     TestPattern.TARGET_PRE_SOFTWARE: 4, TestPattern.TARGET_POST_SOFTWARE: 5}
 
 
+@dataclass(frozen=True)
+class _Steps:
+    """Which of the frame pass's steps a frame computes: each switch is player/geometry.py's skip
+    rule, and each set is its own compiled program (`_frame_source`), so a step switched off
+    costs a frame nothing (a uniform switch left the GPU running every step's code)."""
+    lut_on: bool
+    saturation_on: bool
+    rolloff_on: bool
+    floor_on: bool
+    mat_on: bool
+    test_pattern: int       # _PATTERN_CODES (0: the photos)
+
+
+def _steps(operations: PictureOperations | None, shadow: MatShadow | None, *,
+           lut_drawn: bool) -> _Steps:
+    """The step set for `operations` (neutral when None) and the Frame's mat shadow (None: none).
+    `lut_drawn`: the LUT `operations.lut` names is bound on texture unit 1
+    (`NativeRenderer._bind_lut`), so step 1 mixes it in; otherwise step 1 is skipped."""
+    return _Steps(
+        lut_on=lut_drawn and operations is not None and operations.lut is not None,
+        saturation_on=operations is not None and operations.saturation != 1.0,
+        rolloff_on=operations is not None and not rolloff_skipped(operations),
+        floor_on=operations is not None and operations.black_floor > 0,
+        mat_on=shadow is not None,
+        test_pattern=_PATTERN_CODES[None if operations is None else operations.test_pattern])
+
+
+def _frame_source(steps: _Steps) -> str:
+    """The frame pass's fragment shader for one step set: its switches as constants."""
+    return _FINAL.replace(_STEP_SWITCHES, "".join(
+        f"const int {name} = {int(getattr(steps, name))};\n" for name in _Steps.__dataclass_fields__))
+
+
+_NEUTRAL_STEPS = _Steps(False, False, False, False, False, 0)
+
+
 def _final_uniforms(gl, program: int, operations: PictureOperations | None, opening,
-                    shadow: MatShadow | None, *, lut_drawn: bool,
+                    shadow: MatShadow | None, steps: _Steps,
                     target: tuple[int, BoardDraw] | None = None) -> None:
-    """The final pass's operations (neutral when None), the Frame's mat shadow (None: none) and the
-    per-Output mask's opening. Each step's switch is player/geometry.py's skip rule, worked here,
-    so a neutral step is never computed by the shader either. `lut_drawn`: the LUT
-    `operations.lut` names is bound on texture unit 1 (`NativeRenderer._bind_lut`), so step 1
-    mixes it in; otherwise step 1 is skipped. A test pattern (`operations.test_pattern`) needs the
-    opening's unit square, so `to_opening` is set whenever a pattern or a shadow is on; with no
-    Frame drawn yet the opening is `_NO_OPENING`, off the output, and the pattern stays unseen (a
-    known limit: an Output shows a pattern only once a Frame has drawn there). `target`: for a
-    calibration target, the QR's module count bound on _TARGET_QR_UNIT (0: no code, every QR
-    square draws light) and the opening's BoardDraw (`board_draw`: its columns, aspect and turn;
-    its modules unread, the count stands for them); the board's raster is bound on
-    _TARGET_LAYOUT_UNIT (`NativeRenderer._bind_target`). None: no columns, so nothing is drawn."""
+    """The frame pass's operations (neutral when None), the Frame's mat shadow (None: none) and the
+    per-Output mask's opening, for the program of `steps` (a step switched off sets its neutral
+    value). A test pattern (`operations.test_pattern`) needs the opening's unit square, so
+    `to_opening` is set whenever a pattern or a shadow is on; with no Frame drawn yet the opening
+    is `_NO_OPENING`, off the output, and the pattern stays unseen (a known limit: an Output shows
+    a pattern only once a Frame has drawn there). `target`: for a calibration target, the QR's
+    module count bound on _TARGET_QR_UNIT (0: no code, every QR square draws light) and the
+    opening's BoardDraw (`board_draw`: its columns, aspect and turn; its modules unread, the count
+    stands for them); the board's raster is bound on _TARGET_LAYOUT_UNIT
+    (`NativeRenderer._bind_target`). None: no columns, so nothing is drawn."""
     def uniform(name: str) -> int:
         return gl.glGetUniformLocation(program, name)
 
@@ -227,22 +261,12 @@ def _final_uniforms(gl, program: int, operations: PictureOperations | None, open
     gl.glUniform1f(uniform("light_factor"), light)
     gl.glUniform1f(uniform("contrast_slope"), contrast)
     gl.glUniform1f(uniform("gamma_exponent"), gamma)
-    lut_on = lut_drawn and operations is not None and operations.lut is not None
-    gl.glUniform1i(uniform("lut_on"), int(lut_on))
     gl.glUniform1i(uniform("lut"), _LUT_UNIT)       # never unit 0: two sampler types may not share one
-    gl.glUniform1f(uniform("lut_amount"), operations.lut.amount if lut_on else 0.0)
-    saturation_on = operations is not None and operations.saturation != 1.0
-    gl.glUniform1i(uniform("saturation_on"), int(saturation_on))
-    gl.glUniform1f(uniform("saturation"), operations.saturation if saturation_on else 1.0)
-    rolloff_on = operations is not None and not rolloff_skipped(operations)
-    gl.glUniform1i(uniform("rolloff_on"), int(rolloff_on))
-    gl.glUniform1f(uniform("highlight_knee"), operations.highlight_knee if rolloff_on else 1.0)
-    gl.glUniform1f(uniform("peak"), peak(operations) if rolloff_on else 1.0)
-    floor_on = operations is not None and operations.black_floor > 0
-    gl.glUniform1i(uniform("floor_on"), int(floor_on))
-    gl.glUniform1f(uniform("black_floor"), operations.black_floor if floor_on else 0.0)
-    pattern = None if operations is None else operations.test_pattern
-    gl.glUniform1i(uniform("test_pattern"), _PATTERN_CODES[pattern])
+    gl.glUniform1f(uniform("lut_amount"), operations.lut.amount if steps.lut_on else 0.0)
+    gl.glUniform1f(uniform("saturation"), operations.saturation if steps.saturation_on else 1.0)
+    gl.glUniform1f(uniform("highlight_knee"), operations.highlight_knee if steps.rolloff_on else 1.0)
+    gl.glUniform1f(uniform("peak"), peak(operations) if steps.rolloff_on else 1.0)
+    gl.glUniform1f(uniform("black_floor"), operations.black_floor if steps.floor_on else 0.0)
     gl.glUniform1i(uniform("target_layout"), _TARGET_LAYOUT_UNIT)   # each sampler on its own unit
     gl.glUniform1i(uniform("target_qr"), _TARGET_QR_UNIT)
     modules, draw = target if target is not None else (0, None)
@@ -252,9 +276,8 @@ def _final_uniforms(gl, program: int, operations: PictureOperations | None, open
     gl.glUniform1i(uniform("target_portrait"), int(draw is not None and draw.portrait))
     if shadow is not None:
         _set_matrix(gl, program, "to_opening", shadow.to_opening)
-    elif pattern is not None:
+    elif steps.test_pattern:
         _set_matrix(gl, program, "to_opening", inverse(homography(opening)))
-    gl.glUniform1i(uniform("mat_on"), int(shadow is not None))
     if shadow is not None:
         lights = shadow.lights + (None,) * (MAT_LIGHTS_MAX - len(shadow.lights))
         gl.glUniform2f(uniform("mat_size"), *shadow.size_mm)
@@ -445,7 +468,13 @@ class _Surface:
     # render whose frame equals it (a renewal) draws nothing.
     painted: tuple | None = None
     size: tuple[int, int] = (0, 0)
+    # The fit pass's program and the frame pass's for neutral steps, compiled with the surface's
+    # GL context; None: none yet (not realized, or unrealized).
     programs: tuple[int, int] | None = None
+    # The frame pass's program per step set (`_frame_source`), each compiled on first use.
+    frame_programs: dict[_Steps, int] = field(default_factory=dict)
+    # The step set the last frame pass ran; None before one.
+    steps: _Steps | None = None
     vao: int = 0
     # The Output's picture operations from the display host's shell (frame protocol v4), read
     # each render; None: neutral (none received yet, or no display host).
@@ -611,11 +640,13 @@ _FINAL_CONSTANTS = (
     + ", ".join(f"ivec2({row}, {offset})" for row, offset in QR_COPY_PLACES) + ");\n"
     f"const int QR_SQUARES = {QR_SQUARES};\n"
     f"const float QR_QUIET_MODULES = {float(QR_QUIET_MODULES)!r};\n")
+_STEP_SWITCHES = "// The step set: _frame_source writes each switch here as a constant.\n"
 _FINAL = """#version 300 es
 precision highp float;
 precision highp sampler3D;
 in vec2 uv;
 out vec4 color;
+""" + _STEP_SWITCHES + """
 """ + _FINAL_CONSTANTS + """
 uniform int layer_count;
 uniform int layer_kind[FRAME_LAYERS];
@@ -632,24 +663,18 @@ uniform vec3 rgb_multipliers;
 uniform float light_factor;
 uniform float contrast_slope;
 uniform float gamma_exponent;
-uniform int lut_on;
 uniform sampler3D lut;
 uniform float lut_amount;
-uniform int saturation_on;
 uniform float saturation;
-uniform int rolloff_on;
 uniform float highlight_knee;
 uniform float peak;
-uniform int floor_on;
 uniform float black_floor;
-uniform int test_pattern;
 uniform sampler2D target_layout;
 uniform sampler2D target_qr;
 uniform int target_qr_modules;
 uniform int target_columns;
 uniform float target_aspect;
 uniform int target_portrait;
-uniform int mat_on;
 uniform mat3 to_opening;
 uniform vec2 mat_size;
 uniform int light_count;
@@ -1484,7 +1509,7 @@ class NativeRenderer:
         except Exception:
             return PrepareResult("pending")         # Display Host unreadable now: the next tick
         surface.area.make_current()
-        if surface.area.get_error() is not None:
+        if surface.area.get_error() is not None or surface.size == (0, 0):
             return PrepareResult("pending")
         now = self._key(surface, local, binding, _drawn_fit(probe), decoder)
         fitted = surface.fitted.get(key)
@@ -1498,6 +1523,9 @@ class NativeRenderer:
                 decoder.failure, decoder.prepared = "decode", False
                 decoder.retry_at = time.monotonic()+1
                 return PrepareResult("failed", "decode")
+            finally:
+                # Outside GTK's paint: the window's own framebuffer is bound again, as GTK left it.
+                self.GL.glBindFramebuffer(self.GL.GL_FRAMEBUFFER, 0)
         return PrepareResult("prepared" if prepared(fitted.key if fitted else None, now,
                                                     self._done(fitted)) else "pending")
 
@@ -1713,11 +1741,12 @@ class NativeRenderer:
         if surface.programs is None:
             fit_program = self._program(_FIT)
             try:
-                final_program = self._program(_FINAL)
+                final_program = self._program(_frame_source(_NEUTRAL_STEPS))
             except Exception:
                 gl.glDeleteProgram(fit_program)
                 raise
             surface.programs = fit_program, final_program
+            surface.frame_programs = {_NEUTRAL_STEPS: final_program}
             surface.vao = int(gl.glGenVertexArrays(1))
         if surface.size == (width, height):
             return
@@ -1886,25 +1915,35 @@ class NativeRenderer:
             slots.append((_SLOT_PICTURE, fitted.texture, fitted.key, local.alpha))
         return tuple(slots)
 
+    def _frame_program(self, surface: _Surface, steps: _Steps) -> int:
+        """The frame pass's program for `steps`, compiled on its first use with this GL context
+        (a picture settings edit that switches a step: one compile, then cached)."""
+        program = surface.frame_programs.get(steps)
+        if program is None:
+            program = surface.frame_programs[steps] = self._program(_frame_source(steps))
+        surface.steps = steps
+        return program
+
     def _frame_pass(self, surface: _Surface, shown: _Draw | None, slots: tuple, lut_drawn: bool,
                     target: tuple[int, BoardDraw] | None) -> None:
         """The one pass a shown frame draws, into GTK's framebuffer (bound): the fitted pictures
         and black layers mixed at their strengths, then the Display's picture settings, the mat
-        shadow and the per-Output mask (`_FINAL`)."""
+        shadow and the per-Output mask (`_FINAL`), with the program of its step set."""
         gl = self.GL
-        program = surface.programs[1]
+        fit = _drawn_fit(shown) if shown else None
+        profile = shown.composition.binding.profile if shown else None
+        shadow = mat_shadow(fit, profile, _drawn_mat(shown)) if shown else None
+        steps = _steps(surface.operations, shadow, lut_drawn=lut_drawn)
+        program = self._frame_program(surface, steps)
         gl.glBindVertexArray(surface.vao)
         gl.glViewport(0, 0, *surface.size)
         gl.glDisable(gl.GL_BLEND)
         gl.glUseProgram(program)
-        fit = _drawn_fit(shown) if shown else None
-        profile = shown.composition.binding.profile if shown else None
         matrix = (output_to_picture(fit, surface.size, profile.width_px / profile.height_px)
                   if shown else (1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0))
         _layer_uniforms(gl, program, slots, matrix)
-        shadow = mat_shadow(fit, profile, _drawn_mat(shown)) if shown else None
         _final_uniforms(gl, program, surface.operations, fit.corners if shown else _NO_OPENING,
-                        shadow, lut_drawn=lut_drawn, target=target)
+                        shadow, steps, target=target)
         gl.glDrawArrays(gl.GL_TRIANGLES, 0, 3)
         gl.glFlush()
         if gl.glGetError() != gl.GL_NO_ERROR:
@@ -2114,8 +2153,10 @@ class NativeRenderer:
         for fitted in surface.fitted.values():
             self._delete_fitted(fitted)
         if surface.programs:
-            for program in surface.programs:
-                gl.glDeleteProgram(program)
+            gl.glDeleteProgram(surface.programs[0])
+        for program in surface.frame_programs.values():
+            gl.glDeleteProgram(program)
+        surface.frame_programs, surface.steps = {}, None
         if surface.vao:
             gl.glDeleteVertexArrays(1, [surface.vao])
         surface.textures.clear()

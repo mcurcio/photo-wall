@@ -435,6 +435,7 @@ def frame_renderer(decoders=None, area=None):
     renderer._surfaces = {"hdmi1": surface}
     renderer.capacity = lambda compositions: SimpleNamespace(available=True)
     renderer._decode = lambda local: PrepareResult("prepared")
+    renderer._program = lambda _source: 2           # every step set's frame program
     renderer._upload = lambda _surface, _local: 7
     renderer._read_sample = lambda _decoder: None
     return renderer, surface, area

@@ -39,9 +39,10 @@ a 64x48 PNG of four flat quadrants (red, green, blue, white) written here with t
    up) shades a band under the top edge, equal to `final_pixel` with `mat_shade`'s shade.
 12. cover_at_90_shades_the_wall_up_edge: the same light on a Frame turned 90 degrees shades the
    output's right edge (the picture's up), not its top.
-13. neutral_program_takes_no_new_step: neutral v5 operations and Mat() leave every new step's
-   switch (lut_on, saturation_on, rolloff_on, floor_on, mat_on) at 0 in the linked program, and
-   the pixels are the v4 reference's.
+13. neutral_program_takes_no_new_step: neutral v5 operations and Mat() draw with the neutral step
+   set's program (lut_on, saturation_on, rolloff_on, floor_on, mat_on all 0, each a constant of
+   its program), the pixels are the v4 reference's, and the program with every step on links
+   every step's uniform.
 14. trial_mat_drawn: while Position's trial is drawn its mat shades the picture, though the
    binding's Mat() casts none; when the trial ends the binding's (no shadow) is drawn again.
 15. lut_matches_the_reference (slice P2, rule 3): a picture of four mid-tone quadrants whose
@@ -86,7 +87,6 @@ a 64x48 PNG of four flat quadrants (red, green, blue, white) written here with t
    render queued in the update phase) draws it: many renders, the centre darkening from one to
    the next, black at the end; then the surface no longer follows its frame clock.
 """
-import ctypes
 import hashlib
 import os
 import pathlib
@@ -134,6 +134,7 @@ from contracts.models import (  # noqa: E402
 from contracts.node_frame import LutMix, PictureOperations  # noqa: E402
 from contracts.photo_crop import CENTRED  # noqa: E402
 from contracts.tuning import TARGET_PATTERNS, TestPattern  # noqa: E402
+from player import native as native_module  # noqa: E402
 from player.calibration_target import target_modules  # noqa: E402
 from player.geometry import (  # noqa: E402
     BoardDraw,
@@ -623,16 +624,17 @@ def neutral_program_takes_no_new_step(native, frames, variant) -> None:
     until(lambda: frames.tags and frames.tags[-1][1] == 6)
     check_fit(native, fit, neutral)
     surface = native._surfaces["headless"]
-    surface.area.make_current()
-    gl = native.GL
-    final = surface.programs[1]
     switches = {name: switch(native, name)
                 for name in ("lut_on", "saturation_on", "rolloff_on", "floor_on", "mat_on")}
     print(f"NEUTRAL switches={switches}", flush=True)
     assert switches == dict.fromkeys(switches, 0), switches
+    assert native._surfaces["headless"].steps == native_module._NEUTRAL_STEPS
+    surface.area.make_current()
+    gl = native.GL
+    every = native._frame_program(surface, native_module._Steps(True, True, True, True, True, 0))
     for name in ("lut", "lut_amount", "saturation", "highlight_knee", "peak", "black_floor", "to_opening", "mat_size",
                  "light_count", "light_toward", "light_band", "light_weight"):
-        assert gl.glGetUniformLocation(final, name) != -1, ("missing_uniform", name)
+        assert gl.glGetUniformLocation(every, name) != -1, ("missing_uniform", name)
 
 
 class TrialFrames(Frames):
@@ -692,12 +694,8 @@ def turning_table() -> bytes:
 
 
 def switch(native: CapturingRenderer, name: str) -> int:
-    surface = native._surfaces["headless"]
-    surface.area.make_current()
-    gl = native.GL
-    value = (ctypes.c_int * 1)()
-    gl.glGetUniformiv(surface.programs[1], gl.glGetUniformLocation(surface.programs[1], name), value)
-    return value[0]
+    """A step's switch in the program the last frame pass drew with (its step set's constant)."""
+    return int(getattr(native._surfaces["headless"].steps, name))
 
 
 def lut_matches_the_reference(native, frames, variant) -> None:
