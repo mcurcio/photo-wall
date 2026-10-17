@@ -12,6 +12,7 @@ from contracts.models import (
     Plan,
     Readiness,
     Variant,
+    fade_share,
 )
 from contracts.photo_crop import CENTRED
 from contracts.time import ManualClock, TimeMapping
@@ -224,3 +225,16 @@ def test_the_probe_channel_carries_the_players_gl_renderer():
             parse_node_probe_reply(raw)
     with pytest.raises(ValueError, match="probe_channel_message"):
         parse_node_probe_channel_message(encode_node_renderer(name))  # Player → broker only
+
+
+def test_overlapping_fades_take_the_lesser_never_the_product():
+    """The one fade rule (owner, 2026-10-16: "1, min"): a 2 s showing with a 1.5 s fade-in and a
+    1.5 s fade-out fades in and out at once, at the lesser of the two; outside either fade it is
+    whole. Central's planned opacity and `Layer.alpha` both read it (tests/test_runtime.py).
+    Mutation probe: multiply the two shares."""
+    for tenth in range(21):
+        now = tenth / 10
+        expected = min(1.0, now / 1.5, (2 - now) / 1.5)
+        assert fade_share(now, start=0, end=2, fade_in=1.5, fade_out=1.5) == pytest.approx(expected)
+    assert fade_share(5, start=0, end=10, fade_in=0, fade_out=0) == 1
+    assert fade_share(-1, start=0, end=10, fade_in=2, fade_out=2) == 0

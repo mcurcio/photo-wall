@@ -24,6 +24,8 @@ PRESENTATION_FRESHNESS = 2 * REDRAW_RENEWAL
 class LocalLayer:
     layer: Layer
     path: Path | None
+    # The layer's look when the composition was made (the planning tick's time, or the drawn
+    # frame's in an acknowledgment); a renderer draws `player/look.py` `look` at its frame time.
     position: float
     alpha: float
 
@@ -34,6 +36,10 @@ class OutputComposition:
     calibration: Calibration
     layers: tuple[LocalLayer, ...] = ()
     fallback: bool = False
+    # Plan time less this machine's monotonic time, so a renderer reads its layers at the time of
+    # the frame it draws (player/look.py). None: a still composition, drawn as its layers say
+    # (a fallback: black, or a kept photo at full strength).
+    timebase: float | None = None
 
 
 @dataclass(frozen=True)

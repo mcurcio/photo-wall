@@ -23,6 +23,7 @@ from central.runtime import (
     Transition,
 )
 from central.wall_plan.selection import SceneSelection
+from contracts.models import Layer
 
 
 def media(target="frame:left", source="holiday:v1", **kwargs):
@@ -1539,3 +1540,26 @@ def test_the_timeline_readers_reach_only_as_far_as_the_longest_cross_fade_lead()
         scene_id="child", cycle_seconds=10, transition=Transition(style="cross_fade", seconds=4),
         contributions=(media("frame:right"),))),)))
     assert runtime.longest_lead() == 4                      # a child Scene's
+
+
+
+@pytest.mark.parametrize("playing", [
+    lambda: _playing(CROSS), lambda: _playing(THROUGH_BLACK),
+    lambda: _playing(CROSS, loop=False, ending=("photo", 4)),
+    lambda: _playing(THROUGH_BLACK, loop=False, ending=("photo", 4))])
+def test_centrals_opacity_is_the_players_layer_alpha(playing):
+    """Central's planned opacity at any instant is what the Player draws for that layer: one
+    fade rule (contracts/models.py `fade_share`, owner 2026-10-16: "1, min"), read here through
+    the Layer the planner would offer (start = shows from, opacity = the authored one)."""
+    runtime = playing()
+    for tenth in range(0, 260, 3):
+        now = tenth / 10
+        intent = runtime.advance(now).for_target("frame:left")
+        if intent is None:
+            continue
+        layer = Layer(assignment_id="a", run_id="run", output_id="out", frame_id="frame",
+                      binding_generation=1, start=intent.shows_from, end=intent.interval_end,
+                      media_origin=intent.shows_from, presentation="black",
+                      opacity=intent.base_opacity, fade_in=intent.fade_in_seconds,
+                      fade_out=intent.fade_out_seconds)
+        assert intent.opacity == pytest.approx(layer.alpha(now)), now

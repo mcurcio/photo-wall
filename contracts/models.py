@@ -200,6 +200,16 @@ class PhotoCrop(Model):
 AfterEnd = Literal["leave_as_is", "keep_this_photo", "keep_nothing"]
 
 
+def fade_share(now: float, *, start: float, end: float, fade_in: float, fade_out: float) -> float:
+    """The share of its opacity a layer shown over [start, end) has at `now`, through a fade-in
+    of `fade_in` seconds from `start` and a fade-out of `fade_out` seconds to `end`: the lesser
+    of the two when they overlap. The one fade rule, for Central's planned opacity
+    (central/runtime.py) and the alpha the Player draws (`Layer.alpha`)."""
+    faded_in = min(1.0, max(0.0, (now - start) / fade_in)) if fade_in else 1.0
+    faded_out = min(1.0, max(0.0, (end - now) / fade_out)) if fade_out else 1.0
+    return min(faded_in, faded_out)
+
+
 class Layer(Model):
     assignment_id: Identifier
     run_id: Identifier
@@ -239,11 +249,25 @@ class Layer(Model):
             raise ValueError("only an opaque still may be kept")
         return self
 
+    # The layer at an instant, each value a function of plan time alone: `position` (the media
+    # time a video is sought to) and `alpha`, which changes only during `fades`. A renderer draws
+    # a layer's alpha at the time of the frame it draws (player/look.py), never at a planning
+    # tick's time; a video's picture is its decoder's newest sample, not a plan-time value.
     def position(self, now: float) -> float:
         position = max(0.0, now - self.media_origin)
         if self.variant and self.variant.duration:
             position %= self.variant.duration
         return position
+
+    def alpha(self, now: float) -> float:
+        """Its strength at `now`: its opacity through its fade-in and fade-out."""
+        return self.opacity * fade_share(now, start=self.start, end=self.end,
+                                         fade_in=self.fade_in, fade_out=self.fade_out)
+
+    def fades(self) -> tuple[tuple[float, float], tuple[float, float]]:
+        """Its fade-in and its fade-out as half-open spans of plan time, either empty when it has
+        none: `alpha` changes inside them and nowhere else, so it is its opacity between them."""
+        return (self.start, self.start + self.fade_in), (self.end - self.fade_out, self.end)
 
 
 # How long before a layer starts its Player prepares it (its decoder resident) and Central's cue
