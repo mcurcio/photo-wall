@@ -130,6 +130,13 @@ class WaylandFrames:
         self.client = self.lib.pw_frame_client_create(display)
         if not self.client:
             raise RuntimeError("display_frame_protocol_unavailable")
+        # The display's socket: readable when Display Host's events (picture operations, a trial
+        # edit) may have arrived; GDK's event source reads them onto this client's own queue,
+        # and every read below dispatches that queue (player/mainloop.py `DisplayEvents`).
+        wayland = ctypes.CDLL("libwayland-client.so.0")
+        wayland.wl_display_get_fd.argtypes = (pointer,)
+        wayland.wl_display_get_fd.restype = ctypes.c_int
+        self.fd = wayland.wl_display_get_fd(display)
 
     @staticmethod
     def _pointer(obj) -> int:

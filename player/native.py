@@ -55,7 +55,7 @@ from player.geometry import (
 )
 from player.look import changed, look, retimed, until_change
 from player.luts import LutSource
-from player.mainloop import FrameFollower, Tick, frame_time, watch_bus
+from player.mainloop import DisplayEvents, FrameFollower, Tick, frame_time, watch_bus
 from player.rendering import (
     PRESENTATION_FRESHNESS,
     REDRAW_RENEWAL,
@@ -763,6 +763,7 @@ class NativeRenderer:
         self.Gst.init(None)
         self._frames = None
         self._frame_timer = None
+        self._display_events = None
         if os.environ.get("PHOTO_WALL_DISPLAY_HOST") == "1":
             from player.wayland_frames import WaylandFrames
             display = self.Gdk.Display.get_default()
@@ -771,6 +772,7 @@ class NativeRenderer:
             self._frames = WaylandFrames(display)
             self._frame_timer = Tick(self.GLib, int(REDRAW_RENEWAL*1000),
                                      self._renew_display_frames)
+            self._display_events = DisplayEvents(self.GLib, self._frames.fd, self._arrived)
         diagnostic_style = self.Gtk.CssProvider()
         diagnostic_style.load_from_data(b"""
             .photo-wall-diagnostic {
@@ -916,14 +918,28 @@ class NativeRenderer:
         may next move (0: watch the next frame), None once nothing can (FrameFollower). A pending
         draw has its own render queued."""
         drawn = surface.acknowledged
-        if self._closed or drawn is None or drawn.at is None or not self._follows(drawn):
+        if self._closed or drawn is None or drawn.at is None:
             return None
         if self._moved(surface, drawn, at):
             surface.area.queue_render()
             return 0.0
         if _trial_drawn(drawn):
             return 0.0
-        return max(0.0, until_change(drawn.composition, drawn.at) - (at - drawn.at))
+        wait = until_change(drawn.composition, drawn.at)
+        return None if wait is None else max(0.0, wait - (at - drawn.at))
+
+    def _arrived(self) -> None:
+        """Display Host's events arrived (`DisplayEvents`): a surface not following its frame clock
+        whose drawn composition would now draw other pixels (`_moved`: the Output's picture
+        operations, a trial edit) follows it again, so the change is drawn on its next frame like
+        any other change; one that moved nothing costs no frame."""
+        for surface in self._surfaces.values():
+            drawn = surface.acknowledged
+            if (self._closed or drawn is None or drawn.at is None
+                    or surface.follower.following):
+                continue                # a following surface compares on its next frame anyway
+            if self._moved(surface, drawn, drawn.at):
+                surface.follower.follow()
 
     def _follows(self, draw: _Draw) -> bool:
         """Whether what `draw` shows may change without a new composition, so its surface follows
@@ -1786,6 +1802,9 @@ class NativeRenderer:
         if getattr(self, "_frame_timer", None) is not None:
             self._frame_timer.stop()
             self._frame_timer = None
+        if getattr(self, "_display_events", None) is not None:
+            self._display_events.stop()
+            self._display_events = None
         if getattr(self, "_frames", None) is not None:
             self._frames.close()
             self._frames = None

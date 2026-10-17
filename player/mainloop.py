@@ -6,7 +6,8 @@ GDK paint (priority 120) behind it, is ready on every iteration and starves ever
 it. Control dispatch therefore runs ABOVE the tick and paint (refused at construction
 otherwise), and the tick re-arms only after its work, with a gap, so it never runs back to
 back. The tick plans what to show; a picture that changes over time is drawn on its display's
-frame clock (`FrameFollower`), never at the tick's pace. tests/test_player_mainloop.py walks player/ and fails on any GLib source added outside
+frame clock (`FrameFollower`), never at the tick's pace, and a change arriving from Display Host
+wakes it through the display's own events (`DisplayEvents`), never a poll. tests/test_player_mainloop.py walks player/ and fails on any GLib source added outside
 this module; tests/native_player_mainloop_harness.py holds these numbers to real GLib and Gdk.
 
 Stdlib only: callers pass the GLib module, so importing this needs no native dependency.
@@ -14,6 +15,7 @@ Stdlib only: callers pass the GLib module, so importing this needs no native dep
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from collections.abc import Callable
@@ -25,6 +27,10 @@ TICK = 0
 """GLib.PRIORITY_DEFAULT: the Player tick and the frame renewer."""
 BUS = 0
 """GLib.PRIORITY_DEFAULT: GStreamer bus watches."""
+WAYLAND_EVENTS = 0
+"""GDK_PRIORITY_EVENTS (G_PRIORITY_DEFAULT): GDK's Wayland event source, whose check reads the
+display's socket into every event queue. A watch on that socket runs no higher: GLib skips the
+check of lower-priority sources once a higher one is ready, so nothing would read it."""
 GDK_PRIORITY_REDRAW = 120
 """GDK's paint (G_PRIORITY_HIGH_IDLE + 20), which every queue_render feeds."""
 MIN_GAP_MS = 8
@@ -240,11 +246,41 @@ class FrameFollower:
         return keep
 
 
+class DisplayEvents:
+    """Calls `arrived()` on the main loop after each read of the Wayland display's socket `fd`
+    (g_unix_fd_add, at WAYLAND_EVENTS): GDK's event source reads the socket in its check, before
+    any source of the same iteration dispatches, so `arrived` finds every event read since it last
+    ran queued on its own event queue (wl_display_dispatch_queue_pending). Nothing runs while no
+    event arrives. Events read outside the main loop's poll (a roundtrip) wait for the next event;
+    the planning tick still compares what they change. A raising `arrived` is logged and the
+    watch kept: the next event calls it again."""
+
+    def __init__(self, glib, fd: int, arrived: Callable[[], object], *,
+                 priority: int = WAYLAND_EVENTS):
+        if priority < WAYLAND_EVENTS:
+            raise ValueError("display_events_priority")
+        self.glib, self._arrived = glib, arrived
+        self._source: int | None = glib.unix_fd_add_full(
+            priority, fd, glib.IOCondition.IN, self._readable)
+
+    def _readable(self, _fd, _condition) -> bool:
+        try:
+            self._arrived()
+        except Exception:
+            logging.getLogger(__name__).exception("display event handling failed")
+        return True
+
+    def stop(self) -> None:
+        if self._source is not None:
+            self.glib.source_remove(self._source)
+            self._source = None
+
+
 def watch_bus(bus) -> None:
     """Emit a GStreamer bus's messages as signals on the main loop, at BUS priority."""
     bus.add_signal_watch_full(BUS)
 
 
-__all__ = ["BUS", "CONTROL", "GDK_PRIORITY_REDRAW", "MIN_GAP_MS", "TICK", "DispatchRefused",
-           "FrameFollower", "LatePosts", "LoopLate", "MainLoopDispatcher", "Tick", "WAKE_LEAD",
+__all__ = ["BUS", "CONTROL", "DisplayEvents", "GDK_PRIORITY_REDRAW", "MIN_GAP_MS", "TICK", "DispatchRefused",
+           "FrameFollower", "LatePosts", "LoopLate", "MainLoopDispatcher", "Tick", "WAKE_LEAD", "WAYLAND_EVENTS",
            "frame_time", "watch_bus"]

@@ -43,9 +43,11 @@ def busy(ms):
 
 def priorities():
     redraw = getattr(Gdk, "PRIORITY_REDRAW", GLib.PRIORITY_HIGH_IDLE + 20)
-    assert (mainloop.CONTROL, mainloop.TICK, mainloop.BUS, mainloop.GDK_PRIORITY_REDRAW) == (
-        GLib.PRIORITY_HIGH, GLib.PRIORITY_DEFAULT, GLib.PRIORITY_DEFAULT, redraw), (
-        "mainloop_priorities", GLib.PRIORITY_HIGH, GLib.PRIORITY_DEFAULT, redraw)
+    events = getattr(Gdk, "PRIORITY_EVENTS", GLib.PRIORITY_DEFAULT)
+    assert (mainloop.CONTROL, mainloop.TICK, mainloop.BUS, mainloop.WAYLAND_EVENTS,
+            mainloop.GDK_PRIORITY_REDRAW) == (
+        GLib.PRIORITY_HIGH, GLib.PRIORITY_DEFAULT, GLib.PRIORITY_DEFAULT, events, redraw), (
+        "mainloop_priorities", GLib.PRIORITY_HIGH, GLib.PRIORITY_DEFAULT, events, redraw)
     print("PASS mainloop_priorities_are_glib_and_gdk", flush=True)
 
 

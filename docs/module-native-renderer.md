@@ -82,7 +82,11 @@ compares did, such as a video's newer decoded sample or a trial edit), so a vide
 drawn once per sample, not once per refresh. A wait longer than `WAKE_LEAD` removes
 the callback and one main-loop timeout follows again just before the change (it only
 wakes the frame clock); once nothing can change the callback is removed, so a still
-picture is not redrawn. Subsequent calls therefore correlate the completed token by immutable
+picture is not redrawn. A change from Display Host (the Output's picture operations, as
+a Live slider moves, or a trial edit) is an event, not a poll: `DisplayEvents` watches
+the Wayland display's socket at GDK's event priority, and after each read a surface not
+following whose drawn composition `_moved` follows its frame clock again, so the edit
+is drawn on the next frame; an event that moves nothing costs no frame. Subsequent calls therefore correlate the completed token by immutable
 execution/binding/effective-calibration identity and seek generation, with a 500ms
 freshness bound.
 The native PresentationResult carries the actual acknowledged composition and

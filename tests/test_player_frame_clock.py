@@ -22,13 +22,14 @@ from hypothesis import strategies as st
 from test_executor import Rig, binding, layer
 
 from contracts.models import Calibration
+from contracts.node_frame import PictureOperations
 from contracts.time import ManualClock, TimeMapping
 from player import native as native_module
 from player.cache import Cache
 from player.executor import Executor
 from player.look import TIMEBASE_TOLERANCE, changed, look, retimed, until_change
 from player.luts import PlayerLuts
-from player.mainloop import WAKE_LEAD, FrameFollower, frame_time
+from player.mainloop import WAKE_LEAD, WAYLAND_EVENTS, DisplayEvents, FrameFollower, frame_time
 from player.native import NativeOutput, NativeRenderer
 from player.rendering import LocalLayer, OutputComposition, PrepareResult, PresentationResult
 from player.visibility import visible_now
@@ -228,11 +229,25 @@ class Area:
 
 
 class GLib:
-    """GLib's monotonic time and one-shot timeouts, recorded rather than run."""
+    """GLib's monotonic time, one-shot timeouts and fd watches, recorded rather than run."""
+    IOCondition = SimpleNamespace(IN=1)
 
     def __init__(self):
         self.timeouts: dict[int, tuple[int, object]] = {}
+        self.watches: dict[int, tuple[int, int, object]] = {}
         self.added = 0
+
+    def unix_fd_add_full(self, priority, fd, condition, callback):
+        assert condition == self.IOCondition.IN
+        self.added += 1
+        self.watches[self.added] = (priority, fd, callback)
+        return self.added
+
+    def readable(self, fd) -> None:
+        """`fd` has input: each watch on it runs, as the main loop's dispatch would."""
+        for key, (_priority, watched, callback) in list(self.watches.items()):
+            if watched == fd and not callback(fd, self.IOCondition.IN):
+                del self.watches[key]
 
     @staticmethod
     def get_monotonic_time():
@@ -244,7 +259,7 @@ class GLib:
         return self.added
 
     def source_remove(self, key):
-        del self.timeouts[key]
+        self.timeouts.pop(key, None) or self.watches.pop(key)
 
     def fire(self) -> None:
         """Every armed timeout runs, as the main loop would once it is due."""
@@ -528,6 +543,8 @@ class Frames:
         self.trial_id = uuid.uuid4()
         self.sequence: int | None = 1
         self.tags: list[str] = []
+        self.operations: PictureOperations | None = None
+        self.picture_changes: list[int | None] = []
 
     def grant(self, _output_id, _composition=None):
         return self.grant_
@@ -541,10 +558,14 @@ class Frames:
             calibration=Calibration(), mat=None, primitives=None)
 
     def picture(self, _output_id):
-        return None
+        return self.operations
 
     def tag_rendered_buffer(self, _window, _grant, tag, _primitives=None, *, picture_change=None):
         self.tags.append(tag)
+        self.picture_changes.append(picture_change)
+
+    def close(self):
+        pass
 
 
 def test_a_trial_edit_is_drawn_on_the_frame_clock_and_its_end_stops_following():
@@ -585,3 +606,67 @@ def test_a_surface_with_no_frame_clock_draws_at_now():
     renderer, surface, area = frame_renderer(area=Area(frame_clock=False))
     before = time.monotonic()
     assert before <= renderer._frame_time(area) <= time.monotonic()
+
+
+# -- Display Host's changes arrive as events, drawn on the next frame -----------------------------
+
+def test_display_events_call_on_each_read_of_the_display_and_stop():
+    """The watch sits on the display's socket at GDK's event priority (never above it: GDK's
+    check reads the socket), calls `arrived` once per readable wake, survives a raising one, and
+    stop() removes it."""
+    glib, arrivals = GLib(), []
+
+    def arrived():
+        arrivals.append(1)
+        if len(arrivals) == 2:
+            raise RuntimeError("arrived")
+
+    with pytest.raises(ValueError):
+        DisplayEvents(glib, 9, arrived, priority=WAYLAND_EVENTS - 1)
+    events = DisplayEvents(glib, 9, arrived)
+    assert [(priority, fd) for priority, fd, _ in glib.watches.values()] == [(WAYLAND_EVENTS, 9)]
+    glib.readable(9)
+    glib.readable(9)
+    glib.readable(9)
+    assert len(arrivals) == 3 and glib.watches, "a raising arrival keeps the watch"
+    events.stop()
+    events.stop()
+    assert not glib.watches
+
+
+def operations(change: int, light: float = 1.0) -> PictureOperations:
+    return PictureOperations("hdmi1", change, (1.0, 1.0, 1.0), light, 1.0, 1.0)
+
+
+def test_picture_operations_arriving_between_ticks_are_drawn_on_the_next_frame():
+    """A still photo is drawn once and not followed. A Live slider edit (new picture operations)
+    arrives as Display Host's event: the surface follows its frame clock again and the next frame
+    draws it, with no planning tick between; then it is not followed again. An event that changes
+    nothing installs no frame callback, so nothing runs per frame while no edit arrives."""
+    renderer, surface, area = frame_renderer()
+    renderer._frames = frames = Frames()
+    frames.sequence = None                          # no calibration trial drawn
+    frames.operations = operations(1)
+    renderer._display_events = DisplayEvents(renderer.GLib, 9, renderer._arrived)
+    start = time.monotonic()
+    renderer.present(composition(black("still", start=100, end=200), timebase=100 - start))
+    render(renderer, surface, area, start + .1)
+    assert renderer.GL.opacities == [1.0] and area.renders == 1
+    assert frames.picture_changes[-1] == 1
+    assert not area.callbacks, "a still picture is not followed"
+
+    renderer.GLib.readable(9)                       # an event that changes nothing on screen
+    assert not area.callbacks and not surface.follower.following and area.renders == 1
+
+    frames.operations = operations(2, light=.5)     # the owner moves a slider
+    renderer.GLib.readable(9)
+    assert surface.follower.following, "the edit wakes the frame clock"
+    render(renderer, surface, area, start + .1 + 2 / 60)
+    assert area.renders == 2 and renderer.GL.opacities == [1.0, 1.0]
+    assert frames.picture_changes[-1] == 2, "the tag names the edit the buffer shows"
+    assert not area.frame(start + .1 + 3 / 60) and not area.callbacks
+    renderer._render(area, None, surface)           # GTK repaints: nothing new is drawn
+    assert renderer.GL.opacities == [1.0, 1.0]
+
+    renderer.close()
+    assert not renderer.GLib.watches
