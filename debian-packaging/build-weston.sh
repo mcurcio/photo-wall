@@ -56,11 +56,11 @@ WESTON_IMAGE=$("$root/debian-packaging/build-container.sh" --revision "$commit" 
 mkdir -p "$output"
 output=$(cd "$output" && pwd)
 
-# 2. The patched build, as the caller, with no network.
-git -C "$root" archive --format=tar "$commit" debian-packaging/weston \
-	debian-packaging/snapshot.list debian-packaging/snapshot-epoch.sh scripts/weston_patch_check.py |
-	docker run --rm -i --platform "linux/$ARCHITECTURE" --network none \
-		--user "$(id -u):$(id -g)" --env HOME=/tmp --volume "$output:/out" "$WESTON_IMAGE" sh -ec '
+# 2. The patched build, with no network, as the caller under a name the container's passwd holds:
+#    Weston's Xwayland test starts an X server that admits only a named local user. The
+#    container starts as root only to add that entry, as build-repo.sh's package build does to
+#    install.
+build='
 	mkdir -p /tmp/tree /tmp/build
 	tar -x -C /tmp/tree
 	pins=/tmp/tree/debian-packaging
@@ -87,4 +87,12 @@ git -C "$root" archive --format=tar "$commit" debian-packaging/weston \
 	for package in weston libweston-14-0 libweston-14-dev; do
 		cp "../${package}_${WESTON_LOCAL_VERSION}_arm64.deb" /out/
 	done'
+git -C "$root" archive --format=tar "$commit" debian-packaging/weston \
+	debian-packaging/snapshot.list debian-packaging/snapshot-epoch.sh scripts/weston_patch_check.py |
+	docker run --rm -i --platform "linux/$ARCHITECTURE" --network none --env HOME=/tmp \
+		--volume "$output:/out" "$WESTON_IMAGE" sh -ec '
+	getent passwd "$1" >/dev/null || echo "builder:x:$1:$2::/tmp:/bin/sh" >> /etc/passwd
+	getent group "$2" >/dev/null || echo "builder:x:$2:" >> /etc/group
+	exec setpriv --reuid="$1" --regid="$2" --clear-groups sh -ec "$3"' \
+		sh "$(id -u)" "$(id -g)" "$build"
 echo "$output"
