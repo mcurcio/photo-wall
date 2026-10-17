@@ -1,8 +1,10 @@
 /* App-private bridge; output facts still come from the base shell. MIT. */
+#define _POSIX_C_SOURCE 200809L  /* CLOCK_MONOTONIC under c11 */
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <wayland-client.h>
 #include "photo-wall-frame-client.h"
 #include "presentation-time-client.h"
@@ -13,6 +15,9 @@
 struct grant { char output[97], id[37], frame[97], trial[4097]; uint64_t generation, revision; uint32_t state; };
 /* The newest `picture` operations per Output (frame protocol v4), kept verbatim. */
 struct picture { char output[97], operations[MAX_OPERATIONS + 1]; };
+/* The compositor's newest word per surface (pacing, player/pacing.py): the tag sequence it answers,
+ * 1 presented or 2 discarded, and for a presented one its time and the Output's refresh. */
+struct word { struct wl_surface *surface; uint64_t sequence; int64_t at_ns; uint32_t refresh_ns, kind; };
 struct pw_frame_client {
     struct wl_display *display;
     struct wl_event_queue *queue;
@@ -20,6 +25,12 @@ struct pw_frame_client {
     struct pw_frame_manager_v1 *manager;
     struct wp_presentation *presentation;
     struct wp_presentation_feedback *feedback[MAX_FEEDBACK];
+    struct wl_surface *feedback_surface[MAX_FEEDBACK];
+    uint64_t feedback_sequence[MAX_FEEDBACK];
+    uint64_t tagged;                       /* the newest tag's sequence; 0: none */
+    uint32_t clock;                        /* wp_presentation's clock_id */
+    bool clock_known;
+    struct word words[MAX_OUTPUTS * 2];
     uint32_t manager_name, presentation_name;
     bool lost;
     uint32_t version;
@@ -27,7 +38,9 @@ struct pw_frame_client {
     struct picture pictures[MAX_OUTPUTS];
 };
 static void clock_id(void *data, struct wp_presentation *presentation, uint32_t id) {
-    (void)data; (void)presentation; (void)id;
+    (void)presentation;
+    struct pw_frame_client *c = data;
+    c->clock = id; c->clock_known = true;
 }
 static const struct wp_presentation_listener presentation_listener = {.clock_id = clock_id};
 static void grant_event(void *data, struct pw_frame_manager_v1 *manager,
@@ -94,8 +107,28 @@ static void global_remove(void *data, struct wl_registry *registry, uint32_t nam
     if (name == c->manager_name || name == c->presentation_name) c->lost = true;
 }
 static const struct wl_registry_listener registry_listener = {.global = global, .global_remove = global_remove};
-static void retire(struct pw_frame_client *c, struct wp_presentation_feedback *f) {
-    for (int i = 0; i < MAX_FEEDBACK; i++) if (c->feedback[i] == f) c->feedback[i] = NULL;
+/* Keep the word for the feedback's surface when it answers a newer tag than the word held. A
+ * surface new to a full table takes the oldest word's entry (the lowest sequence: tag sequences
+ * rise across surfaces): a remap gives the Output a new wl_surface and the old one answers no more,
+ * so the table never fills for good. */
+static void retire(struct pw_frame_client *c, struct wp_presentation_feedback *f, uint32_t kind,
+                   int64_t at_ns, uint32_t refresh_ns) {
+    for (int i = 0; i < MAX_FEEDBACK; i++) if (c->feedback[i] == f) {
+        struct wl_surface *surface = c->feedback_surface[i];
+        uint64_t sequence = c->feedback_sequence[i];
+        struct word *w = NULL;
+        for (int j = 0; j < MAX_OUTPUTS * 2 && !w; j++) if (c->words[j].surface == surface) w = &c->words[j];
+        for (int j = 0; j < MAX_OUTPUTS * 2 && !w; j++) if (!c->words[j].surface) w = &c->words[j];
+        if (!w) {
+            w = &c->words[0];
+            for (int j = 1; j < MAX_OUTPUTS * 2; j++) if (c->words[j].sequence < w->sequence) w = &c->words[j];
+            *w = (struct word){0};
+        }
+        if (w && sequence > w->sequence)
+            *w = (struct word){.surface = surface, .sequence = sequence, .at_ns = at_ns,
+                               .refresh_ns = refresh_ns, .kind = kind};
+        c->feedback[i] = NULL; c->feedback_surface[i] = NULL; c->feedback_sequence[i] = 0;
+    }
     wp_presentation_feedback_destroy(f);
 }
 static void sync_output(void *data, struct wp_presentation_feedback *f, struct wl_output *o) {
@@ -104,10 +137,14 @@ static void sync_output(void *data, struct wp_presentation_feedback *f, struct w
 static void presented(void *data, struct wp_presentation_feedback *f,
     uint32_t hi, uint32_t lo, uint32_t ns, uint32_t refresh,
     uint32_t seq_hi, uint32_t seq_lo, uint32_t flags) {
-    (void)hi; (void)lo; (void)ns; (void)refresh; (void)seq_hi; (void)seq_lo; (void)flags;
-    retire(data, f); /* deliberately no app-to-Central evidence callback */
+    (void)seq_hi; (void)seq_lo; (void)flags;
+    struct pw_frame_client *c = data;
+    /* A time on the Player's own clock only: any other clock is not comparable (-1). */
+    int64_t at = c->clock_known && c->clock == CLOCK_MONOTONIC ?
+        (int64_t)((((uint64_t)hi << 32) | lo) * 1000000000ull + ns) : -1;
+    retire(c, f, 1, at, refresh); /* the Player's pacing only; never app-to-Central evidence */
 }
-static void discarded(void *data, struct wp_presentation_feedback *f) { retire(data, f); }
+static void discarded(void *data, struct wp_presentation_feedback *f) { retire(data, f, 2, -1, 0); }
 static const struct wp_presentation_feedback_listener feedback_listener = {
     .sync_output = sync_output, .presented = presented, .discarded = discarded
 };
@@ -161,6 +198,8 @@ static int tag_commit(struct pw_frame_client *c, struct wl_surface *surface,
     struct wp_presentation_feedback *f = wp_presentation_feedback(c->presentation, surface);
     if (!f) return -1;
     c->feedback[slot] = f;
+    c->feedback_surface[slot] = surface;
+    c->feedback_sequence[slot] = ++c->tagged;
     wp_presentation_feedback_add_listener(f, &feedback_listener, c);
     return 0;
 }
@@ -222,5 +261,16 @@ int pw_frame_client_overlay(struct pw_frame_client *c, struct wl_surface *surfac
     const char *grant, const char *tag, const char *primitives) {
     if (!c || !surface || !grant || !tag || !primitives || strlen(primitives) > 512 || c->lost) return -1;
     pw_frame_manager_v1_overlay(c->manager, surface, grant, tag, primitives);
+    return 0;
+}
+
+uint64_t pw_frame_client_tagged(struct pw_frame_client *c) { return c ? c->tagged : 0; }
+int pw_frame_client_presentation(struct pw_frame_client *c, struct wl_surface *surface,
+    uint64_t *sequence, int64_t *at_ns, uint32_t *refresh_ns) {
+    if (!c || !surface || !sequence || !at_ns || !refresh_ns || pw_frame_client_dispatch(c) < 0) return -1;
+    for (int i = 0; i < MAX_OUTPUTS * 2; i++) if (c->words[i].surface == surface) {
+        *sequence = c->words[i].sequence; *at_ns = c->words[i].at_ns; *refresh_ns = c->words[i].refresh_ns;
+        return (int)c->words[i].kind;
+    }
     return 0;
 }

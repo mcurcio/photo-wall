@@ -8,9 +8,9 @@ at /smoke. It starts its own headless Weston (kiosk shell, no photo-wall shell o
 2. Control dispatch answers on a saturated loop: a priority-0 source costing 40 ms every
    33 ms, plus GDK-priority paint, never starves it (p99 under 100 ms). On origin/main's
    default-idle dispatcher this answers nothing (G8 probe rows C and D).
-3. A static photo is not redrawn every tick: after it is presented, NativeRenderer paints it
-   at most twice a second while present() is still called every 33 ms, and every present()
-   meanwhile reads "presented" (the acknowledgment freshness covers the renewal).
+3. A still photo is never redrawn (render only what reaches the screen, 2026-10-17): after it is
+   presented, NativeRenderer runs no render at all on real GTK and GL while present() is still
+   called every 33 ms, and every present() meanwhile reads "presented" (a state, no renewal).
 4. A display socket nobody reads never starves GDK's paint: while GDK pauses its events between
    a frame's flush and its paint, the socket stays readable; DisplayEvents' watch, re-armed only
    behind the paint, lets the paint run (a level-triggered watch at GDK's event priority starved
@@ -199,8 +199,8 @@ def static_photo_render_rate(seconds=6.0):
         assert len(after) >= seconds * 15, ("present_not_called_per_tick", len(after))
         assert all(status == "presented" for status in after), (
             "presented_lapsed", sorted(set(after)))
-        assert len(window) <= 2 * seconds, ("static_photo_redrawn", len(window))
-        print("PASS static_photo_is_not_redrawn_every_tick", flush=True)
+        assert not window, ("still_photo_redrawn", len(window))
+        print("PASS still_photo_is_never_redrawn", flush=True)
         renderer.close()
     finally:
         weston.terminate()

@@ -330,3 +330,16 @@ def test_the_operator_routes_begin_at_a_draft_and_renew(registry):
         plain = client.post(path, headers=headers)
         assert plain.status_code == 200, plain.text
         assert plain.json()["calibration"]["fit"] == saved["calibration"]["fit"]
+
+
+def test_a_trial_begins_on_a_still_output_whose_receipt_is_old(registry):
+    """A still picture is presented once, so the admitted Output's newest receipt is a minute old
+    when the owner starts a calibration trial: the admitted surface and a current exchange say the
+    app holds the Output, and the trial begins and is handed over on the next exchange."""
+    trials, request, exchange = setup_trial(registry)
+    request = replace(request, request_id=uuid4(), sampled_boottime_ms=61_400)
+    exchange(request)
+    row = trials.begin("node-f0")
+    candidate = parse_trial(exchange(replace(request, request_id=uuid4(),
+                                             sampled_boottime_ms=61_500)).trial)
+    assert candidate.sequence == 1 and candidate.candidate_sha256 == row["candidate_sha256"]

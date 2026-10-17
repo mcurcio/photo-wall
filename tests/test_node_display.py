@@ -232,9 +232,51 @@ def test_promoted_revision_unbind_before_upload_uses_exact_issued_role(registry,
         exchange(replace(request, receipt=None))
     with pytest.raises(NodeControlError, match="withdrawal_previous_unknown"):
         exchange(replace(request, receipt=replace(receipt, sampled_boottime_ms=1200)))
+    with pytest.raises(NodeControlError, match="withdrawal_previous_unknown"):
+        exchange(replace(request, sampled_boottime_ms=1400 + 5000))   # the receipt no longer recent
     decision = exchange(request)
     assert decision.operation == "withdraw" and decision.surface == promoted
     assert decision.runtime_fence is not None
     with registry.db.transaction() as conn:
         assert conn.execute("SELECT count(*) n FROM node_display_handoffs").fetchone()["n"] == 0
         assert conn.execute("SELECT count(*) n FROM node_display_withdrawals").fetchone()["n"] == 0
+
+
+def test_a_still_outputs_old_receipt_stands_and_a_revision_is_still_decided(registry):
+    """A still picture is presented once: its receipt then ages while the shell's lease (kept by
+    the app's answers to its pings) says the app still holds the Output. An exchange carrying a
+    receipt a minute old is answered, here with a configuration change's revision; only a receipt
+    sampled after its own request is out of order (the contract refuses it)."""
+    from central.transaction_locks import acquire_runtime_locks
+    from contracts.models import Calibration, CornersFit, Mat
+
+    coordinator, _, _, sessions, claims, grants, facts, _, _ = rig(registry)
+    fact, grant, claim = facts[0], grants["display_host"], claims["display_host"]
+    old = Surface(fact.output, fact.process, fact.app_epoch, fact.binding_generation,
+                  fact.config_revision, fact.frame_id)
+    display = NodeDisplay(sessions, runtime=coordinator)
+
+    def exchange(request):
+        return parse_display_decision(display.exchange(claim.session_id, claim.credential,
+                                                       encode_display_exchange(request)))
+
+    receipt = DisplayReceipt(old, uuid4(), "weston-100", "still", 1500)
+    request = DisplayExchange(grant.producer, uuid4(), 61_500, fact.output, True, admitted=old,
+                              receipt=receipt)
+    assert exchange(request).operation == "retain"
+    with registry.db.transaction() as conn:
+        acquire_runtime_locks(conn)
+        player_id = conn.execute(
+            "SELECT player_id FROM bindings WHERE frame_id='node-f0'").fetchone()["player_id"]
+        registry.commit_calibration_trial_in(
+            conn, frame_id="node-f0", player_id=player_id, authority_epoch=1,
+            output_id=old.output.output_id, binding_generation=old.binding_generation,
+            config_revision=old.config_revision, calibration_revision=2,
+            calibration=Calibration(fit=CornersFit(rotation=180)), mat=Mat(), session_id=None,
+            restored_from=None)
+    decision = exchange(replace(request, request_id=uuid4(), sampled_boottime_ms=62_500))
+    assert decision.operation == "revision"
+    assert decision.surface.config_revision > old.config_revision
+    with pytest.raises(ValueError, match="display_exchange_receipt"):
+        replace(request, sampled_boottime_ms=63_500,
+                receipt=replace(receipt, sampled_boottime_ms=63_600))
