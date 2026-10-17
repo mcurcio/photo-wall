@@ -53,6 +53,14 @@ def prepared(drawn: FitKey | None, now: FitKey, done: bool) -> bool:
     return drawn is not None and drawn.decode == now.decode and done
 
 
+def redrawn_by_frames(drawn: FitKey | None, now: FitKey, on_screen: bool) -> bool:
+    """Whether the frames, not the planning tick, draw a layer's fitted picture again when it
+    changes: the layer is on screen and its fitted picture is of this decode, so what changed is an
+    edit (a Position trial, a resize) or a video's next sample, drawn on the next frame as any edit
+    is. Another decode (a seek, a new decoder) is prepared again like a layer still to come."""
+    return on_screen and drawn is not None and drawn.decode == now.decode
+
+
 def shown_at_once(drawn: FitKey | None, now: FitKey, done: bool) -> bool:
     """Whether a frame may show a layer that is not on screen yet (its first frame, such as a
     fade's first): its fitted picture is drawn for this picture and finished. Otherwise the frame
