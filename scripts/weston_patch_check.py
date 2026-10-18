@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
-"""The Weston build's refusal (docs/module-debian-packaging.md, "Weston"): run by
+"""The Weston build's tripwire (docs/module-debian-packaging.md, "Weston"): run by
 debian-packaging/build-weston.sh over the patched source tree, before dpkg-buildpackage, it refuses
-a libweston DRM backend that can still give two KMS planes one bit of a plane mask.
+a libweston DRM backend that visibly still gives two KMS planes one bit of a plane mask.
 
-- Narrow mask: a `plane_mask` declared as anything but uint64_t.
-- Narrow bit: a shift by a `plane_idx` whose left operand is not a 64-bit one (`UINT64_C(1)`,
+- Narrow mask: a `*plane_mask` declared as anything but uint64_t.
+- Narrow bit: a shift by a `*plane_idx` whose left operand is not a 64-bit one (`UINT64_C(1)`,
   `1ULL`), such as `1 << plane->plane_idx`.
-- No guard: `DRM_PLANE_MASK_BITS` is not defined as 64 in drm-internal.h, or drm.c (where the
-  hardware planes are indexed) or drm-virtual.c (where a virtual output's plane is) does not
-  refuse an index of DRM_PLANE_MASK_BITS or more.
+- No guard: drm-internal.h does not define `DRM_PLANE_MASK_BITS` as 64 or does not
+  static_assert drm_fb::plane_mask against it, or drm.c (where the hardware planes are indexed)
+  or drm-virtual.c (where a virtual output's plane is) compares no plane count or index with it.
 
-A Weston bump re-applies debian-packaging/weston/patches/ to new code; a new mask or shift it
-missed fails the build here instead of aliasing planes on a Node.
+It reads text, so it is a tripwire for a Weston bump, not the guarantee: a mask under another
+name, a BIT() macro or a guard that compares but skips nothing passes it. The guarantees are the
+patch's own: every bit comes from drm_plane_mask_bit(), which asserts the index fits, and a
+static_assert holds drm_fb::plane_mask to DRM_PLANE_MASK_BITS. Weston's DRM tests need a KMS
+device, so no automated tier runs the guard's branches; the Pi bench check does
+(docs/module-debian-packaging.md, "Weston").
 
 Build tooling: stdlib only, so the build container's python3 runs it (`python3 -I -B`).
 """
@@ -30,9 +34,11 @@ MASK_DECLARATION: Final = re.compile(
     r"u?int(?:8|16|32|64)_t|uint))\s+(\w*plane_mask)\b\s*[;=,)]")
 SHIFT: Final = re.compile(r"(\(\(uint64_t\)\s*1\)|\(uint64_t\)\s*1|UINT64_C\(1\)|[\w.]+)\s*<<\s*"
                           r"\(?\s*([\w>.-]*plane_idx)\b")
-GUARD: Final = ">= DRM_PLANE_MASK_BITS"
+GUARD: Final = re.compile(r"[<>]=?\s*DRM_PLANE_MASK_BITS\b")
 GUARDED: Final = ("drm.c", "drm-virtual.c")
 DEFINITION: Final = re.compile(r"^#define\s+DRM_PLANE_MASK_BITS\s+64\s*$", re.MULTILINE)
+WIDTH_ASSERT: Final = re.compile(
+    r"static_assert\(\s*sizeof\(.*->plane_mask\).*DRM_PLANE_MASK_BITS")
 
 
 def _sources(tree: Path) -> list[Path]:
@@ -60,13 +66,17 @@ def findings(tree: Path) -> list[str]:
                 line = text.count("\n", 0, match.start()) + 1
                 found.append(f"{relative}:{line}: narrow bit: {one} << {match.group(2)}")
     header = tree / BACKEND / "drm-internal.h"
-    if not header.is_file() or not DEFINITION.search(header.read_text(errors="replace")):
+    header_text = header.read_text(errors="replace") if header.is_file() else ""
+    if not DEFINITION.search(header_text):
         found.append(f"{BACKEND / 'drm-internal.h'}: no guard: DRM_PLANE_MASK_BITS is not 64")
+    if not WIDTH_ASSERT.search(header_text):
+        found.append(f"{BACKEND / 'drm-internal.h'}: no guard: drm_fb::plane_mask's width is "
+                     "not static_asserted against DRM_PLANE_MASK_BITS")
     for name in GUARDED:
         path = tree / BACKEND / name
-        if not path.is_file() or GUARD not in path.read_text(errors="replace"):
-            found.append(f"{BACKEND / name}: no guard: no index of DRM_PLANE_MASK_BITS or more "
-                         "is refused")
+        if not path.is_file() or not GUARD.search(path.read_text(errors="replace")):
+            found.append(f"{BACKEND / name}: no guard: nothing is compared with "
+                         "DRM_PLANE_MASK_BITS")
     return found
 
 
