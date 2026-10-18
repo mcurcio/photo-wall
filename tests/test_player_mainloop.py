@@ -13,6 +13,7 @@ import pytest
 from player.mainloop import (
     BUS,
     CONTROL,
+    FRAME,
     GDK_PRIORITY_REDRAW,
     MIN_GAP_MS,
     TICK,
@@ -174,3 +175,9 @@ def test_a_bus_watch_runs_at_tick_priority_never_below_paint():
     bus = Bus()
     watch_bus(bus)
     assert bus.priorities == [BUS] and BUS == TICK
+
+
+def test_the_frame_turns_run_below_control_and_above_the_tick():
+    """A fade's next commit never waits behind a planning tick ready in the same iteration, and a
+    control handoff still runs first (render redesign S3, `FrameLoop`)."""
+    assert CONTROL < FRAME < TICK

@@ -32,12 +32,20 @@ Rules this module owns (one home each):
   operations, the Frame's lights, its LUT's generation); a playing video on each new decoded
   frame while it is seen (in its screen's last commit), into the first of its VIDEO_TARGETS
   targets the screen has released. Never a fade: a fade is a strength.
-- **Finishing never holds a due commit**: a picture goes to the screen only once the GPU has
-  finished it (its fence signalled, player/gpu.py), never waited for; a video's newer frame
-  meanwhile leaves its last finished one on screen. A still is finished in steps (its decode taken,
-  a band of BAND_BYTES of its rows uploaded, its draw), at most one step every STEP_GAP over every
-  Output, so no loop turn carries more than one; and a still not needed before a fade under way on
-  any Output is over (it starts after that fade ends) is not prepared during it.
+- **Finishing is off the present path** (s3-page decision 4): `present`, `frame` and `prepare` never
+  draw, upload, import or fence; they commit and report only pictures the GPU has finished (a fence
+  signalled, player/gpu.py: asked, never waited for), so no GPU work sits between a due commit and
+  the screen, and a video's newer frame meanwhile leaves its last finished one on screen. A video's
+  decoder callback only records its newest frame. `finish`, run after the turn's commits, does the
+  work owed, in this order: each seen started video's newest waiting frame (or a prepared video's
+  first) drawn into a released target and fenced, one draw per video per call; every pattern ground
+  and black picture owed, drawn and fenced; at most one still step over every Output (its decode
+  taken, a band of BAND_BYTES of its rows uploaded, or its draw) once STEP_GAP has passed since the
+  last, seen layers first, then by start. A still not needed before a fade under way on any Output
+  is over (it starts after that fade ends) takes no step during it.
+- **The held composition**: each Output's newest composition given to `present` is held, and `frame`
+  presents it again at each frame time (a fade's strengths, a newly finished picture, a trial's edit
+  reach the screen with no planning tick) until all its layers are released or the renderer closes.
 - **The screen's ground**: every commit shows, beneath its planes, the Output's black picture laid
   out for the whole screen (the one black picture of that size, shared with black layers), so
   the display controller can always scan out what the planes leave uncovered and the compositor
@@ -90,7 +98,7 @@ from player.decode import StillPicture
 from player.fit_pass import DrawTarget, FitRequest, FitSource, target_size
 from player.geometry import FrameLights, picture_board, picture_lights
 from player.gpu import DmabufFrame, Target
-from player.look import fade_end, look, moments
+from player.look import fade_end, look, moments, next_change
 from player.luts import LutSource
 from player.pacing import DEFAULT_REFRESH, TOLERANCE, FramePacer, Word
 from player.pattern_pass import PatternRequest
@@ -212,6 +220,14 @@ _PENDING: Final = PresentationResult("pending")
 _FAILED: Final = PresentationResult("failed", "decode")
 
 
+def _expiry(trial: AppliedTrial, now: float) -> float:
+    """When a drawn Position trial runs out, on the renderer's clock (`now` read from it): its expiry
+    is on CLOCK_BOOTTIME (player/plane_screen.py), read against it here at once."""
+    boottime = getattr(time, "CLOCK_BOOTTIME", None)
+    clock_now = time.monotonic() if boottime is None else time.clock_gettime(boottime)
+    return now + trial.candidate.expires_boottime_ms / 1000 - clock_now
+
+
 @dataclass
 class _Picture:
     """One target the fit pass drew into, the compositor's buffer of it, and the GPU's fence after
@@ -276,7 +292,8 @@ class _Layer:
     for `drawing_key` (a video's, of the frame `drawing_frame`); `held` is a video's frame in
     `picture` (kept, so a new key draws it again), `waiting` a newer one not drawn yet, `started`
     whether a present has played it. `serial` counts the pictures finished (module rule, Nothing
-    changed)."""
+    changed); `want` is the setting the last prepare or present asked it for, which `finish`
+    finishes it for."""
     local: LocalLayer
     binding: OutputBinding
     still: Still | None = None
@@ -295,25 +312,29 @@ class _Layer:
     started: bool = False
     serial: int = 0
     failed: bool = False
+    want: _Setting | None = None
 
 
 @dataclass
 class _Output:
     """One screen's commits: its pacer, the last answer, the pictures and the layers its last
-    commit shows, and what that commit showed (module rule, Nothing changed)."""
+    commit shows, and what that commit showed (module rule, Nothing changed); when its last commit
+    was made, and when the trial drawn by the last present runs out (on the renderer's clock)."""
     pacer: FramePacer = field(default_factory=FramePacer)
     last: PresentationResult = _PENDING
     shown: frozenset[int] = frozenset()
     seen: frozenset[str] = frozenset()
     committed: tuple | None = None
+    submitted: float = -float("inf")
+    expires: float | None = None
 
 
 class PlaneRenderer:
     """The new path's renderer (module rules). Every method on one owning thread (the Player's GLib
     main loop), the thread the Gpu's context is current on. The VideoFactory hands each video's
-    `on_frame` to that thread (player/decode.py calls it on a streaming thread). While
-    `finishing`, the caller presents (and prepares) again on the next refresh: a picture becomes
-    showable when the GPU finishes it, which no event announces."""
+    `on_frame` to that thread (player/decode.py calls it on a streaming thread). The frame loop
+    (player/mainloop.py `FrameLoop`) calls `frame`, then `finish`, on each turn, and turns again at
+    `due`: a picture becomes showable when the GPU finishes it, which no event announces."""
 
     def __init__(self, screens: Screens, device: Device, fitter: Fitter, patterns: Patterns, luts: LutSource, *,
                  stills: StillFactory, videos: VideoFactory, budget: ControllerBudget = PI5,
@@ -330,7 +351,11 @@ class PlaneRenderer:
         self._grounds: dict[str, tuple[tuple, _Picture | None]] = {}
         self._layers: dict[str, _Layer] = {}
         self._blacks: dict[tuple[str, tuple[int, int]], _Picture] = {}
+        self._owed_grounds: dict[str, tuple[tuple, PatternRequest, tuple[int, int]]] = {}  # for `finish`
+        self._owed_blacks: set[tuple[str, tuple[int, int]]] = set()                     # for `finish`
+        self._refused_blacks: set[tuple[str, tuple[int, int]]] = set()  # answered "failed" once, then owed
         self._retired: list[_Picture] = []          # freed once no commit shows them
+        self._held: dict[str, OutputComposition] = {}   # Output -> its held composition (module rule)
         self._outputs: dict[str, _Output] = {}
         self._newest: dict[str, Composition] = {}   # every Output's newest composition, for the budget
         self._fades: dict[str, tuple[float, float]] = {}    # Output -> its fade's end (plan, monotonic)
@@ -338,10 +363,17 @@ class PlaneRenderer:
 
     @property
     def finishing(self) -> bool:
-        """Whether a picture is drawn and not finished yet (its fence pending) or a still is part
-        way through its steps (module rule, Finishing never holds a due commit)."""
-        return (any(entry.drawing is not None or (entry.source is not None and entry.picture is None)
-                    for entry in self._layers.values())
+        """Whether a picture is drawn and not finished yet (its fence pending, or not yet taken up),
+        a still is part way through its steps, or a ground is owed (module rule, Finishing is off
+        the present path)."""
+        return (self._drawn_pending()
+                or any(entry.source is not None and entry.picture is None for entry in self._layers.values()))
+
+    def _drawn_pending(self) -> bool:
+        """A picture drawn that a turn must still take up (its fence pending, or a layer's draw not
+        yet made its picture), or a ground owed to `finish`."""
+        return (bool(self._owed_blacks or self._owed_grounds)
+                or any(entry.drawing is not None for entry in self._layers.values())
                 or any(picture.fence for picture in self._blacks.values())
                 or any(picture is not None and picture.fence for _, picture in self._grounds.values()))
 
@@ -387,26 +419,70 @@ class PlaneRenderer:
         """Present again every Output's held composition (the newest `present` was given) at this
         frame time, so a fade's strengths, a finished picture or a trial's edit reach the screen with
         no planning tick (render redesign S3, bead B5). Commits only what changed, as `present`;
-        never draws."""
-        raise NotImplementedError("render-planes S3 bead B5")
+        never draws. Its answers are the renderer's own: the executor hears at its next present."""
+        for composition in list(self._held.values()):
+            self._present(composition)
 
     def finish(self) -> None:
-        """The GPU work owed, after this turn's commits (render redesign S3, bead B5: finishing is
-        off the present path): each seen playing video's newest waiting frame drawn into a released
-        target and fenced; at most one still step over every Output (STEP_GAP); a pattern or black
-        ground drawn and fenced. Never commits and never waits for a fence."""
-        raise NotImplementedError("render-planes S3 bead B5")
+        """The GPU work owed, after this turn's commits (module rule, Finishing is off the present
+        path): each seen started video's newest waiting frame drawn into a released target and
+        fenced; every pattern ground and black picture owed, drawn and fenced; at most one still step
+        over every Output (STEP_GAP). Never commits and never waits for a fence."""
+        for assignment_id, entry in list(self._layers.items()):
+            if entry.failed or entry.want is None:
+                continue
+            if entry.video is not None:
+                self._draw_video(assignment_id, entry)
+            elif entry.drawing is not None:
+                self._still_ready(entry, entry.want)    # a finished draw taken up: nothing more owed
+        for output_id, (key, request, size) in list(self._owed_grounds.items()):
+            try:
+                picture = self._draw(lambda target, request=request: self._patterns.draw(request, target), size,
+                                     opaque=True)
+            except (RuntimeError, ValueError):      # FitFailed, a Gpu or compositor refusal
+                picture = None
+            self._grounds[output_id] = (key, picture)
+        self._owed_grounds.clear()
+        for owed in sorted(self._owed_blacks):
+            try:
+                self._blacks[owed] = self._draw(self._fitter.black, owed[1], opaque=True)
+            except (RuntimeError, ValueError):
+                self._refused_blacks.add(owed)
+        self._owed_blacks.clear()
+        if self._may_step():
+            for entry in self._owed_stills():
+                if self._still_step(entry):
+                    break
 
     def due(self) -> float | None:
         """When `frame` and `finish` are next owed with no event to announce it (monotonic seconds;
-        render redesign S3, bead B5): now while `finishing` or a video frame waits to be drawn; else
-        the soonest player/look.py `next_change` of a held composition (a trial's expiry included);
-        None when nothing changes until an event."""
-        raise NotImplementedError("render-planes S3 bead B5")
+        render redesign S3, bead B5): now while a fence is pending, a drawn picture waits to be taken
+        up, a ground is owed or a video frame waits to be drawn into a free target; the time the
+        next still step may be taken while a still is owed one (after the fade it waits for, module
+        rule); the soonest player/look.py `next_change` of a held composition (a trial's expiry
+        included), though a change owed while that screen's last commit is unanswered is announced
+        by the answer (the compositor speaks: the frame loop's read), so it is due only once that
+        commit is overdue; None when nothing changes until an event."""
+        now = self._clock()
+        if self._drawn_pending() or any(self._video_owed(assignment_id, entry)
+                                        for assignment_id, entry in self._layers.items()):
+            return now
+        times = [max(now, self._stepped + STEP_GAP * (1 - TOLERANCE), self._deferred_until(entry.local))
+                 for entry in self._owed_stills()]
+        for output_id, composition in self._held.items():
+            state = self._outputs.get(output_id)
+            expires = None if state is None else state.expires
+            change = next_change(composition, now, expires)
+            if change is None:
+                continue
+            if state is not None and state.pacer.in_flight:
+                change = max(change, state.submitted + state.pacer.overdue)
+            times.append(max(now, change))
+        return min(times, default=None)
 
     def prepare(self, local: LocalLayer, binding: OutputBinding) -> PrepareResult:
-        """Decode `local` and finish its picture for `binding`'s Frame as it is drawn now (module
-        rules): "prepared" once finished, "pending" while decoding or finishing (or before the
+        """Decode `local` and ask `finish` for its picture for `binding`'s Frame as it is drawn now
+        (module rules): "prepared" once finished, "pending" while decoding or finishing (or before the
         Output is there, while its trial is refused, or while a fade it is not needed before is
         under way), "failed" ("decode") when its media cannot be decoded or drawn, or the drawn
         Position is not a rectangle on the screen. A black layer is prepared once its black picture
@@ -418,7 +494,7 @@ class PlaneRenderer:
             return PrepareResult("failed", "decode")
         if self._deferred(local):
             return PrepareResult("pending")
-        picture = self._finish(local, binding, setting)
+        picture = self._ready(local, binding, setting)
         if picture == "failed":
             return PrepareResult("failed", "decode")
         return PrepareResult("pending" if picture == "pending" else "prepared")
@@ -429,7 +505,12 @@ class PlaneRenderer:
         the controller budget with every other Output's last commit (module rules, Outcomes). While
         the screen's last commit has no word from the compositor (player/pacing.py) nothing is
         committed and the answer is the last commit's; a present that shows what the last commit
-        shows commits nothing either."""
+        shows commits nothing either. `composition` is held (module rule) for `frame`."""
+        self._held[composition.binding.output_id] = composition
+        return self._present(composition)
+
+    def _present(self, composition: OutputComposition) -> PresentationResult:
+        """`present` of `composition`, not held again."""
         output_id = composition.binding.output_id
         now = self._clock()
         state = self._outputs.setdefault(output_id, _Output())
@@ -446,6 +527,7 @@ class PlaneRenderer:
             return _FAILED
         if setting == "gone" or setting == "failed":
             return _FAILED
+        state.expires = None if setting.drawn.trial is None else _expiry(setting.drawn.trial, now)
         ground = self._black(output_id, setting.ground)
         if ground == "failed":
             return _FAILED
@@ -477,7 +559,7 @@ class PlaneRenderer:
             if ground == "pending":
                 return _PENDING                     # the screen keeps its last commit
         for plane in composed.planes:
-            picture = self._finish(plane.layer, composition.binding, setting, live=True)
+            picture = self._ready(plane.layer, composition.binding, setting, live=True)
             if picture == "failed":
                 return _FAILED
             if picture == "pending":
@@ -494,6 +576,7 @@ class PlaneRenderer:
         if not isinstance(sequence, int):
             return _FAILED
         state.pacer.submitted(sequence, now)
+        state.submitted = now
         state.shown = frozenset([*(picture.handle for picture in pictures.values()),
                                  *(() if ground is None else (ground.handle,))])
         state.seen = frozenset(pictures)
@@ -505,7 +588,16 @@ class PlaneRenderer:
         return state.last
 
     def release(self, assignment_id: str) -> None:
-        """Drop the layer's decode, targets and compositor buffers once no commit shows them."""
+        """Drop the layer's decode, targets and compositor buffers once no commit shows them, and
+        the layer from the held compositions (one with no layer left is no longer held)."""
+        for output_id, held in list(self._held.items()):
+            kept = tuple(local for local in held.layers if local.layer.assignment_id != assignment_id)
+            if len(kept) == len(held.layers):
+                continue
+            if kept:
+                self._held[output_id] = replace(held, layers=kept)
+            else:
+                del self._held[output_id]
         entry = self._layers.pop(assignment_id, None)
         if entry is None:
             return
@@ -535,8 +627,11 @@ class PlaneRenderer:
             self._free(picture)
         self._retired.clear()
         self._blacks.clear()
+        self._owed_blacks.clear()
+        self._refused_blacks.clear()
         self._outputs.clear()
         self._newest.clear()
+        self._held.clear()
 
     def _drawn(self, composition: OutputComposition, grant: FrameGrant | None) -> _Drawn:
         """The Position `composition`'s Frame is drawn with now (module rule): the trial
@@ -616,38 +711,40 @@ class PlaneRenderer:
 
     def _pattern(self, output_id: str, request: PatternRequest,
                  setting: _Setting) -> ScreenPicture | Literal["pending", "failed"]:
-        """The Output's pattern ground for `request` (module rule): drawn when the request (or the
-        LUTs' generation) changed since the last, "pending" until the GPU finished it; "failed"
-        while the pass, the Gpu or the compositor refuses this request."""
+        """The Output's pattern ground for `request` (module rule): owed to `finish` when the request
+        (or the LUTs' generation) changed since the last, "pending" until the GPU finished it;
+        "failed" while the pass, the Gpu or the compositor refuses this request."""
         key = (request, setting.generation)
         held = self._grounds.get(output_id)
         if held is None or held[0] != key:
             self._forget_pattern(output_id)
-            try:
-                picture = self._draw(lambda target: self._patterns.draw(request, target), setting.ground,
-                                     opaque=True)
-            except (RuntimeError, ValueError):      # FitFailed, a Gpu or compositor refusal
-                picture = None
-            held = self._grounds[output_id] = (key, picture)
+            self._owed_grounds[output_id] = (key, request, setting.ground)
+            return "pending"
         picture = held[1]
         if picture is None:
             return "failed"
         return picture.shown if self._finished(picture) else "pending"
 
     def _forget_pattern(self, output_id: str) -> None:
-        """Retire the Output's pattern ground (freed once no commit shows it)."""
+        """Retire the Output's pattern ground (freed once no commit shows it); none is owed."""
+        self._owed_grounds.pop(output_id, None)
         held = self._grounds.pop(output_id, None)
         if held is not None and held[1] is not None:
             self._retired.append(held[1])
 
     def _deferred(self, local: LocalLayer) -> bool:
         """Whether `local` is a still not needed before a fade under way on some Output is over: it
-        starts after that fade ends (module rule, Finishing never holds a due commit)."""
+        starts after that fade ends (module rule, Finishing is off the present path)."""
+        return self._deferred_until(local) > self._clock()
+
+    def _deferred_until(self, local: LocalLayer) -> float:
+        """When the last fade `local` waits for (`_deferred`) is over; -inf when it waits for none."""
         variant = local.layer.variant
         if local.layer.presentation != "media" or variant is None or variant.duration is not None:
-            return False
+            return -float("inf")
         now = self._clock()
-        return any(until > now and local.layer.start > ends for ends, until in self._fades.values())
+        return max((until for ends, until in self._fades.values() if until > now and local.layer.start > ends),
+                   default=-float("inf"))
 
     def _shown(self, plane: Plane, pictures: Mapping[str, ScreenPicture]) -> tuple:
         """What `plane` shows (module rule, Nothing changed): its Frame and layer, its picture and
@@ -666,16 +763,18 @@ class PlaneRenderer:
         if not isinstance(sequence, int):
             return _FAILED
         state.pacer.submitted(sequence, now)
+        state.submitted = now
         state.shown = frozenset(() if ground is None else (ground.handle,))
         state.seen, state.committed = frozenset(), None
         self._sweep()
         state.last = _PENDING
         return _PENDING
 
-    def _finish(self, local: LocalLayer, binding: OutputBinding, setting: _Setting, *,
-                live: bool = False) -> ScreenPicture | Literal["pending", "failed"]:
-        """`local`'s picture for `setting` (module rule), its decode started when it has none.
-        `live`: for a present (a video starts, module rule), not a prepare."""
+    def _ready(self, local: LocalLayer, binding: OutputBinding, setting: _Setting, *,
+               live: bool = False) -> ScreenPicture | Literal["pending", "failed"]:
+        """`local`'s finished picture for `setting` (module rule), else "pending" with the picture
+        owed to `finish`; its decode started when it has none. `live`: for a present (a video
+        starts, module rule), not a prepare. No GPU work."""
         if local.layer.presentation == "black":
             return self._black(binding.output_id, setting.size)
         entry = self._layers.get(local.layer.assignment_id)
@@ -684,18 +783,18 @@ class PlaneRenderer:
         entry.binding = binding
         if entry.failed:
             return "failed"
-        try:
-            if entry.video is not None:
-                if live and not entry.started:
-                    entry.started = True            # it plays from where the layer is now
-                    entry.failed = not entry.video.seek(local.position)
-                    if entry.failed:
-                        return "failed"
-                return self._finish_video(entry, setting)
-            return self._finish_still(entry, setting)
-        except (RuntimeError, ValueError):          # FitFailed, a Gpu refusal, VideoRefused
-            entry.failed = True
-            return "failed"
+        entry.want = setting
+        if entry.video is None:
+            return self._still_ready(entry, setting)
+        if live and not entry.started:
+            entry.started = True                    # it plays from where the layer is now
+            try:
+                entry.failed = not entry.video.seek(local.position)
+            except (RuntimeError, ValueError):      # VideoRefused
+                entry.failed = True
+            if entry.failed:
+                return "failed"
+        return self._video_ready(entry, setting)
 
     def _decode(self, local: LocalLayer, binding: OutputBinding, live: bool) -> _Layer:
         entry = _Layer(local, binding, started=live)
@@ -726,11 +825,12 @@ class PlaneRenderer:
 
     def _may_step(self) -> bool:
         """Whether a still's finishing step may be taken now: none was within STEP_GAP (module
-        rule, Finishing never holds a due commit)."""
+        rule, Finishing is off the present path)."""
         return self._clock() - self._stepped >= STEP_GAP * (1 - TOLERANCE)
 
-    def _finish_still(self, entry: _Layer, setting: _Setting) -> ScreenPicture | Literal["pending", "failed"]:
-        """The still's finished picture for `setting`, else one step towards it (module rule)."""
+    def _still_ready(self, entry: _Layer, setting: _Setting) -> ScreenPicture | Literal["pending"]:
+        """The still's finished picture for `setting`, its finished draw taken up (one drawn for
+        what is no longer so retired); else "pending"."""
         key = self._key(entry, setting)
         if entry.drawing is not None:
             if entry.drawing_key != key:
@@ -743,42 +843,61 @@ class PlaneRenderer:
                 entry.serial += 1
         if entry.picture is not None and entry.key == key:
             return entry.picture.shown
-        if entry.drawing is not None or not self._may_step():
-            return "pending"
+        return "pending"
+
+    def _owed_stills(self) -> list[_Layer]:
+        """The stills owed a step for what they were last asked (module rule): seen layers first,
+        then by start; none drawing (its fence answers first) and none waiting for a fade."""
+        owed = [entry for entry in self._layers.values()
+                if entry.still is not None and not entry.failed and entry.want is not None and entry.drawing is None
+                and (entry.picture is None or entry.key != self._key(entry, entry.want))
+                and not self._deferred(entry.local)]
+        return sorted(owed, key=lambda entry: (not self._seen(entry.local.layer.assignment_id),
+                                               entry.local.layer.start))
+
+    def _still_step(self, entry: _Layer) -> bool:
+        """One step towards the still's picture for what it was last asked (module rule): its decode
+        taken, a band of its rows uploaded, or its draw; whether a step was spent (a decode not
+        done yet spends none)."""
+        if self._still_ready(entry, entry.want) != "pending" or entry.drawing is not None:
+            return False
         if entry.source is None:
             result = entry.still.result()
             if result == "pending":
-                return "pending"                    # nothing taken: no step spent
+                return False                        # nothing taken: no step spent
             self._stepped = self._clock()
             if result == "failed":
                 entry.failed = True
-                return "failed"
-            entry.source = result
-            return "pending"
+            else:
+                entry.source = result
+            return True
         self._stepped = self._clock()
         source = entry.source
         height = source.size[1]
-        if entry.uploaded < height:
-            if not entry.texture:
-                entry.texture = self._device.texture(source.size)
-            rows = min(height - entry.uploaded, max(1, BAND_BYTES // source.stride))
-            self._device.upload(entry.texture, source.size, source.stride, source.pixels, (entry.uploaded, rows))
-            entry.uploaded += rows
-            if entry.uploaded == height:
-                entry.source = replace(source, pixels=b"")     # its pixels are the texture's now
-            return "pending"
-        request = self._request(entry, FitSource(entry.texture, False, source.size, "srgb", source.alpha), setting)
-        entry.drawing = self._draw(lambda target: self._fitter.draw(request, target), setting.size,
-                                   opaque=not source.alpha)
-        entry.drawing_key = key
-        return "pending"
+        try:
+            if entry.uploaded < height:
+                if not entry.texture:
+                    entry.texture = self._device.texture(source.size)
+                rows = min(height - entry.uploaded, max(1, BAND_BYTES // source.stride))
+                self._device.upload(entry.texture, source.size, source.stride, source.pixels,
+                                    (entry.uploaded, rows))
+                entry.uploaded += rows
+                if entry.uploaded == height:
+                    entry.source = replace(source, pixels=b"")     # its pixels are the texture's now
+                return True
+            setting = entry.want
+            request = self._request(entry, FitSource(entry.texture, False, source.size, "srgb", source.alpha),
+                                    setting)
+            entry.drawing = self._draw(lambda target: self._fitter.draw(request, target), setting.size,
+                                       opaque=not source.alpha)
+            entry.drawing_key = self._key(entry, setting)
+        except (RuntimeError, ValueError):          # FitFailed, a Gpu or compositor refusal
+            entry.failed = True
+        return True
 
-    def _finish_video(self, entry: _Layer, setting: _Setting) -> ScreenPicture | Literal["pending", "failed"]:
-        """The newest finished frame for `setting`; a newer decoded frame drawn when a target is
-        free and no draw is outstanding. Before it started, only its first frame is taken (module
-        rule); later ones wait in the decoder."""
-        video = entry.video
-        key = self._key(entry, setting)
+    def _video_ready(self, entry: _Layer, setting: _Setting) -> ScreenPicture | Literal["pending"]:
+        """The video's newest finished frame for `setting`, its finished draw taken up (targets laid
+        out for another size or turn retired); else "pending"."""
         if any(picture.target.size != setting.size for picture in entry.targets):
             self._retired += entry.targets          # laid out for another size or turn
             entry.targets, entry.picture = [], None
@@ -787,28 +906,65 @@ class PlaneRenderer:
                 entry.drawing = entry.drawing_frame = None
         if entry.drawing is not None and self._finished(entry.drawing):
             if entry.held is not None and entry.held is not entry.drawing_frame:
-                video.done(entry.held)
+                entry.video.done(entry.held)
             entry.held, entry.picture, entry.key = entry.drawing_frame, entry.drawing, entry.drawing_key
             entry.drawing = entry.drawing_frame = None
             entry.serial += 1
-        taken = any(frame is not None for frame in (entry.held, entry.waiting, entry.drawing_frame))
-        frame = video.latest() if entry.started or not taken else None
-        if frame is not None:
-            self._requeue(entry, frame)
-        if entry.drawing is None:
-            source = entry.waiting or (entry.held if entry.key != key else None)
-            target = None if source is None else self._released(entry, setting.size)
-            if target is not None:
-                texture = self._device.import_frame(source)
-                request = self._request(entry, FitSource(texture, True, source.size, "bt709", False), setting)
-                self._fitter.draw(request, target.target)
-                target.fence = self._device.fence()
-                entry.drawing, entry.drawing_key, entry.drawing_frame = target, key, source
-                if source is entry.waiting:
-                    entry.waiting = None
-        if entry.picture is None or entry.key != key:
+        if entry.picture is None or entry.key != self._key(entry, setting):
             return "pending"
         return entry.picture.shown
+
+    def _seen(self, assignment_id: str) -> bool:
+        """Whether a screen's last commit shows the layer."""
+        return any(assignment_id in state.seen for state in self._outputs.values())
+
+    def _may_take(self, assignment_id: str, entry: _Layer) -> bool:
+        """Whether the video takes its decoder's newest frame (module rule): its first, or any once
+        it is started and seen; later frames otherwise wait in the decoder."""
+        taken = any(frame is not None for frame in (entry.held, entry.waiting, entry.drawing_frame))
+        return not taken or (entry.started and self._seen(assignment_id))
+
+    def _video_source(self, assignment_id: str, entry: _Layer) -> DmabufFrame | None:
+        """The frame `finish` draws for the video: its waiting frame (a started one's only while it
+        is seen), else its frame in `picture` again for a new setting; None when none is owed."""
+        if entry.waiting is not None and (not entry.started or self._seen(assignment_id)):
+            return entry.waiting
+        if entry.held is not None and entry.key != self._key(entry, entry.want):
+            return entry.held
+        return None
+
+    def _video_owed(self, assignment_id: str, entry: _Layer) -> bool:
+        """Whether `finish` would draw a frame of the video now: one owed and a target free."""
+        if entry.video is None or entry.failed or entry.want is None or entry.drawing is not None:
+            return False
+        if self._video_source(assignment_id, entry) is None:
+            return False
+        return len(entry.targets) < VIDEO_TARGETS or any(
+            picture is not entry.picture and not self._showing(picture) for picture in entry.targets)
+
+    def _draw_video(self, assignment_id: str, entry: _Layer) -> None:
+        """`finish`'s draw of the video: its newest frame taken (`_may_take`) and the frame owed
+        drawn into a released target and fenced, one draw per call (module rule)."""
+        setting = entry.want
+        try:
+            self._video_ready(entry, setting)
+            if self._may_take(assignment_id, entry):
+                self._requeue(entry, entry.video.latest())
+            if entry.drawing is not None:
+                return
+            source = self._video_source(assignment_id, entry)
+            target = None if source is None else self._released(entry, setting.size)
+            if target is None:
+                return
+            texture = self._device.import_frame(source)
+            request = self._request(entry, FitSource(texture, True, source.size, "bt709", False), setting)
+            self._fitter.draw(request, target.target)
+            target.fence = self._device.fence()
+            entry.drawing, entry.drawing_key, entry.drawing_frame = target, self._key(entry, setting), source
+            if source is entry.waiting:
+                entry.waiting = None
+        except (RuntimeError, ValueError):          # FitFailed, a Gpu refusal
+            entry.failed = True
 
     @staticmethod
     def _requeue(entry: _Layer, frame: DmabufFrame | None) -> None:
@@ -841,25 +997,15 @@ class PlaneRenderer:
 
     def _black(self, output_id: str, size: tuple[int, int]) -> ScreenPicture | Literal["pending", "failed"]:
         """The Output's one black picture of `size`, shared by its screen's ground and every black
-        layer on it; "pending" until the GPU has finished it."""
+        layer on it; owed to `finish` when there is none, "pending" until the GPU has finished it,
+        "failed" once when `finish` could not draw it (then owed again)."""
         picture = self._blacks.get((output_id, size))
         if picture is None:
-            try:
-                target = self._device.target(size, opaque=True)
-            except RuntimeError:
+            if (output_id, size) in self._refused_blacks:
+                self._refused_blacks.discard((output_id, size))
                 return "failed"
-            try:
-                self._fitter.black(target)
-                fence = self._device.fence()
-            except RuntimeError:
-                self._device.free(target)
-                return "failed"
-            shown = self._screens.import_picture(target)
-            if shown is None:
-                self._device.forget_fence(fence)
-                self._device.free(target)
-                return "failed"
-            picture = self._blacks[output_id, size] = _Picture(target, shown, fence)
+            self._owed_blacks.add((output_id, size))
+            return "pending"
         return picture.shown if self._finished(picture) else "pending"
 
     def _draw(self, paint: Callable[[Target], None], size: tuple[int, int], *, opaque: bool) -> _Picture:
@@ -888,18 +1034,13 @@ class PlaneRenderer:
         return not picture.fence
 
     def _video_frame(self, assignment_id: str) -> None:
-        """A video's new frame (on the owning thread): draw it while the video is seen, or its
-        first (module rule). Its commit is the next present's (s3-page: the frame loop's, B5)."""
+        """A video's new frame (on the owning thread): recorded as its waiting frame when it takes
+        it (`_may_take`); `finish` draws it, never this callback (module rule)."""
         entry = self._layers.get(assignment_id)
-        if entry is None or entry.failed:
+        if entry is None or entry.failed or entry.video is None:
             return
-        seen = entry.started and any(assignment_id in state.seen for state in self._outputs.values())
-        if (entry.picture is not None or entry.drawing is not None) and not seen:
-            return
-        setting = self._binding_setting(entry.binding)
-        if setting == "gone" or setting == "failed":
-            return
-        self._finish(entry.local, entry.binding, setting, live=entry.started)
+        if self._may_take(assignment_id, entry):
+            self._requeue(entry, entry.video.latest())
 
     def _showing(self, picture: _Picture) -> bool:
         """Whether a commit shows `picture`: its screen's last commit, or one the compositor still

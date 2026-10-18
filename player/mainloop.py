@@ -7,7 +7,9 @@ it. Control dispatch therefore runs ABOVE the tick and paint (refused at constru
 otherwise), and the tick re-arms only after its work, with a gap, so it never runs back to
 back. The tick plans what to show; a picture that changes over time is drawn on its display's
 frame clock (`FrameFollower`), never at the tick's pace, and a change arriving from Display Host
-is read from the display's own events (`DisplayEvents`), never polled.
+is read from the display's own events (`DisplayEvents`), never polled. On the render planes path
+the screens' frame turns (`FrameLoop`) run at FRAME, between control and the tick, on reads of the
+screens' connection, wakes and the time the last turn answered.
 tests/test_player_mainloop.py walks player/ and fails on any GLib source added outside this
 module; tests/native_player_mainloop_harness.py holds these numbers to real GLib and Gdk.
 
@@ -17,6 +19,7 @@ Stdlib only: callers pass the GLib module, so importing this needs no native dep
 from __future__ import annotations
 
 import logging
+import math
 import threading
 import time
 from collections.abc import Callable
@@ -291,15 +294,59 @@ class FrameLoop:
 
     def __init__(self, glib, fd: int, turn: Callable[[], float | None], *,
                  clock: Callable[[], float] = time.monotonic) -> None:
-        raise NotImplementedError("render-planes S3 bead B5")
+        """The read watch is level-triggered and kept armed: the turn reads the connection, so it
+        is not ready again until the compositor speaks."""
+        self.glib, self._turn, self._clock = glib, turn, clock
+        self._idle: int | None = None
+        self._timer: int | None = None
+        self._stopped = False
+        self._watch: int | None = glib.unix_fd_add_full(FRAME, fd, glib.IOCondition.IN, self._readable)
 
     def wake(self) -> None:
         """Run a turn soon (an idle at FRAME priority, once however many wakes come first)."""
-        raise NotImplementedError("render-planes S3 bead B5")
+        if not self._stopped and self._idle is None:
+            self._idle = self.glib.idle_add(self._woken, priority=FRAME)
 
     def stop(self) -> None:
         """Remove every source this loop added; no turn runs after it."""
-        raise NotImplementedError("render-planes S3 bead B5")
+        self._stopped = True
+        for source in (self._watch, self._idle, self._timer):
+            if source is not None:
+                self.glib.source_remove(source)
+        self._watch = self._idle = self._timer = None
+
+    def _readable(self, _fd, _condition) -> bool:
+        self._run()
+        return not self._stopped
+
+    def _woken(self) -> bool:
+        self._idle = None
+        self._run()
+        return False
+
+    def _timed(self) -> bool:
+        self._timer = None
+        self._run()
+        return False
+
+    def _run(self) -> None:
+        """One turn, serving every wake pending before it; then the timeout for its answer."""
+        if self._stopped:
+            return
+        if self._idle is not None:
+            self.glib.source_remove(self._idle)
+            self._idle = None
+        try:
+            at = self._turn()
+        except Exception:
+            logging.getLogger(__name__).exception("frame turn failed")
+            at = None
+        if self._timer is not None:
+            self.glib.source_remove(self._timer)
+            self._timer = None
+        if at is not None and not self._stopped:
+            delay_ms = max(0, math.ceil((at - self._clock()) * 1000))
+            self._timer = self.glib.timeout_add(delay_ms, self._timed, priority=FRAME)
 
 
 def watch_bus(bus) -> None:

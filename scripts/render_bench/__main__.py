@@ -16,15 +16,17 @@ properties. `--weston-log` (default DIR/weston-drm-backend.log) is Weston's drm-
 stream recorded alongside the run (`weston-debug drm-backend`), read after it: the one witness of
 which framebuffers are Weston's composites (weston_log.py).
 
-Each loop turn (every refresh, sooner on a video's new frame) it first records a Moment, ten times
+Each loop turn (on the screens' connection speaking, a video's new frame or the renderer's `due`,
+as player/mainloop.py `FrameLoop` would turn, and at least every refresh, standing in for the
+planning tick) it first records a Moment, ten times
 a second, once the compositor has answered the newest commit presented (the kernel then holds that
 commit's planes): the strengths it must show (timeline.py `strengths_at` at its frame time), the
 kernel's planes, the pixel valve's status, whether a picture was being finished or a video played,
 and the GPU's busy share. Then it presents the tracer's layers at the time through the Player's new
 path (player/plane_renderer.py) with the real PlaneScreens, Gpu, FitPass, PatternPass, StillDecode
 and VideoFrames, first shedding an overload's layers as the executor would (timeline.py
-`shed_overload`: the renderer refuses an overload), prepares the layers about to start, and turns
-the screen when the step says."""
+`shed_overload`: the renderer refuses an overload), prepares the layers about to start, then lets
+the renderer finish (all GPU work, after the commit), and turns the screen when the step says."""
 from __future__ import annotations
 
 import argparse
@@ -60,7 +62,7 @@ from scripts.render_bench.weston_log import renderer_framebuffers
 WAYLAND_SOCKET: Final = Path("/run/photo-wall-display-wayland/wayland-0")
 GPU_STATS: Final = Path("/sys/devices/platform/axi/1002000000.v3d/gpu_stats")   # bench T2
 SAMPLE: Final = 0.1             # seconds between moments
-REFRESH: Final = 1 / 60         # a loop turn at least this often
+REFRESH: Final = 1 / 60         # a loop turn at least this often (the planning tick's stand-in)
 LEAD: Final = 3.0               # seconds from the start to the tracer's origin
 TURN_TIMEOUT: Final = 5.0
 GRANT_TIMEOUT: Final = 10.0
@@ -368,7 +370,9 @@ class _Bench:
             if now >= next_sample and self._sample(now):     # before the present: it reads the commit answered
                 next_sample = now + SAMPLE
             self._present(now)
-            ready = select.select([self.screens.fd, self.wake_read], [], [], REFRESH)[0]
+            due = self.renderer.due()
+            wait = REFRESH if due is None else min(REFRESH, max(0.0, due - time.monotonic()))
+            ready = select.select([self.screens.fd, self.wake_read], [], [], wait)[0]
             if self.wake_read in ready:
                 os.read(self.wake_read, 4096)
         return self.moments
@@ -392,6 +396,7 @@ class _Bench:
         for local in locals_:                    # after the present: a due commit goes first
             if local.layer.start > now:
                 self.renderer.prepare(local, self.tracer.binding)
+        self.renderer.finish()                   # every GPU draw, after the commit
 
     def _sample(self, now: float) -> bool:
         """A Moment of the last presented commit, once the compositor answered that very commit
