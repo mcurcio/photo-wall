@@ -49,6 +49,7 @@ from central.installation_models import (
     WallNaming,
 )
 from central.transaction_locks import acquire_runtime_locks, holds_runtime_locks_in
+from contracts.display_turn import DisplayTurn
 from contracts.enrollment import Enrollment as Enrollment
 from contracts.enrollment import OutputReport as OutputReport
 from contracts.enrollment import enrollment_message as enrollment_message
@@ -56,6 +57,7 @@ from contracts.frame_lighting import FrameLighting
 from contracts.models import (
     Calibration,
     CoverFit,
+    ExactTurn,
     FrameProfile,
     Identifier,
     Model,
@@ -122,6 +124,14 @@ class FramePlacement(Model):
 
 class FrameProfileReplacement(Model):
     profile: FrameProfile
+    expected_generation: int = Field(ge=0)
+
+
+class FrameTurnChange(Model):
+    """PUT /v1/operator/frames/{frame_id}/turn: how the Frame's screen hangs (render redesign S2;
+    owner gate Q3, 2026-10-17: the turn belongs to the spot on the wall), against the Frame's
+    generation the operator read. `turn` is exact (`ExactTurn`): a JSON false, 90.0 or "90" is refused."""
+    turn: ExactTurn
     expected_generation: int = Field(ge=0)
 
 
@@ -625,6 +635,18 @@ class Registry:
             _ensure_wall(conn, merged["surface_id"])
             self._audit(conn, "frame_repositioned", frame_id)
             return {"id": frame_id, **merged}
+
+    def turn_frame(self, frame_id: str, turn: DisplayTurn, *, expected_generation: int) -> dict:
+        """Set how the Frame's screen hangs (frames.turn), in one equipment write: RegistryError
+        unknown_frame 404, then binding_generation_conflict 409 when `expected_generation` is not the
+        Frame's (the token before idempotency, as `replace_frame_profile`); the same turn answers
+        {"frame_id", "turn", "generation", "changed": False} with no write. A new turn raises the
+        generation and configuration_revision (a Position made for the other hanging needs checking:
+        readiness POSITION_NEEDED until the next Save), audits "frame_turned" {"turn", "generation"}
+        and wakes the bound Player's Node's document source (`notify_nodes_in`), so its Output
+        document carries the turn without waiting for a deadline; answers {..., "changed": True}.
+        Never touches the Position, the binding or the lighting. (render-planes S2 bead B1)"""
+        raise NotImplementedError("render-planes S2 bead B1")
 
     def replace_frame_profile(self, frame_id: str, profile: FrameProfile, *,
                               expected_generation: int, conn) -> dict:

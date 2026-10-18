@@ -4,9 +4,18 @@ from __future__ import annotations
 
 from typing import Annotated, Final, Literal, Self
 
-from pydantic import Field, model_serializer, model_validator
+from pydantic import BeforeValidator, Field, model_serializer, model_validator
 
-from contracts.frame_fit import FULL_SCREEN, OutputSize, PictureSize, convex_clockwise, picture_size
+from contracts.display_turn import DisplayTurn
+from contracts.frame_fit import (
+    FULL_SCREEN,
+    FrameRectangle,
+    OutputSize,
+    PictureSize,
+    Placement,
+    convex_clockwise,
+    picture_size,
+)
 from contracts.frame_lighting import FrameLighting
 
 # The identifier rules' one home is contracts/identifiers.py; re-exported here under these names.
@@ -64,6 +73,46 @@ class CoverFit(Model):
         return self
 
 
+def _exact_turn(value: object) -> DisplayTurn:
+    """`value` when `is_turn(value)`, else ValueError("display_turn"): pydantic's Literal alone would
+    take a JSON false as 0 and 90.0 as 90. (render-planes S2 bead B1)"""
+    raise NotImplementedError("render-planes S2 bead B1")
+
+
+# A Display turn as a wire model's field (render redesign S2): the one pydantic form of
+# contracts/display_turn.py `DisplayTurn`, checked by its `is_turn`.
+ExactTurn = Annotated[DisplayTurn, BeforeValidator(_exact_turn)]
+
+
+RectangleWidth = Annotated[float, Field(gt=0, le=1, allow_inf_nan=False)]
+
+
+class RectangleFit(Model):
+    """Frame fit Rectangle (render redesign S2, run ledger .claude/runs/render-planes/s2-page.md;
+    owner, 2026-10-17: "We can make the position pure crop and scale"): the Frame's picture is an
+    upright rectangle at the Frame profile's aspect on its screen as it hangs (the Frame's turn,
+    frames.turn); `centre_x` and `centre_y` are fractions of that screen's width and height,
+    `width` a fraction of its width; the height follows from the aspect. No corners, no angle.
+    Its rule's one home is contracts/frame_fit.py `FrameRectangle` (the validator builds one);
+    where it lands in pixels is `frame_placement`. Bead B2 adds it to `FrameFit`; until then it is
+    not a Position form."""
+    mode: Literal["rectangle"] = "rectangle"
+    centre_x: Fraction = 0.5
+    centre_y: Fraction = 0.5
+    width: RectangleWidth = 1.0
+
+    @model_validator(mode="after")
+    def upright(self) -> Self:
+        """`self.rectangle()` (FrameRectangle's own check); its ValueError("frame_rectangle")
+        becomes the model's validation error. (render-planes S2 bead B2)"""
+        raise NotImplementedError("render-planes S2 bead B2")
+
+    def rectangle(self) -> FrameRectangle:
+        """The contracts/frame_fit.py `FrameRectangle` of these three fields. Pure.
+        (render-planes S2 bead B2)"""
+        raise NotImplementedError("render-planes S2 bead B2")
+
+
 FrameFit = Annotated[CornersFit | CoverFit, Field(discriminator="mode")]
 
 
@@ -98,6 +147,28 @@ def frame_output(profile: FrameProfile, calibration: Calibration,
     fit = calibration.fit
     return picture_size(fit.mode, fit.corners, fit.rotation, output,
                         profile.width_px / profile.height_px)
+
+
+def frame_placement(profile: FrameProfile, fit: RectangleFit, output: OutputSize,
+                    turn: DisplayTurn) -> Placement:
+    """Where a Frame's rectangle lands, in whole pixels, on a screen whose mode is `output`
+    (width, height as built, never turned) hung at `turn`:
+    `place(fit.rectangle(), hanging(output, turn), profile.width_px / profile.height_px)`.
+    The one home, for Central, of a Frame's rectangle on its screen (the Frame output and Save's
+    check, `off_screen`). Pure. ValueError as `hanging` ("display_turn", "screen_size") and `place`
+    ("placement_outside"). (render-planes S2 bead B2)"""
+    raise NotImplementedError("render-planes S2 bead B2")
+
+
+def off_screen(profile: FrameProfile, calibration: Calibration, output: OutputSize | None,
+               turn: DisplayTurn) -> bool:
+    """Whether `calibration` is a Rectangle that does not lie wholly on its screen (`output` as
+    built, hung at `turn`): `frame_placement` refuses it with "placement_outside". False for Cover
+    and Corners (worked out on the Output as built, by their own rotation, until migration 102
+    converts them in S5) and when `output` is None or has a side below 1 (nothing to check
+    against). Pure. ValueError("display_turn") for a turn outside TURNS.
+    (render-planes S2 bead B2)"""
+    raise NotImplementedError("render-planes S2 bead B2")
 
 
 class IdentifyOutput(Model):

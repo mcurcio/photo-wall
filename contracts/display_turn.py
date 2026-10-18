@@ -18,10 +18,17 @@ Rules this module owns (one home each):
 """
 from __future__ import annotations
 
-from typing import Final, Literal
+from typing import Final, Literal, TypeGuard
 
 DisplayTurn = Literal[0, 90, 180, 270]                  # degrees clockwise, as the screen hangs
 TURNS: Final[tuple[DisplayTurn, ...]] = (0, 90, 180, 270)
+
+
+def is_turn(value: object) -> TypeGuard[DisplayTurn]:
+    """Whether `value` is one of TURNS: an int (never a bool) of 0, 90, 180 or 270. The one check of
+    a turn: `wayland_transform` and `hanging` refuse by it, and so does the Output document
+    (contracts/node_output.py `OutputDocument.turn`). Pure. (render-planes S2 bead B1)"""
+    raise NotImplementedError("render-planes S2 bead B1")
 
 
 def wayland_transform(turn: DisplayTurn) -> int:
@@ -51,4 +58,4 @@ def hanging(size: tuple[int, int], turn: DisplayTurn) -> tuple[int, int]:
     return (height, width) if quarter else (width, height)
 
 
-__all__ = ["TURNS", "DisplayTurn", "hanging", "turn_of", "wayland_transform"]
+__all__ = ["TURNS", "DisplayTurn", "hanging", "is_turn", "turn_of", "wayland_transform"]

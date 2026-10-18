@@ -80,6 +80,7 @@ from central.registry import (
     FrameCreate,
     FramePlacement,
     FrameProfileReplacement,
+    FrameTurnChange,
     Registry,
     RegistryError,
 )
@@ -706,6 +707,12 @@ def create_app(
                 frame_id, request.profile, expected_generation=request.expected_generation,
                 conn=conn,
             )
+
+    @app.put("/v1/operator/frames/{frame_id}/turn", dependencies=[Depends(admin)])
+    def turn_frame(frame_id: Identifier, request: FrameTurnChange) -> dict:
+        # How the Frame's screen hangs (render redesign S2): the Frame's own setting, sent in its
+        # Output's document; Registry owns the write, the generation and the Node's wake.
+        return registry.turn_frame(frame_id, request.turn, expected_generation=request.expected_generation)
 
     @app.delete("/v1/operator/frames/{frame_id}", dependencies=[Depends(admin)])
     def remove_frame(frame_id: Identifier) -> dict:
