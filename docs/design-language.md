@@ -185,7 +185,7 @@ interface FieldProps { label: string; help?: string; error?: string; notes?: rea
 // Slider — shows its value and unit as text (or `format`'s words, e.g. a display's level "46 % (117 of 255)"); commits on release, previews on drag; follows the pointer while held whatever the caller does with a preview.
 interface SliderProps { value: number; min: number; max: number; step: number; unit: string; format?(v: number): string; onPreview?(v: number): void; onCommit(v: number): void; disabled?: boolean }
 
-// SegmentedControl — 2 to 5 exclusive choices (rotation, nudge step, fit). Alone it shows and carries its `label`;
+// SegmentedControl — 2 to 5 exclusive choices (nudge step, a choice of a few). Alone it shows and carries its `label`;
 // inside a Field the Field's label names the group (aria-labelledby) and its help describes it, and `label` is unused.
 interface SegmentedControlProps<V extends string> { label: string; value: V; options: readonly { value: V; label: string }[]; onChange(v: V): void }
 
@@ -201,7 +201,7 @@ interface ToastProps { message: string; action?: { label: string; onAction(): vo
 // Select — one choice from a list too long for SegmentedControl (the waiting Pi in Replace with…). Field owns its label.
 interface SelectProps<V extends string> { value: V | null; options: readonly { value: V; label: string; hint?: string }[]; onChange(v: V): void; placeholder?: string; disabled?: boolean }
 
-// NumberInput — a number with its unit, for corner pixels, the rotation angle, the Frame display profile and Scene settings in days or percent. Field owns its
+// NumberInput — a number with its unit, for a Position's pixels, the Frame display profile and Scene settings in days or percent. Field owns its
 // label and error; arrow keys step by `step`, and the value commits on blur or Enter.
 interface NumberInputProps { value: number | null; unit: string; min?: number; max?: number; step?: number; onCommit(v: number): void; disabled?: boolean }
 
@@ -256,7 +256,7 @@ type ProblemCardProps = ProblemBase & (
   | { scope: "live"; subject: string; since: string; action: ProblemAction }   // a Frame or Pi problem; since = Central's receive time
   | { scope: "central"; action: ProblemAction }                                // template-wide: "Central did not answer"
   | { scope: "setup"; subject?: string; action: ProblemAction }                // an unfinished setup step: no "since"
-  | { scope: "action"; subject?: string; action?: ProblemAction }              // a request just made was refused ("The Pi refused the new corners")
+  | { scope: "action"; subject?: string; action?: ProblemAction }              // a request just made was refused ("The Pi refused the new position")
 );
 interface ProblemBase {
   verdict: Verdict;           // severity + plain words; a live Frame problem passes the domain's status verdict
@@ -297,10 +297,10 @@ interface LivePreviewEditorProps {
   dirty: boolean;
   onDone(): void;
   onRevert(): void;
-  controls: React.ReactNode;     // QuadEditor + NudgePad (Position), or picture sliders
+  controls: React.ReactNode;     // RectangleEditor + NudgePad (Position), or picture sliders
   mirror?: React.ReactNode;      // a scaled outline of the output
   busy?: boolean;                // a Done or Revert is in flight
-  status?: string;               // the words shown while no preview session runs ("Not previewing. Move a corner to start.")
+  status?: string;               // the words shown while no preview session runs ("Not previewing. Move the picture to start.")
   problem?: ProblemCardProps;    // inline, e.g. no acknowledgement by the deadline
   notes?: readonly React.ReactNode[];   // one-line notes, e.g. changes reverted after the editor was left
   unavailable?: { reason: string; action?: React.ReactNode };   // unbound (with the binding picker), or Pi offline
@@ -316,31 +316,31 @@ interface LivePreviewEditorProps {
 
 Prior art: Apple HIG display arrangement; projector keystone menus.
 
-#### QuadEditor and NudgePad
+#### RectangleEditor and NudgePad
 
-The Position controls, as patterns (they know geometry, not Frames). Prior art: projector keystone menus; macOS Displays arrangement.
+The Position controls, as patterns (they know a screen and a rectangle, not Frames). Since the render redesign a Frame's Position is one upright rectangle of its profile's shape on the screen as it hangs ([0029](decisions/0029-render-planes.md); owner, 2026-10-17: "We can make the position pure crop and scale"), so the four-corner QuadEditor is gone. Prior art: macOS Displays arrangement; a crop box with a locked aspect.
 
 ```ts
-type Point = readonly [number, number];
-// QuadEditor — four draggable corners and four draggable edges over an outline of the output, at its aspect.
-// An edge (its midpoint handle or the line) moves its two corners together by the drag's step (owner,
-// 2026-10-12: "i want to be able to drag "edges" of a frame position and not just the corners"). No crop
-// edges since 1c (Trim edges removed): the corners set every visible edge.
-type QuadPart = { kind: "corner" | "edge"; index: number };  // edge i runs from corner i to the next
-interface QuadEditorProps {
+// RectangleEditor: the screen drawn to its shape as it hangs, the picture on it as one upright rectangle.
+// Drag the picture to move it, or its bottom-right handle to resize it (shape and centre kept). It holds
+// no geometry rules: every move and size is the caller's to accept (src/placement.js `place`).
+interface PixelRectangle { x: number; y: number; width: number; height: number }
+interface RectangleEditorProps {
   label: string;
-  corners: readonly Point[];                        // four, in output coordinates
-  aspect: number;
-  selected: QuadPart | null; onSelect(part: QuadPart | null): void;  // null: the whole quad
-  onCorners(corners: Point[]): void;                // a drag's proposed corners; the caller may refuse them
-  onArrow(dx: number, dy: number): void;            // arrow keys on the selected corner or edge
+  screen: { width: number; height: number };   // the screen as it hangs, in pixels
+  picture: PixelRectangle | null;              // null: the picture does not lie on the screen
+  onMove(dx: number, dy: number): void;        // proposed move in screen pixels; the caller may refuse it
+  onResize(dWidth: number): void;              // proposed change of width in screen pixels
+  onArrow(dx: number, dy: number): void;       // arrow keys on the focused drawing: -1, 0 or 1 per axis
   disabled?: boolean;
 }
 // NudgePad — four labelled arrow buttons; each press is one step, the caller decides its size (1, 10 or 50 px).
 interface NudgePadProps { label: string; subject: string; onNudge(dx: number, dy: number): void; disabled?: boolean }
 ```
 
-Stories: `QuadEditor/Default`, `/CornerSelected`, `/EdgeSelected`, `/Rotated`, `/Disabled`; `NudgePad/Default`, `/Disabled`. A11y: every corner and edge is a focusable, named handle that focus selects, and is in the Move list; each NudgePad button names its direction and subject ("Move up: top-left corner").
+Stories: `RectangleEditor/Default`, `/Turned`, `/Disabled`, `/NoPicture`; `NudgePad/Default`, `/Disabled`. A11y: the drawing is focusable and named; the picture and its size handle are named images (`role="img"`, "Picture", "Picture size handle"), reached by pointer, while the keyboard moves the picture with the arrow keys on the drawing or the NudgePad, whose buttons name their direction and subject ("Move up: the picture"); the width has a slider and a number field.
+
+**How the screen hangs** (`domain/frame-turn.tsx`, on the Hardware tab) is a four-way choice in words (`domain/turn-words.ts`, their one home: Upright, Top to the right, Upside down, Top to the left), applied the moment it is chosen, with no Done (its save model is §8's row "B4 How the screen hangs"). Stories draw `FrameTurnChoice`: `Upright`, `TopToTheRight`, `Sending`, `Refused`.
 
 #### Dialog guards
 
@@ -447,7 +447,7 @@ Built on `feat/configuration-snapshots` ([0025](decisions/0025-configuration-sna
 |---|---|---|---|
 | `HistoryList` | patterns | A titled history of changes, newest first, grouped by day. Props: `title`, `intro`, `notice?` (a line above the days), `days` (each a `label` and its `rows`: `id`, `time`, `what`, `notKept`, `summary`, `details` as label and value pairs, `restore` as `disabled` with an optional `reason`, `session?`), `empty`, `busy` (a skeleton with `aria-busy` while nothing is read yet), `problem?` (a node above the days), `restoring` (the row being restored: every Restore waits), `onRestore(id)`, `onOlder?` ("Show older"). A row not kept is dashed and muted, never a severity colour; rows not kept from one session follow one another as one run: its newest shows and "Show N earlier tries from this session" opens the rest; a Restore reason every disabled row shares is said once above the days. `changedSummary` is every history's one summary rule: what differs from the row below, all of it for the oldest shown | Empty, Loading, Entries, Notice, RestoreDisabled, Restoring, Problem, Phone, SessionRun |
 | `PictureHistory` | domain | The Picture tab's History: a Display's picture entries as `HistoryList` rows (each kind in words, display settings named from the tab's own read), Restore into the live picture session and what did not come back | Kept, NotKept, Unrecorded, Skipped, NoSession |
-| `PositionHistory` | domain | The Position tab's History: a Frame's Position entries (fit, rotation, the lighting's mat depth, lights and paper; corners under Details), Restore into the live draft, and why an entry made for another screen size or display cannot be restored | Kept, NotKept, OtherProfile, OtherDisplay, NoSession |
+| `PositionHistory` | domain | The Position tab's History: a Frame's Position entries (the rectangle's centre and width, the lighting's mat depth, lights and paper), Restore into the live draft, and why an entry made for another screen size or display cannot be restored | Kept, NotKept, OtherProfile, OtherDisplay, NoSession |
 
 ### Later patterns (props written when their delivery starts)
 
@@ -621,7 +621,8 @@ Every journey step in the [roadmap](roadmap.md#the-journey), one row per home (p
 | B3 Name and place | Frame page › header (name; built in 2b) | T3 | EntityHeader (inline title) | Autosave | saved inline | duplicate name: inline error "That name is taken" |
 | B3 Name and place | Frames › Wall tab (the wall's name and room label, #92; built in 2b) | T2 | SettingRow, Field | Autosave | saved inline | none |
 | B3 Name and place | Frames › wall layout (placement) | T6 | WallTile, Tabs (walls) | Autosave | overlaps flagged | EmptyState "Add your first Frame" |
-| B4 Fit the picture | Frame page › Position | T3 + LivePreviewEditor | QuadEditor, NudgePad, SegmentedControl (fit: Cover or Corners; rotation 0/90/180/270), NumberInput and Slider (angle, Cover only), AckBadge, LeaveGuard, then History as `PositionHistory` on `HistoryList` (each change with its time, Restore into the draft; [0025](decisions/0025-configuration-snapshots.md)) | Live (Restore only fills the draft; Done keeps) | Previewing → Presented by the Pi | unbound → binding picker; Pi offline → disabled with since; expired session note; a Cover Save whose picture would turn against the Frame's orientation: the refusal in plain words beside the angle |
+| B4 Fit the picture | Frame page › Position | T3 + LivePreviewEditor | RectangleEditor, NudgePad, SegmentedControl (step), Slider and NumberInput (width, Exact values), Fill the screen and Centre, AckBadge, LeaveGuard, then History as `PositionHistory` on `HistoryList` (each change with its time, Restore into the draft; [0025](decisions/0025-configuration-snapshots.md)) | Live (Restore only fills the draft; Done keeps) | Previewing → Presented by the Pi | unbound → binding picker; Pi offline → disabled with since; expired session note; a change that would leave the screen: refused where it is made, in plain words (`position_off_screen`); how the screen hangs is the Hardware tab's, named in one line with a link |
+| B4 How the screen hangs | Frame page › Hardware › How the screen hangs | T3 | SegmentedControl (Upright, Top to the right, Upside down, Top to the left: `domain/turn-words.ts`), Note, LinkToOwner (to Position) | Action (applies at once; no Done) | "The picture turns now. Check its position on the Position tab, then press Done there." | refused: a ProblemCard "Not turned" with the words for the refusal and Central's code under Details; the Frame changed meanwhile: "Choose again" |
 | B5 Picture quality | Frame page › Picture | T3 + LivePreviewEditor | two sections: Display (hardware), a Slider per level the display offers, read as a percent of its range with the display's own count second ("46 % (117 of 255)"; owner, 2026-10-12, picked "Percent, raw count second"), a Select of exactly its named choices per list setting, a read-only line otherwise, each with "As the display has it"; Photo Wall (software) as `PhotoWallSettings`: three Sliders (contrast 0–150 %, colour temperature, gamma), then the Display's light ([0028](decisions/0028-room-light.md)): NumberInputs for Matched light (lux) and Display black (a percent of white), sent together; then display tuning ([0024](decisions/0024-display-tuning.md)): a Test pattern (Off, White, Grey ramp, Black level, and the two screen targets of [0026](decisions/0026-calibration-targets.md) and [0027](decisions/0027-calibration-targets-v2.md), "Target: pre-software" and "Target: post-software", each line ending in the same three short sentences on printing, laying and photographing the paper target, with links to print it on Letter or A4), a Select since the targets made six choices ([§4](#4-component-and-pattern-catalogue): a SegmentedControl holds two to five), with one line under each pattern saying what to do with it ([console design §5](operator-console-design.md#5-the-frame-page); the wording lives in the tab alone), and a SegmentedControl Signal range (Auto, Full, Limited) noting that a change restarts the picture on every display of the Pi; below the live editor, the Power tab's own input SettingRow (B6), saved on change outside Done and Revert ([0022](decisions/0022-picture-hardware-and-software-apart.md) R10); then History as `PictureHistory` on `HistoryList` (each change to the display's picture with its time, Restore into the editor; [0025](decisions/0025-configuration-snapshots.md)) | Live (the input row: Autosave; Restore only fills the draft, Done keeps) | the section says where a setting acts; "Checking what this display offers" until the Pi has asked; Done once the Pi reports the latest hardware values written, the latest software values and test pattern presented and the latest signal range answered | a write the display refuses: the row says "The display did not take it"; a set value changed on the display's buttons: "Changed on the display's buttons" with the display's value, left alone until the next change; a signal range the Pi could not set: the range the display still gets |
 | B5 Picture quality | Settings › Paper profiles (`#/paper-profiles`; [§4](#4-component-and-pattern-catalogue) `PaperProfiles`) | T8 | EntityList (each paper profile: name, added, used by), FileChooser (Add a paper profile), RemoveDialog (Remove, confirmed) | Action (Add, Remove) | the added paper profile on the list, named from its profile | EmptyState "Add a paper profile from your paper's maker"; a file that is not a printer paper profile, too large, or a paper profile a Frame uses: the refusal in plain words, nothing else changes |
 | B4 Fit the picture | Frame page › Lighting ([§4](#4-component-and-pattern-catalogue) `FrameLighting`; [0028](decisions/0028-room-light.md)) | T3 + LivePreviewEditor | DrawnLine, Slider (mat depth), per light a FactGroup (SegmentedControl kind, Select room light, TypedNumber lux and reference, Sliders and TypedNumbers of its kind), Paper (Sliders, preset Buttons, Select profile), then History as on Position | Live, on Position's session | Previewing → Presented by the Pi | no room light → LinkToOwner to House › Lights; Central's refusal in plain words |

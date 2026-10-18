@@ -16,9 +16,10 @@ pinned authenticated Debian snapshot and records its package inventory. A major
 ABI check alone is not the release package lock.
 
 The shell owns per-Output constrained app views, a protected diagnostic layer,
-connection/mode generations, process checks, and the five-second renewable surface
+connection/mode generations, process checks, the five-second renewable surface
 lease (renewed by a presented tagged commit or by the app's answer to Weston's ping; see
-[the lease](#the-lease-presentation-or-a-ping-answer)). The controller owns portable DisplayHost admission and receives protected
+[the lease](#the-lease-presentation-or-a-ping-answer)), the standard window alpha the Player's
+pictures fade by, and each Output's turn ([the Player's screens](#the-players-screens)). The controller owns portable DisplayHost admission and receives protected
 root-only lifecycle/configuration requests. The app never receives that socket.
 The shell and its Cairo diagnostic client run from the base, independently of app
 files or imports. The sealed Player receives only the public Wayland socket.
@@ -76,17 +77,17 @@ shell renews an Output's lease (`LEASE_MS`, 5 s) on a presented tagged commit of
 surface, or on the app's answer to Weston's standard desktop ping (`xdg_wm_base.ping`/`pong`,
 libweston's `weston_desktop_client_ping` and the desktop API's `pong`), sent once every
 `PING_MS` (1 s) while the Output holds an identity and an app surface (Weston keeps at most one
-outstanding). GDK answers the ping on the Player's main loop, so a hung or stopped loop loses
-the grant within the lease, while a still photo, an Output forced off (`output_power`) or under
+outstanding). The Player's frame client answers the ping when its frame turn reads the screens'
+connection, on the Player's main loop, so a hung or stopped loop loses the grant within the lease, while a still photo, an Output forced off (`output_power`) or under
 the black curtain (`black`) keeps it with no commit. A ping answer renews only while the app's
 newest commit on that Output was tagged: an app that commits untagged buffers (its draws fail,
 or it shows nothing it can name) holds the Output only until the lease runs out, and the
 diagnostic returns, as before the ping. A pong is evidence only that the app is
 alive: handoff, `presented`, `handoff_presented` and revision adoption still need a real
 presented commit, and the handoff still names a buffer presented within `LEASE_MS` (the
-Player draws its candidate colour when its candidate grant comes and once a second after, until
-it is admitted). The Player's
-own copy of the presentation feedback paces its drawing ([native renderer](module-native-renderer.md#pacing-render-only-what-reaches-the-screen));
+Player commits its screen's ground under the candidate tag on every present its pacer allows,
+until it is admitted). The Player's
+own copy of the presentation feedback paces its commits ([plane renderer](module-plane-renderer.md#the-frame-loop-and-pacing));
 it is never evidence. `tests/native_display_smoke.py` proves both sides: a probe that stops
 committing keeps its grant past `LEASE_MS`, one committing untagged buffers loses it, and a
 stopped (SIGSTOP) one loses it. Central's display exchange keeps a receipt however old (a still
@@ -218,37 +219,91 @@ request. It permits surface use, not authored execution without Runtime authorit
 producer/session and validates identity at ingress; the local sequence alone does
 not authenticate a Central evidence stream.
 
-## Remaining integration and verification
+## The Player's screens
 
-The app-owned native frame client and `player/wayland_frames.py` tag the actual
-GDK/Wayland surface from the successful `Gtk.GLArea::render` callback. GTK3's
-[Wayland paint path](https://gitlab.gnome.org/GNOME/gtk/-/blob/3.24.49/gdk/wayland/gdkwindow-wayland.c)
-commits that paint after rendering; no later idle/configure callback supplies the
-tag. Initialization and a private Wayland event queue stay on the GTK owning
-thread. Nothing renews a still frame: the lease holds on ping answers. Before admission
-only a fixed synthetic colour is rendered, when the candidate grant comes and once a second
-after. After
-admission the existing Executor still supplies independently authorized content.
-The adapter is opt-in through `PHOTO_WALL_DISPLAY_HOST=1` and refuses missing
-Wayland protocol or missing app-private native library; it does not load a base
-fallback. The current transform correlation hash is derived from the actual
-composition's binding revision and calibration values. Extending that tag with
-Central's canonical latest trial/sequence/hash remains required for live trials;
-no second homography is introduced. Calibration Save remains unavailable until
-Central has the exact latest matching real backend acknowledgment and all existing
-trial authority checks. No simulator callback may open that gate.
+Render redesign ([0029](decisions/0029-render-planes.md)): the Player shows each Frame's picture
+as its own display plane, so the display controller places and fades it with no GPU. The shell
+applies; it computes nothing about a Frame. Everything here is standard Wayland: frame protocol
+v4's private XML is unchanged.
 
-Native compilation, compositor launch, typed grant/feedback/handoff recovery tests,
-private-client failure, two-Output clipping, the still lease and GPIO/HDMI timing are
-separate evidence tiers. Build and controlled virtual-compositor checks can expose
-API/lifetime errors but cannot qualify physical scanout. The native client limits
-buffer sizes and total allocation; those software bounds do not establish Pi GPU
-capacity under media load.
+- **One screen per Output.** The Player's own connection (`player/plane_screen.py` over the frame
+  client's `pw_screen_*` functions; no GTK or GDK) makes an xdg toplevel per Output with app id
+  `photo-wall-<output>`, which the shell maps full screen as the Output's app surface. Grants,
+  tags, `tag_picture`, presentation feedback and the trial overlay ride that surface, as before.
+- **The ground.** The screen's own buffer is an opaque black picture of the whole screen
+  (XR24, the mode's size, turned with the screen's buffer transform), never a single-pixel buffer:
+  Weston 14 never puts a single-pixel buffer on a plane, and once translucent pictures uncover it
+  Weston has no renderer framebuffer to mix with and composites everything until the next
+  repaint ("cannot propose mixed mode: no previous renderer fb", tracer 2). With a real ground
+  Weston puts it on the primary plane and the pictures on overlays. Test patterns and calibration
+  targets are drawn into the ground.
+- **Sub-windows.** Each picture is a synchronized `wl_subsurface` of the screen, up to 15, stacked
+  once when it is made (planes are only added or removed at the top) and committed with the
+  screen's commit: one atomic commit per screen. Only what changed is sent: a restack
+  (`place_above`) or a sub-window position marks Weston's view list dirty and damages beneath it,
+  which forces a GPU repaint whenever the renderer is in play (tracer 2).
+- **Window alpha.** The shell serves `wp_alpha_modifier_v1` version 1 as wayland-protocols' staging
+  XML states it: `set_multiplier` is double-buffered and applied when the surface's state is (for
+  a synchronized sub-window, its parent's commit) as `weston_view_set_alpha` on every view of the
+  surface; destroying the object resets it to 1. Weston maps a view's alpha onto the plane's alpha
+  property. The implementation is the shell's until Weston 16 serves the protocol upstream; on that
+  upgrade it is deleted, never kept beside Weston's.
+- **Feedback rides on the topmost plane.** Weston answers a surface's presentation feedback only
+  from a paint node with a visible region, and the ground under an opaque full-screen picture has
+  none: feedback asked there is never answered (tracer 1 lost the screen in about 32 s). The frame
+  client asks it on the topmost sub-window (the screen itself for a commit with no plane), and the
+  shell maps it to the app surface its tree hangs from, so the answer is still the screen's word.
+  No slot can leak: the frame client keeps at most `FEEDBACK_PER_SURFACE` (4) answers per surface,
+  dropping the oldest when the table is full and younger than `FEEDBACK_STALE_NS` (250 ms; Weston
+  answers a seen surface at its next repaint) and leaving older commits untracked (a covered
+  surface); the shell keeps at most 4 per app surface.
+- **Buffers.** Pictures arrive through `zwp_linux_dmabuf_v1` (LINEAR XR24 or pre-multiplied AR24
+  GBM buffers, one roundtrip per import) and are reused only after `wl_buffer.release`. CI's
+  headless Weston imports memfd-backed buffers through the same protocol with its GL renderer on
+  llvmpipe (Weston 14's pixman renderer offers no linux-dmabuf).
+
+CI proves the shell's side in `tests/native_display_smoke.py` (a sub-window at multiplier
+0x7fffffff over black captures half white; destroying the modifier brings full white) and the
+screens in `tests/native_screen_harness.py` (planes, the ground, one-plane presents leaving no stale
+sub-window, a fade burst's feedback, the trial overlay naming its tag). Planes themselves exist
+only on the Pi: the render bench is their proof ([runbook](runbook.md#the-render-bench-and-pi-testing-before-merge)).
+
+## The turn
+
+How a Frame's screen hangs is the Frame's ([0029](decisions/0029-render-planes.md), owner Q3: the
+turn belongs to the spot on the wall), sent in the Output document (`turn`, display line schema
+9). Display Host carries it out; the Player reads it back from Weston.
+
+- **Control op `turn`** (base-only control socket): `output_id`, `output` and `transform` 0 to 3
+  (`wl_output.transform` normal, 90, 180, 270; `contracts/display_turn.py` `wayland_transform` is
+  the one mapping: a screen hung turned 90 degrees clockwise wants Weston to turn its content 90
+  counter-clockwise). The shell sets `weston_output_set_transform`, answers a `turn` event ahead of
+  the response, and refuses any other transform. The wanted transform is kept across a hot-plug
+  and applied to the Output's new `weston_output`, as `black` is.
+- **What a turn does to the Output:** a mode change. The app's grant is invalidated and the Output
+  comes back under a new key, which Central's surface decisions grant again; the Frame's Position
+  becomes one to check (a rectangle is fractions of the screen as it hangs).
+- **The controller** ([`screen_turn.py`](../appliance/display_host/screen_turn.py): `ScreenTurns`
+  on its own worker thread, `WestonBackend.turn` its one port) asks once per trigger: a document whose turn differs
+  from the last one the shell confirmed, or the Output appearing connected (documents arrive
+  before the shell announces any Output). A refused ask waits for the next trigger; the newest
+  document wins. It hears of Outputs from the Output reports, as the power and picture controllers
+  do.
+- **The Player draws turned.** `PlaneScreens.screen` reads the mode and transform Weston reports;
+  each picture is laid out turned and committed with the matching buffer transform, so Weston
+  shows it on a plane with no copy (bench T5). A picture with the wrong transform is composited by
+  Weston's GPU (the bench's mutation probe sees it).
+
+CI: `tests/node/display/test_screen_turn.py` (when to ask), `tests/node/display/test_display_turn.py`
+(`WestonBackend.turn` over a socket pair), the display smoke (the event, the turned mode, a
+refused transform 4) and the node-bus integration test `tests/integration/test_central_display_documents.py`
+(Central's turn reaching the Node's document).
 
 Primary implementation references: [Weston 14 shell APIs](https://gitlab.freedesktop.org/wayland/weston/-/blob/14.0/include/libweston/desktop.h),
 [Weston 14 compositor and clipping](https://gitlab.freedesktop.org/wayland/weston/-/blob/14.0/libweston/compositor.c),
 [Wayland server protocol logger](https://gitlab.freedesktop.org/wayland/wayland/-/blob/1.23.1/src/wayland-server-core.h),
-and [presentation feedback protocol](https://gitlab.freedesktop.org/wayland/wayland-protocols/-/blob/main/stable/presentation-time/presentation-time.xml).
+[presentation feedback protocol](https://gitlab.freedesktop.org/wayland/wayland-protocols/-/blob/main/stable/presentation-time/presentation-time.xml)
+and [alpha modifier protocol](https://gitlab.freedesktop.org/wayland/wayland-protocols/-/blob/main/staging/alpha-modifier/alpha-modifier-v1.xml).
 
 ## Picture operations (frame protocol v4)
 
@@ -273,7 +328,8 @@ to the [Player architecture](player-architecture.md#picture-settings-1c).
 - **The frame client** ([`frame-client.c`](../appliance/display_host/native/frame-client.c))
   binds version 4 when offered and still refuses below 3; `pw_frame_client_picture`
   returns the newest operations per Output and `pw_frame_client_tag_picture_next_commit`
-  tags the next commit. The Player reads them through `player/wayland_frames.py`.
+  tags the next commit; `pw_screen_present` tags the screen's commit with the picture change.
+  The Player reads them through `player/plane_screen.py`.
 
 CI proves this in `tests/native_display_smoke.py` (node-pid1 `display-harness`):
 operations reach a late app verbatim, a 10-byte non-JSON operations text is not parsed,
@@ -301,26 +357,36 @@ up belong to the [Player architecture](player-architecture.md#display-identity-a
 CI proves the op in `tests/native_display_smoke.py` and the controller's use of it in
 `tests/node/display/test_display_black_picture.py`.
 
-## The health layer's buffers
+## The health layer and the amber tint
 
-The overlay client (`overlay/client.py`) keeps its health surface mapped over the whole
-Output at all times. With the tint off, and for the first map before any instruction, the
-surface shows a fully transparent solid buffer from `wp_single_pixel_buffer_manager_v1`
-(rgba 0), scaled to the Output by `wp_viewporter`. With the tint on it shows one
-whole-Output ARGB8888 `wl_shm` buffer. Every health commit sets the viewport destination to
-the Output size, so the solid buffer covers the Output and the ARGB buffer maps 1:1. The
-solid buffer holds no pixels and is not counted against the client's buffer and memory caps.
-A compositor that does not offer both globals ends the client, so the shell's fallback tint
-shows; there is no second drawing path.
+The overlay client (`overlay/client.py`) is the private client's per-Output health layer, above the
+app and below the black picture. **With the tint off it is unmapped**: a tint-off page commits a
+NULL buffer, and the judge hears it presented once the compositor has processed that commit (a
+`wl_display.sync` after it). Nothing of the health layer covers the Player's pictures, so they stay
+on display planes ([0029](decisions/0029-render-planes.md)); a mapped transparent layer over them,
+as before, made Weston composite the whole screen. **With the tint on** it shows one whole-Output
+ARGB8888 `wl_shm` buffer scaled by `wp_viewporter`, and Weston composites while it shows. A tint-on
+page that cannot be drawn shows the shell's amber as a pre-multiplied `wp_single_pixel_buffer_v1`
+over the whole Output, never nothing.
 
-Why not a small `wl_shm` buffer: Weston 14's DRM backend treats a small ARGB8888 shm buffer
-as a cursor-plane candidate and builds that plane's mask as `1 << plane_idx` in 32 bits. The
-Pi 5's vc4 exposes 56 KMS planes and the HDMI-A-1 cursor plane has index 50, so the mask
-wraps to an overlay plane and `drm_output_find_plane_for_view` aborts Weston on
-`assert(fb)`. Weston returns before the plane search for a solid buffer. Weston 15 removes
-that assertion (upstream commit d3ead778) but still builds 32-bit plane masks, so a plane
-index of 32 or more still aliases another plane. A real pointer cursor can still reach the
-same path on Weston 14. CI cannot see this: its headless Weston has no DRM planes.
+**The shell's amber keys on the private client being alive** (`fallback_sync` in `shell.c`): it is
+up exactly while the Output is handed off and the private client is not connected, or connected
+without having bound `pw_diagnostic_manager_v1` at version 3 or later. It no longer keys on a mapped
+health surface, which the clear layer no longer has. Cost: a hung but connected health client shows
+no amber. `tests/native_display_smoke.py` proves both: with the client alive and nothing to show,
+no health view is mapped and the capture equals the app's pixels exactly; with it killed, the amber
+shows over the released Output and goes when the restarted client binds.
+
+Why a solid buffer and not a small `wl_shm` one for the fallback: the solid buffer holds no pixels,
+and Weston returns before its plane search for it. Weston's DRM backend treats a small ARGB8888 shm
+buffer as a cursor-plane candidate. The Node runs Photo Wall's Weston
+([packaging module](module-debian-packaging.md#weston)), whose plane masks are 64 bits wide: the
+HDMI-A-1 cursor plane (index 50) gets its own bit, `1 << 50`, and HDMI-A-1's primary (index 54)
+its own, so the Player's ground can be scanned out from the primary. Background: Debian's and
+upstream's Weston 14 build that mask as `1 << plane_idx` in 32 bits, so on the Pi 5's 56 vc4 planes
+the cursor's bit wraps to an overlay plane's and `drm_output_find_plane_for_view` aborts Weston on
+`assert(fb)`; Weston 15 removes that assertion (upstream commit d3ead778) but keeps 32-bit masks.
+CI cannot exercise this path: its headless Weston has no DRM planes, so the Pi bench is the proof.
 
 ## Frame-scoped replacement and explicit withdrawal
 
