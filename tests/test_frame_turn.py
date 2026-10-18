@@ -19,8 +19,11 @@ from central.app import create_app
 from central.content_catalog.catalog import device_id_for_serial
 from central.db import DatabaseTransactionClock
 from central.displays.model import DEFAULT_SETTINGS, ProjectedOutput, Readiness
+from central.fleet.position_history import PositionRestoreRefusal, restore_refusal
 from central.infra.display_store import output_documents
+from central.infra.position_history_store import frame_made_for_in, position_entries_in
 from central.registry import FrameCreate, FrameTurnChange, RegistryError
+from central.tuning_history.bounds import HistoryPage
 from contracts.models import FrameProfile
 from contracts.node_output import (
     Darkness,
@@ -131,6 +134,15 @@ def test_a_turn_raises_the_generation_and_needs_the_position_checked(registry):
     assert _revision(registry) == revision + 1
     assert _audits(registry, "frame_turned") == [{"turn": 90, "generation": ready.generation + 1}]
     assert frame.calibration == ready.calibration and frame.player_id == player   # never the Position or binding
+    # The Position history: the turn is a kept entry made for the new turn, and the Save before it,
+    # made for the screen hung the other way, can no longer be restored.
+    with registry.db.transaction() as conn:
+        entries = conn.execute("SELECT kind, turn FROM position_entries WHERE frame_id='kitchen' "
+                               "ORDER BY number DESC LIMIT 2").fetchall()
+        saved_before = position_entries_in(conn, "kitchen", HistoryPage(None, 5))[1]
+        now = frame_made_for_in(conn, "kitchen")
+    assert [(row["kind"], row["turn"]) for row in entries] == [("kept-turn-changed", 90), ("kept-saved", 0)]
+    assert restore_refusal(saved_before, frame_id="kitchen", now=now) is PositionRestoreRefusal.MADE_FOR_OTHER_TURN
     save_position(registry, "kitchen")      # the whole width of the screen as it now hangs (1080 x 1920)
     assert _inventory_frame(registry).readiness is Readiness.READY
 

@@ -16,6 +16,7 @@ from collections.abc import Callable, Iterator
 import pytest
 from node.display.test_display_turn import LINUX, OUTPUT, TRANSFORMS, Shell, confirmed
 
+from appliance.display_host import screen_turn
 from appliance.display_host.screen_turn import TURN_SECONDS, ScreenTurns, turn_due
 from contracts.display_turn import DisplayTurn
 from contracts.node_output import BEST_DETECTED, Darkness, OutputDocument, OutputPower, Power
@@ -104,7 +105,31 @@ def test_a_document_asks_once_for_its_turn_and_the_same_turn_again_asks_nothing(
     assert shell.mine() == [90, 0]
 
 
-def test_a_refused_ask_is_not_repeated_until_the_next_trigger(turns):
+def test_a_refused_ask_on_a_connected_output_is_asked_again_until_confirmed(monkeypatch):
+    """Documents are sent only when they change: a turn the shell refused (busy remoding at boot) is
+    asked again with a growing wait while the Output is connected, with no new trigger, until the
+    shell confirms it (render planes end review)."""
+    monkeypatch.setattr(screen_turn, "RETRY_FIRST", 0.02)
+    shell = FakeShell()
+    subject = ScreenTurns(shell)
+    subject.start()
+    try:
+        shell.refuse = True
+        subject.output(OUTPUT, connected=True)
+        subject.document(OUTPUT, document(270))
+        until(lambda: len(shell.mine()) >= 3)              # asked again with no trigger, more than once
+        assert subject.confirmed(OUTPUT) is None and set(shell.mine()) == {270}
+        shell.refuse = False
+        until(lambda: subject.confirmed(OUTPUT) == 270)
+        asked = len(shell.mine())
+        time.sleep(0.2)
+        assert len(shell.mine()) == asked                    # confirmed: nothing asked after it
+    finally:
+        shell.gate.set()
+        subject.stop()
+
+
+def test_a_refused_ask_of_an_output_never_reported_connected_waits_for_the_next_trigger(turns):
     subject, shell = turns
     shell.refuse = True
     subject.document(OUTPUT, document(270))

@@ -39,6 +39,7 @@ export const WHAT: Record<PositionEntryKind, string> = {
   "kept-created": "Created",
   "kept-saved": "Kept (Done)",
   "kept-profile-changed": "Kept (screen size changed)",
+  "kept-turn-changed": "Kept (screen turned)",
   "kept-unrecorded": "Changed outside Photo Wall",
   "sent-draft": "Tried, not kept",
   "sent-back": "Put back",
@@ -75,13 +76,15 @@ export function positionDetails(entry: PositionEntryView,
   ];
 }
 
-/** Restore's state for one entry: refused for another screen size or display (Central's
+/** Restore's state for one entry: refused for another screen size, a screen hung another way or display (Central's
  * `restore_refusal`, in words), else offered only while the live adjustment runs. */
 export function restoreState(entry: PositionEntryView, adjustment: Adjustment): HistoryRow["restore"] {
   const { width, height } = entry.made_for.profile_px;
   switch (entry.restore_refusal) {
     case "made_for_other_profile":
       return { disabled: true, reason: `Made for another screen size (${pixelSize(width, height)} px).` };
+    case "made_for_other_turn":
+      return { disabled: true, reason: refusalWords("made_for_other_turn") };
     case "made_for_other_display":
       return { disabled: true, reason: refusalWords("made_for_other_display") };
     case "other_frame":

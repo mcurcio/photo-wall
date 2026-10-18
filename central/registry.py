@@ -37,7 +37,7 @@ from central.infra.display_store import (
     resolve_output,
 )
 from central.infra.output_wakes import notify_nodes_in
-from central.infra.position_history_store import record_created_in, write_position_in
+from central.infra.position_history_store import record_created_in, write_position_in, write_turn_in
 from central.infra.power_store import forget_frame_in
 from central.infra.transactions import PgTransaction
 from central.installation_models import (
@@ -654,7 +654,9 @@ class Registry:
         Frame's (the token before idempotency, as `replace_frame_profile`); the same turn answers
         {"frame_id", "turn", "generation", "changed": False} with no write. A new turn raises the
         generation and configuration_revision (a Position made for the other hanging needs checking:
-        readiness POSITION_NEEDED until the next Save), audits "frame_turned" {"turn", "generation"}
+        readiness POSITION_NEEDED until the next Save) and appends the kept-turn-changed Position history
+        entry (`write_turn_in`: the Position as it is, made for the new turn, so Restore refuses the
+        entries made for the old one), audits "frame_turned" {"turn", "generation"}
         and wakes the bound Player's Node's document source (`notify_nodes_in`), so its Output
         document carries the turn without waiting for a deadline; answers {..., "changed": True}.
         Never touches the Position, the binding or the lighting."""
@@ -668,9 +670,7 @@ class Registry:
             if frame["turn"] == turn:
                 return {"frame_id": frame_id, "turn": turn, "generation": frame["generation"],
                         "changed": False}
-            row = conn.execute("UPDATE frames SET turn=%s, generation=generation+1,"
-                               "configuration_revision=configuration_revision+1 "
-                               "WHERE id=%s RETURNING generation", (turn, frame_id)).fetchone()
+            row = {"generation": write_turn_in(conn, frame_id, turn)}
             self._audit(conn, "frame_turned", frame_id, {"turn": turn, **row})
             bound = conn.execute("SELECT player_id FROM bindings WHERE frame_id=%s", (frame_id,)).fetchone()
             if bound is not None:

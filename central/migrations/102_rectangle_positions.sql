@@ -1,15 +1,19 @@
 -- Every stored Position becomes a rectangle (render redesign S5, frozen page
 -- .claude/runs/render-planes/s5-page.md, "The conversion" and B1): Frames, the Position history,
 -- both copies in Position trials, and the bindings of each Player's last configuration and of each
--- offered plan. Data only: no column, CHECK, function, trigger or stored procedure; the rule of
--- what a rectangle may be is app code (contracts/frame_fit.py `FrameRectangle`, `place`). No
--- backwards compatibility: no Cover or Corners body is left behind.
+-- offered plan. One column, position_entries.turn (below); no CHECK, function, trigger or stored
+-- procedure; the rule of what a rectangle may be is app code (contracts/frame_fit.py
+-- `FrameRectangle`, `place`). No backwards compatibility: no Cover or Corners body is left behind:
+-- take a pg_dump before deploying (docs/decisions/0029-render-planes.md, "Deploying").
 --
 -- Each stored copy converts by its own fit, the Frame shape it was made for (a Position history
 -- entry's own profile_*_px, every other copy its Frame's profile) and the mode as built of the
--- Output its Frame is bound to now (outputs.observation width_px x height_px, as
--- central/infra/display_store.py `frame_outputs_in` reads it; unknown when unbound, missing or
--- below 1). Missing keys read as before: Cover, the whole screen, rotation 0.
+-- Output its Frame is bound to now: outputs.observation width_px x height_px (as
+-- central/infra/display_store.py `frame_outputs_in` reads it) when at least 1 x 1, else the
+-- preferred mode of the display's EDID report (output_displays.report's modes): every Pi before
+-- this release enrolled its Outputs at 0 x 0, and Weston, given no mode, runs the preferred one.
+-- Unknown when unbound or neither is there. Missing keys read as before: Cover, the whole screen,
+-- rotation 0.
 -- - A rectangle is left as it is.
 -- - The turn: the rotation r's nearest quarter turn q = (floor(r / 90 + 0.5) * 90) mod 360 (half
 --   up) reversed, T = (360 - q) mod 360: a screen hung turned T shows upright what the old fit
@@ -25,6 +29,10 @@
 --   Position tab once. Frames, revisions and configuration revisions rise by one, so every Player
 --   is sent its Frame's new Position and a draft made before this release is refused (stale base);
 --   no Position history entry records the conversion.
+-- - Each Position history entry records the turn it was made for (position_entries.turn,
+--   central/fleet/position_history.py `MadeFor`): a converted entry its own T, a rectangle entry
+--   the Frame's turn before this conversion (the only turn S2 knew), so Restore refuses an entry
+--   made for the screen hung another way.
 
 -- Trials in flight end: their copies convert below and a console begins the next at once.
 UPDATE node_calibration_trials SET state = 'ended' WHERE state = 'active';
@@ -34,7 +42,16 @@ CREATE TEMP TABLE frame_screens ON COMMIT DROP AS
     SELECT f.id AS frame_id,
            ARRAY[(f.profile->>'width_px')::int, (f.profile->>'height_px')::int] AS shape,
            CASE WHEN (o.observation->>'width_px')::int >= 1 AND (o.observation->>'height_px')::int >= 1
-                THEN ARRAY[(o.observation->>'width_px')::int, (o.observation->>'height_px')::int] END AS screen
+                THEN ARRAY[(o.observation->>'width_px')::int, (o.observation->>'height_px')::int]
+                ELSE (SELECT ARRAY[(m.mode->>'width')::int, (m.mode->>'height')::int]
+                      FROM output_displays d
+                      CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(d.report->'modes') = 'array'
+                                                                   THEN d.report->'modes' ELSE '[]'::jsonb END)
+                          WITH ORDINALITY AS m(mode, ordinal)
+                      WHERE d.player_id = b.player_id AND d.output_id = b.output_id
+                        AND (m.mode->>'preferred')::boolean
+                        AND (m.mode->>'width')::int >= 1 AND (m.mode->>'height')::int >= 1
+                      ORDER BY m.ordinal LIMIT 1) END AS screen
     FROM frames f
     LEFT JOIN bindings b ON b.frame_id = f.id
     LEFT JOIN outputs o ON o.player_id = b.player_id AND o.output_id = b.output_id;
@@ -110,6 +127,15 @@ CREATE TEMP TABLE fit_answers ON COMMIT DROP AS
     CROSS JOIN LATERAL (SELECT least(greatest(hung.cx, whole.w / 2), hung.wh - whole.w / 2) AS cx,
                                least(greatest(hung.cy, high.h / 2), hung.hh - high.h / 2) AS cy) AS moved;
 
+-- The turn each history entry was made for: a rectangle entry the Frame's turn now (before the
+-- Frames' update below), a converted one its own (with its rectangle, below).
+ALTER TABLE position_entries ADD COLUMN turn SMALLINT,
+    DROP CONSTRAINT position_entries_kind_check,
+    ADD CONSTRAINT position_entries_kind_check CHECK (kind IN ('kept-created', 'kept-saved', 'kept-profile-changed',
+                                                               'kept-turn-changed', 'kept-unrecorded',
+                                                               'sent-draft', 'sent-back'));
+UPDATE position_entries e SET turn = f.turn FROM frames f WHERE f.id = e.frame_id;
+
 -- Frames: the new Position under the next revision, the turn, the next configuration revision;
 -- the Position is to check unless the conversion is exact. A rectangle Frame is not touched.
 UPDATE frames f SET
@@ -123,10 +149,11 @@ WHERE s.frame_id = f.id AND x.fit = COALESCE(f.calibration->'fit', '{}'::jsonb)
   AND x.shape = s.shape AND x.screen IS NOT DISTINCT FROM s.screen;
 
 -- The Position history and both trial copies take their answers; their revisions are kept.
-UPDATE position_entries e SET fit = x.answer
+UPDATE position_entries e SET fit = x.answer, turn = x.turn
 FROM frame_screens s, fit_answers x
 WHERE s.frame_id = e.frame_id AND x.fit = e.fit
   AND x.shape = ARRAY[e.profile_width_px, e.profile_height_px] AND x.screen IS NOT DISTINCT FROM s.screen;
+ALTER TABLE position_entries ALTER COLUMN turn SET NOT NULL;
 
 UPDATE node_calibration_trials t SET calibration = jsonb_set(t.calibration, '{fit}', x.answer)
 FROM frame_screens s, fit_answers x

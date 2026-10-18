@@ -135,8 +135,7 @@ def _position_views(entries: Iterable[PositionEntry], frame_id: str, frame_name:
     Frame now (`position_history.restore_refusal` against what an entry is made for there now)."""
     return tuple(position_entry_view(
         entry, frame_name=frame_name,
-        restore_refusal=position_history.restore_refusal(entry, frame_id=frame_id, profile_px=made_for.profile_px,
-                                                         seen_display_id=made_for.display_id))
+        restore_refusal=position_history.restore_refusal(entry, frame_id=frame_id, now=made_for))
         for entry in entries)
 
 

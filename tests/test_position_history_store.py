@@ -121,13 +121,16 @@ def _see_display(registry, frame_id: str = "node-f0") -> UUID:
 
 
 def _entry(registry, *, frame_id: str = "node-f0", width: int = 1080, height: int = 1920,
-           display: UUID | None = None, fit=SKEWED) -> UUID:
-    """An entry Photo Wall wrote at another time (another profile, another Display), as stored."""
+           display: UUID | None = None, fit=SKEWED, turn: int | None = None) -> UUID:
+    """An entry Photo Wall wrote at another time (another profile, turn or Display), as stored; `turn`
+    None: the Frame's turn now."""
     entry = uuid4()
     _sql(registry, "INSERT INTO position_entries(id, frame_id, number, kind, at, fit, lighting, profile_width_px, "
-                   "profile_height_px, display_id) SELECT %s, %s, COALESCE(max(number), 0) + 1, 'kept-saved', "
-                   "clock_timestamp(), %s, %s, %s, %s, %s FROM position_entries WHERE frame_id=%s",
-         (entry, frame_id, fit.model_dump_json(), LIGHTING.model_dump_json(), width, height, display, frame_id))
+                   "profile_height_px, turn, display_id) SELECT %s, %s, COALESCE(max(number), 0) + 1, 'kept-saved', "
+                   "clock_timestamp(), %s, %s, %s, %s, COALESCE(%s, (SELECT turn FROM frames WHERE id=%s)), %s "
+                   "FROM position_entries WHERE frame_id=%s",
+         (entry, frame_id, fit.model_dump_json(), LIGHTING.model_dump_json(), width, height, turn, frame_id, display,
+          frame_id))
     return entry
 
 
@@ -355,19 +358,22 @@ def test_restore_refusals_in_order(registry):
     other_frame = _history(registry, "node-f1")["entries"][0]["entry_id"]
     _sql(registry, "INSERT INTO displays(id, maker, product, name, serial, first_seen_at, matched_lux, panel_black) "
                    "VALUES (%s, 'DEL', 2, 'Dell', 'other', 0, 1000.0, 0.0003)", (dell := uuid4(),))
+    other_turn = _entry(registry, turn=180)               # made for the screen hung upside down
     other_display = _entry(registry, display=dell)
     with pytest.raises(NodeControlError) as invalid:
         node.restore(trial, own, expected=0)
     refusals = [(invalid.value.code, invalid.value.status)]
     for trial_id, entry, expected in ((uuid4(), own, 1), (UUID(trial["trial_id"]), uuid4(), 1),
                                       (UUID(trial["trial_id"]), other_frame, 1),
+                                      (UUID(trial["trial_id"]), other_turn, 1),
                                       (UUID(trial["trial_id"]), other_display, 1),
                                       (UUID(trial["trial_id"]), own, 7)):
         with pytest.raises(NodeControlError) as refused:
             node.trials.restore("node-f0", trial_id, entry_id=UUID(str(entry)), expected_sequence=expected)
         refusals.append((refused.value.code, refused.value.status))
     assert refusals == [("trial_sequence_invalid", 422), ("trial_unknown", 404), ("unknown_entry", 404),
-                        ("other_frame", 409), ("made_for_other_display", 409), ("trial_sequence_conflict", 409)]
+                        ("other_frame", 409), ("made_for_other_turn", 409), ("made_for_other_display", 409),
+                        ("trial_sequence_conflict", 409)]
     assert _history(registry)["entries"][0]["restore_refusal"] == "made_for_other_display"
     assert seen != dell
     node.end(trial)

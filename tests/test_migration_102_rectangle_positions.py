@@ -69,9 +69,10 @@ def _player(conn, player_id: str) -> None:
 
 
 def _frame(conn, frame_id: str, profile: dict, calibration: dict, *, output: tuple[str, str, tuple[int, int]] | None,
-           turn: int = 0) -> None:
+           turn: int = 0, preferred: tuple[int, int] | None = None) -> None:
     """A Frame positioned at generation 1 (ready when bound), bound to `output` = (player, output id,
-    reported size) when given."""
+    reported size) when given; `preferred`: the display's EDID report on that port, whose preferred
+    mode it is (another mode beside it)."""
     conn.execute("INSERT INTO frames(id, name, surface_id, x_mm, y_mm, width_mm, height_mm, profile, calibration, "
                  "lighting, generation, position_generation, configuration_revision, turn) "
                  "VALUES (%s, %s, 'wall', 0, 0, 600, 340, %s, %s, %s, 1, 1, 5, %s)",
@@ -82,6 +83,11 @@ def _frame(conn, frame_id: str, profile: dict, calibration: dict, *, output: tup
                      (player_id, output_id, Jsonb({"width_px": width, "height_px": height})))
         conn.execute("INSERT INTO bindings(frame_id, player_id, output_id) VALUES (%s, %s, %s)",
                      (frame_id, player_id, output_id))
+        if preferred is not None:
+            modes = [{"width": 1280, "height": 720, "refresh_millihertz": 60000, "preferred": False},
+                     {"width": preferred[0], "height": preferred[1], "refresh_millihertz": 60000, "preferred": True}]
+            conn.execute("INSERT INTO output_displays(player_id, output_id, connected, report, reported_at) "
+                         "VALUES (%s, %s, true, %s, 0)", (player_id, output_id, Jsonb({"modes": modes})))
 
 
 def _grid_cases() -> list[dict]:
@@ -129,7 +135,7 @@ def test_102_turns_every_history_entry_into_a_rectangle_place_accepts(empty_data
             _entries(conn, "grid-unbound", cases)
         db.migrate()
         with db.transaction() as conn:
-            rows = conn.execute("SELECT frame_id, number, fit FROM position_entries").fetchall()
+            rows = conn.execute("SELECT frame_id, number, fit, turn FROM position_entries").fetchall()
     finally:
         db.close()
 
@@ -137,6 +143,8 @@ def test_102_turns_every_history_entry_into_a_rectangle_place_accepts(empty_data
     assert len(rows) == (len(OUTPUTS) + 1) * len(cases) == 5 * 5 * 7 * 13
     for row in rows:
         fit = RectangleFit.model_validate(row["fit"])
+        # Each entry is made for its own fit's turn (Restore refuses it on a screen hung another way).
+        assert row["turn"] == _turn(by_number[row["number"]]["rotation"]), row
         if row["frame_id"] == "grid-unbound":
             assert row["fit"] == CENTRED
             continue
@@ -178,11 +186,18 @@ WORKED = {
            (1920, 1080), 0, {**CENTRED, "width": 0.5}, Readiness.READY),
     "e5": ((1920, 1080), {"revision": 3, "fit": {"mode": "cover", "corners": FULL, "rotation": 270}}, (0, 0),
            90, CENTRED, Readiness.POSITION_NEEDED),
+    # Enrolled at 0 x 0 (every Pi before this release) with its display's EDID report: the preferred
+    # mode, which Weston runs, is the mode as built, so an upright full-screen Frame stays ready.
+    "e8": ((1920, 1080), {"revision": 3, "fit": {"mode": "cover", "corners": FULL, "rotation": 0}}, (0, 0),
+           0, CENTRED, Readiness.READY),
+    "e9": ((1600, 1200), {"revision": 3, "fit": {"mode": "cover", "corners": FULL, "rotation": 0}}, (0, 0),
+           0, {**CENTRED, "width": 0.75}, Readiness.POSITION_NEEDED),
     "e6": ((1920, 1080), {"revision": 3, "fit": {"mode": "cover", "corners": FULL, "rotation": 7.5}}, (1920, 1080),
            0, CENTRED, Readiness.POSITION_NEEDED),
     # calibration '{}' (as 099's seeds): Cover on the whole screen at 0, under revision 1.
     "e7": ((1920, 1080), {}, (1920, 1080), 0, CENTRED, Readiness.READY),
 }
+PREFERRED = {"e8": (1920, 1080), "e9": (1920, 1080)}     # the EDID's preferred mode, for a 0 x 0 enrollment
 KEPT = {"revision": 4, "fit": {"mode": "rectangle", "centre_x": 0.25, "centre_y": 0.5, "width": 0.25}}
 
 
@@ -208,8 +223,12 @@ def test_102_worked_frames_trials_configurations_and_offers(empty_database):
         with db.transaction() as conn:
             _player(conn, "worked")
             for port, (frame_id, (shape, calibration, size, *_)) in enumerate(WORKED.items(), start=1):
-                _frame(conn, frame_id, _profile(*shape), calibration, output=("worked", f"HDMI-A-{port}", size))
-            _frame(conn, "kept", _profile(1920, 1080), KEPT, output=("worked", "HDMI-A-9", (1920, 1080)), turn=90)
+                _frame(conn, frame_id, _profile(*shape), calibration, output=("worked", f"HDMI-A-{port}", size),
+                       preferred=PREFERRED.get(frame_id))
+            _frame(conn, "kept", _profile(1920, 1080), KEPT, output=("worked", "HDMI-A-11", (1920, 1080)), turn=90)
+            conn.execute("INSERT INTO position_entries(id, frame_id, number, kind, at, fit, profile_width_px, "
+                         "profile_height_px, lighting) VALUES (gen_random_uuid(), 'kept', 1, 'kept-saved', now(), "
+                         "%s, 1920, 1080, %s)", (Jsonb(KEPT["fit"]), Jsonb(LIGHTING)))
             assert {frame_id: frame_readiness_in(conn, frame_id) for frame_id in (*WORKED, "kept")} == dict.fromkeys(
                 (*WORKED, "kept"), Readiness.READY)
             frames_before = {row["id"]: row for row in conn.execute("SELECT * FROM frames").fetchall()}
@@ -222,7 +241,7 @@ def test_102_worked_frames_trials_configurations_and_offers(empty_database):
             conn.execute("INSERT INTO player_configurations(player_id, authority_epoch, revision, configuration) "
                          "VALUES ('worked', 1, 1, %s)", (Jsonb({
                              "player_id": "worked", "authority_epoch": 1, "configuration_revision": 1,
-                             "bindings": [_binding("e2", "HDMI-A-2", old_e2), _binding("kept", "HDMI-A-9", KEPT)]}),))
+                             "bindings": [_binding("e2", "HDMI-A-2", old_e2), _binding("kept", "HDMI-A-11", KEPT)]}),))
             conn.execute("INSERT INTO plan_offers(player_id, authority_epoch, revision, plan_id, manifest, groups, "
                          "created_at, valid_until) VALUES ('worked', 1, 1, 'plan', %s, '[]', 1000, 1200)", (Jsonb({
                              "plan_id": "plan", "revision": 1, "player_id": "worked", "authority_epoch": 1,
@@ -238,6 +257,7 @@ def test_102_worked_frames_trials_configurations_and_offers(empty_database):
                 "SELECT state, calibration, saved_calibration FROM node_calibration_trials").fetchall()}
             configuration = conn.execute("SELECT configuration FROM player_configurations").fetchone()["configuration"]
             manifest = conn.execute("SELECT manifest FROM plan_offers").fetchone()["manifest"]
+            kept_turn = conn.execute("SELECT turn FROM position_entries WHERE frame_id='kept'").fetchone()["turn"]
     finally:
         db.close()
 
@@ -249,6 +269,7 @@ def test_102_worked_frames_trials_configurations_and_offers(empty_database):
         assert row["configuration_revision"] == before["configuration_revision"] + 1, frame_id
         assert row["generation"] == before["generation"], frame_id
     assert frames["kept"] == frames_before["kept"]          # a rectangle is left as it is
+    assert kept_turn == 90                                  # a rectangle entry: made for the Frame's turn
 
     assert set(trials) == {"ended", "saved"}                # the active trial ended, the saved one kept
     assert trials["ended"]["calibration"] == {"revision": 3, "fit": frames["e2"]["calibration"]["fit"]}

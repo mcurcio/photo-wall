@@ -204,7 +204,7 @@ export interface PlayerVersionView {
   version: ReleaseTag | null;
 }
 
-export type PositionEntryKind = "kept-created" | "kept-saved" | "kept-profile-changed" | "kept-unrecorded" | "sent-draft" | "sent-back";
+export type PositionEntryKind = "kept-created" | "kept-saved" | "kept-profile-changed" | "kept-turn-changed" | "kept-unrecorded" | "sent-draft" | "sent-back";
 
 export interface PositionEntryView {
   at: string;
@@ -231,7 +231,7 @@ export interface PositionRestore {
   expected_sequence: number;
 }
 
-export type PositionRestoreRefusal = "other_frame" | "made_for_other_profile" | "made_for_other_display";
+export type PositionRestoreRefusal = "other_frame" | "made_for_other_profile" | "made_for_other_turn" | "made_for_other_display";
 
 export interface ProfilePxView {
   height: number;
@@ -789,6 +789,7 @@ export const REFUSALS = {
   PositionRestoreRefusal: [
     "other_frame",
     "made_for_other_profile",
+    "made_for_other_turn",
     "made_for_other_display",
   ],
   ReportRefusal: [

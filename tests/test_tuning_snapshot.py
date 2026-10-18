@@ -128,7 +128,7 @@ def test_a_snapshot_needs_a_time_with_its_zone_and_a_known_frame(registry):
 
 
 def _position(*, frame_id: str = "kitchen", at: datetime = AT) -> PositionEntry:
-    return PositionEntry(uuid4(), frame_id, 1, at, MadeFor((1080, 1920), None),
+    return PositionEntry(uuid4(), frame_id, 1, at, MadeFor((1080, 1920), 0, None),
                          PositionRecord(PositionEntryKind.KEPT_SAVED, PositionValues(RectangleFit(), LIGHTING), None, None))
 
 
