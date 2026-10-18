@@ -159,8 +159,8 @@ class FitPass:
     """The fit pass's programs on the current GL context (module rules)."""
 
     def __init__(self, gl: Any) -> None:
-        """Compile and link the programs (one per source kind and step set, as player/native.py's
-        frame pass switches its steps) with `gl`, PyOpenGL's GLES 3 module or one like it.
+        """Compile and link the programs (one per source kind and step set: a step switched
+        off is a constant of its program) with `gl`, PyOpenGL's GLES 3 module or one like it.
         FitFailed("gpu_error") when a program does not link.
 
         The still sources' programs are linked here; an external source's on its first draw (it

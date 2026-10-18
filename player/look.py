@@ -1,5 +1,5 @@
 """A composition's look at the time of a frame, and when it next changes over time: the one
-evaluation of every time-varying picture property. Pure: no renderer, GTK or executor state.
+evaluation of every time-varying picture property. Pure: no renderer, GL or executor state.
 
 The executor decides what a Frame shows (its planning tick); the renderer decides how it looks,
 evaluating each layer at the time of the frame it draws (its display's frame clock). A layer's

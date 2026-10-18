@@ -1,7 +1,6 @@
 """The Player's renderer (player/rendering.py `Renderer`): each layer's picture finished once at its
 Frame's size, shown as a plane the display controller places and fades (render redesign, run ledgers
-.claude/runs/render-planes/s1-page.md and s3-page.md). It stands beside player/native.py until S3's
-last bead deletes the old one.
+.claude/runs/render-planes/s1-page.md and s3-page.md), the Player's only renderer.
 
 The composition root of the new path: it composes and calls, it never computes a rule. Each rule
 has its home: what can be seen (player/visibility.py), a layer's alpha at a frame time, when a

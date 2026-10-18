@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """Run the native display harnesses (tests/native_display_smoke.py, then
-tests/native_player_mainloop_harness.py, then tests/native_player_resource_harness.py, then
-tests/native_renderer_pixel_harness.py, then tests/native_picture_e2e_harness.py, then
-tests/native_screen_harness.py, then tests/native_fit_pass_harness.py) in a Linux arm64 container.
+tests/native_screen_harness.py, then tests/native_fit_pass_harness.py, then
+tests/native_picture_e2e_harness.py) in a Linux arm64 container.
 
 The harness runs a real headless Weston with the built `photo-wall-shell.so`, a stub app and the
 private diagnostic client, and reads output pixels through Weston's own `weston_capture_v1`. It
@@ -13,14 +12,13 @@ photo-wall-node-display and photo-wall-frame-client installed from the local rep
 (debian-packaging/build-repo.sh's output; decision 0019) and so their Depends (Weston, the
 overlay client's pywayland and pycairo, which the harness also reads pixels and checks the
 private protocol with), plus photo-wall-player, whose Depends are the Player's Debian runtime
-(GTK, GStreamer, PyGObject, PyOpenGL, pydantic), which the Player main-loop harness drives on
-real GLib and GL; the resource harness then holds the Player to releasing every decoder's
-descriptors and to presenting again after a remap or a new grant (1b P1a); the pixel harness
-holds the native renderer's pixels to player/geometry.py's reference (1c R2: Cover and Corners,
-the picture operations, black outside the opening, the picture change in the tag); the picture
-end-to-end harness drives an Output document's picture part through the installed picture
-controller, the shell and the Player to Weston's pixels and back to the report (1c I1). Nothing of
-appliance/display_host is compiled here: the harness proves the packages.
+(GStreamer, PyGObject, PyOpenGL, pydantic). The smoke holds the shell to its client contract; the
+screen harness holds the frame client's screens (the pictures on their planes, the trial
+overlay); the fit pass harness holds the fit and pattern passes, on software GL, to
+player/geometry.py's reference; the picture end-to-end harness drives an Output document's
+picture part through the installed picture controller, the shell and the Player's render planes
+path (on tests/harness_device.py's memfd device) to Weston's pixels and back to the report.
+Nothing of appliance/display_host is compiled here: the harness proves the packages.
 
 The image is tagged `photo-wall-display-harness:<digest>`, the digest being the sha256 of its
 recipe text (the Dockerfile, which records the build container's image ID) and the repo's index
@@ -135,14 +133,9 @@ def run_argv(tag: str, name: str, repository: Path = REPOSITORY) -> list[str]:
             "-v", f"{repository / 'player'}:/repo/player:ro",
             "-v", f"{repository / 'contracts'}:/repo/contracts:ro",
             tag, "/bin/sh", "-c", "/usr/bin/python3 /smoke/native_display_smoke.py"
-            " && /usr/bin/python3 /smoke/native_player_mainloop_harness.py"
-            " && /usr/bin/python3 /smoke/native_player_resource_harness.py"
-            " && /usr/bin/python3 /smoke/native_renderer_pixel_harness.py"
-            " && /usr/bin/python3 /smoke/native_picture_e2e_harness.py"
-            # The render redesign's new path (run ledger .claude/runs/render-planes/s1-page.md):
-            # the frame client's screens (bead B3) and the fit pass (bead B4).
             " && /usr/bin/python3 /smoke/native_screen_harness.py"
-            " && /usr/bin/python3 /smoke/native_fit_pass_harness.py"]
+            " && /usr/bin/python3 /smoke/native_fit_pass_harness.py"
+            " && /usr/bin/python3 /smoke/native_picture_e2e_harness.py"]
 
 
 def main(argv: list[str] | None = None) -> int:

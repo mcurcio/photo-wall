@@ -2,31 +2,22 @@
 waits on a LUT" and R11): PlayerLuts (asked, wanted, held), every bound Frame's LUT wanted as its
 configuration arrives, PlayerService.fetch_lut against Central's LUT route faked with
 httpx.MockTransport (the Variant rule: the served Repr-Digest and Content-Length decide) through a
-real media cache, and the renderer's shown key redrawing when the LUT arrives. No GL: the texture is
-the pixel harness's (tests/native_renderer_pixel_harness.py)."""
+real media cache. No GL: the LUT's arrival joining a drawn Frame is the picture end-to-end harness's
+(tests/native_picture_e2e_harness.py)."""
 from __future__ import annotations
 
 import asyncio
 import functools
 import hashlib
-import threading
-import time
-import uuid
-from types import SimpleNamespace
 
 import httpx
 import pytest
 from test_player_service import Server, close, repr_digest, rig
 
-import player.native as native_module
 from contracts.lut import LUT_BYTES, LUT_MEDIA_TYPE, LutRef
-from contracts.models import Calibration
-from contracts.node_frame import PictureOperations
-from contracts.node_picture import UPGRADE_DISPLAY_LIGHT
 from contracts.time import ManualClock
 from player.cache import Cache
 from player.luts import PlayerLuts
-from player.rendering import PrepareResult
 from player.service import ServiceError
 
 REF = LutRef("ab" * 32, "lut33-perceptual-relcol-bpc-1")
@@ -195,76 +186,3 @@ def test_every_bound_frames_paper_profile_is_wanted_once_and_never_when_held():
     luts.hold(other, TABLE)
     luts.want((REF, other, REF))
     assert luts.wanted() == (REF,)
-
-
-# -- The renderer: the Frame draws at once, its LUT joins when held -------------------------------
-
-def test_the_frames_lut_arrival_redraws_and_nothing_waits_for_it():
-    """Rule 3: a Frame whose paper profile is not held yet is drawn without it (no LUT bound) and
-    its tag names the change at once; hold() raises the generation, the surface draws again and
-    the LUT is bound. Mutation probe: leave the generation out of the shown key -> no redraw after
-    hold."""
-    luts = PlayerLuts()
-    operations = PictureOperations("hdmi1", 9, (1.0, 1.0, 1.0), 1.0, 1.0, UPGRADE_DISPLAY_LIGHT)
-
-    class Area:
-        renders = 0
-
-        def queue_render(self):
-            self.renders += 1
-
-    class Frames:
-        def grant(self, _output_id, _composition=None):
-            return SimpleNamespace(grant_id=uuid.UUID(int=1), binding_generation=1, config_revision=1,
-                                   admitted=True, matches=lambda _c: True)
-
-        def trial(self, _composition, _grant):
-            return None
-
-        def picture(self, _output_id):
-            return operations
-
-    class GL:
-        GL_TEXTURE0, GL_TEXTURE_3D = 0x84C0, 0x806F
-
-        def __init__(self):
-            self.uploads = 0
-
-        def __getattr__(self, name):
-            if name.startswith("GL_"):
-                return 0
-            if name == "glTexImage3D":
-                return lambda *_: setattr(self, "uploads", self.uploads + 1)
-            if name == "glGenTextures":
-                return lambda _n: 5
-            return lambda *_: None
-
-    renderer = native_module.NativeRenderer.__new__(native_module.NativeRenderer)
-    renderer._owner, renderer._closed, renderer._serial = threading.get_ident(), False, 0
-    renderer._decoders, renderer._frames, renderer._luts, renderer.GL = {}, Frames(), luts, GL()
-    surface = native_module._Surface(output=None, window=None, area=Area())
-    renderer._surfaces = {"hdmi1": surface}
-    renderer.capacity = lambda compositions: SimpleNamespace(available=True)
-    renderer._prepare = lambda local, composition, seen: PrepareResult("prepared")
-    photo = SimpleNamespace(binding=SimpleNamespace(output_id="hdmi1"), calibration=Calibration(),
-                            fallback=False, timebase=None, layers=(SimpleNamespace(
-                                layer=SimpleNamespace(assignment_id="a", variant=None), path=None, alpha=1.0),))
-
-    def draw():
-        """What _render does with the pending draw: bind the LUT if held, tag the change."""
-        lut_drawn = renderer._bind_lut(surface, REF)
-        surface.acknowledged, surface.pending = surface.pending, None
-        surface.acknowledged.completed_at = time.monotonic()
-        return lut_drawn, surface._tagged_change(operations)
-
-    assert renderer.present(photo).status == "pending" and surface.area.renders == 1
-    assert draw() == (False, 9)                            # without the LUT; nothing waits
-    assert luts.wanted() == (REF,)
-    assert renderer.present(photo).status == "presented" and surface.area.renders == 1
-    luts.hold(REF, TABLE)
-    renderer.present(photo)
-    assert surface.area.renders == 2, "the LUT's arrival must redraw"
-    assert draw() == (True, 9) and renderer.GL.uploads == 1
-    assert renderer.present(photo).status == "presented" and surface.area.renders == 2
-    assert renderer._bind_lut(surface, REF) and renderer.GL.uploads == 1    # bound, not re-uploaded
-    assert renderer._bind_lut(surface, None) is False                      # a Frame without a profile

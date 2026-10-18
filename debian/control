@@ -25,12 +25,10 @@ Build-Depends: debhelper-compat (= 13),
  python3-websockets,
  python3-segno,
  python3-gst-1.0,
- gir1.2-gtk-3.0,
  gir1.2-gst-plugins-base-1.0,
  gstreamer1.0-plugins-base,
  gstreamer1.0-plugins-good,
  gstreamer1.0-plugins-bad,
- gstreamer1.0-libav,
  libgl1-mesa-dri,
  libegl1,
  initramfs-tools
@@ -179,7 +177,7 @@ Description: Photo Wall frame client library
 # as `python3 -I -B /usr/lib/photo-wall/player`. Its Python libraries are what its modules import
 # (the import check); the render stack is loaded through gi and GStreamer, never imported by name.
 # The frame client is the library the
-# Player loads by path (player/wayland_frames.py). Players are Immich-unaware: nothing here
+# Player loads by path (player/plane_screen.py). Players are Immich-unaware: nothing here
 # reaches Central's or the media worker's code.
 Package: photo-wall-player
 Architecture: all
@@ -192,12 +190,10 @@ Depends: python3,
  python3-segno,
  python3-websockets,
  python3-gst-1.0,
- gir1.2-gtk-3.0,
  gir1.2-gst-plugins-base-1.0,
  gstreamer1.0-plugins-base,
  gstreamer1.0-plugins-good,
  gstreamer1.0-plugins-bad,
- gstreamer1.0-libav,
  libgl1-mesa-dri,
  libegl1,
  libgbm1,

@@ -29,8 +29,8 @@ corners (the quadrants' colours are 0 or 1 per channel), where software GL's 8-b
 5. bt709_is_decoded_as_video: a 2D source marked bt709 equals the reference decoded as video.
 6. a_wrong_target_size_is_refused: a target the size of the unturned picture at 90 degrees is
    ValueError("fit_target_size") and nothing is drawn.
-7. both_passes_carry_the_one_look: the fit pass's linked programs and the frame pass's
-   (player/native.py `_frame_source`, linked here) each hold LOOK_GLSL verbatim.
+7. both_passes_carry_the_one_look: the fit pass's linked programs and the pattern pass's each hold
+   LOOK_GLSL verbatim.
 
 The new path's device and decode on the same libraries the Pi runs (the container's Debian
 PyOpenGL and GStreamer 1.26; the GBM targets and the hardware decoder have no CI and are the Pi
@@ -83,7 +83,6 @@ from contracts.node_frame import PictureOperations  # noqa: E402
 from contracts.node_picture import DisplayLight  # noqa: E402
 from contracts.room_light import FixedColour, FixedEntry, RoomLightsDocument  # noqa: E402
 from contracts.tuning import TARGET_PATTERNS, TestPattern  # noqa: E402
-from player import native as native_module  # noqa: E402
 from player.calibration_target import target_modules  # noqa: E402
 from player.fit_pass import FitPass, FitRequest, FitSource, target_size  # noqa: E402
 from player.geometry import (  # noqa: E402
@@ -330,23 +329,10 @@ def both_passes_carry_the_one_look() -> None:
     assert len(programs) >= 2, programs
     for program in programs:
         assert any(look in text for text in sources_of(program)), ("fit_pass_without_look", program)
-    frame = native_module._frame_source(native_module._Steps(True, 0))
-    shaders = []
-    for text, kind in ((native_module._VERTEX, gl.GL_VERTEX_SHADER), (frame, gl.GL_FRAGMENT_SHADER)):
-        shader = int(gl.glCreateShader(kind))
-        gl.glShaderSource(shader, text)
-        gl.glCompileShader(shader)
-        assert gl.glGetShaderiv(shader, gl.GL_COMPILE_STATUS), ("frame_pass_compile", gl.glGetShaderInfoLog(shader))
-        shaders.append(shader)
-    program = int(gl.glCreateProgram())
-    for shader in shaders:
-        gl.glAttachShader(program, shader)
-    gl.glLinkProgram(program)
-    assert gl.glGetProgramiv(program, gl.GL_LINK_STATUS), ("frame_pass_link", gl.glGetProgramInfoLog(program))
-    assert any(look in text for text in sources_of(program)), "frame_pass_without_look"
-    gl.glDeleteProgram(program)
-    for shader in shaders:
-        gl.glDeleteShader(shader)
+    patterns = list(PATTERNS._programs.values())  # with and without the LUT
+    assert len(patterns) >= 2, patterns
+    for program in patterns:
+        assert any(look in text for text in sources_of(program)), ("pattern_pass_without_look", program)
 
 
 def textures_are_deleted_through_gles3() -> None:

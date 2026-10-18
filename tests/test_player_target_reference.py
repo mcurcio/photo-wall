@@ -4,8 +4,8 @@ pre-software is the display alone, raw everywhere; post-software runs through Ph
 with no raw region left: v1's dark box is gone). Since decision 0028 the post-software target, as the
 look patterns, goes through the Display's white balance, contrast and gamma only, never the room's
 light, the paper or the mat. Where the board's squares sit is B1's
-(tests/test_player_board_reference.py). Pure: the shader is held to this by
-tests/native_renderer_pixel_harness.py."""
+(tests/test_player_board_reference.py). Pure: the pattern pass's shader (player/pattern_pass.py) is held to
+this by tests/native_fit_pass_harness.py."""
 from __future__ import annotations
 
 import math

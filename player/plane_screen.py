@@ -1,5 +1,5 @@
 """The Player's screens on its own connection to Display Host's Weston (render redesign, run ledger
-.claude/runs/render-planes/s1-page.md): no GTK. Each Output's screen is an xdg toplevel
+.claude/runs/render-planes/s1-page.md): the Player's only Wayland client. Each Output's screen is an xdg toplevel
 `photo-wall-<output>` (player/output_discovery.py `output_app_id`) the shell maps full screen,
 showing its ground (an opaque black picture the display controller scans out beneath the planes),
 the parent of one sub-window per plane. A ctypes bridge over the frame

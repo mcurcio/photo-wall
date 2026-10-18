@@ -2,8 +2,8 @@
 mat shadow, whose rules live on in it): a far light's mat shadow (its band, its softness, the wall's up
 on a tilted or turned Frame, an even band in a skewed opening), a close light's cone placed from the
 wall's up and its point shadow, each Frame's own lights on an Output, the paper profile's LUT before
-the paper, and the fixed highlight rolloff. Pure: no GL (the shader is held to this reference by
-tests/native_renderer_pixel_harness.py)."""
+the paper, and the fixed highlight rolloff. Pure: no GL (the fit pass's shader, player/fit_pass.py, is held to this reference by
+tests/native_fit_pass_harness.py)."""
 from __future__ import annotations
 
 import itertools

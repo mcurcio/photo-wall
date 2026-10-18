@@ -1,5 +1,5 @@
 """Room light's physics on the Pi (decision 0028), through the scalar reference the shader is held to
-(player/geometry.py; tests/native_renderer_pixel_harness.py holds the shader to it): the upgrade's
+(player/geometry.py; tests/native_fit_pass_harness.py holds the fit pass's shader to it): the upgrade's
 picture equals today's at neutral sliders, a light whose room light is absent, not reported,
 unavailable, off or read against the wrong reference adds nothing (design rule 2), the bookshelf
 spot's cone and its switch, and the dither that keeps a room dimmed to a few lux from banding."""

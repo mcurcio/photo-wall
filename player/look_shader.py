@@ -1,6 +1,6 @@
-"""The look in GLSL: the one shader copy of player/geometry.py's final steps, shared by the frame pass
-(player/native.py, until S3 deletes it) and the fit pass (player/fit_pass.py) (render redesign,
-run ledger .claude/runs/render-planes/s1-page.md). Moved from player/native.py, never rewritten:
+"""The look in GLSL: the one shader copy of player/geometry.py's final steps, shared by the fit pass
+(player/fit_pass.py) and the pattern pass (player/pattern_pass.py) (render redesign, run ledgers
+.claude/runs/render-planes/s1-page.md and s3-page.md):
 the Frame's paper under the room's light and the mat shadow (`irradiance`, `paper_reflectance`,
 `paper_signal`), the paper profile's LUT, the fixed highlight rolloff, white balance, sRGB encode,
 contrast, gamma, clamp and dither, each step as player/geometry.py states it.

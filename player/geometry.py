@@ -1,6 +1,10 @@
 """Scalar calibration/SDR reference. Production pixels are processed by shaders.
 
-The Frame fit and the final pass are each stated once here and mirrored by the shaders (player/native.py; the look, player/look_shader.py; the fit pass, player/fit_pass.py):
+The Frame fit and the final pass are each stated once here; the look is mirrored by
+player/look_shader.py, the photo fit by the fit pass (player/fit_pass.py), the patterns by player/pattern_pass.py. The Cover and Corners references
+(`output_to_picture`, `inside_opening` and the functions that take a Cover or Corners) have no
+shader since render redesign S3; the calibration target reader and the reference tests use them
+until S5 deletes them with their types:
 - **One matrix per fit** (`output_to_picture`): output fractions -> the picture's unit square.
   Corners: the inverse perspective onto the corners with the quarter turn folded in. Cover: the
   inverse of rotate, scale evenly and move onto contracts/frame_fit.py's cover rectangle (the
@@ -407,8 +411,8 @@ def board_signal(column: float, row: float, draw: BoardDraw) -> float:
     of a copy of qr_copies(draw.columns), the module there (dark 0.0; light and the
     QR_QUIET_MODULES quiet zone 1.0; all 1.0 when draw.modules is None), the modules and their
     quiet zone scaled to fill QR_SQUARES; else board_raster(SCREEN)'s pixel at
-    (floor(column * SQUARE_PX), floor(row * SQUARE_PX)) over 255. Pure; the shader's
-    `board_signal` mirrors it (tests/native_renderer_pixel_harness.py)."""
+    (floor(column * SQUARE_PX), floor(row * SQUARE_PX)) over 255. Pure; player/pattern_pass.py's
+    `board_signal` mirrors it (tests/native_fit_pass_harness.py)."""
     if not (0 <= column < draw.columns and 0 <= row < SCREEN_ROWS):
         return 0.0
     for copy in qr_copies(draw.columns):
@@ -863,8 +867,7 @@ GRID_LINE_WIDTH: Final = 0.035                   # a line's share of the space b
 def commissioning_grid(u: float, v: float) -> Linear:
     """Position's commissioning grid at the Frame's picture point (u, v), in linear light: slate
     GRID_SLATE (0.2, 0.3, 0.45) with light lines GRID_LINE (0.9, 0.9, 0.9) where fract(GRID_LINES u)
-    or fract(GRID_LINES v) < GRID_LINE_WIDTH (10 and 0.035; player/native.py's frame pass drew the
-    same grid in the picture's unit square). The photo a commissioning ground passes through
+    or fract(GRID_LINES v) < GRID_LINE_WIDTH (10 and 0.035, in the picture's unit square). The photo a commissioning ground passes through
     `final_pixel`. Pure; player/pattern_pass.py's shader is written from these constants."""
     def fract(value: float) -> float:
         return value - math.floor(value)

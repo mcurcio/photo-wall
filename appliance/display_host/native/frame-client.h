@@ -1,11 +1,11 @@
-/* App-private client ABI. MIT. Call only from the GTK owning render thread. */
+/* App-private client ABI. MIT. Call a client only from the one thread that owns it. */
 #pragma once
 #include <wayland-client.h>
 #include <stdint.h>
 struct pw_frame_client;
 struct pw_frame_client *pw_frame_client_create(struct wl_display *display);
-/* Call inside the successful draw's GTK paint cycle before GDK commits that
- * very buffer. This queues metadata/feedback; it never commits a surface. */
+/* Call after the successful draw, before the caller commits that very buffer on `surface`.
+ * This queues metadata/feedback; it never commits a surface. */
 int pw_frame_client_tag_next_commit(struct pw_frame_client *client,
     struct wl_surface *surface, const char *grant_id, const char *frame_tag);
 int pw_frame_client_dispatch(struct pw_frame_client *client);
@@ -47,7 +47,7 @@ int pw_frame_client_presentation(struct pw_frame_client *client, struct wl_surfa
     uint64_t *sequence, int64_t *at_ns, uint32_t *refresh_ns);
 
 /* The Player's screens (render redesign, run ledger .claude/runs/render-planes/s1-page.md, bead B3).
- * The client on its own connection, no GDK: every function below and above works on a client
+ * The client on its own connection: every function below and above works on a client
  * made by pw_frame_client_connect, from the one thread that owns it.
  *
  * A screen is one Output's app surface: an xdg toplevel whose app id is "photo-wall-<output_id>"
@@ -76,7 +76,7 @@ struct pw_plane_state {
  * (v4, for its name). NULL when the connection or any of them is missing. The client answers
  * xdg_wm_base pings itself while dispatching; pw_frame_client_destroy disconnects. */
 struct pw_frame_client *pw_frame_client_connect(const char *socket);
-/* The connection's fd (-1: a client made by pw_frame_client_create, whose fd is GDK's). */
+/* The connection's fd (-1: a client made by pw_frame_client_create, on its caller's connection). */
 int pw_frame_client_fd(struct pw_frame_client *client);
 /* The Output named output_id as Weston reports it: its current mode's width and height (physical
  * pixels) and its wl_output.transform. Returns 1 known, 0 not announced (or gone), -1 transport

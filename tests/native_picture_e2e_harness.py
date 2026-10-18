@@ -2,7 +2,7 @@
 pixels Weston shows, through the picture controller, the shell and the Player.
 
 Run only inside the display harness container (scripts/run_display_harness.py), after
-native_renderer_pixel_harness.py, with `player` and `contracts` mounted read-only at /repo and
+native_fit_pass_harness.py, with `player` and `contracts` mounted read-only at /repo and
 `tests` at /smoke. Everything on the path is the real one: a headless Weston with the installed
 photo-wall shell (`--debug`, so `weston_capture_v1` reads its framebuffer), the installed Display
 Host's WestonBackend and DisplayHost on the shell's control socket (allow, candidate, handoff, as

@@ -70,8 +70,7 @@ PATTERN_CODES: Final[Mapping[TestPattern | None, int]] = {
     None: 0, TestPattern.WHITE: 1, TestPattern.GREY_RAMP: 2, TestPattern.BLACK_LEVEL: 3,
     TestPattern.TARGET_PRE_SOFTWARE: 4, TestPattern.TARGET_POST_SOFTWARE: 5}
 """Each pattern's code in the pass's GLSL (`#define PATTERN_<NAME> <code>`); None, 0: the commissioning
-grid (`PATTERN_COMMISSIONING_GRID`). The one home of the codes (the frame pass's copy in
-player/native.py goes with that module)."""
+grid (`PATTERN_COMMISSIONING_GRID`). The one home of the codes."""
 
 
 @dataclass(frozen=True)

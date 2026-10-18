@@ -1,7 +1,7 @@
 """When an Output may draw its next frame: the pacer (owner, 2026-10-17: "The render loop should
 not fire if it there is nothing to render.").
 
-PURE: no GL, Wayland, GTK or clock. The renderer tells it each tagged commit it made
+PURE: no GL, Wayland or clock. The renderer tells it each tagged commit it made
 (`submitted`) and each word the compositor gave about one (`answered`: presented, on which
 refresh, or discarded); `ready` answers whether a frame may be drawn at a frame time, `free`
 whether a commit that draws nothing may be made (the one-in-flight rule alone).
@@ -20,7 +20,8 @@ Rules (docs/module-native-renderer.md, "Pacing"):
   N falls when that sample ages out of the window. The slot holds a frame when its word was read
   sooner than the slowest read of the window (a busy main loop reads some words a tick late):
   every frame then starts as late as that one, so the gaps stay one multiple of the refresh. A
-  frame's own GPU cost cannot be held: GTK 3 commits as soon as the GLArea renders.
+  frame's own GPU cost is not paced here: it is finished off the present path
+  (player/plane_renderer.py `finish`), before the commit that shows it.
 - Only a word waited for measures learn: one read on a frame tick of a frame clock followed for
   it. A word read with no clock followed (nothing was owed: a still picture, a pause before a
   fade or an edit) sat unread for idle time, which is no cost: its latency counts, its read

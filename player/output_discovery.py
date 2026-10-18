@@ -19,7 +19,8 @@ class OutputDiscovery:
 
 
 def output_app_id(output_id: str) -> str:
-    """Shared GTK app-ID/compositor routing convention, without native imports."""
+    """The screen's xdg app ID, shared by the Player (player/plane_screen.py) and the compositor's
+    routing, without native imports."""
     if not (re.fullmatch(r"HDMI-A-[0-9]+", output_id)
             or output_id in ("Virtual-1", "Virtual-2")):
         raise ValueError("invalid connector identity")

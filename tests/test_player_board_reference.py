@@ -3,8 +3,8 @@
 side, the shown columns centred along its long side, a quarter turn clockwise in a portrait
 opening; each point the generated raster or a QR copy's module. And the seam the calibration
 tracer rides on: a board the Player draws in a 5-inch opening is found by OpenCV's ChArUco
-detector and its QR decodes. Pure: the shader is held to this by
-tests/native_renderer_pixel_harness.py."""
+detector and its QR decodes. Pure: the pattern pass's shader (player/pattern_pass.py) is held to
+this by tests/native_fit_pass_harness.py."""
 from __future__ import annotations
 
 import itertools
