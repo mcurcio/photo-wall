@@ -159,8 +159,8 @@ from player.geometry import (  # noqa: E402
 )
 from player.luts import PlayerLuts  # noqa: E402
 from player.native import FOLLOW_LEAD, NativeOutput, NativeRenderer  # noqa: E402
+from player.plane_screen import FrameGrant  # noqa: E402
 from player.rendering import LocalLayer, OutputComposition  # noqa: E402
-from player.wayland_frames import FrameGrant  # noqa: E402
 
 WIDTH, HEIGHT = 64, 48                      # the picture
 TOLERANCE = 0.015

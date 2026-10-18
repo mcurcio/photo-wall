@@ -36,19 +36,64 @@ from contracts.node_frame import (
     PICTURE_OPERATIONS_BYTES,
     PictureOperations,
     decode_picture_operations,
+    frame_witness_tag,
     picture_change_text,
 )
+from player.calibration_trial import AppliedTrial
 from player.fit_pass import target_size
 from player.gpu import Target
 from player.pacing import Word
 from player.planes import Composition, Screen
-from player.rendering import OutputComposition
-from player.wayland_frames import CLIENT_LIBRARY, FrameGrant
+from player.rendering import LocalLayer, OutputComposition
 
+CLIENT_LIBRARY = "/usr/lib/photo-wall/frame-client/libphoto-wall-frame-client.so"
 PresentRefused = Literal["picture_refused", "output_gone"]
 SCREEN_PLANES: Final = 15       # frame-client.h PW_SCREEN_PLANES: one plane is each screen's ground (bench T2)
 LOGGER = logging.getLogger(__name__)
 _FULL: Final = 0xFFFFFFFF       # wp_alpha_modifier_v1's opaque multiplier
+OverlayCorners = tuple[tuple[float, float], tuple[float, float], tuple[float, float], tuple[float, float]]
+"""A trial overlay's four corners (top-left, top-right, bottom-right, bottom-left), each (x, y) as
+fractions 0..1 of the screen as it hangs: the shell's diagnostic client draws them over the Output's
+logical size (frame protocol v2 `overlay`; appliance/display_host/overlay/render.py `render_trial`)."""
+
+
+@dataclass(frozen=True)
+class FrameGrant:
+    grant_id: UUID
+    binding_generation: int
+    config_revision: int
+    frame_id: str
+    admitted: bool
+
+    def matches(self, composition: OutputComposition) -> bool:
+        return (
+            composition.binding.frame_id == self.frame_id
+            and composition.binding.generation == self.binding_generation
+            and composition.binding.configuration_revision == self.config_revision
+        )
+
+
+def composition_tag(composition: OutputComposition, visible_layers: tuple[LocalLayer, ...]) -> str:
+    """Witness exactly the renderer's drawn layers; visibility has one owner."""
+    return frame_witness_tag(
+        output_id=composition.binding.output_id,
+        frame_id=composition.binding.frame_id,
+        binding_generation=composition.binding.generation,
+        config_revision=composition.binding.configuration_revision,
+        calibration=composition.calibration.model_dump(mode="json"),
+        layers=tuple({"assignment_id": local.layer.assignment_id,
+                      "variant_sha256": local.layer.variant.sha256 if local.layer.variant else None}
+                     for local in visible_layers),
+    )
+
+
+def overlay_corners(placement: Placement, screen: tuple[int, int]) -> OverlayCorners:
+    """The trial overlay's corners of a Frame drawn at `placement` on a screen of `screen` = (width,
+    height) pixels as it hangs: ((x, y), (x + w, y), (x + w, y + h), (x, y + h)), each divided by the
+    screen's width and height. The one home of the overlay's primitives (player/calibration_trial.py no
+    longer computes them: a Rectangle has no corners of its own). ValueError("overlay_screen") for a
+    side below 1, ValueError("overlay_outside") for a placement not wholly on the screen. Pure."""
+    raise NotImplementedError("render-planes S3 bead B3")
 
 
 def multiplier(strength: float) -> int:
@@ -144,9 +189,24 @@ class PlaneScreens:
         turn = turn_of(transform.value)
         return Screen(output_id, hanging((width.value, height.value), turn), turn)
 
+    def mode(self, output_id: str) -> tuple[int, int] | None:
+        """The Output's current mode as built, (width, height) in physical pixels, never turned
+        (`pw_frame_client_output`'s width and height; `screen` turns them): what the Player reports to
+        Central at enrollment (contracts/enrollment.py `OutputReport`, Central's `outputs.observation`).
+        None before Weston announced the Output or once it is gone. RuntimeError
+        ("display_frame_protocol_lost") on transport failure."""
+        raise NotImplementedError("render-planes S3 bead B3")
+
+    def trial(self, composition: OutputComposition, grant: FrameGrant) -> AppliedTrial | None:
+        """The Position trial Display Host holds for `composition`'s Output under `grant`
+        (`pw_frame_client_trial`), applied by this Output's player/calibration_trial.py `TrialState`
+        (its fences, expiry and baseline checks) at CLOCK_BOOTTIME now; None when none is drawn.
+        RuntimeError("display_trial_protocol_lost") on transport failure; ValueError as
+        `TrialState.apply` (a trial whose calibration or lighting refuses, a changed hash)."""
+        raise NotImplementedError("render-planes S3 bead B3")
+
     def grant(self, composition: OutputComposition) -> FrameGrant | None:
-        """The shell's grant for `composition`'s binding (`pw_frame_client_grant_revision`), as
-        player/wayland_frames.py `WaylandFrames.grant`."""
+        """The shell's grant for `composition`'s binding (`pw_frame_client_grant_revision`)."""
         binding = composition.binding
         identity, state = ctypes.create_string_buffer(37), ctypes.c_uint32()
         result = self._lib.pw_frame_client_grant_revision(
@@ -274,4 +334,5 @@ class PlaneScreens:
         self._pictures.clear()
 
 
-__all__ = ["SCREEN_PLANES", "PlaneScreens", "PresentRefused", "ScreenPicture", "multiplier"]
+__all__ = ["CLIENT_LIBRARY", "SCREEN_PLANES", "FrameGrant", "OverlayCorners", "PlaneScreens", "PresentRefused",
+           "ScreenPicture", "composition_tag", "multiplier", "overlay_corners"]

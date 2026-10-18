@@ -42,9 +42,9 @@ from player.mainloop import (
 )
 from player.native import FOLLOW_LEAD, NativeOutput, NativeRenderer
 from player.pacing import Word
+from player.plane_screen import FrameGrant
 from player.rendering import LocalLayer, OutputComposition, PrepareResult, PresentationResult
 from player.visibility import visible_now
-from player.wayland_frames import FrameGrant
 
 
 def composition(*layers, timebase: float | None = 100.0) -> OutputComposition:

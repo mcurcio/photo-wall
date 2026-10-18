@@ -1116,7 +1116,10 @@ class NativeRenderer:
             trial_sequence=trial.candidate.sequence if trial else None,
             candidate_sha256=trial.candidate.candidate_sha256 if trial else None)
         draw.applied_lighting = trial.lighting if trial else None
-        draw.primitives = trial.primitives if trial else None
+        # The overlay's primitives: the drawn fit's corners, clamped to the output (moved here from
+        # player/calibration_trial.py, render redesign S3; this module is deleted in S3's last bead).
+        draw.primitives = (tuple(tuple(max(0.0, min(1.0, n)) for n in corner)
+                                 for corner in trial.calibration.fit.corners) if trial else None)
         draw.expires = _expires(trial) if trial else None
 
     def _key(self, surface: _Surface, local: LocalLayer, binding: OutputBinding, fit,
@@ -2033,7 +2036,7 @@ class NativeRenderer:
                 grant = frames.grant(surface.output.output_id, actual)
                 if grant is None or not grant.matches(actual):
                     raise RuntimeError("display_frame_revision_mismatch")
-                from player.wayland_frames import composition_tag
+                from player.plane_screen import composition_tag
                 # GLArea render is inside the same GDK paint cycle. The tag and
                 # wp_presentation feedback precede GDK's commit of this draw;
                 # no timer, configure handler or later idle callback tags it.

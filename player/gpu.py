@@ -269,6 +269,12 @@ class Gpu:
         """The GLES 3 entry points (PyOpenGL's `OpenGL.GLES3`) for the current context."""
         return self._gl
 
+    @property
+    def renderer(self) -> str | None:
+        """The context's GL_RENDERER string (stripped; None when the driver gives none): what the
+        Player reports as its GL renderer (player/probe_responder.py, render redesign S3, bead B6)."""
+        raise NotImplementedError("render-planes S3 bead B6")
+
     def target(self, size: tuple[int, int], *, opaque: bool) -> Target:
         """A new LINEAR target of `size` (XR24 when `opaque`, else AR24): a GBM buffer, its
         EGLImage as a GL texture behind a complete framebuffer, and its dmabuf. RuntimeError

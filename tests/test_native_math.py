@@ -757,7 +757,7 @@ def test_the_player_reads_the_outputs_newest_picture_operations_and_keeps_the_la
 def test_every_tag_names_the_picture_change_its_buffer_was_drawn_with():
     """R2: the tag always goes through tag_picture (frame protocol v4): "0" before any picture
     operations, else the decimal change."""
-    from player.wayland_frames import FrameGrant
+    from player.plane_screen import FrameGrant
 
     frames = _wayland_frames()
     grant = FrameGrant(uuid.uuid4(), 1, 1, "frame", True)
@@ -772,7 +772,7 @@ def test_each_tag_has_a_sequence_and_the_compositors_word_names_it():
     surface is presented (its time on this machine's monotonic clock, else the time it was read,
     and the refresh), discarded, none yet, or a lost transport."""
     from player.pacing import Word
-    from player.wayland_frames import FrameGrant
+    from player.plane_screen import FrameGrant
 
     frames = _wayland_frames()
     grant = FrameGrant(uuid.uuid4(), 1, 1, "frame", True)

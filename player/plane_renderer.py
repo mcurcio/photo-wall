@@ -67,11 +67,16 @@ from player.gpu import DmabufFrame, Target
 from player.look import fade_end, look
 from player.luts import LutSource
 from player.pacing import DEFAULT_REFRESH, TOLERANCE, FramePacer, Word
-from player.plane_screen import PresentRefused, ScreenPicture
+from player.plane_screen import FrameGrant, PresentRefused, ScreenPicture, composition_tag
 from player.planes import Composition, FrameLayers, Plane, Screen, compose
-from player.rendering import LocalLayer, OutputComposition, PrepareResult, PresentationResult
+from player.rendering import (
+    CapacityResult,
+    LocalLayer,
+    OutputComposition,
+    PrepareResult,
+    PresentationResult,
+)
 from player.visibility import visible_now
-from player.wayland_frames import FrameGrant, composition_tag
 
 VIDEO_TARGETS: Final = 3        # a playing video's targets: one shown, one in flight, one drawn
 STEP_GAP: Final = DEFAULT_REFRESH
@@ -286,6 +291,43 @@ class PlaneRenderer:
     def set_room_lights(self, document: RoomLightsDocument) -> None:
         """Every Frame's lights from now on; its pictures are finished again (module rule)."""
         self._room_lights = document
+
+    def set_player(self, player_id: str | None) -> None:
+        """The Player's registered id (None: none yet), which a calibration target's QR names
+        (player/calibration_target.py `target_modules` of (player id, Output, picture change)); a
+        change draws a target ground again (render redesign S3, bead B4)."""
+        raise NotImplementedError("render-planes S3 bead B4")
+
+    def capacity(self, compositions: tuple[OutputComposition, ...]) -> CapacityResult:
+        """Whether `compositions` (one per Output) fit the controller budget together at their busiest
+        (render redesign S3, bead B4): each composed on its screen by its drawn Position at every
+        player/look.py `moments` from now, the busiest per Output by player/controller_budget.py
+        `load`, judged by `fits`. An Output whose screen is not there, or whose rectangle does not lie
+        on it, counts nothing (its present answers that). `qualified` stays False (the budget's
+        two-port numbers are estimates, plan Q6). Asks nothing of the GPU or the compositor but the
+        screens' facts."""
+        raise NotImplementedError("render-planes S3 bead B4")
+
+    def frame(self) -> None:
+        """Present again every Output's held composition (the newest `present` was given) at this
+        frame time, so a fade's strengths, a finished picture or a trial's edit reach the screen with
+        no planning tick (render redesign S3, bead B5). Commits only what changed, as `present`;
+        never draws."""
+        raise NotImplementedError("render-planes S3 bead B5")
+
+    def finish(self) -> None:
+        """The GPU work owed, after this turn's commits (render redesign S3, bead B5: finishing is
+        off the present path): each seen playing video's newest waiting frame drawn into a released
+        target and fenced; at most one still step over every Output (STEP_GAP); a pattern or black
+        ground drawn and fenced. Never commits and never waits for a fence."""
+        raise NotImplementedError("render-planes S3 bead B5")
+
+    def due(self) -> float | None:
+        """When `frame` and `finish` are next owed with no event to announce it (monotonic seconds;
+        render redesign S3, bead B5): now while `finishing` or a video frame waits to be drawn; else
+        the soonest player/look.py `next_change` of a held composition (a trial's expiry included);
+        None when nothing changes until an event."""
+        raise NotImplementedError("render-planes S3 bead B5")
 
     def prepare(self, local: LocalLayer, frame: FrameOnScreen) -> PrepareResult:
         """Decode `local` and finish its picture for `frame` as its screen is now (module rule):

@@ -12,9 +12,9 @@ import pytest
 import player.plane_screen as plane_screen
 from contracts.frame_fit import Placement
 from contracts.models import Layer
+from player.plane_screen import FrameGrant
 from player.planes import Composition, Plane, Screen
 from player.rendering import LocalLayer
-from player.wayland_frames import FrameGrant
 
 
 @pytest.mark.parametrize(("strength", "wire"), [

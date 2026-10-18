@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -61,3 +62,12 @@ def discover_outputs(root: Path = Path("/sys/class/drm")) -> OutputDiscovery:
         return OutputDiscovery(outputs, None if outputs else "outputs_missing")
     except (OSError, ValueError):
         return OutputDiscovery((), "output_discovery")
+
+
+def measured(outputs: tuple[OutputReport, ...], modes: Mapping[str, tuple[int, int]]) -> tuple[OutputReport, ...]:
+    """`outputs` with each connected Output's size from `modes` (output id -> its mode as built,
+    width and height in physical pixels, never turned: player/plane_screen.py `PlaneScreens.mode`),
+    in order: what the Player enrolls with, so Central's `outputs.observation` holds the size that
+    sizes photos and checks a rectangle on its screen (render redesign S3, bead B6; S2's erratum, a
+    Pi enrolled 0 x 0). An Output absent from `modes`, or disconnected, keeps 0 x 0. Pure."""
+    raise NotImplementedError("render-planes S3 bead B6")

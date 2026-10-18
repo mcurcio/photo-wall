@@ -23,10 +23,9 @@ from player.geometry import encode_srgb
 from player.gpu import LINEAR, NV12, XR24, DmabufFrame, Target
 from player.pacing import DEFAULT_REFRESH, Word
 from player.plane_renderer import BAND_BYTES, VIDEO_TARGETS, FrameOnScreen, PlaneRenderer
-from player.plane_screen import ScreenPicture
+from player.plane_screen import FrameGrant, ScreenPicture
 from player.planes import Composition, Screen, plane_strength
 from player.rendering import LocalLayer, OutputComposition
-from player.wayland_frames import FrameGrant
 
 OUTPUT = "hdmi1"
 FULL = FrameRectangle(0.5, 0.5, 1.0)

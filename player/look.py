@@ -58,3 +58,13 @@ def fade_end(composition: OutputComposition, at: float) -> float | None:
     ends = [end for local in composition.layers if local.layer.assignment_id in seen
             for start, end in local.layer.fades() if start < now < end]
     return max(ends, default=None)
+
+
+def moments(composition: OutputComposition, at: float) -> tuple[float, ...]:
+    """The frame times (monotonic) at which `composition`, drawn from `at` on, takes every set of seen
+    layers it will take (render redesign S3: the controller budget is judged at each, player/
+    plane_renderer.py `capacity`): `at`, then the middle of every fade of a layer of `composition`
+    under way at `at` or starting after it, in time order without repeats. (at,) for a still
+    composition (no timebase). What is seen changes only at a fade's ends, so one moment inside each
+    fade and `at` cover them all. Pure."""
+    raise NotImplementedError("render-planes S3 bead B4")

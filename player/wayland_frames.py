@@ -11,51 +11,19 @@ import ctypes
 import json
 import logging
 import threading
-from dataclasses import dataclass
 from uuid import UUID
 
 from contracts.node_frame import (
     PICTURE_OPERATIONS_BYTES,
     PictureOperations,
     decode_picture_operations,
-    frame_witness_tag,
     picture_change_text,
 )
 from player.pacing import Word
-from player.rendering import LocalLayer, OutputComposition
+from player.plane_screen import CLIENT_LIBRARY, FrameGrant
+from player.rendering import OutputComposition
 
-CLIENT_LIBRARY = "/usr/lib/photo-wall/frame-client/libphoto-wall-frame-client.so"
 LOGGER = logging.getLogger(__name__)
-
-
-@dataclass(frozen=True)
-class FrameGrant:
-    grant_id: UUID
-    binding_generation: int
-    config_revision: int
-    frame_id: str
-    admitted: bool
-
-    def matches(self, composition: OutputComposition) -> bool:
-        return (
-            composition.binding.frame_id == self.frame_id
-            and composition.binding.generation == self.binding_generation
-            and composition.binding.configuration_revision == self.config_revision
-        )
-
-
-def composition_tag(composition: OutputComposition, visible_layers: tuple[LocalLayer, ...]) -> str:
-    """Witness exactly the renderer's drawn layers; visibility has one owner."""
-    return frame_witness_tag(
-        output_id=composition.binding.output_id,
-        frame_id=composition.binding.frame_id,
-        binding_generation=composition.binding.generation,
-        config_revision=composition.binding.configuration_revision,
-        calibration=composition.calibration.model_dump(mode="json"),
-        layers=tuple({"assignment_id": local.layer.assignment_id,
-                      "variant_sha256": local.layer.variant.sha256 if local.layer.variant else None}
-                     for local in visible_layers),
-    )
 
 
 class WaylandFrames:

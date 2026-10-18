@@ -269,11 +269,44 @@ class DisplayEvents:
         self._source = self._rearm = None
 
 
+FRAME = -50
+"""Between CONTROL and TICK: the screens' frame turns (render redesign S3, `FrameLoop`), so a fade's
+next commit never waits behind a planning tick that is ready in the same iteration, and control
+handoffs still run first."""
+
+
+class FrameLoop:
+    """Runs `turn()` on the main loop at FRAME priority (render redesign S3, run ledger
+    .claude/runs/render-planes/s3-page.md, bead B5): after every read of the screens' Wayland
+    connection `fd` (g_unix_fd_add: the compositor spoke, a commit's presentation feedback or a
+    release, so a refresh went by), after `wake()` (a video's new frame, a new composition), and at
+    the time `turn()` last answered (a GLib timeout armed for it: a fence that signals or a fade's
+    next frame with no event to announce it); never otherwise. Coalesced: one turn runs for any
+    number of wakes and reads that arrive before it. `turn()` answers when the next turn is owed with
+    no event (seconds on `clock`'s timeline; None: only on an event); a raising `turn` is logged and
+    the loop goes on as if it answered None.
+
+    The composition root's `turn` reads the connection, presents and then finishes
+    (player/renderer_root.py); nothing here knows the renderer."""
+
+    def __init__(self, glib, fd: int, turn: Callable[[], float | None], *,
+                 clock: Callable[[], float] = time.monotonic) -> None:
+        raise NotImplementedError("render-planes S3 bead B5")
+
+    def wake(self) -> None:
+        """Run a turn soon (an idle at FRAME priority, once however many wakes come first)."""
+        raise NotImplementedError("render-planes S3 bead B5")
+
+    def stop(self) -> None:
+        """Remove every source this loop added; no turn runs after it."""
+        raise NotImplementedError("render-planes S3 bead B5")
+
+
 def watch_bus(bus) -> None:
     """Emit a GStreamer bus's messages as signals on the main loop, at BUS priority."""
     bus.add_signal_watch_full(BUS)
 
 
-__all__ = ["BUS", "CONTROL", "DisplayEvents", "GDK_PRIORITY_REDRAW", "MIN_GAP_MS", "REARM", "TICK",
-           "DispatchRefused", "FrameFollower", "LatePosts", "LoopLate", "MainLoopDispatcher", "Tick",
+__all__ = ["BUS", "CONTROL", "FRAME", "DisplayEvents", "GDK_PRIORITY_REDRAW", "MIN_GAP_MS", "REARM", "TICK",
+           "DispatchRefused", "FrameFollower", "FrameLoop", "LatePosts", "LoopLate", "MainLoopDispatcher", "Tick",
            "WAYLAND_EVENTS", "frame_time", "watch_bus"]

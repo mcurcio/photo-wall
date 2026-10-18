@@ -232,7 +232,7 @@ class Frames:
 
     @staticmethod
     def new_grant():
-        from player.wayland_frames import FrameGrant
+        from player.plane_screen import FrameGrant
         return FrameGrant(grant_id=uuid.uuid4(), binding_generation=BINDING.generation,
                           config_revision=BINDING.configuration_revision,
                           frame_id=BINDING.frame_id, admitted=True)

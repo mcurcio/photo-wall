@@ -774,3 +774,9 @@ int pw_screen_presentation(struct pw_screen *s, uint64_t *sequence, int64_t *at_
     return pw_frame_client_presentation(s->client, s->surface, sequence, at_ns, refresh_ns);
 }
 
+/* Render redesign S3 (run ledger .claude/runs/render-planes/s3-page.md, bead B3): the trial overlay on
+ * the screen's surface. Stub until B3: refuses. */
+int pw_screen_overlay(struct pw_screen *s, const char *grant_id, const char *frame_tag, const char *primitives) {
+    (void)s; (void)grant_id; (void)frame_tag; (void)primitives;
+    return -1;
+}

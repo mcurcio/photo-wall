@@ -119,3 +119,11 @@ int64_t pw_screen_present(struct pw_screen *screen, const struct pw_plane_state 
     const char *picture_change);
 /* pw_frame_client_presentation for the screen's surface. */
 int pw_screen_presentation(struct pw_screen *screen, uint64_t *sequence, int64_t *at_ns, uint32_t *refresh_ns);
+/* The Position trial's overlay for the screen's next present (render redesign S3, bead B3): the frame
+ * manager's `overlay` request (v2) on the screen's own surface with `grant_id`, `frame_tag` (the very
+ * tag that present will carry) and `primitives` (bounded JSON, at most 512 bytes: four [x, y] corners,
+ * fractions of the Output as it hangs, player/plane_screen.py `overlay_corners`), consumed by that
+ * present's commit of the screen's surface. Returns 0 queued; -1 transport failure or a bad argument
+ * (NULL, primitives over 512 bytes, a screen with no configure yet). */
+int pw_screen_overlay(struct pw_screen *screen, const char *grant_id, const char *frame_tag,
+    const char *primitives);

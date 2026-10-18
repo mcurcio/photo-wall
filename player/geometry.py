@@ -57,7 +57,7 @@ from contracts.calibration_target import (
 )
 from contracts.colour import srgb_to_linear
 from contracts.display_turn import TURNS, DisplayTurn, wayland_transform
-from contracts.frame_fit import Corners, OutputSize, cover_rectangle
+from contracts.frame_fit import Corners, OutputSize, Placement, cover_rectangle
 from contracts.frame_lighting import (
     SHEET_WHITENESS,
     AtFull,
@@ -832,3 +832,30 @@ def picture_lights(lighting: FrameLighting, document: RoomLightsDocument | None,
     turns the screen, not the wall). One body with `frame_lights`: both call the same rule with their
     opening. Pure."""
     return _opening_lights(lighting, document, IDENTITY, _profile_size_mm(profile), 0, display)
+
+
+# The pattern pass's scalar reference (render redesign S3, run ledger .claude/runs/render-planes/
+# s3-page.md, bead B2): a Frame's pattern drawn into its screen's ground, in the Frame's picture as it
+# hangs (player/pattern_pass.py holds its shader to these within one level).
+
+def placement_uv(x: float, y: float, placement: Placement, screen: tuple[int, int]) -> tuple[float, float] | None:
+    """The screen point (x, y), fractions 0..1 of a screen `screen` = (width, height) pixels as it
+    hangs, as the Frame's picture point (u, v) when it lies in `placement` (left and top edges in,
+    right and bottom out): u = (x * width - placement.x) / placement.width, v likewise down; None
+    outside. Pure."""
+    raise NotImplementedError("render-planes S3 bead B2")
+
+
+def commissioning_grid(u: float, v: float) -> Linear:
+    """Position's commissioning grid at the Frame's picture point (u, v), in linear light: slate
+    (0.2, 0.3, 0.45) with light lines (0.9, 0.9, 0.9) where fract(10 u) < 0.035 or fract(10 v) <
+    0.035 (player/native.py's frame pass drew the same grid in the picture's unit square). The photo
+    a commissioning ground passes through `final_pixel`. Pure."""
+    raise NotImplementedError("render-planes S3 bead B2")
+
+
+def picture_board(profile: FrameProfile, modules: QrModules | None) -> BoardDraw:
+    """`board_draw` for a Frame that is an upright rectangle (the render redesign's Position): its
+    physical (W, H) the profile's own (`_profile_size_mm`; a screen's turn turns the screen, not the
+    wall), aspect max(W, H) / min(W, H), portrait when W < H. One body with `board_draw`. Pure."""
+    raise NotImplementedError("render-planes S3 bead B2")
