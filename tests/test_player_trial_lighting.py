@@ -9,7 +9,7 @@ from uuid import uuid4
 import pytest
 
 from contracts.frame_lighting import AT_FULL, CloseLight, FrameLighting, Paper, WashLight
-from contracts.models import Calibration, CoverFit, FrameProfile, OutputBinding
+from contracts.models import Calibration, FrameProfile, OutputBinding, RectangleFit
 from contracts.node_calibration import TrialCandidate, candidate_hash, canonical, encode_trial
 from contracts.node_display import Surface
 from contracts.node_protocol import NodeProcessIdentity, OutputKey
@@ -21,6 +21,7 @@ LIGHTING = FrameLighting(mat_depth_mm=0, lights=(WashLight(light="room", lux=100
 BINDING = OutputBinding(output_id="HDMI-A-1", frame_id="frame", generation=3, configuration_revision=2,
                         profile=FrameProfile(width_px=1920, height_px=1080, diagonal_inches=27), lighting=LIGHTING)
 COMPOSITION = OutputComposition(BINDING)
+DRAFT_FIT = RectangleFit(centre_x=0.4, width=0.5)    # a drafted Position unlike the binding's
 BASELINE = Surface(OutputKey(uuid4(), uuid4(), "HDMI-A-1", 1, 1), NodeProcessIdentity(100, 5, uuid4()),
                    1, BINDING.generation, BINDING.configuration_revision, "frame")
 SPOT = CloseLight(light="bookshelf-spot", lux=400, reference=AT_FULL, across_mm=0, up_mm=350, out_mm=250,
@@ -30,7 +31,7 @@ SPOT = CloseLight(light="bookshelf-spot", lux=400, reference=AT_FULL, across_mm=
 def envelope(lighting: FrameLighting | dict, sequence: int = 1, trial_id=None) -> str:
     """A trial envelope carrying `lighting`; a dict rides as given, in place of a valid lighting."""
     trial_id = trial_id or uuid4()
-    calibration = canonical(Calibration(fit=CoverFit(rotation=7)).model_dump(mode="json"))
+    calibration = canonical(Calibration(fit=DRAFT_FIT).model_dump(mode="json"))
     valid = lighting if isinstance(lighting, FrameLighting) else LIGHTING
     raw = encode_trial(TrialCandidate(
         trial_id=trial_id, generation=1, sequence=sequence, baseline=BASELINE,
@@ -47,7 +48,7 @@ def test_the_applied_trial_holds_the_drafts_lighting():
     drafted = LIGHTING.model_copy(update={"mat_depth_mm": 2.5, "lights": (*LIGHTING.lights, SPOT)})
     applied = TrialState().apply(envelope(drafted), COMPOSITION, 1000)
     assert applied.lighting == drafted
-    assert applied.calibration.fit == CoverFit(rotation=7)
+    assert applied.calibration.fit == DRAFT_FIT
 
 
 def test_an_edit_that_moves_only_the_lights_is_a_new_candidate():

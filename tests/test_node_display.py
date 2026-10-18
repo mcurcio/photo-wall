@@ -5,8 +5,9 @@ from dataclasses import replace
 from uuid import uuid4
 
 import pytest
-from support.position import LIGHTING
+from support.position import LIGHTING, PORTRAIT_ON_WIDE
 from test_node_runtime_reconciliation import rig
+from test_registry import SKEWED
 
 from central.fleet.node_display import NodeDisplay
 from central.fleet.node_ingest import NodeIngest
@@ -110,13 +111,12 @@ def test_same_process_config_change_requests_revision(registry):
         fact.output, fact.process, fact.app_epoch, fact.binding_generation, fact.config_revision, fact.frame_id
     )
     from central.transaction_locks import acquire_runtime_locks
-    from contracts.models import Calibration, CornersFit
 
     with registry.db.transaction() as conn:
         acquire_runtime_locks(conn)
         registry.commit_calibration_trial_in(conn, frame_id="node-f0", player_id=conn.execute("SELECT player_id FROM bindings WHERE frame_id='node-f0'").fetchone()["player_id"],
             authority_epoch=1, output_id=old.output.output_id, binding_generation=old.binding_generation,
-            config_revision=old.config_revision, calibration_revision=2, calibration=Calibration(fit=CornersFit(rotation=180)), lighting=LIGHTING, session_id=None, restored_from=None)
+            config_revision=old.config_revision, calibration_revision=2, calibration=SKEWED, lighting=LIGHTING, session_id=None, restored_from=None)
     request = DisplayExchange(grant.producer, uuid4(), 1500, fact.output, True, admitted=old)
     decision = parse_display_decision(
         NodeDisplay(sessions, runtime=coordinator).exchange(
@@ -144,7 +144,6 @@ def test_equal_counter_frame_rebind_requires_exact_withdrawal_and_role_removal(r
     from test_registry import frame
 
     from central.transaction_locks import acquire_runtime_locks
-    from contracts.models import Calibration, CornersFit
 
     coordinator, _, _, sessions, claims, grants, facts, _, _ = rig(registry)
     claim, grant, fact = claims["display_host"], grants["display_host"], facts[0]
@@ -165,7 +164,7 @@ def test_equal_counter_frame_rebind_requires_exact_withdrawal_and_role_removal(r
         acquire_runtime_locks(conn)
         registry.commit_calibration_trial_in(conn, frame_id="replacement-frame", player_id=player_id,
             authority_epoch=1, output_id=fact.output.output_id, binding_generation=1,
-            config_revision=2, calibration_revision=1, calibration=Calibration(fit=CornersFit()), lighting=LIGHTING, session_id=None, restored_from=None)
+            config_revision=2, calibration_revision=1, calibration=PORTRAIT_ON_WIDE, lighting=LIGHTING, session_id=None, restored_from=None)
     request = replace(request, request_id=uuid4(), sampled_boottime_ms=1400)
     withdraw = exchange(request)
     assert withdraw.operation == "withdraw" and withdraw.surface == old
@@ -193,7 +192,6 @@ def test_equal_counter_frame_rebind_requires_exact_withdrawal_and_role_removal(r
 @pytest.mark.parametrize("renew", [False, True])
 def test_promoted_revision_unbind_before_upload_uses_exact_issued_role(registry, renew):
     from central.transaction_locks import acquire_runtime_locks
-    from contracts.models import Calibration, CornersFit
 
     coordinator, _, _, sessions, claims, grants, facts, _, _ = rig(registry)
     claim, grant, fact = claims["display_host"], grants["display_host"], facts[0]
@@ -210,7 +208,7 @@ def test_promoted_revision_unbind_before_upload_uses_exact_issued_role(registry,
         player_id = conn.execute("SELECT player_id FROM bindings WHERE frame_id='node-f0'").fetchone()["player_id"]
         registry.commit_calibration_trial_in(conn, frame_id="node-f0", player_id=player_id,
             authority_epoch=1, output_id=old.output.output_id, binding_generation=old.binding_generation,
-            config_revision=old.config_revision, calibration_revision=2, calibration=Calibration(fit=CornersFit(rotation=180)), lighting=LIGHTING, session_id=None, restored_from=None)
+            config_revision=old.config_revision, calibration_revision=2, calibration=SKEWED, lighting=LIGHTING, session_id=None, restored_from=None)
     request = DisplayExchange(grant.producer, uuid4(), 1300, fact.output, True, admitted=old)
     revision = exchange(request)
     assert revision.operation == "revision"
@@ -249,7 +247,6 @@ def test_a_still_outputs_old_receipt_stands_and_a_revision_is_still_decided(regi
     receipt a minute old is answered, here with a configuration change's revision; only a receipt
     sampled after its own request is out of order (the contract refuses it)."""
     from central.transaction_locks import acquire_runtime_locks
-    from contracts.models import Calibration, CornersFit
 
     coordinator, _, _, sessions, claims, grants, facts, _, _ = rig(registry)
     fact, grant, claim = facts[0], grants["display_host"], claims["display_host"]
@@ -273,7 +270,7 @@ def test_a_still_outputs_old_receipt_stands_and_a_revision_is_still_decided(regi
             conn, frame_id="node-f0", player_id=player_id, authority_epoch=1,
             output_id=old.output.output_id, binding_generation=old.binding_generation,
             config_revision=old.config_revision, calibration_revision=2,
-            calibration=Calibration(fit=CornersFit(rotation=180)), lighting=LIGHTING, session_id=None,
+            calibration=SKEWED, lighting=LIGHTING, session_id=None,
             restored_from=None)
     decision = exchange(replace(request, request_id=uuid4(), sampled_boottime_ms=62_500))
     assert decision.operation == "revision"

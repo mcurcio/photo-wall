@@ -27,7 +27,7 @@ from typing import Final
 
 from fastapi.testclient import TestClient
 from psycopg.types.json import Jsonb
-from support.position import save_position
+from support.position import PORTRAIT_ON_WIDE, save_position
 from test_coordination import schedule, setup_players
 from test_display_identity import (
     _SEQ,
@@ -356,7 +356,7 @@ def test_copy_carries_the_software_values_names_the_hardware_skipped_and_never_p
     _frame(registry, "d")                                                  # never bound: no Display
     _report(registry, "pi-a", "HDMI-A-1", SERIAL_DISPLAY)
     _report(registry, "pi-b", "HDMI-A-1", NO_SERIAL)
-    save_position(registry, "b")
+    save_position(registry, "b", PORTRAIT_ON_WIDE)
     _sql(registry, "UPDATE displays SET hardware_picture='{\"12\": 35, \"10\": 65}', matched_lux=2500, "
                    "software_contrast_percent=70, colour_temperature_kelvin=5000, gamma_tenths=20 "
                    "WHERE serial IS NOT NULL")
@@ -383,7 +383,7 @@ def test_copy_carries_the_software_values_names_the_hardware_skipped_and_never_p
 def test_a_picture_edit_and_done_are_never_a_position_commit(registry):
     """(8) Mutation probe: an edit raising the position revision -> the revisions move."""
     player = _bound(registry)
-    save_position(registry, "kitchen")
+    save_position(registry, "kitchen", PORTRAIT_ON_WIDE)
     columns = "SELECT calibration, configuration_revision, generation, position_generation FROM frames"
     before = _sql(registry, columns)
     with _client(registry) as client:

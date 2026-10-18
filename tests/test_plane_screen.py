@@ -14,7 +14,7 @@ import pytest
 import player.plane_screen as plane_screen
 from contracts.frame_fit import Placement
 from contracts.frame_lighting import FrameLighting, Paper
-from contracts.models import Calibration, CoverFit, FrameProfile, Layer, OutputBinding, RectangleFit
+from contracts.models import Calibration, FrameProfile, Layer, OutputBinding, RectangleFit
 from contracts.node_calibration import (
     MAX_TRIAL_BYTES,
     TrialCandidate,
@@ -258,8 +258,8 @@ def _trial_answer(raw: str | None, result: int):
     return answer
 
 
-@pytest.mark.parametrize("fit", [RectangleFit(centre_x=0.4, centre_y=0.5, width=0.5), CoverFit(rotation=7)],
-                         ids=["rectangle", "cover"])
+@pytest.mark.parametrize("fit", [RectangleFit(centre_x=0.4, centre_y=0.5, width=0.5), RectangleFit()],
+                         ids=["moved", "whole-width"])
 def test_trial_hands_the_librarys_envelope_to_the_outputs_trial_state(monkeypatch, fit):
     screens, library = _screens(monkeypatch)
     monkeypatch.setattr(plane_screen, "_boottime_ms", lambda: 1000)

@@ -3,7 +3,7 @@
 One Scene on two Frames (16:9 at 3840 x 2160 and 9:16 at 1080 x 1920), 30 s cycles, each Frame
 keeping its last photo: a pool of a 16:9, a 4:3, a 2:3 (faces on its left) and a 1:1 photo.
 First through the real Planner (`project`) over an hour, the fit rule (`judge`) and the Player's
-scalar reference (`player.geometry.picture_source_uv`); then the same wall through
+scalar reference (`player.geometry.placement_uv` and `fit_source_uv`); then the same wall through
 `Coordinator.advance` over PostgreSQL: offered plans carry the crops, an unmeasured photo is
 measured by the media worker and then placed, and a "presented" report writes shown history that
 the next advance ranks after the others.
@@ -44,15 +44,15 @@ from central.wall_plan.order import PoolLines, WallHistory
 from central.wall_plan.selection import SceneSelection
 from contracts.models import (
     Calibration,
-    CornersFit,
-    CoverFit,
     FrameProfile,
     Observation,
     OutputBinding,
+    RectangleFit,
     Variant,
     frame_output,
+    frame_placement,
 )
-from player.geometry import picture_source_uv
+from player.geometry import fit_source_uv, placement_uv
 
 WIDE = FrameProfile(width_px=3840, height_px=2160, diagonal_inches=55)
 TALL = FrameProfile(width_px=1080, height_px=1920, diagonal_inches=24)
@@ -143,22 +143,25 @@ def test_an_hour_of_the_wall_fills_each_frame_and_crops_on_the_player():
     assert offered and {layer.crop.offset for layer in offered} == {0.0}
     assert {entry.crop.offset for entry in planned["tall"]} == {0.0}
     width, height = SIZES["two_three"]
-    samples = [picture_source_uv(x / 20, y / 20, CornersFit(), (1080, 1920),
-                                 TALL.width_px / TALL.height_px, width, height, offered[0].crop)
-               for x in range(21) for y in range(21)]
+    screen = (1080, 1920)                      # the 9:16 Frame's screen, its whole width
+    placement = frame_placement(TALL, RectangleFit(), screen, 0)
+    points = [placement_uv(x / 20, y / 20, placement, screen) for x in range(21) for y in range(21)]
+    samples = [fit_source_uv(u, v, TALL.width_px / TALL.height_px, (width, height), offered[0].crop)
+               for u, v in (point for point in points if point is not None)]
     kept_width = (9 / 16) / (2 / 3)            # the 9:16 window's share of a 2:3 photo's width
     assert min(u for u, _ in samples) == pytest.approx(0)
-    assert max(u for u, _ in samples) == pytest.approx(kept_width)
+    # The last sampled column is the screen's 19th of 20 (its right edge is outside the picture).
+    assert max(u for u, _ in samples) == pytest.approx(kept_width * 19 / 20)
     assert all(u <= kept_width + 1e-9 for u, _ in samples)    # the right side, faceless, is never drawn
 
 
 def test_a_mat_opening_frame_plans_a_photo_smaller_than_its_display():
     """Follow-ups B1 case 9 (owner, 2026-10-11: compatibility "measuring against the Frame
-    output and not the Display"): one 16:9 Frame drawn through a 40 % x 40 % Cover opening of a
-    3,840 x 2,160 Display needs 1,536 x 864 pixels, so a 1,600 x 900 photo fills it all hour;
+    output and not the Display"): one 16:9 Frame drawn as a centred rectangle 40 % of the width of
+    a 3,840 x 2,160 Display needs 1,536 x 864 pixels, so a 1,600 x 900 photo fills it all hour;
     judged against the Display's size the same wall has nothing to show.
     Mutation probe: judge rule 2 against the profile's pixels -> nothing is placed."""
-    mat = Calibration(fit=CoverFit(corners=((.3, .3), (.7, .3), (.7, .7), (.3, .7))))
+    mat = Calibration(fit=RectangleFit(width=0.4))
     small = {"small": measured("small", 1600, 900, variant=Variant(
         asset_id="asset-" + hashlib.sha256(b"small").hexdigest()[:16], recipe_id="e" * 64, sha256=hashlib.sha256(b"small").hexdigest(), size=10, media_type="image/jpeg",
         width=1600, height=900))}
@@ -207,14 +210,19 @@ class MeasureQueue:
 
 
 def wall_players(registry):
+    """Two Players' 1920 x 1080 screens, each a Frame across its whole width: the wide Frame's
+    screen upright (Frame output 1920 x 1080), the tall Frame's hung a quarter turn (1080 x 1920)."""
     players = []
-    for frame_id, profile, size in (("frame-wide", WIDE, (1210, 680)),
-                                    ("frame-tall", TALL, (300, 530))):
+    for frame_id, profile, size, turn in (("frame-wide", WIDE, (1210, 680), 0),
+                                          ("frame-tall", TALL, (300, 530), 90)):
         player, _, _ = enroll(registry)
         registry.create_frame(FrameCreate(id=frame_id, width_mm=size[0], height_mm=size[1],
                                           profile=profile))
         registry.bind(frame_id, player["player_id"], "HDMI-A-1", expected_generation=0)
-        save_position(registry, frame_id)
+        if turn:
+            generation = next(frame for frame in registry.inventory().frames if frame.id == frame_id).generation
+            registry.turn_frame(frame_id, turn, expected_generation=generation)
+        save_position(registry, frame_id, Calibration(fit=RectangleFit()))
         players.append(player)
     return players
 

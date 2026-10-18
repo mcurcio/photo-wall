@@ -17,21 +17,22 @@ from central.infra.display_store import frame_outputs_in
 from central.infra.photo_library_store import PgPhotoLibrary
 from central.installation_models import FrameOutput
 from central.registry import FrameCreate
-from contracts.models import Calibration, CoverFit, FrameProfile, RectangleFit, frame_output
+from contracts.models import Calibration, FrameProfile, RectangleFit, frame_output
 
 LANDSCAPE = FrameProfile(width_px=1920, height_px=1080, diagonal_inches=24)
 PORTRAIT = FrameProfile(width_px=1080, height_px=1920, diagonal_inches=24)
-OPENING = ((0.25, 0.25), (0.75, 0.25), (0.75, 0.75), (0.25, 0.75))
+# A centred rectangle half the screen's width: a half-size mat opening.
+OPENING = Calibration(fit=RectangleFit(width=0.5))
 
 
 def test_no_reported_output_has_no_frame_output():
     for output in (None, (0, 0), (1920, 0)):
-        assert frame_output(LANDSCAPE, Calibration(), output, 0) is None
+        assert frame_output(LANDSCAPE, OPENING, output, 0) is None
 
 
 def test_the_frame_output_follows_the_position_not_the_display():
     """A half-size mat opening on a 1,920 x 1,080 Output needs 960 x 540, not the Display's size."""
-    assert frame_output(LANDSCAPE, Calibration(fit=CoverFit(corners=OPENING)), (1920, 1080), 0) == (960, 540)
+    assert frame_output(LANDSCAPE, OPENING, (1920, 1080), 0) == (960, 540)
 
 
 def _frame(registry, frame_id: str, profile: FrameProfile) -> None:
@@ -49,7 +50,7 @@ def test_every_frame_reads_its_frame_output_by_frame_id(registry):
     _frame(registry, "b-attic", LANDSCAPE)
     registry.bind("c-lounge", player["player_id"], "HDMI-A-1", expected_generation=0)
     registry.bind("b-attic", player["player_id"], "HDMI-A-2", expected_generation=0)
-    save_position(registry, "c-lounge", Calibration(fit=CoverFit(corners=OPENING)))
+    save_position(registry, "c-lounge", OPENING)
     with registry.db.transaction() as conn:
         conn.execute("UPDATE outputs SET observation=%s WHERE player_id=%s AND output_id=%s",
                      (Jsonb({"output_id": "HDMI-A-2", "width_px": 0, "height_px": 0,

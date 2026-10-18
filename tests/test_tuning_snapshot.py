@@ -38,7 +38,7 @@ from central.fleet.position_history import (
 from central.infra.display_store import PgPictureSessions, output_documents
 from central.infra.picture_history_store import append_kept_in
 from central.tuning_history.model import snapshot_at
-from contracts.models import CoverFit
+from contracts.models import RectangleFit
 
 AT = datetime(2026, 10, 13, 21, 4, 7, tzinfo=UTC)
 
@@ -89,7 +89,7 @@ def test_the_tracer_a_picture_edit_and_a_position_edit_read_back_by_time(registr
     assert both["picture"]["picture"]["software"]["contrast_percent"] == 114
     assert both["picture"]["display"]["id"] == str(display) and both["picture"]["frame"]["id"] == "node-f0"
     assert UUID(both["picture"]["session_id"]) == session.session_id
-    assert both["position"]["fit"]["corners"] == [list(corner) for corner in SKEWED.corners]
+    assert both["position"]["fit"] == SKEWED.model_dump(mode="json")
     exactly = _read(registry, both["position"]["at"])
     assert exactly["position"]["entry_id"] == both["position"]["entry_id"]
     # The picture's sent entry read at its own time (probe P4-strict-at, picture's sent read).
@@ -129,7 +129,7 @@ def test_a_snapshot_needs_a_time_with_its_zone_and_a_known_frame(registry):
 
 def _position(*, frame_id: str = "kitchen", at: datetime = AT) -> PositionEntry:
     return PositionEntry(uuid4(), frame_id, 1, at, MadeFor((1080, 1920), None),
-                         PositionRecord(PositionEntryKind.KEPT_SAVED, PositionValues(CoverFit(), LIGHTING), None, None))
+                         PositionRecord(PositionEntryKind.KEPT_SAVED, PositionValues(RectangleFit(), LIGHTING), None, None))
 
 
 def _picture(kind: PictureEntryKind, *, frame_id: str | None = "kitchen", at: datetime = AT) -> PictureEntry:

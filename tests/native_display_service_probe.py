@@ -192,11 +192,13 @@ try:
                     assert status == 200, (status, raw)
                     trial = json.loads(raw)
                     trial_path += "/" + trial["trial_id"]
+                    # A centred rectangle 40 % of the width: the 9:16 Frame (256 x 455 pixels) lies
+                    # on the fixture's 640 x 480 Output, so Save's off-screen check takes it.
                     calibration = {**trial["calibration"], "fit": {
-                        "mode": "corners", "corners": [[0, 0], [1, 0], [1, 1], [0, 1]], "rotation": 180}}
+                        "mode": "rectangle", "centre_x": 0.5, "centre_y": 0.5, "width": 0.4}}
                     status, raw = transport.request("POST", trial_path, json.dumps({
                         "operation": "edit", "expected_sequence": 1, "calibration": calibration,
-                        "mat": trial["mat"],  # the whole draft, as the console sends it: the saved mat
+                        "lighting": trial["lighting"],  # the whole draft, as the console sends it: the saved lighting
                     }).encode())
                     assert status == 200, (status, raw)
                     trial = json.loads(raw)
@@ -213,7 +215,7 @@ try:
                         }).encode())
                         assert status == 200, (status, raw)
                         saved = json.loads(raw)
-                        assert saved["state"] == "saved" and saved["saved_calibration"]["fit"]["rotation"] == 180
+                        assert saved["state"] == "saved" and saved["saved_calibration"]["fit"]["width"] == 0.4
                         print("PASS first_calibration_operator_trial_native_save", flush=True)
                         status, raw = transport.request("POST", "/fixture/unbind", b"{}")
                         assert status == 200, (status, raw)

@@ -17,7 +17,7 @@ import json
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
-from support.position import save_position
+from support.position import PORTRAIT_ON_WIDE, save_position
 from test_coordination import report
 from test_fleet_attempts import BOOT_ID, DEVICE_ID, SERIAL
 from test_node_boot import claim_for, cold_setup
@@ -74,7 +74,7 @@ class Incident:
                 id=FRAME, surface_id="wall", x_mm=100, y_mm=100, width_mm=300, height_mm=500,
                 profile=FrameProfile(width_px=1080, height_px=1920, diagonal_inches=24)))
             registry.bind(FRAME, self.player_id, OUTPUT, expected_generation=0)
-            save_position(registry, FRAME)
+            save_position(registry, FRAME, PORTRAIT_ON_WIDE)
         # The node sessions are admitted after the Position commit: an admitted node boot turns
         # the commit into a native trial, which this replay does not exercise.
         self.claims = {}

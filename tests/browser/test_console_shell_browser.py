@@ -50,7 +50,7 @@ from operator_harness import (
 )
 from photo_seed import connected, library_of
 from playwright.sync_api import expect
-from support.position import save_position
+from support.position import PORTRAIT_ON_WIDE, save_position
 from test_operator_showrunner_browser import (
     INVALID_FRAME,
     SOURCE,
@@ -111,7 +111,7 @@ def _bound_commissioned(registry, frame_id, *, x_mm=100, commissioned=True):
     _frame(registry, frame_id, x_mm=x_mm)
     registry.bind(frame_id, identity["player_id"], "HDMI-A-1", expected_generation=0)
     if commissioned:
-        save_position(registry, frame_id)
+        save_position(registry, frame_id, PORTRAIT_ON_WIDE)
     report_readiness(registry, identity["player_id"])
 
 

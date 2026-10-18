@@ -28,17 +28,17 @@ from central.fleet.position_history import (
     unrecorded_record,
 )
 from contracts.frame_lighting import FarLight, FrameLighting, Paper
-from contracts.models import Calibration, CornersFit, CoverFit
+from contracts.models import Calibration, RectangleFit
 
-SKEWED = PositionValues(CornersFit(corners=((0.1, 0), (1, 0), (1, 1), (0, 1))), LIGHTING)
-MATTED = PositionValues(CoverFit(), FrameLighting(
+SKEWED = PositionValues(RectangleFit(centre_x=0.45, width=0.8), LIGHTING)
+MATTED = PositionValues(RectangleFit(), FrameLighting(
     mat_depth_mm=2.0, lights=(FarLight(light="room", lux=400.0, reference={"kind": "at-full"}, from_degrees=90,
                                        steep_degrees=30, softness_degrees=5),),
     paper=Paper(whiteness=0.9, ink_density=2.3)))
 PORTRAIT, LANDSCAPE = (1080, 1920), (1920, 1080)
 SAMSUNG, DELL = uuid4(), uuid4()
 SESSION = uuid4()
-CREATED = PositionValues(CoverFit(), LIGHTING)
+CREATED = PositionValues(RectangleFit(), LIGHTING)
 
 
 def _entry(kind: PositionEntryKind, values: PositionValues, *, frame_id: str = "kitchen", profile=PORTRAIT,

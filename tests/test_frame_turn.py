@@ -12,7 +12,7 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
-from support.position import save_position
+from support.position import PORTRAIT_ON_WIDE, save_position
 from test_display_identity import enroll_pi
 
 from central.app import create_app
@@ -118,7 +118,7 @@ def test_a_turn_raises_the_generation_and_needs_the_position_checked(registry):
     player = enroll_pi(registry, SERIAL)
     _frame(registry)
     registry.bind("kitchen", player, "HDMI-A-1", expected_generation=0)
-    save_position(registry, "kitchen")
+    save_position(registry, "kitchen", PORTRAIT_ON_WIDE)
     ready = _inventory_frame(registry)
     assert (ready.readiness, ready.turn) == (Readiness.READY, 0)
     revision = _revision(registry)
@@ -131,7 +131,7 @@ def test_a_turn_raises_the_generation_and_needs_the_position_checked(registry):
     assert _revision(registry) == revision + 1
     assert _audits(registry, "frame_turned") == [{"turn": 90, "generation": ready.generation + 1}]
     assert frame.calibration == ready.calibration and frame.player_id == player   # never the Position or binding
-    save_position(registry, "kitchen")
+    save_position(registry, "kitchen")      # the whole width of the screen as it now hangs (1080 x 1920)
     assert _inventory_frame(registry).readiness is Readiness.READY
 
 

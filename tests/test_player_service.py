@@ -25,7 +25,7 @@ import pytest
 import tls_fixture as tls
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from pydantic import ValidationError
-from support.position import save_position
+from support.position import PORTRAIT_ON_WIDE, save_position
 from test_executor import binding, layer
 from uplink_fakes import FakeReply, FakeTransport, central, finding
 from websockets.datastructures import Headers
@@ -2068,7 +2068,7 @@ def test_real_central_http_media_commit_outage_rejoin_and_renewal(registry, tmp_
             await service.poll_state()
             assert service._plan is None
             registry.bind("portrait", registered.player_id, "HDMI-A-1", expected_generation=0)
-            save_position(registry, "portrait")
+            save_position(registry, "portrait", PORTRAIT_ON_WIDE)
             schedule(app.state.coordinator, ["portrait"], starts=1000, media=True)
             await service.poll_state()
             service._feedback()

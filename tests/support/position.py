@@ -10,11 +10,16 @@ from __future__ import annotations
 from central.frame_lighting.policy import upgrade_lighting
 from central.transaction_locks import acquire_runtime_locks
 from contracts.frame_lighting import FrameLighting
-from contracts.models import Calibration, CornersFit
+from contracts.models import Calibration, RectangleFit
 from contracts.node_picture import UPGRADE_DISPLAY_LIGHT
 
-# Corners on the whole output: a Save that needs no reported output size (Cover's profile does).
-FULL_SCREEN_CORNERS = Calibration(fit=CornersFit())
+# The rectangle centred at the whole width of the screen as it hangs: a Save with no reported output
+# size is never checked; with one, the Frame's shape must fit the screen's width (a Frame taller than
+# its screen passes its own rectangle).
+WHOLE_WIDTH = Calibration(fit=RectangleFit())
+# A 9:16 Frame (test_registry.frame's "portrait") on an upright 16:9 screen (test_registry.enroll's
+# 1920 x 1080 Outputs): centred at 30 % of the width, 576 x 1,024 pixels, wholly on the screen.
+PORTRAIT_ON_WIDE = Calibration(fit=RectangleFit(width=0.3))
 # A new Frame's lighting while the seeded fixed room light "room" is there: one wash of it, paper
 # matching the panel (frame_lighting.policy.new_frame_lighting).
 LIGHTING: FrameLighting = upgrade_lighting(UPGRADE_DISPLAY_LIGHT, 0.0, 1.0)
@@ -22,10 +27,12 @@ LIGHTING: FrameLighting = upgrade_lighting(UPGRADE_DISPLAY_LIGHT, 0.0, 1.0)
 
 def save_position(registry, frame_id: str, calibration: Calibration | None = None, *,
                   expected_revision: int | None = None, lighting: FrameLighting = LIGHTING) -> Calibration:
-    """Commit `calibration` (default: Corners on the whole output) and `lighting` (default: a new Frame's)
-    as the bound Frame's Position,
-    against its current binding, generation and configuration, and the calibration revision the
-    draft was made from (`expected_revision`; default the saved one). TrialRefused as Save's."""
+    """Commit `calibration` (default: `WHOLE_WIDTH`) and `lighting` (default: a new Frame's) as the
+    bound Frame's Position, against its current binding, generation and configuration, and the
+    calibration revision the draft was made from (`expected_revision`; default the saved one).
+    TrialRefused as Save's: a Frame taller than its screen's width allows passes its own rectangle
+    (`PORTRAIT_ON_WIDE` for the portrait Frame on a 1920 x 1080 screen), or Save refuses
+    `position_off_screen`."""
     with registry.db.transaction() as conn:
         acquire_runtime_locks(conn)
         row = conn.execute("SELECT f.calibration, f.generation, f.configuration_revision, b.player_id, b.output_id, "
@@ -39,5 +46,5 @@ def save_position(registry, frame_id: str, calibration: Calibration | None = Non
             config_revision=row["configuration_revision"],
             calibration_revision=(Calibration.model_validate(row["calibration"]).revision
                                   if expected_revision is None else expected_revision),
-            calibration=FULL_SCREEN_CORNERS if calibration is None else calibration, lighting=lighting,
+            calibration=WHOLE_WIDTH if calibration is None else calibration, lighting=lighting,
             session_id=None, restored_from=None)

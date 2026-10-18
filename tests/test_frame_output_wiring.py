@@ -22,7 +22,7 @@ from central.coordination import Coordinator
 from central.photo_fit_routes import ANALYSIS_PATH
 from central.registry import FrameCreate
 from central.runtime import Contribution, Scene
-from contracts.models import Calibration, CoverFit, FrameProfile
+from contracts.models import Calibration, FrameProfile, RectangleFit
 
 WIDE = FrameProfile(width_px=1920, height_px=1080, diagonal_inches=24)
 DISPLAY = (3840, 2160)
@@ -34,9 +34,10 @@ def _matted_frame(registry) -> None:
     player, _, _ = enroll(registry, count=1, size=DISPLAY)
     registry.create_frame(FrameCreate(id="hall", width_mm=530, height_mm=300, profile=WIDE))
     registry.bind("hall", player["player_id"], "HDMI-A-1", expected_generation=0)
-    right, bottom = OPENING[0] / DISPLAY[0], OPENING[1] / DISPLAY[1]
-    save_position(registry, "hall", Calibration(fit=CoverFit(
-        corners=((0.0, 0.0), (right, 0.0), (right, bottom), (0.0, bottom)))))
+    # The opening in the Display's top-left corner: a rectangle of its size, centred on its middle.
+    save_position(registry, "hall", Calibration(fit=RectangleFit(
+        centre_x=OPENING[0] / 2 / DISPLAY[0], centre_y=OPENING[1] / 2 / DISPLAY[1],
+        width=OPENING[0] / DISPLAY[0])))
 
 
 def test_a_photo_that_fills_a_mat_opening_is_judged_against_the_opening_everywhere(registry):
