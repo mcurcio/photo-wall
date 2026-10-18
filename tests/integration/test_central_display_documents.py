@@ -60,6 +60,9 @@ IDENTITY = DisplayIdentity("XYM", 5475, "MNN", None)
 MODES = (DisplayMode(1920, 1080, 60000, preferred=True),)
 
 
+_LISTEN_PROBE = "no-such-device"   # only a wake of all moves its count
+
+
 def _report(output_id: str) -> bytes:
     return encode_output_report(OutputReport(output_id, True, IDENTITY, MODES, (), None, None, None, None))
 
@@ -100,6 +103,10 @@ def test_a_nodes_output_documents_and_reports_cross_the_display_line(database, t
             return account_id(SERIAL) in leaf_connections(hub)
         await until(linked, 15, "the Node's leaf links")
         wakes = DisplayWakes()
+        # Registry writes (turn_frame, unbind) wake the source by NOTIFY, as the worker hears it:
+        # listen here too. A connect wakes all, so a key nobody holds counts the connect alone.
+        connects = wakes.count(_LISTEN_PROBE)
+        listening = asyncio.create_task(wakes.listen(database.dsn))
         stores = PgLinkStores(database, {REPORT_STREAM: OutputReportJudge(wakes)})
         links = NodeLinks(Pipe.FLEET, hub.client_url, stores, 
                          DisplayDocuments(stores, wakes, times=DatabaseTransactionClock()))
@@ -143,6 +150,7 @@ def test_a_nodes_output_documents_and_reports_cross_the_display_line(database, t
             assert len(reconciles) == reconciled   # the judge's wake carried it, not a reconcile
 
             # (4) A turn reaches the Node through turn_frame's wake, not a reconcile.
+            await asyncio.wait_for(wakes.after(_LISTEN_PROBE, connects), SECONDS)   # LISTEN is on
             before = await held("HDMI-A-1")
             assert (before.change, before.turn) == (1, 0)
             [kitchen] = [frame for frame in registry.inventory().frames if frame.id == "kitchen"]
@@ -164,6 +172,7 @@ def test_a_nodes_output_documents_and_reports_cross_the_display_line(database, t
             assert not running.done()
         finally:
             stop.set()
+            listening.cancel()
             await asyncio.wait_for(running, SECONDS)
 
     try:

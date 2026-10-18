@@ -41,6 +41,11 @@ nothing but the app is on screen.
    with only the upper plane's strength changing send no wl_subsurface.place_above, no
    set_position and no wl_surface.attach (the app's own WAYLAND_DEBUG log), one multiplier each:
    Weston answers a restack or a move by damaging and repainting beneath the planes.
+   8b. a_burst_ends_on_a_presented_commit: those presents come within one refresh, past the frame
+   client's FEEDBACK_PER_SURFACE answers on the screen; the shell still names the last one
+   presented (frame-client.c `feedback_slot` drops the oldest answer of a burst rather than leave
+   the newest commit untracked). Mutation probe: FEEDBACK_STALE_NS 0 (every full table untracked)
+   -> the last fade, and case 9's trial after it, are never presented.
 9. a_trial_overlay_rides_the_present_that_carries_it (render redesign S3, bead B3, run ledger
    .claude/runs/render-planes/s3-page.md): a Position trial set through the controller
    (`WestonBackend.trial`, as native_display_smoke.py's overlay cases set theirs), the app reads it on
@@ -743,6 +748,17 @@ def main() -> None:
         assert (counts["place_above"], counts["set_position"], counts["attach"]) == (0, 0, 0), counts
         assert counts["set_multiplier"] == FADE_PRESENTS, counts
         print("PASS a_fade_restacks_moves_and_attaches_nothing", flush=True)
+
+        # 8b. a_burst_ends_on_a_presented_commit: those presents came within one refresh, past the
+        # frame client's FEEDBACK_PER_SURFACE answers; the last is still tracked, so the shell
+        # names it presented (the trial that follows depends on it).
+        last_fade = f"fade-{FADE_PRESENTS}"
+        end = time.monotonic() + 5.0
+        while last_fade not in presented_tags:
+            assert time.monotonic() < end, ("burst_last_unpresented", presented_tags[-5:])
+            drain()
+            time.sleep(0.01)
+        print("PASS a_burst_ends_on_a_presented_commit", flush=True)
 
         # 9. a_trial_overlay_rides_the_present_that_carries_it
         def until(holds, what: str, seconds: float = 10.0) -> None:

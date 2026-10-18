@@ -9,3 +9,9 @@
 -- keeps drawing by it until migration 102 (S5) turns every Position into a rectangle and moves that
 -- quarter turn here. No Frame's generation moves, so every ready Frame stays ready.
 ALTER TABLE frames ADD COLUMN turn SMALLINT NOT NULL DEFAULT 0;
+
+-- Every stored Output document decodes under the display line's schema major 9 (no backwards-
+-- compatible decoder): each gains the turn its Output has now, 0 (every Frame hangs as built). Its
+-- digest stays the pre-101 one, so the document source's next read rewrites it under the next
+-- `change` and the Pi, on schema 9, is sent it.
+UPDATE output_documents SET document = document || '{"turn": 0}'::jsonb;

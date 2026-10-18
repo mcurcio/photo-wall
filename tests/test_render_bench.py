@@ -88,6 +88,14 @@ def test_the_overload_is_cut_to_the_budget(plan):
     assert list(strengths) == ["overload-2", "overload-3", "overload-4"]
 
 
+def test_what_lies_beneath_a_kept_picture_is_judged_over_the_kept_pictures(plan):
+    """The cut sheds the lower pictures (photo 4, overload 1), so the bottom kept picture is over
+    the screen's black: the dip rule (its sRGB), the ones above it over a picture (the share).
+    Mutation probe: judge beneath over the uncut stack -> overload 2 is 0.5 and this fails."""
+    strengths = timeline.strengths_at(plan, plan.steps[-1].start + 1, SCREEN)
+    assert strengths == {"overload-2": pytest.approx(encode_srgb(0.5)), "overload-3": 0.5, "overload-4": 0.5}
+
+
 def test_the_tracers_frame_is_a_centred_full_width_rectangle(plan):
     assert plan.binding.calibration.fit == RectangleFit(centre_x=0.5, centre_y=0.5, width=1.0)
 

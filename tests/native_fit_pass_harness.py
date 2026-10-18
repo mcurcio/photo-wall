@@ -51,8 +51,9 @@ it within one level, except where the reference changes within PATTERN_EDGE pixe
 either side); every pixel outside is exactly opaque black.
 10. pattern_<name>_turn_<0|90>_matches_the_reference: White (non-neutral operations, the LUT bound
    and unread), Grey ramp, Black level, both calibration targets with the QR of a fixed TargetCode
-   and with none (the two differ), and the commissioning grid (the LUT and the far light's mat
-   shadow); at 90 the target is 48 x 64.
+   and with none (the two differ), and the commissioning grid (the far light's mat shadow), also
+   through the LUT, sampled between its grid points there, so held to LUT_BETWEEN_GRID_POINTS; at
+   90 the target is 48 x 64.
 11. a_pattern_target_needs_its_board: ValueError("board"), nothing drawn.
 12. a_wrong_pattern_target_size_is_refused: the unturned screen's target at 90 is
    ValueError("pattern_target_size"), nothing drawn.
@@ -385,6 +386,10 @@ SCREEN = (64, 48)
 PLACEMENT = Placement(16, 15, 32, 18)
 WIDE = FrameProfile(width_px=1920, height_px=1080, diagonal_inches=27)      # 16:9, as the placement
 PATTERN_EDGE = 0.002                        # target pixels either side of a sample's centre
+# A LUT sampled between its grid points: software GL filters it with 8-bit weights, so a sample
+# there is held to two levels (the commissioning grid's slate is no grid corner: worst seen 1.035
+# levels, llvmpipe, 2026-10-18); the same grid without the LUT is held to ONE_LEVEL.
+LUT_BETWEEN_GRID_POINTS = 2 * ONE_LEVEL
 TARGET_CODE = TargetCode("p-" + "0123456789abcdef" * 2, "screen", 3)
 MODULES = target_modules(TARGET_CODE)
 
@@ -418,8 +423,9 @@ def pattern_drawn(request: PatternRequest) -> tuple[tuple[int, int], bytes]:
         target.free()
 
 
-def pattern_compare(request: PatternRequest) -> bytes:
-    """Draw `request` and hold every pixel to the reference (module docstring); the drawn bytes."""
+def pattern_compare(request: PatternRequest, tolerance: float = ONE_LEVEL) -> bytes:
+    """Draw `request` and hold every pixel to the reference within `tolerance` codes (module
+    docstring); the drawn bytes."""
     size, data = pattern_drawn(request)
     width, height = size
     inside = compared = 0
@@ -436,17 +442,18 @@ def pattern_compare(request: PatternRequest) -> bytes:
             if any(max(abs(a - b) for a, b in zip(other, expected, strict=True)) * 255 > .5 for other in near):
                 continue
             error = max(abs(a - e * 255) for a, e in zip(actual, expected, strict=True))
-            assert error <= ONE_LEVEL, ("pixel", request.turn, x, y, actual, [round(e * 255, 3) for e in expected])
+            assert error <= tolerance, ("pixel", request.turn, x, y, actual, [round(e * 255, 3) for e in expected])
             compared += 1
     assert inside == PLACEMENT.width * PLACEMENT.height, ("placement", inside)
     assert compared > inside * 3 / 4, ("too_few_samples", compared)
     return data
 
 
-def pattern_matches_the_reference(name: str, pattern: TestPattern | None, turn: int, **options):
+def pattern_matches_the_reference(name: str, pattern: TestPattern | None, turn: int, tolerance=ONE_LEVEL,
+                                  **options):
     def case() -> None:
         assert target_size(Placement(0, 0, *SCREEN), turn) == ((64, 48) if turn == 0 else (48, 64)), turn
-        drawn = pattern_compare(pattern_request(pattern, turn=turn, **options))
+        drawn = pattern_compare(pattern_request(pattern, turn=turn, **options), tolerance)
         if pattern in TARGET_PATTERNS:      # the QR's modules reach the screen
             uncoded = pattern_compare(pattern_request(pattern, turn=turn, lut=options.get("lut")))
             assert uncoded != drawn, ("the code changes nothing", name)
@@ -488,7 +495,8 @@ PATTERN_CASES = tuple(
         ("black_level", TestPattern.BLACK_LEVEL, {}),
         ("target_pre_software", TestPattern.TARGET_PRE_SOFTWARE, {"modules": MODULES}),
         ("target_post_software", TestPattern.TARGET_POST_SOFTWARE, {"modules": MODULES}),
-        ("commissioning_grid", None, {"lut": LUT})))
+        ("commissioning_grid", None, {}),
+        ("commissioning_grid_through_the_lut", None, {"lut": LUT, "tolerance": LUT_BETWEEN_GRID_POINTS})))
 
 
 CASES = (turn_matches_the_reference(0, 0), turn_matches_the_reference(90, 1), turn_matches_the_reference(270, 2),

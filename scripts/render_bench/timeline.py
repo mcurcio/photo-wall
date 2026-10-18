@@ -222,14 +222,16 @@ def strengths_at(tracer: Tracer, at: float, screen_size: tuple[int, int]) -> dic
     bottom to top: the layers player/look.py `look` and player/planes.py `compose` show on a
     screen of `screen_size` as it hangs, cut to the Pi 5's controller budget
     (player/controller_budget.py `within`), each at `expected_strength` of its drawn alpha over
-    what the nearest seen layer beneath it is (a media layer's picture, else black). Pure."""
+    what the nearest kept layer beneath it is (a media layer's picture, else black): a layer the
+    cut gave up shows nothing, so the bottom kept layer is over the screen's black. Pure."""
     looked, kept = _kept(tracer, at, screen_size)
     kept_ids = {plane.layer.layer.assignment_id for plane in kept.planes}
     strengths: dict[str, float] = {}
     beneath: Beneath = "black"
     for local in visible_now(looked.layers):
-        if local.layer.assignment_id in kept_ids:
-            strengths[local.layer.assignment_id] = expected_strength(local.alpha, beneath)
+        if local.layer.assignment_id not in kept_ids:
+            continue
+        strengths[local.layer.assignment_id] = expected_strength(local.alpha, beneath)
         beneath = "picture" if local.layer.presentation == "media" else "black"
     return strengths
 
