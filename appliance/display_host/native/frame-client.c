@@ -69,7 +69,7 @@ struct pw_frame_client {
     struct wp_alpha_modifier_v1 *alpha;
     struct output outputs[MAX_OUTPUTS];
     struct pw_screen *screens;
-    struct pw_picture *pictures;
+    struct pw_picture *imported;           /* every imported picture, linked */
     struct wl_event_queue *queue;
     struct wl_registry *registry;
     struct pw_frame_manager_v1 *manager;
@@ -271,7 +271,7 @@ static const struct wp_presentation_feedback_listener feedback_listener = {
 void pw_frame_client_destroy(struct pw_frame_client *c) {
     if (!c) return;
     while (c->screens) pw_screen_destroy(c->screens);
-    while (c->pictures) pw_picture_destroy(c->pictures);
+    while (c->imported) pw_picture_destroy(c->imported);
     for (int i = 0; i < MAX_FEEDBACK; i++) if (c->feedback[i]) wp_presentation_feedback_destroy(c->feedback[i]);
     if (c->manager) pw_frame_manager_v1_destroy(c->manager);
     if (c->presentation) wp_presentation_destroy(c->presentation);
@@ -614,14 +614,14 @@ struct pw_picture *pw_picture_import(struct pw_frame_client *c, int fd, uint32_t
     p->client = c;
     p->buffer = result.buffer;
     wl_buffer_add_listener(p->buffer, &picture_listener, p);
-    p->next = c->pictures; c->pictures = p;
+    p->next = c->imported; c->imported = p;
     return p;
 }
 int pw_picture_busy(struct pw_picture *p) { return p && p->held ? 1 : 0; }
 void pw_picture_destroy(struct pw_picture *p) {
     if (!p) return;
     struct pw_frame_client *c = p->client;
-    for (struct pw_picture **at = &c->pictures; *at; at = &(*at)->next) if (*at == p) { *at = p->next; break; }
+    for (struct pw_picture **at = &c->imported; *at; at = &(*at)->next) if (*at == p) { *at = p->next; break; }
     for (struct pw_screen *s = c->screens; s; s = s->next)
         for (uint32_t i = 0; i < PW_SCREEN_PLANES; i++) if (s->shown[i] == p) s->shown[i] = NULL;
     wl_buffer_destroy(p->buffer);
@@ -629,7 +629,7 @@ void pw_picture_destroy(struct pw_picture *p) {
     free(p);
 }
 static bool owned(struct pw_frame_client *c, const struct pw_picture *p) {
-    for (struct pw_picture *q = c->pictures; q; q = q->next) if (q == p) return true;
+    for (struct pw_picture *q = c->imported; q; q = q->next) if (q == p) return true;
     return false;
 }
 static bool showing(struct pw_picture *const *pictures, uint32_t count, const struct pw_picture *p) {
