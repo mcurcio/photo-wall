@@ -33,7 +33,7 @@ from contracts.models import FrameProfile
 from contracts.time import Clock
 from media.library_client import FaceBox, FetchedRendition, LibraryUnavailable
 from media.models import MediaError
-from media.prepare import BuildIdentity, PreparationRecipe, PreparedMedia
+from media.prepare import BuildIdentity, PreparedMedia, StillRecipe
 from media.task_queue import (
     ProcrastinateCheckQueue,
     RetryableMediaTask,
@@ -196,7 +196,7 @@ def test_a_planned_photo_is_fetched_for_its_recipes_need_prepared_and_recorded(
     assert plan == ("preview", "original")   # a JPEG original (the copy ladder)
     assert isinstance(preparer.prepared[0], LibraryAsset)
     # One copy for the wall (follow-up S1): the 1080 x 1920 Frame's need is the 1920 step.
-    assert preparer.recipes == [PreparationRecipe(image_long_edge=1920)]
+    assert preparer.recipes == [StillRecipe(long_edge=1920)]
     assert [(copy.name, copy.width) for copy in
             instance.library.copy_sizes(picture.asset_id).values()] == [("preview", 810)]
     assert (facts.sha256, facts.size, facts.made_from) == (

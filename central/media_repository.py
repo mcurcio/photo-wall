@@ -11,6 +11,10 @@ via scaling and masking"): each photo has ONE copy for the whole wall, named by 
 from the photo's readable size, the wall's Frame outputs and the photo fit settings
 (central/photo_library/rendition.py `wall_need` over central/wall_plan/fit.py
 `fitting_outputs`), so it is the same name whichever Frame shows the photo.
+
+Render planes S4 (owner, gate answer Q5, 2026-10-18: "HEVC now, one 1080p copy per video"): a
+video's one copy is named by the video recipe alone (`variant_recipe`), the same whatever the
+wall's Frames or the photo copy ladder.
 """
 
 from __future__ import annotations
@@ -43,7 +47,7 @@ from central.kernel.jobs import job_keys
 from central.kernel.publishing import Publisher
 from central.kernel.types import media_variant_key, split_media_variant_key
 from central.media_queue import MediaTaskQueue
-from central.photo_library.model import LibraryAsset, PoolMember
+from central.photo_library.model import Kind, LibraryAsset, PoolMember
 from central.photo_library.rendition import FrameNeed, need_at, need_step, wall_need
 from central.planner import AcquisitionRequest, MeasureRequest, candidate_standing
 from central.registry import RegistryError
@@ -54,7 +58,7 @@ from central.wall_plan.key_content import Analysis
 from central.wall_plan.order import LineAnswer, LineMember, LineQuery, SourceLine
 from contracts.models import Model, Variant
 from contracts.time import Clock
-from media.prepare import PreparationRecipe, recipe_id
+from media.prepare import HouseRecipes, PreparationRecipe, recipe_id, stored_recipe
 
 
 class StoreLimits(Model):
@@ -82,7 +86,8 @@ class VariantInputs:
 @dataclass(frozen=True, slots=True)
 class VariantName:
     """A photo's one copy for the wall now: its name (`<asset_id>.<recipe_id>`), the recipe it
-    is prepared by (the house recipe with its long edge at the step) and that step."""
+    is prepared by (`variant_recipe`: a still's house recipe with its long edge at the step, a
+    video's house recipe as it is) and that step."""
 
     key: str
     recipe_id: str
@@ -90,23 +95,27 @@ class VariantName:
     step: int
 
 
-def variant_recipe(base: PreparationRecipe, kind: str, need: FrameNeed) -> PreparationRecipe:
-    """The recipe a photo's one copy is prepared by: `base` with its still long edge at the
-    wall need's step (`need_step`); a video's is `base` (its size is the recipe's). Pure."""
+def variant_recipe(recipes: HouseRecipes, kind: Kind, size: tuple[int, int],
+                   frames: Sequence[FrameOutput], settings: FitSettings
+                   ) -> tuple[PreparationRecipe, FrameNeed]:
+    """The recipe and need a copy of a photo of `size` is prepared by. A still: the wall need
+    over the Frames it could fill (`fitting_outputs`) on `settings.copy_steps`, and the house
+    still recipe with its long edge at that need's step (`need_step`). A video: the house video
+    recipe and the video's own shape at its long edge (`need_at`), whatever `frames` and
+    `settings` are, so the wall and the copy ladder never rename a video. Pure."""
     if kind == "video":
-        return base
-    return base.model_copy(update={"image_long_edge": need_step(need)})
+        return recipes.video, need_at(size, recipes.video.long_edge)
+    need = wall_need(size, fitting_outputs(kind, *size, frames, settings), settings.copy_steps)
+    return recipes.still.model_copy(update={"long_edge": need_step(need)}), need
 
 
-def names_for(base: PreparationRecipe, sized: Mapping[str, tuple[str, tuple[int, int] | None]],
+def names_for(recipes: HouseRecipes, sized: Mapping[str, tuple[str, tuple[int, int] | None]],
               frames: Sequence[FrameOutput], settings: FitSettings) -> dict[str, VariantName]:
     """Each photo's one copy name (module docstring): for each asset id's (kind, judged size),
-    the wall need over the Frames it could fill (`fitting_outputs`) on `settings.copy_steps`.
-    A photo whose size is not measured, or a wall without a Frame, names none. Pure; one need
-    per distinct (kind, size)."""
+    its `variant_recipe` and need, named by `recipe_id`. A photo whose size is not measured, or
+    a wall without a Frame, names none. Pure; one computation per distinct (kind, size)."""
     if not frames:
         return {}
-    steps = settings.copy_steps
     by_size: dict[tuple[str, tuple[int, int]], tuple[str, PreparationRecipe, int]] = {}
     names: dict[str, VariantName] = {}
     for asset_id, (kind, size) in sized.items():
@@ -114,8 +123,7 @@ def names_for(base: PreparationRecipe, sized: Mapping[str, tuple[str, tuple[int,
             continue
         found = by_size.get((kind, size))
         if found is None:
-            need = wall_need(size, fitting_outputs(kind, *size, frames, settings), steps)
-            recipe = variant_recipe(base, kind, need)
+            recipe, need = variant_recipe(recipes, kind, size, frames, settings)
             found = by_size[(kind, size)] = (recipe_id(recipe, need), recipe, need_step(need))
         recipe_name, recipe, step = found
         names[asset_id] = VariantName(key=media_variant_key(asset_id, recipe_name),
@@ -190,7 +198,7 @@ class MediaRepository:
         # Variants are Asset records; `PrepareMedia` is published in coordination's
         # transaction through the one job publisher (a publish-only one by default).
         self.records = PgAssetRecords(clock)
-        self.recipe = PreparationRecipe()
+        self.recipes = HouseRecipes()
         self.publisher = publisher or (ProcrastinatePublisher(
             db.dsn, transactions=PgTransactions(db), outcomes=JobOutcomes(),
             assets=self.records, clock=clock, feed=None) if isinstance(db, Database) else None)
@@ -247,7 +255,7 @@ class MediaRepository:
         values are written to `media_recipes` (its step as the need), so its variants can be
         re-made from their names (a read-only transaction only computes them)."""
         sized = readable_sizes_in(conn, asset_ids) if sized is None else sized
-        names = names_for(self.recipe, sized, frame_outputs_in(conn),
+        names = names_for(self.recipes, sized, frame_outputs_in(conn),
                           PgFitSettings.fit_settings_in(conn))
         if record:
             recipes = {name.recipe_id: name for name in names.values()}
@@ -471,7 +479,8 @@ class MediaRepository:
         """The photo revision, recipe and need a variant's name stands for (`media_recipes`: the
         need is its step, the photo's own shape at that long edge, `need_at`), with its
         connection's full-size copies setting; None when either is unknown (a legacy variant's
-        recipe has no row)."""
+        recipe has no row) or its recipe is one the current models refuse (`stored_recipe`: one
+        from before render planes S4)."""
         asset_id, recipe = split_media_variant_key(key)
         with self.db.transaction() as conn:
             row = conn.execute("SELECT recipe,need FROM media_recipes WHERE recipe_id=%s",
@@ -480,9 +489,11 @@ class MediaRepository:
             full_size = None if asset is None else conn.execute(
                 "SELECT full_size_copies FROM library_connections WHERE connection_ref=%s",
                 (asset.connection_ref,)).fetchone()
-        if row is None or asset is None or not isinstance(row["need"].get("long_edge"), int):
+        recipe = None if row is None else stored_recipe(row["recipe"])
+        if (recipe is None or asset is None
+                or not isinstance(row["need"].get("long_edge"), int)):
             return None
-        return VariantInputs(asset=asset, recipe=PreparationRecipe.model_validate(row["recipe"]),
+        return VariantInputs(asset=asset, recipe=recipe,
                              need=need_at((asset.width, asset.height), row["need"]["long_edge"]),
                              full_size_copies=None if full_size is None
                              else full_size["full_size_copies"])
