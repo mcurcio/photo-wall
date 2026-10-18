@@ -17,7 +17,7 @@ One source package, `photo-wall` (`debian/`, `3.0 (native)`, `debhelper-compat (
 | `photo-wall-node` | the composition: units, slices, the target, system users, runtime directories, the bus configuration, the seven base launchers, `abi.json`; Depends on every context at its exact version and on `nats-server (= the pin)` | base |
 | `photo-wall-netboot-init` | stage 1 and an initramfs-tools hook that copies it, `uplink` and the CA bundle into the netboot initramfs | the scratch root that builds the initrd |
 
-Also in the local repo, built or fetched but not part of the source package: `python3-nats` (`debian-packaging/python-nats/`, the pinned nats-py sdist built with pybuild), upstream's own `nats-server` arm64 `.deb`, checked against a pinned sha256, and Photo Wall's Weston, `weston` and `libweston-14-0` ([Weston](#weston)).
+Also in the local repo, built or fetched but not part of the source package: `python3-nats` (`debian-packaging/python-nats/`, the pinned nats-py sdist built with pybuild), upstream's own `nats-server` arm64 `.deb`, checked against a pinned sha256, and Photo Wall's Weston, `weston`, `libweston-14-0` and `libweston-14-dev` ([Weston](#weston)).
 
 Rules the build enforces:
 
@@ -73,7 +73,7 @@ The real-systemd proof is the [PID1 scenarios](evidence/player-node-handoff-supp
 
 - **Bump the Debian snapshot.** Edit both timestamps of `debian-packaging/snapshot.list` (`YYYYMMDDTHHMMSSZ`, one instant). Every cache keys on it, so the build container, the base, the roots and the initrd root rebuild; re-stage the whole TFTP bundle ([runbook](runbook.md#player-provisioning-stage-the-netboot-bundle-and-read-its-console-0014)).
 - **Bump nats-server.** Edit both lines of `debian-packaging/nats-server.env` from the release's `SHA256SUMS`; `compose.yaml`'s hub image must move with it (`test_pins.py` fails otherwise).
-- **Bump or re-patch Weston.** For a new Debian Weston, set `WESTON_VERSION` and `WESTON_DSC_SHA256` (`sha256sum` of the `.dsc` under the pin's `pool/main/w/weston/`) and reset `WESTON_LOCAL_VERSION` to `<version>+photowall1`. For a patch change, bump the `+photowallN` suffix. Then run `debian-packaging/build-weston.sh --output <new dir>`. If a patch no longer applies, `dpkg-source` stops. If new code adds a plane mask the patch misses, `scripts/weston_patch_check.py` stops the build. Refresh the patch against the new source, keeping its DEP-3 header.
+- **Bump or re-patch Weston.** For a new Debian Weston, set `WESTON_VERSION` and `WESTON_DSC_SHA256` (`sha256sum` of the `.dsc` under the pin's `pool/main/w/weston/`) and reset `WESTON_LOCAL_VERSION` to `<version>+photowall1`. For a patch change, bump the `+photowallN` suffix. A snapshot bump that brings a new Debian Weston, a security update included, stops the `weston` container's build until you do: that stage refuses a `WESTON_VERSION` that is not apt's `weston` candidate at the pin. Then run `debian-packaging/build-weston.sh --output <new dir>`. If a patch no longer applies, `dpkg-source` stops. If new code adds a plane mask in a form the patch misses, `scripts/weston_patch_check.py` usually stops the build (a tripwire, not a proof: see its row below). Refresh the patch against the new source, keeping its DEP-3 header.
 - **Add an OS dependency.** Put it in an `appliance/rpi_image_gen/` layer. A Photo Wall package never names an OS feature.
 - **Add a Python module or context.** Place it in the package whose layer it belongs to; if the import check refuses a Depends line, fix `debian/control`, not the check.
 
@@ -81,21 +81,23 @@ The real-systemd proof is the [PID1 scenarios](evidence/player-node-handoff-supp
 
 The Node runs Photo Wall's build of Debian's `weston` source package ([0019's addendum](decisions/0019-debian-packaging-with-debhelper.md#addendum-2026-10-17-carrying-a-patched-debian-package)). The build adds one patch, `0001-backend-drm-use-64-bit-plane-masks.patch`. Weston's DRM backend keeps the planes a buffer or view may use as a mask with one bit per plane index. Upstream that mask is 32 bits wide, and the Pi 5's vc4 has 56 planes, so two planes shared a bit and the first HDMI output's primary plane (index 54) was never offered to a client buffer. The patch does three things:
 
-- It widens every plane mask to 64 bits, built by one helper, `drm_plane_mask_bit()`.
-- It refuses a plane whose index would not fit, logging it instead of aliasing it.
-- It logs each plane's KMS id, type and index once at startup. On a Node, `journalctl -u photo-wall-display` shows lines such as `DRM: plane 83 (primary) has plane index 54`.
+- It widens every plane mask to 64 bits, built by one helper, `drm_plane_mask_bit()`, which asserts the index fits; a `static_assert` holds `drm_fb::plane_mask` to that width.
+- On a device with more than 64 planes it keeps 64, dropping the lowest overlays first (with a log line each) and a primary or cursor plane only when overlays alone do not make room. Weston sorts planes highest zpos first, so without this the dropped planes would be the lowest, which on vc4 are the primaries. The Pi 5 has 56, so nothing is dropped there.
+- It writes each plane's KMS id, type and index to Weston's `drm-backend` debug scope, read by starting Weston with `--logger-scopes=log,drm-backend`: lines such as `[plane] 83 (primary) has plane index 54`.
+
+What no automated tier proves: Weston's DRM tests need a KMS device, so CI compiles the patched DRM code and runs Weston's other tests, but never runs the mask or the drop branches. The proof on hardware is a Pi bench check: with the `drm-backend` scope on, plane 83 (primary) has index 54 and no `skipping` line appears; and, once the Player's pictures go to planes, the scope's debug output shows a client buffer placed on plane 83.
 
 | Piece | Does |
 |---|---|
 | `debian-packaging/weston/upstream.env` | the pin: Debian's version, the local version and the `.dsc` sha256 |
 | builder Dockerfile, `weston` stage | fetches the `.dsc` from the pin's archive and refuses a wrong sha256; fetches the tarballs and installs Weston's `Build-Depends` |
 | `debian-packaging/build-weston.sh` | runs offline as a named user (Weston's Xwayland test needs one): `dpkg-source -x`, the series, the changelog entry, the patch check, then `dpkg-buildpackage -b` with Debian's rules and tests |
-| `scripts/weston_patch_check.py` | refuses the build while any `plane_mask` is narrower than `uint64_t`, any bit is shifted from a 32-bit one, or the index guard is missing |
-| `build-repo.sh` | checks the three `.deb`s are at the local version, installs them in the build root (so `graphics_abi` hashes our Weston), and adds `weston` and `libweston-14-0` to the repo |
+| `scripts/weston_patch_check.py` | a text tripwire for a Weston bump: refuses the build while any `*plane_mask` is narrower than `uint64_t`, any `*plane_idx` bit is shifted from a 32-bit one, or a guard or the `static_assert` is missing. A mask under another name or a `BIT()` macro passes it; the guarantees are the patch's helper and `static_assert` |
+| `build-repo.sh` | checks the three `.deb`s are at the local version, installs them in the build root (so `graphics_abi` hashes our Weston), and adds all three to the repo. No Node installs `libweston-14-dev`, but every image built FROM the build container holds Debian's, which Depends on `libweston-14-0` at exactly its own version: with ours in the repo, installing `photo-wall-node` there upgrades it instead of removing it (`test_local_repo.py` proves the PID1 fixture's install keeps `pkg-config libweston-14`) |
 | `debian/control` | `photo-wall-node-display` Depends on `weston (= ${weston:Version})` and `libweston-14-0 (= ${weston:Version})`. Both are needed: Debian's `weston` would accept an unpatched `libweston-14-0` |
 
-The image needs no change. The base installs `photo-wall-node`, and the display's exact Depends pull our Weston from the local repo. base-image.yml also requires `weston` and `libweston-14-0` at the local version. The build is bit-reproducible: two builds gave identical `.deb`s.
+The image needs no change. The base installs `photo-wall-node`, and the display's exact Depends pull our Weston from the local repo. base-image.yml also requires `weston` and `libweston-14-0` at the local version. Two local builds of the same commit gave byte-identical `.deb`s (bench, 2026-10-17); CI does not re-check this, since the `debs` job builds the repo twice from one restored Weston.
 
 ## Deviations and costs
 
-Findings recorded while building are in [the repository errata](../.claude/errata.md) under `E-0019-*`; [0019](decisions/0019-debian-packaging-with-debhelper.md#built-this-pr-deviations-from-the-design) lists the ones that change the design. Known costs: we carry our own Weston, whose patch must be rechecked against every Debian Weston update the snapshot pin takes in; versions do not sort; a launcher's `PATH` exposes every module of the package directories it reaches, not only its closure; a root's builds are reproducible only with the hostname and `SOURCE_DATE_EPOCH` the recipe fixes.
+Findings recorded while building are in [the repository errata](../.claude/errata.md) under `E-0019-*`; [0019](decisions/0019-debian-packaging-with-debhelper.md#built-this-pr-deviations-from-the-design) lists the ones that change the design. Known costs: we carry our own Weston, whose patch must be rechecked against every Debian Weston update the snapshot pin takes in (the `weston` stage stops the build until it is), and whose CI cache miss is about 5 minutes; versions do not sort; a launcher's `PATH` exposes every module of the package directories it reaches, not only its closure; a root's builds are reproducible only with the hostname and `SOURCE_DATE_EPOCH` the recipe fixes.

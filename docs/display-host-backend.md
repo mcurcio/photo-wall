@@ -311,14 +311,16 @@ solid buffer holds no pixels and is not counted against the client's buffer and 
 A compositor that does not offer both globals ends the client, so the shell's fallback tint
 shows; there is no second drawing path.
 
-Why not a small `wl_shm` buffer: Weston 14's DRM backend treats a small ARGB8888 shm buffer
-as a cursor-plane candidate and builds that plane's mask as `1 << plane_idx` in 32 bits. The
-Pi 5's vc4 exposes 56 KMS planes and the HDMI-A-1 cursor plane has index 50, so the mask
-wraps to an overlay plane and `drm_output_find_plane_for_view` aborts Weston on
-`assert(fb)`. Weston returns before the plane search for a solid buffer. Weston 15 removes
-that assertion (upstream commit d3ead778) but still builds 32-bit plane masks, so a plane
-index of 32 or more still aliases another plane. A real pointer cursor can still reach the
-same path on Weston 14. CI cannot see this: its headless Weston has no DRM planes.
+Why a solid buffer and not a small `wl_shm` one: the solid buffer holds no pixels, and Weston
+returns before its plane search for it. Weston's DRM backend treats a small ARGB8888 shm buffer
+as a cursor-plane candidate. The Node runs Photo Wall's Weston
+([packaging module](module-debian-packaging.md#weston)), whose plane masks are 64 bits wide:
+the HDMI-A-1 cursor plane (index 50) gets its own bit, `1 << 50`, and HDMI-A-1's primary
+(index 54) its own. Background: Debian's and upstream's Weston 14 build that mask as
+`1 << plane_idx` in 32 bits, so on the Pi 5's 56 vc4 planes the cursor's bit wraps to an
+overlay plane's and `drm_output_find_plane_for_view` aborts Weston on `assert(fb)`; Weston 15
+removes that assertion (upstream commit d3ead778) but keeps 32-bit masks. CI cannot exercise
+this path: its headless Weston has no DRM planes, so the Pi bench check is the proof.
 
 ## Frame-scoped replacement and explicit withdrawal
 

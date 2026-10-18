@@ -168,9 +168,11 @@ screen, on a steady beat).
 - **Without Display Host** (development, the kiosk pixel harness) no tag has a sequence, so the
   pacer never holds a frame and GDK's frame clock alone paces, as before.
 - **Not done here** (costed in the pull request): GTK's 10 ms copy stays (the Player would have to
-  own its surface); Weston's copy stays because Weston 14 cannot scan the Player's buffer out on
-  the Pi 5: its 32-bit plane masks alias the HDMI-A-1 primary plane (index 54) with an overlay
-  plane (index 22) it visits first ([health layer buffers](display-host-backend.md#the-health-layers-buffers)).
+  own its surface); Weston's copy stays because the Player does not yet hand its buffer to Weston
+  for direct scanout, the render redesign's next piece. Photo Wall's Weston can place it on a
+  plane: its 64-bit plane masks give HDMI-A-1's primary plane (index 54) its own bit, which
+  Debian's 32-bit masks shared with an overlay plane
+  ([packaging module](module-debian-packaging.md#weston)).
 
 Tests: `tests/test_player_pacing.py` (the pacer against a fake compositor),
 `tests/test_player_frame_clock.py` (a still minute draws, copies and commits nothing; a fade draws

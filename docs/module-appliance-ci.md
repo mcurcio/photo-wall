@@ -4,7 +4,8 @@ The signed appliance image, its VM boot gate, the reusable OS base (`scripts/os_
 
 | Workflow (called by `pipeline.yml`) | Does | Native arm64 |
 |---|---|---|
-| [`node-components.yml`](../.github/workflows/node-components.yml), job `debs` | Builds the `photo-wall` source package in the pinned build container, twice (the two `Packages` indexes must agree), proves the local repo with `tests/debs`, uploads it | yes |
+| [`node-components.yml`](../.github/workflows/node-components.yml), job `weston` | Restores Photo Wall's Weston (`weston`, `libweston-14-0`, `libweston-14-dev`) from its cache, or builds it with `debian-packaging/build-weston.sh` and saves it (**Weston cache** below); uploads it for `debs` | yes |
+| `node-components.yml`, job `debs` | Builds the `photo-wall` source package in the pinned build container, twice (the two `Packages` indexes must agree), proves the local repo with `tests/debs`, uploads it | yes |
 | `node-components.yml`, job `build` | Builds the app and manager release roots from the pin and the local repo, seals them, writes the component set (`scripts/node_release_writer.py`) | yes |
 | `node-components.yml`, job `pid1-fixture` | Derives the PID1 scenarios' stage targets and fixture image from the repo and the set | yes |
 | [`base-image.yml`](../.github/workflows/base-image.yml) | rpi-image-gen builds the base squashfs installing `photo-wall-node` from the local repo; builds the scratch root with `photo-wall-netboot-init` and assembles the netboot bundle | yes |
@@ -182,6 +183,17 @@ The BuildKit scopes use the same policy with one scope per container (`photo-wal
 the build container and the roots container), written from `main` only. The cache changes no byte:
 packages carry content-derived versions, and a release root's digest is the digest of an image
 built from the pin and the repo's `Package=Version` lines.
+
+**Weston cache.** The `weston` job keeps Photo Wall's Weston `.deb`s whole (`actions/cache`,
+exact key `weston-debs-v2-<stages>-<inputs>`): `<stages>` hashes only the `pinned` and `weston`
+stages of `debian-packaging/builder/Dockerfile`, so a builder or roots edit does not rebuild
+Weston, and `<inputs>` hashes `debian-packaging/weston/`, `build-weston.sh`, its patch check, the
+snapshot pin and the container loader. A miss costs about 5 minutes (Weston's build and tests),
+over the leg budget. Unlike the roots' and `linux-media`'s, this entry is written from every ref,
+not only `main`: a pull request that moves a Weston input would otherwise pay that miss on every
+push. Its entry is visible only to that pull request; the cost is a few MB of cache per such
+pull request. The `debs` job `needs` it, which adds the hit path (checkout, restore, upload,
+under a minute) to the critical path.
 
 **Release roots cache.** The roots are cached whole (`actions/cache`, exact key `node-roots-v1-<digest>`, written only
 from `main`, like `linux-media`'s). The key is `scripts/node_release_writer.py key`: the recipe (the
