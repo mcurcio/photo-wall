@@ -678,6 +678,15 @@ int64_t pw_screen_present(struct pw_screen *s, const struct pw_plane_state *plan
     memcpy(s->shown, now, sizeof now);
     if (tag_send(c, slot, s->surface, grant_id, frame_tag, picture_change) < 0) return -1;
     wl_surface_commit(s->surface);
+    /* That commit unmapped the rest; destroying them now (no visible change) drops the compositor's
+     * last hold on their pictures: Weston 14's GL renderer keeps an unmapped surface's buffer until
+     * the surface gets another or is destroyed, so their pictures would never be released. */
+    for (uint32_t i = count; i < s->planes; i++) {
+        wp_alpha_modifier_surface_v1_destroy(s->alpha[i]);
+        wl_subsurface_destroy(s->sub[i]);
+        wl_surface_destroy(s->plane[i]);
+    }
+    s->planes = count;
     if (!flushed(c)) return -1;
     return (int64_t)c->tagged;
 }

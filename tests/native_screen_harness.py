@@ -8,8 +8,10 @@ the shell's control socket: allow, candidate, handoff, turn, as native_picture_e
 and reads Weston's pixels through weston_capture_v1 (`--debug`). The app is a child process, an
 unprivileged user, driving player/plane_screen.py's PlaneScreens on its own connection; it answers
 one JSON command per line on stdin. Its pictures are memfd-backed LINEAR XR24 buffers passed through
-zwp_linux_dmabuf_v1 to Weston's pixman renderer. The shell's private client is the harness health
-client in its `bare` mode (alive, its health layer unmapped), so nothing but the app is on screen.
+zwp_linux_dmabuf_v1. Weston 14's pixman renderer offers no zwp_linux_dmabuf_v1 (CI, 2026-10-18), so
+the harness falls back to the GL renderer on llvmpipe, which imports them. The shell's private
+client is the harness health client in its `bare` mode (alive, its health layer unmapped), so
+nothing but the app is on screen.
 
 1. the_handed_off_screen_shows_black: the candidate's empty presents (tagged
    "candidate-<grant id>") bring the handoff; then every pixel of the Output is black.
