@@ -1,6 +1,6 @@
 """Scalar calibration/SDR reference. Production pixels are processed by shaders.
 
-The Frame fit and the final pass are each stated once here and mirrored by player/native.py's shaders:
+The Frame fit and the final pass are each stated once here and mirrored by the shaders (player/native.py; the look, player/look_shader.py; the fit pass, player/fit_pass.py):
 - **One matrix per fit** (`output_to_picture`): output fractions -> the picture's unit square.
   Corners: the inverse perspective onto the corners with the quarter turn folded in. Cover: the
   inverse of rotate, scale evenly and move onto contracts/frame_fit.py's cover rectangle (the
@@ -56,7 +56,7 @@ from contracts.calibration_target import (
     screen_columns,
 )
 from contracts.colour import srgb_to_linear
-from contracts.display_turn import DisplayTurn
+from contracts.display_turn import TURNS, DisplayTurn, wayland_transform
 from contracts.frame_fit import Corners, OutputSize, cover_rectangle
 from contracts.frame_lighting import (
     SHEET_WHITENESS,
@@ -136,10 +136,12 @@ def transform(matrix: Matrix, x: float, y: float) -> tuple[float, float]:
             (matrix[3]*x + matrix[4]*y + matrix[5]) / divisor)
 
 
+IDENTITY: Final[Matrix] = (1, 0, 0, 0, 1, 0, 0, 0, 1)
 # Undo a clockwise quarter turn of the picture, as a matrix on the unit square: the one home of
-# the quarter-turn rule (Corners folds it into its matrix).
+# the quarter-turn rule (Corners folds it into its matrix; the fit pass's target is the picture
+# turned the other way, `buffer_to_picture`).
 UNDO_QUARTER_TURN: dict[int, Matrix] = {
-    0: (1, 0, 0, 0, 1, 0, 0, 0, 1),
+    0: IDENTITY,
     90: (0, 1, 0, -1, 0, 1, 0, 0, 1),         # (u, v) -> (v, 1-u)
     180: (-1, 0, 1, 0, -1, 1, 0, 0, 1),       # (u, v) -> (1-u, 1-v)
     270: (0, -1, 1, 1, 0, 0, 0, 0, 1),        # (u, v) -> (1-v, u)
@@ -237,12 +239,11 @@ def picture_source_uv(x: float, y: float, fit: CornersFit | CoverFit, output: Ou
     u, v = transform(output_to_picture(fit, output, profile_aspect), x, y)
     if not (0 <= u <= 1 and 0 <= v <= 1):
         return None
-    left, top, right, bottom = photo_rect(profile_aspect, source_width, source_height, crop)
-    return left + u*(right-left), top + v*(bottom-top)
+    return fit_source_uv(u, v, profile_aspect, (source_width, source_height), crop)
 
 
 # -- The physics' shared rules: luminance, a light's colour, the rolloff's curve, the mat's
-# edge and the paper profile's LUT. Each is stated once here and mirrored by player/native.py's final pass.
+# edge and the paper profile's LUT. Each is stated once here and mirrored by player/look_shader.py `LOOK_GLSL`.
 
 LUMA: Final[Linear] = (0.2126, 0.7152, 0.0722)    # Rec. 709 linear luminance: a light's colour at luminance 1
 LIGHT_ELEVATION_MIN_DEGREES: Final = 1.0            # a soft far light's lower edge never reaches the wall plane
@@ -423,11 +424,16 @@ def opening_size_mm(fit: CornersFit | CoverFit, profile: FrameProfile) -> tuple[
     diagonal_inches*25.4, a = width_px/height_px, W = diag_mm*a/hypot(a,1), H = diag_mm/hypot(a,1);
     (W, H) when the nearest quarter turn of fit.rotation (round(rotation / 90) * 90) is 0 or 180,
     else (H, W). The one home of this rule: `mat_shadow`'s size_mm is it. Pure."""
-    diagonal = profile.diagonal_inches * 25.4
-    aspect = profile.width_px / profile.height_px
-    width, height = diagonal * aspect / math.hypot(aspect, 1), diagonal / math.hypot(aspect, 1)
+    width, height = _profile_size_mm(profile)
     quarter = round(fit.rotation / 90) * 90
     return (width, height) if quarter % 180 == 0 else (height, width)
+
+
+def _profile_size_mm(profile: FrameProfile) -> tuple[float, float]:
+    """The Frame profile's own (W, H) in mm, upright: `opening_size_mm` before its quarter turn."""
+    diagonal = profile.diagonal_inches * 25.4
+    aspect = profile.width_px / profile.height_px
+    return diagonal * aspect / math.hypot(aspect, 1), diagonal / math.hypot(aspect, 1)
 
 
 def final_pixel(photo: Linear, operations: PictureOperations, *, inside: bool, lights: FrameLights | None,
@@ -517,14 +523,14 @@ def output_pixel(x: float, y: float,
     return final_pixel(colour, operations, inside=inside, lights=lights, x=x, y=y)
 
 
-# ---- Room light: one physics path, the scalar reference player/native.py mirrors ----
+# ---- Room light: one physics path, the scalar reference player/look_shader.py mirrors ----
 
 HIGHLIGHT_KNEE: Final = 0.8         # the fixed rolloff's knee, in signal (a share of the TV's white)
 NO_LIGHT: Final[Linear] = (0.0, 0.0, 0.0)
 # The 4 x 4 ordered dither (Bayer): the threshold rank at row y % 4, column x % 4. The shader's copy
-# is written in from here (player/native.py `_FINAL_CONSTANTS`).
+# is written in from here (player/look_shader.py).
 BAYER_4: Final = (0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5)
-# The shader's light kind codes (player/native.py writes them in).
+# The shader's light kind codes (player/look_shader.py writes them in).
 LIGHT_KINDS: Final = ("wash", "far", "close")
 LightKind = Literal["wash", "far", "close"]
 
@@ -661,8 +667,14 @@ def frame_lights(lighting: FrameLighting, document: RoomLightsDocument | None,
     turn of fit.rotation; a far light's `toward` = (sin a, -cos a), a = from_degrees + quarter, its
     band (depth cot(min(90, steep + softness/2)), depth cot(max(LIGHT_ELEVATION_MIN_DEGREES, steep -
     softness/2))); a close light's place `_to_mat` from the opening's centre. Pure."""
-    size = opening_size_mm(fit, profile)
-    quarter = round(fit.rotation / 90) * 90
+    return _opening_lights(lighting, document, inverse(homography(fit.corners)), opening_size_mm(fit, profile),
+                           round(fit.rotation / 90) * 90, display)
+
+
+def _opening_lights(lighting: FrameLighting, document: RoomLightsDocument | None, to_opening: Matrix,
+                    size: tuple[float, float], quarter: int, display: DisplayLight) -> FrameLights:
+    """The one body of `frame_lights` and `picture_lights`: `lighting` against `document` for an
+    opening reached by `to_opening`, `size` mm, hung turned `quarter` degrees."""
     lights = []
     for light in lighting.lights:
         entry = None if document is None else document.lights.get(light.light)
@@ -670,7 +682,7 @@ def frame_lights(lighting: FrameLighting, document: RoomLightsDocument | None,
         if max(rgb) > 0:
             lights.append(_lit(light, rgb, lighting.mat_depth_mm, quarter, size))
     lit = tuple(lights)
-    return FrameLights(inverse(homography(fit.corners)), size, lighting.mat_depth_mm, lighting.paper, lit,
+    return FrameLights(to_opening, size, lighting.mat_depth_mm, lighting.paper, lit,
                        _brightest_white(lit, size, lighting.mat_depth_mm, lighting.paper, display))
 
 
@@ -793,8 +805,14 @@ def buffer_to_picture(x: float, y: float, size: tuple[int, int], turn: DisplayTu
     +0.5, y down) as the picture's own (u, v), each 0..1 across the picture as it hangs, upright: the
     target is the picture turned for a screen hung `turn` degrees clockwise (contracts/display_turn.py),
     so the screen's matching buffer transform shows it upright. ValueError("display_turn") for any
-    other turn. Pure."""
-    raise NotImplementedError("render-planes S1 bead B4")
+    other turn. Pure.
+
+    The target holds the picture turned `turn` degrees counter-clockwise (a screen hung turned 90
+    degrees clockwise has its top edge on the viewer's right), so this undoes a clockwise quarter
+    turn of 360 - `turn` (`UNDO_QUARTER_TURN`) on the target's fractions (x / width, y / height)."""
+    width, height = size
+    back = TURNS[-wayland_transform(turn) % len(TURNS)]
+    return transform(UNDO_QUARTER_TURN[back], x / width, y / height)
 
 
 def fit_source_uv(u: float, v: float, aspect: float, source: tuple[int, int],
@@ -802,7 +820,8 @@ def fit_source_uv(u: float, v: float, aspect: float, source: tuple[int, int],
     """The picture point (u, v) as the source's texture coordinates (0..1, origin top-left): the
     window `crop_window(crop or CENTRED, *source, aspect)` (contracts/photo_crop.py) stretched over the
     picture. Pure."""
-    raise NotImplementedError("render-planes S1 bead B4")
+    left, top, right, bottom = photo_rect(aspect, *source, crop or CENTRED)
+    return left + u*(right-left), top + v*(bottom-top)
 
 
 def picture_lights(lighting: FrameLighting, document: RoomLightsDocument | None, profile: FrameProfile,
@@ -812,4 +831,4 @@ def picture_lights(lighting: FrameLighting, document: RoomLightsDocument | None,
     size the profile's own (`opening_size_mm` of an unturned fit) and no quarter turn (a screen's turn
     turns the screen, not the wall). One body with `frame_lights`: both call the same rule with their
     opening. Pure."""
-    raise NotImplementedError("render-planes S1 bead B4")
+    return _opening_lights(lighting, document, IDENTITY, _profile_size_mm(profile), 0, display)

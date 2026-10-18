@@ -29,8 +29,8 @@ from contracts.calibration_target import (
     TargetCode,
     board_raster,
 )
-from contracts.frame_lighting import FRAME_LIGHTS_MAX, SHEET_WHITENESS, FrameLighting
-from contracts.lut import LUT_GRID, LutRef
+from contracts.frame_lighting import FrameLighting
+from contracts.lut import LutRef
 from contracts.models import AppliedCalibration, OutputBinding
 from contracts.node_frame import PictureOperations, neutral_operations
 from contracts.node_picture import UPGRADE_DISPLAY_LIGHT, DisplayLight
@@ -39,12 +39,9 @@ from contracts.tuning import TARGET_PATTERNS, TestPattern
 from player.calibration_target import target_modules
 from player.fitted import FITTED_BYTES, FitKey, prepared, redrawn_by_frames, shown_at_once
 from player.geometry import (
-    BAYER_4,
     BLACK_LEVEL_PATCH,
     BLACK_LEVEL_STEPS,
     GREY_RAMP_STEPS,
-    HIGHLIGHT_KNEE,
-    LIGHT_KINDS,
     SIGNAL_LEVELS,
     BoardDraw,
     FrameLights,
@@ -57,6 +54,7 @@ from player.geometry import (
     photo_rect,
 )
 from player.look import look, next_change
+from player.look_shader import LOOK_GLSL, LUT_UNIT, look_uniforms, upload_lut
 from player.luts import LutSource
 from player.mainloop import (
     DisplayEvents,
@@ -240,27 +238,23 @@ _NEUTRAL_STEPS = _Steps(False, 0)
 
 
 def _final_uniforms(gl, program: int, operations: PictureOperations, opening, lights: FrameLights | None, *,
-                    output_height: int, target: tuple[int, BoardDraw] | None = None) -> None:
+                    output_height: int, lut_drawn: bool = False,
+                    target: tuple[int, BoardDraw] | None = None) -> None:
     """The frame pass's operations, the Frame's lights (`frame_lights`; None: no Frame drawn yet, so
     no light) and the per-Output mask's opening, for the program of `_steps(operations)`.
     `to_opening` is always the opening's (the physics and the patterns read it); with no Frame
     drawn yet the opening is `_NO_OPENING`, off the output, and everything stays black.
-    `output_height`: the dither reads output pixels from the top, as player/geometry.py
-    `dithered`. `target`: for a calibration target, the QR's module count bound on
-    _TARGET_QR_UNIT (0: no code, every QR square draws light) and the opening's BoardDraw
+    The look's own uniforms are player/look_shader.py `look_uniforms`'s: `output_height` (the
+    dither reads output pixels from the top, as player/geometry.py `dithered`) and `lut_drawn`
+    (the LUT bound on LUT_UNIT, as `_steps`). `target`: for a calibration target, the QR's module
+    count bound on _TARGET_QR_UNIT (0: no code, every QR square draws light) and the opening's BoardDraw
     (`board_draw`: its columns, aspect and turn; its modules unread, the count stands for them);
     the board's raster is bound on _TARGET_LAYOUT_UNIT
     (`NativeRenderer._bind_target`). None: no columns, so nothing is drawn."""
     def uniform(name: str) -> int:
         return gl.glGetUniformLocation(program, name)
 
-    gl.glUniform3f(uniform("rgb_multipliers"), *operations.rgb_multipliers)
-    gl.glUniform1f(uniform("contrast_slope"), operations.contrast_slope)
-    gl.glUniform1f(uniform("gamma_exponent"), operations.gamma_exponent)
-    gl.glUniform1f(uniform("matched_lux"), operations.light.matched_lux)
-    gl.glUniform1f(uniform("panel_black"), operations.light.black)
-    gl.glUniform1i(uniform("output_height"), output_height)
-    gl.glUniform1i(uniform("lut"), _LUT_UNIT)       # never unit 0: two sampler types may not share one
+    look_uniforms(gl, program, operations, lights, dither_height=output_height, lut_bound=lut_drawn)
     gl.glUniform1i(uniform("target_layout"), _TARGET_LAYOUT_UNIT)   # each sampler on its own unit
     gl.glUniform1i(uniform("target_qr"), _TARGET_QR_UNIT)
     modules, draw = target if target is not None else (0, None)
@@ -269,26 +263,6 @@ def _final_uniforms(gl, program: int, operations: PictureOperations, opening, li
     gl.glUniform1f(uniform("target_aspect"), draw.aspect if draw is not None else 1.0)
     gl.glUniform1i(uniform("target_portrait"), int(draw is not None and draw.portrait))
     _set_matrix(gl, program, "to_opening", lights.to_opening if lights is not None else inverse(homography(opening)))
-    present = lights.lights if lights is not None else ()
-    padded = present + (None,) * (FRAME_LIGHTS_MAX - len(present))
-    gl.glUniform2f(uniform("mat_size"), *(lights.size_mm if lights is not None else (1.0, 1.0)))
-    gl.glUniform1f(uniform("mat_depth"), lights.depth_mm if lights is not None else 0.0)
-    gl.glUniform1f(uniform("paper_white"), lights.paper.whiteness if lights is not None else 1.0)
-    gl.glUniform1f(uniform("paper_black"), 10 ** -lights.paper.ink_density if lights is not None else 0.0)
-    gl.glUniform1f(uniform("peak"), lights.peak if lights is not None else 1.0)
-    gl.glUniform1i(uniform("light_count"), len(present))
-    gl.glUniform1iv(uniform("light_kind"), FRAME_LIGHTS_MAX,
-                    [LIGHT_KINDS.index(light.kind) if light else 0 for light in padded])
-    gl.glUniform3fv(uniform("light_rgb"), FRAME_LIGHTS_MAX,
-                    [v for light in padded for v in (light.rgb if light else (0.0, 0.0, 0.0))])
-    gl.glUniform2fv(uniform("light_toward"), FRAME_LIGHTS_MAX,
-                    [v for light in padded for v in (light.toward if light else (0.0, 0.0))])
-    gl.glUniform2fv(uniform("light_band"), FRAME_LIGHTS_MAX,
-                    [v for light in padded for v in (light.band_mm if light else (0.0, 0.0))])
-    gl.glUniform3fv(uniform("light_position"), FRAME_LIGHTS_MAX,
-                    [v for light in padded for v in (light.position_mm if light else (0.0, 0.0, 1.0))])
-    gl.glUniform2fv(uniform("light_beam"), FRAME_LIGHTS_MAX,
-                    [v for light in padded for v in (light.beam if light else (0.0, 0.0))])
     _set_opening(gl, program, opening)
 
 
@@ -481,7 +455,7 @@ class _Surface:
     operations: PictureOperations | None = None
     # The newest picture change this surface drew complete (`_tagged_change`); None before any.
     complete_change: int | None = None
-    # The Frame's paper profile LUT texture (GL_TEXTURE_3D on _LUT_UNIT) and the LUT it holds; 0 and
+    # The Frame's paper profile LUT texture (GL_TEXTURE_3D on LUT_UNIT) and the LUT it holds; 0 and
     # None: none yet.
     lut_texture: int = 0
     lut_ref: LutRef | None = None
@@ -627,7 +601,6 @@ void main() {
 # every Frame layer are replaced with no change to the fit pass; the look patterns skip the light
 # and the paper, the Black level skips every step. geometry.py's constants are written in
 # (`_FINAL_CONSTANTS`), so each has one home.
-_LUT_UNIT = 1      # the LUT's texture unit; unit 0 is the fit pass's photo
 _TARGET_LAYOUT_UNIT = 2     # the screen board's raster (contracts.calibration_target.board_raster)
 _TARGET_QR_UNIT = 3         # its QR's modules
 _FITTED_UNIT = 4            # slot i's fitted picture is on unit _FITTED_UNIT + i
@@ -639,12 +612,6 @@ _FINAL_CONSTANTS = (
     f"#define FRAME_LAYERS {FRAME_LAYERS}\n"
     f"#define SLOT_PICTURE {_SLOT_PICTURE}\n"
     f"#define SLOT_BLACK {_SLOT_BLACK}\n"
-    f"#define FRAME_LIGHTS_MAX {FRAME_LIGHTS_MAX}\n"
-    + "".join(f"#define LIGHT_{kind.upper()} {code}\n" for code, kind in enumerate(LIGHT_KINDS))
-    + f"const float LUT_GRID = {float(LUT_GRID)!r};\n"
-    f"const float SHEET_WHITENESS = {SHEET_WHITENESS!r};\n"
-    f"const float HIGHLIGHT_KNEE = {HIGHLIGHT_KNEE!r};\n"
-    f"const float BAYER_4[16] = float[16]({', '.join(f'{float(rank)!r}' for rank in BAYER_4)});\n"
     f"const float GREY_RAMP_STEPS = {float(GREY_RAMP_STEPS)!r};\n"
     f"const float BLACK_LEVEL_STEPS = {float(BLACK_LEVEL_STEPS)!r};\n"
     f"const float SIGNAL_LEVELS = {float(SIGNAL_LEVELS)!r};\n"
@@ -664,12 +631,10 @@ _STEP_SWITCHES = "// The step set: _frame_source writes each switch here as a co
 _FINAL = """#version 300 es
 precision highp float;
 precision highp int;
-precision highp sampler3D;
 in vec2 uv;
 out vec4 color;
 """ + _STEP_SWITCHES + """
-""" + _FINAL_CONSTANTS + """
-uniform int layer_count;
+""" + _FINAL_CONSTANTS + LOOK_GLSL + """uniform int layer_count;
 uniform int layer_kind[FRAME_LAYERS];
 uniform float layer_alpha[FRAME_LAYERS];
 uniform sampler2D layer0;
@@ -680,13 +645,6 @@ uniform sampler2D layer4;
 uniform sampler2D layer5;
 uniform sampler2D layer6;
 uniform sampler2D layer7;
-uniform vec3 rgb_multipliers;
-uniform float contrast_slope;
-uniform float gamma_exponent;
-uniform float matched_lux;
-uniform float panel_black;
-uniform int output_height;
-uniform sampler3D lut;
 uniform sampler2D target_layout;
 uniform sampler2D target_qr;
 uniform int target_qr_modules;
@@ -694,18 +652,6 @@ uniform int target_columns;
 uniform float target_aspect;
 uniform int target_portrait;
 uniform mat3 to_opening;
-uniform vec2 mat_size;
-uniform float mat_depth;
-uniform float paper_white;
-uniform float paper_black;
-uniform float peak;
-uniform int light_count;
-uniform int light_kind[FRAME_LIGHTS_MAX];
-uniform vec3 light_rgb[FRAME_LIGHTS_MAX];
-uniform vec2 light_toward[FRAME_LIGHTS_MAX];
-uniform vec2 light_band[FRAME_LIGHTS_MAX];
-uniform vec3 light_position[FRAME_LIGHTS_MAX];
-uniform vec2 light_beam[FRAME_LIGHTS_MAX];
 """ + _OPENING + _PICTURE + """
 // Slot i's fitted picture at st (ES 3.00 indexes a sampler array only by a constant).
 vec4 fitted(int i, vec2 st) {
@@ -742,91 +688,6 @@ vec3 composed(vec2 point) {
         }
     }
     return value;
-}
-vec3 srgb_encoded(vec3 value) {
-    value = clamp(value, 0.0, 1.0);
-    return mix(1.055*pow(value, vec3(1.0/2.4))-0.055, 12.92*value, lessThanEqual(value, vec3(0.0031308)));
-}
-vec3 srgb_decoded(vec3 value) {
-    value = clamp(value, 0.0, 1.0);
-    return mix(pow((value+0.055)/1.055, vec3(2.4)), value/12.92, lessThanEqual(value, vec3(0.04045)));
-}
-float smoothstep01(float t) {
-    return t*t*(3.0-2.0*t);
-}
-// geometry.py `lut_applied`: the paper profile's LUT, fully; the grid's points sit at texel centres.
-vec3 lut_applied(vec3 value) {
-    vec3 encoded = srgb_encoded(value);
-    return srgb_decoded(texture(lut, encoded*((LUT_GRID-1.0)/LUT_GRID)+0.5/LUT_GRID).rgb);
-}
-// geometry.py `_edge_distance`: from m (mat space, mm) to the opening's edge along `toward`.
-float edge_distance(vec2 m, vec2 toward) {
-    float reach = 3.0e38;
-    if (toward.x > 0.0) reach = min(reach, (mat_size.x-m.x)/toward.x);
-    else if (toward.x < 0.0) reach = min(reach, m.x/-toward.x);
-    if (toward.y > 0.0) reach = min(reach, (mat_size.y-m.y)/toward.y);
-    else if (toward.y < 0.0) reach = min(reach, m.y/-toward.y);
-    return max(reach, 0.0);
-}
-// geometry.py `_close_shape`: the inverse square with the angle onto the wall, times the cone.
-float close_shape(int j, vec2 m) {
-    vec3 place = light_position[j];
-    vec3 aim = vec3(mat_size*0.5-place.xy, -place.z);
-    vec3 ray = vec3(m-place.xy, -place.z);
-    float d0 = length(aim);
-    float d = length(ray);
-    float phi = acos(clamp(dot(aim, ray)/(d0*d), -1.0, 1.0));
-    vec2 beam = light_beam[j];          // half the inner and outer beam, radians
-    float cone;
-    if (phi <= beam.x) cone = 1.0;
-    else if (phi >= beam.y) cone = 0.0;
-    else cone = smoothstep01((beam.y-phi)/(beam.y-beam.x));
-    float r = d0/d;
-    return r*r*r*cone;
-}
-// geometry.py `_reached`: the share of light j the mat lets reach m.
-float reached(int j, vec2 m) {
-    int kind = light_kind[j];
-    if (kind == LIGHT_WASH) return 1.0;
-    if (kind == LIGHT_FAR) {
-        float s = edge_distance(m, light_toward[j]);
-        vec2 band = light_band[j];      // (dark until, lit from), mm
-        if (s >= band.y) return 1.0;
-        if (s < band.x) return 0.0;
-        return smoothstep01((s-band.x)/(band.y-band.x));
-    }
-    vec3 place = light_position[j];
-    vec2 foot = place.xy-m;
-    float h = length(foot);
-    if (h == 0.0) return 1.0;
-    return edge_distance(m, foot/h) >= mat_depth*h/place.z ? 1.0 : 0.0;
-}
-// geometry.py `irradiance`: E at an output point, rgb lux, summed over the Frame's lights.
-vec3 irradiance(vec2 point) {
-    vec3 q = to_opening*vec3(point, 1.0);
-    vec2 m = q.xy/q.z*mat_size;
-    vec3 total = vec3(0.0);
-    for (int j = 0; j < FRAME_LIGHTS_MAX; j++) {
-        if (j >= light_count) break;
-        float shape = light_kind[j] == LIGHT_CLOSE ? close_shape(j, m) : 1.0;
-        if (shape > 0.0) total += light_rgb[j]*(shape*reached(j, m));
-    }
-    return total;
-}
-// geometry.py `rolled_off` on a pixel's largest channel, through the shortfall, so the peak is
-// exactly white.
-float rolled_off(float value) {
-    if (value <= HIGHLIGHT_KNEE) return value;
-    float t = (min(value, peak)-HIGHLIGHT_KNEE)/(1.0-HIGHLIGHT_KNEE);
-    float w = (peak-HIGHLIGHT_KNEE)/(1.0-HIGHLIGHT_KNEE);
-    return 1.0-(1.0-HIGHLIGHT_KNEE)*(w-t)*(w+t)/(w*w*(1.0+t));
-}
-// geometry.py `highlight_rolled`: the whole pixel scaled by its largest channel's rolloff, so its
-// hue stays.
-vec3 highlight_rolled(vec3 signal) {
-    float largest = max(signal.r, max(signal.g, signal.b));
-    if (peak <= 1.0 || largest <= HIGHLIGHT_KNEE) return signal;
-    return signal*(rolled_off(largest)/largest);
 }
 // Step 0 (geometry.py `pattern_signal`): the pattern's encoded signal at the opening's unit square.
 vec3 pattern_signal(vec2 point) {
@@ -903,19 +764,13 @@ void main() {
     } else if (test_pattern != 0) {
         signal = srgb_decoded(pattern_signal(uv));
     } else {
-        // The Frame's composed photo on paper under the room's light (geometry.py
-        // `paper_reflectance`, `paper_signal`, `highlight_rolled`).
-        vec3 photo = composed(uv);
-        if (lut_on == 1) photo = lut_applied(photo);
-        vec3 reflectance = paper_white*(paper_black+(1.0-paper_black)*photo);
-        vec3 lit = reflectance*irradiance(uv)/(SHEET_WHITENESS*matched_lux);
-        signal = highlight_rolled(max((lit-panel_black)/(1.0-panel_black), 0.0));
+        // The Frame's composed photo on paper under the room's light (player/look_shader.py
+        // `lit_signal`), at its point of the opening's unit square.
+        vec3 q = to_opening*vec3(uv, 1.0);
+        signal = lit_signal(composed(uv), q.xy/q.z);
     }
-    vec3 contrasted = (srgb_encoded(signal*rgb_multipliers)-0.5)*contrast_slope+0.5;
-    vec3 adjusted = clamp(pow(max(contrasted, 0.0), vec3(gamma_exponent)), 0.0, 1.0);
-    // geometry.py `dithered`, at the output pixel counted from the top.
-    ivec2 at = ivec2(int(gl_FragCoord.x), output_height-1-int(gl_FragCoord.y)) & 3;
-    adjusted = clamp(adjusted+((BAYER_4[at.y*4+at.x]+0.5)/16.0-0.5)/255.0, 0.0, 1.0);
+    // The Display's steps and the dither at the output pixel counted from the top (`displayed`).
+    vec3 adjusted = displayed(signal, window_pixel());
     if (!inside_opening(uv)) adjusted = vec3(0.0);
     color = vec4(adjusted, 1.0);
 }
@@ -2063,7 +1918,7 @@ class NativeRenderer:
                   if shown else (1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0))
         _layer_uniforms(gl, program, slots, matrix)
         _final_uniforms(gl, program, operations, fit.corners if shown else _NO_OPENING,
-                        lights, output_height=surface.size[1], target=target)
+                        lights, output_height=surface.size[1], lut_drawn=lut_drawn, target=target)
         gl.glDrawArrays(gl.GL_TRIANGLES, 0, 3)
         gl.glFlush()
         if gl.glGetError() != gl.GL_NO_ERROR:
@@ -2207,7 +2062,7 @@ class NativeRenderer:
             surface.pacer.submitted(sequence, at)
 
     def _bind_lut(self, surface: _Surface, ref: LutRef | None) -> bool:
-        """Bind the Frame's paper profile LUT `ref` on _LUT_UNIT, uploading its bytes when the
+        """Bind the Frame's paper profile LUT `ref` on LUT_UNIT, uploading its bytes when the
         surface holds another; False when the Frame has none or its bytes are not held yet (the
         first ask starts the fetch: player/luts.py). Texture unit 0 stays the active unit."""
         if ref is None:
@@ -2216,22 +2071,13 @@ class NativeRenderer:
         if table is None:
             return False
         gl = self.GL
-        gl.glActiveTexture(gl.GL_TEXTURE0 + _LUT_UNIT)
+        gl.glActiveTexture(gl.GL_TEXTURE0 + LUT_UNIT)
         try:
             if not surface.lut_texture:
                 surface.lut_texture, surface.lut_ref = int(gl.glGenTextures(1)), None
             gl.glBindTexture(gl.GL_TEXTURE_3D, surface.lut_texture)
             if surface.lut_ref != ref:
-                for parameter, value in ((gl.GL_TEXTURE_MIN_FILTER, gl.GL_LINEAR),
-                                         (gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR),
-                                         (gl.GL_TEXTURE_WRAP_S, gl.GL_CLAMP_TO_EDGE),
-                                         (gl.GL_TEXTURE_WRAP_T, gl.GL_CLAMP_TO_EDGE),
-                                         (gl.GL_TEXTURE_WRAP_R, gl.GL_CLAMP_TO_EDGE)):
-                    gl.glTexParameteri(gl.GL_TEXTURE_3D, parameter, value)
-                gl.glPixelStorei(gl.GL_UNPACK_ALIGNMENT, 1)      # a row is 33 * 3 bytes
-                # contracts/lut.py's layout as served: red fastest (width), then green, then blue.
-                gl.glTexImage3D(gl.GL_TEXTURE_3D, 0, gl.GL_RGB8, LUT_GRID, LUT_GRID, LUT_GRID, 0,
-                                gl.GL_RGB, gl.GL_UNSIGNED_BYTE, table)
+                upload_lut(gl, surface.lut_texture, table)
                 surface.lut_ref = ref
         finally:
             gl.glActiveTexture(gl.GL_TEXTURE0)
