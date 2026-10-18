@@ -54,6 +54,9 @@ export const LAYER_NAMES = Object.freeze({
 /** A served code in words: `node_offer_superseded` -> "node offer superseded". */
 export const words = (value) => String(value ?? "unknown").replaceAll("_", " ");
 
+/** "9f8e7d…": an app environment digest's handle. */
+export const appHandle = (sha) => `${String(sha).slice(0, 6)}…`;
+
 /** One of Central's times (epoch seconds) as a zoned clock time (timeWords.js), for display only. */
 export const clock = (seconds) => clockTime(seconds);
 

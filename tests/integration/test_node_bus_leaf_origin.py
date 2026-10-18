@@ -102,14 +102,16 @@ def test_the_shipped_conf_starts_on_every_origin_shape_through_the_environment_f
     through write_bus_environment, is read as systemd reads the unit's EnvironmentFile, and the
     shipped conf starts on it and dials the origin: nats-server parses a `$VAR`'s value as config,
     so an unquoted IPv6 URL ended the urls array and the bus exited 1 on every start (E-E3C-S1-5).
-    Only the client port is replaced by a free one."""
+    Only the client port and the door's are replaced by free ones."""
     environment = read_environment_file(write_bus_environment(tmp_path, origin, SERIAL))
     assert environment == bus_environment(origin, SERIAL)
-    port = _free_port()
+    port, door = _free_port(), _free_port()
     config = tmp_path / "node-bus.conf"
     config.write_bytes(NODE_BUS_CONF.read_bytes())
     node = BusServer(name=f"node on {origin}", config=config, client_url=f"nats://127.0.0.1:{port}",
-                     environment={**environment, "PHOTO_WALL_BUS_PORT": str(port)})
+                     environment={**environment, "PHOTO_WALL_BUS_PORT": str(port),
+                                  "PHOTO_WALL_BUS_DOOR_PORT": str(door)},
+                     door_url=f"ws://127.0.0.1:{door}")
     log = config.with_suffix(".log")
 
     async def run():

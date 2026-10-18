@@ -25,6 +25,7 @@
       "#/wall/layout",
       "#/wall/frames/sample-frame/overview",
       "#/wall/frames/sample-frame/position",
+      "#/wall/frames/sample-frame/lighting",
       "#/wall/frames/sample-frame/picture",
       "#/wall/frames/sample-frame/hardware"
     ]
@@ -45,7 +46,9 @@
     "photo-library": ["#/photo-library"],
     "photo-fit": ["#/photo-fit"],
     "house": ["#/house"],
-    "luts": ["#/luts"]
+    "lights": ["#/lights"],
+    "home-assistant": ["#/home-assistant"],
+    "paper-profiles": ["#/paper-profiles"]
   },
   "neutral": {
     "attention": ["#/attention"]

@@ -1,7 +1,7 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
 
 import {
-  FramePicture, LutSettings, type PATTERN_NAMES, PhotoWallSettings, type PictureSession, SignalSettings, signalWords,
+  FramePicture, panelBlackWords, type PATTERN_NAMES, PhotoWallSettings, type PictureSession, SignalSettings, signalWords,
   TestPatternSettings, testPatternWords,
 } from "./frame-picture";
 
@@ -40,10 +40,8 @@ const VIEW: View = {
   connected: true,
   offered_known: true,
   hardware: [BRIGHTNESS, CONTRAST, PRESET, MODE],
-  software: {
-    brightness_percent: 114, contrast_percent: 100, colour_temperature_kelvin: 6500, gamma_tenths: 22,
-    saturation_percent: 100, highlight_rolloff_percent: 0, black_floor_tenths: 0, lut_amount_percent: 100, lut: null,
-  },
+  software: { contrast_percent: 100, colour_temperature_kelvin: 6500, gamma_tenths: 22 },
+  light: { matched_lux: 1000, black: 0.0003 },
   session: { session_id: "5b7f0c1e-2d4a-4f6b-9c8e-1a2b3c4d5e6f", sequence: 1, idle_until: 1_791_000_005 },
   signal_range: "auto",
   signal: { in_force: "auto", result: "applied", answered: true },
@@ -51,23 +49,16 @@ const VIEW: View = {
   test_pattern_seconds: 600,
 };
 
-// Two paper profiles on the LUTs list.
-const LUTS = [
-  { profile_sha256: "a".repeat(64), name: "Hahnemühle Photo Rag 308 (matte)" },
-  { profile_sha256: "b".repeat(64), name: "Canson Baryta Photographique II" },
-];
-
 const SESSION: PictureSession = {
   view: VIEW,
   phase: "shown",
-  draft: { hardware: {}, software: {}, lut: {}, signal: {}, pattern: {} },
+  draft: { hardware: {}, software: {}, light: {}, signal: {}, pattern: {} },
   dirty: false,
   changeHardware: () => {},
   changeSoftware: () => {},
-  changeLut: () => {},
+  changeLight: () => {},
   changeSignalRange: () => {},
   changeTestPattern: () => {},
-  luts: [],
   done: async () => true,
   revert: async () => {},
   restore: async () => ({ ok: false, error: "session_ended" }),
@@ -89,7 +80,7 @@ const meta = {
 export default meta;
 type Story = StoryObj<typeof meta>;
 
-/** Display brightness 46 % (117 of 255), colour preset "6500 K" and Photo Wall brightness 114 %: nothing changed yet. */
+/** Display brightness 46 % (117 of 255), colour preset "6500 K", matched light 1000 lx: nothing changed yet. */
 export const Shown: Story = {};
 /** A display brightness change the Pi has not shown yet: Done waits. */
 export const Waiting: Story = {
@@ -99,8 +90,8 @@ export const Waiting: Story = {
 export const ChangeShown: Story = {
   args: {
     session: {
-      ...SESSION, dirty: true, latest: 1, draft: { ...SESSION.draft, hardware: {}, software: { brightness: 130 } },
-      view: { ...VIEW, software: { ...VIEW.software, brightness_percent: 130 } },
+      ...SESSION, dirty: true, latest: 1, draft: { ...SESSION.draft, hardware: {}, software: { contrast: 120 } },
+      view: { ...VIEW, software: { ...VIEW.software, contrast_percent: 120 } },
     },
   },
 };
@@ -180,52 +171,22 @@ export const ChangedOnTheButtons: Story = {
     },
   },
 };
-/** The Photo Wall (software) section alone (below the fold of the whole tab): every slider at no change. */
+/** The Photo Wall (software) section alone (below the fold of the whole tab): contrast, colour
+ * temperature and gamma at no change, the Display's light as kept, and the White pattern's line. */
 export const PhotoWallSection: Story = {
-  render: () => <PhotoWallSettings view={{ ...VIEW, software: { ...VIEW.software, brightness_percent: 100 } }} session={SESSION} ready />,
+  render: () => <PhotoWallSettings view={VIEW} session={SESSION} ready />,
 };
-/** The print look changed in this visit: saturation 85 %, soft highlights 40 % (brightness 114 %, so it
- * acts), black floor 2.0 %. */
-export const PhotoWallPrintLook: Story = {
+/** Matched light changed in this visit to 600 lx, shown live; Display black as kept. */
+export const PhotoWallMatchedLight: Story = {
   render: () => (
     <PhotoWallSettings view={VIEW} ready
-      session={{ ...SESSION, dirty: true, draft: { ...SESSION.draft, hardware: {}, software: { saturation: 85, "highlight-rolloff": 40, "black-floor": 20 } } }} />
-  ),
-};
-/** Brightness and saturation at 100 % or below: nothing passes white, so soft highlights says where it acts. */
-export const PhotoWallSoftHighlightsIdle: Story = {
-  render: () => (
-    <PhotoWallSettings view={{ ...VIEW, software: { ...VIEW.software, brightness_percent: 90, highlight_rolloff_percent: 30 } }}
-      session={SESSION} ready />
-  ),
-};
-/** The LUT picker with no LUT chosen: None and each LUT on the list. */
-export const LutNone: Story = {
-  render: () => <LutSettings view={VIEW} session={{ ...SESSION, luts: LUTS }} ready />,
-};
-/** No LUT on the list yet: the picker offers None alone. */
-export const LutNoneListed: Story = {
-  render: () => <LutSettings view={VIEW} session={SESSION} ready />,
-};
-/** A LUT chosen in this visit that the Pi has not fetched yet: the sliders show alone, Done waits;
- * its amount at 80 %. */
-export const LutWaiting: Story = {
-  render: () => (
-    <LutSettings view={VIEW} ready
-      session={{ ...SESSION, phase: "waiting", dirty: true, luts: LUTS,
-        draft: { hardware: {}, software: { "lut-amount": 80 }, lut: { lut: LUTS[0].profile_sha256 }, signal: {}, pattern: {} } }} />
-  ),
-};
-/** A LUT in force and shown, at 100 %. */
-export const LutShown: Story = {
-  render: () => (
-    <LutSettings ready session={{ ...SESSION, luts: LUTS }} view={{ ...VIEW, software: { ...VIEW.software, lut: LUTS[1] } }} />
+      session={{ ...SESSION, dirty: true, phase: "waiting", draft: { ...SESSION.draft, light: { light: { matched_lux: 600, black: 0.0003 } } } }} />
   ),
 };
 /** No session (the Pi is not connected, or someone else is adjusting): the values in force, nothing can change. */
 export const PhotoWallNoSession: Story = {
   render: () => (
-    <PhotoWallSettings view={{ ...VIEW, software: { ...VIEW.software, black_floor_tenths: 25 } }}
+    <PhotoWallSettings view={{ ...VIEW, light: { matched_lux: 450, black: 0.0005 } }}
       session={{ ...SESSION, phase: "idle", latest: null }} ready={false} />
   ),
 };
@@ -233,6 +194,8 @@ export const PhotoWallNoSession: Story = {
 /** The words are the view's: a pure check the catalogue runs before any story renders (the minutes
  * come from `test_pattern_seconds`, the range the Pi still sends from its answer). */
 const checks: [string, string][] = [
+  [panelBlackWords(0.0003), "0.03 %"],
+  [panelBlackWords(0.00001), "0.001 %"],
   [testPatternWords({ pattern: "white", state: "ended" }, 600), "Taken off after 10 min. Choose it again to show it."],
   [testPatternWords({ pattern: "white", state: "ended" }, 300), "Taken off after 5 min. Choose it again to show it."],
   [testPatternWords({ pattern: "grey-ramp", state: "waiting" }, 600),

@@ -43,6 +43,13 @@ carries `CMDLINE_MEMORY_CONTROLLER` exactly once, on every Pi: the Pi 5 device t
 which the firmware puts before cmdline.txt, disable the memory controller, and the later enable
 wins (raspberrypi/linux#6980).
 
+THE GALLERIA ZIP (`GALLERIA`'s file, attached as `GALLERIA_ZIP` in every release). The Home
+Assistant integration as HACS's `zip_release` installs it (hacs.json's `filename` names
+`GALLERIA_ZIP`): the contents of `custom_components/galleria/` at the archive's root, its
+`manifest.json` versioned from the release tag (`scripts/galleria_zip.py` writes and checks it).
+Central reads no Pi asset from it: its catalog finds a release's Pi files through the node
+release alone.
+
 Nothing here is signed (home LAN, no threat model): every sha256 is a corruption check only.
 
 THE ROOTFS BOUND. `MAX_ROOTFS_BYTES` bounds the streamed base image, consumed by
@@ -62,7 +69,9 @@ CHECKSUMS: Final = "SHA256SUMS"
 
 BASE_IMAGE: Final = "base_image"               # photo-wall-base-<revision>.tar.gz: the netboot bundle
 BOOT_IMAGE: Final = "boot_image"               # photo-wall-boot-<revision>.tar.gz: its boot/ alone
-FILES: Final = (BASE_IMAGE, BOOT_IMAGE)
+GALLERIA: Final = "galleria"                   # galleria.zip: the Home Assistant integration
+GALLERIA_ZIP: Final = "galleria.zip"           # one name in every release: HACS asks for it
+FILES: Final = (BASE_IMAGE, BOOT_IMAGE, GALLERIA)
 
 IMAGES_KEY: Final = "images"
 IMAGES: Final = ("central", "media-worker")    # the root Dockerfile's service targets

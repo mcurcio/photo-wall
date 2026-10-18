@@ -284,9 +284,12 @@ class Server:
                 headers=media_headers(self.data))
         return httpx.Response(200, json={"accepted": True})
 
-    def offer(self, *, revision=1, layers=None, commits=(), revocations=(), absent=False):
+    def offer(self, *, revision=1, layers=None, commits=(), revocations=(), absent=False,
+              bindings=None, configuration_revision=1):
+        bindings = (binding(),) if bindings is None else bindings
         configuration = PlayerConfiguration(player_id=self.player_id, authority_epoch=self.epoch,
-            configuration_revision=1, bindings=(binding(),), enabled_outputs=("hdmi1",))
+            configuration_revision=configuration_revision, bindings=bindings,
+            enabled_outputs=tuple(bound.output_id for bound in bindings))
         plan = Plan(plan_id="offered", revision=revision, player_id=self.player_id,
             authority_epoch=self.epoch, issued_at=self.clock.utc(), valid_from=self.clock.utc(),
             valid_until=300, bindings=configuration.bindings,
@@ -296,7 +299,7 @@ class Server:
         return self.state
 
 
-async def rig(tmp_path, *, server=None, negotiate=False):
+async def rig(tmp_path, *, server=None, negotiate=False, **options):
     directory = tmp_path / "cache"
     directory.mkdir(mode=0o700, exist_ok=True)
     clock = ManualClock(100)
@@ -307,7 +310,7 @@ async def rig(tmp_path, *, server=None, negotiate=False):
     service = PlayerService(config, load_identity(), (), RecordingRenderer(), immediate,
         find_central=finding("http://central"), trust=TRUST, clock=clock,
         client=client, time_client=client,
-        websocket_connect=False, boot_context=boot_context(), luts=PlayerLuts())
+        websocket_connect=False, boot_context=boot_context(), luts=PlayerLuts(), **options)
     await service.locate_central()
     await service.enroll()
     if negotiate:

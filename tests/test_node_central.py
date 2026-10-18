@@ -41,7 +41,7 @@ def node_offer(registry, config=None):
     boots, sessions, _ = cold_setup(registry)
     if config is not None:
         sessions = NodeSessions(registry.db, registry.clock, config)
-        boots = NodeBootService(sessions)
+        boots = NodeBootService(sessions, versions=boots.versions)
     return sessions, boots.offer(NodeBootRequestV2(SERIAL, BOOT_ID, "a" * 64))
 
 

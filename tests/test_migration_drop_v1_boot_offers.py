@@ -30,6 +30,8 @@ from test_node_release_ingest import Upstream, node_upload
 from test_registry import ADMIN
 
 from central.app import create_app
+from central.frame_lighting.paper_profiles import LUT_RECIPE_ID
+from central.infra.frame_lighting_store import PgFrameLighting
 from central.kernel.job_types import SyncReleases
 from central.kernel.ports import ReleaseListing
 from central.registry import Registry
@@ -72,7 +74,7 @@ DELETED_ROUTES = (
 @pytest.fixture
 def before_069(empty_database):
     with schema_before(empty_database, "069") as db:
-        yield Registry(db, ManualClock(1000))
+        yield Registry(db, ManualClock(1000), lighting=PgFrameLighting(LUT_RECIPE_ID))
 
 
 def _seed_v1(conn) -> None:
@@ -142,7 +144,7 @@ def _rows(registry, sql: str) -> list[dict]:
 def _node_state(registry) -> dict:
     return {table: _rows(registry, f"SELECT * FROM {table} ORDER BY 1")  # test-controlled names
             for table in ("node_boot_offers", "node_boot_admissions", "node_sessions",
-                          "node_deployments", "node_boot_policy")}
+                          "node_deployments")}
 
 
 def test_069_drops_the_v1_lane_and_keeps_every_node_record(before_069, tmp_path):

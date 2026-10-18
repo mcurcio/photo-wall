@@ -12,7 +12,7 @@ slices C1-C3; a composition-root module like library_routes.py). One route per q
 | POST | /v1/operator/frames/{frame_id}/picture-sessions | | 201 PictureSessionView | 404 unknown_frame, 409 frame_unbound, no_display, session_open |
 | POST | /v1/operator/picture-sessions/{session_id}/hardware-edits | HardwareEdit | PictureSequence | 404 unknown_session, 410 session_ended, 409 stale_sequence, not_offered, 422 out_of_range |
 | POST | /v1/operator/picture-sessions/{session_id}/software-edits | SoftwareEdit | PictureSequence | 404, 410, 409 stale_sequence, 422 out_of_range |
-| POST | /v1/operator/picture-sessions/{session_id}/lut-edits | LutEdit | PictureSequence | 404, 410, 409 stale_sequence, 422 unknown_lut |
+| POST | /v1/operator/picture-sessions/{session_id}/light-edits | LightEdit | PictureSequence | 404, 410, 409 stale_sequence |
 | POST | /v1/operator/picture-sessions/{session_id}/signal-range-edits | SignalRangeEdit | PictureSequence | 404 unknown_session, 410 session_ended, 409 stale_sequence, 422 (a value outside SignalRange) |
 | POST | /v1/operator/picture-sessions/{session_id}/test-pattern-edits | TestPatternEdit | PictureSequence | 404 unknown_session, 410 session_ended, 409 stale_sequence, 422 (a value outside TestPattern) |
 | POST | /v1/operator/picture-sessions/{session_id}/keepalive | | PictureSessionView | 404, 410 |
@@ -26,8 +26,8 @@ answers {"error": code} with its status, the shape apiWrite.js reads. create_app
 `mount_display_routes`: GET display (slice C1) and the Power tab's four, `_mount_power_routes`
 (slice C3). POST is Test: turn off; DELETE is Turn on, which ends the test so the request underneath
 takes over (owner q1, 2026-10-10). The Picture tab's twelve (roadmap 1c's Live model; decision 0022,
-the picture split, slice S2: one edit route per group; the print look's LUT choice its own, since
-it names a LUT where the software edit sets a number; display tuning's signal range and test
+the picture split, slice S2: one edit route per group; the Display's light its own, decision 0028,
+which replaced the print look's LUT choice; display tuning's signal range and test
 pattern, decision 0024, one each; configuration snapshots' Restore of a picture history entry,
 migration 096) are `mount_picture_routes`, which create_app
 mounts too; picture refusals (central/displays/picture.py PictureRefused) answer the same way.
@@ -54,7 +54,7 @@ from central.displays.views import (
     FramePictureView,
     FramePowerView,
     HardwareEdit,
-    LutEdit,
+    LightEdit,
     PictureCopyRequest,
     PictureCopyResult,
     PictureRestore,
@@ -139,10 +139,10 @@ def mount_picture_routes(app: FastAPI, *, admin: Any, queries: PictureQueries, c
     def edit_software(session_id: UUID, request: SoftwareEdit) -> PictureSequence:
         return commands.edit_software(session_id, request)
 
-    @app.post(PICTURE_SESSIONS + "{session_id}/lut-edits", dependencies=[Depends(admin)],
+    @app.post(PICTURE_SESSIONS + "{session_id}/light-edits", dependencies=[Depends(admin)],
               response_model=PictureSequence)
-    def edit_lut(session_id: UUID, request: LutEdit) -> PictureSequence:
-        return commands.edit_lut(session_id, request)
+    def edit_light(session_id: UUID, request: LightEdit) -> PictureSequence:
+        return commands.edit_light(session_id, request)
 
     @app.post(PICTURE_SESSIONS + "{session_id}/signal-range-edits", dependencies=[Depends(admin)],
               response_model=PictureSequence)

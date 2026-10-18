@@ -30,12 +30,14 @@ from appliance.display_host.bus import BusReportSink, display_session
 from appliance.display_host.output_power import OutputPowerController
 from appliance.display_host.runner import document_feed
 from central.app import create_app
+from central.frame_lighting.paper_profiles import LUT_RECIPE_ID
 from central.infra.display_store import (
     REPORT_STREAM,
     DisplayDocuments,
     DisplayWakes,
     OutputReportJudge,
 )
+from central.infra.frame_lighting_store import PgFrameLighting
 from central.infra.node_link_store import PgLinkStores
 from central.infra.node_links import NodeLinks
 from central.registry import FrameCreate, Registry
@@ -85,7 +87,7 @@ def _latest_change(database) -> int:
 def test_the_pi_keeps_night_off_while_central_is_away(database, tmp_path):
     """Mutation probe (P-central-flips): make the Pi act only on `now` (ignore `changes`) -> no off
     while Central is stopped."""
-    registry = Registry(database, ManualClock(FOUR_PM))
+    registry = Registry(database, ManualClock(FOUR_PM), lighting=PgFrameLighting(LUT_RECIPE_ID))
     set_house(database, LONDON)
     player = enroll_pi(registry, SERIAL)
     registry.create_frame(FrameCreate(id="bedroom", width_mm=300, height_mm=500,

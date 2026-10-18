@@ -10,14 +10,15 @@ import { isConvex } from "./convex.js";
  * explicit opt-in): the picture is stretched exactly onto the corners, a quarter turn picking its
  * top.
  *
- * A Frame's mat (contracts/models.py `Mat`, print look): its depth and lights, saved with the
- * Position through the same trial.
+ * A Frame's lighting (src/generated/contract.ts `FrameLighting`): its mat depth, lights and paper,
+ * saved with the Position through the same trial. Central serves every Frame's; the draft holds a
+ * copy of it, never a lighting of its own making.
  *
  * @typedef {[number, number]} Point
  * @typedef {{mode: "cover"|"corners", corners: Point[], rotation: number}} Fit
- * @typedef {import("./domain/frame-mat").MatDraft} Mat
- * @typedef {{fit: Fit, mat: Mat}} Trying   the operator's draft; its base revision is `base`
- * @typedef {{calibration: object|null, mat: Mat|null}} Saved   a saved Position and mat
+ * @typedef {import("./generated/contract").FrameLighting} Lighting
+ * @typedef {{fit: Fit, lighting: Lighting|null}} Trying   the operator's draft (lighting null: Central served none yet); its base revision is `base`
+ * @typedef {{calibration: object|null, lighting: Lighting|null}} Saved   a saved Position and lighting
  */
 
 /** Inline reason an invalid corner patch snaps back with (design §J2 table). */
@@ -53,37 +54,42 @@ export function fitOf(committed) {
 }
 
 /**
- * The mat a Frame holds, as a fresh copy; with none, no depth and no lights (no shadow).
+ * The lighting Central serves for a Frame, as a fresh copy (so a later edit never mutates the
+ * snapshot); null while none is served.
  *
- * @param {Mat|null|undefined} mat
- * @returns {Mat}
+ * @param {Lighting|null|undefined} lighting
+ * @returns {Lighting|null}
  */
-export function matOf(mat) {
-  return { depth_mm: mat?.depth_mm ?? 0, lights: (mat?.lights ?? []).map((light) => ({ ...light })) };
-}
+const lightingOf = (lighting) => (lighting == null ? null : structuredClone(lighting));
 
 /** @returns {Trying} */
-const seed = (saved) => ({ fit: fitOf(saved?.calibration), mat: matOf(saved?.mat) });
+const seed = (saved) => ({ fit: fitOf(saved?.calibration), lighting: lightingOf(saved?.lighting) });
+
+/** JSON with every object's keys sorted: one text for one value, whatever order its keys came in. */
+function canonical(value) {
+  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonical(value[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
 
 /**
- * A draft's identity for comparison: its fit and its mat. Takes a draft (`{fit, mat}`) or what
- * Central serves (`calibration`, `mat`) as `draftKey(calibration, mat)`.
+ * A draft's identity for comparison: its fit and its lighting. Takes a draft (`{fit, lighting}`)
+ * or what Central serves (`calibration`, `lighting`) as `draftKey(calibration, lighting)`.
  *
  * @param {object|null|undefined} value a draft, or a calibration
- * @param {Mat|null} [mat] the mat beside a calibration (a draft carries its own)
+ * @param {Lighting|null} [lighting] the lighting beside a calibration (a draft carries its own)
  */
-export const draftKey = (value, mat) => {
+export const draftKey = (value, lighting) => {
   const fit = fitOf(value);
-  const { depth_mm: depth, lights } = matOf(mat === undefined ? value?.mat : mat);
-  return JSON.stringify([fit.mode, fit.corners, fit.rotation, depth,
-    lights.map((light) => [light.from_degrees, light.steep_degrees, light.softness_degrees,
-      light.strength_tenths, light.colour_kelvin])]);
+  return canonical([fit.mode, fit.corners, fit.rotation, lightingOf(lighting === undefined ? value?.lighting : lighting)]);
 };
 
 /**
  * Plane B edit-draft hook (shared primitive #2).
  *
- * Holds the operator's "trying" Position and mat for one Frame as COMPONENT-LOCAL React state
+ * Holds the operator's "trying" Position and lighting for one Frame as COMPONENT-LOCAL React state
  * seeded from that Frame's saved ones. This is the second of the two planes (design §4a/§6b): a snapshot
  * refresh replaces Plane A (`useSnapshot`) wholesale and CANNOT reach this state cell, so an
  * in-progress edit survives every refresh. The draft is re-seeded when the Frame identity
@@ -95,8 +101,8 @@ export const draftKey = (value, mat) => {
  * the saved Position to `adopt`), and only then, so it is the draft's own, whatever session shows
  * the draft: the live adjustment sends it with every draft, and Central refuses a draft whose
  * base is no longer the saved revision (someone saved meanwhile) instead of re-basing it. `dirty`
- * is whether the draft's fit or mat differs from its origin's. `changeMat` replaces the draft's mat
- * (FrameMat checks its own bounds).
+ * is whether the draft's fit or lighting differs from its origin's. `changeLighting` replaces the
+ * draft's lighting (FrameLighting checks its own bounds).
  *
  * `updateHandles(patch)` merges a partial fit `{mode?, corners?, rotation?}` into the draft,
  * first validating any corners it touches with the SAME convex test + `1e-6` epsilon + winding as
@@ -106,14 +112,14 @@ export const draftKey = (value, mat) => {
  *
  * @param {string} frameId identity of the Frame being edited
  * @param {object|null|undefined} committed the Frame's saved Position (Plane A)
- * @param {Mat|null|undefined} committedMat the Frame's saved mat (Plane A)
+ * @param {Lighting|null|undefined} committedLighting the Frame's saved lighting (Plane A)
  * @returns {{trying: Trying, origin: Saved, base: number|null, dirty: boolean,
  *            updateHandles: (patch: Partial<Fit>) => {valid: boolean, reason?: string},
- *            changeMat: (mat: Mat) => void,
- *            clearDraft: () => void, adopt: (calibration: object, mat: Mat|null) => void}}
+ *            changeLighting: (lighting: Lighting) => void,
+ *            clearDraft: () => void, adopt: (calibration: object, lighting: Lighting|null) => void}}
  */
-export function useDraft(frameId, committed, committedMat) {
-  const saved = () => ({ calibration: committed ?? null, mat: committedMat ?? null });
+export function useDraft(frameId, committed, committedLighting) {
+  const saved = () => ({ calibration: committed ?? null, lighting: committedLighting ?? null });
   const [draft, setDraft] = useState(() => ({ trying: seed(saved()), origin: saved() }));
   // Track the frame the current draft was seeded for. Re-seeding on a refresh is keyed on
   // this identity ALONE — a refresh mutates `committed` but not `frameId`, so the two-plane
@@ -145,18 +151,18 @@ export function useDraft(frameId, committed, committedMat) {
     setDraft((current) => ({ ...current, trying: candidate }));
     return { valid: true };
   }, []);
-  const changeMat = useCallback((mat) => {
-    const candidate = { ...tryingRef.current, mat: matOf(mat) };
+  const changeLighting = useCallback((lighting) => {
+    const candidate = { ...tryingRef.current, lighting: lightingOf(lighting) };
     tryingRef.current = candidate;
     setDraft((current) => ({ ...current, trying: candidate }));
   }, []);
 
-  const adopt = useCallback((calibration, mat) => {
-    const origin = { calibration: calibration ?? null, mat: mat ?? null };
+  const adopt = useCallback((calibration, lighting) => {
+    const origin = { calibration: calibration ?? null, lighting: lighting ?? null };
     tryingRef.current = seed(origin);
     setDraft({ trying: tryingRef.current, origin });
   }, []);
-  const clearDraft = useCallback(() => adopt(committedRef.current.calibration, committedRef.current.mat), [adopt]);
+  const clearDraft = useCallback(() => adopt(committedRef.current.calibration, committedRef.current.lighting), [adopt]);
 
   const { trying, origin } = draft;
   return {
@@ -165,7 +171,7 @@ export function useDraft(frameId, committed, committedMat) {
     base: origin.calibration?.revision ?? null,
     dirty: draftKey(trying) !== draftKey(seed(origin)),
     updateHandles,
-    changeMat,
+    changeLighting,
     clearDraft,
     adopt,
   };

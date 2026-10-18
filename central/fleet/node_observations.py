@@ -86,6 +86,11 @@ _FLEET_HOSTS_SQL = (
     "WHERE d.retired_at IS NULL AND l.revoked_at IS NULL ORDER BY d.device_id")
 
 
+def host_facts_of(hosts: dict) -> dict[str, dict]:
+    """device id -> its current boot's host facts, from a `fleet_hosts` answer (absent: none reported)."""
+    return {host["device_id"]: host["facts"] for host in hosts["devices"] if host["facts"] is not None}
+
+
 class NodeObservations:
     def __init__(self, sessions: NodeSessions):
         self.sessions = sessions
@@ -210,9 +215,13 @@ class NodeObservations:
         boot's sample is never served as `host`; its receipt alone is served, and only when
         the current boot has none."""
         with self.sessions.db.read_snapshot() as conn:
-            read_at = self.sessions.clock.utc()
-            rows = conn.execute(_FLEET_HOSTS_SQL, {"day": int(read_at) // 86400}).fetchall()
-            bus_links = bus_links_in(conn, [row["device_id"] for row in rows])
+            return self.fleet_hosts_in(conn, self.sessions.clock.utc())
+
+    def fleet_hosts_in(self, conn, read_at: float) -> dict:
+        """`fleet_hosts` inside the caller's transaction (a read that needs the hosts beside its
+        own rows in one snapshot: the Releases page, Central's state on its hub)."""
+        rows = conn.execute(_FLEET_HOSTS_SQL, {"day": int(read_at) // 86400}).fetchall()
+        bus_links = bus_links_in(conn, [row["device_id"] for row in rows])
         devices = []
         for row in rows:
             host = None

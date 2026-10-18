@@ -1,7 +1,8 @@
-"""The Player's LUT leg (print look, 2026-10-12, design rule 3 "Nothing waits on a LUT" and R11):
-PlayerLuts (asked, wanted, held), PlayerService.fetch_lut against Central's LUT route faked with
+"""The Player's LUT leg (each Frame's paper profile, decision 0028; the print look's rule 3 "Nothing
+waits on a LUT" and R11): PlayerLuts (asked, wanted, held), every bound Frame's LUT wanted as its
+configuration arrives, PlayerService.fetch_lut against Central's LUT route faked with
 httpx.MockTransport (the Variant rule: the served Repr-Digest and Content-Length decide) through a
-real media cache, and the renderer's shown key and tag waiting for the LUT. No GL: the texture is
+real media cache, and the renderer's shown key redrawing when the LUT arrives. No GL: the texture is
 the pixel harness's (tests/native_renderer_pixel_harness.py)."""
 from __future__ import annotations
 
@@ -20,7 +21,8 @@ from test_player_service import Server, close, repr_digest, rig
 import player.native as native_module
 from contracts.lut import LUT_BYTES, LUT_MEDIA_TYPE, LutRef
 from contracts.models import Calibration
-from contracts.node_frame import LutMix, PictureOperations
+from contracts.node_frame import PictureOperations
+from contracts.node_picture import UPGRADE_DISPLAY_LIGHT
 from contracts.time import ManualClock
 from player.cache import Cache
 from player.luts import PlayerLuts
@@ -187,15 +189,23 @@ def test_the_cache_keeps_any_named_blob_by_its_served_digest(tmp_path):
         cache.close()
 
 
-# -- The renderer: the sliders draw at once, the LUT joins, only then the tag names the change -------
-
-def test_the_luts_arrival_redraws_and_only_then_is_the_change_claimed():
-    """Rule 3: a picture naming a LUT not yet held is drawn with the sliders (no LUT bound) and
-    its tag names the previous complete change; hold() raises the generation, the surface draws
-    again, the LUT is bound and the tag names the change. Mutation probe: leave the generation out
-    of the shown key -> no redraw after hold."""
+def test_every_bound_frames_paper_profile_is_wanted_once_and_never_when_held():
     luts = PlayerLuts()
-    operations = PictureOperations("hdmi1", 9, (1.0, 1.0, 1.0), 1.0, 1.0, 1.0, lut=LutMix(REF, .8))
+    other = LutRef("cd" * 32, "lut33-perceptual-relcol-bpc-1")
+    luts.hold(other, TABLE)
+    luts.want((REF, other, REF))
+    assert luts.wanted() == (REF,)
+
+
+# -- The renderer: the Frame draws at once, its LUT joins when held -------------------------------
+
+def test_the_frames_lut_arrival_redraws_and_nothing_waits_for_it():
+    """Rule 3: a Frame whose paper profile is not held yet is drawn without it (no LUT bound) and
+    its tag names the change at once; hold() raises the generation, the surface draws again and
+    the LUT is bound. Mutation probe: leave the generation out of the shown key -> no redraw after
+    hold."""
+    luts = PlayerLuts()
+    operations = PictureOperations("hdmi1", 9, (1.0, 1.0, 1.0), 1.0, 1.0, UPGRADE_DISPLAY_LIGHT)
 
     class Area:
         renders = 0
@@ -242,13 +252,13 @@ def test_the_luts_arrival_redraws_and_only_then_is_the_change_claimed():
 
     def draw():
         """What _render does with the pending draw: bind the LUT if held, tag the change."""
-        lut_drawn = renderer._bind_lut(surface, operations)
+        lut_drawn = renderer._bind_lut(surface, REF)
         surface.acknowledged, surface.pending = surface.pending, None
         surface.acknowledged.completed_at = time.monotonic()
-        return lut_drawn, surface._tagged_change(operations, lut_drawn)
+        return lut_drawn, surface._tagged_change(operations)
 
     assert renderer.present(photo).status == "pending" and surface.area.renders == 1
-    assert draw() == (False, None)                         # the sliders alone; nothing claimed
+    assert draw() == (False, 9)                            # without the LUT; nothing waits
     assert luts.wanted() == (REF,)
     assert renderer.present(photo).status == "presented" and surface.area.renders == 1
     luts.hold(REF, TABLE)
@@ -256,4 +266,5 @@ def test_the_luts_arrival_redraws_and_only_then_is_the_change_claimed():
     assert surface.area.renders == 2, "the LUT's arrival must redraw"
     assert draw() == (True, 9) and renderer.GL.uploads == 1
     assert renderer.present(photo).status == "presented" and surface.area.renders == 2
-    assert renderer._bind_lut(surface, operations) and renderer.GL.uploads == 1    # bound, not re-uploaded
+    assert renderer._bind_lut(surface, REF) and renderer.GL.uploads == 1    # bound, not re-uploaded
+    assert renderer._bind_lut(surface, None) is False                      # a Frame without a profile

@@ -22,12 +22,14 @@ from central.app import create_app
 from central.content_catalog.catalog import device_id_for_serial
 from central.db import DatabaseTransactionClock
 from central.displays.model import TEST_SECONDS
+from central.frame_lighting.paper_profiles import LUT_RECIPE_ID
 from central.infra.display_store import (
     REPORT_STREAM,
     DisplayDocuments,
     DisplayWakes,
     OutputReportJudge,
 )
+from central.infra.frame_lighting_store import PgFrameLighting
 from central.infra.node_link_store import PgLinkStores
 from central.infra.node_links import NodeLinks
 from central.registry import FrameCreate, Registry
@@ -57,7 +59,7 @@ def test_a_console_test_reaches_the_nodes_desired_bucket_by_notification(databas
         reconciles.append(asyncio.get_running_loop().time())
         return epochs
     monkeypatch.setattr(NodeLink, "reconcile", counted)
-    registry = Registry(database, ManualClock(1000))
+    registry = Registry(database, ManualClock(1000), lighting=PgFrameLighting(LUT_RECIPE_ID))
     player = enroll_pi(registry, SERIAL)
     registry.create_frame(FrameCreate(id="kitchen", width_mm=300, height_mm=500,
                                       profile=FrameProfile(width_px=1080, height_px=1920, diagonal_inches=24)))

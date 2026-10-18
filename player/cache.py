@@ -1,7 +1,7 @@
 """A bounded disposable cache for what the Player fetches from Central, kept by (name, digest).
 
 Each blob is named by its inputs: a media variant by `Variant.key` (`<asset_id>.<recipe_id>`), a
-LUT by `LutRef.key` (`<profile_sha256>.<recipe_id>`, print look 2026-10-12), and Central may
+LUT by `LutRef.key` (`<profile_sha256>.<recipe_id>`), and Central may
 re-make it and serve other bytes of the same content. So the cache keeps a blob's bytes under its
 name and the digest Central served them with (`Repr-Digest`), checked against that digest and
 size (`Content-Length`) as they arrive, never against anything in the name. Any whole file held

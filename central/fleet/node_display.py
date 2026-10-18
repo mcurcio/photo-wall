@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from uuid import UUID, uuid4
 
 from central.fleet.device_fence import fence_in
+from central.fleet.models import TrialRefusal, TrialRefused
 from central.fleet.node_app_links import (
     load_current_node_app_link_for_player_in,
     load_current_node_app_link_in,
@@ -323,7 +324,7 @@ class NodeDisplay:
             (frame_id,),
         ).fetchone()
         if row is None:
-            raise NodeControlError("trial_frame_unbound", 409)
+            raise TrialRefused(TrialRefusal.FRAME_UNBOUND)
         generation = fence_in(conn, row["device_id"], "act").generation()
         now = self.sessions.clock.utc()
         session = conn.execute(
@@ -334,7 +335,7 @@ class NodeDisplay:
             (row["device_id"], generation, now),
         ).fetchone()
         if session is None:
-            raise NodeControlError("trial_display_unavailable", 409)
+            raise TrialRefused(TrialRefusal.DISPLAY_UNAVAILABLE)
         grant = parse_session_grant(bytes(session["grant_payload"]))
         link = load_current_node_app_link_for_player_in(
             conn, row["player_id"], row["authority_epoch"], now
@@ -358,7 +359,7 @@ class NodeDisplay:
             or observed is None
             or now - observed["received_at"] >= 10
         ):
-            raise NodeControlError("trial_current_output_required", 409)
+            raise TrialRefused(TrialRefusal.CURRENT_OUTPUT_REQUIRED)
         request = parse_display_exchange(bytes(observed["request"]))
         expected = Surface(
             request.output,
@@ -377,7 +378,7 @@ class NodeDisplay:
         ):
             # The admitted surface and an exchange within 10 s say the app holds the Output; its
             # last presentation may be old (a still picture is presented once).
-            raise NodeControlError("trial_admitted_surface_required", 409)
+            raise TrialRefused(TrialRefusal.ADMITTED_SURFACE_REQUIRED)
         admission = self.runtime.display_admission_in(
             conn,
             player_id=link.player_id,
@@ -391,8 +392,8 @@ class NodeDisplay:
             environment_sha256=link.environment_sha256,
             phase="revision",
         )
-        if not admission.allowed:
-            raise NodeControlError(admission.reason, 409)
+        if not admission.allowed:   # its reason is the Runtime's; the trial answers in its own words
+            raise TrialRefused(TrialRefusal.SURFACE_CHANGED)
         return CurrentDisplay(session["producer_id"], link, binding, request)
 
     def _operation(self, request, surface) -> tuple[str, str]:

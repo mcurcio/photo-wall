@@ -54,11 +54,6 @@ class _ReadClock:
         return time.monotonic()
 
 
-class _WallDocuments:
-    async def wall_documents(self) -> dict[str, bytes]:
-        return {"timing": b"timing-1"}
-
-
 def _enrol(db: Database, serial: str) -> None:
     with db.transaction() as conn:
         conn.execute("INSERT INTO devices(device_id, serial, first_seen, last_seen) VALUES (%s, %s, 1, 1)",
@@ -88,7 +83,7 @@ def test_the_console_reads_whether_a_node_is_linked(database, tmp_path):
                     monitor_url=f"http://127.0.0.1:{listeners.monitor_port}", listeners=listeners)
     node = node_server(tmp_path, SERIAL, hub)
     fleet = FleetHub(database, hub.client_url, config_path, listeners, WALL_TABLE,
-                     PgWallMarks(database, _WallDocuments()), [])
+                     PgWallMarks(database, lambda: None), [])
     clock = _ReadClock()
     hosts = NodeObservations(NodeSessions(database, clock, NodeControlConfig("presence-test")))
 

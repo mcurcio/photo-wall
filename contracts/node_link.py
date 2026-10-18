@@ -49,6 +49,41 @@ LEAF_PATH: Final = "photo-wall/bus"
 NODE_BUS_PORT: Final = 4222                                # the bus's client port on 127.0.0.1, on every Node
 NODE_BUS_URL: Final = f"nats://127.0.0.1:{NODE_BUS_PORT}"  # what every Node component and the local UI dial
 
+# The Node's read-only door (the Home Assistant system design, 2026-10-16; 0017 C3 amended): the bus's
+# WebSocket listener on the home network, `ws://<the Pi's address>:NODE_DOOR_PORT`. A client there
+# lands, with no credentials, in NODE_READER_USER, whose permissions the Node's server holds: it may
+# only ask for one stored message at a time (NODE_READER_PUBLISH) and hear the replies
+# (NODE_READER_SUBSCRIBE), so any other publish, a write or a JetStream change included, is refused
+# by the server, never by the client's restraint. The reader has an account of its own,
+# NODE_DOOR_ACCOUNT, which imports API's one request as a service (NODE_READER_IMPORTS: API's subject
+# -> the reader's, under NODE_DOOR_API_PREFIX, as WALL's consumer API is imported under
+# WALL_API_PREFIX): every reply lands in the reader's account, so a reply subject the reader names can
+# never make JetStream or a local program publish into API (a confused deputy). A reader asks through
+# nats-py's JetStream context with prefix NODE_DOOR_API_PREFIX. Local programs keep the loopback client port, and
+# the local user is admitted only there (LOCAL_CONNECTIONS); the reader only at the door
+# (DOOR_CONNECTIONS). node-bus.conf repeats these literally and its config test binds the two; the
+# door's port arrives as $PHOTO_WALL_BUS_DOOR_PORT (appliance/boot/bus_environment.py), so tests run
+# several Nodes on one machine. A reader checks it reached the Pi it meant by the server name the
+# door's INFO carries (`bus_server_name`): an address that moved reads unavailable, never another
+# Pi's values.
+NODE_DOOR_PORT: Final = 4280
+NODE_READER_USER: Final = "reader"
+NODE_DOOR_ACCOUNT: Final = "DOOR"            # the reader's own account
+NODE_DOOR_API_PREFIX: Final = "ACC.NODE.API"  # the reader's JetStream API prefix for API's imported request
+# API's subject -> the reader's: one stored message at a time, nothing else.
+NODE_READER_IMPORTS: Final = MappingProxyType({
+    "$JS.API.STREAM.MSG.GET.*": f"{NODE_DOOR_API_PREFIX}.STREAM.MSG.GET.*",
+})
+NODE_READER_PUBLISH: Final = tuple(NODE_READER_IMPORTS.values())
+NODE_READER_SUBSCRIBE: Final = ("_INBOX.>",)
+# nats-server's `allowed_connection_types` values the Node's and the hub's users are confined to: a
+# user admitted on one listener cannot log in on another (the doors' permissions are the server's).
+STANDARD_CONNECTION: Final = "STANDARD"        # a plain TCP client: local programs, Central inside the deployment
+WEBSOCKET_CONNECTION: Final = "WEBSOCKET"      # a door's client: a Pi's reader, Home Assistant on the hub
+LEAF_WEBSOCKET_CONNECTION: Final = "LEAFNODE_WS"   # a Node's leaf through Central's origin relay
+LOCAL_CONNECTIONS: Final = (STANDARD_CONNECTION,)
+DOOR_CONNECTIONS: Final = (WEBSOCKET_CONNECTION,)
+
 # L, the largest message (headers + payload) on either end of a leaf: node-bus.conf's max_payload AND
 # the hub's (the config test binds both). A message past a Node's max_payload that reached its leaf
 # would close the leaf, so the hub refuses it first, at its own client (E-W1-BUF-3).
@@ -199,7 +234,7 @@ STORE_LINES: Final[Mapping[str, StoreLine]] = MappingProxyType({line.name: line 
     StoreLine("display", Pipe.FLEET, "display", 3, 1536 * _KIB),
     StoreLine("health", Pipe.FLEET, "health", 3, 1536 * _KIB),
     StoreLine("content", Pipe.SHOW, "content", 2, 1280 * _KIB),
-    StoreLine("player", Pipe.SHOW, "apps", 3, 4608 * _KIB),   # the app line: apps declares it (§7.3)
+    StoreLine("player", Pipe.SHOW, "player", 3, 4608 * _KIB),   # the Player declares its own line (0017 C4, 2026-10-16)
 )})
 # Every line and the WALL mirror fit the store and the server's stream count, so no line's apply is
 # refused for room by another's (11.5 of 12 MiB, 17 of 17 streams).
@@ -210,7 +245,8 @@ if (sum(line.max_bytes for line in STORE_LINES.values()) + WALL_STREAM_BYTES > N
 # The enrolment serial's charset (central/content_catalog/catalog.py). A `:` would break a leaf
 # URL's user:password@ and a `.` would split $SYS.ACCOUNT.<name> subjects, so the account name
 # is a hash of the serial, never the serial itself.
-_SERIAL = re.compile(r"[A-Za-z0-9:_.-]{1,128}")
+SERIAL_PATTERN: Final = r"[A-Za-z0-9:_.-]{1,128}"
+_SERIAL = re.compile(SERIAL_PATTERN)
 
 
 def account_id(serial: str) -> str:
@@ -229,3 +265,9 @@ def central_user(serial: str) -> str:
     """Central's client user inside the Node's account; a selector, not a secret."""
     return "central-" + account_id(serial)
 
+
+
+def bus_server_name(serial: str) -> str:
+    """The Node bus's server name (node-bus.conf `server_name`, written by the handoff stage), which
+    every client's INFO carries: a read through a Pi's door checks it before it trusts a value."""
+    return node_user(serial)

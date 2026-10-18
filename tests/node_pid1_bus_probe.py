@@ -14,9 +14,12 @@ imports on the Node's python3.
 is absent (`nodeapi.buffers.wall_mirror_config`, create only), then reads the mirror's latest value of
 the wall key WALL_KEY (None while the mirror holds none), with python3-nats and HostCore's nodeapi.
 
-`fill` prints {"sent", "ended"}: with the same nats-py, it fills a FILL_BYTES memory stream with
-FILL_MESSAGE-byte messages, up to FILL_PASSES times over, until the server ends the connection
-(`ended`, the error's type): a bus under a lowered memory cap is OOM-killed (the `success` leg).
+`fill` prints {"sent", "ended"}: with the same nats-py, it fills the bus's own memory streams (every
+stream the Node's components declared, each to its cap, round robin) with FILL_MESSAGE-byte
+messages, FILL_PASSES times FILL_BYTES in all, until the server ends the connection (`ended`, the
+error's type): a bus under a lowered memory cap is OOM-killed (the `success` leg). It adds no stream:
+the components' lines take every stream and byte the bus allows (contracts.node_link NODE_MAX_STREAMS,
+NODE_STORE_BYTES), and the OOM restarts the bus empty anyway.
 """
 from __future__ import annotations
 
@@ -30,9 +33,9 @@ from pathlib import Path
 LISTEN = "0A"   # TCP_LISTEN in /proc/net/tcp's `st` column
 HOST_CORE = Path("/usr/lib/photo-wall/node/host-core/__main__.py")   # its launcher
 HOST_STATE = "KV_state_host"
-# The induced OOM's stream: 8 MiB of the store's free room beside the host line, in small messages,
-# whose heap per stored byte is the largest (erratum E-E3C-S2-1).
-FILL_SUBJECT = "probe.fill"
+# The induced OOM: the declared lines' streams filled in small messages, whose heap per stored byte
+# is the largest (erratum E-E3C-S2-1); FILL_PASSES times FILL_BYTES sent in all.
+FILL_TOKEN = "probe"
 FILL_BYTES = 8 * 1024 * 1024
 FILL_MESSAGE = 1024
 FILL_PASSES = 4
@@ -138,6 +141,11 @@ def wall(port: int) -> dict:
     return asyncio.run(read())
 
 
+def fill_subject(filter_subject: str) -> str:
+    """A literal subject a stream's filter takes: every wildcard token as FILL_TOKEN."""
+    return ".".join(FILL_TOKEN if token in ("*", ">") else token for token in filter_subject.split("."))
+
+
 def fill(port: int) -> dict:
     """Fill a FILL_BYTES memory stream on the bus on 127.0.0.1:<port> until the server ends the
     connection or FILL_PASSES times its bytes are sent: {"sent": messages, "ended": error type or None}."""
@@ -145,18 +153,21 @@ def fill(port: int) -> dict:
     import asyncio
 
     import nats
-    from nats.js.api import StorageType, StreamConfig
+    from nats.js.api import StorageType
 
     async def run() -> dict:
         client = await nats.connect(servers=[f"nats://127.0.0.1:{port}"], allow_reconnect=False,
                                     connect_timeout=2)
         sent = 0
         try:
-            await client.jetstream().add_stream(StreamConfig(
-                name="PROBE_FILL", subjects=[FILL_SUBJECT], storage=StorageType.MEMORY, max_bytes=FILL_BYTES))
+            subjects = [fill_subject(stream.config.subjects[0])
+                        for stream in await client.jetstream().streams_info()
+                        if stream.config.storage == StorageType.MEMORY and stream.config.subjects]
+            if not subjects:
+                return {"sent": 0, "ended": "no_stream"}
             payload = bytes(FILL_MESSAGE)
-            for _ in range(FILL_PASSES * FILL_BYTES // FILL_MESSAGE):
-                await client.publish(FILL_SUBJECT, payload)
+            for index in range(FILL_PASSES * FILL_BYTES // FILL_MESSAGE):
+                await client.publish(subjects[index % len(subjects)], payload)
                 sent += 1
                 if sent % 256 == 0:
                     await client.flush(timeout=5)

@@ -21,12 +21,14 @@ from test_display_identity import enroll_pi
 from appliance.display_host.bus import DISPLAY_COMPONENT, DISPLAY_SLICE, DISPLAY_VERSION
 from central.content_catalog.catalog import device_id_for_serial
 from central.db import DatabaseTransactionClock
+from central.frame_lighting.paper_profiles import LUT_RECIPE_ID
 from central.infra.display_store import (
     REPORT_STREAM,
     DisplayDocuments,
     DisplayWakes,
     OutputReportJudge,
 )
+from central.infra.frame_lighting_store import PgFrameLighting
 from central.infra.node_link_store import PgLinkStores
 from central.infra.node_links import NodeLinks
 from central.registry import FrameCreate, Registry
@@ -67,7 +69,7 @@ def test_a_nodes_output_documents_and_reports_cross_the_display_line(database, t
         reconciles.append(asyncio.get_running_loop().time())
         return epochs
     monkeypatch.setattr(NodeLink, "reconcile", counted)
-    registry = Registry(database, ManualClock(1000))
+    registry = Registry(database, ManualClock(1000), lighting=PgFrameLighting(LUT_RECIPE_ID))
     player = enroll_pi(registry, SERIAL)
     with database.transaction() as conn:   # one enrolled Output only: HDMI-A-2 has no `outputs` row
         conn.execute("DELETE FROM outputs WHERE player_id=%s AND output_id='HDMI-A-2'", (player,))

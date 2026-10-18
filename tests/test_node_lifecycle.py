@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 from psycopg.types.json import Jsonb
 from test_coordination import report
 from test_fleet_attempts import DEVICE_ID, SERIAL
-from test_node_boot import claim_for, environment, publish_deployment
+from test_node_boot import boot_service, claim_for, environment, publish_deployment
 from test_node_runtime_reconciliation import rig
 from test_registry import ADMIN, enroll
 
@@ -21,7 +21,7 @@ from central.displays.model import Readiness
 from central.fleet.device_fence import standing_in
 from central.fleet.node_acceptance import current_cohort_in
 from central.fleet.node_app_links import NodeAppLinks
-from central.fleet.node_boot import NodeBootService, parse_node_deployment
+from central.fleet.node_boot import parse_node_deployment
 from central.fleet.node_display import NodeDisplay
 from central.fleet.node_ingest import NodeIngest
 from central.fleet.node_lifecycle import NodeLifecycle, OperatorAppStage
@@ -337,7 +337,7 @@ def test_operation_of_a_rebooted_boot_is_interrupted_and_not_desired(registry):
     fixture = Rig(registry)
     command = fixture.stage()
     fixture.report(command, 'intent_stop', 1)
-    offer = NodeBootService(fixture.sessions).offer(NodeBootRequestV2(SERIAL, uuid4(), 'b' * 64))
+    offer = boot_service(fixture.sessions).offer(NodeBootRequestV2(SERIAL, uuid4(), 'b' * 64))
     broker = claim_for(offer, owner='app_effect_broker')
     fixture.sessions.enroll(broker)
     assert fixture.states() == ['interrupted_by_reboot']
@@ -349,7 +349,7 @@ def test_operation_of_a_rebooted_boot_is_interrupted_and_not_desired(registry):
 
 def _later_boot(fixture):
     """A later kernel boot of the same device is offered and its broker admitted; its claim."""
-    offer = NodeBootService(fixture.sessions).offer(NodeBootRequestV2(SERIAL, uuid4(), 'b' * 64))
+    offer = boot_service(fixture.sessions).offer(NodeBootRequestV2(SERIAL, uuid4(), 'b' * 64))
     claim = claim_for(offer, owner='app_effect_broker')
     fixture.sessions.enroll(claim)
     return claim

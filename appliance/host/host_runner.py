@@ -10,7 +10,7 @@ import argparse
 import http.client
 import json
 import time
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from uuid import UUID
 
@@ -20,6 +20,7 @@ from appliance.host.bus import host_session
 from appliance.host.host import HostCore
 from appliance.host.host_linux import LinuxHostSampler, SystemdRebootDriver, boot_id, boottime_ms
 from appliance.host.host_storage import FileRebootJournal, RebootDelivery
+from appliance.host.light_sensor import IIO_ROOT, LightMeter, start_light_meter
 from appliance.kernel.boot_stage import DIRECTORY as BOOT_STAGE_DIRECTORY
 from appliance.kernel.boot_stage import read_boot_report
 from appliance.kernel.boot_store import BootStore
@@ -32,6 +33,7 @@ from contracts.node_host_facts import (
     fact_values_document,
     valid_fact,
 )
+from contracts.node_link import NODE_BUS_URL
 from contracts.node_observation import (
     HOST_OBSERVATION_INTERVAL_SECONDS,
     HostObservationV2,
@@ -40,16 +42,17 @@ from contracts.node_observation import (
 )
 from contracts.node_protocol import encode_node_message
 from contracts.strict_json import loads_object
+from nodeapi.node import NodeSession as BusSession
 
 
 class HostRunner:
-    # The observation cadence (console DDD §63): every tick samples and journals; one
+    # The observation cadence: every tick samples and journals; one
     # observation is posted per contract interval on this process's own monotonic clock, and
     # the first at once after each new session. `_posted` is (session id, monotonic seconds)
     # of the last post. Central coalesces faster posts anyway; this only saves it the work.
     monotonic = staticmethod(time.monotonic)
     _posted: tuple | None = None
-    # The host facts sender (console DDD §64), in memory only: `_facts` is the document last
+    # The host facts sender, in memory only: `_facts` is the document last
     # built (None before the first post) and `_facts_state` one of "pending", "stored",
     # "dropped" or "off". A process start therefore sends once. "off" (a Central replica
     # without the route, 404, or an older Central that cannot parse a newer document, 422) lasts
@@ -66,7 +69,7 @@ class HostRunner:
     base_tag: str | None = None
     # The base boot stages' records (boot_stage.py), folded into the facts record's `boot`.
     boot_stage_directory: Path = BOOT_STAGE_DIRECTORY
-    # PID1's failed units as last read by this process (errata E-T3-2): a failed read reuses
+    # PID1's failed units as last read by this process: a failed read reuses
     # the last successful one; None until one succeeds, so "not read" never reads "none failed".
     _failed_units: tuple | None = None
 
@@ -131,7 +134,7 @@ class HostRunner:
                             send=self._send_evidence, budget=2)
 
     def _send_facts(self, now_ms: int) -> None:
-        """The §64 state machine, run once per observation post: facts are read here only, so
+        """The facts sender's state machine, run once per observation post: facts are read here only, so
         a flapping link sends at most one document per interval. A new document (next journal
         sequence) is built on the first post and whenever a value or the producer changed;
         otherwise a pending document is resent unchanged: after no answer, a 5xx, a 429 or a
@@ -197,6 +200,26 @@ class HostRunner:
 
 
 
+@dataclass(frozen=True)
+class HostBus:
+    """HostCore on the Node's bus: its host-line session and the wired light meter feeding it."""
+    session: BusSession
+    meter: LightMeter
+
+    def stop(self) -> None:
+        self.meter.stop()
+        self.session.stop()
+
+
+def start_host_bus(base_tag: str, *, url: str = NODE_BUS_URL, iio_root: Path = IIO_ROOT) -> HostBus:
+    """The host component on the Node's bus (appliance/host/bus.py), on its own thread and never waited
+    on, and a wired light meter, if any, on its own thread onto the host line's state; both started
+    (it returns at once)."""
+    session = host_session(base_tag, url=url)
+    session.start()
+    return HostBus(session, start_light_meter(session.state.put, root=iio_root))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=Path("/run/photo-wall-node/host.json"))
@@ -216,9 +239,7 @@ def main() -> None:
                         base_tag=value["base_tag"])
     recovery = runner.recovery
     server = RecoveryServer(recovery)
-    # The host component on the Node's bus: its own thread, never waited on (appliance/host/bus.py).
-    session = host_session(value["base_tag"])
-    session.start()
+    bus = start_host_bus(value["base_tag"])
     last_tick = 0.0
     try:
         while True:
@@ -235,7 +256,7 @@ def main() -> None:
                 # Fixed bounded cadence; no credential or packet logging.
             time.sleep(0.05)
     finally:
-        session.stop()
+        bus.stop()
         server.close()
         store.close()
 

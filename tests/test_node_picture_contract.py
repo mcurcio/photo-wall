@@ -11,7 +11,6 @@ import json
 
 import pytest
 
-from contracts.lut import LutRef
 from contracts.node_output import DisplayIdentity
 from contracts.node_picture import (
     CHOICE_NAME_MAX,
@@ -21,7 +20,9 @@ from contracts.node_picture import (
     PICTURE_DOCUMENT_BYTES,
     PICTURE_LIST,
     PICTURE_REPORT_BYTES,
+    UPGRADE_DISPLAY_LIGHT,
     Choice,
+    DisplayLight,
     HardwareRange,
     HardwareResult,
     HardwareSetting,
@@ -44,8 +45,8 @@ from contracts.node_picture import (
 from contracts.tuning import TestPattern
 
 IDENTITY = DisplayIdentity("XYM", 5475, "MNN", None)
-SOFTWARE = SoftwarePicture(114, 100, 6500, 22)
-DOCUMENT = PictureDocument("HDMI-A-1", 8, {"10": 46}, SOFTWARE)
+SOFTWARE = SoftwarePicture(contrast_percent=114, colour_temperature_kelvin=6500, gamma_tenths=22)
+DOCUMENT = PictureDocument("HDMI-A-1", 8, {"10": 46}, SOFTWARE, light=UPGRADE_DISPLAY_LIGHT)
 LEVEL = HardwareRange(RangeKind.LEVEL, 100, ())
 PRESETS = HardwareRange(RangeKind.CHOICE, None, (Choice(5, "6500 K"), Choice(11, "User 1")))
 READ_ONLY = HardwareRange(RangeKind.READ_ONLY_CHOICE, None, ())
@@ -54,13 +55,12 @@ REPORT = PictureReport("HDMI-A-1", IDENTITY,
                         HardwareSetting("DC", READ_ONLY, None)),
                        8, {"10": HardwareResult(WriteResult.TAKEN, 60, 46)}, 8)
 
-# The frozen page's wire shapes, byte for byte (schema major 6: display tuning's fields).
-DOCUMENT_BYTES = (b'{"hardware":{"10":46},"output_id":"HDMI-A-1","picture_change":8,"signal_range":"auto",'
-                  b'"software":{"black_floor_tenths":0,"brightness_percent":114,"colour_temperature_kelvin":6500,'
-                  b'"contrast_percent":100,"gamma_tenths":22,"highlight_rolloff_percent":0,"lut":null,'
-                  b'"lut_amount_percent":100,"saturation_percent":100},"test_pattern":null}')
-PAPER = LutRef("ab" * 32, "lut33-perceptual-relcol-bpc-1")
-PRINT_LOOK = PictureDocument("HDMI-A-1", 9, {}, SoftwarePicture(114, 100, 6500, 22, 85, 40, 20, PAPER, 80))
+# The frozen page's wire shapes, byte for byte (schema major 8: room light's Display light, the
+# print look's sliders and LUT gone, decision 0028).
+DOCUMENT_BYTES = (b'{"hardware":{"10":46},"light":{"black":0.0003,"matched_lux":1000.0},"output_id":"HDMI-A-1",'
+                  b'"picture_change":8,"signal_range":"auto",'
+                  b'"software":{"colour_temperature_kelvin":6500,"contrast_percent":114,"gamma_tenths":22},'
+                  b'"test_pattern":null}')
 
 
 def test_the_document_is_the_frozen_wire_shape_and_round_trips():
@@ -70,24 +70,21 @@ def test_the_document_is_the_frozen_wire_shape_and_round_trips():
     assert encode_picture_document(decode_picture_document(reordered)) == DOCUMENT_BYTES
 
 
-def test_the_print_look_rides_the_software_group_and_round_trips():
-    """The print look's fields and the LUT by name. Mutation probe: decode the lut as its dict
-    (not a LutRef) -> the round trip differs."""
-    raw = encode_picture_document(PRINT_LOOK)
-    assert json.loads(raw)["software"]["lut"] == {"profile_sha256": "ab" * 32,
-                                                  "recipe_id": "lut33-perceptual-relcol-bpc-1"}
-    assert decode_picture_document(raw) == PRINT_LOOK
-    without = json.loads(raw)
-    del without["software"]["saturation_percent"]
+def test_the_displays_light_is_required_and_the_sliders_are_gone():
+    """Decision 0028: the document carries the Display's light, never defaulted; a document with the
+    print look's sliders or LUT is refused. Mutation probe: decode the light with a default -> the
+    document without it is read."""
+    raw = json.loads(encode_picture_document(DOCUMENT))
+    without = {key: value for key, value in raw.items() if key != "light"}
     with pytest.raises(ValueError, match="^picture_document$"):
         decode_picture_document(json.dumps(without).encode())
-    for bad in ({"saturation_percent": 151}, {"highlight_rolloff_percent": 101}, {"black_floor_tenths": 101},
-                {"lut_amount_percent": -1}, {"saturation_percent": True}):
-        with pytest.raises(ValueError, match="^software_picture$"):
-            SoftwarePicture(**{**{"brightness_percent": 100, "contrast_percent": 100,
-                                  "colour_temperature_kelvin": 6500, "gamma_tenths": 22}, **bad})
-    with pytest.raises(ValueError, match="^lut_ref$"):
-        LutRef("AB" * 32, "lut33")
+    for extra in ({"brightness_percent": 100}, {"saturation_percent": 100}, {"lut": None}):
+        old = {**raw, "software": {**raw["software"], **extra}}
+        with pytest.raises(ValueError, match="^picture_document$"):
+            decode_picture_document(json.dumps(old).encode())
+    for lux, black in ((9.9, 0.001), (20000.5, 0.001), (100.0, 0.0), (100.0, 0.051), (True, 0.001)):
+        with pytest.raises(ValueError, match="^display_light$"):
+            DisplayLight(matched_lux=lux, black=black)
 
 
 def test_the_report_is_the_frozen_wire_shape_and_round_trips():
@@ -111,13 +108,13 @@ def test_display_tuning_rides_the_document_and_the_report_and_round_trips():
     ask on the report (decision 0024). Mutation probe: build the document's `signal_range` from the
     plain string (not SignalRange(...)) -> the validator refuses every document; drop `signal` from
     the report's decode -> the round trip differs."""
-    tuned = PictureDocument("HDMI-A-1", 9, {}, SOFTWARE, SignalRange.FULL, TestPatternAsk(TestPattern.WHITE, 4))
+    tuned = PictureDocument("HDMI-A-1", 9, {}, SOFTWARE, SignalRange.FULL, TestPatternAsk(TestPattern.WHITE, 4), light=UPGRADE_DISPLAY_LIGHT)
     raw = encode_picture_document(tuned)
     value = json.loads(raw)
     assert value["signal_range"] == "full" and value["test_pattern"] == {"ask": 4, "pattern": "white"}
     assert decode_picture_document(raw) == tuned
-    assert PictureDocument("HDMI-A-1", 9, {}, SOFTWARE) == PictureDocument("HDMI-A-1", 9, {}, SOFTWARE,
-                                                                           SignalRange.AUTO, None)
+    assert PictureDocument("HDMI-A-1", 9, {}, SOFTWARE, light=UPGRADE_DISPLAY_LIGHT) == PictureDocument("HDMI-A-1", 9, {}, SOFTWARE,
+                                                                           SignalRange.AUTO, None, light=UPGRADE_DISPLAY_LIGHT)
     for missing in ("signal_range", "test_pattern"):
         without = dict(value)
         del without[missing]
@@ -143,7 +140,7 @@ def test_display_tuning_rides_the_document_and_the_report_and_round_trips():
         with pytest.raises(ValueError, match="^signal_report$"):
             bad_signal()
     with pytest.raises(ValueError, match="^picture_document$"):
-        PictureDocument("HDMI-A-1", 9, {}, SOFTWARE, "full")
+        PictureDocument("HDMI-A-1", 9, {}, SOFTWARE, "full", light=UPGRADE_DISPLAY_LIGHT)
 
 
 def test_the_keys_and_the_neutral_software():
@@ -151,7 +148,7 @@ def test_the_keys_and_the_neutral_software():
     for key in (picture_document_key, picture_report_key):
         with pytest.raises(ValueError, match="^output_id$"):
             key("DSI-1")
-    assert NEUTRAL_SOFTWARE == SoftwarePicture(100, 100, 6500, 22)
+    assert NEUTRAL_SOFTWARE == SoftwarePicture(contrast_percent=100, colour_temperature_kelvin=6500, gamma_tenths=22)
 
 
 def test_the_worst_valid_report_fits_the_bus():
@@ -167,8 +164,9 @@ def test_the_worst_valid_report_fits_the_bus():
     raw = encode_picture_report(worst)
     assert len(raw) <= PICTURE_REPORT_BYTES and decode_picture_report(raw) == worst
     every_code = PictureDocument("Virtual-2", 2**62, dict.fromkeys(PICTURE_LIST, LEVEL_MAX),
-                                 SoftwarePicture(150, 150, 9300, 26, 150, 100, 100, LutRef("f" * 64, "z" * 64), 100),
-                                 SignalRange.LIMITED, TestPatternAsk(TestPattern.BLACK_LEVEL, 2**62))
+                                 SoftwarePicture(contrast_percent=150, colour_temperature_kelvin=9300, gamma_tenths=26),
+                                 SignalRange.LIMITED, TestPatternAsk(TestPattern.BLACK_LEVEL, 2**62),
+                                 light=DisplayLight(matched_lux=12345.678901234567, black=0.012345678901234567))
     assert len(encode_picture_document(every_code)) <= PICTURE_DOCUMENT_BYTES
 
 
@@ -192,16 +190,16 @@ def test_the_worst_valid_report_fits_the_bus():
     (lambda: HardwareSetting("e0", LEVEL, 1), "hardware_setting"),
     (lambda: HardwareSetting("10", LEVEL, 101), "hardware_setting"),
     (lambda: HardwareSetting("14", PRESETS, 256), "hardware_setting"),
-    (lambda: SoftwarePicture(151, 100, 6500, 22), "software_picture"),
-    (lambda: SoftwarePicture(100, -1, 6500, 22), "software_picture"),
-    (lambda: SoftwarePicture(100, 100, 6550, 22), "software_picture"),
-    (lambda: SoftwarePicture(100, 100, 6500, 27), "software_picture"),
-    (lambda: SoftwarePicture(True, 100, 6500, 22), "software_picture"),
-    (lambda: PictureDocument("DSI-1", 1, {}, SOFTWARE), "picture_document"),
-    (lambda: PictureDocument("HDMI-A-1", 0, {}, SOFTWARE), "picture_document"),
-    (lambda: PictureDocument("HDMI-A-1", 1, {"60": 1}, SOFTWARE), "picture_document"),   # input: not picture
-    (lambda: PictureDocument("HDMI-A-1", 1, {"10": LEVEL_MAX + 1}, SOFTWARE), "picture_document"),
-    (lambda: PictureDocument("HDMI-A-1", 1, {}, None), "picture_document"),
+    (lambda: SoftwarePicture(contrast_percent=151, colour_temperature_kelvin=6500, gamma_tenths=22), "software_picture"),
+    (lambda: SoftwarePicture(contrast_percent=-1, colour_temperature_kelvin=6500, gamma_tenths=22), "software_picture"),
+    (lambda: SoftwarePicture(contrast_percent=100, colour_temperature_kelvin=6550, gamma_tenths=22), "software_picture"),
+    (lambda: SoftwarePicture(contrast_percent=100, colour_temperature_kelvin=6500, gamma_tenths=27), "software_picture"),
+    (lambda: SoftwarePicture(contrast_percent=True, colour_temperature_kelvin=6500, gamma_tenths=22), "software_picture"),
+    (lambda: PictureDocument("DSI-1", 1, {}, SOFTWARE, light=UPGRADE_DISPLAY_LIGHT), "picture_document"),
+    (lambda: PictureDocument("HDMI-A-1", 0, {}, SOFTWARE, light=UPGRADE_DISPLAY_LIGHT), "picture_document"),
+    (lambda: PictureDocument("HDMI-A-1", 1, {"60": 1}, SOFTWARE, light=UPGRADE_DISPLAY_LIGHT), "picture_document"),   # input: not picture
+    (lambda: PictureDocument("HDMI-A-1", 1, {"10": LEVEL_MAX + 1}, SOFTWARE, light=UPGRADE_DISPLAY_LIGHT), "picture_document"),
+    (lambda: PictureDocument("HDMI-A-1", 1, {}, None, light=UPGRADE_DISPLAY_LIGHT), "picture_document"),
     (lambda: HardwareResult(WriteResult.TAKEN, 1, None), "hardware_result"),
     (lambda: HardwareResult(WriteResult.NO_ANSWER, 1, 2), "hardware_result"),
     (lambda: HardwareResult(WriteResult.NOT_TAKEN, -1, 2), "hardware_result"),

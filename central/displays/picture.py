@@ -4,9 +4,13 @@
 A Display keeps two groups of picture settings, never coupled (owner, 2026-10-12: "i want to
 independently control the hardware from the software"): **hardware values**, only the display
 settings someone set in Photo Wall, by MCCS code (an absent code is "as the display has it": the
-Pi never writes it), and **software values**, Photo Wall's group (the picture split's four and the
-print look's: saturation, highlight rolloff, black floor, the LUT and its amount), always complete. No rule here
-reads one group to decide the other. What a display offers, and whether a hardware value may be
+Pi never writes it), and **software values**, Photo Wall's group (contrast, colour temperature and
+gamma), always complete. No rule here reads one group to decide the other. Room light (decision 0028;
+owner, 2026-10-15, Q2 "the paper replaces them") removed the print look's brightness, saturation,
+highlight rolloff, black floor and LUT from the Display and added a fourth group, the **Display's
+light** (`DisplayLight`: the matched lux and the panel's black), live in the session's draft
+(`edited_light`), kept by Done, put back by Revert and the lease's end, copied by Copy and recorded
+in the picture history. What a display offers, and whether a hardware value may be
 set on it, is central/displays/hardware.py's.
 
 One home each for:
@@ -41,15 +45,15 @@ One home each for:
   so Done, Revert and the lease's end each take it off; `test_pattern_state` says what the tab
   shows of it.
 - **Copy** (#119; owner, 2026-10-12: "Both (Recommended)"; "Only ones set in Photo Wall
-  (Recommended)"): every software value, the print look's included; the hardware values set on the source where the
-  target offers them (hardware.py's rule, slice S4); never position, never the signal range (it
-  follows each display).
+  (Recommended)"): every software value and the Display's light; the hardware values set on the
+  source where the target offers them (hardware.py's rule, slice S4); never position, never the
+  signal range (it follows each display).
 - **Restore** (configuration snapshots, migration 096; owner, 2026-10-13: "View and restore"):
   `restored` loads a picture history entry of the session's own Display into the draft, live and
   put back by Revert like any edit; Done still keeps it, and that kept entry names the entry it
-  came from (`restored_from`). Hardware the display no longer offers is skipped, an unlisted LUT
-  keeps the draft's, a LUT baked under an older recipe is rendered by today's, and the test pattern
-  is never restored. Another Display's values cross only by Copy.
+  came from (`restored_from`). Hardware the display no longer offers is skipped, an entry from
+  before the Display's light keeps the draft's light (and says so), and the test pattern is never
+  restored. Another Display's values cross only by Copy.
 """
 from __future__ import annotations
 
@@ -62,13 +66,13 @@ from typing import Final
 from uuid import UUID
 
 from central.displays.hardware import copied_hardware, edit_refusal
-from central.displays.lut import LUT_RECIPE_ID
 from central.live_session import Lease, StaleSequence, next_sequence, touched
-from contracts.lut import LutRef
 from contracts.node_picture import (
     NEUTRAL_SOFTWARE,
     PICTURE_LIST,
     TEST_PATTERN_SECONDS,
+    UPGRADE_DISPLAY_LIGHT,
+    DisplayLight,
     HardwareSetting,
     PictureDocument,
     PictureReport,
@@ -86,39 +90,23 @@ TEST_PATTERN_IDLE_SECONDS: Final = 60.0   # ... while it asks a test pattern (`i
 class SoftwareSetting(StrEnum):
     """Photo Wall's picture settings, as the routes name them (the ranges are
     contracts.node_picture's `SoftwarePicture`)."""
-    BRIGHTNESS = "brightness"                   # #111, percent 0..150 (100 changes nothing)
     CONTRAST = "contrast"                       # #112, percent 0..150
     COLOUR_TEMPERATURE = "colour-temperature"   # #113, kelvin
     GAMMA = "gamma"                             # #114, tenths
-    SATURATION = "saturation"                   # print look: percent 0..150, 100 changes nothing
-    HIGHLIGHT_ROLLOFF = "highlight-rolloff"     # print look: percent 0..100, 0 = the clip at white
-    BLACK_FLOOR = "black-floor"                 # print look: tenths of a percent of white light 0..100
-    LUT_AMOUNT = "lut-amount"                   # print look: percent 0..100 of the LUT mixed in
 
 
-class SoftwareChoice(StrEnum):
-    """Photo Wall's picture settings that name a thing rather than set a number, each with its own
-    edit (one route per question): the LUT choice (`edited_lut`, `.../lut-edits`)."""
-    LUT = "lut"
-
-
-SoftwareTouch = SoftwareSetting | SoftwareChoice     # what a session records as touched in the group
+SoftwareTouch = SoftwareSetting     # what a session records as touched in the group
 
 
 def software_touch(name: str) -> SoftwareTouch:
     """A touched software setting by its stored name. ValueError for an unknown one."""
-    return SoftwareChoice(name) if name in SoftwareChoice._value2member_map_ else SoftwareSetting(name)
+    return SoftwareSetting(name)
 
 
 _SOFTWARE_FIELDS: Final[Mapping[SoftwareSetting, str]] = {
-    SoftwareSetting.BRIGHTNESS: "brightness_percent",
     SoftwareSetting.CONTRAST: "contrast_percent",
     SoftwareSetting.COLOUR_TEMPERATURE: "colour_temperature_kelvin",
     SoftwareSetting.GAMMA: "gamma_tenths",
-    SoftwareSetting.SATURATION: "saturation_percent",
-    SoftwareSetting.HIGHLIGHT_ROLLOFF: "highlight_rolloff_percent",
-    SoftwareSetting.BLACK_FLOOR: "black_floor_tenths",
-    SoftwareSetting.LUT_AMOUNT: "lut_amount_percent",
 }
 
 
@@ -141,7 +129,7 @@ class TestPatternState(StrEnum):
 
 class PictureRefused(Exception):
     """A refusal the routes answer as {"error": code}: stale_sequence 409, not_offered 409,
-    out_of_range 422, unknown_lut 422, session_ended 410, not_presented_yet 409."""
+    out_of_range 422, session_ended 410, not_presented_yet 409."""
 
     def __init__(self, code: str, status: int) -> None:
         super().__init__(code)
@@ -153,10 +141,12 @@ class PictureRefused(Exception):
 class DisplayPicture:
     """The Display record's picture: `hardware`, only codes set in Photo Wall (treat as read-only);
     `software`, always complete; `signal_range`, the Pi's HDMI signal range for this display (no
-    default: every constructor decides, and Copy keeps the target's)."""
+    default: every constructor decides, and Copy keeps the target's); `light`, the Display's light
+    (decision 0028)."""
     hardware: Mapping[VcpCode, int]
     software: SoftwarePicture
     signal_range: SignalRange
+    light: DisplayLight
 
 
 @dataclass(frozen=True)
@@ -181,8 +171,9 @@ class PictureSession:
 
 def default_picture() -> DisplayPicture:
     """A new Display's: no hardware value set, the software group neutral (NEUTRAL_SOFTWARE), the
-    signal range Auto (the kernel's choice: no change)."""
-    return DisplayPicture({}, NEUTRAL_SOFTWARE, SignalRange.AUTO)
+    signal range Auto (the kernel's choice: no change), the light the placeholder every Display
+    starts from (UPGRADE_DISPLAY_LIGHT) until the paper match is typed in."""
+    return DisplayPicture({}, NEUTRAL_SOFTWARE, SignalRange.AUTO, UPGRADE_DISPLAY_LIGHT)
 
 
 def effective_picture(stored: DisplayPicture, session: PictureSession | None, now: float) -> DisplayPicture:
@@ -246,17 +237,15 @@ def edited_software(session: PictureSession, setting: SoftwareSetting, value: in
                    lease=_touched(session, now))
 
 
-def edited_lut(session: PictureSession, lut: LutRef | None, *, known: bool, expected_sequence: int,
-               now: float) -> PictureSession:
-    """The session after the LUT choice: `lut` None is no LUT; `known` says the LUTs list holds
-    `lut`'s paper profile (the caller's read, in the edit's transaction). PictureRefused:
-    session_ended, stale_sequence, then unknown_lut 422 for a LUT not on the list."""
+def edited_light(session: PictureSession, light: DisplayLight, *, expected_sequence: int,
+                 now: float) -> PictureSession:
+    """The session after the Display's light's edit (decision 0028): the draft's light, live on the
+    Display, kept by Done and put back by Revert. PictureRefused: session_ended, stale_sequence,
+    out_of_range 422 (not a DisplayLight; its ranges are the contract's)."""
     sequence = _next(session, expected_sequence, now)
-    if lut is not None and not known:
-        raise PictureRefused("unknown_lut", 422)
-    software = replace(session.draft.software, lut=lut)
-    return replace(session, sequence=sequence, draft=replace(session.draft, software=software),
-                   touched_software=session.touched_software | {SoftwareChoice.LUT},
+    if not isinstance(light, DisplayLight):
+        raise PictureRefused("out_of_range", 422)
+    return replace(session, sequence=sequence, draft=replace(session.draft, light=light),
                    lease=_touched(session, now))
 
 
@@ -293,18 +282,18 @@ def session_test_pattern(session: PictureSession | None, now: float) -> TestPatt
 
 def picture_document(output_id: str, picture_change: int, picture: DisplayPicture,
                      test_pattern: TestPatternAsk | None) -> PictureDocument:
-    """The Output's picture document at `picture_change`: `picture`'s three groups and the live
+    """The Output's picture document at `picture_change`: `picture`'s four groups and the live
     session's `test_pattern` (`session_test_pattern`)."""
     return PictureDocument(output_id, picture_change, dict(picture.hardware), picture.software,
-                           picture.signal_range, test_pattern)
+                           picture.signal_range, test_pattern, light=picture.light)
 
 
 def picture_digest(picture: DisplayPicture, test_pattern: TestPatternAsk | None) -> str:
-    """sha256 hex of the canonical {hardware, software, signal_range, test_pattern}; the projector
-    raises the Output's `picture_change` when it differs, so any of them moving raises it."""
+    """sha256 hex of the canonical {hardware, software, signal_range, light, test_pattern}; the
+    projector raises the Output's `picture_change` when it differs, so any of them moving raises it."""
     pattern = None if test_pattern is None else {"pattern": test_pattern.pattern.value, "ask": test_pattern.ask}
     body = {"hardware": dict(picture.hardware), "software": asdict(picture.software),
-            "signal_range": picture.signal_range.value, "test_pattern": pattern}
+            "signal_range": picture.signal_range.value, "light": asdict(picture.light), "test_pattern": pattern}
     return hashlib.sha256(json.dumps(body, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
@@ -314,11 +303,12 @@ def answers(document: PictureDocument | None, report: PictureReport | None) -> b
 
 
 def carries(document: PictureDocument | None, picture: DisplayPicture) -> bool:
-    """`document` carries exactly `picture`, all three groups (the document is projected from the
+    """`document` carries exactly `picture`, all four groups (the document is projected from the
     session asynchronously, so the recorded one may still be the previous). The test pattern is not
     read: it is never the draft's."""
     return (document is not None and dict(document.hardware) == dict(picture.hardware)
-            and document.software == picture.software and document.signal_range == picture.signal_range)
+            and document.software == picture.software and document.signal_range == picture.signal_range
+            and document.light == picture.light)
 
 
 def hardware_answered(hardware: Mapping[VcpCode, int], document: PictureDocument | None,
@@ -392,14 +382,14 @@ def restore_answered(restore: Mapping[VcpCode, int], in_force: DisplayPicture, d
 def copied(source: DisplayPicture, target: DisplayPicture, *,
            source_offered: tuple[HardwareSetting, ...] | None,
            target_offered: tuple[HardwareSetting, ...] | None) -> tuple[DisplayPicture, tuple[VcpCode, ...]]:
-    """(`target` with `source`'s software and the copied hardware merged over the target's, the
-    source codes skipped in picture-list order): `hardware.copied_hardware` decides which hardware
-    values carry over; a skipped code, and every target code the source does not set, stays as it
-    is on the target, and so does the target's signal range (it follows each display)."""
+    """(`target` with `source`'s software and light and the copied hardware merged over the
+    target's, the source codes skipped in picture-list order): `hardware.copied_hardware` decides
+    which hardware values carry over; a skipped code, and every target code the source does not set,
+    stays as it is on the target, and so does the target's signal range (it follows each display)."""
     hardware, skipped = copied_hardware(source.hardware, source_offered=source_offered,
                                         target_offered=target_offered)
     return DisplayPicture(_in_list_order({**target.hardware, **hardware}), source.software,
-                          target.signal_range), skipped
+                          target.signal_range, source.light), skipped
 
 
 def with_befores(session: PictureSession, report: PictureReport) -> PictureSession:
@@ -419,17 +409,16 @@ def with_befores(session: PictureSession, report: PictureReport) -> PictureSessi
 @dataclass(frozen=True)
 class PictureRestored:
     """A Restore's outcome (configuration snapshots; `restored`): the session after it; the entry's
-    hardware codes the display does not offer now, in picture-list order (not in the draft); whether
-    the entry's LUT is no longer on the LUTs list (the draft keeps its own LUT); and whether today's
-    recipe renders the entry's LUT (it was baked under another)."""
+    hardware codes the display does not offer now, in picture-list order (not in the draft); and
+    whether the entry had no Display's light (written before decision 0028), so the draft kept its
+    own light."""
     session: PictureSession
     hardware_skipped: tuple[VcpCode, ...]
-    lut_skipped: bool
-    lut_recipe_changed: bool
+    light_kept: bool
 
 
 def restored(session: PictureSession, *, entry_id: UUID, entry_display_id: UUID, picture: DisplayPicture,
-             offered: tuple[HardwareSetting, ...] | None, lut_listed: bool, expected_sequence: int,
+             light_recorded: bool, offered: tuple[HardwareSetting, ...] | None, expected_sequence: int,
              now: float) -> PictureRestored:
     """The session after a Restore loads a history entry's `picture` (its id `entry_id`, written for
     `entry_display_id`) into the draft, live on the Display; the operator still presses Done.
@@ -439,36 +428,29 @@ def restored(session: PictureSession, *, entry_id: UUID, entry_display_id: UUID,
     - hardware: each of `picture`'s codes that `hardware.edit_refusal` allows against `offered`
       (the rest are `hardware_skipped`, in picture-list order; `offered` None skips them all); a
       code `picture` does not set is "as the display has it";
-    - software: `picture`'s, with its LUT under today's recipe (`LUT_RECIPE_ID`) when `lut_listed`
-      (`lut_recipe_changed` when the entry's recipe was another), else the draft's own LUT kept
-      (`lut_skipped`); `picture` with no LUT sets none;
-    - signal range: `picture`'s. The test pattern is never restored (the session's ask stays).
-    Every hardware code and software setting whose draft value changed joins the touched sets (so
-    Revert puts the display back), `restored_from` becomes `entry_id`, and the lease is touched."""
+    - software and signal range: `picture`'s;
+    - light: `picture`'s when `light_recorded`, else the draft's own (`light_kept`: the entry was
+      written before the Display had a light).
+    The test pattern is never restored (the session's ask stays). Every hardware code and software
+    setting whose draft value changed joins the touched sets (so Revert puts the display back),
+    `restored_from` becomes `entry_id`, and the lease is touched."""
     sequence = _next(session, expected_sequence, now)
     if entry_display_id != session.display_id:
         raise PictureRefused("other_display", 409)
     hardware = {code: value for code, value in picture.hardware.items() if edit_refusal(code, value, offered) is None}
     skipped = tuple(code for code in PICTURE_LIST if code in picture.hardware and code not in hardware)
-    entry_lut = picture.software.lut
-    lut_skipped = entry_lut is not None and not lut_listed
-    lut = (session.draft.software.lut if lut_skipped
-           else None if entry_lut is None else LutRef(entry_lut.profile_sha256, LUT_RECIPE_ID))
-    draft = DisplayPicture(_in_list_order(hardware), replace(picture.software, lut=lut), picture.signal_range)
     before = session.draft
+    draft = DisplayPicture(_in_list_order(hardware), picture.software, picture.signal_range,
+                           picture.light if light_recorded else before.light)
     touched_hardware = {code for code in {*before.hardware, *draft.hardware}
                         if before.hardware.get(code) != draft.hardware.get(code)}
-    touched_software: set[SoftwareTouch] = {
-        setting for setting, field in _SOFTWARE_FIELDS.items()
-        if getattr(before.software, field) != getattr(draft.software, field)}
-    if before.software.lut != draft.software.lut:
-        touched_software.add(SoftwareChoice.LUT)
+    touched_software = {setting for setting, field in _SOFTWARE_FIELDS.items()
+                        if getattr(before.software, field) != getattr(draft.software, field)}
     return PictureRestored(
         replace(session, sequence=sequence, draft=draft, touched_hardware=session.touched_hardware | touched_hardware,
                 touched_software=session.touched_software | touched_software, restored_from=entry_id,
                 lease=_touched(session, now)),
-        skipped, lut_skipped,
-        entry_lut is not None and not lut_skipped and entry_lut.recipe_id != LUT_RECIPE_ID)
+        skipped, not light_recorded)
 
 
 def idle_seconds(session: PictureSession) -> float:
@@ -517,9 +499,9 @@ def _in_list_order(hardware: Mapping[VcpCode, int]) -> dict[VcpCode, int]:
 
 
 __all__ = ["PICTURE_IDLE_SECONDS", "TEST_PATTERN_IDLE_SECONDS", "TEST_PATTERN_SECONDS", "DisplayPicture", "PictureRefused", "PictureSession",
-           "PictureRestored", "PictureStatus", "SoftwareChoice", "SoftwareSetting", "SoftwareTouch",
+           "PictureRestored", "PictureStatus", "SoftwareSetting", "SoftwareTouch",
            "TestPatternState", "answers",
-           "carries", "copied", "default_picture", "edited_hardware", "edited_lut", "edited_signal_range",
+           "carries", "copied", "default_picture", "edited_hardware", "edited_light", "edited_signal_range",
            "edited_software", "edited_test_pattern", "software_touch",
            "effective_picture", "hardware_answered", "idle_seconds", "kept_alive", "kept_picture", "picture_digest", "picture_document",
            "picture_status", "presented", "restore_answered", "restore_of", "restored", "reverted",

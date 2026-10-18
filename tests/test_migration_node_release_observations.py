@@ -12,6 +12,7 @@ import json
 
 import pytest
 from content_db import schema_before
+from test_node_boot import NOTHING_READY
 from test_node_release_ingest import node_upload
 
 from central.content_catalog.deployment import deployment_for_release, encode_node_deployment
@@ -67,7 +68,8 @@ def test_065_backfills_each_tag_from_its_newest_published_manifest(before_065):
     with db.transaction() as conn:
         rows = {row["tag"]: row for row in conn.execute(
             "SELECT * FROM node_release_observations").fetchall()}
-        policy = conn.execute("SELECT * FROM node_boot_policy").fetchone()
+        versions = conn.execute("SELECT * FROM player_versions").fetchall()
+        policy_kept = conn.execute("SELECT to_regclass('node_boot_policy') AS t").fetchone()["t"]
         wanted = wanted_deployments(conn)
     assert {tag: (row["manifest_sha256"], row["is_prerelease"]) for tag, row in rows.items()} == {
         "v2.0.0": (first.sha, False),  # the newest PUBLISHED manifest, not the newest catalogued
@@ -78,13 +80,11 @@ def test_065_backfills_each_tag_from_its_newest_published_manifest(before_065):
     assert all(row["problem"] is None and row["upstream_changed_at"] is None
                and row["upstream_asset_id"] is None for row in rows.values())
     assert rows["v2.0.0"]["observed_at"] == 1000
-    # The selection is untouched; no earlier selection is derivable, so no previous.
-    assert (policy["revision"], policy["deployment_id"], policy["previous_deployment_id"]) == (
-        3, first.deployment_id, None)
+    # The wall's selection went with migration 100; no Pi was enrolled, so no Pi keeps a version.
+    assert (versions, policy_kept) == ([], None)
     # The backfilled rows are what the code reads: the window and the release read.
     assert wanted.window == (("v2.1.0", no_app.deployment_id), ("v2.0.0", first.deployment_id))
     sessions = NodeSessions(db, ManualClock(5000.0), NodeControlConfig("node-test"))
-    releases = NodeReleaseCatalog(sessions).list()["releases"]
-    assert [(row["tag"], row["deployment_id"]) for row in releases] == [
-        ("v2.2.0-rc.1", str(rc.deployment_id)), ("v2.1.0", str(no_app.deployment_id)),
-        ("v2.0.0", str(first.deployment_id)), ("v1.5.0", str(flagged.deployment_id))]
+    releases = NodeReleaseCatalog(sessions, readiness=NOTHING_READY).view().releases
+    assert [(row.version, row.base_tag) for row in releases] == [
+        ("v2.2.0-rc.1", "v2.2.0-rc.1"), ("v2.1.0", "v2.1.0"), ("v2.0.0", "v2.0.0"), ("v1.5.0", "v1.5.0")]

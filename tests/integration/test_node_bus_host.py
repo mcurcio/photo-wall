@@ -1,23 +1,35 @@
-"""HostCore on the Node's bus (E3c S4; E3b design §7.3, §9.5; errata E-E3C-CUT-2, -3).
+"""HostCore on the Node's bus (E3c S4; E3b design §7.3, §9.5; errata E-E3C-CUT-2, -3), and the Node's
+read-only door on the home network (0017 C3, the Home Assistant system design).
 
 The host component's session declares the host line and writes `birth` and `base` at every attach, so
 a bus killed with SIGKILL (it restarts empty: the memory store) holds both again in a new epoch with
 no help from Central. That the installed HostCore launcher imports its session from the package
 directories its PATH names, with python3-nats, is tests/debs/test_node_package.py's (decision 0019).
+
+The door: a client on the shipped configuration's WebSocket listener with no credentials reads
+HostCore's `base` by one stored-message get and sees the bus's server name; the server refuses its
+writes (a key put, a stream delete or purge) and the stored value stands; the local user is refused
+there.
 """
 from __future__ import annotations
 
 import asyncio
+import json
 
 import nats.errors
-from integration.bus_servers import hub_server, local, node_server, until
+import pytest
+from integration.bus_servers import door, door_get, hub_server, local, node_server, until
 from nats.js.errors import NotFoundError
 from node_pid1_bus_probe import host_state
 
 from appliance.host.bus import HOST_SLICE, host_session
+from contracts.node_link import NODE_DOOR_API_PREFIX, bus_server_name
+from contracts.node_state import HostBase, decode_host_base
 
 SERIAL = "serial-h"
 RECORDS = "RECORD_host"
+STATE = "KV_state_host"
+BASE_SUBJECT = "$KV.state_host.base"
 BASE_TAG = "base-test"
 
 
@@ -72,3 +84,72 @@ def test_the_host_component_writes_birth_and_refills_it_after_a_bus_crash(tmp_pa
         session.stop()
         node.stop()
 
+
+def test_the_door_reads_the_pis_values_and_refuses_every_write(tmp_path):
+    """Mutation probes: widen reader's publish allow to ">" -> the writes are not refused; drop
+    `allowed_connection_types` from `local` -> local over the door is admitted."""
+    node = node_server(tmp_path, SERIAL, hub_server(tmp_path, [SERIAL]))   # its hub is never started
+    node.start()
+    session = host_session(BASE_TAG, url=node.client_url)
+    session.start()
+
+    async def run():
+        await until(lambda: _held(node), 10, "the host's birth and base")
+        refused: list[Exception] = []
+
+        async def on_error(error: Exception) -> None:
+            refused.append(error)
+
+        reader = await door(node, error_cb=on_error)
+        try:
+            # It reached the Pi it meant: the door's INFO names the bus.
+            assert reader._server_info["server_name"] == bus_server_name(SERIAL)
+            base = await door_get(reader, STATE, BASE_SUBJECT)
+            assert base is not None and decode_host_base(base) == HostBase(base_tag=BASE_TAG)
+
+            writes = ((BASE_SUBJECT, b'{"base_tag":"forged"}'), (f"$JS.API.STREAM.DELETE.{STATE}", b""),
+                      (f"$JS.API.STREAM.PURGE.{STATE}", b""))
+            for subject, payload in writes:
+                await reader.publish(subject, payload)
+            await reader.flush()
+
+            async def all_refused():
+                return len(refused) >= len(writes)
+            await until(all_refused, 5, "the server refusing every write through the door")
+            assert all("permissions violation" in str(error).lower() for error in refused), refused
+            assert sorted(next(subject for subject, _ in writes if subject.lower() in str(error)) for error in refused) == \
+                sorted(subject for subject, _ in writes)
+            assert decode_host_base(await door_get(reader, STATE, BASE_SUBJECT)) == HostBase(base_tag=BASE_TAG)
+
+            # A confused deputy: the one allowed request, its reply named as a stored key or a local
+            # program's subject. The reply lands in the reader's own account, never in API.
+            program = await local(node)
+            heard = []
+
+            async def hear(message):
+                heard.append(message.subject)
+            await program.subscribe("probe.heard", cb=hear)
+            await program.flush()
+            ask = json.dumps({"last_by_subj": BASE_SUBJECT}).encode()
+            for reply in (BASE_SUBJECT, "probe.heard"):
+                await reader.publish(f"{NODE_DOOR_API_PREFIX}.STREAM.MSG.GET.{STATE}", ask, reply=reply)
+            await reader.flush()
+            # One more round trip on the same connection: the server has answered both by now.
+            assert decode_host_base(await door_get(reader, STATE, BASE_SUBJECT)) == HostBase(base_tag=BASE_TAG)
+            await program.flush()
+            assert heard == []
+            await program.close()
+        finally:
+            await reader.close()
+        held = await _held(node)
+        assert held is not None and held["base"] == {"base_tag": BASE_TAG}
+
+        # The local user is admitted only on the loopback client port.
+        with pytest.raises((nats.errors.Error, OSError)):
+            await door(node, user="local", password="local")
+
+    try:
+        asyncio.run(run())
+    finally:
+        session.stop()
+        node.stop()

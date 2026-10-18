@@ -17,37 +17,24 @@ import { usePolledRead } from "./polledRead.js";
  * @typedef {import("./pictureApi.js").TestPattern} TestPattern
  * @typedef {import("./pictureApi.js").VcpCode} VcpCode
  * @typedef {{id: string, name: string}} DisplayRefView   A Display by id and its name today.
- * @typedef {{id: string, name: string}} FrameRefView   A Frame by id and its name today.
+ * @typedef {import("./generated/contract").FrameRefView} FrameRefView
  * @typedef {"kept-done"|"kept-copied"|"kept-unrecorded"|"sent-draft"|"sent-back"|"sent-kept"} PictureEntryKind
  *   Why an entry was written: kept by Done, by Copy from another display, or found changed outside
  *   Photo Wall; sent as a session's draft (not kept), put back by Revert or a lapse, or the kept
  *   values sent anew.
+ * @typedef {import("./generated/contract").LightView} DisplayLightView
  * @typedef {{hardware: Record<VcpCode, number>, software: SoftwarePictureView, signal_range: SignalRange,
- *            lut_recipe_id: string|null}} PictureValuesView
+ *            light: DisplayLightView}} PictureValuesView
  *   The hardware codes set in Photo Wall (a code absent is "as the display has it"), the Photo Wall
- *   values, the signal range, and the recipe its LUT was made with then (null: no LUT).
+ *   values, the signal range and the Display's light.
  * @typedef {{entry_id: string, display: DisplayRefView, kind: PictureEntryKind, number: number, at: string,
  *            frame: FrameRefView|null, session_id: string|null, restored_from: string|null,
  *            picture: PictureValuesView, test_pattern: TestPattern|null}} PictureEntryView
  * @typedef {{display: DisplayRefView, unrecorded_change: boolean, entries: PictureEntryView[]}} PictureHistoryView
  *   Newest first by `at`, then number. `unrecorded_change`: the display's stored values differ from
  *   its newest kept entry.
- * @typedef {"kept-saved"|"kept-profile-changed"|"kept-unrecorded"|"sent-draft"|"sent-back"} PositionEntryKind
- *   Why a Position entry was written: kept by Done, kept when the Frame's screen size changed, found
- *   changed outside Photo Wall; a trial's draft handed to the Pi (not kept), or the kept values handed
- *   back once a draft went.
- * @typedef {"other_frame"|"made_for_other_profile"|"made_for_other_display"} PositionRestoreRefusal
- * @typedef {import("./useDraft.js").Fit} Fit
- * @typedef {import("./useDraft.js").Mat} Mat
- * @typedef {{profile_px: {width: number, height: number}, display_id: string|null}} MadeForView
- *   The profile an entry's corners are in, and the Display seen on the Frame's port then.
- * @typedef {{entry_id: string, frame: FrameRefView, kind: PositionEntryKind, number: number, at: string,
- *            session_id: string|null, restored_from: string|null, fit: Fit, mat: Mat, made_for: MadeForView,
- *            restore_refusal: PositionRestoreRefusal|null}} PositionEntryView
- *   `restore_refusal`: what Restore would answer for it on this Frame now (null: it may be restored).
- * @typedef {{frame: FrameRefView, unrecorded_change: boolean, entries: PositionEntryView[]}} PositionHistoryView
- *   Newest first by `at`, then number. `unrecorded_change`: the Frame's stored fit and mat differ
- *   from its newest kept entry.
+ * @typedef {import("./generated/contract").PositionHistoryView} PositionHistoryView   A Frame's
+ *   Position history, Central's shape (central/fleet/position_views.py).
  */
 
 /**
@@ -83,7 +70,7 @@ export function readPictureHistory(displayId, { before, limit } = {}) {
 }
 
 /**
- * One Frame's Position history (fit, corners, rotation, mat and lights), newest first (GET
+ * One Frame's Position history (fit, corners, rotation and lighting), newest first (GET
  * …/frames/{id}/position-history); `before` and `limit` as `readPictureHistory`.
  *
  * @param {string} frameId

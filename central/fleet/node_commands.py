@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, replace
 from hashlib import sha256
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from central.fleet.device_fence import fence_in
 from central.fleet.node_sessions import (
@@ -118,6 +118,24 @@ class NodeCommands:
             if final_now >= expires_at:
                 raise NodeControlError("node_reboot_expired", 410)
             return {"command": json.loads(payload), "duplicate": False, "effect_established": False}
+
+    def reboot_for_install(self, device_id: str, *, audit_ref: str) -> None:
+        """Reboot the Pi onto its new version (central/infra/player_versions.py): a RebootRequest on
+        its current operator_reboot session (HostCore's, of its current boot), with Central-chosen
+        ids. NodeControlError("node_reboot_session_unavailable", 403) when it has none (the install
+        stays restarting; the Pi's next boot takes the version anyway)."""
+        with self.sessions.db.read_snapshot() as conn:
+            row = conn.execute("SELECT s.session_id,s.device_generation FROM node_sessions s "
+                               "JOIN node_producers p USING(producer_id) "
+                               "JOIN node_boot_admissions b USING(admission_id) "
+                               "WHERE s.device_id=%s AND s.scope='operator_reboot' AND s.revoked_at IS NULL "
+                               "AND b.superseded_at IS NULL AND s.expires_at>%s "
+                               "ORDER BY s.issued_at DESC LIMIT 1",
+                               (device_id, self.sessions.clock.utc())).fetchone()
+        if row is None:
+            raise NodeControlError("node_reboot_session_unavailable", 403)
+        self.request_reboot(device_id, OperatorReboot(uuid4(), row["session_id"], row["device_generation"],
+                                                      audit_ref))
 
     def poll(self, session_id: UUID, credential: str) -> dict:
         with self.sessions.db.transaction() as conn:

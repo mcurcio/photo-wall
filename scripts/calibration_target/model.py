@@ -289,14 +289,13 @@ class PreSoftwareSuggestion:
 
 @dataclass(frozen=True)
 class PostSoftwareSuggestion:
-    """The software picture to try: the entry's, with only brightness, contrast, colour temperature
-    and gamma moved, each away from neutral only when that moves the readings by more than
-    KEEP_SPREADS of their spread. `no_change` only when `to` equals the entry's software picture
-    AND the white level, white colour and tone are each proven matched to the aim (`judged`
-    MATCHED); `to` equal to the entry's with `no_change` false: not proven (`retake`, `unsure`, or a
-    gap the four cannot close, pre-software work). `unsure`: the properties held at the entry's
-    values because raising them would be within angle_dimming (WHITE_LEVEL: brightness; take the
-    photo squarer). `retake`: the properties whose spread is too wide to tell a match from a gap
+    """The software picture to try: the entry's contrast, colour temperature and gamma, each moved
+    away from neutral only when that moves the readings by more than KEEP_SPREADS of their spread.
+    `no_change` only when `to` equals the entry's software picture AND the white level, white
+    colour and tone are each proven matched to the aim (`judged` MATCHED); `to` equal to the
+    entry's with `no_change` false: not proven (`retake`, `unsure`, or a gap the three cannot
+    close, pre-software work). `unsure`: the properties held at the entry's values because raising
+    them would be within angle_dimming (WHITE_LEVEL: contrast; take the photo squarer). `retake`: the properties whose spread is too wide to tell a match from a gap
     (`judged` UNDECIDED): retake the photo. Each empty otherwise."""
     to: SoftwarePicture
     no_change: bool
@@ -305,7 +304,6 @@ class PostSoftwareSuggestion:
 
 
 class SuggestionRefusal(StrEnum):
-    LUT_UNREAD = "lut-unread"               # post-software with a LUT whose table could not be read
     TONE_UNREAD = "tone-unread"             # post-software with no grey read (a normal photo, or every
                                             # grey dropped): the display's response is unknown
 

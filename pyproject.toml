@@ -49,6 +49,10 @@ dev = [
     # the sRGB transfer function and colour profiles' maths (the reader and its tests only).
     "scipy==1.18.1",
     "colour-science==0.4.7",
+    # nats-py's WebSocket transport, for the tests that reach a door as Home Assistant does: Central's
+    # door through its origin and a Pi's read-only door (the Home Assistant system design, 2026-10-16).
+    # Home Assistant ships its own aiohttp; nothing of Photo Wall's runs it.
+    "aiohttp==3.12.15",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -106,7 +110,8 @@ select = ["E4", "E7", "E9", "F", "I", "TID251"]
 "scripts/uplink_device_harness.py" = ["TID251"]
 
 [tool.importlinter]
-root_packages = ["central", "contracts", "media", "player", "appliance", "uplink", "nodeapi"]
+root_packages = ["central", "contracts", "media", "player", "appliance", "uplink", "nodeapi",
+                 "custom_components.galleria"]
 include_external_packages = true
 
 [[tool.importlinter.contracts]]
@@ -144,7 +149,8 @@ name = "Kernel, origins and domains have no persistence, queue or HTTP-framework
 type = "forbidden"
 source_modules = ["central.kernel", "central.origins", "central.content_catalog",
                   "central.assets", "central.health", "central.displays", "central.photo_library",
-                  "central.wall_plan", "central.house_time", "central.power", "central.why"]
+                  "central.wall_plan", "central.house_time", "central.power", "central.why",
+                  "central.room_light", "central.frame_lighting"]
 forbidden_modules = ["procrastinate", "psycopg", "psycopg_pool", "fastapi", "starlette"]
 
 [[tool.importlinter.contracts]]
@@ -210,6 +216,44 @@ type = "forbidden"
 source_modules = ["central.why"]
 forbidden_modules = ["media", "httpx", "nodeapi", "central.infra", "central.db", "central.registry",
                      "central.app", "central.coordination", "central.planner"]
+
+[[tool.importlinter.contracts]]
+# Which room lights and Sensors exist, who reports each and the room-lights document are pure, and
+# know no reporting source: the hub, the bus and PostgreSQL are reached through central/infra.
+name = "Room lights are pure"
+type = "forbidden"
+source_modules = ["central.room_light"]
+forbidden_modules = ["media", "httpx", "nodeapi", "central.infra", "central.db",
+                     "central.registry", "central.app", "central.coordination", "central.planner",
+                     "central.displays", "central.fleet", "central.frame_lighting"]
+
+[[tool.importlinter.contracts]]
+# A Frame's lighting rules are pure; the house is read through its port, under the room-lights lock.
+# They read room lights' vocabulary; room lights never import them ("Room lights are pure").
+name = "Frame lighting is pure"
+type = "forbidden"
+source_modules = ["central.frame_lighting"]
+forbidden_modules = ["media", "httpx", "nodeapi", "central.infra", "central.db",
+                     "central.registry", "central.app", "central.coordination", "central.planner",
+                     "central.displays", "central.fleet"]
+
+[[tool.importlinter.contracts]]
+# The adapter is reached only from Central's hub wiring (the listener), Central's state on its hub
+# (the source it listens to), the API's composition root, the Home Assistant settings page's routes,
+# and the console contract's export of its source name.
+name = "Only the worker's wiring reaches the Home Assistant adapter"
+type = "protected"
+protected_modules = ["central.infra.home_assistant"]
+allowed_importers = ["central.node_bus_wiring", "central.infra.central_state", "central.app",
+                     "central.home_assistant_routes", "central.console_contract"]
+
+[[tool.importlinter.contracts]]
+# Fleet and the registry write a Frame's lighting through central/frame_lighting's port, never the
+# house's tables.
+name = "Fleet and the registry reach the house's lighting only through its port"
+type = "forbidden"
+source_modules = ["central.fleet", "central.registry"]
+forbidden_modules = ["central.infra.room_light_store", "central.infra.paper_profile_store"]
 
 [[tool.importlinter.contracts]]
 # Power and the week: sun times and the IANA zone database are Central's house-time calculator's;
@@ -334,6 +378,17 @@ name = "The base never imports the guest"
 type = "forbidden"
 source_modules = ["appliance"]
 forbidden_modules = ["player"]
+
+[[tool.importlinter.contracts]]
+# Galleria, the Home Assistant integration (custom_components/galleria), ships through HACS on its own:
+# it imports no package of this repository at runtime and takes every name, key and shape from its
+# generated copy (custom_components/galleria/contract.py, held by a check test). It is the one NATS
+# client outside nodeapi, because it cannot import nodeapi; the contract below binds the repo's own
+# programs, which it does not list.
+name = "Galleria imports no package of this repository"
+type = "forbidden"
+source_modules = ["custom_components.galleria"]
+forbidden_modules = ["central", "contracts", "media", "player", "appliance", "uplink", "nodeapi"]
 
 [[tool.importlinter.contracts]]
 # The Node API library (nodeapi, created by E3) is the one NATS client (node redesign r3 §3.3.4).

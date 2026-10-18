@@ -111,6 +111,28 @@ jobs:
           PHOTO_WALL_BUS_FENCE_STALL_SECONDS: '60'
         run: .venv/bin/python -m pytest -q -s --tb=short tests/integration/test_bus_memory_fence.py
 
+  # Galleria, the Home Assistant integration (custom_components/galleria), in its own environment:
+  # Home Assistant's test harness (galleria_tests/requirements.txt) on the CPython Home Assistant
+  # needs (3.13, uv-managed), apart from the repository's lock; its door tests on the pinned
+  # nats-server. The repository-side check of its generated contract (tests/test_galleria_contract.py)
+  # is a unit test and runs in the unit leg.
+  galleria:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: ./.github/actions/python-uv
+      - name: Fetch the pinned nats-server
+        run: |
+          binary=$(python3 scripts/nats_server.py fetch --dest "$RUNNER_TEMP/nats")
+          echo "PHOTO_WALL_NATS_SERVER=$binary" >> "$GITHUB_ENV"
+      - name: Galleria's test environment
+        run: |
+          uv venv --python 3.13 "$RUNNER_TEMP/galleria-venv"
+          uv pip install --python "$RUNNER_TEMP/galleria-venv/bin/python" -r galleria_tests/requirements.txt
+      - name: Run Galleria's tests
+        run: '"$RUNNER_TEMP/galleria-venv/bin/python" -m pytest -q --tb=short --durations=10 galleria_tests'
+
   # Central's bus tests start real hubs and Nodes (E-E3D-CC1-3).
   db:
     runs-on: ubuntu-24.04

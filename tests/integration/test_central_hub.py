@@ -17,6 +17,7 @@ a reload keeps it), its links stop, and its records stay.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import time
 import urllib.request
@@ -53,14 +54,27 @@ ENROL_SECONDS = 10
 RESTART_SECONDS = 60   # a Node's WALL mirror resumes up to about a minute after a hub outage (E-E3B-FR1)
 
 
-class _WallDocuments:
-    """Central's wall documents (`central.infra.node_link_store.WallDocuments`), as E5/E8 will hold them."""
+class _TimingWall:
+    """The "timing" key's one writer, as each wall key has one (central/node_bus_wiring.py
+    RoomLightsWall): it puts its value whenever WALL is ensured (`PgWallMarks` wakes it) and on every
+    recheck; WallWriter itself never writes a document."""
 
     def __init__(self, timing: bytes) -> None:
         self.timing = timing
+        self._woken = asyncio.Event()
 
-    async def wall_documents(self) -> dict[str, bytes]:
-        return {"timing": self.timing}
+    def wake(self) -> None:
+        self._woken.set()
+
+    async def run(self, stop: asyncio.Event, fleet: FleetHub) -> None:
+        while not stop.is_set():
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(self._woken.wait(), 1.0)
+            self._woken.clear()
+            writer = fleet.wall
+            if writer is not None:
+                with contextlib.suppress(Exception):   # the hub away: the next recheck puts it
+                    await writer.put("timing", self.timing)
 
 
 def _enrol(db: Database, serial: str) -> None:
@@ -126,12 +140,12 @@ def test_fleet_keeps_the_hub_with_the_enrolled_set(database, tmp_path):
     display = line_slices()["display"]
     sessions = {serial: NodeSession("display", display, RELEASE, url=nodes[serial].client_url, reads_wall=True)
                 for serial in (FIRST, SECOND)}
-    documents = _WallDocuments(b"timing-1")
+    documents = _TimingWall(b"timing-1")
     stores = PgLinkStores(database)
     projection = Projection()
     links = [NodeLinks(pipe, hub.client_url, stores, projection) for pipe in (Pipe.FLEET, Pipe.SHOW)]
     fleet = FleetHub(database, hub.client_url, config_path, listeners, WALL_TABLE,
-                     PgWallMarks(database, documents), links)
+                     PgWallMarks(database, documents.wake), links)
 
     def walled(serial: str, value: bytes):
         async def check():
@@ -145,7 +159,8 @@ def test_fleet_keeps_the_hub_with_the_enrolled_set(database, tmp_path):
 
     async def run() -> None:
         stop = asyncio.Event()
-        running = [asyncio.create_task(fleet.run(stop)), *(asyncio.create_task(link.run(stop)) for link in links)]
+        running = [asyncio.create_task(fleet.run(stop)), asyncio.create_task(documents.run(stop, fleet)),
+                   *(asyncio.create_task(link.run(stop)) for link in links)]
         try:
             # 1. Worker start: the file appears for the enrolled Node; the hub starts from it.
             async def written():

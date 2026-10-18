@@ -1,10 +1,10 @@
 """The Position tab's History (configuration snapshots K2; owner, 2026-10-13: "configuration
 snapshots" that keep "a history of what has been done in the past", scope "Everything per
-Display+Frame", used to "View and restore"): the Frame's kept and tried positions, mats and lights
-with their times, and Restore into the live draft (he still presses Done).
+Display+Frame", used to "View and restore"): the Frame's kept and tried positions and lighting
+(decision 0028) with their times, and Restore into the live draft (he still presses Done).
 
-As in test_frame_mat_browser.py, a real session needs a Node presenting it, so a fake Central
-answers the session routes with Central's rules (`MatSessions`); this one adds what Central's trial
+As in test_frame_lighting_browser.py, a real session needs a Node presenting it, so a fake Central
+answers the session routes with Central's rules (`LightingSessions`); this one adds what Central's trial
 owner does for the history (central/fleet/node_calibration.py): every exchange records what it hands
 the Pi through the real store (`position_history_store.record_sent_in`, as `deliver_in` does), and a
 Restore is answered with Central's own rules (`position_entry_in`, `restore_refusal`,
@@ -34,9 +34,18 @@ import pytest
 from console_tasks import open_frame
 from operator_harness import operator_server, sign_in
 from playwright.sync_api import expect
-from test_console_frame_page_browser import FRAME, OVERTAKEN, PRESENTED, SAVED_X, _bar, _move, _seed
+from test_console_frame_page_browser import (
+    FRAME,
+    OVERTAKEN,
+    PRESENTED,
+    SAVED_X,
+    _bar,
+    _move,
+    _seed,
+    _top_left_field,
+)
 from test_display_identity import _sql
-from test_frame_mat_browser import MatSessions, _mat, _saved_mat
+from test_frame_lighting_browser import LightingSessions, lighting_group, saved_lighting
 
 from central.fleet.position_history import (
     PositionValues,
@@ -50,7 +59,8 @@ from central.infra.position_history_store import (
     position_entry_in,
     record_sent_in,
 )
-from contracts.models import Calibration, Mat
+from contracts.frame_lighting import FrameLighting
+from contracts.models import Calibration
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("PHOTO_WALL_BROWSER_TESTS") != "1",
@@ -61,11 +71,12 @@ KEPT = "Kept (Done)"
 TRIED = "Tried, not kept"
 
 
-class HistorySessions(MatSessions):
-    """MatSessions that record what each exchange hands the Pi and answer Restore as Central does."""
+class HistorySessions(LightingSessions):
+    """LightingSessions that record what each exchange hands the Pi and answer Restore as Central does."""
 
     def _values(self):
-        return PositionValues(Calibration.model_validate(self.row["calibration"]).fit, Mat.model_validate(self.row["mat"]))
+        return PositionValues(Calibration.model_validate(self.row["calibration"]).fit,
+                              FrameLighting.model_validate(self.row["lighting"]))
 
     def _answer(self, route):
         if route.request.url.endswith("/restores"):
@@ -82,7 +93,7 @@ class HistorySessions(MatSessions):
         trial = TrialHanded(self._values(), UUID(self.row["trial_id"]),
                             None if restored is None else UUID(restored)) if active else None
         with self.registry.db.transaction() as conn:
-            record_sent_in(conn, FRAME, trial=trial, saved=position_values(saved.calibration, saved.mat))
+            record_sent_in(conn, FRAME, trial=trial, saved=position_values(saved.calibration, saved.lighting))
 
     def _restore(self, route):
         body = route.request.post_data_json
@@ -105,8 +116,8 @@ class HistorySessions(MatSessions):
         if body["expected_sequence"] != self.row["sequence"]:
             route.fulfill(status=409, json={"error": "trial_sequence_conflict"})
             return
-        calibration, mat = restored_draft(entry, base_revision=self.row["calibration_revision"])
-        self._draft_mat = mat.model_dump(mode="json")
+        calibration, lighting = restored_draft(entry, base_revision=self.row["calibration_revision"])
+        self._draft = lighting.model_dump(mode="json")
         self.row.update(sequence=self.row["sequence"] + 1, calibration=calibration.model_dump(mode="json"),
                         restored_from=str(entry.entry_id))
         self._candidate()
@@ -159,7 +170,7 @@ def _done(page):
 
 
 def _depth(page):
-    return _mat(page).get_by_role("slider", name="Depth", exact=True)
+    return lighting_group(page).get_by_role("slider", name="Mat depth", exact=True)
 
 
 def _top_left(calibration):
@@ -191,20 +202,23 @@ def test_a_tried_and_a_kept_position_are_listed_and_restore_puts_the_kept_one_ba
         [done] = seen["done"]
         assert any(done <= at <= done + 0.25 for at in seen["reads"]), (done, seen["reads"])
 
+        open_frame(page, FRAME, "lighting")  # the mat is the Lighting tab's; the session and History stay
         _depth(page).fill("6")
-        expect(_mat(page)).to_contain_text("6.0 mm")
-        expect(_rows(page, TRIED).first).to_contain_text("Mat depth 6.0 mm")
+        expect(lighting_group(page)).to_contain_text("6 mm")
+        expect(_rows(page, TRIED).first).to_contain_text("Mat depth 6 mm")
         expect(_rows(page, TRIED).first).not_to_contain_text("Top-left")
 
         _rows(page, KEPT).last.get_by_role("button", name="Restore", exact=True).click()
         expect(_depth(page)).to_have_value("0")
+        open_frame(page, FRAME, "position")
+        field = _top_left_field(page)   # the tab was left: Exact values opens again
         expect(field).to_have_value(str(SAVED_X))
         page.wait_for_timeout(600)  # the loop's next exchanges: the restored draft stays what the Pi is handed
-        assert (_top_left(sessions.row["calibration"]), sessions.row["mat"]["depth_mm"]) == (SAVED_X, 0)
+        assert (_top_left(sessions.row["calibration"]), sessions.row["lighting"]["mat_depth_mm"]) == (SAVED_X, 0)
         _done(page)
         expect(_rows(page, KEPT)).to_have_count(3)
         saved = next(frame for frame in registry.inventory().frames if frame.id == FRAME)
-        assert (round(saved.calibration.fit.corners[0][0] * 1920), saved.mat.depth_mm) == (SAVED_X, 0)
+        assert (round(saved.calibration.fit.corners[0][0] * 1920), saved.lighting.mat_depth_mm) == (SAVED_X, 0)
 
 
 def test_a_position_made_for_another_screen_size_cannot_be_restored_and_says_why(page, registry, sessions):
@@ -235,15 +249,16 @@ def test_a_restored_draft_keeps_its_base_so_a_save_made_elsewhere_still_stops_it
         expect(_rows(page, TRIED)).to_have_count(1)
         _save_elsewhere(registry)
 
+        open_frame(page, FRAME, "lighting")
         _depth(page).fill("4")
-        expect(_rows(page, TRIED).first).to_contain_text("Mat depth 4.0 mm")
+        expect(_rows(page, TRIED).first).to_contain_text("Mat depth 4 mm")
         _rows(page, TRIED).last.get_by_role("button", name="Restore", exact=True).click()
         expect(_depth(page)).to_have_value("0")
         bar = _bar(page)
         expect(bar.get_by_role("status")).to_have_text(PRESENTED)
         bar.get_by_role("button", name="Done", exact=True).click()
         expect(page.get_by_role("alert")).to_contain_text(OVERTAKEN)
-        assert round(_saved_mat(registry).depth_mm) == 0
+        assert round(saved_lighting(registry).mat_depth_mm) == 0
         saved = next(frame for frame in registry.inventory().frames if frame.id == FRAME).calibration
         assert round(saved.fit.corners[0][0] * 1920) == ELSEWHERE_X
 
@@ -270,8 +285,9 @@ def test_one_sessions_tries_show_as_one_run_whose_earlier_tries_open_on_request(
         expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
         _move(page, 3)
         expect(_rows(page, TRIED)).to_have_count(1)
+        open_frame(page, FRAME, "lighting")
         _depth(page).fill("4")
-        expect(_rows(page, TRIED).first).to_contain_text("Mat depth 4.0 mm")
+        expect(_rows(page, TRIED).first).to_contain_text("Mat depth 4 mm")
         expect(_rows(page, TRIED)).to_have_count(1)
         earlier = _history(page).get_by_role("button", name="Show 1 earlier try from this session")
         expect(earlier).to_have_attribute("aria-expanded", "false")

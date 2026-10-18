@@ -4,12 +4,16 @@ from dataclasses import replace
 from uuid import uuid4
 
 import pytest
+from pydantic import TypeAdapter
+from support.position import LIGHTING
 from test_node_runtime_reconciliation import rig
 
-from central.fleet.node_calibration import NodeCalibration
+from central.fleet.node_calibration import NodeCalibration, TrialBegin, TrialOperation
 from central.fleet.node_display import NodeDisplay
 from central.fleet.node_sessions import NodeControlError
-from contracts.models import Calibration, CornersFit, CoverFit, Mat
+from central.frame_lighting.paper_profiles import LUT_RECIPE_ID
+from central.infra.frame_lighting_store import PgFrameLighting
+from contracts.models import Calibration, CornersFit, CoverFit
 from contracts.node_calibration import candidate_hash, canonical, parse_trial
 from contracts.node_display import (
     DisplayExchange,
@@ -23,7 +27,20 @@ from player.rendering import OutputComposition
 
 SKEWED = CornersFit(corners=((0.1, 0), (1, 0), (1, 1), (0, 1)))   # Corners, top-left moved in
 TURNED = CoverFit(rotation=7)                                      # Cover at a fine angle
-NO_MAT = Mat().model_dump(mode="json")                             # an edit carries the whole draft mat
+LIGHTING_JSON = LIGHTING.model_dump(mode="json")                   # an edit carries the whole draft lighting
+
+
+_OPERATION: TypeAdapter[TrialOperation] = TypeAdapter(TrialOperation)
+
+
+def operate(trials, frame_id, trial_id, **body):
+    """One trial operation from its body's fields (`TrialOperation`)."""
+    return trials.operate(frame_id, trial_id, _OPERATION.validate_python(body))
+
+
+def begin(trials, frame_id, calibration=None, lighting=None):
+    """Begin a trial at the saved values or the given drafts (`TrialBegin`)."""
+    return trials.begin(frame_id, TrialBegin.model_validate({"calibration": calibration, "lighting": lighting}))
 
 
 def setup_trial(registry):
@@ -33,7 +50,7 @@ def setup_trial(registry):
         fact.output, fact.process, fact.app_epoch, fact.binding_generation, fact.config_revision, fact.frame_id
     )
     display = NodeDisplay(sessions, runtime=coordinator)
-    trials = NodeCalibration(sessions, display=display, registry=registry)
+    trials = NodeCalibration(sessions, display=display, registry=registry, lighting=PgFrameLighting(LUT_RECIPE_ID))
     display.trials = trials
     receipt = DisplayReceipt(surface, uuid4(), "weston-100", "baseline", 1400)
     request = DisplayExchange(
@@ -51,24 +68,24 @@ def setup_trial(registry):
 
 def test_latest_exact_ack_and_atomic_save_retry(registry, monkeypatch):
     trials, request, exchange = setup_trial(registry)
-    row = trials.begin("node-f0")
+    row = begin(trials, "node-f0")
     trial_id = __import__("uuid").UUID(row["trial_id"])
     with pytest.raises(NodeControlError, match="latest_not_presented"):
-        trials.operate("node-f0", trial_id, operation="save", expected_sequence=1)
+        operate(trials, "node-f0", trial_id, operation="save", expected_sequence=1)
     edited = Calibration.model_validate(row["calibration"]).model_copy(update={"fit": SKEWED})
-    row = trials.operate(
+    row = operate(trials, 
         "node-f0",
         trial_id,
         operation="edit",
         expected_sequence=1,
         calibration=edited.model_dump(mode="json"),
-        mat=NO_MAT,
+        lighting=LIGHTING_JSON,
     )
     request = replace(request, request_id=uuid4(), sampled_boottime_ms=1500)
     candidate = parse_trial(exchange(request).trial)
     assert candidate.sequence == 2 and candidate.candidate_sha256 == row["candidate_sha256"]
     with pytest.raises(NodeControlError, match="latest_not_presented"):
-        trials.operate("node-f0", trial_id, operation="save", expected_sequence=2)
+        operate(trials, "node-f0", trial_id, operation="save", expected_sequence=2)
     request = replace(
         request,
         request_id=uuid4(),
@@ -88,24 +105,24 @@ def test_latest_exact_ack_and_atomic_save_retry(registry, monkeypatch):
 
     monkeypatch.setattr(registry, "commit_calibration_trial_in", failed)
     with pytest.raises(ValueError, match="fixture_save_failure"):
-        trials.operate("node-f0", trial_id, operation="save", expected_sequence=2)
+        operate(trials, "node-f0", trial_id, operation="save", expected_sequence=2)
     assert (
-        trials.operate("node-f0", trial_id, operation="status", expected_sequence=2)["state"]
+        operate(trials, "node-f0", trial_id, operation="status", expected_sequence=2)["state"]
         == "active"
     )
     monkeypatch.setattr(registry, "commit_calibration_trial_in", original)
-    saved = trials.operate("node-f0", trial_id, operation="save", expected_sequence=2)
+    saved = operate(trials, "node-f0", trial_id, operation="save", expected_sequence=2)
     assert saved["state"] == "saved" and Calibration.model_validate(saved["saved_calibration"]).fit == SKEWED
     assert saved["saved_calibration"]["revision"] == edited.revision + 1
     assert (
-        trials.operate("node-f0", trial_id, operation="save", expected_sequence=2)["state"]
+        operate(trials, "node-f0", trial_id, operation="save", expected_sequence=2)["state"]
         == "saved"
     )
 
 
 def test_local_terminal_expiry_rejects_delayed_trial_and_canonical_output_primitives(registry):
     trials, request, exchange = setup_trial(registry)
-    row = trials.begin("node-f0")
+    row = begin(trials, "node-f0")
     request = replace(request, request_id=uuid4(), sampled_boottime_ms=1500)
     candidate = parse_trial(exchange(request).trial)
     binding = trials.display.installation.configuration_in
@@ -121,7 +138,7 @@ def test_local_terminal_expiry_rejects_delayed_trial_and_canonical_output_primit
         calibration_json=raw,
         candidate_sha256=candidate_hash(
             candidate.trial_id, candidate.generation, candidate.sequence, candidate.baseline, raw,
-            candidate.mat_json,
+            candidate.lighting,
         ),
     )
     from contracts.node_calibration import encode_trial
@@ -152,7 +169,7 @@ def test_local_terminal_expiry_rejects_delayed_trial_and_canonical_output_primit
         is None
     )
     registry.clock.advance(6)
-    expired = trials.operate("node-f0", candidate.trial_id, operation="status", expected_sequence=1)
+    expired = operate(trials, "node-f0", candidate.trial_id, operation="status", expected_sequence=1)
     assert expired["state"] == "expired"
 
 
@@ -194,7 +211,7 @@ def test_keepalive_slides_the_idle_deadline_up_to_the_hard_one(registry):
 
     Mutation: make `keepalive` answer like `status` -> at 8 s the Node is handed no trial."""
     trials, request, exchange = setup_trial(registry)
-    row = trials.begin("node-f0")
+    row = begin(trials, "node-f0")
     trial_id = __import__("uuid").UUID(row["trial_id"])
     began = registry.clock.utc()
 
@@ -207,7 +224,7 @@ def test_keepalive_slides_the_idle_deadline_up_to_the_hard_one(registry):
 
     first = sample()
     registry.clock.advance(4)
-    kept = trials.operate("node-f0", trial_id, operation="keepalive", expected_sequence=1)
+    kept = operate(trials, "node-f0", trial_id, operation="keepalive", expected_sequence=1)
     assert kept["state"] == "active" and kept["sequence"] == 1
     assert kept["candidate_sha256"] == row["candidate_sha256"]
     registry.clock.advance(4)  # 8 s since begin: past the 5 s idle window it began with
@@ -215,7 +232,7 @@ def test_keepalive_slides_the_idle_deadline_up_to_the_hard_one(registry):
     assert later.sequence == 1 and later.candidate_sha256 == first.candidate_sha256
     assert later.expires_boottime_ms > first.expires_boottime_ms
     assert later.hard_expires_boottime_ms == first.hard_expires_boottime_ms
-    assert trials.operate("node-f0", trial_id, operation="status", expected_sequence=1)["state"] == "active"
+    assert operate(trials, "node-f0", trial_id, operation="status", expected_sequence=1)["state"] == "active"
 
 
 def test_keepalive_never_passes_the_hard_deadline(registry):
@@ -225,7 +242,7 @@ def test_keepalive_never_passes_the_hard_deadline(registry):
     Mutation: drop the `min(hard_expires_at, …)` cap from `keepalive` -> the capped deadline
     assertion goes RED (and the trial outlives its hard deadline)."""
     trials, request, exchange = setup_trial(registry)
-    row = trials.begin("node-f0")
+    row = begin(trials, "node-f0")
     trial_id = __import__("uuid").UUID(row["trial_id"])
     began, hard = registry.clock.utc(), row["hard_expires_at"]
 
@@ -239,16 +256,16 @@ def test_keepalive_never_passes_the_hard_deadline(registry):
     while registry.clock.utc() + 1 < hard:
         registry.clock.advance(1)
         sample()
-        kept = trials.operate("node-f0", trial_id, operation="keepalive", expected_sequence=1)
+        kept = operate(trials, "node-f0", trial_id, operation="keepalive", expected_sequence=1)
         assert kept["state"] == "active"
         assert kept["expires_at"] == min(hard, registry.clock.utc() + trials.inactivity_seconds)
     registry.clock.advance(hard - 0.5 - registry.clock.utc())
     sample()
-    kept = trials.operate("node-f0", trial_id, operation="keepalive", expected_sequence=1)
+    kept = operate(trials, "node-f0", trial_id, operation="keepalive", expected_sequence=1)
     assert kept["state"] == "active" and kept["expires_at"] == hard
     registry.clock.advance(1)
     sample()
-    assert trials.operate("node-f0", trial_id, operation="keepalive", expected_sequence=1)["state"] == "expired"
+    assert operate(trials, "node-f0", trial_id, operation="keepalive", expected_sequence=1)["state"] == "expired"
 
 
 def test_renew_hands_the_draft_to_the_next_trial_in_one_step(registry):
@@ -261,22 +278,22 @@ def test_renew_hands_the_draft_to_the_next_trial_in_one_step(registry):
     Mutation: have `renew` begin the next trial at the saved calibration -> the Node is handed
     the saved fit -> RED. Mutation: drop the base check in `_open` -> the stale draft is accepted -> RED."""
     trials, request, exchange = setup_trial(registry)
-    first = trials.begin("node-f0")
+    first = begin(trials, "node-f0")
     first_id = __import__("uuid").UUID(first["trial_id"])
     draft = Calibration.model_validate(first["calibration"]).model_copy(update={"fit": TURNED})
-    trials.operate("node-f0", first_id, operation="edit", expected_sequence=1,
-                   calibration=draft.model_dump(mode="json"), mat=NO_MAT)
+    operate(trials, "node-f0", first_id, operation="edit", expected_sequence=1,
+                   calibration=draft.model_dump(mode="json"), lighting=LIGHTING_JSON)
     with pytest.raises(NodeControlError, match="trial_sequence_conflict"):
-        trials.operate("node-f0", first_id, operation="renew", expected_sequence=1,
-                       calibration=draft.model_dump(mode="json"), mat=NO_MAT)
-    second = trials.operate("node-f0", first_id, operation="renew", expected_sequence=2,
-                            calibration=draft.model_dump(mode="json"), mat=NO_MAT)
+        operate(trials, "node-f0", first_id, operation="renew", expected_sequence=1,
+                       calibration=draft.model_dump(mode="json"), lighting=LIGHTING_JSON)
+    second = operate(trials, "node-f0", first_id, operation="renew", expected_sequence=2,
+                            calibration=draft.model_dump(mode="json"), lighting=LIGHTING_JSON)
     assert second["state"] == "active" and second["trial_id"] != first["trial_id"]
     assert second["generation"] == first["generation"] + 1 and second["sequence"] == 1
     assert Calibration.model_validate(second["calibration"]).fit == TURNED
     assert second["calibration_revision"] == first["calibration_revision"]
     assert second["hard_expires_at"] == registry.clock.utc() + trials.hard_seconds
-    assert trials.operate("node-f0", first_id, operation="status", expected_sequence=2)["state"] == "ended"
+    assert operate(trials, "node-f0", first_id, operation="status", expected_sequence=2)["state"] == "ended"
     handed = parse_trial(exchange(replace(request, request_id=uuid4(), sampled_boottime_ms=1500)).trial)
     assert str(handed.trial_id) == second["trial_id"] and handed.generation == second["generation"]
     assert Calibration.model_validate_json(handed.calibration_json).fit == TURNED
@@ -284,13 +301,13 @@ def test_renew_hands_the_draft_to_the_next_trial_in_one_step(registry):
     second_id = __import__("uuid").UUID(second["trial_id"])
     stale = draft.model_copy(update={"revision": draft.revision + 1})
     with pytest.raises(NodeControlError, match="trial_baseline_revision_changed"):
-        trials.operate("node-f0", second_id, operation="renew", expected_sequence=1,
-                       calibration=stale.model_dump(mode="json"), mat=NO_MAT)
-    assert trials.operate("node-f0", second_id, operation="status", expected_sequence=1)["state"] == "active"
-    trials.operate("node-f0", second_id, operation="end", expected_sequence=1)
+        operate(trials, "node-f0", second_id, operation="renew", expected_sequence=1,
+                       calibration=stale.model_dump(mode="json"), lighting=LIGHTING_JSON)
+    assert operate(trials, "node-f0", second_id, operation="status", expected_sequence=1)["state"] == "active"
+    operate(trials, "node-f0", second_id, operation="end", expected_sequence=1)
     with pytest.raises(NodeControlError, match="trial_baseline_revision_changed"):
-        trials.begin("node-f0", stale.model_dump(mode="json"))
-    third = trials.begin("node-f0", draft.model_dump(mode="json"))
+        begin(trials, "node-f0", stale.model_dump(mode="json"))
+    third = begin(trials, "node-f0", draft.model_dump(mode="json"))
     assert third["state"] == "active" and Calibration.model_validate(third["calibration"]).fit == TURNED
 
 
@@ -305,8 +322,8 @@ def test_the_operator_routes_begin_at_a_draft_and_renew(registry):
     from central.fleet.node_sessions import NodeControlConfig
 
     trials, _request, _exchange = setup_trial(registry)
-    saved = trials.begin("node-f0")
-    trials.operate("node-f0", __import__("uuid").UUID(saved["trial_id"]), operation="end", expected_sequence=1)
+    saved = begin(trials, "node-f0")
+    operate(trials, "node-f0", __import__("uuid").UUID(saved["trial_id"]), operation="end", expected_sequence=1)
     draft = dict(saved["calibration"], fit=TURNED.model_dump(mode="json"))
     app = create_app(registry.db, registry.clock, ADMIN, run_scheduler=False,
                      node_control=NodeControlConfig("node-test"))
@@ -321,7 +338,7 @@ def test_the_operator_routes_begin_at_a_draft_and_renew(registry):
         assert Calibration.model_validate(begun.json()["calibration"]).fit == TURNED
         renewed = client.post(f"{path}/{begun.json()['trial_id']}", headers=headers,
                               json={"operation": "renew", "expected_sequence": 1, "calibration": draft,
-                                    "mat": NO_MAT})
+                                    "lighting": LIGHTING_JSON})
         assert renewed.status_code == 200, renewed.text
         assert renewed.json()["trial_id"] != begun.json()["trial_id"]
         assert renewed.json()["generation"] == begun.json()["generation"] + 1
@@ -332,6 +349,34 @@ def test_the_operator_routes_begin_at_a_draft_and_renew(registry):
         assert plain.json()["calibration"]["fit"] == saved["calibration"]["fit"]
 
 
+@pytest.mark.parametrize("reason", ["registry_output_changed", "app_process_link_changed"])
+def test_a_surface_the_runtime_no_longer_admits_is_answered_in_the_trials_words(registry, monkeypatch, reason):
+    """Through the real app: a Frame whose output or app the Runtime no longer admits (the display
+    admission's own reasons) is refused with a TrialRefusal code at its TRIAL_REFUSAL_STATUS, never
+    the Runtime's reason. Mutation probe: raise NodeControlError(admission.reason, 409) in
+    NodeDisplay.current_frame_in again -> this fails."""
+    from fastapi.testclient import TestClient
+    from test_registry import ADMIN
+
+    from central.app import create_app
+    from central.coordination import Coordinator, DisplayAdmission
+    from central.fleet.models import TRIAL_REFUSAL_STATUS, TrialRefusal
+    from central.fleet.node_sessions import NodeControlConfig
+
+    setup_trial(registry)
+    monkeypatch.setattr(Coordinator, "display_admission_in",
+                        lambda self, conn, **_: DisplayAdmission(False, "", reason))
+    app = create_app(registry.db, registry.clock, ADMIN, run_scheduler=False,
+                     node_control=NodeControlConfig("node-test"))
+    with TestClient(app) as client:
+        refused = client.post("/v1/operator/frames/node-f0/calibration-trials",
+                              headers={"Authorization": "Bearer " + ADMIN})
+    code = refused.json()["error"]
+    assert code in {each.value for each in TrialRefusal}, code
+    assert (code, refused.status_code) == (TrialRefusal.SURFACE_CHANGED,
+                                           TRIAL_REFUSAL_STATUS[TrialRefusal.SURFACE_CHANGED])
+
+
 def test_a_trial_begins_on_a_still_output_whose_receipt_is_old(registry):
     """A still picture is presented once, so the admitted Output's newest receipt is a minute old
     when the owner starts a calibration trial: the admitted surface and a current exchange say the
@@ -339,7 +384,7 @@ def test_a_trial_begins_on_a_still_output_whose_receipt_is_old(registry):
     trials, request, exchange = setup_trial(registry)
     request = replace(request, request_id=uuid4(), sampled_boottime_ms=61_400)
     exchange(request)
-    row = trials.begin("node-f0")
+    row = begin(trials, "node-f0")
     candidate = parse_trial(exchange(replace(request, request_id=uuid4(),
                                              sampled_boottime_ms=61_500)).trial)
     assert candidate.sequence == 1 and candidate.candidate_sha256 == row["candidate_sha256"]

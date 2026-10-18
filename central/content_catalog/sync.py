@@ -5,8 +5,7 @@ Job types are imported at runtime, never under `TYPE_CHECKING`: `handler_job_typ
 
 One sync is: read the ETag and list releases, sending the ETag only if it was stored less than
 `ETAG_MAX_AGE` ago (an origin failure propagates; the runtime records it); unless unchanged, one
-transaction per release, then store the ETag; then a tail transaction (the first-run
-auto-select and `Prefetch`). Withdrawal of tags gone upstream is not in the MVP.
+transaction per release, then store the ETag; then a tail transaction (`Prefetch`). Withdrawal of tags gone upstream is not in the MVP.
 
 Jobs may run in any order (docs/central-idempotent-jobs.md rule 2, §6). A release that attaches
 a node manifest (auto-ingest design §6.1) gets one transaction of its own. It writes the release
@@ -22,11 +21,9 @@ cannot be built from a manifest the origin accepted (a bug, or data the code did
 is refused by the ingest itself as `node_release_invalid`, classified where that data error
 starts. Every other exception stops the tick before the ETag is stored: the origin's own
 failures (listing, transport) and the database's (lost connection, deadlock, timeout), which say
-nothing about the release. Ingest never selects. The tail's first-run auto-select is the only
-automatic selection: with no selection ever made, it selects the newest stable release that has
-not failed, once that release is ready (`first_run_candidate`, which the release read shows
-too), through the one select writer with expected revision 0, so it can only create the
-selection, never move it.
+nothing about the release. Ingest never chooses a Pi's version: a Pi with none boots the newest
+ready stable release (`boot_policy.newest_ready_stable`), and a version changes only by the
+operator's or Home Assistant's install (central/infra/player_versions.py).
 """
 
 from __future__ import annotations
@@ -35,16 +32,14 @@ import logging
 from datetime import timedelta
 from typing import Final
 
-from central.content_catalog.boot_policy import first_run_choice
 from central.content_catalog.catalog import in_transaction
 from central.content_catalog.ports import (
     NodeReleaseRecords,
     NodeReleaseRefused,
     ReleaseRecords,
-    StableDeployment,
 )
 from central.kernel.job_types import Prefetch, SyncReleases
-from central.kernel.ports import AssetReadiness, PublishedRelease, Readiness, ReleaseOrigin
+from central.kernel.ports import PublishedRelease, ReleaseOrigin
 from central.kernel.publishing import Publisher
 from central.kernel.transactions import Transaction, Transactions
 from contracts.time import Clock
@@ -55,27 +50,14 @@ LOG = logging.getLogger("central.content_catalog.sync")
 ETAG_MAX_AGE: Final = timedelta(hours=1)
 
 
-def first_run_candidate(tx: Transaction, node: NodeReleaseRecords, readiness: AssetReadiness
-                        ) -> tuple[StableDeployment, Readiness] | None:
-    """The release a wall that never had a selection gets (R4) and its readiness: the newest
-    stable release with a deployment that has not failed (`first_run_choice`); None once any
-    selection exists or with no candidate. The ONE definition: the sync tail selects it once it
-    is ready, and the release read shows it."""
-    if node.selection_exists(tx):
-        return None
-    return first_run_choice((row, readiness.readiness(tx, row.jobs, wanted=True))
-                            for row in node.stable_deployments(tx))
-
-
 class SyncReleasesHandler:
     """Implements `Handler[SyncReleases, None]`."""
 
     def __init__(self, *, origin: ReleaseOrigin, releases: ReleaseRecords,
                  transactions: Transactions, publisher: Publisher, clock: Clock,
-                 node_releases: NodeReleaseRecords, readiness: AssetReadiness) -> None:
+                 node_releases: NodeReleaseRecords) -> None:
         self._origin = origin
         self._node = node_releases
-        self._readiness = readiness
         self._releases = releases
         self._transactions = transactions
         self._publisher = publisher
@@ -118,22 +100,4 @@ class SyncReleasesHandler:
             LOG.info("node release %s: an older refusal was not recorded", release.tag)
 
     def _tail(self, tx: Transaction) -> None:
-        self._auto_select(tx)
         self._publisher.publish(Prefetch(), within=tx)
-
-    def _auto_select(self, tx: Transaction) -> None:
-        """First run only (R4): with no node boot selection ever made, select the newest stable
-        release that has not failed once it is ready. Never moves a selection (R6)."""
-        choice = first_run_candidate(tx, self._node, self._readiness)
-        if choice is None:
-            return
-        row, readiness = choice
-        if readiness.state != "ready":
-            LOG.info("no node boot selection yet: %s is %s", row.tag, readiness.state)
-            return
-        if self._node.select_first(tx, row.deployment_id, now=self._clock.utc()):
-            LOG.warning("no node boot selection existed: selected %s (%s), the newest ready "
-                        "stable release; later upgrades are the operator's", row.tag,
-                        row.deployment_id)
-        else:
-            LOG.info("first-run selection of %s yielded to a selection made meanwhile", row.tag)

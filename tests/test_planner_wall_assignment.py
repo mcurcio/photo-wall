@@ -18,6 +18,7 @@ from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 from support.house_time import UTC_HOUSE
 from support.key_content_builders import face, measured
+from support.position import LIGHTING
 
 from central.catalog import Candidate, SourcePool
 from central.planner import PlannerLimits, Projection, project
@@ -27,7 +28,7 @@ from central.wall_plan.fit_settings import FitSettings
 from central.wall_plan.key_content import MeasureFailed
 from central.wall_plan.order import KeptStill, PhotoShowing, PoolLines, WallHistory
 from central.wall_plan.selection import SceneSelection
-from contracts.models import AfterEnd, FrameProfile, Layer, Mat, OutputBinding, Variant
+from contracts.models import AfterEnd, FrameProfile, Layer, OutputBinding, Variant
 from contracts.on_screen import Extent, on_screen_extent, replaces_kept_at
 from contracts.photo_crop import CENTRED
 
@@ -93,7 +94,7 @@ def plan(instance: Runtime, frames: dict[str, FrameSetup], photos, *, now: float
         instance, now,
         bindings_by_player={"player": tuple(OutputBinding(
             output_id=f"out-{frame}", frame_id=frame, generation=1,
-            profile=PROFILES[setup.shape], mat=Mat()) for frame, setup in frames.items())},
+            profile=PROFILES[setup.shape], lighting=LIGHTING) for frame, setup in frames.items())},
         lines=PoolLines({POOL: SourcePool(source_ref=POOL, ready=True,
                                           candidates=tuple(photos))}),
         authored_candidates={candidate.asset_id: candidate for candidate in authored},

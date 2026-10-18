@@ -7,11 +7,12 @@ import type {
   HardwareSettingView, PaperSize, PictureCopyResult, SignalRange, SignalView, SoftwareSetting, TestPattern, TestPatternView,
 } from "../pictureApi.js";
 import type { usePictureSession } from "../pictureSession.js";
+import { CONSTANTS } from "../generated/contract";
 import { FactGroup, FactRow, Note } from "../patterns/fact-row";
-import { OwnerLinks } from "../patterns/link-to-owner";
 import { LivePreviewEditor } from "../patterns/live-preview-editor";
 import { ProblemCard } from "../patterns/problem-card";
-import { formatRoute } from "../routes.js";
+import { TypedNumber } from "../patterns/typed-number";
+import { unitWords } from "../patterns/units";
 import { timeOfDay } from "../timeWords.js";
 import { Button } from "../ui/button";
 import { Disclosure } from "../ui/disclosure";
@@ -44,18 +45,18 @@ export const PHOTO_WALL_GROUP = "Photo Wall (software)";
 const AS_IT_HAS_IT = "As the display has it";
 const NOT_CONNECTED = "Applies when the display is connected";
 const NO_CHANGE = "100 % changes nothing";
-const ZERO_NO_CHANGE = "0 % changes nothing";
-// Where Soft highlights can act: the Pi's rule (player/geometry.py `rolloff_skipped`) is brightness
-// above 100 %, so the row states the condition and never decides it.
-const ACTS_ABOVE_100 = "acts only above 100 % brightness";
-const BLACK_FLOOR_HELP = "How light black is, as a share of white light";
-const ZERO_TENTHS_NO_CHANGE = "0.0 % changes nothing";
-// The LUT picker's "None" (a choice's own value is its paper profile's digest).
-const NO_LUT = "none";
-const LUT_HELP = "Makes photos look printed on one paper";
-const NO_LUTS = "No LUTs on the list yet";
-const ADD_A_LUT = "Add a paper profile in Settings › LUTs";
-const LUT_WAITS = "The sliders show at once; the LUT joins when the Pi has it, and Done waits for it";
+/** A share as a percent: the panel's black is typed as a percent of its white. */
+const PERCENT = 100;
+/** The panel's black's significant digits as typed, and its step in percent. */
+const BLACK_DIGITS = 6;
+const BLACK_STEP = 0.001;
+const MATCHED_HELP = "The light at the Frame, from a phone light meter, when the White pattern matched a sheet of "
+  + "white paper held beside it";
+const BLACK_HELP = "How bright the display's black is, as a percent of its white (a glossy Display about 0.03 %)";
+// The paper match's one line: White is the Display's own white, so the sheet is matched against the
+// Display itself.
+const WHITE_FOR_THE_MATCH = "The White pattern is the Display's own white, through none of a Frame's lighting: match "
+  + "the sheet against it, then type the lux the meter reads at the Frame.";
 const CHECKING = "Checking what this display offers…";
 const CHECKED_WHEN_CONNECTED = "Photo Wall checks what this display offers when it is connected";
 const NOT_OFFERED = "Not offered by this display at its last check";
@@ -96,7 +97,7 @@ const PAPER_SIZES: readonly { paper: PaperSize; label: string }[] = [
 // (display tuning, "Reading the Black level"); the console design and the runbook describe and
 // link here, never quote.
 const PATTERN_HOW: Record<TestPattern, string> = {
-  white: "Tape a sheet of white paper beside the Frame and match its white.",
+  white: "Tape a sheet of white paper beside the Frame and match its white, then type the lux the meter reads as Matched light.",
   "target-pre-software": `Judges the display's own settings: the target skips every Photo Wall step. ${TARGET_HOW}`,
   "target-post-software": `Judges Photo Wall's settings: the target goes through them. ${TARGET_HOW}`,
   "grey-ramp": "Every step should be told apart: the darkest from black, the lightest from white.",
@@ -338,79 +339,31 @@ function DisplaySettings({ view, session, ready }: { view: View; session: Pictur
   );
 }
 
-/** Black floor's words: tenths of a percent of white light as a percent with one decimal ("2.0 %"). */
-export function blackFloorWords(tenths: number): string {
-  return `${(tenths / 10).toFixed(1)} %`;
+/** Display black's words: a share of white as a percent ("0.03 %"). */
+export function panelBlackWords(black: number): string {
+  return unitWords(black * PERCENT, "%");
 }
 
-/** The LUT picker's choices: None, each LUT on the list, and the one in force if the list (not read
- * yet, or changed since) lacks it. */
-export function lutOptions(luts: readonly { profile_sha256: string; name: string }[] | null,
-  inForce: { profile_sha256: string; name: string } | null): { value: string; label: string }[] {
-  const listed = luts ?? [];
-  const extra = inForce !== null && !listed.some((lut) => lut.profile_sha256 === inForce.profile_sha256) ? [inForce] : [];
-  return [{ value: NO_LUT, label: "None" },
-    ...[...listed, ...extra].map((lut) => ({ value: lut.profile_sha256, label: lut.name }))];
-}
-
-/** The LUT (print look R3): None or one on the LUTs list, with its amount 0–100 % only with a LUT.
- * A LUT the Pi has not fetched yet leaves the sliders showing at once; Done waits for it. */
-export function LutSettings({ view, session, ready }: { view: View; session: PictureSession; ready: boolean }) {
-  const lutDraft = session.draft.lut;
-  const lut = "lut" in lutDraft ? lutDraft.lut ?? null : view.software.lut?.profile_sha256 ?? null;
-  const amount = session.draft.software["lut-amount"] ?? view.software.lut_amount_percent;
-  const options = lutOptions(session.luts, view.software.lut);
-  const notes = [
-    ...(options.length === 1 ? [NO_LUTS] : []),
-    ...("lut" in lutDraft && lutDraft.lut != null && session.phase === "waiting" ? [LUT_WAITS] : []),
-  ];
-  const send = (next: number) => session.changeSoftware("lut-amount", next);
-  return (
-    <Stack>
-      <Field label="LUT" help={LUT_HELP} notes={notes}>
-        <Select value={lut ?? NO_LUT} options={options} disabled={!ready} width="fit"
-          onChange={(next) => session.changeLut(next === NO_LUT ? null : next)} />
-      </Field>
-      {options.length === 1 && <OwnerLinks links={[{ text: ADD_A_LUT, href: formatRoute({ section: "luts" }) }]} />}
-      {lut !== null && (
-        <Field label="LUT amount" notes={[ZERO_NO_CHANGE]}>
-          <Slider min={0} max={100} step={1} unit="%" value={amount} disabled={!ready} onPreview={send} onCommit={send} />
-        </Field>
-      )}
-    </Stack>
-  );
-}
-
-/** Photo Wall (software): brightness and contrast 0–150 % (100 % changes nothing), colour
- * temperature and gamma, then the print look (design R2, R3, R4): saturation 0–150 % (100 % changes
- * nothing), soft highlights 0–100 % (acts only above 100 % brightness, the Pi's rule, stated and
- * never decided here), the black floor, 0.0–10.0 % of white in 0.1 steps, sent as tenths, and the
- * LUT: None or one on the LUTs list, with its amount 0–100 % shown only with a LUT. A LUT the Pi has
- * not fetched yet leaves the sliders showing at once; Done waits for it. Each slider shows its own
- * value; the notes say only what changes nothing and where a setting acts. The picture Photo Wall
- * sends, never the display's own brightness. */
+/** Photo Wall (software): contrast 0–150 % (100 % changes nothing), colour temperature and gamma,
+ * then the Display's light: Matched light, the lux at the Frame when the White pattern matched a
+ * sheet of paper, and Display black, the display's black as a percent of its white, both typed and
+ * sent together, live. Each slider shows its own value; the notes say only what changes nothing.
+ * The picture Photo Wall sends, never the display's own brightness; the room's light and a Frame's
+ * paper set the rest. */
 export function PhotoWallSettings({ view, session, ready }: { view: View; session: PictureSession; ready: boolean }) {
   const { software } = session.draft;
   const send = (setting: SoftwareSetting) => (next: number) => session.changeSoftware(setting, next);
-  const percent = (setting: SoftwareSetting, label: string, value: number, max: number, notes: string[]) => (
-    <Field label={label} notes={notes}>
-      <Slider min={0} max={max} step={1} unit="%" value={value} disabled={!ready}
-        onPreview={send(setting)} onCommit={send(setting)} />
-    </Field>
-  );
-  const brightness = software.brightness ?? view.software.brightness_percent;
   const contrast = software.contrast ?? view.software.contrast_percent;
   const kelvin = software["colour-temperature"] ?? view.software.colour_temperature_kelvin;
   const gamma = software.gamma ?? view.software.gamma_tenths;
-  const saturation = software.saturation ?? view.software.saturation_percent;
-  const rolloff = software["highlight-rolloff"] ?? view.software.highlight_rolloff_percent;
-  const floor = software["black-floor"] ?? view.software.black_floor_tenths;
-  const tenths = (next: number) => session.changeSoftware("black-floor", Math.round(next * 10));
+  const light = session.draft.light.light ?? view.light;
   return (
     <FactGroup title={PHOTO_WALL_GROUP}>
       <Stack>
-        {percent("brightness", "Brightness", brightness, 150, [NO_CHANGE])}
-        {percent("contrast", "Contrast", contrast, 150, [NO_CHANGE])}
+        <Field label="Contrast" notes={[NO_CHANGE]}>
+          <Slider min={0} max={150} step={1} unit="%" value={contrast} disabled={!ready}
+            onPreview={send("contrast")} onCommit={send("contrast")} />
+        </Field>
         <Field label="Colour temperature">
           <Slider min={3000} max={9300} step={100} unit="K" disabled={!ready} value={kelvin}
             onPreview={send("colour-temperature")} onCommit={send("colour-temperature")} />
@@ -421,13 +374,13 @@ export function PhotoWallSettings({ view, session, ready }: { view: View; sessio
             onPreview={(next) => session.changeSoftware("gamma", Math.round(next * 10))}
             onCommit={(next) => session.changeSoftware("gamma", Math.round(next * 10))} />
         </Field>
-        {percent("saturation", "Saturation", saturation, 150, [NO_CHANGE])}
-        {percent("highlight-rolloff", "Soft highlights", rolloff, 100, [ZERO_NO_CHANGE, ACTS_ABOVE_100])}
-        <Field label="Black floor" help={BLACK_FLOOR_HELP} notes={[ZERO_TENTHS_NO_CHANGE]}>
-          <Slider min={0} max={10} step={0.1} unit="" disabled={!ready} value={floor / 10}
-            format={(shown) => blackFloorWords(Math.round(shown * 10))} onPreview={tenths} onCommit={tenths} />
-        </Field>
-        <LutSettings view={view} session={session} ready={ready} />
+        <Note>{WHITE_FOR_THE_MATCH}</Note>
+        <TypedNumber label="Matched light" help={MATCHED_HELP} value={light.matched_lux} min={CONSTANTS.MATCHED_LUX_MIN}
+          max={CONSTANTS.MATCHED_LUX_MAX} step={1} unit="lx" disabled={!ready}
+          onChange={(matched) => session.changeLight({ matched_lux: matched })} />
+        <TypedNumber label="Display black" help={BLACK_HELP} value={Number((light.black * PERCENT).toPrecision(BLACK_DIGITS))}
+          min={CONSTANTS.PANEL_BLACK_MIN * PERCENT} max={CONSTANTS.PANEL_BLACK_MAX * PERCENT} step={BLACK_STEP} unit="%"
+          disabled={!ready} onChange={(percent) => session.changeLight({ black: percent / PERCENT })} />
       </Stack>
     </FactGroup>
   );

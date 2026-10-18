@@ -260,7 +260,9 @@ interprets them. The rules for what the operations are and when they are sent be
 to the [Player architecture](player-architecture.md#picture-settings-1c).
 
 - **Control op `picture`** (base-only control socket): `output_id`, `output`, `operations`
-  (a string of at most 512 bytes) and `brightness` (the base page's line, at most 128).
+  (a string of at most 1024 bytes: picture operations v8, decision 0028, carry the Display's
+  white balance, contrast, gamma and light) and `brightness` (the base page's line naming the
+  display's own brightness, at most 128).
   The shell stores both per Output, sends `picture(output_id, operations)` to every
   version-4 frame manager of that Output's app client and `brightness(output_id, text)`
   to the diagnostic client. It sends the stored values again on a version-4 bind and

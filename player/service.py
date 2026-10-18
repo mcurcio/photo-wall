@@ -44,6 +44,8 @@ from contracts.models import (
     PlayerTime,
     Revocation,
 )
+from contracts.node_link import NODE_BUS_URL
+from contracts.node_state import FrameReport, FrameReports
 from contracts.player_control import (
     CAPABILITIES,
     ControlAck,
@@ -52,17 +54,28 @@ from contracts.player_control import (
     ControlHello,
     ControlSelection,
 )
+from contracts.room_light import (
+    LUX_MAX,
+    ROOM_LIGHTS_DRAWN_REPEAT_SECONDS,
+    RoomLightsDocument,
+    RoomLightsDrawn,
+    room_lights_digest,
+)
 from contracts.time import Clock, SystemClock, TimeMapping
+from nodeapi.node import WallReader
 from player.cache import Cache, CacheError
 from player.central_link import CentralLink, Session, read_refusal
 from player.executor import AcquisitionStopped, AuthorityError, Executor
+from player.geometry import light_lux_on_frame
 from player.identity import Identity, load_identity
 from player.luts import LutWants, PlayerLuts
 from player.mainloop import DispatchRefused, LatePosts, LoopLate, MainLoopDispatcher, Tick
 from player.node_app_link import NodeAppLinkClient
 from player.output_discovery import discover_outputs, output_app_id
+from player.player_line import PlayerLine
 from player.probe_responder import ProbeResponder
 from player.rendering import CapacityResult, PrepareResult, PresentationResult, Renderer
+from player.room_lights import start_room_lights
 from uplink.causes import Cause, UplinkError
 from uplink.clock import RunClockRecord
 from uplink.diagnosis import failure_text
@@ -343,12 +356,33 @@ class PlayerService:
                  websocket_connect=None, cache_factory=Cache, executor_factory=Executor,
                  node_link_client: NodeAppLinkClient | None = None,
                  boot_id_path: Path = Path("/proc/sys/kernel/random/boot_id"),
-                 boot_context: BootContext, luts: LutWants):
+                 boot_context: BootContext, luts: LutWants, room_lights_dispatch: Callable | None = None,
+                 node_bus_url: str = NODE_BUS_URL, release_digest: str = "unknown"):
         self.config, self.identity, self.outputs = config, identity, outputs
         # The LUTs the renderer asks for (print look): fetched here, held there. The same
         # PlayerLuts the renderer was built with (`main`).
         self.luts = luts
         self.renderer, self.dispatcher = renderer, dispatcher
+        # The room-lights document's hop onto the GLib thread: its own lane (`main`), so a light
+        # switching never takes a control dispatch's slot; the newest pending document wins
+        # (`room_lights_changed`).
+        self._room_lights_dispatch = room_lights_dispatch or dispatcher
+        self._room_lights_pending: RoomLightsDocument | None = None
+        # What the renderer last drew with (the document and its digest), and the reader's health:
+        # reported on the Player's line.
+        self._room_lights_document: RoomLightsDocument | None = None
+        self._room_lights_drawn: str | None = None
+        self._room_lights_following: Callable[[], bool] | None = None
+        # The Node's bus, where the room lights are followed and the Player's own line is written
+        # from `start` (`node_bus_url`; player/player_line.py). `release_digest`: its birth's.
+        self._node_bus_url = node_bus_url
+        self._room_lights_reader: WallReader | None = None
+        self.line = PlayerLine(release_digest, url=node_bus_url)
+        self._line_started = False
+        # What the line was last given, and when the drawn report is due again (`_report_on_line`).
+        self._frames_reported: tuple | None = None
+        self._drawn_reported: RoomLightsDrawn | None = None
+        self._drawn_due = -math.inf
         self.clock = clock or SystemClock()
         self.mapping = TimeMapping(self.clock)
         self.link = CentralLink(trust, unauthorized=Unauthorized, client=client,
@@ -420,6 +454,74 @@ class PlayerService:
         stall reads as player-silent, as before G8 (E-G8-8 decision: a late loop must not
         withdraw prepared playback)."""
         self.fault("main_loop_late")
+
+    def room_lights_changed(self, document: RoomLightsDocument) -> None:
+        """A newer room-lights document (player/room_lights.py, on the WallReader's thread): handed to
+        the renderer on the GLib thread, which draws every Frame again with it. It never touches the
+        executor, the plan, the configuration or the control State's delivery; it is heard of only
+        through the Player's line (`room_lights_drawn`, each Frame's light). Several arriving before the loop runs the hop draw once,
+        newest."""
+        with self._lock:
+            idle = self._room_lights_pending is None
+            self._room_lights_pending = document
+        if idle:
+            self._room_lights_dispatch(self._draw_room_lights)
+
+    def _draw_room_lights(self) -> None:
+        with self._lock:
+            document, self._room_lights_pending = self._room_lights_pending, None
+        if document is None:
+            return
+        self.renderer.set_room_lights(document)
+        with self._lock:
+            self._room_lights_document = document
+            self._room_lights_drawn = room_lights_digest(document)
+
+    def watch_room_lights_reader(self, following: Callable[[], bool]) -> None:
+        """The room-lights reader's health, asked at every report (thread-safe, never blocks)."""
+        with self._lock:
+            self._room_lights_following = following
+
+    def room_lights_drawn(self) -> RoomLightsDrawn:
+        """What the Frames were last drawn with (None before the first document) and whether the
+        reader follows the Node's WALL mirror now (False before one is watched)."""
+        with self._lock:
+            drawn, following = self._room_lights_drawn, self._room_lights_following
+        return RoomLightsDrawn(drawn=drawn, following=following is not None and bool(following()))
+
+    def frame_reports(self) -> FrameReports:
+        """Every Frame the Player draws now (its control State's bindings): the binding generation,
+        its Output, whether its picture is on screen, and the light on it at its centre for the
+        room-lights document last drawn (None before the first; `light_lux_on_frame`, capped at
+        LUX_MAX). On the GLib thread."""
+        self._main()
+        with self._lock:
+            configuration, document, executor = self._configuration, self._room_lights_document, self.executor
+        reports = []
+        for binding in configuration.bindings if configuration is not None else ():
+            lux = light_lux_on_frame(binding.lighting, document)
+            try:
+                reports.append(FrameReport(
+                    frame_id=binding.frame_id, generation=binding.generation, output_id=binding.output_id,
+                    showing=executor is not None and executor.showing(binding),
+                    light_lux=None if lux is None else min(lux, LUX_MAX)))
+            except ValidationError:   # an id the report's contract refuses: left out, never a fault
+                LOG.debug("player: no Frame report for %s", binding.frame_id)
+        return FrameReports(frames=tuple(reports))
+
+    def _report_on_line(self) -> None:
+        """On the GLib thread, every main-loop turn: the Player's line gets `frames` whenever a Frame's
+        report changes, and `room-lights-drawn` whenever it changes and at least every
+        ROOM_LIGHTS_DRAWN_REPEAT_SECONDS, unchanged too (Central judges it by age). The line holds
+        each and publishes it when attached; nothing here waits on the bus."""
+        frames = self.frame_reports()
+        if frames.frames != self._frames_reported:
+            self.line.put_frames(frames)
+            self._frames_reported = frames.frames
+        drawn, now = self.room_lights_drawn(), self.clock.monotonic()
+        if drawn != self._drawn_reported or now >= self._drawn_due:
+            self.line.put_drawn(drawn)
+            self._drawn_reported, self._drawn_due = drawn, now + ROOM_LIGHTS_DRAWN_REPEAT_SECONDS
 
     def _render_unbound_diagnostic(self) -> None:
         """Publish Central-link context only on known unbound outputs."""
@@ -727,6 +829,9 @@ class PlayerService:
                     rejected = True
                 self._seen_commits.append(commit)
             bound = {binding.output_id for binding in configuration.bindings}
+            # Every bound Frame's paper profile LUT is fetched before its first draw.
+            self.luts.want(tuple(binding.lighting.paper.profile for binding in configuration.bindings
+                                 if binding.lighting is not None and binding.lighting.paper.profile is not None))
             self._unbound_outputs = tuple(output.output_id for output in self.outputs
                                           if output.connected and output.output_id not in bound)
             self._configuration_received = True
@@ -834,6 +939,7 @@ class PlayerService:
                     if len(self._observations) == self._observations.maxlen:
                         self.fault("observation_capacity")
                     self._observations.append(observation)
+        self._report_on_line()
 
     def _feedback(self):
         self._main()
@@ -1305,12 +1411,25 @@ class PlayerService:
             self._session, self._located = None, False
 
     def start(self):
+        """The network thread, and the Node's bus (`start_node_bus`)."""
         self._main()
         if self._thread is not None:
             raise RuntimeError("service already started")
         self._thread = threading.Thread(target=lambda: asyncio.run(self.run()),
                                         name="player-network", daemon=False)
         self._thread.start()
+        self.start_node_bus()
+
+    def start_node_bus(self):
+        """The room lights followed from the Node's WALL mirror, and the Player's own line written,
+        each on its own thread, never blocking the Player (the bus away keeps the last document: the
+        mirror; the line holds its reports until it attaches). `start` calls it; on the GLib thread."""
+        self._main()
+        if self._line_started:
+            raise RuntimeError("node bus already started")
+        self._line_started = True
+        self.line.start()
+        self._room_lights_reader = start_room_lights(self, self._node_bus_url)
 
     def request_relink(self):
         """Thread-safe: the proof loop forgets its recorded app link and proves it again now."""
@@ -1328,6 +1447,11 @@ class PlayerService:
         self._stop.set()
         if self._loop is not None and self._task is not None:
             self._loop.call_soon_threadsafe(self._task.cancel)
+        if (reader := self._room_lights_reader) is not None:   # asked to stop, never waited on here
+            self._room_lights_reader = None
+            reader.stop(0)
+        if self._line_started:
+            self.line.stop(0)
 
     @property
     def stopped(self):
@@ -1350,6 +1474,9 @@ class UnavailableRenderer:
         pass
 
     def set_player(self, player_id):
+        pass
+
+    def set_room_lights(self, document):
         pass
 
     def capacity(self, compositions):
@@ -1437,6 +1564,7 @@ def main():
         find_central=find,
         trust=trust,
         luts=luts,
+        room_lights_dispatch=dispatcher.lane(2),    # one hop queued and one running, at most
     )
     for fault in (discovery.fault, native_fault):
         if fault:

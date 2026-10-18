@@ -19,7 +19,7 @@ clock at the append. The Picture tab's Restore is a session edit and lives with 
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 from typing import Final
@@ -57,14 +57,17 @@ class Port:
 
 @dataclass(frozen=True)
 class PictureRecord:
-    """What a writer appends; the store gives it its id, number and time. `picture`'s LUT, when
-    set, names the recipe of its time; `test_pattern` is a sent kind's only (None for every kept
-    kind); `restored_from` the entry the session's draft was last restored from."""
+    """What a writer appends; the store gives it its id, number and time. `test_pattern` is a sent
+    kind's only (None for every kept kind); `restored_from` the entry the session's draft was last
+    restored from; `light_recorded` False only for an entry read back from before the Display's light
+    (decision 0028, migration 099): its `picture.light` is then a stand-in, never a value it
+    recorded."""
     kind: PictureEntryKind
     picture: DisplayPicture
     session_id: UUID | None
     restored_from: UUID | None
     test_pattern: TestPattern | None
+    light_recorded: bool = True
 
 
 @dataclass(frozen=True)
@@ -82,12 +85,11 @@ class PictureEntry:
     record: PictureRecord
 
 
-def same_values(a: DisplayPicture, b: DisplayPicture) -> bool:
-    """`a` and `b` set the same picture: equal hardware, software and signal range, the LUT compared
-    by its paper profile alone (the stored picture names today's recipe, an entry the recipe of its
-    time, and a new recipe is not a change anyone made)."""
+def same_values(a: DisplayPicture, b: DisplayPicture, *, light_known: bool = True) -> bool:
+    """`a` and `b` set the same picture: equal hardware, software, signal range and, when
+    `light_known` (False: one of them is an entry from before the Display's light), light."""
     return (dict(a.hardware) == dict(b.hardware) and a.signal_range == b.signal_range
-            and _profile(a) == _profile(b) and replace(a.software, lut=None) == replace(b.software, lut=None))
+            and a.software == b.software and (not light_known or a.light == b.light))
 
 
 def unrecorded_record(latest_kept: PictureEntry | None, stored: DisplayPicture) -> PictureRecord | None:
@@ -98,7 +100,7 @@ def unrecorded_record(latest_kept: PictureEntry | None, stored: DisplayPicture) 
     if latest_kept is None:
         changed = not same_values(stored, default_picture())
     else:
-        changed = not same_values(latest_kept.record.picture, stored)
+        changed = not same_values(latest_kept.record.picture, stored, light_known=latest_kept.record.light_recorded)
     return PictureRecord(PictureEntryKind.KEPT_UNRECORDED, stored, None, None, None) if changed else None
 
 
@@ -132,15 +134,9 @@ def sent_record(*, session: PictureSession | None, now: float, previous: Picture
         raise ValueError("sent_test_pattern")
     if (previous is not None and previous.display_id == display_id
             and previous.record.kind is PictureEntryKind.SENT_DRAFT
-            and not same_values(previous.record.picture, picture)):
+            and not same_values(previous.record.picture, picture, light_known=previous.record.light_recorded)):
         return PictureRecord(PictureEntryKind.SENT_BACK, picture, previous.record.session_id, None, None)
     return PictureRecord(PictureEntryKind.SENT_KEPT, picture, None, None, None)
-
-
-def _profile(picture: DisplayPicture) -> str | None:
-    """The paper profile of `picture`'s LUT (None: no LUT)."""
-    lut = picture.software.lut
-    return None if lut is None else lut.profile_sha256
 
 
 __all__ = ["KEPT_KINDS", "SENT_KINDS", "PictureEntry", "PictureEntryKind", "PictureRecord", "Port",

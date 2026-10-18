@@ -1,12 +1,11 @@
 import { useMemo } from "react";
 
 import { apiWrite } from "./apiWrite.js";
-import { LAYER_NAMES } from "./facts.js";
+import { appHandle, LAYER_NAMES } from "./facts.js";
 import { auditRef, frozen } from "./frozenRequest.js";
 import { outputStates } from "./health.js";
 import { nodeUnknown } from "./nodeRead.js";
-import { deploymentHandle, releaseHome, releaseResult } from "./releases.js";
-import { useHeldRequests } from "./sendOutcome.js";
+import { answerOutcome, useHeldRequests } from "./sendOutcome.js";
 
 /**
  * Stage app (console DDD Part E §25, §27-§28, bead NS1): switch this Player's app, on this
@@ -39,7 +38,7 @@ import { useHeldRequests } from "./sendOutcome.js";
  *   sent and unanswered; recorded by Central, not listed yet; or its answer lost
  * @typedef {{request: FrozenStage, state: HeldStageState}} HeldStage
  * @typedef {{get: () => HeldStage|null, set: (request: FrozenStage, state: HeldStageState|null) => void}} HeldStages
- * @typedef {import("./releases.js").Outcome} Outcome
+ * @typedef {import("./sendOutcome.js").Outcome} Outcome
  */
 
 /** The send rule's refusal while a switch runs (§27). */
@@ -47,10 +46,8 @@ export const SWITCH_IN_PROGRESS = "A switch is in progress; wait for it to finis
 /** What the dialog says when its frozen fences no longer match the newest reads. */
 export const STAGE_STALE = "This request is out of date; close and reopen";
 /** Always in the dialog (§25): a stage is desired state for its own boot only. */
-export const stageScope = (selection) => "Applies to this boot only. Any later boot, including an unplanned one, "
-  + `is offered the boot selection (${selection?.deployment_id == null
-    ? "none: Central refuses every boot"
-    : `deployment ${deploymentHandle(selection.deployment_id)}`}).`;
+export const STAGE_SCOPE = "Applies to this boot only. Any later boot, including an unplanned one, is offered "
+  + "this Player's own version (Releases).";
 /** The bound rule (§25, D16), in the dialog when the Player drives Frames. Module-private: shown only through
  * `boundRuleLines`, so no page can state the rule without its caveat. */
 const BOUND_RULE = "Each Frame this Player drives shows the base page while the app switches, then rejoins "
@@ -103,17 +100,32 @@ export function stageBlocker(device, operations, player) {
 }
 
 /**
- * The deployments a stage may name: those carrying an app, as Releases shows them. No
- * verdict: whether one fits this Player's boot is Central's judgement at send.
+ * The deployments a stage may name: the releases on the Releases read (ReleasesView) whose
+ * deployment carries an app, each with its contents and its release. No verdict: whether one fits
+ * this Player's boot is Central's judgement at send.
  *
- * @param {object|null} read the release read
- * @returns {import("./releases.js").DeploymentRow[]}
+ * @param {import("./generated/contract").ReleasesView|null} read the Releases read
+ * @returns {Array<{deploymentId: string, contents: string, tag: string}>}
  */
 export function stageTargets(read) {
   if (read == null) return [];
-  const withApp = new Set((read.deployments ?? []).filter((row) => row.app_environment_sha256 != null)
-    .map((row) => row.deployment_id));
-  return releaseHome(read).deployments.filter((row) => withApp.has(row.deploymentId));
+  return (read.releases ?? []).filter((row) => row.deployment_id != null && row.app_environment_sha256 != null)
+    .map((row) => ({
+      deploymentId: row.deployment_id,
+      contents: `Base ${row.base_tag} · app ${appHandle(row.app_environment_sha256)}`,
+      tag: row.version,
+    }));
+}
+
+/**
+ * The deployment a release (by version) became on the Releases read, or null.
+ *
+ * @param {import("./generated/contract").ReleasesView|null} read the Releases read
+ * @param {string} tag
+ * @returns {string|null}
+ */
+export function deploymentOf(read, tag) {
+  return (read?.releases ?? []).find((row) => row.version === tag)?.deployment_id ?? null;
 }
 
 /** The Frames this Player drives, from the snapshot (the bound rule applies when any). */
@@ -216,7 +228,7 @@ const SESSION_CHANGED = { outcome: "changed", message: `${LAYER_NAMES.app_effect
 const refused = (message) => ({ outcome: "refused", message });
 /**
  * The stage refusals a caller branches on (Update the wall, §25a), by Central's served code: an
- * outcome carries the code (`releaseResult`), so a branch never keys on the words below.
+ * outcome carries the code (`answerOutcome`), so a branch never keys on the words below.
  */
 export const STAGE_REFUSAL = Object.freeze({
   baseMismatch: "node_app_target_base_mismatch",
@@ -242,7 +254,7 @@ const STAGE_CODES = Object.freeze({
  * @returns {Outcome}
  */
 export function stageResult(result) {
-  return releaseResult(result, () => `Stage recorded; ${LAYER_NAMES.app_effect_broker} has not responded yet.`,
+  return answerOutcome(result, () => `Stage recorded; ${LAYER_NAMES.app_effect_broker} has not responded yet.`,
     STAGE_CODES);
 }
 

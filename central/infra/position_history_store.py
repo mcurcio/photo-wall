@@ -1,11 +1,12 @@
-"""A Frame's Position history in PostgreSQL (configuration snapshots; migration 096:
-position_entries). The rules are central/fleet/position_history.py's; this module appends, trims
+"""A Frame's Position history in PostgreSQL (migrations 096 and 099: position_entries). The rules are central/fleet/position_history.py's; this module appends, trims
 and reads, nothing else.
 
 Writers (each in its caller's transaction, so a history write fails only with its change):
+- `record_created_in`: Registry's new Frame (central/registry.py `create_frame`) appends its
+  KEPT_CREATED entry with the row it inserts.
 - `write_position_in`: the one kept Position write, called by Registry's Save
   (central/registry.py `commit_calibration_trial_in`) and profile change (`replace_frame_profile`):
-  it records a change made outside Photo Wall, updates the Frame's calibration and mat (and
+  it records a change made outside Photo Wall, updates the Frame's calibration and lighting (and
   profile), and appends the kept entry together, so no kept write can skip its entry.
 - `record_sent_in`: the trial owner's `deliver_in` (central/fleet/node_calibration.py), on every
   exchange it hands a Frame: it compares without a lock and appends only when
@@ -43,12 +44,13 @@ from central.fleet.position_history import (
 from central.infra.display_store import SEEN_DISPLAY_JOIN
 from central.tuning_history import bounds as retention
 from central.tuning_history.bounds import HistoryPage
-from contracts.models import Calibration, FrameFit, FrameProfile, Mat
+from contracts.frame_lighting import FrameLighting
+from contracts.models import Calibration, FrameFit, FrameProfile
 
 _FIT: Final = TypeAdapter(FrameFit)
 _KEPT_VALUES: Final = sorted(kind.value for kind in KEPT_KINDS)
 _SENT_VALUES: Final = sorted(kind.value for kind in SENT_KINDS)
-_COLUMNS: Final = ("e.id, e.frame_id, e.number, e.kind, e.at, e.session_id, e.restored_from, e.fit, e.mat, "
+_COLUMNS: Final = ("e.id, e.frame_id, e.number, e.kind, e.at, e.session_id, e.restored_from, e.fit, e.lighting, "
                    "e.profile_width_px, e.profile_height_px, e.display_id")
 
 
@@ -65,11 +67,11 @@ def frame_made_for_in(conn: Any, frame_id: str) -> MadeFor | None:
 
 def write_position_in(conn: Any, frame_id: str, record: PositionRecord, *, calibration: Calibration,
                       profile: FrameProfile | None = None) -> int:
-    """Store `calibration` and `record`'s mat on Frame `frame_id` (and `profile`, a new generation,
+    """Store `calibration` and `record`'s lighting on Frame `frame_id` (and `profile`, a new generation,
     for a profile change) and append `record` as its kept entry, in the caller's transaction: the one
     kept Position write (Save: KEPT_SAVED, no `profile`; a profile change: KEPT_PROFILE_CHANGED with
-    it). First, when the stored fit and mat differ from the Frame's newest kept entry, the change made
-    outside Photo Wall is recorded (`position_history.unrecorded_record`, design rule 3). Answers the
+    it). First, when the stored fit and lighting differ from the Frame's newest kept entry, the change made
+    outside Photo Wall is recorded (`position_history.unrecorded_record`). Answers the
     Frame's generation after the write. ValueError("position_history_kind") for another kind or a
     `profile` that does not match it; ValueError("position_history_values") when `record`'s fit is not
     `calibration`'s."""
@@ -78,15 +80,15 @@ def write_position_in(conn: Any, frame_id: str, record: PositionRecord, *, calib
         raise ValueError("position_history_kind")
     if record.values.fit != calibration.fit:
         raise ValueError("position_history_values")
-    stored = conn.execute("SELECT calibration, mat FROM frames WHERE id=%s FOR NO KEY UPDATE", (frame_id,)).fetchone()
+    stored = conn.execute("SELECT calibration, lighting FROM frames WHERE id=%s FOR NO KEY UPDATE", (frame_id,)).fetchone()
     if stored is None:
         raise LookupError("unknown_frame")
     unrecorded = unrecorded_record(latest_kept_position_in(conn, frame_id), position_values(
-        Calibration.model_validate(stored["calibration"]), Mat.model_validate(stored["mat"])))
+        Calibration.model_validate(stored["calibration"]), FrameLighting.model_validate(stored["lighting"])))
     if unrecorded is not None:
         _append_in(conn, frame_id, unrecorded)
-    sets = ["calibration=%s", "mat=%s", "configuration_revision=configuration_revision+1"]
-    params = [Jsonb(calibration.model_dump(mode="json")), Jsonb(record.values.mat.model_dump(mode="json"))]
+    sets = ["calibration=%s", "lighting=%s", "configuration_revision=configuration_revision+1"]
+    params = [Jsonb(calibration.model_dump(mode="json")), Jsonb(record.values.lighting.model_dump(mode="json"))]
     if profile is not None:
         sets += ["profile=%s", "generation=generation+1"]
         params.append(Jsonb(profile.model_dump()))
@@ -94,6 +96,14 @@ def write_position_in(conn: Any, frame_id: str, record: PositionRecord, *, calib
                               (*params, frame_id)).fetchone()["generation"]
     _append_in(conn, frame_id, record)
     return generation
+
+
+def record_created_in(conn: Any, frame_id: str, record: PositionRecord) -> None:
+    """Append a new Frame's KEPT_CREATED `record`, in the caller's transaction that inserted the Frame.
+    ValueError("position_history_kind") for another kind."""
+    if record.kind is not PositionEntryKind.KEPT_CREATED:
+        raise ValueError("position_history_kind")
+    _append_in(conn, frame_id, record)
 
 
 def _append_in(conn: Any, frame_id: str, record: PositionRecord) -> PositionEntry:
@@ -105,12 +115,12 @@ def _append_in(conn: Any, frame_id: str, record: PositionRecord) -> PositionEntr
     width, height = made_for.profile_px
     values = record.values
     row = conn.execute(
-        "INSERT INTO position_entries AS e (id, frame_id, number, kind, at, session_id, restored_from, fit, mat, "
+        "INSERT INTO position_entries AS e (id, frame_id, number, kind, at, session_id, restored_from, fit, lighting, "
         "profile_width_px, profile_height_px, display_id) SELECT %s, %s, COALESCE(max(number), 0) + 1, %s, "
         "clock_timestamp(), %s, %s, %s, %s, %s, %s, %s FROM position_entries WHERE frame_id=%s "
         f"RETURNING {_COLUMNS}",
         (uuid.uuid4(), frame_id, record.kind.value, record.session_id, record.restored_from,
-         Jsonb(values.fit.model_dump(mode="json")), Jsonb(values.mat.model_dump(mode="json")), width, height,
+         Jsonb(values.fit.model_dump(mode="json")), Jsonb(values.lighting.model_dump(mode="json")), width, height,
          made_for.display_id, frame_id)).fetchone()
     kinds, keep = ((_KEPT_VALUES, retention.KEPT_ENTRIES) if record.kind in KEPT_KINDS
                    else (_SENT_VALUES, retention.SENT_ENTRIES))
@@ -177,9 +187,9 @@ def _entry(row: Mapping[str, Any]) -> PositionEntry:
         row["id"], row["frame_id"], row["number"], row["at"].astimezone(UTC),
         MadeFor((row["profile_width_px"], row["profile_height_px"]), row["display_id"]),
         PositionRecord(PositionEntryKind(row["kind"]),
-                       PositionValues(_FIT.validate_python(row["fit"]), Mat.model_validate(row["mat"])),
+                       PositionValues(_FIT.validate_python(row["fit"]), FrameLighting.model_validate(row["lighting"])),
                        row["session_id"], row["restored_from"]))
 
 
 __all__ = ["frame_made_for_in", "latest_kept_position_in", "latest_position_at_in", "latest_position_in",
-           "position_entries_in", "position_entry_in", "record_sent_in", "write_position_in"]
+           "position_entries_in", "position_entry_in", "record_created_in", "record_sent_in", "write_position_in"]

@@ -34,6 +34,38 @@ export function answerUnknown(result, centralRefusal = () => false) {
 }
 
 /**
+ * Central's answer to a node or release write as an outcome. The console keys on the code, never
+ * the status (Central re-maps codes onto statuses). An unanswered request, or a 5xx with no code
+ * (a gateway, a lost answer), is unknown; any code not listed is refused. The served code rides
+ * on the outcome (`code`), so a caller branches on it, never on the words.
+ *
+ * @typedef {{outcome: "done"|"already"|"changed"|"refused"|"unknown", message: string, code?: string|null}} Outcome
+ * @param {{ok: boolean, status: number, error: string|null, data: any}|null} result
+ * @param {(data: any) => string} done the verb's words for a recorded write
+ * @param {Readonly<Record<string, {outcome: Outcome["outcome"], message: string}>>} codes the
+ *   verb's own code table
+ * @returns {Outcome}
+ */
+export function answerOutcome(result, done, codes) {
+  // Any served code at 5xx is Central's own refusal.
+  if (answerUnknown(result, (code) => typeof code === "string" && code !== "")) {
+    return { outcome: "unknown", message: UNKNOWN_MESSAGE, code: null };
+  }
+  if (result.ok) {
+    return result.data?.duplicate === true
+      ? { outcome: "already", message: `Already recorded. ${done(result.data)}`, code: null }
+      : { outcome: "done", message: done(result.data), code: null };
+  }
+  const code = result.error;
+  if (typeof code !== "string" || code === "") {
+    return { outcome: "refused", message: `Central refused: ${result.status}.`, code: null };
+  }
+  const known = Object.hasOwn(codes, code) ? codes[code] : undefined;
+  return known === undefined ? { outcome: "refused", message: `Central refused: ${code}.`, code }
+    : { outcome: known.outcome, message: `${known.message}.`, code };
+}
+
+/**
  * The requests one page holds, by id (`HeldRequests`): a ref, so a send marks its request
  * held in the same step as its check, and a render after each change. `state` is
  * "in_flight", "recorded" or "unknown"; `frozen` is the request body this page sent, so a

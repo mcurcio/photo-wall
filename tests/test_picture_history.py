@@ -14,12 +14,10 @@ from uuid import uuid4
 
 import pytest
 
-from central.displays.lut import LUT_RECIPE_ID
 from central.displays.picture import (
     DisplayPicture,
     PictureRefused,
     PictureSession,
-    SoftwareChoice,
     SoftwareSetting,
     default_picture,
     restore_of,
@@ -45,9 +43,10 @@ from central.tuning_history.bounds import (
     history_page,
     utc_instant,
 )
-from contracts.lut import LutRef
 from contracts.node_picture import (
     NEUTRAL_SOFTWARE,
+    UPGRADE_DISPLAY_LIGHT,
+    DisplayLight,
     HardwareRange,
     HardwareSetting,
     RangeKind,
@@ -56,16 +55,15 @@ from contracts.node_picture import (
 )
 from contracts.tuning import TestPattern
 
-PROFILE_A, PROFILE_B = "a" * 64, "b" * 64
-OLD_RECIPE = "lut33-old-recipe"
+DIM = DisplayLight(matched_lux=400.0, black=0.001)
 OFFERED = (HardwareSetting("10", HardwareRange(RangeKind.LEVEL, 100, ()), 60),
            HardwareSetting("12", HardwareRange(RangeKind.LEVEL, 100, ()), 50))
 DISPLAY = uuid4()
 
 
-def _picture(hardware: dict | None = None, *, lut: LutRef | None = None, signal_range: SignalRange = SignalRange.AUTO,
-             **software) -> DisplayPicture:
-    return DisplayPicture(hardware or {}, replace(NEUTRAL_SOFTWARE, lut=lut, **software), signal_range)
+def _picture(hardware: dict | None = None, *, light: DisplayLight = UPGRADE_DISPLAY_LIGHT,
+             signal_range: SignalRange = SignalRange.AUTO, **software) -> DisplayPicture:
+    return DisplayPicture(hardware or {}, replace(NEUTRAL_SOFTWARE, **software), signal_range, light)
 
 
 def _session(draft: DisplayPicture | None = None, *, idle_until: float = 10.0) -> PictureSession:
@@ -73,15 +71,16 @@ def _session(draft: DisplayPicture | None = None, *, idle_until: float = 10.0) -
                           Lease(idle_until, None), None, None)
 
 
-def _entry(picture: DisplayPicture, kind: PictureEntryKind = PictureEntryKind.KEPT_DONE) -> PictureEntry:
+def _entry(picture: DisplayPicture, kind: PictureEntryKind = PictureEntryKind.KEPT_DONE, *,
+           light_recorded: bool = True) -> PictureEntry:
     return PictureEntry(uuid4(), DISPLAY, 1, datetime(2026, 10, 13, 21, 4, 7, tzinfo=UTC), None, None,
-                        PictureRecord(kind, picture, None, None, None))
+                        PictureRecord(kind, picture, None, None, None, light_recorded))
 
 
-def _restore(session: PictureSession, picture: DisplayPicture, *, offered=OFFERED, lut_listed: bool = True,
+def _restore(session: PictureSession, picture: DisplayPicture, *, offered=OFFERED, light_recorded: bool = True,
              display=DISPLAY, expected: int = 3, now: float = 1.0):
     return restored(session, entry_id=ENTRY, entry_display_id=display, picture=picture, offered=offered,
-                    lut_listed=lut_listed, expected_sequence=expected, now=now)
+                    light_recorded=light_recorded, expected_sequence=expected, now=now)
 
 
 ENTRY = uuid4()
@@ -89,31 +88,30 @@ ENTRY = uuid4()
 
 # --- The records -----------------------------------------------------------------------------------
 
-def test_same_values_compares_a_luts_profile_never_its_recipe():
-    """Acceptance 4: two pictures differing only in their LUT's recipe set the same picture; another
-    profile, a hardware value, a software value or the signal range is a change. Mutation probe
-    P1-recipe-compared: compare the LutRef whole -> the recipe pair reads as a change."""
-    today = _picture(lut=LutRef(PROFILE_A, LUT_RECIPE_ID))
-    assert same_values(today, _picture(lut=LutRef(PROFILE_A, OLD_RECIPE)))
-    assert not same_values(today, _picture(lut=LutRef(PROFILE_B, LUT_RECIPE_ID)))
-    assert not same_values(today, _picture())
+def test_same_values_compares_every_group_and_the_light_when_known():
+    """Acceptance 4: a hardware value, a software value, the signal range or the light is a change;
+    an entry from before the Display's light compares the other groups only. Mutation probe:
+    same_values leaves the light out -> the light pair reads as the same."""
+    today = _picture()
+    assert same_values(today, _picture())
     assert not same_values(today, replace(today, hardware={"10": 46}))
     assert not same_values(today, replace(today, software=replace(today.software, gamma_tenths=24)))
     assert not same_values(today, replace(today, signal_range=SignalRange.FULL))
+    assert not same_values(today, replace(today, light=DIM))
+    assert same_values(today, replace(today, light=DIM), light_known=False)
 
 
 def test_an_unrecorded_record_only_for_values_no_kept_entry_says():
     """Design rule 3. Mutation probes: P1-no-unrecorded (always None) -> the changed value has no
     record; P1-default-unrecorded (drop the default exception) -> a new Display gets one."""
     assert unrecorded_record(None, default_picture()) is None
-    changed = _picture(brightness_percent=120)
+    changed = _picture(contrast_percent=120)
     record = unrecorded_record(None, changed)
     assert record == PictureRecord(PictureEntryKind.KEPT_UNRECORDED, changed, None, None, None)
     assert unrecorded_record(_entry(changed), changed) is None
     assert unrecorded_record(_entry(changed), default_picture()) is not None     # back to defaults unseen
-    with_lut = _picture(lut=LutRef(PROFILE_A, OLD_RECIPE))
-    assert unrecorded_record(_entry(with_lut), replace(with_lut, software=replace(
-        with_lut.software, lut=LutRef(PROFILE_A, LUT_RECIPE_ID)))) is None     # a new recipe is no change
+    assert unrecorded_record(_entry(default_picture(), light_recorded=False),
+                             replace(default_picture(), light=DIM)) is None    # a light no entry recorded
 
 
 def test_done_and_copy_records():
@@ -127,24 +125,24 @@ def test_done_and_copy_records():
 # --- Restore ---------------------------------------------------------------------------------------
 
 def test_restore_loads_the_entry_into_the_draft_and_touches_what_changed():
-    """Acceptance 5 (pure): the draft becomes the entry's three groups, the sequence rises by one,
+    """Acceptance 5 (pure): the draft becomes the entry's four groups, the sequence rises by one,
     `restored_from` names the entry, and every changed code and setting is touched. Mutation probe
     P1-no-restored-from: leave `restored_from` -> None."""
-    session = _session(_picture({"12": 50}, contrast_percent=90, lut=LutRef(PROFILE_A, LUT_RECIPE_ID)))
-    entry = _picture({"10": 46}, brightness_percent=114, contrast_percent=90, signal_range=SignalRange.FULL)
+    session = _session(_picture({"12": 50}, contrast_percent=90))
+    entry = _picture({"10": 46}, contrast_percent=114, light=DIM, signal_range=SignalRange.FULL)
     result = _restore(session, entry, now=8.0)
     assert result.session.draft == entry
     assert (result.session.sequence, result.session.restored_from) == (4, ENTRY)
     assert result.session.touched_hardware == {"10", "12"}
-    assert result.session.touched_software == {SoftwareSetting.BRIGHTNESS, SoftwareChoice.LUT}
+    assert result.session.touched_software == {SoftwareSetting.CONTRAST}
     assert result.session.lease.idle_until > session.lease.idle_until
-    assert (result.hardware_skipped, result.lut_skipped, result.lut_recipe_changed) == ((), False, False)
+    assert (result.hardware_skipped, result.light_kept) == ((), False)
 
 
 def test_restore_refusals_in_order():
     """Acceptance 6 (pure): session_ended, then stale_sequence, then other_display. Mutation probe
     P1-any-display: drop the display check -> another Display's entry is taken."""
-    entry = _picture(brightness_percent=80)
+    entry = _picture(contrast_percent=80)
     for session, kwargs, code, status in (
             (_session(idle_until=0.5), {"display": uuid4(), "expected": 2}, "session_ended", 410),
             (_session(), {"display": uuid4(), "expected": 2}, "stale_sequence", 409),
@@ -154,30 +152,27 @@ def test_restore_refusals_in_order():
         assert (refused.value.code, refused.value.status) == (code, status)
 
 
-def test_restore_skips_what_the_display_no_longer_offers_and_an_unlisted_lut():
+def test_restore_skips_what_the_display_no_longer_offers():
     """Acceptance 7 (pure): a code not offered now is skipped (not in the draft), in picture-list
-    order; an unlisted LUT keeps the draft's; the test pattern is the session's, unchanged.
-    Mutation probe P1-no-skip: keep every entry code -> "16" lands in the draft."""
-    own = LutRef(PROFILE_B, LUT_RECIPE_ID)
-    session = replace(_session(_picture(lut=own)), test_pattern=None, display_id=DISPLAY)
-    entry = _picture({"16": 3, "10": 46, "14": 5}, lut=LutRef(PROFILE_A, LUT_RECIPE_ID))
-    result = _restore(session, entry, lut_listed=False)
+    order; the test pattern is the session's, unchanged. Mutation probe P1-no-skip: keep every entry
+    code -> "16" lands in the draft."""
+    session = replace(_session(_picture()), test_pattern=None, display_id=DISPLAY)
+    entry = _picture({"16": 3, "10": 46, "14": 5})
+    result = _restore(session, entry)
     assert dict(result.session.draft.hardware) == {"10": 46}
     assert result.hardware_skipped == ("14", "16")
-    assert (result.lut_skipped, result.lut_recipe_changed) == (True, False)
-    assert result.session.draft.software.lut == own and SoftwareChoice.LUT not in result.session.touched_software
     unknown = _restore(session, entry, offered=None)
     assert (dict(unknown.session.draft.hardware), unknown.hardware_skipped) == ({}, ("10", "14", "16"))
 
 
-def test_restore_renders_an_older_recipes_lut_with_todays():
-    """Acceptance 7 (pure): an entry LUT baked under another recipe comes back under LUT_RECIPE_ID.
-    Mutation probe P1-lut-recipe-kept: keep the entry's LutRef -> the draft names the old recipe."""
-    result = _restore(_session(), _picture(lut=LutRef(PROFILE_A, OLD_RECIPE)))
-    assert result.session.draft.software.lut == LutRef(PROFILE_A, LUT_RECIPE_ID)
-    assert (result.lut_skipped, result.lut_recipe_changed) == (False, True)
-    no_lut = _restore(_session(_picture(lut=LutRef(PROFILE_A, LUT_RECIPE_ID))), _picture())
-    assert no_lut.session.draft.software.lut is None and not no_lut.lut_recipe_changed
+def test_restore_of_an_entry_from_before_the_light_keeps_the_drafts_light():
+    """Decision 0028: an entry written before the Display had a light fills the draft's own light and
+    says so. Mutation probe: take the entry's stand-in light -> the draft's 400 lx is lost."""
+    result = _restore(_session(_picture(light=DIM)), _picture(contrast_percent=80), light_recorded=False)
+    assert result.session.draft.light == DIM and result.light_kept
+    assert result.session.draft.software.contrast_percent == 80
+    taken = _restore(_session(_picture()), _picture(light=DIM))
+    assert taken.session.draft.light == DIM and not taken.light_kept
 
 
 def test_a_code_restore_changed_is_put_back_by_revert():
@@ -215,17 +210,20 @@ def test_an_entrys_json_names_utc_times_and_todays_names():
     """Acceptance 12 (pure). Mutation probe P1-naive-json: a naive `at` is refused by the view."""
     at = datetime(2026, 10, 13, 21, 4, 7, 250_000, tzinfo=UTC)
     entry = PictureEntry(uuid4(), DISPLAY, 7, at, Port("pi", "HDMI-A-1"), "kitchen",
-                         PictureRecord(PictureEntryKind.SENT_DRAFT, _picture({"10": 46}, lut=LutRef(PROFILE_A, OLD_RECIPE)),
+                         PictureRecord(PictureEntryKind.SENT_DRAFT, _picture({"10": 46}, light=DIM),
                                        uuid4(), None, TestPattern.WHITE))
-    body = json.loads(picture_entry_view(entry, display_name="Samsung", frame_name="Kitchen",
-                                         lut_name=None).model_dump_json())
+    body = json.loads(picture_entry_view(entry, display_name="Samsung", frame_name="Kitchen").model_dump_json())
     assert datetime.fromisoformat(body["at"]).utcoffset() == timedelta(0)
     assert body["frame"] == {"id": "kitchen", "name": "Kitchen"} and body["test_pattern"] == "white"
-    assert body["picture"]["lut_recipe_id"] == OLD_RECIPE
-    assert body["picture"]["software"]["lut"] == {"profile_sha256": PROFILE_A, "name": "Paper profile aaaaaaaa"}
+    assert body["picture"]["light"] == {"matched_lux": 400.0, "black": 0.001}
+    assert body["picture"]["software"] == {"contrast_percent": 100, "colour_temperature_kelvin": 6500,
+                                           "gamma_tenths": 22}
+    unrecorded = replace(entry, record=replace(entry.record, light_recorded=False))
+    assert json.loads(picture_entry_view(unrecorded, display_name="Samsung", frame_name=None).model_dump_json())[
+        "picture"]["light"] is None
     for naive in (at.replace(tzinfo=None), at.astimezone(timezone(timedelta(hours=2))).replace(tzinfo=None)):
         with pytest.raises(ValueError):
-            picture_entry_view(replace(entry, at=naive), display_name="Samsung", frame_name=None, lut_name=None)
+            picture_entry_view(replace(entry, at=naive), display_name="Samsung", frame_name=None)
 
 
 # --- Sent entries (slice S2) ------------------------------------------------------------------------
@@ -237,7 +235,7 @@ def _sent(kind: PictureEntryKind, picture: DisplayPicture, session_id=None) -> P
 
 def test_sent_record_while_a_session_is_live_is_its_draft_with_its_pattern():
     """Acceptance 10, branch 1. Mutation probe P2-kind-from-stored is the DB test's."""
-    session = replace(_session(_picture(brightness_percent=90)), restored_from=ENTRY)
+    session = replace(_session(_picture(contrast_percent=90)), restored_from=ENTRY)
     ask = TestPatternAsk(TestPattern.GREY_RAMP, 4)
     record = sent_record(session=session, now=1.0, previous=None, picture=session.draft, test_pattern=ask, display_id=DISPLAY)
     assert record == PictureRecord(PictureEntryKind.SENT_DRAFT, session.draft, session.session_id, ENTRY,
@@ -249,19 +247,19 @@ def test_sent_record_after_a_draft_went_is_back_only_when_the_values_differ():
     P2-always-kept (SENT_KEPT with no live session) -> no SENT_BACK; P2-lease-ignored (any present
     session is live) -> the lapsed one still reads SENT_DRAFT."""
     draft_id = uuid4()
-    previous = _sent(PictureEntryKind.SENT_DRAFT, _picture(brightness_percent=90), draft_id)
-    lapsed = _session(_picture(brightness_percent=90), idle_until=0.5)
+    previous = _sent(PictureEntryKind.SENT_DRAFT, _picture(contrast_percent=90), draft_id)
+    lapsed = _session(_picture(contrast_percent=90), idle_until=0.5)
     back = sent_record(session=lapsed, now=1.0, previous=previous, picture=default_picture(), test_pattern=None, display_id=DISPLAY)
     assert back == PictureRecord(PictureEntryKind.SENT_BACK, default_picture(), draft_id, None, None)
-    same = sent_record(session=None, now=1.0, previous=previous, picture=_picture(brightness_percent=90),
+    same = sent_record(session=None, now=1.0, previous=previous, picture=_picture(contrast_percent=90),
                        test_pattern=None, display_id=DISPLAY)
-    assert same == PictureRecord(PictureEntryKind.SENT_KEPT, _picture(brightness_percent=90), None, None, None)
+    assert same == PictureRecord(PictureEntryKind.SENT_KEPT, _picture(contrast_percent=90), None, None, None)
 
 
 def test_sent_record_with_no_draft_before_is_the_kept_values():
     """Acceptance 10, branch 4: no entry yet (a Display newly seen), or the previous one not a draft."""
-    for previous in (None, _sent(PictureEntryKind.SENT_KEPT, _picture(brightness_percent=90)),
-                     _sent(PictureEntryKind.SENT_BACK, _picture(brightness_percent=90), uuid4())):
+    for previous in (None, _sent(PictureEntryKind.SENT_KEPT, _picture(contrast_percent=90)),
+                     _sent(PictureEntryKind.SENT_BACK, _picture(contrast_percent=90), uuid4())):
         record = sent_record(session=None, now=1.0, previous=previous, picture=default_picture(), test_pattern=None, display_id=DISPLAY)
         assert record == PictureRecord(PictureEntryKind.SENT_KEPT, default_picture(), None, None, None)
 
@@ -278,7 +276,7 @@ def test_sent_record_after_another_displays_draft_is_the_kept_values():
     """A panel swap: the port's newest sent entry is Display A's draft, and the port now reports
     Display B. Nothing of B's was put back, so B's first entry is SENT_KEPT, never SENT_BACK naming
     A's session."""
-    previous = _sent(PictureEntryKind.SENT_DRAFT, _picture(brightness_percent=90), uuid4())
+    previous = _sent(PictureEntryKind.SENT_DRAFT, _picture(contrast_percent=90), uuid4())
     record = sent_record(session=None, now=1.0, previous=previous, picture=default_picture(), test_pattern=None,
                          display_id=uuid4())
     assert record == PictureRecord(PictureEntryKind.SENT_KEPT, default_picture(), None, None, None)

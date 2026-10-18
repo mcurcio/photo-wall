@@ -8,9 +8,10 @@ import logging
 import mimetypes
 import os
 import traceback
+from collections.abc import Callable, Mapping
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Final, Literal
 
 from fastapi import Depends, FastAPI, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.exceptions import RequestValidationError
@@ -33,9 +34,11 @@ from central.content_wiring import ContentServices, build_content_services
 from central.coordination import CoordinationLimits, Coordinator
 from central.db import Database, DatabaseTransactionClock, ProcessTransactionClock, TransactionClock
 from central.display_routes import mount_display_routes, mount_picture_routes
-from central.fleet.leaf_bridge import mount_leaf_bridge
+from central.fleet.leaf_bridge import mount_bus_bridges
 from central.fleet.node_routes import mount_node_routes
 from central.fleet.node_sessions import NodeControlConfig
+from central.frame_lighting.paper_profiles import LUT_RECIPE_ID
+from central.home_assistant_routes import mount_home_assistant_routes
 from central.house_routes import mount_house_routes
 from central.infra.display_store import (
     PgDisplayCommands,
@@ -45,21 +48,26 @@ from central.infra.display_store import (
 )
 from central.infra.fit_analysis_store import PgFitAnalysisReader
 from central.infra.fit_settings_store import PgFitSettings
+from central.infra.frame_lighting_store import PgFrameLighting, PgHouseLock
+from central.infra.home_assistant import references as home_assistant_references
+from central.infra.home_assistant.settings import PgHomeAssistantSettings
 from central.infra.house_store import PgHouse, seed_house
-from central.infra.lut_store import PgLuts
+from central.infra.light_sensor_judge import PI_SOURCE, is_player
+from central.infra.paper_profile_store import PgPaperProfiles
 from central.infra.photo_library_store import PgPhotoLibrary
 from central.infra.power_store import PgPower
+from central.infra.room_light_store import PgRoomLights
 from central.infra.tuning_history_store import PgTuningHistory
 from central.infra.why_store import PgWhy
 from central.installation_models import FrameName, InstallationInventory, WallInventory, WallNaming
 from central.library_routes import mount_library_routes
-from central.lut_routes import mount_lut_routes
 from central.media_ports import MediaApplication
 from central.media_queue import MediaTaskQueue, ProcrastinateMediaQueue
 from central.media_repository import MediaRepository
 from central.node_runtime_reconciliation import NodeRuntimeReconciler
 from central.operator_auth import OperatorAuth
 from central.operator_snapshot import OperatorSnapshot, OperatorSnapshotReader, runtime_document
+from central.paper_profile_routes import mount_paper_profile_routes
 from central.photo_fit_routes import mount_photo_fit_routes
 from central.photo_library.provisioning import apply_setting, read_setting
 from central.photo_library_routes import mount_photo_library_routes, mount_photo_source_routes
@@ -75,6 +83,8 @@ from central.registry import (
     Registry,
     RegistryError,
 )
+from central.room_light.model import RoomLightRefusal
+from central.room_light_routes import mount_room_light_routes
 from central.runtime import RuntimeConflict, Scene, SceneInUse, SceneOnWall, SceneWriteRefused
 from central.runtime_store import RuntimeStore
 from central.source_names import SourceInUse, SourceNameService
@@ -155,6 +165,22 @@ class AuthoredSceneRequest(AuthoredCandidatesRequest):
 
 
 
+class ReportSourceForms:
+    """room_light.ports.ReportSources over each source Central runs and its adapter's own check of an
+    address's form."""
+
+    def __init__(self, forms: Mapping[str, Callable[[str], bool]]) -> None:
+        self._forms = dict(forms)
+
+    def address_refusal(self, source: str, address: str) -> RoomLightRefusal | None:
+        form = self._forms.get(source)
+        return None if form is not None and form(address) else RoomLightRefusal.UNKNOWN_ADDRESS
+
+
+REPORT_SOURCES: Final = ReportSourceForms({home_assistant_references.SOURCE: home_assistant_references.is_entity,
+                                           PI_SOURCE: is_player})
+
+
 def create_app(
     db: Database | None = None,
     clock: Clock | None = None,
@@ -176,7 +202,8 @@ def create_app(
     admin_token = admin_token or os.environ["PHOTO_WALL_ADMIN_TOKEN"]
     if len(admin_token) < 32:
         raise ValueError("PHOTO_WALL_ADMIN_TOKEN must contain at least 32 characters")
-    registry = Registry(db, clock)
+    house_lock = PgHouseLock()   # the house's lock and "which Frames name it"
+    registry = Registry(db, clock, lighting=PgFrameLighting(LUT_RECIPE_ID))
     media_queue = media_queue or (
         ProcrastinateMediaQueue(db.dsn) if isinstance(db, Database) else None
     )
@@ -819,20 +846,24 @@ def create_app(
     mount_why_routes(app, admin=admin, queries=PgWhy(db, times=media_times))
     house = PgHouse(db, times=media_times)
     mount_house_routes(app, admin=admin, queries=house, commands=house)
+    room_lights = PgRoomLights(db, house_lock)
+    mount_room_light_routes(app, admin=admin, lights=room_lights, sources=REPORT_SOURCES)
+    mount_home_assistant_routes(app, admin=admin, settings=PgHomeAssistantSettings(db))
     pictures = PgPictureSessions(db)
     mount_picture_routes(app, admin=admin, queries=pictures, commands=pictures)
     mount_tuning_history_routes(app, admin=admin, queries=PgTuningHistory(db))
     mount_calibration_target_routes(app, admin=admin)
-    mount_lut_routes(app, admin=admin, player=player, luts=PgLuts(db, clock))
+    mount_paper_profile_routes(app, admin=admin, player=player,
+                               profiles=PgPaperProfiles(db, clock, house_lock))
     if content is not None:
         mount_content_routes(app, content)
     mount_node_routes(app, db=db, clock=clock, admin=admin, coordinator=coordinator, config=node_control,
                       content=content)
     app.state.node_reconciler = NodeRuntimeReconciler(app.state.node_sessions, coordinator)
-    # A Node's leaf arrives at its origin (erratum E-E3D-CUT-4): relayed to the hub when Central has one.
+    # A Node's leaf and Home Assistant's door arrive at Central's origin (erratum E-E3D-CUT-4): relayed to the hub.
     hub_leaf_url = hub_leaf_url or os.environ.get("PHOTO_WALL_HUB_LEAF_URL")
     if hub_leaf_url:
-        mount_leaf_bridge(app, hub_leaf_url)
+        mount_bus_bridges(app, hub_leaf_url)
     # Every route is bound: refuse one that `admin` guards outside the cookie's path.
     operator_auth.require_scoped(app)
     return app

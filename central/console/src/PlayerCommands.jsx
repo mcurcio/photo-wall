@@ -19,7 +19,7 @@ import { useSendDialog } from "./useSendDialog.js";
 
 const tail = (id) => `…${String(id).slice(-6)}`;
 
-// The fleet-wide aggregates' home: the boot selection (Part E §25).
+// Releases: each Player's own version (Q2 A, 2026-10-16).
 const RELEASES = formatRoute({ section: "releases" });
 
 /** One command's named state and its evidence (fleetCommands.js `CommandState`). */
@@ -77,7 +77,7 @@ function RebootDialog({ deviceId, name, request, retry, node, onSent, onClose })
         )}
         <p>The Run stays active. Central sends no command to other Frames or Actuators.</p>
         <p>
-          {"On its next boot, Central offers this Player the boot selection current at that moment (see "}
+          {"On its next boot, Central offers this Player its own version (see "}
           <a href={RELEASES}>Releases</a>
           {")."}
         </p>

@@ -1,4 +1,4 @@
-import { callApi } from "./weekApi.js";
+import { callApi } from "./apiWrite.js";
 
 /**
  * The Power lane's reads and writes (roadmap 2a; central/power_routes.py, central/power/views.py,

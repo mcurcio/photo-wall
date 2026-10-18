@@ -13,6 +13,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import pytest
+from support.position import LIGHTING
 from test_fleet_attempts import DEVICE_ID
 from test_node_calibration import SKEWED
 from test_position_history_store import AUTH, Node, _client, _see_display, _sql
@@ -28,15 +29,16 @@ from central.displays.picture_history import (
 )
 from central.displays.views import SoftwareEdit
 from central.fleet.position_history import (
-    DEFAULT_POSITION,
     MadeFor,
     PositionEntry,
     PositionEntryKind,
     PositionRecord,
+    PositionValues,
 )
 from central.infra.display_store import PgPictureSessions, output_documents
 from central.infra.picture_history_store import append_kept_in
 from central.tuning_history.model import snapshot_at
+from contracts.models import CoverFit
 
 AT = datetime(2026, 10, 13, 21, 4, 7, tzinfo=UTC)
 
@@ -74,7 +76,7 @@ def test_the_tracer_a_picture_edit_and_a_position_edit_read_back_by_time(registr
     display = _see_display(registry)
     pictures = PgPictureSessions(registry.db)
     session = pictures.begin_picture("node-f0")
-    pictures.edit_software(session.session_id, SoftwareEdit(setting="brightness", value=114, expected_sequence=1))
+    pictures.edit_software(session.session_id, SoftwareEdit(setting="contrast", value=114, expected_sequence=1))
     _project(registry)
     between = _now(registry)
     node.edit(node.begin(), SKEWED)
@@ -84,7 +86,7 @@ def test_the_tracer_a_picture_edit_and_a_position_edit_read_back_by_time(registr
     both = _read(registry, after_both)
     assert (both["frame"]["id"], both["position"]["kind"], both["picture"]["kind"]) == (
         "node-f0", "sent-draft", "sent-draft")
-    assert both["picture"]["picture"]["software"]["brightness_percent"] == 114
+    assert both["picture"]["picture"]["software"]["contrast_percent"] == 114
     assert both["picture"]["display"]["id"] == str(display) and both["picture"]["frame"]["id"] == "node-f0"
     assert UUID(both["picture"]["session_id"]) == session.session_id
     assert both["position"]["fit"]["corners"] == [list(corner) for corner in SKEWED.corners]
@@ -127,7 +129,7 @@ def test_a_snapshot_needs_a_time_with_its_zone_and_a_known_frame(registry):
 
 def _position(*, frame_id: str = "kitchen", at: datetime = AT) -> PositionEntry:
     return PositionEntry(uuid4(), frame_id, 1, at, MadeFor((1080, 1920), None),
-                         PositionRecord(PositionEntryKind.KEPT_SAVED, DEFAULT_POSITION, None, None))
+                         PositionRecord(PositionEntryKind.KEPT_SAVED, PositionValues(CoverFit(), LIGHTING), None, None))
 
 
 def _picture(kind: PictureEntryKind, *, frame_id: str | None = "kitchen", at: datetime = AT) -> PictureEntry:

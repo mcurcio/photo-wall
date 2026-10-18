@@ -8,6 +8,29 @@ import tseslint from "typescript-eslint";
 const LAYERS = ["design", "ui", "patterns", "domain", "pages"];
 const files = (layers) => layers.map((layer) => `src/${layer}/**/*.{js,jsx,ts,tsx}`);
 
+// S2: what a page or a domain component may not write (see its block below).
+const COMPOSE_ONLY = [
+  {
+    selector: "JSXAttribute[name.name=/^(className|style)$/]",
+    message: "Pages and domain components do not style: compose primitives and patterns.",
+  },
+  {
+    selector: "JSXSpreadAttribute",
+    message: "Pages and domain components spread no props: a spread can carry a className or style.",
+  },
+  {
+    selector: "CallExpression[callee.name=/^(createElement|cloneElement)$/], "
+      + "CallExpression[callee.property.name=/^(createElement|cloneElement)$/]",
+    message: "Pages and domain components build elements in JSX, where this lint reads them.",
+  },
+];
+// A number typed as a JSX prop (no-magic-numbers always lets one pass): any but 0 and 1.
+const JSX_NUMBER = {
+  selector: "JSXExpressionContainer > Literal[value>1], JSXExpressionContainer > Literal[value<1][value>0], "
+    + "JSXExpressionContainer > UnaryExpression > Literal[value>0]",
+  message: "A limit, range or step comes from src/generated/contract.ts or a named constant, never a number typed here.",
+};
+
 export default tseslint.config(
   { ignores: ["dist/", "storybook-static/", "node_modules/"] },
   {
@@ -40,22 +63,7 @@ export default tseslint.config(
     // either), builds no element by hand and imports no class helper from the catalog.
     files: files(["domain", "pages"]),
     rules: {
-      "no-restricted-syntax": [
-        "error",
-        {
-          selector: "JSXAttribute[name.name=/^(className|style)$/]",
-          message: "Pages and domain components do not style: compose primitives and patterns.",
-        },
-        {
-          selector: "JSXSpreadAttribute",
-          message: "Pages and domain components spread no props: a spread can carry a className or style.",
-        },
-        {
-          selector: "CallExpression[callee.name=/^(createElement|cloneElement)$/], "
-            + "CallExpression[callee.property.name=/^(createElement|cloneElement)$/]",
-          message: "Pages and domain components build elements in JSX, where this lint reads them.",
-        },
-      ],
+      "no-restricted-syntax": ["error", ...COMPOSE_ONLY],
       "no-restricted-imports": [
         "error",
         {
@@ -68,6 +76,19 @@ export default tseslint.config(
           ],
         },
       ],
+    },
+  },
+  {
+    // A limit, range or step Central owns comes from src/generated/contract.ts, never a number typed
+    // here: in the light contexts every number other than 0, 1 and -1 is a named constant.
+    files: ["src/domain/room-lights/**/*.{ts,tsx}", "src/domain/frame-lighting/**/*.{ts,tsx}"],
+    ignores: ["**/*.stories.tsx", "**/*.fixtures.ts"],
+    rules: {
+      "@typescript-eslint/no-magic-numbers": [
+        "error",
+        { ignore: [0, 1, -1], ignoreArrayIndexes: true, ignoreNumericLiteralTypes: true, enforceConst: true },
+      ],
+      "no-restricted-syntax": ["error", ...COMPOSE_ONLY, JSX_NUMBER],
     },
   },
   {

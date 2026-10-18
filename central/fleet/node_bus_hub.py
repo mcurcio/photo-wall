@@ -12,6 +12,9 @@ enrolment and retirement need no hook at their write sites: the next look sees t
 not answer is retried at the next look; the file and the links are kept meanwhile. A database error
 is Central's own failure and ends the loop.
 
+Each look also runs the worker's per-look work it was handed (`each_look`: a running install moves
+on, central/infra/player_versions.py `advance_installs`), in a thread after the hub was kept.
+
 Presence (S4): every look whose `HubAdmin.linked()` answered records, in one transaction, which
 enrolled Nodes' leaves the hub holds and when it looked (`central.fleet.node_bus_presence`); a look
 that did not reach the hub writes nothing, so the look's age tells the console how stale it is.
@@ -23,7 +26,7 @@ import contextlib
 import logging
 import os
 import tempfile
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Final
 
@@ -53,6 +56,11 @@ def enrolled_serials_in(conn) -> frozenset[str]:
     return frozenset(_enrolled_accounts_in(conn))
 
 
+def enrolled_devices_in(conn) -> dict[str, str]:
+    """`{serial: device_id}` of the devices `enrolled_serials_in` names: every enrolled Pi."""
+    return {serial: device_id for serial, (device_id, _) in _enrolled_accounts_in(conn).items()}
+
+
 def _enrolled_accounts_in(conn) -> dict[str, tuple[str, str]]:
     """`{serial: (device_id, hub account)}` of the devices `enrolled_serials_in` names."""
     rows = conn.execute("SELECT device.device_id,device.serial FROM devices AS device "
@@ -73,7 +81,7 @@ class FleetHub:
 
     def __init__(self, db: Database, hub_url: str, config_path: Path, listeners: HubListeners,
                  wall_table: KeyTable, marks: WallMarks, links: Sequence[NodeLinks],
-                 clock: Clock | None = None) -> None:
+                 clock: Clock | None = None, each_look: Sequence[Callable[[], None]] = ()) -> None:
         self._db = db
         self._clock = clock or SystemClock()
         self._hub_url = hub_url
@@ -82,6 +90,7 @@ class FleetHub:
         self._wall_table = wall_table
         self._marks = marks
         self._links = tuple(links)
+        self._each_look = tuple(each_look)
         self._admin: HubAdmin | None = None
         self._writer: WallWriter | None = None
         self._loaded: str | None = None   # the hub's server id Fleet last reloaded and ensured WALL in
@@ -116,6 +125,8 @@ class FleetHub:
             log.info("hub: %s", error)
         for links in self._links:
             await links.track(serials)
+        for work in self._each_look:
+            await asyncio.to_thread(work)
 
     async def _keep(self, serials: frozenset[str]) -> None:
         """Connect what is not connected; reload and ensure WALL unless the running hub is the one

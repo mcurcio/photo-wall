@@ -400,7 +400,7 @@ def test_a_saved_position_survives_restart(registry):
     frame(registry)
     registry.bind("portrait", identity["player_id"], "HDMI-A-1", expected_generation=0)
     save_position(registry, "portrait", SKEWED)
-    restarted = Registry(Database(registry.db.dsn), registry.clock)
+    restarted = Registry(Database(registry.db.dsn), registry.clock, lighting=registry.lighting)
     restarted.db.migrate()  # Idempotent migration on a fresh connection.
     saved = restarted.bindings_for(identity["player_id"], 1)[0]
     assert (saved.calibration.revision, saved.calibration.fit) == (2, SKEWED.fit)

@@ -10,7 +10,8 @@ import { Note } from "../patterns/fact-row";
 import { changedSummary, type HistoryDay, HistoryList, type HistoryRow } from "../patterns/history-list";
 import { ProblemCard } from "../patterns/problem-card";
 import { dayLabel, timeOfDay } from "../timeWords.js";
-import { blackFloorWords, hardwareWords, PATTERN_NAMES, type PictureSession } from "./frame-picture";
+import { unitWords } from "../patterns/units";
+import { hardwareWords, panelBlackWords, PATTERN_NAMES, type PictureSession } from "./frame-picture";
 
 /** The read's shapes (historyApi.js, mirroring central/displays/views.py), for this module's users. */
 export type { PictureEntryView, PictureHistoryView, SoftwarePictureView };
@@ -33,7 +34,6 @@ const EMPTY = "No changes yet. They appear here when you adjust this display, pr
 const OPEN_FIRST = "Open while the editor runs";
 const AS_IT_HAS_IT = "As the display has it";
 const SAME = "Same values as the change below";
-const OLDER_RECIPE = "made with an older recipe";
 
 /** Each kind of entry in the glossary's words (Done, Revert, Copy), never "snapshot" or "draft". */
 export const WHAT: Record<PictureEntryKind, string> = {
@@ -75,28 +75,21 @@ function hardwareLabel(rows: Rows, code: string): string {
 
 /**
  * Every value of one entry, in the Picture tab's order and units: each display setting set in
- * Photo Wall (by its picture-list name), the eight Photo Wall values, the LUT (with "made with an
- * older recipe" when `recipe`, the newest kept entry's, differs), the signal range, and the test
- * pattern when one was up.
+ * Photo Wall (by its picture-list name), the three Photo Wall values, the Display's light, the
+ * signal range, and the test pattern when one was up.
  */
-export function entryDetails(entry: PictureEntryView, rows: Rows, recipe: string | null): { label: string; value: string }[] {
+export function entryDetails(entry: PictureEntryView, rows: Rows): { label: string; value: string }[] {
   const { picture } = entry;
   const software = picture.software;
-  const older = recipe !== null && picture.lut_recipe_id !== null && picture.lut_recipe_id !== recipe;
-  const lut = software.lut === null ? "None" : older ? `${software.lut.name} (${OLDER_RECIPE})` : software.lut.name;
   return [
     ...Object.entries(picture.hardware).map(([code, value]) => ({
       label: hardwareLabel(rows, code), value: hardwareValue(rows, code, value),
     })),
-    { label: "Brightness", value: `${software.brightness_percent} %` },
     { label: "Contrast", value: `${software.contrast_percent} %` },
     { label: "Colour temperature", value: `${software.colour_temperature_kelvin} K` },
     { label: "Gamma", value: (software.gamma_tenths / 10).toFixed(1) },
-    { label: "Saturation", value: `${software.saturation_percent} %` },
-    { label: "Soft highlights", value: `${software.highlight_rolloff_percent} %` },
-    { label: "Black floor", value: blackFloorWords(software.black_floor_tenths) },
-    { label: "LUT", value: lut },
-    { label: "LUT amount", value: `${software.lut_amount_percent} %` },
+    { label: "Matched light", value: unitWords(picture.light.matched_lux, "lx") },
+    { label: "Display black", value: panelBlackWords(picture.light.black) },
     { label: "Signal range", value: RANGES[picture.signal_range] },
     ...(entry.test_pattern === null ? [] : [{ label: "Test pattern", value: PATTERN_NAMES[entry.test_pattern] }]),
   ];
@@ -160,9 +153,7 @@ export function historyProblem({ readError, refused, what, words, onRetry }: {
  */
 export function historyDays(entries: readonly PictureEntryView[], rows: Rows,
   restore: HistoryRow["restore"]): HistoryDay[] {
-  const recipe = entries.find((entry) => entry.kind.startsWith("kept-") && entry.picture.lut_recipe_id !== null)
-    ?.picture.lut_recipe_id ?? null;
-  const details = entries.map((entry) => entryDetails(entry, rows, recipe));
+  const details = entries.map((entry) => entryDetails(entry, rows));
   return daysOf(entries, (entry, index) => ({
     what: WHAT[entry.kind],
     notKept: NOT_KEPT.has(entry.kind),
@@ -180,8 +171,6 @@ export function restoreNotes(result: PictureRestoreResult, rows: Rows): string[]
       `Not restored: ${result.hardware_skipped.map((code) => rows[code]?.name ?? `setting ${code}`).join(", ")} `
         + "(this display does not offer them now).",
     ]),
-    ...(result.lut_skipped ? ["The LUT is no longer on the list: the current one stays."] : []),
-    ...(result.lut_recipe_changed ? ["The LUT is made with today's recipe."] : []),
   ];
 }
 

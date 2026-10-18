@@ -55,6 +55,20 @@ from nats.js.api import (
 )
 from nats.js.errors import APIError, NotFoundError
 
+from contracts import node_state
+from contracts.central_api import (
+    CENTRAL_STATE_BUCKET,
+    CENTRAL_STATE_PREFIX,
+    CENTRAL_STATE_STREAM,
+    HOME_ASSISTANT_STATES_BUCKET,
+    HOME_ASSISTANT_STATES_PREFIX,
+    HOME_ASSISTANT_STATES_STREAM,
+)
+from contracts.home_assistant import (
+    ENTITY_ID_MAX,
+    HOME_ASSISTANT_ENTITIES_MAX,
+    HOME_ASSISTANT_STATE_BYTES,
+)
 from contracts.node_link import (
     MAX_STORED_MESSAGE,
     NODE_MAX_CONTROL_LINE,
@@ -114,7 +128,7 @@ def _build(kind: str, name: str, max_bytes: int, fields: dict,
 def _kv_fields(bucket_name: str, history: int, max_value_size: int | None) -> dict:
     # A KV bucket's stream as nats-py's create_key_value builds it (nats/js/client.py:1447), less its
     # hard-coded discard NEW, which refuses every put once the bucket is full.
-    return dict(subjects=[f"$KV.{bucket_name}.>"], allow_rollup_hdrs=True, allow_msg_ttl=True,
+    return dict(subjects=[_kv_prefix(bucket_name) + ">"], allow_rollup_hdrs=True, allow_msg_ttl=True,
                 deny_delete=True, duplicate_window=120, max_consumers=-1, max_msgs=-1,
                 max_msg_size=max_value_size, max_msgs_per_subject=history)
 
@@ -175,7 +189,7 @@ TABLE_KEY: Final = "photo_wall_table"
 # The most a key table's encoding may take in metadata: a stream description stays far under the
 # leaf's largest reply (L, contracts.node_link.NODE_MAX_PAYLOAD) whatever the table.
 MAX_TABLE_METADATA: Final = 16 * 1024
-BIRTH_KEY: Final = "birth"               # every state bucket: the session's birth (§7.2 node)
+BIRTH_KEY: Final = node_state.BIRTH_KEY  # every state bucket: the session's birth (§7.2 node)
 OUTBOX_KEY: Final = "outbox"             # every state bucket: the outbox's drop count (written from S6)
 RESERVED_STATE_BYTES: Final = 4096       # each reserved key's largest value
 _LOWER = re.compile(r"[a-z]+")
@@ -187,6 +201,7 @@ class Role(StrEnum):
     STATE = "state"       # sticky by its state table
     DESIRED = "desired"   # sticky by its document table (built from S2)
     WALL = "wall"         # sticky: the hub's WALL and every Node mirror
+    STATES = "states"     # sticky by count: Home Assistant's states on the hub, an open key set
 
 
 @dataclass(frozen=True)
@@ -253,11 +268,42 @@ def event_buffer(line: str, topic: str, max_bytes: int, *, max_age: float | None
     return _build(CIRCULAR, f"{topic.upper()}_{line}", max_bytes, fields, _line_metadata(line, Role.EVENTS))
 
 
+KV_OPERATION_HEADER: Final = "KV-Operation"   # a KV delete or purge marker's header: it carries no value
+
+
+def _kv_stream(name: str) -> str:
+    return f"KV_{name}"
+
+
+def _kv_prefix(name: str) -> str:
+    return f"$KV.{name}."
+
+
+def state_stream(line: str) -> str:
+    """The stream of `line`'s state bucket (`state_bucket`): what Central's link store records it as."""
+    return _kv_stream(f"state_{line}")
+
+
+def state_prefix(line: str) -> str:
+    """The subject prefix of `line`'s state keys: a key's subject is state_prefix(line) + key."""
+    return _kv_prefix(f"state_{line}")
+
+
+def desired_stream(line: str) -> str:
+    """The stream of `line`'s desired bucket (`desired_bucket`)."""
+    return _kv_stream(f"desired_{line}")
+
+
+def desired_prefix(line: str) -> str:
+    """The subject prefix of `line`'s desired keys."""
+    return _kv_prefix(f"desired_{line}")
+
+
 def _keyed(name: str, table: KeyTable, metadata: Mapping[str, str]) -> StreamConfig:
     """A sticky KV bucket `KV_<name>` sized by `table`, which rides in its metadata."""
-    _check_subjects(f"$KV.{name}.", table)
-    return _build(STICKY, f"KV_{name}", table.budget(f"$KV.{name}."), _kv_fields(name, table.history, table.largest),
-                  {**metadata, TABLE_KEY: table.encoded()})
+    _check_subjects(_kv_prefix(name), table)
+    return _build(STICKY, _kv_stream(name), table.budget(_kv_prefix(name)),
+                  _kv_fields(name, table.history, table.largest), {**metadata, TABLE_KEY: table.encoded()})
 
 
 def _check_subjects(prefix: str, table: KeyTable) -> None:
@@ -305,6 +351,37 @@ def wall_mirror_config() -> StreamConfig:
         max_msgs_per_subject=1, max_msgs=-1, mirror=StreamSource(
             name=WALL_STREAM, external=ExternalStream(api=WALL_API_PREFIX, deliver=WALL_DELIVER_PREFIX))),
                   {ROLE_KEY: Role.WALL.value})
+
+
+# Central on its hub (contracts/central_api.py): its state bucket and the bucket Home Assistant writes
+# its states into, both in the hub's CENTRAL account and declared by Central's hub session
+# (nodeapi.hub `run_hub_session`). Their names are the contract's; NATS key-value naming binds them.
+if ((_kv_stream(CENTRAL_STATE_BUCKET), _kv_prefix(CENTRAL_STATE_BUCKET))
+        != (CENTRAL_STATE_STREAM, CENTRAL_STATE_PREFIX)
+        or (_kv_stream(HOME_ASSISTANT_STATES_BUCKET), _kv_prefix(HOME_ASSISTANT_STATES_BUCKET))
+        != (HOME_ASSISTANT_STATES_STREAM, HOME_ASSISTANT_STATES_PREFIX)):
+    raise RuntimeError("central_api_bucket_names")
+
+
+def central_state_bucket(table: KeyTable) -> StreamConfig:
+    """Central's state on its hub, `KV_state_central`: sticky by `table` (contracts.central_api
+    CENTRAL_STATE_TABLE), which rides in its metadata, as a Node's state bucket's does."""
+    return _keyed(CENTRAL_STATE_BUCKET, table, {ROLE_KEY: Role.STATE.value})
+
+
+def home_assistant_states_bucket() -> StreamConfig:
+    """Home Assistant's states on the hub, `KV_home_assistant`: one value per entity id (history 1),
+    the keys open (an entity id is the key), at most HOME_ASSISTANT_ENTITIES_MAX values of at most
+    HOME_ASSISTANT_STATE_BYTES each. Full, the server drops the oldest message: the state of the
+    entity written longest ago, which its next change or the publisher's next republish writes again.
+    Its byte cap is that count at the longest entity id's charge, so bytes never evict before the
+    count does."""
+    largest = HOME_ASSISTANT_STATE_BYTES + HEADER_ALLOWANCE
+    charge = message_charge(HOME_ASSISTANT_STATES_PREFIX + "x" * ENTITY_ID_MAX, HOME_ASSISTANT_STATE_BYTES,
+                            HEADER_ALLOWANCE)
+    fields = {**_kv_fields(HOME_ASSISTANT_STATES_BUCKET, 1, largest), "max_msgs": HOME_ASSISTANT_ENTITIES_MAX}
+    return _build(STICKY, HOME_ASSISTANT_STATES_STREAM, HOME_ASSISTANT_ENTITIES_MAX * charge, fields,
+                  {ROLE_KEY: Role.STATES.value})
 
 
 def role_of(config: StreamConfig) -> Role | None:
@@ -370,39 +447,6 @@ class Slice:
             if any(_subject_matches(pattern, subject) for pattern in config.subjects or ()):
                 return config.name
         return None
-
-    def union(self, other: Slice) -> Slice:
-        """Both slices' buffers in one slice of the same line, as the line's declarer applies it while
-        two releases are held (a Player hot-swap, E3b design §7.3, §9.7). A stream both name keeps the
-        larger byte cap and, when keyed, the union of the two key tables (the largest size per key),
-        rebuilt so its cap is that table's budget and no listed key loses its only value; any other
-        difference is refused. A union past the line is refused here, before anything is applied."""
-        if other.line != self.line:
-            raise ValueError("slice_union_lines")
-        theirs = {config.name: config for config in other.buffers}
-        mine = {config.name for config in self.buffers}
-        return Slice(self.line, (*(_stream_union(config, theirs[config.name]) if config.name in theirs else config
-                                   for config in self.buffers),
-                                 *(config for config in other.buffers if config.name not in mine)))
-
-
-def _stream_union(mine: StreamConfig, theirs: StreamConfig) -> StreamConfig:
-    """One stream both slices name: the larger cap, or the union of its key tables (a sticky stream's
-    cap and largest message are its table's)."""
-    old, new = table_of(mine), table_of(theirs)
-    if old is None and new is None:
-        if replace(mine, max_bytes=0) != replace(theirs, max_bytes=0):
-            raise ValueError("slice_union_conflict")
-        return mine if mine.max_bytes >= theirs.max_bytes else theirs
-
-    def rest(config: StreamConfig) -> StreamConfig:
-        return replace(config, max_bytes=0, max_msg_size=0,
-                       metadata={key: value for key, value in config.metadata.items() if key != TABLE_KEY})
-    if old is None or new is None or old.history != new.history or rest(mine) != rest(theirs):
-        raise ValueError("slice_union_conflict")
-    sizes = {key: max(old.sizes.get(key, 0), new.sizes.get(key, 0)) for key in old.sizes.keys() | new.sizes.keys()}
-    metadata = {key: value for key, value in mine.metadata.items() if key not in (TABLE_KEY, KIND_KEY)}
-    return _keyed(mine.name.removeprefix("KV_"), KeyTable(dict(sorted(sizes.items())), old.history), metadata)
 
 
 def _limits(config: StreamConfig) -> tuple:

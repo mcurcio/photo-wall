@@ -30,6 +30,7 @@ from appliance.display_host.signal_range import (
 from contracts.node_output import OUTPUT_IDS
 from contracts.node_picture import (
     NEUTRAL_SOFTWARE,
+    UPGRADE_DISPLAY_LIGHT,
     HardwareResult,
     PictureDocument,
     SignalRange,
@@ -92,7 +93,7 @@ def start(tmp_path, connectors: Connectors, last: dict[str, SignalRange] | None 
 
 def document(change: int, signal: SignalRange, hardware: dict[str, int] | None = None,
              output_id: str = OUTPUT) -> PictureDocument:
-    return PictureDocument(output_id, change, hardware or {}, NEUTRAL_SOFTWARE, signal_range=signal)
+    return PictureDocument(output_id, change, hardware or {}, NEUTRAL_SOFTWARE, signal_range=signal, light=UPGRADE_DISPLAY_LIGHT)
 
 
 def signal_of(run: Running, change: int, output_id: str = OUTPUT) -> SignalReport:

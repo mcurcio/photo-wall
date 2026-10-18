@@ -27,12 +27,14 @@ from appliance.display_host.bus import DISPLAY_COMPONENT, DISPLAY_SLICE, DISPLAY
 from central.app import create_app
 from central.content_catalog.catalog import device_id_for_serial
 from central.db import DatabaseTransactionClock
+from central.frame_lighting.paper_profiles import LUT_RECIPE_ID
 from central.infra.display_store import (
     REPORT_STREAM,
     DisplayDocuments,
     DisplayWakes,
     OutputReportJudge,
 )
+from central.infra.frame_lighting_store import PgFrameLighting
 from central.infra.node_link_store import PgLinkStores
 from central.infra.node_links import NodeLinks
 from central.registry import FrameCreate, Registry
@@ -93,7 +95,7 @@ def test_picture_documents_and_reports_cross_the_display_line_on_their_own_keys(
         reconciles.append(asyncio.get_running_loop().time())
         return epochs
     monkeypatch.setattr(NodeLink, "reconcile", counted)
-    registry = Registry(database, ManualClock(1000))
+    registry = Registry(database, ManualClock(1000), lighting=PgFrameLighting(LUT_RECIPE_ID))
     player = enroll_pi(registry, SERIAL)
     registry.create_frame(FrameCreate(id="kitchen", width_mm=300, height_mm=500,
                                       profile=FrameProfile(width_px=1080, height_px=1920, diagonal_inches=24)))
@@ -141,8 +143,8 @@ def test_picture_documents_and_reports_cross_the_display_line_on_their_own_keys(
                         and decode_picture_document(found.value))
             power = await until(held, SECONDS, "output-HDMI-A-1 on the Node")
             first = await until(held_picture, SECONDS, "(1) picture-HDMI-A-1 on the Node")
-            assert (dict(first.hardware), first.software.brightness_percent) == ({}, 100)
-            assert SCHEMA_MAJOR == 7 and first.software == NEUTRAL_SOFTWARE   # the print look's fields, neutral
+            assert (dict(first.hardware), first.software.contrast_percent) == ({}, 100)
+            assert SCHEMA_MAJOR == 8 and first.software == NEUTRAL_SOFTWARE   # room light: the sliders gone
             assert (first.signal_range, first.test_pattern) == (SignalRange.AUTO, None)
 
             # (2) The Output report records the display; the picture report, what it offers.

@@ -460,8 +460,14 @@ def test_how_a_release_is_written_is_unshipped_and_what_it_contains_is_release_a
     assert _package("release-assets").paths == ("scripts/package_release_artifacts.py",
                                                 "contracts/release.py",
                                                 "contracts/node_release.py",
-                                                "scripts/node_release_artifacts.py")
+                                                "scripts/node_release_artifacts.py",
+                                                "scripts/galleria_zip.py",
+                                                "custom_components/**", "hacs.json")
     assert "release-assets" in claimed_by("contracts/release.py")
+    # Galleria ships as the release's galleria.zip: a change to it, or to how HACS installs it,
+    # releases.
+    for path in ("custom_components/galleria/manifest.json", "hacs.json"):
+        assert claimed_by(path) == ("release-assets",)
 
 
 # --- the gate ----------------------------------------------------------------------------------
@@ -1158,8 +1164,10 @@ def test_every_script_a_release_build_runs_is_claimed_by_what_it_builds():
     seal = {path for path in _with_imports(_scripts_named(_job("pipeline.yml", "seal")))
             if path.startswith("scripts/")}
     assert seal == {"scripts/release_seal.py", "scripts/package_release_artifacts.py",
-                    "scripts/node_release_artifacts.py", "scripts/release_plan.py"}
+                    "scripts/node_release_artifacts.py", "scripts/release_plan.py",
+                    "scripts/galleria_zip.py"}
     assert _package("release-assets").claims("scripts/package_release_artifacts.py")
+    assert _package("release-assets").claims("scripts/galleria_zip.py")
     service = _with_imports(_scripts_named((WORKFLOWS / "service-base.yml").read_text()))
     assert service and all(_package("media-worker-image").claims(path) for path in service)
     # The node components base-image.yml bakes and the seal ships are node-components.yml's:

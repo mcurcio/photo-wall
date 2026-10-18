@@ -163,6 +163,13 @@ def build_library_thumbnails(db: Database, clock: Clock, *, cache_root: Path) ->
                        _nothing_servable)
 
 
+def build_release_services(db: Database, clock: Clock, *, cache_root: Path) -> tuple[AssetReadiness, Publisher]:
+    """The worker's release readiness and publisher for each Pi's version (central/infra/player_versions.py):
+    the one readiness check and a publisher with no feed (it never waits)."""
+    core = _core(db, clock, cache_root=cache_root, feed_wanted=False)
+    return core.stored, core.publisher
+
+
 def build_job_runtime(db: Database, clock: Clock, *, cache_root: Path,
                       env: Mapping[str, str], thumbnails: ThumbnailOrigin,
                       media_maker: Handler[PrepareMedia, MediaReady]) -> JobRuntime:
@@ -183,8 +190,7 @@ def build_job_runtime(db: Database, clock: Clock, *, cache_root: Path,
     handlers = (
         SyncReleasesHandler(origin=origin, releases=PgReleaseRecords(),
                             transactions=core.transactions, publisher=core.publisher,
-                            clock=clock, node_releases=PgNodeReleaseRecords(clock),
-                            readiness=core.stored),
+                            clock=clock, node_releases=PgNodeReleaseRecords(clock)),
         FetchOsImageHandler(production=production, origin=origin, store=core.store),
         FetchSealedEnvironmentHandler(production=production, origin=origin),
         FetchLibraryThumbnailHandler(production=production, origin=thumbnails),

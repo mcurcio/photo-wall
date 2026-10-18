@@ -5,6 +5,7 @@ from zoneinfo import ZoneInfo
 import pytest
 from support.house_time import UTC_HOUSE, window_program
 from support.key_content_builders import measured
+from support.position import LIGHTING
 
 from central.catalog import Candidate, SourcePool
 from central.house_time.model import HouseTime
@@ -14,7 +15,7 @@ from central.wall_plan.fit import FitTarget
 from central.wall_plan.fit_settings import FitSettings
 from central.wall_plan.order import PoolLines, WallHistory
 from central.wall_plan.selection import SceneSelection
-from contracts.models import FrameProfile, Mat, OutputBinding, Plan, Variant, stack_order
+from contracts.models import FrameProfile, OutputBinding, Plan, Variant, stack_order
 
 # Roadmap 5a: a photo is placed only once its key content is measured and it fills its Frame
 # (central/wall_plan/assignment.py), so these candidates are measured, with an even interest
@@ -40,7 +41,7 @@ def binding(frame="left", output="hdmi-1", *, width=1080, height=1920, diagonal=
             generation=1, video=True):
     return OutputBinding(output_id=output, frame_id=frame, generation=generation,
                          profile=FrameProfile(width_px=width, height_px=height,
-                                              diagonal_inches=diagonal, video=video), mat=Mat())
+                                              diagonal_inches=diagonal, video=video), lighting=LIGHTING)
 
 
 def runtime(*, cycle=10, contributions=None, children=(), order="newest_first",

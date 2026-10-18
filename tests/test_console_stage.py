@@ -44,14 +44,18 @@ out.blockers = {
 };
 
 // --- stageTargets: deployments carrying an app, no verdict.
-const releaseRead = { read_at: 1000, selection: { revision: 2, deployment_id: "d-app-1", changed_at: 900 },
-  releases: [], deployments: [
-    { deployment_id: "d-app-1", published_at: 800, base_tag: "v0.15.0", app_environment_sha256: "9f8e7d".padEnd(64, "0") },
-    { deployment_id: "d-noapp", published_at: 700, base_tag: "v0.15.0", app_environment_sha256: null },
-    { deployment_id: "d-app-2", published_at: 600, base_tag: "v0.14.0", app_environment_sha256: "aa".repeat(32) }] };
-out.targets = stage.stageTargets(releaseRead).map((row) => ({ id: row.deploymentId, contents: row.contents, selected: row.selected }));
+const release = (version, deployment_id, base_tag, app_environment_sha256) => ({ version, deployment_id, base_tag,
+  app_environment_sha256 });
+const releaseRead = { read_at: 1000, releases: [
+  release("v0.15.0", "d-app-1", "v0.15.0", "9f8e7d".padEnd(64, "0")),
+  release("v0.14.1", "d-noapp", "v0.15.0", null),
+  release("v0.14.0", "d-app-2", "v0.14.0", "aa".repeat(32)),
+  release("v0.13.0", null, null, null)] };
+out.targets = stage.stageTargets(releaseRead).map((row) => ({ id: row.deploymentId, contents: row.contents, tag: row.tag }));
 out.noTargets = stage.stageTargets(null);
-out.scope = [stage.stageScope(releaseRead.selection), stage.stageScope({ revision: 0, deployment_id: null })];
+out.scope = stage.STAGE_SCOPE;
+out.deploymentOf = [stage.deploymentOf(releaseRead, "v0.15.0"), stage.deploymentOf(releaseRead, "v0.13.0"),
+  stage.deploymentOf(null, "v0.15.0")];
 
 // --- stageReplaces: what sending replaces when the latest is Staged.
 out.replaces = [
@@ -147,17 +151,15 @@ def test_stage_is_blocked_only_on_served_facts():
     assert blockers["staged"] is None and blockers["effectUnknown"] is None
 
 
-def test_stage_targets_are_the_deployments_carrying_an_app_and_the_scope_names_the_selection():
+def test_stage_targets_are_the_deployments_carrying_an_app_and_the_scope_names_the_players_version():
     out = _run()
     assert out["targets"] == [
-        {"id": "d-app-1", "contents": "Base v0.15.0 · app 9f8e7d…", "selected": True},
-        {"id": "d-app-2", "contents": "Base v0.14.0 · app aaaaaa…", "selected": False}]
+        {"id": "d-app-1", "contents": "Base v0.15.0 · app 9f8e7d…", "tag": "v0.15.0"},
+        {"id": "d-app-2", "contents": "Base v0.14.0 · app aaaaaa…", "tag": "v0.14.0"}]
     assert out["noTargets"] == []
-    assert out["scope"] == [
-        "Applies to this boot only. Any later boot, including an unplanned one, is offered the boot selection "
-        "(deployment d-ap…).",
-        "Applies to this boot only. Any later boot, including an unplanned one, is offered the boot selection "
-        "(none: Central refuses every boot)."]
+    assert out["deploymentOf"] == ["d-app-1", None, None]
+    assert out["scope"] == ("Applies to this boot only. Any later boot, including an unplanned one, is offered this "
+                            "Player's own version (Releases).")
 
 
 def test_a_newer_stage_states_what_it_replaces_and_never_calls_it_a_retry():
@@ -247,8 +249,8 @@ _BOUND_TEXT = re.compile(r"shows the base page while the app switches|proven on 
 
 
 def test_the_bound_rule_has_one_home_and_is_shown_only_with_its_caveat():
-    """R1: stage.js `boundRuleLines` is the only export of the rule and its caveat (as releases.js
-    `selectionConfirmation` is Select's), and no other console module names either text."""
+    """R1: stage.js `boundRuleLines` is the only export of the rule and its caveat, and no other
+    console module names either text."""
     out = _run()
     assert out["boundRuleLines"] == [
         "Each Frame this Player drives shows the base page while the app switches, then rejoins its Run at the "

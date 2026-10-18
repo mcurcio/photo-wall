@@ -137,7 +137,8 @@ def unread_display_socket_never_starves_paint(seconds=1.0):
 def static_photo_render_rate(seconds=6.0):
     from native_display_media import image_fixture
 
-    from contracts.models import FrameProfile, Layer, Mat, OutputBinding
+    from contracts.frame_lighting import FrameLighting, Paper
+    from contracts.models import FrameProfile, Layer, OutputBinding
     from contracts.photo_crop import CENTRED
     from player.luts import PlayerLuts
     from player.native import NativeOutput, NativeRenderer
@@ -169,7 +170,9 @@ def static_photo_render_rate(seconds=6.0):
         photo.write_bytes(payload)
         binding = OutputBinding(output_id="headless", frame_id="frame", generation=1,
                                 profile=FrameProfile(width_px=640, height_px=480,
-                                                     diagonal_inches=10), mat=Mat())
+                                                     diagonal_inches=10),
+                                lighting=FrameLighting(mat_depth_mm=0, lights=(),
+                                                       paper=Paper(whiteness=.9, ink_density=2)))
         layer = Layer(assignment_id="photo", run_id="run", output_id="headless",
                       frame_id="frame", binding_generation=1, start=0, end=10**9,
                       media_origin=0, variant=variant, crop=CENTRED)

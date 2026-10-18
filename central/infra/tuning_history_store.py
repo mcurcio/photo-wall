@@ -1,6 +1,6 @@
 """The configuration snapshot's reads over PostgreSQL (`TuningHistoryQueries`; migration 096). Each
 method runs in one transaction and reads through its owner's store (picture_history_store,
-position_history_store); names (the Display's, the Frame's, a LUT's) are read today. It never
+position_history_store); names (the Display's, the Frame's) are read today. It never
 writes.
 """
 from __future__ import annotations
@@ -21,7 +21,6 @@ from central.displays.views import (
 from central.fleet import position_history
 from central.fleet.position_history import MadeFor, PositionEntry, position_values
 from central.fleet.position_views import PositionEntryView, PositionHistoryView, position_entry_view
-from central.infra.lut_rows import lut_name_in
 from central.infra.picture_columns import PICTURE_COLUMNS, stored_picture
 from central.infra.picture_history_store import (
     latest_kept_at_in,
@@ -40,7 +39,8 @@ from central.installation_models import FrameRefView
 from central.tuning_history import model
 from central.tuning_history.bounds import HistoryPage, HistoryRefused
 from central.tuning_history.views import TuningSnapshotView
-from contracts.models import Calibration, Mat
+from contracts.frame_lighting import FrameLighting
+from contracts.models import Calibration
 
 
 class PgTuningHistory:
@@ -69,7 +69,7 @@ class PgTuningHistory:
         not None`."""
         with self._db.transaction() as conn:
             frame, made_for = _frame_in(conn, frame_id)
-            stored = position_values(Calibration.model_validate(frame["calibration"]), Mat.model_validate(frame["mat"]))
+            stored = position_values(Calibration.model_validate(frame["calibration"]), FrameLighting.model_validate(frame["lighting"]))
             unrecorded = position_history.unrecorded_record(latest_kept_position_in(conn, frame_id), stored) is not None
             entries = position_entries_in(conn, frame_id, page)
         return PositionHistoryView(frame=FrameRefView(id=frame_id, name=frame["name"]), unrecorded_change=unrecorded,
@@ -104,9 +104,9 @@ class PgTuningHistory:
 
 
 def _frame_in(conn: Any, frame_id: str) -> tuple[Any, MadeFor]:
-    """The Frame's row (name, calibration, mat) and what an entry is made for on it now.
+    """The Frame's row (name, calibration, lighting) and what an entry is made for on it now.
     HistoryRefused("unknown_frame", 404)."""
-    frame = conn.execute("SELECT f.name, f.calibration, f.mat FROM frames f WHERE f.id=%s", (frame_id,)).fetchone()
+    frame = conn.execute("SELECT f.name, f.calibration, f.lighting FROM frames f WHERE f.id=%s", (frame_id,)).fetchone()
     made_for = frame_made_for_in(conn, frame_id)
     if frame is None or made_for is None:
         raise HistoryRefused("unknown_frame", 404)
@@ -114,8 +114,8 @@ def _frame_in(conn: Any, frame_id: str) -> tuple[Any, MadeFor]:
 
 
 def _picture_views_in(conn: Any, entries: Iterable[PictureEntry]) -> tuple[PictureEntryView, ...]:
-    """`entries` as the routes answer them, with today's names of their Displays, their Frames (a
-    deleted one: none) and their LUTs."""
+    """`entries` as the routes answer them, with today's names of their Displays and their Frames (a
+    deleted one: none)."""
     entries = tuple(entries)
     display_ids = sorted({entry.display_id for entry in entries}, key=str)
     frame_ids = sorted({entry.frame_id for entry in entries if entry.frame_id is not None})
@@ -123,12 +123,9 @@ def _picture_views_in(conn: Any, entries: Iterable[PictureEntry]) -> tuple[Pictu
         "SELECT id, name FROM displays WHERE id = ANY(%s)", (display_ids,)).fetchall()} if display_ids else {}
     frames = {row["id"]: row["name"] for row in conn.execute(
         "SELECT id, name FROM frames WHERE id = ANY(%s)", (frame_ids,)).fetchall()} if frame_ids else {}
-    profiles = {lut.profile_sha256 for entry in entries if (lut := entry.record.picture.software.lut) is not None}
-    luts = {sha: lut_name_in(conn, sha) for sha in sorted(profiles)}
     return tuple(picture_entry_view(
         entry, display_name=displays[entry.display_id],
-        frame_name=None if entry.frame_id is None else frames.get(entry.frame_id),
-        lut_name=None if (lut := entry.record.picture.software.lut) is None else luts[lut.profile_sha256])
+        frame_name=None if entry.frame_id is None else frames.get(entry.frame_id))
         for entry in entries)
 
 
