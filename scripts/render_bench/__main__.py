@@ -62,6 +62,7 @@ REFRESH: Final = 1 / 60         # a loop turn at least this often
 LEAD: Final = 3.0               # seconds from the start to the tracer's origin
 TURN_TIMEOUT: Final = 5.0
 GRANT_TIMEOUT: Final = 10.0
+FREEZE_ATTEMPTS: Final = 20          # half a second apart
 
 
 def _arguments(argv: list[str] | None) -> argparse.Namespace:
@@ -101,10 +102,15 @@ def _frozen(units: list[str]) -> Iterator[None]:
     frozen = []
     try:
         for unit in units:
-            try:
-                call("FreezeUnit", unit)
-            except GLib.Error as error:
-                raise RuntimeError("bench_freeze") from error
+            for attempt in range(FREEZE_ATTEMPTS):      # a unit still thawing or freezing answers busy
+                try:
+                    call("FreezeUnit", unit)
+                    break
+                except GLib.Error as error:
+                    print(f"freeze {unit}: {error.message}", file=sys.stderr)
+                    if attempt + 1 == FREEZE_ATTEMPTS:
+                        raise RuntimeError("bench_freeze") from error
+                    time.sleep(0.5)
             frozen.append(unit)
         yield
     finally:
