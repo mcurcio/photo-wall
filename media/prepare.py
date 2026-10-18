@@ -27,7 +27,7 @@ import pillow_heif
 from pydantic import Field
 
 from central.kernel.assets import MediaReady
-from central.photo_library.model import LibraryAsset
+from central.photo_library.model import Kind, LibraryAsset
 from central.photo_library.policy import STILL_MEDIA_TYPES as STILL_MEDIA_TYPES  # re-exported
 from central.photo_library.rendition import FetchStep, FrameNeed, need_step
 from contracts.models import Digest, Model, Positive
@@ -77,6 +77,66 @@ class PreparationRecipe(Model):
     gop_seconds: Positive = Field(default=2, le=10)
 
 
+# ---- Render planes S4 (frozen page .claude/runs/render-planes/s4-page.md): one recipe per kind.
+# Bead B1 deletes the class `PreparationRecipe` above and makes the name the discriminated union
+# `Annotated[StillRecipe | VideoRecipe, Field(discriminator="kind")]`, with every consumer.
+
+
+class StillRecipe(Model):
+    """How a photo's one copy is made: upright, at most `long_edge` pixels on its longer side
+    (the wall need's step, central/media_repository.py `variant_recipe`), one JPEG at
+    `jpeg_quality`. A video's encoding is not here, so changing it renames no photo's copy."""
+
+    kind: Literal["image"] = "image"
+    # 2: preparation reads the photo Immich shows (roadmap 4, M3): every preparation is redone once.
+    # 3: HEIC, AVIF and wide-colour photos, converted to sRGB (follow-ups 2026-10-11, A5).
+    version: Literal[3] = 3
+    long_edge: int = Field(default=3840, ge=2, le=16384, strict=True)
+    jpeg_quality: int = Field(default=3, ge=1, le=31, strict=True)
+
+
+class VideoRecipe(Model):
+    """How a video's one copy is made (owner, gate answer Q5, 2026-10-18: "HEVC now, one 1080p
+    copy per video"; "1080p at 30 is fine"): upright, square pixels, at most `long_edge` on its
+    longer side and `max_pixels` in all, at most `fps` frames a second, SDR BT.709 limited range,
+    HEVC Main (8-bit 4:2:0) level 4.1 Main tier in an `hvc1` MP4 with `+faststart`, constant
+    quality `crf` at x265's `preset`, a key frame every `gop_seconds`, no audio, subtitles, data
+    or metadata. What the Pi 5's hardware decoder plays (player/decode.py `VIDEO_DECODER`)."""
+
+    kind: Literal["video"] = "video"
+    # 1-3 were the one recipe photos and videos shared (H.264 High 4.2 with libx264).
+    # 4: HEVC Main, level 4.1, hvc1, by libx265 (render planes S4): every video is prepared again.
+    version: Literal[4] = 4
+    long_edge: int = Field(default=1920, ge=2, le=1920, strict=True)
+    max_pixels: int = Field(default=2_073_600, ge=4, le=2_073_600, strict=True)
+    fps: Positive = Field(default=30, le=30)
+    crf: int = Field(default=24, ge=1, le=51, strict=True)
+    preset: Literal["medium", "fast", "slow"] = "medium"
+    gop_seconds: Positive = Field(default=2, le=10)
+
+
+@dataclass(frozen=True)
+class HouseRecipes:
+    """The recipes Photo Wall prepares by now, one per kind: what `Preparer` uses when no recipe
+    is given and what the media repository names copies by."""
+
+    still: StillRecipe = StillRecipe()
+    video: VideoRecipe = VideoRecipe()
+
+    def of(self, kind: Kind) -> StillRecipe | VideoRecipe:
+        """`still` for "image", `video` for "video"; ValueError("recipe_kind") for anything
+        else. Pure."""
+        raise NotImplementedError("render-planes S4 bead B1")
+
+
+def stored_recipe(value: object) -> StillRecipe | VideoRecipe | None:
+    """A recipe as `media_recipes.recipe` stores it (`model_dump(mode="json")`) read back by the
+    current models, or None when they refuse it (a recipe from before S4, one recipe for both
+    kinds, has no `kind`): a variant named by it cannot be re-made. The one reader of a stored
+    recipe. Pure."""
+    raise NotImplementedError("render-planes S4 bead B1")
+
+
 def recipe_id(recipe: PreparationRecipe, need: FrameNeed) -> str:
     """The one home of what a media variant's recipe id hashes: the recipe values and the step
     of the wall need they size for (`need_step`, its long edge; follow-up S1: one copy per
@@ -107,6 +167,10 @@ class PreparationLimits(Model):
     cpu_seconds: Positive = 180
     memory_bytes: int = Field(default=1024**3, ge=64 * 1024**2, strict=True)
     threads: int = Field(default=1, ge=1, le=4, strict=True)
+    # Render planes S4: the HEVC encoder's threads (x265's pool); its process's CPU limit is
+    # `cpu_seconds` times this. Measured 2026-10-18: x265 costs ~1.8x libx264's CPU, and 4
+    # threads cut its wall time ~3.5x, so a video's preparation still fits `wall_seconds`.
+    video_threads: int = Field(default=4, ge=1, le=8, strict=True)
 
 
 class BuildIdentity(Model):
