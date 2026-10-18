@@ -102,6 +102,11 @@ export interface FrameRefView {
   name: string;
 }
 
+export interface FrameTurnChange {
+  expected_generation: number;
+  turn: 0 | 90 | 180 | 270;
+}
+
 export type HeardEntityView = HeardLightView | HeardSensorView;
 
 export interface HeardLightView {
@@ -513,6 +518,12 @@ export const LIMITS = {
   FrameRefView: {
     id: {
       pattern: "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+    },
+  },
+  FrameTurnChange: {
+    expected_generation: {
+      integer: true,
+      minimum: 0,
     },
   },
   HeardLightView: {
