@@ -105,7 +105,7 @@ export function useVisible() {
 }
 
 /**
- * @typedef {import("./useDraft.js").Trying} Draft   `{fit, lighting}`: the Frame fit and lighting being tried
+ * @typedef {import("./useDraft.js").Trying} Draft   `{fit, lighting}`: the Frame fit (its rectangle) and lighting being tried
  * @typedef {import("./useDraft.js").Fit} Fit
  * @typedef {import("./useDraft.js").Lighting} Lighting
  * @typedef {"checking"|"not_admitted"|"unavailable"|"unbound"|"idle"|"connecting"|"waiting"
@@ -409,8 +409,8 @@ export function useFrameAdjustment({ frameId, frame, open }) {
         keep(result.data);
         // The draft becomes the answer's fit and lighting; its base (the saved revision it was made
         // from) stays the draft's own.
-        const { mode, corners, rotation } = fitOf(result.data.calibration);
-        change({ mode, corners, rotation });
+        const { centre_x, centre_y, width } = fitOf(result.data.calibration);
+        change({ centre_x, centre_y, width });
         changeLighting(result.data.lighting);
         return { ok: true };
       }

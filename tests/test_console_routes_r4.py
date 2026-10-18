@@ -807,9 +807,9 @@ LEGACY_MARKUP = {"ConfirmAction.jsx", "PlayerCommands.jsx"}
 FRAME_PAGE_IMPORTS = {
     "frame-page.tsx": {"BindingFacet.jsx", "liveAdjustment.js", "pictureSession.js", "framesApi.js", "useMutate.js"},
     # The Picture tab (1c K1): its routes, the session hook's type and a display level's words
-    # (0022 R11); Position (1c K2): the quarter turns its draft takes.
+    # (0022 R11); Position (render redesign S5): the placement rule it judges every change by.
     "frame-picture.tsx": {"pictureApi.js", "pictureSession.js", "levelWords.js"},
-    "frame-position.tsx": {"useDraft.js"},
+    "frame-position.tsx": {"placement.js"},
     "frame-overview.tsx": {"PrecedenceExplanation.jsx", "ReadinessNotice.jsx", "readinessRecovery.js",
                            "frameIds.js"},
     "frame-profile.tsx": {"framesApi.js", "useMutate.js"},

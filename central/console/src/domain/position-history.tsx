@@ -7,7 +7,6 @@ import { changedSummary, type HistoryDay, HistoryList, type HistoryRow } from ".
 import { unitWords } from "../patterns/units";
 import { pixelSize } from "../timeWords.js";
 import { inkWords, lightDetails, type PaperProfileChoice, profileWords } from "./frame-lighting/model";
-import type { PixelSize } from "./frame-position";
 import type { Adjustment } from "./live-adjustment";
 import { daysOf, historyProblem, shownEntries } from "./picture-history";
 
@@ -18,8 +17,6 @@ export interface PositionHistoryProps {
   frameId: string;
   /** The tab's live adjustment: Restore is one of its edits. */
   adjustment: Adjustment;
-  /** The output's size in pixels (null: not reported), for each corner's pixels. */
-  size: PixelSize | null;
   /** The room lights' names by id, for the lighting's rows (an id not here shows as itself). */
   roomNames?: Readonly<Record<string, string>>;
   /** The paper profiles on the list, for the paper's name. */
@@ -34,7 +31,6 @@ const UNRECORDED = "This Frame's position changed outside Photo Wall since its l
 const EMPTY = "No changes yet. They appear here when you adjust this Frame's position or press Done.";
 const OPEN_FIRST = "Open while the editor runs";
 const SAME = "Same values as the change below";
-const CORNERS = ["Top-left", "Top-right", "Bottom-right", "Bottom-left"] as const;
 // The live adjustment's phases with a session the Pi shows: Restore is offered only then.
 const LIVE = new Set(["sending", "shown"]);
 
@@ -50,7 +46,6 @@ export const WHAT: Record<PositionEntryKind, string> = {
 const NOT_KEPT = new Set<PositionEntryKind>(["sent-draft", "sent-back"]);
 
 const percent = (fraction: number) => `${(fraction * 100).toFixed(1)} %`;
-const FITS = { cover: "Cover", corners: "Corners", rectangle: "Rectangle" } as const;
 
 /** The pattern's one summary rule (`changedSummary`) over two entries' details: what differs from
  * the entry below; a light the entry below had and this one has not is said by the lights' count. */
@@ -59,12 +54,10 @@ export function positionSummary(details: readonly { label: string; value: string
   return changedSummary(details, below, { absent: () => null, same: SAME });
 }
 
-/** Every value of an entry: a Rectangle's centre and width as shares of the screen as it hangs, or
- * Cover's and Corners' each corner as a share of the output (with its pixels when the output's
- * size is known) and the rotation; the lighting (the mat's depth, each light's values, the paper), and
- * the screen size it was made for. `names`: the room lights' names by id; `profiles`: the paper
- * profiles on the list. */
-export function positionDetails(entry: PositionEntryView, size: PixelSize | null,
+/** Every value of an entry: the picture's centre and width as shares of the screen as it hangs; the
+ * lighting (the mat's depth, each light's values, the paper), and the screen size it was made for.
+ * `names`: the room lights' names by id; `profiles`: the paper profiles on the list. */
+export function positionDetails(entry: PositionEntryView,
   names: Readonly<Record<string, string>> = {}, profiles: readonly PaperProfileChoice[] = []): { label: string; value: string }[] {
   const { lighting } = entry;
   const { width, height } = entry.made_for.profile_px;
@@ -74,16 +67,8 @@ export function positionDetails(entry: PositionEntryView, size: PixelSize | null
       { label: "Centre", value: `${percent(fit.centre_x ?? 0.5)} across, ${percent(fit.centre_y ?? 0.5)} down` },
       { label: "Width", value: `${percent(fit.width ?? 1)} of the screen` },
     ]
-    : [
-      ...(fit.corners ?? []).map(([x, y], index) => ({
-        label: CORNERS[index] ?? `Corner ${index + 1}`,
-        value: `${percent(x)} across, ${percent(y)} down`
-          + (size === null ? "" : ` (${Math.round(x * size.width)}, ${Math.round(y * size.height)} px)`),
-      })),
-      { label: "Rotation", value: `${fit.rotation}°` },
-    ];
+    : [];
   return [
-    { label: "Fit", value: FITS[fit.mode] },
     ...placed,
     { label: "Mat depth", value: unitWords(lighting.mat_depth_mm, "mm") },
     { label: "Lights", value: String(lighting.lights.length) },
@@ -113,9 +98,9 @@ export function restoreState(entry: PositionEntryView, adjustment: Adjustment): 
 
 /** The entries as the list's days (`daysOf`), each summary against the entry below it. */
 export function positionDays(entries: readonly PositionEntryView[], adjustment: Adjustment,
-  size: PixelSize | null, names: Readonly<Record<string, string>> = {},
+  names: Readonly<Record<string, string>> = {},
   profiles: readonly PaperProfileChoice[] = []): HistoryDay[] {
-  const details = entries.map((entry) => positionDetails(entry, size, names, profiles));
+  const details = entries.map((entry) => positionDetails(entry, names, profiles));
   return daysOf(entries, (entry, index) => ({
     what: WHAT[entry.kind],
     notKept: NOT_KEPT.has(entry.kind),
@@ -132,7 +117,6 @@ export interface PositionHistoryListProps {
   /** Older entries loaded by "Show older", after the read's. */
   older?: readonly PositionEntryView[];
   adjustment: Adjustment;
-  size: PixelSize | null;
   /** The room lights' names by id. */
   roomNames?: Readonly<Record<string, string>>;
   /** The paper profiles on the list. */
@@ -151,13 +135,13 @@ export interface PositionHistoryListProps {
 /** The list as read: its words, the unrecorded change's Note, a Restore's refusal and the read's
  * problem. Plain props, so its stories need no server. */
 export function PositionHistoryList({
-  history, older = [], adjustment, size, roomNames = {}, profiles = [], busy, readError = null, refused = null, restoring,
+  history, older = [], adjustment, roomNames = {}, profiles = [], busy, readError = null, refused = null, restoring,
   onRestore, onRetry, onOlder,
 }: PositionHistoryListProps) {
   const entries = shownEntries(history?.entries ?? [], older);
   return (
     <HistoryList title={TITLE} intro={INTRO} notice={history?.unrecorded_change ? UNRECORDED : undefined}
-      days={positionDays(entries, adjustment, size, roomNames, profiles)} empty={EMPTY} busy={busy}
+      days={positionDays(entries, adjustment, roomNames, profiles)} empty={EMPTY} busy={busy}
       problem={historyProblem({ readError, refused, what: "this Frame's history", words: refusalWords, onRetry })}
       restoring={restoring} onRestore={onRestore} onOlder={onOlder} />
   );
@@ -166,13 +150,13 @@ export function PositionHistoryList({
 /**
  * The Position tab's History (configuration snapshots; owner, 2026-10-13: "configuration snapshots"
  * that keep "a history of what has been done in the past", used to "View and restore"): every kept
- * and not-kept Position of the Frame (its fit, corners, rotation and lighting), newest first by
+ * and not-kept Position of the Frame (its centre, width and lighting), newest first by
  * day, read while the tab is shown (historyApi.js `useHistoryPages`) and again after a Restore, Done
  * or Revert. Restore replaces the operator's draft with an entry (liveAdjustment.js `restore`); the
  * live session shows it, Done keeps it and Revert returns to the kept Position. An entry made for
  * another screen size or display cannot be restored, and says so.
  */
-export function PositionHistory({ frameId, adjustment, size, roomNames, profiles }: PositionHistoryProps) {
+export function PositionHistory({ frameId, adjustment, roomNames, profiles }: PositionHistoryProps) {
   const read = useCallback((page: { before?: string; limit: number }) => readPositionHistory(frameId, page) as
     Promise<{ ok: true; history: PositionHistoryView } | { ok: false; error: string }>, [frameId]);
   const pages = useHistoryPages(read);
@@ -194,7 +178,7 @@ export function PositionHistory({ frameId, adjustment, size, roomNames, profiles
   };
 
   return (
-    <PositionHistoryList history={pages.history} older={pages.olderEntries} adjustment={adjustment} size={size}
+    <PositionHistoryList history={pages.history} older={pages.olderEntries} adjustment={adjustment}
       roomNames={roomNames} profiles={profiles}
       busy={pages.loading} readError={pages.error} refused={refused} restoring={restoring}
       onRestore={(id) => { void restore(id); }} onRetry={() => { void refresh(); }}

@@ -1,56 +1,39 @@
 import { useCallback, useRef, useState } from "react";
 
-import { isConvex } from "./convex.js";
-
 /**
- * A Frame fit (contracts/models.py `CornersFit` | `CoverFit`, roadmap 1c): how the Frame's picture
- * sits in its four corners. **Cover** (the default, owner 2026-10-10 q1): the picture keeps its
- * shape, turned `rotation` degrees clockwise (any angle, 0 <= r < 360), and is the smallest such
- * rectangle that holds every corner; nothing is drawn outside the corners. **Corners** (an
- * explicit opt-in): the picture is stretched exactly onto the corners, a quarter turn picking its
- * top.
+ * A Frame fit (contracts/models.py `RectangleFit`, render redesign S5): where the Frame's picture
+ * sits on its screen as it hangs, as one upright rectangle of the Frame profile's shape: its
+ * centre as fractions of the hung screen's width and height, its width as a fraction of that
+ * width. The screen's turn is the Frame's own (the Hardware tab), never the fit's.
  *
  * A Frame's lighting (src/generated/contract.ts `FrameLighting`): its mat depth, lights and paper,
  * saved with the Position through the same trial. Central serves every Frame's; the draft holds a
  * copy of it, never a lighting of its own making.
  *
- * @typedef {[number, number]} Point
- * @typedef {{mode: "cover"|"corners", corners: Point[], rotation: number}} Fit
+ * @typedef {{mode: "rectangle", centre_x: number, centre_y: number, width: number}} Fit
  * @typedef {import("./generated/contract").FrameLighting} Lighting
  * @typedef {{fit: Fit, lighting: Lighting|null}} Trying   the operator's draft (lighting null: Central served none yet); its base revision is `base`
  * @typedef {{calibration: object|null, lighting: Lighting|null}} Saved   a saved Position and lighting
  */
 
-/** Inline reason an invalid corner patch snaps back with (design §J2 table). */
-export const CONVEX_REASON = "corners must form a convex aperture";
+/** Inline reason a patch outside FrameRectangle's ranges (contracts/frame_fit.py) is refused with. */
+export const RECTANGLE_REASON = "A picture's centre is on the screen and its width is more than none and at most the screen's.";
 
-/** The four quarter turns: Corners' only rotations, Cover's presets. */
-export const QUARTER_TURNS = [0, 90, 180, 270];
-
-const FULL_SCREEN = [
-  [0, 0],
-  [1, 0],
-  [1, 1],
-  [0, 1],
-];
-
-/** The nearest quarter turn to `rotation` degrees (Corners takes only those). */
-export const quarterTurn = (rotation) => (Math.round(rotation / 90) * 90) % 360;
+/** Whether `fit` holds FrameRectangle's ranges: 0 <= centre <= 1 on each axis, 0 < width <= 1. */
+const inRange = ({ centre_x: x, centre_y: y, width }) =>
+  [x, y, width].every((value) => typeof value === "number" && Number.isFinite(value))
+  && x >= 0 && x <= 1 && y >= 0 && y <= 1 && width > 0 && width <= 1;
 
 /**
- * The fit a saved position holds, as a fresh copy (so a later edit never mutates the snapshot).
- * With no saved position, Cover on the whole output at angle 0 (owner 2026-10-10 q1).
+ * The fit a saved position holds, as a fresh copy (so a later edit never mutates the snapshot):
+ * its centre and width, each absent value read as RectangleFit's default (centred, full width).
  *
  * @param {object|null|undefined} committed
  * @returns {Fit}
  */
 export function fitOf(committed) {
-  const fit = committed?.fit ?? { mode: "cover", corners: FULL_SCREEN, rotation: 0 };
-  return {
-    mode: fit.mode,
-    corners: (fit.corners ?? FULL_SCREEN).map((point) => [point[0], point[1]]),
-    rotation: fit.rotation ?? 0,
-  };
+  const fit = committed?.fit ?? {};
+  return { mode: "rectangle", centre_x: fit.centre_x ?? 0.5, centre_y: fit.centre_y ?? 0.5, width: fit.width ?? 1 };
 }
 
 /**
@@ -83,7 +66,7 @@ function canonical(value) {
  */
 export const draftKey = (value, lighting) => {
   const fit = fitOf(value);
-  return canonical([fit.mode, fit.corners, fit.rotation, lightingOf(lighting === undefined ? value?.lighting : lighting)]);
+  return canonical([fit.centre_x, fit.centre_y, fit.width, lightingOf(lighting === undefined ? value?.lighting : lighting)]);
 };
 
 /**
@@ -104,11 +87,12 @@ export const draftKey = (value, lighting) => {
  * is whether the draft's fit or lighting differs from its origin's. `changeLighting` replaces the
  * draft's lighting (FrameLighting checks its own bounds).
  *
- * `updateHandles(patch)` merges a partial fit `{mode?, corners?, rotation?}` into the draft,
- * first validating any corners it touches with the SAME convex test + `1e-6` epsilon + winding as
- * the server (see convex.js). An INVALID patch does not mutate `trying` (the handle snaps back)
- * and returns a reason; a valid patch commits and returns `{valid: true}`. Choosing Corners turns
- * the picture to the nearest quarter turn, the only rotations Corners takes.
+ * `updateHandles(patch)` merges a partial fit `{centre_x?, centre_y?, width?}` into the draft,
+ * first checking FrameRectangle's ranges (contracts/frame_fit.py: each centre from 0 to 1, the
+ * width above 0 and at most 1). An INVALID patch does not mutate `trying` and returns
+ * RECTANGLE_REASON; a valid patch commits and returns `{valid: true}`. Whether the rectangle lies
+ * on its screen needs the screen and the Frame's shape: the editor judges that by src/placement.js
+ * `place` before it calls here.
  *
  * @param {string} frameId identity of the Frame being edited
  * @param {object|null|undefined} committed the Frame's saved Position (Plane A)
@@ -141,11 +125,9 @@ export function useDraft(frameId, committed, committedLighting) {
   committedRef.current = saved();
 
   const updateHandles = useCallback((patch) => {
-    const fit = { ...tryingRef.current.fit, ...patch };
-    if ("corners" in patch && !isConvex(fit.corners)) {
-      return { valid: false, reason: CONVEX_REASON };
-    }
-    if (fit.mode === "corners") fit.rotation = quarterTurn(fit.rotation);
+    const { centre_x, centre_y, width } = { ...tryingRef.current.fit, ...patch };
+    const fit = { mode: "rectangle", centre_x, centre_y, width };
+    if (!inRange(fit)) return { valid: false, reason: RECTANGLE_REASON };
     const candidate = { ...tryingRef.current, fit };
     tryingRef.current = candidate;
     setDraft((current) => ({ ...current, trying: candidate }));

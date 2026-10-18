@@ -20,7 +20,22 @@
  * @typedef {0|90|180|270} Turn   degrees clockwise, as the screen hangs
  */
 
-const NOT_BUILT = "render-planes S5 bead B2";
+const TURNS = [0, 90, 180, 270];
+
+/** `value` rounded half up, floor(value + 0.5): never Math.round's rounding of a negative half. */
+const halfUp = (value) => Math.floor(value + 0.5);
+
+/** Whether `value` is a finite number, never a boolean (Python's `_finite`). */
+const finite = (value) => typeof value === "number" && Number.isFinite(value);
+
+/** Whether `value` is a whole number of at least 1 (Python: an int, never a bool, >= 1). */
+const side = (value) => Number.isInteger(value) && value >= 1;
+
+/** Error("placement_screen") or Error("placement_aspect") as `place` refuses them. */
+function checkScreen(screen, aspect) {
+  if (!(side(screen[0]) && side(screen[1]))) throw new Error("placement_screen");
+  if (!(finite(aspect) && aspect > 0)) throw new Error("placement_aspect");
+}
 
 /**
  * The screen's [width, height] in pixels as it hangs, from its mode's [width, height]: swapped for
@@ -32,9 +47,10 @@ const NOT_BUILT = "render-planes S5 bead B2";
  * @returns {[number, number]}
  */
 export function hanging(size, turn) {
-  void size;
-  void turn;
-  throw new Error(NOT_BUILT);
+  if (!TURNS.includes(turn)) throw new Error("display_turn");
+  const [width, height] = size;
+  if (!(side(width) && side(height))) throw new Error("screen_size");
+  return turn === 90 || turn === 270 ? [height, width] : [width, height];
 }
 
 /**
@@ -52,10 +68,19 @@ export function hanging(size, turn) {
  * @returns {Placement|null}
  */
 export function place(rectangle, screen, aspect) {
-  void rectangle;
-  void screen;
-  void aspect;
-  throw new Error(NOT_BUILT);
+  const { centre_x: centreX, centre_y: centreY, width: fraction } = rectangle;
+  if (!([centreX, centreY, fraction].every(finite)
+        && centreX >= 0 && centreX <= 1 && centreY >= 0 && centreY <= 1 && fraction > 0 && fraction <= 1)) {
+    throw new Error("frame_rectangle");
+  }
+  checkScreen(screen, aspect);
+  const [screenWidth, screenHeight] = screen;
+  const width = Math.max(1, halfUp(fraction * screenWidth));
+  const height = Math.max(1, halfUp(width / aspect));
+  const x = halfUp(centreX * screenWidth - width / 2);
+  const y = halfUp(centreY * screenHeight - height / 2);
+  if (!(x >= 0 && x + width <= screenWidth && y >= 0 && y + height <= screenHeight)) return null;
+  return { x, y, width, height };
 }
 
 /**
@@ -67,7 +92,7 @@ export function place(rectangle, screen, aspect) {
  * @returns {Rectangle}
  */
 export function fillScreen(screen, aspect) {
-  void screen;
-  void aspect;
-  throw new Error(NOT_BUILT);
+  checkScreen(screen, aspect);
+  const [screenWidth, screenHeight] = screen;
+  return { centre_x: 0.5, centre_y: 0.5, width: Math.min(screenWidth, Math.floor(screenHeight * aspect + 1e-6)) / screenWidth };
 }

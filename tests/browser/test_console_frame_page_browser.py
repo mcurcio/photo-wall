@@ -27,7 +27,8 @@ from test_registry import enroll
 
 from central.fleet.models import TrialRefused
 from central.registry import FrameCreate
-from contracts.models import Calibration, CornersFit, CoverFit, FrameProfile
+from contracts.frame_fit import place
+from contracts.models import Calibration, CornersFit, FrameProfile, RectangleFit
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("PHOTO_WALL_BROWSER_TESTS") != "1",
@@ -46,9 +47,12 @@ SHORT_WINDOW = 16
 PRESENTED = re.compile(r"^Presented by the Pi · \d\d:\d\d:\d\d$")
 WAITING = "Previewing — waiting for the Pi"
 OVERTAKEN = "Someone saved a different position for this Frame meanwhile"
-# The saved top-left corner, in pixels of the 1920 x 1080 output, and one saved elsewhere.
+# The saved picture: half the 1920 x 1080 screen's width (960 x 540 px), its left edge SAVED_X
+# pixels in; and one saved elsewhere, ELSEWHERE_X in. HALF is half its width, so its centre across
+# is x + HALF (what Exact values shows).
 SAVED_X = 100
 ELSEWHERE_X = 300
+HALF = 480
 
 
 LANDSCAPE = FrameProfile(width_px=1920, height_px=1080, diagonal_inches=24)
@@ -58,15 +62,22 @@ PORTRAIT = FrameProfile(width_px=1080, height_px=1920, diagonal_inches=24)
 
 
 def _corners(x):
-    """The whole output with its top-left corner `x` pixels in."""
+    """The whole output with its top-left corner `x` pixels in (the old Corners form, which the
+    Hardware tab's Frame profile note still reads until the turn control replaces it)."""
     return ((x / 1920, 0), (1, 0), (1, 1), (0, 1))
+
+
+def _rectangle(x):
+    """The saved picture's rectangle with its left edge `x` pixels in (half the screen wide, centred down)."""
+    return RectangleFit(centre_x=(x + HALF) / 1920, centre_y=0.5, width=0.5)
 
 
 def _seed(registry, profile=LANDSCAPE, rotation=None):
     """A Frame bound to an Output the Player app reported connected at 1920 x 1080, with a
-    saved position in Cover (its top-left corner SAVED_X pixels in, revision 2); returns the
-    Player's id. With `rotation`, the position is a Corners fit at that quarter turn, which the
-    Hardware tab's Frame profile check reads."""
+    saved position (a rectangle half the screen wide, its left edge SAVED_X pixels in, revision 2;
+    a quarter of it for a portrait profile, so it lies on the screen); returns the Player's id.
+    With `rotation`, the position is a Corners fit at that quarter turn, which the Hardware tab's
+    Frame profile check reads (until the turn control, S5 B5)."""
     # A fixed device id gives a fixed Player id: the page shows its last six hex digits, and a
     # random one held "24" about one run in fifty, which the Hardware tab's diagonal check reads.
     identity, _key, _request = enroll(registry, count=1, device_id=DEVICE)
@@ -75,8 +86,12 @@ def _seed(registry, profile=LANDSCAPE, rotation=None):
         id=FRAME, surface_id="wall", x_mm=100, y_mm=100, width_mm=500 if landscape else 300,
         height_mm=300 if landscape else 500, profile=profile))
     registry.bind(FRAME, identity["player_id"], OUTPUT, expected_generation=0)
-    position = (Calibration(fit=CoverFit(corners=_corners(SAVED_X))) if rotation is None
-                else Calibration(fit=CornersFit(corners=_corners(SAVED_X), rotation=rotation)))
+    if rotation is not None:
+        position = Calibration(fit=CornersFit(corners=_corners(SAVED_X), rotation=rotation))
+    elif landscape:
+        position = Calibration(fit=_rectangle(SAVED_X))
+    else:
+        position = Calibration(fit=RectangleFit(width=0.25))
     save_position(registry, FRAME, position, expected_revision=1)
     return identity["player_id"]
 
@@ -85,18 +100,16 @@ def _saved(registry):
     return next(frame for frame in registry.inventory().frames if frame.id == FRAME).calibration
 
 
-def _top_left_x(calibration):
-    """A saved or drafted position's top-left corner, in pixels of the output."""
-    if isinstance(calibration, dict):
-        corners = calibration["fit"]["corners"]
-    else:
-        corners = calibration.fit.corners
-    return round(corners[0][0] * 1920)
+def _left_x(calibration, screen=(1920, 1080), aspect=16 / 9):
+    """A saved or drafted position's left edge, in pixels of the screen as it hangs (Central's own
+    `place`)."""
+    fit = calibration["fit"] if isinstance(calibration, dict) else calibration.fit.model_dump(mode="json")
+    return place(RectangleFit.model_validate(fit).rectangle(), screen, aspect).x
 
 
 def _save_elsewhere(registry, x=ELSEWHERE_X):
     """Another window saves the Frame's position (revision 2 -> 3)."""
-    save_position(registry, FRAME, Calibration(fit=CoverFit(corners=_corners(x))), expected_revision=2)
+    save_position(registry, FRAME, Calibration(fit=_rectangle(x)), expected_revision=2)
 
 
 class FakeSessions:
@@ -256,16 +269,20 @@ def _bar(page):
 
 
 def _move(page, presses=1):
-    """Move the top-left corner `presses` steps of 10 px right on the Position tab; returns its
-    x field (under Exact values)."""
-    page.get_by_label("Move", exact=True).select_option(label="Top-left corner")
+    """Move the picture `presses` steps of 10 px right on the Position tab; returns its centre
+    across field (under Exact values)."""
     for _ in range(presses):
-        page.get_by_role("button", name="Move right: the top-left corner", exact=True).click()
-    return _top_left_field(page)
+        page.get_by_role("button", name="Move right: the picture", exact=True).click()
+    return _centre_field(page)
 
 
-def _top_left_field(page):
-    field = page.get_by_label("Top-left x", exact=True)
+def _across(x):
+    """The centre across field's value for the saved picture's left edge at `x`."""
+    return str(x + HALF)
+
+
+def _centre_field(page):
+    field = page.get_by_label("Centre across", exact=True)
     if not field.is_visible():
         page.get_by_role("button", name="Exact values", exact=True).click()
     return field
@@ -308,12 +325,9 @@ def test_one_click_on_a_wall_tile_opens_the_frame_page_and_its_position_is_kept_
         expect(done).to_be_disabled()  # nothing changed yet
         expect(bar).to_contain_text("No changes to keep.")
 
-        # Nudge the top-left corner 10 px right; the Pi has not shown it yet.
+        # Nudge the picture 10 px right; the Pi has not shown it yet.
         fake.shown = False
-        page.get_by_label("Move", exact=True).select_option(label="Top-left corner")
-        page.get_by_role("button", name="Move right: the top-left corner", exact=True).click()
-        page.get_by_role("button", name="Exact values", exact=True).click()
-        expect(page.get_by_label("Top-left x", exact=True)).to_have_value(str(SAVED_X + 10))
+        expect(_move(page)).to_have_value(_across(SAVED_X + 10))
         expect(bar.get_by_role("status")).to_have_text(WAITING)
         expect(done).to_be_disabled()
         expect(bar).to_contain_text("Done is offered once the Pi presents your latest change.")
@@ -329,7 +343,7 @@ def test_one_click_on_a_wall_tile_opens_the_frame_page_and_its_position_is_kept_
         done.click()
         expect(page.get_by_role("status").filter(has_text="Saved at")).to_have_text(
             re.compile(r"^Saved at \d\d:\d\d:\d\d\.$"))
-        assert _top_left_x(_saved(registry)) == SAVED_X + 10
+        assert _left_x(_saved(registry)) == SAVED_X + 10
 
         # The next session shows the saved position; leaving the tab (nothing unkept: no
         # question) ends it.
@@ -448,177 +462,176 @@ def test_a_rebound_frame_does_not_trust_its_old_rotation(page, registry):
         expect(_mismatch(frame)).to_contain_text("This Frame's position is not set for this Pi yet")
 
 
-# --- The Position editor: every assertion is on a visible value, word or request, never on
-# SVG coordinates (a drag ACTION may use coordinates).
+# --- The Position editor (render redesign S5): every assertion is on a visible value, word or
+# request, never on SVG coordinates (a drag ACTION may use coordinates).
 
 
-def test_dragging_a_corner_inward_moves_the_picture(page, registry, sessions):
-    _seed(registry)
-    with operator_server(registry.db, registry.clock) as origin:
-        sign_in(page, origin)
-        fake = sessions
-        frame = open_frame(page, FRAME, "position")
-        bar = _bar(page)
-        expect(bar.get_by_role("status")).to_have_text(PRESENTED)
-        box, scale = _editor_box(frame)
-        start = 16 + SAVED_X / 1920 * 480  # the saved top-left corner's handle
-        page.mouse.move(box["x"] + start * scale, box["y"] + 16 * scale)
-        page.mouse.down()
-        page.mouse.move(box["x"] + 76 * scale, box["y"] + 76 * scale, steps=6)
-        page.mouse.up()
-        frame.get_by_role("button", name="Exact values", exact=True).click()
-        expect(frame.get_by_label("Top-left x", exact=True)).not_to_have_value(str(SAVED_X))
-        expect(bar.get_by_role("status")).to_have_text(PRESENTED)
-        expect(bar.get_by_role("button", name="Done", exact=True)).to_be_enabled()
-        assert fake.count("edit") >= 1
-        expect(frame.get_by_role("alert")).to_have_count(0)
+def _fit_sent(sessions):
+    """The fit the fake Central last took (what the Pi was sent to show)."""
+    return sessions.row["calibration"]["fit"]
 
 
-def _editor_box(frame):
-    """The Position drawing's box on the page and its scale: the drawing is 480 wide (270 high
-    for a 16:9 output) inside a 16 px margin."""
-    editor = frame.get_by_role("group", name="Picture position", exact=True)
-    editor.scroll_into_view_if_needed()
-    box = editor.bounding_box()
-    return box, box["width"] / 512
-
-
-def _drag_top_edge(page, frame, to_y, steps):
-    """Drag the top edge's midpoint (the saved quad's) straight down to `to_y` of the screen."""
-    box, scale = _editor_box(frame)
-    middle = 16 + (SAVED_X / 1920 + 1) / 2 * 480
-    page.mouse.move(box["x"] + middle * scale, box["y"] + 16 * scale)
+def _drag(page, frame, name, dx, dy=0, steps=6):
+    """Drag the drawing's `name` part (the picture or its size handle) by (dx, dy) page pixels."""
+    part = frame.get_by_role("group", name="Picture position", exact=True).get_by_role("img", name=name, exact=True)
+    part.scroll_into_view_if_needed()
+    box = part.bounding_box()
+    # The size handle sits on the picture's corner; grab the picture well inside it.
+    x, y = (box["x"] + box["width"] / 2, box["y"] + box["height"] / 2) if name == "Picture size handle" else (
+        box["x"] + box["width"] / 3, box["y"] + box["height"] / 3)
+    page.mouse.move(x, y)
     page.mouse.down()
-    page.mouse.move(box["x"] + middle * scale, box["y"] + (16 + to_y * 270) * scale, steps=steps)
+    page.mouse.move(x + dx, y + dy, steps=steps)
     page.mouse.up()
 
 
-def _corner_values(frame):
-    """Every corner's pixels under Exact values, clockwise from the top left."""
-    return [(frame.get_by_label(f"{name} x", exact=True).input_value(),
-             frame.get_by_label(f"{name} y", exact=True).input_value())
-            for name in ("Top-left", "Top-right", "Bottom-right", "Bottom-left")]
+def _exact(frame, label):
+    field = frame.get_by_label(label, exact=True)
+    if not field.is_visible():
+        frame.get_by_role("button", name="Exact values", exact=True).click()
+    return field
 
 
-def test_dragging_an_edge_moves_both_its_corners_and_leaves_the_others(page, registry, sessions):
-    """Owner, 2026-10-12: "i want to be able to drag "edges" of a frame position and not just
-    the corners". Mutation: have the edge drag move only its first corner -> Top-right y stays
-    0, RED."""
+def test_dragging_the_picture_moves_it_and_sends_the_new_centre(page, registry, sessions):
     _seed(registry)
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
         frame = open_frame(page, FRAME, "position")
         bar = _bar(page)
         expect(bar.get_by_role("status")).to_have_text(PRESENTED)
-        _drag_top_edge(page, frame, 0.2, steps=6)
-        frame.get_by_role("button", name="Exact values", exact=True).click()
-        expect(frame.get_by_label("Top-left y", exact=True)).not_to_have_value("0")
-        (tl_x, tl_y), (tr_x, tr_y), bottom_right, bottom_left = _corner_values(frame)
-        # Straight down: both top corners went down by the same step, sideways not at all.
-        assert (tl_x, tr_x) == (str(SAVED_X), "1920")
-        assert tl_y == tr_y and 150 < float(tl_y) < 280, (tl_y, tr_y)
-        assert (bottom_right, bottom_left) == (("1920", "1080"), ("0", "1080"))
+        _drag(page, frame, "Picture", 40, 20)
+        expect(_exact(frame, "Centre across")).not_to_have_value(_across(SAVED_X))
+        across = float(_exact(frame, "Centre across").input_value())
+        down = float(_exact(frame, "Centre down").input_value())
+        assert across > SAVED_X + HALF and down > 540, (across, down)
+        expect(_exact(frame, "Picture width")).to_have_value("960")
         expect(bar.get_by_role("status")).to_have_text(PRESENTED)
-        page.wait_for_timeout(500)
-        shown = _fake_corners(sessions)
-        assert shown[0][1] == shown[1][1] > 0.1 and shown[2:] == [[1, 1], [0, 1]], shown
+        expect(bar.get_by_role("button", name="Done", exact=True)).to_be_enabled()
+        sent = _fit_sent(sessions)
+        assert sent["mode"] == "rectangle" and sent["width"] == 0.5, sent
+        assert abs(sent["centre_x"] * 1920 - across) < 0.1 and abs(sent["centre_y"] * 1080 - down) < 0.1, sent
         expect(frame.get_by_role("alert")).to_have_count(0)
 
 
-def test_an_edge_dragged_onto_the_opposite_edge_is_refused_like_a_corner(page, registry, sessions):
-    """The top edge dragged onto the bottom one leaves no picture: refused by the same check as a
-    folded corner (convex.js), and it never reaches the Display."""
+def test_dragging_the_handle_resizes_the_picture_at_the_frames_shape_about_its_centre(page, registry, sessions):
     _seed(registry)
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
         frame = open_frame(page, FRAME, "position")
         expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
-        _drag_top_edge(page, frame, 1.2, steps=1)  # past the bottom: held at the screen's edge
-        expect(frame.get_by_role("alert")).to_contain_text("corners must form a convex aperture")
-        frame.get_by_role("button", name="Exact values", exact=True).click()
-        assert _corner_values(frame) == [
-            (str(SAVED_X), "0"), ("1920", "0"), ("1920", "1080"), ("0", "1080")]
+        _drag(page, frame, "Picture size handle", 30)
+        expect(_exact(frame, "Picture width")).not_to_have_value("960")
+        width = float(_exact(frame, "Picture width").input_value())
+        assert width > 960, width
+        expect(_exact(frame, "Centre across")).to_have_value(_across(SAVED_X))
+        expect(frame.get_by_label("Width in pixels", exact=True)).to_have_value(str(round(width)))
         page.wait_for_timeout(500)
-        assert all(point[1] < 1 for point in _fake_corners(sessions)[:2]), sessions.row
+        sent = _fit_sent(sessions)
+        # One rectangle of the Frame's shape: a width, never a height or corners of its own.
+        assert set(sent) == {"mode", "centre_x", "centre_y", "width"}, sent
+        assert abs(sent["width"] * 1920 - width) < 0.5 and sent["centre_x"] == (SAVED_X + HALF) / 1920, sent
+        placed = place(RectangleFit.model_validate(sent).rectangle(), (1920, 1080), 16 / 9)
+        assert placed.height == int(placed.width * 9 / 16 + 0.5), placed
 
 
-def test_an_edge_is_nudged_from_the_move_list_and_from_its_focused_handle(page, registry, sessions):
-    """The arrows move an edge's two corners as they move a corner: chosen in the Move list, or
-    its handle focused on the drawing (keyboard reach)."""
+def test_a_move_past_the_edge_is_refused_where_it_is_made_says_so_and_sends_nothing(page, registry, sessions):
+    """Left: two 50 px steps reach the edge, the third is refused. Right: a centre typed so the
+    picture would run past the right edge is refused (placement.js `place`, Central's pixel rule).
+    Mutation: drop `x + width <= W` from placement.js -> the typed centre is sent -> RED."""
     _seed(registry)
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
         frame = open_frame(page, FRAME, "position")
         expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
-        frame.get_by_label("Move", exact=True).select_option(label="Top edge")
-        frame.get_by_role("button", name="Move down: the top edge", exact=True).click()
-        frame.get_by_role("button", name="Exact values", exact=True).click()
-        expect(frame.get_by_label("Top-right y", exact=True)).to_have_value("10")
-        assert _corner_values(frame) == [
-            (str(SAVED_X), "10"), ("1920", "10"), ("1920", "1080"), ("0", "1080")]
+        frame.get_by_role("radio", name="50 px", exact=True).click()
+        left = frame.get_by_role("button", name="Move left: the picture", exact=True)
+        left.click()
+        left.click()
+        expect(_exact(frame, "Centre across")).to_have_value(_across(0))
+        page.wait_for_timeout(500)
+        sent = len(sessions.sent)
+        edits = sessions.count("edit")
+        assert _left_x(sessions.row["calibration"]) == 0
+        left.click()
+        expect(frame.get_by_role("alert")).to_contain_text("The picture would run off the screen as it hangs")
+        expect(_exact(frame, "Centre across")).to_have_value(_across(0))
+
+        _exact(frame, "Centre across").fill("1500")  # 1020 to 1980 px: past the right edge
+        expect(frame.get_by_role("alert")).to_contain_text("The picture would run off the screen as it hangs")
+        page.wait_for_timeout(500)
+        assert sessions.count("edit") == edits, sessions.sent[sent:]
+        assert _left_x(sessions.row["calibration"]) == 0
+
+
+def test_fill_the_screen_sends_the_largest_centred_rectangle(page, registry, sessions):
+    _seed(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        sign_in(page, origin)
+        frame = open_frame(page, FRAME, "position")
+        expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
+        frame.get_by_role("button", name="Fill the screen", exact=True).click()
+        expect(_exact(frame, "Picture width")).to_have_value("1920")
+        page.wait_for_timeout(500)
+        assert _fit_sent(sessions) == {"mode": "rectangle", "centre_x": 0.5, "centre_y": 0.5, "width": 1}
+
+
+def test_a_frame_turned_a_quarter_draws_a_portrait_screen_and_its_draft_is_in_fractions_of_it(
+        page, registry, sessions):
+    """A portrait Frame on a 1920 x 1080 Output hung top to the right: the screen as it hangs is
+    1080 x 1920, so a 10 px step across is 10/1080 of its width, and Fill the screen is its whole
+    width."""
+    identity, _key, _request = enroll(registry, count=1, device_id=DEVICE)
+    registry.create_frame(FrameCreate(
+        id=FRAME, surface_id="wall", x_mm=100, y_mm=100, width_mm=300, height_mm=500, profile=PORTRAIT))
+    registry.bind(FRAME, identity["player_id"], OUTPUT, expected_generation=0)
+    generation = next(frame for frame in registry.inventory().frames if frame.id == FRAME).generation
+    registry.turn_frame(FRAME, 90, expected_generation=generation)
+    save_position(registry, FRAME, Calibration(fit=RectangleFit(width=0.5)), expected_revision=1)
+    with operator_server(registry.db, registry.clock) as origin:
+        sign_in(page, origin)
+        frame = open_frame(page, FRAME, "position")
+        expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
+        expect(frame).to_contain_text("The screen hangs: Top to the right.")
+        expect(frame.get_by_role("link", name="Change it on the Hardware tab", exact=True)).to_have_attribute(
+            "href", f"#/wall/frames/{FRAME}/hardware")
         editor = frame.get_by_role("group", name="Picture position", exact=True)
-        editor.get_by_role("button", name="Left edge", exact=True).focus()
-        expect(frame.get_by_label("Move", exact=True)).to_have_value("edge-3")
-        page.keyboard.press("ArrowRight")
-        expect(frame.get_by_label("Bottom-left x", exact=True)).to_have_value("10")
-        assert _corner_values(frame) == [
-            ("110", "10"), ("1920", "10"), ("1920", "1080"), ("10", "1080")]
+        box = editor.bounding_box()
+        assert box["height"] > box["width"], box
+        _exact(frame, "Centre across")
+        expect(frame).to_contain_text("In pixels of the 1,080 × 1,920 screen as it hangs")
+        expect(_exact(frame, "Centre across")).to_have_value("540")
+        expect(_exact(frame, "Picture width")).to_have_value("540")
 
-
-def _fake_corners(sessions):
-    """The corners the fake Central last took (what the Pi was sent to show)."""
-    calibration = sessions.row["calibration"]
-    return (calibration.get("fit") or calibration)["corners"]
-
-
-@pytest.mark.parametrize(("corner", "values"), [
-    # Top-left to (0.9, 0.9) of the screen folds the picture.
-    ("Top-left", {"x": "1728", "y": "972"}),
-    # Bottom-right 5e-7 of the height from the top: a sliver the server would refuse (its
-    # 1e-6 epsilon, convex.js). Mutation: set convex.js EPSILON to 0 -> no message, RED.
-    ("Bottom-right", {"y": "0.00054"}),
-])
-def test_a_folded_or_thin_picture_is_refused_where_it_is_typed(page, registry, sessions, corner, values):
-    _seed(registry)
-    with operator_server(registry.db, registry.clock) as origin:
-        sign_in(page, origin)
-        fake = sessions
-        frame = open_frame(page, FRAME, "position")
-        expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
-        frame.get_by_role("button", name="Exact values", exact=True).click()
-        y = frame.get_by_label(f"{corner} y", exact=True)
-        before = y.input_value()
-        for axis, value in values.items():
-            frame.get_by_label(f"{corner} {axis}", exact=True).fill(value)
-        expect(frame.get_by_role("alert")).to_contain_text("corners must form a convex aperture")
-        # The refused value snaps back and never reaches the Display.
-        expect(y).to_have_value(before)
+        _move(page)
+        expect(_exact(frame, "Centre across")).to_have_value("550")
         page.wait_for_timeout(500)
-        refused = float(values["y"]) / 1080
-        shown = fake.row["calibration"].get("fit") or fake.row["calibration"]
-        assert all(abs(point[1] - refused) > 1e-9 for point in shown["corners"]), fake.row
+        assert abs(_fit_sent(sessions)["centre_x"] - 550 / 1080) < 1e-9, _fit_sent(sessions)
+        frame.get_by_role("button", name="Fill the screen", exact=True).click()
+        expect(_exact(frame, "Picture width")).to_have_value("1080")
+        page.wait_for_timeout(500)
+        assert _fit_sent(sessions)["width"] == 1, _fit_sent(sessions)
 
 
 def test_a_refresh_never_overwrites_the_draft(page, registry, sessions):
     """Two planes: the draft is the operator's; a refresh replaces the snapshot, never it.
 
-    Mutation: have useDraft re-seed from the saved position on refresh -> the corner jumps
+    Mutation: have useDraft re-seed from the saved position on refresh -> the picture jumps
     to ELSEWHERE_X after Refresh -> RED."""
     _seed(registry)
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
         open_frame(page, FRAME, "position")
-        corner = _move(page, 4)  # 100 -> 140 px
-        expect(corner).to_have_value("140")
+        centre = _move(page, 4)  # its left edge 100 -> 140 px
+        expect(centre).to_have_value(_across(140))
 
         # The saved position moves underneath the open draft (a save from elsewhere).
         _save_elsewhere(registry)
         page.get_by_role("button", name="Refresh", exact=True).click()
         page.wait_for_timeout(500)
-        expect(corner).to_have_value("140")
+        expect(centre).to_have_value(_across(140))
         # Revert returns to the saved position as refreshed: the refresh was real.
         _bar(page).get_by_role("button", name="Revert", exact=True).click()
-        expect(corner).to_have_value(str(ELSEWHERE_X))
+        expect(centre).to_have_value(_across(ELSEWHERE_X))
 
 
 def test_a_stale_done_is_refused_and_keeps_the_other_save(page, registry, sessions):
@@ -629,16 +642,16 @@ def test_a_stale_done_is_refused_and_keeps_the_other_save(page, registry, sessio
         sign_in(page, origin)
         frame = open_frame(page, FRAME, "position")
         bar = _bar(page)
-        corner = _move(page)  # 100 -> 110 px
+        centre = _move(page)  # its left edge 100 -> 110 px
         expect(bar.get_by_role("status")).to_have_text(PRESENTED)
 
         _save_elsewhere(registry)
         bar.get_by_role("button", name="Done", exact=True).click()
         expect(frame.get_by_role("alert")).to_contain_text(OVERTAKEN)
-        assert _top_left_x(_saved(registry)) == ELSEWHERE_X
+        assert _left_x(_saved(registry)) == ELSEWHERE_X
 
         frame.get_by_role("alert").get_by_role("button", name="Revert", exact=True).click()
-        expect(corner).to_have_value(str(ELSEWHERE_X))
+        expect(centre).to_have_value(_across(ELSEWHERE_X))
         expect(frame.get_by_role("alert")).to_have_count(0)
         expect(bar.get_by_role("status")).to_have_text(PRESENTED)
 
@@ -678,7 +691,7 @@ def test_a_draft_resumed_after_the_page_was_hidden_never_overwrites_a_save_made_
         expect(frame.get_by_role("alert")).to_contain_text(OVERTAKEN)
         expect(bar.get_by_role("button", name="Done", exact=True)).to_be_disabled()
         page.wait_for_timeout(1000)
-        assert _top_left_x(_saved(registry)) == ELSEWHERE_X
+        assert _left_x(_saved(registry)) == ELSEWHERE_X
         assert sessions.bodies[sessions.sent.index("begin", 1)]["calibration"]["revision"] == 2
 
 
@@ -701,7 +714,7 @@ def test_a_handover_carries_the_draft_and_never_overwrites_a_save_made_meanwhile
         expect(frame.get_by_role("alert")).to_contain_text(OVERTAKEN)
         expect(bar.get_by_role("button", name="Done", exact=True)).to_be_disabled()
         page.wait_for_timeout(1000)
-        assert _top_left_x(_saved(registry)) == ELSEWHERE_X
+        assert _left_x(_saved(registry)) == ELSEWHERE_X
 
 
 def test_the_session_is_handed_over_with_the_draft_while_the_tab_stays_open(page, registry, handovers):
@@ -723,13 +736,13 @@ def test_the_session_is_handed_over_with_the_draft_while_the_tab_stays_open(page
         sent = list(handovers.sent)
         assert sent.count("renew") >= 2, sent
         assert sent.count("begin") == 1 and "end" not in sent, sent
-        drafts = [_top_left_x(began) for began in handovers.began_with[1:]]
+        drafts = [_left_x(began) for began in handovers.began_with[1:]]
         assert drafts and all(x == SAVED_X + 10 for x in drafts[1:]), drafts
         assert handovers.state_now() == "active"
         expect(bar.get_by_role("status")).to_have_text(PRESENTED)
         bar.get_by_role("button", name="Done", exact=True).click()
         expect(page.get_by_role("status").filter(has_text="Saved at")).to_be_visible()
-        assert _top_left_x(_saved(registry)) == SAVED_X + 10
+        assert _left_x(_saved(registry)) == SAVED_X + 10
 
 
 def test_a_closed_page_stops_keeping_its_session_and_it_ends_within_the_idle_window(page, registry, sessions):
@@ -808,15 +821,15 @@ def test_leaving_the_tab_with_changes_asks_keep_or_revert(page, registry, sessio
         tabs.get_by_role("tab", name="Overview", exact=True).click()
         dialog.get_by_role("button", name="Revert", exact=True).click()
         expect(page.get_by_role("region", name="Now", exact=True)).to_be_visible()
-        assert _top_left_x(_saved(registry)) == SAVED_X
+        assert _left_x(_saved(registry)) == SAVED_X
 
         tabs.get_by_role("tab", name="Position", exact=True).click()
-        expect(_move(page, 2)).to_have_value(str(SAVED_X + 20))
+        expect(_move(page, 2)).to_have_value(_across(SAVED_X + 20))
         expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
         tabs.get_by_role("tab", name="Hardware", exact=True).click()
         dialog.get_by_role("button", name="Keep", exact=True).click()
         expect(page.get_by_role("region", name="Frame profile", exact=True)).to_be_visible()
-        assert _top_left_x(_saved(registry)) == SAVED_X + 20
+        assert _left_x(_saved(registry)) == SAVED_X + 20
 
 
 def test_leaving_the_page_with_changes_says_they_were_reverted_on_return(page, registry, sessions):
@@ -831,8 +844,8 @@ def test_leaving_the_page_with_changes_says_they_were_reverted_on_return(page, r
         open_frame(page, FRAME, "position")
         expect(page.get_by_role("status").filter(has_text="Your unsaved changes were reverted at")).to_have_text(
             re.compile(r"reverted at \d\d:\d\d:\d\d because you left this Frame's page\.$"))
-        expect(_top_left_field(page)).to_have_value(str(SAVED_X))
-        assert _top_left_x(_saved(registry)) == SAVED_X
+        expect(_centre_field(page)).to_have_value(_across(SAVED_X))
+        assert _left_x(_saved(registry)) == SAVED_X
 
 
 @pytest.mark.parametrize("scheme", ["dark", "light"])
