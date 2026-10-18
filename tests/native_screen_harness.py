@@ -150,8 +150,8 @@ def app() -> None:
         for index in range(count):
             screen = screens.screen(OUTPUT)
             width, height = screen.size
-            colour = (RED, BLUE)[index % 2]
-            result = present([[f"full-{colour}", colour, 0, 0, width, height, 1.0]], f"{tag}-{index}")["result"]
+            name, colour = (("full-red", RED), ("full-blue", BLUE))[index % 2]
+            result = present([[name, colour, 0, 0, width, height, 1.0]], f"{tag}-{index}")["result"]
             assert isinstance(result, int), ("soak_present", index, result)
             end, word = time.monotonic() + 1.0, None
             while time.monotonic() < end:
