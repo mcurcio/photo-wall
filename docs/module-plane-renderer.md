@@ -107,8 +107,8 @@ the test Pi has no second screen (owner, Q6, 2026-10-18).
 `moments`: every set of seen layers it will take, so a fade starting between planning ticks is
 counted) with `fits`. Who gives up a layer is the executor's (`player/visibility.py` `shed`,
 readiness failure `capacity`), never the renderer's: `present` refuses over the budget and commits
-nothing. `within` is the budget module's pure cut, used by the bench, which stands in for the
-executor. With one Frame per screen (owner, Q4) and at most two photos at once per Run
+nothing. The bench stands in for the executor with the same loop (`scripts/render_bench/timeline.py`
+`shed_overload`). With one Frame per screen (owner, Q4) and at most two photos at once per Run
 ([the bound](execution-contract.md#a-scenes-transition-when-a-photo-starts-to-show)) the budget
 bites only when Runs stack on one Frame.
 
@@ -145,7 +145,13 @@ transparency (a PNG) pre-multiplied. Within one level of 256 of the reference.
 - **Targets** (`player/gpu.py`): GBM buffers on the V3D render node, LINEAR (the controller scans
   them out unconverted; it costs the same to render as tiled, bench T5), XR24 for an opaque picture
   and AR24 for one with transparency, in ordinary memory, not CMA. A 4K Frame's picture is 33 MB;
-  a changing still holds two, a playing video three.
+  a changing still holds two, a playing video three. An Output keeps black pictures of two sizes
+  at most (its ground's and its Frame's); a present retires the others.
+- **Memory.** A still's decoded pixels are handed over once (`StillDecode.result`) and dropped once
+  uploaded; the still keeps its source texture (so a key change finishes it again without a new
+  decode) and its target. There is no separate memory budget: what is held is bounded by the layers
+  alive, which the executor's prepare lead and the controller budget bound (the old renderer's
+  texture and decoder limits went with it).
 - **Patterns are the ground** (`player/pattern_pass.py`): while the Display's picture operations
   carry a test pattern, or a Position trial is drawn with nothing playing (the commissioning grid),
   the commit has no planes and its ground is the pattern drawn once over the whole screen, black
@@ -167,8 +173,18 @@ lease), presents every Output's held composition again at the frame time
   changes nothing. A still photo commits once and nothing after.
 - **One commit in flight** (`FramePacer.free`): a commit draws nothing, so it is made as soon as
   the last one is answered (presented or discarded, or overdue by `OVERDUE`, 0.25 s, for an Output
-  that says nothing). The pacer's steady-cadence slot (`ready`) is not used by this path: a commit
-  aimed at a slot missed Weston's repaint deadline once and every one after it (tracer 2, finding E).
+  that says nothing). No steady-cadence slot: a commit aimed at one missed Weston's repaint deadline
+  once and every one after it (tracer 2, finding E), so the old pacer's slot is gone.
+- **Every read wakes a turn.** Any call into the screens that reads the connection outside a turn
+  (the planning tick's `prepare`, `capacity` and `present` read grants and screens) may consume
+  the compositor's answer the fd watch waits for, so it wakes the loop (`PlaneScreens.on_read`).
+- **Every fence is asked.** `finish` ends by asking every outstanding fence (black pictures,
+  pattern grounds, every layer's draw); a failed layer's draw is given up at once. While only a
+  fence is pending, the next turn is `FENCE_POLL` (1 ms) away, so the planning tick and the
+  decoders' callbacks run between asks. Cost: up to a millisecond between a fence signalling and
+  its picture's commit. Prior art not taken yet: an EGL native fence fd
+  (`EGL_ANDROID_native_fence_sync`) watched by the main loop would wake on the signal itself;
+  it needs the Pi to prove Mesa V3D's support.
 - **Before admission** a candidate grant gets the ground under the tag `candidate-<grant>`, again
   on every present the pacer allows (the shell completes a handoff only on a presented commit after
   its release). No grant: nothing committed, "pending".

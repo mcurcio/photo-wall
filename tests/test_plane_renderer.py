@@ -32,7 +32,7 @@ from player.decode import StillPicture
 from player.geometry import BoardDraw, encode_srgb
 from player.gpu import LINEAR, NV12, XR24, DmabufFrame, Target
 from player.pacing import DEFAULT_REFRESH, Word
-from player.plane_renderer import BAND_BYTES, VIDEO_TARGETS, PlaneRenderer
+from player.plane_renderer import BAND_BYTES, FENCE_POLL, VIDEO_TARGETS, PlaneRenderer
 from player.plane_screen import FrameGrant, ScreenPicture
 from player.planes import Composition, Screen, plane_strength
 from player.rendering import LocalLayer, OutputComposition
@@ -978,7 +978,9 @@ def test_a_dissolve_held_by_one_present_is_committed_by_frame_at_every_frame_tim
         assert rig.strengths(commits + index) == wanted
 
 
-def test_due_is_now_while_a_fence_is_pending():
+def test_due_asks_a_pending_fence_again_soon_never_at_once():
+    """A turn never spins at FRAME priority while the GPU works: a pending fence is asked again
+    FENCE_POLL later, so the planning tick and the decoders' callbacks run in between."""
     rig = Rig()
     rig.device.hold = True
     still = photo("still", start=0)
@@ -986,10 +988,57 @@ def test_due_is_now_while_a_fence_is_pending():
         rig.renderer.prepare(still, framed())
         rig.renderer.finish()
         rig.clock.tick()
-    assert len(rig.fitter.draws) == 1 and rig.renderer.due() == rig.clock.now
+    assert len(rig.fitter.draws) == 1
+    assert rig.renderer.due() == pytest.approx(rig.clock.now + FENCE_POLL)
     rig.device.signal()
     rig.renderer.finish()                               # its draw taken up with nothing asking again
     assert rig.renderer.due() is None
+
+
+def test_a_video_that_fails_while_its_draw_is_fenced_leaves_nothing_owed():
+    """A decode error while a frame's draw is pending: the draw is given up, its frame goes back to
+    the decoder, and the frame loop is not kept turning (render planes end review, finding 1)."""
+    rig = Rig()
+    clip = video("clip", start=0)
+    decode = prepared_video(rig, clip)
+    rig.settle(clip)
+    rig.device.hold = True
+    decode.push(2)
+    decode.on_frame()
+    rig.renderer.frame()
+    rig.renderer.finish()                               # frame 2 drawn, its fence pending
+
+    def refused():
+        raise RuntimeError("decode")
+    decode.latest = refused
+    rig.renderer.finish()                               # the decode fails with the draw pending
+    rig.renderer.finish()
+    assert 2 in decode.returned
+    assert rig.renderer.due() is None
+
+
+def test_a_black_picture_nobody_asks_for_again_is_asked_by_finish_and_retired_by_a_present():
+    """A trial's edit changes the black layer's size: the old black's fence is asked by `finish`
+    (nothing else asks for that size again) and the old black is retired, so neither the frame loop
+    nor the black targets grow with the edits."""
+    rig = Rig()
+    dark = LocalLayer(layer("dark", presentation="black", variant=None, start=0), None, 0.0, 1.0)
+    rig.settle(dark)
+    made = rig.device.made
+    rig.device.hold = True
+    for width in (0.9, 0.8, 0.7, 0.6):
+        frame = framed(RectangleFit(width=width))
+        rig.clock.tick()
+        rig.present(dark, frame=frame)
+        rig.renderer.finish()                           # the new size's black drawn, fence pending
+    rig.device.signal()
+    rig.renderer.finish()
+    assert rig.renderer.due() is None
+    assert rig.device.made - made == 4
+    rig.clock.tick()
+    assert rig.present(dark, frame=frame).status == "presented"
+    assert len(rig.renderer._blacks) == 2               # the ground's and the newest size's
+    assert len(rig.device.freed) == 3                   # the three sizes the edits left behind
 
 
 def test_due_is_now_while_a_video_frame_waits():

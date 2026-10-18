@@ -295,3 +295,20 @@ def test_trial_is_none_when_none_is_drawn_and_raises_on_transport_failure(monkey
     library.answers["pw_frame_client_trial"] = _trial_answer(None, -1)
     with pytest.raises(RuntimeError, match="display_trial_protocol_lost"):
         screens.trial(OutputComposition(BINDING), grant)
+
+
+def test_a_read_outside_the_frame_loops_turn_calls_on_read_and_one_inside_does_not(monkeypatch):
+    """Every library call that reads the connection may dispatch the compositor's answer, which the
+    frame loop's fd watch then never sees: a read outside the turn (the tick's) calls `on_read`, a
+    read inside the turn (whose own read it is) does not; a call that reads nothing never does."""
+    screens, library = _screens(monkeypatch)
+    library.answers["pw_frame_client_output"] = 0
+    heard: list[str] = []
+    screens.on_read = lambda: heard.append("read")
+    assert screens.screen("HDMI-A-1") is None
+    assert heard == ["read"]
+    with screens.turning():
+        assert screens.screen("HDMI-A-1") is None
+    assert heard == ["read"]
+    assert screens.fd == 1
+    assert heard == ["read"]

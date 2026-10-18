@@ -26,7 +26,7 @@ from contracts.models import (
     stack_order,
 )
 from contracts.photo_crop import CENTRED
-from player.controller_budget import PI5, within
+from player.controller_budget import PI5, fits
 from player.look import look
 from player.planes import Composition, FrameLayers, Screen, compose
 from player.rendering import CapacityResult, LocalLayer, OutputComposition
@@ -205,23 +205,28 @@ def layers_at(tracer: Tracer, at: float, lead: float = 0.0) -> tuple[Layer, ...]
 
 
 def _kept(tracer: Tracer, at: float, screen_size: tuple[int, int]) -> tuple[OutputComposition, Composition]:
-    """The tracer's layers looked at plan time `at` and the one screen's composition of them, cut
-    to the Pi 5's controller budget: the Player's own rules (player/look.py `look`,
-    player/planes.py `compose`, player/controller_budget.py `within`)."""
-    shown = tuple(LocalLayer(layer, None, 0.0, 1.0) for layer in layers_at(tracer, at))
-    looked = look(OutputComposition(tracer.binding, shown, timebase=0.0), at)
+    """The tracer's layers looked at plan time `at` and the one screen's composition of them, the
+    layers given up until it fits the Pi 5's controller budget: the Player's own rules (player/look.py
+    `look`, player/planes.py `compose`, player/controller_budget.py `fits`, and the executor's shed
+    loop, `shed_overload`)."""
     profile = tracer.binding.profile
     placement = place(tracer.binding.calibration.fit.rectangle(), screen_size, profile.width_px / profile.height_px)
     screen = Screen(tracer.binding.output_id, screen_size, step_at(tracer, at).turn)
-    (kept,), _ = within(PI5, (compose(screen, [FrameLayers(FRAME_ID, placement, looked.layers)]),))
-    return looked, kept
+
+    def composed(composition: OutputComposition) -> Composition:
+        return compose(screen, [FrameLayers(FRAME_ID, placement, look(composition, at).layers)])
+
+    shown = tuple(LocalLayer(layer, None, 0.0, 1.0) for layer in layers_at(tracer, at))
+    kept = shed_overload(OutputComposition(tracer.binding, shown, timebase=0.0),
+                         lambda compositions: CapacityResult(fits(PI5, [composed(c) for c in compositions])))
+    return look(kept, at), composed(kept)
 
 
 def strengths_at(tracer: Tracer, at: float, screen_size: tuple[int, int]) -> dict[str, float]:
     """The plane strength each kept layer must have at plan time `at` (assignment id -> strength),
     bottom to top: the layers player/look.py `look` and player/planes.py `compose` show on a
-    screen of `screen_size` as it hangs, cut to the Pi 5's controller budget
-    (player/controller_budget.py `within`), each at `expected_strength` of its drawn alpha over
+    screen of `screen_size` as it hangs, the layers given up until it fits the Pi 5's controller
+    budget (`_kept`), each at `expected_strength` of its drawn alpha over
     what the nearest kept layer beneath it is (a media layer's picture, else black): a layer the
     cut gave up shows nothing, so the bottom kept layer is over the screen's black. Pure."""
     looked, kept = _kept(tracer, at, screen_size)

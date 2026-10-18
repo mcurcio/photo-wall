@@ -3,6 +3,7 @@ through the module's attributes, so the wiring is a unit fact. The parts themsel
 tests and the display harness."""
 from __future__ import annotations
 
+import contextlib
 from pathlib import Path
 
 import pytest
@@ -47,6 +48,13 @@ class Parts:
             def dispatch(self):
                 self.dispatched += 1
                 parts.log.append("dispatch")
+
+            @contextlib.contextmanager
+            def turning(self):
+                self.dispatch()
+                parts.log.append("turning")
+                yield
+                parts.log.append("turned")
 
             def mode(self, output_id):
                 return parts.modes.get(output_id) if self.dispatched >= parts.known_after else None
@@ -182,7 +190,17 @@ def test_the_frame_turn_reads_presents_finishes_and_answers_when_it_is_due(monke
     _start(monkeypatch, parts)
     parts.log.clear()
     assert parts.loop.turn() == 12.5
-    assert parts.log == ["dispatch", "frame", "finish", "due"]
+    assert parts.log == ["dispatch", "turning", "frame", "finish", "due", "turned"]
+
+
+def test_a_read_outside_the_turn_wakes_the_loop(monkeypatch):
+    """The tick's reads may consume the compositor's answer the loop's fd watch waits for: the
+    screens' `on_read` is the loop's wake."""
+    parts = Parts()
+    _start(monkeypatch, parts)
+    parts.log.clear()
+    parts.screens.on_read()
+    assert parts.log == ["wake"]
 
 
 def test_a_videos_new_frame_goes_through_its_lane_and_then_wakes_the_loop(monkeypatch):

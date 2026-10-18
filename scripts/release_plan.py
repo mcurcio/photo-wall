@@ -435,7 +435,6 @@ SUITES: Final = (
                  "tests/native_display_smoke.py", "tests/native_display_probe.c",
                  "tests/native_screen_harness.py", "tests/native_fit_pass_harness.py",
                  "tests/native_picture_e2e_harness.py", "tests/harness_device.py",
-                 "tests/native_display_media.py",
                  "tests/display_harness_health_client.py", "tests/display_harness_judge_feeder.py",
                  "scripts/run_display_harness.py",
                  "tests/content_db.py", "tests/runtime_fakes.py", "tests/test_assets_handlers.py",

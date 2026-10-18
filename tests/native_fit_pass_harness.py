@@ -371,6 +371,7 @@ def a_still_decodes_on_gstreamer() -> None:
         end = time.monotonic() + STILL_TIMEOUT + 1
         while (result := decode.result()) == "pending" and time.monotonic() < end:
             time.sleep(0.01)
+        assert decode.result() == "failed", "a decoded still is handed over once and not kept"
         decode.close()
         assert result not in ("pending", "failed"), ("still", alpha, result)
         assert result.size == (WIDTH, HEIGHT) and result.alpha == (alpha is not None), (result.size, result.alpha)

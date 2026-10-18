@@ -141,8 +141,10 @@ class StillDecode:
         pad.link(convert.get_static_pad("sink"))
 
     def result(self) -> StillPicture | Literal["pending", "failed"]:
-        """The picture once decoded; "pending" while decoding; "failed" on an error or after
-        STILL_TIMEOUT seconds."""
+        """The picture once decoded, handed over once: the caller owns its pixels and this decode
+        keeps none (a 4K still's 33 MB would otherwise live as long as its layer), so asked again it
+        answers "failed". "pending" while decoding; "failed" on an error or after STILL_TIMEOUT
+        seconds."""
         if self._outcome is not None:
             return self._outcome
         gst = self._gst
@@ -153,7 +155,7 @@ class StillDecode:
             picture = _still_of(sample, self._alpha)
             if picture is None:
                 return self._fail()
-            self._outcome = picture
+            self._outcome = "failed"                    # handed over: nothing kept
             self._pipeline.set_state(gst.State.NULL)
             return picture
         if time.monotonic() - self._started > STILL_TIMEOUT:

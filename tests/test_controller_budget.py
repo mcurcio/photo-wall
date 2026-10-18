@@ -1,13 +1,13 @@
-"""The display controller's budget: planes and source pixels on one output line, and the cut that
-keeps a Pi 5 under them (bench T2: it never refuses an overload, it glitches)."""
+"""The display controller's budget: planes and source pixels on one output line, judged before every
+screen update (bench T2: a Pi 5 never refuses an overload, it glitches)."""
 from __future__ import annotations
 
 import pytest
 from test_executor import layer
 
 from contracts.frame_fit import Placement
-from player.controller_budget import PI5, ControllerBudget, fits, load, within
-from player.planes import Composition, FrameLayers, Plane, Screen, compose
+from player.controller_budget import PI5, ControllerBudget, fits, load
+from player.planes import Composition, Plane, Screen
 from player.rendering import LocalLayer
 
 WIDE = Screen("hdmi1", (3840, 2160), 0)
@@ -57,34 +57,3 @@ def test_screens_add_up():
 def test_two_compositions_of_one_screen_are_refused():
     with pytest.raises(ValueError, match="^budget_screens$"):
         load([stacked(1), stacked(1)])
-
-
-def test_over_budget_the_bottom_planes_give_up_their_place_bottom_first():
-    cut, gone = within(PI5, [stacked(5)])
-    assert [p.layer.layer.assignment_id for p in cut[0].planes] == ["p2", "p3", "p4"]
-    assert gone == ("p0", "p1")
-    assert fits(PI5, cut) is True
-
-
-def test_within_budget_nothing_is_cut():
-    assert within(PI5, [stacked(3)]) == ((stacked(3),), ())
-
-
-def test_the_frame_drawing_the_most_planes_gives_up_first_and_never_its_only_plane():
-    half = Placement(0, 0, 1920, 1080)
-    busy = Composition(WIDE, (plane("lone", half, frame="a"),
-                              plane("b0", half, frame="b", start=100),
-                              plane("b1", half, frame="b", start=101),
-                              plane("b2", half, frame="b", start=102)))
-    cut, gone = within(ControllerBudget(planes=3, line_pixels=99_999), [busy])
-    assert gone == ("b0", "b1")
-    assert [p.layer.layer.assignment_id for p in cut[0].planes] == ["lone", "b2"]
-    cut, gone = within(ControllerBudget(planes=2, line_pixels=99_999), [busy])
-    assert gone == ("b0", "b1") and fits(ControllerBudget(planes=2, line_pixels=99_999), cut) is False
-
-
-def test_the_cut_composes_with_compose():
-    frames = [FrameLayers("frame1", FULL, tuple(
-        LocalLayer(layer(f"p{i}", start=100 + i), None, 0.0, 0.5 if i else 1.0) for i in range(5)))]
-    cut, gone = within(PI5, [compose(WIDE, frames)])
-    assert gone == ("p0", "p1") and len(cut[0].planes) == 3

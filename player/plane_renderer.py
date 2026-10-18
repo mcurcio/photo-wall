@@ -42,13 +42,20 @@ Rules this module owns (one home each):
   taken, a band of BAND_BYTES of its rows uploaded, or its draw) once STEP_GAP has passed since the
   last, seen layers first, then by start. A still not needed before a fade under way on any Output
   is over (it starts after that fade ends) takes no step during it.
+- **Every fence is asked**: `finish` ends by asking every outstanding fence (each black picture's,
+  each pattern ground's, each layer's draw), so none waits for a present to ask for its picture
+  again; a failed layer's draw is given up at once (a still's retired, a video's target and frame
+  given back). While a fence is pending and nothing else is owed, `due` is FENCE_POLL away, never
+  now: a turn never spins at FRAME priority over the planning tick.
 - **The held composition**: each Output's newest composition given to `present` is held, and `frame`
   presents it again at each frame time (a fade's strengths, a newly finished picture, a trial's edit
   reach the screen with no planning tick) until all its layers are released or the renderer closes.
 - **The screen's ground**: every commit shows, beneath its planes, the Output's black picture laid
   out for the whole screen (the one black picture of that size, shared with black layers), so
   the display controller can always scan out what the planes leave uncovered and the compositor
-  never needs its renderer for the screen's black.
+  never needs its renderer for the screen's black. An Output keeps black pictures of two sizes at
+  most, its present's ground and its Frame's placement: a present retires the others (freed once
+  no commit shows them), so a trial's edits or a new mode never pile up black targets.
 - **A video starts when it is first presented**: prepared, it is ready to start, its first frame
   finished once (later frames wait in the decoder); its first present plays it from the layer's
   position, and from then on each new frame is finished while it is seen.
@@ -122,6 +129,9 @@ from player.visibility import visible_now
 VIDEO_TARGETS: Final = 3        # a playing video's targets: one shown, one in flight, one drawn
 STEP_GAP: Final = DEFAULT_REFRESH
 """Seconds between two finishing steps of stills, over every Output (module rule): one a refresh."""
+FENCE_POLL: Final = 0.001
+"""Seconds between two asks of a pending fence while nothing else is owed (module rule, Every fence
+is asked): the frame loop sleeps between them, so the planning tick and the decoders' callbacks run."""
 BAND_BYTES: Final = 4 << 20
 """The bytes of a still's rows one upload step copies (a 4K picture's 33 MB in eight steps)."""
 
@@ -369,10 +379,18 @@ class PlaneRenderer:
                 or any(entry.source is not None and entry.picture is None for entry in self._layers.values()))
 
     def _drawn_pending(self) -> bool:
-        """A picture drawn that a turn must still take up (its fence pending, or a layer's draw not
-        yet made its picture), or a ground owed to `finish`."""
-        return (bool(self._owed_blacks or self._owed_grounds)
-                or any(entry.drawing is not None for entry in self._layers.values())
+        """A ground owed to `finish`, or a fence still unsignalled (a layer's draw, a black
+        picture's, a pattern ground's): `finish` asks every one (module rule, Every fence is asked)."""
+        return self._owed() or self._fenced()
+
+    def _owed(self) -> bool:
+        """A pattern ground or a black picture owed to `finish`."""
+        return bool(self._owed_blacks or self._owed_grounds)
+
+    def _fenced(self) -> bool:
+        """A fence `finish` has not seen signal yet: a layer's draw (taken up by the next
+        `finish` once signalled), a black picture's or a pattern ground's."""
+        return (any(entry.drawing is not None for entry in self._layers.values())
                 or any(picture.fence for picture in self._blacks.values())
                 or any(picture is not None and picture.fence for _, picture in self._grounds.values()))
 
@@ -452,22 +470,56 @@ class PlaneRenderer:
             for entry in self._owed_stills():
                 if self._still_step(entry):
                     break
+        self._ask_fences()
+
+    def _ask_fences(self) -> None:
+        """Ask every outstanding fence (module rule, Every fence is asked); a failed layer's draw is
+        given up."""
+        for picture in self._blacks.values():
+            self._finished(picture)
+        for _, picture in self._grounds.values():
+            if picture is not None:
+                self._finished(picture)
+        for entry in self._layers.values():
+            if entry.drawing is None:
+                continue
+            if entry.failed:
+                self._give_up_drawing(entry)
+            else:
+                self._finished(entry.drawing)
+
+    def _give_up_drawing(self, entry: _Layer) -> None:
+        """A failed layer's draw, never taken up: a still's picture retired, a video's target kept
+        among its targets with its fence forgotten and its frame given back to the decoder."""
+        drawing, entry.drawing = entry.drawing, None
+        if entry.video is None:
+            self._retired.append(drawing)
+            return
+        if drawing.fence:
+            self._device.forget_fence(drawing.fence)
+            drawing.fence = 0
+        frame, entry.drawing_frame = entry.drawing_frame, None
+        if frame is not None and frame is not entry.held and frame is not entry.waiting:
+            entry.video.done(frame)
 
     def due(self) -> float | None:
         """When `frame` and `finish` are next owed with no event to announce it (monotonic seconds;
-        render redesign S3, bead B5): now while a fence is pending, a drawn picture waits to be taken
-        up, a ground is owed or a video frame waits to be drawn into a free target; the time the
+        render redesign S3, bead B5): now while a ground is owed or a video frame waits to be drawn
+        into a free target; FENCE_POLL from now while a fence is pending (module rule, Every fence
+        is asked); the time the
         next still step may be taken while a still is owed one (after the fade it waits for, module
         rule); the soonest player/look.py `next_change` of a held composition (a trial's expiry
         included), though a change owed while that screen's last commit is unanswered is announced
         by the answer (the compositor speaks: the frame loop's read), so it is due only once that
         commit is overdue; None when nothing changes until an event."""
         now = self._clock()
-        if self._drawn_pending() or any(self._video_owed(assignment_id, entry)
-                                        for assignment_id, entry in self._layers.items()):
+        if self._owed() or any(self._video_owed(assignment_id, entry)
+                               for assignment_id, entry in self._layers.items()):
             return now
         times = [max(now, self._stepped + STEP_GAP * (1 - TOLERANCE), self._deferred_until(entry.local))
                  for entry in self._owed_stills()]
+        if self._fenced():
+            times.append(now + FENCE_POLL)
         for output_id, composition in self._held.items():
             state = self._outputs.get(output_id)
             expires = None if state is None else state.expires
@@ -515,7 +567,7 @@ class PlaneRenderer:
         state = self._outputs.setdefault(output_id, _Output())
         word = self._screens.presentation(output_id, now)
         if word is not None:
-            state.pacer.answered(word, None)
+            state.pacer.answered(word)
         self._sweep()
         grant = self._screens.grant(composition)
         if grant is None:
@@ -527,6 +579,7 @@ class PlaneRenderer:
         if setting == "gone" or setting == "failed":
             return _FAILED
         state.expires = None if setting.drawn.trial is None else _expiry(setting.drawn.trial, now)
+        self._keep_blacks(output_id, {setting.ground, setting.size})
         ground = self._black(output_id, setting.ground)
         if ground == "failed":
             return _FAILED
@@ -1005,6 +1058,14 @@ class PlaneRenderer:
             return "pending"
         return picture.shown if self._finished(picture) else "pending"
 
+    def _keep_blacks(self, output_id: str, sizes: set[tuple[int, int]]) -> None:
+        """Retire the Output's black pictures of any size but `sizes` (module rule, The screen's
+        ground), freed once no commit shows them; none of another size stays owed."""
+        for key in [key for key in self._blacks if key[0] == output_id and key[1] not in sizes]:
+            self._retired.append(self._blacks.pop(key))
+        for kept in (self._owed_blacks, self._refused_blacks):
+            kept.difference_update({key for key in kept if key[0] == output_id and key[1] not in sizes})
+
     def _draw(self, paint: Callable[[Target], None], size: tuple[int, int], *, opaque: bool) -> _Picture:
         """A new target of `size` painted (the fit pass's or the pattern pass's draw) and fenced,
         imported by the compositor. RuntimeError (or the pass's ValueError) when the Gpu, the pass
@@ -1063,5 +1124,5 @@ class PlaneRenderer:
         self._retired = kept
 
 
-__all__ = ["BAND_BYTES", "STEP_GAP", "VIDEO_TARGETS", "Device", "Fitter", "Patterns", "PlaneRenderer", "Screens",
+__all__ = ["BAND_BYTES", "FENCE_POLL", "STEP_GAP", "VIDEO_TARGETS", "Device", "Fitter", "Patterns", "PlaneRenderer", "Screens",
            "Still", "StillFactory", "Video", "VideoFactory"]

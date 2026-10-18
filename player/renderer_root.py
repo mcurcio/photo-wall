@@ -126,12 +126,13 @@ def start_renderer(glib, dispatcher: MainLoopDispatcher, luts: LutSource,
             screens, gpu, fit, patterns, luts, stills=StillDecode, videos=videos, gl_renderer=gpu.renderer)
 
         def turn() -> float | None:
-            screens.dispatch()
-            renderer.frame()
-            renderer.finish()
-            return renderer.due()
+            with screens.turning():
+                renderer.frame()
+                renderer.finish()
+                return renderer.due()
 
         loop = parts["loop"] = FrameLoop(glib, screens.fd, turn)
+        screens.on_read = loop.wake         # a read outside the turn may hold the compositor's answer
     except Exception:
         LOGGER.exception("player: the renderer could not be made")
         RendererRoot(UnavailableRenderer(), outputs, parts=parts).close()

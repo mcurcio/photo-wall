@@ -475,6 +475,9 @@ class _Part:
     def stop(self):
         pass
 
+    def wake(self):
+        pass
+
 
 DISCOVERED = (OutputReport(output_id="HDMI-A-1", width_px=0, height_px=0, connected=True),
               OutputReport(output_id="HDMI-A-2", width_px=0, height_px=0, connected=False))

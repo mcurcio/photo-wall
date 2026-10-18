@@ -80,6 +80,13 @@ def _option(scope, player_id, output_id="HDMI-A-1"):
     return scope.get_by_role("radio", name=f"{player_id[-6:]} · {_port(output_id)} · Free", exact=True)
 
 
+def _choices(scope):
+    """The binding chooser's radios alone: the Hardware tab also holds other radio groups (the
+    turn control, "How the screen hangs"), so a count over every radio is not the chooser's."""
+    return scope.get_by_role("radiogroup", name="Choose a Pi and HDMI port", exact=True
+                             ).get_by_role("radio")
+
+
 def _poll(page):
     """Run the paused page clock one poll interval and wait for that poll to finish."""
     drive_poll(page)
@@ -269,7 +276,7 @@ def test_retiring_an_unbound_player_marks_it_retired_and_drops_its_output(page, 
         # chooser says there is nothing free to bind (the Wall link returns to the frame).
         go(page, "wall")
         expect(inspector).to_be_visible()
-        expect(inspector.get_by_role("radio")).to_have_count(0)
+        expect(_choices(inspector)).to_have_count(0)
         expect(inspector.get_by_text("No free HDMI port has a Display connected",
                                      exact=False)).to_be_visible()
 
@@ -359,7 +366,7 @@ def test_the_second_output_of_a_bound_player_is_bindable_and_stored(page, regist
         inspector = open_frame(page, "right", "hardware")
 
         # The bound HDMI-A-1 is not offered; HDMI-A-2 is, and nothing is selected.
-        expect(inspector.get_by_role("radio")).to_have_count(1)
+        expect(_choices(inspector)).to_have_count(1)
         second = _option(inspector, player_id, "HDMI-A-2")
         expect(second).not_to_be_checked()
         second.check()
@@ -405,7 +412,7 @@ def test_a_chosen_output_that_vanishes_on_a_poll_is_cleared_and_announced(page, 
 
         expect(inspector.get_by_role("status")).to_contain_text(
             f"{player_id[-6:]} · HDMI 1 · Free is no longer available")
-        expect(inspector.get_by_role("radio")).to_have_count(0)
+        expect(_choices(inspector)).to_have_count(0)
         expect(inspector.get_by_role("button", name="Connect Frame mine", exact=True)).to_be_disabled()
 
 
@@ -420,7 +427,7 @@ def test_no_display_and_retired_outputs_are_never_offered(page, registry):
         inspector = open_frame(page, "only", "hardware")
         # Exactly the one free Output: the no-display HDMI-A-2 and the retired Player's
         # HDMI-A-1 are excluded.
-        expect(inspector.get_by_role("radio")).to_have_count(1)
+        expect(_choices(inspector)).to_have_count(1)
         expect(_option(inspector, dark["player_id"], "HDMI-A-1")).to_be_visible()
         expect(inspector.get_by_role("radio", name=gone["player_id"][-6:], exact=False)
                ).to_have_count(0)
@@ -483,7 +490,7 @@ def test_a_bound_players_free_second_output_can_be_identified_from_both_homes(pa
         expect(outputs.get_by_role("status")).to_contain_text("Identify requested for HDMI-A-2")
 
         inspector = open_frame(page, "spare", "hardware")
-        expect(inspector.get_by_role("radio")).to_have_count(1)
+        expect(_choices(inspector)).to_have_count(1)
         picker = inspector.get_by_role("radiogroup", name="Choose a Pi and HDMI port", exact=True)
         picker.get_by_role("button", name="Identify display HDMI 2", exact=True).click()
         expect(inspector.get_by_role("status").filter(

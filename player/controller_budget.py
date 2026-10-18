@@ -14,19 +14,17 @@ Rules this module owns (one home each):
   screen, the most source pixels on any one of its physical scanlines (the primary's physical
   width plus every picture crossing that line, along the line), summed over the screens. A 90 or
   270 turn lays a picture's hanging height along the physical line.
-- **The cut** (`within`): over budget, the bottom-most plane of the Frame drawing the most planes
-  (ties: the lower bottom plane, contracts/models.py `stack_order`, then the earlier screen) gives
-  up its place, never a Frame's only plane: player/visibility.py `shed`'s order, for planes.
+
+Who gives up a layer over budget is the executor's alone (player/visibility.py `shed`, player/
+executor.py), never this module's: it only judges (`fits`).
 """
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Final
 
-from contracts.models import Layer
 from player.planes import Composition
-from player.visibility import shed
 
 
 @dataclass(frozen=True)
@@ -73,28 +71,4 @@ def fits(budget: ControllerBudget, compositions: Sequence[Composition]) -> bool:
     return planes <= budget.planes and line_pixels <= budget.line_pixels
 
 
-def within(budget: ControllerBudget,
-           compositions: Sequence[Composition]) -> tuple[tuple[Composition, ...], tuple[str, ...]]:
-    """`compositions` cut to fit `budget` (module rule): the compositions in the order given, and
-    the assignment ids of the planes that gave up their place, in the order they did. When even one
-    plane per Frame does not fit, the cut stops there and the caller, finding `fits` false, refuses
-    the update (readiness failure "capacity"). Pure; `load`'s errors."""
-    kept = [list(composition.planes) for composition in compositions]
-    gone: list[str] = []
-    while not fits(budget, [replace(c, planes=tuple(p)) for c, p in zip(compositions, kept)]):
-        frames: dict[str, list[Layer]] = {}          # screens in order, so shed's ties pick the earlier
-        owner: dict[int, tuple[int, int]] = {}
-        for screen, planes in enumerate(kept):
-            for index, plane in enumerate(planes):
-                frames.setdefault(f"{screen}/{plane.frame_id}", []).append(plane.layer.layer)
-                owner[id(plane.layer.layer)] = (screen, index)
-        given_up = shed(frames)
-        if given_up is None:
-            break
-        screen, index = owner[id(given_up)]
-        kept[screen].pop(index)
-        gone.append(given_up.assignment_id)
-    return tuple(replace(c, planes=tuple(p)) for c, p in zip(compositions, kept)), tuple(gone)
-
-
-__all__ = ["PI5", "ControllerBudget", "fits", "load", "within"]
+__all__ = ["PI5", "ControllerBudget", "fits", "load"]

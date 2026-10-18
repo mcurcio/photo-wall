@@ -159,7 +159,9 @@ class PreparationLimits(Model):
     probe_seconds: Positive = 15
     max_tool_output_bytes: int = Field(default=64 * 1024, ge=1, strict=True)
     cpu_seconds: Positive = 180
-    memory_bytes: int = Field(default=1024**3, ge=64 * 1024**2, strict=True)
+    # x265 needs more than 1 GiB of address space for a 1080p copy (malloc fails at 1 GiB, measured
+    # 2026-10-18 in the pinned media image); 2 GiB is the S4 page's sanctioned limit.
+    memory_bytes: int = Field(default=2 * 1024**3, ge=64 * 1024**2, strict=True)
     threads: int = Field(default=1, ge=1, le=4, strict=True)
     # Render planes S4: the HEVC encoder's threads (x265's pool); its process's CPU limit is
     # `cpu_seconds` times this. Measured 2026-10-18: x265 costs ~1.8x the H.264 encoder's CPU, and 4

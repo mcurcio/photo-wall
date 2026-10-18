@@ -21,6 +21,10 @@ Rules this module owns (one home each):
 - **The Position trial on this connection** (`trial`, render redesign S3, run ledger
   .claude/runs/render-planes/s3-page.md): the envelope Display Host holds for the grant, applied by
   one player/calibration_trial.py `TrialState` per Output on CLOCK_BOOTTIME milliseconds.
+- **Every read wakes the frame loop** (`on_read`, `turning`): each library call that reads the
+  connection (`_READS`) may dispatch the compositor's answers, presentation feedback included, which
+  the frame loop's fd watch then never sees. A read outside the frame loop's own turn calls
+  `on_read` (the root wires the loop's `wake`), so an answer the tick consumed still turns the loop.
 - **The trial overlay** (`overlay_corners`, `present`'s `overlay`): the drawn placement's corners as
   fractions of the screen as it hangs, sent as JSON on the screen's surface under the very grant and
   tag of the present that follows, so the shell draws it only over that commit.
@@ -31,7 +35,8 @@ import ctypes
 import json
 import logging
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Final, Literal
 from uuid import UUID
@@ -167,6 +172,35 @@ def _declare(lib) -> None:
         function.argtypes, function.restype = argtypes, restype
 
 
+# The library's calls that read and dispatch the connection (frame-client.c: each calls
+# `pw_frame_client_dispatch`), so the compositor's answers may arrive through any of them.
+_READS: Final = frozenset({
+    "pw_frame_client_output", "pw_frame_client_grant_revision", "pw_frame_client_picture",
+    "pw_frame_client_trial", "pw_screen_size", "pw_screen_overlay", "pw_screen_present",
+    "pw_screen_presentation"})
+
+
+class _Reading:
+    """The frame client library with every call in `_READS` followed by `read()` (module rule, Every
+    read wakes the frame loop); every other attribute is the library's own."""
+
+    def __init__(self, library, read: Callable[[], None]) -> None:
+        self._library, self._read = library, read
+
+    def __getattr__(self, name: str):
+        value = getattr(self._library, name)
+        if name not in _READS:
+            return value
+        read = self._read
+
+        def call(*args):
+            try:
+                return value(*args)
+            finally:
+                read()
+        return call
+
+
 class PlaneScreens:
     """The Player's screens (module rules). Every method on the owning thread."""
 
@@ -176,8 +210,12 @@ class PlaneScreens:
         connection or a required global (xdg_wm_base, wl_subcompositor, zwp_linux_dmabuf_v1 v3+,
         wp_viewporter, wp_single_pixel_buffer_manager_v1, wp_alpha_modifier_v1, wp_presentation,
         pw_frame_manager_v1 v4) is missing."""
-        self._lib = ctypes.CDLL(library)
-        _declare(self._lib)
+        library_handle = ctypes.CDLL(library)
+        _declare(library_handle)
+        self._lib = _Reading(library_handle, self._read)
+        # Called after a read outside `turning` (module rule); the root wires the frame loop's wake.
+        self.on_read: Callable[[], None] | None = None
+        self._turning = False
         self._client = self._lib.pw_frame_client_connect(socket.encode() if socket is not None else None)
         if not self._client:
             raise RuntimeError("display_frame_protocol_unavailable")
@@ -200,6 +238,21 @@ class PlaneScreens:
         gone."""
         if self._lib.pw_frame_client_dispatch(self._client) < 0:
             raise RuntimeError("display_frame_protocol_lost")
+
+    @contextmanager
+    def turning(self) -> Iterator[None]:
+        """The frame loop's turn (module rule, Every read wakes the frame loop): `dispatch`, then the
+        turn's own reads, none of which calls `on_read` (the turn is the read's answer)."""
+        self._turning = True
+        try:
+            self.dispatch()
+            yield
+        finally:
+            self._turning = False
+
+    def _read(self) -> None:
+        if not self._turning and self.on_read is not None:
+            self.on_read()
 
     def screen(self, output_id: str) -> Screen | None:
         """The Output as Weston reports it now (module rule); None before Weston announced it or

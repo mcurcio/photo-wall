@@ -74,8 +74,7 @@ class Plane:
 @dataclass(frozen=True)
 class Composition:
     """One screen at one frame time: its planes bottom to top (the Frames in the order given, each
-    Frame's seen layers by stack order). Built only by `compose`; the controller budget may cut it
-    (player/controller_budget.py `within`)."""
+    Frame's seen layers by stack order). Built only by `compose`."""
     screen: Screen
     planes: tuple[Plane, ...]
 

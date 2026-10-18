@@ -44,7 +44,6 @@ from __future__ import annotations
 
 import itertools
 import math
-from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Final, Literal
 
@@ -124,22 +123,6 @@ def decode_channel(value: float, video: bool = False) -> float:
 def encode_srgb(value: float) -> float:
     value = min(1.0, max(0.0, value))
     return 12.92*value if value <= .0031308 else 1.055*value**(1/2.4)-.055
-
-
-def compose_pixel(samples: Iterable[tuple[tuple[float, float, float, float], float, bool]]) -> tuple[float, float, float, float]:
-    """Bottom-to-top straight encoded RGBA/effective alpha/video -> opaque sRGB, with neutral
-    picture operations (`final_pixel` is the final pass).
-
-    Empty output is opaque black. Source alpha and Layer alpha multiply in linear
-    premultiplied source-over.
-    """
-    rgb = [0.0, 0.0, 0.0]
-    for rgba, opacity, video in samples:
-        if not all(math.isfinite(v) and 0 <= v <= 1 for v in (*rgba, opacity)):
-            raise ValueError("finite normalized samples required")
-        alpha = rgba[3]*opacity
-        rgb = [decode_channel(rgba[i], video)*alpha + rgb[i]*(1-alpha) for i in range(3)]
-    return (*(encode_srgb(v) for v in rgb), 1.0)
 
 
 def photo_rect(frame_aspect: float, source_width: int, source_height: int,
