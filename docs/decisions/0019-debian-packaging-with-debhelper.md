@@ -220,11 +220,11 @@ The owner, 2026-10-17: "Patch Weston, make it part of our build pipeline". Debia
 - **Fetching.** A build container stage fetches the `.dsc` from the pin's archive and refuses it unless its sha256 matches. It fetches the tarballs the `.dsc` names (`dpkg-source -x` checks them) and installs the package's `Build-Depends`.
 - **Building.** A build script runs with no network. It unpacks the source, appends the patches to Debian's quilt series and writes a changelog entry at the local version, dated at the snapshot's instant. It then runs `dpkg-buildpackage -b` with Debian's own `debian/rules`, tests included.
 - **Into the image.** The binary packages join the local repo. The Photo Wall package that needs them names each one at exactly `${<source>:Version}`, so an image cannot install Debian's version instead of ours. Nothing in the image recipe changes.
-- **In CI.** The output is cached whole, keyed by the sha256 of every input of its build. This follows the rule for slow builds that the release roots already use.
+- **In CI.** The output is cached whole, keyed by the sha256 of every input of its build, as the release roots are. Unlike the roots' cache, it is written from every ref, so a pull request that moves an input pays the build once ([CI module](../module-appliance-ci.md), "Weston cache").
 
 There is no hand-written builder, and no vendored source beyond what `dpkg-source` unpacks (rule 3). The [packaging module](../module-debian-packaging.md#weston) has the files and the steps.
 
-**Costs.** We maintain a Weston build and must recheck the patch against every Debian Weston update the snapshot pin takes in, including security updates. The first build after the pin moves takes several minutes. The patch is not upstream yet: sending it needs the owner's freedesktop GitLab account.
+**Costs.** We maintain a Weston build and must recheck the patch against every Debian Weston update the snapshot pin takes in, including security updates; the build stops when the pin's Weston is not the pinned one, so none is missed. A cache miss takes about 5 minutes in CI, over the 4-minute leg budget, once per input change. The patch is not upstream yet: sending it needs the owner's freedesktop GitLab account.
 
 ## Implementer brief
 

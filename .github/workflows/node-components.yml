@@ -55,11 +55,14 @@ jobs:
   # Photo Wall's Weston (debian-packaging/weston/): Debian's weston source at the pin with the
   # 64-bit plane-mask patch, built by debian-packaging/build-weston.sh. Kept whole in a cache
   # keyed by the sha256 of every input of that build (the pin and patches, the script and its
-  # check, the snapshot pin and the container's Dockerfile and loader), exact keys only. A hit
-  # restores three .debs; a miss builds once (the weston container from its BuildKit cache, or
-  # about 5 min of Build-Depends when the pin moved, then about a minute of build and Weston's
-  # tests) and saves. Each branch's entry is its own; a pull request reads main's (the build is
-  # bit-reproducible, so either holds the same bytes).
+  # check, the snapshot pin, the container's loader, and only the `pinned` and `weston` stages
+  # of the container's Dockerfile, so an edit to the builder or roots stage does not rebuild
+  # Weston), exact keys only. A hit restores three .debs in well under a minute; a miss builds
+  # once and saves: about 5 min end to end with the weston container from its BuildKit cache
+  # (run 39081014486), longer when the pin or the stage moved. That miss is over the ~4 min leg
+  # budget and is paid once per input change. The entry is saved from every ref, unlike the
+  # release roots' (docs/module-appliance-ci.md, "Weston cache"): a pull request that moves an
+  # input pays the miss once, not on every push, and a pull request reads main's.
   weston:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 20
@@ -71,12 +74,22 @@ jobs:
           ref: ${{ inputs.revision }}
           persist-credentials: false
 
+      # The Dockerfile's `pinned` and `weston` stages, each from its FROM line to the next one;
+      # the weston stage builds FROM pinned alone.
+      - name: Hash the weston container's stages
+        id: stages
+        run: |
+          set -euo pipefail
+          digest=$(awk '/^FROM /{keep = ($NF == "pinned" || $NF == "weston")} keep' \
+            debian-packaging/builder/Dockerfile | sha256sum | cut -d' ' -f1)
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
       - name: Restore Photo Wall's Weston
         id: restore
         uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
           path: ${{ runner.temp }}/weston-debs
-          key: weston-debs-v1-${{ hashFiles('debian-packaging/weston/**', 'debian-packaging/build-weston.sh', 'scripts/weston_patch_check.py', 'debian-packaging/snapshot.list', 'debian-packaging/snapshot-epoch.sh', 'debian-packaging/builder/Dockerfile', 'debian-packaging/build-container.sh') }}
+          key: weston-debs-v2-${{ steps.stages.outputs.digest }}-${{ hashFiles('debian-packaging/weston/**', 'debian-packaging/build-weston.sh', 'scripts/weston_patch_check.py', 'debian-packaging/snapshot.list', 'debian-packaging/snapshot-epoch.sh', 'debian-packaging/build-container.sh') }}
 
       - name: Set up the node package builder
         if: steps.restore.outputs.cache-hit != 'true'
