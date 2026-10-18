@@ -91,9 +91,11 @@ export async function updateFrameProfile(frameId, profile, expectedGeneration) {
  * @returns {Promise<{ok:true, changed:boolean, generation:number}|{ok:false, code:string, status:number}>}
  */
 export async function turnFrame(frameId, body) {
-  void frameId;
-  void body;
-  throw new Error("render-planes S5 bead B5");
+  const result = await apiWrite(`/v1/operator/frames/${frameId}/turn`, { method: "PUT", body });
+  if (result.ok) {
+    return { ok: true, changed: result.data?.changed === true, generation: result.data?.generation };
+  }
+  return { ok: false, code: result.error ?? String(result.status), status: result.status };
 }
 
 /** Validate the shared FrameProfile contract and its orientation against a Frame. */

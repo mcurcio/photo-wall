@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 
 import { frameProfileProblem, updateFrameProfile } from "../framesApi.js";
 import { boundOutput, isBound } from "../join.js";
+import { hanging } from "../placement.js";
 import { FactRow, Note } from "../patterns/fact-row";
 import { ProblemCard } from "../patterns/problem-card";
 import { Button } from "../ui/button";
@@ -12,6 +13,7 @@ import { Inline } from "../ui/stack";
 import { Switch } from "../ui/switch";
 import { pixelSize } from "../timeWords.js";
 import { useMutate } from "../useMutate.js";
+import { type Turn, TURN_WORDS } from "./turn-words";
 
 interface Profile {
   width_px?: number;
@@ -27,7 +29,8 @@ interface Frame {
   id: string;
   generation?: number;
   profile?: Profile;
-  calibration?: { fit?: { rotation?: number } };
+  /** How the Frame's screen hangs (Central's `turn`; set on this tab's "How the screen hangs"). */
+  turn?: Turn;
   readiness?: Readiness;
   player_id?: string | null;
   output_id?: string | null;
@@ -94,14 +97,15 @@ export function FrameProfile({ snapshot, frame, draftFit }: FrameProfileProps) {
   const profile = frame.profile ?? {};
   const observation = (boundOutput(snapshot ?? {}, frame.id) as { observation?: { connected?: boolean; width_px?: number; height_px?: number } } | null)
     ?.observation ?? null;
-  const fit = frame.calibration?.fit;
-  const quarterTurn = frame.readiness === "ready" && (fit?.rotation === 90 || fit?.rotation === 270);
-  // A changed display has its own card on this tab (frame-display.tsx), which confirms the profile
-  // from the new display's own modes: a second card from the enrollment record would contradict it.
+  const turn = frame.turn ?? 0;
+  // The screen as it hangs (the Frame's turn), whatever the readiness: the profile is the Frame's
+  // shape upright on its screen. A changed display has its own card on this tab (frame-display.tsx),
+  // which confirms the profile from the new display's own modes: a second card from the enrollment
+  // record would contradict it.
+  const screen = usable(observation) ? hanging([observation!.width_px!, observation!.height_px!], turn) : null;
   const mismatch = frame.readiness !== "display-changed" && isBound(frame) && observation?.connected === true
-    && usable(profile) && usable(observation) &&
-    (profile.width_px !== (quarterTurn ? observation.height_px : observation.width_px) ||
-      profile.height_px !== (quarterTurn ? observation.width_px : observation.height_px));
+    && usable(profile) && screen !== null
+    && (profile.width_px !== screen[0] || profile.height_px !== screen[1]);
 
   const begin = () => {
     setDraft({
@@ -173,7 +177,7 @@ export function FrameProfile({ snapshot, frame, draftFit }: FrameProfileProps) {
           subject="Frame profile"
           variant="inline"
           verdict={{ severity: "todo", label: "Check the Display", receipt: null }}
-          what={`The Pi reported its Display at ${pixelSize(observation.width_px!, observation.height_px!)}, but this Frame's profile is ${pixelSize(profile.width_px!, profile.height_px!)}. ${frame.readiness === "ready" ? `The saved rotation ${fit?.rotation ?? 0}° was considered.` : "This Frame's position is not set for this Pi yet."}`}
+          what={`The Pi reported its Display at ${pixelSize(observation.width_px!, observation.height_px!)}, but this Frame's profile is ${pixelSize(profile.width_px!, profile.height_px!)}. The screen hangs: ${TURN_WORDS[turn]}.`}
           doing={null}
           action={{ label: "Edit Frame profile", onAction: begin }}
           details={(

@@ -25,10 +25,11 @@ from playwright.sync_api import expect
 from support.position import save_position
 from test_registry import enroll
 
+from central.displays.model import Readiness
 from central.fleet.models import TrialRefused
 from central.registry import FrameCreate
 from contracts.frame_fit import place
-from contracts.models import Calibration, CornersFit, FrameProfile, RectangleFit
+from contracts.models import Calibration, FrameProfile, RectangleFit
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("PHOTO_WALL_BROWSER_TESTS") != "1",
@@ -61,23 +62,17 @@ LANDSCAPE = FrameProfile(width_px=1920, height_px=1080, diagonal_inches=24)
 PORTRAIT = FrameProfile(width_px=1080, height_px=1920, diagonal_inches=24)
 
 
-def _corners(x):
-    """The whole output with its top-left corner `x` pixels in (the old Corners form, which the
-    Hardware tab's Frame profile note still reads until the turn control replaces it)."""
-    return ((x / 1920, 0), (1, 0), (1, 1), (0, 1))
-
-
 def _rectangle(x):
     """The saved picture's rectangle with its left edge `x` pixels in (half the screen wide, centred down)."""
     return RectangleFit(centre_x=(x + HALF) / 1920, centre_y=0.5, width=0.5)
 
 
-def _seed(registry, profile=LANDSCAPE, rotation=None):
+def _seed(registry, profile=LANDSCAPE, turn=0):
     """A Frame bound to an Output the Player app reported connected at 1920 x 1080, with a
     saved position (a rectangle half the screen wide, its left edge SAVED_X pixels in, revision 2;
     a quarter of it for a portrait profile, so it lies on the screen); returns the Player's id.
-    With `rotation`, the position is a Corners fit at that quarter turn, which the Hardware tab's
-    Frame profile check reads (until the turn control, S5 B5)."""
+    The Frame hangs at `turn` (set before the Save, so the Frame is ready), which the Hardware tab's
+    Frame profile check reads."""
     # A fixed device id gives a fixed Player id: the page shows its last six hex digits, and a
     # random one held "24" about one run in fifty, which the Hardware tab's diagonal check reads.
     identity, _key, _request = enroll(registry, count=1, device_id=DEVICE)
@@ -86,9 +81,9 @@ def _seed(registry, profile=LANDSCAPE, rotation=None):
         id=FRAME, surface_id="wall", x_mm=100, y_mm=100, width_mm=500 if landscape else 300,
         height_mm=300 if landscape else 500, profile=profile))
     registry.bind(FRAME, identity["player_id"], OUTPUT, expected_generation=0)
-    if rotation is not None:
-        position = Calibration(fit=CornersFit(corners=_corners(SAVED_X), rotation=rotation))
-    elif landscape:
+    if turn:
+        registry.turn_frame(FRAME, turn, expected_generation=1)
+    if landscape:
         position = Calibration(fit=_rectangle(SAVED_X))
     else:
         position = Calibration(fit=RectangleFit(width=0.25))
@@ -400,7 +395,7 @@ def test_hardware_keeps_the_frame_profile_apart_from_the_panel_record(page, regi
 
     Mutation: render a Frame profile field inside the Pi and HDMI port section -> the
     not_to_contain_text assertion goes RED."""
-    player_id = _seed(registry, PORTRAIT, rotation=0)
+    player_id = _seed(registry, PORTRAIT)
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
         frame = open_frame(page, FRAME, "hardware")
@@ -424,8 +419,9 @@ def _mismatch(frame):
 
 
 def test_the_frame_profile_notes_a_reported_resolution_it_does_not_match(page, registry):
-    """In Cover too: the profile is the Frame's own shape, set here, never by Position's Save
-    (owner 2026-10-11). Mutation probe: compare only a Corners fit's profile -> no note."""
+    """A 1080 x 1920 profile on a screen reported at 1920 x 1080 and hung upright: the profile is the
+    Frame's own shape, set here, never by Position's Save (owner 2026-10-11). Mutation probe: compare
+    the profile with the mode as built whatever the turn -> the turned Frame's test below fails."""
     _seed(registry, PORTRAIT)
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
@@ -434,7 +430,7 @@ def test_the_frame_profile_notes_a_reported_resolution_it_does_not_match(page, r
         expect(problem).to_contain_text("Frame profile: Check the Display.")
         expect(problem).to_contain_text(
             "The Pi reported its Display at 1,920 × 1,080, but this Frame's profile is 1,080 × 1,920.")
-        expect(problem).to_contain_text("The saved rotation 0° was considered")
+        expect(problem).to_contain_text("The screen hangs: Upright.")
         # One action: edit the profile; the how-to is under Details.
         problem.get_by_role("button", name="Edit Frame profile", exact=True).click()
         expect(frame.get_by_role("form", name="Edit Frame profile", exact=True)).to_be_visible()
@@ -442,9 +438,9 @@ def test_the_frame_profile_notes_a_reported_resolution_it_does_not_match(page, r
         assert (stored.profile.width_px, stored.profile.height_px) == (1080, 1920)
 
 
-@pytest.mark.parametrize(("profile", "rotation"), [(LANDSCAPE, 0), (PORTRAIT, 90)])
-def test_no_note_when_the_reported_resolution_matches_as_mounted(page, registry, profile, rotation):
-    _seed(registry, profile, rotation)
+@pytest.mark.parametrize(("profile", "turn"), [(LANDSCAPE, 0), (PORTRAIT, 90), (PORTRAIT, 270)])
+def test_no_note_when_the_reported_resolution_matches_as_it_hangs(page, registry, profile, turn):
+    _seed(registry, profile, turn)
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
         frame = open_frame(page, FRAME, "hardware")
@@ -452,14 +448,22 @@ def test_no_note_when_the_reported_resolution_matches_as_mounted(page, registry,
         expect(_mismatch(frame)).to_have_count(0)
 
 
-def test_a_rebound_frame_does_not_trust_its_old_rotation(page, registry):
-    player_id = _seed(registry, PORTRAIT, rotation=90)
-    registry.unbind(FRAME, expected_generation=1)
-    registry.bind(FRAME, player_id, OUTPUT, expected_generation=2)
+def test_a_rebound_frame_keeps_its_turn_whatever_its_readiness(page, registry):
+    """The turn belongs to the spot on the wall (owner, gate Q3, 2026-10-17): a Frame rebound
+    (its Position to check again) still hangs as it did, so the note judges the screen as it hangs
+    there; hung upright again, the note names the turn."""
+    player_id = _seed(registry, PORTRAIT, turn=90)
+    registry.unbind(FRAME, expected_generation=2)
+    registry.bind(FRAME, player_id, OUTPUT, expected_generation=3)
+    stored = next(frame for frame in registry.inventory().frames if frame.id == FRAME)
+    assert stored.readiness is not Readiness.READY
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
         frame = open_frame(page, FRAME, "hardware")
-        expect(_mismatch(frame)).to_contain_text("This Frame's position is not set for this Pi yet")
+        expect(frame.get_by_role("region", name="Frame profile", exact=True)).to_be_visible()
+        expect(_mismatch(frame)).to_have_count(0)
+        registry.turn_frame(FRAME, 0, expected_generation=stored.generation)
+        expect(_mismatch(frame)).to_contain_text("The screen hangs: Upright.", timeout=15_000)
 
 
 # --- The Position editor (render redesign S5): every assertion is on a visible value, word or

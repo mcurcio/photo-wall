@@ -15,6 +15,7 @@ import { FramePosition, type PixelSize } from "../domain/frame-position";
 import { FrameInput, FramePower } from "../domain/frame-power";
 import { useFrameWhy } from "../domain/frame-why";
 import { FrameProfile, type Readiness } from "../domain/frame-profile";
+import { FrameTurn } from "../domain/frame-turn";
 import type { Turn } from "../domain/turn-words";
 import type { HostsRead } from "../domain/hosts-read";
 import { readDrawn, readRoomLights } from "../domain/room-lights/api";
@@ -152,7 +153,7 @@ function useHouseLights(open: boolean): { rooms: RoomLightsView | null; drawn: D
  * (every kept and tried change, and Restore into the editor); Power is how the Pi turns
  * its display off and on, with Test: turn off and Turn on; Hardware is which Pi and HDMI output
  * feed it (bind, unbind, Identify), the Display the Pi reports there (with the display-changed
- * card) and its Frame profile.
+ * card), its Frame profile and how its screen hangs (the turn).
  *
  * Position and Lighting share one live session (liveAdjustment.js, kept on the Frame), Picture has
  * its own (pictureSession.js, kept on the display). Each runs while one of its tabs is shown and
@@ -285,6 +286,8 @@ export function FramePage({ snapshot, bootFacts, hosts, frameId, tab, onTab, foc
                 <FrameDraftFit snapshot={snapshot} frameId={frameId} profile={wholeProfile(profile)}
                   calibration={{ revision: frame.calibration?.revision ?? 1, fit: frame.calibration?.fit ?? { mode: "rectangle" } }} />
               )} />
+            <FrameTurn key={`${frameId}:turn`} frameId={frameId} turn={frame.turn ?? 0}
+              generation={frame.generation ?? 0} />
           </>
         )}
       </Tabs>
