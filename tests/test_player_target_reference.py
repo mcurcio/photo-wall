@@ -1,5 +1,5 @@
 """The calibration targets v2 in the Player's final pass (player/geometry.py `final_pixel`, decision
-0027): the opening's one size rule, and the two stages over the screen board (owner, 2026-10-13:
+0027): the picture's one size rule, and the two stages over the screen board (owner, 2026-10-13:
 pre-software is the display alone, raw everywhere; post-software runs through Photo Wall's steps,
 with no raw region left: v1's dark box is gone). Since decision 0028 the post-software target, as the
 look patterns, goes through the Display's white balance, contrast and gamma only, never the room's
@@ -17,7 +17,7 @@ from contracts.calibration_target import SCREEN_ROWS, Square, Surface, TargetCod
 from contracts.colour import srgb_to_linear
 from contracts.frame_lighting import AT_FULL, FarLight, FrameLighting, Paper, WashLight
 from contracts.lut import LUT_BYTES
-from contracts.models import CoverFit, FrameProfile
+from contracts.models import FrameProfile
 from contracts.node_frame import PictureOperations
 from contracts.node_picture import DisplayLight
 from contracts.room_light import (
@@ -29,27 +29,26 @@ from contracts.tuning import TestPattern
 from player.calibration_target import target_modules
 from player.geometry import (
     BoardDraw,
-    board_draw,
     board_point,
     board_signal,
     encode_srgb,
     final_pixel,
-    frame_lights,
-    opening_size_mm,
+    picture_board,
+    picture_lights,
 )
 
 PRE, POST = TestPattern.TARGET_PRE_SOFTWARE, TestPattern.TARGET_POST_SOFTWARE
 PROFILE = FrameProfile(width_px=1920, height_px=1080, diagonal_inches=27)
 DISPLAY = DisplayLight(1000.0, 0.0003)
-LIT = frame_lights(
+LIT = picture_lights(
     FrameLighting(mat_depth_mm=8, paper=Paper(whiteness=.6, ink_density=1.2), lights=(
         WashLight(light="room", lux=40, reference=AT_FULL),
         FarLight(light="room", lux=200, reference=AT_FULL, from_degrees=0, steep_degrees=30,
                  softness_degrees=20))),
     RoomLightsDocument(change=1, lights={"room": FixedEntry(colour=FixedColour(kelvin=3000))}),
-    CoverFit(), PROFILE, DISPLAY)
+    PROFILE, DISPLAY)
 GLOWING_TABLE = bytes([200]) * LUT_BYTES
-DRAW = board_draw(CoverFit(), PROFILE, target_modules(TargetCode("p-" + "ab" * 16, "HDMI-A-1", 9)))
+DRAW = picture_board(PROFILE, target_modules(TargetCode("p-" + "ab" * 16, "HDMI-A-1", 9)))
 MULTIPLIERS, SLOPE, EXPONENT = (1.0, .9, .8), .8, 1.1
 
 
@@ -91,21 +90,25 @@ def black_squares() -> list[tuple[float, float]]:
             if square(Surface.SCREEN, row, column) is Square.BLACK]
 
 
-# -- 1. The opening's size has one home --------------------------------------------------------
+# -- 1. The picture's size has one home --------------------------------------------------------
 
-def test_the_openings_size_turns_with_the_nearest_quarter():
+NO_LIGHTS = FrameLighting(mat_depth_mm=0, lights=(), paper=Paper(whiteness=.9, ink_density=2))
+
+
+def test_the_pictures_size_is_its_profiles_own_landscape_or_portrait():
+    """A screen's turn turns the screen, not the wall: a portrait profile's picture is tall."""
     diagonal = 27 * 25.4
     width, height = diagonal * 16 / math.hypot(16, 9), diagonal * 9 / math.hypot(16, 9)
-    for rotation in (0, 30, 180):
-        assert opening_size_mm(CoverFit(rotation=rotation), PROFILE) == pytest.approx((width, height))
-    for rotation in (90, 270, 300):
-        assert opening_size_mm(CoverFit(rotation=rotation), PROFILE) == pytest.approx((height, width))
+    portrait = FrameProfile(width_px=1080, height_px=1920, diagonal_inches=27)
+    assert picture_lights(NO_LIGHTS, None, PROFILE, DISPLAY).size_mm == pytest.approx((width, height))
+    assert picture_lights(NO_LIGHTS, None, portrait, DISPLAY).size_mm == pytest.approx((height, width))
 
 
-def test_the_lights_take_the_openings_size_from_the_one_rule(monkeypatch):
-    monkeypatch.setattr(geometry, "opening_size_mm", lambda fit, profile: (123.0, 45.0))
-    assert frame_lights(FrameLighting(mat_depth_mm=0, lights=(), paper=Paper(whiteness=.9, ink_density=2)), None,
-                        CoverFit(), PROFILE, DISPLAY).size_mm == (123.0, 45.0)
+def test_the_lights_and_the_board_take_the_pictures_size_from_the_one_rule(monkeypatch):
+    monkeypatch.setattr(geometry, "_profile_size_mm", lambda profile: (123.0, 45.0))
+    assert picture_lights(NO_LIGHTS, None, PROFILE, DISPLAY).size_mm == (123.0, 45.0)
+    board = picture_board(PROFILE, None)
+    assert (board.aspect, board.portrait) == (123.0 / 45.0, False)
 
 
 # -- 2. The stages -----------------------------------------------------------------------------

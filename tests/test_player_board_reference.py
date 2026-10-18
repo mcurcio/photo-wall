@@ -1,8 +1,8 @@
-"""The screen board in the Player's scalar reference (player/geometry.py `board_draw`,
-`board_point`, `board_signal`, decision 0027): SCREEN_ROWS squares across the opening's short
+"""The screen board in the Player's scalar reference (player/geometry.py `picture_board`,
+`board_point`, `board_signal`, decision 0027): SCREEN_ROWS squares across the picture's short
 side, the shown columns centred along its long side, a quarter turn clockwise in a portrait
-opening; each point the generated raster or a QR copy's module. And the seam the calibration
-tracer rides on: a board the Player draws in a 5-inch opening is found by OpenCV's ChArUco
+picture; each point the generated raster or a QR copy's module. And the seam the calibration
+tracer rides on: a board the Player draws in a 5-inch picture is found by OpenCV's ChArUco
 detector and its QR decodes. Pure: the pattern pass's shader (player/pattern_pass.py) is held to
 this by tests/native_fit_pass_harness.py."""
 from __future__ import annotations
@@ -28,17 +28,18 @@ from contracts.calibration_target import (
     qr_copies,
     square,
 )
-from contracts.models import CoverFit, FrameProfile
+from contracts.models import FrameProfile
 from player.calibration_target import target_modules
-from player.geometry import BoardDraw, board_draw, board_point, board_signal
+from player.geometry import BoardDraw, board_point, board_signal, picture_board
 from scripts.calibration_target.boards import charuco_board, marker_squares
 
 CODE = TargetCode("p-" + "0123456789abcdef" * 2, "HDMI-A-1", 3)
 MODULES = target_modules(CODE)
 WIDE = FrameProfile(width_px=1920, height_px=1080, diagonal_inches=27)
+TALL = FrameProfile(width_px=1080, height_px=1920, diagonal_inches=27)    # the same picture, hung tall
 FIVE_INCH = FrameProfile(width_px=1920, height_px=1080, diagonal_inches=5)
-LANDSCAPE = board_draw(CoverFit(), WIDE, MODULES)
-PORTRAIT = board_draw(CoverFit(rotation=90), WIDE, MODULES)
+LANDSCAPE = picture_board(WIDE, MODULES)
+PORTRAIT = picture_board(TALL, MODULES)
 
 
 def raster_at(column: float, row: float) -> float:
@@ -56,9 +57,9 @@ def drawn(draw: BoardDraw, px: int) -> np.ndarray:
     return image
 
 
-# -- 1. The opening's board ----------------------------------------------------------------------
+# -- 1. The picture's board ----------------------------------------------------------------------
 
-def test_board_draw_takes_the_openings_aspect_and_turn():
+def test_the_board_takes_the_pictures_aspect_and_its_portrait():
     assert LANDSCAPE.aspect == pytest.approx(16 / 9) and not LANDSCAPE.portrait
     assert PORTRAIT.aspect == pytest.approx(16 / 9) and PORTRAIT.portrait
     assert LANDSCAPE.columns == PORTRAIT.columns == 17
@@ -66,7 +67,7 @@ def test_board_draw_takes_the_openings_aspect_and_turn():
 
 
 @pytest.mark.parametrize("draw", [LANDSCAPE, PORTRAIT])
-def test_the_openings_centre_is_the_boards_centre(draw):
+def test_the_pictures_centre_is_the_boards_centre(draw):
     assert board_point(.5, .5, draw) == pytest.approx((draw.columns / 2, SCREEN_ROWS / 2))
 
 
@@ -77,7 +78,7 @@ def test_a_landscape_board_runs_along_u():
     assert board_point(1, 1, LANDSCAPE) == pytest.approx((along - offset, SCREEN_ROWS))
 
 
-def test_a_portrait_board_has_its_top_at_the_openings_right():
+def test_a_portrait_board_has_its_top_at_the_pictures_right():
     for v in (0, .3, 1):
         assert board_point(1, v, PORTRAIT)[1] == pytest.approx(0)
         assert board_point(0, v, PORTRAIT)[1] == pytest.approx(SCREEN_ROWS)
@@ -129,7 +130,7 @@ def test_without_a_code_every_qr_square_draws_light():
         assert {board_signal(*point, blank) for point, _ in module_centres(copy, side)} == {1.0}
 
 
-def test_a_copy_cut_by_the_openings_edge_draws_the_raster():
+def test_a_copy_cut_by_the_pictures_edge_draws_the_raster():
     narrow = BoardDraw(1.0, False, MODULES)
     assert narrow.columns == 10
     for row in range(1, 1 + QR_SQUARES):
@@ -140,7 +141,7 @@ def test_a_copy_cut_by_the_openings_edge_draws_the_raster():
 # -- 3. The tracer's seam: OpenCV finds what the Player draws ----------------------------------------
 
 def test_the_drawn_board_is_found_and_its_code_read():
-    draw = board_draw(CoverFit(), FIVE_INCH, MODULES)
+    draw = picture_board(FIVE_INCH, MODULES)
     assert draw.columns == 17
     parameters = cv2.aruco.CharucoParameters()
     parameters.minMarkers = 1

@@ -41,7 +41,7 @@ from appliance.display_host.picture_list import (
 from appliance.display_host.signal_range import RangeUnknown
 from contracts.frame_lighting import FrameLighting, Paper
 from contracts.kelvin import kelvin_white
-from contracts.models import CoverFit, FrameProfile
+from contracts.models import FrameProfile
 from contracts.node_frame import (
     PictureOperations,
     decode_picture_operations,
@@ -62,7 +62,7 @@ from contracts.node_picture import (
     WriteResult,
 )
 from contracts.tuning import TestPattern
-from player.geometry import final_pixel, frame_lights
+from player.geometry import final_pixel, picture_lights
 
 IDENTITY = DisplayIdentity("XYM", 5475, "MNN", None)   # the spike's monitor
 LEVEL_100 = HardwareRange(RangeKind.LEVEL, 100, ())
@@ -365,8 +365,8 @@ def test_colour_temperature_shows_white_as_charitys_table(kelvin):
     assert max(multipliers) == 1.0
     operations = operations_for(OUTPUT, 1, software(kelvin=kelvin), LIGHT, None)
     assert operations.rgb_multipliers == multipliers
-    lights = frame_lights(FrameLighting(mat_depth_mm=0, lights=(), paper=Paper(whiteness=.9, ink_density=2)), None,
-                          CoverFit(), FrameProfile(width_px=1920, height_px=1080, diagonal_inches=27), LIGHT)
+    lights = picture_lights(FrameLighting(mat_depth_mm=0, lights=(), paper=Paper(whiteness=.9, ink_density=2)), None,
+                            FrameProfile(width_px=1920, height_px=1080, diagonal_inches=27), LIGHT)
     pattern = PictureOperations(**{**operations.__dict__, "test_pattern": TestPattern.WHITE})
     white = final_pixel((0.0, 0.0, 0.0), pattern, inside=True, lights=lights, x=.5, y=.5, opening_uv=(.5, .5))[:3]
     assert white == pytest.approx([_encoded(value) for value in expected], abs=2e-3)

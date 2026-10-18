@@ -11,7 +11,7 @@ picture is a 64x48 RGBA image of four flat quadrants (red, green, blue, white), 
 
 The reference of target pixel (x, y): (u, v) = `buffer_to_picture` at its centre, the source point
 `fit_source_uv`, the quadrant's colour there, `decode_channel`, then `final_pixel` inside, with the
-Frame's `picture_lights`, (u, v) as the opening's point (the identity `to_opening`), the LUT and
+Frame's `picture_lights`, (u, v) as the picture's point for the lights and the pattern, the LUT and
 `dither_at` (x, y); pre-multiplied by the source's alpha when it carries one. Samples within 1.5
 source pixels of a quadrant's edge are skipped (the GPU's filter mixes there). Every sample is
 within one level of 256 (ONE_LEVEL codes) in every channel. The LUT is sampled only at its grid's

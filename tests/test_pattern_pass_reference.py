@@ -13,7 +13,7 @@ import pytest
 from contracts.calibration_target import TargetCode
 from contracts.frame_fit import Placement
 from contracts.frame_lighting import AT_FULL, FarLight, FrameLighting, Paper, WashLight
-from contracts.models import CoverFit, FrameProfile
+from contracts.models import FrameProfile
 from contracts.node_frame import PictureOperations
 from contracts.node_picture import DisplayLight
 from contracts.room_light import FixedColour, FixedEntry, RoomLightsDocument
@@ -25,7 +25,6 @@ from player.geometry import (
     BLACK_LEVEL_STEPS,
     GRID_LINE,
     GRID_SLATE,
-    board_draw,
     board_point,
     board_signal,
     buffer_to_picture,
@@ -93,9 +92,11 @@ def test_the_commissioning_grid_has_lines_on_a_slate():
 
 @pytest.mark.parametrize("profile", [LANDSCAPE, PORTRAIT])
 @pytest.mark.parametrize("modules", [None, MODULES])
-def test_picture_board_is_an_unturned_frames_board(profile, modules):
-    assert picture_board(profile, modules) == board_draw(CoverFit(), profile, modules)
-    assert picture_board(profile, modules).portrait is (profile is PORTRAIT)
+def test_picture_board_is_the_pictures_own_aspect_and_portrait(profile, modules):
+    """The profile's physical long side over its short side, portrait when it is taller than wide."""
+    board = picture_board(profile, modules)
+    assert board.aspect == pytest.approx(16 / 9)
+    assert (board.portrait, board.modules) == (profile is PORTRAIT, modules)
 
 
 # -- the codes ---------------------------------------------------------------------------------------

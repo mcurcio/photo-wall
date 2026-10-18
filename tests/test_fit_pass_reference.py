@@ -1,7 +1,7 @@
 """The fit pass's scalar reference (render redesign S1, bead B4; run ledger
 .claude/runs/render-planes/s1-page.md): the target's layout for each turn, where a target pixel falls
 in the picture as it hangs, the photo's crop window over the picture, and the Frame's lights with the
-whole picture as the opening. Pure; the shader is held to these in tests/native_fit_pass_harness.py."""
+picture at its profile's own size. Pure; the shader is held to these in tests/native_fit_pass_harness.py."""
 from __future__ import annotations
 
 import math
@@ -11,12 +11,12 @@ import pytest
 from contracts.display_turn import TURNS
 from contracts.frame_fit import Placement
 from contracts.frame_lighting import AT_FULL, CloseLight, FarLight, FrameLighting, Paper, WashLight
-from contracts.models import CoverFit, FrameProfile, PhotoCrop
+from contracts.models import FrameProfile, PhotoCrop
 from contracts.node_picture import DisplayLight
 from contracts.photo_crop import CENTRED, crop_window
 from contracts.room_light import FixedColour, FixedEntry, RoomLightsDocument
 from player.fit_pass import target_size
-from player.geometry import buffer_to_picture, fit_source_uv, frame_lights, picture_lights
+from player.geometry import buffer_to_picture, fit_source_uv, picture_lights
 
 PLACEMENT = Placement(x=40, y=10, width=300, height=200)
 
@@ -92,24 +92,24 @@ ROOM = RoomLightsDocument(change=1, lights={
 DISPLAY = DisplayLight(matched_lux=250, black=0.01)
 
 
+WIDTH_MM, HEIGHT_MM = 27 * 25.4 * 16 / math.hypot(16, 9), 27 * 25.4 * 9 / math.hypot(16, 9)
+
+
 @pytest.mark.parametrize("document", [ROOM, None])
-def test_picture_lights_are_a_full_screen_unturned_frames(document):
-    """The whole picture is the opening: the same lights, mat, paper and peak as a full-screen Cover
-    fit at 0 degrees of the same Frame, whose opening is the output's unit square."""
+def test_picture_lights_are_the_pictures_at_its_profiles_own_size(document):
+    """The lights' mat space is the picture's own rectangle at the profile's physical size, with the
+    mat, the paper, each light that adds light, and the peak over it (no light: none)."""
     picture = picture_lights(LIGHTING, document, PROFILE, DISPLAY)
-    framed = frame_lights(LIGHTING, document, CoverFit(), PROFILE, DISPLAY)
-    assert picture.to_opening == (1, 0, 0, 0, 1, 0, 0, 0, 1)
-    assert framed.to_opening == pytest.approx(picture.to_opening, abs=1e-12)
-    assert (picture.size_mm, picture.depth_mm, picture.paper, picture.lights) == \
-        (framed.size_mm, framed.depth_mm, framed.paper, framed.lights)
-    assert math.isclose(picture.peak, framed.peak)
+    assert picture.size_mm == pytest.approx((WIDTH_MM, HEIGHT_MM))
+    assert (picture.depth_mm, picture.paper) == (8, PAPER)
     assert len(picture.lights) == (3 if document else 0)
+    assert (picture.peak > 0) is (document is not None)
 
 
 def test_picture_lights_take_no_quarter_turn():
-    """A turned fit turns its opening and its lights; the picture's are always the upright Frame's."""
-    turned = frame_lights(LIGHTING, ROOM, CoverFit(rotation=90), PROFILE, DISPLAY)
-    picture = picture_lights(LIGHTING, ROOM, PROFILE, DISPLAY)
-    assert turned.size_mm == picture.size_mm[::-1]
-    assert picture.size_mm[0] > picture.size_mm[1]       # the 16:9 profile's own width
-    assert turned.lights != picture.lights
+    """A screen's turn turns the screen, not the wall: the far light's `toward` is its own
+    from_degrees and the close light sits across and up from the picture's centre."""
+    _, far, close = picture_lights(LIGHTING, ROOM, PROFILE, DISPLAY).lights
+    turn = math.radians(20)
+    assert far.toward == pytest.approx((math.sin(turn), -math.cos(turn)))
+    assert close.position_mm == pytest.approx((WIDTH_MM / 2 + 40, HEIGHT_MM / 2 - 350, 250))
