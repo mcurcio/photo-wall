@@ -84,10 +84,13 @@ int pw_screen_size(struct pw_screen *screen, int32_t *width, int32_t *height);
 void pw_screen_destroy(struct pw_screen *screen);
 /* Import a LINEAR (or other `modifier`) single-plane dmabuf: `fd` is duplicated, the caller keeps
  * its own. One roundtrip (zwp_linux_buffer_params_v1.create's created or failed). NULL when the
- * compositor refuses it or on transport failure. */
+ * compositor refuses it, on transport failure, or without asking when the layout cannot hold the
+ * picture (an XR24 or AR24 stride below width x 4, an fd shorter than stride x height: Weston would
+ * answer that with a protocol error, ending the connection). */
 struct pw_picture *pw_picture_import(struct pw_frame_client *client, int fd, uint32_t width,
     uint32_t height, uint32_t stride, uint32_t fourcc, uint64_t modifier);
-/* 1 while a commit showed the picture and the compositor has not released it since, else 0. */
+/* 1 while a commit showed the picture and the compositor has not released it since, else 0 (a
+ * present that shows it after one that did not begins a showing; each wl_buffer.release ends one). */
 int pw_picture_busy(struct pw_picture *picture);
 void pw_picture_destroy(struct pw_picture *picture);
 /* One atomic commit of the screen: planes[0..count) bottom to top, each sub-surface placed above the

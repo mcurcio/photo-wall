@@ -1,13 +1,23 @@
 /* App-private bridge; output facts still come from the base shell. MIT. */
 #define _POSIX_C_SOURCE 200809L  /* CLOCK_MONOTONIC under c11 */
+#include <errno.h>
+#include <poll.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/types.h>
 #include <time.h>
+#include <unistd.h>
 #include <wayland-client.h>
 #include "photo-wall-frame-client.h"
 #include "presentation-time-client.h"
+#include "xdg-shell-client-protocol.h"
+#include "linux-dmabuf-v1-client-protocol.h"
+#include "viewporter-client-protocol.h"
+#include "single-pixel-buffer-v1-client-protocol.h"
+#include "alpha-modifier-v1-client-protocol.h"
 #include "frame-client.h"
 #define MAX_FEEDBACK 128
 #define MAX_OUTPUTS 16
@@ -18,8 +28,48 @@ struct picture { char output[97], operations[MAX_OPERATIONS + 1]; };
 /* The compositor's newest word per surface (pacing, player/pacing.py): the tag sequence it answers,
  * 1 presented or 2 discarded, and for a presented one its time and the Output's refresh. */
 struct word { struct wl_surface *surface; uint64_t sequence; int64_t at_ns; uint32_t refresh_ns, kind; };
+/* An Output as Weston announces it to a connected client (wl_output v4): its name, current mode
+ * and transform, known from its first `done` on. */
+struct output { struct wl_output *proxy; uint32_t global; char id[97]; int32_t width, height, transform; bool done; };
+/* A compositor buffer and how many showings of it the compositor has not released yet: a showing
+ * begins with a present that shows it after one that did not, and wl_buffer.release ends one. */
+struct pw_picture {
+    struct pw_frame_client *client;
+    struct wl_buffer *buffer;
+    uint32_t held;
+    struct pw_picture *next;
+};
+/* One Output's app surface and its sub-surfaces, one per plane, made as presents need them. */
+struct pw_screen {
+    struct pw_frame_client *client;
+    char output[97];
+    struct wl_surface *surface;
+    struct xdg_surface *xdg;
+    struct xdg_toplevel *toplevel;
+    struct wp_viewport *viewport;
+    struct wl_buffer *black;               /* attached once, by the first configure */
+    bool black_attached, configured, closed;
+    int32_t pending_width, pending_height, width, height;
+    uint32_t planes;
+    struct wl_surface *plane[PW_SCREEN_PLANES];
+    struct wl_subsurface *sub[PW_SCREEN_PLANES];
+    struct wp_alpha_modifier_surface_v1 *alpha[PW_SCREEN_PLANES];
+    struct pw_picture *shown[PW_SCREEN_PLANES];   /* each sub-surface's picture in the last present */
+    struct pw_screen *next;
+};
 struct pw_frame_client {
     struct wl_display *display;
+    bool connected;                        /* pw_frame_client_connect: the connection is this client's */
+    struct xdg_wm_base *wm;
+    struct wl_compositor *compositor;
+    struct wl_subcompositor *subcompositor;
+    struct zwp_linux_dmabuf_v1 *dmabuf;
+    struct wp_viewporter *viewporter;
+    struct wp_single_pixel_buffer_manager_v1 *single_pixel;
+    struct wp_alpha_modifier_v1 *alpha;
+    struct output outputs[MAX_OUTPUTS];
+    struct pw_screen *screens;
+    struct pw_picture *pictures;
     struct wl_event_queue *queue;
     struct wl_registry *registry;
     struct pw_frame_manager_v1 *manager;
@@ -87,9 +137,75 @@ static void picture_event(void *data, struct pw_frame_manager_v1 *manager,
 static const struct pw_frame_manager_v1_listener manager_listener = {
     .grant_frame = grant_event, .trial = trial_event, .picture = picture_event
 };
+static void output_geometry(void *data, struct wl_output *proxy, int32_t x, int32_t y, int32_t mm_width,
+    int32_t mm_height, int32_t subpixel, const char *make, const char *model, int32_t transform) {
+    (void)proxy; (void)x; (void)y; (void)mm_width; (void)mm_height; (void)subpixel; (void)make; (void)model;
+    ((struct output *)data)->transform = transform;
+}
+static void output_mode(void *data, struct wl_output *proxy, uint32_t flags, int32_t width, int32_t height,
+    int32_t refresh) {
+    (void)proxy; (void)refresh;
+    struct output *o = data;
+    if (flags & WL_OUTPUT_MODE_CURRENT) { o->width = width; o->height = height; }
+}
+static void output_done(void *data, struct wl_output *proxy) {
+    (void)proxy;
+    struct output *o = data;
+    o->done = o->id[0] != 0;
+}
+static void output_scale(void *data, struct wl_output *proxy, int32_t factor) {
+    (void)data; (void)proxy; (void)factor;
+}
+static void output_name(void *data, struct wl_output *proxy, const char *name) {
+    (void)proxy;
+    struct output *o = data;
+    if (strlen(name) <= 96) strcpy(o->id, name);
+}
+static void output_description(void *data, struct wl_output *proxy, const char *description) {
+    (void)data; (void)proxy; (void)description;
+}
+static const struct wl_output_listener output_listener = {
+    .geometry = output_geometry, .mode = output_mode, .done = output_done, .scale = output_scale,
+    .name = output_name, .description = output_description
+};
+static void wm_ping(void *data, struct xdg_wm_base *wm, uint32_t serial) {
+    (void)data;
+    xdg_wm_base_pong(wm, serial);
+}
+static const struct xdg_wm_base_listener wm_listener = {.ping = wm_ping};
+/* The standard globals a connected client's screens speak. */
+static void screen_global(struct pw_frame_client *c, struct wl_registry *registry, uint32_t name,
+                          const char *interface, uint32_t version) {
+    if (!strcmp(interface, "xdg_wm_base") && !c->wm) {
+        c->wm = wl_registry_bind(registry, name, &xdg_wm_base_interface, 1);
+        xdg_wm_base_add_listener(c->wm, &wm_listener, c);
+    } else if (!strcmp(interface, "wl_compositor") && !c->compositor && version >= 4) {
+        c->compositor = wl_registry_bind(registry, name, &wl_compositor_interface, 4);   /* damage_buffer */
+    } else if (!strcmp(interface, "wl_subcompositor") && !c->subcompositor) {
+        c->subcompositor = wl_registry_bind(registry, name, &wl_subcompositor_interface, 1);
+    } else if (!strcmp(interface, "zwp_linux_dmabuf_v1") && !c->dmabuf && version >= 3) {
+        /* No listener: its format and modifier events are dropped. */
+        c->dmabuf = wl_registry_bind(registry, name, &zwp_linux_dmabuf_v1_interface, 3);
+    } else if (!strcmp(interface, "wp_viewporter") && !c->viewporter) {
+        c->viewporter = wl_registry_bind(registry, name, &wp_viewporter_interface, 1);
+    } else if (!strcmp(interface, "wp_single_pixel_buffer_manager_v1") && !c->single_pixel) {
+        c->single_pixel = wl_registry_bind(registry, name, &wp_single_pixel_buffer_manager_v1_interface, 1);
+    } else if (!strcmp(interface, "wp_alpha_modifier_v1") && !c->alpha) {
+        c->alpha = wl_registry_bind(registry, name, &wp_alpha_modifier_v1_interface, 1);
+    } else if (!strcmp(interface, "wl_output") && version >= 4) {
+        for (int i = 0; i < MAX_OUTPUTS; i++) if (!c->outputs[i].proxy) {
+            struct output *o = &c->outputs[i];
+            *o = (struct output){.global = name};
+            o->proxy = wl_registry_bind(registry, name, &wl_output_interface, 4);   /* its name */
+            wl_output_add_listener(o->proxy, &output_listener, o);
+            return;
+        }
+    }
+}
 static void global(void *data, struct wl_registry *registry, uint32_t name,
                    const char *interface, uint32_t version) {
     struct pw_frame_client *c = data;
+    if (c->connected) screen_global(c, registry, name, interface, version);
     if (!strcmp(interface, "pw_frame_manager_v1") && !c->manager && version >= 3) {
         c->version = version >= 4 ? 4 : version;
         c->manager = wl_registry_bind(registry, name, &pw_frame_manager_v1_interface, c->version);
@@ -105,6 +221,10 @@ static void global_remove(void *data, struct wl_registry *registry, uint32_t nam
     (void)registry;
     struct pw_frame_client *c = data;
     if (name == c->manager_name || name == c->presentation_name) c->lost = true;
+    for (int i = 0; i < MAX_OUTPUTS; i++) if (c->outputs[i].proxy && c->outputs[i].global == name) {
+        wl_output_release(c->outputs[i].proxy);
+        c->outputs[i] = (struct output){0};
+    }
 }
 static const struct wl_registry_listener registry_listener = {.global = global, .global_remove = global_remove};
 /* Keep the word for the feedback's surface when it answers a newer tag than the word held. A
@@ -150,49 +270,115 @@ static const struct wp_presentation_feedback_listener feedback_listener = {
 };
 void pw_frame_client_destroy(struct pw_frame_client *c) {
     if (!c) return;
+    while (c->screens) pw_screen_destroy(c->screens);
+    while (c->pictures) pw_picture_destroy(c->pictures);
     for (int i = 0; i < MAX_FEEDBACK; i++) if (c->feedback[i]) wp_presentation_feedback_destroy(c->feedback[i]);
     if (c->manager) pw_frame_manager_v1_destroy(c->manager);
     if (c->presentation) wp_presentation_destroy(c->presentation);
+    if (c->wm) xdg_wm_base_destroy(c->wm);
+    if (c->compositor) wl_compositor_destroy(c->compositor);
+    if (c->subcompositor) wl_subcompositor_destroy(c->subcompositor);
+    if (c->dmabuf) zwp_linux_dmabuf_v1_destroy(c->dmabuf);
+    if (c->viewporter) wp_viewporter_destroy(c->viewporter);
+    if (c->single_pixel) wp_single_pixel_buffer_manager_v1_destroy(c->single_pixel);
+    if (c->alpha) wp_alpha_modifier_v1_destroy(c->alpha);
+    for (int i = 0; i < MAX_OUTPUTS; i++) if (c->outputs[i].proxy) wl_output_release(c->outputs[i].proxy);
     if (c->registry) wl_registry_destroy(c->registry);
     if (c->queue) wl_event_queue_destroy(c->queue);
+    if (c->connected && c->display) { wl_display_flush(c->display); wl_display_disconnect(c->display); }
     free(c);
+}
+/* The client's own queue and registry on `c->display`, and two roundtrips: the globals, then the
+ * first events of what was bound (an Output's name and mode). */
+static bool start(struct pw_frame_client *c) {
+    c->queue = wl_display_create_queue(c->display);
+    if (!c->queue) return false;
+    struct wl_display *wrapper = wl_proxy_create_wrapper(c->display);
+    if (!wrapper) return false;
+    wl_proxy_set_queue((struct wl_proxy *)wrapper, c->queue);
+    c->registry = wl_display_get_registry(wrapper);
+    wl_proxy_wrapper_destroy(wrapper);
+    wl_registry_add_listener(c->registry, &registry_listener, c);
+    return wl_display_roundtrip_queue(c->display, c->queue) >= 0 &&
+        wl_display_roundtrip_queue(c->display, c->queue) >= 0 && c->manager && c->presentation;
 }
 struct pw_frame_client *pw_frame_client_create(struct wl_display *display) {
     if (!display) return NULL;
     struct pw_frame_client *c = calloc(1, sizeof *c);
     if (!c) return NULL;
     c->display = display;
-    c->queue = wl_display_create_queue(display);
-    if (!c->queue) { pw_frame_client_destroy(c); return NULL; }
-    struct wl_display *wrapper = wl_proxy_create_wrapper(display);
-    if (!wrapper) { pw_frame_client_destroy(c); return NULL; }
-    wl_proxy_set_queue((struct wl_proxy *)wrapper, c->queue);
-    c->registry = wl_display_get_registry(wrapper);
-    wl_proxy_wrapper_destroy(wrapper);
-    wl_registry_add_listener(c->registry, &registry_listener, c);
     /* Initialization happens before rendering begins, on GDK's owning thread. */
-    if (wl_display_roundtrip_queue(display, c->queue) < 0 ||
-        wl_display_roundtrip_queue(display, c->queue) < 0 || !c->manager || !c->presentation) {
+    if (!start(c)) { pw_frame_client_destroy(c); return NULL; }
+    return c;
+}
+struct pw_frame_client *pw_frame_client_connect(const char *socket) {
+    struct wl_display *display = wl_display_connect(socket);
+    if (!display) return NULL;
+    struct pw_frame_client *c = calloc(1, sizeof *c);
+    if (!c) { wl_display_disconnect(display); return NULL; }
+    c->display = display;
+    c->connected = true;
+    if (!start(c) || c->version < 4 || !c->wm || !c->compositor || !c->subcompositor || !c->dmabuf ||
+        !c->viewporter || !c->single_pixel || !c->alpha) {
         pw_frame_client_destroy(c); return NULL;
     }
     return c;
 }
+int pw_frame_client_fd(struct pw_frame_client *c) {
+    return c && c->connected ? wl_display_get_fd(c->display) : -1;
+}
+static bool flushed(struct pw_frame_client *c) {
+    return wl_display_flush(c->display) >= 0 || errno == EAGAIN;
+}
+/* A connected client reads its own socket: whatever arrived, without blocking, then dispatched
+ * (pings answered by wm_ping) and the answers flushed. */
+static int pump(struct pw_frame_client *c) {
+    if (!flushed(c)) return -1;
+    while (wl_display_prepare_read_queue(c->display, c->queue) != 0)
+        if (wl_display_dispatch_queue_pending(c->display, c->queue) < 0) return -1;
+    struct pollfd fd = {.fd = wl_display_get_fd(c->display), .events = POLLIN};
+    int ready = poll(&fd, 1, 0);
+    if (ready > 0 && (fd.revents & (POLLIN | POLLHUP | POLLERR))) {
+        if (wl_display_read_events(c->display) < 0) return -1;
+    } else {
+        wl_display_cancel_read(c->display);
+        if (ready < 0 && errno != EINTR) return -1;
+    }
+    int dispatched = wl_display_dispatch_queue_pending(c->display, c->queue);
+    return dispatched < 0 || !flushed(c) ? -1 : dispatched;
+}
 int pw_frame_client_dispatch(struct pw_frame_client *c) {
     if (!c || c->lost) return -1;
+    if (c->connected) return pump(c);
     return wl_display_dispatch_queue_pending(c->display, c->queue);
 }
+static bool tag_valid(struct pw_frame_client *c, const char *grant_id, const char *frame_tag,
+                      const char *picture_change) {
+    if (!grant_id || strlen(grant_id) != 36 || !frame_tag || !*frame_tag || strlen(frame_tag) > 96) return false;
+    if (picture_change) {
+        size_t length = strlen(picture_change);
+        if (c->version < 4 || !length || length > 20 || strspn(picture_change, "0123456789") != length) return false;
+    }
+    return true;
+}
+static int feedback_slot(struct pw_frame_client *c) {
+    for (int i = 0; i < MAX_FEEDBACK; i++) if (!c->feedback[i]) return i;
+    return -1;
+}
+/* Send the tag and ask for its presentation feedback, into the free `slot`. */
+static int tag_send(struct pw_frame_client *c, int slot, struct wl_surface *surface,
+    const char *grant_id, const char *frame_tag, const char *picture_change);
 /* The tag (v3 `tag`, or v4 `tag_picture` with `picture_change`) and its presentation feedback. */
 static int tag_commit(struct pw_frame_client *c, struct wl_surface *surface,
     const char *grant_id, const char *frame_tag, const char *picture_change) {
-    if (!c || !surface || !grant_id || strlen(grant_id) != 36 || !frame_tag ||
-        !*frame_tag || strlen(frame_tag) > 96 || pw_frame_client_dispatch(c) < 0) return -1;
-    if (picture_change) {
-        size_t length = strlen(picture_change);
-        if (c->version < 4 || !length || length > 20 || strspn(picture_change, "0123456789") != length) return -1;
-    }
-    int slot = -1;
-    for (int i = 0; i < MAX_FEEDBACK; i++) if (!c->feedback[i]) { slot = i; break; }
+    if (!c || !surface || !tag_valid(c, grant_id, frame_tag, picture_change) ||
+        pw_frame_client_dispatch(c) < 0) return -1;
+    int slot = feedback_slot(c);
     if (slot < 0) return -1;
+    return tag_send(c, slot, surface, grant_id, frame_tag, picture_change);
+}
+static int tag_send(struct pw_frame_client *c, int slot, struct wl_surface *surface,
+    const char *grant_id, const char *frame_tag, const char *picture_change) {
     if (picture_change) pw_frame_manager_v1_tag_picture(c->manager, surface, grant_id, frame_tag, picture_change);
     else pw_frame_manager_v1_tag(c->manager, surface, grant_id, frame_tag);
     struct wp_presentation_feedback *f = wp_presentation_feedback(c->presentation, surface);
@@ -275,51 +461,228 @@ int pw_frame_client_presentation(struct pw_frame_client *c, struct wl_surface *s
     return 0;
 }
 
-/* The Player's screens (render redesign, run ledger .claude/runs/render-planes/s1-page.md): interface
- * stubs that refuse, until bead B3 gives them bodies. */
-struct pw_frame_client *pw_frame_client_connect(const char *socket) {
-    (void)socket;
-    return NULL;
-}
-int pw_frame_client_fd(struct pw_frame_client *client) {
-    (void)client;
-    return -1;
-}
-int pw_frame_client_output(struct pw_frame_client *client, const char *output_id,
+/* The Player's screens (frame-client.h; render redesign, run ledger .claude/runs/render-planes/
+ * s1-page.md, bead B3). */
+#define FOURCC_XR24 0x34325258u   /* DRM_FORMAT_XRGB8888 */
+#define FOURCC_AR24 0x34325241u   /* DRM_FORMAT_ARGB8888 */
+int pw_frame_client_output(struct pw_frame_client *c, const char *output_id,
     int32_t *width, int32_t *height, int32_t *transform) {
-    (void)client; (void)output_id; (void)width; (void)height; (void)transform;
-    return -1;
-}
-struct pw_screen *pw_screen_create(struct pw_frame_client *client, const char *output_id) {
-    (void)client; (void)output_id;
-    return NULL;
-}
-int pw_screen_size(struct pw_screen *screen, int32_t *width, int32_t *height) {
-    (void)screen; (void)width; (void)height;
-    return -1;
-}
-void pw_screen_destroy(struct pw_screen *screen) {
-    (void)screen;
-}
-struct pw_picture *pw_picture_import(struct pw_frame_client *client, int fd, uint32_t width,
-    uint32_t height, uint32_t stride, uint32_t fourcc, uint64_t modifier) {
-    (void)client; (void)fd; (void)width; (void)height; (void)stride; (void)fourcc; (void)modifier;
-    return NULL;
-}
-int pw_picture_busy(struct pw_picture *picture) {
-    (void)picture;
+    if (!c || !output_id || !width || !height || !transform || pw_frame_client_dispatch(c) < 0) return -1;
+    for (int i = 0; i < MAX_OUTPUTS; i++) {
+        struct output *o = &c->outputs[i];
+        if (o->proxy && o->done && !strcmp(o->id, output_id)) {
+            *width = o->width; *height = o->height; *transform = o->transform;
+            return 1;
+        }
+    }
     return 0;
 }
-void pw_picture_destroy(struct pw_picture *picture) {
-    (void)picture;
+static void toplevel_configure(void *data, struct xdg_toplevel *toplevel, int32_t width, int32_t height,
+                               struct wl_array *states) {
+    (void)toplevel; (void)states;
+    struct pw_screen *s = data;
+    s->pending_width = width; s->pending_height = height;
 }
-int64_t pw_screen_present(struct pw_screen *screen, const struct pw_plane_state *planes, uint32_t count,
+static void toplevel_close(void *data, struct xdg_toplevel *toplevel) {
+    (void)toplevel;
+    struct pw_screen *s = data;
+    s->closed = true; s->configured = false;
+}
+static void toplevel_bounds(void *data, struct xdg_toplevel *toplevel, int32_t width, int32_t height) {
+    (void)data; (void)toplevel; (void)width; (void)height;
+}
+static void toplevel_capabilities(void *data, struct xdg_toplevel *toplevel, struct wl_array *capabilities) {
+    (void)data; (void)toplevel; (void)capabilities;
+}
+static const struct xdg_toplevel_listener toplevel_listener = {
+    .configure = toplevel_configure, .close = toplevel_close, .configure_bounds = toplevel_bounds,
+    .wm_capabilities = toplevel_capabilities
+};
+/* Each configure with a size: the black stretched over it (its buffer attached once only). This
+ * commit applies nothing of the planes: every present ends with the screen's own commit. */
+static void surface_configure(void *data, struct xdg_surface *xdg, uint32_t serial) {
+    struct pw_screen *s = data;
+    xdg_surface_ack_configure(xdg, serial);
+    if (s->closed) return;
+    if (s->pending_width > 0 && s->pending_height > 0) {
+        s->width = s->pending_width; s->height = s->pending_height; s->configured = true;
+    }
+    if (s->configured) {
+        wp_viewport_set_destination(s->viewport, s->width, s->height);
+        if (!s->black_attached) { wl_surface_attach(s->surface, s->black, 0, 0); s->black_attached = true; }
+        wl_surface_damage_buffer(s->surface, 0, 0, INT32_MAX, INT32_MAX);
+    }
+    wl_surface_commit(s->surface);
+}
+static const struct xdg_surface_listener surface_listener = {.configure = surface_configure};
+struct pw_screen *pw_screen_create(struct pw_frame_client *c, const char *output_id) {
+    if (!c || !c->connected || c->lost || !output_id || !*output_id || strlen(output_id) > 96) return NULL;
+    struct pw_screen *s = calloc(1, sizeof *s);
+    if (!s) return NULL;
+    s->client = c;
+    strcpy(s->output, output_id);
+    s->next = c->screens; c->screens = s;
+    s->surface = wl_compositor_create_surface(c->compositor);
+    s->viewport = s->surface ? wp_viewporter_get_viewport(c->viewporter, s->surface) : NULL;
+    s->black = wp_single_pixel_buffer_manager_v1_create_u32_rgba_buffer(c->single_pixel, 0, 0, 0, UINT32_MAX);
+    s->xdg = s->surface ? xdg_wm_base_get_xdg_surface(c->wm, s->surface) : NULL;
+    s->toplevel = s->xdg ? xdg_surface_get_toplevel(s->xdg) : NULL;
+    if (!s->viewport || !s->black || !s->toplevel) { pw_screen_destroy(s); return NULL; }
+    xdg_surface_add_listener(s->xdg, &surface_listener, s);
+    xdg_toplevel_add_listener(s->toplevel, &toplevel_listener, s);
+    char app_id[112];
+    snprintf(app_id, sizeof app_id, "photo-wall-%s", output_id);   /* player/output_discovery.py */
+    xdg_toplevel_set_app_id(s->toplevel, app_id);
+    wl_surface_commit(s->surface);
+    if (!flushed(c)) { pw_screen_destroy(s); return NULL; }
+    return s;
+}
+int pw_screen_size(struct pw_screen *s, int32_t *width, int32_t *height) {
+    if (!s || !width || !height || pw_frame_client_dispatch(s->client) < 0) return -1;
+    if (!s->configured) return 0;
+    *width = s->width; *height = s->height;
+    return 1;
+}
+void pw_screen_destroy(struct pw_screen *s) {
+    if (!s) return;
+    struct pw_frame_client *c = s->client;
+    for (struct pw_screen **at = &c->screens; *at; at = &(*at)->next) if (*at == s) { *at = s->next; break; }
+    for (uint32_t i = 0; i < s->planes; i++) {
+        wp_alpha_modifier_surface_v1_destroy(s->alpha[i]);
+        wl_subsurface_destroy(s->sub[i]);
+        wl_surface_destroy(s->plane[i]);
+    }
+    /* Its words go with it: a later surface may reuse the address. */
+    for (int i = 0; i < MAX_FEEDBACK; i++) if (c->feedback[i] && c->feedback_surface[i] == s->surface) {
+        wp_presentation_feedback_destroy(c->feedback[i]);
+        c->feedback[i] = NULL; c->feedback_surface[i] = NULL; c->feedback_sequence[i] = 0;
+    }
+    for (int i = 0; i < MAX_OUTPUTS * 2; i++) if (c->words[i].surface == s->surface) c->words[i] = (struct word){0};
+    if (s->toplevel) xdg_toplevel_destroy(s->toplevel);
+    if (s->xdg) xdg_surface_destroy(s->xdg);
+    if (s->viewport) wp_viewport_destroy(s->viewport);
+    if (s->surface) wl_surface_destroy(s->surface);
+    if (s->black) wl_buffer_destroy(s->black);
+    flushed(c);
+    free(s);
+}
+static void picture_release(void *data, struct wl_buffer *buffer) {
+    (void)buffer;
+    struct pw_picture *p = data;
+    if (p->held) p->held--;
+}
+static const struct wl_buffer_listener picture_listener = {.release = picture_release};
+struct import { struct wl_buffer *buffer; bool failed; };
+static void import_created(void *data, struct zwp_linux_buffer_params_v1 *params, struct wl_buffer *buffer) {
+    (void)params;
+    ((struct import *)data)->buffer = buffer;
+}
+static void import_failed(void *data, struct zwp_linux_buffer_params_v1 *params) {
+    (void)params;
+    ((struct import *)data)->failed = true;
+}
+static const struct zwp_linux_buffer_params_v1_listener import_listener = {
+    .created = import_created, .failed = import_failed
+};
+struct pw_picture *pw_picture_import(struct pw_frame_client *c, int fd, uint32_t width,
+    uint32_t height, uint32_t stride, uint32_t fourcc, uint64_t modifier) {
+    if (!c || !c->connected || c->lost || fd < 0 || !width || !height || width > INT32_MAX ||
+        height > INT32_MAX || !stride) return NULL;
+    /* A layout that cannot hold the picture is refused here: Weston answers a buffer shorter than
+     * stride x height with a protocol error, which would end the connection. */
+    if ((fourcc == FOURCC_XR24 || fourcc == FOURCC_AR24) && (uint64_t)stride < (uint64_t)width * 4) return NULL;
+    off_t at = lseek(fd, 0, SEEK_CUR), size = lseek(fd, 0, SEEK_END);
+    if (at >= 0) lseek(fd, at, SEEK_SET);
+    if (size >= 0 && (uint64_t)stride * height > (uint64_t)size) return NULL;
+    struct pw_picture *p = calloc(1, sizeof *p);
+    if (!p) return NULL;
+    struct zwp_linux_buffer_params_v1 *params = zwp_linux_dmabuf_v1_create_params(c->dmabuf);
+    if (!params) { free(p); return NULL; }
+    struct import result = {0};
+    zwp_linux_buffer_params_v1_add_listener(params, &import_listener, &result);
+    /* libwayland sends a duplicate of `fd`: the caller keeps its own. */
+    zwp_linux_buffer_params_v1_add(params, fd, 0, 0, stride, (uint32_t)(modifier >> 32),
+                                   (uint32_t)(modifier & 0xffffffffu));
+    zwp_linux_buffer_params_v1_create(params, (int32_t)width, (int32_t)height, fourcc, 0);
+    int answered = wl_display_roundtrip_queue(c->display, c->queue);
+    zwp_linux_buffer_params_v1_destroy(params);
+    if (answered < 0 || !result.buffer) {
+        if (result.buffer) wl_buffer_destroy(result.buffer);
+        free(p);
+        return NULL;
+    }
+    p->client = c;
+    p->buffer = result.buffer;
+    wl_buffer_add_listener(p->buffer, &picture_listener, p);
+    p->next = c->pictures; c->pictures = p;
+    return p;
+}
+int pw_picture_busy(struct pw_picture *p) { return p && p->held ? 1 : 0; }
+void pw_picture_destroy(struct pw_picture *p) {
+    if (!p) return;
+    struct pw_frame_client *c = p->client;
+    for (struct pw_picture **at = &c->pictures; *at; at = &(*at)->next) if (*at == p) { *at = p->next; break; }
+    for (struct pw_screen *s = c->screens; s; s = s->next)
+        for (uint32_t i = 0; i < PW_SCREEN_PLANES; i++) if (s->shown[i] == p) s->shown[i] = NULL;
+    wl_buffer_destroy(p->buffer);
+    flushed(c);
+    free(p);
+}
+static bool owned(struct pw_frame_client *c, const struct pw_picture *p) {
+    for (struct pw_picture *q = c->pictures; q; q = q->next) if (q == p) return true;
+    return false;
+}
+static bool showing(struct pw_picture *const *pictures, uint32_t count, const struct pw_picture *p) {
+    for (uint32_t i = 0; i < count; i++) if (pictures[i] == p) return true;
+    return false;
+}
+int64_t pw_screen_present(struct pw_screen *s, const struct pw_plane_state *planes, uint32_t count,
     int32_t buffer_transform, const char *grant_id, const char *frame_tag, const char *picture_change) {
-    (void)screen; (void)planes; (void)count; (void)buffer_transform;
-    (void)grant_id; (void)frame_tag; (void)picture_change;
-    return -1;
+    if (!s || (count && !planes) || count > PW_SCREEN_PLANES || buffer_transform < 0 || buffer_transform > 3)
+        return -2;
+    struct pw_frame_client *c = s->client;
+    for (uint32_t i = 0; i < count; i++)
+        if (!planes[i].alpha || !planes[i].picture || !owned(c, planes[i].picture)) return -2;
+    if (!tag_valid(c, grant_id, frame_tag, picture_change)) return -2;
+    /* Read first: a configure dispatched after the planes' requests would commit them untagged. */
+    if (pw_frame_client_dispatch(c) < 0) return -1;
+    if (!s->configured) return -3;
+    int slot = feedback_slot(c);
+    if (slot < 0) return -1;
+    for (; s->planes < count; s->planes++) {
+        uint32_t i = s->planes;
+        s->plane[i] = wl_compositor_create_surface(c->compositor);
+        s->sub[i] = wl_subcompositor_get_subsurface(c->subcompositor, s->plane[i], s->surface);
+        wl_subsurface_set_sync(s->sub[i]);
+        s->alpha[i] = wp_alpha_modifier_v1_get_surface(c->alpha, s->plane[i]);
+    }
+    struct pw_picture *now[PW_SCREEN_PLANES] = {0};
+    for (uint32_t i = 0; i < count; i++) {
+        const struct pw_plane_state *plane = &planes[i];
+        wl_subsurface_place_above(s->sub[i], i ? s->plane[i - 1] : s->surface);
+        wl_subsurface_set_position(s->sub[i], plane->x, plane->y);
+        wl_surface_attach(s->plane[i], plane->picture->buffer, 0, 0);
+        wl_surface_set_buffer_transform(s->plane[i], buffer_transform);
+        wl_surface_damage_buffer(s->plane[i], 0, 0, INT32_MAX, INT32_MAX);
+        wp_alpha_modifier_surface_v1_set_multiplier(s->alpha[i], plane->alpha);
+        wl_surface_commit(s->plane[i]);
+        /* A showing begins when the last present did not show it (one release ends it). */
+        if (!showing(now, i, plane->picture) && !showing(s->shown, PW_SCREEN_PLANES, plane->picture))
+            plane->picture->held++;
+        now[i] = plane->picture;
+    }
+    for (uint32_t i = count; i < s->planes; i++) {     /* the rest unmapped */
+        wl_surface_attach(s->plane[i], NULL, 0, 0);
+        wl_surface_commit(s->plane[i]);
+    }
+    memcpy(s->shown, now, sizeof now);
+    if (tag_send(c, slot, s->surface, grant_id, frame_tag, picture_change) < 0) return -1;
+    wl_surface_commit(s->surface);
+    if (!flushed(c)) return -1;
+    return (int64_t)c->tagged;
 }
-int pw_screen_presentation(struct pw_screen *screen, uint64_t *sequence, int64_t *at_ns, uint32_t *refresh_ns) {
-    (void)screen; (void)sequence; (void)at_ns; (void)refresh_ns;
-    return -1;
+int pw_screen_presentation(struct pw_screen *s, uint64_t *sequence, int64_t *at_ns, uint32_t *refresh_ns) {
+    if (!s) return -1;
+    return pw_frame_client_presentation(s->client, s->surface, sequence, at_ns, refresh_ns);
 }
+
