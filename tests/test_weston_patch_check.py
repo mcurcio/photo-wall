@@ -26,8 +26,10 @@ drm_plane_mask_bit(const struct drm_plane *plane)
 \tassert(plane->plane_idx < DRM_PLANE_MASK_BITS);
 \treturn UINT64_C(1) << plane->plane_idx;
 }
+static_assert(sizeof(((struct drm_fb *)0)->plane_mask) * 8 >= DRM_PLANE_MASK_BITS,
+\t      "drm_fb::plane_mask must hold a bit for every plane index");
 """
-DRM = "\t\tif (next_plane_idx >= DRM_PLANE_MASK_BITS) {\n"
+DRM = "\tfor (pass = 0; pass < 2 && planes > DRM_PLANE_MASK_BITS; pass++) {\n"
 VIRTUAL = "\tif (plane->plane_idx >= DRM_PLANE_MASK_BITS) {\n"
 PROPOSE = """\
 \tuint64_t possible_plane_mask = 0;
@@ -91,6 +93,7 @@ def test_a_wide_bit_passes(tmp_path, line):
     ({"drm-virtual.c": "\tplane->plane_idx = get_drm_plane_index_maximum(device) + 1;\n"},
      "drm-virtual.c"),
     ({"drm-internal.h": HEADER.replace("BITS 64", "BITS 32")}, "drm-internal.h"),
+    ({"drm-internal.h": HEADER.split("static_assert")[0]}, "drm-internal.h"),
 ])
 def test_a_missing_guard_is_refused(tmp_path, files, missing):
     found = findings(tree(tmp_path, files))
@@ -128,7 +131,8 @@ def test_the_patch_adds_no_narrow_form_and_brings_the_guard():
         elif current and line.startswith("+"):
             added.setdefault(current, []).append(line[1:])
     assert "#define DRM_PLANE_MASK_BITS 64" in added["drm-internal.h"]
-    assert any(">= DRM_PLANE_MASK_BITS" in line for line in added["drm.c"])
+    assert any(line.startswith("static_assert(") for line in added["drm-internal.h"])
+    assert any("> DRM_PLANE_MASK_BITS" in line for line in added["drm.c"])
     assert any(">= DRM_PLANE_MASK_BITS" in line for line in added["drm-virtual.c"])
     every = "\n".join(line for lines in added.values() for line in lines)
     assert not re.search(r"uint32_t\s+\w*plane_mask", every)

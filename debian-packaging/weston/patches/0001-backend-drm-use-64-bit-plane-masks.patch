@@ -2,8 +2,8 @@ From: Photo Wall <noreply@example.invalid>
 Subject: backend-drm: use 64-bit plane masks
 
 The DRM backend gives every KMS plane an index (drm_plane::plane_idx, in
-the zpos order the plane list is sorted into) and records the planes a
-buffer or a view may use as a mask with one bit per index:
+the zpos order the plane list is sorted into, highest first) and records
+the planes a buffer or a view may use as a mask with one bit per index:
 drm_fb::plane_mask and the candidate mask in
 drm_output_find_plane_for_view. Both masks are 32 bits wide and built with
 `1 << plane_idx`, so on a device with more than 32 planes the shift
@@ -19,16 +19,24 @@ a client buffer is never scanned out on it, and every frame is composited
 by the renderer.
 
 Make every plane mask 64 bits wide and build each bit with one helper,
-drm_plane_mask_bit(), so no plane bit is built with a 32-bit shift again.
-A plane whose index would not fit in 64 bits is refused where the indices
-are handed out (create_sprites logs and destroys it, and a virtual
-output's plane is not created) instead of sharing a bit; the helper
-asserts the index fits. Each plane's KMS id, type and index is logged once
-at startup, so the mapping can be read from the log.
+drm_plane_mask_bit(), which asserts the index fits; a static_assert holds
+drm_fb::plane_mask to that width. A device with more planes than a mask
+has bits keeps 64 of them, chosen where the indices are handed out
+(create_sprites): the lowest-zpos overlays are dropped first, with a log
+line each, and a primary or cursor plane only when the overlays alone do
+not make room (left past the last bit, the dropped planes would be the
+lowest, which on vc4 are the primaries). A virtual output's plane is not
+created when no index is left. Each plane's KMS id, type and index is
+written to the drm-backend debug scope, so the mapping can be read with
+--logger-scopes=log,drm-backend.
 
-This supersedes !1902 ("backend-drm: support 64-bit plane_mask"), which
-widened state-propose.c but left drm_fb::plane_mask 32 bits wide in fb.c
-and put no bound on the index.
+Prior art: meta-raspberrypi carries 0001-Adapt-weston-to-64-bit-plane-IDs.patch
+for the same defect (linked from the issue below), and !1902
+("backend-drm: support 64-bit plane_mask"), closed unmerged, widened
+state-propose.c but left drm_fb::plane_mask 32 bits wide in fb.c and put
+no bound on the index. Upstream's main has since restructured
+drm_output_find_plane_for_view, so this patch, written against 14.0.2,
+needs a rework before it can be submitted there.
 
 Bug: https://gitlab.freedesktop.org/wayland/weston/-/issues/1078
 Forwarded: no
@@ -46,10 +54,11 @@ Last-Update: 2026-10-17
  
  	/* Used by gbm fbs */
  	struct gbm_bo *bo;
-@@ -434,6 +435,20 @@ struct drm_plane {
+@@ -433,6 +434,23 @@ struct drm_plane {
+ 
  	struct weston_drm_format_array formats;
  };
- 
++
 +/* A plane mask (drm_fb::plane_mask and the candidates of
 + * drm_output_find_plane_for_view) holds one bit per plane index. Drivers
 + * expose more than 32 planes (vc4 on the Raspberry Pi 5 has 56), so the mask
@@ -64,9 +73,11 @@ Last-Update: 2026-10-17
 +	return UINT64_C(1) << plane->plane_idx;
 +}
 +
++static_assert(sizeof(((struct drm_fb *)0)->plane_mask) * 8 >= DRM_PLANE_MASK_BITS,
++	      "drm_fb::plane_mask must hold a bit for every plane index");
+ 
  struct drm_connector {
  	struct drm_device *device;
- 
 --- a/libweston/backend-drm/drm-virtual.c
 +++ b/libweston/backend-drm/drm-virtual.c
 @@ -140,9 +140,14 @@ drm_virtual_plane_create(struct drm_device *device, st
@@ -88,40 +99,65 @@ Last-Update: 2026-10-17
  	return plane;
 --- a/libweston/backend-drm/drm.c
 +++ b/libweston/backend-drm/drm.c
-@@ -1326,7 +1326,7 @@ create_sprites(struct drm_device *device)
- 	struct drm_backend *b = device->backend;
- 	drmModePlaneRes *kplane_res;
- 	drmModePlane *kplane;
--	struct drm_plane *drm_plane;
-+	struct drm_plane *drm_plane, *next;
- 	uint32_t i;
- 	uint32_t next_plane_idx = 0;
- 	uint64_t primary_plane_zpos_min = DRM_PLANE_ZPOS_INVALID_PLANE;
-@@ -1357,7 +1357,14 @@ create_sprites(struct drm_device *device)
+@@ -1312,6 +1312,40 @@ drm_plane_destroy(struct drm_plane *plane)
+ }
+ 
+ /**
++ * Keep no more planes than a plane mask has bits
++ *
++ * The plane list is in descending zpos order, so the planes left past the
++ * last bit would be the lowest: on vc4, every primary plane. Overlays are
++ * dropped first instead, lowest zpos first; a primary or cursor plane only
++ * when the overlays alone do not make room, which an output then lacks.
++ *
++ * @param device DRM device
++ */
++static void
++drm_planes_fit_plane_mask(struct drm_device *device)
++{
++	struct drm_plane *plane, *prev;
++	int planes = wl_list_length(&device->plane_list);
++	int pass;
++
++	for (pass = 0; pass < 2 && planes > DRM_PLANE_MASK_BITS; pass++) {
++		wl_list_for_each_reverse_safe(plane, prev,
++					      &device->plane_list, link) {
++			if (planes <= DRM_PLANE_MASK_BITS)
++				break;
++			if (pass == 0 && plane->type != WDRM_PLANE_TYPE_OVERLAY)
++				continue;
++			weston_log("DRM: skipping %s plane %u: a plane mask "
++				   "holds only %d planes\n",
++				   drm_output_get_plane_type_name(plane),
++				   plane->plane_id, DRM_PLANE_MASK_BITS);
++			drm_plane_destroy(plane);
++			planes--;
++		}
++	}
++}
++
++/**
+  * Initialise sprites (overlay planes)
+  *
+  * Walk the list of provided DRM planes, and add overlay planes.
+@@ -1357,6 +1391,8 @@ create_sprites(struct drm_device *device)
  			primary_plane_zpos_min = drm_plane->zpos_min;
  	}
  
--	wl_list_for_each (drm_plane, &device->plane_list, link) {
-+	wl_list_for_each_safe (drm_plane, next, &device->plane_list, link) {
-+		if (next_plane_idx >= DRM_PLANE_MASK_BITS) {
-+			weston_log("DRM: skipping plane %u: a plane mask "
-+				   "holds only %d planes\n",
-+				   drm_plane->plane_id, DRM_PLANE_MASK_BITS);
-+			drm_plane_destroy(drm_plane);
-+			continue;
-+		}
++	drm_planes_fit_plane_mask(device);
++
+ 	wl_list_for_each (drm_plane, &device->plane_list, link) {
  		drm_plane->plane_idx = next_plane_idx++;
  
- 		if (primary_plane_zpos_min != DRM_PLANE_ZPOS_INVALID_PLANE &&
-@@ -1366,6 +1373,11 @@ create_sprites(struct drm_device *device)
+@@ -1366,6 +1402,11 @@ create_sprites(struct drm_device *device)
  			drm_plane->is_underlay = true;
  			b->has_underlay = true;
  		}
 +
-+		weston_log("DRM: plane %u (%s) has plane index %u\n",
-+			   drm_plane->plane_id,
-+			   drm_output_get_plane_type_name(drm_plane),
-+			   drm_plane->plane_idx);
++		drm_debug(b, "\t[plane] %u (%s) has plane index %u\n",
++			  drm_plane->plane_id,
++			  drm_output_get_plane_type_name(drm_plane),
++			  drm_plane->plane_idx);
  	}
  
  	if (b->has_underlay && !b->format->opaque_substitute) {
