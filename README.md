@@ -12,7 +12,7 @@ Players [appear centrally without local setup](docs/requirements.md#player-provi
 
 Provisioning has one path, the node path ([decision 0014](docs/decisions/0014-reaching-central-from-every-boot-stage.md) for reaching Central, [decision 0019](docs/decisions/0019-debian-packaging-with-debhelper.md) for the packages): a diskless Pi netboots a **generic boot tree** whose kernel command line names Central (e.g., `photowall.central=http://photo-wall.localdomain/`); its first stage locates Central, takes a node boot offer and mounts the offered base read-only in RAM; the base's node units then run the Player app from a sealed release root that Central serves as a squashfs image; the Player enrolls itself by hardware serial into an operator pending queue over HTTP or HTTPS. No flashing, no per-device secret, and no signing: a home LAN has no threat model to defend, so the only integrity checks are content hashes against corruption. Shipping an update is selecting a newer release on the console's **Releases** page, not a re-image. Physical Pi 5 boot, real HDMI output and timing have no automated tier and need bench evidence. See [Status and caveats](#status-and-caveats), the [setup and recovery runbook](docs/runbook.md), the [delivery checklist](docs/implementation-checklist.md), and [acceptance evidence](docs/evidence/README.md).
 
-The foundation is one modular central application and a media preparation worker, with one Python Player process embedding GStreamer and GTK on each Raspberry Pi. Weston hosts the display session. Rendering capacity, real network boot, and visible synchronization still require hardware qualification.
+The foundation is one modular central application and a media preparation worker, with one Python Player process on each Raspberry Pi that finishes each Frame's picture once on the GPU and hands it to the display controller as its own display plane ([0029](docs/decisions/0029-render-planes.md)). Weston hosts the display session. Rendering capacity, real network boot, and visible synchronization still require hardware qualification.
 
 ## Getting started
 
@@ -95,7 +95,7 @@ Most of this lives outside this repo — your LAN, your Pi hardware, and a DHCP/
 
 ### What you provide
 
-- **Hardware:** Raspberry Pi 5 with 4 GB of memory or more, and active cooling; a smaller board is refused at boot ([supported hardware](docs/requirements.md#supported-player-hardware)). Pi 5 H.264 decode is in software — measure your real video capacity, don't assume it. ([platform notes](docs/module-appliance-platform.md))
+- **Hardware:** Raspberry Pi 5 with 4 GB of memory or more, and active cooling; a smaller board is refused at boot ([supported hardware](docs/requirements.md#supported-player-hardware)). Videos play from one 1080p30 HEVC copy each, decoded by the Pi 5's hardware ([0029](docs/decisions/0029-render-planes.md)). ([platform notes](docs/module-appliance-platform.md))
 - **A trusted LAN** central and the Pi both reach. The model trusts that LAN: Central is named on the netboot command line (see [decision 0014](docs/decisions/0014-reaching-central-from-every-boot-stage.md)); there is no mDNS discovery. Transport is HTTP or HTTPS, identity is the Pi's serial. **No signing keys anywhere**: the only integrity checks are content hashes against corruption.
 - **Central reachable from that LAN.**
 - **A DHCP/TFTP boot server** on that LAN to netboot the boot tree (kernel + initrd over TFTP; Central serves the base image over HTTP). [PXE service setup](docs/module-pxe-service.md) owns the tree layout and DHCP/tftpd configuration.
@@ -120,7 +120,7 @@ Each GitHub release carries everything a Pi needs; build it yourself with the [D
 Be honest with yourself about what is proven:
 
 - **Working and tested (software, CI):** kernel command-line Central naming, locate-through-redirects, hardware-serial identity, ticketless enrollment over HTTP, named failure logging, the operator pending queue, and bind/unbind, against a real PostgreSQL-backed central; the node packages build and their tests pass (`node-components.yml`); the node lifecycle runs under real systemd in the PID1 scenarios (`node-pid1.yml`); the full media path runs in the software e2e.
-- **No automated tier:** booting on **physical Raspberry Pi 5 hardware** over a real network boot, real GTK/HDMI rendering on real panels, and timing. CI proves the software contract, not real pixels or a real kernel boot; these need bench evidence ([which evidence](CONTRIBUTING.md#choose-the-right-evidence)).
+- **No automated tier:** booting on **physical Raspberry Pi 5 hardware** over a real network boot, real display planes and HDMI output on real panels, and timing (the render bench on the test Pi, [runbook](docs/runbook.md#the-render-bench-and-pi-testing-before-merge)). CI proves the software contract, not real pixels or a real kernel boot; these need bench evidence ([which evidence](CONTRIBUTING.md#choose-the-right-evidence)).
 - **Not yet qualified regardless:** on-device native rendering and cache reuse, dual-HDMI output, and visible multi-Player synchronization.
 
 Track progress against the [delivery checklist](docs/implementation-checklist.md) and dated [acceptance evidence](docs/evidence/README.md). A passing CI run does not establish physical-Pi, real-Immich, or visible-timing behavior.

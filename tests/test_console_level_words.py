@@ -3,7 +3,7 @@
 central/console/src/levelWords.js against contracts/node_picture.py `HardwareRange.percent`, the
 rule the Pi's base page line uses, so a level reads the same percent on both.
 
-Runs the module under Node (it is pure), as tests/test_console_convex.py does. Without Node it
+Runs the module under Node (it is pure), as tests/test_console_placement.py does. Without Node it
 skips on a developer machine, but FAILS where the checks are meant to run in full (`CI` or
 `PHOTO_WALL_BROWSER_TESTS` set).
 

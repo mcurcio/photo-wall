@@ -803,6 +803,15 @@ All operator mutations use browser controls, and every page rejects uncaught Jav
 
 The bounded schema-2 `operator-browser.json` report records named assertions, pass/failure status, browser version, PostgreSQL/fixture scope, generated-media and controlled-time inputs, checkout revision, dirty state, and GitHub event/SHA. CI always uploads available reports and retains traces only for failed tests. Pull-request runs identify the synthetic merge checkout. A dirty local run is diagnostic evidence, not final committed-revision acceptance. Reports and failure traces contain only the disposable fixture's public test token and synthetic records; keep unrelated deployment data out of the fixture.
 
+## Deploying the render planes release
+
+The release of [0029](decisions/0029-render-planes.md) (pull request #115) converts every stored Position to a rectangle in place (migration 102) and changes the display line's documents (schema 9, with the turn). In order:
+
+1. **Take a `pg_dump` of Central's database.** Migration 102 keeps no Cover or Corners body, and the code before it reads nothing else, so reverting the merge and redeploying cannot bring the old Positions back: restoring the dump can.
+2. **Deploy Central** through the usual pull request to the deployment repository.
+3. **Apply the Pi release at once** (Releases, **Update the wall**). Until a Pi runs it, its Display Host refuses every Output document (an unknown field, `turn`), so power, Night off and picture changes do not reach it, and its Player refuses plans whose bindings carry a rectangle: its screens keep what they show.
+4. Open each Frame's Position tab. A Frame whose conversion was exact (upright, its screen's size known from its Pi or its display's EDID report) stays ready; any other shows its Position to check: press **Done** once it looks right.
+
 ## Recovery
 
 ```sh

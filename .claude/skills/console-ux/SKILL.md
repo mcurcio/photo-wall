@@ -72,17 +72,19 @@ One page per step. Fill every line; write "none" rather than deleting one.
 - `EntityHeader`: "Living room left", Wall and room, status (`HealthBadge`), Identify
 - `Tabs` (1a): Overview · **Position** · Picture · Hardware
 - `LivePreviewEditor`:
-  - controls: Fit (Cover by default, Corners an explicit choice), `QuadEditor` (the four corners over
-    an outline of the output; arrow keys move the selected corner), `NudgePad` (1 / 10 / 50 px
-    steps), Rotation (quarter-turn buttons, and any angle in Cover), "Reset to full screen"
+  - controls: `RectangleEditor` (one upright rectangle of the Frame profile's shape over an outline
+    of the screen as it hangs: drag it to move, its handle to size it; arrow keys on the focused
+    drawing), `NudgePad` (1 / 10 / 50 px steps), Width (slider and pixels), "Fill the screen",
+    "Centre"; under Exact values the centre across, centre down and width in pixels. No corners,
+    angle or skew ([0029](../../../docs/decisions/0029-render-planes.md)); how the screen hangs is
+    the Hardware tab's
   - `AckBadge`; **Done** · **Revert**
 
 **Settings:**
 | Setting | Control | Default | SettingRow kind | Belongs to | Acts on |
 |---|---|---|---|---|---|
-| Corner positions | QuadEditor + NudgePad | full output | equipment | frame | pi |
-| Rotation | SegmentedControl 0/90/180/270 | 0 | equipment | frame | pi |
-| Crop per edge | QuadEditor edges | 0 | equipment | frame | pi |
+| Picture rectangle (centre, width) | RectangleEditor + NudgePad | centred, full width | equipment | frame | pi |
+| How the screen hangs (Hardware tab) | SegmentedControl 0/90/180/270 | Upright | equipment | frame | pi |
 
 **States:** Loading: skeleton canvas · Empty: none (a Frame always has a position) ·
 Error: Central did not answer (`ProblemCard`, Retry) · Can't tell: last geometry greyed with
@@ -95,19 +97,19 @@ changes → `LeaveGuard` (Keep or Revert).
 no session timeout while the tab is open.
 **Copy:** "Position", "Previewing — waiting for the Pi", "Presented by the Pi · 21:04:07",
 "Done", "Revert", "Reset to full screen". Not "calibration", not "on screen".
-**Phone:** mirror above, big arrow buttons and a corner selector below; Done and Revert pinned.
+**Phone:** drawing above, big arrow buttons below; Done and Revert pinned.
 
 **Patterns:** reused EntityHeader, HealthBadge, SettingRow · changed EntityPage → templates/object-page ·
-new Tabs, Inline, Stack, SegmentedControl (ui); LivePreviewEditor, QuadEditor, NudgePad, AckBadge,
+new Tabs, Inline, Stack, SegmentedControl (ui); LivePreviewEditor, RectangleEditor, NudgePad, AckBadge,
 LeaveGuard (patterns); the Position tab's wiring (domain)
 **Stories:** LivePreviewEditor/Clean, /Requested, /Acknowledged, /NoAckProblem, /Unbound,
-/PiOffline, /Expired, /Phone; QuadEditor/Default, /CornerSelected, /Cropped; NudgePad/Default;
+/PiOffline, /Expired, /Phone; RectangleEditor's stories; NudgePad/Default;
 AckBadge/Requested, /Acknowledged; LeaveGuard/Default; Tabs/Default
-**Acceptance:** moment of truth 3 ("Dragging a corner moves the picture on the real display
+**Acceptance:** moment of truth 3 ("Dragging the picture moves it on the real display
 right away, and Undo works"; in this design its "Undo" is **Revert**, so the check is that
 Revert restores the last kept position) · automated: catalogue stories; a browser journey test
 that Done stays disabled until the fake Pi acknowledges the latest revision · bench: the
-corner moves on the test Pi's portable monitor.
+picture moves on the test Pi's portable monitor.
 **Departs from DL §8 row:** none
 ```
 

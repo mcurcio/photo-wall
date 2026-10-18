@@ -74,7 +74,7 @@ class Renderer(Protocol):
 
     def set_room_lights(self, document: RoomLightsDocument) -> None: ...   # every Output draws with it
 
-    # Prepared: ready to be drawn on `binding`'s Frame, whose fit and profile a native renderer
+    # Prepared: ready to be drawn on `binding`'s Frame, whose fit and profile the plane renderer
     # finishes the layer's picture for ahead of its first frame (player/plane_renderer.py).
     def prepare(self, layer: LocalLayer, binding: OutputBinding) -> PrepareResult: ...
 
@@ -116,7 +116,7 @@ class RecordingRenderer:
     ``pending`` and ``prepare_failures`` are controlled before preroll;
     ``presentation_failures`` exercises failure after successful preparation. A
     failed/pending presentation never replaces ``outputs``' successful composition.
-    Capacity counts, as the native renderer's decoder slots do, every resident picture
+    Capacity counts, as a stand-in for the plane renderer's controller budget, every resident picture
     (current, replacement, overlay, retained, on any Output) plus the compositions asked
     about; a released picture frees its slot even while ``outputs`` still records it.
     """

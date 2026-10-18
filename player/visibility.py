@@ -1,5 +1,5 @@
 """Which of a Frame's layers can be seen, now and over the next few seconds: the one rule the
-executor spends decoder slots by and the native renderer draws by ([execution contract › The
+executor sheds layers by and the plane renderer draws by ([execution contract › The
 bound](../docs/execution-contract.md)). Pure: no renderer, clock or plan state.
 
 Every layer fills its whole Frame (a Frame fit applies to the Frame, never to one layer), so a layer
@@ -86,7 +86,7 @@ def beneath_shown(covering: Sequence[Layer], since: float, until: float,
 
 
 def shed(frames: Mapping[str, Sequence[Layer]]) -> Layer | None:
-    """The layer given up when decoder slots run short: the bottom-most of the Frame drawing the
+    """The layer given up when the display controller's budget runs short: the bottom-most of the Frame drawing the
     most layers (ties: the lower bottom layer), so a screen keeps its top photo; never a Frame's
     only layer (None when each Frame has one)."""
     choices = [sorted(layers, key=stack_order) for layers in frames.values() if len(layers) > 1]
