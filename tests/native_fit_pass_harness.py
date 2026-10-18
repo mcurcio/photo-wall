@@ -369,7 +369,6 @@ CASES = (turn_matches_the_reference(0, 0), turn_matches_the_reference(90, 1), tu
 
 def main() -> None:
     global PASS, PHOTO
-    print(f"GL_RENDERER {gl.glGetString(gl.GL_RENDERER)!r}", flush=True)
     PASS = FitPass(gl)
     PHOTO = source()
     failed = []
