@@ -661,6 +661,8 @@ def test_075_rewrites_the_stored_configurations_and_offers_so_central_still_plan
     cover = {"mode": "cover", "corners": SKEWED_CORNERS, "rotation": 0}
     [stored] = _sql(registry, "SELECT configuration FROM player_configurations")
     assert [binding["calibration"]["fit"] for binding in stored["configuration"]["bindings"]] == [cover]
+    # 102 again on a database that already has it: its one column comes off first.
+    _sql(registry, "ALTER TABLE position_entries DROP COLUMN turn")
     with registry.db.transaction() as conn:
         conn.execute(MIGRATION_102.read_text())
 
