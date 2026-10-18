@@ -6,7 +6,7 @@ from typing import Annotated, Final, Literal, Self
 
 from pydantic import BeforeValidator, Field, model_serializer, model_validator
 
-from contracts.display_turn import DisplayTurn, is_turn
+from contracts.display_turn import DisplayTurn, hanging, is_turn
 from contracts.frame_fit import (
     FULL_SCREEN,
     FrameRectangle,
@@ -15,6 +15,7 @@ from contracts.frame_fit import (
     Placement,
     convex_clockwise,
     picture_size,
+    place,
 )
 from contracts.frame_lighting import FrameLighting
 
@@ -96,8 +97,7 @@ class RectangleFit(Model):
     frames.turn); `centre_x` and `centre_y` are fractions of that screen's width and height,
     `width` a fraction of its width; the height follows from the aspect. No corners, no angle.
     Its rule's one home is contracts/frame_fit.py `FrameRectangle` (the validator builds one);
-    where it lands in pixels is `frame_placement`. Bead B2 adds it to `FrameFit`; until then it is
-    not a Position form."""
+    where it lands in pixels is `frame_placement`."""
     mode: Literal["rectangle"] = "rectangle"
     centre_x: Fraction = 0.5
     centre_y: Fraction = 0.5
@@ -106,16 +106,16 @@ class RectangleFit(Model):
     @model_validator(mode="after")
     def upright(self) -> Self:
         """`self.rectangle()` (FrameRectangle's own check); its ValueError("frame_rectangle")
-        becomes the model's validation error. (render-planes S2 bead B2)"""
-        raise NotImplementedError("render-planes S2 bead B2")
+        becomes the model's validation error."""
+        self.rectangle()
+        return self
 
     def rectangle(self) -> FrameRectangle:
-        """The contracts/frame_fit.py `FrameRectangle` of these three fields. Pure.
-        (render-planes S2 bead B2)"""
-        raise NotImplementedError("render-planes S2 bead B2")
+        """The contracts/frame_fit.py `FrameRectangle` of these three fields. Pure."""
+        return FrameRectangle(centre_x=self.centre_x, centre_y=self.centre_y, width=self.width)
 
 
-FrameFit = Annotated[CornersFit | CoverFit, Field(discriminator="mode")]
+FrameFit = Annotated[CornersFit | CoverFit | RectangleFit, Field(discriminator="mode")]
 
 
 class Calibration(Model):
@@ -137,16 +137,27 @@ class OutputBinding(Model):
     lighting: FrameLighting                             # the Frame's lights, mat and paper
 
 
-def frame_output(profile: FrameProfile, calibration: Calibration,
-                 output: OutputSize | None) -> PictureSize | None:
-    """The Frame output of a Frame whose Output reports `output` (width, height): its picture's
-    pixels (contracts/frame_fit.py `picture_size`, in the Frame fit's mode, corners and rotation,
-    at the profile's aspect width_px / height_px). None when `output` is None or has a side
-    below 1 (its Pi has not reported the Output's size). Pure; the one place a Frame's
-    calibration and profile become its Frame output (follow-ups 2026-10-11, slice A1)."""
+def frame_output(profile: FrameProfile, calibration: Calibration, output: OutputSize | None,
+                 turn: DisplayTurn) -> PictureSize | None:
+    """The Frame output of a Frame whose Output reports `output` (width, height, as built) and
+    whose screen hangs at `turn`: its picture's pixels. A Rectangle: its `frame_placement`'s
+    (width, height) on the screen as it hangs, or None when it runs off the screen. Cover and
+    Corners: contracts/frame_fit.py `picture_size` in the Frame fit's mode, corners and rotation,
+    at the profile's aspect width_px / height_px, on the Output as built (the turn is not read:
+    they carry their own rotation until migration 102 converts them in S5). None when `output` is
+    None or has a side below 1 (its Pi has not reported the Output's size). Pure; the one place a
+    Frame's calibration and profile become its Frame output (follow-ups 2026-10-11, slice A1)."""
     if output is None or output[0] < 1 or output[1] < 1:
         return None
     fit = calibration.fit
+    if isinstance(fit, RectangleFit):
+        try:
+            placement = frame_placement(profile, fit, output, turn)
+        except ValueError as error:
+            if str(error) != "placement_outside":
+                raise
+            return None
+        return placement.width, placement.height
     return picture_size(fit.mode, fit.corners, fit.rotation, output,
                         profile.width_px / profile.height_px)
 
@@ -158,8 +169,8 @@ def frame_placement(profile: FrameProfile, fit: RectangleFit, output: OutputSize
     `place(fit.rectangle(), hanging(output, turn), profile.width_px / profile.height_px)`.
     The one home, for Central, of a Frame's rectangle on its screen (the Frame output and Save's
     check, `off_screen`). Pure. ValueError as `hanging` ("display_turn", "screen_size") and `place`
-    ("placement_outside"). (render-planes S2 bead B2)"""
-    raise NotImplementedError("render-planes S2 bead B2")
+    ("placement_outside")."""
+    return place(fit.rectangle(), hanging(output, turn), profile.width_px / profile.height_px)
 
 
 def off_screen(profile: FrameProfile, calibration: Calibration, output: OutputSize | None,
@@ -168,9 +179,19 @@ def off_screen(profile: FrameProfile, calibration: Calibration, output: OutputSi
     built, hung at `turn`): `frame_placement` refuses it with "placement_outside". False for Cover
     and Corners (worked out on the Output as built, by their own rotation, until migration 102
     converts them in S5) and when `output` is None or has a side below 1 (nothing to check
-    against). Pure. ValueError("display_turn") for a turn outside TURNS.
-    (render-planes S2 bead B2)"""
-    raise NotImplementedError("render-planes S2 bead B2")
+    against). Pure. ValueError("display_turn") for a turn outside TURNS."""
+    fit = calibration.fit
+    if not isinstance(fit, RectangleFit) or output is None or output[0] < 1 or output[1] < 1:
+        if not is_turn(turn):
+            raise ValueError("display_turn")
+        return False
+    try:
+        frame_placement(profile, fit, output, turn)
+    except ValueError as error:
+        if str(error) != "placement_outside":
+            raise
+        return True
+    return False
 
 
 class IdentifyOutput(Model):

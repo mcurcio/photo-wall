@@ -54,7 +54,7 @@ def _refused(verdict: FitVerdict) -> str:
 def _opening(corners) -> FitTarget:
     """UHD's Frame drawn through `corners` of the 3840 x 2160 Display (Cover fit)."""
     calibration = Calibration(fit=CoverFit(corners=corners))
-    return FitTarget(profile=UHD, output_px=frame_output(UHD, calibration, DISPLAY))
+    return FitTarget(profile=UHD, output_px=frame_output(UHD, calibration, DISPLAY, 0))
 
 
 MAT = _opening(((.3, .3), (.7, .3), (.7, .7), (.3, .7)))     # a 40 % x 40 % opening
@@ -122,7 +122,7 @@ def test_a_frame_turned_off_axis_needs_more_than_the_display() -> None:
     """B1 case 2: full screen turned 10 degrees, the picture is larger than the Display, so a
     photo of exactly the Display's size is too small."""
     turned = Calibration(fit=CoverFit(rotation=10))
-    target = FitTarget(profile=UHD, output_px=frame_output(UHD, turned, DISPLAY))
+    target = FitTarget(profile=UHD, output_px=frame_output(UHD, turned, DISPLAY, 0))
     assert target.output_px[0] > 3840 and target.output_px[1] > 2160
     assert _refused(_judge(measured("p", 3840, 2160), target)) == "below_frame_pixels"
     assert isinstance(_judge(measured("p", 3840, 2160)), Fits)

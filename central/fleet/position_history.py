@@ -27,7 +27,7 @@ from typing import Final
 from uuid import UUID
 
 from contracts.frame_lighting import FrameLighting
-from contracts.models import Calibration, CornersFit, CoverFit
+from contracts.models import Calibration, FrameFit
 
 
 class PositionEntryKind(StrEnum):
@@ -50,7 +50,7 @@ SENT_KINDS: Final = frozenset({PositionEntryKind.SENT_DRAFT, PositionEntryKind.S
 class PositionValues:
     """What a Position entry records: the Frame fit and the Frame's lighting (the calibration's
     revision is not a value: it only orders saves)."""
-    fit: CornersFit | CoverFit
+    fit: FrameFit
     lighting: FrameLighting
 
 

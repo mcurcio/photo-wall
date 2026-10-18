@@ -12,7 +12,7 @@ export interface AtReading {
 }
 
 export interface Calibration {
-  fit?: CornersFit | CoverFit;
+  fit?: CornersFit | CoverFit | RectangleFit;
   revision?: number;
 }
 
@@ -216,7 +216,7 @@ export type PositionEntryKind = "kept-created" | "kept-saved" | "kept-profile-ch
 export interface PositionEntryView {
   at: string;
   entry_id: string;
-  fit: CornersFit | CoverFit;
+  fit: CornersFit | CoverFit | RectangleFit;
   frame: FrameRefView;
   kind: PositionEntryKind;
   lighting: FrameLighting;
@@ -246,6 +246,13 @@ export interface ProfilePxView {
 }
 
 export type Reading = Measured | Unavailable;
+
+export interface RectangleFit {
+  centre_x?: number;
+  centre_y?: number;
+  mode: "rectangle";
+  width?: number;
+}
 
 export interface RefusedReportView {
   address: string;
@@ -619,6 +626,20 @@ export const LIMITS = {
       minimum: 1,
     },
   },
+  RectangleFit: {
+    centre_x: {
+      maximum: 1,
+      minimum: 0,
+    },
+    centre_y: {
+      maximum: 1,
+      minimum: 0,
+    },
+    width: {
+      exclusiveMinimum: 0,
+      maximum: 1,
+    },
+  },
   RefusedReportView: {
     source: {
       pattern: "^[a-z][a-z0-9-]{0,31}$",
@@ -819,6 +840,7 @@ export const REFUSALS = {
     "node_body_too_large",
     "calibration_revision_conflict",
     "calibration_trial_baseline_changed",
+    "position_off_screen",
   ],
 } as const;
 export type DrawnReportRefusal = (typeof REFUSALS)["DrawnReportRefusal"][number];

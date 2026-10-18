@@ -245,12 +245,13 @@ def frame_outputs_in(conn: Any) -> tuple[FrameOutput, ...]:
     """Every Frame's FrameOutput, ordered by frame id, in the caller's transaction (follow-ups
     2026-10-11, slice A1): frames LEFT JOIN bindings LEFT JOIN outputs on (player_id,
     output_id); `display_px` from `outputs.observation` width_px x height_px when both are >= 1
-    (the enrollment report, connected or not); `output_px` is `contracts.models.frame_output`.
+    (the enrollment report, connected or not); `turn` is `f.turn`; `output_px` is
+    `contracts.models.frame_output` at that turn.
     The one read of Frame outputs: the media worker's rendition choice (PgPhotoLibrary), the
     Planner's slots and the fit analysis (roadmap 5a) all ask here. Never raises for a Frame
     without an Output."""
     rows = conn.execute(
-        "SELECT f.id, f.profile, f.calibration, (o.observation->>'width_px')::int AS width_px, "
+        "SELECT f.id, f.profile, f.calibration, f.turn, (o.observation->>'width_px')::int AS width_px, "
         "(o.observation->>'height_px')::int AS height_px FROM frames f "
         "LEFT JOIN bindings b ON b.frame_id=f.id "
         "LEFT JOIN outputs o ON o.player_id=b.player_id AND o.output_id=b.output_id "
@@ -262,8 +263,9 @@ def frame_outputs_in(conn: Any) -> tuple[FrameOutput, ...]:
         display = (width, height) if width is not None and height is not None \
             and width >= 1 and height >= 1 else None
         frames.append(FrameOutput(
-            frame_id=row["id"], profile=profile, display_px=display,
-            output_px=frame_output(profile, Calibration.model_validate(row["calibration"]), display)))
+            frame_id=row["id"], profile=profile, turn=row["turn"], display_px=display,
+            output_px=frame_output(profile, Calibration.model_validate(row["calibration"]), display,
+                                   row["turn"])))
     return tuple(frames)
 
 

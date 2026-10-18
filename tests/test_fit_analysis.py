@@ -43,8 +43,8 @@ SELECTION = FitSelection(sources=("family:1",))
 def output(frame_id: str, profile: FrameProfile, display=DISPLAY) -> FrameOutput:
     """A Frame full screen on a Display of `display` (Cover): its Frame output is the cover
     rectangle of the profile's shape around that Display."""
-    return FrameOutput(frame_id=frame_id, profile=profile, display_px=display,
-                       output_px=frame_output(profile, Calibration(), display))
+    return FrameOutput(frame_id=frame_id, profile=profile, turn=0, display_px=display,
+                       output_px=frame_output(profile, Calibration(), display, 0))
 
 
 class Reader:

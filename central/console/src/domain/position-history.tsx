@@ -50,7 +50,7 @@ export const WHAT: Record<PositionEntryKind, string> = {
 const NOT_KEPT = new Set<PositionEntryKind>(["sent-draft", "sent-back"]);
 
 const percent = (fraction: number) => `${(fraction * 100).toFixed(1)} %`;
-const FITS = { cover: "Cover", corners: "Corners" } as const;
+const FITS = { cover: "Cover", corners: "Corners", rectangle: "Rectangle" } as const;
 
 /** The pattern's one summary rule (`changedSummary`) over two entries' details: what differs from
  * the entry below; a light the entry below had and this one has not is said by the lights' count. */
@@ -59,22 +59,32 @@ export function positionSummary(details: readonly { label: string; value: string
   return changedSummary(details, below, { absent: () => null, same: SAME });
 }
 
-/** Every value of an entry: each corner as a share of the output (with its pixels when the output's
- * size is known), the rotation, the lighting (the mat's depth, each light's values, the paper), and
+/** Every value of an entry: a Rectangle's centre and width as shares of the screen as it hangs, or
+ * Cover's and Corners' each corner as a share of the output (with its pixels when the output's
+ * size is known) and the rotation; the lighting (the mat's depth, each light's values, the paper), and
  * the screen size it was made for. `names`: the room lights' names by id; `profiles`: the paper
  * profiles on the list. */
 export function positionDetails(entry: PositionEntryView, size: PixelSize | null,
   names: Readonly<Record<string, string>> = {}, profiles: readonly PaperProfileChoice[] = []): { label: string; value: string }[] {
   const { lighting } = entry;
   const { width, height } = entry.made_for.profile_px;
+  const { fit } = entry;
+  const placed = fit.mode === "rectangle"
+    ? [
+      { label: "Centre", value: `${percent(fit.centre_x ?? 0.5)} across, ${percent(fit.centre_y ?? 0.5)} down` },
+      { label: "Width", value: `${percent(fit.width ?? 1)} of the screen` },
+    ]
+    : [
+      ...(fit.corners ?? []).map(([x, y], index) => ({
+        label: CORNERS[index] ?? `Corner ${index + 1}`,
+        value: `${percent(x)} across, ${percent(y)} down`
+          + (size === null ? "" : ` (${Math.round(x * size.width)}, ${Math.round(y * size.height)} px)`),
+      })),
+      { label: "Rotation", value: `${fit.rotation}°` },
+    ];
   return [
-    { label: "Fit", value: FITS[entry.fit.mode] },
-    ...(entry.fit.corners ?? []).map(([x, y], index) => ({
-      label: CORNERS[index] ?? `Corner ${index + 1}`,
-      value: `${percent(x)} across, ${percent(y)} down`
-        + (size === null ? "" : ` (${Math.round(x * size.width)}, ${Math.round(y * size.height)} px)`),
-    })),
-    { label: "Rotation", value: `${entry.fit.rotation}°` },
+    { label: "Fit", value: FITS[fit.mode] },
+    ...placed,
     { label: "Mat depth", value: unitWords(lighting.mat_depth_mm, "mm") },
     { label: "Lights", value: String(lighting.lights.length) },
     ...lighting.lights.flatMap((light, index) => lightDetails(light, index + 1, names)),

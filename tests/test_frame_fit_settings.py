@@ -16,8 +16,11 @@ from support.position import save_position
 from test_registry import enroll
 
 from central.displays.model import Readiness
+from central.fleet.models import TrialRefusal, TrialRefused
+from central.fleet.position_history import PositionEntryKind
+from central.infra.position_history_store import latest_kept_position_in, latest_position_in
 from central.registry import FrameCreate
-from contracts.models import Calibration, CornersFit, CoverFit, FrameProfile
+from contracts.models import Calibration, CornersFit, CoverFit, FrameProfile, RectangleFit
 
 LANDSCAPE = FrameProfile(width_px=1920, height_px=1080, diagonal_inches=24)
 FOLDED = ((0, 0), (1, 1), (1, 0), (0, 1))
@@ -88,3 +91,57 @@ def test_a_folded_quad_is_refused_in_either_fit_before_any_write(registry):
         with pytest.raises(ValidationError, match="convex"):
             Calibration.model_validate({"revision": 1, "fit": {"mode": fit().mode, "corners": FOLDED}})
     assert _frame(registry) == before
+
+
+# --- The Rectangle (render redesign S2 B2, run ledger .claude/runs/render-planes/s2-page.md) -----
+
+UHD_LANDSCAPE = FrameProfile(width_px=1920, height_px=1080, diagonal_inches=55)
+OFF_SCREEN = RectangleFit(centre_x=0.1, width=0.5)
+
+
+def _turned_on_uhd(registry, frame_id: str = "lounge", size=(3840, 2160)) -> str:
+    """A 16:9 Frame bound to HDMI-A-1 of a Pi whose Output reported `size`, turned 90 (its
+    Position then saved again, so it is READY); its player id."""
+    player, _key, _request = enroll(registry, count=1, size=size)
+    registry.create_frame(FrameCreate(id=frame_id, width_mm=500, height_mm=300, profile=UHD_LANDSCAPE))
+    registry.bind(frame_id, player["player_id"], "HDMI-A-1", expected_generation=0)
+    registry.turn_frame(frame_id, 90, expected_generation=_frame(registry, frame_id).generation)
+    save_position(registry, frame_id)
+    return player["player_id"]
+
+
+def test_a_rectangle_save_reaches_the_player_configuration_and_its_history(registry):
+    """A Rectangle is a Position form: Save keeps it, the Player configuration carries it, the
+    Frame is READY and the Save's kept-saved history entry records it."""
+    player = _bound(registry)
+    rectangle = RectangleFit(centre_x=0.25, centre_y=0.5, width=0.5)
+    save_position(registry, "lounge", Calibration(fit=rectangle))
+    assert _frame(registry).readiness is Readiness.READY
+    [binding] = registry.bindings_for(player, 1)
+    assert binding.calibration.fit == rectangle
+    with registry.db.transaction() as conn:
+        entry = latest_kept_position_in(conn, "lounge")
+    assert (entry.record.kind, entry.record.values.fit) == (PositionEntryKind.KEPT_SAVED, rectangle)
+
+
+def test_a_rectangle_off_its_turned_screen_is_refused_before_any_write(registry):
+    """On a 3840 x 2160 Output hung a quarter turn the screen is 2160 wide: a half-width Rectangle
+    centred 10 % across runs off its left edge. Save refuses it (422) and writes nothing."""
+    _turned_on_uhd(registry)
+    before = _frame(registry)
+    with registry.db.transaction() as conn:
+        latest = latest_position_in(conn, "lounge")
+    with pytest.raises(TrialRefused) as refused:
+        save_position(registry, "lounge", Calibration(fit=OFF_SCREEN))
+    assert (refused.value.code, refused.value.status) == (TrialRefusal.POSITION_OFF_SCREEN, 422)
+    after = _frame(registry)
+    assert (after.calibration.revision, after.generation) == (before.calibration.revision, before.generation)
+    with registry.db.transaction() as conn:
+        assert latest_position_in(conn, "lounge") == latest
+
+
+def test_a_rectangle_on_an_output_with_no_reported_size_is_not_checked(registry):
+    """The same Save on an Output that reported 0 x 0 (a real Pi today) succeeds: nothing to check."""
+    _turned_on_uhd(registry, size=(0, 0))
+    save_position(registry, "lounge", Calibration(fit=OFF_SCREEN))
+    assert _frame(registry).calibration.fit == OFF_SCREEN

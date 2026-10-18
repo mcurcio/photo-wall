@@ -64,6 +64,7 @@ from contracts.models import (
     Model,
     OutputBinding,
     TargetIdentifier,
+    off_screen,
 )
 from contracts.node_picture import UPGRADE_DISPLAY_LIGHT
 from contracts.player_control import (
@@ -811,13 +812,20 @@ class Registry:
         trial evidence. It is a kept Position write: a change made outside Photo Wall is recorded
         first, then the Save's kept-saved entry
         (the trial's `session_id`, and `restored_from` when its draft came from a Restore), in this
-        transaction.
+        transaction. A Rectangle that runs off its screen as it hangs (`contracts.models.off_screen`
+        on the bound Output's reported size, `outputs.observation` as built, and the Frame's turn)
+        is refused with POSITION_OFF_SCREEN before any write; an Output that reported no size is
+        not checked.
         """
         if not holds_runtime_locks_in(conn):
             raise RegistryError("calibration_runtime_locks_required")
-        row = conn.execute("SELECT f.*,p.authority_epoch,p.retired_at,b.player_id,b.output_id "
+        row = conn.execute("SELECT f.*,p.authority_epoch,p.retired_at,b.player_id,b.output_id,"
+                           "(o.observation->>'width_px')::int AS output_width_px,"
+                           "(o.observation->>'height_px')::int AS output_height_px "
                            "FROM frames f JOIN bindings b ON b.frame_id=f.id "
-                           "JOIN players p ON p.id=b.player_id WHERE f.id=%s FOR UPDATE OF f",
+                           "JOIN players p ON p.id=b.player_id "
+                           "LEFT JOIN outputs o ON o.player_id=b.player_id AND o.output_id=b.output_id "
+                           "WHERE f.id=%s FOR UPDATE OF f",
                            (frame_id,)).fetchone()
         if row is None or row["retired_at"] is not None or (
             row["player_id"], row["authority_epoch"], row["output_id"], row["generation"],
@@ -827,6 +835,10 @@ class Registry:
         current = Calibration.model_validate(row["calibration"])
         if current.revision != calibration_revision:
             raise TrialRefused(TrialRefusal.CALIBRATION_REVISION_CONFLICT)
+        width, height = row["output_width_px"], row["output_height_px"]
+        size = (width, height) if width is not None and height is not None else None
+        if off_screen(FrameProfile.model_validate(row["profile"]), calibration, size, row["turn"]):
+            raise TrialRefused(TrialRefusal.POSITION_OFF_SCREEN)
         committed = Calibration.model_validate(calibration.model_dump()).model_copy(
             update={"revision": current.revision + 1})
         write_position_in(conn, frame_id, saved_record(position_values(committed, lighting), session_id=session_id,

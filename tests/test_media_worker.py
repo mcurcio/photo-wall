@@ -140,9 +140,9 @@ def library_store(clock):
     library = FakeLibraryStore(clock)
     library.add_connection("fixture", "https://immich.invalid/api", SECRET)
     library.outputs = (
-        FrameOutput(frame_id="hall", profile=PORTRAIT, output_px=(1080, 1920),
+        FrameOutput(frame_id="hall", profile=PORTRAIT, turn=0, output_px=(1080, 1920),
                     display_px=(1080, 1920)),
-        FrameOutput(frame_id="lounge", profile=PORTRAIT, output_px=None, display_px=None))
+        FrameOutput(frame_id="lounge", profile=PORTRAIT, turn=0, output_px=None, display_px=None))
     return library
 
 

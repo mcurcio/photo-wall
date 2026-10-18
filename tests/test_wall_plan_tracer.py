@@ -168,7 +168,7 @@ def test_a_mat_opening_frame_plans_a_photo_smaller_than_its_display():
         contributions=(Contribution(target="frame:wide", source_refs=(POOL,),
                                     after_end="keep_this_photo"),)))
     instance.activate("tracer", "run", 0)
-    opening = frame_output(WIDE, mat, (3840, 2160))
+    opening = frame_output(WIDE, mat, (3840, 2160), 0)
     assert opening == (1536, 864)
     planned = placed_by_frame(an_hour(instance, small, frames=("wide",),
                                       outputs={"wide": opening}))

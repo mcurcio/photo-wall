@@ -1418,8 +1418,9 @@ def test_every_demo_upload_fills_the_demo_frame_output_and_none_fills_the_whole_
     assert "width_px=1920" in PLAYER_RUNNER and "height_px=1080" in PLAYER_RUNNER
     profile = FrameProfile.model_validate(DEMO_FRAME_PROFILE)
     display = (1920, 1080)
-    opening = frame_output(profile, demo_position({"width_px": 1920, "height_px": 1080}), display)
-    whole = frame_output(profile, Calibration(fit=CornersFit()), display)
+    opening = frame_output(profile, demo_position({"width_px": 1920, "height_px": 1080}), display,
+                           turn=0)
+    whole = frame_output(profile, Calibration(fit=CornersFit()), display, turn=0)
     assert opening == (90, 90) and whole == display
     uploads = [("image", size) for size, _ in DEMO_IMAGES.values()] + [("video", DEMO_VIDEO_SIZE)]
     for kind, (width, height) in uploads:
