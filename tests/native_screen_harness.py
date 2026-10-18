@@ -23,8 +23,9 @@ nothing but the app is on screen.
    red stays busy; every present answered a rising sequence and the shell's `presented` named each
    tag.
 4. an_import_with_a_short_stride_is_refused: a stride below width x 4 imports nothing.
-5. a_turned_screen_shows_a_turned_target_upright: after the `turn` op (transform 1) `screen()`
-   reports turn 90 and the Output's size turned; four solid planes on the hanging quadrants and one
+5. a_turned_screen_shows_a_turned_target_upright: after the `turn` op (transform 1) and the new
+   handoff it brings (a turn is a mode change: the shell takes the grant back) `screen()` reports
+   turn 90 and the Output's size turned; four solid planes on the hanging quadrants and one
    full-screen target laid out turned (player/geometry.py `buffer_to_picture`) with the same four
    colours capture alike: the buffer transform shows the target upright, in any capture layout.
 """
@@ -383,10 +384,13 @@ def main() -> None:
         backend = WestonBackend(channel, display_uid=0, compositor_pid=weston.pid, verify_process=alive)
         host = backend.initialize()
         presented_tags: list[str] = []
+        keys: list = []                 # the Output's keys, as the shell announces them
 
         def observe(observed) -> None:
             if isinstance(observed, CompositorPresentation):
                 presented_tags.append(observed.frame_tag)
+            if isinstance(observed, OutputKey) and observed.output_id == OUTPUT:
+                keys.append(observed)
 
         def pump(wanted, seconds: float = 10.0):
             """Dispatch the shell's events until `wanted(observed)`; that observation."""
@@ -434,22 +438,36 @@ def main() -> None:
                         again()
                     time.sleep(0.1)
 
+        def hand_off(known: int) -> None:
+            """The Output's first key after the `known` ones offered to the app and handed off, as
+            the runner does: the app presents its candidate's black meanwhile."""
+            del presented_tags[:]
+            ask(op="candidate", on=True)
+            end = time.monotonic() + 10
+            while len(keys) <= known:
+                assert time.monotonic() < end, ("no_new_output_key", keys)
+                observed = backend.dispatch()
+                observe(observed)
+                if observed is None:
+                    time.sleep(0.01)
+            key = keys[-1]
+            ticks = int(pathlib.Path(f"/proc/{child.pid}/stat").read_text().rpartition(") ")[2].split()[19])
+            surface = Surface(key, NodeProcessIdentity(child.pid, ticks, uuid.uuid4()), 1, 1, 1, "frame")
+            backend.allow(SurfaceGrant(surface, APP_UID, True))
+            host.offer(surface)
+            for _attempt in range(20):     # the handoff names a recent presented buffer; a newer may supersede it
+                presented = pump(lambda seen: isinstance(seen, CompositorPresentation), seconds=20)
+                try:
+                    host.authorize_handoff(surface, now_ms=presented.observed_monotonic_ms)
+                    break
+                except ValueError:
+                    continue
+            pump(lambda seen: isinstance(seen, DiagnosticRelease))
+            assert any(tag.startswith("candidate-") for tag in presented_tags), presented_tags
+            ask(op="candidate", on=False)
+
         # 1. the_handed_off_screen_shows_black
-        key = pump(lambda seen: isinstance(seen, OutputKey) and seen.output_id == OUTPUT)
-        ticks = int(pathlib.Path(f"/proc/{child.pid}/stat").read_text().rpartition(") ")[2].split()[19])
-        surface = Surface(key, NodeProcessIdentity(child.pid, ticks, uuid.uuid4()), 1, 1, 1, "frame")
-        backend.allow(SurfaceGrant(surface, APP_UID, True))
-        host.offer(surface)
-        for _attempt in range(20):     # the handoff names a recent presented buffer; a newer may supersede it
-            presented = pump(lambda seen: isinstance(seen, CompositorPresentation), seconds=20)
-            try:
-                host.authorize_handoff(surface, now_ms=presented.observed_monotonic_ms)
-                break
-            except ValueError:
-                continue
-        pump(lambda seen: isinstance(seen, DiagnosticRelease))
-        assert any(tag.startswith("candidate-") for tag in presented_tags), presented_tags
-        ask(op="candidate", on=False)
+        hand_off(0)
 
         def all_black(frame) -> int:
             width, height, _ = frame
@@ -495,7 +513,9 @@ def main() -> None:
         print("PASS an_import_with_a_short_stride_is_refused", flush=True)
 
         # 5. a_turned_screen_shows_a_turned_target_upright
+        known = len(keys)
         assert backend.turn(OUTPUT, 90, timeout=5.0), "turn_refused"
+        hand_off(known)                 # a turn is a mode change: the shell takes the grant back
         turned = list(hanging((WIDTH_PX, HEIGHT_PX), 90))
         end = time.monotonic() + 5
         while (screen := ask(op="screen")["screen"]) != [*turned, 90] and time.monotonic() < end:
