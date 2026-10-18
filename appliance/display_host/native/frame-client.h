@@ -43,3 +43,61 @@ uint64_t pw_frame_client_tagged(struct pw_frame_client *client);
  * the Output's refresh period (0: unknown). Dispatches the client's queue first. */
 int pw_frame_client_presentation(struct pw_frame_client *client, struct wl_surface *surface,
     uint64_t *sequence, int64_t *at_ns, uint32_t *refresh_ns);
+
+/* The Player's screens (render redesign, run ledger .claude/runs/render-planes/s1-page.md, bead B3).
+ * The client on its own connection, no GDK: every function below and above works on a client
+ * made by pw_frame_client_connect, from the one thread that owns it.
+ *
+ * A screen is one Output's app surface: an xdg toplevel whose app id is "photo-wall-<output_id>"
+ * (the shell maps it full screen on that Output), showing opaque black (a single-pixel buffer the
+ * viewport stretches over the configured size), parent of up to PW_SCREEN_PLANES synchronized
+ * sub-surfaces, one per plane, each with a wp_alpha_modifier_v1 surface. A picture is a LINEAR
+ * dmabuf imported through zwp_linux_dmabuf_v1. */
+#define PW_SCREEN_PLANES 15     /* each screen's black takes the 16th plane (bench T2) */
+struct pw_screen;
+struct pw_picture;
+/* One plane of a present: its picture, its top-left in the screen's surface coordinates (pixels as
+ * the screen hangs) and its strength as the wp_alpha_modifier_v1 multiplier (1..UINT32_MAX). */
+struct pw_plane_state {
+    struct pw_picture *picture;
+    int32_t x, y;
+    uint32_t alpha;
+};
+/* Connect to `socket` (NULL: $WAYLAND_DISPLAY) and bind the frame manager (v4), xdg_wm_base,
+ * wl_compositor, wl_subcompositor, zwp_linux_dmabuf_v1 (v3 or later), wp_viewporter,
+ * wp_single_pixel_buffer_manager_v1, wp_alpha_modifier_v1, wp_presentation and every wl_output
+ * (v4, for its name). NULL when the connection or any of them is missing. The client answers
+ * xdg_wm_base pings itself while dispatching; pw_frame_client_destroy disconnects. */
+struct pw_frame_client *pw_frame_client_connect(const char *socket);
+/* The connection's fd (-1: a client made by pw_frame_client_create, whose fd is GDK's). */
+int pw_frame_client_fd(struct pw_frame_client *client);
+/* The Output named output_id as Weston reports it: its current mode's width and height (physical
+ * pixels) and its wl_output.transform. Returns 1 known, 0 not announced (or gone), -1 transport
+ * failure. Dispatches the client's queue first. */
+int pw_frame_client_output(struct pw_frame_client *client, const char *output_id,
+    int32_t *width, int32_t *height, int32_t *transform);
+/* A new screen for output_id; NULL on failure. It shows nothing until its first configure. */
+struct pw_screen *pw_screen_create(struct pw_frame_client *client, const char *output_id);
+/* The size of the screen's last configure (pixels as it hangs): 1 configured, 0 not yet, -1
+ * transport failure. */
+int pw_screen_size(struct pw_screen *screen, int32_t *width, int32_t *height);
+void pw_screen_destroy(struct pw_screen *screen);
+/* Import a LINEAR (or other `modifier`) single-plane dmabuf: `fd` is duplicated, the caller keeps
+ * its own. One roundtrip (zwp_linux_buffer_params_v1.create's created or failed). NULL when the
+ * compositor refuses it or on transport failure. */
+struct pw_picture *pw_picture_import(struct pw_frame_client *client, int fd, uint32_t width,
+    uint32_t height, uint32_t stride, uint32_t fourcc, uint64_t modifier);
+/* 1 while a commit showed the picture and the compositor has not released it since, else 0. */
+int pw_picture_busy(struct pw_picture *picture);
+void pw_picture_destroy(struct pw_picture *picture);
+/* One atomic commit of the screen: planes[0..count) bottom to top, each sub-surface placed above the
+ * one before, at (x, y), showing its picture with buffer_transform (a wl_output.transform, the
+ * screen's own) and its alpha; sub-surfaces past count attach no buffer (unmapped); then the frame
+ * manager's tag_picture (grant_id, frame_tag, picture_change) and presentation feedback on the
+ * screen's surface, and the screen's commit, which applies them all. Returns the tag's sequence
+ * (>= 1); -1 transport failure; -2 a bad argument (count above PW_SCREEN_PLANES, alpha 0, a NULL
+ * or foreign picture, a transform above 3); -3 the screen has no configure yet. */
+int64_t pw_screen_present(struct pw_screen *screen, const struct pw_plane_state *planes, uint32_t count,
+    int32_t buffer_transform, const char *grant_id, const char *frame_tag, const char *picture_change);
+/* pw_frame_client_presentation for the screen's surface. */
+int pw_screen_presentation(struct pw_screen *screen, uint64_t *sequence, int64_t *at_ns, uint32_t *refresh_ns);

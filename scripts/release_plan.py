@@ -358,6 +358,7 @@ NOT_SHIPPED: Final = (
     "scripts/catalog_baselines.py",  # the console-catalog leg's baseline tool; never shipped
     "scripts/calibration_target/**",  # the agent's calibration target reader (decision 0026); never shipped
     "scripts/calibration_boards.py",  # builds contracts/calibration_boards.py (decision 0027); never shipped
+    "scripts/render_bench/**",  # the render redesign's Pi tracer bench (run ledger .claude/runs/render-planes); never shipped
     "scripts/console_types.py",  # builds the console's generated contract.ts at build time; never shipped
     # Galleria's contract generator and its own test environment are development tooling (the
     # integration itself ships as release-assets' galleria.zip).
@@ -432,6 +433,7 @@ SUITES: Final = (
                  "tests/native_display_smoke.py", "tests/native_display_probe.c",
                  "tests/native_player_mainloop_harness.py", "tests/native_player_resource_harness.py",
                  "tests/native_renderer_pixel_harness.py", "tests/native_picture_e2e_harness.py",
+                 "tests/native_screen_harness.py", "tests/native_fit_pass_harness.py",
                  "tests/native_display_media.py",
                  "tests/display_harness_health_client.py", "tests/display_harness_judge_feeder.py",
                  "scripts/run_display_harness.py",

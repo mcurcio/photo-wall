@@ -56,6 +56,7 @@ from contracts.calibration_target import (
     screen_columns,
 )
 from contracts.colour import srgb_to_linear
+from contracts.display_turn import DisplayTurn
 from contracts.frame_fit import Corners, OutputSize, cover_rectangle
 from contracts.frame_lighting import (
     SHEET_WHITENESS,
@@ -781,3 +782,34 @@ def dithered(encoded: float, x: int, y: int) -> float:
     steps): ((BAYER_4[(y % 4) * 4 + x % 4] + 0.5) / 16 - 0.5) / 255. Its mean over any 4 x 4 tile is
     `encoded`; the shader uses the same pattern. Pure."""
     return encoded + ((BAYER_4[(y % 4) * 4 + x % 4] + .5) / 16 - .5) / 255
+
+
+# The fit pass's scalar reference (render redesign, run ledger .claude/runs/render-planes/s1-page.md):
+# one picture finished at its Frame's pixels, as it hangs and turned for its screen, the look
+# applied once (player/fit_pass.py holds its shader to these within one level).
+
+def buffer_to_picture(x: float, y: float, size: tuple[int, int], turn: DisplayTurn) -> tuple[float, float]:
+    """A point (x, y) of a fit pass target laid out `size` = (width, height) pixels (pixel centres at
+    +0.5, y down) as the picture's own (u, v), each 0..1 across the picture as it hangs, upright: the
+    target is the picture turned for a screen hung `turn` degrees clockwise (contracts/display_turn.py),
+    so the screen's matching buffer transform shows it upright. ValueError("display_turn") for any
+    other turn. Pure."""
+    raise NotImplementedError("render-planes S1 bead B4")
+
+
+def fit_source_uv(u: float, v: float, aspect: float, source: tuple[int, int],
+                  crop: PhotoCrop | None) -> tuple[float, float]:
+    """The picture point (u, v) as the source's texture coordinates (0..1, origin top-left): the
+    window `crop_window(crop or CENTRED, *source, aspect)` (contracts/photo_crop.py) stretched over the
+    picture. Pure."""
+    raise NotImplementedError("render-planes S1 bead B4")
+
+
+def picture_lights(lighting: FrameLighting, document: RoomLightsDocument | None, profile: FrameProfile,
+                   display: DisplayLight) -> FrameLights:
+    """`frame_lights` for a Frame that is an upright rectangle (the render redesign's Position): the
+    opening is the whole picture, so `to_opening` is the identity on the picture's (u, v), its physical
+    size the profile's own (`opening_size_mm` of an unturned fit) and no quarter turn (a screen's turn
+    turns the screen, not the wall). One body with `frame_lights`: both call the same rule with their
+    opening. Pure."""
+    raise NotImplementedError("render-planes S1 bead B4")

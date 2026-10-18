@@ -154,5 +154,50 @@ def window_holds(width: int, height: int, aspect: float, need: PictureSize) -> b
     return window_width >= need_width - 1e-9 and window_height >= need_height - 1e-9
 
 
-__all__ = ["CONVEX_EPSILON", "FULL_SCREEN", "Corners", "CoverRectangle", "OutputSize",
-           "PictureSize", "Point", "convex_clockwise", "cover_rectangle", "picture_size", "window_holds"]
+@dataclass(frozen=True)
+class FrameRectangle:
+    """A Frame's place on its screen (render redesign, run ledger .claude/runs/render-planes/
+    s1-page.md; the design's FrameFit): an upright rectangle at the Frame profile's aspect (the
+    profile stays the one source of the aspect), its centre as fractions of the screen's width and
+    height as it hangs (contracts/display_turn.py `hanging`), its width as a fraction of that
+    width; its height follows from the aspect. No corners, no angle: the screen's turn is the
+    only turn. Whether it lies inside its screen needs the screen and the aspect: `place` checks it.
+
+    __post_init__: ValueError("frame_rectangle") unless each field is a finite int or float (never
+    a bool), 0 <= centre_x <= 1, 0 <= centre_y <= 1 and 0 < width <= 1."""
+    centre_x: float
+    centre_y: float
+    width: float
+
+    def __post_init__(self) -> None:
+        raise NotImplementedError("render-planes S1 bead B1")
+
+
+@dataclass(frozen=True)
+class Placement:
+    """A Frame's rectangle on its screen in whole pixels as the screen hangs: the top-left corner
+    (x, y) and the size; the Frame's picture is exactly width x height pixels, so the display
+    controller never scales it (bench T2: a scaled 4K picture glitches at four). Built by `place`."""
+    x: int
+    y: int
+    width: int
+    height: int
+
+
+def place(rectangle: FrameRectangle, screen: OutputSize, aspect: float) -> Placement:
+    """`rectangle` in whole pixels on a screen of `screen` = (W, H) pixels as it hangs, for a Frame
+    profile of width-to-height `aspect`; each value rounds half up (floor(v + 0.5)):
+    width = max(1, round(rectangle.width * W)), height = max(1, round(width / aspect)),
+    x = round(centre_x * W - width / 2), y = round(centre_y * H - height / 2).
+    The one home of how a rectangle becomes pixels: the Player's planes and, from S2, the Frame
+    output Central sizes photos by (`picture_size`'s successor) both ask here. Pure.
+
+    ValueError("placement_screen") unless both screen sides are ints (never bools) >= 1;
+    ValueError("placement_aspect") unless `aspect` is finite and above 0;
+    ValueError("placement_outside") unless 0 <= x, x + width <= W, 0 <= y and y + height <= H."""
+    raise NotImplementedError("render-planes S1 bead B1")
+
+
+__all__ = ["CONVEX_EPSILON", "FULL_SCREEN", "Corners", "CoverRectangle", "FrameRectangle", "OutputSize",
+           "PictureSize", "Placement", "Point", "convex_clockwise", "cover_rectangle", "picture_size", "place",
+           "window_holds"]

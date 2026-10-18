@@ -20,6 +20,7 @@ from dataclasses import asdict, dataclass
 from typing import Callable, Protocol
 from uuid import UUID, uuid4
 
+from contracts.display_turn import DisplayTurn
 from contracts.node_frame import PictureOperations, encode_picture_operations, parse_picture_change
 from contracts.node_output import Power
 from contracts.node_protocol import NodeProcessIdentity, OutputKey, SurfaceFact
@@ -271,6 +272,14 @@ class WestonBackend:
         Output (a new Output has none)."""
         with self._channel_lock:
             return self._black.get(output_id)
+
+    def turn(self, output_id: str, turn: DisplayTurn, *, timeout: float) -> bool:
+        """Ask the shell to turn `output_id`'s screen as it hangs (control op `turn`, its
+        `transform` contracts/display_turn.py `wayland_transform(turn)`); whether the shell's `turn`
+        event confirms that transform. Weston then reports the Output turned to every client (the
+        Player draws its pictures turned to match). False for an Output the shell does not have
+        (render redesign, run ledger .claude/runs/render-planes/s1-page.md, bead B2)."""
+        raise NotImplementedError("render-planes S1 bead B2")
 
     def picture(self, operations: PictureOperations, *, timeout: float, brightness: str) -> bool:
         """Hand one Output's picture operations and base page brightness line to the shell (control

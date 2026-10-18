@@ -274,3 +274,52 @@ int pw_frame_client_presentation(struct pw_frame_client *c, struct wl_surface *s
     }
     return 0;
 }
+
+/* The Player's screens (render redesign, run ledger .claude/runs/render-planes/s1-page.md): interface
+ * stubs that refuse, until bead B3 gives them bodies. */
+struct pw_frame_client *pw_frame_client_connect(const char *socket) {
+    (void)socket;
+    return NULL;
+}
+int pw_frame_client_fd(struct pw_frame_client *client) {
+    (void)client;
+    return -1;
+}
+int pw_frame_client_output(struct pw_frame_client *client, const char *output_id,
+    int32_t *width, int32_t *height, int32_t *transform) {
+    (void)client; (void)output_id; (void)width; (void)height; (void)transform;
+    return -1;
+}
+struct pw_screen *pw_screen_create(struct pw_frame_client *client, const char *output_id) {
+    (void)client; (void)output_id;
+    return NULL;
+}
+int pw_screen_size(struct pw_screen *screen, int32_t *width, int32_t *height) {
+    (void)screen; (void)width; (void)height;
+    return -1;
+}
+void pw_screen_destroy(struct pw_screen *screen) {
+    (void)screen;
+}
+struct pw_picture *pw_picture_import(struct pw_frame_client *client, int fd, uint32_t width,
+    uint32_t height, uint32_t stride, uint32_t fourcc, uint64_t modifier) {
+    (void)client; (void)fd; (void)width; (void)height; (void)stride; (void)fourcc; (void)modifier;
+    return NULL;
+}
+int pw_picture_busy(struct pw_picture *picture) {
+    (void)picture;
+    return 0;
+}
+void pw_picture_destroy(struct pw_picture *picture) {
+    (void)picture;
+}
+int64_t pw_screen_present(struct pw_screen *screen, const struct pw_plane_state *planes, uint32_t count,
+    int32_t buffer_transform, const char *grant_id, const char *frame_tag, const char *picture_change) {
+    (void)screen; (void)planes; (void)count; (void)buffer_transform;
+    (void)grant_id; (void)frame_tag; (void)picture_change;
+    return -1;
+}
+int pw_screen_presentation(struct pw_screen *screen, uint64_t *sequence, int64_t *at_ns, uint32_t *refresh_ns) {
+    (void)screen; (void)sequence; (void)at_ns; (void)refresh_ns;
+    return -1;
+}
