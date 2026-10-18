@@ -2,10 +2,11 @@
 pixels equal player/geometry.py's scalar reference on software GL.
 
 Run only inside the display harness container (scripts/run_display_harness.py), with `player` and
-`contracts` mounted read-only at /repo and `tests` at /smoke. It makes its own EGL surfaceless
-GLES 3 context on Mesa's software GL (no window system, no render node), drives the real
-`player.fit_pass.FitPass` into plain texture framebuffers and reads each target back with
-glReadPixels: a framebuffer object's row 0 is its memory's first row, the target's top. The
+`contracts` mounted read-only at /repo and `tests` at /smoke. It draws on the harnesses' one EGL
+surfaceless GLES 3 context on Mesa's software GL (tests/harness_device.py `context`), drives the real
+`player.fit_pass.FitPass` into plain texture framebuffers and reads each target back
+(harness_device.py `read_rgba`: a framebuffer object's row 0 is its memory's first row, the
+target's top). The
 picture is a 64x48 RGBA image of four flat quadrants (red, green, blue, white), uploaded here.
 
 The reference of target pixel (x, y): (u, v) = `buffer_to_picture` at its centre, the source point
@@ -56,16 +57,16 @@ either side); every pixel outside is exactly opaque black.
 12. a_wrong_pattern_target_size_is_refused: the unturned screen's target at 90 is
    ValueError("pattern_target_size"), nothing drawn.
 """
-import ctypes
 import dataclasses
-import os
 import sys
 import time
 import zlib
 from pathlib import Path
 
 sys.path[:0] = ["/repo", "/smoke"]
-os.environ.update(LIBGL_ALWAYS_SOFTWARE="1", PYOPENGL_PLATFORM="egl", EGL_PLATFORM="surfaceless")
+from harness_device import context, read_rgba, texture_framebuffer  # noqa: E402
+
+gl = context()      # before any player import: PyOpenGL resolves on it
 
 from contracts.calibration_target import TargetCode  # noqa: E402
 from contracts.frame_fit import Placement  # noqa: E402
@@ -130,67 +131,18 @@ def turning_table() -> bytes:
 LUT = turning_table()
 
 
-# -- The GL context: EGL surfaceless, GLES 3, software ---------------------------------------------
-
-EGL_DEFAULT_DISPLAY = None
-EGL_PLATFORM_SURFACELESS_MESA = 0x31DD
-EGL_NONE, EGL_RENDERABLE_TYPE, EGL_SURFACE_TYPE = 0x3038, 0x3040, 0x3033
-EGL_OPENGL_ES3_BIT, EGL_OPENGL_ES_API, EGL_CONTEXT_MAJOR_VERSION = 0x40, 0x30A0, 0x3098
-
-
-def make_context() -> None:
-    """An EGL surfaceless GLES 3 context, current on this thread (ctypes on libEGL)."""
-    egl = ctypes.CDLL("libEGL.so.1")
-    egl.eglGetPlatformDisplay.restype = ctypes.c_void_p
-    egl.eglGetPlatformDisplay.argtypes = (ctypes.c_uint, ctypes.c_void_p, ctypes.c_void_p)
-    egl.eglInitialize.argtypes = (ctypes.c_void_p, ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int))
-    egl.eglChooseConfig.argtypes = (ctypes.c_void_p, ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_void_p),
-                                    ctypes.c_int, ctypes.POINTER(ctypes.c_int))
-    egl.eglCreateContext.restype = ctypes.c_void_p
-    egl.eglCreateContext.argtypes = (ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_int))
-    egl.eglMakeCurrent.argtypes = (ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)
-    display = egl.eglGetPlatformDisplay(EGL_PLATFORM_SURFACELESS_MESA, EGL_DEFAULT_DISPLAY, None)
-    assert display, "egl_display"
-    major, minor = ctypes.c_int(), ctypes.c_int()
-    assert egl.eglInitialize(display, ctypes.byref(major), ctypes.byref(minor)), "egl_initialize"
-    assert egl.eglBindAPI(EGL_OPENGL_ES_API), "egl_bind_api"
-    attributes = (ctypes.c_int * 5)(EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT, EGL_SURFACE_TYPE, 0, EGL_NONE)
-    config, count = ctypes.c_void_p(), ctypes.c_int()
-    assert egl.eglChooseConfig(display, attributes, ctypes.byref(config), 1, ctypes.byref(count)) and count.value, \
-        "egl_config"
-    context = egl.eglCreateContext(display, config, None, (ctypes.c_int * 3)(EGL_CONTEXT_MAJOR_VERSION, 3, EGL_NONE))
-    assert context, "egl_context"
-    assert egl.eglMakeCurrent(display, None, None, context), "egl_make_current"
-    print(f"EGL {major.value}.{minor.value} surfaceless GLES 3", flush=True)
-
-
-make_context()
-from OpenGL import GLES3 as gl  # noqa: E402  (after the context: PyOpenGL resolves on it)
-
-
 class PlainTarget:
     """A DrawTarget: an RGBA8 texture's framebuffer, `size` as laid out."""
 
     def __init__(self, size: tuple[int, int]):
         self.size = size
-        self.texture = int(gl.glGenTextures(1))
-        gl.glBindTexture(gl.GL_TEXTURE_2D, self.texture)
-        gl.glTexImage2D(gl.GL_TEXTURE_2D, 0, gl.GL_RGBA8, *size, 0, gl.GL_RGBA, gl.GL_UNSIGNED_BYTE, None)
-        self.framebuffer = int(gl.glGenFramebuffers(1))
-        gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, self.framebuffer)
-        gl.glFramebufferTexture2D(gl.GL_FRAMEBUFFER, gl.GL_COLOR_ATTACHMENT0, gl.GL_TEXTURE_2D, self.texture, 0)
-        assert gl.glCheckFramebufferStatus(gl.GL_FRAMEBUFFER) == gl.GL_FRAMEBUFFER_COMPLETE, "framebuffer"
+        self.texture, self.framebuffer = texture_framebuffer(gl, size)
         gl.glClearColor(.5, .25, .75, 1.0)          # anything but the answer
         gl.glClear(gl.GL_COLOR_BUFFER_BIT)
 
     def read(self) -> bytes:
         """The target's RGBA bytes, its top row first."""
-        gl.glFinish()
-        gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, self.framebuffer)
-        width, height = self.size
-        pixels = (ctypes.c_ubyte * (width * height * 4))()
-        gl.glReadPixels(0, 0, width, height, gl.GL_RGBA, gl.GL_UNSIGNED_BYTE, pixels)
-        return bytes(pixels)
+        return read_rgba(gl, self.framebuffer, self.size)
 
     def free(self) -> None:
         gl.glDeleteFramebuffers(1, [self.framebuffer])
