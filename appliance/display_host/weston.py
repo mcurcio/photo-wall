@@ -20,7 +20,7 @@ from dataclasses import asdict, dataclass
 from typing import Callable, Protocol
 from uuid import UUID, uuid4
 
-from contracts.display_turn import DisplayTurn
+from contracts.display_turn import DisplayTurn, wayland_transform
 from contracts.node_frame import PictureOperations, encode_picture_operations, parse_picture_change
 from contracts.node_output import Power
 from contracts.node_protocol import NodeProcessIdentity, OutputKey, SurfaceFact
@@ -168,6 +168,7 @@ class WestonBackend:
         self._channel_lock = threading.RLock()
         self._powered: dict[str, Power] = {}   # the compositor's own output power, per Output
         self._black: dict[str, bool] = {}      # whether the shell's black curtain is up, per Output
+        self._turned: dict[str, int] = {}      # the transform the shell's last `turn` event said, per Output
         self.picture_events: PictureEvents | None = None   # set by the runner (roadmap 1c)
 
     def _receive(self) -> dict:
@@ -179,13 +180,19 @@ class WestonBackend:
             raise ValueError("display_message_invalid")
         return value
 
-    def _note_power(self, value: dict) -> bool:
-        """Keep the compositor's output power from an `output_power` event, or the black curtain's
-        state from a `black` event; whether it was one of them."""
+    def _note_output_state(self, value: dict) -> bool:
+        """Keep the compositor's output power from an `output_power` event, the black curtain's
+        state from a `black` event or the screen's transform from a `turn` event (each the answer
+        to the controller's own op); whether it was one of them."""
         if value.get("event") == "black":
             if type(value.get("on")) is not bool:
                 raise ValueError("display_message_invalid")
             self._black[value["output_id"]] = value["on"]
+            return True
+        if value.get("event") == "turn":
+            if type(value.get("transform")) is not int:
+                raise ValueError("display_message_invalid")
+            self._turned[value["output_id"]] = value["transform"]
             return True
         if value.get("event") != "output_power":
             return False
@@ -231,7 +238,7 @@ class WestonBackend:
                 if value.get("accepted") is not True:
                     raise ValueError("display_request_rejected")
                 return
-            if not self._note_power(value):
+            if not self._note_output_state(value):
                 self._enqueue(value)
         raise TimeoutError("display_response_timeout")
 
@@ -277,9 +284,22 @@ class WestonBackend:
         """Ask the shell to turn `output_id`'s screen as it hangs (control op `turn`, its
         `transform` contracts/display_turn.py `wayland_transform(turn)`); whether the shell's `turn`
         event confirms that transform. Weston then reports the Output turned to every client (the
-        Player draws its pictures turned to match). False for an Output the shell does not have
-        (render redesign, run ledger .claude/runs/render-planes/s1-page.md, bead B2)."""
-        raise NotImplementedError("render-planes S1 bead B2")
+        Player draws its pictures turned to match), and the shell treats the change as any change
+        of the Output's mode (the app's grant is invalidated, a new Output key follows). False for
+        an Output the shell does not have, a refusal or a timeout (render redesign, run ledger
+        .claude/runs/render-planes/s1-page.md, bead B2). ValueError for a turn that is not one of
+        TURNS (the caller's error, never sent)."""
+        transform = wayland_transform(turn)
+        try:
+            with self._channel_lock:
+                if self.host is None or output_id not in self._powered:
+                    return False
+                key = self.host.state(output_id).key
+                self._turned.pop(output_id, None)
+                self._request("turn", key, timeout=timeout, transform=transform)
+                return self._turned.get(output_id) == transform
+        except (OSError, ValueError, KeyError, TimeoutError):
+            return False
 
     def picture(self, operations: PictureOperations, *, timeout: float, brightness: str) -> bool:
         """Hand one Output's picture operations and base page brightness line to the shell (control
@@ -436,7 +456,7 @@ class WestonBackend:
 
     def _dispatch(self, value: dict):
         event = value["event"]
-        if self._note_power(value):
+        if self._note_output_state(value):
             return None
         if event == "role_removed":
             surface, decision_id = _surface(value["identity"]), UUID(value["decision_id"])
@@ -454,6 +474,7 @@ class WestonBackend:
             else:
                 self._powered.pop(key.output_id, None)
                 self._black.pop(key.output_id, None)
+                self._turned.pop(key.output_id, None)
             self.grants.pop(key.output_id, None)
             self.revisions.pop(key.output_id, None)
             self.withdrawals.pop(key.output_id, None)

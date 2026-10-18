@@ -6328,3 +6328,23 @@ Owner, 2026-10-17: "seems like a baseline feature. The render loop should not fi
 - **Spec clarification (the dither row):** `look`'s `dither_at` is the pixel counted from the image's top, as `final_pixel`'s. A framebuffer object's row 0 is its memory's first row (the target's top), so the fit pass passes `gl_FragCoord` as is; the frame pass draws a window bottom-up and passes `window_pixel()` (the `output_height` flip moved with the look).
 - **Moved with the look (one home):** the LUT texture's upload (`upload_lut`) moved from `NativeRenderer._bind_lut` to player/look_shader.py; `_final_uniforms` takes `lut_drawn` (default False, so tests/test_native_math.py's direct calls stay unchanged).
 - **Not run locally (NOTE):** Docker on this host did not answer (`docker info` hung), so tests/native_fit_pass_harness.py and tests/native_renderer_pixel_harness.py were judged by CI's display harness only.
+
+## render-planes S1 B2 (Display Host: window alpha, the turn, amber on a live client)
+
+- **"The captured Output is 2160 wide by 3840 high (its mode turned)" cannot hold for Weston's
+  framebuffer capture.** `weston_capture_v1`'s framebuffer source is the renderer's hardware
+  framebuffer (pixman/GL `fb_size`, the mode as the panel scans it), which a transform never
+  resizes; only the Output's logical size swaps (`weston_output.width/height`, which the shell's
+  `output` event carries, and xdg_output). The smoke proves the turn by the `turn` event, the
+  `output` event's 480 x 640 (the headless 640 x 480 mode turned), the `invalidated`
+  (`output_mode_changed`) it brings and the probe's `wl_output` transform 1, not by the capture
+  size.
+- **A turn invalidates the app's grant.** The shell already records the transform in an Output's
+  mode (`record_mode`), so a turn is a mode change: the app's grant goes and the Output comes back
+  under a new key, as on any mode change. The page does not say so; the bench (B6) and S3's
+  executor must re-grant after a turn.
+- **"Kept across a hot-plug" is unproven in CI** for the turn: the headless backend cannot unplug
+  an Output. `add_output` applies the wanted transform (`turn_sync`), as `black_sync` does
+  `black_on`; only a Pi run sees it.
+- **Docs still state the old rules** (docs/display-host-backend.md: the transparent base map and
+  the amber keyed on a mapped health surface); S6's docs bead owns them.

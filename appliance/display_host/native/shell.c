@@ -6,6 +6,8 @@
  * while its process answers; a hung or stopped one loses it. A ping answer renews only while the
  * app's newest commit was tagged: an app that commits untagged buffers (its draws fail, it shows
  * nothing it can name) holds the Output only until the lease runs out, as before the ping.
+ * The shell also serves the standard window alpha (wp_alpha_modifier_v1, `struct alpha`) and turns
+ * an Output's screen on the controller's `turn` op (render redesign, .claude/runs/render-planes).
  */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -29,6 +31,7 @@
 #include <libweston/desktop.h>
 #include <libweston/shell-utils.h>
 #include "photo-wall-frame-server.h"
+#include "alpha-modifier-v1-server-protocol.h"
 
 #define MAX_OUTPUTS 16
 #define MAX_SURFACES 32
@@ -51,9 +54,11 @@ struct output {
     uint64_t generation;
     int mode_width, mode_height, mode_scale;
     uint32_t mode_refresh, mode_transform;
-    struct weston_curtain *curtain, *fallback; /* fallback: health tint while no health surface shows */
+    struct weston_curtain *curtain, *fallback; /* fallback: amber while released and no live private client */
     struct weston_curtain *black; /* the controller's `black` op: opaque black above every view */
     bool black_on;                /* wanted by the controller; kept across a hot-plug of the Output */
+    bool turned;                  /* the controller's `turn` op set `transform`; kept across a hot-plug */
+    uint32_t transform;           /* wl_output.transform 0..3 (contracts/display_turn.py) */
     struct health *health;
     struct wl_listener destroyed;
     json_t *identity, *revision_identity, *trial_baseline;
@@ -117,7 +122,7 @@ struct shell {
     struct feedback feedbacks[MAX_FEEDBACK];
     struct wl_listener output_created, output_resized, destroyed;
     struct wl_protocol_logger *logger;
-    struct wl_global *frame_global, *diagnostic_global;
+    struct wl_global *frame_global, *diagnostic_global, *alpha_global;
     struct wl_resource *frame_resources[MAX_SURFACES];
     struct wl_client *diagnostic_client;
     struct wl_resource *diagnostic_resource;
@@ -231,12 +236,18 @@ static void curtain(struct output *o, float alpha) {
     weston_view_set_output(o->curtain->view, o->weston);
     weston_surface_damage(o->curtain->view->surface);
 }
-/* Raised exactly while the Output is handed off and no health surface is mapped on it: a bound
- * private client that has not (re)mapped its layer shows nothing, so the bind alone never drops it. */
+/* The private client is alive: connected and bound to the manager at version 3 or later (the
+ * health layer). It keeps its own layer unmapped while it has nothing to show and draws its own
+ * amber when a page cannot be drawn (overlay/client.py HealthLayer), so liveness is the rule. */
+static bool private_client_alive(struct shell *s) {
+    return s->diagnostic_client && s->diagnostic_resource &&
+        wl_resource_get_version(s->diagnostic_resource) >= 3;
+}
+/* Raised exactly while the Output is handed off and the private client is not alive: no health
+ * layer could show then. Never keyed on a mapped health surface (render redesign S1). */
 static void fallback_sync(struct output *o) {
     struct shell *s = o->shell;
-    bool shown = o->health && weston_surface_is_mapped(o->health->view->surface);
-    bool wanted = o->weston && o->released && !shown && !s->shutting_down;
+    bool wanted = o->weston && o->released && !private_client_alive(s) && !s->shutting_down;
     if (!wanted && o->fallback) { weston_shell_utils_curtain_destroy(o->fallback); o->fallback = NULL; }
     if (!wanted || o->fallback) return;
     struct weston_curtain_params p = { /* RGBA (0.55, 0.35, 0, 0.5); Weston wants premultiplied */
@@ -264,6 +275,9 @@ static void black_sync(struct output *o) {
     weston_view_move_to_layer(o->black->view, &s->black_layer.view_list);
     weston_view_set_output(o->black->view, o->weston);
     weston_surface_damage(o->black->view->surface);
+}
+static void fallback_all(struct shell *s) {
+    for (int i = 0; i < MAX_OUTPUTS; i++) if (s->outputs[i].name[0]) fallback_sync(&s->outputs[i]);
 }
 static bool client_matches(struct output *o, struct wl_client *client) {
     pid_t pid; uid_t uid; gid_t gid;
@@ -522,7 +536,6 @@ static void health_free(struct health *h) {
     o->health = NULL;
     wl_resource_set_user_data(h->resource, NULL);
     free(h);
-    fallback_sync(o);
 }
 static void health_resource_gone(struct wl_resource *r) {
     struct health *h = wl_resource_get_user_data(r);
@@ -538,8 +551,8 @@ static void health_committed(struct wl_listener *l, void *data) {
     struct health *h = wl_container_of(l, h, committed);
     struct output *o = h->output;
     struct weston_surface *surface = h->view->surface;
-    if (!o->weston || !weston_surface_has_content(surface)) {
-        weston_surface_unmap(surface); fallback_sync(o); return;
+    if (!o->weston || !weston_surface_has_content(surface)) {   /* a NULL buffer: nothing to show */
+        weston_surface_unmap(surface); return;
     }
     weston_view_set_position(h->view, o->weston->pos);
     weston_view_set_output(h->view, o->weston);
@@ -548,7 +561,6 @@ static void health_committed(struct wl_listener *l, void *data) {
     weston_surface_map(surface);
     weston_view_update_transform(h->view);
     weston_surface_damage(surface);
-    fallback_sync(o);
 }
 static const struct pw_health_layer_v1_interface health_impl = { .destroy = destroy_resource };
 static void get_health_layer(struct wl_client *client, struct wl_resource *r, uint32_t id,
@@ -581,6 +593,7 @@ static const struct pw_diagnostic_manager_v1_interface diagnostic_impl = {
 };
 static void diagnostic_resource_gone(struct wl_resource *r) {
     struct shell *s = wl_resource_get_user_data(r); s->diagnostic_resource = NULL;
+    fallback_all(s);
 }
 static void bind_diagnostic(struct wl_client *client, void *data, uint32_t version, uint32_t id) {
     (void)version;
@@ -597,6 +610,107 @@ static void bind_diagnostic(struct wl_client *client, void *data, uint32_t versi
         diagnostic_configure(&s->outputs[i]);
         brightness_to(&s->outputs[i]);
     }
+    fallback_all(s);   /* alive at v3 or later: the amber goes */
+}
+/* Window alpha (wp_alpha_modifier_v1 v1, wayland-protocols staging): Weston 14 lacks it, so the shell
+ * serves it to any client until Weston 16 does (then this goes, never two globals). One record per
+ * surface. The factor is double-buffered as the protocol states: `set_multiplier` writes `pending`,
+ * the client's wl_surface.commit request moves it to `cached` (protocol_log, which sees the request
+ * before Weston handles it), and the surface's state being applied (its commit signal; for a
+ * synchronized sub-surface, its parent's commit) sets every view of the surface to
+ * weston_view_set_alpha(factor / UINT32_MAX). Destroying the object resets the factor to 1 at the next
+ * commit: the record outlives its object until that commit is applied. */
+struct alpha {
+    struct weston_surface *surface;
+    struct wl_resource *resource;   /* NULL once destroyed: the reset to 1 is still to be applied */
+    uint32_t pending, cached, current;
+    bool staged;                    /* a commit moved `pending` to `cached`, not applied yet */
+    struct wl_listener applied, destroyed;
+};
+static void alpha_surface_gone(struct wl_listener *l, void *data);
+static struct alpha *alpha_of(struct weston_surface *surface) {
+    struct wl_listener *l = wl_signal_get(&surface->destroy_signal, alpha_surface_gone);
+    struct alpha *a = NULL;
+    return l ? wl_container_of(l, a, destroyed) : NULL;
+}
+static void alpha_free(struct alpha *a) {
+    wl_list_remove(&a->applied.link);
+    wl_list_remove(&a->destroyed.link);
+    if (a->resource) wl_resource_set_user_data(a->resource, NULL);   /* later requests: no_surface */
+    free(a);
+}
+static void alpha_surface_gone(struct wl_listener *l, void *data) {
+    (void)data;
+    struct alpha *a = wl_container_of(l, a, destroyed);
+    alpha_free(a);
+}
+static void alpha_applied(struct wl_listener *l, void *data) {
+    (void)data;
+    struct alpha *a = wl_container_of(l, a, applied);
+    if (a->staged) { a->current = a->cached; a->staged = false; }
+    float factor = (float)((double)a->current / UINT32_MAX);
+    struct weston_view *view;
+    wl_list_for_each(view, &a->surface->views, surface_link)
+        if (view->alpha != factor) weston_view_set_alpha(view, factor);
+    if (!a->resource && a->current == UINT32_MAX) alpha_free(a);   /* the reset is applied */
+}
+/* protocol_log: the client's wl_surface.commit request takes the pending factor with it. */
+static void alpha_commit_request(struct wl_resource *surface_resource) {
+    struct weston_surface *surface = wl_resource_get_user_data(surface_resource);
+    struct alpha *a = surface ? alpha_of(surface) : NULL;
+    if (a) { a->cached = a->pending; a->staged = true; }
+}
+static void alpha_set_multiplier(struct wl_client *client, struct wl_resource *r, uint32_t factor) {
+    (void)client;
+    struct alpha *a = wl_resource_get_user_data(r);
+    if (!a) {
+        wl_resource_post_error(r, WP_ALPHA_MODIFIER_SURFACE_V1_ERROR_NO_SURFACE, "surface destroyed");
+        return;
+    }
+    a->pending = factor;
+}
+static const struct wp_alpha_modifier_surface_v1_interface alpha_surface_impl = {
+    .destroy = destroy_resource, .set_multiplier = alpha_set_multiplier
+};
+static void alpha_resource_gone(struct wl_resource *r) {
+    struct alpha *a = wl_resource_get_user_data(r);
+    if (!a) return;
+    a->resource = NULL;
+    a->pending = UINT32_MAX;   /* applied with the surface's next commit */
+}
+static void alpha_get_surface(struct wl_client *client, struct wl_resource *r, uint32_t id,
+                              struct wl_resource *surface_resource) {
+    struct weston_surface *surface = wl_resource_get_user_data(surface_resource);
+    struct alpha *a = alpha_of(surface);
+    if (a && a->resource) {
+        wl_resource_post_error(r, WP_ALPHA_MODIFIER_V1_ERROR_ALREADY_CONSTRUCTED,
+            "the surface already has an alpha modifier");
+        return;
+    }
+    struct wl_resource *resource = wl_resource_create(client, &wp_alpha_modifier_surface_v1_interface,
+        wl_resource_get_version(r), id);
+    if (!resource) { wl_client_post_no_memory(client); return; }
+    if (!a) {   /* else: a destroyed object's reset is pending; the new object takes its record */
+        a = calloc(1, sizeof *a);
+        if (!a) { wl_resource_destroy(resource); wl_client_post_no_memory(client); return; }
+        a->surface = surface;
+        a->pending = a->cached = a->current = UINT32_MAX;
+        a->applied.notify = alpha_applied;
+        a->destroyed.notify = alpha_surface_gone;
+        wl_signal_add(&surface->commit_signal, &a->applied);
+        wl_signal_add(&surface->destroy_signal, &a->destroyed);
+    }
+    a->resource = resource;
+    wl_resource_set_implementation(resource, &alpha_surface_impl, a, alpha_resource_gone);
+}
+static const struct wp_alpha_modifier_v1_interface alpha_impl = {
+    .destroy = destroy_resource, .get_surface = alpha_get_surface
+};
+static void bind_alpha(struct wl_client *client, void *data, uint32_t version, uint32_t id) {
+    (void)version;   /* the global is version 1 */
+    struct wl_resource *r = wl_resource_create(client, &wp_alpha_modifier_v1_interface, 1, id);
+    if (!r) { wl_client_post_no_memory(client); return; }
+    wl_resource_set_implementation(r, &alpha_impl, data, NULL);
 }
 static void protocol_log(void *data, enum wl_protocol_logger_type direction,
                          const struct wl_protocol_logger_message *m) {
@@ -614,6 +728,7 @@ static void protocol_log(void *data, enum wl_protocol_logger_type direction,
         return; /* bounded saturation means no presentation evidence */
     }
     if (direction == WL_PROTOCOL_LOGGER_REQUEST && !strcmp(class, "wl_surface") && !strcmp(name, "commit")) {
+        alpha_commit_request(m->resource);
         struct app_surface *a = find_surface(s, m->resource);
         if (!a) return;
         a->commit = ++s->serial;
@@ -787,6 +902,20 @@ static const struct weston_desktop_api desktop_api = {
     .surface_removed = surface_removed, .committed = committed, .set_parent = set_parent,
     .pong = pong
 };
+static void record_mode(struct output *o);
+/* The Output's mode (size, refresh, scale or transform) changed: the app's grant goes and the
+ * controller hears of the Output under its new key. */
+static void remode(struct output *o) {
+    invalidate(o, "output_mode_changed"); o->generation++; record_mode(o); black_sync(o);
+    diagnostic_configure(o); output_event(o);
+}
+static bool mode_changed(struct output *o);
+/* The screen turn the controller wants, on the Output's current weston_output (a hot-plugged Output
+ * gets it back, as black_on). */
+static void turn_sync(struct output *o) {
+    if (o->turned && o->weston && o->weston->transform != o->transform)
+        weston_output_set_transform(o->weston, o->transform);
+}
 static bool same_key(struct output *o, json_t *key) {
     json_t *expected = output_key(o);
     bool equal = json_equal(expected, key);
@@ -817,6 +946,20 @@ static bool command(struct shell *s, json_t *j) {
         o->black_on = json_is_true(on);
         black_sync(o);
         send_event(s, json_pack("{s:s,s:s,s:b}", "event", "black", "output_id", o->name, "on", o->black != NULL));
+        return true;
+    }
+    /* The screen turn (render redesign S1): wl_output.transform 0..3 (contracts/display_turn.py
+     * wayland_transform), every client told by Weston; a quarter turn swaps the Output's size, a mode
+     * change like any other. The `turn` event says the transform Weston has, ahead of the response. */
+    if (!strcmp(op, "turn")) {
+        json_t *transform = json_object_get(j, "transform");
+        if (!json_is_integer(transform) || json_integer_value(transform) < 0 ||
+            json_integer_value(transform) > 3) return false;
+        o->turned = true; o->transform = (uint32_t)json_integer_value(transform);
+        turn_sync(o);
+        if (mode_changed(o)) remode(o);
+        send_event(s, json_pack("{s:s,s:s,s:i}", "event", "turn", "output_id", o->name,
+            "transform", (int)o->weston->transform));
         return true;
     }
     /* Picture (1c P2): the controller's operations for the Output's app and its base page line for
@@ -1018,6 +1161,7 @@ static void add_output(struct shell *s, struct weston_output *w) {
     if (!o) for (int i = 0; i < MAX_OUTPUTS; i++) if (!s->outputs[i].name[0]) { o = &s->outputs[i]; break; }
     if (!o) return;
     o->shell = s; o->weston = w; o->generation++;
+    turn_sync(o);
     record_mode(o);
     snprintf(o->name, sizeof o->name, "%s", w->name);
     o->destroyed.notify = output_destroyed;
@@ -1036,8 +1180,7 @@ static void output_resized(struct wl_listener *l, void *data) {
     struct weston_output *w = data;
     struct output *o = find_output(s, w->name);
     if (!o) return;
-    invalidate(o, "output_mode_changed"); o->generation++; record_mode(o); black_sync(o); diagnostic_configure(o);
-    output_event(o);
+    remode(o);
 }
 static void diagnostic_client_gone(struct wl_listener *l, void *data) {
     (void)data;
@@ -1046,6 +1189,7 @@ static void diagnostic_client_gone(struct wl_listener *l, void *data) {
     s->diagnostic_client = NULL;
     s->diagnostic_resource = NULL;
     s->next_diagnostic_start = now_ms() + 2000;
+    fallback_all(s);
 }
 static void start_diagnostic(struct shell *s) {
     if (s->diagnostic_client || now_ms() < s->next_diagnostic_start) return;
@@ -1076,10 +1220,7 @@ static int lease_tick(void *data) {
     start_diagnostic(s);
     for (int i = 0; i < MAX_OUTPUTS; i++) {
         struct output *o = &s->outputs[i];
-        if (mode_changed(o)) {
-            invalidate(o, "output_mode_changed"); o->generation++;
-            record_mode(o); black_sync(o); diagnostic_configure(o); output_event(o);
-        }
+        if (mode_changed(o)) remode(o);
         if (o->trial_json[0] && boot_ms() >= o->trial_until) trial_end(o);
         if (o->revision_identity && now_ms() >= o->revision_until) revision_clear(o, true);
         /* The app's liveness: one ping a second while it holds the Output (Weston keeps at most one
@@ -1106,6 +1247,7 @@ static void shell_destroyed(struct wl_listener *l, void *data) {
     wl_protocol_logger_destroy(s->logger);
     wl_global_destroy(s->frame_global);
     wl_global_destroy(s->diagnostic_global);
+    wl_global_destroy(s->alpha_global);
     if (s->diagnostic_pid > 0) kill(s->diagnostic_pid, SIGTERM);
     wl_event_source_remove(s->timer);
     if (s->control_source) wl_event_source_remove(s->control_source);
@@ -1177,8 +1319,9 @@ WL_EXPORT int wet_shell_init(struct weston_compositor *ec, int *argc, char *argv
     s->frame_global = wl_global_create(ec->wl_display, &pw_frame_manager_v1_interface, FRAME_VERSION, s, bind_frame);
     s->diagnostic_global = wl_global_create(ec->wl_display, &pw_diagnostic_manager_v1_interface, FRAME_VERSION, s,
         bind_diagnostic);
+    s->alpha_global = wl_global_create(ec->wl_display, &wp_alpha_modifier_v1_interface, 1, s, bind_alpha);
     s->logger = wl_display_add_protocol_logger(ec->wl_display, protocol_log, s);
-    if (!s->frame_global || !s->diagnostic_global || !s->logger) return -1;
+    if (!s->frame_global || !s->diagnostic_global || !s->alpha_global || !s->logger) return -1;
     s->output_created.notify = output_created;
     wl_signal_add(&ec->output_created_signal, &s->output_created);
     s->output_resized.notify = output_resized;
