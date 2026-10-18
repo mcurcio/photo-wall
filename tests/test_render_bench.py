@@ -8,7 +8,11 @@ from types import SimpleNamespace
 
 import pytest
 
+from contracts.models import RectangleFit
 from player.geometry import encode_srgb
+from player.plane_renderer import PlaneRenderer
+from player.planes import Screen
+from player.rendering import LocalLayer, OutputComposition
 from scripts.render_bench import timeline
 from scripts.render_bench.__main__ import _Bench
 from scripts.render_bench.controller import BenchController
@@ -82,6 +86,36 @@ def test_the_overload_is_cut_to_the_budget(plan):
     overload = plan.steps[-1]
     strengths = timeline.strengths_at(plan, overload.start + 1, SCREEN)
     assert list(strengths) == ["overload-2", "overload-3", "overload-4"]
+
+
+def test_the_tracers_frame_is_a_centred_full_width_rectangle(plan):
+    assert plan.binding.calibration.fit == RectangleFit(centre_x=0.5, centre_y=0.5, width=1.0)
+
+
+class _Screen:
+    """PlaneScreens as PlaneRenderer.capacity asks it: the 4K screen, no grant (so no trial)."""
+
+    def screen(self, output_id):
+        return Screen(output_id, SCREEN, 0)
+
+    def grant(self, composition):
+        return None
+
+    def picture(self, output_id):
+        return None
+
+
+def test_the_overload_step_sheds_to_three_pictures_by_the_renderers_capacity(plan):
+    """The bench stands in for the executor: it gives up visibility.shed's victims until the
+    renderer's capacity says the composition fits, and the three pictures left are those the
+    moments expect (strengths_at)."""
+    at = plan.steps[-1].start + 1
+    renderer = PlaneRenderer(_Screen(), None, None, None, None, stills=None, videos=None, clock=lambda: at)
+    shown = tuple(LocalLayer(layer, None, 0.0, 1.0) for layer in timeline.layers_at(plan, at))
+    assert len(shown) == timeline.OVERLOAD_PICTURES
+    kept = timeline.shed_overload(OutputComposition(plan.binding, shown, timebase=0.0), renderer.capacity)
+    assert [local.layer.assignment_id for local in kept.layers] == list(timeline.strengths_at(plan, at, SCREEN))
+    assert len(kept.layers) == 3
 
 
 def test_a_tracer_needs_four_photos_and_a_video(tmp_path):

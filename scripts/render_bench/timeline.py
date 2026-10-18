@@ -8,21 +8,29 @@ byte size) as Central would."""
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Final, Literal
 
 from contracts.display_turn import DisplayTurn
-from contracts.frame_fit import FrameRectangle, place
+from contracts.frame_fit import place
 from contracts.frame_lighting import FrameLighting, Paper
-from contracts.models import FrameProfile, Layer, OutputBinding, Variant, stack_order
+from contracts.models import (
+    Calibration,
+    FrameProfile,
+    Layer,
+    OutputBinding,
+    RectangleFit,
+    Variant,
+    stack_order,
+)
 from contracts.photo_crop import CENTRED
 from player.controller_budget import PI5, within
 from player.look import look
 from player.planes import Composition, FrameLayers, Screen, compose
-from player.rendering import LocalLayer, OutputComposition
-from player.visibility import visible_now
+from player.rendering import CapacityResult, LocalLayer, OutputComposition
+from player.visibility import shed, visible_now
 
 StepName = Literal["hold", "dissolve", "dip", "photo_to_video", "turn", "soak", "overload"]
 
@@ -75,12 +83,12 @@ class Step:
 
 @dataclass(frozen=True)
 class Tracer:
-    """The whole tracer: its steps in order, the one Frame's binding (a 16:9 profile, no lights)
-    and rectangle (centred, full width), and the plan's layers (contracts.models.Layer, each media
-    layer's Variant named by its file's sha256 and size, its crop centred), by stack order."""
+    """The whole tracer: its steps in order, the one Frame's binding (a 16:9 profile, no lights,
+    its Position a RectangleFit centred at full width), and the plan's layers (contracts.models.Layer,
+    each media layer's Variant named by its file's sha256 and size, its crop centred), by stack
+    order."""
     steps: tuple[Step, ...]
     binding: OutputBinding
-    rectangle: FrameRectangle
     layers: tuple[Layer, ...]
 
 
@@ -176,9 +184,10 @@ def tracer(output_id: str, photos: Sequence[Media], video: Media, *, origin: flo
     for index in range(1, OVERLOAD_PICTURES):
         plan.add(f"overload-{index}", variants[index % len(variants)], at, opacity=0.5)
     step("overload", hold)
+    position = Calibration(fit=RectangleFit(centre_x=0.5, centre_y=0.5, width=1.0))
     return Tracer(tuple(steps), OutputBinding(output_id=output_id, frame_id=FRAME_ID, generation=1, profile=_PROFILE,
-                                              lighting=_LIGHTING),
-                  FrameRectangle(0.5, 0.5, 1.0), plan.layers(at))
+                                              calibration=position, lighting=_LIGHTING),
+                  plan.layers(at))
 
 
 def step_at(tracer: Tracer, at: float) -> Step:
@@ -202,7 +211,7 @@ def _kept(tracer: Tracer, at: float, screen_size: tuple[int, int]) -> tuple[Outp
     shown = tuple(LocalLayer(layer, None, 0.0, 1.0) for layer in layers_at(tracer, at))
     looked = look(OutputComposition(tracer.binding, shown, timebase=0.0), at)
     profile = tracer.binding.profile
-    placement = place(tracer.rectangle, screen_size, profile.width_px / profile.height_px)
+    placement = place(tracer.binding.calibration.fit.rectangle(), screen_size, profile.width_px / profile.height_px)
     screen = Screen(tracer.binding.output_id, screen_size, step_at(tracer, at).turn)
     (kept,), _ = within(PI5, (compose(screen, [FrameLayers(FRAME_ID, placement, looked.layers)]),))
     return looked, kept
@@ -238,5 +247,20 @@ def ground_seen(tracer: Tracer, at: float, screen_size: tuple[int, int]) -> bool
     return not (whole and bottom.strength >= 1 - 1e-9)
 
 
+def shed_overload(composition: OutputComposition,
+                  capacity: Callable[[tuple[OutputComposition, ...]], CapacityResult]) -> OutputComposition:
+    """`composition` with the layers given up until `capacity` (the renderer's, player/
+    plane_renderer.py `PlaneRenderer.capacity`) says it fits: while it does not, player/visibility.py
+    `shed`'s victim goes, as the executor's shed loop does (player/executor.py; the renderer refuses
+    an overload, it never cuts one). The bench stands in for the executor. Pure but for `capacity`."""
+    while not capacity((composition,)).available:
+        victim = shed({composition.binding.frame_id: [local.layer for local in composition.layers]})
+        if victim is None:
+            break
+        composition = replace(composition, layers=tuple(
+            local for local in composition.layers if local.layer.assignment_id != victim.assignment_id))
+    return composition
+
+
 __all__ = ["FRAME_ID", "OVERLOAD_PICTURES", "T3_PLANE_ALPHA", "Beneath", "Media", "Step", "StepName", "Tracer",
-           "expected_strength", "ground_seen", "layers_at", "step_at", "strengths_at", "tracer"]
+           "expected_strength", "ground_seen", "layers_at", "shed_overload", "step_at", "strengths_at", "tracer"]

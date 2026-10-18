@@ -21,8 +21,10 @@ a second, once the compositor has answered the newest commit presented (the kern
 commit's planes): the strengths it must show (timeline.py `strengths_at` at its frame time), the
 kernel's planes, the pixel valve's status, whether a picture was being finished or a video played,
 and the GPU's busy share. Then it presents the tracer's layers at the time through the Player's new
-path (player/plane_renderer.py) with the real PlaneScreens, Gpu, FitPass, StillDecode and
-VideoFrames, prepares the layers about to start, and turns the screen when the step says."""
+path (player/plane_renderer.py) with the real PlaneScreens, Gpu, FitPass, PatternPass, StillDecode
+and VideoFrames, first shedding an overload's layers as the executor would (timeline.py
+`shed_overload`: the renderer refuses an overload), prepares the layers about to start, and turns
+the screen when the step says."""
 from __future__ import annotations
 
 import argparse
@@ -276,7 +278,8 @@ class _Bench:
         from player.decode import StillDecode, VideoFrames
         from player.fit_pass import FitPass
         from player.gpu import Gpu
-        from player.plane_renderer import FrameOnScreen, PlaneRenderer
+        from player.pattern_pass import PatternPass
+        from player.plane_renderer import PlaneRenderer
         from player.plane_screen import PlaneScreens
 
         self.args = args
@@ -305,11 +308,10 @@ class _Bench:
             return VideoFrames(path, scheduled)
 
         budget = ControllerBudget(planes=10**6, line_pixels=10**9) if args.budget == "unlimited" else PI5
-        self.renderer = PlaneRenderer(self.screens, self.device, self.fitter, _NoLuts(), stills=StillDecode,
-                                      videos=videos, budget=budget, on_change=lambda output_id: None)
+        self.renderer = PlaneRenderer(self.screens, self.device, self.fitter, PatternPass(self.gpu.gl), _NoLuts(),
+                                      stills=StillDecode, videos=videos, budget=budget)
         self.tracer = timeline.tracer(args.output, photos, clip, origin=time.monotonic() + LEAD, fade=args.fade,
                                       hold=args.hold, soak=args.soak)
-        self.frame = FrameOnScreen(self.tracer.binding, self.tracer.rectangle)
         # Each Variant's file (the tracer names Variants by their files' bytes).
         self.files = {hashlib.sha256(item.path.read_bytes()).hexdigest(): item.path for item in [*photos, clip]}
         self.moments: list[Moment] = []
@@ -381,12 +383,15 @@ class _Bench:
         locals_ = [LocalLayer(layer, None if layer.variant is None else self.files[layer.variant.sha256],
                               layer.position(now), layer.alpha(now)) for layer in layers]
         shown = tuple(local for local in locals_ if local.layer.start <= now)
-        result = self.renderer.present(OutputComposition(self.tracer.binding, shown, timebase=0.0), self.frame)
+        # The overload sheds its own layers first, as the executor would (the renderer refuses it).
+        composition = timeline.shed_overload(OutputComposition(self.tracer.binding, shown, timebase=0.0),
+                                             self.renderer.capacity)
+        result = self.renderer.present(composition)
         if result.status == "presented":
             self.last = result
         for local in locals_:                    # after the present: a due commit goes first
             if local.layer.start > now:
-                self.renderer.prepare(local, self.frame)
+                self.renderer.prepare(local, self.tracer.binding)
 
     def _sample(self, now: float) -> bool:
         """A Moment of the last presented commit, once the compositor answered that very commit

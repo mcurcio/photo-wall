@@ -5,12 +5,14 @@ The executor decides what a Frame shows (its planning tick); the renderer decide
 evaluating each layer at the time of the frame it draws (its display's frame clock). A layer's
 look is a function of plan time alone (contracts/models.py `Layer.alpha`, changing only during
 `Layer.fades`); `OutputComposition.timebase` maps the renderer's monotonic clock onto plan time.
-A change that follows from time is answered by `next_change`; a change that arrives as an event
+A change that follows from time is answered by `next_change` (and every set of seen layers a
+composition will take, by `moments`, which the controller budget is judged at); a change that arrives as an event
 (a new composition, a video's new sample, an edit from Display Host) is the renderer's to mark.
 """
 
 from __future__ import annotations
 
+import math
 from dataclasses import replace
 
 from player.rendering import OutputComposition
@@ -64,7 +66,14 @@ def moments(composition: OutputComposition, at: float) -> tuple[float, ...]:
     """The frame times (monotonic) at which `composition`, drawn from `at` on, takes every set of seen
     layers it will take (render redesign S3: the controller budget is judged at each, player/
     plane_renderer.py `capacity`): `at`, then the middle of every fade of a layer of `composition`
-    under way at `at` or starting after it, in time order without repeats. (at,) for a still
+    under way at `at` or starting after it, when that middle is after `at` (a fade under way past its
+    middle holds `at` already), in time order without repeats. (at,) for a still
     composition (no timebase). What is seen changes only at a fade's ends, so one moment inside each
     fade and `at` cover them all. Pure."""
-    raise NotImplementedError("render-planes S3 bead B4")
+    if composition.timebase is None:
+        return (at,)
+    now = at + composition.timebase
+    middles = {(start + end) / 2 for local in composition.layers for start, end in local.layer.fades()
+               if start < end and math.isfinite(start + end)}
+    # A fade whose middle is past is under way at `at` (or over): `at` lies inside it already.
+    return (at, *(middle - composition.timebase for middle in sorted(middles) if middle > now))
