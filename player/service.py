@@ -47,7 +47,6 @@ from contracts.models import (
 from contracts.node_link import NODE_BUS_URL
 from contracts.node_state import FrameReport, FrameReports
 from contracts.player_control import (
-    CAPABILITIES,
     ControlAck,
     ControlAckResponse,
     ControlAppliedReceipt,
@@ -71,10 +70,11 @@ from player.identity import Identity, load_identity
 from player.luts import LutWants, PlayerLuts
 from player.mainloop import DispatchRefused, LatePosts, LoopLate, MainLoopDispatcher, Tick
 from player.node_app_link import NodeAppLinkClient
-from player.output_discovery import discover_outputs, output_app_id
+from player.output_discovery import discover_outputs
 from player.player_line import PlayerLine
 from player.probe_responder import ProbeResponder
-from player.rendering import CapacityResult, PrepareResult, PresentationResult, Renderer
+from player.renderer_root import start_renderer
+from player.rendering import Renderer
 from player.room_lights import start_room_lights
 from uplink.causes import Cause, UplinkError
 from uplink.clock import RunClockRecord
@@ -155,8 +155,6 @@ class PlayerConfig(Model):
     ca_file: str | None = Field(default=None, max_length=4096)
     cache_dir: str | None = Field(default=None, max_length=4096)
     cache_bytes: int = Field(default=512 * 1024**2, ge=1024**2, le=1024**4)
-    decoder_limit: int = Field(default=4, ge=1, le=16)
-    texture_budget: int = Field(default=512 * 1024**2, ge=1024**2, le=4 * 1024**3)
 
     @model_validator(mode="after")
     def trusted_origin(self):
@@ -205,6 +203,8 @@ class State(Model):
     plan: Plan | None
     commits: tuple[Commit, ...] = Field(max_length=1024)
     revocations: tuple[Revocation, ...] = Field(max_length=1024)
+    # Central's identify cue: read (the State's wire) and never acted on; the Player offers no
+    # `identify_output` capability (hello_protocol).
     identify_output: IdentifyOutput | None = None
     identify_expires_at: Instant | None = None
     delivery_id: str = Field(pattern=r"^[a-f0-9]{32}$")
@@ -267,17 +267,6 @@ def read_pi_serial() -> bytes | None:
     except OSError:
         pass
     return None
-
-
-def display_serial(raw: bytes | None) -> str | None:
-    """Only put a bounded hardware serial on the local diagnostic display."""
-    if raw is None:
-        return None
-    try:
-        serial = raw.decode("ascii").strip(" \t\r\n\x00").lower()
-    except UnicodeDecodeError:
-        return None
-    return serial if re.fullmatch(r"[a-f0-9]{8,32}", serial) else None
 
 
 def hardware_boot_context(serial_reader: Callable[[], bytes | None] = read_pi_serial) -> BootContext:
@@ -433,12 +422,6 @@ class PlayerService:
         self._highest_control_delivery_id: str | None = None
         self._applied_proof_receipt: tuple[Session, ControlAppliedReceipt] | None = None
         self._control_proof_revision = 0
-        self.central_link_state: Literal["connecting", "reachable", "retrying"] = "connecting"
-        self._configuration_received = False
-        self._unbound_outputs = tuple(output.output_id for output in outputs if output.connected)
-        self._identify_key: tuple[str, int] | None = None
-        self._identify_output: str | None = None
-        self._identify_deadline: float | None = None
         # Dispatches abandoned at DISPATCH_DEADLINE: while one is unreached the loop is late,
         # every dispatch is MainLoopLate at once.
         self._late_posts = LatePosts()
@@ -523,23 +506,6 @@ class PlayerService:
             self.line.put_drawn(drawn)
             self._drawn_reported, self._drawn_due = drawn, now + ROOM_LIGHTS_DRAWN_REPEAT_SECONDS
 
-    def _render_unbound_diagnostic(self) -> None:
-        """Publish Central-link context only on known unbound outputs."""
-        self._main()
-        registration = self.registration
-        self.renderer.set_unbound_outputs(
-            self._unbound_outputs,
-            registration.player_id if registration is not None else None,
-            self.central_link_state,
-            self._configuration_received,
-        )
-
-    def _set_central_link_state(self, state: Literal["connecting", "reachable", "retrying"]):
-        self._main()
-        self.central_link_state = state
-        self._render_unbound_diagnostic()
-        self._publish_player()
-
     def _publish_player(self) -> None:
         """Tell the renderer the Player's registered id, which a calibration target's QR names
         (decision 0026), or None while it has none: on every state applied and every retry, so
@@ -611,12 +577,13 @@ class PlayerService:
         except DispatchRefused as error:
             raise ServiceError(str(error)) from error
 
-    async def _mark_central_retrying(self) -> None:
-        """Best-effort UI update; never let a diagnostic dispatch replace a cycle error."""
+    async def _publish_player_on_retry(self) -> None:
+        """A failed cycle's `_publish_player` (best effort: never let its dispatch replace the
+        cycle's error)."""
         try:
-            await self.dispatch(lambda: self._set_central_link_state("retrying"))
+            await self.dispatch(self._publish_player)
         except Exception as error:
-            LOG.debug("player: could not publish Central retry state: %s", type(error).__name__)
+            LOG.debug("player: could not publish the Player on retry: %s", type(error).__name__)
 
     @property
     def session(self) -> Session:
@@ -761,7 +728,9 @@ class PlayerService:
         epoch = self.registration.authority_epoch
         if self._hello_epoch == epoch:
             return
-        offer = ControlHello(authority_epoch=epoch, schemas=(2,), capabilities=CAPABILITIES)
+        # No capability: the Player shows nothing on an Output without a Frame (Display Host's
+        # curtain covers it), so it offers no identify (s3-page decision 1).
+        offer = ControlHello(authority_epoch=epoch, schemas=(2,), capabilities=())
         response = await self.request("POST", "/v1/player/hello",
                                       body=offer.model_dump(mode="json"))
         selected = ControlSelection.model_validate(response)
@@ -828,31 +797,10 @@ class PlayerService:
                     self.fault("stale_commit")
                     rejected = True
                 self._seen_commits.append(commit)
-            bound = {binding.output_id for binding in configuration.bindings}
             # Every bound Frame's paper profile LUT is fetched before its first draw.
             self.luts.want(tuple(binding.lighting.paper.profile for binding in configuration.bindings
                                  if binding.lighting is not None and binding.lighting.paper.profile is not None))
-            self._unbound_outputs = tuple(output.output_id for output in self.outputs
-                                          if output.connected and output.output_id not in bound)
-            self._configuration_received = True
-            self.central_link_state = "reachable"
-            self._render_unbound_diagnostic()
             self._publish_player()
-            unbound = self._unbound_outputs
-            selection = self._control_selection
-            cue = state.identify_output if (
-                selection is not None
-                and selection.authority_epoch == configuration.authority_epoch
-                and "identify_output" in selection.capabilities
-            ) else None
-            deadline = None
-            if cue is not None:
-                try:
-                    deadline = self.mapping.deadline(state.identify_expires_at)
-                except ValueError:
-                    cue = None
-            self._apply_identify_output(cue, unbound,
-                                        configuration.authority_epoch, deadline=deadline)
             self.tick_main()
             return "rejected" if rejected else "applied"
 
@@ -897,40 +845,8 @@ class PlayerService:
                 self._applied_proof_receipt = (session, receipt)
                 self._wake_link_loop()
 
-    def _apply_identify_output(self, cue: IdentifyOutput | None,
-                               unbound: tuple[str, ...], authority_epoch: int,
-                               *, deadline: float | None = None) -> None:
-        now = self.clock.monotonic()
-        key = None if cue is None else (cue.request_id, cue.authority_epoch)
-        if (cue is None or cue.authority_epoch != authority_epoch
-                or cue.output_id not in unbound
-                or (deadline is not None and deadline <= now)):
-            self._identify_key = None
-            self._identify_output = None
-            self._identify_deadline = None
-        else:
-            if key != self._identify_key:
-                self._identify_key = key
-                self._identify_deadline = min(
-                    now + min(cue.remaining_seconds, 15.0),
-                    deadline if deadline is not None else math.inf,
-                )
-            if self._identify_deadline is not None and now >= self._identify_deadline:
-                self._identify_output = None
-                self._identify_deadline = None
-            elif self._identify_deadline is not None:
-                self._identify_output = cue.output_id
-        self._sync_identify_output()
-
-    def _sync_identify_output(self) -> None:
-        self.renderer.set_identify_output(self._identify_output)
-
     def tick_main(self):
         self._main()
-        if self._identify_deadline is not None and self.clock.monotonic() >= self._identify_deadline:
-            self._identify_output = None
-            self._identify_deadline = None
-            self._sync_identify_output()
         if self.executor is not None:
             self.executor.prepare_imminent()
             observations = self.executor.tick()
@@ -1366,12 +1282,12 @@ class PlayerService:
                         self._control_proof_revision += 1
                     self.fault("registration_required")
                     if not self._stop.is_set():
-                        await self._mark_central_retrying()
+                        await self._publish_player_on_retry()
                 except Exception as error:
                     self._located = False
                     self._fault_for(error)
                     if not self._stop.is_set():
-                        await self._mark_central_retrying()
+                        await self._publish_player_on_retry()
                 finally:
                     if session_started is not None and self._loop.time() - session_started >= 30:
                         attempt = 0
@@ -1458,37 +1374,6 @@ class PlayerService:
         return self._thread is not None and not self._thread.is_alive()
 
 
-class UnavailableRenderer:
-    """Registration remains possible without falsely acknowledging native output."""
-
-    gl_renderer = None  # no GL context: nothing to report
-
-    def prepare(self, layer, binding):
-        return PrepareResult("failed", "capacity")
-
-    def set_unbound_outputs(self, output_ids, player_id, central_link_state,
-                            configuration_received):
-        pass
-
-    def set_identify_output(self, output_id):
-        pass
-
-    def set_player(self, player_id):
-        pass
-
-    def set_room_lights(self, document):
-        pass
-
-    def capacity(self, compositions):
-        return CapacityResult(False)
-
-    def present(self, composition):
-        return PresentationResult("failed", "capacity")
-
-    def release(self, assignment_id):
-        pass
-
-
 def central_finder(config: PlayerConfig, resolution: Configured | Unconfigured, *,
                    transport: Transport) -> Callable[[], Awaitable[Found]]:
     """R1/U3's wiring for the Player (design §2.3): the cmdline root wins outright, and then
@@ -1508,7 +1393,7 @@ def central_finder(config: PlayerConfig, resolution: Configured | Unconfigured, 
 
 def build_finder(config: PlayerConfig, *, transport: Transport,
                  cmdline_path: Path | None = None) -> Callable[[], Awaitable[Found]]:
-    """main()'s pre-GTK construction step: read the kernel command line at `cmdline_path`
+    """main()'s first construction step (before the renderer): read the kernel command line at `cmdline_path`
     (default KERNEL_COMMAND_LINE; a missing file is "no cmdline"), resolve it (R1) and wire
     central_finder. Raises UplinkError for an unreadable or invalid cmdline, or an invalid
     saved root when the cmdline names no Central."""
@@ -1534,31 +1419,16 @@ def main():
     identity = load_identity()
     boot_context = hardware_boot_context()
     discovery = discover_outputs()
-    import gi
-    gi.require_version("Gtk", "3.0")
     from gi.repository import GLib
 
-    from player.native import NativeOutput, NativeRenderer
-
-    renderer = UnavailableRenderer()
     luts = PlayerLuts()         # one for both: the renderer asks, the service fetches
-    native_fault = None
-    connected_outputs = tuple(output for output in discovery.outputs if output.connected)
-    if connected_outputs:
-        try:
-            renderer = NativeRenderer(tuple(NativeOutput(output.output_id,
-                output_app_id(output.output_id), output.width_px or 1920,
-                output.height_px or 1080) for output in connected_outputs),
-                decoder_limit=config.decoder_limit, texture_budget=config.texture_budget,
-                serial=display_serial(read_pi_serial()), luts=luts)
-        except Exception:
-            native_fault = "native_initialization"
     dispatcher = MainLoopDispatcher(GLib)
+    root = start_renderer(GLib, dispatcher, luts, discovery.outputs)
     service = PlayerService(
         config,
         identity,
-        discovery.outputs,
-        renderer,
+        root.outputs,           # enrolled with their modes as built
+        root.renderer,
         dispatcher,
         boot_context=boot_context,
         find_central=find,
@@ -1566,7 +1436,7 @@ def main():
         luts=luts,
         room_lights_dispatch=dispatcher.lane(2),    # one hop queued and one running, at most
     )
-    for fault in (discovery.fault, native_fault):
+    for fault in (discovery.fault, root.fault):
         if fault:
             service.fault(fault)
     loop = GLib.MainLoop()
@@ -1579,8 +1449,6 @@ def main():
 
     def tick():
         if closing and service.stopped:
-            if hasattr(renderer, "close"):
-                renderer.close()
             loop.quit()
             return False
         if not closing:
@@ -1597,9 +1465,12 @@ def main():
     service.start()
     # Probes are answered at control dispatch's priority (own one-slot lane), never here.
     ProbeResponder(dispatcher, on_relink=service.request_relink,
-                   gl_renderer=lambda: renderer.gl_renderer).start()
-    with contextlib.suppress(KeyboardInterrupt):
-        loop.run()
+                   gl_renderer=lambda: root.renderer.gl_renderer).start()
+    try:
+        with contextlib.suppress(KeyboardInterrupt):
+            loop.run()
+    finally:
+        root.close()
 
 
 if __name__ == "__main__":

@@ -86,3 +86,28 @@ def test_the_player_package_depends_on_every_library_the_gpu_loads():
     one opens no GPU (the Pi tracer's app root had no libGLESv2)."""
     assert set(LIBRARIES) <= set(SHIPPED_BY), "name the package of each library the Gpu loads"
     assert {SHIPPED_BY[library] for library in LIBRARIES} <= _player_depends()
+
+
+class _GL:
+    """A GL whose glGetString answers `value` for GL_RENDERER (PyOpenGL gives bytes)."""
+    GL_RENDERER = 0x1F01
+
+    def __init__(self, value):
+        self.value = value
+
+    def glGetString(self, name):
+        assert name == self.GL_RENDERER
+        return self.value
+
+
+def _gpu_with(gl) -> Gpu:
+    gpu = Gpu.__new__(Gpu)      # no device: only the context's GL is read
+    gpu._gl = gl
+    return gpu
+
+
+@pytest.mark.parametrize(("value", "reported"), [
+    (b"  V3D 7.1.10.2 \n", "V3D 7.1.10.2"), ("llvmpipe (LLVM 19.1.7, 128 bits)", "llvmpipe (LLVM 19.1.7, 128 bits)"),
+    (None, None), (b"   ", None), (b"", None)])
+def test_the_renderer_is_the_contexts_gl_renderer_stripped(value, reported):
+    assert _gpu_with(_GL(value)).renderer == reported

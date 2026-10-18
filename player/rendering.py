@@ -1,8 +1,8 @@
 """Platform-independent rendering boundary; no transport or media selection.
 
-Native implementations must keep persistent output surfaces and invoke their GTK
-and GStreamer objects only from their owning GLib thread. Every method is bounded:
-preroll/presentation may report pending while native work continues asynchronously.
+A native implementation (player/plane_renderer.py) is driven only from its owning thread, the
+Player's GLib main loop, where its screens, GPU context and decoders' handoffs live. Every method is
+bounded: preroll/presentation may report pending while native work continues asynchronously.
 """
 
 from __future__ import annotations
@@ -70,18 +70,12 @@ class PresentationResult:
 class Renderer(Protocol):
     gl_renderer: str | None  # GL_RENDERER once a GL context exists; None without GL
 
-    def set_unbound_outputs(self, output_ids: tuple[str, ...], player_id: str | None,
-                            central_link_state: Literal["connecting", "reachable", "retrying"] = "reachable",
-                            configuration_received: bool = True) -> None: ...
-
-    def set_identify_output(self, output_id: str | None) -> None: ...
-
     def set_player(self, player_id: str | None) -> None: ...   # the Player's registered id; None: none yet
 
     def set_room_lights(self, document: RoomLightsDocument) -> None: ...   # every Output draws with it
 
     # Prepared: ready to be drawn on `binding`'s Frame, whose fit and profile a native renderer
-    # draws the layer's fitted picture for ahead of its first frame (player/fitted.py).
+    # finishes the layer's picture for ahead of its first frame (player/plane_renderer.py).
     def prepare(self, layer: LocalLayer, binding: OutputBinding) -> PrepareResult: ...
 
     def capacity(self, compositions: tuple[OutputComposition, ...]) -> CapacityResult: ...
@@ -89,6 +83,31 @@ class Renderer(Protocol):
     def present(self, composition: OutputComposition) -> PresentationResult: ...
 
     def release(self, assignment_id: str) -> None: ...
+
+
+class UnavailableRenderer:
+    """No picture can be made (player/renderer_root.py): registration remains possible without
+    falsely acknowledging native output."""
+
+    gl_renderer = None  # no GL context: nothing to report
+
+    def set_player(self, player_id: str | None) -> None:
+        pass
+
+    def set_room_lights(self, document: RoomLightsDocument) -> None:
+        pass
+
+    def prepare(self, layer: LocalLayer, binding: OutputBinding) -> PrepareResult:
+        return PrepareResult("failed", "capacity")
+
+    def capacity(self, compositions: tuple[OutputComposition, ...]) -> CapacityResult:
+        return CapacityResult(False)
+
+    def present(self, composition: OutputComposition) -> PresentationResult:
+        return PresentationResult("failed", "capacity")
+
+    def release(self, assignment_id: str) -> None:
+        pass
 
 
 class RecordingRenderer:
@@ -114,26 +133,8 @@ class RecordingRenderer:
         self.presentations: list[OutputComposition] = []
         self.outputs: dict[str, OutputComposition] = {}
         self.resident: dict[str, LocalLayer] = {}
-        self.unbound_outputs: tuple[str, ...] = ()
-        self.enrolled_player_id: str | None = None
-        self.central_link_state: Literal["connecting", "reachable", "retrying"] = "connecting"
-        self.configuration_received = False
-        self.central_link_history: list[str] = ["connecting"]
-        self.identify_output: str | None = None
         self.player_id: str | None = None
         self.room_lights: list[RoomLightsDocument] = []     # every document drawn with, in order
-
-    def set_unbound_outputs(self, output_ids: tuple[str, ...], player_id: str | None,
-                            central_link_state: Literal["connecting", "reachable", "retrying"] = "reachable",
-                            configuration_received: bool = True) -> None:
-        self.unbound_outputs = output_ids
-        self.enrolled_player_id = player_id
-        self.central_link_state = central_link_state
-        self.configuration_received = configuration_received
-        self.central_link_history.append(central_link_state)
-
-    def set_identify_output(self, output_id: str | None) -> None:
-        self.identify_output = output_id
 
     def set_player(self, player_id: str | None) -> None:
         self.player_id = player_id

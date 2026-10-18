@@ -54,8 +54,8 @@ def discover_outputs(root: Path = Path("/sys/class/drm")) -> OutputDiscovery:
                     status = stream.read(32).strip()
                 if status not in (b"connected", b"disconnected", b"unknown"):
                     raise ValueError("invalid_connector_status")
-                # DRM's modes lists available/preferred modes, not current scanout.
-                # GTK's actual framebuffer allocation is authoritative for drawing.
+                # DRM's modes lists available/preferred modes, not current scanout: the
+                # mode as built is Weston's, measured once the screens connect (`measured`).
                 connectors[output_id] = OutputReport(output_id=output_id, width_px=0,
                     height_px=0, connected=status == b"connected")
         outputs = tuple(connectors[key] for key in sorted(connectors))
@@ -70,4 +70,9 @@ def measured(outputs: tuple[OutputReport, ...], modes: Mapping[str, tuple[int, i
     in order: what the Player enrolls with, so Central's `outputs.observation` holds the size that
     sizes photos and checks a rectangle on its screen (render redesign S3, bead B6; S2's erratum, a
     Pi enrolled 0 x 0). An Output absent from `modes`, or disconnected, keeps 0 x 0. Pure."""
-    raise NotImplementedError("render-planes S3 bead B6")
+    sized = []
+    for output in outputs:
+        mode = modes.get(output.output_id) if output.connected else None
+        sized.append(output if mode is None else
+                     output.model_copy(update={"width_px": mode[0], "height_px": mode[1]}))
+    return tuple(sized)
