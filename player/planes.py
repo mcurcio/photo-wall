@@ -25,13 +25,16 @@ placement (contracts/frame_fit.py `place`); the turn (contracts/display_turn.py)
 """
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Final
 
 from contracts.display_turn import DisplayTurn
 from contracts.frame_fit import Placement
+from player.geometry import encode_srgb
 from player.rendering import LocalLayer
+from player.visibility import visible_now
 
 MIN_STRENGTH: Final = 1 / 255
 """The weakest plane shown: the controller's 8-bit plane alpha rounds anything below to 0."""
@@ -81,7 +84,10 @@ def plane_strength(alpha: float, over_picture: bool) -> float:
     """A layer's plane alpha for its drawn `alpha` (module rule): `alpha` over a picture,
     `encode_srgb(alpha)` over black. ValueError("plane_alpha") unless `alpha` is a finite int or
     float (never a bool) in 0..1. Pure."""
-    raise NotImplementedError("render-planes S1 bead B1")
+    if not (isinstance(alpha, (int, float)) and not isinstance(alpha, bool)
+            and math.isfinite(alpha) and 0 <= alpha <= 1):
+        raise ValueError("plane_alpha")
+    return float(alpha) if over_picture else encode_srgb(alpha)
 
 
 def compose(screen: Screen, frames: Sequence[FrameLayers]) -> Composition:
@@ -93,7 +99,24 @@ def compose(screen: Screen, frames: Sequence[FrameLayers]) -> Composition:
     unless every placement lies inside `screen.size` (0 <= x, x + width <= W, 0 <= y,
     y + height <= H); ValueError("compose_output") unless every layer's `output_id` is
     `screen.output_id`."""
-    raise NotImplementedError("render-planes S1 bead B1")
+    if len({frame.frame_id for frame in frames}) != len(frames):
+        raise ValueError("compose_frames")
+    width, height = screen.size
+    planes = []
+    for frame in frames:
+        at = frame.placement
+        if not (0 <= at.x and at.x + at.width <= width and 0 <= at.y and at.y + at.height <= height):
+            raise ValueError("compose_outside")
+        if any(local.layer.output_id != screen.output_id for local in frame.layers):
+            raise ValueError("compose_output")
+        beneath = None
+        for local in visible_now(frame.layers):
+            over_picture = beneath is not None and beneath.layer.presentation == "media"
+            strength = plane_strength(local.alpha, over_picture)
+            if strength >= MIN_STRENGTH:
+                planes.append(Plane(frame.frame_id, local, at, strength))
+            beneath = local
+    return Composition(screen, tuple(planes))
 
 
 __all__ = ["MIN_STRENGTH", "Composition", "FrameLayers", "Plane", "Screen", "compose", "plane_strength"]

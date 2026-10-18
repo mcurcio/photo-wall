@@ -18,6 +18,10 @@ Rules this module owns (one home each):
   projected spans du on u and dv on v and the aspect a = width / height, the height is
   max(du / a, dv) and the width a x height; the centre is the midpoint of both spans (never the
   corners' average).
+- **The rectangle's pixels** (`FrameRectangle`, `place`): a Frame's upright rectangle on its
+  screen as it hangs becomes whole pixels by rounding half up (floor(v + 0.5)): its width from
+  the screen's width, its height from that width and the Frame profile's aspect, its corner from
+  its centre; a rectangle that does not lie wholly on its screen is refused, never clipped.
 
 Rules it does NOT own: orientation (setting #96), which is the Frame profile's aspect alone (the
 angle never changes it; owner 2026-10-11: ""landscape" and "portrait" are descriptions of the
@@ -170,7 +174,9 @@ class FrameRectangle:
     width: float
 
     def __post_init__(self) -> None:
-        raise NotImplementedError("render-planes S1 bead B1")
+        if not (all(_finite(value) for value in (self.centre_x, self.centre_y, self.width))
+                and 0 <= self.centre_x <= 1 and 0 <= self.centre_y <= 1 and 0 < self.width <= 1):
+            raise ValueError("frame_rectangle")
 
 
 @dataclass(frozen=True)
@@ -195,7 +201,29 @@ def place(rectangle: FrameRectangle, screen: OutputSize, aspect: float) -> Place
     ValueError("placement_screen") unless both screen sides are ints (never bools) >= 1;
     ValueError("placement_aspect") unless `aspect` is finite and above 0;
     ValueError("placement_outside") unless 0 <= x, x + width <= W, 0 <= y and y + height <= H."""
-    raise NotImplementedError("render-planes S1 bead B1")
+    screen_width, screen_height = screen
+    if not (type(screen_width) is int and type(screen_height) is int
+            and screen_width >= 1 and screen_height >= 1):
+        raise ValueError("placement_screen")
+    if not (_finite(aspect) and aspect > 0):
+        raise ValueError("placement_aspect")
+    width = max(1, _half_up(rectangle.width * screen_width))
+    height = max(1, _half_up(width / aspect))
+    x = _half_up(rectangle.centre_x * screen_width - width / 2)
+    y = _half_up(rectangle.centre_y * screen_height - height / 2)
+    if not (0 <= x and x + width <= screen_width and 0 <= y and y + height <= screen_height):
+        raise ValueError("placement_outside")
+    return Placement(x=x, y=y, width=width, height=height)
+
+
+def _finite(value: object) -> bool:
+    """Whether `value` is a finite int or float, never a bool."""
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def _half_up(value: float) -> int:
+    """`value` rounded half up, floor(value + 0.5): never Python's half-to-even."""
+    return math.floor(value + 0.5)
 
 
 __all__ = ["CONVEX_EPSILON", "FULL_SCREEN", "Corners", "CoverRectangle", "FrameRectangle", "OutputSize",

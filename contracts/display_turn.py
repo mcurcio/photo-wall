@@ -27,20 +27,28 @@ TURNS: Final[tuple[DisplayTurn, ...]] = (0, 90, 180, 270)
 def wayland_transform(turn: DisplayTurn) -> int:
     """The `wl_output.transform` value (0 to 3) for a screen hung turned `turn` (module rule).
     ValueError("display_turn") unless `turn` is one of TURNS (an int, never a bool). Pure."""
-    raise NotImplementedError("render-planes S1 bead B1")
+    if type(turn) is not int or turn not in TURNS:
+        raise ValueError("display_turn")
+    return TURNS.index(turn)
 
 
 def turn_of(transform: int) -> DisplayTurn:
     """The turn whose `wayland_transform` is `transform`. ValueError("display_turn") for a flipped
     transform (4 to 7), any other value, or a bool. Pure."""
-    raise NotImplementedError("render-planes S1 bead B1")
+    if type(transform) is not int or not 0 <= transform < len(TURNS):
+        raise ValueError("display_turn")
+    return TURNS[transform]
 
 
 def hanging(size: tuple[int, int], turn: DisplayTurn) -> tuple[int, int]:
     """The screen's (width, height) in pixels as it hangs, from its mode's (width, height): swapped
     for 90 and 270, as given for 0 and 180. ValueError("display_turn") as `wayland_transform`;
     ValueError("screen_size") unless both sides are ints (never bools) of at least 1. Pure."""
-    raise NotImplementedError("render-planes S1 bead B1")
+    quarter = wayland_transform(turn) % 2
+    width, height = size
+    if not (type(width) is int and type(height) is int and width >= 1 and height >= 1):
+        raise ValueError("screen_size")
+    return (height, width) if quarter else (width, height)
 
 
 __all__ = ["TURNS", "DisplayTurn", "hanging", "turn_of", "wayland_transform"]
