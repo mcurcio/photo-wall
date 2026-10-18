@@ -14,8 +14,8 @@ a calibration target's QR (player/calibration_target.py `target_modules`) and bo
 Rules this module owns (one home each):
 - **The drawn Position**: the Output's Position trial (`Screens.trial` under the composition's
   grant; a prepare asks under the grant of its binding alone) while one is drawn, else the binding's
-  calibration; its fit must be a RectangleFit (an older form fails, "decode", until S5 converts
-  it), placed by `place` at the profile's aspect. The drawn lighting is the trial's while one is
+  calibration; its rectangle is placed by `place` at the profile's aspect (one that does not lie
+  on the screen fails, "decode"). The drawn lighting is the trial's while one is
   drawn, else the binding's. Every presented answer names the drawn Position (`applied_calibration`,
   with the trial's identity while one is drawn), and a commit under a trial carries the trial
   overlay's corners of the drawn placement.
@@ -67,7 +67,7 @@ Rules this module owns (one home each):
 - **Outcomes**: no grant: "pending", nothing committed; a candidate grant: the screen's ground
   under the candidate tag, made again on every present the pacer allows (the shell completes a
   handoff only on a presented commit after its release, which the app cannot see); an Output gone,
-  a Position that is not a rectangle on the screen, a trial refused or a picture refused: "failed"
+  a Position off the screen, a trial refused or a picture refused: "failed"
   ("decode"); over the controller budget with every other Output's last commit: "failed"
   ("capacity"), nothing committed; a seen layer's picture (or the pattern) not finished yet:
   "pending", the screen keeps its last commit; else "presented" (that commit), its composition the
@@ -85,7 +85,7 @@ from typing import Final, Literal, Protocol
 from contracts.calibration_target import QrModules, TargetCode
 from contracts.frame_fit import Placement, place
 from contracts.frame_lighting import FrameLighting
-from contracts.models import AppliedCalibration, Calibration, OutputBinding, RectangleFit
+from contracts.models import AppliedCalibration, Calibration, OutputBinding
 from contracts.node_frame import PictureOperations, neutral_operations
 from contracts.node_picture import UPGRADE_DISPLAY_LIGHT
 from contracts.room_light import RoomLightsDocument
@@ -644,11 +644,9 @@ class PlaneRenderer:
     def _place(self, binding: OutputBinding, drawn: _Drawn) -> tuple[Screen, Placement, float] | Literal[
             "gone", "failed"]:
         """The Frame's screen, its placement on it by the drawn Position and the profile's aspect;
-        "failed" when the Position is not a RectangleFit (s3-page decision 10) or does not lie on the
-        screen, "gone" without the screen."""
+        "failed" when `place` refuses it (it does not lie on the screen) or the profile's aspect,
+        "gone" without the screen."""
         fit = drawn.calibration.fit
-        if not isinstance(fit, RectangleFit):
-            return "failed"
         screen = self._screens.screen(binding.output_id)
         if screen is None:
             return "gone"

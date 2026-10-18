@@ -57,7 +57,6 @@ from contracts.enrollment import enrollment_message as enrollment_message
 from contracts.frame_lighting import FrameLighting
 from contracts.models import (
     Calibration,
-    CoverFit,
     ExactTurn,
     FrameProfile,
     Identifier,
@@ -508,13 +507,13 @@ class Registry:
                 "expires_at": expires_at}
 
     def create_frame(self, frame: FrameCreate) -> dict:
-        """A new Frame at the cover fit and the lighting a new Frame starts with (a new Frame is bound
+        """A new Frame at the default Position (`Calibration()`: centred, the screen's full width) and the lighting a new Frame starts with (a new Frame is bound
         to no port yet, so no Display is seen: UPGRADE_DISPLAY_LIGHT), and its KEPT_CREATED Position
         entry, in one transaction."""
         try:
             with self.db.transaction() as conn:
                 name = frame.name if frame.name is not None else _smallest_free(conn, "frames", "Frame")
-                calibration = Calibration(fit=CoverFit())
+                calibration = Calibration()
                 lighting = self.lighting.new_frame_within(PgTransaction(conn), UPGRADE_DISPLAY_LIGHT)
                 conn.execute("INSERT INTO frames(id,name,surface_id,x_mm,y_mm,width_mm,height_mm,"
                              "profile,calibration,lighting) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",

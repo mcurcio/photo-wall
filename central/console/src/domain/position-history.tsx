@@ -62,14 +62,9 @@ export function positionDetails(entry: PositionEntryView,
   const { lighting } = entry;
   const { width, height } = entry.made_for.profile_px;
   const { fit } = entry;
-  const placed = fit.mode === "rectangle"
-    ? [
-      { label: "Centre", value: `${percent(fit.centre_x ?? 0.5)} across, ${percent(fit.centre_y ?? 0.5)} down` },
-      { label: "Width", value: `${percent(fit.width ?? 1)} of the screen` },
-    ]
-    : [];
   return [
-    ...placed,
+    { label: "Centre", value: `${percent(fit.centre_x ?? 0.5)} across, ${percent(fit.centre_y ?? 0.5)} down` },
+    { label: "Width", value: `${percent(fit.width ?? 1)} of the screen` },
     { label: "Mat depth", value: unitWords(lighting.mat_depth_mm, "mm") },
     { label: "Lights", value: String(lighting.lights.length) },
     ...lighting.lights.flatMap((light, index) => lightDetails(light, index + 1, names)),

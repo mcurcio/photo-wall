@@ -1,6 +1,6 @@
 """The Rectangle as a Position form (render redesign S2 B2, run ledger
 .claude/runs/render-planes/s2-page.md): `RectangleFit` (its rule is contracts/frame_fit.py
-`FrameRectangle`'s), where it lands on its screen as the screen hangs (`frame_placement`), the
+`FrameRectangle`'s), the only Position form (S5 B6), where it lands on its screen as the screen hangs (`frame_placement`), the
 Frame output it gives (`frame_output`) and Save's off-screen check (`off_screen`). Pure."""
 from __future__ import annotations
 
@@ -14,8 +14,6 @@ from central.fleet.node_calibration import TrialEdit
 from contracts.frame_fit import Placement
 from contracts.models import (
     Calibration,
-    CornersFit,
-    CoverFit,
     FrameProfile,
     RectangleFit,
     frame_output,
@@ -26,7 +24,6 @@ from contracts.models import (
 PROFILE = FrameProfile(width_px=1920, height_px=1080, diagonal_inches=24)
 UHD = (3840, 2160)
 OFF = RectangleFit(centre_x=0.1, width=0.5)
-OPENING = ((0.25, 0.25), (0.75, 0.25), (0.75, 0.75), (0.25, 0.75))
 
 
 def test_the_default_rectangle_is_the_whole_width_centred():
@@ -77,15 +74,21 @@ def test_the_frame_output_of_a_rectangle_is_its_placement_size():
     assert frame_output(PROFILE, turned, None, 90) is None
 
 
-@pytest.mark.parametrize("fit", [CoverFit(corners=OPENING), CornersFit(corners=OPENING)])
-def test_cover_and_corners_ignore_the_turn(fit):
-    calibration = Calibration(fit=fit)
-    assert frame_output(PROFILE, calibration, UHD, 0) == frame_output(PROFILE, calibration, UHD, 90)
+@pytest.mark.parametrize("fit", [
+    {"mode": "cover"},
+    {"mode": "cover", "corners": [[0.25, 0.25], [0.75, 0.25], [0.75, 0.75], [0.25, 0.75]], "rotation": 7},
+    {"mode": "corners"},
+    {"mode": "corners", "corners": [[0.25, 0.25], [0.75, 0.25], [0.75, 0.75], [0.25, 0.75]], "rotation": 90},
+], ids=["cover", "cover-opening", "corners", "corners-opening"])
+def test_a_cover_or_corners_calibration_is_a_validation_error(fit):
+    """Cover and Corners are gone (S5 B6): a stored record or body in either form is refused, never
+    read or defaulted. Mutation probe: keep CoverFit in `Calibration.fit` -> the Cover cases pass."""
+    with pytest.raises(ValidationError):
+        Calibration.model_validate({"revision": 1, "fit": fit})
 
 
 def test_off_screen_is_a_rectangle_that_does_not_fit_a_known_screen():
     assert off_screen(PROFILE, Calibration(fit=OFF), UHD, 0)
     assert not off_screen(PROFILE, Calibration(fit=RectangleFit()), UHD, 90)
-    assert not off_screen(PROFILE, Calibration(fit=CoverFit()), UHD, 0)
     assert not off_screen(PROFILE, Calibration(fit=OFF), None, 0)
     assert not off_screen(PROFILE, Calibration(fit=OFF), (0, 0), 0)

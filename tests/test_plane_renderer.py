@@ -1,5 +1,5 @@
 """The Player's renderer through fakes of its six ports (player/plane_renderer.py): each Frame is
-placed by its drawn Position (a RectangleFit: the binding's, or a Position trial's, whose commits
+placed by its drawn Position (its rectangle: the binding's, or a Position trial's, whose commits
 carry the trial overlay); each picture is finished once for its Frame as it is now and finished
 again only when something its pixels depend on changes; a fade is a plane strength, never a draw; a
 picture is committed only once the GPU has finished it, a still is finished in steps, at most one
@@ -20,7 +20,7 @@ from test_executor import LIGHTING, binding, layer, media
 from contracts.calibration_target import TargetCode
 from contracts.frame_fit import Placement, place
 from contracts.frame_lighting import AT_FULL, FrameLighting, Paper, WashLight
-from contracts.models import Calibration, CoverFit, RectangleFit
+from contracts.models import Calibration, RectangleFit
 from contracts.node_frame import neutral_operations
 from contracts.node_picture import DisplayLight
 from contracts.room_light import FixedColour, FixedEntry, RoomLightsDocument
@@ -43,7 +43,7 @@ FRAME = 1 / 60
 SIZE = (3840, 2160)
 
 
-def framed(fit: RectangleFit | CoverFit | None = None, **fields):
+def framed(fit: RectangleFit | None = None, **fields):
     """test_executor's binding, its Position a rectangle (full width, centred, unless `fit`)."""
     return binding(calibration=Calibration(fit=fit or RectangleFit()), **fields)
 
@@ -529,16 +529,6 @@ def test_a_rectangle_position_places_its_plane_and_is_reported_without_a_trial()
     assert result.applied_calibration.calibration == bound.calibration
     assert result.applied_calibration.trial_id is None
     assert rig.screens.overlays[-1] is None
-
-
-def test_an_older_position_form_prepares_and_presents_failed_decode():
-    rig = Rig()
-    still, cover = photo("still", start=0), framed(CoverFit())
-    assert (rig.renderer.prepare(still, cover).status, rig.renderer.prepare(still, cover).code) == ("failed", "decode")
-    result = rig.present(still, frame=cover)
-    assert (result.status, result.code) == ("failed", "decode") and rig.screens.commits == []
-    rig.screens.trial_now = trial(CoverFit())           # a trial of an older form likewise
-    assert rig.present(still).code == "decode" and rig.screens.commits == []
 
 
 def test_a_trial_moves_the_plane_carries_its_overlay_and_is_reported():

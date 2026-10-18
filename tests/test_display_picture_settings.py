@@ -57,9 +57,10 @@ from central.infra.display_store import (
     DisplayDocuments,
     DisplayWakes,
     OutputReportJudge,
+    frame_readiness_in,
 )
 from central.infra.node_link_store import PgLinkStores
-from contracts.models import Calibration, CoverFit, Plan
+from contracts.models import Calibration, Plan
 from contracts.node_link import Pipe
 from contracts.node_output import (
     DisplayIdentity,
@@ -94,6 +95,7 @@ from nodeapi.pull import Batch, Read
 
 MIGRATION_075 = Path(__file__).parents[1] / "central/migrations/075_display_picture.sql"
 MIGRATION_096 = Path(__file__).parents[1] / "central/migrations/096_tuning_history.sql"
+MIGRATION_102 = Path(__file__).parents[1] / "central/migrations/102_rectangle_positions.sql"
 SERIAL = "pi-picture"
 SKEWED_CORNERS = [[0.1, 0.05], [0.95, 0.0], [1.0, 1.0], [0.0, 0.9]]
 # The test monitor as the Pi asked it: brightness and contrast as levels of 100, a colour preset list.
@@ -606,10 +608,11 @@ def test_075_then_092_move_a_frames_gain_to_its_displays_software_brightness(reg
 
 def test_075_moves_every_frame_to_cover_at_angle_0_and_not_ready(registry):
     """Owner q1 and his rotation answer (2026-10-10, "Every frame should reset to 0 rotation"): a
-    Frame stored with corners C and rotation 90 reads Cover with C as its opening at angle 0; its
-    revision and configuration revision rise; trim and gain are gone; it is not ready until its
+    Frame stored with corners C and rotation 90 is stored as Cover with C as its opening at angle 0
+    (075's JSON, asserted as JSON: today's models no longer read Cover, migration 102 converts it);
+    its revision and configuration revision rise; trim and gain are gone; it is not ready until its
     Position is saved again. Mutation probe: drop the readiness statement -> the Frame stays ready."""
-    player = _bound(registry, offered=False)
+    _bound(registry, offered=False)
     _before_075(registry)
     _stored_1b(registry, "kitchen", gain=0.8, rotation=90, corners=SKEWED_CORNERS)
     _sql(registry, "UPDATE frames SET preview=calibration, preview_expires=2000")
@@ -621,13 +624,10 @@ def test_075_moves_every_frame_to_cover_at_angle_0_and_not_ready(registry):
     [row] = _sql(registry, "SELECT calibration, configuration_revision FROM frames")
     assert row["calibration"] == {"revision": 3, "fit": {"mode": "cover", "corners": SKEWED_CORNERS, "rotation": 0}}
     assert row["configuration_revision"] == before + 1
-    saved = Calibration.model_validate(row["calibration"])
-    assert saved.fit == CoverFit(corners=tuple(map(tuple, SKEWED_CORNERS)), rotation=0)
-    assert _frame_row(registry, "kitchen").readiness is Readiness.POSITION_NEEDED
+    with registry.db.transaction() as conn:
+        assert frame_readiness_in(conn, "kitchen") is Readiness.POSITION_NEEDED
     assert not _sql(registry, "SELECT 1 FROM information_schema.columns WHERE table_name='frames' "
                               "AND column_name IN ('preview', 'preview_expires')")
-    epoch = next(p.authority_epoch for p in registry.inventory().players if p.id == player)
-    assert registry.configuration_for(player, epoch)["execution_bindings"] == []
 
 
 STORED_1B = {"revision": 2, "rotation": 90, "corners": SKEWED_CORNERS, "crop": [0.1, 0, 1, 1], "gain": 1.0}
@@ -644,9 +644,10 @@ def _bindings_as_1b(registry, table: str, column: str) -> int:
 
 
 def test_075_rewrites_the_stored_configurations_and_offers_so_central_still_plans(registry):
-    """A Player's last configuration and its plan offers hold copies of the Frame's Position; after
-    075 the strict 1c models still read them, so Central hands the Player a configuration and plans.
-    Mutation probe: drop the two binding rewrites -> `configuration` raises."""
+    """A Player's last configuration and its plan offers hold copies of the Frame's Position; 075
+    rewrites them to 1c's Cover (asserted as JSON) and 102 to a rectangle, after which today's
+    strict models read them, so Central hands the Player a configuration and plans. Mutation probe:
+    drop the two binding rewrites -> `configuration` raises."""
     [player] = setup_players(registry, 1)
     coordinator = Coordinator(registry.db, registry.clock)
     epoch = player["authority_epoch"]
@@ -657,10 +658,17 @@ def test_075_rewrites_the_stored_configurations_and_offers_so_central_still_plan
     assert _bindings_as_1b(registry, "player_configurations", "configuration") == 1
     assert _bindings_as_1b(registry, "plan_offers", "manifest") >= 1
     _migrate(registry)
+    cover = {"mode": "cover", "corners": SKEWED_CORNERS, "rotation": 0}
+    [stored] = _sql(registry, "SELECT configuration FROM player_configurations")
+    assert [binding["calibration"]["fit"] for binding in stored["configuration"]["bindings"]] == [cover]
+    with registry.db.transaction() as conn:
+        conn.execute(MIGRATION_102.read_text())
 
     configuration = coordinator.configuration(player["player_id"], epoch)
     [binding] = configuration.bindings
-    assert binding.calibration.fit == CoverFit(corners=tuple(map(tuple, SKEWED_CORNERS)), rotation=0)
+    [frame] = _sql(registry, "SELECT calibration FROM frames WHERE id='frame-0'")
+    assert binding.calibration == Calibration.model_validate(frame["calibration"])
+    assert binding.calibration.fit.mode == "rectangle"
     coordinator.advance()
     for row in _sql(registry, "SELECT manifest FROM plan_offers"):
         Plan.model_validate(row["manifest"])

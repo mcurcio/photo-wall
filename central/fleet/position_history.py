@@ -1,4 +1,4 @@
-"""A Frame's Position history, pure: the Frame fit (mode, corners, rotation) and the Frame's
+"""A Frame's Position history, pure: the Frame fit (its rectangle) and the Frame's
 lighting (its lights, mat depth and paper).
 
 One numbering per Frame, in commit order under the Frame's row lock, for two kinds of entry, each
@@ -12,7 +12,7 @@ written where its state converges and never by an editor:
   `deliver_in`), appended only when the handed values differ from the Frame's newest entry
   (`sent_record`): a trial's draft, or the kept values back once a draft went.
 
-Each entry says what it was made for (`MadeFor`: the profile its corners are in and the Display seen
+Each entry says what it was made for (`MadeFor`: the profile whose aspect its rectangle has and the Display seen
 on the Frame's port), which is what Restore checks (`restore_refusal`): a Position made for another
 profile or another Display is refused, never adapted. An entry is a record of what was, never a
 second source of current state (frames.calibration and frames.lighting stay the truth). Every `at` is
@@ -27,7 +27,7 @@ from typing import Final
 from uuid import UUID
 
 from contracts.frame_lighting import FrameLighting
-from contracts.models import Calibration, FrameFit
+from contracts.models import Calibration, RectangleFit
 
 
 class PositionEntryKind(StrEnum):
@@ -50,14 +50,14 @@ SENT_KINDS: Final = frozenset({PositionEntryKind.SENT_DRAFT, PositionEntryKind.S
 class PositionValues:
     """What a Position entry records: the Frame fit and the Frame's lighting (the calibration's
     revision is not a value: it only orders saves)."""
-    fit: FrameFit
+    fit: RectangleFit
     lighting: FrameLighting
 
 
 @dataclass(frozen=True)
 class MadeFor:
-    """What an entry was made for: the Frame's profile (`profile_px`, width and height in pixels: its
-    corners are fractions of that output) and the Display seen on the Frame's bound port then (None:
+    """What an entry was made for: the Frame's profile (`profile_px`, width and height in pixels: the
+    aspect its rectangle has) and the Display seen on the Frame's bound port then (None:
     unbound, or none seen)."""
     profile_px: tuple[int, int]
     display_id: UUID | None
@@ -98,7 +98,7 @@ class TrialHanded:
 class PositionRestoreRefusal(StrEnum):
     """Why Restore refuses an entry (the routes answer each as 409)."""
     OTHER_FRAME = "other_frame"                         # another Frame's entry
-    MADE_FOR_OTHER_PROFILE = "made_for_other_profile"   # its corners are in another profile's output
+    MADE_FOR_OTHER_PROFILE = "made_for_other_profile"   # made for another profile's aspect
     MADE_FOR_OTHER_DISPLAY = "made_for_other_display"   # made against another Display than the one seen now
 
 

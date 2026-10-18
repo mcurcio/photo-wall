@@ -12,7 +12,7 @@ export interface AtReading {
 }
 
 export interface Calibration {
-  fit?: CornersFit | CoverFit | RectangleFit;
+  fit?: RectangleFit;
   revision?: number;
 }
 
@@ -39,18 +39,6 @@ export interface ColourEntry {
   colour: ReportedColour;
   kind: "colour";
   state: ColourDimmer | Unavailable | NotReported;
-}
-
-export interface CornersFit {
-  corners?: [[number, number], [number, number], [number, number], [number, number]];
-  mode: "corners";
-  rotation?: 0 | 90 | 180 | 270;
-}
-
-export interface CoverFit {
-  corners?: [[number, number], [number, number], [number, number], [number, number]];
-  mode: "cover";
-  rotation?: number;
 }
 
 export interface Dimmer {
@@ -221,7 +209,7 @@ export type PositionEntryKind = "kept-created" | "kept-saved" | "kept-profile-ch
 export interface PositionEntryView {
   at: string;
   entry_id: string;
-  fit: CornersFit | CoverFit | RectangleFit;
+  fit: RectangleFit;
   frame: FrameRefView;
   kind: PositionEntryKind;
   lighting: FrameLighting;
@@ -437,22 +425,6 @@ export const LIMITS = {
     rgb: {
       maxItems: 3,
       minItems: 3,
-    },
-  },
-  CornersFit: {
-    corners: {
-      maxItems: 4,
-      minItems: 4,
-    },
-  },
-  CoverFit: {
-    corners: {
-      maxItems: 4,
-      minItems: 4,
-    },
-    rotation: {
-      exclusiveMaximum: 360,
-      minimum: 0,
     },
   },
   Dimmer: {

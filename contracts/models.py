@@ -7,16 +7,7 @@ from typing import Annotated, Final, Literal, Self
 from pydantic import BeforeValidator, Field, model_serializer, model_validator
 
 from contracts.display_turn import DisplayTurn, hanging, is_turn
-from contracts.frame_fit import (
-    FULL_SCREEN,
-    FrameRectangle,
-    OutputSize,
-    PictureSize,
-    Placement,
-    convex_clockwise,
-    picture_size,
-    place,
-)
+from contracts.frame_fit import FrameRectangle, OutputSize, PictureSize, Placement, place
 from contracts.frame_lighting import FrameLighting
 
 # The identifier rules' one home is contracts/identifiers.py; re-exported here under these names.
@@ -39,39 +30,6 @@ class FrameProfile(Model):
 
 
 Fraction = Annotated[float, Field(ge=0, le=1, allow_inf_nan=False)]
-FitPoint = tuple[Fraction, Fraction]
-FitCorners = tuple[FitPoint, FitPoint, FitPoint, FitPoint]   # TL, TR, BR, BL; fractions of the output
-
-
-class CornersFit(Model):
-    """Frame fit Corners (roadmap 1c; an explicit opt-in, owner 2026-10-10 q1): the picture is
-    stretched exactly onto the four corners (a perspective transform), and a quarter turn picks
-    which corner edge is the picture's top."""
-    mode: Literal["corners"] = "corners"
-    corners: FitCorners = FULL_SCREEN
-    rotation: Literal[0, 90, 180, 270] = 0
-
-    @model_validator(mode="after")
-    def convex(self) -> Self:
-        if not convex_clockwise(self.corners):
-            raise ValueError("corners must form a nondegenerate ordered convex aperture")
-        return self
-
-
-class CoverFit(Model):
-    """Frame fit Cover (roadmap 1c; the default, owner 2026-10-10 q1): the four corners are the
-    opening; the picture is the unskewed rectangle turned `rotation` degrees clockwise that holds
-    every corner (contracts/frame_fit.py `cover_rectangle`), and nothing is drawn outside the
-    opening (owner q2: "Black/nothing")."""
-    mode: Literal["cover"] = "cover"
-    corners: FitCorners = FULL_SCREEN
-    rotation: float = Field(default=0, ge=0, lt=360, allow_inf_nan=False)
-
-    @model_validator(mode="after")
-    def convex(self) -> Self:
-        if not convex_clockwise(self.corners):
-            raise ValueError("corners must form a nondegenerate ordered convex aperture")
-        return self
 
 
 def _exact_turn(value: object) -> DisplayTurn:
@@ -95,8 +53,8 @@ class RectangleFit(Model):
     owner, 2026-10-17: "We can make the position pure crop and scale"): the Frame's picture is an
     upright rectangle at the Frame profile's aspect on its screen as it hangs (the Frame's turn,
     frames.turn); `centre_x` and `centre_y` are fractions of that screen's width and height,
-    `width` a fraction of its width; the height follows from the aspect. No corners, no angle.
-    Its rule's one home is contracts/frame_fit.py `FrameRectangle` (the validator builds one);
+    `width` a fraction of its width; the height follows from the aspect. The screen's turn is
+    the only turn. Its rule's one home is contracts/frame_fit.py `FrameRectangle` (the validator builds one);
     where it lands in pixels is `frame_placement`."""
     mode: Literal["rectangle"] = "rectangle"
     centre_x: Fraction = 0.5
@@ -115,16 +73,13 @@ class RectangleFit(Model):
         return FrameRectangle(centre_x=self.centre_x, centre_y=self.centre_y, width=self.width)
 
 
-FrameFit = Annotated[CornersFit | CoverFit | RectangleFit, Field(discriminator="mode")]
-
-
 class Calibration(Model):
-    """A Frame's Position (the console's word): how its picture sits on the output, as its Frame
-    fit (roadmap 1c; Cover by default, Corners an explicit opt-in, owner 2026-10-10 q1).
+    """A Frame's Position (the console's word): where its picture sits on its screen as it hangs,
+    one upright rectangle (`RectangleFit`; the default is centred at the screen's full width).
     `revision` rises with every saved Position."""
 
     revision: int = Field(default=1, ge=1)
-    fit: FrameFit = Field(default_factory=CoverFit)
+    fit: RectangleFit = Field(default_factory=RectangleFit)
 
 
 class OutputBinding(Model):
@@ -140,26 +95,19 @@ class OutputBinding(Model):
 def frame_output(profile: FrameProfile, calibration: Calibration, output: OutputSize | None,
                  turn: DisplayTurn) -> PictureSize | None:
     """The Frame output of a Frame whose Output reports `output` (width, height, as built) and
-    whose screen hangs at `turn`: its picture's pixels. A Rectangle: its `frame_placement`'s
-    (width, height) on the screen as it hangs, or None when it runs off the screen. Cover and
-    Corners: contracts/frame_fit.py `picture_size` in the Frame fit's mode, corners and rotation,
-    at the profile's aspect width_px / height_px, on the Output as built (the turn is not read:
-    they carry their own rotation until migration 102 converts them in S5). None when `output` is
-    None or has a side below 1 (its Pi has not reported the Output's size). Pure; the one place a
-    Frame's calibration and profile become its Frame output (follow-ups 2026-10-11, slice A1)."""
+    whose screen hangs at `turn`: its picture's pixels, `frame_placement`'s (width, height). None
+    when `output` is None or has a side below 1 (its Pi has not reported the Output's size) or
+    when the rectangle runs off the screen. Pure; the one place a Frame's calibration and profile
+    become its Frame output (follow-ups 2026-10-11, slice A1)."""
     if output is None or output[0] < 1 or output[1] < 1:
         return None
-    fit = calibration.fit
-    if isinstance(fit, RectangleFit):
-        try:
-            placement = frame_placement(profile, fit, output, turn)
-        except ValueError as error:
-            if str(error) != "placement_outside":
-                raise
-            return None
-        return placement.width, placement.height
-    return picture_size(fit.mode, fit.corners, fit.rotation, output,
-                        profile.width_px / profile.height_px)
+    try:
+        placement = frame_placement(profile, calibration.fit, output, turn)
+    except ValueError as error:
+        if str(error) != "placement_outside":
+            raise
+        return None
+    return placement.width, placement.height
 
 
 def frame_placement(profile: FrameProfile, fit: RectangleFit, output: OutputSize,
@@ -175,18 +123,16 @@ def frame_placement(profile: FrameProfile, fit: RectangleFit, output: OutputSize
 
 def off_screen(profile: FrameProfile, calibration: Calibration, output: OutputSize | None,
                turn: DisplayTurn) -> bool:
-    """Whether `calibration` is a Rectangle that does not lie wholly on its screen (`output` as
-    built, hung at `turn`): `frame_placement` refuses it with "placement_outside". False for Cover
-    and Corners (worked out on the Output as built, by their own rotation, until migration 102
-    converts them in S5) and when `output` is None or has a side below 1 (nothing to check
-    against). Pure. ValueError("display_turn") for a turn outside TURNS."""
-    fit = calibration.fit
-    if not isinstance(fit, RectangleFit) or output is None or output[0] < 1 or output[1] < 1:
+    """Whether `calibration`'s rectangle does not lie wholly on its screen (`output` as built,
+    hung at `turn`): True exactly when `output` is known (both sides >= 1) and `frame_placement`
+    refuses it with "placement_outside". Pure. ValueError("display_turn") for a turn outside
+    TURNS."""
+    if output is None or output[0] < 1 or output[1] < 1:
         if not is_turn(turn):
             raise ValueError("display_turn")
         return False
     try:
-        frame_placement(profile, fit, output, turn)
+        frame_placement(profile, calibration.fit, output, turn)
     except ValueError as error:
         if str(error) != "placement_outside":
             raise
