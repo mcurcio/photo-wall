@@ -110,8 +110,7 @@ class HistorySessions(LightingSessions):
         if entry is None:
             route.fulfill(status=404, json={"error": "unknown_entry"})
             return
-        refusal = restore_refusal(entry, frame_id=FRAME, profile_px=made_for.profile_px,
-                                  seen_display_id=made_for.display_id)
+        refusal = restore_refusal(entry, frame_id=FRAME, now=made_for)
         if refusal is not None:
             route.fulfill(status=409, json={"error": refusal.value})
             return
