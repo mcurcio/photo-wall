@@ -2,8 +2,8 @@
 amends it): a look pattern (White, Grey ramp) goes through the Display's white balance, contrast and
 gamma only, never the room's light, the paper or the mat, so White is the TV's own white for the
 paper match; the Black level is the raw signal; outside every opening stays black for all of them.
-Pure: no GL (the shader is held to this reference by tests/native_renderer_pixel_harness.py, on
-Linux CI)."""
+Pure: no GL (the pattern pass's shader, player/pattern_pass.py, is held to this reference by
+tests/native_fit_pass_harness.py, on Linux CI)."""
 from __future__ import annotations
 
 import math
@@ -37,7 +37,7 @@ from player.geometry import (
     pattern_signal,
     transform,
 )
-from player.native import _FINAL, _PATTERN_CODES
+from player.pattern_pass import PATTERN_CODES, _fragment
 
 PROFILE = FrameProfile(width_px=1920, height_px=1080, diagonal_inches=27)
 SMALL_PROFILE = FrameProfile(width_px=1920, height_px=1080, diagonal_inches=24)
@@ -144,7 +144,10 @@ def test_a_pattern_needs_the_openings_uv():
 
 
 def test_the_shader_names_every_pattern():
-    assert set(_PATTERN_CODES) == {None, *TestPattern} and _PATTERN_CODES[None] == 0
-    assert len(set(_PATTERN_CODES.values())) == len(_PATTERN_CODES)
-    for pattern in TestPattern:
-        assert f"#define PATTERN_{pattern.name} {_PATTERN_CODES[pattern]}\n" in _FINAL
+    assert set(PATTERN_CODES) == {None, *TestPattern} and PATTERN_CODES[None] == 0
+    assert len(set(PATTERN_CODES.values())) == len(PATTERN_CODES)
+    for lut_on in (False, True):
+        source = _fragment(lut_on)
+        assert f"#define PATTERN_COMMISSIONING_GRID {PATTERN_CODES[None]}\n" in source
+        for pattern in TestPattern:
+            assert f"#define PATTERN_{pattern.name} {PATTERN_CODES[pattern]}\n" in source

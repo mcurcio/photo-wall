@@ -39,8 +39,25 @@ tracer's):
 9. a_still_decodes_on_gstreamer: player/decode.py `StillDecode` decodes an opaque and a
    transparent PNG (the quadrants, written here) to their RGBA pixels and alpha flag, through
    GStreamer 1.26's caps structures.
+
+The pattern pass (render redesign S3, bead B2: run ledger .claude/runs/render-planes/s3-page.md),
+the real `player.pattern_pass.PatternPass` into the whole screen's target: a 64 x 48 screen with
+a 16:9 Frame placed 32 x 18 at (16, 15). The reference of target pixel (x, y) is the pass's module
+docstring's chain: `buffer_to_picture` over the screen, `placement_uv`, then `final_pixel` (the
+grid's photo `commissioning_grid`), `dither_at` (x, y). Every pixel inside the placement is held to
+it within one level, except where the reference changes within PATTERN_EDGE pixels of the centre
+(a ramp step, a cell, a grid line, a board texel or a QR module's edge: float rounding may fall
+either side); every pixel outside is exactly opaque black.
+10. pattern_<name>_turn_<0|90>_matches_the_reference: White (non-neutral operations, the LUT bound
+   and unread), Grey ramp, Black level, both calibration targets with the QR of a fixed TargetCode
+   and with none (the two differ), and the commissioning grid (the LUT and the far light's mat
+   shadow); at 90 the target is 48 x 64.
+11. a_pattern_target_needs_its_board: ValueError("board"), nothing drawn.
+12. a_wrong_pattern_target_size_is_refused: the unturned screen's target at 90 is
+   ValueError("pattern_target_size"), nothing drawn.
 """
 import ctypes
+import dataclasses
 import os
 import sys
 import time
@@ -50,6 +67,7 @@ from pathlib import Path
 sys.path[:0] = ["/repo", "/smoke"]
 os.environ.update(LIBGL_ALWAYS_SOFTWARE="1", PYOPENGL_PLATFORM="egl", EGL_PLATFORM="surfaceless")
 
+from contracts.calibration_target import TargetCode  # noqa: E402
 from contracts.frame_fit import Placement  # noqa: E402
 from contracts.frame_lighting import (  # noqa: E402
     AT_FULL,
@@ -63,16 +81,22 @@ from contracts.models import FrameProfile, PhotoCrop  # noqa: E402
 from contracts.node_frame import PictureOperations  # noqa: E402
 from contracts.node_picture import DisplayLight  # noqa: E402
 from contracts.room_light import FixedColour, FixedEntry, RoomLightsDocument  # noqa: E402
+from contracts.tuning import TARGET_PATTERNS, TestPattern  # noqa: E402
 from player import native as native_module  # noqa: E402
+from player.calibration_target import target_modules  # noqa: E402
 from player.fit_pass import FitPass, FitRequest, FitSource, target_size  # noqa: E402
 from player.geometry import (  # noqa: E402
     buffer_to_picture,
+    commissioning_grid,
     decode_channel,
     final_pixel,
     fit_source_uv,
+    picture_board,
     picture_lights,
+    placement_uv,
 )
 from player.look_shader import LOOK_GLSL  # noqa: E402
+from player.pattern_pass import PatternPass, PatternRequest  # noqa: E402
 
 WIDTH, HEIGHT = 64, 48                      # the picture
 QUADRANTS = ((255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 255))
@@ -417,16 +441,130 @@ def a_still_decodes_on_gstreamer() -> None:
             assert tuple(result.pixels[offset:offset + 4]) == wanted, (alpha, x, y, result.pixels[offset:offset + 4])
 
 
+# -- The pattern pass (cases 10-12) ----------------------------------------------------------------
+
+SCREEN = (64, 48)
+PLACEMENT = Placement(16, 15, 32, 18)
+WIDE = FrameProfile(width_px=1920, height_px=1080, diagonal_inches=27)      # 16:9, as the placement
+PATTERN_EDGE = 0.002                        # target pixels either side of a sample's centre
+TARGET_CODE = TargetCode("p-" + "0123456789abcdef" * 2, "screen", 3)
+MODULES = target_modules(TARGET_CODE)
+
+
+def pattern_request(pattern: TestPattern | None, *, turn=0, lut=None, modules=None) -> PatternRequest:
+    board = picture_board(WIDE, modules) if pattern in TARGET_PATTERNS else None
+    return PatternRequest(size=SCREEN, placement=PLACEMENT, turn=turn,
+                          operations=dataclasses.replace(OPERATIONS, test_pattern=pattern),
+                          lights=picture_lights(LIGHTING, ROOM, WIDE, OPERATIONS.light), lut=lut, board=board)
+
+
+def pattern_reference(request: PatternRequest, size: tuple[int, int], x: int, y: int, dx=0.0, dy=0.0):
+    """The scalar reference of target pixel (x, y) (module docstring), its point moved (dx, dy);
+    None outside the placement."""
+    uv = placement_uv(*buffer_to_picture(x + .5 + dx, y + .5 + dy, size, request.turn), request.placement,
+                      request.size)
+    if uv is None:
+        return None
+    pattern = request.operations.test_pattern
+    photo = commissioning_grid(*uv) if pattern is None else (0.0, 0.0, 0.0)
+    return final_pixel(photo, request.operations, inside=True, lights=request.lights, x=uv[0], y=uv[1],
+                       lut=request.lut, opening_uv=uv, board=request.board, dither_at=(x, y))
+
+
+def pattern_drawn(request: PatternRequest) -> tuple[tuple[int, int], bytes]:
+    target = PlainTarget(target_size(Placement(0, 0, *request.size), request.turn))
+    try:
+        PATTERNS.draw(request, target)
+        return target.size, target.read()
+    finally:
+        target.free()
+
+
+def pattern_compare(request: PatternRequest) -> bytes:
+    """Draw `request` and hold every pixel to the reference (module docstring); the drawn bytes."""
+    size, data = pattern_drawn(request)
+    width, height = size
+    inside = compared = 0
+    for y in range(height):
+        for x in range(width):
+            actual = at(data, size, x, y)
+            expected = pattern_reference(request, size, x, y)
+            if expected is None:
+                assert actual == (0, 0, 0, 255), ("outside", request.turn, x, y, actual)
+                continue
+            inside += 1
+            near = [pattern_reference(request, size, x, y, dx, dy)
+                    for dx, dy in ((PATTERN_EDGE, 0), (-PATTERN_EDGE, 0), (0, PATTERN_EDGE), (0, -PATTERN_EDGE))]
+            if any(max(abs(a - b) for a, b in zip(other, expected, strict=True)) * 255 > .5 for other in near):
+                continue
+            error = max(abs(a - e * 255) for a, e in zip(actual, expected, strict=True))
+            assert error <= ONE_LEVEL, ("pixel", request.turn, x, y, actual, [round(e * 255, 3) for e in expected])
+            compared += 1
+    assert inside == PLACEMENT.width * PLACEMENT.height, ("placement", inside)
+    assert compared > inside * 3 / 4, ("too_few_samples", compared)
+    return data
+
+
+def pattern_matches_the_reference(name: str, pattern: TestPattern | None, turn: int, **options):
+    def case() -> None:
+        assert target_size(Placement(0, 0, *SCREEN), turn) == ((64, 48) if turn == 0 else (48, 64)), turn
+        drawn = pattern_compare(pattern_request(pattern, turn=turn, **options))
+        if pattern in TARGET_PATTERNS:      # the QR's modules reach the screen
+            uncoded = pattern_compare(pattern_request(pattern, turn=turn, lut=options.get("lut")))
+            assert uncoded != drawn, ("the code changes nothing", name)
+        assert len({drawn[i:i + 4] for i in range(0, len(drawn), 4)}) > 2, ("flat", name)
+    case.__name__ = f"pattern_{name}_turn_{turn}_matches_the_reference"
+    return case
+
+
+def pattern_refused(request: PatternRequest, size: tuple[int, int], reason: str) -> None:
+    target = PlainTarget(size)
+    try:
+        before = target.read()
+        try:
+            PATTERNS.draw(request, target)
+        except ValueError as error:
+            assert error.args == (reason,), error.args
+        else:
+            raise AssertionError(("drawn", reason))
+        assert target.read() == before, ("drew before refusing", reason)
+    finally:
+        target.free()
+
+
+def a_pattern_target_needs_its_board() -> None:
+    request = dataclasses.replace(pattern_request(TestPattern.TARGET_PRE_SOFTWARE), board=None)
+    pattern_refused(request, SCREEN, "board")
+
+
+def a_wrong_pattern_target_size_is_refused() -> None:
+    pattern_refused(pattern_request(TestPattern.WHITE, turn=90), SCREEN, "pattern_target_size")
+
+
+PATTERN_CASES = tuple(
+    pattern_matches_the_reference(name, pattern, turn, **options)
+    for turn in (0, 90)
+    for name, pattern, options in (
+        ("white", TestPattern.WHITE, {"lut": LUT}),
+        ("grey_ramp", TestPattern.GREY_RAMP, {}),
+        ("black_level", TestPattern.BLACK_LEVEL, {}),
+        ("target_pre_software", TestPattern.TARGET_PRE_SOFTWARE, {"modules": MODULES}),
+        ("target_post_software", TestPattern.TARGET_POST_SOFTWARE, {"modules": MODULES}),
+        ("commissioning_grid", None, {"lut": LUT})))
+
+
 CASES = (turn_matches_the_reference(0, 0), turn_matches_the_reference(90, 1), turn_matches_the_reference(270, 2),
          crop_offset_shows_the_photos_edge(0, {0, 2}), crop_offset_shows_the_photos_edge(1, {1, 3}),
          transparency_is_stored_pre_multiplied, black_is_opaque_black, bt709_is_decoded_as_video,
          a_wrong_target_size_is_refused, both_passes_carry_the_one_look, textures_are_deleted_through_gles3,
-         a_still_decodes_on_gstreamer)
+         a_still_decodes_on_gstreamer, *PATTERN_CASES, a_pattern_target_needs_its_board,
+         a_wrong_pattern_target_size_is_refused)
 
 
 def main() -> None:
-    global PASS, PHOTO
+    global PASS, PATTERNS, PHOTO
     PASS = FitPass(gl)
+    PATTERNS = PatternPass(gl)
     PHOTO = source()
     failed = []
     try:
@@ -439,6 +577,7 @@ def main() -> None:
                 print(f"FAIL {case.__name__}: {error!r}"[:4000], flush=True)
     finally:
         PASS.close()
+        PATTERNS.close()
     assert not failed, ("failed", failed)
 
 

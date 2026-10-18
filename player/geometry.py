@@ -379,7 +379,12 @@ class BoardDraw:
 def board_draw(fit: CornersFit | CoverFit, profile: FrameProfile, modules: QrModules | None) -> BoardDraw:
     """The BoardDraw of a Frame's opening: (W, H) = `opening_size_mm`(fit, profile); aspect
     max(W, H) / min(W, H); portrait when W < H. Pure."""
-    width, height = opening_size_mm(fit, profile)
+    return _board(opening_size_mm(fit, profile), modules)
+
+
+def _board(size: tuple[float, float], modules: QrModules | None) -> BoardDraw:
+    """The one body of `board_draw` and `picture_board`: the BoardDraw of an opening (W, H) mm."""
+    width, height = size
     return BoardDraw(max(width, height) / min(width, height), width < height, modules)
 
 
@@ -843,19 +848,33 @@ def placement_uv(x: float, y: float, placement: Placement, screen: tuple[int, in
     hangs, as the Frame's picture point (u, v) when it lies in `placement` (left and top edges in,
     right and bottom out): u = (x * width - placement.x) / placement.width, v likewise down; None
     outside. Pure."""
-    raise NotImplementedError("render-planes S3 bead B2")
+    width, height = screen
+    u = (x * width - placement.x) / placement.width
+    v = (y * height - placement.y) / placement.height
+    return (u, v) if 0 <= u < 1 and 0 <= v < 1 else None
+
+
+GRID_SLATE: Final[Linear] = (0.2, 0.3, 0.45)     # the commissioning grid's ground, linear light
+GRID_LINE: Final[Linear] = (0.9, 0.9, 0.9)       # its lines
+GRID_LINES: Final = 10                           # lines across the picture, each way
+GRID_LINE_WIDTH: Final = 0.035                   # a line's share of the space between two lines
 
 
 def commissioning_grid(u: float, v: float) -> Linear:
     """Position's commissioning grid at the Frame's picture point (u, v), in linear light: slate
-    (0.2, 0.3, 0.45) with light lines (0.9, 0.9, 0.9) where fract(10 u) < 0.035 or fract(10 v) <
-    0.035 (player/native.py's frame pass drew the same grid in the picture's unit square). The photo
-    a commissioning ground passes through `final_pixel`. Pure."""
-    raise NotImplementedError("render-planes S3 bead B2")
+    GRID_SLATE (0.2, 0.3, 0.45) with light lines GRID_LINE (0.9, 0.9, 0.9) where fract(GRID_LINES u)
+    or fract(GRID_LINES v) < GRID_LINE_WIDTH (10 and 0.035; player/native.py's frame pass drew the
+    same grid in the picture's unit square). The photo a commissioning ground passes through
+    `final_pixel`. Pure; player/pattern_pass.py's shader is written from these constants."""
+    def fract(value: float) -> float:
+        return value - math.floor(value)
+    if fract(u * GRID_LINES) < GRID_LINE_WIDTH or fract(v * GRID_LINES) < GRID_LINE_WIDTH:
+        return GRID_LINE
+    return GRID_SLATE
 
 
 def picture_board(profile: FrameProfile, modules: QrModules | None) -> BoardDraw:
     """`board_draw` for a Frame that is an upright rectangle (the render redesign's Position): its
     physical (W, H) the profile's own (`_profile_size_mm`; a screen's turn turns the screen, not the
     wall), aspect max(W, H) / min(W, H), portrait when W < H. One body with `board_draw`. Pure."""
-    raise NotImplementedError("render-planes S3 bead B2")
+    return _board(_profile_size_mm(profile), modules)
