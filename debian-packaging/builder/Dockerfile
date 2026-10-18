@@ -10,7 +10,10 @@
 #            (debian/control) and python-nats's (debian-packaging/python-nats/debian/control).
 #   roots    mmdebstrap, squashfs-tools (mksquashfs, the image format's tool) and python3 (the seal)
 #            at the pin: debian-packaging/build-root.sh builds and seals the release roots in it.
-#   weston   Debian's weston source package at the pin (debian-packaging/weston/upstream.env):
+#   weston   Debian's weston source package at the pin (debian-packaging/weston/upstream.env),
+#            refused unless it is the weston apt's candidate at the pin (archive and security
+#            suite), so a snapshot bump that brings a new Debian Weston, a security update
+#            included, stops the build until WESTON_VERSION and the patches move with it:
 #            its .dsc from the snapshot's archive, refused unless its sha256 is the pinned one, the
 #            tarballs it names (dpkg-source -x checks them against it) and its Build-Depends, in
 #            /src/weston: debian-packaging/build-weston.sh builds it, patched, with no network.
@@ -47,6 +50,11 @@ RUN . ./upstream.env \
       /etc/apt/sources.list.d/photo-wall-snapshot.list) \
  && pool="$archive/pool/main/w/weston" dsc="weston_$WESTON_VERSION.dsc" \
  && apt-get update \
+ && candidate=$(apt-cache policy weston | sed -n 's/^  Candidate: //p') \
+ && if [ "$candidate" != "$WESTON_VERSION" ]; then \
+      echo "weston: the pin's weston is $candidate, not WESTON_VERSION $WESTON_VERSION:" \
+        "move debian-packaging/weston/upstream.env to it and re-check the patches" >&2; \
+      exit 1; fi \
  && apt-get install -y --no-install-recommends debhelper dpkg-dev curl python3 xz-utils \
  && curl -fsSL --retry 3 -o "$dsc" "$pool/$dsc" \
  && echo "$WESTON_DSC_SHA256  $dsc" | sha256sum -c - \

@@ -18,8 +18,8 @@
 #      Debian's own debian/rules, its test suite included.
 #
 # DIR must not exist. It ends holding weston, libweston-14-0 and libweston-14-dev at
-# WESTON_LOCAL_VERSION: build-repo.sh installs all three in its build root and puts the first two
-# in the local repo. The packages are arm64 (the Node's architecture) whatever the host is.
+# WESTON_LOCAL_VERSION: build-repo.sh installs all three in its build root and puts all three in
+# the local repo. The packages are arm64 (the Node's architecture) whatever the host is.
 #
 # The container's builder and BuildKit caches are build-container.sh's; CI keeps DIR itself in a
 # cache keyed by these inputs (.github/workflows/node-components.yml, the `weston` job).

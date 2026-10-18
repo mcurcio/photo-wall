@@ -26,7 +26,11 @@
 #      products, so they are no Build-Depends: the container takes those from the pin alone;
 #   5. the local repo: upstream's arm64 nats-server .deb at the pin
 #      (debian-packaging/nats-server.env), refused unless its sha256 is the pinned one, step 3's
-#      weston and libweston-14-0, and the apt index of all of them, Packages.
+#      three Weston packages, and the apt index of all of them, Packages. libweston-14-dev is
+#      there although no Node installs it: every image built FROM the build container (the PID1
+#      fixture, the display harness, tests/debs) holds Debian's libweston-14-dev, which Depends
+#      on libweston-14-0 at exactly its own version, so installing photo-wall-node through the
+#      repo would otherwise remove it rather than leave the two at different versions.
 #
 # DIR must not exist. It ends holding the .debs and Packages: a flat repo an image build reads as
 # `deb [trusted=yes] file:<DIR> ./`. The packages are arm64 (the Node's architecture) whatever
@@ -112,9 +116,8 @@ git -C "$root" show "$commit:debian-packaging/weston/upstream.env" |
 			echo "build-repo: $deb is not $package $WESTON_LOCAL_VERSION" >&2
 			exit 1
 		fi
-	done
-	cp "/weston/weston_${WESTON_LOCAL_VERSION}_arm64.deb" \
-		"/weston/libweston-14-0_${WESTON_LOCAL_VERSION}_arm64.deb" /out/'
+		cp "$deb" /out/
+	done'
 
 # 4. The binary packages: the whole committed tree, built at a fixed path with no network, in a
 #    container that runs as root only to install step 2's python3-nats and step 3's Weston.
