@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Load the pinned Debian build container (decision 0019) and print its tag.
 #
-#   debian-packaging/build-container.sh [--revision REV] [--target builder|roots]
+#   debian-packaging/build-container.sh [--revision REV] [--target builder|roots|weston]
 #
 # The container is debian-packaging/builder/Dockerfile's TARGET (default `builder`), loaded as
 # photo-wall-debian-TARGET for linux/arm64 (the Node's architecture) and built from REV's
@@ -9,6 +9,8 @@
 # builder's users: debian-packaging/build-repo.sh (dpkg-buildpackage and the local repo step),
 # the PID1 fixture image (FROM it) and the display harness image (FROM it), and tests/debs
 # (installs). The roots container's: debian-packaging/build-root.sh (mmdebstrap and mksquashfs).
+# The weston container's: debian-packaging/build-weston.sh (Debian's weston source and its
+# Build-Depends).
 #
 # It is built by `docker buildx build` on the builder PHOTO_WALL_NODE_BUILDER names (Docker's
 # default builder when unset), reading and writing the BuildKit caches
@@ -20,7 +22,7 @@ set -euo pipefail
 ARCHITECTURE=arm64
 
 usage() {
-	echo "usage: $0 [--revision REV] [--target builder|roots]" >&2
+	echo "usage: $0 [--revision REV] [--target builder|roots|weston]" >&2
 	exit 2
 }
 
@@ -33,7 +35,7 @@ while [ $# -gt 0 ]; do
 		*) usage ;;
 	esac
 done
-case "$target" in builder|roots) ;; *) usage ;; esac
+case "$target" in builder|roots|weston) ;; *) usage ;; esac
 IMAGE=photo-wall-debian-$target
 ROLE=debian-$target
 

@@ -1,7 +1,9 @@
 """The local repo debian-packaging/build-repo.sh builds (decision 0019, data flow step 1), proved
 on the built artifact: every binary package of debian/control at its own content-derived
-version, the two pinned third-party packages it carries on purpose (upstream's nats-server and
-python3-nats, built from the pinned nats-py sdist), and an apt that resolves and installs the whole set through it.
+version, the pinned third-party packages it carries on purpose (upstream's nats-server,
+python3-nats, built from the pinned nats-py sdist, and Photo Wall's Weston, Debian's weston
+rebuilt with its 64-bit plane masks), and an apt that resolves and installs the whole set through
+it.
 
 PHOTO_WALL_LOCAL_REPO names a build-repo.sh output directory (node-components.yml's `debs` job
 sets it). The install runs in the build container build-repo.sh loaded, photo-wall-debian-builder,
@@ -25,8 +27,17 @@ CONTENT_VERSION = re.compile(r"0\+[0-9a-f]{12}")
 # The pinned third-party packages the repo carries beside debian/control's, at their versions;
 # each one's binding to its pin is tests/debs/test_pins.py's.
 NATS_PY = nats_server.read_pin((REPO / "debian-packaging/python-nats/upstream.env").read_text())
+WESTON = nats_server.read_pin((REPO / "debian-packaging/weston/upstream.env").read_text())
 THIRD_PARTY = {"nats-server": nats_server.NATS_SERVER_VERSION,
-               "python3-nats": f"{NATS_PY['NATS_PY_VERSION']}-1"}
+               "python3-nats": f"{NATS_PY['NATS_PY_VERSION']}-1",
+               "weston": WESTON["WESTON_LOCAL_VERSION"],
+               "libweston-14-0": WESTON["WESTON_LOCAL_VERSION"],
+               "libweston-14-dev": WESTON["WESTON_LOCAL_VERSION"]}
+# The DRM backend libweston-14-0 ships, and what only the patched one says
+# (debian-packaging/weston/patches/): the plane index it writes to the drm-backend debug scope
+# for every plane, and its refusal of a plane a 64-bit plane mask cannot hold.
+DRM_BACKEND = "./usr/lib/aarch64-linux-gnu/libweston-14/drm-backend.so"
+PATCHED_BACKEND = (b"[plane] %u (%s) has plane index %u", b"a plane mask holds only")
 
 pytestmark = pytest.mark.skipif(not BUILT, reason="set PHOTO_WALL_LOCAL_REPO to a "
                                                   "debian-packaging/build-repo.sh output directory")
@@ -90,6 +101,32 @@ def test_the_repo_carries_python3_nats_at_the_pinned_version():
     assert (entry["Version"], entry["Architecture"]) == (THIRD_PARTY["python3-nats"], "all")
 
 
+def test_the_repo_carries_photo_wall_weston_above_debians():
+    """weston, libweston-14-0 and libweston-14-dev at the local version, which dpkg orders above
+    the pin's (Debian's own), so only the display's exact Depends decides which one a Node
+    gets."""
+    index = _index()
+    for name in ("weston", "libweston-14-0", "libweston-14-dev"):
+        assert (index[name]["Version"], index[name]["Architecture"]) == (THIRD_PARTY[name], "arm64")
+    subprocess.run(["docker", "run", "--rm", "--platform", "linux/arm64", BUILDER_IMAGE, "sh",
+                    "-ec", 'dpkg --compare-versions "$1" gt "$2"', "sh",
+                    WESTON["WESTON_LOCAL_VERSION"], WESTON["WESTON_VERSION"]],
+                   check=True, timeout=120)
+
+
+def test_the_shipped_drm_backend_is_the_patched_build():
+    """The library the Node installs is built from the patched source: its DRM backend carries
+    the patch's own messages, which Debian's does not."""
+    deb = Path(BUILT) / _index()["libweston-14-0"]["Filename"]
+    backend = subprocess.run(
+        ["docker", "run", "--rm", "--platform", "linux/arm64", "--volume",
+         f"{deb.resolve()}:/libweston.deb:ro", BUILDER_IMAGE, "sh", "-ec",
+         f"dpkg-deb --fsys-tarfile /libweston.deb | tar -xO {DRM_BACKEND}"],
+        check=True, capture_output=True, timeout=120).stdout
+    assert backend[:4] == b"\x7fELF"
+    assert [text for text in PATCHED_BACKEND if text not in backend] == []
+
+
 def test_every_indexed_file_is_the_bytes_the_index_names():
     for entry in _index().values():
         path = Path(BUILT) / entry["Filename"]
@@ -117,3 +154,28 @@ def test_apt_installs_the_whole_package_set_through_the_local_repo():
         check=True, capture_output=True, text=True, timeout=600).stdout
     assert dict(line.split() for line in installed.splitlines()) == {
         name: entry["Version"] for name, entry in index.items()}
+
+
+def test_installing_the_node_keeps_one_weston_and_its_headers_in_the_build_container():
+    """Every image built FROM the build container (the PID1 fixture, the display harness) holds
+    Debian's libweston-14-dev, which Depends on libweston-14-0 at exactly its own version.
+    Installing photo-wall-node through the repo, as the PID1 fixture does, upgrades all three
+    Weston packages to the local version together: none is removed, none is left at Debian's,
+    and the fixture head still compiles against libweston-14 (pkg-config finds it)."""
+    script = ("echo 'deb [trusted=yes] file:/repo ./' > /etc/apt/sources.list.d/local.list\n"
+              "printf 'Package: *\\nPin: origin \"\"\\nPin-Priority: 1002\\n' "
+              "> /etc/apt/preferences.d/local\n"
+              "apt-get -qq update\n"
+              "DEBIAN_FRONTEND=noninteractive apt-get -qq install -y --no-install-recommends "
+              "photo-wall-node >/dev/null\n"
+              "dpkg --audit\n"
+              "pkg-config --modversion libweston-14 >/dev/null\n"
+              "dpkg-query -W -f '${Package} ${Version} ${db:Status-Abbrev}\\n' "
+              "weston libweston-14-0 libweston-14-dev\n")
+    installed = subprocess.run(
+        ["docker", "run", "--rm", "--platform", "linux/arm64", "--volume", f"{BUILT}:/repo:ro",
+         BUILDER_IMAGE, "sh", "-ec", script],
+        check=True, capture_output=True, text=True, timeout=600).stdout
+    assert sorted(line.split() for line in installed.splitlines()) == [
+        [name, WESTON["WESTON_LOCAL_VERSION"], "ii"]
+        for name in ("libweston-14-0", "libweston-14-dev", "weston")]

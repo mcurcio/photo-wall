@@ -239,6 +239,8 @@ _BASE_BUILD: Final = (*_PROJECT, ".github/actions/python-uv/action.yml",
 # debian/*.install files name; tests/test_release_plan.py holds both claimed.
 _NODE_DEBS: Final = (*_PROJECT, ".github/workflows/node-components.yml", "debian/**",
                      "debian-packaging/**", "scripts/import_check.py",
+                     # Photo Wall's Weston build refuses a patch that leaves a narrow plane mask
+                     "scripts/weston_patch_check.py",
                      "scripts/module_closure.py",
                      # stage 1's uplink on the device runtime, run in the build container
                      "scripts/uplink_device_harness.py",

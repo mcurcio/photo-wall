@@ -210,6 +210,22 @@ The design above is kept as approved. Building it found these differences, each 
 
 - No Raspberry Pi boot, HDMI output or timing check ran; CI proves packages, images and systemd behaviour on a generic arm64 runner only ([CI module](../module-appliance-ci.md)).
 
+## Addendum (2026-10-17): carrying a patched Debian package
+
+The owner, 2026-10-17: "Patch Weston, make it part of our build pipeline". Debian's Weston 14.0.2 keeps each KMS plane's bit in a 32-bit mask, so on the Pi 5's 56 vc4 planes two planes share a bit and Weston never puts a client buffer on the first HDMI output's primary plane. This is the first piece of the owner-approved render redesign, in which the Player's pictures go straight to display planes (gate <https://claude.ai/artifact/QCAypbDziqVMxh7t5DEVHT>).
+
+**The shape.** A patched third-party package is Debian's own source package at the snapshot pin, rebuilt with Debian's tools:
+
+- **One directory.** `debian-packaging/<source>/` holds the pin, `upstream.env`. That file has the Debian version, the local version (`<debian version>+photowall<N>`, which sorts above Debian's) and the `.dsc`'s sha256. The same directory holds DEP-3 patches and their `patches/series`.
+- **Fetching.** A build container stage fetches the `.dsc` from the pin's archive and refuses it unless its sha256 matches. It fetches the tarballs the `.dsc` names (`dpkg-source -x` checks them) and installs the package's `Build-Depends`.
+- **Building.** A build script runs with no network. It unpacks the source, appends the patches to Debian's quilt series and writes a changelog entry at the local version, dated at the snapshot's instant. It then runs `dpkg-buildpackage -b` with Debian's own `debian/rules`, tests included.
+- **Into the image.** The binary packages join the local repo. The Photo Wall package that needs them names each one at exactly `${<source>:Version}`, so an image cannot install Debian's version instead of ours. Nothing in the image recipe changes.
+- **In CI.** The output is cached whole, keyed by the sha256 of every input of its build, as the release roots are. Unlike the roots' cache, it is written from every ref, so a pull request that moves an input pays the build once ([CI module](../module-appliance-ci.md), "Weston cache").
+
+There is no hand-written builder, and no vendored source beyond what `dpkg-source` unpacks (rule 3). The [packaging module](../module-debian-packaging.md#weston) has the files and the steps.
+
+**Costs.** We maintain a Weston build and must recheck the patch against every Debian Weston update the snapshot pin takes in, including security updates; the build stops when the pin's Weston is not the pinned one, so none is missed. A cache miss takes about 5 minutes in CI, over the 4-minute leg budget, once per input change. The patch is not upstream yet: sending it needs the owner's freedesktop GitLab account.
+
 ## Implementer brief
 
 This record is the hand-off for the agent that builds it.

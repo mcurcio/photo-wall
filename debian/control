@@ -104,10 +104,15 @@ Description: Photo Wall HostCore
  The appliance.host context: host metrics and facts, operator reboot, local
  recovery deadlines.
 
-# The display's overlay client is Python on pywayland and pycairo.
+# The display's overlay client is Python on pywayland and pycairo. Weston is Photo Wall's own
+# build of Debian's (debian-packaging/weston/, its 64-bit plane masks), named at exactly that
+# version, ${weston:Version} (debian/rules): Debian's Weston cannot satisfy it, so a display
+# without the patch does not install. libweston-14-0 is named too, because Debian's weston asks
+# only for a libweston-14-0 at or above 14.0.0, which Debian's unpatched one satisfies.
 Package: photo-wall-node-display
 Architecture: any
-Depends: weston,
+Depends: weston (= ${weston:Version}),
+ libweston-14-0 (= ${weston:Version}),
  python3,
  python3-pywayland,
  python3-cairo,

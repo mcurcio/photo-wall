@@ -51,7 +51,9 @@ Each Output's **screen** is an xdg toplevel with app id `photo-wall-<output>`
 (`player/output_discovery.py` `output_app_id`), which the shell maps full screen. Its own buffer is
 the **ground**: an opaque black picture of the whole screen (the Output's mode, laid out turned
 with the screen), so the controller can always scan out what the planes leave uncovered and
-Weston never needs its GPU renderer for the screen's black. Above it, one synchronized sub-window
+Weston never needs its GPU renderer for the screen's black. Planes are possible at all because the Node runs Photo Wall's Weston,
+whose 64-bit plane masks give HDMI-A-1's primary plane (index 54) its own bit, which Debian's
+32-bit masks shared with an overlay plane ([packaging module](module-debian-packaging.md#weston)). Above it, one synchronized sub-window
 (`wl_subsurface`) per plane, up to 15 (`SCREEN_PLANES`), each with its strength set through
 Wayland's standard window alpha (`wp_alpha_modifier_v1`, multiplier `round(strength x 0xffffffff)`).
 

@@ -1,0 +1,216 @@
+From: Photo Wall <noreply@example.invalid>
+Subject: backend-drm: use 64-bit plane masks
+
+The DRM backend gives every KMS plane an index (drm_plane::plane_idx, in
+the zpos order the plane list is sorted into, highest first) and records
+the planes a buffer or a view may use as a mask with one bit per index:
+drm_fb::plane_mask and the candidate mask in
+drm_output_find_plane_for_view. Both masks are 32 bits wide and built with
+`1 << plane_idx`, so on a device with more than 32 planes the shift
+overflows (undefined behaviour; in practice index N lands on bit N % 32)
+and two planes share one bit.
+
+The Raspberry Pi 5's vc4 exposes 56 planes. Sorted by zpos, the overlays
+take indices 0-15, the writeback-only overlays 16-47, the cursors 48-51
+and the primaries 52-55, so the first HDMI output's primary plane (index
+54) shares bit 22 with an overlay. drm_output_find_plane_for_view visits
+that overlay first, clears the shared bit and never offers the primary:
+a client buffer is never scanned out on it, and every frame is composited
+by the renderer.
+
+Make every plane mask 64 bits wide and build each bit with one helper,
+drm_plane_mask_bit(), which asserts the index fits; a static_assert holds
+drm_fb::plane_mask to that width. A device with more planes than a mask
+has bits keeps 64 of them, chosen where the indices are handed out
+(create_sprites): the lowest-zpos overlays are dropped first, with a log
+line each, and a primary or cursor plane only when the overlays alone do
+not make room (left past the last bit, the dropped planes would be the
+lowest, which on vc4 are the primaries). A virtual output's plane is not
+created when no index is left. Each plane's KMS id, type and index is
+written to the drm-backend debug scope, so the mapping can be read with
+--logger-scopes=log,drm-backend.
+
+Prior art: meta-raspberrypi carries 0001-Adapt-weston-to-64-bit-plane-IDs.patch
+for the same defect (linked from the issue below), and !1902
+("backend-drm: support 64-bit plane_mask"), closed unmerged, widened
+state-propose.c but left drm_fb::plane_mask 32 bits wide in fb.c and put
+no bound on the index. Upstream's main has since restructured
+drm_output_find_plane_for_view, so this patch, written against 14.0.2,
+needs a rework before it can be submitted there.
+
+Bug: https://gitlab.freedesktop.org/wayland/weston/-/issues/1078
+Forwarded: no
+Last-Update: 2026-10-17
+---
+--- a/libweston/backend-drm/drm-internal.h
++++ b/libweston/backend-drm/drm-internal.h
+@@ -296,7 +296,8 @@ struct drm_fb {
+ 	int width, height;
+ 	int fd;
+ 
+-	uint32_t plane_mask;
++	/* One bit per drm_plane::plane_idx: drm_plane_mask_bit() */
++	uint64_t plane_mask;
+ 
+ 	/* Used by gbm fbs */
+ 	struct gbm_bo *bo;
+@@ -433,6 +434,23 @@ struct drm_plane {
+ 
+ 	struct weston_drm_format_array formats;
+ };
++
++/* A plane mask (drm_fb::plane_mask and the candidates of
++ * drm_output_find_plane_for_view) holds one bit per plane index. Drivers
++ * expose more than 32 planes (vc4 on the Raspberry Pi 5 has 56), so the mask
++ * is 64 bits wide, and a plane whose index would not fit is refused when the
++ * planes are indexed rather than given an aliased bit. */
++#define DRM_PLANE_MASK_BITS 64
++
++static inline uint64_t
++drm_plane_mask_bit(const struct drm_plane *plane)
++{
++	assert(plane->plane_idx < DRM_PLANE_MASK_BITS);
++	return UINT64_C(1) << plane->plane_idx;
++}
++
++static_assert(sizeof(((struct drm_fb *)0)->plane_mask) * 8 >= DRM_PLANE_MASK_BITS,
++	      "drm_fb::plane_mask must hold a bit for every plane index");
+ 
+ struct drm_connector {
+ 	struct drm_device *device;
+--- a/libweston/backend-drm/drm-virtual.c
++++ b/libweston/backend-drm/drm-virtual.c
+@@ -140,9 +140,14 @@ drm_virtual_plane_create(struct drm_device *device, st
+ 	if (weston_drm_format_add_modifier(fmt, mod) < 0)
+ 		goto err;
+ 
+-	weston_plane_init(&plane->base, b->compositor);
+-
+ 	plane->plane_idx = get_drm_plane_index_maximum(device) + 1;
++	if (plane->plane_idx >= DRM_PLANE_MASK_BITS) {
++		weston_log("%s: no plane index left: a plane mask holds only "
++			   "%d planes\n", __func__, DRM_PLANE_MASK_BITS);
++		goto err;
++	}
++
++	weston_plane_init(&plane->base, b->compositor);
+ 	wl_list_insert(&device->plane_list, &plane->link);
+ 
+ 	return plane;
+--- a/libweston/backend-drm/drm.c
++++ b/libweston/backend-drm/drm.c
+@@ -1312,6 +1312,40 @@ drm_plane_destroy(struct drm_plane *plane)
+ }
+ 
+ /**
++ * Keep no more planes than a plane mask has bits
++ *
++ * The plane list is in descending zpos order, so the planes left past the
++ * last bit would be the lowest: on vc4, every primary plane. Overlays are
++ * dropped first instead, lowest zpos first; a primary or cursor plane only
++ * when the overlays alone do not make room, which an output then lacks.
++ *
++ * @param device DRM device
++ */
++static void
++drm_planes_fit_plane_mask(struct drm_device *device)
++{
++	struct drm_plane *plane, *prev;
++	int planes = wl_list_length(&device->plane_list);
++	int pass;
++
++	for (pass = 0; pass < 2 && planes > DRM_PLANE_MASK_BITS; pass++) {
++		wl_list_for_each_reverse_safe(plane, prev,
++					      &device->plane_list, link) {
++			if (planes <= DRM_PLANE_MASK_BITS)
++				break;
++			if (pass == 0 && plane->type != WDRM_PLANE_TYPE_OVERLAY)
++				continue;
++			weston_log("DRM: skipping %s plane %u: a plane mask "
++				   "holds only %d planes\n",
++				   drm_output_get_plane_type_name(plane),
++				   plane->plane_id, DRM_PLANE_MASK_BITS);
++			drm_plane_destroy(plane);
++			planes--;
++		}
++	}
++}
++
++/**
+  * Initialise sprites (overlay planes)
+  *
+  * Walk the list of provided DRM planes, and add overlay planes.
+@@ -1357,6 +1391,8 @@ create_sprites(struct drm_device *device)
+ 			primary_plane_zpos_min = drm_plane->zpos_min;
+ 	}
+ 
++	drm_planes_fit_plane_mask(device);
++
+ 	wl_list_for_each (drm_plane, &device->plane_list, link) {
+ 		drm_plane->plane_idx = next_plane_idx++;
+ 
+@@ -1366,6 +1402,11 @@ create_sprites(struct drm_device *device)
+ 			drm_plane->is_underlay = true;
+ 			b->has_underlay = true;
+ 		}
++
++		drm_debug(b, "\t[plane] %u (%s) has plane index %u\n",
++			  drm_plane->plane_id,
++			  drm_output_get_plane_type_name(drm_plane),
++			  drm_plane->plane_idx);
+ 	}
+ 
+ 	if (b->has_underlay && !b->format->opaque_substitute) {
+--- a/libweston/backend-drm/fb.c
++++ b/libweston/backend-drm/fb.c
+@@ -759,7 +759,7 @@ drm_fb_get_from_paint_node(struct drm_output_state *st
+ 			continue;
+ 
+ 		if (drm_fb_compatible_with_plane(fb, plane, pnode->view))
+-			fb->plane_mask |= 1 << (plane->plane_idx);
++			fb->plane_mask |= drm_plane_mask_bit(plane);
+ 	}
+ 	if (fb->plane_mask == 0) {
+ 		drm_fb_unref(fb);
+--- a/libweston/backend-drm/state-propose.c
++++ b/libweston/backend-drm/state-propose.c
+@@ -412,7 +412,7 @@ drm_output_find_plane_for_view(struct drm_output_state
+ 	                               current_lowest_zpos_overlay;
+ 
+ 	bool view_matches_entire_output, scanout_has_view_assigned;
+-	uint32_t possible_plane_mask = 0;
++	uint64_t possible_plane_mask = 0;
+ 
+ 	pnode->try_view_on_plane_failure_reasons = FAILURE_REASONS_NONE;
+ 
+@@ -461,7 +461,7 @@ drm_output_find_plane_for_view(struct drm_output_state
+ 			return NULL;
+ 		}
+ 
+-		possible_plane_mask = (1 << output->cursor_plane->plane_idx);
++		possible_plane_mask = drm_plane_mask_bit(output->cursor_plane);
+ 	} else {
+ 		if (mode == DRM_OUTPUT_PROPOSE_STATE_RENDERER_ONLY) {
+ 			drm_debug(b, "\t\t\t\t[view] not assigning view %p "
+@@ -474,7 +474,7 @@ drm_output_find_plane_for_view(struct drm_output_state
+ 				continue;
+ 
+ 			if (drm_paint_node_transform_supported(pnode, plane))
+-				possible_plane_mask |= 1 << plane->plane_idx;
++				possible_plane_mask |= drm_plane_mask_bit(plane);
+ 		}
+ 
+ 		if (!possible_plane_mask) {
+@@ -508,10 +508,10 @@ drm_output_find_plane_for_view(struct drm_output_state
+ 		if (possible_plane_mask == 0)
+ 			break;
+ 
+-		if (!(possible_plane_mask & (1 << plane->plane_idx)))
++		if (!(possible_plane_mask & drm_plane_mask_bit(plane)))
+ 			continue;
+ 
+-		possible_plane_mask &= ~(1 << plane->plane_idx);
++		possible_plane_mask &= ~drm_plane_mask_bit(plane);
+ 		mm_has_underlay =
+ 			drm_mixed_mode_check_underlay(mode, scanout_state, plane->zpos_max);
+ 

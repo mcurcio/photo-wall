@@ -12,7 +12,8 @@ name: V2 node components
 # The `debs` job is step 1 of decision 0019: the one source package (debian/) built by
 # dpkg-buildpackage in the pinned build container (its import check refusing any Depends that
 # drifts from the imports, scripts/import_check.py), and the local repo beside upstream's
-# nats-server .deb and python3-nats (debian-packaging/build-repo.sh), built twice (the two indexes,
+# nats-server .deb, python3-nats and Photo Wall's Weston (the `weston` job's, from its cache)
+# (debian-packaging/build-repo.sh), built twice (the two indexes,
 # which name every .deb's sha256, must agree) and proved by installing the whole set through it
 # (tests/debs/test_local_repo.py), by the display and frame client's installed files and ABI
 # identity (tests/debs/test_display_packages.py), by each Python context importing from its
@@ -51,7 +52,79 @@ defaults:
     shell: bash
 
 jobs:
+  # Photo Wall's Weston (debian-packaging/weston/): Debian's weston source at the pin with the
+  # 64-bit plane-mask patch, built by debian-packaging/build-weston.sh. Kept whole in a cache
+  # keyed by the sha256 of every input of that build (the pin and patches, the script and its
+  # check, the snapshot pin, the container's loader, and only the `pinned` and `weston` stages
+  # of the container's Dockerfile, so an edit to the builder or roots stage does not rebuild
+  # Weston), exact keys only. A hit restores three .debs in well under a minute; a miss builds
+  # once and saves: about 5 min end to end with the weston container from its BuildKit cache
+  # (run 39081014486), longer when the pin or the stage moved. That miss is over the ~4 min leg
+  # budget and is paid once per input change. The entry is saved from every ref, unlike the
+  # release roots' (docs/module-appliance-ci.md, "Weston cache"): a pull request that moves an
+  # input pays the miss once, not on every push, and a pull request reads main's.
+  weston:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 20
+    env:
+      REVISION: ${{ inputs.revision }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ inputs.revision }}
+          persist-credentials: false
+
+      # The Dockerfile's `pinned` and `weston` stages, each from its FROM line to the next one;
+      # the weston stage builds FROM pinned alone.
+      - name: Hash the weston container's stages
+        id: stages
+        run: |
+          set -euo pipefail
+          digest=$(awk '/^FROM /{keep = ($NF == "pinned" || $NF == "weston")} keep' \
+            debian-packaging/builder/Dockerfile | sha256sum | cut -d' ' -f1)
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Restore Photo Wall's Weston
+        id: restore
+        uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ${{ runner.temp }}/weston-debs
+          key: weston-debs-v2-${{ steps.stages.outputs.digest }}-${{ hashFiles('debian-packaging/weston/**', 'debian-packaging/build-weston.sh', 'scripts/weston_patch_check.py', 'debian-packaging/snapshot.list', 'debian-packaging/snapshot-epoch.sh', 'debian-packaging/build-container.sh') }}
+
+      - name: Set up the node package builder
+        if: steps.restore.outputs.cache-hit != 'true'
+        id: builder
+        uses: ./.github/actions/node-builder
+
+      - name: Build Photo Wall's Weston
+        if: steps.restore.outputs.cache-hit != 'true'
+        env:
+          PHOTO_WALL_NODE_BUILDER: ${{ steps.builder.outputs.builder }}
+          PHOTO_WALL_NODE_BUILD_CACHE_FROM: ${{ steps.builder.outputs.cache-from }}
+          PHOTO_WALL_NODE_BUILD_CACHE_TO: ${{ steps.builder.outputs.cache-to }}
+        run: |
+          set -eu
+          # A failed restore can leave part of an output behind; build-weston.sh refuses one.
+          rm -rf "$RUNNER_TEMP/weston-debs"
+          debian-packaging/build-weston.sh --revision "$REVISION" --output "$RUNNER_TEMP/weston-debs"
+
+      - name: Save Photo Wall's Weston
+        if: steps.restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ${{ runner.temp }}/weston-debs
+          key: ${{ steps.restore.outputs.cache-primary-key }}
+
+      - name: Upload Photo Wall's Weston
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: photo-wall-weston-debs-${{ inputs.revision }}
+          path: ${{ runner.temp }}/weston-debs/
+          if-no-files-found: error
+          retention-days: 1
+
   debs:
+    needs: weston
     runs-on: ubuntu-24.04-arm
     # The container's layers come from the BuildKit cache; each build of the tree is about a
     # minute, the install proof under one.
@@ -68,6 +141,14 @@ jobs:
         id: builder
         uses: ./.github/actions/node-builder
 
+      - name: Download Photo Wall's Weston
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: photo-wall-weston-debs-${{ inputs.revision }}
+          path: ${{ runner.temp }}/weston-debs
+
+      # Both builds take the one Weston the `weston` job built or restored, so the two indexes
+      # still compare every byte this job builds.
       - name: Build the Debian packages and the local repo, twice
         env:
           PHOTO_WALL_NODE_BUILDER: ${{ steps.builder.outputs.builder }}
@@ -75,8 +156,10 @@ jobs:
           PHOTO_WALL_NODE_BUILD_CACHE_TO: ${{ steps.builder.outputs.cache-to }}
         run: |
           set -eu
-          debian-packaging/build-repo.sh --revision "$REVISION" --output "$RUNNER_TEMP/node-debs"
-          debian-packaging/build-repo.sh --revision "$REVISION" --output "$RUNNER_TEMP/node-debs-again"
+          debian-packaging/build-repo.sh --revision "$REVISION" --output "$RUNNER_TEMP/node-debs" \
+            --weston "$RUNNER_TEMP/weston-debs"
+          debian-packaging/build-repo.sh --revision "$REVISION" --output "$RUNNER_TEMP/node-debs-again" \
+            --weston "$RUNNER_TEMP/weston-debs"
           # Content-derived versions are only as good as the bytes behind them.
           if ! cmp "$RUNNER_TEMP/node-debs/Packages" "$RUNNER_TEMP/node-debs-again/Packages"; then
             diff "$RUNNER_TEMP/node-debs/Packages" "$RUNNER_TEMP/node-debs-again/Packages" || true
