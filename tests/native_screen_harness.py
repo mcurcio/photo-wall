@@ -41,6 +41,12 @@ nothing but the app is on screen.
    with only the upper plane's strength changing send no wl_subsurface.place_above, no
    set_position and no wl_surface.attach (the app's own WAYLAND_DEBUG log), one multiplier each:
    Weston answers a restack or a move by damaging and repainting beneath the planes.
+9. a_trial_overlay_rides_the_present_that_carries_it (render redesign S3, bead B3, run ledger
+   .claude/runs/render-planes/s3-page.md): a Position trial set through the controller
+   (`WestonBackend.trial`, as native_display_smoke.py's overlay cases set theirs), the app reads it on
+   its own connection (`PlaneScreens.trial`) and presents under the trial's tag: without an overlay
+   the shell presents that tag and sends no `overlay_presented`; with the overlay of the drawn
+   placement (`overlay_corners`) it sends `overlay_presented` naming that tag.
 """
 import json
 import mmap
@@ -77,6 +83,13 @@ GREY = (64, 64, 64)                         # case 7's ground
 FADE_PRESENTS = 10                          # case 8
 
 
+def frame_lighting():
+    """The app's Frame lighting, which a trial's envelope carries too (case 9)."""
+    from contracts.frame_lighting import FrameLighting, Paper
+
+    return FrameLighting(mat_depth_mm=0, lights=(), paper=Paper(whiteness=.9, ink_density=2))
+
+
 # --- the app (child process, unprivileged) ------------------------------------------------------
 
 def quadrant_colour(u: float, v: float) -> tuple[int, int, int]:
@@ -104,11 +117,10 @@ def target_bytes(size: tuple[int, int], turn: int, fill) -> bytes:
 
 def app() -> None:
     from contracts.frame_fit import Placement
-    from contracts.frame_lighting import FrameLighting, Paper
     from contracts.models import FrameProfile, Layer, OutputBinding
     from player.fit_pass import target_size
     from player.gpu import Target
-    from player.plane_screen import PlaneScreens
+    from player.plane_screen import PlaneScreens, overlay_corners
     from player.planes import Composition, Plane
     from player.rendering import LocalLayer, OutputComposition
 
@@ -116,7 +128,7 @@ def app() -> None:
     binding = OutputComposition(OutputBinding(
         output_id=OUTPUT, frame_id="frame", generation=1,
         profile=FrameProfile(width_px=WIDTH_PX, height_px=HEIGHT_PX, diagonal_inches=10),
-        lighting=FrameLighting(mat_depth_mm=0, lights=(), paper=Paper(whiteness=.9, ink_density=2))))
+        lighting=frame_lighting()))
     pictures, fds = {}, []
     candidate, last, pending = True, 0.0, b""
 
@@ -128,7 +140,7 @@ def app() -> None:
         fds.append(fd)
         return Target(size, 0, 0, fd, stride, XR24, LINEAR)
 
-    def present(planes, tag, ground=None):
+    def present(planes, tag, ground=None, overlay=None):
         screen = screens.screen(OUTPUT)
         grant = screens.grant(binding)
         if screen is None or grant is None:
@@ -156,9 +168,24 @@ def app() -> None:
             shown.append((Plane("frame", LocalLayer(layer, None, 0.0, 1.0), at, strength), pictures[key]))
         result = screens.present(Composition(screen, tuple(plane for plane, _ in shown)),
                                  {plane.layer.layer.assignment_id: picture for plane, picture in shown},
-                                 grant, tag, None, ground)
+                                 grant, tag, None, ground, overlay)
         return {"result": result, "busy": {plane.layer.layer.assignment_id: screens.busy(picture)
                                            for plane, picture in shown}}
+
+    def trial_present(with_overlay: bool):
+        """The trial Display Host holds for the grant (waited on up to 5 s), then one present of red
+        at RECTANGLE under the trial's tag, with that placement's overlay when `with_overlay`."""
+        end, applied = time.monotonic() + 5, None
+        while applied is None and time.monotonic() < end:
+            screens.dispatch()
+            grant = screens.grant(binding)
+            applied = None if grant is None else screens.trial(binding, grant)
+            if applied is None:
+                select.select([screens.fd], [], [], 0.02)
+        assert applied is not None, "trial_unseen"
+        corners = overlay_corners(Placement(*RECTANGLE), screens.screen(OUTPUT).size) if with_overlay else None
+        tag = applied.candidate.frame_tag
+        return {**present([["red", RED, *RECTANGLE, 1.0]], tag, overlay=corners), "tag": tag}
 
     def soak(count: int, tag: str):
         """`count` presents of one opaque full-screen plane, red and blue in turn, each waited on
@@ -200,6 +227,8 @@ def app() -> None:
             return {"screen": None if screen is None else [*screen.size, screen.turn]}
         if op == "soak":
             return soak(command["count"], command["tag"])
+        if op == "trial_present":
+            return trial_present(command["overlay"])
         if op == "short_stride":
             size = (64, 48)
             short = target(size, target_bytes(size, 0, RED), 64 * 4 - 4)
@@ -396,10 +425,13 @@ def main() -> None:
     from appliance.display_host.weston import (
         CompositorPresentation,
         DiagnosticRelease,
+        OverlayPresentation,
         SurfaceGrant,
         WestonBackend,
     )
     from contracts.display_turn import hanging
+    from contracts.models import Calibration, RectangleFit
+    from contracts.node_calibration import TrialCandidate, candidate_hash, canonical, encode_trial
     from contracts.node_display import Surface
     from contracts.node_protocol import NodeProcessIdentity, OutputKey
 
@@ -437,11 +469,14 @@ def main() -> None:
         backend = WestonBackend(channel, display_uid=0, compositor_pid=weston.pid, verify_process=alive)
         host = backend.initialize()
         presented_tags: list[str] = []
+        overlay_tags: list[str] = []    # each overlay_presented's frame tag (case 9)
         keys: list = []                 # the Output's keys, as the shell announces them
 
         def observe(observed) -> None:
             if isinstance(observed, CompositorPresentation):
                 presented_tags.append(observed.frame_tag)
+            if isinstance(observed, OverlayPresentation):
+                overlay_tags.append(observed.frame_tag)
             if isinstance(observed, OutputKey) and observed.output_id == OUTPUT:
                 keys.append(observed)
 
@@ -491,9 +526,9 @@ def main() -> None:
                         again()
                     time.sleep(0.1)
 
-        def hand_off(known: int) -> None:
+        def hand_off(known: int):
             """The Output's first key after the `known` ones offered to the app and handed off, as
-            the runner does: the app presents its candidate's black meanwhile."""
+            the runner does: the app presents its candidate's black meanwhile. The admitted Surface."""
             del presented_tags[:]
             ask(op="candidate", on=True)
             end = time.monotonic() + 10
@@ -518,6 +553,7 @@ def main() -> None:
             pump(lambda seen: isinstance(seen, DiagnosticRelease))
             assert any(tag.startswith("candidate-") for tag in presented_tags), presented_tags
             ask(op="candidate", on=False)
+            return surface
 
         # 1. the_handed_off_screen_shows_black
         hand_off(0)
@@ -623,7 +659,7 @@ def main() -> None:
         # 6. a_full_screen_frame_is_answered_past_the_feedback_table
         known = len(keys)
         assert backend.turn(OUTPUT, 0, timeout=5.0), "turn_back_refused"
-        hand_off(known)
+        admitted = hand_off(known)
         end = time.monotonic() + 5
         while (screen := ask(op="screen")["screen"]) != [WIDTH_PX, HEIGHT_PX, 0] and time.monotonic() < end:
             time.sleep(0.05)
@@ -707,6 +743,35 @@ def main() -> None:
         assert (counts["place_above"], counts["set_position"], counts["attach"]) == (0, 0, 0), counts
         assert counts["set_multiplier"] == FADE_PRESENTS, counts
         print("PASS a_fade_restacks_moves_and_attaches_nothing", flush=True)
+
+        # 9. a_trial_overlay_rides_the_present_that_carries_it
+        def until(holds, what: str, seconds: float = 10.0) -> None:
+            end = time.monotonic() + seconds
+            while not holds():
+                assert time.monotonic() < end, (what, presented_tags[-5:], overlay_tags)
+                drain()
+                time.sleep(0.01)
+
+        boot_ms = time.clock_gettime_ns(time.CLOCK_BOOTTIME) // 1_000_000
+        trial_id, lighting = uuid.uuid4(), frame_lighting()
+        calibration = canonical(Calibration(fit=RectangleFit(width=0.5)).model_dump(mode="json"))
+        trial = TrialCandidate(
+            trial_id=trial_id, generation=1, sequence=1, baseline=admitted, calibration_json=calibration,
+            candidate_sha256=candidate_hash(trial_id, 1, 1, admitted, calibration, lighting),
+            expires_boottime_ms=boot_ms + 30_000, hard_expires_boottime_ms=boot_ms + 60_000, lighting=lighting)
+        backend.trial(admitted.output, encode_trial(trial))
+        plain = ask(op="trial_present", overlay=False)
+        assert isinstance(plain["result"], int) and plain["tag"] == trial.frame_tag, plain
+        until(lambda: trial.frame_tag in presented_tags, "trial_present_unpresented")
+        settle = time.monotonic() + 1.0             # long enough for an overlay the shell would draw
+        until(lambda: time.monotonic() >= settle, "settle", seconds=5.0)
+        assert overlay_tags == [], overlay_tags
+        shown = ask(op="trial_present", overlay=True)
+        assert isinstance(shown["result"], int) and shown["tag"] == trial.frame_tag, shown
+        until(lambda: trial.frame_tag in overlay_tags, "overlay_unpresented")
+        print(f"TRIAL tag={trial.frame_tag} overlays={overlay_tags}", flush=True)
+        backend.trial(admitted.output, None)
+        print("PASS a_trial_overlay_rides_the_present_that_carries_it", flush=True)
     except BaseException:
         app_log.flush()
         print("APP LOG:\n" + APP_LOG.read_text()[-4000:], flush=True)

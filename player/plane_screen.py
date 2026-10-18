@@ -16,15 +16,21 @@ Rules this module owns (one home each):
 - **A picture is reused only once released** (`busy`): the compositor's wl_buffer.release.
 - **The strength's wire value**: wp_alpha_modifier_v1's multiplier, round(strength * 0xffffffff).
 - **The screen's facts** (`screen`): the Output's mode and wl_output.transform as Weston reports
-  them, read through contracts/display_turn.py.
-
-Grants, picture operations and presentation words are read as player/wayland_frames.py reads them
-over GDK's connection, through the same library functions, until S3 deletes that path.
+  them, read through contracts/display_turn.py; the mode as built (`mode`), never turned, is what
+  the Player enrolls.
+- **The Position trial on this connection** (`trial`, render redesign S3, run ledger
+  .claude/runs/render-planes/s3-page.md): the envelope Display Host holds for the grant, applied by
+  one player/calibration_trial.py `TrialState` per Output on CLOCK_BOOTTIME milliseconds.
+- **The trial overlay** (`overlay_corners`, `present`'s `overlay`): the drawn placement's corners as
+  fractions of the screen as it hangs, sent as JSON on the screen's surface under the very grant and
+  tag of the present that follows, so the shell draws it only over that commit.
 """
 from __future__ import annotations
 
 import ctypes
+import json
 import logging
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Final, Literal
@@ -32,6 +38,7 @@ from uuid import UUID
 
 from contracts.display_turn import hanging, turn_of, wayland_transform
 from contracts.frame_fit import Placement
+from contracts.node_calibration import MAX_TRIAL_BYTES
 from contracts.node_frame import (
     PICTURE_OPERATIONS_BYTES,
     PictureOperations,
@@ -39,7 +46,7 @@ from contracts.node_frame import (
     frame_witness_tag,
     picture_change_text,
 )
-from player.calibration_trial import AppliedTrial
+from player.calibration_trial import AppliedTrial, TrialState
 from player.fit_pass import target_size
 from player.gpu import Target
 from player.pacing import Word
@@ -92,8 +99,21 @@ def overlay_corners(placement: Placement, screen: tuple[int, int]) -> OverlayCor
     height) pixels as it hangs: ((x, y), (x + w, y), (x + w, y + h), (x, y + h)), each divided by the
     screen's width and height. The one home of the overlay's primitives (player/calibration_trial.py no
     longer computes them: a Rectangle has no corners of its own). ValueError("overlay_screen") for a
-    side below 1, ValueError("overlay_outside") for a placement not wholly on the screen. Pure."""
-    raise NotImplementedError("render-planes S3 bead B3")
+    side below 1, ValueError("overlay_outside") for a placement not wholly on the screen (or with a
+    side below 1). Pure."""
+    width, height = screen
+    if width < 1 or height < 1:
+        raise ValueError("overlay_screen")
+    left, top, right, bottom = placement.x, placement.y, placement.x + placement.width, placement.y + placement.height
+    if placement.width < 1 or placement.height < 1 or left < 0 or top < 0 or right > width or bottom > height:
+        raise ValueError("overlay_outside")
+    return ((left / width, top / height), (right / width, top / height),
+            (right / width, bottom / height), (left / width, bottom / height))
+
+
+def _boottime_ms() -> int:
+    """CLOCK_BOOTTIME now in milliseconds: the clock a trial's expiries are on."""
+    return time.clock_gettime_ns(time.CLOCK_BOOTTIME) // 1_000_000
 
 
 def multiplier(strength: float) -> int:
@@ -131,7 +151,10 @@ def _declare(lib) -> None:
         ("pw_frame_client_output", (pointer, text, out_i32, out_i32, out_i32), ctypes.c_int),
         ("pw_frame_client_grant_revision", (pointer, text, text, u64, u64, text, out_u32), ctypes.c_int),
         ("pw_frame_client_picture", (pointer, text, text, u32), ctypes.c_int),
+        ("pw_frame_client_trial", (pointer, text, text, text, u32), ctypes.c_int),
         ("pw_screen_create", (pointer, text), pointer),
+        ("pw_screen_size", (pointer, out_i32, out_i32), ctypes.c_int),
+        ("pw_screen_overlay", (pointer, text, text, text), ctypes.c_int),
         ("pw_screen_destroy", (pointer,), None),
         ("pw_picture_import", (pointer, ctypes.c_int, u32, u32, u32, u32, u64), pointer),
         ("pw_picture_busy", (pointer,), ctypes.c_int),
@@ -163,6 +186,7 @@ class PlaneScreens:
         # Per Output: the newest picture operations' text read, and the last ones that decoded.
         self._picture_texts: dict[str, str] = {}
         self._operations: dict[str, PictureOperations] = {}
+        self._trials: dict[str, TrialState] = {}    # output id -> its trial's fences
 
     @property
     def fd(self) -> int:
@@ -180,14 +204,22 @@ class PlaneScreens:
     def screen(self, output_id: str) -> Screen | None:
         """The Output as Weston reports it now (module rule); None before Weston announced it or
         once it is gone."""
+        output = self._output(output_id)
+        if output is None:
+            return None
+        width, height, transform = output
+        turn = turn_of(transform)
+        return Screen(output_id, hanging((width, height), turn), turn)
+
+    def _output(self, output_id: str) -> tuple[int, int, int] | None:
+        """`pw_frame_client_output`: the mode's (width, height) as built and the wl_output.transform."""
         width, height, transform = ctypes.c_int32(), ctypes.c_int32(), ctypes.c_int32()
         result = self._lib.pw_frame_client_output(self._client, output_id.encode(), width, height, transform)
         if result < 0:
             raise RuntimeError("display_frame_protocol_lost")
         if result == 0:
             return None
-        turn = turn_of(transform.value)
-        return Screen(output_id, hanging((width.value, height.value), turn), turn)
+        return width.value, height.value, transform.value
 
     def mode(self, output_id: str) -> tuple[int, int] | None:
         """The Output's current mode as built, (width, height) in physical pixels, never turned
@@ -195,7 +227,8 @@ class PlaneScreens:
         Central at enrollment (contracts/enrollment.py `OutputReport`, Central's `outputs.observation`).
         None before Weston announced the Output or once it is gone. RuntimeError
         ("display_frame_protocol_lost") on transport failure."""
-        raise NotImplementedError("render-planes S3 bead B3")
+        output = self._output(output_id)
+        return None if output is None else output[:2]
 
     def trial(self, composition: OutputComposition, grant: FrameGrant) -> AppliedTrial | None:
         """The Position trial Display Host holds for `composition`'s Output under `grant`
@@ -203,7 +236,14 @@ class PlaneScreens:
         (its fences, expiry and baseline checks) at CLOCK_BOOTTIME now; None when none is drawn.
         RuntimeError("display_trial_protocol_lost") on transport failure; ValueError as
         `TrialState.apply` (a trial whose calibration or lighting refuses, a changed hash)."""
-        raise NotImplementedError("render-planes S3 bead B3")
+        output_id = composition.binding.output_id
+        raw = ctypes.create_string_buffer(MAX_TRIAL_BYTES + 1)
+        result = self._lib.pw_frame_client_trial(self._client, output_id.encode(), str(grant.grant_id).encode(),
+                                                 raw, len(raw))
+        if result < 0:
+            raise RuntimeError("display_trial_protocol_lost")
+        state = self._trials.setdefault(output_id, TrialState())
+        return state.apply(raw.value.decode() if result else None, composition, _boottime_ms())
 
     def grant(self, composition: OutputComposition) -> FrameGrant | None:
         """The shell's grant for `composition`'s binding (`pw_frame_client_grant_revision`)."""
@@ -261,7 +301,8 @@ class PlaneScreens:
             self._lib.pw_picture_destroy(picture.handle)
 
     def present(self, composition: Composition, pictures: Mapping[str, ScreenPicture], grant: FrameGrant,
-                tag: str, picture_change: int | None, ground: ScreenPicture | None = None) -> int | PresentRefused:
+                tag: str, picture_change: int | None, ground: ScreenPicture | None = None,
+                overlay: OverlayCorners | None = None) -> int | PresentRefused:
         """One commit of `composition`'s screen (module rule): each plane shows
         `pictures[plane.layer.layer.assignment_id]` at its placement, bottom to top, with buffer
         transform `wayland_transform(composition.screen.turn)` and its strength; sub-windows beyond
@@ -273,7 +314,12 @@ class PlaneScreens:
         current one, admitted or candidate (the caller never presents without one). The tag's
         sequence (>= 1) when committed; "picture_refused" when a picture is missing, forgotten or
         not of its plane's `target_size` (the ground likewise, of the whole screen's); "output_gone" when the Output is not there or its screen
-        is not configured yet. ValueError("present_planes") past SCREEN_PLANES planes."""
+        is not configured yet. ValueError("present_planes") past SCREEN_PLANES planes.
+
+        `overlay` (a Position trial's corners, `overlay_corners`; `tag` is then the trial's) is sent
+        first, on the screen's surface under `grant` and `tag` (`pw_screen_overlay`), so the shell
+        draws it over this very commit (module rule). RuntimeError("display_trial_overlay_failed")
+        when the library refuses it, before anything is committed."""
         planes = composition.planes
         if len(planes) > SCREEN_PLANES:
             raise ValueError("present_planes")
@@ -297,10 +343,20 @@ class PlaneScreens:
             if not handle:
                 raise RuntimeError("display_frame_protocol_lost")
             self._screens[screen.output_id] = handle
+        grant_id = str(grant.grant_id).encode()
+        if overlay is not None:
+            width, height = ctypes.c_int32(), ctypes.c_int32()
+            configured = self._lib.pw_screen_size(handle, width, height)
+            if configured < 0:
+                raise RuntimeError("display_frame_protocol_lost")
+            if configured == 0:
+                return "output_gone"            # as the present would answer: nothing shows yet
+            primitives = json.dumps(overlay, separators=(",", ":"), allow_nan=False).encode()
+            if self._lib.pw_screen_overlay(handle, grant_id, tag.encode(), primitives) != 0:
+                raise RuntimeError("display_trial_overlay_failed")
         result = self._lib.pw_screen_present(
             handle, states, len(planes), None if ground is None else ground.handle, wayland_transform(screen.turn),
-            str(grant.grant_id).encode(),
-            tag.encode(), picture_change_text(picture_change).encode())
+            grant_id, tag.encode(), picture_change_text(picture_change).encode())
         if result >= 1:
             return int(result)
         if result == -3:

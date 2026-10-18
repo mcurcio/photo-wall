@@ -476,7 +476,9 @@ int pw_frame_client_trial(struct pw_frame_client *c, const char *output, const c
 }
 int pw_frame_client_overlay(struct pw_frame_client *c, struct wl_surface *surface,
     const char *grant, const char *tag, const char *primitives) {
-    if (!c || !surface || !grant || !tag || !primitives || strlen(primitives) > 512 || c->lost) return -1;
+    /* The tag's own check first: the shell answers a bad grant or tag with a protocol error. */
+    if (!c || !surface || !tag_valid(c, grant, tag, NULL) || !primitives || strlen(primitives) > 512 ||
+        c->lost) return -1;
     pw_frame_manager_v1_overlay(c->manager, surface, grant, tag, primitives);
     return 0;
 }
@@ -775,8 +777,10 @@ int pw_screen_presentation(struct pw_screen *s, uint64_t *sequence, int64_t *at_
 }
 
 /* Render redesign S3 (run ledger .claude/runs/render-planes/s3-page.md, bead B3): the trial overlay on
- * the screen's surface. Stub until B3: refuses. */
+ * the screen's surface, pw_frame_client_overlay's own checks and request. Read first, as
+ * pw_screen_present does, so the configure check is current; the shell keeps the overlay for the
+ * surface's next commit, which the present that follows makes. */
 int pw_screen_overlay(struct pw_screen *s, const char *grant_id, const char *frame_tag, const char *primitives) {
-    (void)s; (void)grant_id; (void)frame_tag; (void)primitives;
-    return -1;
+    if (!s || pw_frame_client_dispatch(s->client) < 0 || !s->configured) return -1;
+    return pw_frame_client_overlay(s->client, s->surface, grant_id, frame_tag, primitives);
 }

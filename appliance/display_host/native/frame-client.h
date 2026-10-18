@@ -22,6 +22,8 @@ int pw_frame_client_grant_revision(struct pw_frame_client *client, const char *o
 
 int pw_frame_client_trial(struct pw_frame_client *client, const char *output_id,
     const char *grant_id, char *candidate, uint32_t capacity);
+/* The frame manager's `overlay` (v2) for `surface`'s next commit: 0 queued, -1 a bad argument (a
+ * grant_id or frame_tag the tag would refuse, primitives over 512 bytes) or a lost connection. */
 int pw_frame_client_overlay(struct pw_frame_client *client, struct wl_surface *surface,
     const char *grant_id, const char *frame_tag, const char *primitives);
 
@@ -123,7 +125,9 @@ int pw_screen_presentation(struct pw_screen *screen, uint64_t *sequence, int64_t
  * manager's `overlay` request (v2) on the screen's own surface with `grant_id`, `frame_tag` (the very
  * tag that present will carry) and `primitives` (bounded JSON, at most 512 bytes: four [x, y] corners,
  * fractions of the Output as it hangs, player/plane_screen.py `overlay_corners`), consumed by that
- * present's commit of the screen's surface. Returns 0 queued; -1 transport failure or a bad argument
- * (NULL, primitives over 512 bytes, a screen with no configure yet). */
+ * present's commit of the screen's surface (any commit of that surface consumes it: send it right
+ * before the present). Dispatches the client's queue first. Returns 0 queued; -1 transport failure or
+ * a bad argument (NULL, a grant_id or frame_tag pw_screen_present would refuse, primitives over 512
+ * bytes, a screen with no configure yet). */
 int pw_screen_overlay(struct pw_screen *screen, const char *grant_id, const char *frame_tag,
     const char *primitives);
