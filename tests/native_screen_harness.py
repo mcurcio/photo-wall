@@ -282,8 +282,63 @@ def rectangle_check(inside_colour, frame) -> tuple[int, int]:
     return counts[0], counts[1]
 
 
+# What pw_frame_client_connect binds, at the lowest version it takes (frame-client.h).
+REQUIRED = {"pw_frame_manager_v1": 4, "xdg_wm_base": 1, "wl_compositor": 4, "wl_subcompositor": 1,
+            "zwp_linux_dmabuf_v1": 3, "wp_viewporter": 1, "wp_single_pixel_buffer_manager_v1": 1,
+            "wp_alpha_modifier_v1": 1, "wp_presentation": 1, "wl_output": 4}
+
+
+def start_weston(renderer: str) -> subprocess.Popen:
+    """Headless Weston with the installed shell and `renderer`, once its sockets are up (the app's
+    opened to the app's user)."""
+    for stale in (ROOT / "control.sock", ROOT / SOCKET, ROOT / f"{SOCKET}.lock"):
+        stale.unlink(missing_ok=True)
+    env = {**os.environ, "XDG_RUNTIME_DIR": str(ROOT), "PHOTO_WALL_CONTROLLER_UID": "0",
+           "LIBGL_ALWAYS_SOFTWARE": "1"}
+    with WESTON_LOG.open("a") as log:
+        weston = subprocess.Popen(
+            ["weston", "--backend=headless-backend.so", f"--renderer={renderer}",
+             f"--shell={DISPLAY}/photo-wall-shell.so", f"--width={WIDTH_PX}", f"--height={HEIGHT_PX}",
+             "--idle-time=0", f"--socket={SOCKET}", "--no-config", "--debug"],
+            env=env, stdout=log, stderr=log)
+    for _ in range(200):
+        if (ROOT / "control.sock").exists() and (ROOT / SOCKET).exists():
+            break
+        assert weston.poll() is None, ("weston_failed", renderer)
+        time.sleep(0.05)
+    (ROOT / SOCKET).chmod(0o666)
+    return weston
+
+
+def stop_weston(weston: subprocess.Popen) -> None:
+    weston.terminate()
+    try:
+        weston.wait(timeout=3)
+    except subprocess.TimeoutExpired:
+        weston.kill()
+        weston.wait()
+
+
+def advertised() -> dict[str, int]:
+    """Every global Weston offers a client, with its version."""
+    from pywayland.client import Display
+
+    display = Display(str(ROOT / SOCKET))
+    display.connect()
+    try:
+        offered: dict[str, int] = {}
+        registry = display.get_registry()
+        registry.dispatcher["global"] = lambda _r, _name, iface, version: offered.update(
+            {iface: max(version, offered.get(iface, 0))})
+        display.roundtrip()
+        return offered
+    finally:
+        display.disconnect()
+
+
 def main() -> None:
     protocols()
+    WESTON_LOG.write_text("")
     from appliance.display_host.weston import (
         CompositorPresentation,
         DiagnosticRelease,
@@ -302,22 +357,21 @@ def main() -> None:
     home = pathlib.Path(APP_ENV["HOME"])
     home.mkdir(exist_ok=True)
     os.chown(home, APP_UID, APP_UID)
-    env = {**os.environ, "XDG_RUNTIME_DIR": str(ROOT), "PHOTO_WALL_CONTROLLER_UID": "0"}
-    weston_log = WESTON_LOG.open("w")
-    weston = subprocess.Popen(
-        ["weston", "--backend=headless-backend.so", "--renderer=pixman",
-         f"--shell={DISPLAY}/photo-wall-shell.so", f"--width={WIDTH_PX}", f"--height={HEIGHT_PX}",
-         "--idle-time=0", f"--socket={SOCKET}", "--no-config", "--debug"],
-        env=env, stdout=weston_log, stderr=weston_log)
+    # The pixman renderer first; the GL renderer on llvmpipe only when pixman offers no linux-dmabuf.
+    for renderer in ("pixman", "gl"):
+        weston = start_weston(renderer)
+        offered = advertised()
+        missing = {name for name, version in REQUIRED.items() if offered.get(name, 0) < version}
+        print(f"RENDERER {renderer} missing={sorted(missing)} offered={sorted(offered.items())}", flush=True)
+        if not missing:
+            break
+        stop_weston(weston)
+        assert missing == {"zwp_linux_dmabuf_v1"}, ("globals_missing", renderer, missing)
+    else:
+        raise AssertionError("no_renderer_offers_linux_dmabuf")
     child = None
     app_log = APP_LOG.open("w")
     try:
-        for _ in range(200):
-            if (ROOT / "control.sock").exists() and (ROOT / SOCKET).exists():
-                break
-            assert weston.poll() is None, "weston_failed"
-            time.sleep(0.05)
-        (ROOT / SOCKET).chmod(0o666)
         channel = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
         channel.connect(str(ROOT / "control.sock"))
         child = subprocess.Popen([sys.executable, "-B", __file__, "--app"], env={**os.environ, **APP_ENV},
@@ -498,11 +552,7 @@ def main() -> None:
         if child is not None:
             child.kill()
             child.wait(timeout=5)
-        weston.terminate()
-        try:
-            weston.wait(timeout=3)
-        except subprocess.TimeoutExpired:
-            weston.kill()
+        stop_weston(weston)
 
 
 if __name__ == "__main__":
